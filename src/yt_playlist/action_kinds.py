@@ -10,10 +10,11 @@ PLAN = "plan"                    # a planned (then executed) delete/move/merge o
 APPLY_MERGE = "apply_merge"      # N-way merge editor applied: keepers set to a result, droppers deleted
 MOVE_IDENTITY = "move_identity"  # playlist copied/moved to another identity
 DELETE_EMPTY = "delete_empty"    # an empty playlist deleted
+DELETE_PLAYLIST = "delete_playlist"  # a playlist deleted outright (e.g. from the Playlists tab)
 UNDO = "undo"                    # an undo of a previous action (itself not undoable)
 
 # Kinds whose effects can be reversed from the Actions page.
-UNDOABLE_KINDS = (PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY)
+UNDOABLE_KINDS = (PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST)
 
 
 def is_undoable(kind) -> bool:

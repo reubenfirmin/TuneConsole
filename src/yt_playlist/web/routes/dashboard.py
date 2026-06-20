@@ -11,7 +11,7 @@ def build(ctx) -> APIRouter:
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
 
-    @router.get("/")
+    @router.get("/cleanup")
     def dashboard(request: Request):
         dupes = analysis.find_dupes(store)
         groups = analysis.find_identical_groups(store)         # exact-duplicate clusters

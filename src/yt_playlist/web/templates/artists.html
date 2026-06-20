@@ -1,0 +1,34 @@
+{% extends "base.html" %}{% block title %}Artists · yt-playlist{% endblock %}{% block body %}
+<div class="page-head">
+  <span class="eyebrow">Artists</span>
+  <h1>Artists in your collection</h1>
+  <p>Every artist represented across your playlists. Click a heading to sort, or an artist for their page.</p>
+</div>
+{% include "_syncbar.html" %}
+
+<div class="card">
+  <table x-data="rowSort()">
+    <thead><tr>
+      <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
+      <th class="sorth num" @click="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
+      <th class="sorth num" @click="sortBy('albums')">Albums<span x-text="ind('albums')"></span></th>
+      <th class="sorth num" @click="sortBy('pls')">Playlists<span x-text="ind('pls')"></span></th>
+      <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+    </tr></thead>
+    <tbody x-ref="body">
+    {% for a in artists %}
+      <tr class="srow" data-artist="{{ a.artist|lower }}" data-songs="{{ a.songs }}"
+          data-albums="{{ a.n_albums }}" data-pls="{{ a.n_pls }}" data-plays="{{ a.plays }}">
+        <td><a class="ptitle alink" href="/artist?name={{ a.artist|urlencode }}">{{ a.artist }}</a></td>
+        <td class="num mono">{{ a.songs }}</td>
+        <td class="num mono">{{ a.n_albums }}</td>
+        <td class="num mono">{{ a.n_pls }}</td>
+        <td class="num mono">{{ a.plays or '' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="empty">No artists yet — sync first.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

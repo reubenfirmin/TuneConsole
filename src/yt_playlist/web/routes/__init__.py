@@ -6,12 +6,12 @@ dashboard, destructive merge/dupe operations, rediscover, move, sync, the action
 and the setup wizard.
 """
 from yt_playlist.web.routes import (
-    actions, dashboard, merge, move, rediscover, setup, sync,
+    actions, charts, collection, dashboard, merge, move, playlists, rediscover, setup, sync,
 )
 
 # Order matters only where literal and parameterized paths share a method; the
 # modules here keep those apart, so registration order is otherwise free.
-MODULES = (dashboard, merge, rediscover, move, sync, actions, setup)
+MODULES = (dashboard, merge, playlists, charts, collection, rediscover, move, sync, actions, setup)
 
 
 def build_all(ctx):

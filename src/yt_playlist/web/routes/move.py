@@ -2,8 +2,6 @@
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import JSONResponse
 
-from yt_playlist.executor import copy_or_move_playlist
-
 
 def build(ctx) -> APIRouter:
     router = APIRouter()
@@ -22,17 +20,8 @@ def build(ctx) -> APIRouter:
 
     @router.post("/move/run")
     def move_run(playlist: int = Form(...), target_identity: int = Form(...), copy_only: str = Form("")):
-        clients = ctx.client_provider()
-        pl = store.get_playlist(playlist)
-        if pl is None:
-            return JSONResponse({"ok": False, "error": "playlist no longer exists"})
-        src_client = clients.get(pl.identity_id)
-        tgt_client = clients.get(target_identity)
-        if src_client is None or tgt_client is None:
-            return JSONResponse({"ok": False, "error": "missing client for an identity"})
         try:
-            res = copy_or_move_playlist(store, playlist, target_identity, src_client, tgt_client,
-                                        now_fn(), delete_source=not bool(copy_only))
+            res = ctx.ops().move(playlist, target_identity, copy_only=bool(copy_only))
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception:  # noqa: BLE001

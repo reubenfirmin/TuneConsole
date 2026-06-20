@@ -208,7 +208,7 @@ def test_no_external_cdn_in_pages(store):
     store.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app)
-    body = c.get("/").text
+    body = c.get("/cleanup").text
     assert "unpkg.com" not in body and "cdn.jsdelivr" not in body
     assert "/static/vendor/htmx.min.js" in body
 
@@ -293,13 +293,13 @@ def test_overlap_suppress_and_unsuppress(store):
     t1 = store.upsert_track("v1", "A", "X", None, 1); t2 = store.upsert_track("v2", "B", "X", None, 1)
     store.set_playlist_tracks(fav, [t1, t2]); store.set_playlist_tracks(sml, [t1])
     c = _client(store, lambda: {iid: FakeClient()})
-    assert "Little Mix" in c.get("/").text
+    assert "Little Mix" in c.get("/cleanup").text
     r = c.post("/overlaps/suppress", data={"a": "PLFAV", "b": "PLSML"})
     assert r.status_code == 200 and r.json()["ok"] is True   # AJAX, no redirect
     # check the section header specifically (other copy may mention "hidden")
-    assert 'Hidden overlaps <span class="count">' in c.get("/").text
+    assert 'Hidden overlaps <span class="count">' in c.get("/cleanup").text
     c.post("/overlaps/unsuppress", data={"a": "PLSML", "b": "PLFAV"})
-    assert 'Hidden overlaps <span class="count">' not in c.get("/").text
+    assert 'Hidden overlaps <span class="count">' not in c.get("/cleanup").text
 
 
 def test_overlaps_suppress_many(store):
@@ -316,7 +316,7 @@ def test_overlaps_suppress_many(store):
     r = c.post("/overlaps/suppress-many",
                data={"pairs": json.dumps([["PLFAV", "PL2"], ["PLFAV", "PL1"]])})
     assert r.status_code == 200 and r.json() == {"ok": True, "n": 2}
-    assert "Hidden overlaps" in c.get("/").text
+    assert "Hidden overlaps" in c.get("/cleanup").text
     # malformed entries are ignored, not fatal
     r = c.post("/overlaps/suppress-many", data={"pairs": json.dumps([["only-one"], "junk", []])})
     assert r.status_code == 200 and r.json()["n"] == 0
@@ -396,16 +396,16 @@ def test_overlap_ignore_excludes_playlist(store):
     t1 = store.upsert_track("v1", "S1", "X", None, 1); t2 = store.upsert_track("v2", "S2", "X", None, 1)
     store.set_playlist_tracks(fav, [t1, t2]); store.set_playlist_tracks(a, [t1]); store.set_playlist_tracks(b, [t2])
     c = _client(store, lambda: {iid: FakeClient()})
-    assert "Big Mixtape" in c.get("/").text                       # overlaps present
+    assert "Big Mixtape" in c.get("/cleanup").text                       # overlaps present
     r = c.post("/overlaps/ignore", data={"ytm": "PLFAV"})
     assert r.status_code == 200 and r.json()["ok"] is True
-    body = c.get("/").text
+    body = c.get("/cleanup").text
     # overlaps card spans from its header to the next section header
     overlaps_card = body.split('id="overlaps"')[1].split('<h2 class="section')[0]
     assert "Big Mixtape" not in overlaps_card                     # gone from overlaps table
     assert "Ignored in overlaps" in body                          # shows in ignored section
     c.post("/overlaps/unignore", data={"ytm": "PLFAV"}, follow_redirects=False)
-    assert "Big Mixtape" in c.get("/").text                       # back
+    assert "Big Mixtape" in c.get("/cleanup").text                       # back
 
 def test_system_playlist_excluded_from_overlaps(store):
     from yt_playlist.analysis import find_overlaps
@@ -471,6 +471,53 @@ def test_overlap_keep_only_mutes_others(store):
     r = c.post("/overlaps/ignore-except", data={"ytm": "PLFAV", "a": "PLFAV", "b": "PLB"})
     assert r.status_code == 200 and r.json()["ok"] is True
     # scope to the overlaps card only (a 1-track playlist also shows under "Tiny playlists")
-    overlaps_card = c.get("/").text.split('id="overlaps"')[1].split('<h2 class="section')[0]
+    overlaps_card = c.get("/cleanup").text.split('id="overlaps"')[1].split('<h2 class="section')[0]
     assert "Favorite Songs 2" in overlaps_card     # kept pair still shown
     assert "Little Mix" not in overlaps_card       # the noise overlap is muted
+
+
+def test_playlists_is_default_tab(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
+    c = _client(store, lambda: {iid: FakeClient()})
+    root = c.get("/").text
+    assert "All playlists" in root and "playlistsTab(" in root     # default tab is Playlists
+    assert c.get("/cleanup").status_code == 200                    # cleanup moved here
+    assert 'href="/cleanup"' in root                              # nav points at it
+
+
+def test_playlists_group_and_delete(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
+    t = store.upsert_track("v1", "S", "X", None, None, 1)
+    store.set_playlist_tracks(a, [t]); store.set_playlist_tracks(b, [t])
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    # group both
+    r = c.post("/playlists/group", data={"ids": f"{a},{b}", "name": "Faves"})
+    assert r.status_code == 200 and r.json()["n"] == 2
+    assert store.get_playlist_groups() == {"PLA": "Faves", "PLB": "Faves"}
+    assert "By group" in c.get("/").text          # split toggle appears once groups exist
+
+    # delete one
+    r = c.post("/playlists/delete", data={"ids": str(a)})
+    assert r.status_code == 200 and r.json() == {"ok": True, "deleted": 1, "hidden": 0, "errors": []}
+    assert store.get_playlist(a) is None
+    assert store.get_playlist_groups() == {"PLB": "Faves"}   # pruned on delete
+
+
+def test_playlists_delete_hides_system(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
+    t = store.upsert_track("v1", "S", "X", None, None, 1)
+    store.set_playlist_tracks(lm, [t])
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.post("/playlists/delete", data={"ids": str(lm)})
+    # undeletable system playlist is hidden locally, not deleted
+    assert r.json() == {"ok": True, "deleted": 0, "hidden": 1, "errors": []}
+    assert store.get_playlist(lm) is not None      # survives in YouTube
+    assert "LM" in store.get_hidden_playlists()    # but hidden from the tab
+    assert "list=LM" not in c.get("/").text

@@ -5,6 +5,7 @@
 {% if kind == 'audio' %}<span class="kind kind-audio" title="Audio playlist">♪</span>
 {%- elif kind == 'video' %}<span class="kind kind-video" title="Video playlist">▶</span>
 {%- elif kind == 'mixed' %}<span class="kind kind-mixed" title="Mixed — audio &amp; video">♪▶</span>
+{%- elif kind == 'mix' %}<span class="kind kind-mix" title="Auto-mix / radio — YouTube doesn’t tag these track types">≋</span>
 {%- endif %}
 {%- endmacro %}
 

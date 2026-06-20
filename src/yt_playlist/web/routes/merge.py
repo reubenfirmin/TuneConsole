@@ -2,9 +2,6 @@
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from yt_playlist import analysis
-from yt_playlist.executor import (
-    MergePlan, apply_result, delete_empty_playlist, execute_planned, store_plan)
 from yt_playlist.merge_order import track_positions
 
 
@@ -49,17 +46,20 @@ def build(ctx) -> APIRouter:
                            if row["pos"][mi] is not None else None
                            for mi in range(len(pls))]
         track_list = sorted(tracks.values(), key=lambda r: (r["order"], (r["title"] or "").lower()))
+        # where to land after Apply — only allow local paths (default: the Cleanup dashboard)
+        ret = request.query_params.get("return", "/cleanup")
+        if not (ret.startswith("/") and not ret.startswith("//")):
+            ret = "/cleanup"
         return templates.TemplateResponse(request, "editor.html",
-                                          {"members": members, "tracks": track_list})
+                                          {"members": members, "tracks": track_list, "return_to": ret})
 
     @router.post("/merge/apply")
     def merge_apply(ids: str = Form(...), result: str = Form(""), keep: str = Form("all")):
         # Apply the N-way editor: set the kept playlist(s) to exactly `result`.
-        clients = ctx.client_provider()
         pid_list = [int(x) for x in ids.split(",") if x]
         vids = [v for v in result.split(",") if v]
         try:
-            s = apply_result(store, clients, pid_list, vids, keep, now_fn())
+            s = ctx.ops().apply_merge(pid_list, vids, keep)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception:  # noqa: BLE001
@@ -70,6 +70,8 @@ def build(ctx) -> APIRouter:
             parts.append(f"{s['added']} added")
         if s["removed"]:
             parts.append(f"{s['removed']} removed")
+        if s.get("skipped"):
+            parts.append(f"{s['skipped']} skipped (unavailable)")
         if s["deleted"]:
             parts.append("deleted " + ", ".join(f"“{t}”" for t in s["deleted"]))
         detail = (" — " + ", ".join(parts)) if parts else ""
@@ -81,61 +83,29 @@ def build(ctx) -> APIRouter:
         # One-shot delete for the dupes table: plan + remote-verified delete in a single call,
         # returning JSON so the row can be removed without a page reload. The remote verify in
         # execute_planned makes rapid-fire deletes safe (refuses if the kept copy lacks a track).
-        if source == target:
-            return JSONResponse({"ok": False, "error": "source and target must differ"})
-        clients = ctx.client_provider()
-        src, tgt = store.get_playlist(source), store.get_playlist(target)
-        if src is None or tgt is None:
-            return JSONResponse({"ok": False, "error": "playlist no longer exists (already deleted?)"})
         try:
-            aid = store_plan(store, MergePlan(source, target, [], []), "delete",
-                             src.ytm_playlist_id, now_fn())
-            execute_planned(store, aid, clients, now_fn())
+            title = ctx.ops().delete_dupe(source, target)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception:  # noqa: BLE001
             logger.exception("inline dupe delete failed")
             return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response."})
-        return JSONResponse({"ok": True, "deleted": src.title})
+        return JSONResponse({"ok": True, "deleted": title})
 
     @router.post("/dupe/keep-one")
     def dupe_keep_one(keep: int = Form(...)):
         # Collapse a cluster of identical playlists to one: delete every other copy with the same
         # track set, each remote-verified against the keeper. One click resolves the whole group.
-        clients = ctx.client_provider()
-        kept = store.get_playlist(keep)
-        if kept is None:
-            return JSONResponse({"ok": False, "error": "kept playlist no longer exists"})
-        keep_keys = store.get_playlist_track_keys(keep)
-        # never treat undeletable system playlists (Liked Music, etc.) as deletable siblings
-        siblings = [p for p in store.get_playlists()
-                    if p.id != keep and p.ytm_playlist_id not in analysis.SYSTEM_PLAYLIST_IDS
-                    and store.get_playlist_track_keys(p.id) == keep_keys]
-        deleted, errors = 0, []
-        for sib in siblings:
-            try:
-                aid = store_plan(store, MergePlan(sib.id, keep, [], []), "delete",
-                                 sib.ytm_playlist_id, now_fn())
-                execute_planned(store, aid, clients, now_fn())
-                deleted += 1
-            except ValueError as e:
-                errors.append(str(e))
-            except Exception:  # noqa: BLE001
-                logger.exception("keep-one delete of %s failed", sib.ytm_playlist_id)
-                errors.append(f"{sib.ytm_playlist_id}: unexpected error")
+        try:
+            deleted, errors = ctx.ops().keep_one(keep)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": not errors, "deleted": deleted, "errors": errors})
 
     @router.post("/playlist/delete-empty")
     def delete_empty(playlist: int = Form(...)):
-        clients = ctx.client_provider()
-        pl = store.get_playlist(playlist)
-        if pl is None:
-            return JSONResponse({"ok": False, "error": "playlist no longer exists"})
-        client = clients.get(pl.identity_id)
-        if client is None:
-            return JSONResponse({"ok": False, "error": "no client for that identity"})
         try:
-            delete_empty_playlist(store, playlist, client, now_fn())
+            ctx.ops().delete_empty(playlist)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception:  # noqa: BLE001

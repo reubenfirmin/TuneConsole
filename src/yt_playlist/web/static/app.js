@@ -1,3 +1,11 @@
+// Keep --topbar-h in sync with the real navbar height so sticky table headers pin right below it.
+function syncTopbarH() {
+  const tb = document.querySelector('.topbar');
+  if (tb) document.documentElement.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
+}
+window.addEventListener('DOMContentLoaded', syncTopbarH);
+window.addEventListener('resize', syncTopbarH);
+
 // Alpine component factories for the dashboard tabs (loaded globally via base.html).
 function groupCard() {
   return {
@@ -83,6 +91,42 @@ function ajaxRow() {
     },
   };
 }
+function saveAlbum() {
+  // "Add to collection" — save a YouTube album to your library.
+  return {
+    state: '',
+    async go(browseId) {
+      if (this.state === '…' || this.state.startsWith('✓')) return;
+      this.state = '…';
+      try {
+        const fd = new FormData(); fd.append('browse_id', browseId);
+        const j = await (await fetch('/collection/save-album', { method: 'POST', body: fd })).json();
+        this.state = j.ok ? '✓ Saved' : '✗ ' + (j.error || 'failed');
+      } catch (e) { this.state = '✗'; }
+    },
+  };
+}
+function rowSort() {
+  // Generic click-to-sort for a static-row table; reorders <tr class="srow"> by data-<key>.
+  // Numeric when both values parse as numbers, else locale string compare.
+  return {
+    key: '', dir: 1,
+    sortBy(k) {
+      if (this.key === k) { this.dir = -this.dir; } else { this.key = k; this.dir = 1; }
+      const tb = this.$refs.body;
+      if (!tb) return;
+      Array.from(tb.querySelectorAll('tr.srow'))
+        .sort((x, y) => {
+          const a = x.dataset[k] || '', b = y.dataset[k] || '';
+          const na = parseFloat(a), nb = parseFloat(b);
+          const numeric = a !== '' && b !== '' && !isNaN(na) && !isNaN(nb);
+          return (numeric ? na - nb : a.localeCompare(b)) * this.dir;
+        })
+        .forEach(r => tb.appendChild(r));
+    },
+    ind(k) { return this.key === k ? (this.dir === 1 ? ' ▲' : ' ▼') : ''; },
+  };
+}
 function overlapSort() {
   // Client-side sort of the overlaps table by reordering the per-row <tbody> nodes
   // (which preserves each row's Alpine state — pie menu, hide animation, etc.).
@@ -131,6 +175,78 @@ function overlapSort() {
     ind(k) { return this.key === k ? (this.dir === 1 ? ' ▲' : ' ▼') : ''; },
   };
 }
+function playlistsTab(rows) {
+  return {
+    rows, sel: {}, sortKey: 'title', sortDir: 1, split: false, busy: false,
+    groupModal: false, groupName: '', delModal: false,
+    init() {
+      // remember view preferences across reloads (the tab reloads after group/delete)
+      try {
+        this.split = localStorage.getItem('pl.split') === '1';
+        this.sortKey = localStorage.getItem('pl.sortKey') || 'title';
+        this.sortDir = +localStorage.getItem('pl.sortDir') || 1;
+      } catch (e) {}
+      this.$watch('split', v => { try { localStorage.setItem('pl.split', v ? '1' : '0'); } catch (e) {} });
+      this.$watch('sortKey', v => { try { localStorage.setItem('pl.sortKey', v); } catch (e) {} });
+      this.$watch('sortDir', v => { try { localStorage.setItem('pl.sortDir', v); } catch (e) {} });
+    },
+    selected() { return this.rows.filter(r => this.sel[r.id]); },
+    count() { return this.selected().length; },
+    toggle(id) { this.sel[id] = !this.sel[id]; },
+    sortBy(key) {
+      if (this.sortKey === key) { this.sortDir = -this.sortDir; }
+      else { this.sortKey = key; this.sortDir = ['count', 'listens', 'last'].includes(key) ? -1 : 1; }
+    },
+    ind(key) { return this.sortKey === key ? (this.sortDir === 1 ? ' ▲' : ' ▼') : ''; },
+    cmp(a, b) {
+      const k = this.sortKey, numeric = (k === 'count' || k === 'listens' || k === 'last');
+      const r = numeric ? ((a[k] || 0) - (b[k] || 0))
+                        : String(a[k] || '').localeCompare(String(b[k] || ''));
+      return (r ? r * this.sortDir : a.title.localeCompare(b.title));   // stable tiebreak by title
+    },
+    sorted() { return [...this.rows].sort((a, b) => this.cmp(a, b)); },
+    sections() {
+      // when split, partition by group name (Ungrouped last); else one "" section
+      if (!this.split) return [{ name: '', rows: this.sorted() }];
+      const m = {};
+      this.sorted().forEach(r => { const g = r.group || 'Ungrouped'; (m[g] = m[g] || []).push(r); });
+      return Object.keys(m)
+        .sort((a, b) => a === 'Ungrouped' ? 1 : b === 'Ungrouped' ? -1 : a.localeCompare(b))
+        .map(n => ({ name: n, rows: m[n] }));
+    },
+    selectAll(on) { this.rows.forEach(r => { this.sel[r.id] = on; }); },
+    fmtLast(ts) {
+      if (!ts) return '—';
+      const days = Math.floor((Date.now() / 1000 - ts) / 86400);
+      if (days <= 0) return 'today';
+      if (days === 1) return 'yesterday';
+      if (days < 30) return days + 'd ago';
+      if (days < 365) return Math.floor(days / 30) + 'mo ago';
+      return Math.floor(days / 365) + 'y ago';
+    },
+    merge() {
+      if (this.count() < 2) return;
+      location.href = '/merge?ids=' + this.selected().map(r => r.id).join(',') + '&return=/';
+    },
+    async _post(url, data) {
+      const fd = new FormData();
+      Object.entries(data).forEach(([k, v]) => fd.append(k, v));
+      const r = await fetch(url, { method: 'POST', body: fd });
+      return r.json();
+    },
+    openGroup() { if (this.count()) { this.groupName = ''; this.groupModal = true; } },
+    async doGroup() {
+      this.groupModal = false;
+      await this._post('/playlists/group', { ids: this.selected().map(r => r.id).join(','), name: this.groupName });
+      location.reload();
+    },
+    async doDelete() {
+      this.delModal = false;
+      await this._post('/playlists/delete', { ids: this.selected().map(r => r.id).join(',') });
+      location.reload();
+    },
+  };
+}
 function moveTab(fromId, toId) {
   return {
     from: fromId, to: toId, rows: {},
@@ -174,9 +290,10 @@ function memberColor(i) {
   const palette = ['#7c6cff', '#4fd6e0', '#ff6b8b', '#6bffab', '#f4c66a', '#c08cff', '#ff9d5c', '#5cc8ff'];
   return palette[i % palette.length];
 }
-function mergeEditor(members, tracks) {
+function mergeEditor(members, tracks, returnTo) {
   return {
-    members, tracks, keep: String(members[0].id), busy: false, err: '', inc: {}, pick: {},
+    members, tracks, returnTo: returnTo || '/cleanup',
+    keep: String(members[0].id), busy: false, err: '', inc: {}, pick: {},
     // Two independent axes:
     //   sort: 'alpha' (by title) | 'playlist' (order-preserving merge by position)
     //   mode: 'interleaved' (all together) | 'ducks' (shared first, odd ducks pushed to the end)
@@ -229,7 +346,8 @@ function mergeEditor(members, tracks) {
         const r = await fetch('/merge/apply', { method: 'POST', body: fd });
         const j = await r.json();
         if (j.ok) {
-          let u = '/?flash=' + encodeURIComponent(j.message);
+          const sep = this.returnTo.includes('?') ? '&' : '?';
+          let u = this.returnTo + sep + 'flash=' + encodeURIComponent(j.message);
           if (j.playlist) u += '&flash_pl=' + encodeURIComponent(j.playlist);
           location.href = u;
         } else { this.busy = false; this.err = j.error || 'failed'; }

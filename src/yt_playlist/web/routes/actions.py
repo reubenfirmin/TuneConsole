@@ -5,10 +5,9 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
-from yt_playlist import sync as sync_mod
 from yt_playlist.action_kinds import (
-    APPLY_MERGE, DELETE_EMPTY, MOVE_IDENTITY, PLAN, UNDO, is_undoable)
-from yt_playlist.executor import deserialize_plan, undo_action
+    APPLY_MERGE, DELETE_EMPTY, DELETE_PLAYLIST, MOVE_IDENTITY, PLAN, UNDO, is_undoable)
+from yt_playlist.executor import deserialize_plan
 
 
 def build(ctx) -> APIRouter:
@@ -32,6 +31,8 @@ def build(ctx) -> APIRouter:
             return f"{verb} “{params.get('title')}” to another identity"
         if action.kind == DELETE_EMPTY:
             return f"deleted empty “{params.get('title')}”"
+        if action.kind == DELETE_PLAYLIST:
+            return f"deleted “{params.get('title')}”"
         if action.kind != PLAN:
             return action.kind
         try:
@@ -57,24 +58,14 @@ def build(ctx) -> APIRouter:
 
     @router.post("/undo/{action_id}")
     def undo(action_id: int):
-        clients = ctx.client_provider()
         try:
-            undo_action(store, action_id, clients, now_fn())
+            ctx.ops().undo(action_id)   # reverts + best-effort targeted refresh of the target
         except ValueError as e:
-            return RedirectResponse(f"/?flasherr={quote(str(e))}", status_code=303)
+            return RedirectResponse(f"/cleanup?flasherr={quote(str(e))}", status_code=303)
         except Exception:  # noqa: BLE001
             logger.exception("undo %s failed", action_id)
-            return RedirectResponse(f"/?flasherr={quote('Could not undo — YouTube returned an '
+            return RedirectResponse(f"/cleanup?flasherr={quote('Could not undo — YouTube returned an '
                 'unexpected response.')}", status_code=303)
-        # targeted refresh of the target (added tracks were removed); recreated source picked up
-        # on the next full Sync. Avoids a slow full re-sync that left the browser spinning.
-        try:
-            tgt = store.get_playlist(deserialize_plan(store.get_action(action_id)).plan.target_playlist_id)
-            if tgt is not None and tgt.identity_id in clients:
-                sync_mod.refresh_playlist(store, tgt.identity_id, clients[tgt.identity_id],
-                                          tgt.ytm_playlist_id, tgt.title, now_fn())
-        except Exception:  # noqa: BLE001 - best-effort refresh
-            logger.exception("post-undo refresh failed (non-fatal)")
-        return RedirectResponse("/?flash=Undone.", status_code=303)
+        return RedirectResponse("/cleanup?flash=Undone.", status_code=303)
 
     return router

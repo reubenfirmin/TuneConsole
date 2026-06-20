@@ -2,6 +2,7 @@ import hashlib
 import logging
 from yt_playlist.matching import identity_key, track_artist, track_album
 from yt_playlist.retry import with_retry
+from yt_playlist.thumbnails import best_thumb
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +12,14 @@ def content_hash(track_keys) -> str:
 
 _artist = track_artist
 _album = track_album
+
+def _artist_id(t):
+    arts = t.get("artists") or []
+    return arts[0].get("id") if arts and isinstance(arts[0], dict) else None
+
+def _album_id(t):
+    alb = t.get("album")
+    return alb.get("id") if isinstance(alb, dict) else None
 
 def _emit(on_progress, type, text, **extra):
     """Report a progress event to an optional callback (used to stream sync to the browser)."""
@@ -38,12 +47,14 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None)
         for t in detail.get("tracks", []):
             tid = store.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
                                      _album(t), t.get("duration_seconds"), t.get("isAvailable"),
-                                     t.get("videoType"))
+                                     t.get("videoType"), _artist_id(t), _album_id(t))
             track_ids.append(tid)
             keys.append(identity_key(t.get("title", ""), _artist(t)))
+        track_ids = list(dict.fromkeys(track_ids))   # de-dupe (YouTube can repeat a video; see set_playlist_tracks)
+        keys = list(dict.fromkeys(keys))
         chash = content_hash(keys)
         db_pid = store.upsert_playlist(identity_id, pid, pl.get("title", ""),
-                                       pl.get("count", len(track_ids)), chash, now)
+                                       len(track_ids), chash, now)
         store.set_playlist_tracks(db_pid, track_ids)
         _emit(on_progress, "step", f"{label} › {pl.get('title', '')} ({len(track_ids)} tracks)",
               i=i, total=total)
@@ -75,16 +86,37 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now) ->
     for t in detail.get("tracks", []):
         tid = store.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
                                  _album(t), t.get("duration_seconds"), t.get("isAvailable"),
-                                 t.get("videoType"))
+                                 t.get("videoType"), _artist_id(t), _album_id(t))
         track_ids.append(tid)
         keys.append(identity_key(t.get("title", ""), _artist(t)))
+    track_ids = list(dict.fromkeys(track_ids))   # de-dupe repeated videos
+    keys = list(dict.fromkeys(keys))
     db_pid = store.upsert_playlist(identity_id, ytm_playlist_id, title,
                                    len(track_ids), content_hash(keys), now)
     store.set_playlist_tracks(db_pid, track_ids)
+
+def _sync_saved_albums(store, clients, on_progress) -> None:
+    """Pull the albums saved in each account's library and store them (best-effort)."""
+    saved = {}
+    for client in clients.values():
+        try:
+            for a in with_retry(lambda: client.get_library_albums(limit=500)) or []:
+                bid = a.get("browseId")
+                if not bid:
+                    continue
+                saved[bid] = {"browse": bid, "title": a.get("title"),
+                              "artist": ", ".join(x.get("name", "") for x in (a.get("artists") or [])),
+                              "year": a.get("year"), "type": a.get("type"),
+                              "thumbnail": best_thumb(a.get("thumbnails"))}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("saved-albums fetch failed: %s", e)
+    store.replace_saved_albums(list(saved.values()))
+    _emit(on_progress, "info", f"saved albums: {len(saved)}")
 
 def sync_all(store, clients, now, on_progress=None) -> None:
     labels = {idn.id: idn.label for idn in store.get_identities()}
     for identity_id, client in clients.items():
         sync_identity(store, identity_id, client, now,
                       on_progress=on_progress, label=labels.get(identity_id))
+    _sync_saved_albums(store, clients, on_progress)
     _emit(on_progress, "done", "sync complete", final=True)

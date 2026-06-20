@@ -185,12 +185,17 @@ table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
 thead th {
   text-align: left; font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase;
   color: var(--faint); font-weight: 700; padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--border-2);
+  /* pin the header below the sticky top bar so it stays visible down a long table.
+     --topbar-h is measured at runtime (see app.js) so it tracks the real navbar height. */
+  position: sticky; top: var(--topbar-h, 3.45rem); z-index: 3; background: var(--surface);
 }
 tbody td { padding: 0.6rem 0.7rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
 tbody tr { transition: background 0.12s ease; }
 tbody tr:hover { background: var(--accent-soft); }
 td.mono, .mono { font-family: var(--font-mono); font-size: 0.82rem; }
-td.num { text-align: right; font-family: var(--font-mono); }
+/* right-align numeric columns for BOTH header and cells (th + td) so they line up everywhere */
+.num { text-align: right; }
+td.num { font-family: var(--font-mono); }
 
 /* secondary playlist id under a title */
 /* per-playlist metadata, stacked under the title: song count is primary, the id is least important */
@@ -203,13 +208,16 @@ td.num { text-align: right; font-family: var(--font-mono); }
   color: var(--faint); letter-spacing: 0.02em; margin-top: 0.1rem; user-select: all;
 }
 .ptitle { font-weight: 600; }
-/* audio/video/mixed marker */
-.kind { display: inline-block; font-size: 0.72rem; line-height: 1; margin-right: 0.4rem;
-  padding: 0.12rem 0.28rem; border-radius: 5px; border: 1px solid var(--border-2);
-  color: var(--dim); vertical-align: middle; white-space: nowrap; }
+/* audio/video/mixed marker — fixed-size box so all three line up identically */
+.kind { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
+  width: 1.6rem; height: 1.15rem; font-size: 0.74rem; line-height: 1; margin-right: 0.4rem;
+  border-radius: 5px; border: 1px solid var(--border-2); color: var(--dim);
+  vertical-align: middle; white-space: nowrap; }
+.kind-mixed { font-size: 0.6rem; letter-spacing: -0.03em; }   /* two glyphs squeezed into the same box */
 .kind-audio { color: var(--teal); border-color: color-mix(in srgb, var(--teal) 40%, var(--border-2)); }
 .kind-video { color: #ff9d5c; border-color: color-mix(in srgb, #ff9d5c 40%, var(--border-2)); }
 .kind-mixed { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 40%, var(--border-2)); }
+.kind-mix { color: var(--dim); border-color: var(--border-2); }
 
 /* ---- badges / tags ---- */
 .tag {
@@ -311,6 +319,47 @@ ol.steps > li::before {
   border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: -0.1em; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* segmented toggle (shared by merge editor + playlists tab) */
+.seg { display: inline-flex; border: 1px solid var(--border-2); border-radius: 7px; overflow: hidden; }
+.seg button, .seg a { background: transparent; color: var(--dim); border: none; box-shadow: none;
+  border-radius: 0; font-size: 0.78rem; padding: 0.25rem 0.6rem; cursor: pointer; text-decoration: none;
+  display: inline-flex; align-items: center; }
+.seg button.on, .seg a.on { background: var(--accent); color: #fff; }
+.seg button:hover, .seg a:hover { box-shadow: none; transform: none; color: var(--text); }
+/* playlists tab */
+.pl-toolbar { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; }
+.pl-actionbar { position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%); z-index: 60;
+  display: flex; align-items: center; gap: 0.6rem; padding: 0.55rem 0.7rem 0.55rem 1rem;
+  background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 999px;
+  box-shadow: 0 14px 40px rgba(0,0,0,.55); }
+.pl-actionbar strong { color: var(--accent-2); margin-right: 0.3rem; white-space: nowrap; }
+tr.selrow td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: var(--accent-2);
+  padding-top: 0.9rem; letter-spacing: 0.02em; }
+.lastcol { font-size: 0.82rem; color: var(--dim); white-space: nowrap; }   /* alignment from .num */
+/* charts */
+.chart .rank { width: 2.8rem; text-align: right; padding-right: 1rem; color: var(--faint);
+  font-family: var(--font-mono); font-size: 0.82rem; }
+.chart .barhead, .chart .barcell { width: 38%; }
+.playbar { display: block; height: 0.55rem; min-width: 2px; border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--teal)); }
+.alink { color: var(--dim); text-decoration: none; }
+.alink:hover { color: var(--accent-2); text-decoration: underline; }
+.small { font-size: 0.78rem; }
+/* artist page */
+.artist-head { display: flex; gap: 1.4rem; align-items: flex-start; margin: 0.5rem 0 2rem; }
+.artist-thumb { width: 110px; height: 110px; border-radius: 12px; object-fit: cover;
+  border: 1px solid var(--border-2); flex-shrink: 0; }
+.artist-meta { color: var(--dim); margin: 0.3rem 0 0; }
+.artist-bio { color: var(--dim); font-size: 0.9rem; line-height: 1.6; margin: 0.8rem 0 0;
+  max-width: 60ch; white-space: pre-line; }
+.album-thumb { width: 2.4rem; height: 2.4rem; border-radius: 5px; object-fit: cover; display: block; }
+.gtag { display: inline-block; font-size: 0.72rem; padding: 0.08rem 0.4rem; border-radius: 999px;
+  background: var(--surface-2); border: 1px solid var(--border-2); color: var(--dim); }
+.modal-input { width: 100%; box-sizing: border-box; margin-bottom: 1.1rem; padding: 0.5rem 0.7rem;
+  background: var(--bg-2); border: 1px solid var(--border-2); border-radius: 8px; color: var(--text);
+  font-size: 0.95rem; }
+.modal-input:focus { outline: none; border-color: var(--accent); }
 .section.toggle { cursor: pointer; user-select: none; }
 .section.toggle:hover { color: var(--accent-2); }
 .section .chev { display: inline-block; width: 1rem; color: var(--faint); font-size: 0.8em; }

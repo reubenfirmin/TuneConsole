@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from fastapi import HTTPException
 from fastapi.templating import Jinja2Templates
 
+from yt_playlist.ops import PlaylistOps
 from yt_playlist.web.jobs import SyncJobs
 
 logger = logging.getLogger("yt_playlist.web")
@@ -34,6 +35,10 @@ class Ctx:
 
     def clients(self):
         return self.client_provider()
+
+    def ops(self) -> PlaylistOps:
+        """A PlaylistOps bound to this context's store, client provider, and clock."""
+        return PlaylistOps(self.store, self.client_provider, self.now_fn)
 
     def playlist_by_id(self, pid):
         pl = self.store.get_playlist(pid)

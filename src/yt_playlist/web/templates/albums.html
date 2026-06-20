@@ -1,0 +1,76 @@
+{% extends "base.html" %}{% block title %}Albums · yt-playlist{% endblock %}{% block body %}
+<div class="page-head">
+  <span class="eyebrow">Albums</span>
+  <h1>Albums</h1>
+  <p>Albums across your playlists, or the ones you've saved in your YouTube library.</p>
+</div>
+{% include "_syncbar.html" %}
+
+<div class="card pl-toolbar" style="margin-bottom:1.1rem">
+  <span class="seg">
+    <a href="/albums?view=playlists" class="{{ 'on' if view == 'playlists' }}">In my playlists</a>
+    <a href="/albums?view=saved" class="{{ 'on' if view == 'saved' }}">Saved in YouTube</a>
+  </span>
+</div>
+
+{% if view == 'saved' %}
+<div class="card">
+  {% if saved is none %}
+    <p class="empty" style="margin:0">Couldn't reach YouTube to load your saved albums. Make sure the app is connected, then reload.</p>
+  {% else %}
+  <table x-data="rowSort()">
+    <thead><tr>
+      <th style="width:3rem"></th>
+      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
+      <th class="sorth num" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth" @click="sortBy('type')">Type<span x-text="ind('type')"></span></th>
+    </tr></thead>
+    <tbody x-ref="body">
+    {% for a in saved %}
+      <tr class="srow" data-album="{{ a.title|lower }}" data-artist="{{ a.artist|lower }}"
+          data-year="{{ a.year or 0 }}" data-type="{{ (a.type or '')|lower }}">
+        <td>{% if a.thumbnail %}<img class="album-thumb" src="{{ a.thumbnail }}" alt="" onerror="this.remove()">{% endif %}</td>
+        <td>{% if a.browse %}<a class="ptitle" href="https://music.youtube.com/browse/{{ a.browse }}"
+               target="_blank" rel="noopener">{{ a.title }} ↗</a>{% else %}<span class="ptitle">{{ a.title }}</span>{% endif %}</td>
+        <td><a class="alink" href="/artist?name={{ a.artist|urlencode }}">{{ a.artist }}</a></td>
+        <td class="num mono">{{ a.year or '' }}</td>
+        <td class="muted">{{ a.type or '' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="empty">No saved albums found in your YouTube library.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+{% else %}
+<div class="card">
+  <table x-data="rowSort()">
+    <thead><tr>
+      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
+      <th class="sorth num" @click="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
+      <th class="sorth num" @click="sortBy('pls')">Playlists<span x-text="ind('pls')"></span></th>
+      <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+    </tr></thead>
+    <tbody x-ref="body">
+    {% for a in albums %}
+      <tr class="srow" data-album="{{ a.album|lower }}" data-artist="{{ a.artist|lower }}"
+          data-songs="{{ a.songs }}" data-pls="{{ a.n_pls }}" data-plays="{{ a.plays }}">
+        <td>{% if a.browse %}<a class="ptitle" href="https://music.youtube.com/browse/{{ a.browse }}"
+               target="_blank" rel="noopener">{{ a.album }} ↗</a>{% else %}<span class="ptitle">{{ a.album }}</span>{% endif %}</td>
+        <td><a class="alink" href="/artist?name={{ a.artist|urlencode }}">{{ a.artist }}</a></td>
+        <td class="num mono">{{ a.songs }}</td>
+        <td class="num mono">{{ a.n_pls }}</td>
+        <td class="num mono">{{ a.plays or '' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="empty">No albums yet — sync first.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

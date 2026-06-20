@@ -17,8 +17,12 @@
   <header class="topbar">
     <a class="brand" href="/">yt&#8202;<span class="dot">/</span>&#8202;playlist <small>console</small></a>
     <nav>
-      <a href="/" class="{{ 'active' if path == '/' else '' }}">Cleanup</a>
+      <a href="/" class="{{ 'active' if path == '/' else '' }}">Playlists</a>
+      <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
+      <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
+      <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
       <a href="/discover" class="{{ 'active' if path.startswith('/discover') else '' }}">Rediscover</a>
+      <a href="/cleanup" class="{{ 'active' if path.startswith('/cleanup') else '' }}">Cleanup</a>
       <a href="/move" class="{{ 'active' if path.startswith('/move') else '' }}">Move</a>
       <a href="/actions" class="{{ 'active' if path.startswith('/actions') else '' }}">Actions</a>
       <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>

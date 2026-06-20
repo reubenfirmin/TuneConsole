@@ -1,0 +1,80 @@
+{% extends "base.html" %}{% block title %}{{ artist }} · yt-playlist{% endblock %}{% block body %}
+<div class="artist-head">
+  {% if info and info.thumbnail %}<img class="artist-thumb" src="{{ info.thumbnail }}" alt="" onerror="this.remove()">{% endif %}
+  <div>
+    <span class="eyebrow">Artist</span>
+    <h1>{{ artist }}</h1>
+    <p class="artist-meta">
+      <strong>{{ songs|length }}</strong> song{{ '' if songs|length == 1 else 's' }} in your playlists ·
+      <strong>{{ total_plays }}</strong> total plays{% if info and info.subscribers %} ·
+      {{ info.subscribers }} subscribers{% endif %}
+    </p>
+    {% if info and info.bio %}<p class="artist-bio">{{ info.bio|linkify }}</p>{% endif %}
+  </div>
+</div>
+
+<h2 class="section">Songs <span class="count">{{ songs|length }}</span></h2>
+<div class="card">
+  <table x-data="rowSort()">
+    <thead><tr>
+      <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
+      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th>In playlists</th>
+      <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth num" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
+    </tr></thead>
+    <tbody x-ref="body">
+    {% for s in songs %}
+      <tr class="srow" data-title="{{ s.title|lower }}" data-album="{{ s.album|lower }}"
+          data-plays="{{ s.plays }}" data-len="{{ s.duration or 0 }}">
+        <td><a class="ptitle" href="https://music.youtube.com/watch?v={{ s.video_id }}"
+               target="_blank" rel="noopener">{{ s.title }} ↗</a></td>
+        <td class="muted">{{ s.album }}</td>
+        <td class="small">{% for p in s.playlists %}<a class="alink"
+              href="https://music.youtube.com/playlist?list={{ p.ytm }}" target="_blank" rel="noopener">{{ p.title }}</a>{{ ', ' if not loop.last }}{% endfor %}</td>
+        <td class="num mono">{{ s.plays }}</td>
+        <td class="num mono">{% if s.duration %}{{ '%d:%02d'|format(s.duration // 60, s.duration % 60) }}{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="empty">No songs by this artist in your playlists.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if albums %}
+<h2 class="section">Albums <span class="count">{{ albums|length }}</span></h2>
+<p class="section-note">{% if info and info.albums %}From YouTube — “Songs / Plays” count what you have in your
+   playlists.{% else %}Grouped from your playlist tracks (re-sync to pull full discographies with cover art).{% endif %}</p>
+<div class="card">
+  <table x-data="rowSort()">
+    <thead><tr>
+      <th style="width:3rem"></th>
+      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th class="sorth num" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth num" @click="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
+      <th class="sorth num" @click="sortBy('pls')">Playlists<span x-text="ind('pls')"></span></th>
+      <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th></th>
+    </tr></thead>
+    <tbody x-ref="body">
+    {% for al in albums %}
+      <tr class="srow" data-album="{{ al.album|lower }}" data-year="{{ al.year or 0 }}"
+          data-songs="{{ al.songs }}" data-pls="{{ al.n_pls }}" data-plays="{{ al.plays }}">
+        <td>{% if al.thumbnail %}<img class="album-thumb" src="{{ al.thumbnail }}" alt="" onerror="this.remove()">{% endif %}</td>
+        <td>{% if al.browse_id %}<a class="ptitle" href="https://music.youtube.com/browse/{{ al.browse_id }}"
+               target="_blank" rel="noopener">{{ al.album }} ↗</a>{% else %}<span class="ptitle">{{ al.album }}</span>{% endif %}</td>
+        <td class="num mono">{{ al.year or '' }}</td>
+        <td class="num mono">{{ al.songs or '' }}</td>
+        <td class="num mono">{{ al.n_pls or '' }}</td>
+        <td class="num mono">{{ al.plays or '' }}</td>
+        <td style="text-align:right">{% if al.browse_id %}<button type="button" class="btn-ghost btn-sm"
+              x-data="saveAlbum()" :disabled="state === '…'" @click="go('{{ al.browse_id }}')"
+              x-text="state || 'Save'" title="Save this album to your YouTube library"></button>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

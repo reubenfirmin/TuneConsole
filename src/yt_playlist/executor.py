@@ -7,7 +7,7 @@ from yt_playlist.matching import fuzzy_ratio, normalize, track_artist, identity_
 from yt_playlist.retry import with_retry
 from yt_playlist import paths
 from yt_playlist.action_kinds import (
-    PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, UNDO, UNDOABLE_KINDS, is_undoable)
+    PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, UNDO, UNDOABLE_KINDS, is_undoable)
 from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
 
 logger = logging.getLogger(__name__)
@@ -117,11 +117,34 @@ def _verify_and_delete(store, plan, source_client, target_client, source_ytm_pla
     source_client.delete_playlist(source_ytm_playlist_id)
     return backup_path
 
+def _add_items(client, ytm_playlist_id, video_ids):
+    """Add items, surviving a batch rejection. YouTube 400s the WHOLE add_playlist_items call if any
+    single videoId is invalid/unavailable, which would otherwise kill an entire merge. So on failure
+    we retry one id at a time and skip the bad ones. Returns (added_count, skipped_video_ids)."""
+    if not video_ids:
+        return 0, []
+    try:
+        client.add_playlist_items(ytm_playlist_id, video_ids)
+        return len(video_ids), []
+    except Exception:  # noqa: BLE001 - usually one unavailable id poisoning the batch
+        logger.warning("batch add of %d items to %s failed; retrying individually",
+                       len(video_ids), ytm_playlist_id)
+        added, skipped = 0, []
+        for v in video_ids:
+            try:
+                client.add_playlist_items(ytm_playlist_id, [v])
+                added += 1
+            except Exception:  # noqa: BLE001
+                skipped.append(v)
+        if skipped:
+            logger.warning("skipped %d unaddable item(s) for %s", len(skipped), ytm_playlist_id)
+        return added, skipped
+
 def _reconcile(client, ytm_playlist_id, desired_video_ids):
     """Make a playlist's contents equal desired_video_ids: add what's missing, remove the extras.
 
-    Returns (n_added, n_removed, prior_video_ids) — prior_video_ids is the contents before the
-    change, so an undo can restore it.
+    Returns (n_added, n_removed, prior_video_ids, skipped_video_ids) — prior is the contents before
+    the change (so undo can restore it); skipped are ids YouTube refused to add.
     """
     detail = with_retry(lambda: client.get_playlist(ytm_playlist_id, limit=None))
     tracks = detail.get("tracks", [])
@@ -131,11 +154,10 @@ def _reconcile(client, ytm_playlist_id, desired_video_ids):
     current = set(prior)
     to_add = [v for v in desired if v not in current]
     to_remove = [t for t in tracks if t.get("videoId") and t.get("videoId") not in desired_set]
-    if to_add:
-        client.add_playlist_items(ytm_playlist_id, to_add)
+    added, skipped = _add_items(client, ytm_playlist_id, to_add)
     if to_remove:
         client.remove_playlist_items(ytm_playlist_id, to_remove)
-    return len(to_add), len(to_remove), prior
+    return added, len(to_remove), prior, skipped
 
 def apply_result(store, clients, playlist_ids, result_video_ids, keep, now) -> dict:
     """N-way track-level merge: set the kept playlist(s) to exactly result_video_ids.
@@ -161,13 +183,14 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now) -> d
         raise ValueError("keep must be 'all' or one of the playlists")
     droppers = [] if keep_all else [p for p in pls if p.id != int(keep)]
 
-    summary = {"added": 0, "removed": 0, "deleted": [],
+    summary = {"added": 0, "removed": 0, "skipped": 0, "deleted": [],
                "kept_ytm": keepers[0].ytm_playlist_id, "kept_title": keepers[0].title}
     restored, backups = [], []
     for pl in keepers:
-        added, removed, prior = _reconcile(client_for(pl), pl.ytm_playlist_id, result_video_ids)
+        added, removed, prior, skipped = _reconcile(client_for(pl), pl.ytm_playlist_id, result_video_ids)
         summary["added"] += added
         summary["removed"] += removed
+        summary["skipped"] += len(skipped)
         restored.append({"ytm": pl.ytm_playlist_id, "identity": pl.identity_id, "prev": prior})
     for pl in droppers:
         backups.append(backup_playlist(store, pl.id, now))
@@ -241,6 +264,24 @@ def delete_empty_playlist(store, playlist_id, client, now) -> str:
     client.delete_playlist(pl.ytm_playlist_id)
     store.remove_playlist(playlist_id)
     store.record_action(DELETE_EMPTY,
+                        json.dumps({"ytm": pl.ytm_playlist_id, "title": pl.title}),
+                        "{}", "executed", json.dumps({"backup": backup_path}), now)
+    return backup_path
+
+def delete_playlist(store, playlist_id, client, now) -> str:
+    """Delete a playlist outright (any size). Backs up first, prunes the row, records an undoable action.
+
+    Unlike delete_empty_playlist, this does not require the playlist to be empty — it's the
+    Playlists-tab bulk delete. System playlists are refused by backup_playlist.
+    """
+    pl = store.get_playlist(playlist_id)
+    if pl is None:
+        raise ValueError("playlist no longer exists")
+    backup_path = backup_playlist(store, playlist_id, now)
+    logger.warning("deleting playlist %s (backup at %s)", pl.ytm_playlist_id, backup_path)
+    client.delete_playlist(pl.ytm_playlist_id)
+    store.remove_playlist(playlist_id)
+    store.record_action(DELETE_PLAYLIST,
                         json.dumps({"ytm": pl.ytm_playlist_id, "title": pl.title}),
                         "{}", "executed", json.dumps({"backup": backup_path}), now)
     return backup_path

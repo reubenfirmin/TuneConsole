@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS tracks (
   identity_key TEXT NOT NULL,
   available INTEGER,
   video_type TEXT,
+  artist_browse_id TEXT,
+  album_browse_id TEXT,
   UNIQUE(identity_key, video_id)
 );
 CREATE TABLE IF NOT EXISTS playlists (
@@ -85,6 +87,15 @@ CREATE TABLE IF NOT EXISTS overlap_kept (
 CREATE TABLE IF NOT EXISTS stale_dismissed (
   ytm TEXT PRIMARY KEY, until REAL   -- until NULL = dismissed forever; else snoozed until ts
 );
+CREATE TABLE IF NOT EXISTS playlist_group (
+  ytm TEXT PRIMARY KEY, name TEXT NOT NULL   -- user-assigned group name for a playlist
+);
+CREATE TABLE IF NOT EXISTS hidden_playlists (
+  ytm TEXT PRIMARY KEY   -- playlists hidden from the Playlists tab (e.g. undeletable system ones)
+);
+CREATE TABLE IF NOT EXISTS saved_albums (
+  browse_id TEXT PRIMARY KEY, title TEXT, artist TEXT, year TEXT, type TEXT, thumbnail TEXT
+);
 """
 
 @dataclass
@@ -127,6 +138,10 @@ class Store:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN available INTEGER")
         if "video_type" not in cols:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN video_type TEXT")
+        if "artist_browse_id" not in cols:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN artist_browse_id TEXT")
+        if "album_browse_id" not in cols:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN album_browse_id TEXT")
         self.conn.commit()
 
     @_synchronized
@@ -157,39 +172,46 @@ class Store:
 
     @_synchronized
     def upsert_track(self, video_id, title, artist, album, duration_s, available=None,
-                     video_type=None) -> int:
+                     video_type=None, artist_browse_id=None, album_browse_id=None) -> int:
         key = identity_key(title, artist)
         row = self.conn.execute(
             "SELECT id FROM tracks WHERE identity_key=? AND IFNULL(video_id,'')=IFNULL(?,'')",
             (key, video_id)).fetchone()
         if row:
-            if available is not None:   # keep availability fresh on re-sync
-                self.conn.execute("UPDATE tracks SET available=? WHERE id=?", (int(available), row["id"]))
-            if video_type is not None:
-                self.conn.execute("UPDATE tracks SET video_type=? WHERE id=?", (video_type, row["id"]))
+            # keep these fresh on re-sync (backfills existing rows once the data is available)
+            for col, val in (("available", None if available is None else int(available)),
+                             ("video_type", video_type),
+                             ("artist_browse_id", artist_browse_id),
+                             ("album_browse_id", album_browse_id)):
+                if val is not None:
+                    self.conn.execute(f"UPDATE tracks SET {col}=? WHERE id=?", (val, row["id"]))
             self.conn.commit()
             return row["id"]
         cur = self.conn.execute(
-            "INSERT INTO tracks(video_id,title,artist,album,duration_s,identity_key,available,video_type) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO tracks(video_id,title,artist,album,duration_s,identity_key,available,"
+            "video_type,artist_browse_id,album_browse_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (video_id, title, artist, album, duration_s, key,
-             None if available is None else int(available), video_type))
+             None if available is None else int(available), video_type,
+             artist_browse_id, album_browse_id))
         self.conn.commit()
         return cur.lastrowid
 
     @_synchronized
     def playlist_kind(self, playlist_id) -> str:
-        """Classify a playlist by its tracks' YouTube videoType: 'audio', 'video', 'mixed', or ''.
+        """Classify a playlist by its tracks' YouTube videoType.
 
-        ATV (album track / provided audio) is audio; OMV/UGC/etc. are video. Unknown if no
-        videoType has been captured yet.
+        Returns 'audio' (all ATV), 'video' (all OMV/UGC/…), 'mixed' (both), 'mix' (has tracks but
+        YouTube tagged none — i.e. an auto-generated radio/mix playlist), or '' (no tracks).
         """
         rows = self.conn.execute(
-            "SELECT DISTINCT t.video_type FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
-            "WHERE pt.playlist_id=? AND t.video_type IS NOT NULL", (playlist_id,)).fetchall()
-        kinds = {"audio" if r["video_type"] == "MUSIC_VIDEO_TYPE_ATV" else "video" for r in rows}
-        if not kinds:
+            "SELECT t.video_type FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
+            "WHERE pt.playlist_id=?", (playlist_id,)).fetchall()
+        if not rows:
             return ""
+        kinds = {"audio" if r["video_type"] == "MUSIC_VIDEO_TYPE_ATV" else "video"
+                 for r in rows if r["video_type"] is not None}
+        if not kinds:
+            return "mix"        # non-empty but entirely untyped -> auto-mix / radio
         if kinds == {"audio"}:
             return "audio"
         if kinds == {"video"}:
@@ -217,11 +239,15 @@ class Store:
 
     @_synchronized
     def set_playlist_tracks(self, playlist_id, track_ids) -> None:
+        # de-dupe by track id, keeping first position — YouTube's get_playlist can return the same
+        # video many times (pagination duplication), which would otherwise inflate the playlist.
+        seen = set()
+        unique = [t for t in track_ids if not (t in seen or seen.add(t))]
         with self.conn:
             self.conn.execute("DELETE FROM playlist_tracks WHERE playlist_id=?", (playlist_id,))
             self.conn.executemany(
                 "INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES (?,?,?)",
-                [(playlist_id, tid, pos) for pos, tid in enumerate(track_ids)])
+                [(playlist_id, tid, pos) for pos, tid in enumerate(unique)])
 
     @_synchronized
     def remove_playlist(self, playlist_id) -> None:
@@ -240,6 +266,7 @@ class Store:
                 self.conn.execute("DELETE FROM suppressed_overlaps WHERE a=? OR b=?", (ytm, ytm))
                 self.conn.execute("DELETE FROM overlap_ignored WHERE ytm=?", (ytm,))
                 self.conn.execute("DELETE FROM overlap_kept WHERE a=? OR b=?", (ytm, ytm))
+                self.conn.execute("DELETE FROM playlist_group WHERE ytm=?", (ytm,))
 
     @_synchronized
     def get_playlists(self) -> list[Playlist]:
@@ -377,6 +404,183 @@ class Store:
     def restore_stale(self, ytm) -> None:
         self.conn.execute("DELETE FROM stale_dismissed WHERE ytm = ?", (ytm,))
         self.conn.commit()
+
+    @_synchronized
+    def set_playlist_group(self, ytm, name) -> None:
+        name = (name or "").strip()
+        if name:
+            self.conn.execute("INSERT OR REPLACE INTO playlist_group(ytm,name) VALUES (?,?)", (ytm, name))
+        else:   # empty name clears the assignment
+            self.conn.execute("DELETE FROM playlist_group WHERE ytm=?", (ytm,))
+        self.conn.commit()
+
+    @_synchronized
+    def hide_playlist(self, ytm) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO hidden_playlists(ytm) VALUES (?)", (ytm,))
+        self.conn.commit()
+
+    @_synchronized
+    def unhide_playlist(self, ytm) -> None:
+        self.conn.execute("DELETE FROM hidden_playlists WHERE ytm=?", (ytm,))
+        self.conn.commit()
+
+    @_synchronized
+    def get_hidden_playlists(self) -> set:
+        return {r["ytm"] for r in self.conn.execute("SELECT ytm FROM hidden_playlists")}
+
+    @_synchronized
+    def replace_saved_albums(self, albums) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM saved_albums")
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO saved_albums(browse_id,title,artist,year,type,thumbnail) "
+                "VALUES (?,?,?,?,?,?)",
+                [(a["browse"], a.get("title"), a.get("artist"), str(a.get("year") or ""),
+                  a.get("type"), a.get("thumbnail")) for a in albums if a.get("browse")])
+
+    @_synchronized
+    def get_saved_albums(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT browse_id browse, title, artist, year, type, thumbnail FROM saved_albums "
+            "ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE").fetchall()
+        return [dict(r) for r in rows]
+
+    @_synchronized
+    def get_playlist_groups(self) -> dict:
+        return {r["ytm"]: r["name"] for r in self.conn.execute("SELECT ytm,name FROM playlist_group")}
+
+    @_synchronized
+    def get_playlist_listen_stats(self) -> dict:
+        """Per-playlist {playlist_id: (last_listen_ts | None, listen_count)} from sync history.
+
+        listen_count = times the playlist's tracks appear across history snapshots; last = newest
+        snapshot containing any of them. Playlists with no recorded listens are absent.
+        """
+        rows = self.conn.execute(
+            "SELECT pt.playlist_id AS pid, COUNT(hi.identity_key) AS cnt, MAX(hs.taken_at) AS last "
+            "FROM playlist_tracks pt "
+            "JOIN tracks t ON t.id = pt.track_id "
+            "JOIN history_items hi ON hi.identity_key = t.identity_key "
+            "JOIN history_snapshots hs ON hs.id = hi.snapshot_id "
+            "GROUP BY pt.playlist_id").fetchall()
+        return {r["pid"]: (r["last"], r["cnt"]) for r in rows}
+
+    @_synchronized
+    def top_tracks(self, limit=100, since=None) -> list[dict]:
+        """Most-played songs from sync history — play count = appearances across history snapshots.
+
+        `since` (unix ts) limits to snapshots at/after that time, for a time-windowed chart.
+        """
+        rows = self.conn.execute(
+            "WITH plays AS (SELECT hi.identity_key, COUNT(*) c FROM history_items hi "
+            "  JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
+            "  WHERE (:since IS NULL OR hs.taken_at >= :since) GROUP BY hi.identity_key), "
+            "     names AS (SELECT identity_key, MIN(title) title, MIN(artist) artist, MIN(video_id) vid "
+            "               FROM tracks GROUP BY identity_key) "
+            "SELECT n.title, n.artist, n.vid, p.c FROM plays p JOIN names n ON n.identity_key=p.identity_key "
+            "WHERE n.title <> '' ORDER BY p.c DESC, n.title LIMIT :limit",
+            {"since": since, "limit": limit}).fetchall()
+        return [{"title": r["title"], "artist": r["artist"], "video_id": r["vid"], "plays": r["c"]}
+                for r in rows]
+
+    @_synchronized
+    def top_artists(self, limit=100, since=None) -> list[dict]:
+        """Most-played artists from sync history — play count summed over the artist's songs."""
+        rows = self.conn.execute(
+            "WITH plays AS (SELECT hi.identity_key, COUNT(*) c FROM history_items hi "
+            "  JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
+            "  WHERE (:since IS NULL OR hs.taken_at >= :since) GROUP BY hi.identity_key), "
+            "     names AS (SELECT identity_key, MIN(artist) artist FROM tracks GROUP BY identity_key) "
+            "SELECT n.artist, SUM(p.c) total FROM plays p JOIN names n ON n.identity_key=p.identity_key "
+            "WHERE n.artist <> '' GROUP BY n.artist ORDER BY total DESC, n.artist LIMIT :limit",
+            {"since": since, "limit": limit}).fetchall()
+        return [{"artist": r["artist"], "plays": r["total"]} for r in rows]
+
+    @_synchronized
+    def artist_songs(self, artist) -> list[dict]:
+        """An artist's songs that appear in your playlists: play count + which playlists hold each."""
+        songs = self.conn.execute(
+            "SELECT t.identity_key key, MIN(t.title) title, MIN(t.album) album, MIN(t.video_id) vid, "
+            "       MIN(t.duration_s) dur, MIN(t.video_type) vtype, "
+            "       (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=t.identity_key) plays "
+            "FROM tracks t WHERE t.artist=? GROUP BY t.identity_key", (artist,)).fetchall()
+        membership = self.conn.execute(
+            "SELECT DISTINCT t.identity_key key, pl.title title, pl.ytm_playlist_id ytm FROM tracks t "
+            "JOIN playlist_tracks pt ON pt.track_id=t.id JOIN playlists pl ON pl.id=pt.playlist_id "
+            "WHERE t.artist=?", (artist,)).fetchall()
+        by_key = {}
+        for r in membership:
+            by_key.setdefault(r["key"], []).append({"title": r["title"], "ytm": r["ytm"]})
+        out = [{"title": r["title"], "album": r["album"] or "", "video_id": r["vid"],
+                "duration": r["dur"], "plays": r["plays"],
+                "playlists": sorted(by_key.get(r["key"], []), key=lambda p: p["title"].lower())}
+               for r in songs]
+        out.sort(key=lambda s: (-s["plays"], (s["title"] or "").lower()))
+        return out
+
+    def _play_counts(self):
+        return {r["identity_key"]: r["c"]
+                for r in self.conn.execute("SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key")}
+
+    @_synchronized
+    def collection_albums(self) -> list[dict]:
+        """Every album across your playlists: artist, song count, #playlists, total plays."""
+        plays = self._play_counts()
+        rows = self.conn.execute(
+            "SELECT t.album album, t.identity_key key, MIN(t.artist) artist, MIN(t.album_browse_id) browse, "
+            "       GROUP_CONCAT(DISTINCT pt.playlist_id) pls "
+            "FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id "
+            "WHERE t.album IS NOT NULL AND t.album<>'' GROUP BY t.album, t.identity_key").fetchall()
+        albums = {}
+        for r in rows:
+            a = albums.setdefault(r["album"], {"album": r["album"], "artist": r["artist"],
+                                               "browse": r["browse"], "songs": 0, "plays": 0, "_pls": set()})
+            a["songs"] += 1
+            a["plays"] += plays.get(r["key"], 0)
+            a["_pls"].update((r["pls"] or "").split(","))
+        out = []
+        for a in albums.values():
+            a["n_pls"] = len([x for x in a.pop("_pls") if x])
+            out.append(a)
+        out.sort(key=lambda a: (-a["plays"], a["album"].lower()))
+        return out
+
+    @_synchronized
+    def collection_artists(self) -> list[dict]:
+        """Every artist across your playlists: song count, distinct albums, #playlists, total plays."""
+        plays = self._play_counts()
+        rows = self.conn.execute(
+            "SELECT t.artist artist, t.identity_key key, t.album album, MIN(t.artist_browse_id) browse, "
+            "       GROUP_CONCAT(DISTINCT pt.playlist_id) pls "
+            "FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id "
+            "WHERE t.artist<>'' GROUP BY t.artist, t.identity_key, t.album").fetchall()
+        artists = {}
+        for r in rows:
+            a = artists.setdefault(r["artist"], {"artist": r["artist"], "browse": r["browse"],
+                                                 "songs": 0, "plays": 0, "_albums": set(), "_pls": set()})
+            a["plays"] += plays.get(r["key"], 0)
+            if r["album"]:
+                a["_albums"].add(r["album"])
+            a["_pls"].update((r["pls"] or "").split(","))
+        # song count = distinct identity_keys per artist (separate, since the query groups by album too)
+        scount = {r["artist"]: r["c"] for r in self.conn.execute(
+            "SELECT artist, COUNT(DISTINCT identity_key) c FROM tracks WHERE artist<>'' GROUP BY artist")}
+        out = []
+        for a in artists.values():
+            a["songs"] = scount.get(a["artist"], 0)
+            a["n_albums"] = len(a.pop("_albums"))
+            a["n_pls"] = len([x for x in a.pop("_pls") if x])
+            out.append(a)
+        out.sort(key=lambda a: (-a["plays"], a["artist"].lower()))
+        return out
+
+    @_synchronized
+    def artist_browse_id(self, artist):
+        """The artist's YouTube channel/browse id (most common among their tracks), or None."""
+        r = self.conn.execute(
+            "SELECT artist_browse_id b FROM tracks WHERE artist=? AND artist_browse_id IS NOT NULL "
+            "GROUP BY artist_browse_id ORDER BY COUNT(*) DESC LIMIT 1", (artist,)).fetchone()
+        return r["b"] if r else None
 
     @_synchronized
     def get_stale_dismissed(self, now) -> list[tuple]:

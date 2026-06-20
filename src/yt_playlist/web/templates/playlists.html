@@ -1,0 +1,109 @@
+{% extends "base.html" %}{% block title %}Playlists · yt-playlist{% endblock %}{% block body %}
+{% if flash %}<div class="notice ok" style="margin-bottom:1.4rem">{{ flash }}{% if flash_pl %}
+  &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}</div>{% endif %}
+<div class="page-head">
+  <span class="eyebrow">Playlists</span>
+  <h1>All playlists</h1>
+  <p>Select playlists to merge, delete, or assign to a group. Sort by name or by your listening,
+     and split the view by group.</p>
+</div>
+{% include "_syncbar.html" %}
+
+<div x-data='playlistsTab({{ rows|tojson }})'>
+  <div class="card" style="margin-bottom:1.1rem">
+    <div class="pl-toolbar">
+      <span class="muted" style="font-size:.85rem">Click a column heading to sort.</span>
+      {% if has_groups %}
+      <span class="seg" title="Group the list by your group names">
+        <button type="button" :class="{ on: !split }" @click="split = false">All together</button>
+        <button type="button" :class="{ on: split }" @click="split = true">By group</button>
+      </span>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- floating bulk-action bar: teleported to body so it stays fixed to the viewport (and isn't
+       captured by <main>'s transform) and is reachable however far you've scrolled -->
+  <template x-teleport="body">
+    <div class="pl-actionbar" x-show="count() > 0" x-cloak x-transition.scale.origin.bottom>
+      <strong x-text="count() + ' selected'"></strong>
+      <button type="button" class="btn-sm" :disabled="count() < 2"
+              @click="merge()" title="Open the merge editor with the selected playlists">Merge →</button>
+      <button type="button" class="btn-sm" @click="openGroup()">Group…</button>
+      <button type="button" class="btn-danger btn-sm" @click="delModal = true">Delete</button>
+      <button type="button" class="btn-ghost btn-sm" @click="selectAll(false)">Clear</button>
+    </div>
+  </template>
+
+  <div class="card">
+    <table>
+      <thead><tr>
+        <th style="width:2rem"></th>
+        <th class="sorth" @click="sortBy('title')">Playlist<span x-text="ind('title')"></span></th>
+        <th class="sorth" style="width:8rem" @click="sortBy('group')">Group<span x-text="ind('group')"></span></th>
+        <th class="sorth num" style="width:4.5rem" @click="sortBy('count')">Songs<span x-text="ind('count')"></span></th>
+        <th class="sorth num" style="width:6rem" @click="sortBy('last')"
+            title="Most recent time a song from this playlist showed up in your play history">Last<span x-text="ind('last')"></span></th>
+        <th class="sorth num" style="width:5rem" @click="sortBy('listens')"
+            title="Total plays of this playlist's songs across your sync history — sums per-song plays, so big playlists score high. Not playlist-level plays.">Plays<span x-text="ind('listens')"></span></th>
+      </tr></thead>
+      <template x-for="sec in sections()" :key="sec.name">
+        <tbody>
+          <tr x-show="split && sec.name" class="group-row"><td colspan="6" x-text="sec.name"></td></tr>
+          <template x-for="r in sec.rows" :key="r.id">
+            <tr :class="{ selrow: sel[r.id] }">
+              <td><input type="checkbox" :checked="sel[r.id]" @change="toggle(r.id)" style="width:auto"></td>
+              <td>
+                <span class="kind kind-audio" x-show="r.kind === 'audio'" title="Audio">♪</span>
+                <span class="kind kind-video" x-show="r.kind === 'video'" title="Video">▶</span>
+                <span class="kind kind-mixed" x-show="r.kind === 'mixed'" title="Mixed audio + video">♪▶</span>
+                <span class="kind kind-mix" x-show="r.kind === 'mix'" title="Auto-mix / radio (no track types)">≋</span>
+                <a class="ptitle" :href="'https://music.youtube.com/playlist?list=' + r.ytm"
+                   target="_blank" rel="noopener" x-text="r.title + ' ↗'"></a>
+              </td>
+              <td><span class="gtag" x-show="r.group" x-text="r.group"></span></td>
+              <td class="num mono" x-text="r.count"></td>
+              <td class="num lastcol" x-text="fmtLast(r.last)"></td>
+              <td class="num mono" x-text="r.listens || ''"></td>
+            </tr>
+          </template>
+        </tbody>
+      </template>
+      <tbody x-show="rows.length === 0"><tr><td colspan="7" class="empty">No playlists yet — sync first.</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- group modal -->
+  <template x-teleport="body">
+    <div class="modal-backdrop" x-show="groupModal" x-cloak x-transition.opacity
+         @click="groupModal = false" @keydown.escape.window="groupModal = false">
+      <div class="modal" @click.stop x-transition.scale.origin.center>
+        <h3>Group <span x-text="count()"></span> playlist<span x-show="count() !== 1">s</span></h3>
+        <p>Type a group name. Existing names are reused; leave blank to remove them from their group.</p>
+        <input class="modal-input" type="text" x-model="groupName" placeholder="e.g. Workout"
+               @keydown.enter="doGroup()" x-ref="gname" x-init="$watch('groupModal', v => v && $nextTick(() => $refs.gname.focus()))">
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="groupModal = false">Cancel</button>
+          <button type="button" @click="doGroup()">Save</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- delete modal -->
+  <template x-teleport="body">
+    <div class="modal-backdrop" x-show="delModal" x-cloak x-transition.opacity
+         @click="delModal = false" @keydown.escape.window="delModal = false">
+      <div class="modal" @click.stop x-transition.scale.origin.center>
+        <h3>Delete <span x-text="count()"></span> playlist<span x-show="count() !== 1">s</span>?</h3>
+        <p>Each is backed up first and can be undone from <strong>Actions</strong>. System playlists
+           (e.g. Liked Music) are skipped.</p>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="delModal = false">Cancel</button>
+          <button type="button" class="btn-danger" @click="doDelete()">Delete them</button>
+        </div>
+      </div>
+    </div>
+  </template>
+</div>
+{% endblock %}

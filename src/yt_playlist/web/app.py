@@ -1,7 +1,9 @@
+import re
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from markupsafe import Markup, escape
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,6 +15,23 @@ from yt_playlist.web.routes import build_all
 
 # Methods that don't change state: exempt from the cross-origin guard below.
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+_URL_RE = re.compile(r"\(?\s*(https?://[^)\s]+)\s*\)?")
+
+
+def _linkify(text):
+    """Escape text and replace each (possibly parenthesised) URL with a small ↗ link, so bios keep
+    their wording but lose the raw URLs (e.g. the Wikipedia/CC-BY-SA attribution stays clickable)."""
+    if not text:
+        return ""
+    s, out, last = str(text), [], 0
+    for m in _URL_RE.finditer(s):
+        out.append(escape(s[last:m.start()]))
+        url = m.group(1)
+        out.append(Markup('<a href="{}" target="_blank" rel="noopener nofollow">↗</a>').format(url))
+        last = m.end()
+    out.append(escape(s[last:]))
+    return Markup("").join(out)
 
 
 def create_app(store, client_provider, *, now_fn=time.time,
@@ -34,6 +53,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
     except OSError:
         asset_v = "0"
     templates.env.globals["asset_v"] = asset_v
+    templates.env.filters["linkify"] = _linkify
 
     @app.middleware("http")
     async def require_configured(request: Request, call_next):

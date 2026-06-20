@@ -1,0 +1,63 @@
+{% extends "base.html" %}{% block title %}Charts · yt-playlist{% endblock %}{% block body %}
+<div class="page-head">
+  <span class="eyebrow">Charts</span>
+  <h1>Your top charts</h1>
+  <p>Ranked by plays captured in your sync history (how often each song turns up in recently-played).
+     The more you sync, the richer this gets.</p>
+</div>
+{% include "_syncbar.html" %}
+
+<div x-data="{ view: 'songs' }">
+  <div class="card pl-toolbar" style="margin-bottom:1.1rem">
+    <span class="seg">
+      <button type="button" :class="{ on: view === 'songs' }" @click="view = 'songs'">Top songs</button>
+      <button type="button" :class="{ on: view === 'artists' }" @click="view = 'artists'">Top artists</button>
+    </span>
+    <span style="margin-left:auto"></span>
+    <span class="seg" title="Limit to plays in this window of your sync history">
+      <a href="/charts?window=all" class="{{ 'on' if window == 'all' }}">All time</a>
+      <a href="/charts?window=90d" class="{{ 'on' if window == '90d' }}">90d</a>
+      <a href="/charts?window=30d" class="{{ 'on' if window == '30d' }}">30d</a>
+      <a href="/charts?window=7d" class="{{ 'on' if window == '7d' }}">7d</a>
+    </span>
+  </div>
+
+  <div class="card" x-show="view === 'songs'">
+    {% if songs %}{% set smax = songs[0].plays %}
+    <table class="chart">
+      <thead><tr><th class="rank">#</th><th>Song</th><th>Artist</th><th class="barhead"></th><th class="num">Plays</th></tr></thead>
+      <tbody>
+      {% for s in songs %}
+        <tr>
+          <td class="rank">{{ loop.index }}</td>
+          <td><a class="ptitle" href="https://music.youtube.com/watch?v={{ s.video_id }}"
+                 target="_blank" rel="noopener">{{ s.title }} ↗</a></td>
+          <td><a class="alink" href="/artist?name={{ s.artist|urlencode }}">{{ s.artist }}</a></td>
+          <td class="barcell"><span class="playbar" style="width:{{ (s.plays / smax * 100)|round(1) }}%"></span></td>
+          <td class="num mono">{{ s.plays }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="empty" style="margin:0">No play history yet — sync a few times to build it up.</p>{% endif %}
+  </div>
+
+  <div class="card" x-show="view === 'artists'" x-cloak>
+    {% if artists %}{% set amax = artists[0].plays %}
+    <table class="chart">
+      <thead><tr><th class="rank">#</th><th>Artist</th><th class="barhead"></th><th class="num">Plays</th></tr></thead>
+      <tbody>
+      {% for a in artists %}
+        <tr>
+          <td class="rank">{{ loop.index }}</td>
+          <td><a class="ptitle alink" href="/artist?name={{ a.artist|urlencode }}">{{ a.artist }}</a></td>
+          <td class="barcell"><span class="playbar" style="width:{{ (a.plays / amax * 100)|round(1) }}%"></span></td>
+          <td class="num mono">{{ a.plays }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="empty" style="margin:0">No play history yet.</p>{% endif %}
+  </div>
+</div>
+{% endblock %}
