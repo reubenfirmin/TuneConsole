@@ -1,0 +1,281 @@
+{% extends "base.html" %}{% from "_macros.html" import pllink with context %}{% block title %}Cleanup · yt-playlist{% endblock %}{% block body %}
+{% if flash %}<div class="notice ok" style="margin-bottom:1.4rem">{{ flash }}{% if flash_pl %}
+  &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}</div>{% endif %}
+{% if flasherr %}<div class="notice err" style="margin-bottom:1.4rem">{{ flasherr }}</div>{% endif %}
+<div class="page-head">
+  <span class="eyebrow">Cleanup</span>
+  <h1>Cleanup</h1>
+  <p>Dedupe, consolidate, and prune playlists across your YouTube identities.</p>
+</div>
+{% include "_syncbar.html" %}
+
+<div class="metrics">
+  <div class="metric"><div class="n">{{ n_playlists }}</div><div class="l">Playlists</div></div>
+  <a class="metric cool" href="/setup"><div class="n">{{ n_identities }}</div><div class="l">Identities</div></a>
+  <a class="metric warn" href="#dupes"><div class="n">{{ n_groups }}</div><div class="l">Exact-dup groups ↓</div></a>
+  <a class="metric" href="#overlaps"><div class="n">{{ n_overlaps }}</div><div class="l">Overlapping pairs ↓</div></a>
+</div>
+
+{% if n_playlists == 0 %}
+<div class="card" style="margin-top:1.6rem">
+  <p class="muted" style="margin:0">No library data yet. Hit <strong>Sync now</strong> to pull your playlists
+  and listening history from each identity.</p>
+</div>
+{% endif %}
+
+<h2 class="section" id="dupes">Exact duplicates <span class="count">{{ n_groups }} group{{ '' if n_groups == 1 else 's' }}</span></h2>
+<p class="section-note">Each group is a set of identical playlists. Pick the one to <strong>keep</strong> — every
+   other copy is deleted (backup first, remote-verified). One click resolves the whole group.</p>
+{% for g in groups %}
+  <div class="card group" x-data="groupCard()" x-show="state !== 'gone'" x-transition.opacity.duration.350ms
+       :class="{ dim: state === 'working' }" style="margin-bottom:1rem">
+    <div class="group-head">
+      <strong>{{ g.playlists|length }} identical copies</strong>
+      <span class="muted">· {{ g.track_count }} tracks</span>
+      <span class="muted" x-show="state === 'working'" style="display:none">· deleting the others…</span>
+    </div>
+    <table>
+      <tbody>
+      {% for p in g.playlists %}
+        <tr>
+          <td><span class="tag amber">{{ identities[p.identity_id] }}</span>
+              {{ pllink(p.ytm_playlist_id, p.title, p.track_count) }}</td>
+          <td style="text-align:right; white-space:nowrap">
+            <button type="button" class="cta" :disabled="state === 'working'"
+                    @click="keep({{ p.id }})" title="Keep this copy, delete the rest">Keep this one</button>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <div x-show="err" class="notice err" style="display:none; margin-top:.7rem" x-text="err"></div>
+  </div>
+{% else %}
+  <div class="card"><p class="empty" style="margin:0">No exact duplicates. 🎉</p></div>
+{% endfor %}
+
+{% if near_groups %}
+<h2 class="section" id="near">Near-duplicates <span class="count">{{ n_near }} group{{ '' if n_near == 1 else 's' }}</span></h2>
+<p class="section-note">Clusters of similar (≥70%, not identical) playlists. <strong>Keep one</strong> and the
+   rest are merged into it (their unique songs added, then deleted — undoable). Or <em>Review</em> a
+   pair for track-by-track control.</p>
+{% for g in near_groups %}
+  {% set member_csv = g.playlists | map(attribute='id') | join(',') %}
+  <div class="card" style="margin-bottom:1rem">
+    <div class="group-head" style="display:flex; align-items:center; gap:.6rem">
+      <span>{{ g.playlists|length }} similar playlists <span class="muted">· ~{{ '%.0f'|format(g.avg_similarity*100) }}% alike</span></span>
+      <a class="cta" style="margin-left:auto" href="/merge?ids={{ member_csv }}">Open merge editor →</a>
+    </div>
+    <table>
+      <tbody>
+      {% for p in g.playlists %}
+        <tr>
+          <td><span class="tag amber">{{ identities[p.identity_id] }}</span>
+              {{ pllink(p.ytm_playlist_id, p.title, p.track_count) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endfor %}
+{% endif %}
+
+{% if empties %}
+<h2 class="section" id="empty">Empty playlists <span class="count">{{ empties|length }}</span></h2>
+<p class="section-note">Playlists with no tracks. Delete the ones you don't need (a backup is written first).</p>
+<div class="card">
+  <table>
+    <thead><tr><th>Playlist</th><th></th></tr></thead>
+    {% for p in empties %}
+    <tbody x-data="emptyRow()" x-show="state !== 'gone'" x-transition.opacity.duration.300ms>
+      <tr :class="{ rowdel: state === 'deleting' }">
+        <td><span class="tag amber">{{ identities[p.identity_id] }}</span>
+            {{ pllink(p.ytm_playlist_id, p.title) }}</td>
+        <td style="text-align:right; white-space:nowrap">
+          <button type="button" class="btn-danger btn-sm" :disabled="state === 'deleting'"
+                  @click="del({{ p.id }})">Delete</button>
+        </td>
+      </tr>
+      <tr x-show="err" style="display:none"><td colspan="2"><span class="notice err" style="display:inline-block" x-text="err"></span></td></tr>
+    </tbody>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<h2 class="section" id="overlaps">Overlaps <span class="count">shared tracks · {{ n_overlaps }}</span></h2>
+<p class="section-note">Playlists that share songs without being duplicates.</p>
+<div class="card" x-data="overlapSort()" x-init="start()">
+  <table x-ref="tbl">
+    <thead><tr>
+      <th class="sorth" @click="sortBy('a')">Playlist A<span x-text="ind('a')"></span></th>
+      <th class="sorth" @click="sortBy('b')">Playlist B<span x-text="ind('b')"></span></th>
+      <th class="sorth" @click="sortBy('shared')">Overlap<span x-text="ind('shared')"></span></th>
+      <th></th>
+    </tr></thead>
+    {% for o in overlaps %}
+    {% set ay = o.playlist_a.ytm_playlist_id %}{% set by = o.playlist_b.ytm_playlist_id %}
+    <tbody class="ov-row" data-a="{{ o.playlist_a.title|lower }}" data-b="{{ o.playlist_b.title|lower }}"
+           data-shared="{{ o.shared|length }}" data-ay="{{ ay }}" data-by="{{ by }}"
+           x-data="hideRow()" x-show="state !== 'gone'" x-transition.opacity.duration.300ms>
+      <tr :class="{ rowdel: state === 'hiding' }">
+        <td><span class="abx">A</span>{{ pllink(ay, o.playlist_a.title, o.count_a) }}</td>
+        <td><span class="abx">B</span>{{ pllink(by, o.playlist_b.title, o.count_b) }}</td>
+        <td>
+          <span class="mono">{{ o.shared|length }}</span> shared
+          <span class="pid">{{ o.pct_a() }}% of A · {{ o.pct_b() }}% of B</span>
+        </td>
+        <td style="text-align:right; white-space:nowrap">
+          <a class="cta" href="/dupe/{{ o.playlist_a.id }}/{{ o.playlist_b.id }}">Review →</a>
+          <span class="pie-wrap" @click.outside="open = false" @keydown.escape.window="open = false">
+            <button type="button" class="kebab" :disabled="state === 'hiding'" :aria-expanded="open" title="More actions"
+                    @click="const w = $el.closest('.pie-wrap').getBoundingClientRect();
+                            mx = $event.clientX - w.left; my = $event.clientY - w.top; open = !open">⋯</button>
+            <div class="pie" x-show="open" x-cloak x-transition.scale.origin.center
+                 :style="open ? ('left:' + (mx - 80) + 'px;top:' + (my - 80) + 'px') : ''">
+              <svg viewBox="0 0 160 160" width="160" height="160" role="menu" aria-label="Overlap actions">
+                <!-- top: hide this pair -->
+                <path class="wedge w-hide" d="M38.9 23.4 A70 70 0 0 1 121.1 23.4 L96.5 57.3 A28 28 0 0 0 63.5 57.3 Z"
+                      @click="open = false; hide('{{ ay }}', '{{ by }}')">
+                  <title>Hide just this A–B pair (unhide later)</title></path>
+                <!-- upper-right: never show B's overlaps -->
+                <path class="wedge w-b" d="M121.1 23.4 A70 70 0 0 1 146.6 101.6 L106.6 88.7 A28 28 0 0 0 96.5 57.3 Z"
+                      @click="neverShowOverlaps('{{ by }}')">
+                  <title>Never show B’s overlaps — “{{ o.playlist_b.title }}”</title></path>
+                <!-- lower-right: mute others, keep pair -->
+                <path class="wedge w-mute" d="M146.6 101.6 A70 70 0 0 1 80.0 150.0 L80.0 108.0 A28 28 0 0 0 106.6 88.7 Z"
+                      @click="muteOtherOverlaps('{{ ay }}', '{{ by }}')">
+                  <title>Keep this A–B pair, mute every other overlap involving either A or B</title></path>
+                <!-- lower-left: hide this + all below (only meaningful when sorted by overlap) -->
+                <path class="wedge w-below" :class="{ 'wedge-off': key !== 'shared' }"
+                      d="M80.0 150.0 A70 70 0 0 1 13.4 101.6 L53.4 88.7 A28 28 0 0 0 80.0 108.0 Z"
+                      @click="key === 'shared' && (open = false, dismissFromRow($el.closest('tbody.ov-row')))">
+                  <title>Hide this pair and every lower-overlap pair below it (sort by Overlap first)</title></path>
+                <!-- upper-left: never show A's overlaps -->
+                <path class="wedge w-a" d="M13.4 101.6 A70 70 0 0 1 38.9 23.4 L63.5 57.3 A28 28 0 0 0 53.4 88.7 Z"
+                      @click="neverShowOverlaps('{{ ay }}')">
+                  <title>Never show A’s overlaps — “{{ o.playlist_a.title }}”</title></path>
+                <!-- glyphs -->
+                <text class="pie-glyph" x="80" y="31" text-anchor="middle" dominant-baseline="central">✕</text>
+                <text class="pie-glyph" x="108.8" y="119.6" text-anchor="middle" dominant-baseline="central">✦</text>
+                <text class="pie-glyph" x="51.2" y="119.6" text-anchor="middle" dominant-baseline="central"
+                      :class="{ 'wedge-off': key !== 'shared' }">⤓</text>
+                <!-- A / B = "never show this playlist's overlaps": eye-off icon + letter -->
+                <g class="pie-icon" transform="translate(33.4,64.9)">
+                  <path class="pie-eyeoff" d="M-8 0 C-5 -4.5 5 -4.5 8 0 C5 4.5 -5 4.5 -8 0 Z"/>
+                  <circle class="pie-eyeoff-pupil" cx="0" cy="0" r="2.1"/>
+                  <line class="pie-eyeoff" x1="-8.5" y1="-8.5" x2="8.5" y2="8.5"/>
+                  <text class="pie-glyph pie-sub" x="9" y="-8" text-anchor="middle" dominant-baseline="central">A</text>
+                </g>
+                <g class="pie-icon" transform="translate(126.6,64.9)">
+                  <path class="pie-eyeoff" d="M-8 0 C-5 -4.5 5 -4.5 8 0 C5 4.5 -5 4.5 -8 0 Z"/>
+                  <circle class="pie-eyeoff-pupil" cx="0" cy="0" r="2.1"/>
+                  <line class="pie-eyeoff" x1="-8.5" y1="-8.5" x2="8.5" y2="8.5"/>
+                  <text class="pie-glyph pie-sub" x="9" y="-8" text-anchor="middle" dominant-baseline="central">B</text>
+                </g>
+                <!-- center hub = dismiss -->
+                <circle class="pie-hub" cx="80" cy="80" r="26" @click="open = false">
+                  <title>Close — make no change</title></circle>
+                <text class="pie-hub-x" x="80" y="81" text-anchor="middle" dominant-baseline="central">⋯</text>
+              </svg>
+            </div>
+          </span>
+        </td>
+      </tr>
+    </tbody>
+    {% else %}
+    <tbody><tr><td colspan="4" class="empty">No overlaps found.</td></tr></tbody>
+    {% endfor %}
+  </table>
+  <!-- confirm modal (teleported to body so the fixed overlay isn't captured by <main>'s transform) -->
+  <template x-teleport="body">
+    <div class="modal-backdrop" x-show="confirmOpen" x-cloak x-transition.opacity
+         @click="confirmOpen = false" @keydown.escape.window="confirmOpen = false">
+      <div class="modal" @click.stop x-transition.scale.origin.center>
+        <h3>Hide low-overlap pairs?</h3>
+        <p>This hides <strong x-text="tail"></strong> overlap pair<span x-show="tail !== 1">s</span>
+           with <strong x-text="tailMax"></strong> or fewer shared tracks. You can unhide them later
+           from the list below.</p>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="confirmOpen = false">No</button>
+          <button type="button" @click="confirmDismiss()">Yes, hide them</button>
+        </div>
+      </div>
+    </div>
+  </template>
+</div>
+
+{% if tiny %}
+<h2 class="section" id="tiny">Tiny playlists <span class="count">{{ tiny|length }}</span></h2>
+<p class="section-note">Playlists with just 1–3 tracks. Often stragglers worth merging into a bigger
+   playlist or pruning — open one to decide.</p>
+<div class="card">
+  <table>
+    <thead><tr><th>Playlist</th><th class="num">Songs</th></tr></thead>
+    <tbody>
+    {% for p in tiny %}
+      <tr>
+        <td><span class="tag amber">{{ identities[p.identity_id] }}</span>
+            {{ pllink(p.ytm_playlist_id, p.title) }}</td>
+        <td class="num mono">{{ p.track_count }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if ignored %}
+<div x-data="{ open: false }">
+  <h2 class="section toggle" @click="open = !open">
+    <span class="chev" x-text="open ? '▾' : '▸'"></span> Ignored in overlaps <span class="count">{{ ignored|length }}</span>
+  </h2>
+  <div x-show="open" x-cloak>
+    <p class="section-note">These playlists are excluded from overlap detection (still checked for exact duplicates).</p>
+    <div class="card">
+      <table>
+        <tbody>
+        {% for g in ignored %}
+          <tr x-data="ajaxRow()" x-show="!gone" x-transition.opacity.duration.300ms>
+            <td>{{ pllink(g.ytm, g.title) }}</td>
+            <td style="text-align:right">
+              <button type="button" class="btn-ghost btn-sm" :disabled="busy"
+                      @click="go('/overlaps/unignore', { ytm: '{{ g.ytm }}' })">Stop ignoring</button>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if hidden %}
+<div x-data="{ open: false }">
+  <h2 class="section toggle" @click="open = !open">
+    <span class="chev" x-text="open ? '▾' : '▸'"></span> Hidden overlaps <span class="count">{{ hidden|length }}</span>
+  </h2>
+  <div x-show="open" x-cloak>
+    <p class="section-note">Overlaps you've suppressed — unhide any to bring it back.</p>
+    <div class="card">
+      <table>
+        <thead><tr><th>Playlist A</th><th>Playlist B</th><th></th></tr></thead>
+        <tbody>
+        {% for h in hidden %}
+          <tr x-data="ajaxRow()" x-show="!gone" x-transition.opacity.duration.300ms>
+            <td>{{ pllink(h.a, h.a_title) }}</td>
+            <td>{{ pllink(h.b, h.b_title) }}</td>
+            <td>
+              <button type="button" class="btn-ghost btn-sm" :disabled="busy"
+                      @click="go('/overlaps/unsuppress', { a: '{{ h.a }}', b: '{{ h.b }}' })">Unhide</button>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

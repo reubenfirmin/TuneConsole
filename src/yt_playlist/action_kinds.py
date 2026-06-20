@@ -1,0 +1,20 @@
+"""Central registry of action kinds recorded in the actions log.
+
+Every mutation records an Action with one of these kinds. Single-sourcing the
+constants and the undoable set here — rather than repeating string literals across
+the executor, the web routes, and the actions template — keeps the taxonomy in one
+place and lets the undoable check evolve without hunting down duplicated lists.
+"""
+
+PLAN = "plan"                    # a planned (then executed) delete/move/merge of one playlist into another
+APPLY_MERGE = "apply_merge"      # N-way merge editor applied: keepers set to a result, droppers deleted
+MOVE_IDENTITY = "move_identity"  # playlist copied/moved to another identity
+DELETE_EMPTY = "delete_empty"    # an empty playlist deleted
+UNDO = "undo"                    # an undo of a previous action (itself not undoable)
+
+# Kinds whose effects can be reversed from the Actions page.
+UNDOABLE_KINDS = (PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY)
+
+
+def is_undoable(kind) -> bool:
+    return kind in UNDOABLE_KINDS

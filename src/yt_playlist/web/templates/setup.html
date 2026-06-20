@@ -1,0 +1,98 @@
+{% extends "base.html" %}{% block title %}Setup · yt-playlist{% endblock %}{% block body %}
+<div class="page-head">
+  <span class="eyebrow">Connect</span>
+  <h1>Set up yt-playlist</h1>
+  <p>Paste a signed-in request from YouTube Music, name your identities, and you're in.</p>
+</div>
+
+{% if error %}<div class="notice err" style="margin-bottom:1.2rem"><strong>{{ error }}</strong></div>{% endif %}
+{% if configured %}<div class="notice" style="margin-bottom:1.2rem">Already configured — saving will update your settings.</div>{% endif %}
+
+<form method="post" action="/setup"
+      x-data='setupForm({{ rows|tojson }}, {{ master_idx|tojson }})' x-ref="form">
+
+  <div class="card" style="margin-bottom:1.4rem">
+    <h2 class="section" style="margin-top:0">1 · Capture your sign-in</h2>
+    <ol class="steps">
+      <li>Open <a href="https://music.youtube.com" target="_blank" rel="noopener">music.youtube.com</a>
+          signed in, then DevTools (F12) → <strong>Network</strong>, and reload so requests appear.</li>
+      <li>Type <code class="mono">browse</code> in the filter and click a <code class="mono">browse</code> request <em>row</em>.</li>
+      <li>Right-click it → <em>Copy</em> → <strong>Copy as cURL</strong>
+          (Windows: <em>Copy as cURL (bash)</em>), then paste below.</li>
+    </ol>
+    <p class="section-note">It includes everything needed. A raw request-headers block works too.
+      {% if has_credentials %}<br><em>A credential is already saved — leave the box blank to keep it.</em>{% endif %}</p>
+
+    <textarea name="headers" rows="7" @change="check()"
+              placeholder="Paste your 'Copy as cURL' here…"></textarea>
+
+    <div class="btn-row" style="margin-top:.8rem">
+      <button type="button" class="btn-ghost btn-sm" @click="check()"
+              x-text="auth === 'checking' ? 'Checking…' : 'Check sign-in'"></button>
+      <span x-show="auth === 'ok'" class="notice ok" style="padding:.3rem .7rem; display:none">
+        ✓ Signed in as <strong x-text="account"></strong></span>
+      <span x-show="auth === 'error'" class="notice err" style="padding:.3rem .7rem; display:none" x-text="error"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 class="section" style="margin-top:0">2 · Your identities</h2>
+    <p class="section-note">One row per YouTube identity. Exactly one is the <strong>master</strong> —
+      your main account, where cross-identity merges land (we fill its label in once your sign-in
+      checks out). A brand identity also needs its <code class="mono">brand_account_id</code>: open
+      <a href="https://myaccount.google.com/brandaccounts" target="_blank" rel="noopener">myaccount.google.com/brandaccounts</a>,
+      pick the account, and copy the id from the URL <code class="mono">…/b/&lt;id&gt;/</code>. Leave it blank for your main account.</p>
+
+    <table>
+      <thead><tr><th>Label</th><th>brand_account_id</th><th style="width:4rem">Master</th><th style="width:2rem"></th></tr></thead>
+      <tbody>
+        <template x-for="(row, i) in rows" :key="i">
+          <tr>
+            <td><input name="label" x-model="row.label" placeholder="main"></td>
+            <td><input name="brand_account_id" x-model="row.brand" placeholder="(blank for main account)"></td>
+            <td style="text-align:center"><input type="radio" name="master" :value="i" x-model.number="masterIdx" style="width:auto"></td>
+            <td><button type="button" class="btn-ghost btn-sm" x-show="rows.length > 1"
+                        @click="rows.splice(i, 1); if (masterIdx >= rows.length) masterIdx = 0">×</button></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+
+    <div class="btn-row" style="margin-top:1rem">
+      <button type="button" class="btn-ghost btn-sm" @click="rows.push({label: '', brand: ''})">+ Add identity</button>
+      <button type="submit">{{ 'Save' if configured else 'Save and start →' }}</button>
+    </div>
+  </div>
+</form>
+
+<script>
+function setupForm(rows, masterIdx) {
+  return {
+    rows: rows,
+    masterIdx: masterIdx,
+    auth: 'idle',        // idle | checking | ok | error
+    account: '',
+    error: '',
+    async check() {
+      const fd = new FormData(this.$refs.form);
+      if (!(fd.get('headers') || '').trim()) return;  // nothing pasted yet
+      this.auth = 'checking'; this.error = '';
+      try {
+        const resp = await fetch('/setup/check', { method: 'POST', body: fd });
+        const data = await resp.json();
+        if (data.ok) {
+          this.auth = 'ok'; this.account = data.account;
+          // auto-detect the logged-in (master) identity: fill its label if still blank
+          const m = this.rows[this.masterIdx];
+          if (m && !m.label.trim()) m.label = data.account;
+        } else {
+          this.auth = 'error'; this.error = data.error || 'sign-in not valid';
+        }
+      } catch (e) {
+        this.auth = 'error'; this.error = String(e);
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

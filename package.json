@@ -1,0 +1,16 @@
+{
+  "name": "yt-playlist-assets",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Front-end asset deps for yt-playlist. Run `npm run sync-assets` after install/upgrade to refresh src/yt_playlist/web/static/vendor/ (those copies are committed; npm is only needed to upgrade).",
+  "scripts": {
+    "sync-assets": "node scripts/sync-assets.mjs"
+  },
+  "dependencies": {
+    "@fontsource-variable/fraunces": "^5.2.9",
+    "@fontsource-variable/hanken-grotesk": "^5.2.8",
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "alpinejs": "3.14.8",
+    "htmx.org": "2.0.4"
+  }
+}

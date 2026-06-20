@@ -1,0 +1,17 @@
+{# Reusable bits shared across templates. #}
+
+{# audio/video/mixed marker for a playlist. #}
+{% macro kindicon(kind) -%}
+{% if kind == 'audio' %}<span class="kind kind-audio" title="Audio playlist">♪</span>
+{%- elif kind == 'video' %}<span class="kind kind-video" title="Video playlist">▶</span>
+{%- elif kind == 'mixed' %}<span class="kind kind-mixed" title="Mixed — audio &amp; video">♪▶</span>
+{%- endif %}
+{%- endmacro %}
+
+{# A playlist title that links to YouTube Music, with its song count and (when a `kinds`
+   map is in the template context) an audio/video/mixed icon. Import "with context" so the
+   icon lookup works without threading the kind through every call site. #}
+{% macro pllink(ytm, title, count=None) -%}
+{% set kind = kinds.get(ytm) if kinds is defined and kinds else None -%}
+{{ kindicon(kind) }}<a class="ptitle" href="https://music.youtube.com/playlist?list={{ ytm }}" target="_blank" rel="noopener">{{ title }} ↗</a>{% if count is not none %}<span class="pcount">{{ count }} song{{ '' if count == 1 else 's' }}</span>{% endif %}<span class="pid">{{ ytm }}</span>
+{%- endmacro %}

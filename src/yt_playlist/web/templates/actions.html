@@ -1,0 +1,37 @@
+{% extends "base.html" %}{% block title %}Actions · yt-playlist{% endblock %}{% block body %}
+<div class="page-head">
+  <span class="eyebrow">History</span>
+  <h1>Action log</h1>
+  <p>Every merge, move, and undo, newest first. Executed plans can be reverted.</p>
+</div>
+
+<div class="card">
+  <table>
+    <thead><tr><th class="num">#</th><th>Action</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {% for row in rows %}
+      {% set a = row.a %}
+      <tr>
+        <td class="num">{{ a.id }}</td>
+        <td>{{ row.desc }} <span class="tag">{{ a.kind }}</span></td>
+        <td>
+          {% if a.status == 'executed' %}<span class="tag teal">{{ a.status }}</span>
+          {% elif a.status in ('cancelled', 'undone') %}<span class="tag">{{ a.status }}</span>
+          {% elif a.status == 'planned' %}<span class="tag amber">{{ a.status }}</span>
+          {% else %}<span class="tag">{{ a.status }}</span>{% endif %}
+        </td>
+        <td>
+          {% if a.status == 'executed' and row.undoable %}
+            <form method="post" action="/undo/{{ a.id }}" style="display:inline">
+              <button class="btn-ghost btn-sm">Undo</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="empty">No actions yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

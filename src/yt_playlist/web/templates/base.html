@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}yt-playlist{% endblock %}</title>
+  <!-- Vendored from npm (see package.json); refresh with `npm run sync-assets`. Served locally
+       so nothing is fetched from a third-party CDN at runtime. -->
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <script src="/static/vendor/htmx.min.js"></script>
+  <script src="/static/app.js?v={{ asset_v }}"></script>
+  <script defer src="/static/vendor/alpine.min.js"></script>
+</head>
+<body>
+  {% set path = request.url.path if request else "/" %}
+  <header class="topbar">
+    <a class="brand" href="/">yt&#8202;<span class="dot">/</span>&#8202;playlist <small>console</small></a>
+    <nav>
+      <a href="/" class="{{ 'active' if path == '/' else '' }}">Cleanup</a>
+      <a href="/discover" class="{{ 'active' if path.startswith('/discover') else '' }}">Rediscover</a>
+      <a href="/move" class="{{ 'active' if path.startswith('/move') else '' }}">Move</a>
+      <a href="/actions" class="{{ 'active' if path.startswith('/actions') else '' }}">Actions</a>
+      <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
+    </nav>
+  </header>
+  <main>{% block body %}{% endblock %}</main>
+</body>
+</html>

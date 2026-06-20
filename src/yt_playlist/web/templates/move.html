@@ -1,0 +1,56 @@
+{% extends "base.html" %}{% from "_macros.html" import pllink with context %}{% block title %}Move · yt-playlist{% endblock %}{% block body %}
+{% if flash %}<div class="notice ok" style="margin-bottom:1.4rem">{{ flash }}</div>{% endif %}
+<div class="page-head">
+  <span class="eyebrow">Move</span>
+  <h1>Move playlists between identities</h1>
+  <p><strong>Move</strong> recreates a playlist under the target identity and deletes the original
+     (backup first). <strong>Copy</strong> keeps both. Tracks are re-matched in the target account.</p>
+</div>
+{% include "_syncbar.html" %}
+
+{% if identities|length < 2 %}
+  <div class="card"><p class="muted" style="margin:0">You need at least two identities —
+    add another in <a href="/setup">Setup</a>.</p></div>
+{% else %}
+<div x-data='moveTab({{ identities[0].id }}, {{ identities[1].id }})'>
+  <div class="card" style="margin-bottom:1.2rem">
+    <div class="cfg" style="align-items:center">
+      <label class="opt">From
+        <select x-model.number="from" style="width:auto; margin-left:.4rem">
+          {% for i in identities %}<option value="{{ i.id }}">{{ i.label }}</option>{% endfor %}
+        </select>
+      </label>
+      <span class="ab" style="background:none; color:var(--faint); font-size:1.3rem">→</span>
+      <label class="opt">To
+        <select x-model.number="to" style="width:auto; margin-left:.4rem">
+          {% for i in identities %}<option value="{{ i.id }}">{{ i.label }}</option>{% endfor %}
+        </select>
+      </label>
+      <span class="notice err" x-show="!canMove()" style="display:none; padding:.3rem .7rem">Pick two different identities.</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead><tr><th>Playlist</th><th></th></tr></thead>
+      {% for p in playlists %}
+      <tbody x-show="from === {{ p.identity_id }} && st({{ p.id }}).state !== 'gone'"
+             x-transition.opacity.duration.300ms style="display:none">
+        <tr :class="{ rowdel: st({{ p.id }}).state === 'working' }">
+          <td>{{ pllink(p.ytm_playlist_id, p.title, p.track_count) }}</td>
+          <td style="text-align:right; white-space:nowrap">
+            <button type="button" class="btn-ghost btn-sm" :disabled="!canMove() || st({{ p.id }}).state === 'working'"
+                    @click="run({{ p.id }}, true)">Copy →</button>
+            <button type="button" class="btn-sm" :disabled="!canMove() || st({{ p.id }}).state === 'working'"
+                    @click="run({{ p.id }}, false)">Move →</button>
+            <span class="muted" x-show="st({{ p.id }}).msg" style="display:none" x-text="st({{ p.id }}).msg"></span>
+            <span class="notice err" x-show="st({{ p.id }}).err" style="display:none; padding:.2rem .5rem" x-text="st({{ p.id }}).err"></span>
+          </td>
+        </tr>
+      </tbody>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
