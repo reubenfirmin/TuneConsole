@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from yt_playlist import analysis
 
-SYNC_STALE_S = 12 * 3600   # nudge to sync after 12h
+SYNC_STALE_S = 24 * 3600   # highlight the Sync card after 24h
 
 
 @dataclass

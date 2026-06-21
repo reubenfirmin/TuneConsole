@@ -173,17 +173,13 @@ function rowSort(pid) {
       this.editVid = null; this.gSuggest = []; this.gSel = -1;
       const genre = (value || '').trim();
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
-      if (tr) {                                   // optimistic update
-        const disp = tr.querySelector('.gdisplay');
-        if (disp) disp.innerHTML = genreChip(genre);
-        tr.dataset.genre = genre.toLowerCase();
-      }
+      if (!tr) return;
+      // htmx owns the request + swap: the server re-renders the whole row, keeping the data-*
+      // the sort reads in sync. (Alpine just triggers it; it never builds the HTML itself.)
       try {
-        await fetch(`/playlist/${this.pid}/track-genre`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ video_id: vid, genre }),
-        });
-      } catch (e) { /* optimistic UI already applied; a reload would resync if needed */ }
+        await htmx.ajax('POST', `/playlist/${this.pid}/track-genre`,
+          { values: { video_id: vid, genre }, target: tr, swap: 'outerHTML' });
+      } catch (e) { /* leave the row as-is; a reload would resync */ }
     },
 
     // --- click-to-edit year ---
@@ -202,17 +198,11 @@ function rowSort(pid) {
       this.editYearVid = null;
       const year = (value || '').trim();
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
-      if (tr) {
-        const disp = tr.querySelector('.ydisplay');
-        if (disp) disp.innerHTML = year ? escapeHtml(year) : '<span class="muted ghint">＋</span>';
-        tr.dataset.year = year || 0;
-      }
+      if (!tr) return;
       try {
-        await fetch(`/playlist/${this.pid}/track-year`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ video_id: vid, year }),
-        });
-      } catch (e) { /* optimistic UI already applied */ }
+        await htmx.ajax('POST', `/playlist/${this.pid}/track-year`,
+          { values: { video_id: vid, year }, target: tr, swap: 'outerHTML' });
+      } catch (e) { /* leave the row as-is; a reload would resync */ }
     },
   };
 }
@@ -517,29 +507,14 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
       };
       es.onerror = () => { es.close(); this.running = false; this.status = 'Stream interrupted.'; };
     },
-    // patch a row's Year/Genre cells live — but only the fields this event carries (MusicBrainz
-    // sends both, Last.fm sends only genre, so we must not blank year on a Last.fm run)
+    // The SSE event carries the server-rendered row HTML (same partial as a manual edit), so we just
+    // drop it in — Alpine re-inits the replaced <tr>, and its data-* (which sort reads) come along.
     applyRow(ev) {
+      if (!ev.row_html) return;
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(ev.video_id)}"]`);
-      if (!tr) return;
-      if ('year' in ev) {
-        const y = tr.querySelector('.ydisplay');
-        if (y) y.innerHTML = ev.year ? escapeHtml(ev.year) : '<span class="muted ghint">＋</span>';
-        tr.dataset.year = ev.year || 0;
-      }
-      if ('genre' in ev) {
-        const g = tr.querySelector('.gdisplay');
-        if (g) g.innerHTML = genreChip(ev.genre);
-        tr.dataset.genre = (ev.genre || '').toLowerCase();
-      }
+      if (tr) tr.outerHTML = ev.row_html;
     },
   };
-}
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-}
-function genreChip(genre) {
-  return genre ? `<span class="gtag">${escapeHtml(genre)}</span>` : '<span class="muted ghint">＋</span>';
 }
 function authBanner(initial) {
   // The "session expired" bar — seeded from the server, and updated live by the sync panel so it

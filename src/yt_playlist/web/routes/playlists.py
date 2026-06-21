@@ -152,11 +152,31 @@ def build(ctx) -> APIRouter:
         if job is None:
             raise HTTPException(status_code=404, detail="no such enrichment job")
 
+        # Render each track's <tr> server-side so the live enrich update and a manual edit produce
+        # identical cells (the page's applyRow just drops in row_html — no client HTML building).
+        row_tmpl = templates.env.get_template("_partials/track_row.html")
+        base, idx_of = {}, {}
+        if job.playlist_id is not None:
+            for i, t in enumerate(store.playlist_tracks_detail(job.playlist_id), start=1):
+                base[t["video_id"]] = t
+                idx_of[t["video_id"]] = i
+
+        def _with_row(ev):
+            vid = ev.get("video_id")
+            if ev.get("type") != "track" or vid not in base:
+                return ev
+            t = dict(base[vid])
+            if "genre" in ev:
+                t["genre"] = ev["genre"]
+            if "year" in ev:
+                t["year"] = ev["year"]
+            return {**ev, "row_html": row_tmpl.render(t=t, idx=idx_of[vid])}
+
         async def gen():
             sent = 0
             while True:
                 while sent < len(job.events):
-                    yield f"data: {json.dumps(job.events[sent])}\n\n"
+                    yield f"data: {json.dumps(_with_row(job.events[sent]))}\n\n"
                     sent += 1
                 if job.done:
                     yield f"data: {json.dumps({'type': 'end', 'error': job.error})}\n\n"

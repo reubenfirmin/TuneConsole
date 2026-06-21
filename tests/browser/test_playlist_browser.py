@@ -63,3 +63,47 @@ def test_rename_playlist_updates_heading(live_playlist_app, page):
     # survives a reload (persisted, not just a DOM poke)
     page.goto(f"{base}/playlist/{pid}")
     expect(page.get_by_role("heading", name="Renamed Mix")).to_be_visible()
+
+
+def test_set_year_click_to_edit(live_playlist_app, page):
+    base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    page.goto(f"{base}/playlist/{pid}")
+    row = page.get_by_role("row").filter(has_text="Song B")
+    row.locator(".ydisplay").click()                       # click-to-edit
+    row.locator(".yinput").fill("1999")
+    row.locator(".yinput").press("Enter")
+    expect(row.get_by_text("1999")).to_be_visible()        # cell shows the new year
+    page.goto(f"{base}/playlist/{pid}")                    # persisted
+    expect(page.get_by_role("row").filter(has_text="Song B").get_by_text("1999")).to_be_visible()
+
+
+def test_set_genre_by_typing(live_playlist_app, page):
+    base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    page.goto(f"{base}/playlist/{pid}")
+    row = page.get_by_role("row").filter(has_text="Song B")
+    row.locator(".gdisplay").click()
+    row.locator(".ginput").fill("Jazz")
+    row.locator(".ginput").press("Enter")
+    expect(row.get_by_text("Jazz")).to_be_visible()
+
+
+def test_set_genre_via_suggestion_click(live_playlist_app, page):
+    base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    page.goto(f"{base}/playlist/{pid}")
+    row = page.get_by_role("row").filter(has_text="Song B")
+    row.locator(".gdisplay").click()
+    row.locator(".ginput").fill("Jaz")                     # filters the autosuggest
+    row.get_by_role("button", name="Jazz", exact=True).click()   # pick the suggestion
+    expect(row.get_by_text("Jazz")).to_be_visible()
+
+
+def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):
+    import yt_playlist.musicbrainz as mb
+    monkeypatch.setattr(mb, "enrich",
+                        lambda title, artist: ("Electronic", "1998") if title == "Song B" else (None, None))
+    base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    page.goto(f"{base}/playlist/{pid}")
+    page.get_by_role("button", name="Enrich via MusicBrainz").click()
+    row = page.get_by_role("row").filter(has_text="Song B")
+    expect(row.get_by_text("Electronic")).to_be_visible(timeout=5000)   # live SSE cell update
+    expect(row.get_by_text("1998")).to_be_visible()
