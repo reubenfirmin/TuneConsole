@@ -82,14 +82,13 @@ def _artist_genre(mbid):
     if not mbid:
         return None
     if mbid not in _artist_genre_cache:
-        genre = None
         try:
             art = _get(f"artist/{mbid}", {"inc": "genres+tags", "fmt": "json"})
-            genre = _top_label(art)
         except Exception as e:  # noqa: BLE001
             logger.warning("MB artist lookup failed for %s: %s", mbid, e)
-        _artist_genre_cache[mbid] = genre
-    return _artist_genre_cache[mbid]
+            return None        # transient failure — don't cache, so a later track retries
+        _artist_genre_cache[mbid] = _top_label(art)   # cache only on success (incl. a legit None)
+    return _artist_genre_cache.get(mbid)
 
 
 _PARENS = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
@@ -132,7 +131,8 @@ def _lookup(title, artist):
     rec = recordings[0]                          # best match drives genre/artist
     year = _earliest_year(recordings)            # but year comes from the earliest candidate
     credit = rec.get("artist-credit") or []
-    artist_mbid = (credit[0].get("artist") or {}).get("id") if credit else None
+    first = credit[0] if credit else None        # MB sometimes returns bare join-phrase strings here
+    artist_mbid = (first.get("artist") or {}).get("id") if isinstance(first, dict) else None
     genre = None
     mbid = rec.get("id")
     if mbid:
@@ -147,11 +147,12 @@ def _lookup(title, artist):
     return (genre, year)
 
 
-def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop=None):
-    """Walk a playlist's not-yet-enriched tracks, fetch genre+year for each, persist, and report
-    progress. `on_progress(event_dict)` receives info/track/done events for the SSE stream."""
+def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop=None, pending=None):
+    """Walk a track set's not-yet-enriched tracks, fetch genre+year for each, persist, and report
+    progress. Scope is a playlist (playlist_id) or an explicit `pending` list (e.g. an album's tracks).
+    `on_progress(event_dict)` receives info/track/done events for the SSE stream."""
     enrich_fn = enrich_fn or enrich        # resolved here so tests can monkeypatch module-level enrich
-    pending = store.tracks_to_enrich(playlist_id)
+    pending = store.tracks_to_enrich(playlist_id) if pending is None else pending
     total = len(pending)
     if not total:
         on_progress({"type": "done", "text": "Everything is already enriched.", "total": 0})

@@ -68,8 +68,10 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="playlist not found")
         labels = {i.id: i.label for i in store.get_identities()}
         tracks = store.playlist_tracks_detail(pid)
+        from yt_playlist.repos.rec_query import GENERATED_GROUP
         return templates.TemplateResponse(request, "playlist.html", {
             "pl": pl, "tracks": tracks, "identity": labels.get(pl.identity_id, "?"),
+            "is_generated": store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP,
             "kind": store.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),
             # autosuggest = the editable whitelist plus whatever genres already exist in the library
             "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
@@ -137,6 +139,12 @@ def build(ctx) -> APIRouter:
         runner = ENRICH_SOURCES.get(source)
         if runner is None:
             raise HTTPException(status_code=404, detail="unknown enrichment source")
+        # Rejoin an already-running job for this playlist+source instead of starting a duplicate
+        # (double-click, or the same playlist open in two tabs) — which would double the API load
+        # and race writes. A different source is allowed to run alongside (separate rate gate).
+        active = ctx.jobs.find_active(pid)
+        if active is not None and active.source == source:
+            return JSONResponse({"job_id": active.id})
         job = ctx.jobs.create()
         job.playlist_id = pid           # so a refreshed page can find + rejoin this job
         job.source = source
@@ -162,12 +170,17 @@ def build(ctx) -> APIRouter:
 
         # Render each track's <tr> server-side so the live enrich update and a manual edit produce
         # identical cells (the page's applyRow just drops in row_html — no client HTML building).
-        row_tmpl = templates.env.get_template("_partials/track_row.html")
+        # Album jobs render the album row partial from the album's folded-in tracks instead.
+        if job.album_browse is not None:
+            row_tmpl = templates.env.get_template("_partials/album_track_row.html")
+            rows = store.album_tracks_detail(job.album_browse)
+        else:
+            row_tmpl = templates.env.get_template("_partials/track_row.html")
+            rows = store.playlist_tracks_detail(job.playlist_id) if job.playlist_id is not None else []
         base, idx_of = {}, {}
-        if job.playlist_id is not None:
-            for i, t in enumerate(store.playlist_tracks_detail(job.playlist_id), start=1):
-                base[t["video_id"]] = t
-                idx_of[t["video_id"]] = i
+        for i, t in enumerate(rows, start=1):
+            base[t["video_id"]] = t
+            idx_of[t["video_id"]] = i
 
         def _with_row(ev):
             vid = ev.get("video_id")
@@ -268,6 +281,15 @@ def build(ctx) -> APIRouter:
             logger.exception("reorder failed for playlist %s", pid)
             return _refresh()
         return Response(status_code=204)              # success: order persisted, nothing to swap
+
+    @router.post("/playlist/{pid}/promote")
+    def playlist_promote(pid: int):
+        """Promote a Generated playlist into the library: move it out of the quarantine group so it
+        counts as a real playlist and starts shaping the taste model (graduation by user intent)."""
+        pl = store.get_playlist(pid)
+        if pl is not None:
+            store.set_playlist_group(pl.ytm_playlist_id, "")
+        return _refresh()
 
     @router.post("/playlists/group")
     async def playlists_group(request: Request):

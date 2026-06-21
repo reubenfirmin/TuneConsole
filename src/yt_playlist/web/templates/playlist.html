@@ -60,6 +60,7 @@
     </button>
   </div>
 </div>
+{% if is_generated %}{% with pid = pl.id %}{% include "_partials/mood_panel.html" %}{% endwith %}{% endif %}
 <div class="enrich-strip" x-show="running || finished" x-cloak x-transition>
   <div class="enrich-bar"><i :style="`width:${pct}%`"></i></div>
   <span class="enrich-status" x-text="status"></span>

@@ -38,16 +38,49 @@ def recall_at_k(store, k=20, min_size=5, seed=0) -> dict:
             "lift": (recall / baseline) if recall and baseline else None}
 
 
-def autotune(store, dims=(32, 48, 64), k=20) -> dict:
-    """Pick the embedding dimensionality that maximizes recall@k, persist it, and rebuild on it.
+def projection_recall(store, k=20) -> dict:
+    """How well content predicts the embedding (the ACARec-flavored learned grounding's quality):
+    hold out each tagged track, predict its vector from genre/year, and check whether the true track
+    lands in the top-k by cosine. This is the 'groundability' of cold items — high means the learned
+    projection is a viable cold-start grounding to compare against the bridge heuristic."""
+    from yt_playlist.discover import ContentProjection
+    from yt_playlist.rec_dao import RecDao
+    keys, V, idx = embed.load_vectors(store)
+    if V is None:
+        return {"recall": None, "trials": 0}
+    proj = ContentProjection.fit(store)
+    if proj is None:
+        return {"recall": None, "trials": 0}
+    Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
+    hits = trials = 0
+    for key, (g, y) in RecDao(store).track_content().items():
+        if key not in idx:
+            continue
+        p = proj.predict(g, y)
+        n = np.linalg.norm(p)
+        if n == 0:
+            continue
+        sims = Vn @ (p / n)
+        rank = int((sims > sims[idx[key]]).sum())   # how many tracks score above the true one
+        hits += rank < k
+        trials += 1
+    return {"recall": hits / trials if trials else None, "k": k, "trials": trials}
 
-    This is recall@k actually *tuning* the model (spec §10), not just reporting it. Returns the
-    winning dim and the per-dim scores."""
+
+def autotune(store, dims=(32, 48, 64), methods=("svd", "item2vec"), k=20) -> dict:
+    """A/B the embedding *method* (svd vs item2vec) and dimensionality by recall@k, persist the
+    winner, and rebuild on it. recall@k actually *tuning* the model (spec §10) — never forcing
+    item2vec, only keeping it if it wins on your data. Returns the winner + per-config scores."""
     scores = {}
-    for d in dims:
-        embed.build_and_store(store, dim=d)
-        scores[d] = recall_at_k(store, k=k).get("recall_at_k") or 0.0
+    for method in methods:
+        store.set_setting("rec_embed_method", method)
+        for d in dims:
+            embed.build_and_store(store, dim=d)
+            scores[(method, d)] = recall_at_k(store, k=k).get("recall_at_k") or 0.0
     best = max(scores, key=scores.get)
-    store.set_setting("rec_dim", str(best))
-    embed.build_and_store(store, dim=best)   # leave the live model on the winning dim
-    return {"best_dim": best, "scores": scores}
+    bm, bd = best
+    store.set_setting("rec_embed_method", bm)
+    store.set_setting("rec_dim", str(bd))
+    embed.build_and_store(store, dim=bd)     # leave the live model on the winning config
+    return {"best_method": bm, "best_dim": bd,
+            "scores": {f"{m}:{d}": v for (m, d), v in scores.items()}}

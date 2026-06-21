@@ -11,18 +11,23 @@ DIM = 48
 
 
 def build_vectors(store, dim=DIM):
-    """Return (keys, V) where V[i] is the L2-normalised embedding for keys[i]. May be empty."""
+    """Return (keys, V), L2-normalised per-track embeddings. Method ('svd' default, or 'item2vec')
+    comes from the recall@k-tuned `rec_embed_method` setting."""
     baskets = store.rec_baskets()
     keys = sorted({k for b in baskets for k in b})
-    n = len(keys)
-    if n < dim + 5:
+    if len(keys) < dim + 5:
         return [], np.zeros((0, dim), dtype=np.float32)
-    idx = {k: i for i, k in enumerate(keys)}
+    if (store.get_setting("rec_embed_method") or "svd") == "item2vec":
+        return _item2vec(baskets, keys, dim)
+    return _svd(baskets, keys, dim)
 
-    # weighted co-occurrence: each basket contributes 1/(size-1) per pair (Newman weighting),
-    # so a 100-track playlist doesn't drown out a tight 8-track one.
+
+def _svd(baskets, keys, dim):
+    """PPMI co-occurrence + randomised truncated SVD (numpy only)."""
+    n = len(keys)
+    idx = {k: i for i, k in enumerate(keys)}
     C = np.zeros((n, n), dtype=np.float64)
-    for b in baskets:
+    for b in baskets:                                  # Newman 1/(size-1) per pair
         ii = [idx[k] for k in b]
         w = 1.0 / (len(ii) - 1)
         for a in range(len(ii)):
@@ -31,7 +36,6 @@ def build_vectors(store, dim=DIM):
                 ic = ii[c]
                 C[ia, ic] += w
                 C[ic, ia] += w
-
     tot = C.sum()
     if tot <= 0:
         return [], np.zeros((0, dim), dtype=np.float32)
@@ -40,14 +44,59 @@ def build_vectors(store, dim=DIM):
         P = C / tot
         exp = np.outer(row, row) / (tot * tot)
         ppmi = np.maximum(np.log(np.where((P > 0) & (exp > 0), P / np.where(exp > 0, exp, 1.0), 1.0)), 0.0)
-
-    # randomised truncated SVD (numpy only): Q captures the top subspace, then SVD the small B.
     rng = np.random.default_rng(0)
     om = rng.standard_normal((n, dim + 10))
     Q, _ = np.linalg.qr(ppmi @ om)
     Ub, S, _ = np.linalg.svd(Q.T @ ppmi, full_matrices=False)
     V = (Q @ Ub)[:, :dim] * np.sqrt(S[:dim])
     V /= np.linalg.norm(V, axis=1, keepdims=True) + 1e-9
+    return keys, V.astype(np.float32)
+
+
+def _sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -30, 30)))
+
+
+def _item2vec(baskets, keys, dim, epochs=5, neg=5, lr=0.025, seed=0):
+    """item2vec: skip-gram with negative sampling over baskets-as-sentences (numpy SGNS).
+
+    Each basket is an unordered 'sentence', so every co-member is a context. Slightly better than
+    SVD on the long tail per the literature — gated by recall@k in autotune, never forced.
+    """
+    rng = np.random.default_rng(seed)
+    n = len(keys)
+    idx = {k: i for i, k in enumerate(keys)}
+    pairs = []
+    for b in baskets:
+        ii = [idx[k] for k in b]
+        for a in range(len(ii)):
+            for c in range(len(ii)):
+                if a != c:
+                    pairs.append((ii[a], ii[c]))
+    if not pairs:
+        return keys, np.zeros((n, dim), dtype=np.float32)
+    pairs = np.asarray(pairs, dtype=np.int64)
+    counts = np.bincount(pairs[:, 1], minlength=n).astype(np.float64) + 1.0
+    pdist = counts ** 0.75
+    pdist /= pdist.sum()
+    W = rng.standard_normal((n, dim)) * 0.01
+    Cm = rng.standard_normal((n, dim)) * 0.01
+    bs = 2048
+    for _ in range(epochs):
+        perm = rng.permutation(len(pairs))
+        for s in range(0, len(pairs), bs):
+            bp = pairs[perm[s:s + bs]]
+            ci, cj = bp[:, 0], bp[:, 1]
+            m = len(bp)
+            negs = rng.choice(n, size=(m, neg), p=pdist)
+            wi = W[ci]                                   # (m, dim)
+            gp = (_sigmoid((wi * Cm[cj]).sum(1)) - 1.0)[:, None]          # positive grad
+            gn = _sigmoid((wi[:, None, :] * Cm[negs]).sum(2))[:, :, None]  # (m, neg, 1)
+            gW = gp * Cm[cj] + (gn * Cm[negs]).sum(1)
+            np.add.at(W, ci, -lr * gW)
+            np.add.at(Cm, cj, -lr * (gp * wi))
+            np.add.at(Cm, negs.ravel(), (-lr * gn * wi[:, None, :]).reshape(-1, dim))
+    V = W / (np.linalg.norm(W, axis=1, keepdims=True) + 1e-9)
     return keys, V.astype(np.float32)
 
 
@@ -120,6 +169,23 @@ def neighbors(store, key, topn=12, exclude=None):
     if V is None or key not in idx:
         return []
     return _rank(keys, V, V[idx[key]], (exclude or set()) | {key}, topn)
+
+
+def neighbors_for_unmodeled(store, key, topn=12):
+    """Neighbours for a seed track that has no vector of its own — it's brand new, or quarantined out
+    of the embedding (an unplayed generated track). Query with a proxy: the centroid of the seed
+    artist's tracks that ARE modeled. Lets 'songs like this' work for such tracks without putting the
+    track itself into the model. Empty if the artist has nothing modeled."""
+    keys, V, idx = load_vectors(store)
+    if V is None or key in idx:
+        return []
+    artist = key.rsplit("|", 1)[-1]                      # identity_key = "title|artist" (normalized)
+    rows = [idx[k] for k in idx if k != key and k.rsplit("|", 1)[-1] == artist]
+    if not rows:
+        return []
+    proxy = V[rows].mean(0)
+    n = np.linalg.norm(proxy)
+    return _rank(keys, V, proxy / n, {key}, topn) if n > 0 else []
 
 
 def _centroid(V, idx, seed_groups):

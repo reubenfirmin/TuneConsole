@@ -129,3 +129,27 @@ def test_copy_into_rejects_system_target(store, monkeypatch, tmp_path):
 
     r = c.post("/playlists/copy-into", data={"ids": str(src), "target": str(lm)})
     assert r.status_code == 422 and "system playlist" in r.text.lower()
+
+
+def test_copy_into_rejects_cross_account_target(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    a = store.upsert_identity("main", "cred", None, True)
+    b = store.upsert_identity("alt", "cred2", "BA", False)             # a second account
+    src = store.upsert_playlist(a, "PLA", "Rock", 1, "h", 1.0)         # source on account A
+    dst = store.upsert_playlist(b, "PLB", "Dest", 0, "h", 1.0)         # target on account B
+    store.set_playlist_tracks(src, [store.upsert_track("v0", "S0", "X", None, None, 1)])
+    c = _client(store, lambda: {a: FakeClient(), b: FakeClient()})
+
+    r = c.post("/playlists/copy-into", data={"ids": str(src), "target": str(dst)})
+    assert r.status_code == 422 and "same account" in r.text.lower()    # cross-account add refused
+
+
+def test_promote_moves_playlist_out_of_generated(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    pid = store.upsert_playlist(iid, "PLG", "Gen Mix", 3, "h", 0.0)
+    store.set_playlist_group("PLG", "Generated")
+    assert store.get_playlist_groups().get("PLG") == "Generated"
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.post(f"/playlist/{pid}/promote")
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
+    assert store.get_playlist_groups().get("PLG", "") != "Generated"   # graduated out of quarantine

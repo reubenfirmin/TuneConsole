@@ -43,18 +43,57 @@ class RecWorker:
                     return
                 self._pending = False
             try:
-                self.rebuild()
+                self._do_rebuild()
             except Exception:  # noqa: BLE001 - never let rec work crash the app
                 self.ctx.logger.warning("rec worker rebuild failed", exc_info=True)
 
     def rebuild(self):
-        """Rebuild vectors and materialize the heavy proposal surfaces."""
+        """Synchronous rebuild for the Taste-model 'rebuild' button. Guarded against the background
+        loop: if a rebuild is already running it defers (marks pending) instead of starting a second
+        concurrent SVD, and it flips `_running` so `busy` reflects a direct rebuild too."""
+        with self._lock:
+            if self._running:
+                self._pending = True   # one's already in flight; let it absorb this request
+                return
+            self._running = True
+        try:
+            self._do_rebuild()
+        finally:
+            with self._lock:
+                self._running = False
+                again = self._pending
+                self._pending = False
+        if again:
+            self.trigger()             # a request arrived mid-rebuild -> background catch-up pass
+
+    def _do_rebuild(self):
+        """Rebuild vectors and materialize the heavy proposal surfaces.
+
+        Each surface is materialized INDEPENDENTLY: the album/fresh surfaces hit YouTube and can
+        fail (network, rate-limit, parse), and a single failure must not block the surfaces after it
+        from refreshing — otherwise e.g. a flaky album fetch would leave new-artist thumbnails stuck
+        on stale cache forever. A failed surface keeps its last-good proposals."""
+        from yt_playlist import discover
+        log = self.ctx.logger
         store = self.ctx.store
         dao = RecDao(store)
         now = self.ctx.now_fn()
-        embed.build_and_store(store)
-        dao.put_proposals("auto_playlists", recommend.auto_playlists(store, k=24), now)
-        dao.put_proposals("discover", recommend.new_albums_from_favorites(self.ctx), now)
-        dao.put_proposals("fresh_songs", recommend.fresh_songs(self.ctx), now)
-        from yt_playlist import discover
-        dao.put_proposals("new_artists", discover.new_artists(self.ctx), now)
+        t0 = time.monotonic()
+        log.info("rec rebuild: starting")
+        n = embed.build_and_store(store)
+        log.info("rec rebuild: embedded %d vectors in %.1fs", n, time.monotonic() - t0)
+        surfaces = (
+            ("auto_playlists", lambda: recommend.auto_playlists(store, k=40)),
+            ("discover", lambda: recommend.new_albums_from_favorites(self.ctx)),
+            ("fresh_songs", lambda: recommend.fresh_songs(self.ctx)),
+            ("new_artists", lambda: discover.new_artists(self.ctx)),
+        )
+        for surface, build in surfaces:
+            ts = time.monotonic()
+            try:
+                items = build()
+                dao.put_proposals(surface, items, now)
+                log.info("rec rebuild: %s → %d items in %.1fs", surface, len(items), time.monotonic() - ts)
+            except Exception:  # noqa: BLE001 - one surface's failure must not starve the others
+                log.warning("rec rebuild: %s failed after %.1fs", surface, time.monotonic() - ts, exc_info=True)
+        log.info("rec rebuild: done in %.1fs", time.monotonic() - t0)

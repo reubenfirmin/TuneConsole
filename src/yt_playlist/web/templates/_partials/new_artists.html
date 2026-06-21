@@ -1,19 +1,20 @@
 {% if building %}
 <div hx-get="/home/new-artists" hx-trigger="load delay:4s" hx-swap="outerHTML">
   <h2 class="section">New artists for you <span class="refreshing">finding…</span></h2>
-  <div class="for-you-grid">{% for _ in range(4) %}<div class="card fy-card skeleton"></div>{% endfor %}</div>
+  <div class="tile-grid">{% for _ in range(5) %}<div class="tile"><div class="tile-cover skeleton"></div></div>{% endfor %}</div>
 </div>
 {% elif artists %}
-<h2 class="section">New artists for you</h2>
+{% from "_macros.html" import tile %}
+<div{% if stale %} hx-get="/home/new-artists" hx-trigger="load delay:3s" hx-swap="outerHTML"{% endif %}>
+<h2 class="section">New artists for you{% if stale %} <span class="refreshing">refreshing…</span>{% endif %}</h2>
 <p class="section-note">Pinned to your taste — artists similar to the ones you actually play, fitting the playlists you actually listen to.</p>
-<div class="for-you-grid">
+<div class="tile-grid">
   {% for a in artists %}
-  <div class="card na-card">
-    <a class="na-name" href="https://music.youtube.com/search?q={{ a.artist|urlencode }}"
-       target="_blank" rel="noopener">{{ a.artist }}</a>
-    {% if a.because %}<span class="na-because">because you play {{ a.because|join(', ') }}</span>{% endif %}
-    {% if a.fits %}<span class="na-fits">fits your {{ a.fits|join(', ') }}</span>{% endif %}
-  </div>
+  {{ tile('artist', a.thumbnail, a.artist,
+          ('because you play ' ~ a.because|join(', ')) if a.because else none,
+          "/artist?name=" ~ a.artist|urlencode, none,
+          ('fits your ' ~ a.fits|join(', ')) if a.fits else none) }}
   {% endfor %}
+</div>
 </div>
 {% endif %}

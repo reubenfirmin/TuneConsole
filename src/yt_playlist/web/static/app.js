@@ -15,12 +15,14 @@ document.addEventListener('htmx:beforeSwap', (e) => {
 });
 
 // Alpine component factories for the various pages (loaded globally via base.html).
-function rowSort(pid) {
+function rowSort(pid, editBase) {
   // Generic click-to-sort for a static-row table; reorders <tr class="srow"> by data-<key>.
   // Numeric when both values parse as numbers, else locale string compare.
   // Also hosts the per-row "⋯" menu and the "find alternate versions" flow for the playlist view.
+  // `editBase` is the URL the genre/year edits POST under (defaults to /playlist/<pid>; the album
+  // page passes /album/<browse>). Reorder/remove stay playlist-only.
   return {
-    pid: pid, key: '', dir: 1,
+    pid: pid, editBase: editBase || ('/playlist/' + pid), key: '', dir: 1,
     openMenu: null,                                   // video_id whose ⋯ menu is open
     // alternate-versions modal
     altOpen: false, altLoading: false, altTitle: '',
@@ -36,6 +38,10 @@ function rowSort(pid) {
           return (numeric ? na - nb : a.localeCompare(b)) * this.dir;
         })
         .forEach(r => tb.appendChild(r));
+      // A manual drag-reorder only makes sense in the playlist's TRUE order. Once a column sort is
+      // applied, the on-screen order isn't canonical, so persisting a single drag would scramble the
+      // real order — disable dragging until the view is reloaded back to the default order.
+      if (this._sortable) this._sortable.option('disabled', this.key !== '');
     },
     ind(k) { return this.key === k ? (this.dir === 1 ? ' ▲' : ' ▼') : ''; },
 
@@ -70,8 +76,9 @@ function rowSort(pid) {
     initSortable() {
       const tb = this.$refs.body;
       if (!tb || typeof Sortable === 'undefined') return;
-      Sortable.create(tb, {
+      this._sortable = Sortable.create(tb, {
         handle: '.drag-handle',
+        disabled: this.key !== '',           // only draggable in the true (unsorted) order
         draggable: 'tr.srow',
         animation: 160,
         // Native drag image (a faithful, full-width snapshot of the row) floats under the cursor —
@@ -132,7 +139,7 @@ function rowSort(pid) {
       // htmx owns the request + swap: the server re-renders the whole row, keeping the data-*
       // the sort reads in sync. (Alpine just triggers it; it never builds the HTML itself.)
       try {
-        await htmx.ajax('POST', `/playlist/${this.pid}/track-genre`,
+        await htmx.ajax('POST', `${this.editBase}/track-genre`,
           { values: { video_id: vid, genre }, target: tr, swap: 'outerHTML' });
       } catch (e) { /* leave the row as-is; a reload would resync */ }
     },
@@ -155,7 +162,7 @@ function rowSort(pid) {
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
       if (!tr) return;
       try {
-        await htmx.ajax('POST', `/playlist/${this.pid}/track-year`,
+        await htmx.ajax('POST', `${this.editBase}/track-year`,
           { values: { video_id: vid, year }, target: tr, swap: 'outerHTML' });
       } catch (e) { /* leave the row as-is; a reload would resync */ }
     },
@@ -204,13 +211,14 @@ function overlapSort() {
 function playlistsTab(rows) {
   return {
     rows, sel: {}, sortKey: 'title', sortDir: 1, split: false, busy: false,
-    groupModal: false, groupName: '', delModal: false,
+    groupModal: false, groupName: '', delModal: false, collapsed: {},
     init() {
       // remember view preferences across reloads (the tab reloads after group/delete)
       try {
         this.split = localStorage.getItem('pl.split') === '1';
         this.sortKey = localStorage.getItem('pl.sortKey') || 'title';
         this.sortDir = +localStorage.getItem('pl.sortDir') || 1;
+        this.collapsed = JSON.parse(localStorage.getItem('pl.collapsed') || '{}');
       } catch (e) {}
       this.$watch('split', v => { try { localStorage.setItem('pl.split', v ? '1' : '0'); } catch (e) {} });
       this.$watch('sortKey', v => { try { localStorage.setItem('pl.sortKey', v); } catch (e) {} });
@@ -231,11 +239,23 @@ function playlistsTab(rows) {
       return (r ? r * this.sortDir : a.title.localeCompare(b.title));   // stable tiebreak by title
     },
     sorted() { return [...this.rows].sort((a, b) => this.cmp(a, b)); },
+    toggleGen() {
+      this.collapsed.Generated = !this.collapsed.Generated;
+      try { localStorage.setItem('pl.collapsed', JSON.stringify(this.collapsed)); } catch (e) {}
+    },
+    // "Generated" is pinned into its own card above the table (see template) — never in the sections.
+    genRows() { return this.sorted().filter(r => r.group === 'Generated'); },
+    promote(r) {
+      // graduate a Generated playlist into the library (out of the quarantine group), then reload
+      fetch('/playlist/' + r.id + '/promote', { method: 'POST', headers: { 'HX-Request': 'true' } })
+        .then(() => location.reload());
+    },
     sections() {
-      // when split, partition by group name (Ungrouped last); else one "" section
-      if (!this.split) return [{ name: '', rows: this.sorted() }];
+      // the main table holds everything EXCEPT Generated; split partitions by group (Ungrouped last)
+      const rest = this.sorted().filter(r => r.group !== 'Generated');
+      if (!this.split) return [{ name: '', rows: rest }];
       const m = {};
-      this.sorted().forEach(r => { const g = r.group || 'Ungrouped'; (m[g] = m[g] || []).push(r); });
+      rest.forEach(r => { const g = r.group || 'Ungrouped'; (m[g] = m[g] || []).push(r); });
       return Object.keys(m)
         .sort((a, b) => a === 'Ungrouped' ? 1 : b === 'Ungrouped' ? -1 : a.localeCompare(b))
         .map(n => ({ name: n, rows: m[n] }));
@@ -300,11 +320,13 @@ function titleEditor(pid) {
     },
   };
 }
-function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
-  // MusicBrainz enrichment: background job streamed over SSE. Updates the Year/Genre cells live
-  // as each track resolves, and drives a determinate progress bar.
+function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBase) {
+  // Enrichment: background job streamed over SSE. Updates the Year/Genre cells live as each track
+  // resolves, and drives a determinate progress bar. `enrichBase` is the URL the start POSTs under
+  // (defaults to /playlist/<pid>; album pages pass /album/<browse>). The events stream is shared.
   return {
-    pid: pid, lastfmConfigured: lastfmConfigured, running: false, finished: false, pct: 0, status: '', source: '',
+    pid: pid, enrichBase: enrichBase || ('/playlist/' + pid),
+    lastfmConfigured: lastfmConfigured, running: false, finished: false, pct: 0, status: '', source: '',
     // Last.fm API key modal
     keyModal: false, keyValue: '', keyBusy: false, keyErr: '',
     lastfmClick() {
@@ -336,7 +358,7 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
       this.status = source === 'lastfm' ? 'Starting Last.fm tagging…' : 'Starting enrichment…';
       let job;
       try {
-        const r = await fetch(`/playlist/${this.pid}/enrich/${source}`, { method: 'POST' });
+        const r = await fetch(`${this.enrichBase}/enrich/${source}`, { method: 'POST' });
         job = (await r.json()).job_id;
       } catch (e) { this.status = 'Could not start.'; this.running = false; return; }
       this.listen(job, source);
@@ -344,7 +366,9 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
     listen(job, source) {
       this.source = source; this.running = true; this.finished = false;
       const es = new EventSource(`/playlist/enrich/events/${job}`);
+      let errs = 0;
       es.onmessage = (m) => {
+        errs = 0;                          // a delivered event means we're reconnected — reset backoff
         const ev = JSON.parse(m.data);
         if (ev.type === 'track') {
           this.applyRow(ev);
@@ -364,7 +388,13 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
           if (!ev.error) setTimeout(() => { this.finished = false; }, 4000);
         }
       };
-      es.onerror = () => { es.close(); this.running = false; this.status = 'Stream interrupted.'; };
+      es.onerror = () => {
+        // A transient drop (e.g. a proxy idle-timeout): let EventSource auto-reconnect — the server
+        // replays events idempotently and sends 'end' once the job finishes — so a successful
+        // background job no longer looks failed. Give up only after several consecutive failures.
+        this.status = 'Reconnecting…';
+        if (++errs >= 5) { es.close(); this.running = false; this.status = 'Stream interrupted — reload to check.'; }
+      };
     },
     // The SSE event carries the server-rendered row HTML (same partial as a manual edit), so we just
     // drop it in — Alpine re-inits the replaced <tr>, and its data-* (which sort reads) come along.

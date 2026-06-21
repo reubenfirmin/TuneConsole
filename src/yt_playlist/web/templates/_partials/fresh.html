@@ -1,24 +1,10 @@
 {% if building %}
-<div hx-get="/home/fresh" hx-trigger="load delay:4s" hx-swap="outerHTML">
-  <h2 class="section">Fresh songs for you <span class="refreshing">finding…</span></h2>
-  <div class="for-you-grid">{% for _ in range(4) %}<div class="card fy-card skeleton"></div>{% endfor %}</div>
+<div class="gen-card card" hx-get="/home/fresh" hx-trigger="load delay:4s" hx-swap="outerHTML">
+  <header class="gen-head"><span class="eyebrow">Fresh songs <span class="refreshing">finding…</span></span></header>
+  <div class="gen-list">{% for _ in range(6) %}<div class="gen-row skeleton" style="min-height:2.6rem"></div>{% endfor %}</div>
 </div>
-{% elif songs %}
-<h2 class="section">Fresh songs for you</h2>
-<p class="section-note">From radios seeded by what you play — tracks you don't own yet.</p>
-<div class="for-you-grid">
-  {% for f in songs %}
-  <div class="card fy-card">
-    <a class="fy-cover" href="https://music.youtube.com/watch?v={{ f.video_id }}"
-       target="_blank" rel="noopener" title="Play on YouTube Music">
-      {% if f.thumbnail %}<img src="{{ f.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
-      <span class="fy-play">▶</span>
-    </a>
-    <div class="fy-meta">
-      <span class="fy-title">{{ f.title }}</span>
-      <span class="fy-artist">{{ f.artist }}</span>
-    </div>
-  </div>
-  {% endfor %}
+{% elif proto %}
+<div{% if stale %} hx-get="/home/fresh" hx-trigger="load delay:3s" hx-swap="outerHTML"{% endif %}>
+{% with p = proto %}{% include "_partials/generated_playlist.html" %}{% endwith %}
 </div>
 {% endif %}

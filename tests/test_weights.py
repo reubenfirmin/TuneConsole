@@ -25,15 +25,15 @@ def test_dismiss_with_lane_downweights_that_lane(store):
 def test_for_you_prefers_higher_weighted_lane(store):
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 200 * day
-    # a forgotten gem (resurface lane)
-    store.upsert_track("g", "Gem", "G", None, None)
-    store.add_history_snapshot(iid, now - 120 * day, ["gem|g"])
-    store.add_history_snapshot(iid, now - 119 * day, ["gem|g"])
     # a deep cut (deep_cut lane): artist played, plus a neglected track
-    store.upsert_track("h", "Hit", "Fav", None, None)
+    hit = store.upsert_track("h", "Hit", "Fav", None, None)
     store.upsert_track("b", "Bench", "Fav", None, None)
+    # a rotation neighbour (rotation lane): shares a playlist with your most-played, barely played
+    nb = store.upsert_track("n", "Neighbour", "Other", None, None)
+    store.set_playlist_tracks(store.upsert_playlist(iid, "PL", "Mix", 2, "h", 0.0), [hit, nb])
+    store.add_history_snapshot(iid, now - 2 * day, ["hit|fav"])
     store.add_history_snapshot(iid, now - 1 * day, ["hit|fav"])
 
-    store.set_weight("lane:resurface", 3.0)     # strongly prefer the resurface lane
+    store.set_weight("lane:deep_cut", 3.0)      # strongly prefer the deep-cut lane over rotation
     top = recommend.for_you(store, now=now, limit=1)
-    assert top and top[0].lane == "resurface"
+    assert top and top[0].lane == "deep_cut"

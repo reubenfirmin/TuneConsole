@@ -1,0 +1,37 @@
+{# A dated, saveable proto-playlist built from a For-You lane. Rows can be pruned via feedback;
+   "Save & play" posts the surviving rows to /home/generate, which creates the real YouTube
+   playlist (auto-grouped "Generated") and swaps this card for the saved-state confirmation. #}
+<section class="gen-card card" id="gen-{{ p.lane }}" data-name="{{ p.name }}">
+  <header class="gen-head">
+    <h2 class="gen-name">{{ p.name }}</h2>
+    {% if p.note %}<p class="section-note">{{ p.note }}</p>{% endif %}
+  </header>
+  {% if p.tracks %}
+  <ol class="gen-list">
+    {% for f in p.tracks %}
+    <li class="gen-row" data-vid="{{ f.video_id }}" data-title="{{ f.title }}"
+        data-artist="{{ f.artist }}" data-album="{{ f.album }}" data-thumb="{{ f.thumbnail or '' }}">
+      <span class="gen-th{{ ' no-art' if not f.thumbnail }}">{% if f.thumbnail %}<img src="{{ f.thumbnail }}"
+           alt="" loading="lazy" referrerpolicy="no-referrer"
+           onerror="this.closest('.gen-th').classList.add('no-art'); this.remove()">{% endif %}</span>
+      <span class="gen-meta">
+        <a class="gen-title" href="https://music.youtube.com/watch?v={{ f.video_id }}"
+           target="_blank" rel="noopener" title="Preview this one on YouTube Music">{{ f.title }}</a>
+        <span class="gen-artist">{{ f.artist }}{% if f.reason %} · <span class="gen-why">{{ f.reason }}</span>{% endif %}</span>
+      </span>
+      <button type="button" class="gen-rm" title="Remove from this playlist" aria-label="Remove from this playlist"
+              onclick="this.closest('.gen-row').remove()">✕</button>
+    </li>
+    {% endfor %}
+  </ol>
+  <footer class="gen-foot">
+    <button type="button" class="cta" hx-post="/home/generate" hx-target="#gen-{{ p.lane }}"
+            hx-swap="outerHTML" hx-disabled-elt="this"
+            hx-vals='js:{name: genName("gen-{{ p.lane }}"), tracks: genTracks("gen-{{ p.lane }}")}'>Save &amp; play on YouTube ↗</button>
+    <span class="gen-foot-note">Lands in your <strong>Generated</strong> group. It won't sway your
+      recommendations until you actually play it.</span>
+  </footer>
+  {% else %}
+  <p class="section-note">Nothing to bundle yet — sync your library to get started.</p>
+  {% endif %}
+</section>

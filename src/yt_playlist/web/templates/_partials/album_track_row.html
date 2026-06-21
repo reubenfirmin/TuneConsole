@@ -1,0 +1,54 @@
+{# One album track row — display-only genre/year (filled live by enrichment) plus 'songs like this'.
+   class 'srow' + data-vid so the enrich SSE applyRow can replace it, identical to the playlist flow.
+   Needs: t, idx. (No reorder/remove/liked — those are playlist-only.) #}
+<tr class="srow" data-vid="{{ t.video_id }}">
+  <td class="num"><span class="rownum">{{ idx }}</span></td>
+  <td>
+    <span class="pl-cover">
+      {% if t.thumbnail %}<img class="pl-thumb" src="{{ t.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+      <a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}"
+         target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
+    </span>
+  </td>
+  <td class="t-wrap" title="{{ t.title }}">
+    <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
+       target="_blank" rel="noopener">{{ t.title }}&nbsp;↗</a>
+  </td>
+  <td class="t-wrap" title="{{ t.artist }}"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
+  <td class="num mono mb-year">
+    <span class="ydisplay" x-show="editYearVid !== '{{ t.video_id }}'"
+          @click="startEditYear('{{ t.video_id }}')" title="Click to set year">
+      {% if t.year %}{{ t.year }}{% else %}<span class="muted ghint">＋</span>{% endif %}
+    </span>
+    <input class="yinput" type="text" inputmode="numeric" autocomplete="off" x-cloak
+           x-show="editYearVid === '{{ t.video_id }}'"
+           @keydown.enter.prevent="saveYear('{{ t.video_id }}', $event.target.value)"
+           @keydown.escape="editYearVid = null"
+           @blur="saveYear('{{ t.video_id }}', $event.target.value)">
+  </td>
+  <td class="mb-genre">
+    <span class="gdisplay" x-show="editVid !== '{{ t.video_id }}'"
+          @click="startEditGenre('{{ t.video_id }}')" title="Click to set genre">
+      {% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">＋</span>{% endif %}
+    </span>
+    <span class="ginput-wrap" x-show="editVid === '{{ t.video_id }}'" x-cloak>
+      <input class="ginput" type="text" autocomplete="off"
+             @input="filterGenres($event.target.value)"
+             @keydown.enter.prevent="saveGenre('{{ t.video_id }}', gSel >= 0 ? gSuggest[gSel] : $event.target.value)"
+             @keydown.escape="editVid = null" @keydown.arrow-down.prevent="moveGenreSel(1)"
+             @keydown.arrow-up.prevent="moveGenreSel(-1)"
+             @blur="saveGenre('{{ t.video_id }}', $event.target.value)">
+      <div class="genre-suggest" x-show="gSuggest.length" x-cloak>
+        <template x-for="(g, i) in gSuggest" :key="g">
+          <button type="button" class="genre-opt" :class="{ sel: i === gSel }"
+                  @mousedown.prevent="saveGenre('{{ t.video_id }}', g)" x-text="g"></button>
+        </template>
+      </div>
+    </span>
+  </td>
+  <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
+  <td class="rowmenu">
+    <button type="button" class="dots" title="Songs like this"
+            hx-get="/track/{{ t.video_id }}/similar" hx-target="#similar-modal" hx-swap="innerHTML">≈</button>
+  </td>
+</tr>

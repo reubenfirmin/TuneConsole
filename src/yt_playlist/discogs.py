@@ -91,11 +91,12 @@ def enrich(title, artist, tok=None):
     return (genre, year)
 
 
-def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, tok=None, should_stop=None):
-    """Fill missing genre and year for a playlist's tracks from Discogs (fill-only)."""
+def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, tok=None, should_stop=None, pending=None):
+    """Fill missing genre and year for a track set from Discogs (fill-only). Scope is a playlist
+    (playlist_id) or an explicit `pending` list (an album's tracks)."""
     enrich_fn = enrich_fn or enrich
     tok = tok or token(store)
-    pending = store.tracks_to_enrich(playlist_id)        # missing genre OR year
+    pending = store.tracks_to_enrich(playlist_id) if pending is None else pending   # missing genre OR year
     total = len(pending)
     if not total:
         on_progress({"type": "done", "text": "Every track already has genre & year.", "total": 0})

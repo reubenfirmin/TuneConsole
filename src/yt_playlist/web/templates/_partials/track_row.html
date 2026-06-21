@@ -20,8 +20,7 @@
     {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
   </td>
   <td class="t-wrap" title="{{ t.artist }}"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
-  <td class="t-wrap" title="{{ t.album }}">{% if t.album_browse %}<a class="alink" href="https://music.youtube.com/browse/{{ t.album_browse }}"
-         target="_blank" rel="noopener">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</td>
+  <td class="t-wrap" title="{{ t.album }}">{% if t.album_browse %}<a class="alink" href="/album?browse={{ t.album_browse }}">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</td>
   <td class="num mono mb-year">
     <span class="ydisplay" x-show="editYearVid !== '{{ t.video_id }}'"
           @click="startEditYear('{{ t.video_id }}')" title="Click to set year">

@@ -1,0 +1,170 @@
+{% extends "base.html" %}{% block title %}{{ album.title if album else 'Album' }} · yt-playlist{% endblock %}{% block body %}
+{% if not album %}
+<div class="page-head">
+  <span class="eyebrow">Album</span>
+  <h1>Album unavailable</h1>
+  <p>Couldn't load this album{% if browse_id %} —
+    <a href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">open it on YouTube Music ↗</a>{% endif %}.
+    A connected account is required to fetch album details.</p>
+</div>
+{% else %}
+{# enrichPanel drives the live genre/year enrichment for the folded-in tracks (pid unused for albums;
+   enrichBase scopes the start POST to this album). #}
+<div x-data="enrichPanel(0, {{ 'true' if lastfm_configured else 'false' }}, 0, '', '/album/{{ browse_id }}')">
+<div class="artist-head pl-head">
+  {% if album.thumbnail %}<span class="pl-art"><img src="{{ album.thumbnail }}" alt=""
+       referrerpolicy="no-referrer" onerror="this.closest('.pl-art').remove()"></span>{% endif %}
+  <div class="pl-headmain">
+    <span class="eyebrow">Album</span>
+    <h1>{{ album.title }}</h1>
+    <p class="pl-stats">
+      <span class="tag amber">{{ album.artist }}</span>
+      {% if album.year %}<span class="stat">{{ album.year }}</span>{% endif %}
+      <span class="stat"><strong>{{ album.tracks|length }}</strong>&nbsp;track{{ '' if album.tracks|length == 1 else 's' }}</span>
+      {% if tracks and gaps %}<span class="stat">{{ gaps }} missing genre</span>{% endif %}
+    </p>
+    <div class="pl-actions">
+      <a class="cta" href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">▶ Play on YouTube Music ↗</a>
+      {% if saved %}<span class="tag teal">✓ In your library</span>
+      {% else %}
+      <form hx-post="/collection/save-album" hx-swap="none" style="display:inline">
+        <input type="hidden" name="browse_id" value="{{ browse_id }}">
+        <button type="submit" class="btn-ghost">Save to library</button>
+      </form>{% endif %}
+    </div>
+  </div>
+  {% if tracks %}
+  <div class="head-tools">
+    <button type="button" class="head-icon" :class="{ on: running && source === 'musicbrainz' }"
+            @click="start('musicbrainz')" :disabled="running"
+            title="Enrich genre &amp; year from MusicBrainz" aria-label="Enrich via MusicBrainz">
+      <span class="spinner" x-show="running && source === 'musicbrainz'" x-cloak></span>
+      <svg x-show="!(running && source === 'musicbrainz')" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 5a2.5 2.5 0 0 0-4.6-1.3A2.6 2.6 0 0 0 4 6.2 2.7 2.7 0 0 0 3 11a2.7 2.7 0 0 0 1.3 4.7A2.5 2.5 0 0 0 7 19a2.4 2.4 0 0 0 5 .5Z"/>
+        <path d="M12 5a2.5 2.5 0 0 1 4.6-1.3A2.6 2.6 0 0 1 20 6.2 2.7 2.7 0 0 1 21 11a2.7 2.7 0 0 1-1.3 4.7A2.5 2.5 0 0 1 17 19a2.4 2.4 0 0 1-5 .5Z"/>
+        <path d="M12 5v14.5M8 9h1.5M14.5 9H16M7.5 13H9M15 13h1.5"/>
+      </svg>
+    </button>
+    <button type="button" class="head-icon" :class="{ on: running && source === 'lastfm' }"
+            @click="lastfmClick()" :disabled="running"
+            :title="lastfmConfigured ? 'Enrich genre &amp; year from Last.fm' : 'Set a Last.fm API key to enrich from Last.fm'"
+            aria-label="Enrich via Last.fm">
+      <span class="spinner" x-show="running && source === 'lastfm'" x-cloak></span>
+      <svg x-show="!(running && source === 'lastfm')" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M20.6 13.4 13 21a2 2 0 0 1-2.8 0l-7-7a2 2 0 0 1 0-2.8l7.6-7.6a2 2 0 0 1 1.4-.6H19a2 2 0 0 1 2 2v5.6a2 2 0 0 1-.4 1.2Z"/>
+        <circle cx="16.5" cy="7.5" r="1.3"/>
+      </svg>
+    </button>
+    <button type="button" class="head-icon" :class="{ on: running && source === 'discogs' }"
+            @click="start('discogs')" :disabled="running"
+            title="Enrich genre &amp; year from Discogs" aria-label="Enrich via Discogs">
+      <span class="spinner" x-show="running && source === 'discogs'" x-cloak></span>
+      <svg x-show="!(running && source === 'discogs')" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
+           stroke-width="1.6" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.3"/>
+        <circle cx="12" cy="12" r="0.9" fill="currentColor" stroke="none"/>
+      </svg>
+    </button>
+  </div>
+  {% endif %}
+</div>
+
+{% if tracks %}
+<div class="enrich-strip" x-show="running || finished" x-cloak x-transition>
+  <div class="enrich-bar"><i :style="`width:${pct}%`"></i></div>
+  <span class="enrich-status" x-text="status"></span>
+</div>
+{% endif %}
+
+{# Create a playlist from this album — prefilled with the album title (the server falls back to it
+   if the field is cleared), so the button is always usable. Lands on the new playlist. #}
+<div class="card" style="margin-top:1.1rem">
+  <form class="album-make" hx-post="/album/create-playlist" hx-swap="none"
+        style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
+    <input type="hidden" name="browse_id" value="{{ browse_id }}">
+    <strong>Create a playlist from this album</strong>
+    <input class="modal-input" type="text" name="name" value="{{ album.title }}" placeholder="Playlist name"
+           style="flex:1;min-width:12rem;margin:0">
+    <button type="submit">Create playlist</button>
+  </form>
+</div>
+
+<div class="card" style="margin-top:1.1rem">
+  {% if tracks %}
+  {# Folded-in library tracks: genre/year columns that fill in live as enrichment runs, and are
+     click-to-edit by hand (same flow as playlists, scoped to this album). #}
+  <table class="track-table" x-data="rowSort(0, '/album/{{ browse_id }}')">
+    <thead><tr>
+      <th class="num" style="width:2.6rem">#</th>
+      <th style="width:2.6rem"></th>
+      <th>Song</th><th>Artist</th>
+      <th class="num" style="width:4rem">Year</th>
+      <th style="width:9rem">Genre</th>
+      <th class="num" style="width:4.5rem">Length</th>
+      <th style="width:2.6rem"></th>
+    </tr></thead>
+    <tbody x-ref="body">
+      {% for t in tracks %}{% set idx = loop.index %}{% include "_partials/album_track_row.html" %}{% endfor %}
+    </tbody>
+  </table>
+  <datalist id="genrelist">{% for g in genres %}<option value="{{ g }}"></option>{% endfor %}</datalist>
+  {% else %}
+  {# Not in your library yet — read-only preview from YouTube. Save it to enrich. #}
+  <table class="track-table">
+    <thead><tr>
+      <th class="num" style="width:2.6rem">#</th><th style="width:2.6rem"></th>
+      <th>Song</th><th>Artist</th><th class="num" style="width:5rem">Length</th>
+    </tr></thead>
+    <tbody>
+    {% for t in album.tracks %}
+    <tr class="srow">
+      <td class="num"><span class="rownum">{{ loop.index }}</span></td>
+      <td>
+        <span class="pl-cover">
+          {% if album.thumbnail %}<img class="pl-thumb" src="{{ album.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+          {% if t.video_id %}<a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}"
+             target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>{% endif %}
+        </span>
+      </td>
+      <td class="t-wrap" title="{{ t.title }}">
+        {% if t.video_id %}<a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
+           target="_blank" rel="noopener">{{ t.title }}&nbsp;↗</a>
+        {% else %}{{ t.title }}{% endif %}</td>
+      <td class="t-wrap" title="{{ t.artist or album.artist }}">{{ t.artist or album.artist }}</td>
+      <td class="num mono">{{ t.duration or '' }}</td>
+    </tr>
+    {% else %}
+      <tr><td colspan="5" class="empty">This album has no listed tracks.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<!-- Last.fm API key modal -->
+<template x-teleport="body">
+  <div class="modal-backdrop" x-show="keyModal" x-cloak x-transition.opacity
+       @click="keyModal = false" @keydown.escape.window="keyModal = false">
+    <div class="modal" @click.stop x-transition.scale.origin.center>
+      <h3>Last.fm API key</h3>
+      <p>Last.fm has dense genre tags. Enrichment needs a free API key — create one at
+         <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>
+         and paste the <strong>API key</strong> here. It's stored locally.</p>
+      <input class="modal-input" type="text" x-model="keyValue" placeholder="API key"
+             autocomplete="off" spellcheck="false" @keydown.enter="saveKey()"
+             x-ref="lfkey" x-init="$watch('keyModal', v => v && $nextTick(() => $refs.lfkey.focus()))">
+      <p class="notice err" x-show="keyErr" x-text="keyErr"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" @click="keyModal = false" :disabled="keyBusy">Cancel</button>
+        <button type="button" @click="saveKey()" :disabled="keyBusy"
+                x-text="keyBusy ? 'Saving…' : 'Save & run'"></button>
+      </div>
+    </div>
+  </div>
+</template>
+<div id="similar-modal"></div>   {# "Songs like this" modal loads here via htmx #}
+</div>
+{% endif %}
+{% endblock %}

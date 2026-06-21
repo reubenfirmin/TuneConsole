@@ -3,24 +3,20 @@
   <div class="modal modal-wide" @click.stop x-transition.scale.origin.center>
     <h3>Songs like &ldquo;{{ seed.title or 'this track' }}&rdquo;</h3>
     {% if items %}
+    {% from "_macros.html" import tile %}
     <p class="section-note">Nearest in your taste space — including tracks that share no playlist with it.</p>
-    <div class="for-you-grid">
+    <div class="tile-grid">
       {% for f in items %}
-      <div class="fy-card card">
-        <a class="fy-cover" href="https://music.youtube.com/watch?v={{ f.video_id }}"
-           target="_blank" rel="noopener" title="Play on YouTube Music">
-          {% if f.thumbnail %}<img src="{{ f.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
-          <span class="fy-play">▶</span>
-        </a>
-        <div class="fy-meta">
-          <span class="fy-title">{{ f.title }}</span>
-          <span class="fy-artist">{{ f.artist }}</span>
-        </div>
-      </div>
+      {{ tile('neighbourhood', f.thumbnail, f.title, f.artist, "/artist?name=" ~ f.artist|urlencode,
+              "https://music.youtube.com/watch?v=" ~ f.video_id) }}
       {% endfor %}
     </div>
+    {% elif not have_model %}
+    <p class="section-note">No taste model yet — build it from the Sync button or the Taste Model page.</p>
     {% else %}
-    <p class="section-note">No similar tracks yet — build the taste model from the Sync button or the Taste Model page.</p>
+    <p class="section-note">Couldn't place &ldquo;{{ seed.title or 'this track' }}&rdquo; in your taste space yet —
+      it's likely brand new or set aside (a saved-album or generated track not folded in yet).
+      Re-sync, then <a href="/taste">Rebuild the model</a> to include it.</p>
     {% endif %}
     <div class="modal-actions"><button type="button" class="btn-ghost" @click="open = false">Close</button></div>
   </div>

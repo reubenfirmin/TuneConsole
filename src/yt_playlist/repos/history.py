@@ -22,3 +22,14 @@ class HistoryRepo(Repo):
             "JOIN history_snapshots hs ON hs.id=hi.snapshot_id WHERE hs.taken_at>=?",
             (since_ts,)).fetchall()
         return {r["identity_key"] for r in rows}
+
+    @synchronized
+    def recent_keys_ordered(self, since_ts, limit=None) -> list[str]:
+        """Identity keys played at/after since_ts, MOST-RECENT first (deduped by latest snapshot).
+        For the recent-mood centroid, which wants the latest plays — not an arbitrary subset of a set."""
+        rows = self.conn.execute(
+            "SELECT hi.identity_key k, MAX(hs.taken_at) last FROM history_items hi "
+            "JOIN history_snapshots hs ON hs.id=hi.snapshot_id WHERE hs.taken_at>=? "
+            "GROUP BY hi.identity_key ORDER BY last DESC", (since_ts,)).fetchall()
+        keys = [r["k"] for r in rows]
+        return keys[:limit] if limit else keys

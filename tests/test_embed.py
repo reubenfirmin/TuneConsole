@@ -1,4 +1,5 @@
 from yt_playlist import embed, recommend
+from yt_playlist.matching import identity_key
 
 
 def _two_clusters(store):
@@ -23,6 +24,22 @@ def test_embedding_neighbors_stay_in_cluster(store):
 def test_neighbors_empty_before_build(store):
     _two_clusters(store)
     assert embed.neighbors(store, "a0|ab") == []      # no vectors yet -> no neighbours
+
+
+def test_neighbors_for_unmodeled_uses_artist_proxy(store):
+    # A generated (quarantined) track by artist 'AB' gets no vector of its own, but 'songs like this'
+    # should still work — proxied through the AB tracks that ARE in the model.
+    iid, A, B = _two_clusters(store)
+    g = store.upsert_track("gnew", "GNEW", "AB", None, None)
+    gpl = store.upsert_playlist(iid, "PG", "Gen", 1, "h2", 0.0)
+    store.set_playlist_tracks(gpl, [g])
+    store.set_playlist_group("PG", "Generated")
+    embed.build_and_store(store, dim=4)
+
+    seed = identity_key("GNEW", "AB")
+    assert embed.neighbors(store, seed) == []                   # quarantined: no vector of its own
+    nbrs = embed.neighbors_for_unmodeled(store, seed, topn=4)
+    assert nbrs and all(k.endswith("|ab") for k, _ in nbrs)     # proxied to the artist's A-cluster
 
 
 def test_for_you_uses_taste_neighbourhood_when_built(store):

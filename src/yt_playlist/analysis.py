@@ -162,8 +162,8 @@ def find_stale(store, now, history_window_days=90, exclude_ytm=None):
     exclude_ytm = exclude_ytm or set()
     out = []
     for p in store.get_playlists():
-        if p.ytm_playlist_id in exclude_ytm:
-            continue
+        if p.ytm_playlist_id in exclude_ytm or not _manageable(p):
+            continue   # skip undeletable system playlists (LM/SE) — the user can't act on them
         keys = store.get_playlist_track_keys(p.id)
         played_recently = bool(keys & recent)
         age_days = (now - p.first_seen) / 86400.0

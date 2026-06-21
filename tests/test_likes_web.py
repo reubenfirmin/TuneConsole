@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
@@ -56,6 +58,25 @@ def test_merge_with_liked_only_offers_keep_liked_or_all(store):
     # the keep field rejects a non-Liked keeper even if posted directly
     c.post(f"/merge/update?ids={lm},{pl}", data={"field": "keep", "value": str(pl)})
     assert f'value="{lm}" checked' in c.get(f"/merge?ids={lm},{pl}").text   # unchanged: still Liked
+
+
+def test_add_tracks_to_liked_music_likes_each_song(store):
+    """Adding an alternate version (or 'complete this playlist' pick) while viewing Liked Music must
+    *like* the song — YouTube rejects directly-added tracks on the system-managed LM playlist, so the
+    add is shimmed into a like, which is the only thing that actually lands a song in Liked Music."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    lm = store.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 1.0)
+    client = FakeClient()
+    c = _client(store, lambda: {iid: client})
+    # a brand-new alternate version not yet in the local catalog
+    alt = {"videoId": "v9", "title": "Alt Take", "artist": "X", "album": "", "thumbnail": ""}
+
+    r = c.post(f"/playlist/{lm}/add-tracks", data={"track": json.dumps(alt)})
+
+    assert r.status_code == 200                                    # success refresh, not the error toast
+    assert client.rated == [("v9", "LIKE")]                        # liked on YouTube, not a doomed add
+    lm_meta = store.get_playlist_tracks_with_meta(lm)
+    assert [m[1] for m in lm_meta] == ["v9"]                       # now shows in Liked Music locally
 
 
 def test_track_like_without_master_returns_toast(store):

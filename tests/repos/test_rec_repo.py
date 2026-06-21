@@ -5,6 +5,21 @@ lock (constructed as RecRepo(store)) and owns its own rec tables. RecDao is kept
 """
 from yt_playlist.repos.base import Repo
 from yt_playlist.repos.rec import RecRepo
+from yt_playlist.repos.rec_model import RecModelRepo
+from yt_playlist.repos.rec_query import RecQueryRepo
+from yt_playlist.repos.rec_surface import RecSurfaceRepo
+
+
+def test_recrepo_is_a_facade_over_three_focused_daos(store):
+    # The former 40-method god class is split by responsibility; RecRepo composes the parts and
+    # delegates, so model/surface/query methods all resolve through the one facade object.
+    assert isinstance(store.rec.model, RecModelRepo)        # learned model
+    assert isinstance(store.rec.surface, RecSurfaceRepo)    # serving surfaces
+    assert isinstance(store.rec.query, RecQueryRepo)        # library reads + candidate generators
+    store.rec.set_weight("lane:explore", 1.1)               # -> model, via facade __getattr__
+    assert store.rec.get_weights()["lane:explore"] == 1.1
+    assert store.rec.tracks_total() == 0                    # -> query, via facade __getattr__
+    assert store.rec.get_proposals("discover") is None      # -> surface, via facade __getattr__
 
 
 def test_unified_onto_repo_base(store):
@@ -86,3 +101,21 @@ def test_folded_methods_delegate_via_facade(store):
     store.set_weight("lane:rotation", 1.2)               # legacy store.x() call site
     assert store.get_weights()["lane:rotation"] == 1.2
     assert store.rec_vectors_count() == 0
+
+
+def test_track_decades_and_artists_and_era_distribution(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_track("v1", "A", "Alpha", None, None)   # key "a|alpha"
+    b = store.upsert_track("v2", "B", "Beta", None, None)    # key "b|beta"
+    store.set_track_year(a, "1991")                          # -> decade "1990"
+    store.set_track_year(b, "2003")                          # -> decade "2000"
+    store.add_history_snapshot(iid, 1.0, ["a|alpha"])        # one play of A
+
+    decades = store.track_decades(["a|alpha", "b|beta"])
+    assert decades == {"a|alpha": "1990", "b|beta": "2000"}
+    artists = store.track_artists(["a|alpha", "b|beta"])
+    assert artists == {"a|alpha": "Alpha", "b|beta": "Beta"}
+
+    dist = store.era_play_distribution()
+    assert dist["1990"] == 2     # 1 + 1 play
+    assert dist["2000"] == 1     # 1 + 0 plays

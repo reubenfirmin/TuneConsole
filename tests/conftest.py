@@ -9,12 +9,14 @@ def store():
 
 
 class FakeClient:
-    def __init__(self, playlists=None, tracks=None, history=None, search_results=None, catalog=None):
+    def __init__(self, playlists=None, tracks=None, history=None, search_results=None, catalog=None,
+                 albums=None):
         self._playlists = playlists or []          # [{"playlistId","title","count"}]
         self._tracks = tracks or {}                # {playlistId: [track dict, ...]}
         self._history = history or []              # [track dict, ...]
         self._search_results = search_results or []  # list returned by search()
         self._catalog = dict(catalog or {})        # {video_id: track_dict}
+        self._albums = albums or {}                # {browseId: album dict (get_album shape)}
         for tlist in self._tracks.values():        # auto-seed: a client knows its own tracks
             for t in tlist:
                 if t.get("videoId"):
@@ -28,6 +30,7 @@ class FakeClient:
         tracks = list(self._tracks.get(playlistId, []))
         return {"tracks": tracks[:limit] if limit is not None else tracks}
     def get_history(self): return list(self._history)
+    def get_album(self, browseId): return self._albums.get(browseId, {})
     def create_playlist(self, title, description):  # description required, matching real YTMusic API
         pid = f"PL_NEW_{len(self.created)}"; self.created.append((pid, title, description))
         self._tracks.setdefault(pid, []); return pid

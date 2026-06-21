@@ -70,6 +70,21 @@ class ChartsRepo(Repo):
                  "genre": r["genre"] or "", "year": r["mb_year"] or ""} for r in rows]
 
     @synchronized
+    def album_tracks_detail(self, album_browse_id) -> list[dict]:
+        """Per-track detail for a saved album's folded-in tracks (same shape as playlist_tracks_detail,
+        so the row partial renders identically). Album order ≈ insertion order (t.id)."""
+        rows = self.conn.execute(
+            "SELECT t.video_id vid, t.title, t.artist, t.album, t.album_browse_id abrowse, "
+            "       t.duration_s dur, t.available avail, t.thumbnail thumb, t.genre, t.mb_year, "
+            "       (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=t.identity_key) plays, "
+            f"      {LIKED_EXISTS} liked "
+            "FROM tracks t WHERE t.album_browse_id=? ORDER BY t.id", (album_browse_id,)).fetchall()
+        return [{"video_id": r["vid"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
+                 "album_browse": r["abrowse"], "duration": r["dur"], "available": r["avail"],
+                 "thumbnail": r["thumb"], "plays": r["plays"], "liked": bool(r["liked"]),
+                 "genre": r["genre"] or "", "year": r["mb_year"] or ""} for r in rows]
+
+    @synchronized
     def artist_songs(self, artist) -> list[dict]:
         """An artist's songs that appear in your playlists: play count + which playlists hold each."""
         songs = self.conn.execute(

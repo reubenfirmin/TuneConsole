@@ -123,6 +123,21 @@ def test_remove_track_returns_empty_and_drops_row(store):
     assert store.get_playlist(a).track_count == 2
 
 
+def test_remove_track_from_liked_music_unlikes(store):
+    # On the Liked Music (LM) list "remove" has no playlist item to delete — it unlikes the song.
+    iid = store.upsert_identity("main", "cred", None, True)
+    lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
+    store.set_playlist_tracks(lm, [store.upsert_track("v0", "S0", "X", "Alb", 200, 1)])
+    fc = FakeClient(tracks={"LM": [{"videoId": "v0", "setVideoId": "sv0"}]})
+    c = _client(store, lambda: {iid: fc})
+    r = c.post(f"/playlist/{lm}/remove-track", data={"video_id": "v0"})
+    assert r.status_code == 200 and r.text == ""           # empty body -> htmx swaps the row out
+    assert fc.rated == [("v0", "INDIFFERENT")]              # unliked on YouTube
+    assert fc.removed == []                                 # not a playlist-item removal
+    assert store.playlist_tracks_detail(lm) == []           # dropped from local LM membership
+    assert store.get_playlist(lm).track_count == 0
+
+
 def test_remove_track_no_vid_returns_toast(store):
     iid, a, fc = _seed_three(store)
     c = _client(store, lambda: {iid: fc})

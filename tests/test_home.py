@@ -41,3 +41,47 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     # Sync control removed from the other tabs (Rediscover is deleted in Task 8)
     assert 'class="sync-bar"' not in c.get("/playlists").text
     assert 'class="sync-bar"' not in c.get("/charts").text
+
+
+def test_home_feed_fragment_renders_fingerprint_and_respects_stance(store):
+    c = _client(store)
+    r = c.get("/home/feed")
+    assert r.status_code == 200
+    assert "fingerprint" in r.text                       # the header partial rendered
+    assert 'id="home-feed"' in r.text                    # the re-rank swap-target container
+
+    c.post("/home/stance", data={"stance": "explore"})
+    assert store.get_setting("home_stance") == "explore"  # persisted
+
+
+def test_home_page_has_steering_and_fingerprint(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    t = store.upsert_track("v1", "Song", "Band", None, None)
+    store.set_track_genre(t, "Techno")
+    store.set_track_year(t, "1999")
+    store.add_history_snapshot(iid, 1.0, ["song|band"])
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    html = c.get("/").text
+    assert 'id="fingerprint"' in html                    # fingerprint header present
+    assert 'type="range"' in html                        # draggable bars, not +/- buttons
+    assert "/home/steer" in html                         # dragging a bar steers + re-ranks
+    assert "/home/stance" in html                        # explore/exploit toggle wired
+    assert "/taste" in html                              # "Tune your taste model" affordance
+
+
+def test_home_steer_sets_weight_and_returns_feed(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    r = c.post("/home/steer", data={"axis": "genre:techno", "weight": "0.3"})
+    assert r.status_code == 200
+    assert 'id="home-feed"' in r.text                     # returns the re-ranked feed fragment
+    assert store.get_weights()["genre:techno"] == 0.3     # weight set (genre band allows < 0.2)
+
+
+def test_home_feed_has_steer_toast_scaffold(store):
+    c = _client(store)
+    html = c.get("/home/feed").text
+    assert 'id="steer-toast"' in html
+    assert "Tune your taste model" in html or "fine-tune" in html.lower()

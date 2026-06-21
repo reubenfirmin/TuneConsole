@@ -57,3 +57,12 @@ def test_add_suggested_track_adds_it_to_the_playlist(store):
                data={"track": json.dumps({"videoId": "v2", "title": "Bonus", "artist": "Band"})})
     assert r.status_code == 200
     assert "bonus|band" in store.get_playlist_track_keys(target)
+
+
+def test_suggestion_dismiss_is_reasoned(store):
+    target, c = _seed(store)
+    frag = c.get(f"/playlist/{target}/suggestions").text
+    # the × opens reason chips that route to /recs/feedback with a reason (not a bare dismiss)
+    assert "/recs/feedback" in frag
+    assert "wrong era" in frag and "already know it" in frag and "not this artist" in frag
+    assert '"reason":"era"' in frag and '"reason":"own_it"' in frag

@@ -12,3 +12,8 @@ class SettingsRepo(Repo):
     def set_setting(self, key, value) -> None:
         self.conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, value or ""))
         self.conn.commit()
+
+    @synchronized
+    def delete_setting(self, key) -> None:
+        self.conn.execute("DELETE FROM settings WHERE key=?", (key,))
+        self.conn.commit()

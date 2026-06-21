@@ -126,7 +126,7 @@ def enrich(title, artist, key):
         logger.warning("Last.fm getInfo failed for %r / %r: %s", title, artist, e)
         return (None, None)
     track = (info or {}).get("track") or {}
-    track_tags = [t.get("name", "") for t in ((track.get("toptags") or {}).get("tag") or []) if t.get("name")]
+    track_tags = _tag_names(track)   # _tag_names guards the single-tag-as-dict case the API returns
     genre = genres.pick_genre(track_tags)
     if not genre and artist:                      # no track-level genre — fall back to artist tags
         try:
@@ -146,16 +146,17 @@ def enrich(title, artist, key):
     return (genre, year)
 
 
-def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, key=None, should_stop=None):
-    """Fill missing genre and year for a playlist's tracks from Last.fm (fill-only: never overwrites
-    what's already there). `on_progress` receives info/track/done events for the SSE stream."""
+def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, key=None, should_stop=None, pending=None):
+    """Fill missing genre and year for a track set from Last.fm (fill-only: never overwrites what's
+    already there). Scope is a playlist (playlist_id) or an explicit `pending` list (an album's
+    tracks). `on_progress` receives info/track/done events for the SSE stream."""
     enrich_fn = enrich_fn or enrich
     key = key or api_key(store)
     if not key:
         on_progress({"type": "err", "text": "No Last.fm API key. Set $LASTFM_API_KEY or "
                                             "lastfm_api_key in config.toml."})
         return
-    pending = store.tracks_to_enrich(playlist_id)         # missing genre OR year
+    pending = store.tracks_to_enrich(playlist_id) if pending is None else pending   # missing genre OR year
     total = len(pending)
     if not total:
         on_progress({"type": "done", "text": "Every track already has genre & year.", "total": 0})

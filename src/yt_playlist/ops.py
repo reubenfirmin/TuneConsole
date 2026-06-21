@@ -14,8 +14,10 @@ from yt_playlist import analysis
 from yt_playlist import sync as sync_mod
 from yt_playlist.executor import (
     MergePlan, add_tracks_to_playlist, apply_result, copy_into_playlist, copy_or_move_playlist,
-    copy_playlist, delete_empty_playlist, delete_playlist, deserialize_plan, execute_planned,
-    remove_track, rename_playlist, reorder_track, search_versions, store_plan, undo_action)
+    copy_playlist, create_playlist_from_album, delete_empty_playlist, delete_playlist,
+    deserialize_plan, execute_planned, remove_track, rename_playlist,
+    reorder_track, search_versions, store_plan, undo_action)
+from yt_playlist.liked_music import LikedMusic
 
 logger = logging.getLogger("yt_playlist.ops")
 
@@ -92,6 +94,16 @@ class PlaylistOps:
         client = self._require_client(target_id)
         return copy_into_playlist(self.store, source_ids, target_id, client, self.now_fn())
 
+    def create_playlist_from_album(self, browse_id, name="") -> dict:
+        """Create a new playlist from an album's tracks, under the master account."""
+        if not browse_id:
+            raise ValueError("no album given")
+        identity = self.store.get_master_identity()
+        client = self._clients().get(identity.id)
+        if client is None:
+            raise ValueError("the master account isn't connected")
+        return create_playlist_from_album(self.store, browse_id, name, client, self.now_fn(), identity.id)
+
     # --- alternate versions -------------------------------------------------
     def find_alternates(self, playlist_id, video_id) -> list:
         """Search YouTube for alternate versions of a track already in the playlist."""
@@ -103,11 +115,29 @@ class PlaylistOps:
         return search_versions(client, track["title"], track["artist"], exclude=video_id)
 
     def add_tracks(self, playlist_id, tracks) -> dict:
-        client = self._require_client(playlist_id)
+        pl = self.store.get_playlist(playlist_id)
+        if pl is None:
+            raise ValueError("playlist no longer exists")
+        client = self._client_for(pl)
+        if client is None:
+            raise ValueError("no client for that identity")
+        # Liked Music is YouTube-managed and won't accept directly-added tracks, so "Add" (from an
+        # alternate version or a 'complete this playlist' suggestion) becomes a *like* — the only thing
+        # that actually lands a song in Liked Music. Every other playlist adds normally.
+        if LikedMusic.is_lm(pl):
+            return LikedMusic(self.store).add(playlist_id, tracks, client, self.now_fn())
         return add_tracks_to_playlist(self.store, playlist_id, tracks, client, self.now_fn())
 
     def remove_track(self, playlist_id, video_id) -> dict:
-        client = self._require_client(playlist_id)
+        pl = self.store.get_playlist(playlist_id)
+        if pl is None:
+            raise ValueError("playlist no longer exists")
+        client = self._client_for(pl)
+        if client is None:
+            raise ValueError("no client for that identity")
+        # Liked Music has no removable playlist item — "remove" unlikes the song instead.
+        if LikedMusic.is_lm(pl):
+            return LikedMusic(self.store).remove(playlist_id, video_id, client, self.now_fn())
         return remove_track(self.store, playlist_id, video_id, client, self.now_fn())
 
     def rename(self, playlist_id, title) -> dict:
@@ -119,15 +149,16 @@ class PlaylistOps:
         return reorder_track(self.store, playlist_id, video_id, before_video_id, client, self.now_fn())
 
     def set_liked(self, video_id, on) -> dict:
-        # Like/unlike a song in your main account's Liked Music (LM is per-account; we target master).
+        # The like-button path: like/unlike a song in your main account's Liked Music (LM is
+        # per-account; we target master). Resolve the master client here, then hand the rate+mirror
+        # to LikedMusic so all LM membership changes go through one primitive.
         master = next((i for i in self.store.get_identities() if i.is_master), None)
         if master is None:
             raise ValueError("no main account configured")
         client = self._clients().get(master.id)
         if client is None:
             raise ValueError("your main account isn’t connected")
-        client.rate_song(video_id, "LIKE" if on else "INDIFFERENT")
-        self.store.set_song_liked(master.id, video_id, on)
+        LikedMusic(self.store).set_rating(master.id, video_id, on, client)
         return {"liked": bool(on)}
 
     def _require_client(self, playlist_id):

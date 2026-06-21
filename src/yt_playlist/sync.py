@@ -146,6 +146,41 @@ def _sync_saved_albums(store, clients, on_progress) -> None:
             logger.warning("saved-albums fetch failed: %s", e)
     store.replace_saved_albums(list(saved.values()))
     _emit(on_progress, "info", f"saved albums: {len(saved)}")
+    _materialize_album_tracks(store, clients, saved, on_progress)
+
+
+def _materialize_album_tracks(store, clients, saved, on_progress) -> None:
+    """Fold each saved album's TRACKS into the library so they count in the taste corpus (the model
+    is built from your tracks; metadata alone doesn't). Incremental: only albums not already
+    materialized are fetched (their tracks carry album_browse_id, so we skip them next time)."""
+    client = next(iter(clients.values()), None)
+    if client is None:
+        return
+    todo = [bid for bid in saved if bid not in store.materialized_album_ids()]
+    if not todo:
+        return
+    # Each album is a separate get_album network call, so stream one step per album (named, with a
+    # running counter) instead of going silent for the whole batch — 258 of these is a long wait.
+    _emit(on_progress, "info", f"folding in {len(todo)} saved album(s)…", count=len(todo))
+    added = 0
+    for i, bid in enumerate(todo, 1):
+        meta = saved[bid]
+        _emit(on_progress, "step",
+              f"albums › {i}/{len(todo)} {meta.get('title') or '(album)'} — {meta.get('artist') or '?'}",
+              count=len(todo), index=i)
+        try:
+            album = with_retry(lambda: client.get_album(bid))
+        except Exception as e:  # noqa: BLE001 - one album's failure shouldn't abort the rest
+            logger.warning("album-tracks fetch failed for %s: %s", bid, e)
+            continue
+        for t in (album or {}).get("tracks") or []:
+            if not t.get("title"):
+                continue
+            artist = ", ".join(x.get("name", "") for x in (t.get("artists") or [])) or meta["artist"]
+            store.upsert_track(t.get("videoId"), t.get("title"), artist, meta["title"], None,
+                               album_browse_id=bid, thumbnail=meta["thumbnail"])
+            added += 1
+    _emit(on_progress, "info", f"album tracks folded in: {added} from {len(todo)} album(s)")
 
 def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None) -> None:
     labels = {idn.id: idn.label for idn in store.get_identities()}

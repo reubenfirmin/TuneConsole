@@ -39,6 +39,42 @@
     </div>
   </template>
 
+  {% macro pl_row(promote=False) %}
+  <tr :class="{ selrow: sel[r.id] }">
+    <td><input type="checkbox" :checked="sel[r.id]" @change="toggle(r.id)" style="width:auto"></td>
+    <td>
+      <span class="pl-cover">
+        <img class="pl-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
+        <a class="pl-play" :href="'https://music.youtube.com/playlist?list=' + r.ytm"
+           target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
+        <span class="pl-ptype" x-show="r.kind"
+              :title="r.kind" x-text="({ audio: '♪', video: '▦', mixed: '◑', mix: '≋' })[r.kind] || ''"></span>
+      </span>
+      <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in yt-playlist"></a>
+      {% if promote %}<button type="button" class="promote-btn" @click.stop="promote(r)"
+              title="Move into your library so it counts as a real playlist and shapes your recommendations">Promote to library ↑</button>{% endif %}
+    </td>
+    <td><span class="gtag" x-show="r.group" x-text="r.group"></span></td>
+    <td class="num mono" x-text="r.count"></td>
+    <td class="num lastcol" x-text="fmtLast(r.last)"></td>
+    <td class="num mono" x-text="r.listens || ''"></td>
+  </tr>
+  {% endmacro %}
+
+  {# "Generated" lives in its own card above the table — always a separate block, collapsible #}
+  <div class="card gen-grp" x-show="genRows().length" x-cloak>
+    <div class="gen-grp-head" @click="toggleGen()" title="Click to collapse / expand">
+      <span class="eyebrow">Generated</span>
+      <span class="gen-grp-count" x-text="'(' + genRows().length + ')'"></span>
+      <span class="gen-grp-caret" x-text="collapsed.Generated ? '▸' : '▾'"></span>
+    </div>
+    <table x-show="!collapsed.Generated" x-cloak>
+      <tbody>
+        <template x-for="r in genRows()" :key="r.id">{{ pl_row(promote=True) }}</template>
+      </tbody>
+    </table>
+  </div>
+
   <div class="card">
     <table>
       <thead><tr>
@@ -54,25 +90,7 @@
       <template x-for="sec in sections()" :key="sec.name">
         <tbody>
           <tr x-show="split && sec.name" class="group-row"><td colspan="6" x-text="sec.name"></td></tr>
-          <template x-for="r in sec.rows" :key="r.id">
-            <tr :class="{ selrow: sel[r.id] }">
-              <td><input type="checkbox" :checked="sel[r.id]" @change="toggle(r.id)" style="width:auto"></td>
-              <td>
-                <span class="pl-cover">
-                  <img class="pl-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
-                  <a class="pl-play" :href="'https://music.youtube.com/playlist?list=' + r.ytm"
-                     target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
-                  <span class="pl-ptype" x-show="r.kind"
-                        :title="r.kind" x-text="({ audio: '♪', video: '▦', mixed: '◑', mix: '≋' })[r.kind] || ''"></span>
-                </span>
-                <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in yt-playlist"></a>
-              </td>
-              <td><span class="gtag" x-show="r.group" x-text="r.group"></span></td>
-              <td class="num mono" x-text="r.count"></td>
-              <td class="num lastcol" x-text="fmtLast(r.last)"></td>
-              <td class="num mono" x-text="r.listens || ''"></td>
-            </tr>
-          </template>
+          <template x-for="r in sec.rows" :key="r.id">{{ pl_row() }}</template>
         </tbody>
       </template>
       <tbody x-show="rows.length === 0"><tr><td colspan="7" class="empty">No playlists yet — sync first.</td></tr></tbody>
@@ -117,7 +135,8 @@
         </select>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="copyIntoModal = false">Cancel</button>
-          <button type="button" hx-post="/playlists/copy-into" @htmx:after-request="copyIntoModal = false"
+          <button type="button" hx-post="/playlists/copy-into"
+                  @htmx:after-request="if ($event.detail.successful) copyIntoModal = false"
                   hx-vals='js:{ids: plData().copyIds.join(","), target: plData().copyIntoTarget}'
                   :disabled="!copyIntoTarget">Copy in</button>
         </div>

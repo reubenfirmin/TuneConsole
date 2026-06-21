@@ -121,6 +121,57 @@ def test_apply_result_update_both(store, monkeypatch, tmp_path):
     assert store.get_playlist(a) is not None and store.get_playlist(b) is not None
 
 
+def test_resolve_in_target_rejects_low_confidence_match():
+    # A merely-similar title with a very different duration must stay UNRESOLVED (so a move won't
+    # delete the source for a wrong substitute); a duration-matching candidate resolves.
+    from yt_playlist.executor import _resolve_in_target
+
+    class SearchClient(FakeClient):
+        def __init__(self, results):
+            super().__init__()
+            self._results = results
+
+        def search(self, query, filter="songs"):
+            return self._results
+
+    # wrong cut: title close-ish but duration off by minutes, score < 0.95 -> unresolved
+    wrong = SearchClient([{"title": "Time Zero (Extended Club Mix)", "artists": [{"name": "Artist"}],
+                           "videoId": "WRONG", "duration_seconds": 600}])
+    r = _resolve_in_target(wrong, "k", "Time Zero", "Artist", None, 200, 0.85)
+    assert r.method == "unresolved" and r.target_video_id is None
+
+    # right cut: duration within 3s -> resolved even if title isn't identical
+    right = SearchClient([{"title": "Time Zero", "artists": [{"name": "Artist"}],
+                           "videoId": "RIGHT", "duration_seconds": 201}])
+    r = _resolve_in_target(right, "k", "Time Zero", "Artist", None, 200, 0.85)
+    assert r.method == "search" and r.target_video_id == "RIGHT"
+
+
+def test_apply_result_partial_failure_records_undoable_action(store, monkeypatch, tmp_path):
+    # If a mutation throws mid-merge (here: a dropper delete fails), apply_result must still record an
+    # undoable APPLY_MERGE with the kept playlist's prior contents — not exit leaving no undo trail.
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    from yt_playlist.executor import apply_result
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "A", 2, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "B", 2, "h", 1.0)
+
+    class FailDelete(FakeClient):
+        def delete_playlist(self, playlistId):
+            raise RuntimeError("youtube 500")
+
+    client = FailDelete(tracks={"PLA": [_track("v1", "One", "X"), _track("v2", "Two", "X")],
+                                "PLB": [_track("v1", "One", "X"), _track("v3", "Three", "X")]})
+    with pytest.raises(RuntimeError):
+        apply_result(store, {iid: client}, [a, b], ["v1", "v3"], a, now=1.0)   # keep A, delete B (fails)
+    actions = [x for x in store.get_actions() if x.kind == "apply_merge"]
+    assert actions, "a partial merge must still record an undoable action"
+    undo = json.loads(actions[0].undo_json)
+    prev = next(e["prev"] for e in undo["restored"] if e["ytm"] == "PLA")
+    assert set(prev) == {"v1", "v2"}            # A's pre-merge contents captured for undo
+    assert actions[0].status == "executed"      # undoable
+
+
 def test_undo_apply_merge_restores(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.executor import apply_result, undo_action

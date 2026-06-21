@@ -1,30 +1,28 @@
 {% if suggestions %}
+{% from "_macros.html" import tile %}
 <h2 class="section">Complete this playlist</h2>
 <p class="section-note">Tracks you own that fit here but aren't in it yet.</p>
-<div class="for-you-grid">
+<div class="tile-grid">
   {% for f in suggestions %}
-  <div class="fy-card card">
-    <a class="fy-cover" href="https://music.youtube.com/watch?v={{ f.video_id }}"
-       target="_blank" rel="noopener" title="Play on YouTube Music">
-      {% if f.thumbnail %}<img src="{{ f.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
-      <span class="fy-play">▶</span>
-    </a>
-    <div class="fy-meta">
-      <span class="fy-title">{{ f.title }}</span>
-      <span class="fy-artist">{{ f.artist }}</span>
-      <span class="fy-reason">{{ f.reason }}</span>
-    </div>
-    <div class="fy-actions">
-      {# matches the playlist add-tracks contract: form post with each track as a JSON 'track' field #}
+  {% call tile('fit', f.thumbnail, f.title, f.artist, "/artist?name=" ~ f.artist|urlencode,
+               "https://music.youtube.com/watch?v=" ~ f.video_id, f.reason) %}
+    <div class="tile-actions">
       <form hx-post="/playlist/{{ pid }}/add-tracks" hx-swap="none">
         <input type="hidden" name="track" value="{{ {'videoId': f.video_id, 'title': f.title, 'artist': f.artist, 'album': f.album, 'thumbnail': f.thumbnail}|tojson }}">
-        <button type="submit" class="btn-ghost btn-sm fy-add">+ Add</button>
+        <button type="submit" class="tile-act" title="Add to this playlist" aria-label="Add">+ Add</button>
       </form>
-      <button type="button" class="fy-x" title="Doesn't fit this playlist"
-              hx-post="/recs/feedback" hx-target="closest .fy-card" hx-swap="outerHTML swap:200ms"
-              hx-vals='{"item": {{ f.key|tojson }}, "surface": "suggest", "scope": "{{ pid }}", "kind": "dismiss"}'>×</button>
+      <button type="button" class="tile-act" title="Not for this playlist" aria-label="Dismiss"
+              x-data="{open:false}" @click="open=!open">×
+        <span class="dismiss-pop" x-show="open" x-cloak @click.outside="open=false"
+              hx-target="closest .tile" hx-swap="outerHTML swap:200ms">
+          <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"vibe"}'>wrong vibe</button>
+          <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"era"}'>wrong era</button>
+          <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"mainstream"}'>too mainstream</button>
+          <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"own_it"}'>already know it</button>
+          <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"artist", "axis":"artist:{{ f.artist }}"}'>not this artist</button>
+        </span></button>
     </div>
-  </div>
+  {% endcall %}
   {% endfor %}
 </div>
 {% endif %}

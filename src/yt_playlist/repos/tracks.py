@@ -44,6 +44,17 @@ class TrackRepo(Repo):
                 for r in rows]
 
     @synchronized
+    def album_tracks_to_enrich(self, album_browse_id) -> list:
+        """A saved album's folded-in tracks still missing genre or year — the album-scoped twin of
+        tracks_to_enrich, so the same enrich runners work over an album."""
+        rows = self.conn.execute(
+            "SELECT t.id, t.video_id, t.title, t.artist FROM tracks t WHERE t.album_browse_id=? "
+            "AND (t.genre IS NULL OR t.genre = '' OR t.mb_year IS NULL OR t.mb_year = '') "
+            "ORDER BY t.id", (album_browse_id,)).fetchall()
+        return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"], "artist": r["artist"]}
+                for r in rows]
+
+    @synchronized
     def set_track_genre(self, track_id, genre) -> None:
         # manual override: set exactly what the user chose (may be blank to clear)
         self.conn.execute("UPDATE tracks SET genre=? WHERE id=?", (genre or "", track_id))
@@ -95,3 +106,10 @@ class TrackRepo(Repo):
             if row is not None:
                 out[vid] = row["id"]
         return out
+
+    @synchronized
+    def materialized_album_ids(self) -> set:
+        """browse_ids of saved albums whose tracks we've already folded into the library — so sync
+        only fetches an album's track list once, not on every pass."""
+        return {r["album_browse_id"] for r in self.conn.execute(
+            "SELECT DISTINCT album_browse_id FROM tracks WHERE album_browse_id IS NOT NULL")}

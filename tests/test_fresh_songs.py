@@ -31,6 +31,24 @@ def test_fresh_songs_excludes_owned(store):
     assert "Hit" not in titles               # already owned -> filtered
 
 
+class _ThumbRadioClient(FakeClient):
+    def get_watch_playlist(self, videoId):
+        # ytmusicapi watch-playlist tracks carry art under `thumbnail` (singular), not `thumbnails`.
+        return {"tracks": [{"videoId": "NEWV", "title": "Brand New Song",
+                            "artists": [{"name": "Newcomer"}],
+                            "thumbnail": [{"url": "https://img/new.jpg"}]}]}
+
+
+def test_fresh_songs_reads_singular_thumbnail_key(store):
+    iid, ctx = _ctx(store, _ThumbRadioClient())
+    t = store.upsert_track("v1", "Hit", "Fav", None, None)
+    store.set_playlist_tracks(store.upsert_playlist(iid, "P", "P", 1, "h", 0.0), [t])
+    store.add_history_snapshot(iid, 1.0, ["hit|fav"])
+
+    new = next(s for s in recommend.fresh_songs(ctx) if s["title"] == "Brand New Song")
+    assert new["thumbnail"] == "https://img/new.jpg"      # cover art now actually populated
+
+
 def test_worker_materializes_fresh_songs(store):
     iid, ctx = _ctx(store, _RadioClient())
     t = store.upsert_track("v1", "Hit", "Fav", None, None)

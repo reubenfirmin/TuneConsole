@@ -29,8 +29,7 @@
       <tr class="srow" data-album="{{ a.title|lower }}" data-artist="{{ a.artist|lower }}"
           data-year="{{ a.year or 0 }}">
         <td>{% if a.thumbnail %}<img class="album-thumb" src="{{ a.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
-        <td>{% if a.browse %}<a class="ptitle" href="https://music.youtube.com/browse/{{ a.browse }}"
-               target="_blank" rel="noopener">{{ a.title }}&nbsp;↗</a>{% else %}<span class="ptitle">{{ a.title }}</span>{% endif %}</td>
+        <td>{% if a.browse %}<a class="ptitle" href="/album?browse={{ a.browse }}">{{ a.title }}</a>{% else %}<span class="ptitle">{{ a.title }}</span>{% endif %}</td>
         <td><a class="alink" href="/artist?name={{ a.artist|urlencode }}">{{ a.artist }}</a></td>
         <td class="num mono">{{ a.year or '' }}</td>
       </tr>
@@ -58,8 +57,7 @@
       <tr class="srow" data-album="{{ a.album|lower }}" data-artist="{{ a.artist|lower }}"
           data-songs="{{ a.songs }}" data-pls="{{ a.n_pls }}" data-plays="{{ a.plays }}">
         <td>{% if a.thumb %}<img class="album-thumb" src="{{ a.thumb }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
-        <td>{% if a.browse %}<a class="ptitle" href="https://music.youtube.com/browse/{{ a.browse }}"
-               target="_blank" rel="noopener">{{ a.album }}&nbsp;↗</a>{% else %}<span class="ptitle">{{ a.album }}</span>{% endif %}</td>
+        <td>{% if a.browse %}<a class="ptitle" href="/album?browse={{ a.browse }}">{{ a.album }}</a>{% else %}<span class="ptitle">{{ a.album }}</span>{% endif %}</td>
         <td><a class="alink" href="/artist?name={{ a.artist|urlencode }}">{{ a.artist }}</a></td>
         <td class="num mono">{{ a.songs }}</td>
         <td class="num mono">{{ a.n_pls }}</td>

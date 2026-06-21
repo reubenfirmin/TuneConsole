@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from yt_playlist import embed, recommend
+from yt_playlist import embed, rec_params, recommend
 from yt_playlist.rec_dao import RecDao
 
 # feedback kinds that suppress an item (vs 'more'/'less' which only nudge future weights)
@@ -28,19 +28,25 @@ def build(ctx) -> APIRouter:
         dao = RecDao(store)
         key = dao.key_for_video(vid)
         nbrs = embed.neighbors(store, key, topn=12) if key else []
+        if not nbrs and key:                              # new/quarantined track: proxy via its artist
+            nbrs = embed.neighbors_for_unmodeled(store, key, topn=12)
         meta = store.tracks_by_keys([k for k, _ in nbrs] + ([key] if key else []))
         items = [meta[k] for k, _ in nbrs if k in meta]
         return templates.TemplateResponse(request, "_partials/similar_modal.html",
-                                          {"items": items, "seed": meta.get(key, {})})
+                                          {"items": items, "seed": meta.get(key, {}),
+                                           "have_model": store.rec_vectors_count() > 0})
 
     @router.post("/recs/rebuild")
     def recs_rebuild():
-        """Rebuild the model + materialize proposals (also runs in the worker after each sync)."""
+        """Kick off a model rebuild + proposal materialization. Dispatched to the background worker
+        (coalesced) so a hung YTM/Last.fm call during materialization can't tie up a request worker;
+        falls back to a synchronous rebuild only when no worker is configured."""
         if ctx.rec_worker:
-            ctx.rec_worker.rebuild()
+            ctx.rec_worker.trigger()
         else:
             embed.build_and_store(store)
-        return JSONResponse({"ok": True, "count": store.rec_vectors_count()})
+        return JSONResponse({"ok": True, "queued": bool(ctx.rec_worker),
+                             "count": store.rec_vectors_count()})
 
     @router.post("/recs/feedback")
     async def recs_feedback(request: Request):
@@ -61,6 +67,27 @@ def build(ctx) -> APIRouter:
                 store.nudge_weight(f"lane:{lane}", 0.85)
             elif kind == "more":
                 store.nudge_weight(f"lane:{lane}", 1.15)
+        # explicit-axis steering (Home why-chips): nudge a genre/era/artist weight directly
+        axis = form.get("axis")
+        if axis:
+            lo, hi = (rec_params.GENRE_MIN, rec_params.GENRE_MAX) \
+                if axis.split(":", 1)[0] in ("genre", "era", "artist") else (0.2, 3.0)
+            store.nudge_weight(axis, 1.15 if kind == "more" else 0.85, lo=lo, hi=hi)
         return HTMLResponse("")
+
+    @router.post("/recs/mood")
+    async def recs_mood(request: Request):
+        """Transient mood feedback on a generated playlist: tilts the Home lanes toward (+1) or away
+        from (-1) this mix's vibe for a few hours, then decays. NOT a permanent taste signal."""
+        form = await request.form()
+        try:
+            pid, direction = int(form.get("pid")), int(form.get("dir", 1))
+        except (TypeError, ValueError):
+            return HTMLResponse("", status_code=422)
+        keys = store.get_playlist_track_keys(pid)
+        if keys:
+            store.record_mood(keys, 1 if direction >= 0 else -1, now_fn())
+        return templates.TemplateResponse(request, "_partials/mood_panel.html",
+                                          {"pid": pid, "done": True, "dir": direction})
 
     return router

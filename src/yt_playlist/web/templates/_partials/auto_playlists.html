@@ -4,16 +4,28 @@
   <div class="for-you-grid">{% for _ in range(3) %}<div class="card auto-card skeleton"></div>{% endfor %}</div>
 </div>
 {% elif proposals %}
-<h2 class="section">Discover playlists{% if stale %} <span class="refreshing">refreshing…</span>{% endif %}</h2>
-<p class="section-note">Coherent groups the model found in your library that aren't playlists yet.</p>
+<div{% if stale %} hx-get="/home/auto-playlists" hx-trigger="load delay:3s" hx-swap="outerHTML"{% endif %}>
+<h2 class="section">Playlists hiding in your library{% if stale %} <span class="refreshing">refreshing…</span>{% endif %}</h2>
+<p class="section-note">Coherent groups the model found among songs you own but haven't made a playlist
+  from. Save any one as a real playlist — it lands in your <strong>Generated</strong> group.</p>
 <div class="for-you-grid">
   {% for p in proposals %}
   <div class="card auto-card">
     <div class="auto-head"><strong>{{ p.label }}</strong><span class="tag teal">{{ p.size }} tracks</span></div>
     <ul class="auto-sample">
       {% for t in p.sample %}<li>{{ t.artist }} — {{ t.title }}</li>{% endfor %}
+      {% if p.size > p.sample|length %}<li class="auto-more">…and {{ p.size - p.sample|length }} more</li>{% endif %}
     </ul>
+    {% if p.tracks %}
+    <form class="auto-foot" hx-post="/home/generate" hx-target="closest .auto-card" hx-swap="outerHTML"
+          hx-disabled-elt="find button">
+      <input type="hidden" name="name" value="{{ p.label }}">
+      <input type="hidden" name="tracks" value="{{ p.tracks|tojson }}">
+      <button type="submit" class="btn-sm">Save as playlist ↗</button>
+    </form>
+    {% endif %}
   </div>
   {% endfor %}
+</div>
 </div>
 {% endif %}

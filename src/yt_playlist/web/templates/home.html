@@ -14,20 +14,7 @@
 
   {% include "_partials/alerts.html" %}
 
-  <div class="two-lane">
-    <section class="lane">
-      <h2 class="section">More in your wheelhouse</h2>
-      <p class="section-note">Deeper into what you already love.</p>
-      {% include "_partials/for_you_section.html" %}
-    </section>
-    {% if explore %}
-    <section class="lane">
-      <h2 class="section">Try something new</h2>
-      <p class="section-note">Near your taste, but artists you don't play yet.</p>
-      {% with for_you = explore %}{% include "_partials/for_you_section.html" %}{% endwith %}
-    </section>
-    {% endif %}
-  </div>
+  {% include "_partials/home_feed.html" %}
 
   {% if muted_count %}
   <p class="section-note muted-note">Hiding {{ muted_count }} muted artist{{ 's' if muted_count != 1 }} based on your feedback —
@@ -39,7 +26,16 @@
   </div>
 
   <div hx-get="/home/discover" hx-trigger="load" hx-swap="innerHTML"></div>
-  <div hx-get="/home/fresh" hx-trigger="load" hx-swap="innerHTML"></div>
   <div hx-get="/home/new-artists" hx-trigger="load" hx-swap="innerHTML"></div>
 </div>
+{# hx-vals js: runs in global scope, so the "Save & play" button reaches its card's surviving rows
+   by id — pruned (feedback-dismissed) rows are gone from the DOM, so they're naturally excluded. #}
+<script>
+function genName(id) { return document.getElementById(id).dataset.name; }
+function genTracks(id) {
+  return JSON.stringify([...document.getElementById(id).querySelectorAll('.gen-row')].map(r => ({
+    video_id: r.dataset.vid, title: r.dataset.title, artist: r.dataset.artist,
+    album: r.dataset.album, thumbnail: r.dataset.thumb })));
+}
+</script>
 {% endblock %}

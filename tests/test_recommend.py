@@ -1,24 +1,107 @@
-from yt_playlist import recommend
+from yt_playlist import embed, genre_map, rec_params, recommend
 from yt_playlist.store import Store
 
 
-def test_resurface_picks_played_but_not_recent(store):
+def test_wheelhouse_excludes_play_recency_lane(store):
+    """Wheelhouse is the taste/genre model, not play-recency: a high-play dormant track that isn't
+    a deep cut or taste neighbour must NOT surface in for_you (it belongs to Comfort Listening)."""
     iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_track("v1", "Gem", "X", None, None)      # key "gem|x"
-    store.upsert_track("v2", "Fresh", "X", None, None)    # key "fresh|x"
+    store.upsert_track("v1", "Gem", "X", None, None)         # key "gem|x" — played a lot, then dormant
     day = 86400.0
     now = 200 * day
-    # "Gem": two old snapshots (plays=2), last play 119 days ago -> outside the 90d window
-    store.add_history_snapshot(iid, now - 120 * day, ["gem|x"])
-    store.add_history_snapshot(iid, now - 119 * day, ["gem|x"])
-    # "Fresh": one play, yesterday -> recent, must be excluded
-    store.add_history_snapshot(iid, now - 1 * day, ["fresh|x"])
+    for d in (120, 100, 80, 60):                              # 4 plays, last 60 days ago
+        store.add_history_snapshot(iid, now - d * day, ["gem|x"])
 
-    res = store.resurface_candidates(now=now, window_days=90, min_plays=2, limit=10)
+    # Gem is its artist's only/most-played track, so it's not a deep cut; with no playlists it's not
+    # a neighbour either. Wheelhouse must not resurface it on play-recency alone.
+    assert "Gem" not in {i.title for i in recommend.for_you(store, now=now, limit=10)}
+    # ...but Comfort Listening is exactly where it belongs.
+    assert "Gem" in {i.title for i in recommend.comfort_listening(store, now=now, limit=10)}
 
-    assert [r["title"] for r in res] == ["Gem"]
-    assert res[0]["plays"] == 2
-    assert res[0]["last_played"] == now - 119 * day
+
+def test_comfort_listening_favors_high_play_not_recent(store):
+    """Comfort = your high-rotation favorites, demoted the more recently you've heard them."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_track("v1", "Old Favorite", "X", None, None)
+    store.upsert_track("v2", "Recent Favorite", "X", None, None)
+    day = 86400.0
+    now = 400 * day
+    for d in (300, 250, 200, 150, 90):                       # 5 plays, last 90 days ago
+        store.add_history_snapshot(iid, now - d * day, ["old favorite|x"])
+    for d in (20, 15, 10, 5, 1):                             # 5 plays, last yesterday
+        store.add_history_snapshot(iid, now - d * day, ["recent favorite|x"])
+
+    items = recommend.comfort_listening(store, now=now, limit=10)
+    titles = [i.title for i in items]
+    assert {"Old Favorite", "Recent Favorite"} <= set(titles)
+    assert titles.index("Old Favorite") < titles.index("Recent Favorite")   # not-recent ranks higher
+    assert all(i.lane == "comfort" for i in items)
+
+
+def test_comfort_listening_excludes_never_and_barely_played(store):
+    """Comfort is grounded in real rotation: never-played and below-min_plays tracks don't show."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_track("v1", "Never", "X", None, None)       # zero plays
+    store.upsert_track("v2", "Barely", "X", None, None)      # one play, below default min_plays=4
+    store.upsert_track("v3", "Worn", "X", None, None)        # 5 plays
+    day = 86400.0
+    now = 400 * day
+    store.add_history_snapshot(iid, now - 50 * day, ["barely|x"])
+    for d in (200, 150, 100, 80, 60):
+        store.add_history_snapshot(iid, now - d * day, ["worn|x"])
+
+    titles = {i.title for i in recommend.comfort_listening(store, now=now, limit=10)}
+    assert "Worn" in titles
+    assert "Never" not in titles
+    assert "Barely" not in titles
+
+
+def test_for_you_genre_suppression_reduces_that_family(store):
+    """Per-genre weights re-rank for_you: muting a family yields fewer of its tracks than favoring it."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    techno = [store.upsert_track(f"t{i}", f"T{i}", "TechnoBand", None, None) for i in range(6)]
+    folk = [store.upsert_track(f"f{i}", f"F{i}", "FolkBand", None, None) for i in range(6)]
+    store.set_playlist_tracks(store.upsert_playlist(iid, "PT", "Techno", 6, "h", 0.0), techno)
+    store.set_playlist_tracks(store.upsert_playlist(iid, "PF", "Folk", 6, "h2", 0.0), folk)
+    store.add_history_snapshot(iid, 1.0, ["t0|technoband"])
+    store.add_history_snapshot(iid, 1.0, ["f0|folkband"])
+    for t in techno:
+        store.set_track_genre(t, "Techno")
+    for f in folk:
+        store.set_track_genre(f, "Folk")
+    embed.build_and_store(store, dim=4)        # 12 tracks; build needs len(keys) >= dim + 5
+    fam = genre_map.family("Folk")
+
+    def folk_count():
+        return sum(1 for i in recommend.for_you(store, now=1000.0, limit=6) if i.artist == "FolkBand")
+
+    store.set_weight(f"genre:{fam}", 2.0, lo=0.0, hi=2.0)       # favor folk
+    boosted = folk_count()
+    store.set_weight(f"genre:{fam}", 0.0, lo=0.0, hi=2.0)       # mute folk
+    suppressed = folk_count()
+    assert boosted > suppressed
+
+
+def test_comfort_candidates_scores_plays_times_recency(store):
+    """comfort_candidates ranks by plays * min(1, days_since_last / recency_full_days): a dormant
+    4-play track beats a recently-spun 8-play one, and below-min_plays tracks are excluded."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_track("v1", "Dormant", "X", None, None)        # key "dormant|x"
+    store.upsert_track("v2", "HeavyRecent", "X", None, None)    # key "heavyrecent|x"
+    store.upsert_track("v3", "Barely", "X", None, None)         # key "barely|x"
+    day = 86400.0
+    now = 400 * day
+    for d in (300, 250, 200, 120):                              # 4 plays, last 120d ago -> factor 1.0
+        store.add_history_snapshot(iid, now - d * day, ["dormant|x"])
+    for d in (40, 35, 30, 25, 20, 15, 10, 1):                  # 8 plays, last yesterday -> factor ~1/30
+        store.add_history_snapshot(iid, now - d * day, ["heavyrecent|x"])
+    store.add_history_snapshot(iid, now - 10 * day, ["barely|x"])   # 1 play -> below min_plays
+
+    res = store.comfort_candidates(now=now, min_plays=4, recency_full_days=30, limit=10)
+    titles = [r["title"] for r in res]
+    assert titles[0] == "Dormant"                              # 4*1.0 > 8*(1/30)
+    assert set(titles) == {"Dormant", "HeavyRecent"}           # Barely excluded (below min_plays)
+    assert res[0]["plays"] == 4 and res[0]["last_played"] == now - 120 * day
 
 
 def test_for_you_blends_real_signals_with_reasons(store):
@@ -55,6 +138,39 @@ def test_for_you_never_empty_without_history_depth(store):
 
     items = recommend.for_you(store, now=now, limit=10)
     assert items, "for_you must not be empty on a fresh library with plays"
+
+
+def test_for_you_erode_false_shows_eroded_items(store):
+    """The taste-page preview passes erode=False so knob effects aren't masked by anti-staleness."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_track("v1", "Hit", "Fav", None, None)
+    store.upsert_track("v2", "Neglected", "Fav", None, None)   # Fav's deep cut -> a for_you candidate
+    now = 1000.0
+    store.add_history_snapshot(iid, now - 100, ["hit|fav"])
+    store.add_history_snapshot(iid, now - 50, ["hit|fav"])
+    for t in range(3):                                          # show "Neglected" past the erosion cap
+        store.record_impressions("for_you", ["neglected|fav"], now + t * 400)
+
+    assert "Neglected" not in {i.title for i in recommend.for_you(store, now + 2000, limit=10)}
+    assert "Neglected" in {i.title for i in recommend.for_you(store, now + 2000, limit=10, erode=False)}
+
+
+def test_taste_sample_is_a_rotating_slice_not_the_top_n(store):
+    """The Taste page's 'refresh sample' must show a *random slice* of matching tracks: each refresh
+    a new set (even with knobs unchanged), drawn from beyond the deterministic top-N."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    now = 1000.0
+    for n in range(30):                                            # 30 artists -> 30 deep-cut candidates
+        store.upsert_track(f"h{n}", f"Hit{n}", f"Band{n}", None, None)
+        store.upsert_track(f"d{n}", f"Deep{n}", f"Band{n}", None, None)
+        store.add_history_snapshot(iid, now - 100, [f"hit{n}|band{n}"])
+        store.add_history_snapshot(iid, now - 50, [f"hit{n}|band{n}"])
+
+    runs = [tuple(i.key for i in recommend.taste_sample(store, now, limit=8)) for _ in range(15)]
+    assert all(len(set(r)) == 8 for r in runs)         # a full, deduped slice every refresh
+    assert len(set(runs)) > 1                           # refresh yields a new set, not the same top-8
+    union = {k for r in runs for k in r}
+    assert len(union) > 8                               # samples reach beyond a fixed top-8
 
 
 def test_complete_playlist_suggests_fitting_owned_tracks(store):
@@ -142,3 +258,77 @@ def test_sync_status_over_24h_is_stale(store):
     store.set_setting("last_sync_at", "1000.0")
     st = recommend.sync_status(store, now=1000.0 + 25 * 3600)
     assert st.stale is True and st.message
+
+
+def _seed_two_eras(store):
+    """6 nineties + 6 noughties tracks, one playlist each, model built. Returns iid."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    nineties = [store.upsert_track(f"n{i}", f"N{i}", f"NB{i}", None, None) for i in range(6)]
+    noughts = [store.upsert_track(f"o{i}", f"O{i}", f"OB{i}", None, None) for i in range(6)]
+    for t in nineties:
+        store.set_track_year(t, "1995")
+    for t in noughts:
+        store.set_track_year(t, "2005")
+    store.set_playlist_tracks(store.upsert_playlist(iid, "PN", "Nineties", 6, "h", 0.0), nineties)
+    store.set_playlist_tracks(store.upsert_playlist(iid, "PO", "Noughts", 6, "h2", 0.0), noughts)
+    store.add_history_snapshot(iid, 1.0, ["n0|nb0"])
+    store.add_history_snapshot(iid, 1.0, ["o0|ob0"])
+    embed.build_and_store(store, dim=4)
+    return iid
+
+
+def test_for_you_era_suppression_reduces_that_decade(store):
+    _seed_two_eras(store)
+
+    def nineties_count():
+        return sum(1 for i in recommend.for_you(store, now=1000.0, limit=6)
+                   if i.title.startswith("N"))
+
+    store.set_weight("era:1990", 2.0, lo=0.0, hi=2.0)      # favor the 90s
+    boosted = nineties_count()
+    store.set_weight("era:1990", 0.0, lo=0.0, hi=2.0)      # mute the 90s
+    suppressed = nineties_count()
+    assert boosted > suppressed
+
+
+def test_for_you_artist_boost_lifts_that_artist(store):
+    _seed_two_eras(store)
+
+    def nb0_count():
+        return sum(1 for i in recommend.for_you(store, now=1000.0, limit=6) if i.artist == "NB0")
+    store.set_weight("artist:NB0", 2.0, lo=0.0, hi=2.0)
+    boosted = nb0_count()
+    store.set_weight("artist:NB0", 0.0, lo=0.0, hi=2.0)
+    suppressed = nb0_count()
+    assert boosted >= suppressed
+    assert boosted >= 1
+
+
+def test_axis_adjusted_scores_neutral_is_noop(store):
+    scores = {"a": 0.5, "b": 0.4}
+    assert recommend.axis_adjusted_scores(scores, {"a": 1.0, "b": 1.0}) == scores
+    assert recommend._axis_weights_for(store, ["a", "b"]) is None   # nothing stored -> neutral
+
+
+def test_complete_playlist_caps_flooding_artist_on_eclectic_playlist(store):
+    """An eclectic playlist (many artists) shouldn't get flooded by one artist's big catalog — the
+    '529 repeats' bug, where a 12-track/10-artist playlist returned 9 tracks by one band."""
+    from collections import Counter
+    iid = store.upsert_identity("main", "cred", None, True)
+    # "WL" has a big catalog; 9 other artists have a couple tracks each
+    wl = [store.upsert_track(f"wl{i}", f"WL song {i}", "WL", None, None) for i in range(11)]
+    others = {}
+    for n in range(9):
+        a = f"Art{n}"
+        others[a] = [store.upsert_track(f"a{n}_{i}", f"{a} song {i}", a, None, None) for i in range(2)]
+    # eclectic target: 1 WL + 1 from each of the 9 others -> 10 distinct artists
+    target = store.upsert_playlist(iid, "PT", "Eclectic", 10, "h", 0.0)
+    store.set_playlist_tracks(target, [wl[0]] + [others[a][0] for a in others])
+    # a big co-occurrence playlist so the rest are candidates (deterministic fallback path; no vectors)
+    store.set_playlist_tracks(store.upsert_playlist(iid, "PO", "All", 29, "h2", 0.0),
+                              wl + [t for ts in others.values() for t in ts])
+
+    items = recommend.complete_playlist(store, target, limit=12)
+    by_artist = Counter(i.artist for i in items)
+    assert by_artist.get("WL", 0) <= 2     # the big-catalog artist no longer floods (was ~9)
+    assert len(by_artist) >= 4             # eclectic variety preserved
