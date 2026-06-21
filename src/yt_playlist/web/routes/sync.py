@@ -21,7 +21,9 @@ def build(ctx) -> APIRouter:
 
         def run():
             try:
-                sync_mod.sync_all(store, clients, now_fn(), on_progress=job.events.append)
+                sync_mod.sync_all(store, clients, now_fn(), on_progress=job.events.append,
+                                  on_auth_expired=lambda iid, label: ctx.auth_expired.__setitem__(iid, label or str(iid)),
+                                  on_auth_ok=lambda iid: ctx.auth_expired.pop(iid, None))
             except Exception as e:  # noqa: BLE001 - report any failure to the stream
                 detail = str(e) or type(e).__name__
                 job.error = detail

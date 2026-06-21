@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS tracks (
   artist_browse_id TEXT,
   album_browse_id TEXT,
   thumbnail TEXT,
+  genre TEXT,
+  mb_year TEXT,
   UNIQUE(identity_key, video_id)
 );
 CREATE TABLE IF NOT EXISTS playlists (
@@ -50,6 +52,7 @@ CREATE TABLE IF NOT EXISTS playlists (
   title TEXT, track_count INTEGER,
   content_hash TEXT,
   first_seen REAL, last_seen REAL, last_changed REAL,
+  thumbnail TEXT,
   UNIQUE(identity_id, ytm_playlist_id)
 );
 CREATE TABLE IF NOT EXISTS playlist_tracks (
@@ -109,6 +112,7 @@ class Playlist:
     id: int; identity_id: int; ytm_playlist_id: str; title: str
     track_count: int; content_hash: str
     first_seen: float; last_seen: float; last_changed: float
+    thumbnail: str | None = None
 
 @dataclass
 class Track:
@@ -145,6 +149,13 @@ class Store:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN album_browse_id TEXT")
         if "thumbnail" not in cols:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN thumbnail TEXT")
+        if "genre" not in cols:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN genre TEXT")
+        if "mb_year" not in cols:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN mb_year TEXT")
+        pcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(playlists)")}
+        if "thumbnail" not in pcols:
+            self.conn.execute("ALTER TABLE playlists ADD COLUMN thumbnail TEXT")
         self.conn.commit()
 
     @_synchronized
@@ -223,21 +234,23 @@ class Store:
         return "mixed"
 
     @_synchronized
-    def upsert_playlist(self, identity_id, ytm_playlist_id, title, track_count, content_hash, now) -> int:
+    def upsert_playlist(self, identity_id, ytm_playlist_id, title, track_count, content_hash, now,
+                        thumbnail=None) -> int:
         row = self.conn.execute(
             "SELECT id, first_seen, content_hash, last_changed FROM playlists "
             "WHERE identity_id=? AND ytm_playlist_id=?", (identity_id, ytm_playlist_id)).fetchone()
         if row is None:
             cur = self.conn.execute(
                 "INSERT INTO playlists(identity_id,ytm_playlist_id,title,track_count,"
-                "content_hash,first_seen,last_seen,last_changed) VALUES (?,?,?,?,?,?,?,?)",
-                (identity_id, ytm_playlist_id, title, track_count, content_hash, now, now, now))
+                "content_hash,first_seen,last_seen,last_changed,thumbnail) VALUES (?,?,?,?,?,?,?,?,?)",
+                (identity_id, ytm_playlist_id, title, track_count, content_hash, now, now, now, thumbnail))
             self.conn.commit()
             return cur.lastrowid
         last_changed = now if row["content_hash"] != content_hash else row["last_changed"]
         self.conn.execute(
-            "UPDATE playlists SET title=?, track_count=?, content_hash=?, last_seen=?, last_changed=? "
-            "WHERE id=?", (title, track_count, content_hash, now, last_changed, row["id"]))
+            "UPDATE playlists SET title=?, track_count=?, content_hash=?, last_seen=?, last_changed=?, "
+            "thumbnail=COALESCE(?, thumbnail) WHERE id=?",
+            (title, track_count, content_hash, now, last_changed, thumbnail, row["id"]))
         self.conn.commit()
         return row["id"]
 
@@ -252,6 +265,54 @@ class Store:
             self.conn.executemany(
                 "INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES (?,?,?)",
                 [(playlist_id, tid, pos) for pos, tid in enumerate(unique)])
+
+    @_synchronized
+    def tracks_to_enrich(self, playlist_id) -> list:
+        """Tracks in this playlist still missing genre or year (NULL or blank), in playlist order.
+        Blank counts as missing so re-running enrichment retries tracks that didn't fully resolve."""
+        rows = self.conn.execute(
+            "SELECT t.id, t.video_id, t.title, t.artist FROM playlist_tracks pt "
+            "JOIN tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? "
+            "AND (t.genre IS NULL OR t.genre = '' OR t.mb_year IS NULL OR t.mb_year = '') "
+            "ORDER BY pt.position", (playlist_id,)).fetchall()
+        return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"], "artist": r["artist"]}
+                for r in rows]
+
+    @_synchronized
+    def all_genres(self) -> list:
+        """Every distinct non-blank genre we've collected, case-insensitively alpha-sorted."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT genre FROM tracks WHERE genre IS NOT NULL AND genre <> ''").fetchall()
+        return sorted((r["genre"] for r in rows), key=str.lower)
+
+    @_synchronized
+    def set_track_genre(self, track_id, genre) -> None:
+        # manual override: set exactly what the user chose (may be blank to clear)
+        self.conn.execute("UPDATE tracks SET genre=? WHERE id=?", (genre or "", track_id))
+        self.conn.commit()
+
+    @_synchronized
+    def set_track_enrichment(self, track_id, genre, year) -> None:
+        # fill in only what we found — never overwrite an existing value with a blank, so re-running
+        # to fix a missing genre can't wipe a year we already had (and vice-versa)
+        self.conn.execute(
+            "UPDATE tracks SET genre = CASE WHEN ? <> '' THEN ? ELSE genre END, "
+            "                  mb_year = CASE WHEN ? <> '' THEN ? ELSE mb_year END WHERE id=?",
+            (genre or "", genre or "", year or "", year or "", track_id))
+        self.conn.commit()
+
+    @_synchronized
+    def get_playlist_track_ids(self, playlist_id) -> list:
+        rows = self.conn.execute(
+            "SELECT track_id FROM playlist_tracks WHERE playlist_id=? ORDER BY position",
+            (playlist_id,)).fetchall()
+        return [r["track_id"] for r in rows]
+
+    @_synchronized
+    def set_playlist_track_count(self, playlist_id, count, now) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE playlists SET track_count=?, last_changed=?, last_seen=? WHERE id=?",
+                              (count, now, now, playlist_id))
 
     @_synchronized
     def remove_playlist(self, playlist_id) -> None:
@@ -277,7 +338,7 @@ class Store:
         rows = self.conn.execute("SELECT * FROM playlists").fetchall()
         return [Playlist(r["id"], r["identity_id"], r["ytm_playlist_id"], r["title"],
                          r["track_count"], r["content_hash"], r["first_seen"],
-                         r["last_seen"], r["last_changed"]) for r in rows]
+                         r["last_seen"], r["last_changed"], r["thumbnail"]) for r in rows]
 
     @_synchronized
     def get_playlist(self, playlist_id) -> Playlist | None:
@@ -285,7 +346,7 @@ class Store:
         return None if row is None else Playlist(
             row["id"], row["identity_id"], row["ytm_playlist_id"], row["title"],
             row["track_count"], row["content_hash"], row["first_seen"],
-            row["last_seen"], row["last_changed"])
+            row["last_seen"], row["last_changed"], row["thumbnail"])
 
     @_synchronized
     def get_playlist_track_keys(self, playlist_id) -> set[str]:
@@ -302,6 +363,17 @@ class Store:
             "WHERE pt.playlist_id=? ORDER BY pt.position", (playlist_id,)).fetchall()
         return [(r["identity_key"], r["video_id"], r["title"], r["artist"], r["duration_s"], r["available"])
                 for r in rows]
+
+    @_synchronized
+    def track_ids_for_videos(self, video_ids) -> dict:
+        """Map video_id -> track_id for tracks already in the store (latest row wins)."""
+        out = {}
+        for vid in video_ids:
+            row = self.conn.execute(
+                "SELECT id FROM tracks WHERE video_id=? ORDER BY id DESC LIMIT 1", (vid,)).fetchone()
+            if row is not None:
+                out[vid] = row["id"]
+        return out
 
     @_synchronized
     def add_history_snapshot(self, identity_id, taken_at, item_keys) -> int:
@@ -518,6 +590,20 @@ class Store:
             "WHERE n.artist <> '' GROUP BY n.artist ORDER BY total DESC, n.artist LIMIT :limit",
             {"since": since, "limit": limit}).fetchall()
         return [{"artist": r["artist"], "plays": r["total"], "thumbnail": r["thumb"]} for r in rows]
+
+    @_synchronized
+    def playlist_tracks_detail(self, playlist_id) -> list[dict]:
+        """Full per-track detail for our own playlist view (in playlist order)."""
+        rows = self.conn.execute(
+            "SELECT t.video_id vid, t.title, t.artist, t.album, t.album_browse_id abrowse, "
+            "       t.duration_s dur, t.available avail, t.thumbnail thumb, t.genre, t.mb_year, "
+            "       (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=t.identity_key) plays "
+            "FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
+            "WHERE pt.playlist_id=? ORDER BY pt.position", (playlist_id,)).fetchall()
+        return [{"video_id": r["vid"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
+                 "album_browse": r["abrowse"], "duration": r["dur"], "available": r["avail"],
+                 "thumbnail": r["thumb"], "plays": r["plays"],
+                 "genre": r["genre"] or "", "year": r["mb_year"] or ""} for r in rows]
 
     @_synchronized
     def artist_songs(self, artist) -> list[dict]:

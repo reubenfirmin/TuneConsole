@@ -82,6 +82,11 @@ body::before {
 a { color: var(--accent-2); text-decoration: none; }
 a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
+.authbar { background: color-mix(in srgb, var(--danger) 18%, var(--bg)); color: var(--text);
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); padding: 0.6rem 1.4rem;
+  font-size: 0.88rem; text-align: center; }
+.authbar a { color: var(--accent-2); font-weight: 600; }
+
 /* ---- top bar ---- */
 .topbar {
   position: sticky; top: 0; z-index: 5;
@@ -351,9 +356,68 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 .artist-thumb { width: 110px; height: 110px; border-radius: 12px; object-fit: cover;
   border: 1px solid var(--border-2); flex-shrink: 0; }
 .artist-meta { color: var(--dim); margin: 0.3rem 0 0; }
+
+/* playlist header: roomy thumb + title stack, with a bare share icon parked top-right */
+/* Square thumb whose height is matched to the title stack by JS (see playlist.html). aspect-ratio
+   keeps it square once the height is set; the img fills the wrapper. */
+.pl-head { align-items: center; gap: 1.8rem; }
+.pl-art { position: relative; flex: none; aspect-ratio: 1; border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--border-2); box-shadow: 0 14px 34px -16px rgba(0,0,0,0.75); }
+.pl-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.pl-headmain { min-width: 0; }
+.share-link { align-self: flex-start; }
+.pl-headmain { display: flex; flex-direction: column; min-width: 0; }
+.pl-head h1 { margin: 0.2rem 0 0; line-height: 1.12; }
+.pl-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem 0.85rem;
+  color: var(--dim); font-size: 0.92rem; margin: 0.8rem 0 0; }
+.pl-stats .stat { display: inline-flex; align-items: baseline; }
+.pl-stats .stat::before { content: "·"; color: var(--faint); margin-right: 0.85rem; }
+.pl-stats strong { color: var(--text); font-weight: 700; }
+.pl-actions { margin-top: 1.25rem; }
+/* bare icon tools (share, enrich) stacked at the top-right of the header */
+.head-tools { margin-left: auto; align-self: flex-start; display: flex; flex-direction: column; gap: 0.35rem; }
+.head-icon { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem;
+  padding: 0; background: transparent; border: none; box-shadow: none; border-radius: 8px;
+  color: var(--dim); cursor: pointer; transition: color 0.15s ease, background 0.15s ease, transform 0.12s ease; }
+.head-icon:hover { color: var(--accent); background: var(--surface-2); transform: translateY(-1px); }
+.head-icon.on, .head-icon:disabled { color: var(--accent-2); transform: none; }
+.head-icon:disabled { cursor: default; }
+
+/* enrichment progress strip below the header */
+.enrich-strip { display: flex; align-items: center; gap: 0.8rem; margin: -0.6rem 0 1.6rem; }
+.enrich-bar { flex: 1; height: 6px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.enrich-bar > i { display: block; height: 100%; width: 0; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.3s ease; }
+.enrich-status { color: var(--dim); font-size: 0.82rem; white-space: nowrap; max-width: 60%;
+  overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); }
 .artist-bio { color: var(--dim); font-size: 0.9rem; line-height: 1.6; margin: 0.8rem 0 0;
   max-width: 60ch; white-space: pre-line; }
 .album-thumb { width: 2.4rem; height: 2.4rem; border-radius: 5px; object-fit: cover; display: block; }
+.pl-thumb { width: 1.7rem; height: 1.7rem; border-radius: 4px; object-fit: cover; vertical-align: middle;
+  margin-right: 0.45rem; }
+/* cover slot: shows the playlist art; on row hover a neon-green ▶ overlays it (click = play on YT).
+   A small corner badge always marks the content type (audio/video/mixed/mix). */
+.pl-cover { position: relative; display: inline-flex; width: 2rem; height: 2rem; flex: none;
+  vertical-align: middle; margin-right: 0.6rem; border-radius: 5px; background: var(--surface-2); }
+.pl-cover .pl-thumb { width: 2rem; height: 2rem; border-radius: 5px; object-fit: cover; margin: 0; }
+.pl-play { position: absolute; inset: 0; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 5px; background: rgba(4,22,14,0.55); color: #6bffab; font-size: 0.9rem; padding-left: 2px;
+  text-decoration: none; opacity: 0; transition: opacity 0.12s ease; }
+tr:hover .pl-play, tr.selrow .pl-play { opacity: 1; }
+.pl-play:hover { background: rgba(4,22,14,0.72); color: #b6ffd5; box-shadow: inset 0 0 0 1.5px #15e98c; }
+.pl-ptype { position: absolute; right: -4px; bottom: -4px; min-width: 0.92rem; height: 0.92rem; z-index: 1;
+  display: inline-flex; align-items: center; justify-content: center; padding: 0 1px; border-radius: 999px;
+  background: var(--surface-2); border: 1px solid var(--border-2); font-size: 0.5rem; line-height: 1;
+  color: var(--dim); }
+.unavail { color: var(--danger); margin-left: 0.3rem; }
+
+/* click-to-edit genre cell */
+.gdisplay { cursor: pointer; display: inline-flex; align-items: center; min-height: 1.5rem; }
+.gdisplay .ghint { opacity: 0; transition: opacity 0.12s ease; font-weight: 700; }
+tr.srow:hover .gdisplay .ghint { opacity: 0.55; }
+.gdisplay:hover .gtag { box-shadow: inset 0 0 0 1px var(--accent); }
+.ginput { width: 100%; max-width: 8rem; padding: 0.18rem 0.4rem; font-size: 0.82rem;
+  background: var(--bg-2); border: 1px solid var(--accent); border-radius: 6px; color: var(--text); }
 .gtag { display: inline-block; font-size: 0.72rem; padding: 0.08rem 0.4rem; border-radius: 999px;
   background: var(--surface-2); border: 1px solid var(--border-2); color: var(--dim); }
 .modal-input { width: 100%; box-sizing: border-box; margin-bottom: 1.1rem; padding: 0.5rem 0.7rem;
@@ -373,6 +437,47 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 .modal h3 { margin: 0 0 0.6rem; font-family: var(--font-display); }
 .modal p { margin: 0 0 1.1rem; color: var(--dim); font-size: 0.9rem; line-height: 1.5; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 0.6rem; }
+.modal-wide { max-width: 40rem; width: calc(100vw - 3rem); }
+
+/* per-row "⋯" actions menu */
+.rowmenu { position: relative; text-align: right; overflow: visible; }
+.dots { background: transparent; border: none; box-shadow: none; color: var(--faint);
+  font-size: 1.15rem; line-height: 1; padding: 0.15rem 0.4rem; border-radius: 6px; cursor: pointer; }
+.dots:hover { background: var(--surface-2); color: var(--text); box-shadow: none; }
+.rowmenu-pop { position: absolute; right: 0.4rem; top: 100%; z-index: 30; min-width: 12.5rem;
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: 10px;
+  box-shadow: 0 16px 40px -12px rgba(0,0,0,.7); padding: 0.3rem; }
+.rowmenu-pop button { display: block; width: 100%; text-align: left; background: transparent;
+  border: none; box-shadow: none; color: var(--text); font-weight: 500; font-size: 0.85rem;
+  padding: 0.45rem 0.6rem; border-radius: 6px; cursor: pointer; }
+.rowmenu-pop button:hover { background: var(--accent-soft); box-shadow: none; }
+.rowmenu-pop button.danger { color: var(--danger); }
+.rowmenu-pop button.danger:hover { background: var(--danger-soft); }
+
+/* drag-to-reorder handle on the # column */
+.drag-handle { color: var(--faint); cursor: grab; user-select: none; }
+.drag-handle:active, tr.srow-chosen .drag-handle { cursor: grabbing; }
+tr.srow:hover .drag-handle { color: var(--accent-2); }
+/* SortableJS: the placeholder slot left at the insert point (a neon-edged gap) */
+tr.srow-ghost td { background: var(--accent-soft);
+  box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); }
+tr.srow-ghost td * { visibility: hidden; }
+tr.srow-chosen { background: var(--accent-soft); }
+
+/* alternate-versions list */
+.alt-list { max-height: 52vh; overflow-y: auto; margin: 0.2rem -0.4rem 1.1rem; }
+.alt-row { display: grid; grid-template-columns: auto 2.4rem minmax(0,1fr) auto auto; align-items: center;
+  gap: 0.7rem; padding: 0.5rem 0.4rem; border-radius: 8px; cursor: pointer; }
+.alt-row:hover { background: var(--surface-2); }
+.alt-row.on { background: var(--accent-soft); }
+.alt-row input { width: auto; }
+.alt-meta { min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
+.alt-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.alt-sub { color: var(--dim); font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.alt-kind { margin-left: 0.45rem; font-family: var(--font-mono); font-size: 0.62rem; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--faint); border: 1px solid var(--border-2); border-radius: 4px;
+  padding: 0.02rem 0.3rem; }
+.alt-dur { color: var(--faint); font-size: 0.82rem; }
 th.sorth { cursor: pointer; user-select: none; white-space: nowrap; }
 th.sorth:hover { color: var(--text); }
 tr.rowdel { opacity: .35; transition: opacity .2s ease; }

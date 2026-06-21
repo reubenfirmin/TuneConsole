@@ -1,7 +1,14 @@
 """Playlists tab: browse every playlist, sort, assign user groups, and run bulk actions."""
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+import asyncio
+import json
+import re
+import threading
+from urllib.parse import quote
 
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+
+from yt_playlist import musicbrainz
 from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
 
 
@@ -25,16 +32,154 @@ def build(ctx) -> APIRouter:
             last, listens = stats.get(p.id, (None, 0))
             rows.append({
                 "id": p.id, "ytm": p.ytm_playlist_id, "title": p.title,
-                "identity": labels.get(p.identity_id, "?"),
+                "identity": labels.get(p.identity_id, "?"), "thumbnail": p.thumbnail,
                 "count": p.track_count, "kind": store.playlist_kind(p.id),
                 "group": groups.get(p.ytm_playlist_id, ""),
                 "last": last, "listens": listens,
             })
+        group_names = sorted({g for g in groups.values() if g}, key=str.lower)
         return templates.TemplateResponse(request, "playlists.html", {
-            "rows": rows, "has_groups": bool(groups),
+            "rows": rows, "has_groups": bool(groups), "group_names": group_names,
             "flash": request.query_params.get("flash"),
             "flash_pl": request.query_params.get("flash_pl"),
         })
+
+    @router.get("/playlist/{pid}")
+    def playlist_detail(request: Request, pid: int):
+        pl = store.get_playlist(pid)
+        if pl is None:
+            raise HTTPException(status_code=404, detail="playlist not found")
+        labels = {i.id: i.label for i in store.get_identities()}
+        tracks = store.playlist_tracks_detail(pid)
+        return templates.TemplateResponse(request, "playlist.html", {
+            "pl": pl, "tracks": tracks, "identity": labels.get(pl.identity_id, "?"),
+            "kind": store.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),
+            "genres": store.all_genres(),
+        })
+
+    @router.get("/playlist/{pid}/share.txt")
+    def playlist_share(pid: int):
+        """Download the playlist as a plain .txt — one song URL per line — for easy sharing."""
+        pl = store.get_playlist(pid)
+        if pl is None:
+            raise HTTPException(status_code=404, detail="playlist not found")
+        lines = [f"https://music.youtube.com/watch?v={t['video_id']}"
+                 for t in store.playlist_tracks_detail(pid) if t.get("video_id")]
+        # ascii-safe filename for the legacy param, plus RFC 5987 filename* for the real title
+        safe = re.sub(r'[\\/:*?"<>|]', "_", pl.title).strip() or "playlist"
+        ascii_name = safe.encode("ascii", "ignore").decode() or "playlist"
+        return PlainTextResponse("\n".join(lines) + ("\n" if lines else ""), headers={
+            "Content-Disposition": f'attachment; filename="{ascii_name}.txt"; '
+                                   f"filename*=UTF-8''{quote(safe)}.txt",
+        })
+
+    @router.get("/playlist/{pid}/alternates")
+    def playlist_alternates(pid: int, video_id: str):
+        """Search YouTube for alternate versions of a track in this playlist."""
+        try:
+            return JSONResponse({"ok": True, "results": ctx.ops().find_alternates(pid, video_id)})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        except Exception:  # noqa: BLE001
+            logger.exception("alternate search failed for %s in playlist %s", video_id, pid)
+            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
+
+    @router.post("/playlist/{pid}/add-tracks")
+    async def playlist_add_tracks(pid: int, request: Request):
+        body = await request.json()
+        tracks = body.get("tracks") or []
+        if not tracks:
+            return JSONResponse({"ok": False, "error": "no tracks selected"})
+        try:
+            return JSONResponse({"ok": True, **ctx.ops().add_tracks(pid, tracks)})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        except Exception:  # noqa: BLE001
+            logger.exception("add-tracks failed for playlist %s", pid)
+            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
+
+    @router.post("/playlist/{pid}/enrich")
+    def playlist_enrich(pid: int):
+        """Kick off a background MusicBrainz enrichment job for this playlist's tracks."""
+        if store.get_playlist(pid) is None:
+            raise HTTPException(status_code=404, detail="playlist not found")
+        job = ctx.jobs.create()
+
+        def run():
+            try:
+                musicbrainz.enrich_playlist(store, pid, on_progress=job.events.append)
+            except Exception as e:  # noqa: BLE001
+                detail = str(e) or type(e).__name__
+                job.error = detail
+                job.events.append({"type": "err", "text": f"enrichment failed: {detail}"})
+            finally:
+                job.done = True
+
+        threading.Thread(target=run, daemon=True).start()
+        return JSONResponse({"job_id": job.id})
+
+    @router.get("/playlist/enrich/events/{job_id}")
+    async def playlist_enrich_events(request: Request, job_id: int):
+        job = ctx.jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="no such enrichment job")
+
+        async def gen():
+            sent = 0
+            while True:
+                while sent < len(job.events):
+                    yield f"data: {json.dumps(job.events[sent])}\n\n"
+                    sent += 1
+                if job.done:
+                    yield f"data: {json.dumps({'type': 'end', 'error': job.error})}\n\n"
+                    return
+                if await request.is_disconnected():
+                    return
+                await asyncio.sleep(0.1)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @router.post("/playlist/{pid}/track-genre")
+    async def playlist_set_track_genre(pid: int, request: Request):
+        body = await request.json()
+        vid = (body.get("video_id") or "").strip()
+        genre = (body.get("genre") or "").strip()
+        if not vid:
+            return JSONResponse({"ok": False, "error": "no track given"})
+        tid = store.track_ids_for_videos([vid]).get(vid)
+        if tid is None:
+            return JSONResponse({"ok": False, "error": "track not found"})
+        store.set_track_genre(tid, genre)
+        return JSONResponse({"ok": True, "genre": genre})
+
+    @router.post("/playlist/{pid}/remove-track")
+    async def playlist_remove_track(pid: int, request: Request):
+        body = await request.json()
+        vid = (body.get("video_id") or "").strip()
+        if not vid:
+            return JSONResponse({"ok": False, "error": "no track given"})
+        try:
+            return JSONResponse({"ok": True, **ctx.ops().remove_track(pid, vid)})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        except Exception:  # noqa: BLE001
+            logger.exception("remove-track failed for playlist %s", pid)
+            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
+
+    @router.post("/playlist/{pid}/reorder")
+    async def playlist_reorder(pid: int, request: Request):
+        body = await request.json()
+        vid = (body.get("video_id") or "").strip()
+        before = (body.get("before_video_id") or "").strip()
+        if not vid:
+            return JSONResponse({"ok": False, "error": "no track given"})
+        try:
+            return JSONResponse({"ok": True, **ctx.ops().reorder_track(pid, vid, before)})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        except Exception:  # noqa: BLE001
+            logger.exception("reorder failed for playlist %s", pid)
+            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
 
     @router.post("/playlists/group")
     async def playlists_group(request: Request):
@@ -47,6 +192,21 @@ def build(ctx) -> APIRouter:
                 store.set_playlist_group(pl.ytm_playlist_id, name)
                 n += 1
         return JSONResponse({"ok": True, "n": n})
+
+    @router.post("/playlists/copy")
+    async def playlists_copy(request: Request):
+        form = await request.form()
+        ids = _ids(form)
+        if not ids:
+            return JSONResponse({"ok": False, "error": "select at least one playlist to copy"})
+        try:
+            res = ctx.ops().copy(ids, form.get("name", ""))
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        except Exception:  # noqa: BLE001
+            logger.exception("copy of %s failed", ids)
+            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
+        return JSONResponse({"ok": True, **res})
 
     @router.post("/playlists/delete")
     async def playlists_delete(request: Request):

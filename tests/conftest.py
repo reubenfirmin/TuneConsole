@@ -19,7 +19,7 @@ class FakeClient:
             for t in tlist:
                 if t.get("videoId"):
                     self._catalog.setdefault(t["videoId"], t)
-        self.created = []; self.added = []; self.removed = []; self.deleted = []
+        self.created = []; self.added = []; self.removed = []; self.deleted = []; self.edited = []
     def get_library_playlists(self, limit=25):
         playlists = list(self._playlists)
         return playlists[:limit] if limit is not None else playlists
@@ -43,7 +43,12 @@ class FakeClient:
         self._tracks[playlistId] = [t for t in self._tracks.get(playlistId, []) if t.get("videoId") not in gone]
     def delete_playlist(self, playlistId): self.deleted.append(playlistId)
     def search(self, query, filter="songs"): return list(self._search_results)
+    def edit_playlist(self, playlistId, **kw):
+        self.edited.append((playlistId, kw)); return "STATUS_SUCCEEDED"
 
-def _track(vid, title, artist, dur=200, album="Alb"):
-    return {"videoId": vid, "title": title, "artists": [{"name": artist}],
-            "album": {"name": album}, "duration_seconds": dur}
+def _track(vid, title, artist, dur=200, album="Alb", set_video_id=None):
+    t = {"videoId": vid, "title": title, "artists": [{"name": artist}],
+         "album": {"name": album}, "duration_seconds": dur}
+    if set_video_id is not None:
+        t["setVideoId"] = set_video_id
+    return t

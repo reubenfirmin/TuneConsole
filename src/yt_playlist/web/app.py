@@ -86,6 +86,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
 
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
               templates=templates, jobs=SyncJobs(), setup=setup)
+    templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync
     for router in build_all(ctx):
         app.include_router(router)
 

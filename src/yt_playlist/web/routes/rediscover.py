@@ -18,10 +18,13 @@ def build(ctx) -> APIRouter:
         snoozed = [{"playlist": by_ytm[ytm], "until": until}
                    for ytm, until in hidden if ytm in by_ytm]
         snoozed.sort(key=lambda s: (s["until"] is None, s["until"] or 0))
+        stale = analysis.find_stale(store, now, exclude_ytm=hidden_set)[:50]
+        shown = [s.playlist.id for s in stale] + [s["playlist"].id for s in snoozed]
         return templates.TemplateResponse(request, "discover.html", {
-            "stale": analysis.find_stale(store, now, exclude_ytm=hidden_set)[:50],
+            "stale": stale,
             "snoozed": snoozed,
             "labels": {i.id: i.label for i in store.get_identities()},
+            "kinds": {pid: store.playlist_kind(pid) for pid in shown},
             "flash": request.query_params.get("flash"),
         })
 

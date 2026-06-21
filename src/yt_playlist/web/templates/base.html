@@ -3,15 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!-- googleusercontent throttles/403s image requests that carry a Referer header (browser sends one,
-       curl doesn't — which is why the same URLs load via curl but flake in the page). Drop the referrer. -->
-  <meta name="referrer" content="no-referrer">
   <title>{% block title %}yt-playlist{% endblock %}</title>
   <!-- Vendored from npm (see package.json); refresh with `npm run sync-assets`. Served locally
        so nothing is fetched from a third-party CDN at runtime. -->
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
   <script src="/static/vendor/htmx.min.js"></script>
+  <script src="/static/vendor/sortable.min.js"></script>
   <script src="/static/app.js?v={{ asset_v }}"></script>
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
@@ -31,6 +29,12 @@
       <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
     </nav>
   </header>
+  {% if auth_expired %}
+  <div class="authbar">
+    ⚠ YouTube session expired for <strong>{{ auth_expired.values()|join(', ') }}</strong> — its data is
+    stale until you reconnect. <a href="/setup">Re-authenticate →</a>
+  </div>
+  {% endif %}
   <main>{% block body %}{% endblock %}</main>
 </body>
 </html>

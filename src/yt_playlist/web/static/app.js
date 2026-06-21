@@ -109,11 +109,15 @@ function saveAlbum(saved) {
     },
   };
 }
-function rowSort() {
+function rowSort(pid) {
   // Generic click-to-sort for a static-row table; reorders <tr class="srow"> by data-<key>.
   // Numeric when both values parse as numbers, else locale string compare.
+  // Also hosts the per-row "⋯" menu and the "find alternate versions" flow for the playlist view.
   return {
-    key: '', dir: 1,
+    pid: pid, key: '', dir: 1,
+    openMenu: null,                                   // video_id whose ⋯ menu is open
+    // alternate-versions modal
+    altOpen: false, altLoading: false, altErr: '', altTitle: '', altResults: [], altSel: {},
     sortBy(k) {
       if (this.key === k) { this.dir = -this.dir; } else { this.key = k; this.dir = 1; }
       const tb = this.$refs.body;
@@ -128,6 +132,119 @@ function rowSort() {
         .forEach(r => tb.appendChild(r));
     },
     ind(k) { return this.key === k ? (this.dir === 1 ? ' ▲' : ' ▼') : ''; },
+
+    async findAlternates(vid, title) {
+      this.openMenu = null;
+      this.altOpen = true; this.altLoading = true; this.altErr = '';
+      this.altResults = []; this.altSel = {}; this.altTitle = title;
+      try {
+        const r = await fetch(`/playlist/${this.pid}/alternates?video_id=${encodeURIComponent(vid)}`);
+        const j = await r.json();
+        if (!j.ok) { this.altErr = j.error || 'search failed'; }
+        else { this.altResults = j.results; if (!j.results.length) this.altErr = 'No other versions found.'; }
+      } catch (e) { this.altErr = 'network error'; }
+      this.altLoading = false;
+    },
+    toggleAlt(vid) {
+      const s = { ...this.altSel };
+      if (s[vid]) delete s[vid]; else s[vid] = true;
+      this.altSel = s;
+    },
+    altCount() { return Object.keys(this.altSel).length; },
+    async addAlternates() {
+      const chosen = this.altResults.filter(r => this.altSel[r.videoId]);
+      if (!chosen.length) return;
+      this.altLoading = true; this.altErr = '';
+      try {
+        const r = await fetch(`/playlist/${this.pid}/add-tracks`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tracks: chosen }),
+        });
+        const j = await r.json();
+        if (!j.ok) { this.altErr = j.error || 'add failed'; this.altLoading = false; return; }
+        location.reload();                            // new tracks drop into the table
+      } catch (e) { this.altErr = 'network error'; this.altLoading = false; }
+    },
+    fmtDur(s) { return s ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : ''; },
+
+    // remove-track confirmation modal
+    rmOpen: false, rmBusy: false, rmErr: '', rmVid: '', rmTitle: '',
+    removeTrack(vid, title) {
+      this.openMenu = null;
+      this.rmVid = vid; this.rmTitle = title; this.rmErr = ''; this.rmOpen = true;
+    },
+    async confirmRemove() {
+      this.rmBusy = true; this.rmErr = '';
+      try {
+        const r = await fetch(`/playlist/${this.pid}/remove-track`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ video_id: this.rmVid }),
+        });
+        const j = await r.json();
+        if (!j.ok) { this.rmErr = j.error || 'remove failed'; this.rmBusy = false; return; }
+        location.reload();
+      } catch (e) { this.rmErr = 'network error'; this.rmBusy = false; }
+    },
+
+    // --- drag-and-drop reorder via SortableJS (floating drag clone + ghost placeholder) ---
+    initSortable() {
+      const tb = this.$refs.body;
+      if (!tb || typeof Sortable === 'undefined') return;
+      Sortable.create(tb, {
+        handle: '.drag-handle',
+        draggable: 'tr.srow',
+        animation: 160,
+        // Native drag image (a faithful, full-width snapshot of the row) floats under the cursor —
+        // a fallback clone would detach the <tr> from the table and collapse its columns.
+        ghostClass: 'srow-ghost',            // the placeholder shown at the insert point
+        chosenClass: 'srow-chosen',
+        onEnd: (e) => {
+          this.renumber();
+          if (e.oldIndex === e.newIndex) return;
+          const rows = tb.querySelectorAll('tr.srow');
+          const moved = e.item.dataset.vid;
+          const next = e.item.nextElementSibling;
+          const beforeVid = next && next.classList.contains('srow') ? next.dataset.vid : '';
+          fetch(`/playlist/${this.pid}/reorder`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ video_id: moved, before_video_id: beforeVid }),
+          }).then(r => r.json()).then(j => { if (!j.ok) location.reload(); })
+            .catch(() => location.reload());
+        },
+      });
+    },
+    renumber() {
+      this.$refs.body.querySelectorAll('tr.srow .rownum').forEach((el, i) => { el.textContent = i + 1; });
+    },
+
+    // --- click-to-edit genre (autosuggest from the genres we already have) ---
+    editVid: null,
+    startEditGenre(vid) {
+      this.editVid = vid;
+      this.$nextTick(() => {
+        const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
+        const inp = tr && tr.querySelector('.ginput');
+        const tag = tr && tr.querySelector('.gtag');
+        if (inp) { inp.value = tag ? tag.textContent.trim() : ''; inp.focus(); inp.select(); }
+      });
+    },
+    async saveGenre(vid, value) {
+      if (this.editVid !== vid) return;          // ignore the trailing blur after enter/escape
+      this.editVid = null;
+      const genre = (value || '').trim();
+      const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
+      if (tr) {                                   // optimistic update
+        const disp = tr.querySelector('.gdisplay');
+        if (disp) disp.innerHTML = genreChip(genre);
+        tr.dataset.genre = genre.toLowerCase();
+      }
+      try {
+        await fetch(`/playlist/${this.pid}/track-genre`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ video_id: vid, genre }),
+        });
+      } catch (e) { /* optimistic UI already applied; a reload would resync if needed */ }
+    },
   };
 }
 function overlapSort() {
@@ -236,6 +353,20 @@ function playlistsTab(rows) {
       Object.entries(data).forEach(([k, v]) => fd.append(k, v));
       const r = await fetch(url, { method: 'POST', body: fd });
       return r.json();
+    },
+    copyModal: false, copyName: '', copyIds: [],
+    openCopy() {
+      const sel = this.selected();
+      if (!sel.length) return;
+      this.copyIds = sel.map(r => r.id);
+      // single -> "Title (copy)"; multiple -> a copy+merge, prefilled with the joined names
+      this.copyName = sel.length === 1 ? sel[0].title + ' (copy)' : sel.map(r => r.title).join(' + ');
+      this.copyModal = true;
+    },
+    async doCopy() {
+      this.copyModal = false;
+      await this._post('/playlists/copy', { ids: this.copyIds.join(','), name: this.copyName });
+      location.reload();                      // new playlist drops into the table
     },
     openGroup() { if (this.count()) { this.groupName = ''; this.groupModal = true; } },
     async doGroup() {
@@ -357,6 +488,58 @@ function mergeEditor(members, tracks, returnTo) {
       } catch (e) { this.busy = false; this.err = String(e); }
     },
   };
+}
+function enrichPanel(pid) {
+  // MusicBrainz enrichment: background job streamed over SSE. Updates the Year/Genre cells live
+  // as each track resolves, and drives a determinate progress bar.
+  return {
+    pid: pid, running: false, finished: false, pct: 0, status: '',
+    async start() {
+      if (this.running) return;
+      this.running = true; this.finished = false; this.pct = 0;
+      this.status = 'Starting MusicBrainz enrichment…';
+      let job;
+      try {
+        const r = await fetch(`/playlist/${this.pid}/enrich`, { method: 'POST' });
+        job = (await r.json()).job_id;
+      } catch (e) { this.status = 'Could not start.'; this.running = false; return; }
+      const es = new EventSource(`/playlist/enrich/events/${job}`);
+      es.onmessage = (m) => {
+        const ev = JSON.parse(m.data);
+        if (ev.type === 'track') {
+          this.applyRow(ev);
+          this.pct = Math.round((ev.i / ev.n) * 100);
+          this.status = ev.text;
+        } else if (ev.type === 'info') {
+          this.status = ev.text;
+        } else if (ev.type === 'done') {
+          this.pct = 100; this.status = ev.text;
+        } else if (ev.type === 'err') {
+          this.status = ev.text;
+        } else if (ev.type === 'end') {
+          es.close(); this.running = false; this.finished = true;
+          if (!ev.error) setTimeout(() => { this.finished = false; }, 4000);
+        }
+      };
+      es.onerror = () => { es.close(); this.running = false; this.status = 'Stream interrupted.'; };
+    },
+    // patch a single row's Year/Genre cells (and sort keys) without a full reload
+    applyRow(ev) {
+      const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(ev.video_id)}"]`);
+      if (!tr) return;
+      const y = tr.querySelector('.mb-year'), g = tr.querySelector('.gdisplay');
+      if (y) y.textContent = ev.year || '';
+      if (g) g.innerHTML = genreChip(ev.genre);
+      tr.dataset.year = ev.year || 0;
+      tr.dataset.genre = (ev.genre || '').toLowerCase();
+    },
+  };
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+function genreChip(genre) {
+  return genre ? `<span class="gtag">${escapeHtml(genre)}</span>` : '<span class="muted ghint">＋</span>';
 }
 function syncPanel() {
   return {

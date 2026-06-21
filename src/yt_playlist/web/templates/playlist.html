@@ -1,0 +1,171 @@
+{% extends "base.html" %}{% block title %}{{ pl.title }} · yt-playlist{% endblock %}{% block body %}
+<div x-data="enrichPanel({{ pl.id }})">
+<div class="artist-head pl-head" x-data="{ artH: 0 }"
+     x-init="const fit = () => artH = $refs.main.offsetHeight; fit(); new ResizeObserver(fit).observe($refs.main)">
+  {% if pl.thumbnail %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ pl.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.closest('.pl-art').remove()"></span>{% endif %}
+  <div class="pl-headmain" x-ref="main">
+    <span class="eyebrow">Playlist</span>
+    <h1>{{ pl.title }}</h1>
+    <p class="pl-stats">
+      <span class="tag amber">{{ identity }}</span>
+      <span class="stat"><strong>{{ tracks|length }}</strong>&nbsp;track{{ '' if tracks|length == 1 else 's' }}</span>
+      <span class="stat"><strong>{{ total_plays }}</strong>&nbsp;total plays</span>
+    </p>
+    <div class="pl-actions">
+      <a class="cta" href="https://music.youtube.com/playlist?list={{ pl.ytm_playlist_id }}"
+         target="_blank" rel="noopener">▶ Play on YouTube Music ↗</a>
+    </div>
+  </div>
+  <div class="head-tools">
+    <a class="head-icon" href="/playlist/{{ pl.id }}/share.txt" download="{{ pl.title }}.txt"
+       title="Share — download one song URL per line as a .txt" aria-label="Share playlist">
+      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+        <line x1="8.6" y1="10.7" x2="15.4" y2="6.3"/><line x1="8.6" y1="13.3" x2="15.4" y2="17.7"/>
+      </svg>
+    </a>
+    <button type="button" class="head-icon" :class="{ on: running }" @click="start()" :disabled="running"
+            title="Enrich genre & year via MusicBrainz" aria-label="Enrich via MusicBrainz">
+      <span class="spinner" x-show="running" x-cloak></span>
+      <svg x-show="!running" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 5a2.5 2.5 0 0 0-4.6-1.3A2.6 2.6 0 0 0 4 6.2 2.7 2.7 0 0 0 3 11a2.7 2.7 0 0 0 1.3 4.7A2.5 2.5 0 0 0 7 19a2.4 2.4 0 0 0 5 .5Z"/>
+        <path d="M12 5a2.5 2.5 0 0 1 4.6-1.3A2.6 2.6 0 0 1 20 6.2 2.7 2.7 0 0 1 21 11a2.7 2.7 0 0 1-1.3 4.7A2.5 2.5 0 0 1 17 19a2.4 2.4 0 0 1-5 .5Z"/>
+        <path d="M12 5v14.5M8 9h1.5M14.5 9H16M7.5 13H9M15 13h1.5"/>
+      </svg>
+    </button>
+  </div>
+</div>
+<div class="enrich-strip" x-show="running || finished" x-cloak x-transition>
+  <div class="enrich-bar"><i :style="`width:${pct}%`"></i></div>
+  <span class="enrich-status" x-text="status"></span>
+</div>
+
+<div x-data="rowSort({{ pl.id }})" x-init="$nextTick(() => initSortable())">
+<div class="card">
+  <table>
+    <thead><tr>
+      <th class="num">#</th>
+      <th style="width:2.6rem"></th>
+      <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
+      <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
+      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th class="sorth num" style="width:4rem" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth" style="width:8rem" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
+      <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth num" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
+      <th style="width:2.4rem"></th>
+    </tr></thead>
+    <tbody x-ref="body">
+    {% for t in tracks %}
+      <tr class="srow" data-vid="{{ t.video_id }}" data-title="{{ t.title|lower }}" data-artist="{{ t.artist|lower }}"
+          data-album="{{ t.album|lower }}" data-plays="{{ t.plays }}" data-len="{{ t.duration or 0 }}"
+          data-year="{{ t.year or 0 }}" data-genre="{{ t.genre|lower }}" :class="{ rowdel: false }">
+        <td class="num drag-handle" title="Drag to reorder"><span class="rownum">{{ loop.index }}</span></td>
+        <td>
+          <span class="pl-cover">
+            {% if t.thumbnail %}<img class="pl-thumb" src="{{ t.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+            <a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}"
+               target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
+          </span>
+        </td>
+        <td>
+          <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
+             target="_blank" rel="noopener">{{ t.title }} ↗</a>
+          {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
+        </td>
+        <td><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
+        <td>{% if t.album_browse %}<a class="alink" href="https://music.youtube.com/browse/{{ t.album_browse }}"
+               target="_blank" rel="noopener">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</td>
+        <td class="num mono mb-year">{{ t.year }}</td>
+        <td class="mb-genre">
+          <span class="gdisplay" x-show="editVid !== '{{ t.video_id }}'"
+                @click="startEditGenre('{{ t.video_id }}')" title="Click to set genre">
+            {% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">＋</span>{% endif %}
+          </span>
+          <input class="ginput" type="text" list="genrelist" autocomplete="off" x-cloak
+                 x-show="editVid === '{{ t.video_id }}'"
+                 @keydown.enter.prevent="saveGenre('{{ t.video_id }}', $event.target.value)"
+                 @keydown.escape="editVid = null"
+                 @blur="saveGenre('{{ t.video_id }}', $event.target.value)">
+        </td>
+        <td class="num mono">{{ t.plays or '' }}</td>
+        <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
+        <td class="rowmenu">
+          <button type="button" class="dots" title="More actions"
+                  @click="openMenu = (openMenu === '{{ t.video_id }}' ? null : '{{ t.video_id }}')">⋯</button>
+          <div class="rowmenu-pop" x-show="openMenu === '{{ t.video_id }}'" x-cloak x-transition.opacity
+               @click.away="openMenu = null">
+            <button type="button" data-vid="{{ t.video_id }}" data-title="{{ t.title }}"
+                    @click="findAlternates($event.currentTarget.dataset.vid, $event.currentTarget.dataset.title)">
+              Find alternate versions…</button>
+            <button type="button" class="danger" data-vid="{{ t.video_id }}" data-title="{{ t.title }}"
+                    @click="removeTrack($event.currentTarget.dataset.vid, $event.currentTarget.dataset.title)">Remove from playlist</button>
+          </div>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="10" class="empty">This playlist has no tracks.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+<datalist id="genrelist">{% for g in genres %}<option value="{{ g }}"></option>{% endfor %}</datalist>
+
+  <!-- remove-track confirm modal -->
+  <template x-teleport="body">
+    <div class="modal-backdrop" x-show="rmOpen" x-cloak x-transition.opacity
+         @click="rmOpen = false" @keydown.escape.window="rmOpen = false">
+      <div class="modal" @click.stop x-transition.scale.origin.center>
+        <h3>Remove track?</h3>
+        <p>Remove <strong x-text="rmTitle"></strong> from this playlist? This changes the playlist on
+           YouTube. You can re-add it later from search.</p>
+        <p class="notice err" x-show="rmErr" x-text="rmErr"></p>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="rmOpen = false" :disabled="rmBusy">Cancel</button>
+          <button type="button" class="btn-danger" @click="confirmRemove()" :disabled="rmBusy"
+                  x-text="rmBusy ? 'Removing…' : 'Remove'"></button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- alternate-versions modal -->
+  <template x-teleport="body">
+    <div class="modal-backdrop" x-show="altOpen" x-cloak x-transition.opacity
+         @click="altOpen = false" @keydown.escape.window="altOpen = false">
+      <div class="modal modal-wide" @click.stop x-transition.scale.origin.center>
+        <h3>Alternate versions <span class="muted" x-show="altTitle" x-text="'· ' + altTitle"></span></h3>
+        <p class="muted" x-show="altLoading && !altResults.length">Searching YouTube…</p>
+        <p class="notice err" x-show="altErr" x-text="altErr"></p>
+        <div class="alt-list" x-show="altResults.length">
+          <template x-for="r in altResults" :key="r.videoId">
+            <label class="alt-row" :class="{ on: altSel[r.videoId] }">
+              <input type="checkbox" :checked="!!altSel[r.videoId]" @change="toggleAlt(r.videoId)">
+              <img class="album-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
+              <span class="alt-meta">
+                <span class="alt-title" x-text="r.title"></span>
+                <span class="alt-sub">
+                  <span x-text="r.artist"></span>
+                  <template x-if="r.album"><span x-text="' · ' + r.album"></span></template>
+                  <span class="alt-kind" x-text="r.kind"></span>
+                </span>
+              </span>
+              <span class="mono alt-dur" x-text="fmtDur(r.duration)"></span>
+              <a class="alink" :href="'https://music.youtube.com/watch?v=' + r.videoId"
+                 target="_blank" rel="noopener" @click.stop title="Try it on YouTube Music">Play ↗</a>
+            </label>
+          </template>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="altOpen = false">Cancel</button>
+          <button type="button" :disabled="!altCount() || altLoading" @click="addAlternates()"
+                  x-text="altCount() ? `Add ${altCount()} to playlist` : 'Add to playlist'"></button>
+        </div>
+      </div>
+    </div>
+  </template>
+</div>
+</div>
+{% endblock %}

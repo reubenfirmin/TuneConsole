@@ -29,6 +29,9 @@ class Ctx:
     jobs: SyncJobs
     setup: object | None = None
     logger: logging.Logger = field(default=logger)
+    # identities whose YouTube session has expired (id -> label), set during sync, cleared on
+    # a successful re-sync. Drives the "session expired, re-authenticate" banner.
+    auth_expired: dict = field(default_factory=dict)
 
     def now(self):
         return self.now_fn()

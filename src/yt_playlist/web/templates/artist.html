@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% block title %}{{ artist }} · yt-playlist{% endblock %}{% block body %}
 <div class="artist-head">
-  {% if info and info.thumbnail %}<img class="artist-thumb" src="{{ info.thumbnail }}" alt="" onerror="this.remove()">{% endif %}
+  {% if info and info.thumbnail %}<img class="artist-thumb" src="{{ info.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
   <div>
     <span class="eyebrow">Artist</span>
     <h1>{{ artist }}</h1>
@@ -61,7 +61,7 @@
       <tr class="srow" data-album="{{ al.album|lower }}" data-year="{{ al.year or 0 }}"
           data-songs="{{ al.songs }}" data-pls="{{ al.n_pls }}" data-plays="{{ al.plays }}"
           data-saved="{{ '1' if al.saved else '0' }}">
-        <td>{% if al.thumb %}<img class="album-thumb" src="{{ al.thumb }}" alt="" onerror="this.remove()">{% endif %}</td>
+        <td>{% if al.thumb %}<img class="album-thumb" src="{{ al.thumb }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
         <td>{% if al.browse %}<a class="ptitle" href="https://music.youtube.com/browse/{{ al.browse }}"
                target="_blank" rel="noopener">{{ al.album }} ↗</a>{% else %}<span class="ptitle">{{ al.album }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>
@@ -90,7 +90,7 @@
     <tbody x-ref="body">
     {% for al in yt_albums %}
       <tr class="srow" data-album="{{ al.title|lower }}" data-year="{{ al.year or 0 }}">
-        <td>{% if al.thumbnail %}<img class="album-thumb" src="{{ al.thumbnail }}" alt="" onerror="this.remove()">{% endif %}</td>
+        <td>{% if al.thumbnail %}<img class="album-thumb" src="{{ al.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
         <td>{% if al.browse_id %}<a class="ptitle" href="https://music.youtube.com/browse/{{ al.browse_id }}"
                target="_blank" rel="noopener">{{ al.title }} ↗</a>{% else %}<span class="ptitle">{{ al.title }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>

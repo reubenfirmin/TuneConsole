@@ -13,8 +13,9 @@ import logging
 from yt_playlist import analysis
 from yt_playlist import sync as sync_mod
 from yt_playlist.executor import (
-    MergePlan, apply_result, copy_or_move_playlist, delete_empty_playlist, delete_playlist,
-    deserialize_plan, execute_planned, store_plan, undo_action)
+    MergePlan, add_tracks_to_playlist, apply_result, copy_or_move_playlist, copy_playlist,
+    delete_empty_playlist, delete_playlist, deserialize_plan, execute_planned, remove_track,
+    reorder_track, search_versions, store_plan, undo_action)
 
 logger = logging.getLogger("yt_playlist.ops")
 
@@ -76,6 +77,35 @@ class PlaylistOps:
 
     def delete(self, playlist_id) -> None:
         delete_playlist(self.store, playlist_id, self._require_client(playlist_id), self.now_fn())
+
+    def copy(self, playlist_ids, new_name) -> dict:
+        if not playlist_ids:
+            raise ValueError("no playlists to copy")
+        # the new playlist is created under the first selected playlist's identity
+        client = self._require_client(playlist_ids[0])
+        return copy_playlist(self.store, playlist_ids, new_name, client, self.now_fn())
+
+    # --- alternate versions -------------------------------------------------
+    def find_alternates(self, playlist_id, video_id) -> list:
+        """Search YouTube for alternate versions of a track already in the playlist."""
+        track = next((t for t in self.store.playlist_tracks_detail(playlist_id)
+                      if t["video_id"] == video_id), None)
+        if track is None:
+            raise ValueError("track is not in this playlist")
+        client = self._require_client(playlist_id)
+        return search_versions(client, track["title"], track["artist"], exclude=video_id)
+
+    def add_tracks(self, playlist_id, tracks) -> dict:
+        client = self._require_client(playlist_id)
+        return add_tracks_to_playlist(self.store, playlist_id, tracks, client, self.now_fn())
+
+    def remove_track(self, playlist_id, video_id) -> dict:
+        client = self._require_client(playlist_id)
+        return remove_track(self.store, playlist_id, video_id, client, self.now_fn())
+
+    def reorder_track(self, playlist_id, video_id, before_video_id) -> dict:
+        client = self._require_client(playlist_id)
+        return reorder_track(self.store, playlist_id, video_id, before_video_id, client, self.now_fn())
 
     def _require_client(self, playlist_id):
         pl = self.store.get_playlist(playlist_id)

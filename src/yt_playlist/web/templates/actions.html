@@ -1,4 +1,6 @@
 {% extends "base.html" %}{% block title %}Actions · yt-playlist{% endblock %}{% block body %}
+{% if flash %}<div class="notice ok" style="margin-bottom:1.4rem">{{ flash }}</div>{% endif %}
+{% if flasherr %}<div class="notice err" style="margin-bottom:1.4rem">{{ flasherr }}</div>{% endif %}
 <div class="page-head">
   <span class="eyebrow">History</span>
   <h1>Action log</h1>
@@ -7,12 +9,13 @@
 
 <div class="card">
   <table>
-    <thead><tr><th class="num">#</th><th>Action</th><th>Status</th><th></th></tr></thead>
+    <thead><tr><th class="num">#</th><th>When</th><th>Action</th><th>Status</th><th></th></tr></thead>
     <tbody>
     {% for row in rows %}
       {% set a = row.a %}
       <tr>
         <td class="num">{{ a.id }}</td>
+        <td class="mono" style="white-space:nowrap; color:var(--dim)">{{ row.when }}</td>
         <td>{{ row.desc }} <span class="tag">{{ a.kind }}</span></td>
         <td>
           {% if a.status == 'executed' %}<span class="tag teal">{{ a.status }}</span>

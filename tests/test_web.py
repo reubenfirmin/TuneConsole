@@ -20,6 +20,20 @@ def test_dashboard_and_sync(store):
     assert '"type": "end"' in body
     assert len(store.get_playlists()) == 1
 
+def test_auth_expired_shows_reauth_banner(store):
+    class Expired:   # a client whose session has lapsed
+        def get_library_playlists(self, limit=None):
+            raise RuntimeError("Server returned HTTP 401: Unauthorized")
+    iid = store.upsert_identity("main", "cred", None, True)
+    app = create_app(store, lambda: {iid: Expired()}, now_fn=lambda: 1.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    assert "authbar" not in c.get("/").text          # nothing wrong before a sync
+    jid = c.post("/sync").json()["job_id"]
+    with c.stream("GET", f"/sync/events/{jid}") as s:
+        "".join(s.iter_text())                        # drain to completion
+    body = c.get("/").text
+    assert "authbar" in body and "session expired" in body   # banner now shown
+
 def test_dupe_detail_renders(store):
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
@@ -506,6 +520,150 @@ def test_playlists_group_and_delete(store, monkeypatch, tmp_path):
     assert r.status_code == 200 and r.json() == {"ok": True, "deleted": 1, "hidden": 0, "errors": []}
     assert store.get_playlist(a) is None
     assert store.get_playlist_groups() == {"PLB": "Faves"}   # pruned on delete
+
+
+def test_playlists_copy_and_copy_merge(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Pop", 2, "h", 1.0)
+    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
+    store.set_playlist_tracks(a, [t[0], t[1]]); store.set_playlist_tracks(b, [t[1], t[2]])
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    r = c.post("/playlists/copy", data={"ids": str(a), "name": "Rock Copy"})
+    assert r.status_code == 200 and r.json()["ok"] and r.json()["added"] == 2 and r.json()["from"] == 1
+    assert any(p.title == "Rock Copy" for p in store.get_playlists())   # pulled into the store
+
+    # copy + merge: union of the two playlists' tracks (v0,v1,v2) = 3
+    r = c.post("/playlists/copy", data={"ids": f"{a},{b}", "name": "Combined"})
+    assert r.json()["ok"] and r.json()["added"] == 3 and r.json()["from"] == 2
+
+
+def test_find_and_add_alternate_versions(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
+    results = [
+        {"videoId": "v0", "title": "Song A", "artists": [{"name": "Artist X"}], "duration_seconds": 200},
+        {"videoId": "v1", "title": "Song A (Live)", "artists": [{"name": "Artist X"}], "duration": "4:10"},
+        {"videoId": "v2", "title": "Song A (Remix)", "artists": [{"name": "DJ Z"}], "duration_seconds": 190},
+    ]
+    fc = FakeClient(search_results=results)
+    c = _client(store, lambda: {iid: fc})
+
+    # search excludes the source track and de-dupes across the songs/videos passes
+    r = c.get(f"/playlist/{a}/alternates?video_id=v0").json()
+    assert r["ok"] and [x["videoId"] for x in r["results"]] == ["v1", "v2"]
+    assert r["results"][0]["duration"] == 250          # "4:10" parsed to seconds
+
+    # adding the chosen alternates appends them to the playlist (YT + store) and bumps the count
+    chosen = [x for x in r["results"] if x["videoId"] in ("v1", "v2")]
+    add = c.post(f"/playlist/{a}/add-tracks", json={"tracks": chosen}).json()
+    assert add == {"ok": True, "added": 2, "skipped": 0, "count": 3}
+    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v1", "v2"]
+    assert store.get_playlist(a).track_count == 3
+    assert fc.added == [("PL1", ["v1", "v2"])]
+
+    # empty selection is rejected
+    assert c.post(f"/playlist/{a}/add-tracks", json={"tracks": []}).json()["ok"] is False
+
+
+def test_added_alternate_keeps_album_link(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 0, "h", 1.0)
+    c = _client(store, lambda: {iid: FakeClient()})
+    track = {"videoId": "v9", "title": "T", "artist": "A", "album": "The Album",
+             "album_browse": "MPREb_123", "duration": 200, "thumbnail": ""}
+    assert c.post(f"/playlist/{a}/add-tracks", json={"tracks": [track]}).json()["ok"]
+    detail = store.playlist_tracks_detail(a)
+    assert detail[0]["album_browse"] == "MPREb_123"   # album becomes a browse link in the view
+
+
+def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
+    import json as _json
+    import yt_playlist.musicbrainz as mb
+    # stub MusicBrainz so the test never hits the network
+    monkeypatch.setattr(mb, "enrich",
+                        lambda title, artist: {"S0": ("rock", "1998"), "S1": ("jazz", "2003")}.get(title, (None, None)))
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", "Al", 200, 1),
+                                  store.upsert_track("v1", "S1", "Y", "Al", 200, 1),
+                                  store.upsert_track("v2", "Sx", "Z", "Al", 200, 1)])
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    assert len(store.tracks_to_enrich(a)) == 3
+    jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
+    with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
+        body = "".join(st.iter_text())
+    types = [_json.loads(l[6:])["type"] for l in body.splitlines() if l.startswith("data: ")]
+    assert types == ["info", "track", "track", "track", "done", "end"]
+
+    detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.playlist_tracks_detail(a)}
+    assert detail["v0"] == ("rock", "1998") and detail["v1"] == ("jazz", "2003")
+    assert detail["v2"] == ("", "")                      # no match this run
+    # fully-resolved tracks are done; the no-match one stays eligible for a re-run
+    assert [t["video_id"] for t in store.tracks_to_enrich(a)] == ["v2"]
+
+    # re-run after MusicBrainz gains a genre for v2 — it fills the gap and v2 is now complete
+    monkeypatch.setattr(mb, "enrich", lambda title, artist: ("ambient", "2010") if title == "Sx" else (None, None))
+    jid2 = c.post(f"/playlist/{a}/enrich").json()["job_id"]
+    with c.stream("GET", f"/playlist/enrich/events/{jid2}") as st:
+        "".join(st.iter_text())
+    v2 = next(t for t in store.playlist_tracks_detail(a) if t["video_id"] == "v2")
+    assert (v2["genre"], v2["year"]) == ("ambient", "2010")
+    assert store.tracks_to_enrich(a) == []
+
+    # a blank result must never clobber values we already have
+    store.set_track_enrichment(store.track_ids_for_videos(["v0"])["v0"], "", "")
+    v0 = next(t for t in store.playlist_tracks_detail(a) if t["video_id"] == "v0")
+    assert (v0["genre"], v0["year"]) == ("rock", "1998")
+
+
+def test_set_track_genre_and_suggestions(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
+    t0 = store.upsert_track("v0", "S0", "X", "Al", 200, 1)
+    store.set_playlist_tracks(a, [t0, store.upsert_track("v1", "S1", "Y", "Al", 200, 1)])
+    store.set_track_genre(t0, "Rock")
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    # autosuggest list = distinct genres so far, alpha-sorted; rendered into a datalist
+    assert store.all_genres() == ["Rock"]
+    page = c.get(f"/playlist/{a}").text
+    assert 'id="genrelist"' in page and 'value="Rock"' in page and "startEditGenre" in page
+
+    # set a genre on the second track; it persists and joins the suggestion list
+    assert c.post(f"/playlist/{a}/track-genre", json={"video_id": "v1", "genre": "Jazz"}).json()["ok"]
+    detail = {t["video_id"]: t["genre"] for t in store.playlist_tracks_detail(a)}
+    assert detail["v1"] == "Jazz"
+    assert store.all_genres() == ["Jazz", "Rock"]
+
+
+def test_reorder_and_remove_track(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track(f"v{i}", f"S{i}", "X", "Alb", 200, 1) for i in range(3)])
+    # the YT playlist exposes setVideoIds (what moves/removes are keyed on)
+    fc = FakeClient(tracks={"PL1": [{"videoId": f"v{i}", "setVideoId": f"sv{i}"} for i in range(3)]})
+    c = _client(store, lambda: {iid: fc})
+
+    # move v2 before v0 (to the top)
+    assert c.post(f"/playlist/{a}/reorder", json={"video_id": "v2", "before_video_id": "v0"}).json()["ok"]
+    assert fc.edited[-1] == ("PL1", {"moveItem": ("sv2", "sv0")})
+    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v2", "v0", "v1"]
+
+    # move v2 to the end (empty successor -> bare setVideoId)
+    c.post(f"/playlist/{a}/reorder", json={"video_id": "v2", "before_video_id": ""})
+    assert fc.edited[-1] == ("PL1", {"moveItem": "sv2"})
+    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v1", "v2"]
+
+    # remove v1
+    assert c.post(f"/playlist/{a}/remove-track", json={"video_id": "v1"}).json() == {"ok": True, "count": 2}
+    assert fc.removed == [("PL1", [{"videoId": "v1", "setVideoId": "sv1"}])]
+    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v2"]
+    assert store.get_playlist(a).track_count == 2
 
 
 def test_playlists_delete_hides_system(store, monkeypatch, tmp_path):
