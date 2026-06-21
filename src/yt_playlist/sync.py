@@ -155,10 +155,6 @@ def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_aut
                       on_auth_expired=on_auth_expired, on_auth_ok=on_auth_ok)
     _sync_saved_albums(store, clients, on_progress)
     store.set_setting("last_sync_at", str(now))   # drives the Home "Time to sync" nudge
-    try:
-        from yt_playlist import embed
-        n = embed.build_and_store(store)
-        _emit(on_progress, "step", f"recommendation model rebuilt ({n} tracks)")
-    except Exception as e:  # noqa: BLE001 - never let rec-building break a sync
-        logger.warning("recommendation rebuild failed: %s", e)
+    # the recommendation model is rebuilt by the decoupled RecWorker (triggered from the sync
+    # route), so a burst of syncs coalesces into one rebuild instead of blocking each sync.
     _emit(on_progress, "done", "sync complete", final=True)

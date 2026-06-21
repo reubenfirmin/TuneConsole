@@ -1,0 +1,56 @@
+{% extends "base.html" %}{% block title %}Taste Model · yt-playlist{% endblock %}{% block body %}
+<div class="page-head">
+  <span class="eyebrow">Tools</span>
+  <h1>Taste Model</h1>
+  <p>Everything the recommender knows, and every knob. Built entirely from your own library.</p>
+</div>
+
+<h2 class="section">Model status</h2>
+<div class="card stat-grid">
+  <div><strong>{{ vectors }}</strong><span>track vectors</span></div>
+  <div><strong>{{ baskets }}</strong><span>co-occurrence baskets</span></div>
+  <div><strong>{{ '%.0f'|format(coverage * 100) }}%</strong><span>genre coverage ({{ tagged }}/{{ tracks_total }})</span></div>
+  <div><strong>{{ '%.2f'|format(breadth) }}</strong><span>taste breadth (0=narrow, 1=eclectic)</span></div>
+  <div hx-get="/taste/recall" hx-trigger="load" hx-swap="innerHTML"><strong>…</strong><span>recall@20 (computing)</span></div>
+</div>
+<div class="pl-actions" style="margin-top:1rem">
+  <button hx-post="/taste/rebuild" hx-swap="none">Rebuild model</button>
+  <button class="btn-ghost" hx-post="/taste/autotune" hx-swap="none"
+          hx-confirm="Grid-search the embedding dimension by recall@k and rebuild on the best? Takes a few seconds.">Auto-tune (recall@k)</button>
+  <button class="btn-ghost" hx-post="/taste/purge-vectors" hx-swap="none"
+          hx-confirm="Delete all taste vectors? They rebuild on next sync.">Purge vectors</button>
+</div>
+
+<h2 class="section">Genre families</h2>
+<div class="card">
+  {% for fam, share in families[:12] %}
+  <div class="bar-row"><span class="bar-label">{{ fam }}</span>
+    <span class="bar"><i style="width:{{ '%.0f'|format(share * 100) }}%"></i></span>
+    <span class="bar-val">{{ '%.0f'|format(share * 100) }}%</span></div>
+  {% endfor %}
+</div>
+
+<h2 class="section">Blend weights</h2>
+<p class="section-note">How much each lane contributes. 1.0 = neutral; feedback nudges these, or set them yourself.</p>
+<div class="card">
+  {% for lane, w in lanes %}
+  <form class="weight-row" hx-post="/taste/weight" hx-swap="none">
+    <input type="hidden" name="axis" value="lane:{{ lane }}">
+    <label>{{ lane }}</label>
+    <input type="number" name="weight" value="{{ '%.2f'|format(w) }}" step="0.05" min="0.2" max="3.0">
+    <button type="submit" class="btn-ghost btn-sm">Set</button>
+  </form>
+  {% endfor %}
+  <button class="btn-ghost btn-sm" hx-post="/taste/reset-weights" hx-swap="none"
+          style="margin-top:0.6rem">Reset all to 1.0</button>
+</div>
+
+<h2 class="section">Feedback</h2>
+<div class="card">
+  {% if feedback %}
+  <p>{% for kind, c in feedback.items() %}<span class="tag">{{ kind }}: {{ c }}</span> {% endfor %}</p>
+  {% else %}<p class="section-note">No feedback recorded yet.</p>{% endif %}
+  <button class="btn-ghost btn-sm" hx-post="/taste/clear-feedback" hx-swap="none"
+          hx-confirm="Clear all dismissals, mutes, and impression history?">Clear feedback &amp; impressions</button>
+</div>
+{% endblock %}

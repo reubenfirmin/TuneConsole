@@ -34,7 +34,7 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     c = TestClient(app, base_url="http://127.0.0.1")
 
     home = c.get("/").text
-    assert "For you" in home
+    assert "More in your wheelhouse" in home    # the exploit lane heading
     assert "Gem" in home                       # the forgotten gem is rendered
     assert 'class="sync-bar"' in home          # Sync control present on Home
 

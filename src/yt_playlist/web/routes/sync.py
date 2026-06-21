@@ -30,6 +30,8 @@ def build(ctx) -> APIRouter:
                 job.events.append({"type": "err", "text": f"sync failed: {detail}"})
             finally:
                 job.done = True
+                if ctx.rec_worker:                  # rebuild recs off the sync path (debounced)
+                    ctx.rec_worker.trigger()
 
         threading.Thread(target=run, daemon=True).start()
         return JSONResponse({"job_id": job.id})

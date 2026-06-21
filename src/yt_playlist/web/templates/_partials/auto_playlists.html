@@ -1,0 +1,19 @@
+{% if building %}
+<div hx-get="/home/auto-playlists" hx-trigger="load delay:3s" hx-swap="outerHTML">
+  <h2 class="section">Discover playlists <span class="refreshing">building…</span></h2>
+  <div class="for-you-grid">{% for _ in range(3) %}<div class="card auto-card skeleton"></div>{% endfor %}</div>
+</div>
+{% elif proposals %}
+<h2 class="section">Discover playlists{% if stale %} <span class="refreshing">refreshing…</span>{% endif %}</h2>
+<p class="section-note">Coherent groups the model found in your library that aren't playlists yet.</p>
+<div class="for-you-grid">
+  {% for p in proposals %}
+  <div class="card auto-card">
+    <div class="auto-head"><strong>{{ p.label }}</strong><span class="tag teal">{{ p.size }} tracks</span></div>
+    <ul class="auto-sample">
+      {% for t in p.sample %}<li>{{ t.artist }} — {{ t.title }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

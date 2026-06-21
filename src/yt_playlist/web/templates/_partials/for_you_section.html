@@ -12,9 +12,27 @@
       <span class="fy-artist">{{ f.artist }}</span>
       <span class="fy-reason">{{ f.reason }}</span>
     </div>
-    <button type="button" class="fy-x" title="Not interested — stop showing this"
-            hx-post="/recs/feedback" hx-swap="outerHTML swap:200ms" hx-target="closest .fy-card"
-            hx-vals='{"item": {{ f.key|tojson }}, "surface": "for_you", "kind": "dismiss"}'>×</button>
+    <div class="fy-fb" x-data="{ open: false }" @click.outside="open = false">
+      <button type="button" class="fy-x" title="Feedback" @click="open = !open">⋯</button>
+      <div class="fy-fb-pop" x-show="open" x-cloak x-transition.opacity
+           hx-target="closest .fy-card" hx-swap="outerHTML swap:200ms">
+        {% set base = '"item": ' + f.key|tojson + ', "surface": "for_you", "lane": ' + f.lane|tojson %}
+        <button type="button" class="more" hx-post="/recs/feedback" hx-swap="none" @click="open=false"
+                hx-vals='{ {{ base }}, "kind": "more" }'>👍 More like this</button>
+        <button type="button" hx-post="/recs/feedback"
+                hx-vals='{ {{ base }}, "kind": "not_now" }'>Not now</button>
+        <button type="button" hx-post="/recs/feedback"
+                hx-vals='{ {{ base }}, "kind": "less", "reason": "vibe" }'>Not the vibe</button>
+        <button type="button" hx-post="/recs/feedback"
+                hx-vals='{ {{ base }}, "kind": "less", "reason": "era" }'>Wrong era</button>
+        <button type="button" hx-post="/recs/feedback"
+                hx-vals='{ {{ base }}, "kind": "less", "reason": "mainstream" }'>Too mainstream</button>
+        <button type="button" hx-post="/recs/feedback"
+                hx-vals='{ "item": {{ ("artist:" ~ f.artist)|tojson }}, "surface": "for_you", "kind": "mute" }'>Mute {{ f.artist }}</button>
+        <button type="button" hx-post="/recs/feedback"
+                hx-vals='{ {{ base }}, "kind": "dismiss", "reason": "own_it" }'>Already know it</button>
+      </div>
+    </div>
   </div>
   {% endfor %}
 </div>

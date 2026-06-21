@@ -1,0 +1,27 @@
+<div class="modal-backdrop" x-data="{ open: true }" x-show="open" x-cloak x-transition.opacity
+     @click="open = false" @keydown.escape.window="open = false">
+  <div class="modal modal-wide" @click.stop x-transition.scale.origin.center>
+    <h3>Songs like &ldquo;{{ seed.title or 'this track' }}&rdquo;</h3>
+    {% if items %}
+    <p class="section-note">Nearest in your taste space — including tracks that share no playlist with it.</p>
+    <div class="for-you-grid">
+      {% for f in items %}
+      <div class="fy-card card">
+        <a class="fy-cover" href="https://music.youtube.com/watch?v={{ f.video_id }}"
+           target="_blank" rel="noopener" title="Play on YouTube Music">
+          {% if f.thumbnail %}<img src="{{ f.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+          <span class="fy-play">▶</span>
+        </a>
+        <div class="fy-meta">
+          <span class="fy-title">{{ f.title }}</span>
+          <span class="fy-artist">{{ f.artist }}</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="section-note">No similar tracks yet — build the taste model from the Sync button or the Taste Model page.</p>
+    {% endif %}
+    <div class="modal-actions"><button type="button" class="btn-ghost" @click="open = false">Close</button></div>
+  </div>
+</div>

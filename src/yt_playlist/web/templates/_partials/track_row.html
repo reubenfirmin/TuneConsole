@@ -60,6 +60,8 @@
             @click="openMenu = (openMenu === '{{ t.video_id }}' ? null : '{{ t.video_id }}')">⋯</button>
     <div class="rowmenu-pop" x-show="openMenu === '{{ t.video_id }}'" x-cloak x-transition.opacity
          @click.away="openMenu = null">
+      <button type="button" hx-get="/track/{{ t.video_id }}/similar" hx-target="#similar-modal"
+              hx-swap="innerHTML" @click="openMenu = null">Songs like this…</button>
       <button type="button" data-vid="{{ t.video_id }}" data-title="{{ t.title }}"
               @click="findAlternates($event.currentTarget.dataset.vid, $event.currentTarget.dataset.title)">
         Find alternate versions…</button>

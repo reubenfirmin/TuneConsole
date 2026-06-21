@@ -1,7 +1,7 @@
 {% if actions %}
 <section class="alerts" aria-label="Needs attention">
   {% for a in actions %}
-  <div class="alert-card card alert-{{ a.severity }}" x-data="{ shown: true }" x-show="shown" x-cloak>
+  <div class="alert-card card alert-{{ a.severity }}">
     {% if a.thumbnail %}<img class="alert-thumb" src="{{ a.thumbnail }}" alt=""
          referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
     <div class="alert-text">
@@ -10,9 +10,13 @@
     </div>
     <div class="alert-cta">
       {% if a.cta_href %}<a class="btn-ghost btn-sm" href="{{ a.cta_href }}">{{ a.cta_label }}</a>{% endif %}
-      <button type="button" class="alert-x" @click="shown = false" aria-label="Dismiss">×</button>
+      <button type="button" class="alert-x" aria-label="Snooze" title="Snooze this"
+              hx-post="/recs/feedback" hx-target="closest .alert-card" hx-swap="outerHTML swap:200ms"
+              hx-vals='{"item": {{ a.key|tojson }}, "surface": "alert", "kind": "not_now"}'>×</button>
     </div>
   </div>
   {% endfor %}
 </section>
+{% else %}
+<p class="section-note alerts-clear">✓ All clear — nothing needs your attention.</p>
 {% endif %}

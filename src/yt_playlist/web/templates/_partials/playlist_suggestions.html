@@ -14,11 +14,16 @@
       <span class="fy-artist">{{ f.artist }}</span>
       <span class="fy-reason">{{ f.reason }}</span>
     </div>
-    {# matches the playlist add-tracks contract: form post with each track as a JSON 'track' field #}
-    <form hx-post="/playlist/{{ pid }}/add-tracks" hx-swap="none">
-      <input type="hidden" name="track" value="{{ {'videoId': f.video_id, 'title': f.title, 'artist': f.artist, 'album': f.album, 'thumbnail': f.thumbnail}|tojson }}">
-      <button type="submit" class="btn-ghost btn-sm fy-add">+ Add</button>
-    </form>
+    <div class="fy-actions">
+      {# matches the playlist add-tracks contract: form post with each track as a JSON 'track' field #}
+      <form hx-post="/playlist/{{ pid }}/add-tracks" hx-swap="none">
+        <input type="hidden" name="track" value="{{ {'videoId': f.video_id, 'title': f.title, 'artist': f.artist, 'album': f.album, 'thumbnail': f.thumbnail}|tojson }}">
+        <button type="submit" class="btn-ghost btn-sm fy-add">+ Add</button>
+      </form>
+      <button type="button" class="fy-x" title="Doesn't fit this playlist"
+              hx-post="/recs/feedback" hx-target="closest .fy-card" hx-swap="outerHTML swap:200ms"
+              hx-vals='{"item": {{ f.key|tojson }}, "surface": "suggest", "scope": "{{ pid }}", "kind": "dismiss"}'>×</button>
+    </div>
   </div>
   {% endfor %}
 </div>

@@ -51,8 +51,12 @@ def build_vectors(store, dim=DIM):
     return keys, V.astype(np.float32)
 
 
-def build_and_store(store, dim=DIM) -> int:
-    """Build embeddings and persist them. Returns the number of tracks embedded."""
+def build_and_store(store, dim=None) -> int:
+    """Build embeddings and persist them. Returns the number of tracks embedded.
+
+    dim defaults to the recall@k-tuned `rec_dim` setting (or DIM if unset/untuned)."""
+    if dim is None:
+        dim = int(store.get_setting("rec_dim") or DIM)
     keys, V = build_vectors(store, dim)
     store.replace_rec_vectors([(k, V[i].tobytes()) for i, k in enumerate(keys)])
     return len(keys)
@@ -81,12 +85,90 @@ def _rank(keys, V, target, exclude, topn):
     return out
 
 
+def _kmeans(V, k, iters=25, seed=0):
+    """Spherical k-means on L2-normalised vectors (cosine = dot). Returns a label per row."""
+    rng = np.random.default_rng(seed)
+    C = V[rng.choice(len(V), size=k, replace=False)].copy()
+    labels = np.zeros(len(V), dtype=int)
+    for _ in range(iters):
+        labels = (V @ C.T).argmax(1)
+        for j in range(k):
+            members = V[labels == j]
+            if len(members):
+                c = members.mean(0)
+                norm = np.linalg.norm(c)
+                if norm > 0:
+                    C[j] = c / norm
+    return labels
+
+
+def cluster(store, k=14):
+    """Group the library's vectors into k coherent clusters: {cluster_id: [identity_key, ...]}."""
+    keys, V, idx = load_vectors(store)
+    if V is None or len(keys) < k:
+        return {}
+    labels = _kmeans(V, k)
+    out: dict = {}
+    for key, lab in zip(keys, labels):
+        out.setdefault(int(lab), []).append(key)
+    return out
+
+
 def neighbors(store, key, topn=12, exclude=None):
     """Tracks most similar to one seed track in taste space."""
     keys, V, idx = load_vectors(store)
     if V is None or key not in idx:
         return []
     return _rank(keys, V, V[idx[key]], (exclude or set()) | {key}, topn)
+
+
+def _centroid(V, idx, seed_groups):
+    target = np.zeros(V.shape[1], dtype=np.float64)
+    for ks, w in seed_groups:
+        si = [idx[k] for k in ks if k in idx]
+        if si:
+            c = V[si].mean(0)
+            n = np.linalg.norm(c)
+            if n > 0:
+                target += w * (c / n)
+    n = np.linalg.norm(target)
+    return target / n if n > 0 else None
+
+
+def sims_for(store, seed_groups, keys):
+    """Cosine similarity of each given key to the weighted taste centroid (for Tier-2 re-ranking).
+    Returns {key: sim}; empty if no vectors. Spec §8 'refined by Tier-2'."""
+    allkeys, V, idx = load_vectors(store)
+    if V is None:
+        return {}
+    target = _centroid(V, idx, seed_groups)
+    if target is None:
+        return {}
+    return {k: float(V[idx[k]] @ target) for k in keys if k in idx}
+
+
+def blended_neighbors(store, seed_groups, topn=12, exclude=None):
+    """Rank by a weighted blend of several seed centroids.
+
+    seed_groups = [(keys, weight), ...] — e.g. slow all-time taste at 0.6 + fast recent-mood at
+    0.4. Each group's centroid is normalised before weighting, so a small recent set still counts.
+    """
+    keys, V, idx = load_vectors(store)
+    if V is None:
+        return []
+    target = np.zeros(V.shape[1], dtype=np.float64)
+    excl = set(exclude or set())
+    for ks, w in seed_groups:
+        si = [idx[k] for k in ks if k in idx]
+        excl |= set(ks)
+        if si:
+            c = V[si].mean(0)
+            n = np.linalg.norm(c)
+            if n > 0:
+                target += w * (c / n)
+    if not np.any(target):
+        return []
+    return _rank(keys, V, target / (np.linalg.norm(target) + 1e-9), excl, topn)
 
 
 def centroid_neighbors(store, seed_keys, topn=12, exclude=None):

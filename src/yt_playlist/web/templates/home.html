@@ -14,7 +14,31 @@
 
   {% include "_partials/alerts.html" %}
 
-  <h2 class="section">For you</h2>
-  {% include "_partials/for_you_section.html" %}
+  <div class="two-lane">
+    <section class="lane">
+      <h2 class="section">More in your wheelhouse</h2>
+      <p class="section-note">Deeper into what you already love.</p>
+      {% include "_partials/for_you_section.html" %}
+    </section>
+    {% if explore %}
+    <section class="lane">
+      <h2 class="section">Try something new</h2>
+      <p class="section-note">Near your taste, but artists you don't play yet.</p>
+      {% with for_you = explore %}{% include "_partials/for_you_section.html" %}{% endwith %}
+    </section>
+    {% endif %}
+  </div>
+
+  {% if muted_count %}
+  <p class="section-note muted-note">Hiding {{ muted_count }} muted artist{{ 's' if muted_count != 1 }} based on your feedback —
+    <a href="/taste">manage on the Taste Model page</a>.</p>
+  {% endif %}
+
+  <div hx-get="/home/auto-playlists" hx-trigger="load" hx-swap="innerHTML">
+    <p class="section-note">Finding coherent groups in your library…</p>
+  </div>
+
+  <div hx-get="/home/discover" hx-trigger="load" hx-swap="innerHTML"></div>
+  <div hx-get="/home/fresh" hx-trigger="load" hx-swap="innerHTML"></div>
 </div>
 {% endblock %}
