@@ -7,22 +7,22 @@
      don't. (MusicBrainz returns its own genres and isn't filtered by this list.)</p>
 </div>
 
-<div class="card" x-data='genresTab({{ genres|tojson }})'>
+<div class="card">
   <div class="genre-add">
-    <input type="text" x-model="newName" placeholder="Add a genre…" autocomplete="off"
-           @keydown.enter="add()" x-ref="inp">
-    <button type="button" @click="add()">Add</button>
-    <button type="button" class="btn-ghost" @click="reset()"
+    <input type="text" name="name" placeholder="Add a genre…" autocomplete="off"
+           hx-post="/genres/add" hx-trigger="keyup[key=='Enter']"
+           hx-target="#genre-list" hx-swap="innerHTML"
+           hx-on::after-request="this.value=''">
+    <button type="button"
+            hx-post="/genres/add" hx-include="previous input"
+            hx-target="#genre-list" hx-swap="innerHTML"
+            hx-on::after-request="this.previousElementSibling.value=''">Add</button>
+    <button type="button" class="btn-ghost"
+            hx-post="/genres/reset" hx-target="#genre-list" hx-swap="innerHTML"
             title="Restore the built-in list of {{ builtin_count }} genres">Reset to defaults</button>
-    <span class="muted genre-count" x-text="list.length + ' genres'"></span>
   </div>
-  <p class="notice err" x-show="err" x-text="err" style="margin-top:1rem"></p>
-  <div class="genre-chips">
-    <template x-for="g in list" :key="g">
-      <span class="genre-chip"><span x-text="g"></span><button type="button" class="chip-x"
-            @click="remove(g)" :title="'Remove ' + g">×</button></span>
-    </template>
-    <p class="muted" x-show="!list.length">No genres — tags won't be matched. Add some, or reset to defaults.</p>
+  <div id="genre-list">
+    {% include "_partials/genre_list.html" %}
   </div>
 </div>
 {% endblock %}

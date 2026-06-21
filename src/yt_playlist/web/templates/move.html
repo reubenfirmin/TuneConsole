@@ -22,7 +22,7 @@
       </label>
       <span class="ab" style="background:none; color:var(--faint); font-size:1.3rem">→</span>
       <label class="opt">To
-        <select x-model.number="to" style="width:auto; margin-left:.4rem">
+        <select id="move-to" name="target_identity" x-model.number="to" style="width:auto; margin-left:.4rem">
           {% for i in identities %}<option value="{{ i.id }}">{{ i.label }}</option>{% endfor %}
         </select>
       </label>
@@ -34,20 +34,7 @@
     <table>
       <thead><tr><th>Playlist</th><th></th></tr></thead>
       {% for p in playlists %}
-      <tbody x-show="from === {{ p.identity_id }} && st({{ p.id }}).state !== 'gone'"
-             x-transition.opacity.duration.300ms style="display:none">
-        <tr :class="{ rowdel: st({{ p.id }}).state === 'working' }">
-          <td>{{ pllink(p.ytm_playlist_id, p.title, p.track_count) }}</td>
-          <td style="text-align:right; white-space:nowrap">
-            <button type="button" class="btn-ghost btn-sm" :disabled="!canMove() || st({{ p.id }}).state === 'working'"
-                    @click="run({{ p.id }}, true)">Copy →</button>
-            <button type="button" class="btn-sm" :disabled="!canMove() || st({{ p.id }}).state === 'working'"
-                    @click="run({{ p.id }}, false)">Move →</button>
-            <span class="muted" x-show="st({{ p.id }}).msg" style="display:none" x-text="st({{ p.id }}).msg"></span>
-            <span class="notice err" x-show="st({{ p.id }}).err" style="display:none; padding:.2rem .5rem" x-text="st({{ p.id }}).err"></span>
-          </td>
-        </tr>
-      </tbody>
+      {% include "_partials/move_row.html" %}
       {% endfor %}
     </table>
   </div>

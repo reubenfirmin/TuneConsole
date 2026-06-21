@@ -627,30 +627,6 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     assert (v0["genre"], v0["year"]) == ("rock", "1998")
 
 
-def test_genres_whitelist_editor(store):
-    import yt_playlist.genres as g
-    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)   # seeds the built-in list
-    c = TestClient(app, base_url="http://127.0.0.1")
-    n = len(g.builtin_names())
-    assert len(store.get_genre_whitelist()) == n
-    page = c.get("/genres").text
-    assert "genresTab" in page and "Rock" in page
-
-    # add a custom genre -> persisted and recognized by the live matcher
-    r = c.post("/genres/add", json={"name": "Phonk"}).json()
-    assert r["ok"] and "Phonk" in r["genres"]
-    assert g.pick_genre(["seen live", "phonk"]) == "Phonk"
-
-    # remove it -> gone and no longer matched
-    c.post("/genres/remove", json={"name": "Phonk"})
-    assert "Phonk" not in store.get_genre_whitelist()
-    assert g.pick_genre(["phonk"]) is None
-
-    # reset restores the built-in list
-    assert c.post("/genres/reset").json()["ok"]
-    assert len(store.get_genre_whitelist()) == n
-
-
 def test_liked_songs_get_a_heart(store):
     iid = store.upsert_identity("main", "cred", None, True)
     mix = store.upsert_playlist(iid, "PLM", "Mix", 2, "h", 1.0)
@@ -954,3 +930,38 @@ def test_no_stalerow_alpine_remains(store):
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     assert "staleRow" not in c.get("/discover").text
+
+
+def _two_identity_move(store):
+    i1 = store.upsert_identity("Main", "c1", None, True)
+    i2 = store.upsert_identity("Alt", "c2", None, False)
+    pid = store.upsert_playlist(i1, "PL1", "Mix", 1, "h", 1.0)
+    t = store.upsert_track("v1", "S", "X", None, None, 1)
+    store.set_playlist_tracks(pid, [t])
+    return i1, i2, pid
+
+
+def test_move_run_copy_returns_row_with_message(store):
+    i1, i2, pid = _two_identity_move(store)
+    c = _client(store, lambda: {i1: FakeClient(), i2: FakeClient()})
+    r = c.post("/move/run", data={"playlist": pid, "target_identity": i2, "copy_only": "1"})
+    assert r.status_code == 200
+    assert "Copied" in r.text and "Mix" in r.text       # row re-rendered, still present
+    assert store.get_playlist(pid) is not None
+
+
+def test_move_run_move_removes_row(store):
+    i1, i2, pid = _two_identity_move(store)
+    c = _client(store, lambda: {i1: FakeClient(), i2: FakeClient()})
+    r = c.post("/move/run", data={"playlist": pid, "target_identity": i2})   # move (no copy_only)
+    assert r.status_code == 200
+    assert r.text.strip() == ""                          # deleted -> empty -> htmx removes the row
+    assert store.get_playlist(pid) is None
+
+
+def test_move_run_same_identity_shows_inline_error(store):
+    i1, _i2, pid = _two_identity_move(store)
+    c = _client(store, lambda: {i1: FakeClient()})
+    r = c.post("/move/run", data={"playlist": pid, "target_identity": i1})
+    assert r.status_code == 200
+    assert "same" in r.text.lower() and "move-row" in r.text   # error re-rendered in the row

@@ -1,0 +1,20 @@
+{% from "_macros.html" import pllink with context %}
+{# One movable playlist. htmx: Copy/Move post to /move/run; the to-identity comes from the
+   #move-to select via hx-include. A move that deletes the source returns empty (row fades out);
+   copy / kept-source / error re-render this row with a message. from-filter stays Alpine. #}
+<tbody class="move-row" x-show="from === {{ p.identity_id }}"
+       x-transition.opacity.duration.300ms style="display:none">
+  <tr>
+    <td>{{ pllink(p.ytm_playlist_id, p.title, p.track_count) }}</td>
+    <td style="text-align:right; white-space:nowrap">
+      <button type="button" class="btn-ghost btn-sm" :disabled="!canMove()"
+              hx-post="/move/run" hx-include="#move-to" hx-vals='{"playlist": {{ p.id }}, "copy_only": "1"}'
+              hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Copy →</button>
+      <button type="button" class="btn-sm" :disabled="!canMove()"
+              hx-post="/move/run" hx-include="#move-to" hx-vals='{"playlist": {{ p.id }}}'
+              hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Move →</button>
+      {% if message %}<span class="muted">{{ message }}</span>{% endif %}
+      {% if error %}<span class="notice err" style="padding:.2rem .5rem">{{ error }}</span>{% endif %}
+    </td>
+  </tr>
+</tbody>

@@ -1,10 +1,14 @@
 {% if snoozed %}
-<h2 class="section">Snoozed &amp; dismissed <span class="count">{{ snoozed|length }}</span></h2>
-<p class="section-note">Hidden from the list above. Restore any to start surfacing it again.</p>
-<div class="card">
-  <table>
-    <tbody>
-    {% for s in snoozed %}
+<div x-data="{ open: false }">
+  <h2 class="section toggle" @click="open = !open">
+    <span class="chev" x-text="open ? '▾' : '▸'"></span> Snoozed &amp; dismissed <span class="count">{{ snoozed|length }}</span>
+  </h2>
+  <div x-show="open" x-cloak>
+    <p class="section-note">Hidden from the list above. Restore any to start surfacing it again.</p>
+    <div class="card">
+      <table>
+        <tbody>
+        {% for s in snoozed %}
       <tr>
         <td>
           <span class="pl-cover">
@@ -23,7 +27,9 @@
         </td>
       </tr>
     {% endfor %}
-    </tbody>
-  </table>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 {% endif %}

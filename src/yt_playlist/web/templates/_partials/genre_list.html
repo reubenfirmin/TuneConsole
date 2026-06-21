@@ -1,0 +1,13 @@
+{# Genre whitelist: count + chips. Page {% include %}s this inside #genre-list; the
+   add/remove/reset routes return it standalone for htmx to swap into #genre-list. #}
+<span class="muted genre-count">{{ genres|length }} genres</span>
+<div class="genre-chips">
+  {% for name in genres %}
+  <span class="genre-chip"><span>{{ name }}</span><button type="button" class="chip-x"
+        title="Remove {{ name }}"
+        hx-post="/genres/remove" hx-vals='{"name": {{ name|tojson }}}'
+        hx-target="#genre-list" hx-swap="innerHTML">×</button></span>
+  {% else %}
+  <p class="muted">No genres — tags won't be matched. Add some, or reset to defaults.</p>
+  {% endfor %}
+</div>
