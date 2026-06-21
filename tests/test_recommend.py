@@ -98,7 +98,7 @@ def test_take_action_enrichment_ranked_by_playcount(store):
     iid = store.upsert_identity("main", "cred", None, True)
     hot = store.upsert_track("v1", "Hot", "A", None, None)    # no genre -> gap
     cold = store.upsert_track("v2", "Cold", "B", None, None)  # no genre -> gap
-    php = store.upsert_playlist(iid, "PH", "Hot List", 1, "h", 0.0)
+    php = store.upsert_playlist(iid, "PH", "Hot List", 1, "h", 0.0, "http://t/hot.jpg")
     plp = store.upsert_playlist(iid, "PL", "Cold List", 1, "h2", 0.0)
     store.set_playlist_tracks(php, [hot])
     store.set_playlist_tracks(plp, [cold])
@@ -107,12 +107,12 @@ def test_take_action_enrichment_ranked_by_playcount(store):
     items = recommend.take_action(store, now=1000.0, auth_expired={})
     enrich = [i for i in items if i.kind == "enrich"]
 
-    assert enrich, "should surface an enrichment nudge"
-    assert enrich[0].severity == "low"
-    assert "Hot List" in enrich[0].detail           # the high-play gappy playlist is named
-    assert enrich[0].cta_href == f"/playlist/{php}"  # CTA goes to the top-ranked playlist
-    # ranked by playcount: Hot List (1 play) before Cold List (0)
-    assert enrich[0].detail.index("Hot List") < enrich[0].detail.index("Cold List")
+    assert len(enrich) == 2                           # one card per gappy playlist
+    assert all(i.severity == "low" for i in enrich)
+    assert "Hot List" in enrich[0].title              # ranked by playcount: Hot List first
+    assert "Cold List" in enrich[1].title
+    assert enrich[0].cta_href == f"/playlist/{php}"
+    assert enrich[0].thumbnail == "http://t/hot.jpg"  # card carries the playlist thumbnail
 
 
 def test_sync_status_never_synced(store):

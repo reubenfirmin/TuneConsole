@@ -2,6 +2,8 @@
 <section class="alerts" aria-label="Needs attention">
   {% for a in actions %}
   <div class="alert-card card alert-{{ a.severity }}" x-data="{ shown: true }" x-show="shown" x-cloak>
+    {% if a.thumbnail %}<img class="alert-thumb" src="{{ a.thumbnail }}" alt=""
+         referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
     <div class="alert-text">
       <span class="alert-title">{{ a.title }}</span>
       <span class="alert-detail">{{ a.detail }}</span>

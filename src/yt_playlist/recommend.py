@@ -92,12 +92,13 @@ def sync_status(store, now) -> SyncStatus:
 
 @dataclass
 class ActionItem:
-    kind: str          # "auth" | "cleanup"
+    kind: str          # "auth" | "cleanup" | "enrich"
     severity: str      # "high" | "med" | "low"
     title: str
     detail: str
     cta_label: str | None
     cta_href: str | None
+    thumbnail: str | None = None
 
 
 def _ago(seconds) -> str:
@@ -139,6 +140,6 @@ def take_action(store, now, auth_expired) -> list[ActionItem]:
             f"{e['gaps']} of {e['total']} tracks are missing genre tags — and it's one of your "
             f"most-played playlists ({e['plays']} plays). Enriching it sharpens recommendations, "
             "since recs lean on genre and year.",
-            "Enrich", f"/playlist/{e['id']}"))
+            "Enrich", f"/playlist/{e['id']}", thumbnail=e["thumbnail"]))
 
     return items

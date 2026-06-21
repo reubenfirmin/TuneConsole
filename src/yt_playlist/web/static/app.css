@@ -641,9 +641,11 @@ button.htmx-request .check-busy { display: inline; }
 .home-control.sync-stale { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
 
 .alerts { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 1.8rem; }
-.alert-card { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+.alert-card { display: flex; align-items: center; gap: 0.9rem;
   padding: 0.7rem 0.9rem; }
-.alert-text { display: flex; flex-direction: column; gap: 0.15rem; }
+.alert-thumb { width: 2.6rem; height: 2.6rem; flex: 0 0 auto; object-fit: cover;
+  border-radius: var(--radius-sm); }
+.alert-text { display: flex; flex-direction: column; gap: 0.15rem; flex: 1 1 auto; min-width: 0; }
 .alert-title { font-weight: 650; }
 .alert-detail { color: var(--dim); font-size: 0.84rem; }
 .alert-high { border-color: var(--danger); }
