@@ -6,6 +6,14 @@ function syncTopbarH() {
 window.addEventListener('DOMContentLoaded', syncTopbarH);
 window.addEventListener('resize', syncTopbarH);
 
+// htmx: a 422 carries an OOB error toast. By default htmx won't process a 4xx body,
+// so opt this status in — the server sets `HX-Reswap: none` to keep the primary
+// target untouched while the OOB toast still lands in #toasts. Bind on `document`
+// (not document.body): app.js loads in <head>, before <body> exists.
+document.addEventListener('htmx:beforeSwap', (e) => {
+  if (e.detail.xhr.status === 422) { e.detail.shouldSwap = true; e.detail.isError = false; }
+});
+
 // Alpine component factories for the dashboard tabs (loaded globally via base.html).
 function groupCard() {
   return {
@@ -50,28 +58,6 @@ function hideRow() {
         const r = await fetch('/overlaps/suppress', { method: 'POST', body: fd });
         if ((await r.json()).ok) { this.state = 'gone'; } else { this.state = 'idle'; }
       } catch (e) { this.state = 'idle'; }
-    },
-  };
-}
-function staleRow() {
-  return {
-    state: 'idle',
-    async _post(url, fd) {
-      this.state = 'working';
-      try {
-        const r = await fetch(url, { method: 'POST', body: fd });
-        if ((await r.json()).ok) { this.state = 'gone'; } else { this.state = 'idle'; }
-      } catch (e) { this.state = 'idle'; }
-    },
-    dismiss(ytm) {
-      if (this.state === 'working') return;
-      const fd = new FormData(); fd.append('ytm', ytm);
-      return this._post('/rediscover/dismiss', fd);
-    },
-    snooze(ytm, days) {
-      if (this.state === 'working') return;
-      const fd = new FormData(); fd.append('ytm', ytm); fd.append('days', days);
-      return this._post('/rediscover/snooze', fd);
     },
   };
 }

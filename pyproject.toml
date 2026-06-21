@@ -17,7 +17,7 @@ dependencies = [
 yt-playlist = "yt_playlist.__main__:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "httpx>=0.27", "watchfiles>=0.21"]  # watchfiles powers `yt-playlist --reload`
+dev = ["pytest>=8", "httpx>=0.27", "watchfiles>=0.21", "pytest-playwright>=0.5"]  # watchfiles powers `yt-playlist --reload`
 
 [build-system]
 requires = ["hatchling"]
@@ -27,6 +27,7 @@ build-backend = "hatchling.build"
 packages = ["src/yt_playlist"]
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q -m 'not browser'"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["browser: live-browser tests via Playwright (run with -m browser)"]

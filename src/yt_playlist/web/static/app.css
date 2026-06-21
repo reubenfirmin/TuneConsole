@@ -601,3 +601,20 @@ tr.rowdel td { text-decoration: line-through; }
 hr { border: none; border-top: 1px solid var(--border); margin: 1.4rem 0; }
 .cols { display: flex; gap: 1.4rem; flex-wrap: wrap; }
 .cols > div { flex: 1 1 14rem; }
+
+/* --- htmx OOB error toasts --- */
+.toasts { position: fixed; top: 1rem; right: 1rem; z-index: 1000; display: flex;
+  flex-direction: column; gap: .5rem; pointer-events: none; }
+.toast { pointer-events: auto; display: flex; align-items: center; gap: .75rem;
+  padding: .6rem .9rem; border-radius: .5rem; box-shadow: 0 4px 16px rgba(0,0,0,.25);
+  font-size: .9rem; max-width: 28rem; }
+.toast-err { background: #3a1d1d; color: #ffd9d9; border: 1px solid #7a3b3b; }
+.toast-body { flex: 1; }
+.toast-x { background: none; border: 0; color: inherit; font-size: 1.1rem;
+  line-height: 1; cursor: pointer; opacity: .7; }
+.toast-x:hover { opacity: 1; }
+
+/* discover: reproduce the old Alpine row states with htmx lifecycle classes */
+tr.htmx-request { opacity: .35; transition: opacity .2s ease; }
+tr.htmx-request td { text-decoration: line-through; }
+tbody.stale-row.htmx-swapping { opacity: 0; transition: opacity .3s ease; }

@@ -1,0 +1,29 @@
+{% if snoozed %}
+<h2 class="section">Snoozed &amp; dismissed <span class="count">{{ snoozed|length }}</span></h2>
+<p class="section-note">Hidden from the list above. Restore any to start surfacing it again.</p>
+<div class="card">
+  <table>
+    <tbody>
+    {% for s in snoozed %}
+      <tr>
+        <td>
+          <span class="pl-cover">
+            {% if s.playlist.thumbnail %}<img class="pl-thumb" src="{{ s.playlist.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+            <a class="pl-play" href="https://music.youtube.com/playlist?list={{ s.playlist.ytm_playlist_id }}"
+               target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
+            {% set k = kinds[s.playlist.id] %}{% if k %}<span class="pl-ptype" title="{{ k }}">{{ {'audio':'♪','video':'▦','mixed':'◑','mix':'≋'}[k] }}</span>{% endif %}
+          </span>
+          <a class="ptitle" href="/playlist/{{ s.playlist.id }}" title="Open in yt-playlist">{{ s.playlist.title }}</a></td>
+        <td>{% if s.until is none %}<span class="tag red">dismissed</span>{% else %}<span class="tag">snoozed</span>{% endif %}</td>
+        <td style="text-align:right">
+          <form method="post" action="/rediscover/restore" style="display:inline">
+            <input type="hidden" name="ytm" value="{{ s.playlist.ytm_playlist_id }}">
+            <button class="btn-ghost btn-sm">Restore</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

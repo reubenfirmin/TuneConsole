@@ -1,0 +1,10 @@
+{# OOB error toast. Returned by routes on a 422; htmx inserts this wrapper's CHILDREN at the
+   top of #toasts (positional OOB swaps splice in children, so the .toast div must be nested).
+   The toast carries x-data so Alpine auto-dismisses it — also proving Alpine mounts swapped content. #}
+<div hx-swap-oob="afterbegin:#toasts">
+  <div class="toast toast-err" x-data="{ show: true }" x-show="show" x-cloak
+       x-init="setTimeout(() => show = false, 5000)">
+    <span class="toast-body">{{ message }}</span>
+    <button type="button" class="toast-x" @click="show = false" aria-label="Dismiss">×</button>
+  </div>
+</div>
