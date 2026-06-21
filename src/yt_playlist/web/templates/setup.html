@@ -1,22 +1,24 @@
-{% extends "base.html" %}{% block title %}Setup · yt-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Setup · yt-playlist{% endblock %}{% block body %}
 <div class="page-head">
   <span class="eyebrow">Connect</span>
   <h1>Set up yt-playlist</h1>
   <p>Paste a signed-in request from YouTube Music, name your identities, and you're in.</p>
 </div>
 
-{% if error %}<div class="notice err" style="margin-bottom:1.2rem"><strong>{{ error }}</strong></div>{% endif %}
-{% if configured %}<div class="notice" style="margin-bottom:1.2rem">Already configured — saving will update your settings.</div>{% endif %}
+{% if error %}{% call banner('err') %}<strong>{{ error }}</strong>{% endcall %}{% endif %}
+{% if configured %}{% call banner('') %}Already configured — saving will update your settings.{% endcall %}{% endif %}
 
 <form method="post" action="/setup"
-      x-data='setupForm({{ rows|tojson }}, {{ master_idx|tojson }})' x-ref="form">
+      x-data='setupForm({{ rows|tojson }}, {{ master_idx|tojson }}, {{ configured|tojson }})' x-ref="form">
 
   <div class="card" style="margin-bottom:1.4rem">
     <h2 class="section" style="margin-top:0">1 · Capture your sign-in</h2>
     <ol class="steps">
       <li>Open <a href="https://music.youtube.com" target="_blank" rel="noopener">music.youtube.com</a>
-          signed in, then DevTools (F12) → <strong>Network</strong>, and reload so requests appear.</li>
-      <li>Type <code class="mono">browse</code> in the filter and click a <code class="mono">browse</code> request <em>row</em>.</li>
+          signed in, then open DevTools (F12) → <strong>Network</strong>.</li>
+      <li>Click <strong>any playlist</strong> (e.g. in the left sidebar) — that fires a
+          <code class="mono">browse</code> request. Type <code class="mono">browse</code> in the
+          filter and click that <code class="mono">browse</code> request <em>row</em>.</li>
       <li>Right-click it → <em>Copy</em> → <strong>Copy as cURL</strong>
           (Windows: <em>Copy as cURL (bash)</em>), then paste below.</li>
     </ol>
@@ -60,16 +62,21 @@
 
     <div class="btn-row" style="margin-top:1rem">
       <button type="button" class="btn-ghost btn-sm" @click="rows.push({label: '', brand: ''})">+ Add identity</button>
-      <button type="submit">{{ 'Save' if configured else 'Save and start →' }}</button>
     </div>
+  </div>
+
+  <div class="setup-actions">
+    <span class="muted" x-show="auth === 'ok'" x-cloak>✓ Signed in as <strong x-text="account"></strong> — </span>
+    <button type="submit" class="setup-save">{{ 'Save' if configured else 'Save and start →' }}</button>
   </div>
 </form>
 
 <script>
-function setupForm(rows, masterIdx) {
+function setupForm(rows, masterIdx, configured) {
   return {
     rows: rows,
     masterIdx: masterIdx,
+    configured: configured,
     auth: 'idle',        // idle | checking | ok | error
     account: '',
     error: '',
@@ -85,6 +92,9 @@ function setupForm(rows, masterIdx) {
           // auto-detect the logged-in (master) identity: fill its label if still blank
           const m = this.rows[this.masterIdx];
           if (m && !m.label.trim()) m.label = data.account;
+          // Re-auth: the identities are already configured, so a valid check is everything we need —
+          // commit the new credential straight away (saves, clears the banner, returns to playlists).
+          if (this.configured) this.$nextTick(() => this.$refs.form.requestSubmit());
         } else {
           this.auth = 'error'; this.error = data.error || 'sign-in not valid';
         }

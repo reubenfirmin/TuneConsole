@@ -117,6 +117,29 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .topbar nav a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
 .topbar nav a.active { color: #fff; background: var(--grad); box-shadow: 0 6px 16px -10px var(--accent); }
 
+/* Tools dropdown (cleanup / move / actions / setup) at the right of the nav */
+.tools-menu { position: relative; display: flex; }
+.tools-btn {
+  font-family: inherit; color: var(--dim); font-weight: 650; font-size: 0.95rem; letter-spacing: 0.01em;
+  padding: 0.4rem 0.85rem; border-radius: 9px; border: 1px solid transparent; background: transparent;
+  box-shadow: none; cursor: pointer; display: inline-flex; align-items: center; gap: 0.35rem;
+}
+.tools-btn:hover { color: var(--text); background: var(--surface-2); box-shadow: none; }
+.tools-btn.active { color: #fff; background: var(--grad); box-shadow: 0 6px 16px -10px var(--accent); }
+.tools-btn .caret { font-size: 0.66rem; transition: transform 0.15s ease; }
+.tools-btn .caret.up { transform: rotate(180deg); }
+.tools-pop {
+  position: absolute; right: 0; top: calc(100% + 0.45rem); z-index: 30; min-width: 9.5rem;
+  display: flex; flex-direction: column; gap: 0.15rem; padding: 0.35rem;
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: 11px;
+  box-shadow: 0 18px 44px -14px rgba(0,0,0,0.75);
+}
+.tools-pop a {
+  color: var(--dim); font-weight: 600; font-size: 0.9rem; padding: 0.45rem 0.7rem; border-radius: 7px;
+}
+.tools-pop a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
+.tools-pop a.active { color: #fff; background: var(--grad); }
+
 /* ---- layout ---- */
 main {
   position: relative; z-index: 1;
@@ -355,6 +378,9 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 .artist-head { display: flex; gap: 1.4rem; align-items: flex-start; margin: 0.5rem 0 2rem; }
 .artist-thumb { width: 110px; height: 110px; border-radius: 12px; object-fit: cover;
   border: 1px solid var(--border-2); flex-shrink: 0; }
+/* artist page: a larger, round avatar (the playlist page opts out via .pl-head) */
+.artist-head:not(.pl-head) .artist-thumb { width: 168px; height: 168px; border-radius: 50%;
+  box-shadow: 0 14px 34px -16px rgba(0,0,0,0.75); }
 .artist-meta { color: var(--dim); margin: 0.3rem 0 0; }
 
 /* playlist header: roomy thumb + title stack, with a bare share icon parked top-right */
@@ -368,14 +394,21 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 .share-link { align-self: flex-start; }
 .pl-headmain { display: flex; flex-direction: column; min-width: 0; }
 .pl-head h1 { margin: 0.2rem 0 0; line-height: 1.12; }
+.editable-title { cursor: text; border-radius: 6px; transition: background 0.12s ease; }
+.editable-title:hover { background: var(--surface-2); box-shadow: 0 0 0 0.35rem var(--surface-2); }
+.title-input { margin: 0.2rem 0 0; width: 100%; box-sizing: border-box;
+  font-family: var(--font-display); font-size: 2rem; font-weight: 600; line-height: 1.12;
+  letter-spacing: -0.01em; color: var(--text); background: var(--bg-2);
+  border: 1px solid var(--accent); border-radius: 8px; padding: 0.1rem 0.5rem; }
 .pl-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem 0.85rem;
   color: var(--dim); font-size: 0.92rem; margin: 0.8rem 0 0; }
 .pl-stats .stat { display: inline-flex; align-items: baseline; }
 .pl-stats .stat::before { content: "·"; color: var(--faint); margin-right: 0.85rem; }
 .pl-stats strong { color: var(--text); font-weight: 700; }
 .pl-actions { margin-top: 1.25rem; }
-/* bare icon tools (share, enrich) stacked at the top-right of the header */
-.head-tools { margin-left: auto; align-self: flex-start; display: flex; flex-direction: column; gap: 0.35rem; }
+/* bare icon tools (share, MusicBrainz, Last.fm) stacked at the right, spread to fill the header height */
+.head-tools { margin-left: auto; align-self: stretch; display: flex; flex-direction: column;
+  justify-content: space-between; gap: 0.35rem; }
 .head-icon { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem;
   padding: 0; background: transparent; border: none; box-shadow: none; border-radius: 8px;
   color: var(--dim); cursor: pointer; transition: color 0.15s ease, background 0.15s ease, transform 0.12s ease; }
@@ -393,6 +426,8 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 .artist-bio { color: var(--dim); font-size: 0.9rem; line-height: 1.6; margin: 0.8rem 0 0;
   max-width: 60ch; white-space: pre-line; }
 .album-thumb { width: 2.4rem; height: 2.4rem; border-radius: 5px; object-fit: cover; display: block; }
+.artist-avatar { width: 2.4rem; height: 2.4rem; border-radius: 50%; object-fit: cover; display: block;
+  border: 1px solid var(--border-2); }
 .pl-thumb { width: 1.7rem; height: 1.7rem; border-radius: 4px; object-fit: cover; vertical-align: middle;
   margin-right: 0.45rem; }
 /* cover slot: shows the playlist art; on row hover a neon-green ▶ overlays it (click = play on YT).
@@ -410,16 +445,65 @@ tr:hover .pl-play, tr.selrow .pl-play { opacity: 1; }
   background: var(--surface-2); border: 1px solid var(--border-2); font-size: 0.5rem; line-height: 1;
   color: var(--dim); }
 .unavail { color: var(--danger); margin-left: 0.3rem; }
+.liked-col { text-align: center; padding-left: 0; padding-right: 0; }
+.liked-heart { color: #ff5c8a; font-size: 0.85rem; line-height: 1;
+  filter: drop-shadow(0 0 4px rgba(255,92,138,0.45)); }
 
 /* click-to-edit genre cell */
 .gdisplay { cursor: pointer; display: inline-flex; align-items: center; min-height: 1.5rem; }
 .gdisplay .ghint { opacity: 0; transition: opacity 0.12s ease; font-weight: 700; }
 tr.srow:hover .gdisplay .ghint { opacity: 0.55; }
 .gdisplay:hover .gtag { box-shadow: inset 0 0 0 1px var(--accent); }
+.mb-genre { position: relative; }
+.ginput-wrap { position: relative; display: inline-block; }
 .ginput { width: 100%; max-width: 8rem; padding: 0.18rem 0.4rem; font-size: 0.82rem;
   background: var(--bg-2); border: 1px solid var(--accent); border-radius: 6px; color: var(--text); }
+/* custom autosuggest dropdown — constrained height, anchored under the input */
+.genre-suggest { position: absolute; left: 0; top: calc(100% + 3px); z-index: 40;
+  min-width: 9.5rem; max-width: 14rem; max-height: 12rem; overflow-y: auto; padding: 0.25rem;
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: 9px;
+  box-shadow: 0 16px 38px -12px rgba(0,0,0,0.75); }
+.genre-opt { display: block; width: 100%; text-align: left; background: transparent; border: none;
+  box-shadow: none; color: var(--text); font-size: 0.82rem; padding: 0.34rem 0.55rem; border-radius: 6px;
+  cursor: pointer; white-space: nowrap; }
+.genre-opt:hover, .genre-opt.sel { background: var(--accent-soft); box-shadow: none; }
+/* click-to-edit year cell */
+.ydisplay { cursor: pointer; display: inline-flex; align-items: center; justify-content: flex-end;
+  min-height: 1.5rem; min-width: 2.5rem; }
+.ydisplay .ghint { opacity: 0; transition: opacity 0.12s ease; font-weight: 700; }
+tr.srow:hover .ydisplay .ghint { opacity: 0.55; }
+.yinput { box-sizing: border-box; width: 100%; min-width: 0; padding: 0.12rem 0.3rem;
+  font-size: 0.8rem; font-family: var(--font-mono); text-align: right; line-height: 1.2;
+  background: var(--bg-2); border: 1px solid var(--accent); border-radius: 5px; color: var(--text); }
 .gtag { display: inline-block; font-size: 0.72rem; padding: 0.08rem 0.4rem; border-radius: 999px;
-  background: var(--surface-2); border: 1px solid var(--border-2); color: var(--dim); }
+  background: var(--surface-2); border: 1px solid var(--border-2); color: var(--dim); white-space: nowrap; }
+
+/* dismissible banners (flash notices + the session-expired bar) */
+.notice.banner { display: flex; align-items: center; gap: 0.8rem; margin-bottom: 1.4rem; }
+.banner-body { flex: 1; }
+.banner-x, .authbar-x { background: transparent; border: none; box-shadow: none; color: inherit;
+  opacity: 0.55; cursor: pointer; font-size: 1.25rem; line-height: 1; padding: 0 0.25rem; border-radius: 6px; }
+.banner-x:hover, .authbar-x:hover { opacity: 1; background: rgba(255,255,255,0.08); box-shadow: none; }
+.authbar { display: flex; align-items: center; gap: 0.8rem; }
+.authbar > span:first-child, .authbar-body { flex: 1; }
+
+/* setup: prominent save footer (so it isn't buried in the identities card) */
+.setup-actions { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end;
+  gap: 0.7rem; margin-top: 1.4rem; padding: 1rem 0 0.2rem;
+  background: linear-gradient(0deg, var(--bg) 60%, transparent); }
+.setup-save { font-size: 1rem; padding: 0.6rem 1.6rem; }
+
+/* genre whitelist editor */
+.genre-add { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+.genre-add input { flex: 1; min-width: 12rem; }
+.genre-count { margin-left: auto; font-size: 0.85rem; }
+.genre-chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.3rem; }
+.genre-chip { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.82rem;
+  padding: 0.22rem 0.3rem 0.22rem 0.7rem; border-radius: 999px; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border-2); }
+.chip-x { background: transparent; border: none; box-shadow: none; color: var(--faint); cursor: pointer;
+  font-size: 1rem; line-height: 1; padding: 0 0.25rem; border-radius: 999px; }
+.chip-x:hover { background: var(--danger-soft); color: var(--danger); box-shadow: none; }
 .modal-input { width: 100%; box-sizing: border-box; margin-bottom: 1.1rem; padding: 0.5rem 0.7rem;
   background: var(--bg-2); border: 1px solid var(--border-2); border-radius: 8px; color: var(--text);
   font-size: 0.95rem; }

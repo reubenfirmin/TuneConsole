@@ -84,9 +84,13 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 return PlainTextResponse("cross-origin request blocked", status_code=403)
         return await call_next(request)
 
+    from yt_playlist import genres as genre_lib
+    genre_lib.configure(store)                                 # load (and seed) the genre whitelist
+
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
               templates=templates, jobs=SyncJobs(), setup=setup)
     templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync
+    app.state.ctx = ctx                                        # exposed for tests/introspection
     for router in build_all(ctx):
         app.include_router(router)
 

@@ -59,15 +59,20 @@ def build(ctx) -> APIRouter:
         songs = store.artist_songs(name)
         info = _fetch_artist_info(ctx, name, store.artist_browse_id(name))
 
+        # "Saved" is a single source of truth — membership in the saved-album set, keyed by browse_id —
+        # so the collection table and the YouTube-discography table below always agree.
+        saved_ids = store.saved_album_ids()
+
         # Section 1 — your collection: albums from your playlist tracks, merged with saved albums.
         coll = {}
         for s in songs:
             key = s["album"] or "Singles / no album"
             d = coll.setdefault(key.lower(), {"album": key, "songs": 0, "plays": 0, "_pls": set(),
-                                              "saved": False, "browse": None, "year": None, "thumb": None})
+                                              "browse": None, "year": None, "thumb": None})
             d["songs"] += 1
             d["plays"] += s["plays"]
             d["thumb"] = d["thumb"] or s["thumbnail"]
+            d["browse"] = d["browse"] or s.get("album_browse")
             d["_pls"].update(p["ytm"] for p in s["playlists"])
 
         def _by_artist(a):
@@ -79,21 +84,19 @@ def build(ctx) -> APIRouter:
             key = (a["title"] or "").lower()
             d = coll.get(key)
             if d:
-                d["saved"] = True
                 d["browse"] = d["browse"] or a["browse"]
                 d["year"] = d["year"] or a.get("year")
                 d["thumb"] = d["thumb"] or a.get("thumbnail")
             else:
                 coll[key] = {"album": a["title"], "songs": 0, "plays": 0, "_pls": set(),
-                             "saved": True, "browse": a["browse"], "year": a.get("year"),
-                             "thumb": a.get("thumbnail")}
+                             "browse": a["browse"], "year": a.get("year"), "thumb": a.get("thumbnail")}
         for d in coll.values():
             d["n_pls"] = len(d.pop("_pls"))
+            d["saved"] = d["browse"] in saved_ids if d["browse"] else False
         collection = sorted(coll.values(), key=lambda d: (-d["plays"], (d["album"] or "").lower()))
 
         # Section 2 — full discography pulled live from YouTube; mark which you've already saved.
         yt_albums = info["albums"] if info and info.get("albums") else []
-        saved_ids = store.saved_album_ids()
         for ya in yt_albums:
             ya["saved"] = ya.get("browse_id") in saved_ids
         return templates.TemplateResponse(request, "artist.html", {

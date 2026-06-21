@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=YT Playlist
+GenericName=YouTube Music playlist manager
+Comment=Dedupe, merge, enrich and prune your YouTube Music playlists
+Exec=yt-playlist-launch
+Icon=io._4rc.YtPlaylist
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=youtube;music;playlist;dedupe;merge;
+StartupNotify=true

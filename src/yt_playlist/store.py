@@ -100,7 +100,20 @@ CREATE TABLE IF NOT EXISTS hidden_playlists (
 CREATE TABLE IF NOT EXISTS saved_albums (
   browse_id TEXT PRIMARY KEY, title TEXT, artist TEXT, year TEXT, type TEXT, thumbnail TEXT
 );
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY, value TEXT   -- small app settings, e.g. lastfm_api_key
+);
+CREATE TABLE IF NOT EXISTS genre_whitelist (
+  name TEXT PRIMARY KEY COLLATE NOCASE   -- editable genre whitelist for tag matching
+);
 """
+
+# A track is "liked" if its song (identity_key) appears in any "Liked Music" (LM) playlist. Used as a
+# correlated subquery in the per-song views; the outer query must alias the tracks table as `t`.
+_LIKED_EXISTS = ("EXISTS(SELECT 1 FROM playlist_tracks lpt "
+                 "JOIN playlists lpl ON lpl.id = lpt.playlist_id "
+                 "JOIN tracks lt ON lt.id = lpt.track_id "
+                 "WHERE lpl.ytm_playlist_id = 'LM' AND lt.identity_key = t.identity_key)")
 
 @dataclass
 class Identity:
@@ -279,6 +292,38 @@ class Store:
                 for r in rows]
 
     @_synchronized
+    def get_setting(self, key, default=None):
+        row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row is not None else default
+
+    @_synchronized
+    def set_setting(self, key, value) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, value or ""))
+        self.conn.commit()
+
+    @_synchronized
+    def get_genre_whitelist(self) -> list:
+        rows = self.conn.execute("SELECT name FROM genre_whitelist").fetchall()
+        return sorted((r["name"] for r in rows), key=str.lower)
+
+    @_synchronized
+    def set_genres(self, names) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM genre_whitelist")
+            self.conn.executemany("INSERT OR IGNORE INTO genre_whitelist(name) VALUES (?)",
+                                  [(n,) for n in names])
+
+    @_synchronized
+    def add_genre(self, name) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO genre_whitelist(name) VALUES (?)", (name,))
+        self.conn.commit()
+
+    @_synchronized
+    def remove_genre(self, name) -> None:
+        self.conn.execute("DELETE FROM genre_whitelist WHERE name=?", (name,))
+        self.conn.commit()
+
+    @_synchronized
     def all_genres(self) -> list:
         """Every distinct non-blank genre we've collected, case-insensitively alpha-sorted."""
         rows = self.conn.execute(
@@ -292,14 +337,40 @@ class Store:
         self.conn.commit()
 
     @_synchronized
+    def set_track_year(self, track_id, year) -> None:
+        # manual override: set exactly what the user typed (may be blank to clear)
+        self.conn.execute("UPDATE tracks SET mb_year=? WHERE id=?", (year or "", track_id))
+        self.conn.commit()
+
+    @_synchronized
+    def tracks_missing_genre(self, playlist_id) -> list:
+        """Playlist tracks with no genre yet (for Last.fm genre enrichment), in playlist order."""
+        rows = self.conn.execute(
+            "SELECT t.id, t.video_id, t.title, t.artist FROM playlist_tracks pt "
+            "JOIN tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? "
+            "AND (t.genre IS NULL OR t.genre = '') ORDER BY pt.position", (playlist_id,)).fetchall()
+        return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"], "artist": r["artist"]}
+                for r in rows]
+
+    @_synchronized
     def set_track_enrichment(self, track_id, genre, year) -> None:
-        # fill in only what we found — never overwrite an existing value with a blank, so re-running
-        # to fix a missing genre can't wipe a year we already had (and vice-versa)
+        # fill-only: set a field just when it's currently blank. So enrichment fills gaps and never
+        # overwrites what you already have — MusicBrainz and Last.fm each top up the other's misses.
         self.conn.execute(
-            "UPDATE tracks SET genre = CASE WHEN ? <> '' THEN ? ELSE genre END, "
-            "                  mb_year = CASE WHEN ? <> '' THEN ? ELSE mb_year END WHERE id=?",
+            "UPDATE tracks SET "
+            "  genre = CASE WHEN (genre IS NULL OR genre='') AND ? <> '' THEN ? ELSE genre END, "
+            "  mb_year = CASE WHEN (mb_year IS NULL OR mb_year='') AND ? <> '' THEN ? ELSE mb_year END "
+            "WHERE id=?",
             (genre or "", genre or "", year or "", year or "", track_id))
         self.conn.commit()
+
+    @_synchronized
+    def get_track_enrichment(self, track_id):
+        """Current (genre, year) for a track — used to report the effective value after a fill."""
+        row = self.conn.execute("SELECT genre, mb_year FROM tracks WHERE id=?", (track_id,)).fetchone()
+        if row is None:
+            return ("", "")
+        return (row["genre"] or "", row["mb_year"] or "")
 
     @_synchronized
     def get_playlist_track_ids(self, playlist_id) -> list:
@@ -307,6 +378,12 @@ class Store:
             "SELECT track_id FROM playlist_tracks WHERE playlist_id=? ORDER BY position",
             (playlist_id,)).fetchall()
         return [r["track_id"] for r in rows]
+
+    @_synchronized
+    def set_playlist_title(self, playlist_id, title, now) -> None:
+        self.conn.execute("UPDATE playlists SET title=?, last_changed=? WHERE id=?",
+                          (title, now, playlist_id))
+        self.conn.commit()
 
     @_synchronized
     def set_playlist_track_count(self, playlist_id, count, now) -> None:
@@ -320,6 +397,11 @@ class Store:
 
         Pruning the suppress/ignore/keep rows keeps stale pairs (one side deleted) from
         lingering in the Hidden/Ignored sections.
+
+        We deliberately KEEP the playlist's group assignment (playlist_group, keyed by the YouTube
+        id): groups are user curation that can't be reconstructed from YouTube, and a playlist that
+        disappears (a transient sync, or one re-added later) should get its group back automatically.
+        An orphaned group row is harmless — it just isn't shown until a matching playlist exists.
         """
         with self.conn:
             row = self.conn.execute("SELECT ytm_playlist_id FROM playlists WHERE id=?",
@@ -331,7 +413,6 @@ class Store:
                 self.conn.execute("DELETE FROM suppressed_overlaps WHERE a=? OR b=?", (ytm, ytm))
                 self.conn.execute("DELETE FROM overlap_ignored WHERE ytm=?", (ytm,))
                 self.conn.execute("DELETE FROM overlap_kept WHERE a=? OR b=?", (ytm, ytm))
-                self.conn.execute("DELETE FROM playlist_group WHERE ytm=?", (ytm,))
 
     @_synchronized
     def get_playlists(self) -> list[Playlist]:
@@ -597,12 +678,13 @@ class Store:
         rows = self.conn.execute(
             "SELECT t.video_id vid, t.title, t.artist, t.album, t.album_browse_id abrowse, "
             "       t.duration_s dur, t.available avail, t.thumbnail thumb, t.genre, t.mb_year, "
-            "       (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=t.identity_key) plays "
+            "       (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=t.identity_key) plays, "
+            f"      {_LIKED_EXISTS} liked "
             "FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
             "WHERE pt.playlist_id=? ORDER BY pt.position", (playlist_id,)).fetchall()
         return [{"video_id": r["vid"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
                  "album_browse": r["abrowse"], "duration": r["dur"], "available": r["avail"],
-                 "thumbnail": r["thumb"], "plays": r["plays"],
+                 "thumbnail": r["thumb"], "plays": r["plays"], "liked": bool(r["liked"]),
                  "genre": r["genre"] or "", "year": r["mb_year"] or ""} for r in rows]
 
     @_synchronized
@@ -610,8 +692,9 @@ class Store:
         """An artist's songs that appear in your playlists: play count + which playlists hold each."""
         songs = self.conn.execute(
             "SELECT t.identity_key key, MIN(t.title) title, MIN(t.album) album, MIN(t.video_id) vid, "
-            "       MIN(t.duration_s) dur, MIN(t.thumbnail) thumb, "
-            "       (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=t.identity_key) plays "
+            "       MIN(t.duration_s) dur, MIN(t.thumbnail) thumb, MIN(t.album_browse_id) abrowse, "
+            "       (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=t.identity_key) plays, "
+            f"      {_LIKED_EXISTS} liked "
             "FROM tracks t WHERE t.artist=? GROUP BY t.identity_key", (artist,)).fetchall()
         membership = self.conn.execute(
             "SELECT DISTINCT t.identity_key key, pl.title title, pl.ytm_playlist_id ytm FROM tracks t "
@@ -622,6 +705,7 @@ class Store:
             by_key.setdefault(r["key"], []).append({"title": r["title"], "ytm": r["ytm"]})
         out = [{"title": r["title"], "album": r["album"] or "", "video_id": r["vid"],
                 "duration": r["dur"], "plays": r["plays"], "thumbnail": r["thumb"],
+                "album_browse": r["abrowse"], "liked": bool(r["liked"]),
                 "playlists": sorted(by_key.get(r["key"], []), key=lambda p: p["title"].lower())}
                for r in songs]
         out.sort(key=lambda s: (-s["plays"], (s["title"] or "").lower()))
@@ -676,11 +760,15 @@ class Store:
         # song count = distinct identity_keys per artist (separate, since the query groups by album too)
         scount = {r["artist"]: r["c"] for r in self.conn.execute(
             "SELECT artist, COUNT(DISTINCT identity_key) c FROM tracks WHERE artist<>'' GROUP BY artist")}
+        thumbs = {r["artist"]: r["thumb"] for r in self.conn.execute(
+            "SELECT artist, MIN(thumbnail) thumb FROM tracks "
+            "WHERE artist<>'' AND thumbnail IS NOT NULL GROUP BY artist")}
         out = []
         for a in artists.values():
             a["songs"] = scount.get(a["artist"], 0)
             a["n_albums"] = len(a.pop("_albums"))
             a["n_pls"] = len([x for x in a.pop("_pls") if x])
+            a["thumbnail"] = thumbs.get(a["artist"])
             out.append(a)
         out.sort(key=lambda a: (-a["plays"], a["artist"].lower()))
         return out

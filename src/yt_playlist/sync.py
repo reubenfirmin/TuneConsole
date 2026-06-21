@@ -42,7 +42,8 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
             logger.warning("auth expired for identity %s: %s", identity_id, e)
             if on_auth_expired:
                 on_auth_expired(identity_id, label)
-            _emit(on_progress, "err", f"{label}: YouTube session expired — re-authenticate")
+            _emit(on_progress, "auth_expired",
+                  f"{label}: YouTube session expired — re-authenticate", label=label)
             return
         raise
     _emit(on_progress, "info", f"{label}: {len(playlists)} playlists", count=len(playlists))
@@ -73,14 +74,30 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         _emit(on_progress, "step", f"{label} › {pl.get('title', '')} ({len(track_ids)} tracks)",
               i=i, total=total)
 
-    # prune playlists that are no longer in this identity's remote library (deleted elsewhere /
-    # stale rows). Local-only removal: a later sync re-adds any that reappear remotely.
-    stale = [p for p in store.get_playlists()
-             if p.identity_id == identity_id and p.ytm_playlist_id not in seen_ytm]
-    for p in stale:
-        store.remove_playlist(p.id)
-    if stale:
-        _emit(on_progress, "info", f"{label}: removed {len(stale)} playlist(s) no longer present")
+    # Prune playlists no longer in this identity's remote library (deleted elsewhere / stale rows) —
+    # but ONLY when the fetch actually returned a library. An empty result is almost always a
+    # transient or session glitch (it doesn't always surface as a 401/403), and pruning on it would
+    # destructively wipe every playlist for the identity. Sync must only *update* on success, never
+    # clear on a non-result. A later, real sync re-adds anything genuinely missing.
+    auth_bad = False
+    if playlists:
+        stale = [p for p in store.get_playlists()
+                 if p.identity_id == identity_id and p.ytm_playlist_id not in seen_ytm]
+        for p in stale:
+            store.remove_playlist(p.id)
+        if stale:
+            _emit(on_progress, "info", f"{label}: removed {len(stale)} playlist(s) no longer present")
+    else:
+        # An empty library on a configured identity is, in practice, a broken/expired session — some
+        # endpoints return [] instead of raising a 401 (exactly what happened to the master account
+        # while the brand account got a clean 401). Treat it the SAME: flag for re-auth, never prune.
+        auth_bad = True
+        logger.warning("identity %s returned no playlists — flagging for re-auth, keeping existing",
+                       identity_id)
+        if on_auth_expired:
+            on_auth_expired(identity_id, label)
+        _emit(on_progress, "auth_expired",
+              f"{label}: returned no playlists — session may have expired, re-authenticate", label=label)
 
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
@@ -90,10 +107,11 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")
-    if on_auth_ok:
-        on_auth_ok(identity_id)   # session is good -> clear any "expired" flag
-    logger.info("synced identity %s: %d playlists", identity_id, len(playlists))
-    _emit(on_progress, "done", f"{label}: done ({len(playlists)} playlists)")
+    if not auth_bad:
+        if on_auth_ok:
+            on_auth_ok(identity_id)   # genuine success -> clear any "expired" flag
+        logger.info("synced identity %s: %d playlists", identity_id, len(playlists))
+        _emit(on_progress, "done", f"{label}: done ({len(playlists)} playlists)")
 
 def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now) -> None:
     """Re-fetch a single playlist's tracks into the store — fast post-merge refresh (no full sync)."""

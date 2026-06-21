@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io._4rc.YtPlaylist</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>YT Playlist</name>
+  <summary>Dedupe, merge, enrich and prune YouTube Music playlists</summary>
+  <developer id="io.4rc">
+    <name>Reuben Firmin</name>
+  </developer>
+  <!-- TODO: point this at the real project page before publishing -->
+  <url type="homepage">https://4rc.io</url>
+
+  <description>
+    <p>
+      A local web tool to manage YouTube Music playlists across multiple brand identities:
+      find duplicate and overlapping playlists, merge them while preserving order, copy and
+      reorder tracks, find alternate versions of a song, enrich tracks with genre and year from
+      MusicBrainz, and surface stale playlists to rediscover.
+    </p>
+    <p>
+      Everything runs on your machine. The app serves a web UI on 127.0.0.1 and talks only to
+      YouTube Music and MusicBrainz; its data stays in the app's private sandbox directory.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io._4rc.YtPlaylist.desktop</launchable>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+  </categories>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-06-21">
+      <description>
+        <p>First packaged release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

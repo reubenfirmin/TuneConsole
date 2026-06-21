@@ -1,11 +1,16 @@
 {% extends "base.html" %}{% block title %}{{ pl.title }} · yt-playlist{% endblock %}{% block body %}
-<div x-data="enrichPanel({{ pl.id }})">
+<div x-data="enrichPanel({{ pl.id }}, {{ 'true' if lastfm_configured else 'false' }}, {{ active_job.id if active_job else 0 }}, '{{ active_job.source if active_job else '' }}')"
+     x-init="rejoinIfActive()">
 <div class="artist-head pl-head" x-data="{ artH: 0 }"
      x-init="const fit = () => artH = $refs.main.offsetHeight; fit(); new ResizeObserver(fit).observe($refs.main)">
   {% if pl.thumbnail %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ pl.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.closest('.pl-art').remove()"></span>{% endif %}
   <div class="pl-headmain" x-ref="main">
     <span class="eyebrow">Playlist</span>
-    <h1>{{ pl.title }}</h1>
+    <div x-data="titleEditor({{ pl.id }})">
+      <h1 x-show="!editing" @click="start()" x-ref="h1" class="editable-title" title="Click to rename">{{ pl.title }}</h1>
+      <input x-show="editing" x-cloak class="title-input" x-model="draft" x-ref="inp"
+             @keydown.enter="save()" @keydown.escape="cancel()" @blur="save()">
+    </div>
     <p class="pl-stats">
       <span class="tag amber">{{ identity }}</span>
       <span class="stat"><strong>{{ tracks|length }}</strong>&nbsp;track{{ '' if tracks|length == 1 else 's' }}</span>
@@ -25,14 +30,36 @@
         <line x1="8.6" y1="10.7" x2="15.4" y2="6.3"/><line x1="8.6" y1="13.3" x2="15.4" y2="17.7"/>
       </svg>
     </a>
-    <button type="button" class="head-icon" :class="{ on: running }" @click="start()" :disabled="running"
-            title="Enrich genre & year via MusicBrainz" aria-label="Enrich via MusicBrainz">
-      <span class="spinner" x-show="running" x-cloak></span>
-      <svg x-show="!running" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+    <button type="button" class="head-icon" :class="{ on: running && source === 'musicbrainz' }"
+            @click="start('musicbrainz')" :disabled="running"
+            title="Enrich genre &amp; year from MusicBrainz" aria-label="Enrich via MusicBrainz">
+      <span class="spinner" x-show="running && source === 'musicbrainz'" x-cloak></span>
+      <svg x-show="!(running && source === 'musicbrainz')" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
            stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M12 5a2.5 2.5 0 0 0-4.6-1.3A2.6 2.6 0 0 0 4 6.2 2.7 2.7 0 0 0 3 11a2.7 2.7 0 0 0 1.3 4.7A2.5 2.5 0 0 0 7 19a2.4 2.4 0 0 0 5 .5Z"/>
         <path d="M12 5a2.5 2.5 0 0 1 4.6-1.3A2.6 2.6 0 0 1 20 6.2 2.7 2.7 0 0 1 21 11a2.7 2.7 0 0 1-1.3 4.7A2.5 2.5 0 0 1 17 19a2.4 2.4 0 0 1-5 .5Z"/>
         <path d="M12 5v14.5M8 9h1.5M14.5 9H16M7.5 13H9M15 13h1.5"/>
+      </svg>
+    </button>
+    <button type="button" class="head-icon" :class="{ on: running && source === 'lastfm' }"
+            @click="lastfmClick()" :disabled="running"
+            :title="lastfmConfigured ? 'Enrich genre & year from Last.fm' : 'Set a Last.fm API key to enrich from Last.fm'"
+            aria-label="Enrich via Last.fm">
+      <span class="spinner" x-show="running && source === 'lastfm'" x-cloak></span>
+      <svg x-show="!(running && source === 'lastfm')" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M20.6 13.4 13 21a2 2 0 0 1-2.8 0l-7-7a2 2 0 0 1 0-2.8l7.6-7.6a2 2 0 0 1 1.4-.6H19a2 2 0 0 1 2 2v5.6a2 2 0 0 1-.4 1.2Z"/>
+        <circle cx="16.5" cy="7.5" r="1.3"/>
+      </svg>
+    </button>
+    <button type="button" class="head-icon" :class="{ on: running && source === 'discogs' }"
+            @click="start('discogs')" :disabled="running"
+            title="Enrich genre &amp; year from Discogs" aria-label="Enrich via Discogs">
+      <span class="spinner" x-show="running && source === 'discogs'" x-cloak></span>
+      <svg x-show="!(running && source === 'discogs')" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
+           stroke-width="1.6" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.3"/>
+        <circle cx="12" cy="12" r="0.9" fill="currentColor" stroke="none"/>
       </svg>
     </button>
   </div>
@@ -48,10 +75,11 @@
     <thead><tr>
       <th class="num">#</th>
       <th style="width:2.6rem"></th>
+      <th style="width:1.6rem"></th>
       <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
       <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
       <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
-      <th class="sorth num" style="width:4rem" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth num" style="width:5rem" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
       <th class="sorth" style="width:8rem" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
       <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
       <th class="sorth num" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
@@ -70,25 +98,45 @@
                target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
           </span>
         </td>
+        <td class="liked-col">{% if t.liked %}<span class="liked-heart" title="In your Liked Music">♥</span>{% endif %}</td>
         <td>
           <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-             target="_blank" rel="noopener">{{ t.title }} ↗</a>
+             target="_blank" rel="noopener">{{ t.title }}&nbsp;↗</a>
           {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
         </td>
         <td><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
         <td>{% if t.album_browse %}<a class="alink" href="https://music.youtube.com/browse/{{ t.album_browse }}"
                target="_blank" rel="noopener">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</td>
-        <td class="num mono mb-year">{{ t.year }}</td>
+        <td class="num mono mb-year">
+          <span class="ydisplay" x-show="editYearVid !== '{{ t.video_id }}'"
+                @click="startEditYear('{{ t.video_id }}')" title="Click to set year">
+            {% if t.year %}{{ t.year }}{% else %}<span class="muted ghint">＋</span>{% endif %}
+          </span>
+          <input class="yinput" type="text" inputmode="numeric" autocomplete="off" x-cloak
+                 x-show="editYearVid === '{{ t.video_id }}'"
+                 @keydown.enter.prevent="saveYear('{{ t.video_id }}', $event.target.value)"
+                 @keydown.escape="editYearVid = null"
+                 @blur="saveYear('{{ t.video_id }}', $event.target.value)">
+        </td>
         <td class="mb-genre">
           <span class="gdisplay" x-show="editVid !== '{{ t.video_id }}'"
                 @click="startEditGenre('{{ t.video_id }}')" title="Click to set genre">
             {% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">＋</span>{% endif %}
           </span>
-          <input class="ginput" type="text" list="genrelist" autocomplete="off" x-cloak
-                 x-show="editVid === '{{ t.video_id }}'"
-                 @keydown.enter.prevent="saveGenre('{{ t.video_id }}', $event.target.value)"
-                 @keydown.escape="editVid = null"
-                 @blur="saveGenre('{{ t.video_id }}', $event.target.value)">
+          <span class="ginput-wrap" x-show="editVid === '{{ t.video_id }}'" x-cloak>
+            <input class="ginput" type="text" autocomplete="off"
+                   @input="filterGenres($event.target.value)"
+                   @keydown.enter.prevent="saveGenre('{{ t.video_id }}', gSel >= 0 ? gSuggest[gSel] : $event.target.value)"
+                   @keydown.escape="editVid = null" @keydown.arrow-down.prevent="moveGenreSel(1)"
+                   @keydown.arrow-up.prevent="moveGenreSel(-1)"
+                   @blur="saveGenre('{{ t.video_id }}', $event.target.value)">
+            <div class="genre-suggest" x-show="gSuggest.length" x-cloak>
+              <template x-for="(g, i) in gSuggest" :key="g">
+                <button type="button" class="genre-opt" :class="{ sel: i === gSel }"
+                        @mousedown.prevent="saveGenre('{{ t.video_id }}', g)" x-text="g"></button>
+              </template>
+            </div>
+          </span>
         </td>
         <td class="num mono">{{ t.plays or '' }}</td>
         <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
@@ -106,12 +154,34 @@
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="10" class="empty">This playlist has no tracks.</td></tr>
+      <tr><td colspan="11" class="empty">This playlist has no tracks.</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
 <datalist id="genrelist">{% for g in genres %}<option value="{{ g }}"></option>{% endfor %}</datalist>
+
+  <!-- Last.fm API key modal -->
+  <template x-teleport="body">
+    <div class="modal-backdrop" x-show="keyModal" x-cloak x-transition.opacity
+         @click="keyModal = false" @keydown.escape.window="keyModal = false">
+      <div class="modal" @click.stop x-transition.scale.origin.center>
+        <h3>Last.fm API key</h3>
+        <p>Last.fm has dense genre tags. Enrichment needs a free API key — create one at
+           <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>
+           and paste the <strong>API key</strong> here. It's stored locally.</p>
+        <input class="modal-input" type="text" x-model="keyValue" placeholder="API key"
+               autocomplete="off" spellcheck="false" @keydown.enter="saveKey()"
+               x-ref="lfkey" x-init="$watch('keyModal', v => v && $nextTick(() => $refs.lfkey.focus()))">
+        <p class="notice err" x-show="keyErr" x-text="keyErr"></p>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="keyModal = false" :disabled="keyBusy">Cancel</button>
+          <button type="button" @click="saveKey()" :disabled="keyBusy"
+                  x-text="keyBusy ? 'Saving…' : 'Save & run'"></button>
+        </div>
+      </div>
+    </div>
+  </template>
 
   <!-- remove-track confirm modal -->
   <template x-teleport="body">

@@ -8,7 +8,7 @@ from yt_playlist.retry import with_retry
 from yt_playlist import paths
 from yt_playlist.action_kinds import (
     PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, COPY_PLAYLIST, ADD_TRACKS,
-    REMOVE_TRACK, UNDO, UNDOABLE_KINDS, is_undoable)
+    REMOVE_TRACK, RENAME_PLAYLIST, UNDO, UNDOABLE_KINDS, is_undoable)
 from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.thumbnails import best_thumb
 
@@ -344,14 +344,29 @@ def _parse_duration(text):
     return secs
 
 
+_PARENS_RE = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
+
+
+def _strip_parens(text):
+    """Drop parenthetical/bracketed qualifiers, e.g. 'Time Zero (Paul Ritch Remix)' -> 'Time Zero'."""
+    return _PARENS_RE.sub("", text or "").strip()
+
+
 def search_versions(client, title, artist, exclude=None, limit=14) -> list:
     """Search YouTube Music for alternate versions of a song. Returns normalized candidates
-    (songs first, then videos), de-duped by videoId, excluding the track we started from."""
-    query = " ".join(x for x in (title, artist) if x).strip()
+    (songs first, then videos, then unfiltered), de-duped by videoId, excluding the starting track.
+
+    The query uses the title with remix/live/etc. qualifiers stripped, so a track like
+    'Time Zero (Paul Ritch Remix)' searches for 'Time Zero <artist>' and surfaces every version —
+    the original and all remixes — rather than only that exact (often-removed) one."""
+    base_title = _strip_parens(title) or title
+    query = " ".join(x for x in (base_title, artist) if x).strip()
     out, seen = [], set()
     if exclude:
         seen.add(exclude)
-    for filt in ("songs", "videos"):
+    # UNFILTERED first — it mirrors a plain web search (the most relevant top hits, incl. tracks the
+    # filtered searches miss) — then songs/videos add structured extras. De-duped by videoId.
+    for filt in (None, "songs", "videos"):
         try:
             results = with_retry(lambda f=filt: client.search(query, filter=f)) or []
         except Exception:  # noqa: BLE001
@@ -363,6 +378,8 @@ def search_versions(client, title, artist, exclude=None, limit=14) -> list:
                 continue
             seen.add(vid)
             album = r.get("album")
+            is_video = filt == "videos" or r.get("resultType") == "video" \
+                or r.get("videoType") == "MUSIC_VIDEO_TYPE_UGC"
             out.append({
                 "videoId": vid,
                 "title": r.get("title", ""),
@@ -371,7 +388,7 @@ def search_versions(client, title, artist, exclude=None, limit=14) -> list:
                 "album_browse": album.get("id") if isinstance(album, dict) else None,
                 "duration": r.get("duration_seconds") or _parse_duration(r.get("duration")),
                 "thumbnail": best_thumb(r.get("thumbnails")),
-                "kind": "video" if filt == "videos" else "song",
+                "kind": "video" if is_video else "song",
             })
             if len(out) >= limit:
                 return out
@@ -419,6 +436,23 @@ def _set_video_ids(client, ytm_playlist_id) -> dict:
         if vid and svid and vid not in out:
             out[vid] = svid
     return out
+
+
+def rename_playlist(store, playlist_id, title, client, now) -> dict:
+    """Rename a playlist on YouTube and in the store."""
+    pl = store.get_playlist(playlist_id)
+    if pl is None:
+        raise ValueError("playlist no longer exists")
+    if pl.ytm_playlist_id in SYSTEM_PLAYLIST_IDS:
+        raise ValueError("system playlists can't be renamed")
+    title = (title or "").strip()
+    if not title:
+        raise ValueError("name can't be empty")
+    with_retry(lambda: client.edit_playlist(pl.ytm_playlist_id, title=title))
+    store.set_playlist_title(playlist_id, title, now)
+    store.record_action(RENAME_PLAYLIST,
+                        json.dumps({"from": pl.title, "to": title}), "{}", "executed", "{}", now)
+    return {"title": title}
 
 
 def remove_track(store, playlist_id, video_id, client, now) -> dict:

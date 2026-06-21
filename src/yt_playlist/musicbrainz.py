@@ -7,10 +7,13 @@ genres/tags). Network/parse failures degrade to (None, None) so one bad track ne
 """
 import json
 import logging
+import re
 import threading
 import time
 import urllib.parse
 import urllib.request
+
+from yt_playlist.enrich_queue import PriorityGate
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +23,7 @@ _USER_AGENT = "yt-playlist/0.1 ( https://github.com/yt-playlist ; rf@4rc.io )"
 _MIN_INTERVAL = 1.1                       # seconds between requests (just over the 1/s limit)
 _pace_lock = threading.Lock()
 _last_call = [0.0]
+_gate = PriorityGate()                    # newest enrichment job preempts older ones
 
 
 def _get(path, params):
@@ -39,21 +43,23 @@ def _lucene_escape(text):
     return "".join("\\" + c if c in '+-&|!(){}[]^"~*?:\\/' else c for c in (text or ""))
 
 
-def _earliest_year(*objs):
-    dates = []
-    for obj in objs:
-        if not obj:
-            continue
-        if obj.get("first-release-date"):
-            dates.append(obj["first-release-date"])
-        for rel in obj.get("releases", []):
-            if rel.get("date"):
-                dates.append(rel["date"])
-            rg = rel.get("release-group") or {}
-            if rg.get("first-release-date"):
-                dates.append(rg["first-release-date"])
-    years = [d[:4] for d in dates if len(d) >= 4 and d[:4].isdigit()]
-    return min(years) if years else None
+def _years(dates):
+    return [d[:4] for d in dates if d and len(d) >= 4 and d[:4].isdigit()]
+
+
+def _earliest_year(recordings):
+    """A song's original release year: the earliest recording-level first-release-date across ALL
+    candidate recordings — the top search match is usually a remaster/compilation with a much later
+    date. Fall back to release dates, then release-group dates."""
+    frd = _years(r.get("first-release-date") for r in recordings)
+    if frd:
+        return min(frd)
+    rel = _years(rel.get("date") for r in recordings for rel in (r.get("releases") or []))
+    if rel:
+        return min(rel)
+    rg = _years(rel.get("release-group", {}).get("first-release-date")
+                for r in recordings for rel in (r.get("releases") or []))
+    return min(rg) if rg else None
 
 
 def _top_label(obj):
@@ -86,25 +92,45 @@ def _artist_genre(mbid):
     return _artist_genre_cache[mbid]
 
 
+_PARENS = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
+
+
+def _strip_parens(title):
+    """Drop parenthetical/bracketed qualifiers, e.g. 'No Quarter (Remaster)' -> 'No Quarter'."""
+    return _PARENS.sub("", title or "").strip()
+
+
 def enrich(title, artist):
     """Return (genre, year) for a track, or (None, None) on no match / error.
 
     Genre falls back from recording -> artist level, because recording-level genres are sparse in
     MusicBrainz while artist-level ones are well populated. Year comes from the earliest release.
+    If the full title finds nothing, retry once with parenthetical qualifiers stripped (a remaster /
+    live / remix suffix often blocks the match).
     """
+    result = _lookup(title, artist)
+    if result == (None, None):
+        stripped = _strip_parens(title)
+        if stripped and stripped != title:
+            result = _lookup(stripped, artist)
+    return result
+
+
+def _lookup(title, artist):
     query = f'recording:"{_lucene_escape(title)}"'
     if artist:
         query += f' AND artist:"{_lucene_escape(artist)}"'
     try:
-        res = _get("recording", {"query": query, "fmt": "json", "limit": "3"})
+        # wide net (25) so the original recording is in the pool, not just remasters near the top
+        res = _get("recording", {"query": query, "fmt": "json", "limit": "25"})
     except Exception as e:  # noqa: BLE001
         logger.warning("MB search failed for %r / %r: %s", title, artist, e)
         return (None, None)
     recordings = res.get("recordings") or []
     if not recordings:
         return (None, None)
-    rec = recordings[0]
-    year = _earliest_year(rec)
+    rec = recordings[0]                          # best match drives genre/artist
+    year = _earliest_year(recordings)            # but year comes from the earliest candidate
     credit = rec.get("artist-credit") or []
     artist_mbid = (credit[0].get("artist") or {}).get("id") if credit else None
     genre = None
@@ -113,7 +139,7 @@ def enrich(title, artist):
         try:
             full = _get(f"recording/{mbid}", {"inc": "genres+tags+releases", "fmt": "json"})
             genre = _top_label(full)
-            year = year or _earliest_year(full)
+            year = year or _earliest_year([full])
         except Exception as e:  # noqa: BLE001
             logger.warning("MB lookup failed for %s: %s", mbid, e)
     if not genre:                              # recording had no genre/tag — use the artist's
@@ -131,14 +157,21 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
         on_progress({"type": "done", "text": "Everything is already enriched.", "total": 0})
         return
     on_progress({"type": "info", "text": f"Enriching {total} track(s) via MusicBrainz…", "total": total})
-    for i, t in enumerate(pending, 1):
-        if should_stop and should_stop():
-            on_progress({"type": "info", "text": "Stopped."})
-            return
-        genre, year = enrich_fn(t["title"], t["artist"])
-        store.set_track_enrichment(t["id"], genre, year)
-        bits = " · ".join(x for x in (genre, year) if x) or "no match"
-        on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "genre": genre or "", "year": year or "",
-                     "text": f"{i}/{total} {t['title']} — {bits}"})
-    on_progress({"type": "done", "text": f"Enriched {total} track(s).", "total": total})
+    seq = _gate.enter()
+    try:
+        for i, t in enumerate(pending, 1):
+            if should_stop and should_stop():
+                on_progress({"type": "info", "text": "Stopped."})
+                return
+            _gate.wait_turn(seq, on_wait=lambda: on_progress(
+                {"type": "info", "text": "Waiting — a newer playlist is enriching first…"}))
+            genre, year = enrich_fn(t["title"], t["artist"])
+            store.set_track_enrichment(t["id"], genre, year)
+            eff_genre, eff_year = store.get_track_enrichment(t["id"])    # report what actually stuck
+            bits = " · ".join(x for x in (genre, year) if x) or "no match"
+            on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
+                         "genre": eff_genre, "year": eff_year,
+                         "text": f"{i}/{total} {t['title']} — {bits}"})
+        on_progress({"type": "done", "text": f"Enriched {total} track(s).", "total": total})
+    finally:
+        _gate.leave(seq)

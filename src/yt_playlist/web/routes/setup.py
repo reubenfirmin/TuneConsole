@@ -58,6 +58,7 @@ def build(ctx) -> APIRouter:
                 "brand_account_id": (brand or "").strip() or None,
                 "is_master": str(idx) == master,
                 "credential_ref": BROWSER_CREDENTIAL_FILENAME})
+        was_expired = bool(ctx.auth_expired)        # a re-signin (vs first-time setup)?
         try:
             setup.apply_setup(capture, identities)
         except ValueError as e:
@@ -65,8 +66,12 @@ def build(ctx) -> APIRouter:
             master_idx = int(master) if (master or "").isdigit() else 0
             return _setup_context(request, rows=rows, master_idx=master_idx,
                                   error=str(e), status_code=400)
-        n = len(identities)
-        msg = f"Saved {n} identit{'y' if n == 1 else 'ies'}. Click “Sync now” to pull their playlists."
+        ctx.auth_expired.clear()                    # success clears the stale-session banner (in place)
+        if was_expired:
+            msg = "Signed back in."
+        else:
+            n = len(identities)
+            msg = f"Saved {n} identit{'y' if n == 1 else 'ies'}. Click “Sync now” to pull their playlists."
         return RedirectResponse(f"/?flash={quote(msg)}", status_code=303)
 
     return router

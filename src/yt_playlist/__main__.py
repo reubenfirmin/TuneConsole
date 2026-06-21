@@ -1,7 +1,10 @@
 import argparse
 import logging
+import socket
+import threading
 import time
 import uvicorn
+import webbrowser
 from pathlib import Path
 from yt_playlist import paths
 from yt_playlist.store import Store
@@ -42,6 +45,9 @@ def parse_args(argv=None):
     parser.add_argument("--reload", action="store_true",
                         help="dev: auto-restart the server when source files change "
                              "(needs the dev extras for watchfiles)")
+    parser.add_argument("--open", action="store_true", dest="open_browser",
+                        help="open the app in your default web browser once the server is up "
+                             "(used by the packaged Linux/macOS launchers)")
     return parser.parse_args(argv)
 
 def build_app():
@@ -56,8 +62,22 @@ def build_app():
         logging.getLogger(__name__).warning("no usable config yet — open /setup to finish setup")
     return create_app(store, runtime.clients, now_fn=time.time, setup=runtime)
 
+def _open_browser_when_ready(host, port):
+    """Wait (briefly) for the server to accept connections, then open it in the default browser.
+    Runs in a daemon thread so it never blocks or delays shutdown."""
+    target = "127.0.0.1" if host in ("0.0.0.0", "") else host
+    for _ in range(150):                        # up to ~15s; the server is usually up in well under 1s
+        try:
+            with socket.create_connection((target, port), timeout=0.2):
+                break
+        except OSError:
+            time.sleep(0.1)
+    webbrowser.open(f"http://{target}:{port}/")
+
 def main(argv=None):
     args = parse_args(argv)
+    if args.open_browser:
+        threading.Thread(target=_open_browser_when_ready, args=(args.host, args.port), daemon=True).start()
     if args.reload:
         # The reloader runs the app in a child process that re-imports this module on change,
         # so it needs an import string + factory, not an already-built app object. Watch only

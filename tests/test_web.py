@@ -27,12 +27,13 @@ def test_auth_expired_shows_reauth_banner(store):
     iid = store.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: Expired()}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
-    assert "authbar" not in c.get("/").text          # nothing wrong before a sync
+    assert app.state.ctx.auth_expired == {}          # nothing wrong before a sync
+    assert "authBanner([])" in c.get("/").text       # banner seeded empty (hidden)
     jid = c.post("/sync").json()["job_id"]
     with c.stream("GET", f"/sync/events/{jid}") as s:
         "".join(s.iter_text())                        # drain to completion
-    body = c.get("/").text
-    assert "authbar" in body and "session expired" in body   # banner now shown
+    assert app.state.ctx.auth_expired == {iid: "main"}        # flagged for re-auth
+    assert 'authBanner(["main"])' in c.get("/").text          # banner seeded with the label
 
 def test_dupe_detail_renders(store):
     iid = store.upsert_identity("main", "cred", None, True)
@@ -519,7 +520,8 @@ def test_playlists_group_and_delete(store, monkeypatch, tmp_path):
     r = c.post("/playlists/delete", data={"ids": str(a)})
     assert r.status_code == 200 and r.json() == {"ok": True, "deleted": 1, "hidden": 0, "errors": []}
     assert store.get_playlist(a) is None
-    assert store.get_playlist_groups() == {"PLB": "Faves"}   # pruned on delete
+    # the group assignment is preserved (user curation) so it reattaches if the playlist returns
+    assert store.get_playlist_groups() == {"PLA": "Faves", "PLB": "Faves"}
 
 
 def test_playlists_copy_and_copy_merge(store, monkeypatch, tmp_path):
@@ -594,7 +596,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     c = _client(store, lambda: {iid: FakeClient()})
 
     assert len(store.tracks_to_enrich(a)) == 3
-    jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
+    jid = c.post(f"/playlist/{a}/enrich/musicbrainz").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
     types = [_json.loads(l[6:])["type"] for l in body.splitlines() if l.startswith("data: ")]
@@ -608,7 +610,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
 
     # re-run after MusicBrainz gains a genre for v2 — it fills the gap and v2 is now complete
     monkeypatch.setattr(mb, "enrich", lambda title, artist: ("ambient", "2010") if title == "Sx" else (None, None))
-    jid2 = c.post(f"/playlist/{a}/enrich").json()["job_id"]
+    jid2 = c.post(f"/playlist/{a}/enrich/musicbrainz").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid2}") as st:
         "".join(st.iter_text())
     v2 = next(t for t in store.playlist_tracks_detail(a) if t["video_id"] == "v2")
@@ -619,6 +621,254 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     store.set_track_enrichment(store.track_ids_for_videos(["v0"])["v0"], "", "")
     v0 = next(t for t in store.playlist_tracks_detail(a) if t["video_id"] == "v0")
     assert (v0["genre"], v0["year"]) == ("rock", "1998")
+
+
+def test_genres_whitelist_editor(store):
+    import yt_playlist.genres as g
+    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)   # seeds the built-in list
+    c = TestClient(app, base_url="http://127.0.0.1")
+    n = len(g.builtin_names())
+    assert len(store.get_genre_whitelist()) == n
+    page = c.get("/genres").text
+    assert "genresTab" in page and "Rock" in page
+
+    # add a custom genre -> persisted and recognized by the live matcher
+    r = c.post("/genres/add", json={"name": "Phonk"}).json()
+    assert r["ok"] and "Phonk" in r["genres"]
+    assert g.pick_genre(["seen live", "phonk"]) == "Phonk"
+
+    # remove it -> gone and no longer matched
+    c.post("/genres/remove", json={"name": "Phonk"})
+    assert "Phonk" not in store.get_genre_whitelist()
+    assert g.pick_genre(["phonk"]) is None
+
+    # reset restores the built-in list
+    assert c.post("/genres/reset").json()["ok"]
+    assert len(store.get_genre_whitelist()) == n
+
+
+def test_liked_songs_get_a_heart(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    mix = store.upsert_playlist(iid, "PLM", "Mix", 2, "h", 1.0)
+    lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)   # the YouTube liked playlist
+    loved = store.upsert_track("v1", "Loved", "A", "Al", 200, 1)
+    store.set_playlist_tracks(mix, [loved, store.upsert_track("v2", "Plain", "B", "Al", 200, 1)])
+    store.set_playlist_tracks(lm, [loved])
+
+    liked = {t["video_id"]: t["liked"] for t in store.playlist_tracks_detail(mix)}
+    assert liked == {"v1": True, "v2": False}                       # song in LM is liked
+    assert store.artist_songs("A")[0]["liked"] is True             # and wherever the song appears
+    c = _client(store, lambda: {iid: FakeClient()})
+    assert "liked-heart" in c.get(f"/playlist/{mix}").text
+
+
+def test_remove_playlist_preserves_group(store):
+    # Groups are user curation (not on YouTube) — a removed/pruned playlist must keep its group so it
+    # reattaches if the playlist comes back. Regression for the prune that wiped groups too.
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLG", "Grouped", 1, "h", 1.0)
+    store.set_playlist_group("PLG", "Workout")
+    store.remove_playlist(a)
+    assert store.get_playlist_groups() == {"PLG": "Workout"}      # survives removal
+    store.upsert_playlist(iid, "PLG", "Grouped", 1, "h", 2.0)     # re-added on a later sync
+    assert store.get_playlist_groups().get("PLG") == "Workout"    # grouping reattaches
+
+
+def test_sync_keeps_playlists_when_library_comes_back_empty(store):
+    # Regression: an empty get_library_playlists (session glitch, not a 401) must NOT prune the store.
+    from yt_playlist import sync as sync_mod
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Keep Me", 1, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "S", "X", None, None, 1)])
+    sync_mod.sync_identity(store, iid, FakeClient(playlists=[], tracks={}, history=[]), now=2.0)
+    assert [p.title for p in store.get_playlists()] == ["Keep Me"]      # preserved, not wiped
+
+
+def test_sync_flags_reauth_when_known_identity_returns_empty(store):
+    # An identity that HAD playlists but now returns empty is flagged for re-auth (not silently empty).
+    from yt_playlist import sync as sync_mod
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_playlist(iid, "PL1", "Keep Me", 1, "h", 1.0)
+    expired = {}
+    sync_mod.sync_identity(store, iid, FakeClient(playlists=[], tracks={}, history=[]), now=2.0,
+                           label="main", on_auth_expired=lambda i, label: expired.__setitem__(i, label))
+    assert expired == {iid: "main"}                    # flagged for re-authentication
+    assert [p.title for p in store.get_playlists()] == ["Keep Me"]   # still preserved
+
+
+def test_sync_prunes_when_library_is_real(store):
+    # A genuine, non-empty library still prunes playlists that are actually gone.
+    from yt_playlist import sync as sync_mod
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_playlist(iid, "GONE", "Deleted Remotely", 0, "h", 1.0)
+    client = FakeClient(playlists=[{"playlistId": "PL2", "title": "New", "count": 1}],
+                        tracks={"PL2": [_track("v1", "A", "X")]}, history=[])
+    sync_mod.sync_identity(store, iid, client, now=2.0)
+    assert sorted(p.title for p in store.get_playlists()) == ["New"]    # GONE pruned, New added
+
+
+def test_resignin_clears_banner_and_flashes(store):
+    rt = _FakeRuntime(store, configured=True)
+    app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
+    app.state.ctx.auth_expired["main"] = "Main"          # simulate an expired session (banner shown)
+    c = TestClient(app, base_url="http://127.0.0.1")
+
+    r = c.post("/setup", data={"headers": "Cookie: SID=abc", "label": ["main"],
+                               "brand_account_id": [""], "master": "0"}, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/?flash=Signed%20back%20in."   # re-signin message, back to playlists
+    assert app.state.ctx.auth_expired == {}                          # banner cleared
+
+
+def test_jobs_find_active():
+    from yt_playlist.web.jobs import SyncJobs
+    jobs = SyncJobs()
+    j1 = jobs.create(); j1.playlist_id = 5; j1.source = "musicbrainz"
+    j2 = jobs.create(); j2.playlist_id = 5; j2.source = "discogs"
+    assert jobs.find_active(5) is j2            # most recent running job for the playlist
+    assert jobs.find_active(9) is None
+    j2.done = True
+    assert jobs.find_active(5) is j1            # falls back to the still-running older one
+    j1.done = True
+    assert jobs.find_active(5) is None          # nothing running -> no rejoin
+
+
+def test_page_rejoins_active_enrichment(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "S", "X", "Al", 200, 1)])
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+
+    assert f"enrichPanel({a}, false, 0, '')" in c.get(f"/playlist/{a}").text   # nothing to rejoin
+    job = app.state.ctx.jobs.create(); job.playlist_id = a; job.source = "discogs"
+    page = c.get(f"/playlist/{a}").text
+    assert f"enrichPanel({a}, false, {job.id}, 'discogs')" in page and "rejoinIfActive()" in page
+    job.done = True
+    assert f"enrichPanel({a}, false, 0, '')" in c.get(f"/playlist/{a}").text   # finished -> no rejoin
+
+
+def test_discogs_fills_genre_and_year(store, monkeypatch):
+    import json as _json
+    import yt_playlist.discogs as dc
+    # stub Discogs search: styles map to the whitelist, earliest year wins
+    monkeypatch.setattr(dc, "_search", lambda q, tok: [
+        {"year": "1996", "genre": ["Electronic"], "style": ["Techno", "Drum n Bass"]},
+        {"year": "1995", "genre": ["Electronic"], "style": ["Techno"]},
+    ] if "Born Slippy" in q else [])
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "Born Slippy", "Underworld", "Al", 200, 1),
+                                  store.upsert_track("v1", "Unknown", "Nobody", "Al", 200, 1)])
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    jid = c.post(f"/playlist/{a}/enrich/discogs").json()["job_id"]
+    with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
+        body = "".join(st.iter_text())
+    types = [_json.loads(l[6:])["type"] for l in body.splitlines() if l.startswith("data: ")]
+    assert types == ["info", "track", "track", "done", "end"]
+    detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.playlist_tracks_detail(a)}
+    assert detail["v0"] == ("Techno", "1995")        # style->genre, earliest year
+    assert detail["v1"] == ("", "")
+
+
+def test_lastfm_fills_missing_genre_and_year(store, monkeypatch):
+    import json as _json
+    import yt_playlist.lastfm as lf
+    monkeypatch.setenv("LASTFM_API_KEY", "testkey")
+    # stub the Last.fm lookup: (genre, year) per track; one fully unknown
+    monkeypatch.setattr(lf, "enrich", lambda title, artist, key:
+                        {"S0": ("Trip Hop", None), "S1": ("House", "2010")}.get(title, (None, None)))
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
+    t0 = store.upsert_track("v0", "S0", "X", "Al", 200, 1)
+    store.set_playlist_tracks(a, [t0, store.upsert_track("v1", "S1", "Y", "Al", 200, 1),
+                                  store.upsert_track("v2", "S?", "Z", "Al", 200, 1)])
+    store.set_track_year(t0, "1998")                 # fill-only must not clobber this
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    jid = c.post(f"/playlist/{a}/enrich/lastfm").json()["job_id"]
+    with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
+        body = "".join(st.iter_text())
+    evs = [_json.loads(l[6:]) for l in body.splitlines() if l.startswith("data: ")]
+    track_evs = [e for e in evs if e["type"] == "track"]
+    # events report the effective stored values (so the UI matches the DB) — both fields present
+    assert track_evs and all("genre" in e and "year" in e for e in track_evs)
+
+    detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.playlist_tracks_detail(a)}
+    assert detail["v0"] == ("Trip Hop", "1998")      # genre filled, existing year preserved
+    assert detail["v1"] == ("House", "2010")         # both filled from Last.fm
+    assert detail["v2"] == ("", "")                  # nothing found -> still missing
+
+
+def test_lastfm_enrich_scrapes_release_year(monkeypatch):
+    import yt_playlist.lastfm as lf
+    # one getInfo gives tags + the album page URL; the album page carries the Release Date
+    monkeypatch.setattr(lf, "_get", lambda params: {"track": {
+        "album": {"url": "https://www.last.fm/music/Ph+1/Sizzling+Love"},
+        "toptags": {"tag": [{"name": "seen live"}, {"name": "house"}]}}})
+    fetched = []
+    def fake_fetch(url):
+        fetched.append(url)
+        return ('<dt class="catalogue-metadata-heading">Release Date</dt>'
+                '<dd class="catalogue-metadata-description">11 March 1996</dd>')
+    monkeypatch.setattr(lf, "_fetch_text", fake_fetch)
+    assert lf.enrich("Sizzling Love", "Ph 1", "key") == ("House", "1996")
+    assert fetched == ["https://www.last.fm/music/Ph+1/Sizzling+Love"]   # the album page, not the track
+
+
+def test_lastfm_key_saved_via_ui(store, monkeypatch, tmp_path):
+    monkeypatch.delenv("LASTFM_API_KEY", raising=False)
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))   # no env/config key
+    import yt_playlist.lastfm as lf
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    # the playlist page reflects "not configured"; after saving a key it flips to configured
+    assert lf.api_key(store) is None
+    assert "enrichPanel(%d, false," % a in c.get(f"/playlist/{a}").text
+    r = c.post("/settings/lastfm-key", json={"key": " abc123 "}).json()
+    assert r == {"ok": True, "configured": True}
+    assert store.get_setting("lastfm_api_key") == "abc123" and lf.api_key(store) == "abc123"
+    assert "enrichPanel(%d, true," % a in c.get(f"/playlist/{a}").text
+
+
+def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
+    monkeypatch.delenv("LASTFM_API_KEY", raising=False)
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))   # empty config -> no key
+    import json as _json
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", "Al", 200, 1)])
+    c = _client(store, lambda: {iid: FakeClient()})
+    jid = c.post(f"/playlist/{a}/enrich/lastfm").json()["job_id"]
+    with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
+        body = "".join(st.iter_text())
+    assert "Last.fm API key" in body
+
+
+def test_rename_playlist(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Old Name", 1, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "S", "X", "Al", 200, 1)])
+    fc = FakeClient()
+    c = _client(store, lambda: {iid: fc})
+
+    r = c.post(f"/playlist/{a}/rename", json={"title": "  New Name  "}).json()
+    assert r == {"ok": True, "title": "New Name"}            # trimmed
+    assert store.get_playlist(a).title == "New Name"          # store updated
+    assert fc.edited == [("PL1", {"title": "New Name"})]      # YouTube updated
+    assert c.post(f"/playlist/{a}/rename", json={"title": "  "}).json()["ok"] is False
+
+
+def test_set_track_year(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", "Al", 200, 1)])
+    c = _client(store, lambda: {iid: FakeClient()})
+    assert c.post(f"/playlist/{a}/track-year", json={"video_id": "v0", "year": "1991"}).json()["ok"]
+    assert store.playlist_tracks_detail(a)[0]["year"] == "1991"
 
 
 def test_set_track_genre_and_suggestions(store):

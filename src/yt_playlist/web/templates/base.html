@@ -16,25 +16,33 @@
 <body>
   {% set path = request.url.path if request else "/" %}
   <header class="topbar">
-    <a class="brand" href="/">yt&#8202;<span class="dot">/</span>&#8202;playlist <small>console</small></a>
+    <a class="brand" href="/">yt&#8202;<span class="dot">/</span>&#8202;playlist</a>
+    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') %}
     <nav>
       <a href="/" class="{{ 'active' if path == '/' else '' }}">Playlists</a>
       <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
       <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
       <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
       <a href="/discover" class="{{ 'active' if path.startswith('/discover') else '' }}">Rediscover</a>
-      <a href="/cleanup" class="{{ 'active' if path.startswith('/cleanup') else '' }}">Cleanup</a>
-      <a href="/move" class="{{ 'active' if path.startswith('/move') else '' }}">Move</a>
-      <a href="/actions" class="{{ 'active' if path.startswith('/actions') else '' }}">Actions</a>
-      <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
+      <div class="tools-menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
+        <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"
+                @click="open = !open" :aria-expanded="open">Tools <span class="caret" :class="{ up: open }">▾</span></button>
+        <div class="tools-pop" x-show="open" x-cloak x-transition.opacity.scale.origin.top.right>
+          <a href="/cleanup" class="{{ 'active' if path.startswith('/cleanup') else '' }}">Cleanup</a>
+          <a href="/move" class="{{ 'active' if path.startswith('/move') else '' }}">Move</a>
+          <a href="/actions" class="{{ 'active' if path.startswith('/actions') else '' }}">Actions</a>
+          <a href="/genres" class="{{ 'active' if path.startswith('/genres') else '' }}">Genres</a>
+          <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
+        </div>
+      </div>
     </nav>
   </header>
-  {% if auth_expired %}
-  <div class="authbar">
-    ⚠ YouTube session expired for <strong>{{ auth_expired.values()|join(', ') }}</strong> — its data is
-    stale until you reconnect. <a href="/setup">Re-authenticate →</a>
+  <div class="authbar" x-data='authBanner({{ (auth_expired.values()|list)|tojson }})'
+       x-show="labels.length && !dismissed" x-cloak @auth-expired.window="add($event.detail.label)">
+    <span class="authbar-body">⚠ YouTube session expired for <strong x-text="labels.join(', ')"></strong> —
+      its data is stale until you reconnect. <a href="/setup">Re-authenticate →</a></span>
+    <button type="button" class="authbar-x" @click="dismissed = true" title="Dismiss" aria-label="Dismiss">×</button>
   </div>
-  {% endif %}
   <main>{% block body %}{% endblock %}</main>
 </body>
 </html>

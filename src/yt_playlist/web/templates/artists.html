@@ -9,6 +9,7 @@
 <div class="card">
   <table x-data="rowSort()">
     <thead><tr>
+      <th style="width:3rem"></th>
       <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
       <th class="sorth num" @click="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
       <th class="sorth num" @click="sortBy('albums')">Albums<span x-text="ind('albums')"></span></th>
@@ -19,6 +20,7 @@
     {% for a in artists %}
       <tr class="srow" data-artist="{{ a.artist|lower }}" data-songs="{{ a.songs }}"
           data-albums="{{ a.n_albums }}" data-pls="{{ a.n_pls }}" data-plays="{{ a.plays }}">
+        <td>{% if a.thumbnail %}<img class="artist-avatar" src="{{ a.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
         <td><a class="ptitle alink" href="/artist?name={{ a.artist|urlencode }}">{{ a.artist }}</a></td>
         <td class="num mono">{{ a.songs }}</td>
         <td class="num mono">{{ a.n_albums }}</td>
@@ -26,7 +28,7 @@
         <td class="num mono">{{ a.plays or '' }}</td>
       </tr>
     {% else %}
-      <tr><td colspan="5" class="empty">No artists yet — sync first.</td></tr>
+      <tr><td colspan="6" class="empty">No artists yet — sync first.</td></tr>
     {% endfor %}
     </tbody>
   </table>

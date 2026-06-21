@@ -1,0 +1,28 @@
+{% extends "base.html" %}{% block title %}Genres · yt-playlist{% endblock %}{% block body %}
+<div class="page-head">
+  <span class="eyebrow">Genres</span>
+  <h1>Genre whitelist</h1>
+  <p>Last.fm and Discogs return noisy tags; we pin a genre by matching them against this list, so the
+     result is always something you recognize. Add genres you want recognized, or remove ones you
+     don't. (MusicBrainz returns its own genres and isn't filtered by this list.)</p>
+</div>
+
+<div class="card" x-data='genresTab({{ genres|tojson }})'>
+  <div class="genre-add">
+    <input type="text" x-model="newName" placeholder="Add a genre…" autocomplete="off"
+           @keydown.enter="add()" x-ref="inp">
+    <button type="button" @click="add()">Add</button>
+    <button type="button" class="btn-ghost" @click="reset()"
+            title="Restore the built-in list of {{ builtin_count }} genres">Reset to defaults</button>
+    <span class="muted genre-count" x-text="list.length + ' genres'"></span>
+  </div>
+  <p class="notice err" x-show="err" x-text="err" style="margin-top:1rem"></p>
+  <div class="genre-chips">
+    <template x-for="g in list" :key="g">
+      <span class="genre-chip"><span x-text="g"></span><button type="button" class="chip-x"
+            @click="remove(g)" :title="'Remove ' + g">×</button></span>
+    </template>
+    <p class="muted" x-show="!list.length">No genres — tags won't be matched. Add some, or reset to defaults.</p>
+  </div>
+</div>
+{% endblock %}

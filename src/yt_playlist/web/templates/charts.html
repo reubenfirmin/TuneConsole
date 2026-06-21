@@ -32,7 +32,7 @@
           <td class="rank">{{ loop.index }}</td>
           <td>{% if s.thumbnail %}<img class="album-thumb" src="{{ s.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
           <td><a class="ptitle" href="https://music.youtube.com/watch?v={{ s.video_id }}"
-                 target="_blank" rel="noopener">{{ s.title }} ↗</a></td>
+                 target="_blank" rel="noopener">{{ s.title }}&nbsp;↗</a></td>
           <td><a class="alink" href="/artist?name={{ s.artist|urlencode }}">{{ s.artist }}</a></td>
           <td class="barcell"><span class="playbar" style="width:{{ (s.plays / smax * 100)|round(1) }}%"></span></td>
           <td class="num mono">{{ s.plays }}</td>

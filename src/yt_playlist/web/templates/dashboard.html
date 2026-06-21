@@ -1,7 +1,7 @@
-{% extends "base.html" %}{% from "_macros.html" import pllink with context %}{% block title %}Cleanup · yt-playlist{% endblock %}{% block body %}
-{% if flash %}<div class="notice ok" style="margin-bottom:1.4rem">{{ flash }}{% if flash_pl %}
-  &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}</div>{% endif %}
-{% if flasherr %}<div class="notice err" style="margin-bottom:1.4rem">{{ flasherr }}</div>{% endif %}
+{% extends "base.html" %}{% from "_macros.html" import pllink, banner with context %}{% block title %}Cleanup · yt-playlist{% endblock %}{% block body %}
+{% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
+  &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}{% endcall %}{% endif %}
+{% if flasherr %}{% call banner('err') %}{{ flasherr }}{% endcall %}{% endif %}
 <div class="page-head">
   <span class="eyebrow">Cleanup</span>
   <h1>Cleanup</h1>

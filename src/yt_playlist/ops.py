@@ -15,7 +15,7 @@ from yt_playlist import sync as sync_mod
 from yt_playlist.executor import (
     MergePlan, add_tracks_to_playlist, apply_result, copy_or_move_playlist, copy_playlist,
     delete_empty_playlist, delete_playlist, deserialize_plan, execute_planned, remove_track,
-    reorder_track, search_versions, store_plan, undo_action)
+    rename_playlist, reorder_track, search_versions, store_plan, undo_action)
 
 logger = logging.getLogger("yt_playlist.ops")
 
@@ -102,6 +102,10 @@ class PlaylistOps:
     def remove_track(self, playlist_id, video_id) -> dict:
         client = self._require_client(playlist_id)
         return remove_track(self.store, playlist_id, video_id, client, self.now_fn())
+
+    def rename(self, playlist_id, title) -> dict:
+        client = self._require_client(playlist_id)
+        return rename_playlist(self.store, playlist_id, title, client, self.now_fn())
 
     def reorder_track(self, playlist_id, video_id, before_video_id) -> dict:
         client = self._require_client(playlist_id)

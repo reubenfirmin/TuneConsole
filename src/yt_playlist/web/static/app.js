@@ -217,20 +217,36 @@ function rowSort(pid) {
       this.$refs.body.querySelectorAll('tr.srow .rownum').forEach((el, i) => { el.textContent = i + 1; });
     },
 
-    // --- click-to-edit genre (autosuggest from the genres we already have) ---
-    editVid: null,
+    // --- click-to-edit genre with a custom, constrained autosuggest dropdown ---
+    editVid: null, genreList: [], gSuggest: [], gSel: -1,
+    _loadGenres() {
+      if (!this.genreList.length)
+        this.genreList = Array.from(document.querySelectorAll('#genrelist option')).map(o => o.value);
+    },
+    filterGenres(val) {
+      this._loadGenres();
+      const q = (val || '').trim().toLowerCase();
+      const all = this.genreList;
+      this.gSuggest = (q ? all.filter(g => g.toLowerCase().includes(q)) : all).slice(0, 8);
+      this.gSel = -1;
+    },
+    moveGenreSel(d) {
+      if (!this.gSuggest.length) return;
+      this.gSel = (this.gSel + d + this.gSuggest.length) % this.gSuggest.length;
+    },
     startEditGenre(vid) {
-      this.editVid = vid;
+      this._loadGenres();
+      this.editVid = vid; this.gSuggest = []; this.gSel = -1;
       this.$nextTick(() => {
         const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
         const inp = tr && tr.querySelector('.ginput');
         const tag = tr && tr.querySelector('.gtag');
-        if (inp) { inp.value = tag ? tag.textContent.trim() : ''; inp.focus(); inp.select(); }
+        if (inp) { inp.value = tag ? tag.textContent.trim() : ''; inp.focus(); inp.select(); this.filterGenres(inp.value); }
       });
     },
     async saveGenre(vid, value) {
       if (this.editVid !== vid) return;          // ignore the trailing blur after enter/escape
-      this.editVid = null;
+      this.editVid = null; this.gSuggest = []; this.gSel = -1;
       const genre = (value || '').trim();
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
       if (tr) {                                   // optimistic update
@@ -244,6 +260,35 @@ function rowSort(pid) {
           body: JSON.stringify({ video_id: vid, genre }),
         });
       } catch (e) { /* optimistic UI already applied; a reload would resync if needed */ }
+    },
+
+    // --- click-to-edit year ---
+    editYearVid: null,
+    startEditYear(vid) {
+      this.editYearVid = vid;
+      this.$nextTick(() => {
+        const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
+        const inp = tr && tr.querySelector('.yinput');
+        const disp = tr && tr.querySelector('.ydisplay');
+        if (inp) { inp.value = (disp ? disp.textContent : '').trim().replace(/\D/g, ''); inp.focus(); inp.select(); }
+      });
+    },
+    async saveYear(vid, value) {
+      if (this.editYearVid !== vid) return;
+      this.editYearVid = null;
+      const year = (value || '').trim();
+      const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
+      if (tr) {
+        const disp = tr.querySelector('.ydisplay');
+        if (disp) disp.innerHTML = year ? escapeHtml(year) : '<span class="muted ghint">＋</span>';
+        tr.dataset.year = year || 0;
+      }
+      try {
+        await fetch(`/playlist/${this.pid}/track-year`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ video_id: vid, year }),
+        });
+      } catch (e) { /* optimistic UI already applied */ }
     },
   };
 }
@@ -489,20 +534,113 @@ function mergeEditor(members, tracks, returnTo) {
     },
   };
 }
-function enrichPanel(pid) {
+function genresTab(rows) {
+  // Tools > Genres: edit the whitelist used to pin genres from Last.fm/Discogs tags.
+  return {
+    list: rows, newName: '', err: '',
+    async add() {
+      const name = (this.newName || '').trim();
+      if (!name) return;
+      this.err = '';
+      try {
+        const j = await (await fetch('/genres/add', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+        })).json();
+        if (!j.ok) { this.err = j.error || 'could not add'; return; }
+        this.list = j.genres; this.newName = '';
+        this.$nextTick(() => this.$refs.inp.focus());
+      } catch (e) { this.err = 'network error'; }
+    },
+    async remove(name) {
+      this.list = this.list.filter(g => g !== name);    // optimistic
+      try {
+        await fetch('/genres/remove', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+        });
+      } catch (e) { /* optimistic UI already applied */ }
+    },
+    async reset() {
+      try {
+        const j = await (await fetch('/genres/reset', { method: 'POST' })).json();
+        if (j.ok) this.list = j.genres;
+      } catch (e) { this.err = 'network error'; }
+    },
+  };
+}
+function titleEditor(pid) {
+  // click the playlist <h1> to rename it (YouTube + store). The title stays server-rendered in the
+  // <h1> (Jinja escapes it safely); we read/write its text rather than threading it through x-data.
+  return {
+    pid: pid, editing: false, draft: '',
+    start() {
+      this.draft = this.$refs.h1.textContent.trim();
+      this.editing = true;
+      this.$nextTick(() => { this.$refs.inp.focus(); this.$refs.inp.select(); });
+    },
+    cancel() { this.editing = false; },
+    async save() {
+      if (!this.editing) return;                 // ignore trailing blur after enter/escape
+      this.editing = false;
+      const t = (this.draft || '').trim();
+      const cur = this.$refs.h1.textContent.trim();
+      if (!t || t === cur) return;
+      try {
+        const r = await fetch(`/playlist/${this.pid}/rename`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: t }),
+        });
+        const j = await r.json();
+        if (j.ok) { this.$refs.h1.textContent = t; document.title = t + ' · yt-playlist'; }
+      } catch (e) { /* leave the old title in place */ }
+    },
+  };
+}
+function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
   // MusicBrainz enrichment: background job streamed over SSE. Updates the Year/Genre cells live
   // as each track resolves, and drives a determinate progress bar.
   return {
-    pid: pid, running: false, finished: false, pct: 0, status: '',
-    async start() {
+    pid: pid, lastfmConfigured: lastfmConfigured, running: false, finished: false, pct: 0, status: '', source: '',
+    // Last.fm API key modal
+    keyModal: false, keyValue: '', keyBusy: false, keyErr: '',
+    lastfmClick() {
+      if (this.lastfmConfigured) this.start('lastfm');
+      else { this.keyErr = ''; this.keyModal = true; }
+    },
+    async saveKey() {
+      const key = (this.keyValue || '').trim();
+      if (!key) { this.keyErr = 'Enter a key.'; return; }
+      this.keyBusy = true; this.keyErr = '';
+      try {
+        const r = await fetch('/settings/lastfm-key', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key }),
+        });
+        const j = await r.json();
+        this.keyBusy = false;
+        if (!j.configured) { this.keyErr = 'Could not save that key.'; return; }
+        this.lastfmConfigured = true; this.keyModal = false; this.keyValue = '';
+        this.start('lastfm');                       // saved — run it now
+      } catch (e) { this.keyBusy = false; this.keyErr = 'Network error.'; }
+    },
+    // if the page was refreshed while a job is running, reattach to it and resume the progress UI
+    rejoinIfActive() {
+      if (activeJobId) {
+        this.status = 'Reconnecting to enrichment in progress…';
+        this.listen(activeJobId, activeSource);
+      }
+    },
+    async start(source) {
       if (this.running) return;
+      this.source = source;
       this.running = true; this.finished = false; this.pct = 0;
-      this.status = 'Starting MusicBrainz enrichment…';
+      this.status = source === 'lastfm' ? 'Starting Last.fm tagging…' : 'Starting enrichment…';
       let job;
       try {
-        const r = await fetch(`/playlist/${this.pid}/enrich`, { method: 'POST' });
+        const r = await fetch(`/playlist/${this.pid}/enrich/${source}`, { method: 'POST' });
         job = (await r.json()).job_id;
       } catch (e) { this.status = 'Could not start.'; this.running = false; return; }
+      this.listen(job, source);
+    },
+    listen(job, source) {
+      this.source = source; this.running = true; this.finished = false;
       const es = new EventSource(`/playlist/enrich/events/${job}`);
       es.onmessage = (m) => {
         const ev = JSON.parse(m.data);
@@ -516,6 +654,9 @@ function enrichPanel(pid) {
           this.pct = 100; this.status = ev.text;
         } else if (ev.type === 'err') {
           this.status = ev.text;
+          if (ev.text && ev.text.includes('Last.fm API key')) {   // key missing/invalid — prompt for it
+            this.lastfmConfigured = false; this.keyModal = true;
+          }
         } else if (ev.type === 'end') {
           es.close(); this.running = false; this.finished = true;
           if (!ev.error) setTimeout(() => { this.finished = false; }, 4000);
@@ -523,15 +664,21 @@ function enrichPanel(pid) {
       };
       es.onerror = () => { es.close(); this.running = false; this.status = 'Stream interrupted.'; };
     },
-    // patch a single row's Year/Genre cells (and sort keys) without a full reload
+    // patch a row's Year/Genre cells live — but only the fields this event carries (MusicBrainz
+    // sends both, Last.fm sends only genre, so we must not blank year on a Last.fm run)
     applyRow(ev) {
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(ev.video_id)}"]`);
       if (!tr) return;
-      const y = tr.querySelector('.mb-year'), g = tr.querySelector('.gdisplay');
-      if (y) y.textContent = ev.year || '';
-      if (g) g.innerHTML = genreChip(ev.genre);
-      tr.dataset.year = ev.year || 0;
-      tr.dataset.genre = (ev.genre || '').toLowerCase();
+      if ('year' in ev) {
+        const y = tr.querySelector('.ydisplay');
+        if (y) y.innerHTML = ev.year ? escapeHtml(ev.year) : '<span class="muted ghint">＋</span>';
+        tr.dataset.year = ev.year || 0;
+      }
+      if ('genre' in ev) {
+        const g = tr.querySelector('.gdisplay');
+        if (g) g.innerHTML = genreChip(ev.genre);
+        tr.dataset.genre = (ev.genre || '').toLowerCase();
+      }
     },
   };
 }
@@ -541,37 +688,55 @@ function escapeHtml(s) {
 function genreChip(genre) {
   return genre ? `<span class="gtag">${escapeHtml(genre)}</span>` : '<span class="muted ghint">＋</span>';
 }
+function authBanner(initial) {
+  // The "session expired" bar — seeded from the server, and updated live by the sync panel so it
+  // pops up during an AJAX sync (no page reload needed).
+  return {
+    labels: initial || [],
+    add(label) { if (label && !this.labels.includes(label)) this.labels.push(label); },
+  };
+}
 function syncPanel() {
   return {
     running: false,
+    failed: false,
     lines: [],
     push(ev) {
-      const pip = ev.type === 'err' ? '✗' : ev.type === 'done' || ev.type === 'end' ? '✓'
+      const bad = ev.type === 'err' || ev.type === 'auth_expired';
+      const pip = bad ? '✗' : ev.type === 'done' || ev.type === 'end' ? '✓'
                 : ev.type === 'step' ? '›' : '•';
-      const cls = ev.type === 'err' ? 'err' : (ev.type === 'done' || ev.type === 'end') ? 'done' : '';
+      const cls = bad ? 'err' : (ev.type === 'done' || ev.type === 'end') ? 'done' : '';
       this.lines.push({ text: ev.text || '', pip, cls });
       this.$nextTick(() => { const l = this.$refs.log; if (l) l.scrollTop = l.scrollHeight; });
     },
     async start() {
       if (this.running) return;
-      this.running = true; this.lines = [];
+      this.running = true; this.failed = false; this.lines = [];
       this.push({ type: 'info', text: 'starting sync…' });
       let job;
       try {
         const r = await fetch('/sync', { method: 'POST' });
         job = (await r.json()).job_id;
-      } catch (e) { this.push({ type: 'err', text: String(e) }); this.running = false; return; }
+      } catch (e) { this.push({ type: 'err', text: String(e) }); this.running = false; this.failed = true; return; }
       const es = new EventSource(`/sync/events/${job}`);
       es.onmessage = (m) => {
         const ev = JSON.parse(m.data);
+        if (ev.type === 'err' || ev.type === 'auth_expired') this.failed = true;   // keep the log open
+        if (ev.type === 'auth_expired' && ev.label)        // pop the "session expired" banner live
+          window.dispatchEvent(new CustomEvent('auth-expired', { detail: { label: ev.label } }));
         if (ev.type === 'end') {
           es.close(); this.running = false;
-          if (!ev.error) { this.push({ type: 'done', text: 'reloading…' }); setTimeout(() => location.reload(), 700); }
+          if (!ev.error && !this.failed) {
+            this.push({ type: 'done', text: 'reloading…' });
+            setTimeout(() => location.reload(), 700);
+          } else {
+            this.push({ type: 'err', text: 'finished with errors — log kept open. Reload when ready.' });
+          }
           return;
         }
         this.push(ev);
       };
-      es.onerror = () => { es.close(); this.running = false; this.push({ type: 'err', text: 'stream interrupted' }); };
+      es.onerror = () => { es.close(); this.running = false; this.failed = true; this.push({ type: 'err', text: 'stream interrupted' }); };
     },
   };
 }

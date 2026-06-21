@@ -8,7 +8,7 @@ from fastapi.responses import RedirectResponse
 
 from yt_playlist.action_kinds import (
     ADD_TRACKS, APPLY_MERGE, COPY_PLAYLIST, DELETE_EMPTY, DELETE_PLAYLIST, MOVE_IDENTITY, PLAN,
-    REMOVE_TRACK, UNDO, is_undoable)
+    REMOVE_TRACK, RENAME_PLAYLIST, UNDO, is_undoable)
 from yt_playlist.executor import deserialize_plan
 
 
@@ -48,6 +48,8 @@ def build(ctx) -> APIRouter:
             return f"added {n} track{'' if n == 1 else 's'} to “{params.get('playlist')}”"
         if action.kind == REMOVE_TRACK:
             return f"removed a track from “{params.get('playlist')}”"
+        if action.kind == RENAME_PLAYLIST:
+            return f"renamed “{params.get('from')}” → “{params.get('to')}”"
         if action.kind != PLAN:
             return action.kind
         try:

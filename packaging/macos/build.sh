@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Build "YT Playlist.app" and a .dmg with PyInstaller. Run on macOS.
+#
+#   ./build.sh
+#
+# Produces:
+#   dist/YT Playlist.app
+#   dist/YT-Playlist-0.1.0.dmg
+#
+# The bundle is unsigned, so first launch needs right-click -> Open (or System Settings ->
+# Privacy & Security -> Open Anyway). Add an Apple Developer cert + notarization later for
+# distribution; see ../README.md.
+set -euo pipefail
+cd "$(dirname "$0")"
+ROOT=$(cd ../.. && pwd)
+VERSION=0.1.0
+
+# 1. Isolated build environment with the app + PyInstaller installed (so data/metadata collect).
+python3 -m venv .build-venv
+# shellcheck disable=SC1091
+. .build-venv/bin/activate
+python -m pip install -U pip wheel
+python -m pip install "$ROOT" pyinstaller
+
+# 2. Optional custom icon (svg -> icns). Non-fatal if the tools are missing.
+./make-icns.sh || true
+
+# 3. Build the .app.
+rm -rf build dist
+pyinstaller --noconfirm --clean yt-playlist.spec
+
+# 4. Wrap it in a compressed .dmg.
+APP="dist/YT Playlist.app"
+DMG="dist/YT-Playlist-$VERSION.dmg"
+hdiutil create -volname "YT Playlist" -srcfolder "$APP" -ov -format UDZO "$DMG"
+
+echo
+echo "Built:"
+echo "  $APP"
+echo "  $DMG"

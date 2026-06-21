@@ -1,6 +1,6 @@
-{% extends "base.html" %}{% block title %}Playlists · yt-playlist{% endblock %}{% block body %}
-{% if flash %}<div class="notice ok" style="margin-bottom:1.4rem">{{ flash }}{% if flash_pl %}
-  &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}</div>{% endif %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Playlists · yt-playlist{% endblock %}{% block body %}
+{% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
+  &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}{% endcall %}{% endif %}
 <div class="page-head">
   <span class="eyebrow">Playlists</span>
   <h1>All playlists</h1>

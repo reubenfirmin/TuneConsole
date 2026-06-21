@@ -8,7 +8,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
-from yt_playlist import musicbrainz
+from yt_playlist import discogs, lastfm, musicbrainz
 from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
 
 
@@ -54,7 +54,10 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "playlist.html", {
             "pl": pl, "tracks": tracks, "identity": labels.get(pl.identity_id, "?"),
             "kind": store.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),
-            "genres": store.all_genres(),
+            # autosuggest = the editable whitelist plus whatever genres already exist in the library
+            "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
+            "lastfm_configured": lastfm.api_key(store) is not None,
+            "active_job": ctx.jobs.find_active(pid),     # an in-progress enrichment to rejoin, if any
         })
 
     @router.get("/playlist/{pid}/share.txt")
@@ -91,23 +94,31 @@ def build(ctx) -> APIRouter:
         if not tracks:
             return JSONResponse({"ok": False, "error": "no tracks selected"})
         try:
-            return JSONResponse({"ok": True, **ctx.ops().add_tracks(pid, tracks)})
+            return JSONResponse({"ok": True, **(await asyncio.to_thread(ctx.ops().add_tracks, pid, tracks))})
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception:  # noqa: BLE001
             logger.exception("add-tracks failed for playlist %s", pid)
             return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
 
-    @router.post("/playlist/{pid}/enrich")
-    def playlist_enrich(pid: int):
-        """Kick off a background MusicBrainz enrichment job for this playlist's tracks."""
+    ENRICH_SOURCES = {"musicbrainz": musicbrainz.enrich_playlist, "lastfm": lastfm.enrich_playlist,
+                      "discogs": discogs.enrich_playlist}
+
+    @router.post("/playlist/{pid}/enrich/{source}")
+    def playlist_enrich(pid: int, source: str):
+        """Kick off a background enrichment job (source: 'musicbrainz' = genre+year, 'lastfm' = genre)."""
         if store.get_playlist(pid) is None:
             raise HTTPException(status_code=404, detail="playlist not found")
+        runner = ENRICH_SOURCES.get(source)
+        if runner is None:
+            raise HTTPException(status_code=404, detail="unknown enrichment source")
         job = ctx.jobs.create()
+        job.playlist_id = pid           # so a refreshed page can find + rejoin this job
+        job.source = source
 
         def run():
             try:
-                musicbrainz.enrich_playlist(store, pid, on_progress=job.events.append)
+                runner(store, pid, on_progress=job.events.append)
             except Exception as e:  # noqa: BLE001
                 detail = str(e) or type(e).__name__
                 job.error = detail
@@ -139,6 +150,26 @@ def build(ctx) -> APIRouter:
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    @router.post("/playlist/{pid}/rename")
+    async def playlist_rename(pid: int, request: Request):
+        body = await request.json()
+        title = (body.get("title") or "").strip()
+        if not title:
+            return JSONResponse({"ok": False, "error": "name can't be empty"})
+        try:
+            return JSONResponse({"ok": True, **(await asyncio.to_thread(ctx.ops().rename, pid, title))})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        except Exception:  # noqa: BLE001
+            logger.exception("rename of playlist %s failed", pid)
+            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
+
+    @router.post("/settings/lastfm-key")
+    async def set_lastfm_key(request: Request):
+        body = await request.json()
+        store.set_setting("lastfm_api_key", (body.get("key") or "").strip())
+        return JSONResponse({"ok": True, "configured": lastfm.api_key(store) is not None})
+
     @router.post("/playlist/{pid}/track-genre")
     async def playlist_set_track_genre(pid: int, request: Request):
         body = await request.json()
@@ -152,6 +183,19 @@ def build(ctx) -> APIRouter:
         store.set_track_genre(tid, genre)
         return JSONResponse({"ok": True, "genre": genre})
 
+    @router.post("/playlist/{pid}/track-year")
+    async def playlist_set_track_year(pid: int, request: Request):
+        body = await request.json()
+        vid = (body.get("video_id") or "").strip()
+        year = (body.get("year") or "").strip()
+        if not vid:
+            return JSONResponse({"ok": False, "error": "no track given"})
+        tid = store.track_ids_for_videos([vid]).get(vid)
+        if tid is None:
+            return JSONResponse({"ok": False, "error": "track not found"})
+        store.set_track_year(tid, year)
+        return JSONResponse({"ok": True, "year": year})
+
     @router.post("/playlist/{pid}/remove-track")
     async def playlist_remove_track(pid: int, request: Request):
         body = await request.json()
@@ -159,7 +203,7 @@ def build(ctx) -> APIRouter:
         if not vid:
             return JSONResponse({"ok": False, "error": "no track given"})
         try:
-            return JSONResponse({"ok": True, **ctx.ops().remove_track(pid, vid)})
+            return JSONResponse({"ok": True, **(await asyncio.to_thread(ctx.ops().remove_track, pid, vid))})
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception:  # noqa: BLE001
@@ -174,7 +218,7 @@ def build(ctx) -> APIRouter:
         if not vid:
             return JSONResponse({"ok": False, "error": "no track given"})
         try:
-            return JSONResponse({"ok": True, **ctx.ops().reorder_track(pid, vid, before)})
+            return JSONResponse({"ok": True, **(await asyncio.to_thread(ctx.ops().reorder_track, pid, vid, before))})
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception:  # noqa: BLE001
@@ -200,7 +244,7 @@ def build(ctx) -> APIRouter:
         if not ids:
             return JSONResponse({"ok": False, "error": "select at least one playlist to copy"})
         try:
-            res = ctx.ops().copy(ids, form.get("name", ""))
+            res = await asyncio.to_thread(ctx.ops().copy, ids, form.get("name", ""))
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception:  # noqa: BLE001
@@ -223,7 +267,7 @@ def build(ctx) -> APIRouter:
                 hidden += 1
                 continue
             try:
-                ops.delete(pid)
+                await asyncio.to_thread(ops.delete, pid)
                 deleted += 1
             except ValueError as e:
                 errors.append(f"{pl.title}: {e}")

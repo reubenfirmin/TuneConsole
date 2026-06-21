@@ -14,6 +14,7 @@ DELETE_PLAYLIST = "delete_playlist"  # a playlist deleted outright (e.g. from th
 COPY_PLAYLIST = "copy_playlist"  # a playlist duplicated into a new one (same identity)
 ADD_TRACKS = "add_tracks"        # one or more tracks added to an existing playlist (e.g. alternate versions)
 REMOVE_TRACK = "remove_track"    # a single track removed from a playlist
+RENAME_PLAYLIST = "rename_playlist"  # a playlist renamed
 UNDO = "undo"                    # an undo of a previous action (itself not undoable)
 
 # Kinds whose effects can be reversed from the Actions page.

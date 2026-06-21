@@ -1,6 +1,6 @@
-{% extends "base.html" %}{% block title %}Actions · yt-playlist{% endblock %}{% block body %}
-{% if flash %}<div class="notice ok" style="margin-bottom:1.4rem">{{ flash }}</div>{% endif %}
-{% if flasherr %}<div class="notice err" style="margin-bottom:1.4rem">{{ flasherr }}</div>{% endif %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Actions · yt-playlist{% endblock %}{% block body %}
+{% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
+{% if flasherr %}{% call banner('err') %}{{ flasherr }}{% endcall %}{% endif %}
 <div class="page-head">
   <span class="eyebrow">History</span>
   <h1>Action log</h1>

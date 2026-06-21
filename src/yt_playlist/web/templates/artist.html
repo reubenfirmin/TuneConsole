@@ -17,6 +17,8 @@
 <div class="card">
   <table x-data="rowSort()">
     <thead><tr>
+      <th style="width:2.6rem"></th>
+      <th style="width:1.6rem"></th>
       <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
       <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
       <th>In playlists</th>
@@ -27,16 +29,25 @@
     {% for s in songs %}
       <tr class="srow" data-title="{{ s.title|lower }}" data-album="{{ s.album|lower }}"
           data-plays="{{ s.plays }}" data-len="{{ s.duration or 0 }}">
+        <td>
+          <span class="pl-cover">
+            {% if s.thumbnail %}<img class="pl-thumb" src="{{ s.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+            <a class="pl-play" href="https://music.youtube.com/watch?v={{ s.video_id }}"
+               target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
+          </span>
+        </td>
+        <td class="liked-col">{% if s.liked %}<span class="liked-heart" title="In your Liked Music">♥</span>{% endif %}</td>
         <td><a class="ptitle" href="https://music.youtube.com/watch?v={{ s.video_id }}"
-               target="_blank" rel="noopener">{{ s.title }} ↗</a></td>
-        <td class="muted">{{ s.album }}</td>
+               target="_blank" rel="noopener">{{ s.title }}&nbsp;↗</a></td>
+        <td>{% if s.album_browse %}<a class="alink" href="https://music.youtube.com/browse/{{ s.album_browse }}"
+               target="_blank" rel="noopener">{{ s.album }}</a>{% else %}<span class="muted">{{ s.album }}</span>{% endif %}</td>
         <td class="small">{% for p in s.playlists %}<a class="alink"
               href="https://music.youtube.com/playlist?list={{ p.ytm }}" target="_blank" rel="noopener">{{ p.title }}</a>{{ ', ' if not loop.last }}{% endfor %}</td>
         <td class="num mono">{{ s.plays }}</td>
         <td class="num mono">{% if s.duration %}{{ '%d:%02d'|format(s.duration // 60, s.duration % 60) }}{% endif %}</td>
       </tr>
     {% else %}
-      <tr><td colspan="5" class="empty">No songs by this artist in your playlists.</td></tr>
+      <tr><td colspan="7" class="empty">No songs by this artist in your playlists.</td></tr>
     {% endfor %}
     </tbody>
   </table>
@@ -63,12 +74,15 @@
           data-saved="{{ '1' if al.saved else '0' }}">
         <td>{% if al.thumb %}<img class="album-thumb" src="{{ al.thumb }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
         <td>{% if al.browse %}<a class="ptitle" href="https://music.youtube.com/browse/{{ al.browse }}"
-               target="_blank" rel="noopener">{{ al.album }} ↗</a>{% else %}<span class="ptitle">{{ al.album }}</span>{% endif %}</td>
+               target="_blank" rel="noopener">{{ al.album }}&nbsp;↗</a>{% else %}<span class="ptitle">{{ al.album }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>
         <td class="num mono">{{ al.songs or '' }}</td>
         <td class="num mono">{{ al.n_pls or '' }}</td>
         <td class="num mono">{{ al.plays or '' }}</td>
-        <td>{% if al.saved %}<span class="kind kind-audio" title="Saved in your YouTube library">✓</span>{% endif %}</td>
+        <td>{% if al.browse %}<button type="button" class="btn-ghost btn-sm"
+              x-data="saveAlbum({{ 'true' if al.saved else 'false' }})" :disabled="busy"
+              @click="toggle('{{ al.browse }}')" x-text="label()"
+              :title="saved ? 'Remove from your YouTube library' : 'Save to your YouTube library'"></button>{% elif al.saved %}<span class="kind kind-audio" title="Saved in your YouTube library">✓</span>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -92,7 +106,7 @@
       <tr class="srow" data-album="{{ al.title|lower }}" data-year="{{ al.year or 0 }}">
         <td>{% if al.thumbnail %}<img class="album-thumb" src="{{ al.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
         <td>{% if al.browse_id %}<a class="ptitle" href="https://music.youtube.com/browse/{{ al.browse_id }}"
-               target="_blank" rel="noopener">{{ al.title }} ↗</a>{% else %}<span class="ptitle">{{ al.title }}</span>{% endif %}</td>
+               target="_blank" rel="noopener">{{ al.title }}&nbsp;↗</a>{% else %}<span class="ptitle">{{ al.title }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>
         <td style="text-align:right">{% if al.browse_id %}<button type="button" class="btn-ghost btn-sm"
               x-data="saveAlbum({{ 'true' if al.saved else 'false' }})" :disabled="busy"

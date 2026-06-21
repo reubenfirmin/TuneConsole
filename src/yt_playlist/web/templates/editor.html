@@ -6,7 +6,7 @@
   <div class="cmp-ids">
     {% for m in members %}
     <div><span class="ab" style="background:{{ palette[loop.index0 % palette|length] }}">{{ m.letter }}</span> <strong>{{ m.ident }}</strong> ·
-      <a href="https://music.youtube.com/playlist?list={{ m.ytm }}" target="_blank" rel="noopener">{{ m.title }} ↗</a>
+      <a href="https://music.youtube.com/playlist?list={{ m.ytm }}" target="_blank" rel="noopener">{{ m.title }}&nbsp;↗</a>
       <span class="pid">{{ m.ytm }}</span></div>
     {% endfor %}
   </div>
