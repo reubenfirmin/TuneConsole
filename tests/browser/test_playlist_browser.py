@@ -38,8 +38,12 @@ def live_playlist_app():
     t1 = s.upsert_track("v1", "Song B", "Artist Y", "Alb", 200, 1)
     s.set_playlist_tracks(pid, [t0, t1])
     s.set_track_genre(t0, "Rock")            # one track starts with a genre, one blank
-    client = FakeClient(tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},
-                                        {"videoId": "v1", "setVideoId": "sv1"}]})
+    client = FakeClient(
+        tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},
+                        {"videoId": "v1", "setVideoId": "sv1"}]},
+        search_results=[  # alternate-version search (source is excluded by find_alternates)
+            {"videoId": "v0", "title": "Song A", "artists": [{"name": "Artist X"}], "duration_seconds": 200},
+            {"videoId": "valt", "title": "Song A (Live)", "artists": [{"name": "Artist X"}], "duration_seconds": 210}])
     app = create_app(s, lambda: {iid: client}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
@@ -105,7 +109,20 @@ def test_remove_track_drops_row(live_playlist_app, page):
     row.get_by_role("button", name="Remove from playlist").click()  # opens confirm modal
     page.get_by_role("button", name="Remove", exact=True).click()   # confirm
     expect(page.get_by_role("row").filter(has_text="Song B")).to_have_count(0)
-    expect(page.get_by_role("row").filter(has_text="Song A")).to_be_visible()   # other row stays
+    expect(page.get_by_role("link", name="Song A ↗")).to_be_visible()           # other row stays
+
+
+def test_find_and_add_alternate_version(live_playlist_app, page):
+    base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    page.goto(f"{base}/playlist/{pid}")
+    row = page.get_by_role("row").filter(has_text="Song A")
+    row.get_by_title("More actions").click()
+    row.get_by_role("button", name="Find alternate versions…").click()
+    expect(page.get_by_text("Song A (Live)")).to_be_visible()        # htmx-rendered search results
+    page.locator('#alt-results input[name="track"]').first.check()
+    page.get_by_role("button", name="Add to playlist").click()
+    # HX-Refresh reload -> the chosen alternate is now a row in the table
+    expect(page.get_by_role("link", name="Song A (Live) ↗")).to_be_visible()
 
 
 def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):

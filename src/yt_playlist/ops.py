@@ -111,6 +111,18 @@ class PlaylistOps:
         client = self._require_client(playlist_id)
         return reorder_track(self.store, playlist_id, video_id, before_video_id, client, self.now_fn())
 
+    def set_liked(self, video_id, on) -> dict:
+        # Like/unlike a song in your main account's Liked Music (LM is per-account; we target master).
+        master = next((i for i in self.store.get_identities() if i.is_master), None)
+        if master is None:
+            raise ValueError("no main account configured")
+        client = self._clients().get(master.id)
+        if client is None:
+            raise ValueError("your main account isn’t connected")
+        client.rate_song(video_id, "LIKE" if on else "INDIFFERENT")
+        self.store.set_song_liked(master.id, video_id, on)
+        return {"liked": bool(on)}
+
     def _require_client(self, playlist_id):
         pl = self.store.get_playlist(playlist_id)
         if pl is None:

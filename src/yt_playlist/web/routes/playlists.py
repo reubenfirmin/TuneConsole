@@ -6,7 +6,7 @@ import threading
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from yt_playlist import discogs, lastfm, musicbrainz
 from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
@@ -94,29 +94,37 @@ def build(ctx) -> APIRouter:
         })
 
     @router.get("/playlist/{pid}/alternates")
-    def playlist_alternates(pid: int, video_id: str):
-        """Search YouTube for alternate versions of a track in this playlist."""
+    def playlist_alternates(request: Request, pid: int, video_id: str):
+        """Search YouTube for alternate versions of a track; render the results list for the modal."""
+        ctx_data = {"results": []}
         try:
-            return JSONResponse({"ok": True, "results": ctx.ops().find_alternates(pid, video_id)})
+            ctx_data["results"] = ctx.ops().find_alternates(pid, video_id)
         except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
+            ctx_data["error"] = str(e)
         except Exception:  # noqa: BLE001
             logger.exception("alternate search failed for %s in playlist %s", video_id, pid)
-            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
+            ctx_data["error"] = "YouTube returned an unexpected response"
+        return templates.TemplateResponse(request, "_partials/alternates_results.html", ctx_data)
 
     @router.post("/playlist/{pid}/add-tracks")
     async def playlist_add_tracks(pid: int, request: Request):
-        body = await request.json()
-        tracks = body.get("tracks") or []
+        # each selected alternate posts as a "track" field carrying its full track JSON
+        tracks = []
+        for raw in (await request.form()).getlist("track"):
+            try:
+                tracks.append(json.loads(raw))
+            except (ValueError, TypeError):
+                continue
         if not tracks:
-            return JSONResponse({"ok": False, "error": "no tracks selected"})
+            return _toast(request, "select at least one version to add")
         try:
-            return JSONResponse({"ok": True, **(await asyncio.to_thread(ctx.ops().add_tracks, pid, tracks))})
+            await asyncio.to_thread(ctx.ops().add_tracks, pid, tracks)
         except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
+            return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             logger.exception("add-tracks failed for playlist %s", pid)
-            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
+            return _toast(request, "YouTube returned an unexpected response")
+        return _refresh()                             # reload so the new tracks drop into the table
 
     ENRICH_SOURCES = {"musicbrainz": musicbrainz.enrich_playlist, "lastfm": lastfm.enrich_playlist,
                       "discogs": discogs.enrich_playlist}
@@ -204,9 +212,8 @@ def build(ctx) -> APIRouter:
 
     @router.post("/settings/lastfm-key")
     async def set_lastfm_key(request: Request):
-        body = await request.json()
-        store.set_setting("lastfm_api_key", (body.get("key") or "").strip())
-        return JSONResponse({"ok": True, "configured": lastfm.api_key(store) is not None})
+        store.set_setting("lastfm_api_key", ((await request.form()).get("key") or "").strip())
+        return Response(status_code=204)
 
     @router.post("/playlist/{pid}/track-genre")
     async def playlist_set_track_genre(pid: int, request: Request):
@@ -236,32 +243,31 @@ def build(ctx) -> APIRouter:
 
     @router.post("/playlist/{pid}/remove-track")
     async def playlist_remove_track(pid: int, request: Request):
-        body = await request.json()
-        vid = (body.get("video_id") or "").strip()
+        vid = ((await request.form()).get("video_id") or "").strip()
         if not vid:
-            return JSONResponse({"ok": False, "error": "no track given"})
+            return _toast(request, "no track given")
         try:
-            return JSONResponse({"ok": True, **(await asyncio.to_thread(ctx.ops().remove_track, pid, vid))})
+            await asyncio.to_thread(ctx.ops().remove_track, pid, vid)
         except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
+            return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             logger.exception("remove-track failed for playlist %s", pid)
-            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
+            return _toast(request, "YouTube returned an unexpected response")
+        return HTMLResponse("")                       # htmx swaps empty -> the row is removed
 
     @router.post("/playlist/{pid}/reorder")
     async def playlist_reorder(pid: int, request: Request):
-        body = await request.json()
-        vid = (body.get("video_id") or "").strip()
-        before = (body.get("before_video_id") or "").strip()
+        form = await request.form()
+        vid = (form.get("video_id") or "").strip()
+        before = (form.get("before_video_id") or "").strip()
         if not vid:
-            return JSONResponse({"ok": False, "error": "no track given"})
+            return _toast(request, "no track given")
         try:
-            return JSONResponse({"ok": True, **(await asyncio.to_thread(ctx.ops().reorder_track, pid, vid, before))})
-        except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
-        except Exception:  # noqa: BLE001
+            await asyncio.to_thread(ctx.ops().reorder_track, pid, vid, before)
+        except Exception:  # noqa: BLE001  (the DOM already moved; reload to resync the true order)
             logger.exception("reorder failed for playlist %s", pid)
-            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
+            return _refresh()
+        return Response(status_code=204)              # success: order persisted, nothing to swap
 
     @router.post("/playlists/group")
     async def playlists_group(request: Request):

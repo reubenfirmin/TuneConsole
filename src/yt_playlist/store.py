@@ -284,6 +284,30 @@ class Store:
                 [(playlist_id, tid, pos) for pos, tid in enumerate(unique)])
 
     @_synchronized
+    def set_song_liked(self, identity_id, video_id, on) -> None:
+        """Reflect a like/unlike locally by toggling the song's membership in this identity's
+        Liked Music (LM) playlist, so the derived `liked` flag flips immediately (a later sync
+        reconciles with YouTube). No-op if the identity has no synced LM playlist yet."""
+        lm = self.conn.execute(
+            "SELECT id FROM playlists WHERE identity_id=? AND ytm_playlist_id='LM'", (identity_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT id, identity_key FROM tracks WHERE video_id=? ORDER BY id DESC LIMIT 1", (video_id,)).fetchone()
+        if lm is None or row is None:
+            return
+        lm_id, tid, key = lm["id"], row["id"], row["identity_key"]
+        with self.conn:
+            if on:
+                self.conn.execute(
+                    "INSERT INTO playlist_tracks(playlist_id, track_id, position) "
+                    "SELECT ?,?,(SELECT IFNULL(MAX(position),-1)+1 FROM playlist_tracks WHERE playlist_id=?) "
+                    "WHERE NOT EXISTS(SELECT 1 FROM playlist_tracks WHERE playlist_id=? AND track_id=?)",
+                    (lm_id, tid, lm_id, lm_id, tid))
+            else:   # drop every copy of this song (by identity_key) from this identity's LM
+                self.conn.execute(
+                    "DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id IN "
+                    "(SELECT id FROM tracks WHERE identity_key=?)", (lm_id, key))
+
+    @_synchronized
     def tracks_to_enrich(self, playlist_id) -> list:
         """Tracks in this playlist still missing genre or year (NULL or blank), in playlist order.
         Blank counts as missing so re-running enrichment retries tracks that didn't fully resolve."""
@@ -768,11 +792,14 @@ class Store:
                  "same_artist": bool(r["sa"]), "cooc": r["cooc"]} for r in rows]
 
     @_synchronized
-    def enrichment_candidates(self, limit=3) -> list[dict]:
-        """Playlists with missing genre tags, ranked by how much you listen to them.
+    def enrichment_candidates(self, limit=3, min_gaps=5, min_ratio=0.25) -> list[dict]:
+        """Playlists worth enriching, ranked by how much you listen to them.
 
-        Enriching the most-played playlists first gives the biggest recommendation lift:
-        recs lean on genre/year, so filling gaps where you listen most sharpens them most.
+        Only playlists with a meaningful share of missing genre tags qualify (>= min_ratio of
+        tracks, and at least min_gaps). This stops nagging about playlists you've already enriched
+        down to a handful of untaggable residuals — what's left there isn't worth another pass,
+        regardless of which providers ran. Enriching the most-played gappy playlists first gives
+        the biggest recommendation lift, since recs lean on genre/year.
         """
         rows = self.conn.execute(
             "WITH tp AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key) "
@@ -782,9 +809,9 @@ class Store:
             "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
             "JOIN tracks t ON t.id=pt.track_id "
             "LEFT JOIN tp ON tp.identity_key=t.identity_key "
-            "GROUP BY p.id HAVING gaps > 0 "
+            "GROUP BY p.id HAVING gaps >= :min_gaps AND (gaps * 1.0 / total) >= :min_ratio "
             "ORDER BY plays DESC, gaps DESC LIMIT :limit",
-            {"limit": limit}).fetchall()
+            {"limit": limit, "min_gaps": min_gaps, "min_ratio": min_ratio}).fetchall()
         return [{"id": r["id"], "title": r["title"], "thumbnail": r["thumb"], "gaps": r["gaps"],
                  "total": r["total"], "plays": r["plays"]} for r in rows]
 
@@ -797,23 +824,36 @@ class Store:
         "tracks" that are really DJ mixes/compilations are dropped too, since they co-occur with
         unrelated songs and blur the model. Each basket is a list of track identity_keys.
         """
+        from yt_playlist import genre_map
         good = {r["k"] for r in self.conn.execute(
             "SELECT DISTINCT identity_key k FROM tracks "
             "WHERE (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
             "AND (duration_s IS NULL OR duration_s <= 1200)")}
         out = []
+        # structural baskets: tracks grouped by a shared column
         for grp, cap in (
             ("SELECT pt.playlist_id g, t.identity_key k FROM playlist_tracks pt "
              "JOIN tracks t ON t.id=pt.track_id", max_playlist),
             ("SELECT album g, identity_key k FROM tracks WHERE album<>''", max_album),
             ("SELECT artist g, identity_key k FROM tracks WHERE artist<>''", 50),
-            ("SELECT genre g, identity_key k FROM tracks WHERE genre<>''", 60),
             ("SELECT snapshot_id g, identity_key k FROM history_items", max_session)):
             buckets = {}
             for r in self.conn.execute(grp):
                 if r["k"] in good:
                     buckets.setdefault(r["g"], set()).add(r["k"])
             out += [list(s) for s in buckets.values() if 1 < len(s) <= cap]
+        # content baskets: genre FAMILY (meta-genre map §2.1) and year decade
+        fam, yr = {}, {}
+        for r in self.conn.execute("SELECT genre, mb_year, identity_key k FROM tracks "
+                                   "WHERE genre<>'' OR mb_year<>''"):
+            if r["k"] not in good:
+                continue
+            if r["genre"]:
+                fam.setdefault(genre_map.family(r["genre"]), set()).add(r["k"])
+            if r["mb_year"] and r["mb_year"][:4].isdigit():
+                yr.setdefault(int(r["mb_year"][:4]) // 10 * 10, set()).add(r["k"])
+        out += [list(s) for s in fam.values() if 1 < len(s) <= 80]
+        out += [list(s) for s in yr.values() if 1 < len(s) <= 80]
         return out
 
     @_synchronized
@@ -845,6 +885,36 @@ class Store:
             f"WHERE identity_key IN ({qs}) GROUP BY identity_key", keys).fetchall()
         return {r["k"]: {"title": r["title"], "artist": r["artist"], "album": r["album"] or "",
                          "video_id": r["vid"], "thumbnail": r["thumb"]} for r in rows}
+
+    @_synchronized
+    def genre_cooccurrence(self) -> dict:
+        """How often each unordered genre pair shares a playlist — the corpus adjacency signal.
+
+        Returns {"pairs": {(g1,g2): count}, "occ": {genre: #playlists}}. Used to pull genres the
+        user repeatedly playlists together closer than the static map alone (spec §2.1/§5.3).
+        """
+        from collections import Counter
+        pl = {}
+        for r in self.conn.execute(
+            "SELECT pt.playlist_id pid, t.genre g FROM playlist_tracks pt "
+            "JOIN tracks t ON t.id=pt.track_id WHERE t.genre<>''"):
+            pl.setdefault(r["pid"], set()).add(r["g"])
+        pairs, occ = Counter(), Counter()
+        for genres in pl.values():
+            gs = sorted(genres)
+            for g in gs:
+                occ[g] += 1
+            for i in range(len(gs)):
+                for j in range(i + 1, len(gs)):
+                    pairs[(gs[i], gs[j])] += 1
+        return {"pairs": dict(pairs), "occ": dict(occ)}
+
+    @_synchronized
+    def playlist_track_genres(self, playlist_id) -> list[str]:
+        """Non-empty genres of a playlist's tracks (for the genre-diversity stat)."""
+        return [r["g"] for r in self.conn.execute(
+            "SELECT t.genre g FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
+            "WHERE pt.playlist_id=? AND t.genre<>''", (playlist_id,))]
 
     @_synchronized
     def top_played_keys(self, limit=10) -> list[str]:

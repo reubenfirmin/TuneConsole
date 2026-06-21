@@ -57,39 +57,14 @@ function rowSort(pid) {
     },
     ind(k) { return this.key === k ? (this.dir === 1 ? ' ▲' : ' ▼') : ''; },
 
-    async findAlternates(vid, title) {
+    // Open the modal and let htmx fetch + render the results (server builds the list; we only own the
+    // modal open/close + loading flag). The "Add" button hx-includes the checked results.
+    findAlternates(vid, title) {
       this.openMenu = null;
-      this.altOpen = true; this.altLoading = true; this.altErr = '';
-      this.altResults = []; this.altSel = {}; this.altTitle = title;
-      try {
-        const r = await fetch(`/playlist/${this.pid}/alternates?video_id=${encodeURIComponent(vid)}`);
-        const j = await r.json();
-        if (!j.ok) { this.altErr = j.error || 'search failed'; }
-        else { this.altResults = j.results; if (!j.results.length) this.altErr = 'No other versions found.'; }
-      } catch (e) { this.altErr = 'network error'; }
-      this.altLoading = false;
+      this.altOpen = true; this.altLoading = true; this.altTitle = title;
+      htmx.ajax('GET', `/playlist/${this.pid}/alternates?video_id=${encodeURIComponent(vid)}`,
+        { target: '#alt-results', swap: 'innerHTML' }).finally(() => { this.altLoading = false; });
     },
-    toggleAlt(vid) {
-      const s = { ...this.altSel };
-      if (s[vid]) delete s[vid]; else s[vid] = true;
-      this.altSel = s;
-    },
-    altCount() { return Object.keys(this.altSel).length; },
-    async addAlternates() {
-      const chosen = this.altResults.filter(r => this.altSel[r.videoId]);
-      if (!chosen.length) return;
-      this.altLoading = true; this.altErr = '';
-      try {
-        const r = await fetch(`/playlist/${this.pid}/add-tracks`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tracks: chosen }),
-        });
-        const j = await r.json();
-        if (!j.ok) { this.altErr = j.error || 'add failed'; this.altLoading = false; return; }
-        location.reload();                            // new tracks drop into the table
-      } catch (e) { this.altErr = 'network error'; this.altLoading = false; }
-    },
-    fmtDur(s) { return s ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : ''; },
 
     // remove-track confirmation modal
     rmOpen: false, rmBusy: false, rmErr: '', rmVid: '', rmTitle: '',
@@ -98,16 +73,15 @@ function rowSort(pid) {
       this.rmVid = vid; this.rmTitle = title; this.rmErr = ''; this.rmOpen = true;
     },
     async confirmRemove() {
-      this.rmBusy = true; this.rmErr = '';
+      this.rmBusy = true;
+      const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(this.rmVid)}"]`);
+      // htmx owns request + swap: success returns an empty row -> the <tr> is removed; an error
+      // returns the OOB toast and leaves the row in place.
       try {
-        const r = await fetch(`/playlist/${this.pid}/remove-track`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ video_id: this.rmVid }),
-        });
-        const j = await r.json();
-        if (!j.ok) { this.rmErr = j.error || 'remove failed'; this.rmBusy = false; return; }
-        location.reload();
-      } catch (e) { this.rmErr = 'network error'; this.rmBusy = false; }
+        await htmx.ajax('POST', `/playlist/${this.pid}/remove-track`,
+          { values: { video_id: this.rmVid }, target: tr, swap: 'outerHTML' });
+      } catch (e) { /* leave the row; a reload would resync */ }
+      this.rmBusy = false; this.rmOpen = false;
     },
 
     // --- drag-and-drop reorder via SortableJS (floating drag clone + ghost placeholder) ---
@@ -129,11 +103,10 @@ function rowSort(pid) {
           const moved = e.item.dataset.vid;
           const next = e.item.nextElementSibling;
           const beforeVid = next && next.classList.contains('srow') ? next.dataset.vid : '';
-          fetch(`/playlist/${this.pid}/reorder`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ video_id: moved, before_video_id: beforeVid }),
-          }).then(r => r.json()).then(j => { if (!j.ok) location.reload(); })
-            .catch(() => location.reload());
+          // htmx persists the new order (no swap — the DOM is already reordered); on failure the
+          // server replies HX-Refresh to reload and resync the true order.
+          htmx.ajax('POST', `/playlist/${this.pid}/reorder`,
+            { values: { video_id: moved, before_video_id: beforeVid }, swap: 'none' });
         },
       });
     },
@@ -453,15 +426,11 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
       if (!key) { this.keyErr = 'Enter a key.'; return; }
       this.keyBusy = true; this.keyErr = '';
       try {
-        const r = await fetch('/settings/lastfm-key', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key }),
-        });
-        const j = await r.json();
+        await htmx.ajax('POST', '/settings/lastfm-key', { values: { key }, swap: 'none' });
         this.keyBusy = false;
-        if (!j.configured) { this.keyErr = 'Could not save that key.'; return; }
         this.lastfmConfigured = true; this.keyModal = false; this.keyValue = '';
         this.start('lastfm');                       // saved — run it now
-      } catch (e) { this.keyBusy = false; this.keyErr = 'Network error.'; }
+      } catch (e) { this.keyBusy = false; this.keyErr = 'Could not save that key.'; }
     },
     // if the page was refreshed while a job is running, reattach to it and resume the progress UI
     rejoinIfActive() {

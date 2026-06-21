@@ -564,46 +564,6 @@ def test_playlists_tab_renders(store):
     assert c.get("/").status_code == 200                          # / is now the Home tab
 
 
-def test_find_and_add_alternate_versions(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
-    results = [
-        {"videoId": "v0", "title": "Song A", "artists": [{"name": "Artist X"}], "duration_seconds": 200},
-        {"videoId": "v1", "title": "Song A (Live)", "artists": [{"name": "Artist X"}], "duration": "4:10"},
-        {"videoId": "v2", "title": "Song A (Remix)", "artists": [{"name": "DJ Z"}], "duration_seconds": 190},
-    ]
-    fc = FakeClient(search_results=results)
-    c = _client(store, lambda: {iid: fc})
-
-    # search excludes the source track and de-dupes across the songs/videos passes
-    r = c.get(f"/playlist/{a}/alternates?video_id=v0").json()
-    assert r["ok"] and [x["videoId"] for x in r["results"]] == ["v1", "v2"]
-    assert r["results"][0]["duration"] == 250          # "4:10" parsed to seconds
-
-    # adding the chosen alternates appends them to the playlist (YT + store) and bumps the count
-    chosen = [x for x in r["results"] if x["videoId"] in ("v1", "v2")]
-    add = c.post(f"/playlist/{a}/add-tracks", json={"tracks": chosen}).json()
-    assert add == {"ok": True, "added": 2, "skipped": 0, "count": 3}
-    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v1", "v2"]
-    assert store.get_playlist(a).track_count == 3
-    assert fc.added == [("PL1", ["v1", "v2"])]
-
-    # empty selection is rejected
-    assert c.post(f"/playlist/{a}/add-tracks", json={"tracks": []}).json()["ok"] is False
-
-
-def test_added_alternate_keeps_album_link(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 0, "h", 1.0)
-    c = _client(store, lambda: {iid: FakeClient()})
-    track = {"videoId": "v9", "title": "T", "artist": "A", "album": "The Album",
-             "album_browse": "MPREb_123", "duration": 200, "thumbnail": ""}
-    assert c.post(f"/playlist/{a}/add-tracks", json={"tracks": [track]}).json()["ok"]
-    detail = store.playlist_tracks_detail(a)
-    assert detail[0]["album_browse"] == "MPREb_123"   # album becomes a browse link in the view
-
-
 def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     import json as _json
     import yt_playlist.musicbrainz as mb
@@ -657,7 +617,7 @@ def test_liked_songs_get_a_heart(store):
     assert liked == {"v1": True, "v2": False}                       # song in LM is liked
     assert store.artist_songs("A")[0]["liked"] is True             # and wherever the song appears
     c = _client(store, lambda: {iid: FakeClient()})
-    assert "liked-heart" in c.get(f"/playlist/{mix}").text
+    assert "like-btn on" in c.get(f"/playlist/{mix}").text          # the liked song shows a filled heart
 
 
 def test_remove_playlist_preserves_group(store):
@@ -815,23 +775,6 @@ def test_lastfm_enrich_scrapes_release_year(monkeypatch):
     assert fetched == ["https://www.last.fm/music/Ph+1/Sizzling+Love"]   # the album page, not the track
 
 
-def test_lastfm_key_saved_via_ui(store, monkeypatch, tmp_path):
-    monkeypatch.delenv("LASTFM_API_KEY", raising=False)
-    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))   # no env/config key
-    import yt_playlist.lastfm as lf
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
-    c = _client(store, lambda: {iid: FakeClient()})
-
-    # the playlist page reflects "not configured"; after saving a key it flips to configured
-    assert lf.api_key(store) is None
-    assert "enrichPanel(%d, false," % a in c.get(f"/playlist/{a}").text
-    r = c.post("/settings/lastfm-key", json={"key": " abc123 "}).json()
-    assert r == {"ok": True, "configured": True}
-    assert store.get_setting("lastfm_api_key") == "abc123" and lf.api_key(store) == "abc123"
-    assert "enrichPanel(%d, true," % a in c.get(f"/playlist/{a}").text
-
-
 def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
     monkeypatch.delenv("LASTFM_API_KEY", raising=False)
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))   # empty config -> no key
@@ -844,31 +787,6 @@ def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
     assert "Last.fm API key" in body
-
-
-def test_reorder_and_remove_track(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track(f"v{i}", f"S{i}", "X", "Alb", 200, 1) for i in range(3)])
-    # the YT playlist exposes setVideoIds (what moves/removes are keyed on)
-    fc = FakeClient(tracks={"PL1": [{"videoId": f"v{i}", "setVideoId": f"sv{i}"} for i in range(3)]})
-    c = _client(store, lambda: {iid: fc})
-
-    # move v2 before v0 (to the top)
-    assert c.post(f"/playlist/{a}/reorder", json={"video_id": "v2", "before_video_id": "v0"}).json()["ok"]
-    assert fc.edited[-1] == ("PL1", {"moveItem": ("sv2", "sv0")})
-    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v2", "v0", "v1"]
-
-    # move v2 to the end (empty successor -> bare setVideoId)
-    c.post(f"/playlist/{a}/reorder", json={"video_id": "v2", "before_video_id": ""})
-    assert fc.edited[-1] == ("PL1", {"moveItem": "sv2"})
-    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v1", "v2"]
-
-    # remove v1
-    assert c.post(f"/playlist/{a}/remove-track", json={"video_id": "v1"}).json() == {"ok": True, "count": 2}
-    assert fc.removed == [("PL1", [{"videoId": "v1", "setVideoId": "sv1"}])]
-    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v2"]
-    assert store.get_playlist(a).track_count == 2
 
 
 def test_toasts_region_present_on_every_page(store):

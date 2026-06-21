@@ -1,9 +1,46 @@
 """Local recommendation logic. Pure functions over a Store (no web imports), like analysis.py."""
 from dataclasses import dataclass
 
-from yt_playlist import analysis, embed
+import statistics
+
+from yt_playlist import analysis, embed, genre_map
 
 SYNC_STALE_S = 24 * 3600   # highlight the Sync card after 24h
+
+
+def playlist_genre_diversity(store, playlist_id):
+    """How genre-tight vs genre-wide a playlist is, via pairwise genre-map distances.
+
+    Returns {min, max, median, n_tagged} over its tagged tracks, or None if fewer than two
+    are tagged. median≈0 = tight (one vibe); median≈1 = eclectic. Spec §6.B.
+    """
+    genres = store.playlist_track_genres(playlist_id)
+    if len(genres) < 2:
+        return None
+    dists = [genre_map.distance(genres[i], genres[j])
+             for i in range(len(genres)) for j in range(i + 1, len(genres))]
+    return {"min": min(dists), "max": max(dists),
+            "median": statistics.median(dists), "n_tagged": len(genres)}
+
+
+def genre_distance_fn(store, alpha=0.5):
+    """A genre-distance function blending the static meta-genre map with this library's own
+    co-occurrence: genres you repeatedly playlist together are pulled closer. alpha = static
+    weight. Falls back to the static map for pairs you've never grouped. Spec §2.1/§5.3.
+    """
+    co = store.genre_cooccurrence()
+    pairs, occ = co["pairs"], co["occ"]
+
+    def dist(g1, g2):
+        base = genre_map.distance(g1, g2)
+        a, b = (g1, g2) if g1 <= g2 else (g2, g1)
+        c = pairs.get((a, b), 0)
+        if c == 0 or not occ.get(g1) or not occ.get(g2):
+            return base
+        jaccard = c / (occ[g1] + occ[g2] - c)
+        return alpha * base + (1 - alpha) * (1 - jaccard)
+
+    return dist
 
 
 @dataclass

@@ -96,13 +96,13 @@ def test_take_action_empty_when_clean(store):
 
 def test_take_action_enrichment_ranked_by_playcount(store):
     iid = store.upsert_identity("main", "cred", None, True)
-    hot = store.upsert_track("v1", "Hot", "A", None, None)    # no genre -> gap
-    cold = store.upsert_track("v2", "Cold", "B", None, None)  # no genre -> gap
-    php = store.upsert_playlist(iid, "PH", "Hot List", 1, "h", 0.0, "http://t/hot.jpg")
-    plp = store.upsert_playlist(iid, "PL", "Cold List", 1, "h2", 0.0)
-    store.set_playlist_tracks(php, [hot])
-    store.set_playlist_tracks(plp, [cold])
-    store.add_history_snapshot(iid, 1.0, ["hot|a"])           # only Hot List has plays
+    hot = [store.upsert_track(f"h{i}", f"H{i}", "HA", None, None) for i in range(6)]   # all gappy
+    cold = [store.upsert_track(f"c{i}", f"C{i}", "CA", None, None) for i in range(6)]  # all gappy
+    php = store.upsert_playlist(iid, "PH", "Hot List", 6, "h", 0.0, "http://t/hot.jpg")
+    plp = store.upsert_playlist(iid, "PL", "Cold List", 6, "h2", 0.0)
+    store.set_playlist_tracks(php, hot)
+    store.set_playlist_tracks(plp, cold)
+    store.add_history_snapshot(iid, 1.0, ["h0|ha"])           # only Hot List has plays
 
     items = recommend.take_action(store, now=1000.0, auth_expired={})
     enrich = [i for i in items if i.kind == "enrich"]
@@ -113,6 +113,18 @@ def test_take_action_enrichment_ranked_by_playcount(store):
     assert "Cold List" in enrich[1].title
     assert enrich[0].cta_href == f"/playlist/{php}"
     assert enrich[0].thumbnail == "http://t/hot.jpg"  # card carries the playlist thumbnail
+
+
+def test_enrichment_skips_mostly_enriched_playlist(store):
+    """A playlist enriched down to a few untaggable residuals must stop nagging (the 13/639 bug)."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    ts = [store.upsert_track(f"t{i}", f"T{i}", "A", None, None) for i in range(20)]
+    pid = store.upsert_playlist(iid, "P", "Almost Done", 20, "h", 0.0)
+    store.set_playlist_tracks(pid, ts)
+    for t in ts[2:]:                                  # tag all but 2 -> 10% gap, below threshold
+        store.set_track_genre(t, "Techno")
+    items = recommend.take_action(store, now=1000.0, auth_expired={})
+    assert not [i for i in items if i.kind == "enrich"]
 
 
 def test_sync_status_never_synced(store):

@@ -445,9 +445,21 @@ tr:hover .pl-play, tr.selrow .pl-play { opacity: 1; }
   background: var(--surface-2); border: 1px solid var(--border-2); font-size: 0.5rem; line-height: 1;
   color: var(--dim); }
 .unavail { color: var(--danger); margin-left: 0.3rem; }
-.liked-col { text-align: center; padding-left: 0; padding-right: 0; }
+.liked-col { text-align: center; padding: 0 .45rem 0 .6rem; }   /* breathing room from the thumbnail */
 .liked-heart { color: #ff5c8a; font-size: 0.85rem; line-height: 1;
   filter: drop-shadow(0 0 4px rgba(255,92,138,0.45)); }
+
+/* clickable Liked-Music toggle: an SVG heart, outline by default, filled-pink + soft haze when on
+   (the haze mirrors the green play-on-YouTube button's tinted background). */
+.like-btn { display: inline-flex; align-items: center; justify-content: center;
+  width: 1.85rem; height: 1.85rem; border-radius: 50%; padding: 0;
+  background: none; border: 0; box-shadow: none; cursor: pointer; color: var(--faint);
+  transition: color .12s ease, background .12s ease, box-shadow .12s ease, transform .08s ease; }
+.like-btn svg { width: 1.05rem; height: 1.05rem; display: block; }
+.like-btn:hover { color: #ff5c8a; transform: scale(1.08); box-shadow: none; }
+.like-btn.on { color: #ff5c8a; background: rgba(255,92,138,0.14);
+  box-shadow: inset 0 0 0 1.5px rgba(255,92,138,0.55); }
+.like-btn.htmx-request { opacity: .5; }
 
 /* click-to-edit genre cell */
 .gdisplay { cursor: pointer; display: inline-flex; align-items: center; min-height: 1.5rem; }

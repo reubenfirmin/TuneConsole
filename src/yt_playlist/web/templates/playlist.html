@@ -71,7 +71,9 @@
      genre/⋯ popups (which need visible overflow) are unaffected, and the sticky header is preserved
      (no scroll/overflow context is introduced). */
   .track-table { table-layout: fixed; }
-  .track-table td.t-trunc { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  /* free-text columns wrap to as many lines as needed (never cropped); fixed layout keeps the
+     column widths bounded so the table still fits the card. break long unspaced tokens too. */
+  .track-table td.t-wrap { white-space: normal; overflow-wrap: anywhere; }
 </style>
 <div x-data="rowSort({{ pl.id }})" x-init="$nextTick(() => initSortable())">
 <div class="card">
@@ -84,7 +86,7 @@
       <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
       <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
       <th class="sorth num" style="width:4.5rem" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
-      <th class="sorth" style="width:8rem" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
+      <th class="sorth" style="width:6rem" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
       <th class="sorth num" style="width:4.5rem" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
       <th class="sorth num" style="width:5rem" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
       <th style="width:2.4rem"></th>
@@ -145,31 +147,14 @@
          @click="altOpen = false" @keydown.escape.window="altOpen = false">
       <div class="modal modal-wide" @click.stop x-transition.scale.origin.center>
         <h3>Alternate versions <span class="muted" x-show="altTitle" x-text="'· ' + altTitle"></span></h3>
-        <p class="muted" x-show="altLoading && !altResults.length">Searching YouTube…</p>
-        <p class="notice err" x-show="altErr" x-text="altErr"></p>
-        <div class="alt-list" x-show="altResults.length">
-          <template x-for="r in altResults" :key="r.videoId">
-            <label class="alt-row" :class="{ on: altSel[r.videoId] }">
-              <input type="checkbox" :checked="!!altSel[r.videoId]" @change="toggleAlt(r.videoId)">
-              <img class="album-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
-              <span class="alt-meta">
-                <span class="alt-title" x-text="r.title"></span>
-                <span class="alt-sub">
-                  <span x-text="r.artist"></span>
-                  <template x-if="r.album"><span x-text="' · ' + r.album"></span></template>
-                  <span class="alt-kind" x-text="r.kind"></span>
-                </span>
-              </span>
-              <span class="mono alt-dur" x-text="fmtDur(r.duration)"></span>
-              <a class="alink" :href="'https://music.youtube.com/watch?v=' + r.videoId"
-                 target="_blank" rel="noopener" @click.stop title="Try it on YouTube Music">Play ↗</a>
-            </label>
-          </template>
-        </div>
+        <p class="muted" x-show="altLoading">Searching YouTube…</p>
+        {# htmx swaps the server-rendered results (checkboxes carrying each track's JSON) here #}
+        <div id="alt-results"></div>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="altOpen = false">Cancel</button>
-          <button type="button" :disabled="!altCount() || altLoading" @click="addAlternates()"
-                  x-text="altCount() ? `Add ${altCount()} to playlist` : 'Add to playlist'"></button>
+          {# include the checked results and add them; the server reloads the page with the new tracks #}
+          <button type="button" hx-post="/playlist/{{ pl.id }}/add-tracks" hx-include="#alt-results"
+                  :disabled="altLoading">Add to playlist</button>
         </div>
       </div>
     </div>
