@@ -80,7 +80,7 @@ def build(ctx) -> APIRouter:
         return out
 
     def _draft(ids, members, *, return_to=None):
-        sig = tuple(sorted(ids))
+        sig = tuple(ids)   # keep the entry order so member letters/colors stay stable across refresh
         d = drafts.get(sig)
         if d is None:
             d = {"excluded": set(), "pick": {}, "sort": "playlist", "mode": "interleaved",
@@ -156,14 +156,15 @@ def build(ctx) -> APIRouter:
         draft = _draft(ids, members)
         vids = [t["video_id"] for t in _ordered(tracks, draft)
                 if t["tid"] not in draft["excluded"] and t["video_id"]]
+        member_ids = [m["id"] for m in members]   # the existing playlists only (not stale ?ids entries)
         try:
-            s = ctx.ops().apply_merge(ids, vids, draft["keep"])
+            s = ctx.ops().apply_merge(member_ids, vids, draft["keep"])
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             logger.exception("merge/apply failed")
             return _toast(request, "YouTube returned an unexpected response.")
-        drafts.pop(tuple(sorted(ids)), None)            # consume the draft
+        drafts.pop(tuple(ids), None)                    # consume the draft
         parts = []
         if s["added"]:
             parts.append(f"{s['added']} added")

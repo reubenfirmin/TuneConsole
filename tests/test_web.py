@@ -453,6 +453,22 @@ def test_merge_apply_route(store, monkeypatch, tmp_path):
     assert r.status_code == 200 and "/cleanup" in r.headers.get("hx-redirect", "")   # HX-Redirect on success
     assert client.deleted == ["PLB"] and store.get_playlist(b) is None
 
+
+def test_merge_apply_ignores_stale_ids_in_url(store, monkeypatch, tmp_path):
+    # a non-existent id in ?ids (e.g. a playlist deleted after the link was made) must not break Apply:
+    # the editor renders the existing playlists, and Apply operates on that filtered member set.
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
+    t1 = store.upsert_track("v1", "One", "X", None, None, 1)
+    store.set_playlist_tracks(a, [t1]); store.set_playlist_tracks(b, [t1])
+    c = _client(store, lambda: {iid: FakeClient()})
+    c.get(f"/merge?ids={a},{b},99999")                    # 99999 doesn't exist
+    r = c.post(f"/merge/apply?ids={a},{b},99999")
+    assert r.status_code == 200 and r.headers.get("hx-redirect")   # applied (not the 422 error toast)
+    assert store.get_playlist(b) is None                  # kept A, deleted B -> merge ran
+
 def test_merge_editor_renders_nway(store):
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
@@ -891,6 +907,15 @@ def test_move_run_same_identity_shows_inline_error(store):
     r = c.post("/move/run", data={"playlist": pid, "target_identity": i1})
     assert r.status_code == 200
     assert "same" in r.text.lower() and "move-row" in r.text   # error re-rendered in the row
+
+
+def test_move_run_gone_playlist_drops_row(store):
+    # the playlist was deleted elsewhere between page load and click -> ops().move raises,
+    # and the row must drop cleanly (empty fragment) rather than render a None-deref'd row.
+    i1, i2, _pid = _two_identity_move(store)
+    c = _client(store, lambda: {i1: FakeClient(), i2: FakeClient()})
+    r = c.post("/move/run", data={"playlist": "99999", "target_identity": i2})   # no such playlist
+    assert r.status_code == 200 and r.text.strip() == ""
 
 
 def test_delete_empty_removes_row(store):

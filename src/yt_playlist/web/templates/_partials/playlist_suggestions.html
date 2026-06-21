@@ -3,7 +3,24 @@
 <p class="section-note">Tracks you own that fit here but aren't in it yet.</p>
 <div class="for-you-grid">
   {% for f in suggestions %}
-  <div class="fy-card card">
+  <div class="fy-card card" x-data="{
+         state: 'idle',
+         async add() {
+           if (this.state === 'busy' || this.state === 'added') return;
+           this.state = 'busy';
+           try {
+             const r = await fetch('/playlist/{{ pid }}/add-tracks', {
+               method: 'POST', headers: { 'Content-Type': 'application/json' },
+               body: JSON.stringify({ tracks: [{
+                 videoId: {{ f.video_id|tojson }}, title: {{ f.title|tojson }},
+                 artist: {{ f.artist|tojson }}, album: {{ f.album|tojson }},
+                 thumbnail: {{ f.thumbnail|tojson }} }] })
+             });
+             const j = await r.json();
+             this.state = j.ok ? 'added' : 'error';
+           } catch (e) { this.state = 'error'; }
+         }
+       }">
     <a class="fy-cover" href="https://music.youtube.com/watch?v={{ f.video_id }}"
        target="_blank" rel="noopener" title="Play on YouTube Music">
       {% if f.thumbnail %}<img src="{{ f.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
@@ -14,6 +31,9 @@
       <span class="fy-artist">{{ f.artist }}</span>
       <span class="fy-reason">{{ f.reason }}</span>
     </div>
+    <button type="button" class="btn-ghost btn-sm fy-add" :class="{ added: state === 'added' }"
+            :disabled="state === 'busy' || state === 'added'" @click="add()"
+            x-text="state === 'added' ? 'Added ✓' : state === 'busy' ? 'Adding…' : state === 'error' ? 'Retry' : '+ Add'"></button>
   </div>
   {% endfor %}
 </div>

@@ -67,6 +67,7 @@
 
 <div x-data="rowSort({{ pl.id }})" x-init="$nextTick(() => initSortable())">
 <div class="card">
+  <div style="overflow-x:auto">           {# wide playlists scroll horizontally instead of clipping past the card #}
   <table>
     <thead><tr>
       <th class="num">#</th>
@@ -88,6 +89,7 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
 </div>
 <datalist id="genrelist">{% for g in genres %}<option value="{{ g }}"></option>{% endfor %}</datalist>
 

@@ -9,7 +9,9 @@ def build(ctx) -> APIRouter:
 
     def _move_row(request, playlist_id, *, message=None, error=None):
         p = store.get_playlist(playlist_id)
-        kinds = {p.ytm_playlist_id: store.playlist_kind(p.id)} if p else {}
+        if p is None:
+            return HTMLResponse("")   # the playlist is gone (deleted elsewhere) -> drop the row
+        kinds = {p.ytm_playlist_id: store.playlist_kind(p.id)}
         return templates.TemplateResponse(request, "_partials/move_row.html",
                                           {"p": p, "kinds": kinds, "message": message, "error": error})
 

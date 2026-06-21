@@ -663,7 +663,9 @@ button.htmx-request .check-busy { display: inline; }
   background: var(--surface-2); }
 .fy-cover img { width: 100%; height: 100%; object-fit: cover; }
 .fy-play { position: absolute; color: #fff; opacity: 0.85; font-size: 0.9rem; }
-.fy-meta { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.fy-meta { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1 1 auto; }
 .fy-title { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fy-artist { color: var(--dim); font-size: 0.84rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fy-reason { color: var(--accent-2); font-size: 0.76rem; margin-top: 0.15rem; }
+.fy-add { flex: 0 0 auto; align-self: center; white-space: nowrap; }
+.fy-add.added { color: var(--teal); border-color: transparent; }

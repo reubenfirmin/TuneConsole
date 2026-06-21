@@ -32,3 +32,19 @@ def test_playlist_suggestions_unknown_id_404(store):
 def test_playlist_page_lazy_loads_suggestions(store):
     target, c = _seed(store)
     assert f"/playlist/{target}/suggestions" in c.get(f"/playlist/{target}").text
+
+
+def test_suggestion_card_has_wired_add_button(store):
+    target, c = _seed(store)
+    frag = c.get(f"/playlist/{target}/suggestions").text
+    assert f"/playlist/{target}/add-tracks" in frag    # Add posts to the existing endpoint
+    assert "+ Add" in frag and "v2" in frag            # button + the suggested track's videoId
+
+
+def test_add_suggested_track_adds_it_to_the_playlist(store):
+    target, c = _seed(store)
+    # what the Add button POSTs for the "Bonus" suggestion (videoId v2)
+    r = c.post(f"/playlist/{target}/add-tracks",
+               json={"tracks": [{"videoId": "v2", "title": "Bonus", "artist": "Band"}]})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert "bonus|band" in store.get_playlist_track_keys(target)

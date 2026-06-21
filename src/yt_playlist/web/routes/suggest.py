@@ -14,6 +14,7 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="playlist not found")
         return templates.TemplateResponse(request, "_partials/playlist_suggestions.html", {
             "suggestions": recommend.complete_playlist(store, pid),
+            "pid": pid,
         })
 
     return router
