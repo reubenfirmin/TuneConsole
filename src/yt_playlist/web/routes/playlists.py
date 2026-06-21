@@ -24,7 +24,19 @@ def build(ctx) -> APIRouter:
         # location.reload(); the list re-renders from the server as it did before.
         return Response(status_code=200, headers={"HX-Refresh": "true"})
 
-    @router.get("/")
+    def _toast(request, message):
+        return templates.TemplateResponse(
+            request, "_partials/error_toast.html", {"message": message},
+            status_code=422, headers={"HX-Reswap": "none"})
+
+    def _track_row(request, pid, video_id):
+        # Re-render one track's <tr> (the shared swap unit for manual edits and enrich).
+        for i, t in enumerate(store.playlist_tracks_detail(pid), start=1):
+            if t["video_id"] == video_id:
+                return templates.TemplateResponse(request, "_partials/track_row.html", {"t": t, "idx": i})
+        return Response(status_code=204)         # row no longer present — nothing to swap
+
+    @router.get("/playlists")
     def playlists_page(request: Request):
         labels = {i.id: i.label for i in store.get_identities()}
         groups = store.get_playlist_groups()                 # ytm -> group name
@@ -157,17 +169,18 @@ def build(ctx) -> APIRouter:
 
     @router.post("/playlist/{pid}/rename")
     async def playlist_rename(pid: int, request: Request):
-        body = await request.json()
-        title = (body.get("title") or "").strip()
+        title = ((await request.form()).get("title") or "").strip()
         if not title:
-            return JSONResponse({"ok": False, "error": "name can't be empty"})
+            return _toast(request, "name can't be empty")
         try:
-            return JSONResponse({"ok": True, **(await asyncio.to_thread(ctx.ops().rename, pid, title))})
+            await asyncio.to_thread(ctx.ops().rename, pid, title)
         except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
+            return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             logger.exception("rename of playlist %s failed", pid)
-            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
+            return _toast(request, "YouTube returned an unexpected response")
+        return templates.TemplateResponse(request, "_partials/playlist_head.html",
+                                          {"pl": store.get_playlist(pid)})
 
     @router.post("/settings/lastfm-key")
     async def set_lastfm_key(request: Request):
@@ -177,29 +190,29 @@ def build(ctx) -> APIRouter:
 
     @router.post("/playlist/{pid}/track-genre")
     async def playlist_set_track_genre(pid: int, request: Request):
-        body = await request.json()
-        vid = (body.get("video_id") or "").strip()
-        genre = (body.get("genre") or "").strip()
+        form = await request.form()
+        vid = (form.get("video_id") or "").strip()
+        genre = (form.get("genre") or "").strip()
         if not vid:
-            return JSONResponse({"ok": False, "error": "no track given"})
+            return _toast(request, "no track given")
         tid = store.track_ids_for_videos([vid]).get(vid)
         if tid is None:
-            return JSONResponse({"ok": False, "error": "track not found"})
+            return _toast(request, "track not found")
         store.set_track_genre(tid, genre)
-        return JSONResponse({"ok": True, "genre": genre})
+        return _track_row(request, pid, vid)
 
     @router.post("/playlist/{pid}/track-year")
     async def playlist_set_track_year(pid: int, request: Request):
-        body = await request.json()
-        vid = (body.get("video_id") or "").strip()
-        year = (body.get("year") or "").strip()
+        form = await request.form()
+        vid = (form.get("video_id") or "").strip()
+        year = (form.get("year") or "").strip()
         if not vid:
-            return JSONResponse({"ok": False, "error": "no track given"})
+            return _toast(request, "no track given")
         tid = store.track_ids_for_videos([vid]).get(vid)
         if tid is None:
-            return JSONResponse({"ok": False, "error": "track not found"})
+            return _toast(request, "track not found")
         store.set_track_year(tid, year)
-        return JSONResponse({"ok": True, "year": year})
+        return _track_row(request, pid, vid)
 
     @router.post("/playlist/{pid}/remove-track")
     async def playlist_remove_track(pid: int, request: Request):

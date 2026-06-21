@@ -1,8 +1,9 @@
 """Setup wizard: render the config form, live-check the capture, and save identities."""
+import json
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 
 from yt_playlist.setup import BROWSER_CREDENTIAL_FILENAME
 
@@ -31,14 +32,20 @@ def build(ctx) -> APIRouter:
     @router.post("/setup/check")
     async def setup_check(request: Request):
         # Live-verify the capture (network) and report who's signed in, for the green checkmark.
+        # Returns the result fragment AND fires an `setup-checked` HX-Trigger so the page's Alpine
+        # can auto-fill the master label and (on re-auth) submit immediately.
         if setup is None:
             raise HTTPException(status_code=404, detail="setup not available")
         form = await request.form()
         try:
             account = setup.check_auth(form.get("headers", "") or "")
         except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
-        return JSONResponse({"ok": True, "account": account})
+            resp = templates.TemplateResponse(request, "_partials/setup_check.html", {"error": str(e)})
+            resp.headers["HX-Trigger"] = json.dumps({"setup-checked": {"ok": False}})
+            return resp
+        resp = templates.TemplateResponse(request, "_partials/setup_check.html", {"account": account})
+        resp.headers["HX-Trigger"] = json.dumps({"setup-checked": {"ok": True, "account": account}})
+        return resp
 
     @router.post("/setup")
     async def setup_submit(request: Request):

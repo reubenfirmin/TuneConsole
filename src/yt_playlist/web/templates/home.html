@@ -1,0 +1,16 @@
+{% extends "base.html" %}{% from "_macros.html" import banner %}
+{% block title %}Home — yt-playlist{% endblock %}
+{% block body %}
+{% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
+<div id="home">
+  <section class="home-control card">
+    {% include "_syncbar.html" %}
+  </section>
+
+  {% include "_partials/take_action.html" %}
+
+  <h2 class="section">For you</h2>
+  <p class="section-note">Songs you used to play a lot but haven't lately.</p>
+  {% include "_partials/for_you_section.html" %}
+</div>
+{% endblock %}

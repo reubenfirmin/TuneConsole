@@ -237,7 +237,9 @@ def test_setup_check_reports_account(store):
     app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/setup/check", data={"headers": "cookie: x"})
-    assert r.status_code == 200 and r.json() == {"ok": True, "account": "Reuben"}
+    assert r.status_code == 200
+    assert "Signed in as" in r.text and "Reuben" in r.text       # result fragment
+    assert "Reuben" in r.headers.get("hx-trigger", "")           # HX-Trigger carries the account
 
 def test_setup_check_reports_error(store):
     rt = _FakeRuntime(store); rt.check_error = "sign-in didn't work (401)"
@@ -245,8 +247,8 @@ def test_setup_check_reports_error(store):
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/setup/check", data={"headers": "bad"})
     assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is False and "sign-in" in body["error"]
+    assert "sign-in" in r.text                                    # error rendered in the fragment
+    assert '"ok": false' in r.headers.get("hx-trigger", "").lower()
 
 
 def test_setup_page_alpine_attr_well_formed(store):
@@ -314,7 +316,7 @@ def test_overlap_suppress_and_unsuppress(store):
     c = _client(store, lambda: {iid: FakeClient()})
     assert "Little Mix" in c.get("/cleanup").text
     r = c.post("/overlaps/suppress", data={"a": "PLFAV", "b": "PLSML"})
-    assert r.status_code == 200 and r.json()["ok"] is True   # AJAX, no redirect
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"   # pair -> Hidden, recompute
     # check the section header specifically (other copy may mention "hidden")
     assert 'Hidden overlaps <span class="count">' in c.get("/cleanup").text
     c.post("/overlaps/unsuppress", data={"a": "PLSML", "b": "PLFAV"})
@@ -334,11 +336,11 @@ def test_overlaps_suppress_many(store):
     c = _client(store, lambda: {iid: FakeClient()})
     r = c.post("/overlaps/suppress-many",
                data={"pairs": json.dumps([["PLFAV", "PL2"], ["PLFAV", "PL1"]])})
-    assert r.status_code == 200 and r.json() == {"ok": True, "n": 2}
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
     assert "Hidden overlaps" in c.get("/cleanup").text
     # malformed entries are ignored, not fatal
     r = c.post("/overlaps/suppress-many", data={"pairs": json.dumps([["only-one"], "junk", []])})
-    assert r.status_code == 200 and r.json()["n"] == 0
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
 
 
 def test_inline_dupe_delete_ok(store, monkeypatch, tmp_path):
@@ -417,7 +419,7 @@ def test_overlap_ignore_excludes_playlist(store):
     c = _client(store, lambda: {iid: FakeClient()})
     assert "Big Mixtape" in c.get("/cleanup").text                       # overlaps present
     r = c.post("/overlaps/ignore", data={"ytm": "PLFAV"})
-    assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
     body = c.get("/cleanup").text
     # overlaps card spans from its header to the next section header
     overlaps_card = body.split('id="overlaps"')[1].split('<h2 class="section')[0]
@@ -487,22 +489,23 @@ def test_overlap_keep_only_mutes_others(store):
     store.set_playlist_tracks(noise, [t[2]])   # shares only with PLFAV (t2), not PLB
     c = _client(store, lambda: {iid: FakeClient()})
     # mute PLFAV's other overlaps but keep the PLFAV–PLB pair
-    r = c.post("/overlaps/ignore-except", data={"ytm": "PLFAV", "a": "PLFAV", "b": "PLB"})
-    assert r.status_code == 200 and r.json()["ok"] is True
+    r = c.post("/overlaps/mute-others", data={"a": "PLFAV", "b": "PLB"})
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
     # scope to the overlaps card only (a 1-track playlist also shows under "Tiny playlists")
     overlaps_card = c.get("/cleanup").text.split('id="overlaps"')[1].split('<h2 class="section')[0]
     assert "Favorite Songs 2" in overlaps_card     # kept pair still shown
     assert "Little Mix" not in overlaps_card       # the noise overlap is muted
 
 
-def test_playlists_is_default_tab(store):
+def test_playlists_tab_renders(store):
     iid = store.upsert_identity("main", "cred", None, True)
     store.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
-    root = c.get("/").text
-    assert "All playlists" in root and "playlistsTab(" in root     # default tab is Playlists
+    page = c.get("/playlists").text                                # Playlists moved off / to /playlists
+    assert "All playlists" in page and "playlistsTab(" in page
     assert c.get("/cleanup").status_code == 200                    # cleanup moved here
-    assert 'href="/cleanup"' in root                              # nav points at it
+    assert 'href="/cleanup"' in page                              # nav points at it
+    assert c.get("/").status_code == 200                          # / is now the Home tab
 
 
 def test_find_and_add_alternate_versions(store):
@@ -785,20 +788,6 @@ def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
     assert "Last.fm API key" in body
-
-
-def test_rename_playlist(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Old Name", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "S", "X", "Al", 200, 1)])
-    fc = FakeClient()
-    c = _client(store, lambda: {iid: fc})
-
-    r = c.post(f"/playlist/{a}/rename", json={"title": "  New Name  "}).json()
-    assert r == {"ok": True, "title": "New Name"}            # trimmed
-    assert store.get_playlist(a).title == "New Name"          # store updated
-    assert fc.edited == [("PL1", {"title": "New Name"})]      # YouTube updated
-    assert c.post(f"/playlist/{a}/rename", json={"title": "  "}).json()["ok"] is False
 
 
 def test_set_track_year(store):

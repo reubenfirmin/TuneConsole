@@ -154,4 +154,5 @@ def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_aut
                       on_progress=on_progress, label=labels.get(identity_id),
                       on_auth_expired=on_auth_expired, on_auth_ok=on_auth_ok)
     _sync_saved_albums(store, clients, on_progress)
+    store.set_setting("last_sync_at", str(now))   # drives the Home "Time to sync" nudge
     _emit(on_progress, "done", "sync complete", final=True)

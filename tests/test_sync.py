@@ -1,5 +1,13 @@
-from yt_playlist.sync import sync_identity, content_hash
+from yt_playlist.sync import sync_identity, sync_all, content_hash
 from tests.conftest import FakeClient, _track
+
+
+def test_sync_all_records_last_sync_at(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    client = FakeClient(playlists=[{"playlistId": "PL1", "title": "Mix", "count": 1}],
+                        tracks={"PL1": [_track("v1", "A", "X")]})
+    sync_all(store, {iid: client}, now=1234.0)
+    assert store.get_setting("last_sync_at") == "1234.0"
 
 
 def test_content_hash_is_order_independent():

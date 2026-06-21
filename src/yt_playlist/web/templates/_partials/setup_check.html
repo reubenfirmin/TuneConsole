@@ -1,0 +1,4 @@
+{# Result of a live sign-in check. htmx swaps this into #check-result; the route also fires an
+   `setup-checked` HX-Trigger so Alpine can auto-fill the master label / auto-submit on re-auth. #}
+{% if account %}<span class="notice ok" style="padding:.3rem .7rem">✓ Signed in as <strong>{{ account }}</strong></span>
+{% elif error %}<span class="notice err" style="padding:.3rem .7rem">{{ error }}</span>{% endif %}

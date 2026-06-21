@@ -7,7 +7,6 @@
   <h1>Cleanup</h1>
   <p>Dedupe, consolidate, and prune playlists across your YouTube identities.</p>
 </div>
-{% include "_syncbar.html" %}
 
 <div class="metrics">
   <div class="metric"><div class="n">{{ n_playlists }}</div><div class="l">Playlists</div></div>
@@ -105,8 +104,8 @@
     {% set ay = o.playlist_a.ytm_playlist_id %}{% set by = o.playlist_b.ytm_playlist_id %}
     <tbody class="ov-row" data-a="{{ o.playlist_a.title|lower }}" data-b="{{ o.playlist_b.title|lower }}"
            data-shared="{{ o.shared|length }}" data-ay="{{ ay }}" data-by="{{ by }}"
-           x-data="hideRow()" x-show="state !== 'gone'" x-transition.opacity.duration.300ms>
-      <tr :class="{ rowdel: state === 'hiding' }">
+           x-data="{ open: false, mx: 0, my: 0 }">
+      <tr>
         <td><span class="abx">A</span>{{ pllink(ay, o.playlist_a.title, o.count_a) }}</td>
         <td><span class="abx">B</span>{{ pllink(by, o.playlist_b.title, o.count_b) }}</td>
         <td>
@@ -116,7 +115,7 @@
         <td style="text-align:right; white-space:nowrap">
           <a class="cta" href="/dupe/{{ o.playlist_a.id }}/{{ o.playlist_b.id }}">Review →</a>
           <span class="pie-wrap" @click.outside="open = false" @keydown.escape.window="open = false">
-            <button type="button" class="kebab" :disabled="state === 'hiding'" :aria-expanded="open" title="More actions"
+            <button type="button" class="kebab" :aria-expanded="open" title="More actions"
                     @click="const w = $el.closest('.pie-wrap').getBoundingClientRect();
                             mx = $event.clientX - w.left; my = $event.clientY - w.top; open = !open">⋯</button>
             <div class="pie" x-show="open" x-cloak x-transition.scale.origin.center
@@ -124,15 +123,15 @@
               <svg viewBox="0 0 160 160" width="160" height="160" role="menu" aria-label="Overlap actions">
                 <!-- top: hide this pair -->
                 <path class="wedge w-hide" d="M38.9 23.4 A70 70 0 0 1 121.1 23.4 L96.5 57.3 A28 28 0 0 0 63.5 57.3 Z"
-                      @click="open = false; hide('{{ ay }}', '{{ by }}')">
+                      @click="open = false; location.hash = 'overlaps'; htmx.ajax('POST', '/overlaps/suppress', {source: $el, values: {a: '{{ ay }}', b: '{{ by }}'}, swap: 'none'})">
                   <title>Hide just this A–B pair (unhide later)</title></path>
                 <!-- upper-right: never show B's overlaps -->
                 <path class="wedge w-b" d="M121.1 23.4 A70 70 0 0 1 146.6 101.6 L106.6 88.7 A28 28 0 0 0 96.5 57.3 Z"
-                      @click="neverShowOverlaps('{{ by }}')">
+                      @click="open = false; location.hash = 'overlaps'; htmx.ajax('POST', '/overlaps/ignore', {source: $el, values: {ytm: '{{ by }}'}, swap: 'none'})">
                   <title>Never show B’s overlaps — “{{ o.playlist_b.title }}”</title></path>
                 <!-- lower-right: mute others, keep pair -->
                 <path class="wedge w-mute" d="M146.6 101.6 A70 70 0 0 1 80.0 150.0 L80.0 108.0 A28 28 0 0 0 106.6 88.7 Z"
-                      @click="muteOtherOverlaps('{{ ay }}', '{{ by }}')">
+                      @click="open = false; location.hash = 'overlaps'; htmx.ajax('POST', '/overlaps/mute-others', {source: $el, values: {a: '{{ ay }}', b: '{{ by }}'}, swap: 'none'})">
                   <title>Keep this A–B pair, mute every other overlap involving either A or B</title></path>
                 <!-- lower-left: hide this + all below (only meaningful when sorted by overlap) -->
                 <path class="wedge w-below" :class="{ 'wedge-off': key !== 'shared' }"
@@ -141,7 +140,7 @@
                   <title>Hide this pair and every lower-overlap pair below it (sort by Overlap first)</title></path>
                 <!-- upper-left: never show A's overlaps -->
                 <path class="wedge w-a" d="M13.4 101.6 A70 70 0 0 1 38.9 23.4 L63.5 57.3 A28 28 0 0 0 53.4 88.7 Z"
-                      @click="neverShowOverlaps('{{ ay }}')">
+                      @click="open = false; location.hash = 'overlaps'; htmx.ajax('POST', '/overlaps/ignore', {source: $el, values: {ytm: '{{ ay }}'}, swap: 'none'})">
                   <title>Never show A’s overlaps — “{{ o.playlist_a.title }}”</title></path>
                 <!-- glyphs -->
                 <text class="pie-glyph" x="80" y="31" text-anchor="middle" dominant-baseline="central">✕</text>
@@ -186,7 +185,7 @@
            from the list below.</p>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="confirmOpen = false">No</button>
-          <button type="button" @click="confirmDismiss()">Yes, hide them</button>
+          <button type="button" @click="confirmOpen = false; location.hash = 'overlaps'; htmx.ajax('POST', '/overlaps/suppress-many', {source: $el, values: {pairs: pairsJson()}, swap: 'none'})">Yes, hide them</button>
         </div>
       </div>
     </div>

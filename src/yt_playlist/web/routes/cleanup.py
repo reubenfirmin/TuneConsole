@@ -2,7 +2,7 @@
 import json
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 
 from yt_playlist import analysis
 
@@ -55,24 +55,25 @@ def build(ctx) -> APIRouter:
     @router.post("/overlaps/ignore")
     def ignore_overlap(ytm: str = Form(...)):
         store.ignore_overlap_playlist(ytm, now_fn())
-        return JSONResponse({"ok": True})
+        return _refresh()
 
     @router.post("/overlaps/unignore")
     def unignore_overlap(ytm: str = Form(...)):
         store.unignore_overlap_playlist(ytm)
         return _refresh()   # restore: recompute so the comparison reappears in its section
 
-    @router.post("/overlaps/ignore-except")
-    def ignore_overlaps_except(ytm: str = Form(...), a: str = Form(...), b: str = Form(...)):
-        # Mute every OTHER overlap involving `ytm`, but keep the a–b pair the user is looking at.
+    @router.post("/overlaps/mute-others")
+    def mute_other_overlaps(a: str = Form(...), b: str = Form(...)):
+        # Keep the a–b pair, but mute every OTHER overlap involving either a or b.
         store.keep_overlap_pair(a, b, now_fn())
-        store.ignore_overlap_playlist(ytm, now_fn())
-        return JSONResponse({"ok": True})
+        store.ignore_overlap_playlist(a, now_fn())
+        store.ignore_overlap_playlist(b, now_fn())
+        return _refresh()
 
     @router.post("/overlaps/suppress")
     def suppress_overlap(a: str = Form(...), b: str = Form(...)):
         store.suppress_overlap(a, b, now_fn())
-        return JSONResponse({"ok": True})   # AJAX: row hides in place, no full-page reload
+        return _refresh()   # the pair moves to the "Hidden overlaps" section
 
     @router.post("/overlaps/suppress-many")
     async def suppress_many(request: Request):
@@ -83,12 +84,10 @@ def build(ctx) -> APIRouter:
         except (ValueError, TypeError):
             pairs = []
         now = now_fn()
-        n = 0
         for pair in pairs:
             if isinstance(pair, (list, tuple)) and len(pair) == 2 and all(pair):
                 store.suppress_overlap(pair[0], pair[1], now)
-                n += 1
-        return JSONResponse({"ok": True, "n": n})
+        return _refresh()
 
     @router.post("/overlaps/unsuppress")
     def unsuppress_overlap(a: str = Form(...), b: str = Form(...)):

@@ -1,0 +1,10 @@
+{# Editable playlist title. The page includes this inside the head; /playlist/{id}/rename returns it
+   standalone and htmx swaps it into #pl-title with the new title. The click-to-edit toggle stays
+   Alpine (pure client state); Enter/blur posts via htmx. Escape reverts the draft and closes. #}
+<div id="pl-title" x-data="titleEditor({{ pl.id }})">
+  <h1 x-show="!editing" @click="start()" x-ref="h1" class="editable-title" title="Click to rename">{{ pl.title }}</h1>
+  <input x-show="editing" x-cloak class="title-input" x-model="draft" x-ref="inp" name="title"
+         hx-post="/playlist/{{ pl.id }}/rename" hx-trigger="keyup[key=='Enter'], blur"
+         hx-target="#pl-title" hx-swap="outerHTML"
+         @keydown.escape="draft = $refs.h1.textContent.trim(); editing = false">
+</div>

@@ -15,20 +15,6 @@ document.addEventListener('htmx:beforeSwap', (e) => {
 });
 
 // Alpine component factories for the various pages (loaded globally via base.html).
-function hideRow() {
-  return {
-    state: 'idle', open: false, mx: 0, my: 0,
-    async hide(a, b) {
-      if (this.state === 'hiding') return;
-      this.state = 'hiding';
-      try {
-        const fd = new FormData(); fd.append('a', a); fd.append('b', b);
-        const r = await fetch('/overlaps/suppress', { method: 'POST', body: fd });
-        if ((await r.json()).ok) { this.state = 'gone'; } else { this.state = 'idle'; }
-      } catch (e) { this.state = 'idle'; }
-    },
-  };
-}
 function saveAlbum(saved) {
   // Save/unsave a YouTube album to your library, then reload so both album tables refresh.
   return {
@@ -265,16 +251,8 @@ function overlapSort() {
       this.tailMax = this._below.reduce((m, r) => Math.max(m, +r.dataset.shared), 0);
       this.confirmOpen = true;
     },
-    async confirmDismiss() {
-      this.confirmOpen = false;
-      if (!this._below.length) return;
-      const pairs = this._below.map(r => [r.dataset.ay, r.dataset.by]);
-      try {
-        const fd = new FormData(); fd.append('pairs', JSON.stringify(pairs));
-        await fetch('/overlaps/suppress-many', { method: 'POST', body: fd });
-      } catch (e) {}
-      location.hash = 'overlaps'; location.reload();
-    },
+    // the "hide this + all below" pairs, for the confirm modal's htmx post (see cleanup.html)
+    pairsJson() { return JSON.stringify(this._below.map(r => [r.dataset.ay, r.dataset.by])); },
     ind(k) { return this.key === k ? (this.dir === 1 ? ' ▲' : ' ▼') : ''; },
   };
 }
@@ -371,22 +349,6 @@ function moveTab(fromId, toId) {
     from: fromId, to: toId,
     canMove() { return this.from != null && this.to != null && this.from !== this.to; },
   };
-}
-function _reloadOverlaps() { location.hash = 'overlaps'; location.reload(); }
-async function _ignoreExcept(ytm, a, b) {
-  const fd = new FormData(); fd.append('ytm', ytm); fd.append('a', a); fd.append('b', b);
-  await fetch('/overlaps/ignore-except', { method: 'POST', body: fd });
-}
-async function muteOtherOverlaps(a, b) {
-  // keep the a–b pair, mute every other overlap involving EITHER a or b, then reload
-  try { await _ignoreExcept(a, a, b); await _ignoreExcept(b, a, b); } catch (e) {}
-  _reloadOverlaps();
-}
-async function neverShowOverlaps(ytm) {
-  // ignore a playlist's overlaps entirely (including this pair), then reload
-  const fd = new FormData(); fd.append('ytm', ytm);
-  try { await fetch('/overlaps/ignore', { method: 'POST', body: fd }); } catch (e) {}
-  _reloadOverlaps();
 }
 // distinct colors for member badges A,B,C…N (index → palette)
 function memberColor(i) {

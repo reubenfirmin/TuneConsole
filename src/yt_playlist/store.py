@@ -658,6 +658,31 @@ class Store:
                  "thumbnail": r["thumb"], "plays": r["c"]} for r in rows]
 
     @_synchronized
+    def resurface_candidates(self, now, window_days=90, min_plays=2, limit=50) -> list[dict]:
+        """'Forgotten gems': songs played often overall but not within the recent window.
+
+        play count = appearances across history snapshots; last_played = newest snapshot
+        containing the song. Returns songs with >= min_plays whose last play predates the
+        window (now - window_days), most-played and longest-unplayed first.
+        """
+        cutoff = now - window_days * 86400.0
+        rows = self.conn.execute(
+            "WITH plays AS (SELECT hi.identity_key, COUNT(*) c, MAX(hs.taken_at) last "
+            "  FROM history_items hi JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
+            "  GROUP BY hi.identity_key), "
+            "     names AS (SELECT identity_key, MIN(title) title, MIN(artist) artist, "
+            "               MIN(album) album, MIN(video_id) vid, MIN(thumbnail) thumb "
+            "               FROM tracks GROUP BY identity_key) "
+            "SELECT n.title, n.artist, n.album, n.vid, n.thumb, p.c plays, p.last last "
+            "FROM plays p JOIN names n ON n.identity_key=p.identity_key "
+            "WHERE n.title <> '' AND p.c >= :min_plays AND p.last < :cutoff "
+            "ORDER BY p.c DESC, p.last ASC LIMIT :limit",
+            {"min_plays": min_plays, "cutoff": cutoff, "limit": limit}).fetchall()
+        return [{"title": r["title"], "artist": r["artist"], "album": r["album"] or "",
+                 "video_id": r["vid"], "thumbnail": r["thumb"], "plays": r["plays"],
+                 "last_played": r["last"]} for r in rows]
+
+    @_synchronized
     def top_artists(self, limit=100, since=None) -> list[dict]:
         """Most-played artists from sync history — play count summed over the artist's songs."""
         rows = self.conn.execute(

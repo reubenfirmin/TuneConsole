@@ -19,7 +19,8 @@
     <a class="brand" href="/">yt&#8202;<span class="dot">/</span>&#8202;playlist</a>
     {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') %}
     <nav>
-      <a href="/" class="{{ 'active' if path == '/' else '' }}">Playlists</a>
+      <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>
+      <a href="/playlists" class="{{ 'active' if path.startswith('/playlist') else '' }}">Playlists</a>
       <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
       <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
       <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>

@@ -1,0 +1,18 @@
+def test_home_is_landing_with_sync_and_sections(live_app, page):
+    page.goto(f"{live_app}/")
+    # Home is the default tab and owns the Sync control
+    assert page.get_by_role("button", name="Sync now").is_visible()
+    assert page.get_by_role("heading", name="Take action").is_visible()
+    assert page.get_by_role("heading", name="For you").is_visible()
+
+
+def test_sync_button_absent_from_playlists_tab(live_app, page):
+    page.goto(f"{live_app}/playlists")
+    assert page.get_by_role("button", name="Sync now").count() == 0
+
+
+def test_nav_has_home_and_playlists(live_app, page):
+    page.goto(f"{live_app}/")
+    nav = page.locator("header nav")
+    assert nav.get_by_role("link", name="Home").is_visible()
+    assert nav.get_by_role("link", name="Playlists").is_visible()
