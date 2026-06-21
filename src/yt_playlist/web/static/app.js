@@ -413,25 +413,11 @@ function playlistsTab(rows) {
   };
 }
 function moveTab(fromId, toId) {
+  // Move page: the from/to identity selection and the "two different identities" gate.
+  // The copy/move actions themselves are htmx (see _partials/move_row.html).
   return {
-    from: fromId, to: toId, rows: {},
+    from: fromId, to: toId,
     canMove() { return this.from != null && this.to != null && this.from !== this.to; },
-    st(id) { if (!this.rows[id]) this.rows[id] = { state: 'idle', err: '', msg: '' }; return this.rows[id]; },
-    async run(id, copyOnly) {
-      if (!this.canMove()) return;
-      const r = this.st(id);
-      if (r.state === 'working') return;
-      r.state = 'working'; r.err = ''; r.msg = '';
-      try {
-        const fd = new FormData();
-        fd.append('playlist', id); fd.append('target_identity', this.to);
-        if (copyOnly) fd.append('copy_only', '1');
-        const resp = await fetch('/move/run', { method: 'POST', body: fd });
-        const j = await resp.json();
-        if (j.ok) { r.state = copyOnly ? 'done' : 'gone'; r.msg = j.message || 'done'; }
-        else { r.state = 'idle'; r.err = j.error || 'failed'; }
-      } catch (e) { r.state = 'idle'; r.err = String(e); }
-    },
   };
 }
 function _reloadOverlaps() { location.hash = 'overlaps'; location.reload(); }
@@ -517,39 +503,6 @@ function mergeEditor(members, tracks, returnTo) {
           location.href = u;
         } else { this.busy = false; this.err = j.error || 'failed'; }
       } catch (e) { this.busy = false; this.err = String(e); }
-    },
-  };
-}
-function genresTab(rows) {
-  // Tools > Genres: edit the whitelist used to pin genres from Last.fm/Discogs tags.
-  return {
-    list: rows, newName: '', err: '',
-    async add() {
-      const name = (this.newName || '').trim();
-      if (!name) return;
-      this.err = '';
-      try {
-        const j = await (await fetch('/genres/add', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
-        })).json();
-        if (!j.ok) { this.err = j.error || 'could not add'; return; }
-        this.list = j.genres; this.newName = '';
-        this.$nextTick(() => this.$refs.inp.focus());
-      } catch (e) { this.err = 'network error'; }
-    },
-    async remove(name) {
-      this.list = this.list.filter(g => g !== name);    // optimistic
-      try {
-        await fetch('/genres/remove', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
-        });
-      } catch (e) { /* optimistic UI already applied */ }
-    },
-    async reset() {
-      try {
-        const j = await (await fetch('/genres/reset', { method: 'POST' })).json();
-        if (j.ok) this.list = j.genres;
-      } catch (e) { this.err = 'network error'; }
     },
   };
 }
