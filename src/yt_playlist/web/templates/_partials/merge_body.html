@@ -7,13 +7,16 @@
     <div>
       <div class="cmp-h">Where should the result go?</div>
       {% for m in members %}
+      {% if not liked_id or m.id == liked_id %}{# Liked can't be deleted, so a non-Liked keeper is never offered #}
       <label class="opt"><input type="radio" name="keep" value="{{ m.id }}" {{ 'checked' if draft.keep == m.id|string }}
              hx-post="{{ upd }}" hx-vals='{"field": "keep", "value": "{{ m.id }}"}' hx-target="#merge-body" hx-swap="innerHTML">
         Keep <span class="ab" style="background:{{ palette[loop.index0 % palette|length] }}">{{ m.letter }}</span> ({{ m.title }}), delete the other{{ 's' if members|length > 2 else '' }}</label>
+      {% endif %}
       {% endfor %}
       <label class="opt"><input type="radio" name="keep" value="all" {{ 'checked' if draft.keep == 'all' }}
              hx-post="{{ upd }}" hx-vals='{"field": "keep", "value": "all"}' hx-target="#merge-body" hx-swap="innerHTML">
         Update <strong>all</strong> (keep them all, set each to the result)</label>
+      {% if liked_id %}<p class="muted" style="font-size:.8rem; margin:.5rem 0 0">Liked Music can’t be deleted, so the result always lands there.</p>{% endif %}
     </div>
     <div style="text-align:right">
       <div class="muted" style="font-size:.85rem">Result</div>

@@ -31,6 +31,33 @@ def test_track_like_toggles_liked_music(store):
     assert len(store.get_playlist_tracks_with_meta(lm_id)) == 0   # removed from local LM
 
 
+def test_liked_music_playlist_uses_header_heart_not_per_row(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
+    t = store.upsert_track("v1", "Song", "X", None, None, 1)
+    store.set_playlist_tracks(lm, [t])
+    c = _client(store, lambda: {iid: FakeClient()})
+    body = c.get(f"/playlist/{lm}").text
+    assert "track-table is-lm" in body                      # per-row hearts hidden on the LM playlist
+    assert "lm-heart" in body and "Liked Music" in body     # a single heart in the header instead
+
+
+def test_merge_with_liked_only_offers_keep_liked_or_all(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
+    pl = store.upsert_playlist(iid, "PLA", "Road Trip", 1, "h", 1.0)
+    t = store.upsert_track("v1", "Song", "X", None, None, 1)
+    store.set_playlist_tracks(lm, [t]); store.set_playlist_tracks(pl, [t])
+    c = _client(store, lambda: {iid: FakeClient()})
+    body = c.get(f"/merge?ids={lm},{pl}").text
+    assert "(Road Trip), delete" not in body              # a non-Liked keeper would delete Liked -> hidden
+    assert f'value="{lm}" checked' in body                # Liked is the default keeper
+    assert 'value="all"' in body and "can’t be deleted" in body   # "all" still offered + the hint
+    # the keep field rejects a non-Liked keeper even if posted directly
+    c.post(f"/merge/update?ids={lm},{pl}", data={"field": "keep", "value": str(pl)})
+    assert f'value="{lm}" checked' in c.get(f"/merge?ids={lm},{pl}").text   # unchanged: still Liked
+
+
 def test_track_like_without_master_returns_toast(store):
     store.upsert_identity("alt", "cred", None, False)             # no master configured
     c = _client(store, lambda: {})

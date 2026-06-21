@@ -52,6 +52,7 @@ class ForYouItem:
     thumbnail: str | None
     plays: int
     reason: str        # why this was recommended (human-readable)
+    key: str = ""      # track identity_key, for feedback (dismiss/less/mute)
 
 
 def for_you(store, now, limit=24) -> list[ForYouItem]:
@@ -77,6 +78,8 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
     sources.append((store.deep_cuts(limit=limit),
                     lambda r: f"A deep cut from {r['artist']}, who you play a lot"))
     queues = [(list(rows), reason) for rows, reason in sources]
+    suppressed = store.suppressed_keys("for_you", now)   # dismissed / snoozed / muted-track
+    muted = store.muted_artists()
     seen: set = set()
     out: list[ForYouItem] = []
     i = 0
@@ -86,12 +89,13 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
         i += 1
         while rows:
             r = rows.pop(0)
-            if r["key"] in seen:
+            if r["key"] in seen or r["key"] in suppressed or r["artist"] in muted:
+                seen.add(r["key"])
                 continue
             seen.add(r["key"])
             out.append(ForYouItem(
                 title=r["title"], artist=r["artist"], album=r["album"], video_id=r["video_id"],
-                thumbnail=r["thumbnail"], plays=r["plays"], reason=reason(r)))
+                thumbnail=r["thumbnail"], plays=r["plays"], reason=reason(r), key=r["key"]))
             break
     return out
 
@@ -110,31 +114,42 @@ def _taste_neighbourhood(store, limit):
     return [{"key": k, "plays": 0, **meta[k]} for k, _ in nbrs if k in meta]
 
 
-def complete_playlist(store, playlist_id, limit=12) -> list[ForYouItem]:
+def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem]:
     """Tracks you own that fit a given playlist but aren't in it yet.
 
     Uses the taste-embedding model (nearest to the playlist's centroid) once it's built;
     falls back to the artist/co-occurrence heuristic until then.
     """
     members = store.get_playlist_track_keys(playlist_id)
+    scope = str(playlist_id)
+    suppressed = store.suppressed_keys("suggest", now or 0, scope=scope)
+    muted = store.muted_artists()
+
+    def keep(key, artist):
+        return key not in suppressed and artist not in muted
+
     if store.rec_vectors_count() and members:
-        nbrs = embed.centroid_neighbors(store, list(members), topn=limit, exclude=members)
+        nbrs = embed.centroid_neighbors(store, list(members), topn=limit * 2, exclude=members)
         if nbrs:
             meta = store.tracks_by_keys([k for k, _ in nbrs])
             member_artists = {m["artist"] for m in store.tracks_by_keys(members).values()}
             out = []
             for k, _ in nbrs:
                 m = meta.get(k)
-                if not m:
+                if not m or not keep(k, m["artist"]):
                     continue
                 reason = (f"More from {m['artist']}, already here" if m["artist"] in member_artists
                           else "Matches the sound of this playlist")
                 out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"],
-                                      m["thumbnail"], 0, reason))
+                                      m["thumbnail"], 0, reason, k))
+                if len(out) >= limit:
+                    break
             return out
 
     out: list[ForYouItem] = []
-    for r in store.complete_playlist(playlist_id, limit=limit):
+    for r in store.complete_playlist(playlist_id, limit=limit * 2):
+        if not keep(r["key"], r["artist"]):
+            continue
         if r["same_artist"] and r["cooc"]:
             reason = f"By {r['artist']} (already here), and in {r['cooc']} related playlist(s)"
         elif r["same_artist"]:
@@ -143,7 +158,9 @@ def complete_playlist(store, playlist_id, limit=12) -> list[ForYouItem]:
             reason = f"Sits with these tracks in {r['cooc']} of your playlists"
         out.append(ForYouItem(
             title=r["title"], artist=r["artist"], album=r["album"], video_id=r["video_id"],
-            thumbnail=r["thumbnail"], plays=0, reason=reason))
+            thumbnail=r["thumbnail"], plays=0, reason=reason, key=r["key"]))
+        if len(out) >= limit:
+            break
     return out
 
 

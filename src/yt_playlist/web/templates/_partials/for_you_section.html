@@ -12,6 +12,9 @@
       <span class="fy-artist">{{ f.artist }}</span>
       <span class="fy-reason">{{ f.reason }}</span>
     </div>
+    <button type="button" class="fy-x" title="Not interested — stop showing this"
+            hx-post="/recs/feedback" hx-swap="outerHTML swap:200ms" hx-target="closest .fy-card"
+            hx-vals='{"item": {{ f.key|tojson }}, "surface": "for_you", "kind": "dismiss"}'>×</button>
   </div>
   {% endfor %}
 </div>

@@ -79,12 +79,19 @@ def build(ctx) -> APIRouter:
             out = sorted(out, key=lambda t: 0 if sum(t["present"]) >= 2 else 1)
         return out
 
+    def _liked_id(members):
+        # Liked Music can't be deleted, so a merge that includes it can only keep Liked (delete the
+        # others) or keep all — the per-other "keep" options are dropped. Returns LM's member id or None.
+        return next((m["id"] for m in members if m["ytm"] == "LM"), None)
+
     def _draft(ids, members, *, return_to=None):
         sig = tuple(ids)   # keep the entry order so member letters/colors stay stable across refresh
         d = drafts.get(sig)
         if d is None:
+            liked = _liked_id(members)                    # merge with Liked always lands in Liked
             d = {"excluded": set(), "pick": {}, "sort": "playlist", "mode": "interleaved",
-                 "keep": str(members[0]["id"]), "return_to": return_to or "/cleanup"}
+                 "keep": str(liked if liked is not None else members[0]["id"]),
+                 "return_to": return_to or "/cleanup"}
             drafts[sig] = d
         elif return_to:
             d["return_to"] = return_to
@@ -94,7 +101,7 @@ def build(ctx) -> APIRouter:
         rows = [{**t, "included": t["tid"] not in draft["excluded"],
                  "picked": draft["pick"].get(t["tid"]), "present_count": sum(t["present"])}
                 for t in _ordered(tracks, draft)]
-        return {"request": request, "members": members, "rows": rows,
+        return {"request": request, "members": members, "rows": rows, "liked_id": _liked_id(members),
                 "count": sum(1 for t in tracks if t["tid"] not in draft["excluded"]),
                 "total": len(tracks), "draft": draft, "ids_csv": ",".join(str(i) for i in ids)}
 
@@ -133,7 +140,9 @@ def build(ctx) -> APIRouter:
         elif field == "mode" and value in ("interleaved", "ducks"):
             draft["mode"] = value
         elif field == "keep":
-            draft["keep"] = value
+            liked = _liked_id(members)   # with Liked in the merge, only "keep Liked" or "all" are valid
+            if liked is None or value in (str(liked), "all"):
+                draft["keep"] = value
         elif field == "pick" and ":" in value:
             tid, _, idx = value.rpartition(":")
             if tid in valid and idx.isdigit():

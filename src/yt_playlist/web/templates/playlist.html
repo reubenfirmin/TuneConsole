@@ -5,7 +5,7 @@
      x-init="const fit = () => artH = $refs.main.offsetHeight; fit(); new ResizeObserver(fit).observe($refs.main)">
   {% if pl.thumbnail %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ pl.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.closest('.pl-art').remove()"></span>{% endif %}
   <div class="pl-headmain" x-ref="main">
-    <span class="eyebrow">Playlist</span>
+    <span class="eyebrow">{% if pl.ytm_playlist_id == 'LM' %}<svg class="lm-heart" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg> Liked Music{% else %}Playlist{% endif %}</span>
     {% include "_partials/playlist_head.html" %}
     <p class="pl-stats">
       <span class="tag amber">{{ identity }}</span>
@@ -77,11 +77,11 @@
 </style>
 <div x-data="rowSort({{ pl.id }})" x-init="$nextTick(() => initSortable())">
 <div class="card">
-  <table class="track-table">
+  <table class="track-table{{ ' is-lm' if pl.ytm_playlist_id == 'LM' }}">
     <thead><tr>
       <th class="num" style="width:2.6rem">#</th>
       <th style="width:2.6rem"></th>
-      <th style="width:1.6rem"></th>
+      <th class="liked-col" style="width:2.4rem"></th>
       <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
       <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
       <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>

@@ -15,24 +15,6 @@ document.addEventListener('htmx:beforeSwap', (e) => {
 });
 
 // Alpine component factories for the various pages (loaded globally via base.html).
-function saveAlbum(saved) {
-  // Save/unsave a YouTube album to your library, then reload so both album tables refresh.
-  return {
-    saved: !!saved, busy: false,
-    label() { return this.busy ? '…' : (this.saved ? 'Unsave' : 'Save'); },
-    async toggle(browseId) {
-      if (this.busy) return;
-      this.busy = true;
-      const url = this.saved ? '/collection/unsave-album' : '/collection/save-album';
-      try {
-        const fd = new FormData(); fd.append('browse_id', browseId);
-        const j = await (await fetch(url, { method: 'POST', body: fd })).json();
-        if (j.ok) { location.reload(); return; }
-      } catch (e) {}
-      this.busy = false;
-    },
-  };
-}
 function rowSort(pid) {
   // Generic click-to-sort for a static-row table; reorders <tr class="srow"> by data-<key>.
   // Numeric when both values parse as numbers, else locale string compare.
@@ -41,7 +23,7 @@ function rowSort(pid) {
     pid: pid, key: '', dir: 1,
     openMenu: null,                                   // video_id whose ⋯ menu is open
     // alternate-versions modal
-    altOpen: false, altLoading: false, altErr: '', altTitle: '', altResults: [], altSel: {},
+    altOpen: false, altLoading: false, altTitle: '',
     sortBy(k) {
       if (this.key === k) { this.dir = -this.dir; } else { this.key = k; this.dir = 1; }
       const tb = this.$refs.body;
@@ -272,12 +254,6 @@ function playlistsTab(rows) {
       if (this.count() < 2) return;
       location.href = '/merge?ids=' + this.selected().map(r => r.id).join(',') + '&return=/';
     },
-    async _post(url, data) {
-      const fd = new FormData();
-      Object.entries(data).forEach(([k, v]) => fd.append(k, v));
-      const r = await fetch(url, { method: 'POST', body: fd });
-      return r.json();
-    },
     copyModal: false, copyName: '', copyIds: [],
     openCopy() {
       const sel = this.selected();
@@ -287,22 +263,7 @@ function playlistsTab(rows) {
       this.copyName = sel.length === 1 ? sel[0].title + ' (copy)' : sel.map(r => r.title).join(' + ');
       this.copyModal = true;
     },
-    async doCopy() {
-      this.copyModal = false;
-      await this._post('/playlists/copy', { ids: this.copyIds.join(','), name: this.copyName });
-      location.reload();                      // new playlist drops into the table
-    },
     openGroup() { if (this.count()) { this.groupName = ''; this.groupModal = true; } },
-    async doGroup() {
-      this.groupModal = false;
-      await this._post('/playlists/group', { ids: this.selected().map(r => r.id).join(','), name: this.groupName });
-      location.reload();
-    },
-    async doDelete() {
-      this.delModal = false;
-      await this._post('/playlists/delete', { ids: this.selected().map(r => r.id).join(',') });
-      location.reload();
-    },
   };
 }
 function moveTab(fromId, toId) {
@@ -311,76 +272,6 @@ function moveTab(fromId, toId) {
   return {
     from: fromId, to: toId,
     canMove() { return this.from != null && this.to != null && this.from !== this.to; },
-  };
-}
-// distinct colors for member badges A,B,C…N (index → palette)
-function memberColor(i) {
-  const palette = ['#7c6cff', '#4fd6e0', '#ff6b8b', '#6bffab', '#f4c66a', '#c08cff', '#ff9d5c', '#5cc8ff'];
-  return palette[i % palette.length];
-}
-function mergeEditor(members, tracks, returnTo) {
-  return {
-    members, tracks, returnTo: returnTo || '/cleanup',
-    keep: String(members[0].id), busy: false, err: '', inc: {}, pick: {},
-    // Two independent axes:
-    //   sort: 'alpha' (by title) | 'playlist' (order-preserving merge by position)
-    //   mode: 'interleaved' (all together) | 'ducks' (shared first, odd ducks pushed to the end)
-    sort: 'playlist', mode: 'interleaved',
-    init() { this.tracks.forEach(t => { this.inc[t.tid] = true; }); },   // default: include everything
-    presentCount(t) { return t.present.filter(Boolean).length; },
-    // Effective normalized position: a per-track chosen playlist's position, else the average.
-    effPos(t) {
-      const p = this.pick[t.tid];
-      if (p != null && t.npos && t.npos[p] != null) return t.npos[p];
-      const vals = (t.npos || []).filter(v => v != null);
-      return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 1;
-    },
-    pickPos(t, i) {
-      if (!t.present[i] || this.presentCount(t) < 2) return;   // nothing to choose
-      this.pick[t.tid] = (this.pick[t.tid] === i) ? null : i;  // toggle
-    },
-    isPicked(t, i) { return this.pick[t.tid] === i; },
-    isIn(t) { return !!this.inc[t.tid]; },
-    toggle(t) { this.inc[t.tid] = !this.inc[t.tid]; },
-    setAll(v) { this.tracks.forEach(t => { this.inc[t.tid] = v; }); },
-    count() { return this.tracks.filter(t => this.isIn(t)).length; },
-    letters(t) { return this.members.filter((m, i) => t.present[i]).map(m => m.letter); },
-    colorOf(letter) { return memberColor(letter.charCodeAt(0) - 65); },
-    posOf(t, letter) { return (t.pos && t.pos[letter.charCodeAt(0) - 65]) || ''; },   // 1-based index in that playlist
-    fmtDur(s) {
-      if (s == null || isNaN(s) || s <= 0) return '';
-      s = Math.round(s);
-      const m = Math.floor(s / 60), sec = s % 60;
-      return m + ':' + String(sec).padStart(2, '0');
-    },
-    ordered() {
-      const byTitle = (a, b) => (a.title || '').localeCompare(b.title || '');
-      const byPos = (a, b) => this.effPos(a) - this.effPos(b) || byTitle(a, b);
-      const within = this.sort === 'playlist' ? byPos : byTitle;   // sort axis
-      const cnt = t => t.present.filter(Boolean).length;
-      if (this.mode === 'ducks') {                                   // shared first, odd ducks last
-        const grp = t => (cnt(t) >= 2 ? 0 : 1);
-        return [...this.tracks].sort((a, b) => (grp(a) - grp(b)) || within(a, b));
-      }
-      return [...this.tracks].sort(within);                         // interleaved: one combined list
-    },
-    async apply() {
-      if (this.busy) return; this.busy = true; this.err = '';
-      const vids = this.ordered().filter(t => this.isIn(t)).map(t => t.video_id).filter(Boolean);
-      const ids = this.members.map(m => m.id).join(',');
-      const fd = new FormData();
-      fd.append('ids', ids); fd.append('result', vids.join(',')); fd.append('keep', this.keep);
-      try {
-        const r = await fetch('/merge/apply', { method: 'POST', body: fd });
-        const j = await r.json();
-        if (j.ok) {
-          const sep = this.returnTo.includes('?') ? '&' : '?';
-          let u = this.returnTo + sep + 'flash=' + encodeURIComponent(j.message);
-          if (j.playlist) u += '&flash_pl=' + encodeURIComponent(j.playlist);
-          location.href = u;
-        } else { this.busy = false; this.err = j.error || 'failed'; }
-      } catch (e) { this.busy = false; this.err = String(e); }
-    },
   };
 }
 function titleEditor(pid) {
@@ -392,21 +283,6 @@ function titleEditor(pid) {
       this.draft = this.$refs.h1.textContent.trim();
       this.editing = true;
       this.$nextTick(() => { this.$refs.inp.focus(); this.$refs.inp.select(); });
-    },
-    cancel() { this.editing = false; },
-    async save() {
-      if (!this.editing) return;                 // ignore trailing blur after enter/escape
-      this.editing = false;
-      const t = (this.draft || '').trim();
-      const cur = this.$refs.h1.textContent.trim();
-      if (!t || t === cur) return;
-      try {
-        const r = await fetch(`/playlist/${this.pid}/rename`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: t }),
-        });
-        const j = await r.json();
-        if (j.ok) { this.$refs.h1.textContent = t; document.title = t + ' · yt-playlist'; }
-      } catch (e) { /* leave the old title in place */ }
     },
   };
 }

@@ -110,6 +110,16 @@ CREATE TABLE IF NOT EXISTS rec_vectors (
   identity_key TEXT PRIMARY KEY,
   vec BLOB NOT NULL                       -- float32 taste-embedding for the track (see embed.py)
 );
+CREATE TABLE IF NOT EXISTS rec_feedback (
+  surface TEXT NOT NULL,                  -- where it happened: 'for_you', 'suggest', 'discover'
+  item_key TEXT NOT NULL,                 -- track identity_key (or 'artist:<name>' for a mute)
+  kind TEXT NOT NULL,                     -- 'dismiss' | 'less' | 'more' | 'mute' | 'not_now'
+  reason TEXT,                            -- optional axis/reason ('era','artist','vibe','own_it')
+  scope TEXT NOT NULL DEFAULT '',         -- '' = global; else a playlist id for playlist-local
+  until REAL,                             -- suppressed until ts (NULL = until explicitly cleared)
+  created_at REAL,
+  PRIMARY KEY (surface, item_key, scope)
+);
 """
 
 # A track is "liked" if its song (identity_key) appears in any "Liked Music" (LM) playlist. Used as a
@@ -814,6 +824,31 @@ class Store:
             {"limit": limit, "min_gaps": min_gaps, "min_ratio": min_ratio}).fetchall()
         return [{"id": r["id"], "title": r["title"], "thumbnail": r["thumb"], "gaps": r["gaps"],
                  "total": r["total"], "plays": r["plays"]} for r in rows]
+
+    @_synchronized
+    def record_feedback(self, surface, item_key, kind, reason=None, scope="", until=None, now=None) -> None:
+        """Persist a feedback event (dismiss/less/more/mute/not_now). Upserts per (surface,item,scope)."""
+        self.conn.execute(
+            "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) "
+            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(surface,item_key,scope) DO UPDATE SET "
+            "kind=excluded.kind, reason=excluded.reason, until=excluded.until, created_at=excluded.created_at",
+            (surface, item_key, kind, reason, scope or "", until, now))
+        self.conn.commit()
+
+    @_synchronized
+    def suppressed_keys(self, surface, now, scope="") -> set:
+        """Track keys to hide on a surface: dismissed/muted/snoozed, honoring any 'until' expiry."""
+        rows = self.conn.execute(
+            "SELECT item_key FROM rec_feedback WHERE surface=? AND (scope='' OR scope=?) "
+            "AND kind IN ('dismiss','mute','not_now') AND (until IS NULL OR until>?)",
+            (surface, scope or "", now)).fetchall()
+        return {r["item_key"] for r in rows}
+
+    @_synchronized
+    def muted_artists(self) -> set:
+        """Artist names the user has muted (stored as item_key 'artist:<name>')."""
+        rows = self.conn.execute("SELECT item_key FROM rec_feedback WHERE kind='mute'").fetchall()
+        return {r["item_key"][7:] for r in rows if r["item_key"].startswith("artist:")}
 
     @_synchronized
     def rec_baskets(self, max_playlist=120, max_album=30, max_session=120) -> list[list[str]]:

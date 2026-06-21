@@ -445,21 +445,24 @@ tr:hover .pl-play, tr.selrow .pl-play { opacity: 1; }
   background: var(--surface-2); border: 1px solid var(--border-2); font-size: 0.5rem; line-height: 1;
   color: var(--dim); }
 .unavail { color: var(--danger); margin-left: 0.3rem; }
-.liked-col { text-align: center; padding: 0 .45rem 0 .6rem; }   /* breathing room from the thumbnail */
+.liked-col { text-align: center; padding: 0 .55rem; }   /* even breathing room either side */
 .liked-heart { color: #ff5c8a; font-size: 0.85rem; line-height: 1;
   filter: drop-shadow(0 0 4px rgba(255,92,138,0.45)); }
 
-/* clickable Liked-Music toggle: an SVG heart, outline by default, filled-pink + soft haze when on
-   (the haze mirrors the green play-on-YouTube button's tinted background). */
+/* clickable Liked-Music toggle: an SVG heart, faint outline by default; filled-pink with a soft
+   glow when on (an outer drop-shadow halo — no box, no ring). */
 .like-btn { display: inline-flex; align-items: center; justify-content: center;
-  width: 1.85rem; height: 1.85rem; border-radius: 50%; padding: 0;
-  background: none; border: 0; box-shadow: none; cursor: pointer; color: var(--faint);
-  transition: color .12s ease, background .12s ease, box-shadow .12s ease, transform .08s ease; }
-.like-btn svg { width: 1.05rem; height: 1.05rem; display: block; }
-.like-btn:hover { color: #ff5c8a; transform: scale(1.08); box-shadow: none; }
-.like-btn.on { color: #ff5c8a; background: rgba(255,92,138,0.14);
-  box-shadow: inset 0 0 0 1.5px rgba(255,92,138,0.55); }
+  padding: 0; background: none; border: 0; box-shadow: none; cursor: pointer; color: var(--faint);
+  transition: color .12s ease, filter .12s ease, transform .08s ease; }
+.like-btn svg { width: 1.2rem; height: 1.2rem; display: block; }
+.like-btn:hover { color: #ff5c8a; transform: scale(1.12); }
+.like-btn.on { color: #ff5c8a; filter: drop-shadow(0 0 5px rgba(255,92,138,0.7)); }
 .like-btn.htmx-request { opacity: .5; }
+/* the Liked Music playlist is all-liked, so per-row hearts are redundant — hide the column;
+   a single heart sits in the header instead (.lm-heart). */
+.track-table.is-lm .liked-col { display: none; }
+.lm-heart { width: .9rem; height: .9rem; color: #ff5c8a; vertical-align: -1px; margin-right: .15rem;
+  filter: drop-shadow(0 0 4px rgba(255,92,138,0.45)); }
 
 /* click-to-edit genre cell */
 .gdisplay { cursor: pointer; display: inline-flex; align-items: center; min-height: 1.5rem; }
@@ -681,3 +684,11 @@ button.htmx-request .check-busy { display: inline; }
 .fy-reason { color: var(--accent-2); font-size: 0.76rem; margin-top: 0.15rem; }
 .fy-add { flex: 0 0 auto; align-self: center; white-space: nowrap; }
 .fy-add.added { color: var(--teal); border-color: transparent; }
+
+/* For-You dismiss (feedback persistence) */
+.fy-card { position: relative; }
+.fy-x { position: absolute; top: 0.35rem; right: 0.45rem; background: transparent; border: none;
+  color: var(--faint); font-size: 1rem; line-height: 1; padding: 0.1rem 0.25rem; cursor: pointer;
+  box-shadow: none; opacity: 0; transition: opacity 0.12s ease; }
+.fy-card:hover .fy-x { opacity: 1; }
+.fy-x:hover { color: var(--danger); background: transparent; box-shadow: none; }
