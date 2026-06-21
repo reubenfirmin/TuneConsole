@@ -4,18 +4,83 @@ from dataclasses import dataclass
 import math
 import statistics
 
+import numpy as np
+
 from yt_playlist import analysis, embed, genre_map
 from yt_playlist.rec_dao import RecDao
+
+
+class PlaylistTaste:
+    """Play-weighted per-playlist taste model: each playlist is one taste *context* (its embedding
+    centroid), weighted by how much you actually listen to it. Scoring a candidate against this
+    rewards fit to the contexts you play — so a low-play playlist (the 'vacation with Dad' problem)
+    can't drag in off-taste recommendations, and distinct high-play contexts aren't blurred into one
+    average. Catch-all playlists (too big to be a coherent context) are excluded.
+    """
+
+    def __init__(self, titles, centroids, weights):
+        self.titles = list(titles)               # playlist titles, one per context
+        self.centroids = centroids               # (n, dim) L2-normalised rows, or empty
+        self.weights = weights                   # (n,) sums to 1, or empty
+
+    def __bool__(self):
+        return len(self.titles) > 0
+
+    def score(self, vec, top=3):
+        """(total, [(playlist_title, contribution), ...]) for a candidate taste vector."""
+        if not self.titles:
+            return 0.0, []
+        v = vec / (np.linalg.norm(vec) + 1e-9)
+        contrib = self.weights * (self.centroids @ v)        # play-weighted cosine per context
+        order = np.argsort(-contrib)[:top]
+        because = [(self.titles[i], float(contrib[i])) for i in order if contrib[i] > 0]
+        return float(contrib.sum()), because
+
+    def score_all(self, V):
+        """Per-context taste score for every row of V (N, dim) -> (N,). Vectorized."""
+        if not self.titles or len(V) == 0:
+            return np.zeros(len(V))
+        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
+        return self.weights @ (self.centroids @ Vn.T)        # (P,)·(P,N) -> (N,)
+
+
+def playlist_taste(store, max_tracks=120) -> PlaylistTaste:
+    """Build the per-playlist taste model from the embedding + listen history."""
+    keys, V, idx = embed.load_vectors(store)
+    if V is None:
+        return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
+    stats = store.get_playlist_listen_stats()                # {pid: (last_ts, listen_count)}
+    titles, cents, ws = [], [], []
+    for p in store.get_playlists():
+        members = store.get_playlist_track_keys(p.id)
+        if len(members) > max_tracks:                        # skip catch-alls — not a coherent context
+            continue
+        rows = [idx[k] for k in members if k in idx]
+        if not rows:
+            continue
+        c = V[rows].mean(0)
+        n = np.linalg.norm(c)
+        if n == 0:
+            continue
+        titles.append(p.title)
+        cents.append(c / n)
+        ws.append(stats.get(p.id, (None, 0))[1] or 0)        # how much you listen to this playlist
+    if not titles:
+        return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
+    w = np.asarray(ws, dtype=np.float64)
+    w = w / w.sum() if w.sum() > 0 else np.full(len(titles), 1.0 / len(titles))   # uniform if no plays
+    return PlaylistTaste(titles, np.asarray(cents), w)
 
 
 def taste_breadth(store) -> dict:
     """How narrow vs eclectic this library is, from the entropy of its genre-family mix.
 
-    breadth in [0,1]: ~0 = one-vibe (opera-only), ~1 = spread across many families. Computed
-    over tagged tracks (genre is sparse today, so it sharpens as enrichment fills). Spec §5.2.
+    breadth in [0,1]: ~0 = one-vibe (opera-only), ~1 = spread across many families. Computed over
+    a *play-weighted* genre distribution, so a low-play context doesn't inflate your apparent breadth
+    or register its genres as 'in palette' (the Clapton-leak fix). Spec §5.2.
     """
     fams: dict = {}
-    for genre, c in store.genre_distribution().items():
+    for genre, c in RecDao(store).genre_play_distribution().items():
         fams[genre_map.family(genre)] = fams.get(genre_map.family(genre), 0) + c
     total = sum(fams.values())
     if total == 0 or len(fams) <= 1:
@@ -122,15 +187,14 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
     sources.append((store.deep_cuts(limit=pool),
                     lambda r: f"A deep cut from {r['artist']}, who you play a lot", "deep_cut"))
 
-    # Tier-2 refinement: re-rank every lane's candidates by similarity to your taste centroid
-    # (slow all-time + fast recent), so the strongest-fitting items rise within each lane.
+    # Tier-2 refinement: re-rank every lane's candidates by your play-weighted per-playlist taste,
+    # so the strongest-fitting items rise within each lane (no single blurred centroid).
     if store.rec_vectors_count():
-        slow = store.top_played_keys(limit=8)
-        recent = list(store.get_recent_history_keys(now - 86400.0))[:12]
-        groups = [(slow, 0.6)] + ([(recent, 0.4)] if recent else [])
-        all_keys = [r["key"] for rows, _, _ in sources for r in rows]
-        sims = embed.sims_for(store, groups, all_keys)
-        if sims:
+        pt = playlist_taste(store)
+        keys, V, idx = embed.load_vectors(store)
+        if pt and V is not None:
+            allscores = pt.score_all(V)
+            sims = {keys[i]: float(allscores[i]) for i in range(len(keys))}
             for rows, _, _ in sources:
                 rows.sort(key=lambda r: -sims.get(r["key"], -1.0))
 
@@ -274,20 +338,19 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     centroid yet by artists you *don't* play much. The edge of your palette, not the centre.
     Empty until the embedding model is built. Spec §5.4/§5.5.
     """
-    if not store.rec_vectors_count():
+    pt = playlist_taste(store)
+    if not pt:
         return []
-    seeds = store.top_played_keys(limit=8)
-    if not seeds:
-        return []
-    nbrs = embed.centroid_neighbors(store, seeds, topn=limit * 12, exclude=set(seeds))
-    if not nbrs:
-        return []
-    meta = store.tracks_by_keys([k for k, _ in nbrs])
+    keys, V, idx = embed.load_vectors(store)
+    scores = pt.score_all(V)                                    # fit to your play-weighted contexts
+    order = np.argsort(-scores)
     familiar = {a["artist"] for a in store.top_artists(25)}     # artists you already play
     suppressed = store.suppressed_keys("for_you", now) | RecDao(store).eroded_keys("explore", now)
     muted = store.muted_artists()
+    cand = [keys[i] for i in order[:limit * 12]]
+    meta = store.tracks_by_keys(cand)
     out: list[ForYouItem] = []
-    for k, _ in nbrs:
+    for k in cand:
         m = meta.get(k)
         if not m or k in suppressed or m["artist"] in muted or m["artist"] in familiar:
             continue
@@ -299,21 +362,24 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
 
 
 def _taste_neighbourhood(store, limit, now=None):
-    """Embedding-based: tracks near a blend of your *all-time* taste (slow) and your *recent*
-    plays (fast/mood). Recent listening tilts the lane toward your current vibe. Spec §5.1."""
-    slow = store.top_played_keys(limit=8)
-    if not slow:
+    """Tracks scoring high on your play-weighted per-playlist taste (slow, blur-free — distinct
+    high-play contexts stay distinct), tilted toward your *recent* plays (fast/mood). Spec §5.1."""
+    pt = playlist_taste(store)
+    if not pt:
         return None
-    groups = [(slow, 0.6)]
+    keys, V, idx = embed.load_vectors(store)
+    scores = pt.score_all(V)                                  # per-context taste (slow)
     if now is not None:
-        recent = list(store.get_recent_history_keys(now - 86400.0))[:12]   # last day = mood
-        if recent:
-            groups.append((recent, 0.4))
-    nbrs = embed.blended_neighbors(store, groups, topn=limit, exclude=set(slow))
-    if not nbrs:
-        return None
-    meta = store.tracks_by_keys([k for k, _ in nbrs])
-    return [{"key": k, "plays": 0, **meta[k]} for k, _ in nbrs if k in meta]
+        recent = list(store.get_recent_history_keys(now - 86400.0))[:12]
+        mood = embed._centroid(V, idx, [(recent, 1.0)]) if recent else None
+        if mood is not None:
+            Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
+            scores = 0.7 * scores + 0.3 * (Vn @ mood)        # + recent mood (fast)
+    seeds = set(store.top_played_keys(limit=8))
+    order = np.argsort(-scores)
+    top = [keys[i] for i in order if keys[i] not in seeds][:limit]
+    meta = store.tracks_by_keys(top)
+    return [{"key": k, "plays": 0, **meta[k]} for k in top if k in meta]
 
 
 def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem]:

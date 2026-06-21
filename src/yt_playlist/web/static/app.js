@@ -259,9 +259,23 @@ function playlistsTab(rows) {
       const sel = this.selected();
       if (!sel.length) return;
       this.copyIds = sel.map(r => r.id);
-      // single -> "Title (copy)"; multiple -> a copy+merge, prefilled with the joined names
+      // single -> "Title (copy)"; multiple -> combine-to-new, prefilled with the joined names
       this.copyName = sel.length === 1 ? sel[0].title + ' (copy)' : sel.map(r => r.title).join(' + ');
       this.copyModal = true;
+    },
+    copyIntoModal: false, copyIntoTarget: '',
+    openCopyInto() {
+      const sel = this.selected();
+      if (!sel.length) return;
+      this.copyIds = sel.map(r => r.id);
+      this.copyIntoTarget = '';
+      this.copyIntoModal = true;
+    },
+    // destinations for "Copy into…": every playlist except the selected sources, by title
+    intoTargets() {
+      const src = new Set(this.copyIds);
+      return [...this.rows].filter(r => !src.has(r.id))
+        .sort((a, b) => a.title.localeCompare(b.title));
     },
     openGroup() { if (this.count()) { this.groupName = ''; this.groupModal = true; } },
   };

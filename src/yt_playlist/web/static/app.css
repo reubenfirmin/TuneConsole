@@ -740,3 +740,9 @@ button.htmx-request .check-busy { display: inline; }
 .skeleton { min-height: 4.4rem; background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 37%, var(--surface) 63%);
   background-size: 400% 100%; animation: shimmer 1.4s ease infinite; }
 @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+/* New-artist discovery */
+.na-card { display: flex; flex-direction: column; gap: 0.25rem; }
+.na-name { font-weight: 650; font-size: 1rem; }
+.na-because { color: var(--dim); font-size: 0.8rem; }
+.na-fits { color: var(--accent-2); font-size: 0.76rem; }

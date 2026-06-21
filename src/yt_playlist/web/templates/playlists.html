@@ -29,8 +29,10 @@
       <button type="button" class="btn-sm" :disabled="count() < 2"
               @click="merge()" title="Open the merge editor with the selected playlists">Merge →</button>
       <button type="button" class="btn-sm" @click="openCopy()"
-              :title="count() > 1 ? 'Copy + merge the selected playlists into a new one' : 'Duplicate the selected playlist'"
-              x-text="count() > 1 ? 'Copy + merge…' : 'Copy…'"></button>
+              :title="count() > 1 ? 'Combine the selected playlists into a new one' : 'Duplicate the selected playlist'"
+              x-text="count() > 1 ? 'Combine to new…' : 'Copy…'"></button>
+      <button type="button" class="btn-sm" @click="openCopyInto()"
+              title="Copy the selected playlists' songs into an existing playlist">Copy into…</button>
       <button type="button" class="btn-sm" @click="openGroup()">Group…</button>
       <button type="button" class="btn-danger btn-sm" @click="delModal = true">Delete</button>
       <button type="button" class="btn-ghost btn-sm" @click="selectAll(false)">Clear</button>
@@ -82,7 +84,7 @@
     <div class="modal-backdrop" x-show="copyModal" x-cloak x-transition.opacity
          @click="copyModal = false" @keydown.escape.window="copyModal = false">
       <div class="modal" @click.stop x-transition.scale.origin.center>
-        <h3 x-text="copyIds.length > 1 ? 'Copy + merge ' + copyIds.length + ' playlists' : 'Copy playlist'"></h3>
+        <h3 x-text="copyIds.length > 1 ? 'Combine ' + copyIds.length + ' playlists into a new one' : 'Copy playlist'"></h3>
         <p x-show="copyIds.length > 1">A new playlist is created with the combined tracks of the selected
            playlists. The originals are left untouched.</p>
         <input class="modal-input" type="text" x-model="copyName" placeholder="New playlist name"
@@ -93,6 +95,31 @@
           <button type="button" class="btn-ghost" @click="copyModal = false">Cancel</button>
           <button type="button" hx-post="/playlists/copy"
                   hx-vals='js:{ids: plData().copyIds.join(","), name: plData().copyName}'>Save</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- copy-into modal: copy the selected playlists' songs into an existing playlist -->
+  <template x-teleport="body">
+    <div class="modal-backdrop" x-show="copyIntoModal" x-cloak x-transition.opacity
+         @click="copyIntoModal = false" @keydown.escape.window="copyIntoModal = false">
+      <div class="modal" @click.stop x-transition.scale.origin.center>
+        <h3 x-text="'Copy ' + copyIds.length + ' playlist' + (copyIds.length === 1 ? '' : 's') + ' into…'"></h3>
+        <p>The selected playlists' songs are added to an existing playlist. Songs already there are
+           skipped, and the originals are left untouched.</p>
+        <select class="modal-input" x-model="copyIntoTarget" x-ref="ctarget"
+                x-init="$watch('copyIntoModal', v => v && $nextTick(() => $refs.ctarget.focus()))">
+          <option value="">Choose a destination…</option>
+          <template x-for="t in intoTargets()" :key="t.id">
+            <option :value="t.id" x-text="t.title"></option>
+          </template>
+        </select>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="copyIntoModal = false">Cancel</button>
+          <button type="button" hx-post="/playlists/copy-into" @htmx:after-request="copyIntoModal = false"
+                  hx-vals='js:{ids: plData().copyIds.join(","), target: plData().copyIntoTarget}'
+                  :disabled="!copyIntoTarget">Copy in</button>
         </div>
       </div>
     </div>

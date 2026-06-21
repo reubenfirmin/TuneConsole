@@ -13,7 +13,8 @@ def build(ctx) -> APIRouter:
     def home_page(request: Request):
         now = now_fn()
         for_you = recommend.for_you(store, now)
-        explore = recommend.explore_for_you(store, now)
+        shown = {i.key for i in for_you}
+        explore = [i for i in recommend.explore_for_you(store, now) if i.key not in shown]
         dao = RecDao(store)   # record what was shown so erosion can recycle stale items
         dao.record_impressions("for_you", [i.key for i in for_you if i.key], now)
         dao.record_impressions("explore", [i.key for i in explore if i.key], now)
@@ -53,6 +54,13 @@ def build(ctx) -> APIRouter:
         props = RecDao(store).get_proposals("fresh_songs")
         return templates.TemplateResponse(request, "_partials/fresh.html",
                                           {"songs": props or [],
+                                           "building": props is None and _busy()})
+
+    @router.get("/home/new-artists")
+    def home_new_artists(request: Request):
+        props = RecDao(store).get_proposals("new_artists")
+        return templates.TemplateResponse(request, "_partials/new_artists.html",
+                                          {"artists": props or [],
                                            "building": props is None and _busy()})
 
     return router

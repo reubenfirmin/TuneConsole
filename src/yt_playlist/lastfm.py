@@ -178,3 +178,24 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, key=None, s
         on_progress({"type": "done", "text": f"Tagged {total} track(s).", "total": total})
     finally:
         _gate.leave(seq)
+
+
+def similar_artists(name, key, limit=50):
+    """Last.fm artist.getSimilar -> [(artist_name, match_0_to_1)], most similar first. [] on error."""
+    if not name or not key:
+        return []
+    try:
+        data = _get({"method": "artist.getSimilar", "artist": name, "api_key": key,
+                     "format": "json", "limit": limit, "autocorrect": 1})
+    except (urllib.error.URLError, OSError, ValueError):
+        return []
+    out = []
+    for a in (data.get("similarartists") or {}).get("artist") or []:
+        nm = (a.get("name") or "").strip()
+        try:
+            match = float(a.get("match") or 0.0)
+        except (TypeError, ValueError):
+            match = 0.0
+        if nm:
+            out.append((nm, match))
+    return out

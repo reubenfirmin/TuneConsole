@@ -290,6 +290,25 @@ def build(ctx) -> APIRouter:
                 logger.exception("copy of %s failed", ids)
         return _refresh()
 
+    @router.post("/playlists/copy-into")
+    async def playlists_copy_into(request: Request):
+        form = await request.form()
+        ids = _ids(form)
+        try:
+            target = int(form.get("target") or 0)
+        except ValueError:
+            target = 0
+        if not ids or not target:
+            return _toast(request, "Pick a destination playlist.")
+        try:
+            await asyncio.to_thread(ctx.ops().copy_into, ids, target)
+        except ValueError as e:
+            return _toast(request, str(e))
+        except Exception:  # noqa: BLE001  (errors surface on the reloaded page, as before)
+            logger.exception("copy-into %s -> %s failed", ids, target)
+            return _toast(request, "Copy failed — see the log.")
+        return _refresh()
+
     @router.post("/playlists/delete")
     async def playlists_delete(request: Request):
         ops = ctx.ops()

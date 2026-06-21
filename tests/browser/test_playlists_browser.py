@@ -90,8 +90,18 @@ def test_delete_removes_playlists_after_reload(live_pl_app, page):
 def test_copy_creates_new_playlist_after_reload(live_pl_app, page):
     page.goto(f"{live_pl_app}/playlists")
     _select(page, "Alpha")
-    page.get_by_role("button", name=re.compile("Copy")).click()
+    page.get_by_role("button", name="Copy…", exact=True).click()   # the duplicate button (not "Copy into…")
     inp = page.get_by_placeholder("New playlist name")
     inp.fill("Alpha Copy")
     inp.press("Enter")
     expect(page.get_by_role("link", name="Alpha Copy")).to_be_visible()   # copy in the table after reload
+
+
+def test_copy_into_appends_songs_to_existing_playlist(live_pl_app, page):
+    page.goto(f"{live_pl_app}/playlists")
+    _select(page, "Alpha")                                          # source: Alpha (SongA)
+    page.get_by_role("button", name="Copy into…").click()
+    page.get_by_role("combobox").select_option(label="Beta")        # destination: Beta
+    page.get_by_role("button", name="Copy in", exact=True).click()  # modal confirm -> full reload
+    # Beta now holds both songs (SongA copied in alongside its own SongB)
+    expect(page.get_by_role("row").filter(has_text="Beta").get_by_role("cell").nth(3)).to_have_text("2")

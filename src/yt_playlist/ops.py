@@ -13,9 +13,9 @@ import logging
 from yt_playlist import analysis
 from yt_playlist import sync as sync_mod
 from yt_playlist.executor import (
-    MergePlan, add_tracks_to_playlist, apply_result, copy_or_move_playlist, copy_playlist,
-    delete_empty_playlist, delete_playlist, deserialize_plan, execute_planned, remove_track,
-    rename_playlist, reorder_track, search_versions, store_plan, undo_action)
+    MergePlan, add_tracks_to_playlist, apply_result, copy_into_playlist, copy_or_move_playlist,
+    copy_playlist, delete_empty_playlist, delete_playlist, deserialize_plan, execute_planned,
+    remove_track, rename_playlist, reorder_track, search_versions, store_plan, undo_action)
 
 logger = logging.getLogger("yt_playlist.ops")
 
@@ -84,6 +84,13 @@ class PlaylistOps:
         # the new playlist is created under the first selected playlist's identity
         client = self._require_client(playlist_ids[0])
         return copy_playlist(self.store, playlist_ids, new_name, client, self.now_fn())
+
+    def copy_into(self, source_ids, target_id) -> dict:
+        """Copy the selected playlists' songs into an existing target playlist (the target's client)."""
+        if not source_ids:
+            raise ValueError("no playlists to copy")
+        client = self._require_client(target_id)
+        return copy_into_playlist(self.store, source_ids, target_id, client, self.now_fn())
 
     # --- alternate versions -------------------------------------------------
     def find_alternates(self, playlist_id, video_id) -> list:

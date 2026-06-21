@@ -90,3 +90,42 @@ def test_copy_merge_unions_tracks_and_refreshes(store, monkeypatch, tmp_path):
     assert _refreshes(r)
     combined = next(p for p in store.get_playlists() if p.title == "Combined")
     assert combined.track_count == 3                   # union of v0,v1,v2
+
+
+def test_copy_into_appends_union_skipping_dupes(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    src = store.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
+    dst = store.upsert_playlist(iid, "PLB", "Dest", 1, "h", 1.0)
+    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
+    store.set_playlist_tracks(src, [t[0], t[1], t[2]])
+    store.set_playlist_tracks(dst, [t[1]])             # v1 already in the destination
+    fc = FakeClient(tracks={"PLA": [_track("v0", "S0", "X"), _track("v1", "S1", "X"), _track("v2", "S2", "X")],
+                            "PLB": [_track("v1", "S1", "X")]})
+    c = _client(store, lambda: {iid: fc})
+
+    r = c.post("/playlists/copy-into", data={"ids": str(src), "target": str(dst)})
+    assert _refreshes(r)
+    assert store.get_playlist_track_ids(dst) == [t[1], t[0], t[2]]   # existing kept, v0/v2 appended
+    assert fc.added == [("PLB", ["v0", "v2"])]                       # v1 skipped (already present)
+
+
+def test_copy_into_requires_a_destination(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Rock", 1, "h", 1.0)
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    r = c.post("/playlists/copy-into", data={"ids": str(a), "target": ""})
+    assert r.status_code == 422 and "destination" in r.text.lower()  # toast, not a refresh
+
+
+def test_copy_into_rejects_system_target(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    src = store.upsert_playlist(iid, "PLA", "Rock", 1, "h", 1.0)
+    lm = store.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 1.0)   # system playlist
+    store.set_playlist_tracks(src, [store.upsert_track("v0", "S0", "X", None, None, 1)])
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    r = c.post("/playlists/copy-into", data={"ids": str(src), "target": str(lm)})
+    assert r.status_code == 422 and "system playlist" in r.text.lower()

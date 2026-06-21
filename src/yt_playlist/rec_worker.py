@@ -56,3 +56,5 @@ class RecWorker:
         dao.put_proposals("auto_playlists", recommend.auto_playlists(store, k=24), now)
         dao.put_proposals("discover", recommend.new_albums_from_favorites(self.ctx), now)
         dao.put_proposals("fresh_songs", recommend.fresh_songs(self.ctx), now)
+        from yt_playlist import discover
+        dao.put_proposals("new_artists", discover.new_artists(self.ctx), now)

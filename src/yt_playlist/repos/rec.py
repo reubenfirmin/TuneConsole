@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS rec_proposals (
   payload TEXT NOT NULL,                  -- JSON, materialized by the rec worker (last-good serving)
   built_at REAL
 );
+CREATE TABLE IF NOT EXISTS rec_artist_similar (
+  artist TEXT PRIMARY KEY,                -- anchor artist (display name)
+  payload TEXT NOT NULL,                  -- JSON [[name, match], ...] from Last.fm
+  fetched_at REAL
+);
 """
 
 
@@ -108,6 +113,42 @@ class RecRepo(Repo):
         """All track identity_keys in the library — to filter 'fresh' (unowned) discovery."""
         return {r["identity_key"] for r in self.conn.execute(
             "SELECT DISTINCT identity_key FROM tracks")}
+
+    @synchronized
+    def library_artists(self) -> set:
+        """Normalized artist names already in the library — to exclude from new-artist discovery."""
+        from yt_playlist.matching import normalize
+        rows = self.conn.execute("SELECT DISTINCT artist FROM tracks WHERE artist<>''").fetchall()
+        return {normalize(r["artist"]) for r in rows}
+
+    @synchronized
+    def cached_similar(self, artist, now, ttl_days=14):
+        """Cached Last.fm similar-artist list, or None if missing/expired."""
+        row = self.conn.execute(
+            "SELECT payload, fetched_at FROM rec_artist_similar WHERE artist=?", (artist,)).fetchone()
+        if row is None or row["fetched_at"] is None or now - row["fetched_at"] > ttl_days * 86400:
+            return None
+        return json.loads(row["payload"])
+
+    @synchronized
+    def cache_similar(self, artist, pairs, now) -> None:
+        self.conn.execute(
+            "INSERT INTO rec_artist_similar(artist, payload, fetched_at) VALUES (?,?,?) "
+            "ON CONFLICT(artist) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
+            (artist, json.dumps(pairs), now))
+        self.conn.commit()
+
+    @synchronized
+    def genre_play_distribution(self) -> dict:
+        """{genre: Σ (1 + play_count)} over tagged tracks — play-weighted so a barely-played
+        context counts toward breadth/palette far less than one you actually listen to (the +1 keeps
+        owned-but-unplayed tracks from vanishing entirely)."""
+        rows = self.conn.execute(
+            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key) "
+            "SELECT t.genre g, SUM(1 + COALESCE(tp.c, 0)) w FROM tracks t "
+            "LEFT JOIN tp ON tp.identity_key = t.identity_key "
+            "WHERE t.genre <> '' GROUP BY t.genre").fetchall()
+        return {r["g"]: r["w"] for r in rows}
 
     @synchronized
     def saved_album_ids(self) -> set:

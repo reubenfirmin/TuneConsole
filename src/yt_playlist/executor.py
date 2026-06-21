@@ -7,8 +7,8 @@ from yt_playlist.matching import fuzzy_ratio, normalize, track_artist, identity_
 from yt_playlist.retry import with_retry
 from yt_playlist import paths
 from yt_playlist.action_kinds import (
-    PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, COPY_PLAYLIST, ADD_TRACKS,
-    REMOVE_TRACK, RENAME_PLAYLIST, UNDO, UNDOABLE_KINDS, is_undoable)
+    PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, COPY_PLAYLIST, COPY_INTO,
+    ADD_TRACKS, REMOVE_TRACK, RENAME_PLAYLIST, UNDO, UNDOABLE_KINDS, is_undoable)
 from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.thumbnails import best_thumb
 
@@ -329,6 +329,41 @@ def copy_playlist(store, playlist_ids, new_name, client, now) -> dict:
     db_pid = store.upsert_playlist(identity, new_pid, title, len(track_ids), content_hash(track_keys), now)
     store.set_playlist_tracks(db_pid, track_ids)
     return {"new_ytm": new_pid, "title": title, "added": added, "skipped": len(skipped), "from": len(pls)}
+
+def copy_into_playlist(store, source_ids, target_id, client, now) -> dict:
+    """Copy the union of tracks from one or more source playlists INTO an existing target playlist
+    (non-destructive append). Songs already in the target (by identity_key) are skipped, so it's
+    safe to re-run. The source playlists are left untouched."""
+    target = store.get_playlist(target_id)
+    if target is None:
+        raise ValueError("target playlist no longer exists")
+    if target.ytm_playlist_id in SYSTEM_PLAYLIST_IDS:
+        raise ValueError("can't copy into a system playlist")
+    sources = [p for p in (store.get_playlist(i) for i in source_ids) if p is not None and p.id != target_id]
+    if not sources:
+        raise ValueError("no source playlists to copy")
+    have = set(store.get_playlist_track_keys(target_id))   # songs already in the target
+    vids, seen = [], set()
+    for pl in sources:
+        for (k, v, t, a, d, av) in _tracks_with_meta(store, pl.id):
+            if v and v not in seen and k not in have:
+                seen.add(v)
+                have.add(k)                                # also de-dupe across sources by song
+                vids.append(v)
+    added, skipped = _add_items(client, target.ytm_playlist_id, vids)
+    skipped_set = set(skipped)
+    added_vids = [v for v in vids if v not in skipped_set]
+    tid_by_vid = store.track_ids_for_videos(added_vids)
+    new_ids = [tid_by_vid[v] for v in added_vids if v in tid_by_vid]
+    combined = list(dict.fromkeys(store.get_playlist_track_ids(target_id) + new_ids))
+    store.set_playlist_tracks(target_id, combined)
+    store.set_playlist_track_count(target_id, len(combined), now)
+    store.record_action(COPY_INTO,
+                        json.dumps({"target": target.title, "added": added, "skipped": len(skipped),
+                                    "source": ", ".join(p.title for p in sources)}),
+                        "{}", "executed", "{}", now)
+    return {"target_ytm": target.ytm_playlist_id, "title": target.title, "added": added,
+            "skipped": len(skipped), "from": len(sources), "count": len(combined)}
 
 def _parse_duration(text):
     """'3:45' / '1:02:03' -> seconds, else None."""

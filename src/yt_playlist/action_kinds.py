@@ -12,6 +12,7 @@ MOVE_IDENTITY = "move_identity"  # playlist copied/moved to another identity
 DELETE_EMPTY = "delete_empty"    # an empty playlist deleted
 DELETE_PLAYLIST = "delete_playlist"  # a playlist deleted outright (e.g. from the Playlists tab)
 COPY_PLAYLIST = "copy_playlist"  # a playlist duplicated into a new one (same identity)
+COPY_INTO = "copy_into"          # selected playlists' songs copied into an existing playlist
 ADD_TRACKS = "add_tracks"        # one or more tracks added to an existing playlist (e.g. alternate versions)
 REMOVE_TRACK = "remove_track"    # a single track removed from a playlist
 RENAME_PLAYLIST = "rename_playlist"  # a playlist renamed
