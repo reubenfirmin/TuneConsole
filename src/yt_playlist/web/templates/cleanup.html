@@ -27,12 +27,10 @@
 <p class="section-note">Each group is a set of identical playlists. Pick the one to <strong>keep</strong> — every
    other copy is deleted (backup first, remote-verified). One click resolves the whole group.</p>
 {% for g in groups %}
-  <div class="card group" x-data="groupCard()" x-show="state !== 'gone'" x-transition.opacity.duration.350ms
-       :class="{ dim: state === 'working' }" style="margin-bottom:1rem">
+  <div class="card group" style="margin-bottom:1rem">
     <div class="group-head">
       <strong>{{ g.playlists|length }} identical copies</strong>
       <span class="muted">· {{ g.track_count }} tracks</span>
-      <span class="muted" x-show="state === 'working'" style="display:none">· deleting the others…</span>
     </div>
     <table>
       <tbody>
@@ -41,14 +39,14 @@
           <td><span class="tag amber">{{ identities[p.identity_id] }}</span>
               {{ pllink(p.ytm_playlist_id, p.title, p.track_count) }}</td>
           <td style="text-align:right; white-space:nowrap">
-            <button type="button" class="cta" :disabled="state === 'working'"
-                    @click="keep({{ p.id }})" title="Keep this copy, delete the rest">Keep this one</button>
+            <button type="button" class="cta"
+                    hx-post="/dupe/keep-one" hx-vals='{"keep": {{ p.id }}}' hx-indicator="closest .card"
+                    title="Keep this copy, delete the rest">Keep this one</button>
           </td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
-    <div x-show="err" class="notice err" style="display:none; margin-top:.7rem" x-text="err"></div>
   </div>
 {% else %}
   <div class="card"><p class="empty" style="margin:0">No exact duplicates. 🎉</p></div>
@@ -174,7 +172,7 @@
       </tr>
     </tbody>
     {% else %}
-    <tbody><tr><td colspan="4" class="empty">No overlaps found.</td></tr></tbody>
+    <tbody><tr><td colspan="4" class="empty inbox-zero">📭 Inbox zero — no overlapping playlists to review.</td></tr></tbody>
     {% endfor %}
   </table>
   <!-- confirm modal (teleported to body so the fixed overlay isn't captured by <main>'s transform) -->
@@ -226,11 +224,11 @@
       <table>
         <tbody>
         {% for g in ignored %}
-          <tr x-data="ajaxRow()" x-show="!gone" x-transition.opacity.duration.300ms>
+          <tr>
             <td>{{ pllink(g.ytm, g.title) }}</td>
             <td style="text-align:right">
-              <button type="button" class="btn-ghost btn-sm" :disabled="busy"
-                      @click="go('/overlaps/unignore', { ytm: '{{ g.ytm }}' })">Stop ignoring</button>
+              <button type="button" class="btn-ghost btn-sm"
+                      hx-post="/overlaps/unignore" hx-vals='{"ytm": "{{ g.ytm }}"}'>Stop ignoring</button>
             </td>
           </tr>
         {% endfor %}
@@ -257,13 +255,12 @@
         </tr></thead>
         <tbody x-ref="body">
         {% for h in hidden %}
-          <tr class="srow" data-a="{{ h.a_title|lower }}" data-b="{{ h.b_title|lower }}"
-              x-data="ajaxRow()" x-show="!gone" x-transition.opacity.duration.300ms>
+          <tr class="srow" data-a="{{ h.a_title|lower }}" data-b="{{ h.b_title|lower }}">
             <td>{{ pllink(h.a, h.a_title) }}</td>
             <td>{{ pllink(h.b, h.b_title) }}</td>
             <td>
-              <button type="button" class="btn-ghost btn-sm" :disabled="busy"
-                      @click="go('/overlaps/unsuppress', { a: '{{ h.a }}', b: '{{ h.b }}' })">Unhide</button>
+              <button type="button" class="btn-ghost btn-sm"
+                      hx-post="/overlaps/unsuppress" hx-vals='{"a": "{{ h.a }}", "b": "{{ h.b }}"}'>Unhide</button>
             </td>
           </tr>
         {% endfor %}

@@ -29,6 +29,11 @@ def live_cleanup_app():
     s.init_schema()
     iid = s.upsert_identity("Main", "c1", None, True)
     s.upsert_playlist(iid, "PLE", "Empty One", 0, "h", 1.0)   # no tracks -> an empty playlist
+    # two identical playlists -> an exact-duplicate group
+    dup_tracks = [s.upsert_track(f"d{i}", f"D{i}", "X", None, None, 1) for i in range(2)]
+    for ytm, title in (("PLD1", "Dup A"), ("PLD2", "Dup B")):
+        pid = s.upsert_playlist(iid, ytm, title, 2, "h", 1.0)
+        s.set_playlist_tracks(pid, dup_tracks)
     app = create_app(s, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
@@ -47,3 +52,11 @@ def test_empty_playlist_delete_removes_row(live_cleanup_app, page):
     expect(link).to_be_visible()
     page.get_by_role("row").filter(has_text="Empty One").get_by_role("button", name="Delete").click()
     link.wait_for(state="hidden", timeout=3000)
+
+
+def test_keep_one_resolves_duplicate_group(live_cleanup_app, page):
+    page.goto(f"{live_cleanup_app}/cleanup")
+    expect(page.get_by_text("identical copies")).to_be_visible()
+    page.get_by_role("button", name="Keep this one").first.click()
+    # keeping one deletes the other copy and the group resolves (page recomputes)
+    page.get_by_text("identical copies").wait_for(state="hidden", timeout=4000)

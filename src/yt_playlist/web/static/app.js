@@ -14,24 +14,7 @@ document.addEventListener('htmx:beforeSwap', (e) => {
   if (e.detail.xhr.status === 422) { e.detail.shouldSwap = true; e.detail.isError = false; }
 });
 
-// Alpine component factories for the dashboard tabs (loaded globally via base.html).
-function groupCard() {
-  return {
-    state: 'idle', err: '',
-    async keep(id) {
-      if (this.state === 'working') return;
-      this.state = 'working'; this.err = '';
-      try {
-        const fd = new FormData(); fd.append('keep', id);
-        const r = await fetch('/dupe/keep-one', { method: 'POST', body: fd });
-        const j = await r.json();
-        // reload so dependent sections (e.g. overlaps that referenced a deleted copy) recompute
-        if (j.ok) { location.reload(); }
-        else { this.state = 'idle'; this.err = (j.errors || []).join(' · ') || 'failed'; }
-      } catch (e) { this.state = 'idle'; this.err = String(e); }
-    },
-  };
-}
+// Alpine component factories for the various pages (loaded globally via base.html).
 function emptyRow() {
   return {
     state: 'idle', err: '',
@@ -58,22 +41,6 @@ function hideRow() {
         const r = await fetch('/overlaps/suppress', { method: 'POST', body: fd });
         if ((await r.json()).ok) { this.state = 'gone'; } else { this.state = 'idle'; }
       } catch (e) { this.state = 'idle'; }
-    },
-  };
-}
-function ajaxRow() {
-  // Generic "POST then drop this row" for restore-style actions (unhide, stop-ignoring).
-  return {
-    gone: false, busy: false,
-    async go(url, data) {
-      if (this.busy) return;
-      this.busy = true;
-      try {
-        const fd = new FormData();
-        Object.entries(data).forEach(([k, v]) => fd.append(k, v));
-        const r = await fetch(url, { method: 'POST', body: fd });
-        if ((await r.json()).ok) { this.gone = true; } else { this.busy = false; }
-      } catch (e) { this.busy = false; }
     },
   };
 }

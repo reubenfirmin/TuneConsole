@@ -619,3 +619,10 @@ tr.htmx-request { opacity: .35; transition: opacity .2s ease; }
 tr.htmx-request td { text-decoration: line-through; }
 tbody.stale-row.htmx-swapping, tbody.move-row.htmx-swapping,
 tbody.empty-row.htmx-swapping { opacity: 0; transition: opacity .3s ease; }
+
+/* "inbox zero" empty state (overlaps table) — reads as an achievement, not an absence */
+td.inbox-zero { text-align: center; padding: 2.4rem 1rem; font-size: 1.05rem;
+  color: var(--text); opacity: .85; }
+
+/* dim a duplicate-group card while its keep-one request is in flight (matches old .dim) */
+.card.group.htmx-request { opacity: .5; transition: opacity .2s ease; }

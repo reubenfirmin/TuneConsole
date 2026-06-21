@@ -14,6 +14,11 @@ def build(ctx) -> APIRouter:
             request, "_partials/error_toast.html", {"message": message},
             status_code=422, headers={"HX-Reswap": "none"})
 
+    def _refresh():
+        # htmx does a full page reload; dependent sections (overlaps that referenced a
+        # deleted copy) recompute, exactly as the old location.reload() did.
+        return HTMLResponse("", headers={"HX-Refresh": "true"})
+
     @router.get("/merge")
     def merge_editor(request: Request):
         # N-way track-level merge editor for a set of playlists (?ids=1,2,3).
@@ -98,14 +103,16 @@ def build(ctx) -> APIRouter:
         return JSONResponse({"ok": True, "deleted": title})
 
     @router.post("/dupe/keep-one")
-    def dupe_keep_one(keep: int = Form(...)):
+    def dupe_keep_one(request: Request, keep: int = Form(...)):
         # Collapse a cluster of identical playlists to one: delete every other copy with the same
         # track set, each remote-verified against the keeper. One click resolves the whole group.
         try:
-            deleted, errors = ctx.ops().keep_one(keep)
+            _deleted, errors = ctx.ops().keep_one(keep)
         except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
-        return JSONResponse({"ok": not errors, "deleted": deleted, "errors": errors})
+            return _toast(request, str(e))
+        if errors:
+            return _toast(request, "Couldn’t delete some copies: " + " · ".join(errors))
+        return _refresh()
 
     @router.post("/playlist/delete-empty")
     def delete_empty(request: Request, playlist: int = Form(...)):

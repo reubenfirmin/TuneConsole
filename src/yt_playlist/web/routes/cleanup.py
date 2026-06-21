@@ -2,7 +2,7 @@
 import json
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from yt_playlist import analysis
 
@@ -10,6 +10,11 @@ from yt_playlist import analysis
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
+
+    def _refresh():
+        # htmx does a full page reload; the page recomputes, so a restored comparison
+        # lands back in whichever section now applies (Exact duplicates or Overlaps).
+        return Response(status_code=200, headers={"HX-Refresh": "true"})
 
     @router.get("/cleanup")
     def cleanup(request: Request):
@@ -55,7 +60,7 @@ def build(ctx) -> APIRouter:
     @router.post("/overlaps/unignore")
     def unignore_overlap(ytm: str = Form(...)):
         store.unignore_overlap_playlist(ytm)
-        return JSONResponse({"ok": True})   # AJAX: row drops in place
+        return _refresh()   # restore: recompute so the comparison reappears in its section
 
     @router.post("/overlaps/ignore-except")
     def ignore_overlaps_except(ytm: str = Form(...), a: str = Form(...), b: str = Form(...)):
@@ -88,6 +93,6 @@ def build(ctx) -> APIRouter:
     @router.post("/overlaps/unsuppress")
     def unsuppress_overlap(a: str = Form(...), b: str = Form(...)):
         store.unsuppress_overlap(a, b)
-        return JSONResponse({"ok": True})   # AJAX: row drops in place
+        return _refresh()   # restore: recompute so the comparison reappears in its section
 
     return router

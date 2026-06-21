@@ -381,7 +381,7 @@ def test_dupe_keep_one_deletes_whole_cluster(store, monkeypatch, tmp_path):
     client = FakeClient(tracks={ytm: [_track("v1", "Song", "X")] for _, ytm in ids})
     c = _client(store, lambda: {iid: client})
     r = c.post("/dupe/keep-one", data={"keep": keep_id})
-    assert r.status_code == 200 and r.json()["ok"] is True and r.json()["deleted"] == 2
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"   # success -> recompute page
     remaining = {p.ytm_playlist_id for p in store.get_playlists()}
     assert remaining == {"PLa"}                      # only the kept copy survives
     assert sorted(client.deleted) == ["PLb", "PLc"]
@@ -919,3 +919,32 @@ def test_delete_empty_removes_row(store):
     r = c.post("/playlist/delete-empty", data={"playlist": pid})
     assert r.status_code == 200 and r.text.strip() == ""       # empty -> htmx removes the row
     assert store.get_playlist(pid) is None
+
+
+def test_unhide_overlap_restores_to_overlaps_section(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Beta", 3, "h", 1.0)
+    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(4)]
+    store.set_playlist_tracks(a, [t[0], t[1], t[2]])           # {0,1,2}
+    store.set_playlist_tracks(b, [t[1], t[2], t[3]])           # {1,2,3}: shared {1,2}, jaccard .5 -> overlap
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    store.suppress_overlap("PLA", "PLB", 1.0)                  # hide the pair
+    assert c.get("/cleanup").text.count('class="ov-row"') == 0  # gone from Overlaps, now Hidden
+
+    r = c.post("/overlaps/unsuppress", data={"a": "PLA", "b": "PLB"})
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"   # recompute, not drop-in-place
+    assert c.get("/cleanup").text.count('class="ov-row"') == 1  # restored to the Overlaps section
+
+
+def test_keep_one_refreshes_and_deletes_other_copies(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Dup A", 2, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Dup B", 2, "h", 1.0)
+    t = [store.upsert_track(f"d{i}", f"D{i}", "X", None, None, 1) for i in range(2)]
+    store.set_playlist_tracks(a, t); store.set_playlist_tracks(b, t)   # identical -> a dup group
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.post("/dupe/keep-one", data={"keep": a})
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
+    assert store.get_playlist(a) is not None and store.get_playlist(b) is None   # other copy deleted

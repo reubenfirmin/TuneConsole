@@ -1,6 +1,6 @@
 """Albums and Artists tabs (your collection across all playlists) + save/unsave album."""
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 
 from yt_playlist.thumbnails import best_thumb
 
@@ -8,6 +8,16 @@ from yt_playlist.thumbnails import best_thumb
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates = ctx.store, ctx.templates
+
+    def _refresh():
+        # htmx reloads on this header — exact parity with the old location.reload(), which keeps the
+        # collection table, the saved column, and the discography table in sync after a save/unsave.
+        return Response(status_code=200, headers={"HX-Refresh": "true"})
+
+    def _toast(request, message):
+        return templates.TemplateResponse(
+            request, "_partials/error_toast.html", {"message": message},
+            status_code=422, headers={"HX-Reswap": "none"})
 
     @router.get("/albums")
     def albums_page(request: Request):
@@ -38,7 +48,7 @@ def build(ctx) -> APIRouter:
         # Save a YouTube album to your library: get_album -> like its audio playlist; mirror locally.
         browse_id = ((await request.form()).get("browse_id") or "").strip()
         if not browse_id:
-            return JSONResponse({"ok": False, "error": "no album id"})
+            return _toast(request, "no album id")
         try:
             client, album = _album_and_client(browse_id)
             client.rate_playlist(album["audioPlaylistId"], "LIKE")
@@ -47,26 +57,26 @@ def build(ctx) -> APIRouter:
                 "artist": ", ".join(x.get("name", "") for x in (album.get("artists") or [])),
                 "year": album.get("year"), "thumbnail": best_thumb(album.get("thumbnails"))})
         except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
+            return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             ctx.logger.exception("save-album %s failed", browse_id)
-            return JSONResponse({"ok": False, "error": "YouTube refused the save"})
-        return JSONResponse({"ok": True, "title": album.get("title", "album")})
+            return _toast(request, "YouTube refused the save")
+        return _refresh()
 
     @router.post("/collection/unsave-album")
     async def unsave_album(request: Request):
         browse_id = ((await request.form()).get("browse_id") or "").strip()
         if not browse_id:
-            return JSONResponse({"ok": False, "error": "no album id"})
+            return _toast(request, "no album id")
         try:
             client, album = _album_and_client(browse_id)
             client.rate_playlist(album["audioPlaylistId"], "INDIFFERENT")
             store.remove_saved_album(browse_id)
         except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
+            return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             ctx.logger.exception("unsave-album %s failed", browse_id)
-            return JSONResponse({"ok": False, "error": "YouTube refused"})
-        return JSONResponse({"ok": True})
+            return _toast(request, "YouTube refused")
+        return _refresh()
 
     return router
