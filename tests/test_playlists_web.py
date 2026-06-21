@@ -1,0 +1,92 @@
+"""Contract tests for the htmx Playlists bulk actions (/playlists/copy|group|delete).
+
+The bulk routes now do their store/YouTube work and return an empty 200 with
+HX-Refresh: true (htmx then does a full page reload — parity with the old
+location.reload()), instead of the old JSON payloads. Fast TestClient assertions
+on the header + the store mutation.
+
+Store-mutation coverage moved here from the JSON-based test_web.py tests
+(test_playlists_group_and_delete / _copy_and_copy_merge / _delete_hides_system).
+"""
+from fastapi.testclient import TestClient
+
+from yt_playlist.web.app import create_app
+from tests.conftest import FakeClient, _track
+
+
+def _client(store, provider):
+    # local base_url so state-changing POSTs pass the cross-origin guard.
+    return TestClient(create_app(store, provider, now_fn=lambda: 1.0), base_url="http://127.0.0.1")
+
+
+def _refreshes(r):
+    return r.status_code == 200 and r.headers.get("hx-refresh") == "true"
+
+
+def test_group_assigns_and_refreshes(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    r = c.post("/playlists/group", data={"ids": f"{a},{b}", "name": "Faves"})
+    assert _refreshes(r)
+    assert r.text == ""                                # no JSON body — htmx just reloads
+    assert store.get_playlist_groups() == {"PLA": "Faves", "PLB": "Faves"}
+
+
+def test_delete_removes_and_refreshes(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v1", "S", "X", None, None, 1)])
+    fc = FakeClient(tracks={"PLA": [_track("v1", "S", "X")]})
+    c = _client(store, lambda: {iid: fc})
+
+    r = c.post("/playlists/delete", data={"ids": str(a)})
+    assert _refreshes(r)
+    assert store.get_playlist(a) is None and fc.deleted == ["PLA"]
+
+
+def test_delete_hides_system_playlist_and_refreshes(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)   # undeletable system playlist
+    store.set_playlist_tracks(lm, [store.upsert_track("v1", "S", "X", None, None, 1)])
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    r = c.post("/playlists/delete", data={"ids": str(lm)})
+    assert _refreshes(r)
+    assert store.get_playlist(lm) is not None          # survives on YouTube
+    assert "LM" in store.get_hidden_playlists()        # just hidden from the tab
+
+
+def test_copy_creates_playlist_and_refreshes(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", None, None, 1),
+                                  store.upsert_track("v1", "S1", "X", None, None, 1)])
+    fc = FakeClient(tracks={"PLA": [_track("v0", "S0", "X"), _track("v1", "S1", "X")]})
+    c = _client(store, lambda: {iid: fc})
+
+    r = c.post("/playlists/copy", data={"ids": str(a), "name": "Rock Copy"})
+    assert _refreshes(r)
+    assert any(p.title == "Rock Copy" for p in store.get_playlists())   # pulled into the store
+
+
+def test_copy_merge_unions_tracks_and_refreshes(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Pop", 2, "h", 1.0)
+    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
+    store.set_playlist_tracks(a, [t[0], t[1]]); store.set_playlist_tracks(b, [t[1], t[2]])
+    fc = FakeClient(tracks={"PLA": [_track("v0", "S0", "X"), _track("v1", "S1", "X")],
+                            "PLB": [_track("v1", "S1", "X"), _track("v2", "S2", "X")]})
+    c = _client(store, lambda: {iid: fc})
+
+    r = c.post("/playlists/copy", data={"ids": f"{a},{b}", "name": "Combined"})
+    assert _refreshes(r)
+    combined = next(p for p in store.get_playlists() if p.title == "Combined")
+    assert combined.track_count == 3                   # union of v0,v1,v2

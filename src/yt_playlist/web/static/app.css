@@ -617,4 +617,5 @@ hr { border: none; border-top: 1px solid var(--border); margin: 1.4rem 0; }
 /* discover: reproduce the old Alpine row states with htmx lifecycle classes */
 tr.htmx-request { opacity: .35; transition: opacity .2s ease; }
 tr.htmx-request td { text-decoration: line-through; }
-tbody.stale-row.htmx-swapping, tbody.move-row.htmx-swapping { opacity: 0; transition: opacity .3s ease; }
+tbody.stale-row.htmx-swapping, tbody.move-row.htmx-swapping,
+tbody.empty-row.htmx-swapping { opacity: 0; transition: opacity .3s ease; }

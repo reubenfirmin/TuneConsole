@@ -1,6 +1,6 @@
 """Destructive cleanup ops: the N-way merge editor, dupe deletes, keep-one, delete-empty."""
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from yt_playlist.merge_order import track_positions
 
@@ -8,6 +8,11 @@ from yt_playlist.merge_order import track_positions
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, now_fn, templates, logger = ctx.store, ctx.now_fn, ctx.templates, ctx.logger
+
+    def _toast(request, message):
+        return templates.TemplateResponse(
+            request, "_partials/error_toast.html", {"message": message},
+            status_code=422, headers={"HX-Reswap": "none"})
 
     @router.get("/merge")
     def merge_editor(request: Request):
@@ -103,15 +108,15 @@ def build(ctx) -> APIRouter:
         return JSONResponse({"ok": not errors, "deleted": deleted, "errors": errors})
 
     @router.post("/playlist/delete-empty")
-    def delete_empty(playlist: int = Form(...)):
+    def delete_empty(request: Request, playlist: int = Form(...)):
         try:
             ctx.ops().delete_empty(playlist)
         except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
+            return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             logger.exception("delete-empty failed")
-            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response."})
-        return JSONResponse({"ok": True})
+            return _toast(request, "YouTube returned an unexpected response.")
+        return HTMLResponse("")   # htmx fades + removes the row
 
     @router.get("/dupe/{a}/{b}")
     def dupe_detail(a: int, b: int):

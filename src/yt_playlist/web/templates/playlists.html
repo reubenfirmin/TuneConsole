@@ -9,7 +9,7 @@
 </div>
 {% include "_syncbar.html" %}
 
-<div x-data='playlistsTab({{ rows|tojson }})'>
+<div id="pltab" x-data='playlistsTab({{ rows|tojson }})'>
   <div class="card" style="margin-bottom:1.1rem">
     <div class="pl-toolbar">
       <span class="muted" style="font-size:.85rem">Click a column heading to sort.</span>
@@ -87,10 +87,13 @@
         <p x-show="copyIds.length > 1">A new playlist is created with the combined tracks of the selected
            playlists. The originals are left untouched.</p>
         <input class="modal-input" type="text" x-model="copyName" placeholder="New playlist name"
-               @keydown.enter="doCopy()" x-ref="cname" x-init="$watch('copyModal', v => v && $nextTick(() => $refs.cname.select()))">
+               x-ref="cname" x-init="$watch('copyModal', v => v && $nextTick(() => $refs.cname.select()))"
+               hx-post="/playlists/copy" hx-trigger="keyup[key=='Enter']"
+               hx-vals='js:{ids: plData().copyIds.join(","), name: plData().copyName}'>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="copyModal = false">Cancel</button>
-          <button type="button" @click="doCopy()">Save</button>
+          <button type="button" hx-post="/playlists/copy"
+                  hx-vals='js:{ids: plData().copyIds.join(","), name: plData().copyName}'>Save</button>
         </div>
       </div>
     </div>
@@ -105,11 +108,14 @@
         <p>Type a group name. Existing names are reused; leave blank to remove them from their group.</p>
         <input class="modal-input" type="text" x-model="groupName" placeholder="e.g. Workout"
                list="grouplist" autocomplete="off"
-               @keydown.enter="doGroup()" x-ref="gname" x-init="$watch('groupModal', v => v && $nextTick(() => $refs.gname.focus()))">
+               x-ref="gname" x-init="$watch('groupModal', v => v && $nextTick(() => $refs.gname.focus()))"
+               hx-post="/playlists/group" hx-trigger="keyup[key=='Enter']"
+               hx-vals='js:{ids: plData().selected().map(r => r.id).join(","), name: plData().groupName}'>
         <datalist id="grouplist">{% for g in group_names %}<option value="{{ g }}"></option>{% endfor %}</datalist>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="groupModal = false">Cancel</button>
-          <button type="button" @click="doGroup()">Save</button>
+          <button type="button" hx-post="/playlists/group"
+                  hx-vals='js:{ids: plData().selected().map(r => r.id).join(","), name: plData().groupName}'>Save</button>
         </div>
       </div>
     </div>
@@ -126,10 +132,14 @@
            <strong>hidden</strong> from this tab instead.</p>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="delModal = false">Cancel</button>
-          <button type="button" class="btn-danger" @click="doDelete()">Delete them</button>
+          <button type="button" class="btn-danger" hx-post="/playlists/delete"
+                  hx-vals='js:{ids: plData().selected().map(r => r.id).join(",")}'>Delete them</button>
         </div>
       </div>
     </div>
   </template>
 </div>
+{# htmx evaluates hx-vals js: in the global scope (no $el/this/event bound), so reach the
+   playlistsTab Alpine state by id. The teleported modals share this same component data. #}
+<script>function plData() { return Alpine.$data(document.getElementById('pltab')); }</script>
 {% endblock %}

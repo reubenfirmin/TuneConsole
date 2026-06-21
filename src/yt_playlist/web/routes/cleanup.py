@@ -1,4 +1,4 @@
-"""Cleanup dashboard (`/`) plus the overlap suppress/ignore endpoints it drives."""
+"""Cleanup page (`/cleanup`) plus the overlap suppress/ignore endpoints it drives."""
 import json
 
 from fastapi import APIRouter, Form, Request
@@ -12,7 +12,7 @@ def build(ctx) -> APIRouter:
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
 
     @router.get("/cleanup")
-    def dashboard(request: Request):
+    def cleanup(request: Request):
         dupes = analysis.find_dupes(store)
         groups = analysis.find_identical_groups(store)         # exact-duplicate clusters
         empties = analysis.find_empty_playlists(store)
@@ -34,7 +34,7 @@ def build(ctx) -> APIRouter:
                   if a in pl_by_ytm and b in pl_by_ytm]
         ignored = [{"ytm": y, "title": pl_by_ytm[y].title}
                    for y in sorted(ignored_ytm) if y in pl_by_ytm]
-        return templates.TemplateResponse(request, "dashboard.html", {
+        return templates.TemplateResponse(request, "cleanup.html", {
             "groups": groups, "near_groups": near_groups, "overlaps": overlaps,
             "empties": empties, "tiny": tiny, "kinds": kinds,
             "identities": {i.id: i.label for i in store.get_identities()},

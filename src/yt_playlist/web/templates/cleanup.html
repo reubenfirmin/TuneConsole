@@ -87,17 +87,7 @@
   <table>
     <thead><tr><th>Playlist</th><th></th></tr></thead>
     {% for p in empties %}
-    <tbody x-data="emptyRow()" x-show="state !== 'gone'" x-transition.opacity.duration.300ms>
-      <tr :class="{ rowdel: state === 'deleting' }">
-        <td><span class="tag amber">{{ identities[p.identity_id] }}</span>
-            {{ pllink(p.ytm_playlist_id, p.title) }}</td>
-        <td style="text-align:right; white-space:nowrap">
-          <button type="button" class="btn-danger btn-sm" :disabled="state === 'deleting'"
-                  @click="del({{ p.id }})">Delete</button>
-        </td>
-      </tr>
-      <tr x-show="err" style="display:none"><td colspan="2"><span class="notice err" style="display:inline-block" x-text="err"></span></td></tr>
-    </tbody>
+    {% include "_partials/empty_row.html" %}
     {% endfor %}
   </table>
 </div>

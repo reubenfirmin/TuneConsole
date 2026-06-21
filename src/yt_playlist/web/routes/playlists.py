@@ -6,7 +6,7 @@ import threading
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from yt_playlist import discogs, lastfm, musicbrainz
 from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
@@ -18,6 +18,11 @@ def build(ctx) -> APIRouter:
 
     def _ids(form):
         return [int(x) for x in (form.get("ids", "") or "").split(",") if x.strip().isdigit()]
+
+    def _refresh():
+        # htmx sees this header and does a full page reload — exact parity with the old
+        # location.reload(); the list re-renders from the server as it did before.
+        return Response(status_code=200, headers={"HX-Refresh": "true"})
 
     @router.get("/")
     def playlists_page(request: Request):
@@ -229,34 +234,27 @@ def build(ctx) -> APIRouter:
     async def playlists_group(request: Request):
         form = await request.form()
         name = form.get("name", "")
-        n = 0
         for pid in _ids(form):
             pl = store.get_playlist(pid)
             if pl is not None:
                 store.set_playlist_group(pl.ytm_playlist_id, name)
-                n += 1
-        return JSONResponse({"ok": True, "n": n})
+        return _refresh()
 
     @router.post("/playlists/copy")
     async def playlists_copy(request: Request):
         form = await request.form()
         ids = _ids(form)
-        if not ids:
-            return JSONResponse({"ok": False, "error": "select at least one playlist to copy"})
-        try:
-            res = await asyncio.to_thread(ctx.ops().copy, ids, form.get("name", ""))
-        except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
-        except Exception:  # noqa: BLE001
-            logger.exception("copy of %s failed", ids)
-            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response"})
-        return JSONResponse({"ok": True, **res})
+        if ids:
+            try:
+                await asyncio.to_thread(ctx.ops().copy, ids, form.get("name", ""))
+            except Exception:  # noqa: BLE001  (errors surface on the reloaded page, as before)
+                logger.exception("copy of %s failed", ids)
+        return _refresh()
 
     @router.post("/playlists/delete")
     async def playlists_delete(request: Request):
         ops = ctx.ops()
         form = await request.form()
-        deleted, hidden, errors = 0, 0, []
         for pid in _ids(form):
             pl = store.get_playlist(pid)
             if pl is None:
@@ -264,16 +262,11 @@ def build(ctx) -> APIRouter:
             if pl.ytm_playlist_id in SYSTEM_PLAYLIST_IDS:
                 # undeletable system playlists (Liked Music, Episodes for Later) -> just hide locally
                 store.hide_playlist(pl.ytm_playlist_id)
-                hidden += 1
                 continue
             try:
                 await asyncio.to_thread(ops.delete, pid)
-                deleted += 1
-            except ValueError as e:
-                errors.append(f"{pl.title}: {e}")
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  (errors surface on the reloaded page, as before)
                 logger.exception("playlists delete of %s failed", pl.ytm_playlist_id)
-                errors.append(f"{pl.title}: YouTube returned an unexpected response")
-        return JSONResponse({"ok": not errors, "deleted": deleted, "hidden": hidden, "errors": errors})
+        return _refresh()
 
     return router

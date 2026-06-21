@@ -394,7 +394,7 @@ def test_delete_empty_playlist(store, monkeypatch, tmp_path):
     client = FakeClient()                                                     # get_playlist -> {tracks: []}
     c = _client(store, lambda: {iid: client})
     r = c.post("/playlist/delete-empty", data={"playlist": empty})
-    assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.status_code == 200 and r.text.strip() == ""          # empty -> htmx removes the row
     assert client.deleted == ["PLempty"] and store.get_playlist(empty) is None
 
 def test_delete_empty_refuses_if_not_empty(store, monkeypatch, tmp_path):
@@ -404,7 +404,7 @@ def test_delete_empty_refuses_if_not_empty(store, monkeypatch, tmp_path):
     client = FakeClient(tracks={"PLfull": [_track("v1", "S", "X")]})          # has a track remotely
     c = _client(store, lambda: {iid: client})
     r = c.post("/playlist/delete-empty", data={"playlist": pl})
-    assert r.json()["ok"] is False and client.deleted == []
+    assert r.status_code == 422 and client.deleted == []          # refused -> error toast, nothing deleted
 
 
 def test_overlap_ignore_excludes_playlist(store):
@@ -503,47 +503,6 @@ def test_playlists_is_default_tab(store):
     assert "All playlists" in root and "playlistsTab(" in root     # default tab is Playlists
     assert c.get("/cleanup").status_code == 200                    # cleanup moved here
     assert 'href="/cleanup"' in root                              # nav points at it
-
-
-def test_playlists_group_and_delete(store, monkeypatch, tmp_path):
-    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
-    t = store.upsert_track("v1", "S", "X", None, None, 1)
-    store.set_playlist_tracks(a, [t]); store.set_playlist_tracks(b, [t])
-    c = _client(store, lambda: {iid: FakeClient()})
-
-    # group both
-    r = c.post("/playlists/group", data={"ids": f"{a},{b}", "name": "Faves"})
-    assert r.status_code == 200 and r.json()["n"] == 2
-    assert store.get_playlist_groups() == {"PLA": "Faves", "PLB": "Faves"}
-    assert "By group" in c.get("/").text          # split toggle appears once groups exist
-
-    # delete one
-    r = c.post("/playlists/delete", data={"ids": str(a)})
-    assert r.status_code == 200 and r.json() == {"ok": True, "deleted": 1, "hidden": 0, "errors": []}
-    assert store.get_playlist(a) is None
-    # the group assignment is preserved (user curation) so it reattaches if the playlist returns
-    assert store.get_playlist_groups() == {"PLA": "Faves", "PLB": "Faves"}
-
-
-def test_playlists_copy_and_copy_merge(store, monkeypatch, tmp_path):
-    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Pop", 2, "h", 1.0)
-    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
-    store.set_playlist_tracks(a, [t[0], t[1]]); store.set_playlist_tracks(b, [t[1], t[2]])
-    c = _client(store, lambda: {iid: FakeClient()})
-
-    r = c.post("/playlists/copy", data={"ids": str(a), "name": "Rock Copy"})
-    assert r.status_code == 200 and r.json()["ok"] and r.json()["added"] == 2 and r.json()["from"] == 1
-    assert any(p.title == "Rock Copy" for p in store.get_playlists())   # pulled into the store
-
-    # copy + merge: union of the two playlists' tracks (v0,v1,v2) = 3
-    r = c.post("/playlists/copy", data={"ids": f"{a},{b}", "name": "Combined"})
-    assert r.json()["ok"] and r.json()["added"] == 3 and r.json()["from"] == 2
 
 
 def test_find_and_add_alternate_versions(store):
@@ -896,21 +855,6 @@ def test_reorder_and_remove_track(store):
     assert store.get_playlist(a).track_count == 2
 
 
-def test_playlists_delete_hides_system(store, monkeypatch, tmp_path):
-    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
-    t = store.upsert_track("v1", "S", "X", None, None, 1)
-    store.set_playlist_tracks(lm, [t])
-    c = _client(store, lambda: {iid: FakeClient()})
-    r = c.post("/playlists/delete", data={"ids": str(lm)})
-    # undeletable system playlist is hidden locally, not deleted
-    assert r.json() == {"ok": True, "deleted": 0, "hidden": 1, "errors": []}
-    assert store.get_playlist(lm) is not None      # survives in YouTube
-    assert "LM" in store.get_hidden_playlists()    # but hidden from the tab
-    assert "list=LM" not in c.get("/").text
-
-
 def test_toasts_region_present_on_every_page(store):
     store.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
@@ -965,3 +909,13 @@ def test_move_run_same_identity_shows_inline_error(store):
     r = c.post("/move/run", data={"playlist": pid, "target_identity": i1})
     assert r.status_code == 200
     assert "same" in r.text.lower() and "move-row" in r.text   # error re-rendered in the row
+
+
+def test_delete_empty_removes_row(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    pid = store.upsert_playlist(iid, "PLE", "Empty One", 0, "h", 1.0)   # no tracks
+    c = _client(store, lambda: {iid: FakeClient()})
+    assert c.get("/cleanup").text.count('class="empty-row"') == 1
+    r = c.post("/playlist/delete-empty", data={"playlist": pid})
+    assert r.status_code == 200 and r.text.strip() == ""       # empty -> htmx removes the row
+    assert store.get_playlist(pid) is None
