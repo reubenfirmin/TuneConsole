@@ -15,21 +15,6 @@ document.addEventListener('htmx:beforeSwap', (e) => {
 });
 
 // Alpine component factories for the various pages (loaded globally via base.html).
-function emptyRow() {
-  return {
-    state: 'idle', err: '',
-    async del(id) {
-      if (this.state === 'deleting') return;
-      this.state = 'deleting'; this.err = '';
-      try {
-        const fd = new FormData(); fd.append('playlist', id);
-        const r = await fetch('/playlist/delete-empty', { method: 'POST', body: fd });
-        const j = await r.json();
-        if (j.ok) { this.state = 'gone'; } else { this.state = 'idle'; this.err = j.error || 'failed'; }
-      } catch (e) { this.state = 'idle'; this.err = String(e); }
-    },
-  };
-}
 function hideRow() {
   return {
     state: 'idle', open: false, mx: 0, my: 0,
