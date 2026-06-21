@@ -167,5 +167,9 @@
     </div>
   </template>
 </div>
+<section class="pl-suggest" style="margin-top:2.2rem"
+         hx-get="/playlist/{{ pl.id }}/suggestions" hx-trigger="load" hx-swap="innerHTML">
+  <p class="section-note">Finding tracks that fit…</p>
+</section>
 </div>
 {% endblock %}

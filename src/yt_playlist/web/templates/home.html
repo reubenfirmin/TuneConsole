@@ -3,14 +3,18 @@
 {% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 <div id="home">
-  <section class="home-control card">
+  <section class="home-control card{% if sync.stale %} sync-stale{% endif %}">
     {% include "_syncbar.html" %}
+    <div class="sync-status">
+      {% if sync.last_synced_ago %}<span class="tag">Last synced {{ sync.last_synced_ago }}</span>
+      {% else %}<span class="tag red">Never synced</span>{% endif %}
+      {% if sync.message %}<span class="sync-nudge">{{ sync.message }}</span>{% endif %}
+    </div>
   </section>
 
-  {% include "_partials/take_action.html" %}
+  {% include "_partials/alerts.html" %}
 
   <h2 class="section">For you</h2>
-  <p class="section-note">Songs you used to play a lot but haven't lately.</p>
   {% include "_partials/for_you_section.html" %}
 </div>
 {% endblock %}

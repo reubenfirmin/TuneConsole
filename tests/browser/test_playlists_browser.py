@@ -68,7 +68,7 @@ def _select(page, title):
 
 
 def test_group_assigns_group_after_reload(live_pl_app, page):
-    page.goto(f"{live_pl_app}/")
+    page.goto(f"{live_pl_app}/playlists")
     _select(page, "Alpha")
     _select(page, "Beta")
     page.get_by_role("button", name=re.compile("Group")).click()
@@ -79,7 +79,7 @@ def test_group_assigns_group_after_reload(live_pl_app, page):
 
 
 def test_delete_removes_playlists_after_reload(live_pl_app, page):
-    page.goto(f"{live_pl_app}/")
+    page.goto(f"{live_pl_app}/playlists")
     _select(page, "Beta")
     page.get_by_role("button", name="Delete", exact=True).click()   # actionbar
     page.get_by_role("button", name="Delete them").click()          # modal confirm
@@ -88,7 +88,7 @@ def test_delete_removes_playlists_after_reload(live_pl_app, page):
 
 
 def test_copy_creates_new_playlist_after_reload(live_pl_app, page):
-    page.goto(f"{live_pl_app}/")
+    page.goto(f"{live_pl_app}/playlists")
     _select(page, "Alpha")
     page.get_by_role("button", name=re.compile("Copy")).click()
     inp = page.get_by_placeholder("New playlist name")

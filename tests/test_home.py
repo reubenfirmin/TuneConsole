@@ -15,7 +15,7 @@ def test_home_is_default_route(store):
     r = c.get("/")
     assert r.status_code == 200
     assert 'id="home"' in r.text          # Home shell marker
-    assert "Time to sync" in r.text        # take_action nudge (no last_sync_at)
+    assert "Never synced" in r.text        # sync card shows status (no last_sync_at yet)
 
 
 def test_playlists_moved_to_slash_playlists(store):
@@ -37,7 +37,6 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     assert "For you" in home
     assert "Gem" in home                       # the forgotten gem is rendered
     assert 'class="sync-bar"' in home          # Sync control present on Home
-    assert "Take action" in home
 
     # Sync control removed from the other tabs (Rediscover is deleted in Task 8)
     assert 'class="sync-bar"' not in c.get("/playlists").text

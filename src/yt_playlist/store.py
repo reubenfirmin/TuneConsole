@@ -673,14 +673,116 @@ class Store:
             "     names AS (SELECT identity_key, MIN(title) title, MIN(artist) artist, "
             "               MIN(album) album, MIN(video_id) vid, MIN(thumbnail) thumb "
             "               FROM tracks GROUP BY identity_key) "
-            "SELECT n.title, n.artist, n.album, n.vid, n.thumb, p.c plays, p.last last "
+            "SELECT n.identity_key k, n.title, n.artist, n.album, n.vid, n.thumb, p.c plays, p.last last "
             "FROM plays p JOIN names n ON n.identity_key=p.identity_key "
             "WHERE n.title <> '' AND p.c >= :min_plays AND p.last < :cutoff "
             "ORDER BY p.c DESC, p.last ASC LIMIT :limit",
             {"min_plays": min_plays, "cutoff": cutoff, "limit": limit}).fetchall()
-        return [{"title": r["title"], "artist": r["artist"], "album": r["album"] or "",
+        return [{"key": r["k"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
                  "video_id": r["vid"], "thumbnail": r["thumb"], "plays": r["plays"],
                  "last_played": r["last"]} for r in rows]
+
+    @_synchronized
+    def more_like_rotation(self, seed_limit=40, limit=40) -> list[dict]:
+        """Tracks that share a playlist with your most-played songs but that you barely play.
+
+        Collaborative signal: 'because you listen to X, and these live alongside X in your
+        playlists.' Seeds = your top-played songs; candidates = co-members of their playlists.
+        """
+        rows = self.conn.execute(
+            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key), "
+            " seeds AS (SELECT identity_key k FROM tp ORDER BY c DESC LIMIT :seed_limit), "
+            " seedpl AS (SELECT DISTINCT pt.playlist_id pid FROM playlist_tracks pt "
+            "            JOIN tracks t ON t.id=pt.track_id JOIN seeds s ON s.k=t.identity_key), "
+            " cand AS (SELECT t.identity_key key, MIN(t.title) title, MIN(t.artist) artist, "
+            "                 MIN(t.album) album, MIN(t.video_id) vid, MIN(t.thumbnail) thumb, "
+            "                 COUNT(DISTINCT pt.playlist_id) sp, COALESCE(MAX(tp.c),0) plays "
+            "          FROM playlist_tracks pt JOIN seedpl ON seedpl.pid=pt.playlist_id "
+            "          JOIN tracks t ON t.id=pt.track_id "
+            "          LEFT JOIN tp ON tp.identity_key=t.identity_key "
+            "          WHERE t.title<>'' GROUP BY t.identity_key) "
+            "SELECT key, title, artist, album, vid, thumb, sp, plays FROM cand "
+            "WHERE key NOT IN (SELECT k FROM seeds) AND plays<=1 "
+            "ORDER BY sp DESC, plays ASC, key LIMIT :limit",
+            {"seed_limit": seed_limit, "limit": limit}).fetchall()
+        return [{"key": r["key"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
+                 "video_id": r["vid"], "thumbnail": r["thumb"], "plays": r["plays"],
+                 "shared_playlists": r["sp"]} for r in rows]
+
+    @_synchronized
+    def deep_cuts(self, limit=40) -> list[dict]:
+        """The least-played track of each artist you play a lot — 'you love them, revisit this.'
+
+        Content/affinity signal that needs no history depth: ranks artists by total plays,
+        surfaces each one's most-neglected track. Works on day one.
+        """
+        rows = self.conn.execute(
+            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key), "
+            " trk AS (SELECT t.identity_key key, MIN(t.title) title, MIN(t.artist) artist, "
+            "                MIN(t.album) album, MIN(t.video_id) vid, MIN(t.thumbnail) thumb, "
+            "                COALESCE(MAX(tp.c),0) plays "
+            "         FROM tracks t LEFT JOIN tp ON tp.identity_key=t.identity_key "
+            "         WHERE t.title<>'' AND t.artist<>'' GROUP BY t.identity_key), "
+            " ap AS (SELECT artist, SUM(plays) total FROM trk GROUP BY artist), "
+            " r AS (SELECT trk.*, ap.total atot, "
+            "        ROW_NUMBER() OVER (PARTITION BY trk.artist ORDER BY trk.plays ASC, trk.key) rn "
+            "       FROM trk JOIN ap ON ap.artist=trk.artist WHERE ap.total>0) "
+            "SELECT key, title, artist, album, vid, thumb, plays, atot FROM r WHERE rn=1 "
+            "ORDER BY atot DESC, plays ASC, key LIMIT :limit",
+            {"limit": limit}).fetchall()
+        return [{"key": r["key"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
+                 "video_id": r["vid"], "thumbnail": r["thumb"], "plays": r["plays"],
+                 "artist_plays": r["atot"]} for r in rows]
+
+    @_synchronized
+    def complete_playlist(self, playlist_id, limit=20) -> list[dict]:
+        """Tracks you own that fit a playlist but aren't in it.
+
+        Fit = by an artist already in the playlist, and/or co-occurring with the playlist's
+        tracks in your other playlists. Score weights same-artist above co-occurrence.
+        """
+        rows = self.conn.execute(
+            "WITH pm AS (SELECT t.identity_key key, t.artist FROM playlist_tracks pt "
+            "            JOIN tracks t ON t.id=pt.track_id WHERE pt.playlist_id=:pid), "
+            " pa AS (SELECT DISTINCT artist FROM pm WHERE artist<>''), "
+            " shared AS (SELECT DISTINCT pt.playlist_id pid FROM playlist_tracks pt "
+            "            JOIN tracks t ON t.id=pt.track_id JOIN pm ON pm.key=t.identity_key "
+            "            WHERE pt.playlist_id<>:pid), "
+            " cand AS (SELECT t.identity_key key, MIN(t.title) title, MIN(t.artist) artist, "
+            "                 MIN(t.album) album, MIN(t.video_id) vid, MIN(t.thumbnail) thumb, "
+            "                 MAX(CASE WHEN t.artist IN (SELECT artist FROM pa) THEN 1 ELSE 0 END) sa, "
+            "                 COUNT(DISTINCT CASE WHEN pt.playlist_id IN (SELECT pid FROM shared) "
+            "                                THEN pt.playlist_id END) cooc "
+            "          FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id "
+            "          WHERE t.identity_key NOT IN (SELECT key FROM pm) AND t.title<>'' "
+            "          GROUP BY t.identity_key) "
+            "SELECT key, title, artist, album, vid, thumb, sa, cooc FROM cand "
+            "WHERE sa=1 OR cooc>0 ORDER BY (sa*2+cooc) DESC, cooc DESC, key LIMIT :limit",
+            {"pid": playlist_id, "limit": limit}).fetchall()
+        return [{"key": r["key"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
+                 "video_id": r["vid"], "thumbnail": r["thumb"],
+                 "same_artist": bool(r["sa"]), "cooc": r["cooc"]} for r in rows]
+
+    @_synchronized
+    def enrichment_candidates(self, limit=3) -> list[dict]:
+        """Playlists with missing genre tags, ranked by how much you listen to them.
+
+        Enriching the most-played playlists first gives the biggest recommendation lift:
+        recs lean on genre/year, so filling gaps where you listen most sharpens them most.
+        """
+        rows = self.conn.execute(
+            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key) "
+            "SELECT p.id id, p.title title, p.thumbnail thumb, "
+            "       SUM(CASE WHEN t.genre IS NULL OR t.genre='' THEN 1 ELSE 0 END) gaps, "
+            "       COUNT(pt.track_id) total, COALESCE(SUM(tp.c),0) plays "
+            "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
+            "JOIN tracks t ON t.id=pt.track_id "
+            "LEFT JOIN tp ON tp.identity_key=t.identity_key "
+            "GROUP BY p.id HAVING gaps > 0 "
+            "ORDER BY plays DESC, gaps DESC LIMIT :limit",
+            {"limit": limit}).fetchall()
+        return [{"id": r["id"], "title": r["title"], "thumbnail": r["thumb"], "gaps": r["gaps"],
+                 "total": r["total"], "plays": r["plays"]} for r in rows]
 
     @_synchronized
     def top_artists(self, limit=100, since=None) -> list[dict]:

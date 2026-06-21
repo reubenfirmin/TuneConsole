@@ -1,6 +1,8 @@
-{% if for_you %}
+{% if suggestions %}
+<h2 class="section">Complete this playlist</h2>
+<p class="section-note">Tracks you own that fit here but aren't in it yet.</p>
 <div class="for-you-grid">
-  {% for f in for_you %}
+  {% for f in suggestions %}
   <div class="fy-card card">
     <a class="fy-cover" href="https://music.youtube.com/watch?v={{ f.video_id }}"
        target="_blank" rel="noopener" title="Play on YouTube Music">
@@ -15,6 +17,4 @@
   </div>
   {% endfor %}
 </div>
-{% else %}
-<p class="section-note">Nothing to recommend yet — sync your library to get started.</p>
 {% endif %}

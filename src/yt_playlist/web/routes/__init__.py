@@ -7,12 +7,12 @@ and the setup wizard.
 """
 from yt_playlist.web.routes import (
     actions, charts, cleanup, collection, genres, home, merge, move, playlists, rediscover, setup,
-    sync,
+    suggest, sync,
 )
 
 # Order matters only where literal and parameterized paths share a method; the
 # modules here keep those apart, so registration order is otherwise free.
-MODULES = (home, cleanup, merge, playlists, charts, collection, rediscover, move, sync, actions,
+MODULES = (home, suggest, cleanup, merge, playlists, charts, collection, rediscover, move, sync, actions,
            setup, genres)
 
 

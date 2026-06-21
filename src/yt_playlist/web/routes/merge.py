@@ -1,6 +1,8 @@
 """Destructive cleanup ops: the N-way merge editor, dupe deletes, keep-one, delete-empty."""
+from urllib.parse import quote
+
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from yt_playlist.merge_order import track_positions
 
@@ -19,19 +21,23 @@ def build(ctx) -> APIRouter:
         # deleted copy) recompute, exactly as the old location.reload() did.
         return HTMLResponse("", headers={"HX-Refresh": "true"})
 
-    @router.get("/merge")
-    def merge_editor(request: Request):
-        # N-way track-level merge editor for a set of playlists (?ids=1,2,3).
-        raw = request.query_params.get("ids", "")
-        ids = [int(x) for x in raw.split(",") if x.strip().lstrip("-").isdigit()]
+    # In-memory merge drafts keyed by the sorted member-id signature. Survives a browser refresh
+    # (same server process); cleared on Apply. The editing state lives here, not in the client.
+    drafts = {}
+
+    def _ids(raw):
+        return [int(x) for x in raw.split(",") if x.strip().lstrip("-").isdigit()]
+
+    def _members_tracks(ids):
+        """Build members + de-duped track rows for a set of playlist ids (None if <2 exist)."""
         pls = [p for p in (store.get_playlist(i) for i in ids) if p is not None]
         if len(pls) < 2:
-            raise HTTPException(status_code=404, detail="need at least two existing playlists")
+            return None
         idmap = {i.id: i.label for i in store.get_identities()}
         members = [{"id": p.id, "letter": chr(65 + n), "ident": idmap.get(p.identity_id, "?"),
                     "title": p.title, "ytm": p.ytm_playlist_id} for n, p in enumerate(pls)]
         tracks = {}
-        seqs = [[] for _ in pls]                          # each playlist's track order, for order-preserving merge
+        seqs = [[] for _ in pls]
         for mi, p in enumerate(pls):
             for pos, (k, v, t, ar, d, av) in enumerate(store.get_playlist_tracks_with_meta(p.id)):
                 tid = ("v:" + v) if v else ("k:" + k)
@@ -43,38 +49,121 @@ def build(ctx) -> APIRouter:
                            "pos": [None] * len(pls)}
                     tracks[tid] = row
                 elif row["duration"] is None and d is not None:
-                    row["duration"] = d                 # fill from whichever copy has it
+                    row["duration"] = d
                 row["present"][mi] = True
-                row["pos"][mi] = pos + 1                 # 1-based index within this playlist (for display)
-        positions = track_positions(seqs)            # avg normalized position → weaves shared & unique
+                row["pos"][mi] = pos + 1
+        positions = track_positions(seqs)
         lens = [len(sq) for sq in seqs]
         for row in tracks.values():
             row["order"] = positions.get(row["tid"], 1.0)
-            # normalized position (0..1) within each playlist, or None if absent — lets the editor
-            # place a track by one chosen playlist's position instead of the average.
             row["npos"] = [((row["pos"][mi] - 1) / (lens[mi] - 1) if lens[mi] > 1 else 0.0)
                            if row["pos"][mi] is not None else None
                            for mi in range(len(pls))]
-        track_list = sorted(tracks.values(), key=lambda r: (r["order"], (r["title"] or "").lower()))
-        # where to land after Apply — only allow local paths (default: the Cleanup dashboard)
+        return members, sorted(tracks.values(), key=lambda r: (r["order"], (r["title"] or "").lower()))
+
+    def _eff_pos(t, pick):
+        p = pick.get(t["tid"])
+        npos = t["npos"]
+        if p is not None and p < len(npos) and npos[p] is not None:
+            return npos[p]
+        vals = [v for v in npos if v is not None]
+        return sum(vals) / len(vals) if vals else 1.0
+
+    def _ordered(tracks, draft):
+        by_title = lambda t: (t["title"] or "").lower()
+        if draft["sort"] == "playlist":
+            out = sorted(tracks, key=lambda t: (_eff_pos(t, draft["pick"]), by_title(t)))
+        else:
+            out = sorted(tracks, key=by_title)
+        if draft["mode"] == "ducks":   # shared (present in >=2) first, odd ducks last (stable within)
+            out = sorted(out, key=lambda t: 0 if sum(t["present"]) >= 2 else 1)
+        return out
+
+    def _draft(ids, members, *, return_to=None):
+        sig = tuple(sorted(ids))
+        d = drafts.get(sig)
+        if d is None:
+            d = {"excluded": set(), "pick": {}, "sort": "playlist", "mode": "interleaved",
+                 "keep": str(members[0]["id"]), "return_to": return_to or "/cleanup"}
+            drafts[sig] = d
+        elif return_to:
+            d["return_to"] = return_to
+        return d
+
+    def _view(request, ids, members, tracks, draft):
+        rows = [{**t, "included": t["tid"] not in draft["excluded"],
+                 "picked": draft["pick"].get(t["tid"]), "present_count": sum(t["present"])}
+                for t in _ordered(tracks, draft)]
+        return {"request": request, "members": members, "rows": rows,
+                "count": sum(1 for t in tracks if t["tid"] not in draft["excluded"]),
+                "total": len(tracks), "draft": draft, "ids_csv": ",".join(str(i) for i in ids)}
+
+    @router.get("/merge")
+    def merge_editor(request: Request):
+        # N-way track-level merge editor for a set of playlists (?ids=1,2,3).
+        ids = _ids(request.query_params.get("ids", ""))
+        mt = _members_tracks(ids)
+        if mt is None:
+            raise HTTPException(status_code=404, detail="need at least two existing playlists")
+        members, tracks = mt
         ret = request.query_params.get("return", "/cleanup")
         if not (ret.startswith("/") and not ret.startswith("//")):
             ret = "/cleanup"
-        return templates.TemplateResponse(request, "editor.html",
-                                          {"members": members, "tracks": track_list, "return_to": ret})
+        draft = _draft(ids, members, return_to=ret)
+        return templates.TemplateResponse(request, "editor.html", _view(request, ids, members, tracks, draft))
+
+    @router.post("/merge/update")
+    async def merge_update(request: Request):
+        # Mutate one field of the draft and re-render the editor body.
+        ids = _ids(request.query_params.get("ids", ""))
+        mt = _members_tracks(ids)
+        if mt is None:
+            raise HTTPException(status_code=404, detail="merge no longer available")
+        members, tracks = mt
+        draft = _draft(ids, members)
+        form = await request.form()
+        field, value = form.get("field", ""), form.get("value", "")
+        valid = {t["tid"] for t in tracks}
+        if field == "toggle" and value in valid:
+            draft["excluded"] ^= {value}
+        elif field == "setall":
+            draft["excluded"] = set() if value == "1" else set(valid)
+        elif field == "sort" and value in ("alpha", "playlist"):
+            draft["sort"] = value
+        elif field == "mode" and value in ("interleaved", "ducks"):
+            draft["mode"] = value
+        elif field == "keep":
+            draft["keep"] = value
+        elif field == "pick" and ":" in value:
+            tid, _, idx = value.rpartition(":")
+            if tid in valid and idx.isdigit():
+                i = int(idx)
+                if draft["pick"].get(tid) == i:
+                    draft["pick"].pop(tid, None)        # toggle off
+                else:
+                    draft["pick"][tid] = i
+        return templates.TemplateResponse(request, "_partials/merge_body.html",
+                                          _view(request, ids, members, tracks, draft))
 
     @router.post("/merge/apply")
-    def merge_apply(ids: str = Form(...), result: str = Form(""), keep: str = Form("all")):
-        # Apply the N-way editor: set the kept playlist(s) to exactly `result`.
-        pid_list = [int(x) for x in ids.split(",") if x]
-        vids = [v for v in result.split(",") if v]
+    def merge_apply(request: Request):
+        # Apply the N-way editor: set the kept playlist(s) to the draft's included tracks, in order.
+        ids = _ids(request.query_params.get("ids", ""))
+        mt = _members_tracks(ids)
+        if mt is None:
+            return _toast(request, "Merge no longer available.")
+        members, tracks = mt
+        draft = _draft(ids, members)
+        vids = [t["video_id"] for t in _ordered(tracks, draft)
+                if t["tid"] not in draft["excluded"] and t["video_id"]]
         try:
-            s = ctx.ops().apply_merge(pid_list, vids, keep)
+            s = ctx.ops().apply_merge(ids, vids, draft["keep"])
         except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
+            return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             logger.exception("merge/apply failed")
-            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response."})
+            return _toast(request, "YouTube returned an unexpected response.")
+        drafts.pop(tuple(sorted(ids)), None)            # consume the draft
         parts = []
         if s["added"]:
             parts.append(f"{s['added']} added")
@@ -86,7 +175,9 @@ def build(ctx) -> APIRouter:
             parts.append("deleted " + ", ".join(f"“{t}”" for t in s["deleted"]))
         detail = (" — " + ", ".join(parts)) if parts else ""
         msg = f"Merged into “{s['kept_title']}”{detail}."
-        return JSONResponse({"ok": True, "message": msg, "playlist": s["kept_ytm"]})
+        sep = "&" if "?" in draft["return_to"] else "?"
+        url = f"{draft['return_to']}{sep}flash={quote(msg)}&flash_pl={quote(s['kept_ytm'])}"
+        return Response(status_code=200, headers={"HX-Redirect": url})
 
     @router.post("/dupe/delete")
     def dupe_delete(source: int = Form(...), target: int = Form(...)):

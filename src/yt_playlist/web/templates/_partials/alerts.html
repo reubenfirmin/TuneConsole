@@ -1,0 +1,16 @@
+{% if actions %}
+<section class="alerts" aria-label="Needs attention">
+  {% for a in actions %}
+  <div class="alert-card card alert-{{ a.severity }}" x-data="{ shown: true }" x-show="shown" x-cloak>
+    <div class="alert-text">
+      <span class="alert-title">{{ a.title }}</span>
+      <span class="alert-detail">{{ a.detail }}</span>
+    </div>
+    <div class="alert-cta">
+      {% if a.cta_href %}<a class="btn-ghost btn-sm" href="{{ a.cta_href }}">{{ a.cta_label }}</a>{% endif %}
+      <button type="button" class="alert-x" @click="shown = false" aria-label="Dismiss">×</button>
+    </div>
+  </div>
+  {% endfor %}
+</section>
+{% endif %}

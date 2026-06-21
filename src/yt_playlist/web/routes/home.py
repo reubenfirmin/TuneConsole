@@ -13,6 +13,7 @@ def build(ctx) -> APIRouter:
         now = now_fn()
         return templates.TemplateResponse(request, "home.html", {
             "actions": recommend.take_action(store, now, ctx.auth_expired),
+            "sync": recommend.sync_status(store, now),
             "for_you": recommend.for_you(store, now),
             "flash": request.query_params.get("flash"),
         })

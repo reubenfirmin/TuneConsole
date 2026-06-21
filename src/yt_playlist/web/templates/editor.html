@@ -12,67 +12,7 @@
   </div>
 </div>
 
-<div x-data='mergeEditor({{ members|tojson }}, {{ tracks|tojson }}, {{ return_to|tojson }})'>
-  <div class="card" style="margin-bottom:1.2rem">
-    <div class="cfg">
-      <div>
-        <div class="cmp-h">Where should the result go?</div>
-        {% for m in members %}
-        <label class="opt"><input type="radio" :value="'{{ m.id }}'" x-model="keep">
-          Keep <span class="ab" style="background:{{ palette[loop.index0 % palette|length] }}">{{ m.letter }}</span> ({{ m.title }}), delete the other{{ 's' if members|length > 2 else '' }}</label>
-        {% endfor %}
-        <label class="opt"><input type="radio" value="all" x-model="keep"> Update <strong>all</strong> (keep them all, set each to the result)</label>
-      </div>
-      <div style="text-align:right">
-        <div class="muted" style="font-size:.85rem">Result</div>
-        <div style="font-family:var(--font-display); font-size:1.8rem"><span x-text="count()"></span> songs</div>
-        <button type="button" :disabled="busy" @click="apply()" x-text="busy ? 'Applying…' : 'Apply'"></button>
-      </div>
-    </div>
-    <p x-show="err" class="notice err" style="display:none; margin:.8rem 0 0" x-text="err"></p>
-    <p class="muted" style="font-size:.82rem; margin:.6rem 0 0"><strong>Nothing changes until you click Apply.</strong>
-       Tick the songs you want in the result. A backup of any deleted playlist is written first, and it's undoable from Actions.</p>
-  </div>
-
-  <div class="card">
-    <div class="col-head">Songs <span class="count" x-text="count() + ' / ' + tracks.length"></span>
-      <span style="margin-left:auto"></span>
-      <span class="seg" title="Sort order">
-        <button type="button" :class="{ on: sort === 'alpha' }" @click="sort = 'alpha'">alpha</button>
-        <button type="button" :class="{ on: sort === 'playlist' }" @click="sort = 'playlist'"
-                title="Preserve each playlist's order, weaving unique tracks around shared ones">playlist order</button>
-      </span>
-      <span class="seg" title="Where to put tracks unique to one playlist">
-        <button type="button" :class="{ on: mode === 'interleaved' }" @click="mode = 'interleaved'">interleaved</button>
-        <button type="button" :class="{ on: mode === 'ducks' }" @click="mode = 'ducks'">odd ducks at end</button>
-      </span>
-      <button type="button" class="btn-ghost btn-sm" @click="setAll(true)">all</button>
-      <button type="button" class="btn-ghost btn-sm" @click="setAll(false)">none</button>
-    </div>
-    <table>
-      <thead><tr><th style="width:2rem"></th><th style="width:4.5rem">In</th><th class="num" style="width:3.5rem" title="Track number within each playlist">#</th><th>Song</th><th class="num" style="width:4rem">Length</th></tr></thead>
-      <tbody>
-        <template x-for="t in ordered()" :key="t.tid">
-          <tr :class="{ rowdel: !isIn(t) }">
-            <td><input type="checkbox" :checked="isIn(t)" @change="toggle(t)" style="width:auto"></td>
-            <td><template x-for="L in letters(t)" :key="L"><span class="ab ab-sm" :style="'background:' + colorOf(L)" x-text="L"></span></template></td>
-            <td class="num"><template x-for="(m, i) in members" :key="m.id"><button type="button" x-show="t.present[i]"
-                  class="pidx" :class="{ picked: isPicked(t, i), sole: presentCount(t) < 2 }"
-                  :style="'color:' + colorOf(m.letter)" @click="pickPos(t, i)" x-text="t.pos[i]"
-                  :title="presentCount(t) > 1 ? 'Place this track by ' + m.letter + '’s position (#' + t.pos[i] + ')' : ''"></button></template></td>
-            <td>
-              <a class="tk-t" x-show="t.video_id" :href="'https://music.youtube.com/watch?v=' + t.video_id"
-                 target="_blank" rel="noopener" x-text="t.title"></a><span class="tk-t" x-show="!t.video_id" x-text="t.title"></span>
-              <span class="muted" x-text="'— ' + t.artist"></span>
-              <span class="unavail" x-show="t.available === 0" title="unavailable on YouTube Music">⚠</span>
-            </td>
-            <td class="num mono" x-text="fmtDur(t.duration)"></td>
-          </tr>
-        </template>
-      </tbody>
-    </table>
-  </div>
-</div>
+<div id="merge-body">{% include "_partials/merge_body.html" %}</div>
 
 <style>
   .cmp-ids { margin: .2rem 0 .5rem; display: flex; flex-direction: column; gap: .3rem; font-size: .9rem; }

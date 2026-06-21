@@ -97,6 +97,17 @@ def test_set_genre_via_suggestion_click(live_playlist_app, page):
     expect(row.get_by_text("Jazz")).to_be_visible()
 
 
+def test_remove_track_drops_row(live_playlist_app, page):
+    base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    page.goto(f"{base}/playlist/{pid}")
+    row = page.get_by_role("row").filter(has_text="Song B")
+    row.get_by_role("button", name="More actions").click()          # ⋯ menu
+    row.get_by_role("button", name="Remove from playlist").click()  # opens confirm modal
+    page.get_by_role("button", name="Remove", exact=True).click()   # confirm
+    expect(page.get_by_role("row").filter(has_text="Song B")).to_have_count(0)
+    expect(page.get_by_role("row").filter(has_text="Song A")).to_be_visible()   # other row stays
+
+
 def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):
     import yt_playlist.musicbrainz as mb
     monkeypatch.setattr(mb, "enrich",

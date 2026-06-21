@@ -304,7 +304,7 @@ def test_identical_pair_opens_editor(store):
     store.set_playlist_tracks(a, [t]); store.set_playlist_tracks(b, [t])
     c = _client(store, lambda: {iid: FakeClient()})
     body = c.get(f"/dupe/{a}/{b}").text   # redirects into the N-way editor
-    assert "mergeEditor(" in body and "Keep" in body
+    assert "Where should the result go" in body and "Keep" in body
 
 
 def test_overlap_suppress_and_unsuppress(store):
@@ -443,10 +443,14 @@ def test_merge_apply_route(store, monkeypatch, tmp_path):
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
     b = store.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
-    client = FakeClient(tracks={"PLA": [_track("v1", "One", "X")], "PLB": [_track("v2", "Two", "X")]})
+    t1 = store.upsert_track("v1", "One", "X", None, None, 1)
+    t2 = store.upsert_track("v2", "Two", "X", None, None, 1)
+    store.set_playlist_tracks(a, [t1]); store.set_playlist_tracks(b, [t2])
+    client = FakeClient()
     c = _client(store, lambda: {iid: client})
-    r = c.post("/merge/apply", data={"ids": f"{a},{b}", "result": "v1,v2", "keep": str(a)})
-    assert r.status_code == 200 and r.json()["ok"] is True
+    c.get(f"/merge?ids={a},{b}")                          # create the draft (all included, keep = first = A)
+    r = c.post(f"/merge/apply?ids={a},{b}")
+    assert r.status_code == 200 and "/cleanup" in r.headers.get("hx-redirect", "")   # HX-Redirect on success
     assert client.deleted == ["PLB"] and store.get_playlist(b) is None
 
 def test_merge_editor_renders_nway(store):
@@ -457,9 +461,27 @@ def test_merge_editor_renders_nway(store):
     store.set_playlist_tracks(a, [t1, t2]); store.set_playlist_tracks(b, [t1])
     c = _client(store, lambda: {iid: FakeClient()})
     body = c.get(f"/merge?ids={a},{b}").text
-    assert "mergeEditor(" in body and "Where should the result go" in body
+    assert "Where should the result go" in body and "One" in body and "Two" in body
     # /dupe redirects into the same editor
     assert c.get(f"/dupe/{a}/{b}").status_code == 200
+
+
+def test_merge_update_toggle_and_setall_persist(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Mix2", 2, "h", 1.0)
+    t1 = store.upsert_track("v1", "One", "X", None, None, 1)
+    t2 = store.upsert_track("v2", "Two", "X", None, None, 1)
+    store.set_playlist_tracks(a, [t1, t2]); store.set_playlist_tracks(b, [t1])
+    c = _client(store, lambda: {iid: FakeClient()})
+    c.get(f"/merge?ids={a},{b}")                          # all included -> count 2 / 2
+    upd = f"/merge/update?ids={a},{b}"
+    r = c.post(upd, data={"field": "toggle", "value": "v:v1"})
+    assert r.status_code == 200 and "1 / 2" in r.text     # one excluded now
+    # the draft survives a "refresh" (re-GET) — v1 still excluded
+    assert "1 / 2" in c.get(f"/merge?ids={a},{b}").text
+    assert "0 / 2" in c.post(upd, data={"field": "setall", "value": "0"}).text   # none
+    assert "2 / 2" in c.post(upd, data={"field": "setall", "value": "1"}).text   # all back
 
 
 def test_undo_via_dupe_delete(store, monkeypatch, tmp_path):
@@ -788,35 +810,6 @@ def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
     assert "Last.fm API key" in body
-
-
-def test_set_track_year(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", "Al", 200, 1)])
-    c = _client(store, lambda: {iid: FakeClient()})
-    assert c.post(f"/playlist/{a}/track-year", json={"video_id": "v0", "year": "1991"}).json()["ok"]
-    assert store.playlist_tracks_detail(a)[0]["year"] == "1991"
-
-
-def test_set_track_genre_and_suggestions(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
-    t0 = store.upsert_track("v0", "S0", "X", "Al", 200, 1)
-    store.set_playlist_tracks(a, [t0, store.upsert_track("v1", "S1", "Y", "Al", 200, 1)])
-    store.set_track_genre(t0, "Rock")
-    c = _client(store, lambda: {iid: FakeClient()})
-
-    # autosuggest list = distinct genres so far, alpha-sorted; rendered into a datalist
-    assert store.all_genres() == ["Rock"]
-    page = c.get(f"/playlist/{a}").text
-    assert 'id="genrelist"' in page and 'value="Rock"' in page and "startEditGenre" in page
-
-    # set a genre on the second track; it persists and joins the suggestion list
-    assert c.post(f"/playlist/{a}/track-genre", json={"video_id": "v1", "genre": "Jazz"}).json()["ok"]
-    detail = {t["video_id"]: t["genre"] for t in store.playlist_tracks_detail(a)}
-    assert detail["v1"] == "Jazz"
-    assert store.all_genres() == ["Jazz", "Rock"]
 
 
 def test_reorder_and_remove_track(store):

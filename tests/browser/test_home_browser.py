@@ -2,8 +2,9 @@ def test_home_is_landing_with_sync_and_sections(live_app, page):
     page.goto(f"{live_app}/")
     # Home is the default tab and owns the Sync control
     assert page.get_by_role("button", name="Sync now").is_visible()
-    assert page.get_by_role("heading", name="Take action").is_visible()
     assert page.get_by_role("heading", name="For you").is_visible()
+    # the merged Sync card carries the status badge (no separate "Time to sync" row)
+    assert page.get_by_text("Never synced").is_visible()
 
 
 def test_sync_button_absent_from_playlists_tab(live_app, page):

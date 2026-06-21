@@ -1,0 +1,69 @@
+{# Server-rendered merge editor body. Every control posts to /merge/update (which mutates the
+   in-memory draft) and swaps this whole partial back into #merge-body. #}
+{% set palette = ['#7c6cff', '#4fd6e0', '#ff6b8b', '#6bffab', '#f4c66a', '#c08cff', '#ff9d5c', '#5cc8ff'] %}
+{% set upd = '/merge/update?ids=' ~ ids_csv %}
+<div class="card" style="margin-bottom:1.2rem">
+  <div class="cfg">
+    <div>
+      <div class="cmp-h">Where should the result go?</div>
+      {% for m in members %}
+      <label class="opt"><input type="radio" name="keep" value="{{ m.id }}" {{ 'checked' if draft.keep == m.id|string }}
+             hx-post="{{ upd }}" hx-vals='{"field": "keep", "value": "{{ m.id }}"}' hx-target="#merge-body" hx-swap="innerHTML">
+        Keep <span class="ab" style="background:{{ palette[loop.index0 % palette|length] }}">{{ m.letter }}</span> ({{ m.title }}), delete the other{{ 's' if members|length > 2 else '' }}</label>
+      {% endfor %}
+      <label class="opt"><input type="radio" name="keep" value="all" {{ 'checked' if draft.keep == 'all' }}
+             hx-post="{{ upd }}" hx-vals='{"field": "keep", "value": "all"}' hx-target="#merge-body" hx-swap="innerHTML">
+        Update <strong>all</strong> (keep them all, set each to the result)</label>
+    </div>
+    <div style="text-align:right">
+      <div class="muted" style="font-size:.85rem">Result</div>
+      <div style="font-family:var(--font-display); font-size:1.8rem">{{ count }} songs</div>
+      <button type="button" hx-post="/merge/apply?ids={{ ids_csv }}" hx-swap="none">Apply</button>
+    </div>
+  </div>
+  <p class="muted" style="font-size:.82rem; margin:.6rem 0 0"><strong>Nothing changes until you click Apply.</strong>
+     Tick the songs you want in the result. A backup of any deleted playlist is written first, and it's undoable from Actions.</p>
+</div>
+
+<div class="card">
+  <div class="col-head">Songs <span class="count">{{ count }} / {{ total }}</span>
+    <span style="margin-left:auto"></span>
+    <span class="seg" title="Sort order">
+      <button type="button" class="{{ 'on' if draft.sort == 'alpha' }}"
+              hx-post="{{ upd }}" hx-vals='{"field": "sort", "value": "alpha"}' hx-target="#merge-body" hx-swap="innerHTML">alpha</button>
+      <button type="button" class="{{ 'on' if draft.sort == 'playlist' }}"
+              hx-post="{{ upd }}" hx-vals='{"field": "sort", "value": "playlist"}' hx-target="#merge-body" hx-swap="innerHTML"
+              title="Preserve each playlist's order, weaving unique tracks around shared ones">playlist order</button>
+    </span>
+    <span class="seg" title="Where to put tracks unique to one playlist">
+      <button type="button" class="{{ 'on' if draft.mode == 'interleaved' }}"
+              hx-post="{{ upd }}" hx-vals='{"field": "mode", "value": "interleaved"}' hx-target="#merge-body" hx-swap="innerHTML">interleaved</button>
+      <button type="button" class="{{ 'on' if draft.mode == 'ducks' }}"
+              hx-post="{{ upd }}" hx-vals='{"field": "mode", "value": "ducks"}' hx-target="#merge-body" hx-swap="innerHTML">odd ducks at end</button>
+    </span>
+    <button type="button" class="btn-ghost btn-sm" hx-post="{{ upd }}" hx-vals='{"field": "setall", "value": "1"}' hx-target="#merge-body" hx-swap="innerHTML">all</button>
+    <button type="button" class="btn-ghost btn-sm" hx-post="{{ upd }}" hx-vals='{"field": "setall", "value": "0"}' hx-target="#merge-body" hx-swap="innerHTML">none</button>
+  </div>
+  <table>
+    <thead><tr><th style="width:2rem"></th><th style="width:4.5rem">In</th><th class="num" style="width:3.5rem" title="Track number within each playlist">#</th><th>Song</th><th class="num" style="width:4rem">Length</th></tr></thead>
+    <tbody>
+      {% for t in rows %}
+      <tr class="{{ '' if t.included else 'rowdel' }}">
+        <td><input type="checkbox" {{ 'checked' if t.included }} style="width:auto"
+                   hx-post="{{ upd }}" hx-vals='{"field": "toggle", "value": "{{ t.tid }}"}' hx-target="#merge-body" hx-swap="innerHTML"></td>
+        <td>{% for i in range(members|length) %}{% if t.present[i] %}<span class="ab ab-sm" style="background:{{ palette[i % palette|length] }}">{{ members[i].letter }}</span>{% endif %}{% endfor %}</td>
+        <td class="num">{% for i in range(members|length) %}{% if t.present[i] %}<button type="button"
+              class="pidx{{ ' picked' if t.picked == i }}{{ ' sole' if t.present_count < 2 }}" style="color:{{ palette[i % palette|length] }}"
+              hx-post="{{ upd }}" hx-vals='{"field": "pick", "value": "{{ t.tid }}:{{ i }}"}' hx-target="#merge-body" hx-swap="innerHTML"
+              title="{{ 'Place this track by ' ~ members[i].letter ~ '’s position (#' ~ t.pos[i] ~ ')' if t.present_count > 1 else '' }}">{{ t.pos[i] }}</button>{% endif %}{% endfor %}</td>
+        <td>
+          {% if t.video_id %}<a class="tk-t" href="https://music.youtube.com/watch?v={{ t.video_id }}" target="_blank" rel="noopener">{{ t.title }}</a>{% else %}<span class="tk-t">{{ t.title }}</span>{% endif %}
+          <span class="muted">— {{ t.artist }}</span>
+          {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
+        </td>
+        <td class="num mono">{% if t.duration %}{{ t.duration // 60 }}:{{ '%02d'|format(t.duration % 60) }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
