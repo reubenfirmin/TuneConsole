@@ -500,6 +500,24 @@ def test_merge_update_toggle_and_setall_persist(store):
     assert "2 / 2" in c.post(upd, data={"field": "setall", "value": "1"}).text   # all back
 
 
+def test_merge_update_sort_mode_keep_pick(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Mix2", 1, "h", 1.0)
+    t1 = store.upsert_track("v1", "Beta", "X", None, None, 1)
+    t2 = store.upsert_track("v2", "Alpha", "X", None, None, 1)
+    store.set_playlist_tracks(a, [t1, t2]); store.set_playlist_tracks(b, [t1])
+    c = _client(store, lambda: {iid: FakeClient()})
+    c.get(f"/merge?ids={a},{b}")
+    upd = f"/merge/update?ids={a},{b}"
+    alpha = c.post(upd, data={"field": "sort", "value": "alpha"}).text
+    assert alpha.index("Alpha") < alpha.index("Beta")       # alpha sort orders by title
+    # mode / keep / pick / an unknown field all dispatch and re-render without error
+    for field, value in (("mode", "ducks"), ("keep", "all"), ("pick", "v:v1:1"), ("bogus", "x")):
+        assert c.post(upd, data={"field": field, "value": value}).status_code == 200
+    assert 'value="all" checked' in c.get(f"/merge?ids={a},{b}").text   # keep choice survived the refresh
+
+
 def test_undo_via_dupe_delete(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     iid = store.upsert_identity("main", "cred", None, True)

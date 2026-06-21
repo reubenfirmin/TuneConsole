@@ -101,7 +101,7 @@ def test_remove_track_drops_row(live_playlist_app, page):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     page.goto(f"{base}/playlist/{pid}")
     row = page.get_by_role("row").filter(has_text="Song B")
-    row.get_by_role("button", name="More actions").click()          # ⋯ menu
+    row.get_by_title("More actions").click()                        # ⋯ menu
     row.get_by_role("button", name="Remove from playlist").click()  # opens confirm modal
     page.get_by_role("button", name="Remove", exact=True).click()   # confirm
     expect(page.get_by_role("row").filter(has_text="Song B")).to_have_count(0)

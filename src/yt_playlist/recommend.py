@@ -1,7 +1,7 @@
 """Local recommendation logic. Pure functions over a Store (no web imports), like analysis.py."""
 from dataclasses import dataclass
 
-from yt_playlist import analysis
+from yt_playlist import analysis, embed
 
 SYNC_STALE_S = 24 * 3600   # highlight the Sync card after 24h
 
@@ -28,11 +28,17 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
     sources = [
         (store.resurface_candidates(now, limit=limit),
          lambda r: "You played this a lot — give it another spin"),
-        (store.more_like_rotation(limit=limit),
-         lambda r: _rotation_reason(r["shared_playlists"])),
-        (store.deep_cuts(limit=limit),
-         lambda r: f"A deep cut from {r['artist']}, who you play a lot"),
     ]
+    # the taste-embedding lane: tracks in the neighbourhood of what you play most.
+    # Falls back to the plain co-occurrence query until the model has been built.
+    nbrs = _taste_neighbourhood(store, limit) if store.rec_vectors_count() else None
+    if nbrs:
+        sources.append((nbrs, lambda r: "In your taste neighbourhood"))
+    else:
+        sources.append((store.more_like_rotation(limit=limit),
+                        lambda r: _rotation_reason(r["shared_playlists"])))
+    sources.append((store.deep_cuts(limit=limit),
+                    lambda r: f"A deep cut from {r['artist']}, who you play a lot"))
     queues = [(list(rows), reason) for rows, reason in sources]
     seen: set = set()
     out: list[ForYouItem] = []
@@ -57,8 +63,39 @@ def _rotation_reason(n) -> str:
     return f"Sits with your favorites in {n} of your playlist{'s' if n != 1 else ''}"
 
 
+def _taste_neighbourhood(store, limit):
+    """Embedding-based: tracks near the centroid of your most-played songs."""
+    seeds = store.top_played_keys(limit=8)
+    nbrs = embed.centroid_neighbors(store, seeds, topn=limit, exclude=set(seeds))
+    if not nbrs:
+        return None
+    meta = store.tracks_by_keys([k for k, _ in nbrs])
+    return [{"key": k, "plays": 0, **meta[k]} for k, _ in nbrs if k in meta]
+
+
 def complete_playlist(store, playlist_id, limit=12) -> list[ForYouItem]:
-    """Tracks you own that fit a given playlist but aren't in it yet."""
+    """Tracks you own that fit a given playlist but aren't in it yet.
+
+    Uses the taste-embedding model (nearest to the playlist's centroid) once it's built;
+    falls back to the artist/co-occurrence heuristic until then.
+    """
+    members = store.get_playlist_track_keys(playlist_id)
+    if store.rec_vectors_count() and members:
+        nbrs = embed.centroid_neighbors(store, list(members), topn=limit, exclude=members)
+        if nbrs:
+            meta = store.tracks_by_keys([k for k, _ in nbrs])
+            member_artists = {m["artist"] for m in store.tracks_by_keys(members).values()}
+            out = []
+            for k, _ in nbrs:
+                m = meta.get(k)
+                if not m:
+                    continue
+                reason = (f"More from {m['artist']}, already here" if m["artist"] in member_artists
+                          else "Matches the sound of this playlist")
+                out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"],
+                                      m["thumbnail"], 0, reason))
+            return out
+
     out: list[ForYouItem] = []
     for r in store.complete_playlist(playlist_id, limit=limit):
         if r["same_artist"] and r["cooc"]:

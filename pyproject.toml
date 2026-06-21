@@ -11,6 +11,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "rapidfuzz>=3.6",
     "tomli>=2.0; python_version < '3.11'",
+    "numpy>=1.26",
 ]
 
 [project.scripts]

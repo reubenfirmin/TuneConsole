@@ -106,6 +106,10 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS genre_whitelist (
   name TEXT PRIMARY KEY COLLATE NOCASE   -- editable genre whitelist for tag matching
 );
+CREATE TABLE IF NOT EXISTS rec_vectors (
+  identity_key TEXT PRIMARY KEY,
+  vec BLOB NOT NULL                       -- float32 taste-embedding for the track (see embed.py)
+);
 """
 
 # A track is "liked" if its song (identity_key) appears in any "Liked Music" (LM) playlist. Used as a
@@ -783,6 +787,72 @@ class Store:
             {"limit": limit}).fetchall()
         return [{"id": r["id"], "title": r["title"], "thumbnail": r["thumb"], "gaps": r["gaps"],
                  "total": r["total"], "plays": r["plays"]} for r in rows]
+
+    @_synchronized
+    def rec_baskets(self, max_playlist=120, max_album=30, max_session=120) -> list[list[str]]:
+        """Co-occurrence baskets for the embedding model: playlists, albums, listening sessions.
+
+        Catch-all playlists (more than max_playlist tracks) are excluded — they link everything to
+        everything and only add noise. Live sets, full-performance uploads (UGC), and over-long
+        "tracks" that are really DJ mixes/compilations are dropped too, since they co-occur with
+        unrelated songs and blur the model. Each basket is a list of track identity_keys.
+        """
+        good = {r["k"] for r in self.conn.execute(
+            "SELECT DISTINCT identity_key k FROM tracks "
+            "WHERE (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
+            "AND (duration_s IS NULL OR duration_s <= 1200)")}
+        out = []
+        for grp, cap in (
+            ("SELECT pt.playlist_id g, t.identity_key k FROM playlist_tracks pt "
+             "JOIN tracks t ON t.id=pt.track_id", max_playlist),
+            ("SELECT album g, identity_key k FROM tracks WHERE album<>''", max_album),
+            ("SELECT artist g, identity_key k FROM tracks WHERE artist<>''", 50),
+            ("SELECT genre g, identity_key k FROM tracks WHERE genre<>''", 60),
+            ("SELECT snapshot_id g, identity_key k FROM history_items", max_session)):
+            buckets = {}
+            for r in self.conn.execute(grp):
+                if r["k"] in good:
+                    buckets.setdefault(r["g"], set()).add(r["k"])
+            out += [list(s) for s in buckets.values() if 1 < len(s) <= cap]
+        return out
+
+    @_synchronized
+    def replace_rec_vectors(self, rows) -> None:
+        """Atomically replace all taste-embedding vectors. rows = iterable of (identity_key, bytes)."""
+        self.conn.execute("DELETE FROM rec_vectors")
+        self.conn.executemany("INSERT INTO rec_vectors(identity_key, vec) VALUES (?,?)", rows)
+        self.conn.commit()
+
+    @_synchronized
+    def get_rec_vectors(self) -> list[tuple]:
+        return [(r["identity_key"], r["vec"])
+                for r in self.conn.execute("SELECT identity_key, vec FROM rec_vectors")]
+
+    @_synchronized
+    def rec_vectors_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) c FROM rec_vectors").fetchone()["c"]
+
+    @_synchronized
+    def tracks_by_keys(self, keys) -> dict:
+        """Display metadata for a set of identity_keys: {key: {title, artist, album, video_id, thumbnail}}."""
+        keys = list(keys)
+        if not keys:
+            return {}
+        qs = ",".join("?" * len(keys))
+        rows = self.conn.execute(
+            f"SELECT identity_key k, MIN(title) title, MIN(artist) artist, MIN(album) album, "
+            f"       MIN(video_id) vid, MIN(thumbnail) thumb FROM tracks "
+            f"WHERE identity_key IN ({qs}) GROUP BY identity_key", keys).fetchall()
+        return {r["k"]: {"title": r["title"], "artist": r["artist"], "album": r["album"] or "",
+                         "video_id": r["vid"], "thumbnail": r["thumb"]} for r in rows}
+
+    @_synchronized
+    def top_played_keys(self, limit=10) -> list[str]:
+        """Identity keys of your most-played songs (for seeding taste-neighbourhood recs)."""
+        rows = self.conn.execute(
+            "SELECT identity_key k, COUNT(*) c FROM history_items GROUP BY identity_key "
+            "ORDER BY c DESC LIMIT ?", (limit,)).fetchall()
+        return [r["k"] for r in rows]
 
     @_synchronized
     def top_artists(self, limit=100, since=None) -> list[dict]:

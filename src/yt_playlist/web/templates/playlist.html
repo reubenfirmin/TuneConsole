@@ -65,21 +65,28 @@
   <span class="enrich-status" x-text="status"></span>
 </div>
 
+<style>
+  /* Fixed layout so a wide playlist can't push columns past the card; the three free-text columns
+     truncate with an ellipsis instead of overflowing. Scoped to this table so other tables and the
+     genre/⋯ popups (which need visible overflow) are unaffected, and the sticky header is preserved
+     (no scroll/overflow context is introduced). */
+  .track-table { table-layout: fixed; }
+  .track-table td.t-trunc { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+</style>
 <div x-data="rowSort({{ pl.id }})" x-init="$nextTick(() => initSortable())">
 <div class="card">
-  <div style="overflow-x:auto">           {# wide playlists scroll horizontally instead of clipping past the card #}
-  <table>
+  <table class="track-table">
     <thead><tr>
-      <th class="num">#</th>
+      <th class="num" style="width:2.6rem">#</th>
       <th style="width:2.6rem"></th>
       <th style="width:1.6rem"></th>
       <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
       <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
       <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
-      <th class="sorth num" style="width:5rem" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth num" style="width:4.5rem" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
       <th class="sorth" style="width:8rem" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
-      <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
-      <th class="sorth num" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
+      <th class="sorth num" style="width:4.5rem" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth num" style="width:5rem" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
       <th style="width:2.4rem"></th>
     </tr></thead>
     <tbody x-ref="body">
@@ -89,7 +96,6 @@
     {% endfor %}
     </tbody>
   </table>
-  </div>
 </div>
 <datalist id="genrelist">{% for g in genres %}<option value="{{ g }}"></option>{% endfor %}</datalist>
 

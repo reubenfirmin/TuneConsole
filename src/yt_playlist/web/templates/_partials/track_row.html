@@ -14,13 +14,13 @@
     </span>
   </td>
   <td class="liked-col">{% if t.liked %}<span class="liked-heart" title="In your Liked Music">♥</span>{% endif %}</td>
-  <td>
+  <td class="t-trunc" title="{{ t.title }}">
     <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
        target="_blank" rel="noopener">{{ t.title }}&nbsp;↗</a>
     {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
   </td>
-  <td><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
-  <td>{% if t.album_browse %}<a class="alink" href="https://music.youtube.com/browse/{{ t.album_browse }}"
+  <td class="t-trunc" title="{{ t.artist }}"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
+  <td class="t-trunc" title="{{ t.album }}">{% if t.album_browse %}<a class="alink" href="https://music.youtube.com/browse/{{ t.album_browse }}"
          target="_blank" rel="noopener">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</td>
   <td class="num mono mb-year">
     <span class="ydisplay" x-show="editYearVid !== '{{ t.video_id }}'"

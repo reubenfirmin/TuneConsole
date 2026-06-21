@@ -41,6 +41,14 @@ def test_suggestion_card_has_wired_add_button(store):
     assert "+ Add" in frag and "v2" in frag            # button + the suggested track's videoId
 
 
+def test_recs_rebuild_endpoint(store):
+    store.upsert_identity("main", "cred", None, True)
+    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    r = c.post("/recs/rebuild")
+    assert r.status_code == 200 and r.json()["ok"] is True
+
+
 def test_add_suggested_track_adds_it_to_the_playlist(store):
     target, c = _seed(store)
     # what the Add button POSTs for the "Bonus" suggestion (videoId v2)

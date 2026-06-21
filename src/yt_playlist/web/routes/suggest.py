@@ -1,7 +1,8 @@
 """Recommendation-serving endpoints, returned as lazy htmx fragments."""
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 
-from yt_playlist import recommend
+from yt_playlist import embed, recommend
 
 
 def build(ctx) -> APIRouter:
@@ -16,5 +17,10 @@ def build(ctx) -> APIRouter:
             "suggestions": recommend.complete_playlist(store, pid),
             "pid": pid,
         })
+
+    @router.post("/recs/rebuild")
+    def recs_rebuild():
+        """Rebuild the taste-embedding model from the current library (also runs after each sync)."""
+        return JSONResponse({"ok": True, "count": embed.build_and_store(store)})
 
     return router
