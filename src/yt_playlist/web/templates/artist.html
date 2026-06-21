@@ -42,10 +42,9 @@
   </table>
 </div>
 
-{% if albums %}
-<h2 class="section">Albums <span class="count">{{ albums|length }}</span></h2>
-<p class="section-note">{% if info and info.albums %}From YouTube — “Songs / Plays” count what you have in your
-   playlists.{% else %}Grouped from your playlist tracks (re-sync to pull full discographies with cover art).{% endif %}</p>
+{% if collection %}
+<h2 class="section">Albums in your collection <span class="count">{{ collection|length }}</span></h2>
+<p class="section-note">Albums from your playlists and your saved YouTube albums.</p>
 <div class="card">
   <table x-data="rowSort()">
     <thead><tr>
@@ -55,22 +54,50 @@
       <th class="sorth num" @click="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
       <th class="sorth num" @click="sortBy('pls')">Playlists<span x-text="ind('pls')"></span></th>
       <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
-      <th></th>
+      <th class="sorth" @click="sortBy('saved')">Saved<span x-text="ind('saved')"></span></th>
     </tr></thead>
     <tbody x-ref="body">
-    {% for al in albums %}
+    {% for al in collection %}
       <tr class="srow" data-album="{{ al.album|lower }}" data-year="{{ al.year or 0 }}"
-          data-songs="{{ al.songs }}" data-pls="{{ al.n_pls }}" data-plays="{{ al.plays }}">
-        <td>{% if al.thumbnail %}<img class="album-thumb" src="{{ al.thumbnail }}" alt="" onerror="this.remove()">{% endif %}</td>
-        <td>{% if al.browse_id %}<a class="ptitle" href="https://music.youtube.com/browse/{{ al.browse_id }}"
+          data-songs="{{ al.songs }}" data-pls="{{ al.n_pls }}" data-plays="{{ al.plays }}"
+          data-saved="{{ '1' if al.saved else '0' }}">
+        <td>{% if al.thumb %}<img class="album-thumb" src="{{ al.thumb }}" alt="" onerror="this.remove()">{% endif %}</td>
+        <td>{% if al.browse %}<a class="ptitle" href="https://music.youtube.com/browse/{{ al.browse }}"
                target="_blank" rel="noopener">{{ al.album }} ↗</a>{% else %}<span class="ptitle">{{ al.album }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>
         <td class="num mono">{{ al.songs or '' }}</td>
         <td class="num mono">{{ al.n_pls or '' }}</td>
         <td class="num mono">{{ al.plays or '' }}</td>
+        <td>{% if al.saved %}<span class="kind kind-audio" title="Saved in your YouTube library">✓</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if yt_albums %}
+<h2 class="section">All albums on YouTube <span class="count">{{ yt_albums|length }}</span></h2>
+<p class="section-note">{{ artist }}’s full discography — Save any to your YouTube library.</p>
+<div class="card">
+  <table x-data="rowSort()">
+    <thead><tr>
+      <th style="width:3rem"></th>
+      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th class="sorth num" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th></th>
+    </tr></thead>
+    <tbody x-ref="body">
+    {% for al in yt_albums %}
+      <tr class="srow" data-album="{{ al.title|lower }}" data-year="{{ al.year or 0 }}">
+        <td>{% if al.thumbnail %}<img class="album-thumb" src="{{ al.thumbnail }}" alt="" onerror="this.remove()">{% endif %}</td>
+        <td>{% if al.browse_id %}<a class="ptitle" href="https://music.youtube.com/browse/{{ al.browse_id }}"
+               target="_blank" rel="noopener">{{ al.title }} ↗</a>{% else %}<span class="ptitle">{{ al.title }}</span>{% endif %}</td>
+        <td class="num mono">{{ al.year or '' }}</td>
         <td style="text-align:right">{% if al.browse_id %}<button type="button" class="btn-ghost btn-sm"
-              x-data="saveAlbum()" :disabled="state === '…'" @click="go('{{ al.browse_id }}')"
-              x-text="state || 'Save'" title="Save this album to your YouTube library"></button>{% endif %}</td>
+              x-data="saveAlbum({{ 'true' if al.saved else 'false' }})" :disabled="busy"
+              @click="toggle('{{ al.browse_id }}')" x-text="label()"
+              :title="saved ? 'Remove from your YouTube library' : 'Save to your YouTube library'"></button>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>

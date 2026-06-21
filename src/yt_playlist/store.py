@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   video_type TEXT,
   artist_browse_id TEXT,
   album_browse_id TEXT,
+  thumbnail TEXT,
   UNIQUE(identity_key, video_id)
 );
 CREATE TABLE IF NOT EXISTS playlists (
@@ -142,6 +143,8 @@ class Store:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN artist_browse_id TEXT")
         if "album_browse_id" not in cols:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN album_browse_id TEXT")
+        if "thumbnail" not in cols:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN thumbnail TEXT")
         self.conn.commit()
 
     @_synchronized
@@ -172,7 +175,7 @@ class Store:
 
     @_synchronized
     def upsert_track(self, video_id, title, artist, album, duration_s, available=None,
-                     video_type=None, artist_browse_id=None, album_browse_id=None) -> int:
+                     video_type=None, artist_browse_id=None, album_browse_id=None, thumbnail=None) -> int:
         key = identity_key(title, artist)
         row = self.conn.execute(
             "SELECT id FROM tracks WHERE identity_key=? AND IFNULL(video_id,'')=IFNULL(?,'')",
@@ -182,17 +185,18 @@ class Store:
             for col, val in (("available", None if available is None else int(available)),
                              ("video_type", video_type),
                              ("artist_browse_id", artist_browse_id),
-                             ("album_browse_id", album_browse_id)):
+                             ("album_browse_id", album_browse_id),
+                             ("thumbnail", thumbnail)):
                 if val is not None:
                     self.conn.execute(f"UPDATE tracks SET {col}=? WHERE id=?", (val, row["id"]))
             self.conn.commit()
             return row["id"]
         cur = self.conn.execute(
             "INSERT INTO tracks(video_id,title,artist,album,duration_s,identity_key,available,"
-            "video_type,artist_browse_id,album_browse_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "video_type,artist_browse_id,album_browse_id,thumbnail) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (video_id, title, artist, album, duration_s, key,
              None if available is None else int(available), video_type,
-             artist_browse_id, album_browse_id))
+             artist_browse_id, album_browse_id, thumbnail))
         self.conn.commit()
         return cur.lastrowid
 
@@ -439,6 +443,23 @@ class Store:
                   a.get("type"), a.get("thumbnail")) for a in albums if a.get("browse")])
 
     @_synchronized
+    def saved_album_ids(self) -> set:
+        return {r["browse_id"] for r in self.conn.execute("SELECT browse_id FROM saved_albums")}
+
+    @_synchronized
+    def add_saved_album(self, a) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO saved_albums(browse_id,title,artist,year,type,thumbnail) VALUES (?,?,?,?,?,?)",
+            (a["browse"], a.get("title"), a.get("artist"), str(a.get("year") or ""),
+             a.get("type"), a.get("thumbnail")))
+        self.conn.commit()
+
+    @_synchronized
+    def remove_saved_album(self, browse_id) -> None:
+        self.conn.execute("DELETE FROM saved_albums WHERE browse_id=?", (browse_id,))
+        self.conn.commit()
+
+    @_synchronized
     def get_saved_albums(self) -> list[dict]:
         rows = self.conn.execute(
             "SELECT browse_id browse, title, artist, year, type, thumbnail FROM saved_albums "
@@ -475,13 +496,13 @@ class Store:
             "WITH plays AS (SELECT hi.identity_key, COUNT(*) c FROM history_items hi "
             "  JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
             "  WHERE (:since IS NULL OR hs.taken_at >= :since) GROUP BY hi.identity_key), "
-            "     names AS (SELECT identity_key, MIN(title) title, MIN(artist) artist, MIN(video_id) vid "
-            "               FROM tracks GROUP BY identity_key) "
-            "SELECT n.title, n.artist, n.vid, p.c FROM plays p JOIN names n ON n.identity_key=p.identity_key "
+            "     names AS (SELECT identity_key, MIN(title) title, MIN(artist) artist, MIN(video_id) vid, "
+            "               MIN(thumbnail) thumb FROM tracks GROUP BY identity_key) "
+            "SELECT n.title, n.artist, n.vid, n.thumb, p.c FROM plays p JOIN names n ON n.identity_key=p.identity_key "
             "WHERE n.title <> '' ORDER BY p.c DESC, n.title LIMIT :limit",
             {"since": since, "limit": limit}).fetchall()
-        return [{"title": r["title"], "artist": r["artist"], "video_id": r["vid"], "plays": r["c"]}
-                for r in rows]
+        return [{"title": r["title"], "artist": r["artist"], "video_id": r["vid"],
+                 "thumbnail": r["thumb"], "plays": r["c"]} for r in rows]
 
     @_synchronized
     def top_artists(self, limit=100, since=None) -> list[dict]:
@@ -491,17 +512,19 @@ class Store:
             "  JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
             "  WHERE (:since IS NULL OR hs.taken_at >= :since) GROUP BY hi.identity_key), "
             "     names AS (SELECT identity_key, MIN(artist) artist FROM tracks GROUP BY identity_key) "
-            "SELECT n.artist, SUM(p.c) total FROM plays p JOIN names n ON n.identity_key=p.identity_key "
+            "SELECT n.artist, SUM(p.c) total, "
+            "       (SELECT MIN(thumbnail) FROM tracks t2 WHERE t2.artist=n.artist AND t2.thumbnail IS NOT NULL) thumb "
+            "FROM plays p JOIN names n ON n.identity_key=p.identity_key "
             "WHERE n.artist <> '' GROUP BY n.artist ORDER BY total DESC, n.artist LIMIT :limit",
             {"since": since, "limit": limit}).fetchall()
-        return [{"artist": r["artist"], "plays": r["total"]} for r in rows]
+        return [{"artist": r["artist"], "plays": r["total"], "thumbnail": r["thumb"]} for r in rows]
 
     @_synchronized
     def artist_songs(self, artist) -> list[dict]:
         """An artist's songs that appear in your playlists: play count + which playlists hold each."""
         songs = self.conn.execute(
             "SELECT t.identity_key key, MIN(t.title) title, MIN(t.album) album, MIN(t.video_id) vid, "
-            "       MIN(t.duration_s) dur, MIN(t.video_type) vtype, "
+            "       MIN(t.duration_s) dur, MIN(t.thumbnail) thumb, "
             "       (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=t.identity_key) plays "
             "FROM tracks t WHERE t.artist=? GROUP BY t.identity_key", (artist,)).fetchall()
         membership = self.conn.execute(
@@ -512,7 +535,7 @@ class Store:
         for r in membership:
             by_key.setdefault(r["key"], []).append({"title": r["title"], "ytm": r["ytm"]})
         out = [{"title": r["title"], "album": r["album"] or "", "video_id": r["vid"],
-                "duration": r["dur"], "plays": r["plays"],
+                "duration": r["dur"], "plays": r["plays"], "thumbnail": r["thumb"],
                 "playlists": sorted(by_key.get(r["key"], []), key=lambda p: p["title"].lower())}
                for r in songs]
         out.sort(key=lambda s: (-s["plays"], (s["title"] or "").lower()))
@@ -528,15 +551,17 @@ class Store:
         plays = self._play_counts()
         rows = self.conn.execute(
             "SELECT t.album album, t.identity_key key, MIN(t.artist) artist, MIN(t.album_browse_id) browse, "
-            "       GROUP_CONCAT(DISTINCT pt.playlist_id) pls "
+            "       MIN(t.thumbnail) thumb, GROUP_CONCAT(DISTINCT pt.playlist_id) pls "
             "FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id "
             "WHERE t.album IS NOT NULL AND t.album<>'' GROUP BY t.album, t.identity_key").fetchall()
         albums = {}
         for r in rows:
             a = albums.setdefault(r["album"], {"album": r["album"], "artist": r["artist"],
-                                               "browse": r["browse"], "songs": 0, "plays": 0, "_pls": set()})
+                                               "browse": r["browse"], "thumb": None,
+                                               "songs": 0, "plays": 0, "_pls": set()})
             a["songs"] += 1
             a["plays"] += plays.get(r["key"], 0)
+            a["thumb"] = a["thumb"] or r["thumb"]
             a["_pls"].update((r["pls"] or "").split(","))
         out = []
         for a in albums.values():

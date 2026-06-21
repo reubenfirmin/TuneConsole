@@ -58,29 +58,46 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="no artist specified")
         songs = store.artist_songs(name)
         info = _fetch_artist_info(ctx, name, store.artist_browse_id(name))
-        # local rollup of the artist's albums (song count, plays, #playlists) keyed by lowercased name
-        local = {}
+
+        # Section 1 — your collection: albums from your playlist tracks, merged with saved albums.
+        coll = {}
         for s in songs:
             key = s["album"] or "Singles / no album"
-            d = local.setdefault(key.lower(), {"album": key, "songs": 0, "plays": 0, "n_pls": 0, "_pls": set()})
+            d = coll.setdefault(key.lower(), {"album": key, "songs": 0, "plays": 0, "_pls": set(),
+                                              "saved": False, "browse": None, "year": None, "thumb": None})
             d["songs"] += 1
             d["plays"] += s["plays"]
+            d["thumb"] = d["thumb"] or s["thumbnail"]
             d["_pls"].update(p["ytm"] for p in s["playlists"])
-        for d in local.values():
+
+        def _by_artist(a):
+            return any(name.lower() == x.strip().lower() for x in (a.get("artist") or "").split(","))
+
+        for a in store.get_saved_albums():
+            if not _by_artist(a):
+                continue
+            key = (a["title"] or "").lower()
+            d = coll.get(key)
+            if d:
+                d["saved"] = True
+                d["browse"] = d["browse"] or a["browse"]
+                d["year"] = d["year"] or a.get("year")
+                d["thumb"] = d["thumb"] or a.get("thumbnail")
+            else:
+                coll[key] = {"album": a["title"], "songs": 0, "plays": 0, "_pls": set(),
+                             "saved": True, "browse": a["browse"], "year": a.get("year"),
+                             "thumb": a.get("thumbnail")}
+        for d in coll.values():
             d["n_pls"] = len(d.pop("_pls"))
-        if info and info.get("albums"):
-            # YouTube's full discography (with year + cover), annotated with our local play data
-            album_list = []
-            for ya in info["albums"]:
-                l = local.get((ya["title"] or "").lower(), {})
-                album_list.append({"album": ya["title"], "year": ya.get("year"),
-                                   "thumbnail": ya.get("thumbnail"), "browse_id": ya.get("browse_id"),
-                                   "songs": l.get("songs", 0), "plays": l.get("plays", 0),
-                                   "n_pls": l.get("n_pls", 0)})
-        else:
-            album_list = sorted(local.values(), key=lambda d: (-d["plays"], d["album"].lower()))
+        collection = sorted(coll.values(), key=lambda d: (-d["plays"], (d["album"] or "").lower()))
+
+        # Section 2 — full discography pulled live from YouTube; mark which you've already saved.
+        yt_albums = info["albums"] if info and info.get("albums") else []
+        saved_ids = store.saved_album_ids()
+        for ya in yt_albums:
+            ya["saved"] = ya.get("browse_id") in saved_ids
         return templates.TemplateResponse(request, "artist.html", {
-            "artist": name, "songs": songs, "albums": album_list,
+            "artist": name, "songs": songs, "collection": collection, "yt_albums": yt_albums,
             "total_plays": sum(s["plays"] for s in songs), "info": info,
         })
 

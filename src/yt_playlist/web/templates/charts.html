@@ -25,11 +25,12 @@
   <div class="card" x-show="view === 'songs'">
     {% if songs %}{% set smax = songs[0].plays %}
     <table class="chart">
-      <thead><tr><th class="rank">#</th><th>Song</th><th>Artist</th><th class="barhead"></th><th class="num">Plays</th></tr></thead>
+      <thead><tr><th class="rank">#</th><th style="width:2.6rem"></th><th>Song</th><th>Artist</th><th class="barhead"></th><th class="num">Plays</th></tr></thead>
       <tbody>
       {% for s in songs %}
         <tr>
           <td class="rank">{{ loop.index }}</td>
+          <td>{% if s.thumbnail %}<img class="album-thumb" src="{{ s.thumbnail }}" alt="" onerror="this.remove()">{% endif %}</td>
           <td><a class="ptitle" href="https://music.youtube.com/watch?v={{ s.video_id }}"
                  target="_blank" rel="noopener">{{ s.title }} ↗</a></td>
           <td><a class="alink" href="/artist?name={{ s.artist|urlencode }}">{{ s.artist }}</a></td>
@@ -45,11 +46,12 @@
   <div class="card" x-show="view === 'artists'" x-cloak>
     {% if artists %}{% set amax = artists[0].plays %}
     <table class="chart">
-      <thead><tr><th class="rank">#</th><th>Artist</th><th class="barhead"></th><th class="num">Plays</th></tr></thead>
+      <thead><tr><th class="rank">#</th><th style="width:2.6rem"></th><th>Artist</th><th class="barhead"></th><th class="num">Plays</th></tr></thead>
       <tbody>
       {% for a in artists %}
         <tr>
           <td class="rank">{{ loop.index }}</td>
+          <td>{% if a.thumbnail %}<img class="album-thumb" style="border-radius:50%" src="{{ a.thumbnail }}" alt="" onerror="this.remove()">{% endif %}</td>
           <td><a class="ptitle alink" href="/artist?name={{ a.artist|urlencode }}">{{ a.artist }}</a></td>
           <td class="barcell"><span class="playbar" style="width:{{ (a.plays / amax * 100)|round(1) }}%"></span></td>
           <td class="num mono">{{ a.plays }}</td>

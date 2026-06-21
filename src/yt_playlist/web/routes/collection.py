@@ -1,6 +1,8 @@
-"""Albums and Artists tabs (your collection across all playlists) + save-album-to-library."""
+"""Albums and Artists tabs (your collection across all playlists) + save/unsave album."""
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+
+from yt_playlist.thumbnails import best_thumb
 
 
 def build(ctx) -> APIRouter:
@@ -21,26 +23,50 @@ def build(ctx) -> APIRouter:
     def artists_page(request: Request):
         return templates.TemplateResponse(request, "artists.html", {"artists": store.collection_artists()})
 
-    @router.post("/collection/save-album")
-    async def save_album(request: Request):
-        # Save a YouTube album to your library: get_album -> like its audio playlist.
-        form = await request.form()
-        browse_id = (form.get("browse_id") or "").strip()
-        if not browse_id:
-            return JSONResponse({"ok": False, "error": "no album id"})
+    def _album_and_client(browse_id):
         clients = ctx.client_provider() or {}
         client = next(iter(clients.values()), None)
         if client is None:
-            return JSONResponse({"ok": False, "error": "no client available"})
+            raise ValueError("no client available")
+        album = client.get_album(browse_id)
+        if not album.get("audioPlaylistId"):
+            raise ValueError("album has no playlist")
+        return client, album
+
+    @router.post("/collection/save-album")
+    async def save_album(request: Request):
+        # Save a YouTube album to your library: get_album -> like its audio playlist; mirror locally.
+        browse_id = ((await request.form()).get("browse_id") or "").strip()
+        if not browse_id:
+            return JSONResponse({"ok": False, "error": "no album id"})
         try:
-            album = client.get_album(browse_id)
-            audio_pl = album.get("audioPlaylistId")
-            if not audio_pl:
-                return JSONResponse({"ok": False, "error": "album has no playlist to save"})
-            client.rate_playlist(audio_pl, "LIKE")
+            client, album = _album_and_client(browse_id)
+            client.rate_playlist(album["audioPlaylistId"], "LIKE")
+            store.add_saved_album({
+                "browse": browse_id, "title": album.get("title"), "type": album.get("type"),
+                "artist": ", ".join(x.get("name", "") for x in (album.get("artists") or [])),
+                "year": album.get("year"), "thumbnail": best_thumb(album.get("thumbnails"))})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
         except Exception:  # noqa: BLE001
             ctx.logger.exception("save-album %s failed", browse_id)
             return JSONResponse({"ok": False, "error": "YouTube refused the save"})
         return JSONResponse({"ok": True, "title": album.get("title", "album")})
+
+    @router.post("/collection/unsave-album")
+    async def unsave_album(request: Request):
+        browse_id = ((await request.form()).get("browse_id") or "").strip()
+        if not browse_id:
+            return JSONResponse({"ok": False, "error": "no album id"})
+        try:
+            client, album = _album_and_client(browse_id)
+            client.rate_playlist(album["audioPlaylistId"], "INDIFFERENT")
+            store.remove_saved_album(browse_id)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        except Exception:  # noqa: BLE001
+            ctx.logger.exception("unsave-album %s failed", browse_id)
+            return JSONResponse({"ok": False, "error": "YouTube refused"})
+        return JSONResponse({"ok": True})
 
     return router

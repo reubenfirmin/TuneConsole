@@ -97,7 +97,8 @@
       <div class="modal" @click.stop x-transition.scale.origin.center>
         <h3>Delete <span x-text="count()"></span> playlist<span x-show="count() !== 1">s</span>?</h3>
         <p>Each is backed up first and can be undone from <strong>Actions</strong>. System playlists
-           (e.g. Liked Music) are skipped.</p>
+           (e.g. Liked Music, Episodes for Later) can't be deleted from YouTube, so they're just
+           <strong>hidden</strong> from this tab instead.</p>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="delModal = false">Cancel</button>
           <button type="button" class="btn-danger" @click="doDelete()">Delete them</button>

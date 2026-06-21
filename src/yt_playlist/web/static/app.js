@@ -91,18 +91,21 @@ function ajaxRow() {
     },
   };
 }
-function saveAlbum() {
-  // "Add to collection" — save a YouTube album to your library.
+function saveAlbum(saved) {
+  // Save/unsave a YouTube album to your library, then reload so both album tables refresh.
   return {
-    state: '',
-    async go(browseId) {
-      if (this.state === '…' || this.state.startsWith('✓')) return;
-      this.state = '…';
+    saved: !!saved, busy: false,
+    label() { return this.busy ? '…' : (this.saved ? 'Unsave' : 'Save'); },
+    async toggle(browseId) {
+      if (this.busy) return;
+      this.busy = true;
+      const url = this.saved ? '/collection/unsave-album' : '/collection/save-album';
       try {
         const fd = new FormData(); fd.append('browse_id', browseId);
-        const j = await (await fetch('/collection/save-album', { method: 'POST', body: fd })).json();
-        this.state = j.ok ? '✓ Saved' : '✗ ' + (j.error || 'failed');
-      } catch (e) { this.state = '✗'; }
+        const j = await (await fetch(url, { method: 'POST', body: fd })).json();
+        if (j.ok) { location.reload(); return; }
+      } catch (e) {}
+      this.busy = false;
     },
   };
 }

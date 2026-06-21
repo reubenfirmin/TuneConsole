@@ -47,7 +47,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None)
         for t in detail.get("tracks", []):
             tid = store.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
                                      _album(t), t.get("duration_seconds"), t.get("isAvailable"),
-                                     t.get("videoType"), _artist_id(t), _album_id(t))
+                                     t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")))
             track_ids.append(tid)
             keys.append(identity_key(t.get("title", ""), _artist(t)))
         track_ids = list(dict.fromkeys(track_ids))   # de-dupe (YouTube can repeat a video; see set_playlist_tracks)
@@ -86,7 +86,7 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now) ->
     for t in detail.get("tracks", []):
         tid = store.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
                                  _album(t), t.get("duration_seconds"), t.get("isAvailable"),
-                                 t.get("videoType"), _artist_id(t), _album_id(t))
+                                 t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")))
         track_ids.append(tid)
         keys.append(identity_key(t.get("title", ""), _artist(t)))
     track_ids = list(dict.fromkeys(track_ids))   # de-dupe repeated videos

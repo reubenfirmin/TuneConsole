@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- googleusercontent throttles/403s image requests that carry a Referer header (browser sends one,
+       curl doesn't — which is why the same URLs load via curl but flake in the page). Drop the referrer. -->
+  <meta name="referrer" content="no-referrer">
   <title>{% block title %}yt-playlist{% endblock %}</title>
   <!-- Vendored from npm (see package.json); refresh with `npm run sync-assets`. Served locally
        so nothing is fetched from a third-party CDN at runtime. -->
