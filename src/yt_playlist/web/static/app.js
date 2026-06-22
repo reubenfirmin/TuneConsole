@@ -422,11 +422,23 @@ function authBanner(initial) {
     add(label) { if (label && !this.labels.includes(label)) this.labels.push(label); },
   };
 }
-function syncPanel() {
+function syncPanel(autoOn = false) {
   return {
     running: false,
     failed: false,
+    auto: autoOn,
     lines: [],
+    async toggleAuto() {
+      const next = !this.auto;
+      this.auto = next;   // optimistic: flip immediately so the note appears/disappears
+      try {
+        await fetch('/sync/auto', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'enabled=' + (next ? '1' : '0'),
+        });
+      } catch (e) { this.auto = !next; }   // revert if the server didn't take it
+    },
     push(ev) {
       const bad = ev.type === 'err' || ev.type === 'auth_expired';
       const pip = bad ? '✗' : ev.type === 'done' || ev.type === 'end' ? '✓'

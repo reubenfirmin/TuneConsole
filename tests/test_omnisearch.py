@@ -130,3 +130,59 @@ def test_like_wildcards_are_escaped(store):
     songs = next((s for s in res["sections"] if s["kind"] == "songs"), None)
     labels = [r["label"] for r in songs["rows"]] if songs else []
     assert labels == ["100%"]
+
+
+def test_cross_section_dedup(store):
+    """Tracks and playlists shown under the artist pivot must not reappear in direct-match sections."""
+    iid = store.upsert_identity("main", "cred", None, True)
+
+    # "Zola" is the primary artist (most tracks => pivot artist).
+    # Track "zola anthem" by Zola: matches the query "zola" both as artist AND by title.
+    t_overlap = store.upsert_track("z1", "zola anthem", "Zola", "LP", None,
+                                   album_browse_id="MPREb_zola")
+    # A second Zola track (no title match) just to make Zola the clear primary.
+    store.upsert_track("z2", "side b", "Zola", "LP", None,
+                       album_browse_id="MPREb_zola")
+    # Playlist titled "Zola Sessions" that features Zola (contains t_overlap):
+    # matches "zola" both under "Playlists featuring" AND by title.
+    pl_overlap = store.upsert_playlist(iid, "PLZ", "Zola Sessions", 1, "hz", 0.0)
+    store.set_playlist_tracks(pl_overlap, [t_overlap])
+
+    res = store.omni_search("zola")
+    assert res["primary_artist"]["name"] == "Zola"
+
+    # Collect identity_keys in "tracks_by" and "songs" sections.
+    tracks_by_section = next((s for s in res["sections"] if s["kind"] == "tracks_by"), None)
+    songs_section = next((s for s in res["sections"] if s["kind"] == "songs"), None)
+
+    # The overlapping track must appear in tracks_by (it is by Zola).
+    assert tracks_by_section is not None
+    tracks_by_hrefs = {r["href"] for r in tracks_by_section["rows"]}
+    assert any("z1" in href for href in tracks_by_hrefs), (
+        "Overlapping track should be in tracks_by section"
+    )
+
+    # The same track must NOT appear in the direct songs section.
+    if songs_section:
+        songs_hrefs = {r["href"] for r in songs_section["rows"]}
+        assert not any("z1" in href for href in songs_hrefs), (
+            "Overlapping track should be de-duped out of songs section"
+        )
+
+    # Collect pids in "playlists_featuring" and "playlists" sections.
+    featuring_section = next((s for s in res["sections"] if s["kind"] == "playlists_featuring"), None)
+    playlists_section = next((s for s in res["sections"] if s["kind"] == "playlists"), None)
+
+    # The overlapping playlist must appear under playlists_featuring.
+    assert featuring_section is not None
+    featuring_pids = {r["href"].rsplit("/", 1)[1] for r in featuring_section["rows"]}
+    assert str(pl_overlap) in featuring_pids, (
+        "Overlapping playlist should be in playlists_featuring section"
+    )
+
+    # The same playlist must NOT appear in the direct playlists section.
+    if playlists_section:
+        playlists_pids = {r["href"].rsplit("/", 1)[1] for r in playlists_section["rows"]}
+        assert str(pl_overlap) not in playlists_pids, (
+            "Overlapping playlist should be de-duped out of direct playlists section"
+        )

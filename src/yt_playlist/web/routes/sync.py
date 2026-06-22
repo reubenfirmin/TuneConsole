@@ -60,6 +60,14 @@ def build(ctx) -> APIRouter:
         threading.Thread(target=run, daemon=True).start()
         return JSONResponse({"job_id": job.id})
 
+    @router.post("/sync/auto")
+    async def set_auto_sync(request: Request):
+        # Toggle background auto-sync of plays. Persisted as a setting; the RecWorker's auto-sync
+        # daemon re-reads it each tick (~30 min) and pulls new plays/likes while it's on.
+        enabled = (await request.form()).get("enabled") == "1"
+        store.set_setting("auto_sync_plays", "1" if enabled else "0")
+        return JSONResponse({"enabled": enabled})
+
     @router.get("/sync/events/{job_id}")
     async def sync_events(request: Request, job_id: int):
         job = jobs.get(job_id)

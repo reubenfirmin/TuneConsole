@@ -43,16 +43,6 @@ PARAMS = [
               "full weight once this many days have passed since its last play; more recent plays "
               "demote it (a track played today barely shows).",
               1, 365, 1, 30, integer=True),
-    ParamSpec("neighbourhood_taste_ratio", "Taste vs. recent mood", "discovery",
-              "Balance of the neighbourhood lane: 1.0 = pure overall taste, 0.0 = only your "
-              "last-day mood. The remainder goes to recent mood.",
-              0.0, 1.0, 0.05, 0.70),
-    ParamSpec("recent_mood_window_hours", "Recent-mood window (hours)", "discovery",
-              "How far back 'recent mood' looks when tilting the neighbourhood lane.",
-              1, 168, 1, 24, integer=True),
-    ParamSpec("recent_mood_tracks", "Recent-mood tracks", "discovery",
-              "How many of your latest plays define your current mood.",
-              1, 50, 1, 12, integer=True),
     ParamSpec("explore_top_artists", "Explore skips top N artists", "discovery",
               "Explore stays novel by skipping your most-played N artists.",
               0, 100, 1, 25, integer=True),

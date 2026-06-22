@@ -89,6 +89,7 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "home.html", {
             "actions": recommend.take_action(store, now, ctx.auth_expired),
             "sync": recommend.sync_status(store, now),
+            "auto_sync": store.get_setting("auto_sync_plays") == "1",
             "muted_count": len(store.muted_artists()),   # transparency: what's being hidden
             "rediscover": recommend.rediscover_playlists(store, now, epoch=_epoch(store, "rediscover")),
             "flash": request.query_params.get("flash"),

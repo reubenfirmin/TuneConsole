@@ -82,11 +82,12 @@ def build(ctx) -> APIRouter:
 
     @router.post("/recs/mood")
     async def recs_mood(request: Request):
-        """Transient mood feedback: tilts the Home lanes toward (+) or away (-) from a vibe for a few
-        hours, then decays. NOT a permanent taste signal. Two shapes:
+        """Transient mood feedback: tilts the Home lanes toward (+) or away (-) from a vibe. It sticks
+        until you change it (and only relaxes once your sync goes stale) — reactive, but NOT a
+        permanent taste signal. Two shapes:
           - whole-mix (simple panel): `pid` -> seeds with the whole playlist; swaps in a confirmation.
           - facet/track levers: explicit `keys` (JSON list) of just that subset; returns a light ack.
-        `intensity=lot` doubles the magnitude (a stronger, still-transient tilt)."""
+        `intensity=lot` doubles the magnitude (a stronger tilt)."""
         form = await request.form()
         try:
             direction = int(form.get("dir", 1))

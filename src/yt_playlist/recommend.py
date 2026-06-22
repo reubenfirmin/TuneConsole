@@ -339,28 +339,36 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
     gp = rec_params.get_param
     pool = limit * gp(store, "candidate_pool_factor")   # fetch deeper than we show, so rotation has slack
     sources = []
-    # the taste-embedding lane: tracks in the neighbourhood of what you play most.
-    # Falls back to the plain co-occurrence query until the model has been built.
-    nbrs = _taste_neighbourhood(store, pool, now) if store.rec_vectors_count() else None
-    if nbrs:
+    # The taste-embedding scores: per-playlist taste fit, tilted by the transient model (mood centroid
+    # + genre/era/artist facet leans, staleness-gated). This single score drives both the neighbourhood
+    # lane's candidate selection AND every lane's final ordering — no separate recency mechanism.
+    sims = None
+    if store.rec_vectors_count():
+        pt = playlist_taste(store)
+        keys, V, idx = embed.load_vectors(store)
+        if pt and V is not None:
+            allscores = _apply_mood(pt.score_all(V), store, now, V, idx)   # taste, tilted by transient mood
+            sims = _apply_axis_weights(store, {keys[i]: float(allscores[i]) for i in range(len(keys))}, now)
+
+    if sims is not None:
+        # Neighbourhood lane: top tracks by taste×transient, excluding your most-played (so it's the
+        # *neighbourhood* of your taste, not your hits).
+        seeds = set(store.top_played_keys(limit=8))
+        top = [k for k in sorted(sims, key=lambda k: -sims[k]) if k not in seeds][:pool]
+        meta = store.tracks_by_keys(top)
+        nbrs = [{"key": k, "plays": 0, **meta[k]} for k in top if k in meta]
         sources.append((nbrs, lambda r: "In your taste neighbourhood", "neighbourhood"))
     else:
+        # Until the embedding model is built, fall back to plain rotation co-occurrence.
         sources.append((store.more_like_rotation(limit=pool),
                         lambda r: _rotation_reason(r["shared_playlists"]), "rotation"))
     sources.append((store.deep_cuts(limit=pool),
                     lambda r: f"A deep cut from {r['artist']}, who you play a lot", "deep_cut"))
 
-    # Tier-2 refinement: re-rank every lane's candidates by your play-weighted per-playlist taste,
-    # so the strongest-fitting items rise within each lane (no single blurred centroid).
-    if store.rec_vectors_count():
-        pt = playlist_taste(store)
-        keys, V, idx = embed.load_vectors(store)
-        if pt and V is not None:
-            allscores = _apply_mood(pt.score_all(V), store, now, V, idx)   # tilt by current mood
-            sims = {keys[i]: float(allscores[i]) for i in range(len(keys))}
-            sims = _apply_axis_weights(store, sims, now)        # favor/mute genre·era·artist (perm × transient)
-            for rows, _, _ in sources:
-                rows.sort(key=lambda r: -sims.get(r["key"], -1.0))
+    # Re-rank every lane's candidates by the same taste×transient score.
+    if sims is not None:
+        for rows, _, _ in sources:
+            rows.sort(key=lambda r: -sims.get(r["key"], -1.0))
 
     weights = store.get_weights()
     # Never show these: dismissed/snoozed/muted, and anything already bundled into a generated
@@ -706,29 +714,6 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
             break
     return out
 
-
-def _taste_neighbourhood(store, limit, now=None):
-    """Tracks scoring high on your play-weighted per-playlist taste (slow, blur-free — distinct
-    high-play contexts stay distinct), tilted toward your *recent* plays (fast/mood). Spec §5.1."""
-    pt = playlist_taste(store)
-    if not pt:
-        return None
-    keys, V, idx = embed.load_vectors(store)
-    scores = pt.score_all(V)                                  # per-context taste (slow)
-    if now is not None:
-        win_h = rec_params.get_param(store, "recent_mood_window_hours")
-        n_recent = rec_params.get_param(store, "recent_mood_tracks")
-        recent = store.recent_keys_ordered(now - win_h * 3600.0, limit=n_recent)  # latest plays, in order
-        mood = embed._centroid(V, idx, [(recent, 1.0)]) if recent else None
-        if mood is not None:
-            ratio = rec_params.get_param(store, "neighbourhood_taste_ratio")
-            Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
-            scores = ratio * scores + (1.0 - ratio) * (Vn @ mood)   # taste vs. recent mood
-    seeds = set(store.top_played_keys(limit=8))
-    order = np.argsort(-scores)
-    top = [keys[i] for i in order if keys[i] not in seeds][:limit]
-    meta = store.tracks_by_keys(top)
-    return [{"key": k, "plays": 0, **meta[k]} for k in top if k in meta]
 
 
 def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem]:

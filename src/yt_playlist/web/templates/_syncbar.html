@@ -1,13 +1,18 @@
-<div class="sync-bar" x-data="syncPanel()" style="margin-bottom:1.6rem">
-  <button type="button" @click="start('/sync/plays')" :disabled="running">
-    <span x-show="!running">Sync plays</span>
-    <span x-show="running" style="display:none"><span class="spinner"></span>&nbsp;Syncing…</span>
+<div class="sync-bar" x-data="syncPanel({{ 'true' if auto_sync else 'false' }})" style="margin-bottom:1.6rem">
+  {# A brand-new user (never synced) has no plays to sync yet — only offer the Full sync that
+     pulls in their library. The "Sync plays" auto-sync toggle appears once there's been a first sync. #}
+  {% if sync.last_synced_ago %}
+  <button type="button" class="sync-toggle" :class="{ on: auto }" :aria-pressed="auto" @click="toggleAuto()">
+    <span class="sync-toggle-track"><span class="sync-toggle-thumb"></span></span>
+    <span>Sync plays</span>
   </button>
+  {% endif %}
   <button type="button" class="btn-ghost" @click="start('/sync')" :disabled="running">
     <span x-show="!running">Full sync</span>
     <span x-show="running" style="display:none"><span class="spinner"></span>&nbsp;Syncing…</span>
   </button>
-  <div class="sync-panel" x-show="running || lines.length" style="display:none; margin-top:1rem">
+  <div class="sync-panel" x-show="running || lines.length || auto" style="display:none; margin-top:1rem">
+    <p class="sync-note" x-show="auto">Will re-sync plays automatically every 30 mins</p>
     <div class="bar" x-show="running"><i></i></div>
     <div class="sync-log" x-ref="log">
       <template x-for="(ln, i) in lines" :key="i">

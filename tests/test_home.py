@@ -102,3 +102,37 @@ def test_home_feed_has_steer_toast_scaffold(store):
     html = c.get("/home/feed").text
     assert 'id="steer-toast"' in html
     assert "Tune your taste model" in html or "fine-tune" in html.lower()
+
+
+def test_new_user_only_gets_full_sync(store):
+    """A never-synced user is offered Full sync only — the 'Sync plays' auto-sync toggle appears once
+    there's been a first sync."""
+    c = _client(store)
+    html = c.get("/").text
+    assert "Never synced" in html
+    assert "Full sync" in html
+    assert "Sync plays" not in html          # no plays to sync yet
+    assert "sync-toggle" not in html
+
+    store.set_setting("last_sync_at", "1000")   # now there's a first sync (now_fn -> 1000.0)
+    html = c.get("/").text
+    assert "Sync plays" in html and "sync-toggle" in html
+
+
+def test_auto_sync_toggle_persists_and_renders(store):
+    store.set_setting("last_sync_at", "1000")   # synced user -> toggle is offered
+    iid = store.upsert_identity("main", "cred", None, True)
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+
+    assert "Will re-sync plays automatically every 30 mins" in c.get("/").text   # note copy present
+
+    r = c.post("/sync/auto", data={"enabled": "1"})
+    assert r.status_code == 200 and r.json() == {"enabled": True}
+    assert store.get_setting("auto_sync_plays") == "1"
+    assert "syncPanel(true)" in c.get("/").text                                   # reflected on load
+
+    r = c.post("/sync/auto", data={"enabled": "0"})
+    assert r.json() == {"enabled": False}
+    assert store.get_setting("auto_sync_plays") == "0"
+    assert "syncPanel(false)" in c.get("/").text

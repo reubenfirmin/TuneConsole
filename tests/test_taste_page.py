@@ -72,8 +72,8 @@ def test_taste_param_saves_and_marks_sample_stale(store):
 
 def test_taste_param_is_clamped(store):
     c = _client(store)
-    c.post("/taste/param", data={"name": "neighbourhood_taste_ratio", "value": "9"})
-    assert rec_params.get_param(store, "neighbourhood_taste_ratio") == 1.0   # max
+    c.post("/taste/param", data={"name": "palette_absence_penalty", "value": "9"})
+    assert rec_params.get_param(store, "palette_absence_penalty") == 2.0   # max
 
 
 def test_taste_genre_weight_uses_genre_band(store):

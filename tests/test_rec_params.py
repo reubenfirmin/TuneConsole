@@ -10,7 +10,7 @@ from yt_playlist.recommend import genre_adjusted_scores
 def test_unset_param_returns_registry_default(store):
     # nothing stored -> the spec default, not None
     assert rec_params.get_param(store, "comfort_recency_full_days") == 30
-    assert rec_params.get_param(store, "neighbourhood_taste_ratio") == 0.70
+    assert rec_params.get_param(store, "explore_top_artists") == 25
 
 
 def test_set_and_get_param_round_trips(store):
@@ -19,16 +19,16 @@ def test_set_and_get_param_round_trips(store):
 
 
 def test_integer_param_is_rounded_to_int(store):
-    rec_params.set_param(store, "recent_mood_tracks", 8.0)
-    v = rec_params.get_param(store, "recent_mood_tracks")
-    assert v == 8 and isinstance(v, int)
+    rec_params.set_param(store, "erosion_view_cap", 2.0)
+    v = rec_params.get_param(store, "erosion_view_cap")
+    assert v == 2 and isinstance(v, int)
 
 
 def test_param_is_clamped_to_spec_range(store):
-    rec_params.set_param(store, "neighbourhood_taste_ratio", 5.0)   # max is 1.0
-    assert rec_params.get_param(store, "neighbourhood_taste_ratio") == 1.0
-    rec_params.set_param(store, "neighbourhood_taste_ratio", -2.0)  # min is 0.0
-    assert rec_params.get_param(store, "neighbourhood_taste_ratio") == 0.0
+    rec_params.set_param(store, "palette_absence_penalty", 5.0)   # max is 2.0
+    assert rec_params.get_param(store, "palette_absence_penalty") == 2.0
+    rec_params.set_param(store, "palette_absence_penalty", -2.0)  # min is 0.0
+    assert rec_params.get_param(store, "palette_absence_penalty") == 0.0
 
 
 def test_reset_param_restores_default(store):
@@ -52,7 +52,7 @@ def test_unknown_param_raises(store):
 
 def test_registry_has_expected_groups_and_advanced_flag():
     names = {p.name for p in rec_params.PARAMS}
-    assert {"comfort_recency_full_days", "neighbourhood_taste_ratio", "palette_absence_penalty",
+    assert {"comfort_recency_full_days", "comfort_min_plays", "palette_absence_penalty",
             "candidate_pool_factor"} <= names
     advanced = {p.name for p in rec_params.PARAMS if p.advanced}
     assert "candidate_pool_factor" in advanced            # the nichest knobs are collapsed
