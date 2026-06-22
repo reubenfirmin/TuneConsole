@@ -60,6 +60,12 @@ PARAMS = [
               "How many times you can reload Home before each card rotates to a fresh set of "
               "suggestions. Lower = the cards turn over faster.",
               1, 10, 1, 3, integer=True),
+    ParamSpec("generated_gc_days", "Generated playlist cleanup (days)", "discovery",
+              "A daily worker deletes generated playlists you never play (locally and on YouTube). "
+              "Each gets this many days from when it was created to be played; if fewer than half of "
+              "its tracks show up in your play history by then, it's collected. Deletions are backed "
+              "up and undoable from the Actions page.",
+              1, 365, 1, 7, integer=True),
     ParamSpec("palette_absence_penalty", "Out-of-palette penalty", "discovery",
               "How hard to penalize genres absent from your library (scaled by how eclectic you "
               "are). Higher = stick closer to genres you already have.",
@@ -119,3 +125,24 @@ def reset_all_params(store) -> None:
     """Revert every scalar knob to its default."""
     for p in PARAMS:
         store.delete_setting(SETTING_PREFIX + p.name)
+
+
+# --- Transient model (lifecycle / recency) ---
+SYNC_STALE_S = 24 * 3600       # sync older than this is "stale" (also used by recommend.sync_status)
+MOOD_RECENCY_ALPHA = 0.35      # EMA over interaction RANK; newest pick ~35% of the blend
+MOOD_EVENT_CAP = 200           # bound the rec_mood table (count, not age)
+STALE_DECAY_HALFLIFE_D = 3     # once sync stale, transient relaxes with this half-life (days)
+# Source weights into the transient leans
+PLAY_TRANSIENT_W = 0.30        # one recent play's positive push
+DISLIKE_TRANSIENT_W = 1.50     # one recent dislike's negative push (strong, explicit)
+RECENT_PLAY_LIMIT = 50         # how many recent plays feed the transient leans
+# Facet overlay shape (read by _axis_weights_for and roll_recipe)
+FACET_GAIN = 0.6
+FACET_MULT_MIN = 0.1           # a strong negative lean nearly mutes a facet (not a hard ban)
+FACET_MULT_MAX = 2.5
+# Dislike (permanent suppression side)
+DISLIKE_SUPPRESS_DAYS = 365
+# Graduation
+THEME_THRESHOLD = 1.2
+GRADUATE_UP = 1.05
+GRADUATE_DOWN = 0.95

@@ -244,7 +244,7 @@ def palette(store):
 
     return {"breadth": bd["breadth"], "present": present, "fit": fit}
 
-SYNC_STALE_S = 24 * 3600   # highlight the Sync card after 24h
+SYNC_STALE_S = rec_params.SYNC_STALE_S   # highlight the Sync card after this (defined in rec_params)
 
 
 def playlist_genre_diversity(store, playlist_id):
@@ -418,13 +418,14 @@ def comfort_listening(store, now, limit=24) -> list[ForYouItem]:
 def rediscover_playlists(store, now, count=2, per=5) -> list[dict]:
     """Spotlight real library playlists you haven't reached for lately, to nudge a rediscover.
 
-    Picks the `count` playlists with the oldest last-listen (played-but-stale first; never-played
-    only fills in when there aren't enough stale ones), and highlights `per` tracks from each so the
-    card is a teaser, not the full tracklist. Skips system playlists (Liked Music, Episodes for
-    Later), Generated proto-playlists, and empties — none of those are a library playlist to revisit.
+    Ranks by *aggregate* track staleness — the median of when each track was last played, with
+    never-played tracks counted as cold — so a playlist leads only when most of it has gone unplayed,
+    not because one track was heard recently. Picks the `count` coldest and highlights `per` tracks
+    from each as a teaser. Skips system playlists (Liked Music, Episodes for Later), Generated
+    proto-playlists, and empties — none of those are a library playlist to revisit.
     """
     from yt_playlist.repos.rec_query import GENERATED_GROUP
-    stats = store.get_playlist_listen_stats()            # {pid: (last_ts, listen_count)}
+    recency = store.get_playlist_track_recency()         # {pid: [per-track last-played ts | None, ...]}
     groups = store.get_playlist_groups()                 # ytm -> group name
     candidates = []
     for p in store.get_playlists():
@@ -432,17 +433,16 @@ def rediscover_playlists(store, now, count=2, per=5) -> list[dict]:
                 or groups.get(p.ytm_playlist_id) == GENERATED_GROUP
                 or not p.track_count):
             continue
-        last, _listens = stats.get(p.id, (None, 0))
-        candidates.append((p, last))
-    # Played-but-stale first (oldest last-listen leads); never-played only fills empty slots.
-    played = sorted((c for c in candidates if c[1] is not None), key=lambda c: c[1])
-    never = [c for c in candidates if c[1] is None]
-    picked = (played + never)[:count]
+        # Never-played tracks count as cold: a 0.0 sentinel sorts older than any real timestamp.
+        lasts = [t if t is not None else 0.0 for t in (recency.get(p.id) or [0.0])]
+        candidates.append((p, statistics.median(lasts)))
+    candidates.sort(key=lambda c: c[1])                  # coldest aggregate (oldest median) leads
     out = []
-    for p, last in picked:
+    for p, med in candidates[:count]:
         out.append({"id": p.id, "ytm": p.ytm_playlist_id, "title": p.title,
                     "track_count": p.track_count, "thumbnail": p.thumbnail,
-                    "last_played": _ago(now - last) if last else None,
+                    # the median is per-track; 0.0 means most tracks have never been played
+                    "last_played": _ago(now - med) if med > 0 else None,
                     "tracks": store.playlist_tracks_detail(p.id)[:per]})
     return out
 

@@ -7,8 +7,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
 from yt_playlist.action_kinds import (
-    ADD_TRACKS, APPLY_MERGE, COPY_INTO, COPY_PLAYLIST, DELETE_EMPTY, DELETE_PLAYLIST, MOVE_IDENTITY,
-    PLAN, REMOVE_TRACK, RENAME_PLAYLIST, UNDO, is_undoable)
+    ADD_TRACKS, APPLY_MERGE, COPY_INTO, COPY_PLAYLIST, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED,
+    MOVE_IDENTITY, PLAN, REMOVE_TRACK, RENAME_PLAYLIST, UNDO, is_undoable)
 from yt_playlist.executor import deserialize_plan
 
 
@@ -41,6 +41,8 @@ def build(ctx) -> APIRouter:
             return f"deleted empty “{params.get('title')}”"
         if action.kind == DELETE_PLAYLIST:
             return f"deleted “{params.get('title')}”"
+        if action.kind == GC_GENERATED:
+            return f"auto-removed unplayed generated playlist “{params.get('title')}”"
         if action.kind == COPY_PLAYLIST:
             return f"copied “{params.get('source')}” → “{params.get('title')}”"
         if action.kind == COPY_INTO:

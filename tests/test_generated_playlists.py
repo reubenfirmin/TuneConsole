@@ -124,3 +124,124 @@ def test_create_generated_playlist_stores_recipe_and_versions(store):
     r2 = executor.create_generated_playlist(store, "Fresh songs - June 21 2026", list(tracks),
                                             fc, now=2.0, identity_id=iid, recipe=recipe)
     assert r2["title"] == "Fresh songs - June 21 2026 #2"          # next version that day
+
+
+# --- garbage collection of unplayed generated playlists (daily worker) -------------------------
+
+def _seed_generated_at(store, iid, created, n=3, ytm="PLG"):
+    """A Generated-group playlist of n unplayed tracks whose first_seen (creation) is `created`."""
+    pid = store.upsert_playlist(iid, ytm, "Gen mix", n, "h", created)
+    tids = [store.upsert_track(f"{ytm}{i}", f"{ytm}T{i}", "GenArt", None, None, 1) for i in range(n)]
+    store.set_playlist_tracks(pid, tids)
+    store.set_playlist_group(ytm, "Generated")
+    return pid, ytm, {identity_key(f"{ytm}T{i}", "GenArt") for i in range(n)}
+
+
+def test_gc_deletes_stale_unplayed_generated(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    from yt_playlist import executor
+    from yt_playlist.action_kinds import is_undoable
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0; now = 100 * day
+    pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day)   # 10d old, never played
+    fc = FakeClient()
+
+    collected = executor.gc_generated_playlists(store, {iid: fc}, now)     # 7-day grace by default
+
+    assert [c["ytm"] for c in collected] == [ytm]
+    assert store.get_playlist(pid) is None         # pruned locally
+    assert fc.deleted == [ytm]                      # deleted on YouTube
+    act = store.get_actions()[0]
+    assert act.kind == "gc_generated" and is_undoable(act.kind)
+
+
+def test_gc_keeps_young_generated(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    from yt_playlist import executor
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0; now = 100 * day
+    pid, _ytm, _ = _seed_generated_at(store, iid, created=now - 2 * day)   # still inside the grace window
+    fc = FakeClient()
+
+    assert executor.gc_generated_playlists(store, {iid: fc}, now) == []
+    assert store.get_playlist(pid) is not None and fc.deleted == []
+
+
+def test_gc_keeps_generated_played_since_creation(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    from yt_playlist import executor
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0; now = 100 * day
+    pid, _ytm, keys = _seed_generated_at(store, iid, created=now - 10 * day)
+    store.add_history_snapshot(iid, now - 1 * day, list(keys))             # full playthrough since creation
+
+    assert executor.gc_generated_playlists(store, {iid: FakeClient()}, now) == []
+    assert store.get_playlist(pid) is not None
+
+
+def test_gc_keeps_generated_when_at_least_half_played(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    from yt_playlist import executor
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0; now = 100 * day
+    pid, _ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day, n=4)
+    half = [identity_key(f"PLGT{i}", "GenArt") for i in (0, 1)]            # 2 of 4 = 50% played since creation
+    store.add_history_snapshot(iid, now - 1 * day, half)
+
+    assert executor.gc_generated_playlists(store, {iid: FakeClient()}, now) == []
+    assert store.get_playlist(pid) is not None
+
+
+def test_gc_deletes_generated_when_under_half_played(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    from yt_playlist import executor
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0; now = 100 * day
+    _pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day, n=4)
+    store.add_history_snapshot(iid, now - 1 * day, [identity_key("PLGT0", "GenArt")])   # only 1 of 4 = 25%
+    fc = FakeClient()
+
+    collected = executor.gc_generated_playlists(store, {iid: fc}, now)
+    assert [c["ytm"] for c in collected] == [ytm]                          # a stray play or two doesn't save it
+
+
+def test_gc_ignores_plays_before_creation(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    from yt_playlist import executor
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0; now = 100 * day
+    _pid, ytm, keys = _seed_generated_at(store, iid, created=now - 10 * day)
+    store.add_history_snapshot(iid, now - 20 * day, list(keys))            # only ever played pre-creation
+    fc = FakeClient()
+
+    collected = executor.gc_generated_playlists(store, {iid: fc}, now)
+    assert [c["ytm"] for c in collected] == [ytm]                          # a pre-creation play doesn't save it
+
+
+def test_gc_ignores_non_generated_playlists(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    from yt_playlist import executor
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0; now = 100 * day
+    t = store.upsert_track("v1", "S", "A", None, None, 1)
+    pl = store.upsert_playlist(iid, "PLN", "Normal", 1, "h", now - 30 * day)   # old + unplayed, but real
+    store.set_playlist_tracks(pl, [t])
+    fc = FakeClient()
+
+    assert executor.gc_generated_playlists(store, {iid: fc}, now) == []
+    assert store.get_playlist(pl) is not None and fc.deleted == []
+
+
+def test_gc_deletion_is_undoable(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    from yt_playlist import executor
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0; now = 100 * day
+    _pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day)
+    fc = FakeClient()
+    executor.gc_generated_playlists(store, {iid: fc}, now)
+    aid = store.get_actions()[0].id
+
+    executor.undo_action(store, aid, {iid: fc}, now + day)
+    assert fc.created and fc.created[0][1] == "Gen mix"     # recreated from backup
+    assert store.get_action(aid).status == "undone"

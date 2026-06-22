@@ -4,6 +4,8 @@
 <section id="rediscover">
   <h2 class="section">Rediscover in your library</h2>
   <p class="section-note">Playlists you haven't reached for lately — dip back in.</p>
+  <p class="section-note redis-note">Play times are per track — we rank by the median of when each
+    song was last played, so one recently-heard track won't hide an otherwise-cold playlist.</p>
   <div class="for-you-grid rediscover-grid">
     {% for p in rediscover %}
     <div class="card redis-card">
@@ -13,7 +15,7 @@
              onerror="this.closest('.gen-th').classList.add('no-art'); this.remove()">{% endif %}</span>
         <span class="redis-meta">
           <a class="redis-title" href="/playlist/{{ p.id }}" title="Open in yt-playlist">{{ p.title }}</a>
-          <span class="redis-sub">{{ p.track_count }} track{{ 's' if p.track_count != 1 }}{% if p.last_played %} · last played {{ p.last_played }}{% else %} · not played yet{% endif %}</span>
+          <span class="redis-sub">{{ p.track_count }} track{{ 's' if p.track_count != 1 }}{% if p.last_played %} · tracks typically last played {{ p.last_played }}{% else %} · mostly never played{% endif %}</span>
         </span>
       </header>
       <ol class="redis-list">

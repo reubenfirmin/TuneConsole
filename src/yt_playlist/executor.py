@@ -7,8 +7,8 @@ from yt_playlist.matching import fuzzy_ratio, normalize, track_artist, identity_
 from yt_playlist.retry import with_retry
 from yt_playlist import paths
 from yt_playlist.action_kinds import (
-    PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, COPY_PLAYLIST, COPY_INTO,
-    ADD_TRACKS, REMOVE_TRACK, RENAME_PLAYLIST, UNDO, UNDOABLE_KINDS, is_undoable)
+    PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED, COPY_PLAYLIST,
+    COPY_INTO, ADD_TRACKS, REMOVE_TRACK, RENAME_PLAYLIST, UNDO, UNDOABLE_KINDS, is_undoable)
 from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.thumbnails import best_thumb
 
@@ -321,6 +321,62 @@ def delete_playlist(store, playlist_id, client, now) -> str:
                         json.dumps({"ytm": pl.ytm_playlist_id, "title": pl.title}),
                         "{}", "executed", json.dumps({"backup": backup_path}), now)
     return backup_path
+
+# Keep a generated playlist if at least this fraction of its tracks were played since it was created
+# — evidence you actually played the playlist, not just stumbled across a song or two from it.
+GC_PLAYED_FRACTION = 0.5
+
+
+def gc_generated_playlists(store, clients, now, grace_days=None) -> list[dict]:
+    """Garbage-collect generated playlists that have gone (mostly) unplayed past their grace window.
+
+    A generated playlist (group == GENERATED_GROUP) is collected when BOTH hold:
+      • it's older than the grace window (now - first_seen ≥ grace_days), and
+      • fewer than GC_PLAYED_FRACTION of its tracks have been played since it was created.
+
+    YouTube exposes no per-playlist play count, so "played" is judged at the song level using each
+    track's last-played date: playing the playlist through lights up most of its tracks within the
+    window, whereas a couple of stray plays (a song heard via radio/autoplay) doesn't clear the bar.
+    Each collection backs up, deletes locally + on YouTube, and records an undoable GC_GENERATED
+    action — exactly like a manual delete, just automatic. Returns the collected playlists.
+    """
+    from yt_playlist.repos.rec import GENERATED_GROUP
+    from yt_playlist import rec_params
+    if grace_days is None:
+        grace_days = rec_params.get_param(store, "generated_gc_days")
+    grace_s = grace_days * 86400.0
+    clients = clients or {}
+    groups = store.get_playlist_groups()                 # ytm -> group name
+    recency = store.get_playlist_track_recency()         # pid -> [per-track last-played ts | None, ...]
+    collected = []
+    for pl in store.get_playlists():
+        if groups.get(pl.ytm_playlist_id) != GENERATED_GROUP:
+            continue
+        created = pl.first_seen or now
+        if now - created < grace_s:                      # still inside its grace window — leave it
+            continue
+        lasts = recency.get(pl.id) or []
+        if lasts:                                        # fraction of tracks played since creation
+            played = sum(1 for t in lasts if t is not None and t >= created)
+            if played / len(lasts) >= GC_PLAYED_FRACTION:   # enough of it was played -> keep
+                continue
+        client = clients.get(pl.identity_id)
+        if client is None:                                # can't delete remotely without its client
+            continue
+        try:
+            backup_path = backup_playlist(store, pl.id, now)
+            logger.warning("GC: deleting unplayed generated playlist %s (backup at %s)",
+                           pl.ytm_playlist_id, backup_path)
+            client.delete_playlist(pl.ytm_playlist_id)
+            store.remove_playlist(pl.id)
+            store.record_action(GC_GENERATED,
+                                json.dumps({"ytm": pl.ytm_playlist_id, "title": pl.title}),
+                                "{}", "executed", json.dumps({"backup": backup_path}), now)
+            collected.append({"ytm": pl.ytm_playlist_id, "title": pl.title, "backup": backup_path})
+        except Exception:  # noqa: BLE001 - one playlist's failure must not stop the sweep
+            logger.warning("GC: could not delete generated playlist %s", pl.ytm_playlist_id,
+                           exc_info=True)
+    return collected
 
 def copy_playlist(store, playlist_ids, new_name, client, now) -> dict:
     """Copy one or more playlists into a NEW playlist (non-destructive). With several, it's a

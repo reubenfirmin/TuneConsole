@@ -781,8 +781,10 @@ button.htmx-request .check-busy { display: inline; }
 .album-grid { display: grid; gap: 0.9rem;
   grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
   max-width: calc(5 * 11rem + 4 * 0.9rem); margin-bottom: 1.4rem; }
-/* New-artists tile grid: same 5-column cap (the shared .tile-grid stays uncapped elsewhere). */
-#new-artist-grid { max-width: calc(5 * 10.5rem + 4 * 0.9rem); }
+/* New-artists tile grid: match .album-grid exactly (same column min, gap, and 5-col cap) so the two
+   Home cards are the same width and their columns line up. The shared .tile-grid stays uncapped elsewhere. */
+#new-artist-grid { grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  max-width: calc(5 * 11rem + 4 * 0.9rem); }
 .tile { position: relative; }
 .tile-cover { display: block; position: relative; aspect-ratio: 1 / 1; overflow: hidden;
   border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border); }
@@ -1023,6 +1025,8 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .gen-grp-head .gen-grp-count { color: var(--faint); font-size: 0.85rem; }
 .gen-grp-head .gen-grp-caret { margin-left: auto; color: var(--accent-2); }
 .gen-grp table { margin-top: 0.6rem; }
+.gen-gc-note { margin: 0.7rem 0 0; padding-top: 0.7rem; border-top: 1px solid var(--border);
+  font-size: 0.82rem; line-height: 1.5; }
 .promote-btn { margin-left: 0.6rem; background: var(--accent-soft); border: 1px solid var(--border-2);
   color: var(--accent-2); border-radius: 6px; padding: 0.05rem 0.5rem; font-size: 0.8rem; cursor: pointer; }
 .promote-btn:hover { border-color: var(--accent); color: #fff; background: var(--accent); }

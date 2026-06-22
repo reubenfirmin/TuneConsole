@@ -8,7 +8,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
-from yt_playlist import discogs, lastfm, musicbrainz, recommend
+from yt_playlist import discogs, lastfm, musicbrainz, rec_params, recommend
 from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
 
 
@@ -65,6 +65,7 @@ def build(ctx) -> APIRouter:
         group_names = sorted({g for g in groups.values() if g}, key=str.lower)
         return templates.TemplateResponse(request, "playlists.html", {
             "rows": rows, "has_groups": bool(groups), "group_names": group_names,
+            "gc_days": rec_params.get_param(store, "generated_gc_days"),
             "flash": request.query_params.get("flash"),
             "flash_pl": request.query_params.get("flash_pl"),
         })

@@ -13,23 +13,26 @@ from yt_playlist.rec_dao import RecDao
 
 
 class RecWorker:
-    def __init__(self, ctx, debounce_s=2.0, discovery_tick_s=1800):
+    def __init__(self, ctx, debounce_s=2.0, discovery_tick_s=1800, gc_tick_s=86400, gc_initial_s=60):
         self.ctx = ctx
         self.debounce_s = debounce_s
         self.discovery_tick_s = discovery_tick_s   # background discovery scan cadence (~30 min)
+        self.gc_tick_s = gc_tick_s                 # generated-playlist GC cadence (daily)
+        self.gc_initial_s = gc_initial_s           # first GC pass shortly after start (catches restarts)
         self._lock = threading.Lock()
         self._pending = False
         self._running = False
         self._ticker_started = False
 
     def start_ticker(self):
-        """Start the periodic background discovery scan (idempotent). A daemon timer runs one budgeted
-        discovery pass every discovery_tick_s, so the album/artist pools keep filling between syncs."""
+        """Start the periodic background daemons (idempotent): the budgeted discovery scan (so the
+        album/artist pools keep filling between syncs) and the daily generated-playlist GC sweep."""
         with self._lock:
             if self._ticker_started:
                 return
             self._ticker_started = True
         threading.Thread(target=self._tick_loop, daemon=True).start()
+        threading.Thread(target=self._gc_loop, daemon=True).start()
 
     def _tick_loop(self):
         from yt_playlist import discover
@@ -39,6 +42,23 @@ class RecWorker:
                 discover.run_discovery(self.ctx, self.ctx.now_fn())
             except Exception:  # noqa: BLE001 - a scan failure must never crash the ticker
                 self.ctx.logger.warning("discovery tick failed", exc_info=True)
+
+    def _gc_loop(self):
+        """Daily sweep that deletes generated playlists you never played. An initial pass runs soon
+        after start so a daily-restarted app still collects them, then once per gc_tick_s."""
+        from yt_playlist import executor
+        time.sleep(self.gc_initial_s)
+        while True:
+            try:
+                clients = self.ctx.client_provider() or {}
+                if clients:        # no clients configured (e.g. pre-setup) -> nothing to delete remotely
+                    collected = executor.gc_generated_playlists(self.ctx.store, clients, self.ctx.now_fn())
+                    if collected:
+                        self.ctx.logger.info("GC: collected %d unplayed generated playlist(s): %s",
+                                             len(collected), ", ".join(c["title"] for c in collected))
+            except Exception:  # noqa: BLE001 - a GC failure must never crash the daemon
+                self.ctx.logger.warning("generated-playlist GC tick failed", exc_info=True)
+            time.sleep(self.gc_tick_s)
 
     @property
     def busy(self):

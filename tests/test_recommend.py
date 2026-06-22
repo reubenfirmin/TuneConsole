@@ -359,8 +359,13 @@ def test_playlist_facets_groups_genres_eras_tracks(store):
     assert len(techno["keys"]) == 2            # both techno tracks' keys, to tilt that subset
 
 
-def _seed_pl(store, iid, ytm, title, n, now, played_at=None, group=None):
-    """Make a library playlist of `n` tracks; optionally record one play of it at `played_at`."""
+def _seed_pl(store, iid, ytm, title, n, now, played_at=None, group=None, play_each_at=None):
+    """Make a library playlist of `n` tracks, optionally with play history.
+
+    play_each_at: list aligned to the n tracks — play_each_at[i] is when track i was last played
+                  (None entry = that track was never played). One snapshot per played track.
+    played_at:    legacy shorthand — play just the *first* track at this time (the rest never played).
+    """
     from yt_playlist.matching import identity_key
     keys, tids = [], []
     for i in range(n):
@@ -373,34 +378,54 @@ def _seed_pl(store, iid, ytm, title, n, now, played_at=None, group=None):
         store.set_playlist_group(ytm, group)
     if played_at is not None:
         store.add_history_snapshot(iid, played_at, [keys[0]])
+    for k, ts in zip(keys, play_each_at or []):
+        if ts is not None:
+            store.add_history_snapshot(iid, ts, [k])
     return pid
 
 
-def test_rediscover_picks_least_recently_played_library_playlists(store):
+def test_rediscover_ranks_by_aggregate_track_staleness(store):
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0
     now = 300 * day
-    _seed_pl(store, iid, "PA", "Ancient", 8, now, played_at=now - 200 * day)
-    _seed_pl(store, iid, "PB", "Dusty", 8, now, played_at=now - 150 * day)
-    _seed_pl(store, iid, "PC", "Fresh", 8, now, played_at=now - 3 * day)
-    _seed_pl(store, iid, "LM", "Liked Music", 8, now, played_at=now - 400 * day)   # system -> skip
-    store.upsert_playlist(iid, "PE", "Empty", 0, "h_pe", now)                       # empty -> skip
-    _seed_pl(store, iid, "PG", "Gen", 8, now, played_at=now - 500 * day, group="Generated")  # skip
+    # Every track played at the same time -> the playlist's median recency is exactly that time.
+    _seed_pl(store, iid, "PA", "Ancient", 8, now, play_each_at=[now - 200 * day] * 8)
+    _seed_pl(store, iid, "PB", "Dusty", 8, now, play_each_at=[now - 150 * day] * 8)
+    _seed_pl(store, iid, "PC", "Fresh", 8, now, play_each_at=[now - 3 * day] * 8)
+    _seed_pl(store, iid, "LM", "Liked Music", 8, now, play_each_at=[now - 400 * day] * 8)  # system -> skip
+    store.upsert_playlist(iid, "PE", "Empty", 0, "h_pe", now)                               # empty -> skip
+    _seed_pl(store, iid, "PG", "Gen", 8, now, play_each_at=[now - 500 * day] * 8, group="Generated")  # skip
 
     out = recommend.rediscover_playlists(store, now, count=2, per=5)
-    assert [p["title"] for p in out] == ["Ancient", "Dusty"]   # oldest-played first; others excluded
+    assert [p["title"] for p in out] == ["Ancient", "Dusty"]   # coldest median first; others excluded
     assert len(out[0]["tracks"]) == 5                          # a teaser, not the full 8
     assert out[0]["track_count"] == 8 and out[0]["last_played"]
 
 
-def test_rediscover_falls_back_to_never_played(store):
+def test_rediscover_one_fresh_track_does_not_unstale_a_cold_playlist(store):
+    # The reported bug: a playlist with a single recently-played track was ranked as "played hours
+    # ago". With median-of-tracks it stays cold, because most of it is cold.
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0
+    now = 300 * day
+    # "Decoy": 7 cold tracks (180d) + 1 fresh (1d). MAX would say ~1 day; median says ~180 days.
+    _seed_pl(store, iid, "PD", "Decoy", 8, now, play_each_at=[now - 1 * day] + [now - 180 * day] * 7)
+    _seed_pl(store, iid, "PW", "Warm", 8, now, play_each_at=[now - 20 * day] * 8)
+
+    out = recommend.rediscover_playlists(store, now, count=2, per=5)
+    assert out[0]["title"] == "Decoy"                          # cold-in-aggregate leads, not the fresh track
+    # the displayed time reflects the median (~180d), not the single fresh track (~1d)
+    assert "180 days ago" in out[0]["last_played"]
+
+
+def test_rediscover_treats_never_played_as_coldest(store):
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0
     now = 100 * day
-    _seed_pl(store, iid, "PP", "Played", 3, now, played_at=now - 10 * day)
-    _seed_pl(store, iid, "PN", "Untouched", 3, now)            # never played -> fills the second slot
+    _seed_pl(store, iid, "PP", "Played", 3, now, play_each_at=[now - 10 * day] * 3)
+    _seed_pl(store, iid, "PN", "Untouched", 3, now)            # never played -> coldest of all
 
     out = recommend.rediscover_playlists(store, now, count=2, per=5)
-    assert {p["title"] for p in out} == {"Played", "Untouched"}
+    assert [p["title"] for p in out] == ["Untouched", "Played"]   # never-played is coldest -> leads
     never = next(p for p in out if p["title"] == "Untouched")
-    assert never["last_played"] is None
+    assert never["last_played"] is None                           # -> "mostly never played" in the UI

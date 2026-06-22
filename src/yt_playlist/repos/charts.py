@@ -22,6 +22,25 @@ class ChartsRepo(Repo):
         return {r["pid"]: (r["last"], r["cnt"]) for r in rows}
 
     @synchronized
+    def get_playlist_track_recency(self) -> dict:
+        """Per-playlist {playlist_id: [per-track last-played ts | None, ...]} — one entry per distinct
+        track, its newest snapshot (None = never played). Unlike get_playlist_listen_stats (which
+        collapses to the single freshest track), this keeps every track's recency so callers can judge
+        a playlist by the *aggregate* staleness of its tracks, not its one most-recently-played song.
+        """
+        rows = self.conn.execute(
+            "SELECT pt.playlist_id AS pid, MAX(hs.taken_at) AS last "
+            "FROM playlist_tracks pt "
+            "JOIN tracks t ON t.id = pt.track_id "
+            "LEFT JOIN history_items hi ON hi.identity_key = t.identity_key "
+            "LEFT JOIN history_snapshots hs ON hs.id = hi.snapshot_id "
+            "GROUP BY pt.playlist_id, pt.track_id").fetchall()
+        out: dict = {}
+        for r in rows:
+            out.setdefault(r["pid"], []).append(r["last"])
+        return out
+
+    @synchronized
     def top_tracks(self, limit=100, since=None) -> list[dict]:
         """Most-played songs from sync history — play count = appearances across history snapshots.
 

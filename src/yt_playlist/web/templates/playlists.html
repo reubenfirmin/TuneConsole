@@ -73,6 +73,12 @@
         <template x-for="r in genRows()" :key="r.id">{{ pl_row(promote=True) }}</template>
       </tbody>
     </table>
+    <p class="section-note gen-gc-note" x-show="!collapsed.Generated" x-cloak>
+      Generated playlists you never play are cleaned up automatically: if fewer than half its tracks
+      are played within {{ gc_days }} day{{ 's' if gc_days != 1 }} of being created, it's deleted here
+      and on YouTube. Each deletion is backed up and can be undone from <a href="/actions">Actions</a>.
+      <strong>Promote</strong> one to your library to keep it.
+    </p>
   </div>
 
   <div class="card">
