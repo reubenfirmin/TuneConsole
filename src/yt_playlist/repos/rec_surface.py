@@ -120,6 +120,24 @@ class RecSurfaceRepo(Repo):
             "SELECT views FROM rec_impressions WHERE surface='card' AND item_key=?", (card,)).fetchone()
         return row["views"] if row else 0
 
+    @synchronized
+    def refresh_card(self, card, cap, now) -> None:
+        """Refresh button: jump a Home card to the START of its NEXT rotation epoch — a fresh, unseen
+        slice — and reset its view clock there, so it holds the new slice for the next `cap` views.
+        epoch = (views-1)//cap, so landing at (epoch+1)*cap+1 advances one epoch and resets the clock."""
+        cap = max(1, cap)
+        row = self.conn.execute(
+            "SELECT views FROM rec_impressions WHERE surface='card' AND item_key=?", (card,)).fetchone()
+        cur = row["views"] if row else 0
+        new_views = (max(0, cur - 1) // cap + 1) * cap + 1
+        if row:
+            self.conn.execute("UPDATE rec_impressions SET views=?, last_shown=? "
+                              "WHERE surface='card' AND item_key=?", (new_views, now, card))
+        else:
+            self.conn.execute("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
+                              "VALUES('card',?,?,?)", (card, new_views, now))
+        self.conn.commit()
+
     # --- materialized proposals (rec worker writes, routes read last-good) ---
     @synchronized
     def put_proposals(self, surface, data, now=None) -> None:

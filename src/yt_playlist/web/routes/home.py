@@ -3,7 +3,7 @@ import asyncio
 import json
 from datetime import datetime
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 
 from yt_playlist import executor, rec_params, recommend
 from yt_playlist.rec_dao import RecDao
@@ -39,7 +39,34 @@ def _carded(store, lane, label, items, now):
     recipe = recommend.roll_recipe(store, lane, seed=_epoch(store, lane), now=now)
     p = _proto(lane, label, recommend.theme_filter(store, items, recipe.get("facets", {})), now)
     p["recipe"] = recipe
+    p["refreshable"] = True   # a Home rotation card -> show the Refresh (fresh-batch) button
     return p
+
+
+# Labels for the four refreshable Home cards, by their internal lane name.
+_CARD_LABELS = {"wheelhouse": "More in your wheelhouse", "explore": "From your catalog",
+                "comfort": "Comfort listening", "fresh": "Fresh songs"}
+
+
+def _one_card(store, card, now):
+    """Build a single Home card's proto (its pool, rotated at the card's CURRENT epoch). Used by the
+    per-card Refresh route after the rotation has been advanced. Returns None if the card is empty."""
+    if card == "wheelhouse":
+        items = recommend.rotate_sample(recommend.for_you(store, now, limit=ROTATION_POOL),
+                                        PROTO_SIZE, _epoch(store, "wheelhouse"))
+    elif card == "explore":
+        fy = {i.key for i in recommend.for_you(store, now, limit=ROTATION_POOL)}
+        pool = [i for i in recommend.explore_for_you(store, now, limit=ROTATION_POOL) if i.key not in fy]
+        items = recommend.rotate_sample(pool, PROTO_SIZE, _epoch(store, "explore"))
+    elif card == "comfort":
+        items = recommend.rotate_sample(recommend.comfort_listening(store, now, limit=ROTATION_POOL),
+                                        PROTO_SIZE, _epoch(store, "comfort"))
+    elif card == "fresh":
+        props = RecDao(store).get_proposals("fresh_songs")
+        items = recommend.rotate_sample(props or [], PROTO_SIZE, _epoch(store, "fresh"))
+    else:
+        return None
+    return _carded(store, card, _CARD_LABELS[card], items, now) if items else None
 
 
 def _epoch(store, card):
@@ -101,9 +128,26 @@ def build(ctx) -> APIRouter:
             **_feed_context(now),
         })
 
+    @router.get("/privacy")
+    def privacy(request: Request):
+        return templates.TemplateResponse(request, "privacy.html", {})
+
     @router.get("/home/feed")
     def home_feed(request: Request):
         return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(now_fn()))
+
+    @router.post("/home/refresh-card/{card}")
+    def home_refresh_card(request: Request, card: str):
+        """Refresh one Home card: advance its rotation to a fresh, unseen slice, rerun that card's
+        model, and re-render just that card in place."""
+        if card not in _CARD_LABELS:
+            return Response(status_code=404)
+        now = now_fn()
+        RecDao(store).refresh_card(card, max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+        p = _one_card(store, card, now)
+        if p is None:
+            return Response(status_code=204)
+        return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": p})
 
     @router.post("/home/stance")
     async def home_stance(request: Request):

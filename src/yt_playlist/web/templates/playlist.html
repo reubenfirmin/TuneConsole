@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% block title %}{{ pl.title }} · yt-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% block title %}{{ pl.title }} · TuneConsole{% endblock %}{% block body %}
 <div x-data="enrichPanel({{ pl.id }}, {{ 'true' if lastfm_configured else 'false' }}, {{ active_job.id if active_job else 0 }}, '{{ active_job.source if active_job else '' }}')"
      x-init="rejoinIfActive()">
 <div class="artist-head pl-head" x-data="{ artH: 0 }"

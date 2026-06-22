@@ -5,6 +5,12 @@
   <button type="button" class="sync-toggle" :class="{ on: auto }" :aria-pressed="auto" @click="toggleAuto()">
     <span class="sync-toggle-track"><span class="sync-toggle-thumb"></span></span>
     <span>Sync plays</span>
+    {# Refresh icon WITHIN the toggle: force an immediate plays sync. @click.stop so clicking the icon
+       forces a sync instead of toggling auto off/on. #}
+    <span class="sync-plays-refresh" x-show="auto" style="display:none" role="button" tabindex="0"
+          title="Sync plays now" aria-label="Sync plays now"
+          @click.stop="!running && start('/sync/plays')"
+          @keydown.enter.stop.prevent="!running && start('/sync/plays')">↻</span>
   </button>
   {% endif %}
   <button type="button" class="btn-ghost" @click="start('/sync')" :disabled="running">

@@ -1,7 +1,7 @@
-{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Setup · yt-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Setup · TuneConsole{% endblock %}{% block body %}
 <div class="page-head">
   <span class="eyebrow">Connect</span>
-  <h1>Set up yt-playlist</h1>
+  <h1>Set up TuneConsole</h1>
   <p>Paste a signed-in request from YouTube Music, name your identities, and you're in.</p>
 </div>
 
@@ -36,7 +36,11 @@
         there's no OAuth option. Treat the saved file like a password. This is why the app runs
         locally: we cannot host a service that captures these.</p>
       <p class="section-note">In practice the app only uses it to read and manage your YouTube Music
-        library and playlists. To revoke it, sign out of YouTube Music or remove the session from your
+        library and playlists, and it's built so it can't quietly do more. A built-in network guard
+        restricts the app to YouTube and a handful of music-metadata services, blocking anything else
+        before it leaves your machine; you can watch every request it makes on the
+        <a href="/network">Network</a> page (full details in the <a href="/privacy">privacy policy</a>).
+        To revoke the sign-in entirely, sign out of YouTube Music or remove the session from your
         <a href="https://myaccount.google.com/device-activity" target="_blank" rel="noopener">Google
         account security page</a>; that invalidates the saved capture.</p>
     </details>
@@ -94,18 +98,18 @@
   </div>
 
   <div class="setup-actions">
+    {% if has_credentials %}
+    {# Sign out lives in the action bar (not a separate form below) so the sticky bar can't hide it.
+       formaction reuses this form to POST /setup/signout; that route ignores the body. #}
+    <button type="submit" class="btn-ghost btn-sm" style="margin-right:auto"
+            formaction="/setup/signout" formmethod="post" formnovalidate
+            title="Deletes the locally-saved sign-in (cookies). Identities are kept."
+            onclick="return confirm('Delete the saved sign-in from this machine? You\'ll need to paste a fresh capture to sign back in.')">Sign out</button>
+    {% endif %}
     <span class="muted" x-show="signedIn" x-cloak>✓ Signed in as <strong x-text="account"></strong> </span>
     <button type="submit" class="setup-save">{{ 'Save' if configured else 'Save and start →' }}</button>
   </div>
 </form>
-
-{% if has_credentials %}
-<form method="post" action="/setup/signout" class="setup-signout"
-      onsubmit="return confirm('Delete the saved sign-in from this machine? You\'ll need to paste a fresh capture to sign back in.')">
-  <button type="submit" class="btn-ghost btn-sm">Sign out</button>
-  <span class="section-note" style="margin:0">Deletes the locally-saved sign-in (cookies). Identities are kept.</span>
-</form>
-{% endif %}
 
 <script>
 function setupForm(rows, masterIdx, configured) {

@@ -5,6 +5,11 @@
          {% if p.recipe %}data-recipe='{{ p.recipe|tojson }}'{% endif %}>
   <header class="gen-head">
     <h2 class="gen-name">{{ p.name }}</h2>
+    {% if p.refreshable %}
+    <button type="button" class="gen-refresh" title="Refresh — a fresh batch from this model"
+            aria-label="Refresh this card" hx-post="/home/refresh-card/{{ p.lane }}"
+            hx-target="#gen-{{ p.lane }}" hx-swap="outerHTML" hx-disabled-elt="this">↻</button>
+    {% endif %}
     {% if p.note %}<p class="section-note">{{ p.note }}</p>{% endif %}
   </header>
   {% if p.tracks %}

@@ -14,7 +14,7 @@
              alt="" loading="lazy" referrerpolicy="no-referrer"
              onerror="this.closest('.gen-th').classList.add('no-art'); this.remove()">{% endif %}</span>
         <span class="redis-meta">
-          <a class="redis-title" href="/playlist/{{ p.id }}" title="Open in yt-playlist">{{ p.title }}</a>
+          <a class="redis-title" href="/playlist/{{ p.id }}" title="Open in TuneConsole">{{ p.title }}</a>
           <span class="redis-sub">{{ p.track_count }} track{{ 's' if p.track_count != 1 }}{% if p.last_played %} · tracks typically last played {{ p.last_played }}{% else %} · mostly never played{% endif %}</span>
         </span>
       </header>

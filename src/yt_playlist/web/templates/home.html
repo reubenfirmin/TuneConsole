@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% from "_macros.html" import banner %}
-{% block title %}Home - yt-playlist{% endblock %}
+{% block title %}Home - TuneConsole{% endblock %}
 {% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 <div id="home">
@@ -25,6 +25,10 @@
 
   <div hx-get="/home/discover" hx-trigger="load" hx-swap="innerHTML"></div>
   <div hx-get="/home/new-artists" hx-trigger="load" hx-swap="innerHTML"></div>
+
+  <footer class="home-footer">
+    <a href="/privacy">Privacy</a>
+  </footer>
 </div>
 {# hx-vals js: runs in global scope, so the "Save & play" button reaches its card's surviving rows
    by id - pruned (feedback-dismissed) rows are gone from the DOM, so they're naturally excluded. #}

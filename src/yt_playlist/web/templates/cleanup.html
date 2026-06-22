@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_macros.html" import pllink, banner with context %}{% block title %}Cleanup · yt-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import pllink, banner with context %}{% block title %}Cleanup · TuneConsole{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
   &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}{% endcall %}{% endif %}
 {% if flasherr %}{% call banner('err') %}{{ flasherr }}{% endcall %}{% endif %}

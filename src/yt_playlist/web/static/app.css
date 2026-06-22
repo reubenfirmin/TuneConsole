@@ -1,4 +1,4 @@
-/* yt-playlist — "late-night studio console"
+/* TuneConsole — "late-night studio console"
    warm near-black, amber accent, editorial serif + grotesque + mono. */
 
 @font-face {
@@ -96,18 +96,27 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--border);
 }
+/* TuneConsole logo — an equalizer logomark (bars belong on a console) beside a
+   two-tone wordmark: "Tune" in ink, "Console" in violet. The bars bounce like
+   a live EQ. */
 .brand {
   font-family: var(--font-display);
-  font-weight: 600; font-size: 1.32rem; letter-spacing: -0.01em;
-  color: var(--text);
-  display: flex; align-items: baseline; gap: 0.5rem;
+  font-weight: 700; font-size: 1.4rem; letter-spacing: -0.01em; line-height: 1;
+  display: inline-flex; align-items: baseline; gap: 0.5rem;
+  text-decoration: none;
 }
-.brand:hover { text-decoration: none; filter: brightness(1.12); }
-.brand .dot { color: var(--accent); }
-.brand small {
-  font-family: var(--font-mono); font-size: 0.62rem; font-weight: 500;
-  letter-spacing: 0.18em; text-transform: uppercase; color: var(--faint);
+.brand .b-tune    { color: var(--text); }
+.brand .b-console { color: var(--accent-2); }
+.brand:hover { text-decoration: none; }
+.brand:hover .b-console { color: #fff; }
+
+.brand-eq { flex: none; filter: drop-shadow(0 2px 7px rgba(124, 108, 255, 0.45)); }
+.brand-eq .eqbar {
+  transform-box: fill-box; transform-origin: 50% 100%;
+  animation: eq-bounce 1.05s ease-in-out infinite;
 }
+@keyframes eq-bounce { 0%, 100% { transform: scaleY(0.35); } 50% { transform: scaleY(1); } }
+@media (prefers-reduced-motion: reduce) { .brand-eq .eqbar { animation: none; } }
 .topbar nav { display: flex; gap: 0.4rem; margin-left: auto; }
 .topbar nav a {
   color: var(--dim); font-weight: 650; font-size: 0.95rem; letter-spacing: 0.01em;
@@ -377,6 +386,13 @@ ol.steps > li::before {
 /* Sync controls sit in a centered flex row; the progress panel wraps to its own full-width line. */
 .sync-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem; }
 .sync-bar .sync-panel { flex-basis: 100%; }
+/* Refresh icon nested in the "Sync plays" toggle: a little box, vertically centred, sitting the
+   button's horizontal padding-width in from the right edge (symmetric with the switch on the left). */
+.sync-plays-refresh { display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 1.45rem; height: 1.45rem; cursor: pointer; font-size: 0.95rem; line-height: 1;
+  color: var(--dim); background: var(--surface); border: 1px solid var(--border-2); border-radius: 5px;
+  transform: translateY(1px); }   /* nudge down to sit on the text's optical centre */
+.sync-plays-refresh:hover { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
 
 /* ---- "Sync plays" auto-sync toggle: a pill with a sliding switch, lit when on ---- */
 .sync-toggle { display: inline-flex; align-items: center; gap: 0.55rem;
@@ -578,10 +594,8 @@ td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
 /* setup: prominent save footer (so it isn't buried in the identities card) */
 .setup-actions { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end;
   gap: 0.7rem; margin-top: 1.4rem; padding: 1rem 0 0.2rem;
-  background: linear-gradient(0deg, var(--bg) 60%, transparent); }
+  background: var(--bg); border-top: 1px solid var(--border); }
 .setup-save { font-size: 1rem; padding: 0.6rem 1.6rem; }
-.setup-signout { display: flex; align-items: center; gap: 0.7rem; margin-top: 1.6rem;
-  padding-top: 1.1rem; border-top: 1px solid var(--border); }
 
 /* genre whitelist editor */
 .genre-add { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
@@ -736,6 +750,9 @@ button.htmx-request .check-busy { display: inline; }
 .sync-status { display: flex; align-items: center; gap: 0.6rem; }
 .sync-nudge { color: var(--accent-2); font-size: 0.86rem; font-weight: 600; }
 .home-control.sync-stale { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
+.home-footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border);
+  text-align: center; font-size: 0.85rem; }
+.home-footer a { color: var(--dim); }
 
 /* Poster action cards: a big cover across the top, minimal orienting text, then the CTA. auto-fit
    so the cards stretch to FILL the row (no trailing empty columns). */
@@ -929,6 +946,10 @@ button.htmx-request .check-busy { display: inline; }
 .gen-card { display: flex; flex-direction: column; }
 .gen-head { margin-bottom: 0.7rem; }
 .gen-head .section-note { margin: 0.35rem 0 0; }
+.gen-refresh { float: right; background: none; border: 0; cursor: pointer; font-size: 1.15rem;
+  line-height: 1; color: var(--muted, #888); padding: 0.1rem 0.35rem; border-radius: 5px; }
+.gen-refresh:hover { color: var(--fg, #1a1a1a); background: var(--surface-2, rgba(0,0,0,0.06)); }
+.gen-refresh[disabled] { opacity: 0.45; cursor: wait; }
 .gen-name { font-family: var(--font-display); font-size: 1.12rem; line-height: 1.25;
   letter-spacing: -0.01em; margin: 0.2rem 0 0; color: var(--text); }
 .gen-list { list-style: none; margin: 0 0 0.2rem; padding: 0; counter-reset: gen; }

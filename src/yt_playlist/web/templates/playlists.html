@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Playlists · yt-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Playlists · TuneConsole{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
   &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}{% endcall %}{% endif %}
 <div class="page-head">
@@ -50,7 +50,7 @@
         <span class="pl-ptype" x-show="r.kind"
               :title="r.kind" x-text="({ audio: '♪', video: '▦', mixed: '◑', mix: '≋' })[r.kind] || ''"></span>
       </span>
-      <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in yt-playlist"></a>
+      <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in TuneConsole"></a>
       {% if promote %}<button type="button" class="promote-btn" @click.stop="promote(r)"
               title="Move into your library so it counts as a real playlist and shapes your recommendations">Promote to library ↑</button>{% endif %}
     </td>
