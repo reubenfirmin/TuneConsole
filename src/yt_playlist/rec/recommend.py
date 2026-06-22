@@ -1,5 +1,5 @@
 """Local recommendation logic. Pure functions over a Store (no web imports), like analysis.py."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import math
 import random
@@ -300,6 +300,7 @@ class ForYouItem:
     reason: str        # why this was recommended (human-readable)
     key: str = ""      # track identity_key, for feedback (dismiss/less/mute)
     lane: str = ""     # source lane (neighbourhood/rotation/deep_cut/comfort), for weighting
+    genre: str = ""    # filled in at DJ-ordering time (attach_genres) so dj_order can do genre segues
 
 
 def rotate_sample(items, size, epoch):
@@ -546,12 +547,44 @@ def versioned_title(store, prefix) -> str:
     return f"{prefix} #{n}"
 
 
-def dj_order(tracks, stickiness=0.0, seed=0):
-    """Order a chosen track set like a DJ. Start from a seeded shuffle, then greedily (a) avoid
-    back-to-back same-artist tracks and (b) — scaled by `stickiness` in [0,1] — prefer smooth genre
-    transitions: 0 = essentially a shuffle, 1 = careful genre segues using the genre map. Pure;
-    returns a new list that is a permutation of `tracks`. Items need 'artist' and 'genre' keys.
+def _field(item, name):
+    """Read a field from either a track dict (DOM/save path) or a ForYouItem (preview path)."""
+    return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+
+def attach_genres(store, items):
+    """Fill each item's genre from the library (by identity_key) so dj_order can do genre segues.
+
+    Works for both ForYouItem objects (preview) and plain track dicts (DOM/save); mutates in place
+    and returns `items`. Without this, dj_order sees no genre and collapses to 'shuffle, but space
+    same-artist' — no genre journey at all (the comfort-playlist bug). Untagged tracks stay '' (the
+    segue just can't smooth across them), never an error.
     """
+    from yt_playlist.util.matching import identity_key
+    key_of = {id(it): (_field(it, "key")
+                       or identity_key(_field(it, "title") or "", _field(it, "artist") or ""))
+              for it in items}
+    genres = RecDao(store).track_genres([k for k in key_of.values() if k])
+    for it in items:
+        g = genres.get(key_of[id(it)], "")
+        if isinstance(it, dict):
+            it["genre"] = g
+        else:
+            it.genre = g
+    return items
+
+
+def dj_order(tracks, stickiness=0.0, seed=0):
+    """Order a chosen track set like a DJ. Start from a seeded shuffle, then greedily pick each next
+    track by a lexicographic key: (a) never follow a track with the same artist unless every remaining
+    track is that artist; (b) among the rest, place the artist with the MOST tracks left first — this
+    schedules the heavy hitters early so they can't pile up at the end (the cause of same-artist
+    clustering); (c) break ties by a `stickiness`-scaled genre segue (0 ≈ shuffle, 1 = careful genre
+    transitions via the genre map). Guarantees no back-to-back same artist whenever that's feasible.
+    Pure; returns a new list that is a permutation of `tracks`. Items may be track dicts or ForYouItem
+    objects; both expose 'artist' and 'genre' (run attach_genres first so 'genre' is populated).
+    """
+    from collections import Counter
     items = list(tracks)
     if len(items) <= 2:
         return items
@@ -560,12 +593,15 @@ def dj_order(tracks, stickiness=0.0, seed=0):
     out = [items.pop(0)]
     while items:
         last = out[-1]
+        remaining = Counter(_field(c, "artist") for c in items)
 
         def score(c):
-            same = 5.0 if (c.get("artist") and c.get("artist") == last.get("artist")) else 0.0
-            lg, cg = last.get("genre") or "", c.get("genre") or ""
+            same = bool(_field(c, "artist")) and _field(c, "artist") == _field(last, "artist")
+            lg, cg = _field(last, "genre") or "", _field(c, "genre") or ""
             gd = genre_map.distance(lg, cg) if (lg and cg) else 0.0
-            return same + stickiness * gd + (1.0 - stickiness) * rng.random()
+            seg = stickiness * gd + (1.0 - stickiness) * rng.random()
+            # same-artist last (hard), then most-remaining-artist first (anti-pileup), then segue.
+            return (same, -remaining[_field(c, "artist")], seg)
 
         items.sort(key=score)
         out.append(items.pop(0))
@@ -832,7 +868,8 @@ class ActionItem:
     cta_label: str | None
     cta_href: str | None
     thumbnail: str | None = None
-    key: str = ""      # stable id for dismiss/snooze (e.g. 'enrich:12', 'cleanup:empty')
+    thumbnails: list = field(default_factory=list)   # 0..2 covers for cards that show several playlists
+    key: str = ""      # stable id for dismiss/snooze (e.g. 'enrich:12', 'cleanup:all')
     note: str = ""     # one-line orienting summary for the card (count + why); detail is the full text
     badge: str = ""    # tiny count chip shown beside the CTA (the number); detail is its tooltip
 
@@ -845,6 +882,21 @@ def _ago(seconds) -> str:
     if hours >= 1:
         return f"{hours} hour{'s' if hours != 1 else ''} ago"
     return "just now"
+
+
+CLEANUP_SURFACE = "cleanup"
+
+
+def refresh_cleanup(store, now=None) -> dict:
+    """Recompute the playlist-cleanup summary and cache it as a rec proposal (last-good serving).
+
+    This is the ONLY place the heavy O(n²) cleanup scan runs for the home card: the rec worker calls
+    it on every rebuild (so it tracks the playlist changes a sync brings in) and the /cleanup page
+    calls it after every edit (its mutations HX-Refresh back through the GET). take_action then just
+    reads the cached number — the home page never pays for the scan."""
+    payload = analysis.cleanup_summary(store).as_payload()
+    store.put_proposals(CLEANUP_SURFACE, payload, now)
+    return payload
 
 
 def take_action(store, now, auth_expired) -> list[ActionItem]:
@@ -861,19 +913,16 @@ def take_action(store, now, auth_expired) -> list[ActionItem]:
             "Re-authenticate", "/setup", key=f"auth:{label}",
             note="Session expired - sync is stalled", badge="!"))
 
-    empties = analysis.find_empty_playlists(store)
-    if empties:
+    # Read the cached summary the rec worker / cleanup page materialize — never scan on home load.
+    cleanup = store.get_proposals(CLEANUP_SURFACE) or {}
+    n = cleanup.get("count", 0)
+    if n:
         items.append(ActionItem(
-            "cleanup", "low", "Empty playlists",
-            f"{len(empties)} empty playlist(s) clutter your library - review and remove them.",
-            "Review", "/cleanup", key="cleanup:empty", badge=str(len(empties))))
-
-    dupes = analysis.find_near_duplicate_groups(store)
-    if dupes:
-        items.append(ActionItem(
-            "cleanup", "low", "Near-duplicate playlists",
-            f"{len(dupes)} group(s) of playlists heavily overlap - review them for merges.",
-            "Review", "/cleanup", key="cleanup:dupes", badge=str(len(dupes))))
+            "cleanup", "low", "Playlist cleanups",
+            f"{n} playlist(s) look like duplicates, overlaps, or clutter - review and tidy them up "
+            "on the cleanup page.",
+            "Review", "/cleanup", thumbnails=cleanup.get("thumbnails", []), key="cleanup:all",
+            note="Duplicates, overlaps & clutter to review", badge=str(n)))
 
     # Enrichment cards: playlists and saved albums, capped at 3 TOTAL (most-played playlists first,
     # then gappiest albums) so the section stays a tight, single row rather than a flood.

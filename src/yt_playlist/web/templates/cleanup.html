@@ -26,10 +26,14 @@
 <p class="section-note">Each group is a set of identical playlists. Pick the one to <strong>keep</strong>. Every
    other copy is deleted (backup first, remote-verified). One click resolves the whole group.</p>
 {% for g in groups %}
+  {% set member_ytms = g.playlists | map(attribute='ytm_playlist_id') | join(',') %}
   <div class="card group" style="margin-bottom:1rem">
-    <div class="group-head">
+    <div class="group-head" style="display:flex; align-items:center; gap:.6rem">
       <strong>{{ g.playlists|length }} identical copies</strong>
       <span class="muted">· {{ g.track_count }} tracks</span>
+      <button type="button" class="btn-ghost btn-sm" style="margin-left:auto"
+              hx-post="/cleanup/ignore-merge" hx-vals='{"members": "{{ member_ytms }}"}'
+              title="Keep all these copies; stop suggesting this">Ignore this merge</button>
     </div>
     <table>
       <tbody>
@@ -58,10 +62,14 @@
    pair for track-by-track control.</p>
 {% for g in near_groups %}
   {% set member_csv = g.playlists | map(attribute='id') | join(',') %}
+  {% set member_ytms = g.playlists | map(attribute='ytm_playlist_id') | join(',') %}
   <div class="card" style="margin-bottom:1rem">
     <div class="group-head" style="display:flex; align-items:center; gap:.6rem">
       <span>{{ g.playlists|length }} similar playlists <span class="muted">· ~{{ '%.0f'|format(g.avg_similarity*100) }}% alike</span></span>
-      <a class="cta" style="margin-left:auto" href="/merge?ids={{ member_csv }}">Open merge editor →</a>
+      <button type="button" class="btn-ghost btn-sm" style="margin-left:auto"
+              hx-post="/cleanup/ignore-merge" hx-vals='{"members": "{{ member_ytms }}"}'
+              title="Keep these separate; stop suggesting this merge">Ignore this merge</button>
+      <a class="cta" href="/merge?ids={{ member_csv }}">Open merge editor →</a>
     </div>
     <table>
       <tbody>
@@ -198,13 +206,18 @@
    playlist or pruning; open one to decide.</p>
 <div class="card">
   <table>
-    <thead><tr><th>Playlist</th><th class="num">Songs</th></tr></thead>
+    <thead><tr><th>Playlist</th><th class="num">Songs</th><th></th></tr></thead>
     <tbody>
     {% for p in tiny %}
       <tr>
         <td><span class="tag amber">{{ identities[p.identity_id] }}</span>
             {{ pllink(p.ytm_playlist_id, p.title) }}</td>
         <td class="num mono">{{ p.track_count }}</td>
+        <td style="text-align:right; white-space:nowrap">
+          <button type="button" class="btn-ghost btn-sm"
+                  hx-post="/cleanup/ignore" hx-vals='{"ytm": "{{ p.ytm_playlist_id }}", "category": "tiny"}'
+                  title="Keep this playlist; stop listing it here">Ignore</button>
+        </td>
       </tr>
     {% endfor %}
     </tbody>
@@ -228,6 +241,52 @@
             <td style="text-align:right">
               <button type="button" class="btn-ghost btn-sm"
                       hx-post="/overlaps/unignore" hx-vals='{"ytm": "{{ g.ytm }}"}'>Stop ignoring</button>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if ignored_empty or ignored_tiny or ignored_merges %}
+<div x-data="{ open: false }">
+  <h2 class="section toggle" @click="open = !open">
+    <span class="chev" x-text="open ? '▾' : '▸'"></span> Ignored cleanups
+    <span class="count">{{ ignored_empty|length + ignored_tiny|length + ignored_merges|length }}</span>
+  </h2>
+  <div x-show="open" x-cloak>
+    <p class="section-note">Suggestions you've dismissed. Each is scoped: an ignored empty/tiny
+       playlist is still checked everywhere else, and an ignored merge only hides that exact set.</p>
+    <div class="card">
+      <table>
+        <tbody>
+        {% for g in ignored_empty %}
+          <tr>
+            <td>{{ pllink(g.ytm, g.title) }} <span class="muted">· empty</span></td>
+            <td style="text-align:right">
+              <button type="button" class="btn-ghost btn-sm"
+                      hx-post="/cleanup/unignore" hx-vals='{"ytm": "{{ g.ytm }}", "category": "empty"}'>Stop ignoring</button>
+            </td>
+          </tr>
+        {% endfor %}
+        {% for g in ignored_tiny %}
+          <tr>
+            <td>{{ pllink(g.ytm, g.title) }} <span class="muted">· tiny</span></td>
+            <td style="text-align:right">
+              <button type="button" class="btn-ghost btn-sm"
+                      hx-post="/cleanup/unignore" hx-vals='{"ytm": "{{ g.ytm }}", "category": "tiny"}'>Stop ignoring</button>
+            </td>
+          </tr>
+        {% endfor %}
+        {% for m in ignored_merges %}
+          <tr>
+            <td>{{ m.titles | join(' + ') }} <span class="muted">· merge</span></td>
+            <td style="text-align:right">
+              <button type="button" class="btn-ghost btn-sm"
+                      hx-post="/cleanup/unignore-merge" hx-vals='{"signature": "{{ m.signature }}"}'>Stop ignoring</button>
             </td>
           </tr>
         {% endfor %}

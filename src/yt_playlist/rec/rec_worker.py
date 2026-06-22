@@ -160,6 +160,14 @@ class RecWorker:
                 log.info("rec rebuild: %s → %d items in %.1fs", surface, len(items), time.monotonic() - ts)
             except Exception:  # noqa: BLE001 - one surface's failure must not starve the others
                 log.warning("rec rebuild: %s failed after %.1fs", surface, time.monotonic() - ts, exc_info=True)
+        # Playlist-cleanup summary: a local-only O(n²) scan we keep OFF the home request path by
+        # materializing it here (sync changes the playlists this depends on, so a rebuild is the right
+        # moment). Last-good: a failure leaves the previous summary in place.
+        try:
+            payload = recommend.refresh_cleanup(store, now)
+            log.info("rec rebuild: cleanup → %d playlist(s)", payload["count"])
+        except Exception:  # noqa: BLE001 - never let the cleanup scan crash a rebuild
+            log.warning("rec rebuild: cleanup summary failed", exc_info=True)
         # Outward discovery (new albums + new artists) is now an accumulating, scan-ledger-backed pass
         # over ALL interested artists, a budgeted batch at a time — not a top-10 overwrite each sync.
         try:

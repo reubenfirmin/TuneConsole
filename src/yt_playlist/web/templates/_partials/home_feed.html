@@ -1,5 +1,6 @@
 <div id="home-feed" class="home-feed" data-stance="{{ stance }}">
-  {% include "_partials/taste_fingerprint.html" %}
+  {# The steering panel only makes sense once the library has genres to steer; empty state until then. #}
+  {% if fingerprint.families %}{% include "_partials/taste_fingerprint.html" %}{% endif %}
   <div id="steer-toast" class="steer-toast" x-data="{show:false}" x-show="show" x-cloak x-transition
        x-init="$nextTick(() => { if (sessionStorage.getItem('steered')) { sessionStorage.removeItem('steered'); show=true; setTimeout(()=>show=false, 3500); } })">
     Re-ranked. <a href="/taste">Fine-tune your taste model →</a>

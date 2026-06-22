@@ -35,10 +35,16 @@ def _proto(lane, label, items, now):
 
 def _carded(store, lane, label, items, now):
     """A proto-card built from a rolled recipe: roll the theme (seeded by the card's rotation epoch so
-    it's stable across steer/stance previews, like the rotation), focus the items on it, and attach
-    the recipe so a Save persists exactly how this mix was made."""
+    it's stable across steer/stance previews, like the rotation), focus the items on it, DJ-order it
+    (genre-aware, artist-spaced) using the recipe's seed, and attach the recipe so a Save persists
+    exactly how this mix was made. Ordering here — not at save — means the preview IS the playlist
+    (WYSIWYG): a Save just keeps the rows you didn't prune, in the order you see."""
     recipe = recommend.roll_recipe(store, lane, seed=_epoch(store, lane), now=now)
-    p = _proto(lane, label, recommend.theme_filter(store, items, recipe.get("facets", {})), now)
+    items = recommend.theme_filter(store, items, recipe.get("facets", {}))
+    dj = recipe.get("dj", {})
+    items = recommend.dj_order(recommend.attach_genres(store, items),
+                               stickiness=dj.get("stickiness", 0.0), seed=dj.get("seed", 0))
+    p = _proto(lane, label, items, now)
     p["recipe"] = recipe
     p["refreshable"] = True   # a Home rotation card -> show the Refresh (fresh-batch) button
     return p

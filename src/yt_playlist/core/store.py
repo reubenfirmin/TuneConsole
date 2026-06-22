@@ -86,6 +86,15 @@ CREATE TABLE IF NOT EXISTS overlap_kept (
   a TEXT NOT NULL, b TEXT NOT NULL, created_at REAL,
   PRIMARY KEY (a, b)
 );
+CREATE TABLE IF NOT EXISTS cleanup_ignored (
+  ytm TEXT NOT NULL, category TEXT NOT NULL,   -- category: 'empty' | 'tiny' (per-playlist, scoped)
+  created_at REAL, PRIMARY KEY (ytm, category)
+);
+CREATE TABLE IF NOT EXISTS ignored_merges (
+  signature TEXT PRIMARY KEY,   -- canonical sorted member ytm ids joined ("A|B|C"): one merge suggestion
+  members TEXT NOT NULL,        -- JSON list of member ytm ids (for display / reconstruction)
+  created_at REAL
+);
 CREATE TABLE IF NOT EXISTS playlist_group (
   ytm TEXT PRIMARY KEY, name TEXT NOT NULL   -- user-assigned group name for a playlist
 );

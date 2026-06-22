@@ -357,6 +357,13 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-sm { padding: 0.3rem 0.7rem; font-size: 0.8rem; }
 .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
 
+/* Green primary button — used for the pre-sync "Sync now" onboarding CTA (resting green, not just
+   on hover like other buttons). */
+.sync-cta {
+  background-image: linear-gradient(135deg, #6bffab, #15e98c); color: #042b16;
+  box-shadow: 0 0 0 1px rgba(107,255,171,0.35), 0 8px 20px -12px rgba(21,233,140,0.9);
+}
+
 /* neon-green call-to-action link (e.g. table "Review") */
 .cta {
   display: inline-block; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.02em;
@@ -775,6 +782,8 @@ button.htmx-request .check-busy { display: inline; }
 .alert-card { position: relative; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 .alert-cover { display: block; width: 100%; height: 7.5rem; overflow: hidden; background: var(--grad-soft); }
 .alert-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.alert-cover-2 { display: flex; gap: 1px; }   /* two playlists, split the banner down the middle */
+.alert-cover-2 img { width: 50%; }
 .alert-body { display: flex; flex-direction: column; gap: 0.5rem;
   padding: 0.8rem 0.9rem 0.9rem; flex: 1 1 auto; }
 .alert-title { font-weight: 650; font-size: 0.92rem; line-height: 1.3; min-height: 2.4em;
@@ -1248,3 +1257,37 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .cluster-incl { display: flex; align-items: center; gap: 0.4rem; color: var(--dim); font-size: 0.85rem; white-space: nowrap; }
 .sync-urgent { border-color: var(--danger, #c0392b); box-shadow: 0 0 0 2px var(--danger, #c0392b) inset; }
 .sync-urgent .sync-nudge { color: var(--danger, #c0392b); font-weight: 600; }
+
+/* Pre-sync onboarding placeholder: stands in for the whole rec feed before the first sync. */
+.presync { text-align: center; padding: 3.2rem 1.5rem; margin-bottom: 1.6rem; }
+.presync-art { display: block; width: 132px; height: 72px; margin: 0 auto 1.4rem;
+  filter: drop-shadow(0 6px 18px rgba(124,108,255,0.35)); }
+.presync-art .pbar { transform-box: fill-box; transform-origin: 50% 100%;
+  animation: presync-eq 1.9s ease-in-out infinite; }
+@keyframes presync-eq { 0%, 100% { transform: scaleY(0.28); opacity: 0.55; } 50% { transform: scaleY(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .presync-art .pbar { animation: none; } }
+.presync-title { font-family: var(--font-display); font-size: 1.35rem; font-weight: 600;
+  color: var(--text); margin: 0 0 0.45rem; }
+.presync-sub { color: var(--dim); font-size: 1rem; max-width: 42ch; margin: 0 auto; line-height: 1.5; }
+
+/* Enrich onboarding nudge — icon, text, and dismiss as three columns so the copy never wraps under
+   the bulb. Violet-tinted to match the recommendation theme. */
+.enrich-nudge {
+  display: flex; align-items: flex-start; gap: 0.85rem;
+  padding: 0.95rem 1.05rem; margin-bottom: 1.4rem; border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, var(--accent-soft), rgba(124, 108, 255, 0.05));
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+}
+.enrich-nudge-icon { flex: none; font-size: 1.35rem; line-height: 1.35; }
+.enrich-nudge-body { flex: 1; display: flex; flex-direction: column; gap: 0.18rem; min-width: 0; }
+.enrich-nudge-body strong { color: var(--text); font-weight: 650; }
+.enrich-nudge-body span { color: var(--dim); font-size: 0.92rem; line-height: 1.5; }
+.enrich-nudge-x { flex: none; align-self: flex-start; margin: -0.2rem -0.3rem 0 0; }
+
+/* Sync controls go CTA-green on hover (matching the ↻ refresh icon) instead of the neutral grey dim.
+   Scoped to the sync bar so other ghost buttons keep their normal hover. */
+.sync-toggle:hover,
+.sync-bar .btn-ghost:hover {
+  background: var(--surface-2); box-shadow: none;
+  color: #15e98c; border-color: #15e98c;
+}

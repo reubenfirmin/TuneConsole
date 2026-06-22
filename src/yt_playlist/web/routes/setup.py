@@ -90,7 +90,7 @@ def build(ctx) -> APIRouter:
             msg = "Signed back in."
         else:
             n = len(identities)
-            msg = f"Saved {n} identit{'y' if n == 1 else 'ies'}. Click “Sync now” to pull their playlists."
+            msg = f"Saved {n} identit{'y' if n == 1 else 'ies'}. Click “Sync now” to pull your playlists."
         return RedirectResponse(f"/?flash={quote(msg)}", status_code=303)
 
     return router

@@ -5,9 +5,10 @@
     <button type="button" class="alert-x" aria-label="Snooze" title="Snooze this"
             hx-post="/recs/feedback" hx-target="closest .alert-card" hx-swap="outerHTML swap:200ms"
             hx-vals='{"item": {{ a.key|tojson }}, "surface": "alert", "kind": "not_now"}'>×</button>
-    <span class="alert-cover{{ ' no-art' if not a.thumbnail }}">
-      {% if a.thumbnail %}<img src="{{ a.thumbnail }}" alt="" referrerpolicy="no-referrer"
-           onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()">{% endif %}
+    {% set covers = a.thumbnails if a.thumbnails else ([a.thumbnail] if a.thumbnail else []) %}
+    <span class="alert-cover{{ ' no-art' if not covers }}{{ ' alert-cover-2' if covers|length > 1 }}">
+      {% for src in covers %}<img src="{{ src }}" alt="" referrerpolicy="no-referrer"
+           onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()">{% endfor %}
     </span>
     <div class="alert-body">
       <span class="alert-title">{{ a.title }}</span>

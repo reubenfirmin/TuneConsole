@@ -451,6 +451,10 @@ function syncPanel(autoOn = false) {
     async start(endpoint = '/sync') {
       if (this.running) return;
       this.running = true; this.failed = false; this.lines = [];
+      // Onboarding: kicking off a sync retires the setup flash and strips ?flash from the URL, so the
+      // post-sync reload doesn't bring it back.
+      window.dispatchEvent(new CustomEvent('sync-started'));
+      if (location.search.includes('flash=')) history.replaceState({}, '', location.pathname);
       this.push({ type: 'info', text: 'starting sync…' });
       let job;
       try {

@@ -11,6 +11,7 @@ def _seed(store):
     now = 1000.0
     store.add_history_snapshot(iid, now - 100, ["hit|fav"])
     store.add_history_snapshot(iid, now - 50, ["hit|fav"])
+    store.set_setting("last_sync_at", str(now))     # synced -> Home renders the rec feed
     return iid, TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                            base_url="http://127.0.0.1")
 

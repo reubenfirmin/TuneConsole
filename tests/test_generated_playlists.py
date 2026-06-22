@@ -103,11 +103,37 @@ def test_home_renders_generated_cards(store):
     pl = store.upsert_playlist(iid, "PL", "P", 1, "h", 1.0)
     store.set_playlist_tracks(pl, [t])
     store.add_history_snapshot(iid, 1.0, [identity_key("Song", "Artist")])
+    store.set_setting("last_sync_at", "1.0")        # synced -> the rec feed (generated cards) renders
     c = _client(store, lambda: {iid: FakeClient()})
 
     r = c.get("/")
     assert r.status_code == 200
     assert "More in your wheelhouse" in r.text and "Save &amp; play on YouTube" in r.text
+
+
+def test_comfort_proto_card_dj_ordered_with_genre(store):
+    """A proto-card must be DJ-ordered BEFORE it's shown: no back-to-back same artist, and genres
+    attached so a genre journey is possible. Reproduces the 'comfort playlist clustered by artist,
+    no genre journey' bug — the DJ used to run only at save, on data that had already dropped genre."""
+    from yt_playlist.web.routes import home
+    from yt_playlist.rec.recommend import ForYouItem
+    store.upsert_identity("main", "cred", None, True)
+    spec = ([("Hermanos", "Latin")] * 4 + [("Younger", "Electronica")] * 3
+            + [("Ritmo", "Electronica")] * 2 + [("Supertramp", "Rock")])   # arrives artist-clustered
+    items = []
+    for i, (art, genre) in enumerate(spec):
+        tid = store.upsert_track(f"v{i}", f"S{i}", art, "", None, 1)
+        store.set_track_genre(tid, genre)
+        items.append(ForYouItem(f"S{i}", art, "", f"v{i}", None, 5, "most-played",
+                                identity_key(f"S{i}", art), "comfort"))
+
+    card = home._carded(store, "comfort", "Comfort listening", items, now=1.0)
+
+    out = card["tracks"]
+    assert len(out) == len(items)                                   # all rows survive the ordering
+    adj_same = sum(1 for a, b in zip(out, out[1:]) if a.artist == b.artist)
+    assert adj_same == 0                                            # DJ spaced the artists in the PREVIEW
+    assert all(getattr(t, "genre", "") for t in out)               # genres attached -> journey possible
 
 
 def test_create_generated_playlist_stores_recipe_and_versions(store):
