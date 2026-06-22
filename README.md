@@ -1,6 +1,25 @@
-# yt-playlist
+# TuneConsole
 
-Local web tool to dedupe, merge, and prune YouTube Music playlists across YouTube brand identities.
+A local web console for power-managing your YouTube Music library across multiple YouTube brand
+identities — dedupe, merge, prune, organize, and grow it, all from one place.
+
+## Features
+
+- **Cross-identity consolidation** — sign in to several YouTube brand accounts and merge or move
+  playlists into one master library.
+- **Dedupe, merge & prune** — find duplicate and overlapping playlists, merge them, and delete
+  empties. Every destructive action is undoable.
+- **Omnisearch** — instant search across playlists, artists, albums, and tracks in your whole library.
+- **Library browsing** — dedicated Artists, Albums, Charts, and Genres views.
+- **Clusters** — an interactive force-directed graph of how your library hangs together.
+- **Taste model** — a tunable model of your taste, with its own control panel.
+- **Recommendations & discovery** — surfaces new artists, rediscoveries, and a personalized
+  "for you" feed driven by the taste model.
+- **Generative playlists** — auto-build playlists from your taste; unplayed ones are
+  garbage-collected after a grace window.
+- **Play-history sync** — pulls play counts to keep recommendations and cleanup current.
+- **Guided browser setup** — capture auth and add identities through a wizard; no config files
+  needed up front.
 
 ## Quickstart
 ```bash
