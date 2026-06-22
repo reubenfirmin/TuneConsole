@@ -6,7 +6,7 @@ import threading
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from yt_playlist import sync as sync_mod
+from yt_playlist.library import sync as sync_mod
 
 
 def build(ctx) -> APIRouter:

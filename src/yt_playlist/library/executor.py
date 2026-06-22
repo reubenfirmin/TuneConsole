@@ -3,14 +3,14 @@ import logging
 import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from yt_playlist.matching import fuzzy_ratio, normalize, track_artist, identity_key
-from yt_playlist.retry import with_retry
-from yt_playlist import paths
-from yt_playlist.action_kinds import (
+from yt_playlist.util.matching import fuzzy_ratio, normalize, track_artist, identity_key
+from yt_playlist.util.retry import with_retry
+from yt_playlist.core import paths
+from yt_playlist.util.action_kinds import (
     PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED, COPY_PLAYLIST,
     COPY_INTO, ADD_TRACKS, REMOVE_TRACK, RENAME_PLAYLIST, UNDO, UNDOABLE_KINDS, is_undoable)
-from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
-from yt_playlist.thumbnails import best_thumb
+from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
+from yt_playlist.util.thumbnails import best_thumb
 
 logger = logging.getLogger(__name__)
 
@@ -341,7 +341,7 @@ def gc_generated_playlists(store, clients, now, grace_days=None) -> list[dict]:
     action — exactly like a manual delete, just automatic. Returns the collected playlists.
     """
     from yt_playlist.repos.rec import GENERATED_GROUP
-    from yt_playlist import rec_params
+    from yt_playlist.rec import rec_params
     if grace_days is None:
         grace_days = rec_params.get_param(store, "generated_gc_days")
     grace_s = grace_days * 86400.0
@@ -407,7 +407,7 @@ def copy_playlist(store, playlist_ids, new_name, client, now) -> dict:
     added_vids = [v for v in vids if v not in skipped_set]
     tid_by_vid = store.track_ids_for_videos(added_vids)
     track_ids = [tid_by_vid[v] for v in added_vids if v in tid_by_vid]
-    from yt_playlist.sync import content_hash   # local import avoids an import cycle
+    from yt_playlist.library.sync import content_hash   # local import avoids an import cycle
     track_keys = list(dict.fromkeys(keys[v] for v in added_vids if v in keys))
     db_pid = store.upsert_playlist(identity, new_pid, title, len(track_ids), content_hash(track_keys), now)
     store.set_playlist_tracks(db_pid, track_ids)
@@ -424,7 +424,7 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
     your library): the playlist is excluded from playlist-level signals, and its unplayed-only tracks
     are excluded from the embedding baskets — until you actually play it."""
     from yt_playlist.repos.rec import GENERATED_GROUP
-    from yt_playlist.sync import content_hash   # local import avoids an import cycle
+    from yt_playlist.library.sync import content_hash   # local import avoids an import cycle
     group = group or GENERATED_GROUP
     uniq, seen = [], set()
     for t in tracks:
@@ -436,7 +436,7 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
         raise ValueError("no tracks to add")
     title = (title or "Generated playlist").strip()
     if recipe is not None:                                # recipe-driven: version the title + DJ-order
-        from yt_playlist.recommend import dj_order, versioned_title
+        from yt_playlist.rec.recommend import dj_order, versioned_title
         title = versioned_title(store, title)
         dj = recipe.get("dj", {})
         uniq = dj_order(uniq, stickiness=dj.get("stickiness", 0.0), seed=dj.get("seed", 0))
@@ -494,7 +494,7 @@ def create_playlist_from_album(store, browse_id, name, client, now, identity_id)
         ti, ar, al = meta[v]
         track_ids.append(store.upsert_track(v, ti, ar, al, None, thumbnail=thumb))
         keys.append(identity_key(ti, ar))
-    from yt_playlist.sync import content_hash   # local import avoids an import cycle
+    from yt_playlist.library.sync import content_hash   # local import avoids an import cycle
     db_pid = store.upsert_playlist(identity_id, new_pid, title, len(track_ids),
                                    content_hash(list(dict.fromkeys(keys))), now)
     store.set_playlist_tracks(db_pid, track_ids)
@@ -799,7 +799,7 @@ def _pull_recreated(store, client, identity_id, new_pid, title, now):
     if store is None or now is None:
         return
     try:
-        from yt_playlist import sync as _sync   # local import avoids an import cycle
+        from yt_playlist.library import sync as _sync   # local import avoids an import cycle
         _sync.refresh_playlist(store, identity_id, client, new_pid, title or "Restored", now)
     except Exception:  # noqa: BLE001
         logger.warning("undo: recreated %s but couldn't pull it into the store (re-sync to see it)", new_pid)

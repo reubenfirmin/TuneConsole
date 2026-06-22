@@ -55,7 +55,7 @@ import logging
 import logging.handlers
 from urllib.parse import urlsplit
 
-from yt_playlist import paths
+from yt_playlist.core import paths
 
 # Two distinct loggers, on purpose:
 #   • `_access` — the structured request log. Goes ONLY to the rotating network.log
@@ -75,6 +75,7 @@ ALLOWED_DOMAINS = frozenset({
     "musicbrainz.org",    # enrichment — release metadata
     "discogs.com",        # enrichment — release metadata (api.discogs.com)
     "audioscrobbler.com",  # enrichment — Last.fm API (ws.audioscrobbler.com)
+    "last.fm",            # enrichment — Last.fm album HTML page, for the Release Date (www.last.fm)
 })
 
 

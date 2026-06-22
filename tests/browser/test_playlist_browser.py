@@ -13,7 +13,7 @@ import pytest
 import uvicorn
 from playwright.sync_api import expect
 
-from yt_playlist.store import Store
+from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
@@ -126,7 +126,7 @@ def test_find_and_add_alternate_version(live_playlist_app, page):
 
 
 def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):
-    import yt_playlist.musicbrainz as mb
+    import yt_playlist.providers.musicbrainz as mb
     monkeypatch.setattr(mb, "enrich",
                         lambda title, artist: ("Electronic", "1998") if title == "Song B" else (None, None))
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]

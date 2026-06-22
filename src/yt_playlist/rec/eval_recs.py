@@ -7,7 +7,7 @@ that says "does the model put tracks that genuinely belong together near each ot
 """
 import numpy as np
 
-from yt_playlist import embed
+from yt_playlist.rec import embed
 
 
 def recall_at_k(store, k=20, min_size=5, seed=0) -> dict:
@@ -43,8 +43,8 @@ def projection_recall(store, k=20) -> dict:
     hold out each tagged track, predict its vector from genre/year, and check whether the true track
     lands in the top-k by cosine. This is the 'groundability' of cold items — high means the learned
     projection is a viable cold-start grounding to compare against the bridge heuristic."""
-    from yt_playlist.discover import ContentProjection
-    from yt_playlist.rec_dao import RecDao
+    from yt_playlist.rec.discover import ContentProjection
+    from yt_playlist.rec.rec_dao import RecDao
     keys, V, idx = embed.load_vectors(store)
     if V is None:
         return {"recall": None, "trials": 0}

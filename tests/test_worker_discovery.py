@@ -1,8 +1,8 @@
 from fastapi.testclient import TestClient
 
-from yt_playlist import recommend
-from yt_playlist.rec_dao import RecDao
-from yt_playlist.rec_worker import RecWorker
+from yt_playlist.rec import recommend
+from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 from yt_playlist.web.context import Ctx
 from tests.conftest import FakeClient

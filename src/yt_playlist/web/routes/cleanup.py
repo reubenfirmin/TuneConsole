@@ -4,7 +4,7 @@ import json
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import Response
 
-from yt_playlist import analysis
+from yt_playlist.library import analysis
 
 
 def build(ctx) -> APIRouter:

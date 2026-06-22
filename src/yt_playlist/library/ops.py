@@ -10,14 +10,14 @@ callers turn those into messages and let unexpected exceptions bubble to their o
 """
 import logging
 
-from yt_playlist import analysis
-from yt_playlist import sync as sync_mod
-from yt_playlist.executor import (
+from yt_playlist.library import analysis
+from yt_playlist.library import sync as sync_mod
+from yt_playlist.library.executor import (
     MergePlan, add_tracks_to_playlist, apply_result, copy_into_playlist, copy_or_move_playlist,
     copy_playlist, create_playlist_from_album, delete_empty_playlist, delete_playlist,
     deserialize_plan, execute_planned, remove_track, rename_playlist,
     reorder_track, search_versions, store_plan, undo_action)
-from yt_playlist.liked_music import LikedMusic
+from yt_playlist.library.liked_music import LikedMusic
 
 logger = logging.getLogger("yt_playlist.ops")
 

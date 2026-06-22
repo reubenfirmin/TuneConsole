@@ -1,8 +1,8 @@
 # tests/test_graduation.py
 import json
 import pytest
-from yt_playlist import recommend
-from yt_playlist.matching import identity_key
+from yt_playlist.rec import recommend
+from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 

@@ -56,7 +56,7 @@ def test_discovered_albums_accumulate_not_overwrite(store):
 
 
 def test_pick_discovered_albums_biases_recent_mixes_older_and_avoids_repeats(store):
-    from yt_playlist import discover
+    from yt_playlist.rec import discover
     for i in range(5):
         store.upsert_discovered_album(f"new{i}", "A", f"New {i}", "2025", None, now=1.0)
     for i in range(5):
@@ -74,7 +74,7 @@ def test_pick_discovered_albums_biases_recent_mixes_older_and_avoids_repeats(sto
 
 
 def test_pick_discovered_albums_varies_artists(store):
-    from yt_playlist import discover
+    from yt_playlist.rec import discover
     # Six distinct artists, plus a second album from Art0 — the "mixed" vs "split" pair of one release.
     for i in range(6):
         store.upsert_discovered_album(f"b{i}", f"Art{i}", f"Alb {i}", "2025", None, now=1.0)
@@ -87,7 +87,7 @@ def test_pick_discovered_albums_varies_artists(store):
 
 
 def test_pick_discovered_albums_repeats_artist_only_when_forced(store):
-    from yt_playlist import discover
+    from yt_playlist.rec import discover
     # Just two artists but n=4 -> must reuse artists to fill, rather than return fewer than asked.
     for a in ("X", "Y"):
         for i in range(3):
@@ -107,7 +107,7 @@ class _Ctx:
 
 
 def test_run_discovery_accumulates_and_skips_fresh(store, monkeypatch):
-    from yt_playlist import discover
+    from yt_playlist.rec import discover
     iid = store.upsert_identity("main", "cred", None, True)
     for n in ("A", "B"):
         t = store.upsert_track(f"v{n}", f"S{n}", n, None, None)

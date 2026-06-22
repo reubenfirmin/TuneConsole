@@ -1,6 +1,6 @@
 import numpy as np
 
-from yt_playlist import discover, embed, eval_recs
+from yt_playlist.rec import discover, embed, eval_recs
 
 
 def test_content_projection_lands_in_right_cluster(store):

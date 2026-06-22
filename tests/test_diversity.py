@@ -1,4 +1,4 @@
-from yt_playlist import recommend
+from yt_playlist.rec import recommend
 
 
 def test_tight_playlist_has_zero_diversity(store):

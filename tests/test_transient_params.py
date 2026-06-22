@@ -1,4 +1,4 @@
-from yt_playlist import rec_params, recommend
+from yt_playlist.rec import rec_params, recommend
 
 
 def test_transient_constants_present():

@@ -1,6 +1,6 @@
 # tests/test_dislike_sync.py
-from yt_playlist import sync
-from yt_playlist.matching import identity_key
+from yt_playlist.library import sync
+from yt_playlist.util.matching import identity_key
 from tests.conftest import FakeClient
 
 

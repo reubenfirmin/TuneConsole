@@ -1,10 +1,10 @@
 import pytest
-from yt_playlist.runtime import Runtime
+from yt_playlist.core.runtime import Runtime
 
 
 def _stub_ytmusic(monkeypatch, blob='{"cookie": "x"}'):
     import ytmusicapi
-    import yt_playlist.identities as identities
+    import yt_playlist.core.identities as identities
     monkeypatch.setattr(ytmusicapi, "setup", lambda headers_raw=None: blob)
     monkeypatch.setattr(ytmusicapi, "YTMusic", lambda *a, **k: object())       # store_credentials check
     monkeypatch.setattr(identities, "YTMusic", lambda *a, **k: object())        # build_client provider

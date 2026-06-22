@@ -1,5 +1,5 @@
-from yt_playlist import transient
-from yt_playlist.matching import identity_key
+from yt_playlist.rec import transient
+from yt_playlist.util.matching import identity_key
 
 
 def test_facets_for_maps_genre_era_artist(store):

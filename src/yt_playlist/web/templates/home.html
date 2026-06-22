@@ -12,6 +12,16 @@
     </div>
   </section>
 
+  {% if show_enrich_nudge %}
+  <div id="enrich-nudge" class="notice ok banner enrich-nudge">
+    <span class="banner-body">💡 <strong>The more you enrich, the better your recommendations.</strong>
+      Tap the enrich icon on any playlist to pull in richer metadata. We'll keep reminding you here
+      on Home as you go.</span>
+    <button type="button" class="banner-x" title="Dismiss" aria-label="Dismiss"
+            hx-post="/onboard/enrich/dismiss" hx-target="#enrich-nudge" hx-swap="outerHTML swap:200ms">×</button>
+  </div>
+  {% endif %}
+
   {% include "_partials/alerts.html" %}
 
   {% include "_partials/home_feed.html" %}

@@ -1,6 +1,6 @@
 from typing import Protocol
 from ytmusicapi import YTMusic
-from yt_playlist.config import IdentityConfig
+from yt_playlist.core.config import IdentityConfig
 
 class IdentityClient(Protocol):
     def get_library_playlists(self, limit: int = ...) -> list: ...

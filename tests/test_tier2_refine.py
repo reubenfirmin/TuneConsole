@@ -1,4 +1,4 @@
-from yt_playlist import embed, recommend
+from yt_playlist.rec import embed, recommend
 
 
 def test_for_you_tier2_prefers_high_play_context(store):

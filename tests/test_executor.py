@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 import pytest
-from yt_playlist.executor import (
+from yt_playlist.library.executor import (
     backup_playlist, deserialize_plan, store_plan, execute_planned, undo_action,
     MergePlan, Resolution)
 from tests.conftest import FakeClient, _track
@@ -31,7 +31,7 @@ def test_backup_filename_sanitizes_remote_playlist_id(store, monkeypatch, tmp_pa
     iid = store.upsert_identity("main", "cred", None, True)
     pid = store.upsert_playlist(iid, "../../../../etc/pwned", "Evil", 0, "h", 1.0)
     path = backup_playlist(store, pid, 123.0)
-    from yt_playlist import paths
+    from yt_playlist.core import paths
     backups = paths.backups_dir().resolve()
     assert Path(path).resolve().parent == backups        # stayed inside backups dir
     assert "/" not in Path(path).name.replace(".json", "").split("_")[0]
@@ -39,7 +39,7 @@ def test_backup_filename_sanitizes_remote_playlist_id(store, monkeypatch, tmp_pa
 
 def test_execute_planned_delete_removes_identical_copy(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist.executor import store_plan, execute_planned, MergePlan
+    from yt_playlist.library.executor import store_plan, execute_planned, MergePlan
     from tests.conftest import FakeClient, _track
     iid = store.upsert_identity("main", "cred", None, True)
     t = store.upsert_track("v1", "Song", "Artist", None, 200)
@@ -55,7 +55,7 @@ def test_execute_planned_delete_removes_identical_copy(store, monkeypatch, tmp_p
 
 def test_execute_planned_delete_refuses_if_not_subset(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist.executor import store_plan, execute_planned, MergePlan
+    from yt_playlist.library.executor import store_plan, execute_planned, MergePlan
     from tests.conftest import FakeClient, _track
     import pytest
     iid = store.upsert_identity("main", "cred", None, True)
@@ -75,7 +75,7 @@ def test_execute_planned_delete_refuses_if_not_subset(store, monkeypatch, tmp_pa
 
 def test_delete_prunes_row_and_undo_recreates_via_backup(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist.executor import store_plan, execute_planned, undo_action, MergePlan
+    from yt_playlist.library.executor import store_plan, execute_planned, undo_action, MergePlan
     from tests.conftest import FakeClient, _track
     iid = store.upsert_identity("main", "cred", None, True)
     t = store.upsert_track("v1", "Song", "Artist", None, 200)
@@ -92,7 +92,7 @@ def test_delete_prunes_row_and_undo_recreates_via_backup(store, monkeypatch, tmp
 
 def test_apply_result_reconciles_and_deletes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist.executor import apply_result
+    from yt_playlist.library.executor import apply_result
     from tests.conftest import FakeClient, _track
     iid = store.upsert_identity("main", "cred", None, True)
     # A has v1,v2 ; B has v1,v3. Result = v1 + v3 (drop v2, add v3 from B). Keep A, delete B.
@@ -110,7 +110,7 @@ def test_apply_result_reconciles_and_deletes(store, monkeypatch, tmp_path):
 
 def test_apply_result_update_both(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist.executor import apply_result
+    from yt_playlist.library.executor import apply_result
     from tests.conftest import FakeClient, _track
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
@@ -124,7 +124,7 @@ def test_apply_result_update_both(store, monkeypatch, tmp_path):
 def test_resolve_in_target_rejects_low_confidence_match():
     # A merely-similar title with a very different duration must stay UNRESOLVED (so a move won't
     # delete the source for a wrong substitute); a duration-matching candidate resolves.
-    from yt_playlist.executor import _resolve_in_target
+    from yt_playlist.library.executor import _resolve_in_target
 
     class SearchClient(FakeClient):
         def __init__(self, results):
@@ -151,7 +151,7 @@ def test_apply_result_partial_failure_records_undoable_action(store, monkeypatch
     # If a mutation throws mid-merge (here: a dropper delete fails), apply_result must still record an
     # undoable APPLY_MERGE with the kept playlist's prior contents — not exit leaving no undo trail.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist.executor import apply_result
+    from yt_playlist.library.executor import apply_result
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PLA", "A", 2, "h", 1.0)
     b = store.upsert_playlist(iid, "PLB", "B", 2, "h", 1.0)
@@ -174,7 +174,7 @@ def test_apply_result_partial_failure_records_undoable_action(store, monkeypatch
 
 def test_undo_apply_merge_restores(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist.executor import apply_result, undo_action
+    from yt_playlist.library.executor import apply_result, undo_action
     from tests.conftest import FakeClient, _track
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PLA", "A", 2, "h", 1.0)
@@ -193,7 +193,7 @@ def test_undo_apply_merge_restores(store, monkeypatch, tmp_path):
 
 def test_undo_delete_empty_recreates(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist.executor import delete_empty_playlist, undo_action
+    from yt_playlist.library.executor import delete_empty_playlist, undo_action
     from tests.conftest import FakeClient
     iid = store.upsert_identity("main", "cred", None, True)
     p = store.upsert_playlist(iid, "PLe", "empty", 0, "h", 1.0)

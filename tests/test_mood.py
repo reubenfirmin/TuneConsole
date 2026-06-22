@@ -1,4 +1,4 @@
-from yt_playlist import embed, recommend
+from yt_playlist.rec import embed, recommend
 
 
 def test_mood_demotes_but_does_not_banish_cluster_in_for_you(store):

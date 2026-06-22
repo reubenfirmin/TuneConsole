@@ -1,5 +1,5 @@
-from yt_playlist import embed, recommend
-from yt_playlist.matching import identity_key
+from yt_playlist.rec import embed, recommend
+from yt_playlist.util.matching import identity_key
 
 
 def _two_clusters(store):

@@ -1,7 +1,7 @@
 """Genres tab: view and edit the genre whitelist that Last.fm/Discogs tags are matched against."""
 from fastapi import APIRouter, Request
 
-from yt_playlist import genres as genre_lib
+from yt_playlist.providers import genres as genre_lib
 
 
 def build(ctx) -> APIRouter:

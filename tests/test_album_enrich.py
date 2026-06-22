@@ -2,7 +2,8 @@
 the same runners (scoped to the album's folded-in tracks)."""
 from fastapi.testclient import TestClient
 
-from yt_playlist import musicbrainz, recommend
+from yt_playlist.providers import musicbrainz
+from yt_playlist.rec import recommend
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 

@@ -2,8 +2,8 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
-from yt_playlist import embed, eval_recs, rec_params, recommend
-from yt_playlist.rec_dao import RecDao
+from yt_playlist.rec import embed, eval_recs, rec_params, recommend
+from yt_playlist.rec.rec_dao import RecDao
 
 
 def build(ctx) -> APIRouter:

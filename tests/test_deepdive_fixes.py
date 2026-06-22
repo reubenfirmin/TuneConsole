@@ -1,7 +1,7 @@
 """Regression tests for the deep-dive review fixes."""
 import pytest
 
-from yt_playlist.matching import identity_key, normalize
+from yt_playlist.util.matching import identity_key, normalize
 
 
 # --- #1 normalize: non-Latin no longer collapses to "" / identity_key "|" ---

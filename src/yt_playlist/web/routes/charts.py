@@ -1,7 +1,7 @@
 """Charts tab: top songs/artists by play count, plus per-artist pages."""
 from fastapi import APIRouter, HTTPException, Request
 
-from yt_playlist.thumbnails import best_thumb
+from yt_playlist.util.thumbnails import best_thumb
 
 
 _WINDOWS = {"all": None, "90d": 90, "30d": 30, "7d": 7}

@@ -1,4 +1,4 @@
-from yt_playlist.sync import sync_identity, sync_all, sync_plays_all, content_hash
+from yt_playlist.library.sync import sync_identity, sync_all, sync_plays_all, content_hash
 from tests.conftest import FakeClient, _track
 
 
@@ -48,7 +48,7 @@ def test_sync_all_records_last_sync_at(store):
 def test_sync_status_uses_most_recent_of_either_sync(store):
     """The 'Last synced' badge reflects the most recent sync of either kind — a recent plays/auto sync
     must not be eclipsed by an older full sync (and resets staleness too)."""
-    from yt_playlist.recommend import sync_status
+    from yt_playlist.rec.recommend import sync_status
     now = 100_000.0
     store.set_setting("last_sync_at", str(now - 17 * 3600))        # full sync 17h ago
     store.set_setting("last_plays_sync_at", str(now - 2 * 3600))   # plays synced 2h ago
@@ -103,7 +103,7 @@ def test_sync_identity_no_truncation_beyond_defaults(store):
 
 
 def test_sync_prunes_playlists_gone_from_remote(store):
-    import yt_playlist.sync as sync
+    import yt_playlist.library.sync as sync
     from tests.conftest import FakeClient, _track
     iid = store.upsert_identity("main", "cred", None, True)
     # stale row in the store that the remote library no longer lists

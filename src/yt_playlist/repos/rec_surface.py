@@ -5,7 +5,7 @@ Owns its own tables (created lazily/idempotently) since they're rec-internal ser
 """
 import json
 
-from yt_playlist import rec_params
+from yt_playlist.rec import rec_params
 from yt_playlist.repos.base import Repo, synchronized
 
 _SCHEMA = """

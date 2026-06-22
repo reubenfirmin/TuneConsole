@@ -1,4 +1,4 @@
-from yt_playlist.analysis import jaccard, find_dupes, find_overlaps
+from yt_playlist.library.analysis import jaccard, find_dupes, find_overlaps
 
 def _seed_two_playlists(store, keys_a, keys_b):
     iid = store.upsert_identity("main", "cred", None, True)
@@ -71,7 +71,7 @@ def test_find_overlaps_honors_suppressed_pairs(store):
 
 
 def test_empty_playlists_not_grouped_and_listed(store):
-    from yt_playlist.analysis import find_identical_groups, find_empty_playlists
+    from yt_playlist.library.analysis import find_identical_groups, find_empty_playlists
     iid = store.upsert_identity("main", "cred", None, True)
     e1 = store.upsert_playlist(iid, "PLe1", "jazz 2", 0, "h", 1.0)            # empty
     e2 = store.upsert_playlist(iid, "PLe2", "old stuff", 0, "h", 1.0)         # empty
@@ -82,7 +82,7 @@ def test_empty_playlists_not_grouped_and_listed(store):
 
 
 def test_find_near_duplicate_groups_clusters(store):
-    from yt_playlist.analysis import find_near_duplicate_groups
+    from yt_playlist.library.analysis import find_near_duplicate_groups
     iid = store.upsert_identity("main", "cred", None, True)
     # 3 "Monkey Juice" playlists each sharing 7 of 8 tracks (pairwise ~0.78 ≥ 0.70, not identical)
     t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(10)]
@@ -96,7 +96,7 @@ def test_find_near_duplicate_groups_clusters(store):
 
 
 def test_find_overlaps_kept_pair_survives_ignore(store):
-    from yt_playlist.analysis import find_overlaps
+    from yt_playlist.library.analysis import find_overlaps
     iid = store.upsert_identity("main", "cred", None, True)
     fav = store.upsert_playlist(iid, "PLFAV", "Favorite Songs", 3, "h", 1.0)
     other = store.upsert_playlist(iid, "PLB", "Favorite Songs 2", 2, "h", 1.0)
@@ -114,7 +114,7 @@ def test_find_overlaps_kept_pair_survives_ignore(store):
 
 
 def test_find_tiny_playlists(store):
-    from yt_playlist.analysis import find_tiny_playlists
+    from yt_playlist.library.analysis import find_tiny_playlists
     iid = store.upsert_identity("main", "cred", None, True)
     big = store.upsert_playlist(iid, "PLBIG", "Big", 5, "h", 1.0)
     one = store.upsert_playlist(iid, "PL1", "Lonely", 1, "h", 1.0)

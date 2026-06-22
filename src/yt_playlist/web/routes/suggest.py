@@ -4,8 +4,8 @@ import json
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from yt_playlist import embed, rec_params, recommend
-from yt_playlist.rec_dao import RecDao
+from yt_playlist.rec import embed, rec_params, recommend
+from yt_playlist.rec.rec_dao import RecDao
 
 # feedback kinds that suppress an item (vs 'more'/'less' which only nudge future weights)
 _SNOOZE_DAYS = 14

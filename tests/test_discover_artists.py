@@ -1,4 +1,5 @@
-from yt_playlist import discover, embed, lastfm
+from yt_playlist.rec import discover, embed
+from yt_playlist.providers import lastfm
 from yt_playlist.web.context import Ctx
 
 

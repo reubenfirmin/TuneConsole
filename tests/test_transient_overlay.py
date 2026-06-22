@@ -1,6 +1,6 @@
 """Tests for Task 8: transient facet leans wired into _axis_weights_for / explore_for_you."""
-from yt_playlist import recommend
-from yt_playlist.matching import identity_key
+from yt_playlist.rec import recommend
+from yt_playlist.util.matching import identity_key
 
 
 def test_axis_overlay_lowers_disfavored_facet(store):
@@ -21,7 +21,7 @@ def test_axis_weights_none_when_fully_neutral(store):
 
 
 def test_explore_lane_respects_transient_facet_lean(store):
-    from yt_playlist import embed
+    from yt_playlist.rec import embed
     iid = store.upsert_identity("main", "cred", None, True)
     house, jazz = [], []
     for i in range(6):

@@ -8,7 +8,8 @@ import json
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from yt_playlist import embed, executor
+from yt_playlist.rec import embed
+from yt_playlist.library import executor
 
 RING_SIZE = 6        # tracks added per "grow" — a small ring keeps the canvas legible
 

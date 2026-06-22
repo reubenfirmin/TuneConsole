@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from yt_playlist import embed
+from yt_playlist.rec import embed
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 

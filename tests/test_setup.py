@@ -1,6 +1,6 @@
 import pytest
-from yt_playlist import setup as setup_mod
-from yt_playlist.config import load_identities
+from yt_playlist.core import setup as setup_mod
+from yt_playlist.core.config import load_identities
 
 
 def test_store_credentials_writes_validated_blob(monkeypatch, tmp_path):

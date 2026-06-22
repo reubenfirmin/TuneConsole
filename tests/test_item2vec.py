@@ -1,6 +1,6 @@
 import numpy as np
 
-from yt_playlist import embed
+from yt_playlist.rec import embed
 
 
 def test_item2vec_builds_unit_vectors(store):

@@ -8,8 +8,9 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
-from yt_playlist import discogs, lastfm, musicbrainz, rec_params, recommend
-from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
+from yt_playlist.providers import discogs, lastfm, musicbrainz
+from yt_playlist.rec import rec_params, recommend
+from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 
 
 def build(ctx) -> APIRouter:

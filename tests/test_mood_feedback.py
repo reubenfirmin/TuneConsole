@@ -2,7 +2,7 @@
 import numpy as np
 from fastapi.testclient import TestClient
 
-from yt_playlist import recommend
+from yt_playlist.rec import recommend
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 

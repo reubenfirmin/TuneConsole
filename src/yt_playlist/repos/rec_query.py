@@ -99,7 +99,7 @@ class RecQueryRepo(Repo):
     @synchronized
     def library_artists(self) -> set:
         """Normalized artist names already in the library — to exclude from new-artist discovery."""
-        from yt_playlist.matching import normalize
+        from yt_playlist.util.matching import normalize
         rows = self.conn.execute("SELECT DISTINCT artist FROM tracks WHERE artist<>''").fetchall()
         return {normalize(r["artist"]) for r in rows}
 
@@ -295,7 +295,7 @@ class RecQueryRepo(Repo):
         "tracks" that are really DJ mixes/compilations are dropped too, since they co-occur with
         unrelated songs and blur the model. Each basket is a list of track identity_keys.
         """
-        from yt_playlist import genre_map
+        from yt_playlist.rec import genre_map
         good = {r["k"] for r in self.conn.execute(
             "SELECT DISTINCT identity_key k FROM tracks "
             "WHERE (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "

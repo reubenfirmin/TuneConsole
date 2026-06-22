@@ -8,7 +8,7 @@ import pytest
 import uvicorn
 from playwright.sync_api import expect
 
-from yt_playlist.store import Store
+from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.test_web import _FakeRuntime
 

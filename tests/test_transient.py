@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
-from yt_playlist import rec_params, transient
-from yt_playlist.matching import identity_key
+from yt_playlist.rec import rec_params, transient
+from yt_playlist.util.matching import identity_key
 
 
 def _jazz_track(store, vid, title, artist="A", year="1960"):

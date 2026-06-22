@@ -1,4 +1,4 @@
-from yt_playlist.merge_order import merge_order, track_positions
+from yt_playlist.library.merge_order import merge_order, track_positions
 
 
 def test_single_sequence_is_unchanged():

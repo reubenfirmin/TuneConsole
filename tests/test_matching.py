@@ -1,5 +1,5 @@
 # tests/test_matching.py
-from yt_playlist.matching import normalize, identity_key, fuzzy_ratio
+from yt_playlist.util.matching import normalize, identity_key, fuzzy_ratio
 
 def test_normalize_strips_noise():
     assert normalize("Wonderwall (Remastered 2014)") == "wonderwall"
