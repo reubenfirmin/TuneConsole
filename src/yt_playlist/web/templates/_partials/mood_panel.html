@@ -1,9 +1,9 @@
 {# Transient mood feedback for a generated playlist. Tilts the Home lanes for a few hours, then
-   decays — it is NOT a permanent taste signal. Shown on the post-save card and on the playlist page
+   decays - it is NOT a permanent taste signal. Shown on the post-save card and on the playlist page
    of any Generated playlist. POSTs to /recs/mood and swaps itself for the confirmation. #}
 {% if done %}
 <div class="mood-panel mood-done" id="mood-{{ pid }}">
-  <span class="mood-q">{{ '🔥 More like this — for now.' if dir > 0 else '🙅 Noted — easing off this vibe.' }}</span>
+  <span class="mood-q">{{ '🔥 More like this - for now.' if dir > 0 else '🙅 Noted - easing off this vibe.' }}</span>
   <p class="mood-note">Your Home picks lean {{ 'into' if dir > 0 else 'away from' }} this for a few hours, then it fades.</p>
 </div>
 {% else %}
@@ -13,6 +13,6 @@
     <button type="button" class="mood-btn" hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": 1}'>🔥 More of this vibe</button>
     <button type="button" class="mood-btn" hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": -1}'>🙅 Not my mood</button>
   </div>
-  <p class="mood-note">Tilts your Home picks for a few hours — it won't change your long-term taste.</p>
+  <p class="mood-note">Tilts your Home picks for a few hours - it won't change your long-term taste.</p>
 </div>
 {% endif %}

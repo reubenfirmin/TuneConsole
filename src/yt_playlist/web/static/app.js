@@ -457,3 +457,147 @@ function syncPanel() {
     },
   };
 }
+
+// Clusters tab: a pannable/zoomable canvas where you seed a central group and grow a tree outward.
+// Each node's next ring = library tracks nearest its pinned-path centroid, pushed away from pruned
+// tracks (server: POST /clusters/expand). Tree state lives here; the server stays stateless.
+function clusterCanvas() {
+  const WORLD = 8000, CENTER = WORLD / 2;   // big fixed world; we pan/zoom a transform over it
+  const SEED_R = 170, RING_R = 235;         // seed ring radius; parent→child spoke length
+  const GOLDEN = 2.39996323;                // golden angle — fans seeds apart without bookkeeping
+  return {
+    WORLD,
+    nodes: [], nextId: 1, seedCount: 0,
+    query: '', results: [],
+    playlistName: '', includeCentral: true,
+    tx: 0, ty: 0, scale: 1,
+    _pan: null,
+
+    init() { this.$nextTick(() => this.resetView()); },
+
+    // --- search / seeding ---
+    async search() {
+      const q = this.query.trim();
+      if (!q) { this.results = []; return; }
+      try {
+        const r = await fetch('/clusters/search?q=' + encodeURIComponent(q));
+        this.results = await r.json();
+      } catch (e) { this.results = []; }
+    },
+    async addSeed(r) {
+      this.query = ''; this.results = [];
+      const angle = this.seedCount * GOLDEN; this.seedCount++;
+      const id = this.nextId++;
+      this.nodes.push({
+        id, parentId: null, kind: 'seed', skind: r.kind, label: r.label, sub: r.sub,
+        keys: r.keys, key: null, state: 'pinned', thumbnail: '', angle, depth: 0,
+        x: CENTER + SEED_R * Math.cos(angle), y: CENTER + SEED_R * Math.sin(angle),
+      });
+      if (!this.playlistName) this.playlistName = r.label + ' cluster';
+      await this.grow(id);
+      this.focusOn(this.nodeById(id));
+    },
+
+    // --- tree growth ---
+    async grow(nodeId) {
+      const node = this.nodeById(nodeId);
+      if (!node || node.state === 'pruned') return;
+      try {
+        const r = await fetch('/clusters/expand', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pos_keys: this.posKeys(node),
+                                 neg_keys: this.prunedKeys(), exclude: this.allKeys(), k: 6 }),
+        });
+        this.layoutChildren(node, (await r.json()).ring || []);
+      } catch (e) { /* a failed grow just adds nothing */ }
+    },
+    layoutChildren(parent, ring) {
+      const n = ring.length; if (!n) return;
+      const span = Math.min(Math.PI * 0.9, n * 0.5);
+      ring.forEach((t, i) => {
+        const a = n === 1 ? parent.angle : parent.angle - span / 2 + i * (span / (n - 1));
+        this.nodes.push({
+          id: this.nextId++, parentId: parent.id, kind: 'track', key: t.key,
+          label: t.title, sub: t.artist, thumbnail: t.thumbnail, vid: t.video_id,
+          state: 'neutral', angle: a, depth: parent.depth + 1,
+          x: parent.x + RING_R * Math.cos(a), y: parent.y + RING_R * Math.sin(a),
+        });
+      });
+    },
+    pin(id) { const n = this.nodeById(id); if (n) n.state = n.state === 'pinned' ? 'neutral' : 'pinned'; },
+    prune(id) {
+      const n = this.nodeById(id); if (!n) return;
+      if (n.state === 'pruned') { n.state = 'neutral'; return; }
+      n.state = 'pruned';                              // pruning terminates the branch...
+      const kill = this.descendants(id);              // ...so drop anything grown below it
+      this.nodes = this.nodes.filter(x => !kill.has(x.id));
+    },
+
+    // --- derived keys ---
+    nodeById(id) { return this.nodes.find(n => n.id === id); },
+    edgeNodes() { return this.nodes.filter(n => n.parentId !== null && this.nodeById(n.parentId)); },
+    centralKeys() { return this.nodes.filter(n => n.kind === 'seed').flatMap(n => n.keys); },
+    prunedKeys() { return this.nodes.filter(n => n.state === 'pruned').map(n => n.key); },
+    keepKeys() { return this.nodes.filter(n => n.kind === 'track' && n.state !== 'pruned').map(n => n.key); },
+    allKeys() {
+      const s = new Set(this.centralKeys());
+      this.nodes.forEach(n => { if (n.key) s.add(n.key); });
+      return [...s];
+    },
+    posKeys(node) {
+      const keys = new Set(this.centralKeys());        // root seeds are shared across every branch
+      for (let cur = node; cur; cur = cur.parentId != null ? this.nodeById(cur.parentId) : null) {
+        if (cur.kind === 'track' && cur.state === 'pinned') keys.add(cur.key);   // pins along the path steer
+      }
+      if (node.kind === 'track') keys.add(node.key);   // grow from where you clicked
+      return [...keys];
+    },
+    descendants(id) {
+      const out = new Set(); const stack = [id];
+      while (stack.length) {
+        const p = stack.pop();
+        this.nodes.filter(n => n.parentId === p).forEach(c => { out.add(c.id); stack.push(c.id); });
+      }
+      return out;
+    },
+
+    // --- pan / zoom ---
+    worldStyle() { return `transform: translate(${this.tx}px, ${this.ty}px) scale(${this.scale}); transform-origin: 0 0;`; },
+    onWheel(e) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      const factor = Math.exp(-e.deltaY * 0.0015);
+      const ns = Math.min(2.5, Math.max(0.2, this.scale * factor));
+      this.tx = mx - ((mx - this.tx) / this.scale) * ns;
+      this.ty = my - ((my - this.ty) / this.scale) * ns;
+      this.scale = ns;
+    },
+    onPanStart(e) {
+      if (e.target.closest('.cluster-node, .cluster-zoombar')) return;   // let nodes/buttons get clicks
+      this._pan = { x: e.clientX, y: e.clientY };
+    },
+    onPanMove(e) {
+      if (!this._pan) return;
+      this.tx += e.clientX - this._pan.x; this.ty += e.clientY - this._pan.y;
+      this._pan = { x: e.clientX, y: e.clientY };
+    },
+    onPanEnd() { this._pan = null; },
+    zoomBy(f) {
+      const el = document.getElementById('cluster-canvas'); const rect = el.getBoundingClientRect();
+      const cx = rect.width / 2, cy = rect.height / 2;
+      const ns = Math.min(2.5, Math.max(0.2, this.scale * f));
+      this.tx = cx - ((cx - this.tx) / this.scale) * ns;
+      this.ty = cy - ((cy - this.ty) / this.scale) * ns;
+      this.scale = ns;
+    },
+    focusOn(node) { if (node) this._centerWorld(node.x, node.y, this.scale); },
+    resetView() { this._centerWorld(CENTER, CENTER, 1); },
+    _centerWorld(wx, wy, scale) {
+      const el = document.getElementById('cluster-canvas'); if (!el) return;
+      const rect = el.getBoundingClientRect();
+      this.scale = scale;
+      this.tx = rect.width / 2 - wx * scale;
+      this.ty = rect.height / 2 - wy * scale;
+    },
+  };
+}

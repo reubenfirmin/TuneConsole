@@ -7,7 +7,7 @@
 {% from "_macros.html" import tile %}
 <div{% if stale %} hx-get="/home/new-artists" hx-trigger="load delay:3s" hx-swap="outerHTML"{% endif %}>
 <h2 class="section">New artists for you{% if stale %} <span class="refreshing">refreshing…</span>{% endif %}</h2>
-<p class="section-note">Pinned to your taste — artists similar to the ones you actually play, fitting the playlists you actually listen to.</p>
+<p class="section-note">Pinned to your taste - artists similar to the ones you actually play, fitting the playlists you actually listen to.</p>
 <div class="tile-grid" id="new-artist-grid">
   {% for a in artists %}
   {{ tile('artist', a.thumbnail, a.artist,

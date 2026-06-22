@@ -16,10 +16,10 @@ ALBUMS_PER_CARD = 15               # discover album tiles fetched per epoch (gri
 # Home cards that rotate. Each holds its content for erosion_view_cap real Home visits, then advances
 # to a fresh epoch. They tick together (once per visit, in GET /) but each rotates its OWN pool at its
 # own size — so the small new-artist pool cycles through faster than the deep playlist pool.
-ROTATING_CARDS = ("wheelhouse", "explore", "comfort", "fresh", "new_artists", "discover")
+ROTATING_CARDS = ("wheelhouse", "explore", "comfort", "fresh", "new_artists", "discover", "rediscover")
 _NOTES = {
     "wheelhouse": "Deeper into what you already love.",
-    "explore": "Unplayed tracks from your own playlists — corners you've drifted from.",
+    "explore": "Unplayed tracks from your own playlists - corners you've drifted from.",
     "fresh": "Tracks that aren't in your collection yet.",
     "comfort": "Your most-played favorites you haven't reached for lately.",
 }
@@ -36,7 +36,7 @@ def _carded(store, lane, label, items, now):
     """A proto-card built from a rolled recipe: roll the theme (seeded by the card's rotation epoch so
     it's stable across steer/stance previews, like the rotation), focus the items on it, and attach
     the recipe so a Save persists exactly how this mix was made."""
-    recipe = recommend.roll_recipe(store, lane, seed=_epoch(store, lane))
+    recipe = recommend.roll_recipe(store, lane, seed=_epoch(store, lane), now=now)
     p = _proto(lane, label, recommend.theme_filter(store, items, recipe.get("facets", {})), now)
     p["recipe"] = recipe
     return p
@@ -90,7 +90,7 @@ def build(ctx) -> APIRouter:
             "actions": recommend.take_action(store, now, ctx.auth_expired),
             "sync": recommend.sync_status(store, now),
             "muted_count": len(store.muted_artists()),   # transparency: what's being hidden
-            "rediscover": recommend.rediscover_playlists(store, now),
+            "rediscover": recommend.rediscover_playlists(store, now, epoch=_epoch(store, "rediscover")),
             "flash": request.query_params.get("flash"),
             **_feed_context(now),
         })
@@ -132,7 +132,7 @@ def build(ctx) -> APIRouter:
         identity_id, client = next(iter((ctx.client_provider() or {}).items()), (None, None))
         result = {"name": name}
         if client is None or not tracks:
-            result["error"] = "Couldn't create it — connect an account and keep at least one track."
+            result["error"] = "Couldn't create it - connect an account and keep at least one track."
         else:
             try:
                 res = await asyncio.to_thread(
@@ -146,16 +146,6 @@ def build(ctx) -> APIRouter:
 
     def _busy():
         return bool(ctx.rec_worker and ctx.rec_worker.busy)
-
-    @router.get("/home/auto-playlists")
-    def home_auto_playlists(request: Request):
-        props = RecDao(store).get_proposals("auto_playlists")
-        if props is None and not _busy():
-            props = recommend.auto_playlists(store, k=40)   # first-load fallback
-        return templates.TemplateResponse(request, "_partials/auto_playlists.html",
-                                          {"proposals": props or [],
-                                           "building": props is None and _busy(),
-                                           "stale": props is not None and _busy()})
 
     @router.get("/home/discover")
     def home_discover(request: Request):

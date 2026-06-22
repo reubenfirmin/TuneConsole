@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from yt_playlist import genres, paths
+from yt_playlist import genres, net, paths
 from yt_playlist.enrich_queue import PriorityGate
 
 if sys.version_info >= (3, 11):
@@ -33,6 +33,7 @@ _MIN_INTERVAL = 0.25                      # Last.fm allows ~5 req/s; stay comfor
 _pace_lock = threading.Lock()
 _last_call = [0.0]
 _gate = PriorityGate()                    # newest enrichment job preempts older ones
+_breaker = net.CircuitBreaker()           # stop a run once the host looks unreachable
 
 
 class MissingKey(Exception):
@@ -71,8 +72,14 @@ def _get(params):
     _pace()
     url = _API + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp)
+    except Exception as e:                # report the outcome to the breaker, then let callers handle it
+        _breaker.record(e)
+        raise
+    _breaker.record()
+    return data
 
 
 def _fetch_text(url):
@@ -81,12 +88,18 @@ def _fetch_text(url):
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:
-                return resp.read().decode("utf-8", "replace")
+                text = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
+            _breaker.record(e)                     # server answered (an error) — host is reachable
             if e.code >= 500 and attempt == 1:
                 time.sleep(1.0)
                 continue
             raise
+        except Exception as e:
+            _breaker.record(e)
+            raise
+        _breaker.record()
+        return text
 
 
 def _page_release_year(html):
@@ -162,6 +175,7 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, key=None, s
         on_progress({"type": "done", "text": "Every track already has genre & year.", "total": 0})
         return
     on_progress({"type": "info", "text": f"Tagging {total} track(s) via Last.fm…", "total": total})
+    _breaker.reset()                       # fresh chance each run — a past outage shouldn't pre-trip it
     seq = _gate.enter()
     try:
         for i, t in enumerate(pending, 1):
@@ -171,6 +185,10 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, key=None, s
             _gate.wait_turn(seq, on_wait=lambda: on_progress(
                 {"type": "info", "text": "Waiting — a newer playlist is tagging first…"}))
             genre, year = enrich_fn(t["title"], t["artist"], key)
+            if _breaker.tripped():         # host unreachable — the rest would all fail too, so stop
+                on_progress({"type": "err", "text": "Last.fm looks unreachable — stopped. "
+                             "The remaining tracks will retry next time."})
+                return
             store.set_track_enrichment(t["id"], genre, year)
             eff_genre, eff_year = store.get_track_enrichment(t["id"])    # report what actually stuck
             bits = " · ".join(x for x in (genre, year) if x) or "no tags"

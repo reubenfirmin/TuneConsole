@@ -894,7 +894,7 @@ button.htmx-request .check-busy { display: inline; }
 .gen-foot-note { color: var(--dim); font-size: 0.78rem; line-height: 1.4; }
 .gen-done { justify-content: center; }
 
-/* --- Rediscover: a couple of stale library playlists spotlighted above auto-playlists --- */
+/* --- Rediscover: a couple of stale library playlists spotlighted on Home --- */
 .rediscover-grid { grid-template-columns: 1fr 1fr; gap: 1.4rem; margin-bottom: 1.4rem; }
 @media (max-width: 60rem) { .rediscover-grid { grid-template-columns: 1fr; } }
 .redis-card { display: flex; flex-direction: column; }
@@ -1035,3 +1035,89 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .fb-recipe { margin: 0 0 0.6rem; font-size: 0.85rem; color: var(--dim); }
 .fb-recipe .fb-chip { display: inline-block; background: var(--accent-soft); color: var(--accent-2);
   border-radius: 6px; padding: 0.05rem 0.5rem; margin: 0 0.15rem; }
+
+/* ===== Clusters tab ===================================================== */
+.cluster-page { position: relative; }
+.cluster-canvas {
+  position: relative; overflow: hidden; touch-action: none; cursor: grab;
+  height: calc(100vh - var(--topbar-h, 3.45rem) - 7.5rem);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-2);
+  background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
+  background-size: 26px 26px;
+}
+.cluster-canvas:active { cursor: grabbing; }
+.cluster-world { position: absolute; top: 0; left: 0; width: 0; height: 0; }
+.cluster-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+.edge { stroke: var(--border-2); stroke-width: 2; }
+.edge.pinned { stroke: var(--teal); stroke-width: 2.5; }
+.edge.pruned { stroke: var(--danger); stroke-dasharray: 4 4; opacity: 0.5; }
+
+.cluster-node {
+  position: absolute; transform: translate(-50%, -50%);
+  width: 190px; background: var(--surface); border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm); padding: 0.5rem 0.55rem; box-shadow: var(--shadow);
+}
+.cluster-node.seed { background: var(--grad-soft); border-color: var(--accent); }
+.cluster-node.pinned { border-color: var(--teal); box-shadow: 0 0 0 2px color-mix(in srgb, var(--teal) 35%, transparent); }
+.cluster-node.pruned { opacity: 0.4; border-color: var(--danger); }
+.cluster-node.pruned .cn-label { text-decoration: line-through; }
+.cn-body { display: flex; gap: 0.5rem; align-items: center; }
+.cn-thumb { width: 34px; height: 34px; border-radius: 6px; object-fit: cover; flex: none; }
+.cn-text { min-width: 0; }
+.cn-label { display: block; font-size: 0.82rem; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cn-sub { display: block; font-size: 0.7rem; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cn-actions { display: flex; gap: 0.25rem; margin-top: 0.4rem; opacity: 0; transition: opacity 0.12s; }
+.cluster-node:hover .cn-actions, .cluster-node.pinned .cn-actions, .cluster-node.pruned .cn-actions { opacity: 1; }
+.cn-btn {
+  flex: 1; border: 1px solid var(--border-2); background: var(--surface-2); color: var(--text);
+  border-radius: 6px; padding: 0.18rem 0; font-size: 0.78rem; cursor: pointer; line-height: 1;
+}
+.cn-btn:hover { border-color: var(--accent); }
+.cn-btn.pin.on { background: color-mix(in srgb, var(--teal) 25%, var(--surface-2)); border-color: var(--teal); }
+.cn-btn.prune.on { background: var(--danger-soft); border-color: var(--danger); }
+
+/* search — centered hero when empty, docked strip once seeded */
+.cluster-search { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; }
+.cluster-search:not(.docked) { margin: 4rem 0 1.4rem; }
+.cluster-search.docked { margin: 0 0 0.8rem; align-items: stretch; }
+.cluster-search-box { position: relative; width: 100%; max-width: 34rem; }
+.cluster-search.docked .cluster-search-box { max-width: 26rem; }
+.cluster-search-icon { position: absolute; left: 0.8rem; top: 50%; transform: translateY(-50%); color: var(--faint); }
+.cluster-search-box input {
+  width: 100%; padding: 0.7rem 0.9rem 0.7rem 2.1rem; font-size: 1rem;
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: 999px; color: var(--text);
+}
+.cluster-search-box input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.cluster-suggest {
+  position: absolute; z-index: 5; top: calc(100% + 0.35rem); left: 0; right: 0; margin: 0; padding: 0.3rem;
+  list-style: none; background: var(--surface); border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow); max-height: 20rem; overflow-y: auto;
+}
+.cluster-suggest li { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.4rem 0.5rem; border-radius: 6px; cursor: pointer; }
+.cluster-suggest li:hover { background: var(--accent-soft); }
+.cs-kind { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.08em; padding: 0.1rem 0.35rem;
+  border-radius: 4px; background: var(--surface-2); color: var(--dim); flex: none; }
+.cs-kind.artist { color: var(--accent-2); } .cs-kind.playlist { color: var(--teal); } .cs-kind.song { color: var(--dim); }
+.cs-label { font-weight: 600; }
+.cs-sub { font-size: 0.75rem; color: var(--faint); margin-left: auto; }
+.cluster-hint { color: var(--dim); font-size: 0.85rem; }
+
+.cluster-zoombar { position: absolute; right: 0.8rem; bottom: 0.8rem; display: flex; flex-direction: column; gap: 0.3rem; }
+.cluster-zoombar button {
+  width: 2rem; height: 2rem; border: 1px solid var(--border-2); background: var(--surface);
+  color: var(--text); border-radius: 6px; cursor: pointer; font-size: 1rem; line-height: 1;
+}
+.cluster-zoombar button:hover { border-color: var(--accent); }
+
+.cluster-savebar {
+  display: flex; align-items: center; gap: 0.8rem; margin-top: 0.8rem; padding: 0.7rem 0.9rem;
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: var(--radius);
+}
+.cluster-count { color: var(--dim); font-size: 0.85rem; white-space: nowrap; }
+.cluster-count strong { color: var(--text); font-size: 1.05rem; }
+.cluster-savebar input[name="name"] {
+  flex: 1; padding: 0.55rem 0.7rem; background: var(--bg-2); border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm); color: var(--text);
+}
+.cluster-incl { display: flex; align-items: center; gap: 0.4rem; color: var(--dim); font-size: 0.85rem; white-space: nowrap; }

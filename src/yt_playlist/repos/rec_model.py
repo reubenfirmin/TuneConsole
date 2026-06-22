@@ -51,12 +51,41 @@ class RecModelRepo(Repo):
 
     @synchronized
     def suppressed_keys(self, surface, now, scope="") -> set:
-        """Track keys to hide on a surface: dismissed/muted/snoozed, honoring any 'until' expiry."""
+        """Keys to hide on a surface: dismissed/muted/snoozed (surface-scoped) PLUS YouTube dislikes
+        (global, every surface). All honor any 'until' expiry."""
         rows = self.conn.execute(
-            "SELECT item_key FROM rec_feedback WHERE surface=? AND (scope='' OR scope=?) "
-            "AND kind IN ('dismiss','mute','not_now') AND (until IS NULL OR until>?)",
+            "SELECT item_key FROM rec_feedback WHERE "
+            "( (surface=? AND (scope='' OR scope=?) AND kind IN ('dismiss','mute','not_now')) "
+            "  OR kind='dislike' ) "
+            "AND (until IS NULL OR until>?)",
             (surface, scope or "", now)).fetchall()
         return {r["item_key"] for r in rows}
+
+    # --- YouTube dislikes (captured during sync; global long suppression, idempotent) ---
+    @synchronized
+    def record_dislike(self, identity_key, until, now) -> bool:
+        """Persist a thumbs-down as a long global suppression (surface='sync'). Returns True iff newly
+        created, so the caller feeds transient/graduation exactly once. Idempotent on re-sync."""
+        if self.conn.execute(
+                "SELECT 1 FROM rec_feedback WHERE surface='sync' AND item_key=? AND scope='' "
+                "AND kind='dislike'", (identity_key,)).fetchone():
+            return False
+        self.conn.execute(
+            "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) "
+            "VALUES ('sync',?,'dislike',NULL,'',?,?)", (identity_key, until, now))
+        self.conn.commit()
+        return True
+
+    @synchronized
+    def clear_dislike(self, identity_key) -> None:
+        """Reconcile an un-disliked track: drop its dislike row (un-suppress)."""
+        self.conn.execute("DELETE FROM rec_feedback WHERE item_key=? AND kind='dislike'", (identity_key,))
+        self.conn.commit()
+
+    @synchronized
+    def disliked_identity_keys(self) -> set:
+        return {r["item_key"] for r in self.conn.execute(
+            "SELECT item_key FROM rec_feedback WHERE kind='dislike'")}
 
     @synchronized
     def muted_artists(self) -> set:

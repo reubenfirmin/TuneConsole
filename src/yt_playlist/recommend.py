@@ -7,7 +7,7 @@ import statistics
 
 import numpy as np
 
-from yt_playlist import analysis, embed, genre_map, rec_params
+from yt_playlist import analysis, embed, genre_map, rec_params, transient
 from yt_playlist.rec_dao import RecDao
 
 
@@ -105,29 +105,39 @@ def axis_adjusted_scores(scores, mult):
     return {k: (s - smin + eps) * mult.get(k, 1.0) for k, s in scores.items()}
 
 
-def _axis_weights_for(store, keys):
-    """{key: genre_w * era_w * artist_w} from rec_weights, or None if every axis is neutral."""
+def _axis_weights_for(store, keys, now=None):
+    """{key: genre_w * era_w * artist_w}, where each axis weight is the permanent weight times the
+    transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
     w = store.get_weights()
     gw = {a[len("genre:"):]: v for a, v in w.items() if a.startswith("genre:")}
     ew = {a[len("era:"):]: v for a, v in w.items() if a.startswith("era:")}
     aw = {a[len("artist:"):]: v for a, v in w.items() if a.startswith("artist:")}
-    if all(v == 1.0 for v in list(gw.values()) + list(ew.values()) + list(aw.values())):
+    leans = transient.facet_leans(store, now) if now is not None else {}
+    perm_neutral = all(v == 1.0 for v in list(gw.values()) + list(ew.values()) + list(aw.values()))
+    if perm_neutral and not leans:
         return None
     keys = list(keys)
     dao = RecDao(store)
-    genres = dao.track_genres(keys)
-    decades = dao.track_decades(keys)
-    artists = dao.track_artists(keys)
+    genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
+
+    def tm(token):
+        return transient.facet_multiplier(leans.get(token, 0.0))
+
     mult = {}
     for k in keys:
         fam = genre_map.family(genres[k]) if k in genres else None
-        mult[k] = (gw.get(fam, 1.0) * ew.get(decades.get(k), 1.0) * aw.get(artists.get(k), 1.0))
+        dec = decades.get(k)
+        art = artists.get(k)
+        gm = gw.get(fam, 1.0) * (tm(f"genre:{fam}") if fam else 1.0)
+        em = ew.get(dec, 1.0) * (tm(f"era:{dec}") if dec else 1.0)
+        am = aw.get(art, 1.0) * (tm(f"artist:{art}") if art else 1.0)
+        mult[k] = gm * em * am
     return mult
 
 
-def _apply_axis_weights(store, sims):
-    """Re-weight a {key: taste-score} map by the user's genre/era/artist preferences (no-op if neutral)."""
-    mult = _axis_weights_for(store, list(sims))
+def _apply_axis_weights(store, sims, now=None):
+    """Re-weight a {key: taste-score} map by permanent preferences × the live transient facet leans."""
+    mult = _axis_weights_for(store, list(sims), now=now)
     return sims if mult is None else axis_adjusted_scores(sims, mult)
 
 
@@ -177,29 +187,25 @@ def playlist_facets(store, playlist_id) -> dict:
 
 
 def playlist_mood_state(store, playlist_id, now) -> int:
-    """+1/-1 if there's an active *whole-mix* mood for this playlist (its full key set), else 0.
-
-    Lets the feedback panel show your choice as 'selected' so it survives a refresh — until the
-    transient signal decays out of the window (a few hours), which is the whole point.
-    """
+    """+1/-1 if there's an active *whole-mix* mood for this playlist, else 0. Persists until you change
+    it (the transient signal no longer expires on a clock)."""
     keys = set(store.get_playlist_track_keys(playlist_id))
     if not keys:
         return 0
-    state = 0
-    for _created, direction, mkeys in sorted(RecDao(store).active_mood(now)):
-        if set(mkeys) == keys:                       # whole-mix feedback (not a facet subset); latest wins
-            state = 1 if direction > 0 else -1
-    return state
+    for _created, direction, mkeys in RecDao(store).recent_mood_events():   # newest-first
+        if set(mkeys) == keys:                       # whole-mix feedback; first match is the latest
+            return 1 if direction > 0 else -1
+    return 0
 
 
 def track_mood_states(store, now) -> dict:
-    """Map identity_key -> +1/-1 for active *per-track* mood signals (the "🔥 More / 🙅 Less like this"
-    row levers), so a generated playlist can flag which rows you nudged. Those buttons seed a single
-    key, so single-key events are exactly the per-track ones — whole-mix and facet tilts (many keys)
-    are excluded. Latest wins; decays out of the window with the rest."""
+    """Map identity_key -> +1/-1 for *per-track* mood signals (the "🔥 More / 🙅 Less like this" row
+    levers), so a generated playlist can flag which rows you nudged. Those buttons seed a single key,
+    so single-key events are exactly the per-track ones — whole-mix and facet tilts (many keys) are
+    excluded. Persists until changed; newest-first, so the first event seen for a key is the latest."""
     out = {}
-    for _created, direction, mkeys in sorted(RecDao(store).active_mood(now)):
-        if len(mkeys) == 1:
+    for _created, direction, mkeys in RecDao(store).recent_mood_events():   # newest-first
+        if len(mkeys) == 1 and mkeys[0] not in out:    # first match is the latest -> latest wins
             out[mkeys[0]] = 1 if direction > 0 else -1
     return out
 
@@ -352,7 +358,7 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
         if pt and V is not None:
             allscores = _apply_mood(pt.score_all(V), store, now, V, idx)   # tilt by current mood
             sims = {keys[i]: float(allscores[i]) for i in range(len(keys))}
-            sims = _apply_axis_weights(store, sims)                         # favor/mute genre·era·artist
+            sims = _apply_axis_weights(store, sims, now)        # favor/mute genre·era·artist (perm × transient)
             for rows, _, _ in sources:
                 rows.sort(key=lambda r: -sims.get(r["key"], -1.0))
 
@@ -410,19 +416,21 @@ def comfort_listening(store, now, limit=24) -> list[ForYouItem]:
         out.append(ForYouItem(
             title=r["title"], artist=r["artist"], album=r["album"], video_id=r["video_id"],
             thumbnail=r["thumbnail"], plays=r["plays"],
-            reason="One of your most-played — you haven't reached for it lately",
+            reason="One of your most-played - you haven't reached for it lately",
             key=r["key"], lane="comfort"))
     return out
 
 
-def rediscover_playlists(store, now, count=2, per=5) -> list[dict]:
+def rediscover_playlists(store, now, count=2, per=5, epoch=0, pool=8) -> list[dict]:
     """Spotlight real library playlists you haven't reached for lately, to nudge a rediscover.
 
     Ranks by *aggregate* track staleness — the median of when each track was last played, with
     never-played tracks counted as cold — so a playlist leads only when most of it has gone unplayed,
-    not because one track was heard recently. Picks the `count` coldest and highlights `per` tracks
-    from each as a teaser. Skips system playlists (Liked Music, Episodes for Later), Generated
-    proto-playlists, and empties — none of those are a library playlist to revisit.
+    not because one track was heard recently. Then rotates like the other Home cards: pages through
+    the coldest `pool` playlists `count` at a time, advancing one page per rotation `epoch` (wrapping),
+    so you cycle through only the genuinely-cold tail rather than ever drifting into warmer playlists.
+    Highlights `per` tracks from each page as a teaser. Skips system playlists (Liked Music, Episodes
+    for Later), Generated proto-playlists, and empties — none of those are a library playlist to revisit.
     """
     from yt_playlist.repos.rec_query import GENERATED_GROUP
     recency = store.get_playlist_track_recency()         # {pid: [per-track last-played ts | None, ...]}
@@ -437,8 +445,9 @@ def rediscover_playlists(store, now, count=2, per=5) -> list[dict]:
         lasts = [t if t is not None else 0.0 for t in (recency.get(p.id) or [0.0])]
         candidates.append((p, statistics.median(lasts)))
     candidates.sort(key=lambda c: c[1])                  # coldest aggregate (oldest median) leads
+    cold = candidates[:max(count, pool)]                 # rotate within the coldest tail only
     out = []
-    for p, med in candidates[:count]:
+    for p, med in rotate_page(cold, count, epoch):       # rotate through the ranked cold pool
         out.append({"id": p.id, "ytm": p.ytm_playlist_id, "title": p.title,
                     "track_count": p.track_count, "thumbnail": p.thumbnail,
                     # the median is per-track; 0.0 means most tracks have never been played
@@ -458,16 +467,18 @@ def taste_sample(store, now, limit=8, pool_factor=8) -> list[ForYouItem]:
     return [pool[i] for i in sorted(random.sample(range(len(pool)), limit))]  # keep ranked order in-slice
 
 
-def roll_recipe(store, model, seed=None) -> dict:
-    """Roll a per-playlist theme for a generated-playlist model. Preference-weighted: facets are
-    sampled by your play-weighted genre/era distribution scaled by your stored axis weights, so
-    common facets come up often, the long tail occasionally surprises, and a muted facet never
-    rolls. Returns a Recipe (the model's input + what's stored/surfaced/re-run)."""
+def roll_recipe(store, model, seed=None, now=None) -> dict:
+    """Roll a per-playlist theme. Preference-weighted by your play distribution × permanent axis
+    weights × the live transient facet leans, so common facets come up often, a muted facet never
+    rolls, and a fresh 'less house' makes house roll less in the very next generation."""
     rng = random.Random(seed)
     weights = store.get_weights()
+    leans = transient.facet_leans(store, now) if now is not None else {}
 
     def pick(dist, prefix):
-        items = [(k, share * weights.get(f"{prefix}:{k}", 1.0)) for k, share in dist.items()]
+        items = [(k, share * weights.get(f"{prefix}:{k}", 1.0)
+                     * transient.facet_multiplier(leans.get(f"{prefix}:{k}", 0.0)))
+                 for k, share in dist.items()]
         items = [(k, w) for k, w in items if w > 0]
         if not items:
             return None
@@ -615,89 +626,53 @@ def fresh_songs(ctx, limit=12) -> list[dict]:
     return out
 
 
-def auto_playlists(store, k=16, min_size=10, max_proposals=6) -> list[dict]:
-    """Cluster the taste-embedding space into coherent groups and propose the ones that aren't
-    already a playlist. Each proposal: {label, size, keys, sample, tracks} — `tracks` are the full
-    saveable track dicts, so a proposal can be turned into a real playlist in one click. Spec §8."""
-    clusters = embed.cluster(store, k)
-    if not clusters:
-        return []
-    dao = RecDao(store)
-    excluded = dao.excluded_playlist_ids()                   # a generated playlist isn't "already a playlist"
-    existing = [set(store.get_playlist_track_keys(p.id)) for p in store.get_playlists() if p.id not in excluded]
-    existing = [e for e in existing if e]
-    props = []
-    for keys in clusters.values():
-        if len(keys) < min_size:
-            continue
-        ks = set(keys)
-        if any(len(ks & e) / len(ks) > 0.6 for e in existing):   # already basically a playlist
-            continue
-        meta = store.tracks_by_keys(keys)
-        tracks = [{"video_id": meta[k]["video_id"], "title": meta[k]["title"],
-                   "artist": meta[k]["artist"], "album": meta[k].get("album", ""),
-                   "thumbnail": meta[k]["thumbnail"]}
-                  for k in keys if k in meta and meta[k].get("video_id")]
-        props.append({
-            "label": _cluster_label(dao, keys, meta),
-            "size": len(keys),
-            "keys": list(ks),
-            "sample": [meta[k] for k in keys if k in meta][:6],
-            "tracks": tracks,
-        })
-    props.sort(key=lambda p: -p["size"])
-    return props[:max_proposals]
-
-
-def _cluster_label(dao, keys, meta):
-    """Name a cluster by its dominant genre family (if tagged) plus a couple of artists."""
-    fams: dict = {}
-    for g in dao.track_genres(keys).values():
-        fam = genre_map.family(g)
-        if not fam.startswith("other:"):
-            fams[fam] = fams.get(fam, 0) + 1
-    artists = {}
-    for k in keys:
-        a = (meta.get(k) or {}).get("artist")
-        if a:
-            artists[a] = artists.get(a, 0) + 1
-    top_artists = [a for a, _ in sorted(artists.items(), key=lambda x: -x[1])[:2]]
-    fam = max(fams, key=fams.get).replace("-", " ").title() if fams else "Mixed"
-    return f"{fam} · incl. {', '.join(top_artists)}" if top_artists else fam
-
-
 MOOD_ALPHA = 0.35   # how hard a mood event tilts the lanes, relative to the taste score
 
 
-def mood_tilt(store, now, V, idx, half_life_h=3.0, window_h=8.0):
-    """A transient, decaying direction in embedding space from recent mood feedback — NOT permanent
-    taste. Each event contributes sign x time-decay x its seed-playlist centroid; the summed,
-    normalized vector tilts the lanes for a few hours, then fades to nothing. None if quiet."""
-    events = RecDao(store).active_mood(now, window_h)
-    if not events:
-        return None
-    tilt = np.zeros(V.shape[1], dtype=np.float64)
-    for created, direction, keys in events:
-        rows = [idx[k] for k in keys if k in idx]
-        if not rows:
-            continue
-        c = V[rows].mean(0)
-        n = np.linalg.norm(c)
-        if n == 0:
-            continue
-        age_h = max(0.0, (now - created) / 3600.0)
-        tilt += direction * (0.5 ** (age_h / half_life_h)) * (c / n)   # decay toward zero with age
-    n = np.linalg.norm(tilt)
-    return tilt / n if n > 0 else None
+mood_tilt = transient.centroid_tilt   # back-compat: tests/callers use recommend.mood_tilt(store, now, V, idx)
 
 
 def _apply_mood(scores, store, now, V, idx):
-    """Blend the transient mood tilt into a per-track score vector (in place-safe; returns new)."""
-    tilt = mood_tilt(store, now, V, idx)
+    """Blend the transient centroid tilt into per-track scores, scaled down as sync goes stale."""
+    tilt = transient.centroid_tilt(store, now, V, idx)
     if tilt is None:
         return scores
+    factor = transient.staleness_factor(store, now)
+    if factor <= 0:
+        return scores
     Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
-    return scores + MOOD_ALPHA * (Vn @ tilt)
+    return scores + MOOD_ALPHA * factor * (Vn @ tilt)
+
+
+def apply_dislikes(store, status_map, now) -> None:
+    """Fold a sync's per-track likeStatus into the model. A first-seen DISLIKE → a long global
+    suppression + a negative graduation contribution on its facets (which also feeds the transient
+    leans via disliked_identity_keys). NO direct permanent axis nudge — graduation owns that, so we
+    don't triple-count. A no-longer-disliked track has its suppression cleared. Idempotent."""
+    existing = store.disliked_identity_keys()
+    until = now + rec_params.DISLIKE_SUPPRESS_DAYS * 86400
+    for key, status in status_map.items():
+        if status == "DISLIKE" and key not in existing:
+            if store.record_dislike(key, until, now):
+                graduate_moods(store, [key], -1.0, now)         # negative facet accumulation
+        elif status in ("LIKE", "INDIFFERENT") and key in existing:
+            store.clear_dislike(key)
+
+
+def graduate_moods(store, keys, signed, now) -> None:
+    """Accumulate a transient-feeding event into the per-facet graduation ledger (presence-weighted).
+    When a facet's running total crosses THEME_THRESHOLD, graduate it: a gentle permanent nudge, then
+    a smooth reset. Model-only — NEVER suppresses. `signed` carries intensity (±1, ±2 on 'a lot')."""
+    facets = transient.facets_for(store, keys)
+    if not facets:
+        return
+    n = len(set(keys)) or 1
+    for axis, axis_keys in facets.items():
+        score = store.bump_theme(axis, signed * (len(axis_keys) / n), now)
+        if abs(score) >= rec_params.THEME_THRESHOLD:
+            factor = rec_params.GRADUATE_UP if score > 0 else rec_params.GRADUATE_DOWN
+            store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
+            store.discount_theme(axis, math.copysign(rec_params.THEME_THRESHOLD, score))
 
 
 def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
@@ -710,6 +685,8 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
         return []
     keys, V, idx = embed.load_vectors(store)
     scores = _apply_mood(pt.score_all(V), store, now, V, idx)   # taste fit, tilted by current mood
+    sims = _apply_axis_weights(store, {keys[i]: float(scores[i]) for i in range(len(keys))}, now)
+    scores = np.array([sims[keys[i]] for i in range(len(keys))])   # × permanent weights × transient facet leans
     order = np.argsort(-scores)
     familiar = {a["artist"] for a in store.top_artists(rec_params.get_param(store, "explore_top_artists"))}
     dao = RecDao(store)
@@ -724,7 +701,7 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
         if not m or k in suppressed or m["artist"] in muted or m["artist"] in familiar:
             continue
         out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"], m["thumbnail"],
-                              0, "New to you — sits near your taste", k, "explore"))
+                              0, "New to you - sits near your taste", k, "explore"))
         if len(out) >= limit:
             break
     return out
@@ -829,7 +806,7 @@ def sync_status(store, now) -> SyncStatus:
         return SyncStatus(None, True, "Sync to pull in your library and recommendations.")
     age = now - float(last)
     if age > SYNC_STALE_S:
-        return SyncStatus(_ago(age), True, "It's been a while — sync to refresh.")
+        return SyncStatus(_ago(age), True, "It's been a while - sync to refresh.")
     return SyncStatus(_ago(age), False, None)
 
 
@@ -867,22 +844,22 @@ def take_action(store, now, auth_expired) -> list[ActionItem]:
     for label in auth_expired.values():
         items.append(ActionItem(
             "auth", "high", f"Re-authenticate {label}",
-            "YouTube session expired — sync and recommendations are stale until you reconnect.",
+            "YouTube session expired - sync and recommendations are stale until you reconnect.",
             "Re-authenticate", "/setup", key=f"auth:{label}",
-            note="Session expired — sync is stalled", badge="!"))
+            note="Session expired - sync is stalled", badge="!"))
 
     empties = analysis.find_empty_playlists(store)
     if empties:
         items.append(ActionItem(
             "cleanup", "low", "Empty playlists",
-            f"{len(empties)} empty playlist(s) clutter your library — review and remove them.",
+            f"{len(empties)} empty playlist(s) clutter your library - review and remove them.",
             "Review", "/cleanup", key="cleanup:empty", badge=str(len(empties))))
 
     dupes = analysis.find_near_duplicate_groups(store)
     if dupes:
         items.append(ActionItem(
             "cleanup", "low", "Near-duplicate playlists",
-            f"{len(dupes)} group(s) of playlists heavily overlap — review them for merges.",
+            f"{len(dupes)} group(s) of playlists heavily overlap - review them for merges.",
             "Review", "/cleanup", key="cleanup:dupes", badge=str(len(dupes))))
 
     # Enrichment cards: playlists and saved albums, capped at 3 TOTAL (most-played playlists first,
@@ -891,7 +868,7 @@ def take_action(store, now, auth_expired) -> list[ActionItem]:
     for e in store.enrichment_candidates(limit=3):
         enrich.append(ActionItem(
             "enrich", "low", e["title"],
-            f"{e['gaps']} of {e['total']} tracks are missing genre tags — and it's one of your "
+            f"{e['gaps']} of {e['total']} tracks are missing genre tags - and it's one of your "
             f"most-played playlists ({e['plays']} plays). Enriching it sharpens recommendations, "
             "since recs lean on genre and year.",
             "Enrich", f"/playlist/{e['id']}?enrich=1", thumbnail=e["thumbnail"], key=f"enrich:{e['id']}",

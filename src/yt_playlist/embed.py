@@ -134,35 +134,6 @@ def _rank(keys, V, target, exclude, topn):
     return out
 
 
-def _kmeans(V, k, iters=25, seed=0):
-    """Spherical k-means on L2-normalised vectors (cosine = dot). Returns a label per row."""
-    rng = np.random.default_rng(seed)
-    C = V[rng.choice(len(V), size=k, replace=False)].copy()
-    labels = np.zeros(len(V), dtype=int)
-    for _ in range(iters):
-        labels = (V @ C.T).argmax(1)
-        for j in range(k):
-            members = V[labels == j]
-            if len(members):
-                c = members.mean(0)
-                norm = np.linalg.norm(c)
-                if norm > 0:
-                    C[j] = c / norm
-    return labels
-
-
-def cluster(store, k=14):
-    """Group the library's vectors into k coherent clusters: {cluster_id: [identity_key, ...]}."""
-    keys, V, idx = load_vectors(store)
-    if V is None or len(keys) < k:
-        return {}
-    labels = _kmeans(V, k)
-    out: dict = {}
-    for key, lab in zip(keys, labels):
-        out.setdefault(int(lab), []).append(key)
-    return out
-
-
 def neighbors(store, key, topn=12, exclude=None):
     """Tracks most similar to one seed track in taste space."""
     keys, V, idx = load_vectors(store)
@@ -235,6 +206,42 @@ def blended_neighbors(store, seed_groups, topn=12, exclude=None):
     if not np.any(target):
         return []
     return _rank(keys, V, target / (np.linalg.norm(target) + 1e-9), excl, topn)
+
+
+CLUSTER_BETA = 0.6   # how hard a pruned ("negative model") track pushes a branch's ring away
+
+
+def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=CLUSTER_BETA):
+    """A Clusters-canvas ring: tracks nearest a node's PINNED-path centroid, tilted AWAY from the
+    PRUNED set's centroid. Score = cos(c, pos_centroid) - beta * cos(c, neg_centroid). pos/neg seeds
+    and `exclude` (already-on-canvas keys) are never returned. Empty until the model is built.
+
+    The candidate pool is today the user's own library vectors; a later pass can widen it to a
+    new-music pool without touching this scoring."""
+    keys, V, idx = load_vectors(store)
+    if V is None:
+        return []
+    pi = [idx[k] for k in pos_keys if k in idx]
+    if not pi:
+        return []
+    pos = V[pi].mean(0)
+    pos /= np.linalg.norm(pos) + 1e-9
+    scores = V @ pos
+    ni = [idx[k] for k in neg_keys if k in idx]
+    if ni:
+        neg = V[ni].mean(0)
+        neg /= np.linalg.norm(neg) + 1e-9
+        scores = scores - beta * (V @ neg)
+    excl = set(exclude or ()) | set(pos_keys) | set(neg_keys)
+    out = []
+    for j in np.argsort(-scores):
+        k = keys[j]
+        if k in excl:
+            continue
+        out.append((k, float(scores[j])))
+        if len(out) >= topn:
+            break
+    return out
 
 
 def centroid_neighbors(store, seed_keys, topn=12, exclude=None):

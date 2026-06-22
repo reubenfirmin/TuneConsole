@@ -14,6 +14,12 @@ const fontDir = resolve(destDir, "fonts");
 const ASSETS = [
   ["htmx.org/dist/htmx.min.js", "htmx.min.js"],
   ["alpinejs/dist/cdn.min.js", "alpine.min.js"],
+  // Clusters canvas graph layout. d3-force's UMD doesn't bundle its deps — it reads them off the
+  // global `d3`, so dispatch/quadtree/timer MUST load before it (see base.html script order).
+  ["d3-dispatch/dist/d3-dispatch.min.js", "d3-dispatch.min.js"],
+  ["d3-quadtree/dist/d3-quadtree.min.js", "d3-quadtree.min.js"],
+  ["d3-timer/dist/d3-timer.min.js", "d3-timer.min.js"],
+  ["d3-force/dist/d3-force.min.js", "d3-force.min.js"],
 ];
 
 // self-hosted variable fonts (latin, weight axis) -> static/vendor/fonts/<dest>

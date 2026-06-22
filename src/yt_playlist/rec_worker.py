@@ -1,7 +1,7 @@
 """Decoupled recommendation worker (spec §3).
 
 Rec computation runs OFF the sync/request path here: a single background thread rebuilds the
-taste vectors and materializes the heavy/slow surfaces (auto-playlists, outward discovery) into
+taste vectors and materializes the heavy/slow surfaces (fresh songs, outward discovery) into
 rec_proposals for last-good serving. Triggers coalesce — many syncs in a row collapse into one
 rebuild — so frequent syncs never pile up.
 """
@@ -125,7 +125,6 @@ class RecWorker:
         # Materialize deeper pools than a single card shows, so each surface has several epochs of
         # material to rotate through before it has to wrap.
         surfaces = (
-            ("auto_playlists", lambda: recommend.auto_playlists(store, k=40)),
             ("fresh_songs", lambda: recommend.fresh_songs(self.ctx, limit=36)),
         )
         for surface, build in surfaces:

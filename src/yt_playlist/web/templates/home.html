@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% from "_macros.html" import banner %}
-{% block title %}Home — yt-playlist{% endblock %}
+{% block title %}Home - yt-playlist{% endblock %}
 {% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 <div id="home">
@@ -17,21 +17,17 @@
   {% include "_partials/home_feed.html" %}
 
   {% if muted_count %}
-  <p class="section-note muted-note">Hiding {{ muted_count }} muted artist{{ 's' if muted_count != 1 }} based on your feedback —
+  <p class="section-note muted-note">Hiding {{ muted_count }} muted artist{{ 's' if muted_count != 1 }} based on your feedback -
     <a href="/taste">manage on the Taste Model page</a>.</p>
   {% endif %}
 
   {% include "_partials/rediscover.html" %}
 
-  <div hx-get="/home/auto-playlists" hx-trigger="load" hx-swap="innerHTML">
-    <p class="section-note">Finding coherent groups in your library…</p>
-  </div>
-
   <div hx-get="/home/discover" hx-trigger="load" hx-swap="innerHTML"></div>
   <div hx-get="/home/new-artists" hx-trigger="load" hx-swap="innerHTML"></div>
 </div>
 {# hx-vals js: runs in global scope, so the "Save & play" button reaches its card's surviving rows
-   by id — pruned (feedback-dismissed) rows are gone from the DOM, so they're naturally excluded. #}
+   by id - pruned (feedback-dismissed) rows are gone from the DOM, so they're naturally excluded. #}
 <script>
 function genName(id) { return document.getElementById(id).dataset.name; }
 function genRecipe(id) { return document.getElementById(id).dataset.recipe || ''; }

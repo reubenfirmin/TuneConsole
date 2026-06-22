@@ -1,4 +1,4 @@
-from yt_playlist.analysis import jaccard, find_dupes, find_overlaps, find_stale
+from yt_playlist.analysis import jaccard, find_dupes, find_overlaps
 
 def _seed_two_playlists(store, keys_a, keys_b):
     iid = store.upsert_identity("main", "cred", None, True)
@@ -43,36 +43,6 @@ def test_dupe_at_exact_threshold_boundary(store):
     assert dupes[0].similarity == threshold
     overlaps = find_overlaps(store, dupe_threshold=threshold)
     assert overlaps == []
-
-
-def test_find_stale_unplayed_ranks_first(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    pid_unplayed = store.upsert_playlist(iid, "PLOLD", "Old", 1, "h1", 0.0)
-    pid_played = store.upsert_playlist(iid, "PLNEW", "New", 1, "h2", 0.0)
-    tid_unplayed = store.upsert_track("v1", "T1", "X", None, None)
-    tid_played = store.upsert_track("v2", "T2", "X", None, None)
-    store.set_playlist_tracks(pid_unplayed, [tid_unplayed])
-    store.set_playlist_tracks(pid_played, [tid_played])
-    now = 200 * 86400.0
-    store.add_history_snapshot(iid, now - 10, ["t2|x"])
-    res = find_stale(store, now=now, history_window_days=90)
-    assert len(res) == 2
-    assert res[0].playlist.id == pid_unplayed
-    assert res[0].played_recently is False
-    assert res[1].playlist.id == pid_played
-    assert res[1].played_recently is True
-
-
-def test_find_stale_ranks_unplayed_old(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    pid = store.upsert_playlist(iid, "PLOLD", "Old", 1, "h", 0.0)  # first_seen=0, never changed
-    tid = store.upsert_track("v", "t", "x", None, None)
-    store.set_playlist_tracks(pid, [tid])
-    now = 200 * 86400.0
-    res = find_stale(store, now=now, history_window_days=90)
-    assert len(res) == 1
-    assert res[0].played_recently is False
-    assert res[0].age_days > 100
 
 
 def test_find_overlaps_excludes_dupe_playlists(store):

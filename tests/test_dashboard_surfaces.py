@@ -1,8 +1,6 @@
-"""Dashboard surfaces: fresh songs as a proto-playlist, interactive library clusters, and
-graphical new-artist cards."""
+"""Dashboard surfaces: fresh songs as a proto-playlist and graphical new-artist cards."""
 from fastapi.testclient import TestClient
 
-from yt_playlist import embed, recommend
 from yt_playlist.rec_dao import RecDao
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
@@ -23,19 +21,6 @@ def test_fresh_renders_as_saveable_proto(store):
     assert "Fresh songs -" in html                  # dated name
     assert "Save &amp; play on YouTube" in html     # same save flow as the other lanes
     assert "New One" in html
-
-
-def test_library_clusters_are_saveable(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    b = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(12)]   # unplaylisted cluster
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PA", "PA", 12,  "h", 0.0),
-                              [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(12)])
-    embed.build_and_store(store, dim=4)
-
-    props = recommend.auto_playlists(store, k=2, min_size=8)
-    assert props and all("tracks" in p for p in props)
-    saveable = next(p for p in props if any(t["artist"] == "BB" for t in p["tracks"]))
-    assert {t["video_id"] for t in saveable["tracks"]} >= {f"b{i}" for i in range(12)}
 
 
 def test_new_artists_render_with_thumbnail(store):

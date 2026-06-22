@@ -1,6 +1,5 @@
 """Live-server fixture for Playwright tests: a real uvicorn server (Playwright needs
-real HTTP + a JS runtime, which TestClient does not provide), seeded with one stale
-playlist so /discover shows an actionable candidate."""
+real HTTP + a JS runtime, which TestClient does not provide), seeded with one playlist."""
 import socket
 import threading
 import time
@@ -23,7 +22,7 @@ def _free_port():
 @pytest.fixture
 def live_app(store):
     iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)   # a stale candidate
+    store.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))

@@ -90,41 +90,6 @@ def test_post_with_local_origin_allowed(store):
     r = c.post("/sync", headers={"origin": "http://127.0.0.1"}, follow_redirects=False)
     assert r.status_code == 200  # starts a sync job (JSON), no longer a redirect
 
-def test_rediscover_dismiss_fades_and_drops_candidate(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
-    c = _client(store, lambda: {iid: FakeClient()})
-
-    assert c.get("/discover").text.count('class="stale-row"') == 1
-    r = c.post("/rediscover/dismiss", data={"ytm": "PLZ"})
-    assert r.status_code == 200
-
-    body = c.get("/discover").text
-    assert body.count('class="stale-row"') == 0       # no longer a candidate
-    assert "dismissed" in body and "PLZ" in body       # shown in snoozed section on reload
-
-    r = c.post("/rediscover/restore", data={"ytm": "PLZ"}, follow_redirects=False)
-    assert r.status_code == 303
-    assert c.get("/discover").text.count('class="stale-row"') == 1
-
-def test_rediscover_dismiss_without_ytm_returns_toast(store):
-    store.upsert_identity("main", "cred", None, True)
-    c = _client(store, lambda: {})
-    r = c.post("/rediscover/dismiss", data={})
-    assert r.status_code == 422
-    assert r.headers.get("hx-reswap") == "none"
-    assert "Nothing to dismiss" in r.text
-    assert 'hx-swap-oob="afterbegin:#toasts"' in r.text
-
-def test_rediscover_snooze_fades_and_hides(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
-    c = _client(store, lambda: {iid: FakeClient()})
-    assert c.post("/rediscover/snooze", data={"ytm": "PLZ", "days": "30"}).status_code == 200
-    assert c.get("/discover").text.count('class="stale-row"') == 0
-    assert store.get_stale_hidden_ytm(now=1.0) == {"PLZ"}
-    assert store.get_stale_hidden_ytm(now=1.0 + 31 * 86400) == set()
-
 def test_get_with_foreign_host_still_allowed(store):
     # Reads are exempt: the guard only protects state-changing methods.
     store.upsert_identity("main", "cred", None, True)
@@ -807,7 +772,7 @@ def test_toasts_region_present_on_every_page(store):
     store.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
-    assert 'id="toasts"' in c.get("/discover").text
+    assert 'id="toasts"' in c.get("/").text
 
 
 def test_error_toast_partial_renders(store):
@@ -816,12 +781,6 @@ def test_error_toast_partial_renders(store):
     html = tmpl.render(message="Boom")
     assert "Boom" in html
     assert 'hx-swap-oob="afterbegin:#toasts"' in html
-
-
-def test_no_stalerow_alpine_remains(store):
-    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
-    c = TestClient(app, base_url="http://127.0.0.1")
-    assert "staleRow" not in c.get("/discover").text
 
 
 def _two_identity_move(store):

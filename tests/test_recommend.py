@@ -429,3 +429,31 @@ def test_rediscover_treats_never_played_as_coldest(store):
     assert [p["title"] for p in out] == ["Untouched", "Played"]   # never-played is coldest -> leads
     never = next(p for p in out if p["title"] == "Untouched")
     assert never["last_played"] is None                           # -> "mostly never played" in the UI
+
+
+def test_rediscover_rotates_through_cold_pool_by_epoch(store):
+    # Same erosion/rotation as other Home cards: page through the ranked-by-coldness pool, one page
+    # per epoch, wrapping — so you cycle through cold playlists instead of always seeing the same two.
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0
+    now = 400 * day
+    for ytm, title, age in [("PA", "A", 200), ("PB", "B", 150), ("PC", "C", 100), ("PD", "D", 50)]:
+        _seed_pl(store, iid, ytm, title, 4, now, play_each_at=[now - age * day] * 4)
+    titles = lambda e: [p["title"] for p in recommend.rediscover_playlists(store, now, count=2, epoch=e)]
+    assert titles(0) == ["A", "B"]        # coldest page leads
+    assert titles(1) == ["C", "D"]        # next epoch advances to the next-coldest page
+    assert titles(2) == ["A", "B"]        # wraps back around the ranked pool
+
+
+def test_rediscover_rotation_stays_within_coldest_pool(store):
+    # The rotating pool is capped to the coldest N: warmer playlists never surface, even across epochs.
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0
+    now = 400 * day
+    for ytm, title, age in [("PA", "A", 300), ("PB", "B", 250), ("PC", "C", 200),
+                            ("PD", "D", 150), ("PE", "E", 100), ("PF", "F", 50)]:
+        _seed_pl(store, iid, ytm, title, 4, now, play_each_at=[now - age * day] * 4)
+    seen = set()
+    for e in range(6):
+        seen.update(p["title"] for p in recommend.rediscover_playlists(store, now, count=2, epoch=e, pool=4))
+    assert seen == {"A", "B", "C", "D"}   # coldest 4 cycle through; warmest E, F never appear

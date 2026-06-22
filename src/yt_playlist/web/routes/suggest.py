@@ -98,6 +98,7 @@ def build(ctx) -> APIRouter:
                 keys = []
             if keys:
                 store.record_mood(keys, signed, now_fn())
+                recommend.graduate_moods(store, keys, signed, now_fn())
             return HTMLResponse("")
         try:                                          # whole-mix simple buttons
             pid = int(form.get("pid"))
@@ -106,6 +107,7 @@ def build(ctx) -> APIRouter:
         keys = store.get_playlist_track_keys(pid)
         if keys:
             store.record_mood(keys, signed, now_fn())
+            recommend.graduate_moods(store, list(keys), signed, now_fn())
         return HTMLResponse("")                        # no swap — the panel stays put (Advanced reachable)
 
     return router

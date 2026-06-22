@@ -14,7 +14,6 @@ from yt_playlist.repos.identities import IdentityRepo
 from yt_playlist.repos.overlaps import OverlapRepo
 from yt_playlist.repos.playlists import PlaylistRepo
 from yt_playlist.repos.rec import RecRepo
-from yt_playlist.repos.rediscover import RediscoverRepo
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.settings import SettingsRepo
 from yt_playlist.repos.tracks import TrackRepo
@@ -86,9 +85,6 @@ CREATE TABLE IF NOT EXISTS overlap_kept (
   a TEXT NOT NULL, b TEXT NOT NULL, created_at REAL,
   PRIMARY KEY (a, b)
 );
-CREATE TABLE IF NOT EXISTS stale_dismissed (
-  ytm TEXT PRIMARY KEY, until REAL   -- until NULL = dismissed forever; else snoozed until ts
-);
 CREATE TABLE IF NOT EXISTS playlist_group (
   ytm TEXT PRIMARY KEY, name TEXT NOT NULL   -- user-assigned group name for a playlist
 );
@@ -140,7 +136,6 @@ class Store:
         # --- domain DAOs (each shares this connection + lock). Use store.overlaps.x() in new code;
         #     legacy store.x() still works via __getattr__ while methods migrate out of Store. ---
         self.overlaps = OverlapRepo(self)
-        self.rediscover = RediscoverRepo(self)
         self.genres = GenreRepo(self)
         self.settings = SettingsRepo(self)
         self.actions = ActionRepo(self)
@@ -152,9 +147,9 @@ class Store:
         self.tracks = TrackRepo(self)
         self.playlists = PlaylistRepo(self)
         self.discovery = DiscoveryRepo(self)
-        self._repos = (self.overlaps, self.rediscover, self.genres, self.settings, self.actions,
+        self._repos = (self.overlaps, self.discovery, self.genres, self.settings, self.actions,
                        self.identities, self.history, self.collection, self.rec, self.charts,
-                       self.tracks, self.playlists, self.discovery)
+                       self.tracks, self.playlists)
 
     def __getattr__(self, name):
         # Delegate any attribute Store no longer defines to the DAO that owns it. Only hit on a

@@ -49,6 +49,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     _emit(on_progress, "info", f"{label}: {len(playlists)} playlists", count=len(playlists))
     total = len(playlists)
     seen_ytm = set()
+    rated: dict[str, str] = {}                  # identity_key -> likeStatus; DISLIKE wins on conflict
     for i, pl in enumerate(playlists, 1):
         pid = pl["playlistId"]
         seen_ytm.add(pid)  # mark seen before fetch so a transient read failure doesn't prune it
@@ -65,6 +66,11 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
                                      t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")))
             track_ids.append(tid)
             keys.append(identity_key(t.get("title", ""), _artist(t)))
+            status = t.get("likeStatus")
+            if status:
+                rk = identity_key(t.get("title", ""), _artist(t))
+                if rated.get(rk) != "DISLIKE":
+                    rated[rk] = status
         track_ids = list(dict.fromkeys(track_ids))   # de-dupe (YouTube can repeat a video; see set_playlist_tracks)
         keys = list(dict.fromkeys(keys))
         chash = content_hash(keys)
@@ -99,6 +105,8 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         _emit(on_progress, "auth_expired",
               f"{label}: returned no playlists — session may have expired, re-authenticate", label=label)
 
+    from yt_playlist import recommend            # local import avoids any import cycle
+    recommend.apply_dislikes(store, rated, now)
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history())

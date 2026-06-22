@@ -5,6 +5,7 @@ Owns its own tables (created lazily/idempotently) since they're rec-internal ser
 """
 import json
 
+from yt_playlist import rec_params
 from yt_playlist.repos.base import Repo, synchronized
 
 _SCHEMA = """
@@ -16,7 +17,7 @@ CREATE TABLE IF NOT EXISTS rec_impressions (
   PRIMARY KEY (surface, item_key)
 );
 CREATE TABLE IF NOT EXISTS rec_proposals (
-  surface TEXT PRIMARY KEY,               -- 'auto_playlists' | 'discover'
+  surface TEXT PRIMARY KEY,               -- 'fresh_songs' | 'discover'
   payload TEXT NOT NULL,                  -- JSON, materialized by the rec worker (last-good serving)
   built_at REAL
 );
@@ -34,6 +35,11 @@ CREATE TABLE IF NOT EXISTS rec_recipes (
   playlist_ytm TEXT PRIMARY KEY,          -- the generated playlist's YouTube id
   recipe TEXT NOT NULL,                   -- JSON: the rolled theme + params + dj seed + version
   created_at REAL
+);
+CREATE TABLE IF NOT EXISTS rec_theme (
+  facet      TEXT PRIMARY KEY,             -- 'genre:<fam>' | 'era:<decade>' | 'artist:<name>'
+  score      REAL NOT NULL,                -- persistent signed running total (interaction-driven, no time decay)
+  updated_at REAL NOT NULL                 -- bookkeeping only
 );
 """
 
@@ -59,25 +65,33 @@ class RecSurfaceRepo(Repo):
                                 (playlist_ytm,)).fetchone()
         return json.loads(row["recipe"]) if row else None
 
-    # --- transient mood: short-lived, decaying tilt on the recommendation lanes (NOT permanent taste) ---
+    # --- persistent mood: count-capped (replaces time-windowed active_mood) ---
     @synchronized
     def record_mood(self, keys, direction, now) -> None:
-        """Log a mood signal: the seed tracks (a generated playlist's) and whether the user wants
-        more (+1) or less (-1) of that vibe right now. Read back by active_mood within a short window."""
+        """Log a mood signal (seed keys + ±direction). Persistent — NOT pruned by time; only the
+        newest MOOD_EVENT_CAP rows are kept so the table stays bounded. Read by recent_mood_events."""
         self.conn.execute("INSERT INTO rec_mood(created_at, direction, keys) VALUES (?,?,?)",
                           (now, int(direction), json.dumps(list(keys))))
+        self.conn.execute(
+            "DELETE FROM rec_mood WHERE rowid NOT IN "
+            "(SELECT rowid FROM rec_mood ORDER BY created_at DESC, rowid DESC LIMIT ?)",
+            (rec_params.MOOD_EVENT_CAP,))
         self.conn.commit()
 
     @synchronized
-    def active_mood(self, now, window_h=8) -> list:
-        """Recent mood events within the window: [(created_at, direction, [keys])]. Older events have
-        already decayed to nothing, so they're dropped (and pruned) rather than returned."""
-        cutoff = now - window_h * 3600
-        self.conn.execute("DELETE FROM rec_mood WHERE created_at < ?", (cutoff,))
-        self.conn.commit()
+    def recent_mood_events(self, limit=None) -> list:
+        """Recent mood events, newest-first: [(created_at, direction, [keys])]. Persistent — recency is
+        the caller's concern (interaction-rank weighting), not a time window."""
+        limit = rec_params.MOOD_EVENT_CAP if limit is None else limit
         return [(r["created_at"], r["direction"], json.loads(r["keys"]))
                 for r in self.conn.execute(
-                    "SELECT created_at, direction, keys FROM rec_mood WHERE created_at >= ?", (cutoff,))]
+                    "SELECT created_at, direction, keys FROM rec_mood "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,))]
+
+    def active_mood(self, now, window_h=8) -> list:
+        """Deprecated alias for recent_mood_events() — retained for callers not yet updated to the
+        persistent API. Time-window args are ignored; all stored events are returned newest-first."""
+        return self.recent_mood_events()
 
     # --- per-card rotation (the rec_impressions table, surface='card') ---
     @synchronized
@@ -140,3 +154,23 @@ class RecSurfaceRepo(Repo):
             "ON CONFLICT(artist) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
             (artist, json.dumps(pairs), now))
         self.conn.commit()
+
+    # --- graduation ledger (interaction-driven; no wall-clock decay) ---
+    @synchronized
+    def bump_theme(self, facet, contribution, now) -> float:
+        self.conn.execute(
+            "INSERT INTO rec_theme(facet, score, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(facet) DO UPDATE SET score = score + excluded.score, updated_at = excluded.updated_at",
+            (facet, contribution, now))
+        self.conn.commit()
+        return self.conn.execute("SELECT score FROM rec_theme WHERE facet=?", (facet,)).fetchone()["score"]
+
+    @synchronized
+    def discount_theme(self, facet, amount) -> None:
+        self.conn.execute("UPDATE rec_theme SET score = score - ? WHERE facet=?", (amount, facet))
+        self.conn.commit()
+
+    @synchronized
+    def get_theme(self, facet):
+        row = self.conn.execute("SELECT score FROM rec_theme WHERE facet=?", (facet,)).fetchone()
+        return row["score"] if row else None

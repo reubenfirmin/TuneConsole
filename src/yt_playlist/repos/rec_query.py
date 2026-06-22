@@ -135,6 +135,47 @@ class RecQueryRepo(Repo):
                          "video_id": r["vid"], "thumbnail": r["thumb"]} for r in rows}
 
     @synchronized
+    def cluster_search(self, q, limit=8) -> list[dict]:
+        """Autosuggest seeds for the Clusters canvas. Up to `limit` results per kind, each a dict
+        {kind, label, sub, keys}: an artist (all their modelled tracks), a playlist (its modelled
+        tracks, excluding the quarantined Generated group), or a single song. Only vector-backed
+        identity_keys are returned — a seed with no vector adds nothing to a node's centroid."""
+        q = (q or "").strip()
+        if not q:
+            return []
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        out = []
+        for r in self.conn.execute(
+                "SELECT t.artist label, COUNT(DISTINCT t.identity_key) n, "
+                "       GROUP_CONCAT(DISTINCT t.identity_key) keys "
+                "FROM tracks t JOIN rec_vectors rv ON rv.identity_key=t.identity_key "
+                "WHERE t.artist LIKE ? ESCAPE '\\' AND t.artist<>'' "
+                "GROUP BY t.artist ORDER BY n DESC LIMIT ?", (like, limit)):
+            out.append({"kind": "artist", "label": r["label"],
+                        "sub": f"{r['n']} track" + ("" if r["n"] == 1 else "s"),
+                        "keys": r["keys"].split(",")})
+        for r in self.conn.execute(
+                "SELECT p.title label, COUNT(DISTINCT t.identity_key) n, "
+                "       GROUP_CONCAT(DISTINCT t.identity_key) keys "
+                "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
+                "JOIN tracks t ON t.id=pt.track_id "
+                "JOIN rec_vectors rv ON rv.identity_key=t.identity_key "
+                "LEFT JOIN playlist_group g ON g.ytm=p.ytm_playlist_id "
+                "WHERE p.title LIKE ? ESCAPE '\\' AND (g.name IS NULL OR g.name<>?) "
+                "GROUP BY p.id ORDER BY n DESC LIMIT ?", (like, GENERATED_GROUP, limit)):
+            out.append({"kind": "playlist", "label": r["label"],
+                        "sub": f"{r['n']} track" + ("" if r["n"] == 1 else "s"),
+                        "keys": r["keys"].split(",")})
+        for r in self.conn.execute(
+                "SELECT MIN(t.title) title, MIN(t.artist) artist, t.identity_key key "
+                "FROM tracks t JOIN rec_vectors rv ON rv.identity_key=t.identity_key "
+                "WHERE t.title LIKE ? ESCAPE '\\' GROUP BY t.identity_key "
+                "ORDER BY MIN(t.title) LIMIT ?", (like, limit)):
+            out.append({"kind": "song", "label": r["title"], "sub": r["artist"],
+                        "keys": [r["key"]]})
+        return out
+
+    @synchronized
     def top_played_keys(self, limit=10) -> list[str]:
         """Identity keys of your most-played songs (for seeding taste-neighbourhood recs)."""
         rows = self.conn.execute(

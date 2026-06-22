@@ -1,9 +1,6 @@
 """Regression tests for the deep-dive review fixes."""
-import time
-
 import pytest
 
-from yt_playlist import analysis
 from yt_playlist.matching import identity_key, normalize
 
 
@@ -35,12 +32,3 @@ def test_set_weight_clamps(store):
     assert store.get_weights()["lane:deep_cut"] == 0.2          # floored, not 0 (would disable the lane)
     store.rec.set_weight("lane:explore", 99.0)
     assert store.get_weights()["lane:explore"] == 3.0           # capped
-
-
-# --- #15 find_stale excludes undeletable system playlists ---
-def test_find_stale_excludes_system_playlists(store):
-    iid = store.upsert_identity("me", "c", None, True)
-    store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)   # system — must not appear
-    store.upsert_playlist(iid, "P1", "Normal", 1, "h", 1.0)
-    ytms = {f.playlist.ytm_playlist_id for f in analysis.find_stale(store, now=time.time())}
-    assert "LM" not in ytms and "P1" in ytms

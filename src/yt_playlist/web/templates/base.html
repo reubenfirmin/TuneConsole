@@ -24,7 +24,7 @@
       <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
       <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
       <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
-      <a href="/discover" class="{{ 'active' if path.startswith('/discover') else '' }}">Rediscover</a>
+      <a href="/clusters" class="{{ 'active' if path.startswith('/clusters') else '' }}">Clusters</a>
       <div class="tools-menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
         <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"
                 @click="open = !open" :aria-expanded="open">Tools <span class="caret" :class="{ up: open }">▾</span></button>
@@ -41,7 +41,7 @@
   </header>
   <div class="authbar" x-data='authBanner({{ (auth_expired.values()|list)|tojson }})'
        x-show="labels.length && !dismissed" x-cloak @auth-expired.window="add($event.detail.label)">
-    <span class="authbar-body">⚠ YouTube session expired for <strong x-text="labels.join(', ')"></strong> —
+    <span class="authbar-body">⚠ YouTube session expired for <strong x-text="labels.join(', ')"></strong> -
       its data is stale until you reconnect. <a href="/setup">Re-authenticate →</a></span>
     <button type="button" class="authbar-x" @click="dismissed = true" title="Dismiss" aria-label="Dismiss">×</button>
   </div>
