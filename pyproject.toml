@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Local web tool to dedupe, merge, and prune YouTube Music playlists across identities"
 requires-python = ">=3.10"
 dependencies = [
-    "ytmusicapi>=1.12",
+    # Major-capped: the egress guard (yt_playlist.egress) patches the requests/urllib
+    # contract, not ytmusicapi internals, so the security guarantee survives upgrades —
+    # but we cap the major for reproducibility and to review breaking changes deliberately.
+    "ytmusicapi>=1.12,<2",
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "jinja2>=3.1",

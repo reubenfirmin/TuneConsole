@@ -8,8 +8,8 @@
 </div>
 
 {% if identities|length < 2 %}
-  <div class="card"><p class="muted" style="margin:0">You need at least two identities —
-    add another in <a href="/setup">Setup</a>.</p></div>
+  <div class="card"><p class="muted" style="margin:0">You need at least two identities.
+    Add another in <a href="/setup">Setup</a>.</p></div>
 {% else %}
 <div x-data='moveTab({{ identities[0].id }}, {{ identities[1].id }})'>
   <div class="card" style="margin-bottom:1.2rem">

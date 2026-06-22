@@ -6,7 +6,7 @@
   <div class="modal modal-similar" @click.stop x-transition.scale.origin.center>
     <h3>Songs like &ldquo;{{ seed.title or 'this track' }}&rdquo;</h3>
     {% if items %}
-    <p class="section-note">Nearest in your taste space — including tracks that share no playlist with it.{% if pid %}
+    <p class="section-note">Nearest in your taste space, including tracks that share no playlist with it.{% if pid %}
       Pick any to add just below this track.{% endif %}</p>
     <div id="similar-results">
       {% if pid %}<input type="hidden" name="after_video_id" value="{{ seed_vid }}">{% endif %}
@@ -29,10 +29,10 @@
       </div>
     </div>
     {% elif not have_model %}
-    <p class="section-note">No taste model yet — build it from the Sync button or the Taste Model page.</p>
+    <p class="section-note">No taste model yet. Build it from the Sync button or the Taste Model page.</p>
     {% else %}
-    <p class="section-note">Couldn't place &ldquo;{{ seed.title or 'this track' }}&rdquo; in your taste space yet —
-      it's likely brand new or set aside (a saved-album or generated track not folded in yet).
+    <p class="section-note">Couldn't place &ldquo;{{ seed.title or 'this track' }}&rdquo; in your taste space yet.
+      It's likely brand new or set aside (a saved-album or generated track not folded in yet).
       Re-sync, then <a href="/taste">Rebuild the model</a> to include it.</p>
     {% endif %}
     <div class="modal-actions">

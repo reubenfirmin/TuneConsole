@@ -72,6 +72,15 @@ class Runtime:
         """Live-verify a capture and return the signed-in account name (raises ValueError)."""
         return verify_capture(capture)[1]
 
+    def sign_out(self) -> None:
+        """Delete the saved sign-in (the local credential file) and reload.
+
+        Only drops the captured cookies — the identity config stays put so re-signing in just
+        means pasting a fresh capture. With no credential, load() leaves the runtime unconfigured.
+        """
+        (self.creds_dir / BROWSER_CREDENTIAL_FILENAME).unlink(missing_ok=True)
+        self.load()
+
     def apply_setup(self, capture, identities) -> None:
         """Validate input, write credential + config, then reload. Raises ValueError on bad input.
 

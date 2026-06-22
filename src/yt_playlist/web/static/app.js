@@ -402,7 +402,7 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
         // replays events idempotently and sends 'end' once the job finishes — so a successful
         // background job no longer looks failed. Give up only after several consecutive failures.
         this.status = 'Reconnecting…';
-        if (++errs >= 5) { es.close(); this.running = false; this.status = 'Stream interrupted — reload to check.'; }
+        if (++errs >= 5) { es.close(); this.running = false; this.status = 'Stream interrupted. Reload to check.'; }
       };
     },
     // The SSE event carries the server-rendered row HTML (same partial as a manual edit), so we just
@@ -437,7 +437,8 @@ function syncPanel(autoOn = false) {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'enabled=' + (next ? '1' : '0'),
         });
-      } catch (e) { this.auto = !next; }   // revert if the server didn't take it
+      } catch (e) { this.auto = !next; return; }   // revert if the server didn't take it
+      if (next) this.start('/sync/plays');   // turning it on also runs an immediate live sync, as before
     },
     push(ev) {
       const bad = ev.type === 'err' || ev.type === 'auth_expired';
@@ -468,7 +469,7 @@ function syncPanel(autoOn = false) {
             this.push({ type: 'done', text: 'reloading…' });
             setTimeout(() => location.reload(), 700);
           } else {
-            this.push({ type: 'err', text: 'finished with errors — log kept open. Reload when ready.' });
+            this.push({ type: 'err', text: 'finished with errors. Log kept open. Reload when ready.' });
           }
           return;
         }

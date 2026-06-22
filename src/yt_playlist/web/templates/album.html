@@ -3,8 +3,8 @@
 <div class="page-head">
   <span class="eyebrow">Album</span>
   <h1>Album unavailable</h1>
-  <p>Couldn't load this album{% if browse_id %} —
-    <a href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">open it on YouTube Music ↗</a>{% endif %}.
+  <p>Couldn't load this album.{% if browse_id %}
+    <a href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">Open it on YouTube Music ↗</a>.{% endif %}
     A connected account is required to fetch album details.</p>
 </div>
 {% else %}
@@ -38,7 +38,7 @@
      you save it — so the icons are always shown (parity with playlists) but disabled until saved. #}
   <div class="head-tools{% if enrich_hint %} enrich-hint{% endif %}">
     <a class="head-icon" href="/album/{{ browse_id }}/share.txt" download="{{ album.title }}.txt"
-       title="Share — download one song URL per line as a .txt" aria-label="Share album">
+       title="Share: download one song URL per line as a .txt" aria-label="Share album">
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
@@ -160,7 +160,7 @@
        @click="keyModal = false" @keydown.escape.window="keyModal = false">
     <div class="modal" @click.stop x-transition.scale.origin.center>
       <h3>Last.fm API key</h3>
-      <p>Last.fm has dense genre tags. Enrichment needs a free API key — create one at
+      <p>Last.fm has dense genre tags. Enrichment needs a free API key. Create one at
          <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>
          and paste the <strong>API key</strong> here. It's stored locally.</p>
       <input class="modal-input" type="text" x-model="keyValue" placeholder="API key"

@@ -91,7 +91,7 @@
         <th class="sorth num" style="width:6rem" @click="sortBy('last')"
             title="Most recent time a song from this playlist showed up in your play history">Last<span x-text="ind('last')"></span></th>
         <th class="sorth num" style="width:5rem" @click="sortBy('listens')"
-            title="Total plays of this playlist's songs across your sync history — sums per-song plays, so big playlists score high. Not playlist-level plays.">Plays<span x-text="ind('listens')"></span></th>
+            title="Total plays of this playlist's songs across your sync history. Sums per-song plays, so big playlists score high. Not playlist-level plays.">Plays<span x-text="ind('listens')"></span></th>
       </tr></thead>
       <template x-for="sec in sections()" :key="sec.name">
         <tbody>
@@ -99,7 +99,7 @@
           <template x-for="r in sec.rows" :key="r.id">{{ pl_row() }}</template>
         </tbody>
       </template>
-      <tbody x-show="rows.length === 0"><tr><td colspan="7" class="empty">No playlists yet — sync first.</td></tr></tbody>
+      <tbody x-show="rows.length === 0"><tr><td colspan="7" class="empty">No playlists yet. Sync first.</td></tr></tbody>
     </table>
   </div>
 

@@ -183,6 +183,14 @@ class RecQueryRepo(Repo):
             "ORDER BY c DESC LIMIT ?", (limit,)).fetchall()
         return [r["k"] for r in rows]
 
+    @synchronized
+    def play_counts(self) -> dict:
+        """{identity_key: total play count} from listening history. A key absent from the map has
+        never been played (count 0) — the primary signal for the Catalog card (your under-played
+        catalog)."""
+        return {r["identity_key"]: r["c"] for r in self.conn.execute(
+            "SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key")}
+
     # --- genre distributions / adjacency ---
     @synchronized
     def genre_distribution(self) -> dict:

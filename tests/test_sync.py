@@ -45,6 +45,18 @@ def test_sync_all_records_last_sync_at(store):
     assert store.get_setting("last_sync_at") == "1234.0"
 
 
+def test_sync_status_uses_most_recent_of_either_sync(store):
+    """The 'Last synced' badge reflects the most recent sync of either kind — a recent plays/auto sync
+    must not be eclipsed by an older full sync (and resets staleness too)."""
+    from yt_playlist.recommend import sync_status
+    now = 100_000.0
+    store.set_setting("last_sync_at", str(now - 17 * 3600))        # full sync 17h ago
+    store.set_setting("last_plays_sync_at", str(now - 2 * 3600))   # plays synced 2h ago
+    st = sync_status(store, now)
+    assert st.last_synced_ago == "2 hours ago"   # not "17 hours ago"
+    assert st.stale is False and st.message is None
+
+
 def test_content_hash_is_order_independent():
     assert content_hash(["a", "b"]) == content_hash(["b", "a"])
     assert content_hash(["a", "b"]) != content_hash(["a", "c"])

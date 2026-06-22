@@ -11,8 +11,8 @@
     <span x-show="!running">Full sync</span>
     <span x-show="running" style="display:none"><span class="spinner"></span>&nbsp;Syncing…</span>
   </button>
-  <div class="sync-panel" x-show="running || lines.length || auto" style="display:none; margin-top:1rem">
-    <p class="sync-note" x-show="auto">Will re-sync plays automatically every 30 mins</p>
+  <span class="sync-note" x-show="auto" style="display:none">Will re-sync plays automatically every 30 mins</span>
+  <div class="sync-panel" x-show="running || lines.length" style="display:none; margin-top:1rem">
     <div class="bar" x-show="running"><i></i></div>
     <div class="sync-log" x-ref="log">
       <template x-for="(ln, i) in lines" :key="i">

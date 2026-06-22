@@ -174,10 +174,10 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
                 on_progress({"type": "info", "text": "Stopped."})
                 return
             _gate.wait_turn(seq, on_wait=lambda: on_progress(
-                {"type": "info", "text": "Waiting — a newer playlist is enriching first…"}))
+                {"type": "info", "text": "Waiting: a newer playlist is enriching first…"}))
             genre, year = enrich_fn(t["title"], t["artist"])
             if _breaker.tripped():         # host unreachable — the rest would all fail too, so stop
-                on_progress({"type": "err", "text": "MusicBrainz looks unreachable — stopped. "
+                on_progress({"type": "err", "text": "MusicBrainz looks unreachable; enrichment stopped. "
                              "The remaining tracks will retry next time."})
                 return
             store.set_track_enrichment(t["id"], genre, year)

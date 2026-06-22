@@ -58,10 +58,15 @@ def build(ctx) -> APIRouter:
         # epoch advances (every erosion_view_cap real Home visits). The epoch is read here, never
         # ticked — the tick happens only in GET /, so steer/stance previews re-render the same slice
         # and tuning your taste model never churns the cards.
-        fy_pool = recommend.for_you(store, now, limit=ROTATION_POOL)
+        # HOME CARD MAP (heading <- function): Wheelhouse <- for_you, Catalog <- explore_for_you,
+        # Comfort <- comfort_listening, Fresh <- fresh_songs. Catalog ('ex_pool') is DEDUPED against
+        # the Wheelhouse pool below, so the two cards never show the same track — but note both rank
+        # off the same taste×transient score, so Catalog is currently "Wheelhouse's leftovers by
+        # under-played artists" rather than a distinct novelty signal (a known differentiation gap).
+        fy_pool = recommend.for_you(store, now, limit=ROTATION_POOL)            # Wheelhouse pool
         fy_keys = {i.key for i in fy_pool}
-        ex_pool = [i for i in recommend.explore_for_you(store, now, limit=ROTATION_POOL)
-                   if i.key not in fy_keys]
+        ex_pool = [i for i in recommend.explore_for_you(store, now, limit=ROTATION_POOL)  # Catalog pool
+                   if i.key not in fy_keys]                                     # deduped vs Wheelhouse
         wheel_items = recommend.rotate_sample(fy_pool, PROTO_SIZE, _epoch(store, "wheelhouse"))
         catalog_items = recommend.rotate_sample(ex_pool, PROTO_SIZE, _epoch(store, "explore"))
         # Comfort Listening: a fixed 4th card, kept out of the stance reordering. Dedup against what

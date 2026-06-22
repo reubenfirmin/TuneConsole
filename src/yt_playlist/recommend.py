@@ -325,6 +325,9 @@ def rotate_page(items, size, epoch):
     return [items[(start + i) % n] for i in range(min(size, n))]
 
 
+# HOME CARD: "Wheelhouse" ("More in your wheelhouse") — deeper into what you already love.
+# Internal lanes here are 'neighbourhood' + 'deep_cut'. When naming new code/vars, prefer the home
+# heading "wheelhouse" over the legacy function name "for_you".
 def for_you(store, now, limit=24) -> list[ForYouItem]:
     """Blended local recommendations from your taste model, interleaved and deduped, best-ranked
     first. Returns a deep, ranked pool; per-card rotation (a random epoch-seeded slice) happens at
@@ -399,6 +402,7 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
     return out
 
 
+# HOME CARD: "Comfort" ("Comfort listening") — most-played favourites that have gone quiet.
 def comfort_listening(store, now, limit=24) -> list[ForYouItem]:
     """High-rotation favorites you haven't reached for lately — your comfort listening.
 
@@ -595,6 +599,7 @@ def new_albums_from_favorites(ctx, limit_artists=10, limit=18) -> list[dict]:
     return out
 
 
+# HOME CARD: "Fresh" ("Fresh songs") — tracks NOT in your collection yet (outward discovery).
 def fresh_songs(ctx, limit=12) -> list[dict]:
     """Outward (Phase 2): songs from YTM radios seeded by your top tracks that you don't own.
 
@@ -683,33 +688,46 @@ def graduate_moods(store, keys, signed, now) -> None:
             store.discount_theme(axis, math.copysign(rec_params.THEME_THRESHOLD, score))
 
 
+# HOME CARD: "Catalog" ("From your catalog") — own-but-under-played tracks, the edge of your palette.
+# This powers the Catalog card, NOT a separate "Explore" surface; the internal lane name 'explore' is
+# the source of the naming confusion. The home page dedups this pool against the Wheelhouse pool
+# (see web/routes/home.py), so Catalog displays only what Wheelhouse didn't. When naming new
+# code/vars, prefer the home heading "catalog" over "explore".
 def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
-    """The 'try something new' lane: tracks near your taste but novel — sitting close to your
-    centroid yet by artists you *don't* play much. The edge of your palette, not the centre.
-    Empty until the embedding model is built. Spec §5.4/§5.5.
+    """Catalog: your OWN under-played tracks, surfaced primarily by LACK OF PLAYS and *weighted*
+    (never filtered) by the taste model. So a never-played track that fits your taste tops the card,
+    an off-taste never-played track still appears (just lower), and a heavily-played track stays low
+    no matter how well it fits — that's the Wheelhouse's job, not Catalog's. Empty until the
+    embedding model is built. Distinct from Wheelhouse by signal (plays vs taste), not by a filter.
     """
     pt = playlist_taste(store)
     if not pt:
         return []
     keys, V, idx = embed.load_vectors(store)
-    scores = _apply_mood(pt.score_all(V), store, now, V, idx)   # taste fit, tilted by current mood
+    if V is None:
+        return []
+    # taste WEIGHT (taste-fit + transient mood + permanent×transient facets) — modulates, never filters
+    scores = _apply_mood(pt.score_all(V), store, now, V, idx)
     sims = _apply_axis_weights(store, {keys[i]: float(scores[i]) for i in range(len(keys))}, now)
-    scores = np.array([sims[keys[i]] for i in range(len(keys))])   # × permanent weights × transient facet leans
-    order = np.argsort(-scores)
-    familiar = {a["artist"] for a in store.top_artists(rec_params.get_param(store, "explore_top_artists"))}
+    smin = min(sims.values()) if sims else 0.0
+    plays = store.play_counts()                                  # {key: count}; absent = never played
+    # Catalog score = novelty(lack of plays, PRIMARY) × taste-fit weight (shifted positive so it only
+    # ever scales, never zeroes — "weighted, not filtered").
+    scored = {k: (1.0 / (1.0 + plays.get(k, 0))) * (sims.get(k, smin) - smin + 1e-6) for k in keys}
+    order = sorted(scored, key=lambda k: -scored[k])
     dao = RecDao(store)
-    suppressed = (store.suppressed_keys("for_you", now)
-                  | dao.generated_track_keys())                 # don't re-offer saved-proto tracks
+    suppressed = store.suppressed_keys("for_you", now) | dao.generated_track_keys()
     muted = store.muted_artists()
-    cand = [keys[i] for i in order[:limit * 12]]
-    meta = store.tracks_by_keys(cand)
+    meta = store.tracks_by_keys(order[:limit * 8])
     out: list[ForYouItem] = []
-    for k in cand:
+    for k in order[:limit * 8]:
         m = meta.get(k)
-        if not m or k in suppressed or m["artist"] in muted or m["artist"] in familiar:
+        if not m or k in suppressed or m["artist"] in muted:
             continue
+        p = plays.get(k, 0)
+        reason = "Never played — sits near your taste" if p == 0 else f"Barely played ({p}×) — worth another spin"
         out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"], m["thumbnail"],
-                              0, "New to you - sits near your taste", k, "explore"))
+                              p, reason, k, "explore"))
         if len(out) >= limit:
             break
     return out
@@ -787,16 +805,20 @@ class SyncStatus:
 
 
 def sync_status(store, now) -> SyncStatus:
-    last = store.get_setting("last_sync_at")
-    if last is None:
+    # "Last synced" reflects the most recent sync of EITHER kind: a quick plays/auto sync keeps your
+    # plays current just as a full sync does, so the badge must not claim you synced longer ago than
+    # you actually did. Staleness rides the same most-recent stamp — recent plays = not stale.
+    stamps = [float(s) for s in (store.get_setting("last_sync_at"),
+                                 store.get_setting("last_plays_sync_at")) if s is not None]
+    if not stamps:
         return SyncStatus(None, True, "Sync to pull in your library and recommendations.")
-    age = now - float(last)
+    age = now - max(stamps)
     if age > SYNC_STALE_S:
         if age > SYNC_STALE_S + rec_params.STALE_DECAY_HALFLIFE_D * 86400:
             return SyncStatus(_ago(age), True,
-                              f"We haven't seen your plays in {_ago(age)} — your recommendations are "
+                              f"We haven't seen your plays in {_ago(age)}. Your recommendations are "
                               "drifting. Sync now.", urgent=True)
-        return SyncStatus(_ago(age), True, "It's been a while — sync to refresh.")
+        return SyncStatus(_ago(age), True, "It's been a while. Sync to refresh.")
     return SyncStatus(_ago(age), False, None)
 
 

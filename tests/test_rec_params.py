@@ -10,7 +10,7 @@ from yt_playlist.recommend import genre_adjusted_scores
 def test_unset_param_returns_registry_default(store):
     # nothing stored -> the spec default, not None
     assert rec_params.get_param(store, "comfort_recency_full_days") == 30
-    assert rec_params.get_param(store, "explore_top_artists") == 25
+    assert rec_params.get_param(store, "comfort_min_plays") == 4
 
 
 def test_set_and_get_param_round_trips(store):
@@ -32,17 +32,17 @@ def test_param_is_clamped_to_spec_range(store):
 
 
 def test_reset_param_restores_default(store):
-    rec_params.set_param(store, "explore_top_artists", 5)
-    rec_params.reset_param(store, "explore_top_artists")
-    assert rec_params.get_param(store, "explore_top_artists") == 25
+    rec_params.set_param(store, "comfort_min_plays", 5)
+    rec_params.reset_param(store, "comfort_min_plays")
+    assert rec_params.get_param(store, "comfort_min_plays") == 4
 
 
 def test_reset_all_params_restores_every_default(store):
     rec_params.set_param(store, "comfort_recency_full_days", 14)
-    rec_params.set_param(store, "explore_top_artists", 1)
+    rec_params.set_param(store, "comfort_min_plays", 1)
     rec_params.reset_all_params(store)
     assert rec_params.get_param(store, "comfort_recency_full_days") == 30
-    assert rec_params.get_param(store, "explore_top_artists") == 25
+    assert rec_params.get_param(store, "comfort_min_plays") == 4
 
 
 def test_unknown_param_raises(store):

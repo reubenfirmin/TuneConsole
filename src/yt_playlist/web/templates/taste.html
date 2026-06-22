@@ -2,9 +2,9 @@
 <div class="page-head">
   <span class="eyebrow">Tools</span>
   <h1>Taste Model</h1>
-  <p>Your recommender's control room. Every number here is built from your own library — nothing comes
+  <p>Your recommender's control room. Every number here is built from your own library. Nothing comes
      from outside. The <strong>track vectors</strong> below underlie <em>every</em> recommendation surface
-     (For You, Explore, Discover, "more like this"). The <strong>knobs</strong>, however, are narrower —
+     (For You, Explore, Discover, "more like this"). The <strong>knobs</strong>, however, are narrower;
      each section says exactly what it touches. Changes apply immediately; the live sample recomputes when
      you click <em>Refresh</em>. Start over any time with one button:</p>
   <div class="pl-actions">
@@ -66,7 +66,7 @@
 </div>
 
 <h2 class="section">Genre families <span class="scope-tag">For You only</span></h2>
-<p class="section-note">Each knob multiplies the taste-match score of every track in that family when ranking the <strong>For You</strong> feed (and nothing else): 1.0 = neutral, 0 mutes the family (sinks to the bottom), 2 doubles its scores (floats to the top). The % is that family's share of your listening — shown for context only; it does not set the knob.</p>
+<p class="section-note">Each knob multiplies the taste-match score of every track in that family when ranking the <strong>For You</strong> feed (and nothing else): 1.0 = neutral, 0 mutes the family (sinks to the bottom), 2 doubles its scores (floats to the top). The % is that family's share of your listening, shown for context only; it does not set the knob.</p>
 <div class="card knob-list">
   {% for g in genres[:20] %}
   <div class="knob">
@@ -83,12 +83,12 @@
            oninput="updateOut(this)">
   </div>
   {% else %}
-  <p class="section-note">No genre tags yet — enrich your library to unlock per-genre controls.</p>
+  <p class="section-note">No genre tags yet. Enrich your library to unlock per-genre controls.</p>
   {% endfor %}
 </div>
 
 <h2 class="section">Discovery &amp; timing <span class="scope-tag">For You + Explore</span></h2>
-<p class="section-note">When and how candidates are surfaced in the <strong>For You</strong> and <strong>Explore</strong> feeds. (The outward <em>Discover</em> page — new artists/albums — uses your vectors but ignores these knobs.) Defaults are sensible; nudge to reshape what those two feeds dig up.</p>
+<p class="section-note">When and how candidates are surfaced in the <strong>For You</strong> and <strong>Explore</strong> feeds. (The outward <em>Discover</em> page, for new artists/albums, uses your vectors but ignores these knobs.) Defaults are sensible; nudge to reshape what those two feeds dig up.</p>
 <div class="card knob-list">
   {% for p in params %}{% include "_partials/taste_knob.html" %}{% endfor %}
   <details class="advanced">

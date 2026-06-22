@@ -8,8 +8,8 @@ def test_transient_constants_present():
     assert rec_params.PLAY_TRANSIENT_W == 0.30
     assert rec_params.DISLIKE_TRANSIENT_W == 1.50
     assert rec_params.RECENT_PLAY_LIMIT == 50
-    assert rec_params.FACET_GAIN == 0.6
-    assert rec_params.FACET_MULT_MIN == 0.1 and rec_params.FACET_MULT_MAX == 2.5
+    assert rec_params.FACET_GAIN == 0.35
+    assert rec_params.FACET_MULT_MIN == 0.35 and rec_params.FACET_MULT_MAX == 2.5
     assert rec_params.DISLIKE_SUPPRESS_DAYS == 365
     assert rec_params.THEME_THRESHOLD == 1.2
     assert rec_params.GRADUATE_UP == 1.05 and rec_params.GRADUATE_DOWN == 0.95

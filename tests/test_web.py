@@ -124,6 +124,10 @@ class _FakeRuntime:
             raise ValueError(self.raise_value_error)
         self.applied = (headers_raw, identities)
         self._configured = True
+    def sign_out(self):
+        self.signed_out = True
+        self.credentials_present = False
+        self._configured = False
 
 def test_unconfigured_redirects_to_setup(store):
     rt = _FakeRuntime(store, configured=False)
@@ -177,6 +181,48 @@ def test_setup_post_without_collaborator_404(store):
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     assert c.post("/setup", data={"label": "x"}).status_code == 404
+
+def test_signout_button_shows_only_with_credentials(store):
+    app = create_app(store, _FakeRuntime(store, credentials_present=True).clients,
+                      now_fn=lambda: 1.0, setup=_FakeRuntime(store, credentials_present=True))
+    c = TestClient(app, base_url="http://127.0.0.1")
+    assert "/setup/signout" in c.get("/setup").text
+    rt = _FakeRuntime(store, credentials_present=False)
+    app2 = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
+    assert "/setup/signout" not in TestClient(app2, base_url="http://127.0.0.1").get("/setup").text
+
+def test_signout_deletes_credential_and_redirects(store):
+    rt = _FakeRuntime(store, configured=True, credentials_present=True)
+    app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    r = c.post("/setup/signout", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith("/setup?flash=")
+    assert rt.signed_out is True
+
+def test_signout_without_collaborator_404(store):
+    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    assert c.post("/setup/signout").status_code == 404
+
+# --- network transparency page ---
+
+def test_network_page_renders_allowlist(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))   # keep the lazy guard's log off the real FS
+    rt = _FakeRuntime(store, configured=True, credentials_present=True)
+    app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    r = c.get("/network")
+    assert r.status_code == 200
+    for host in ("youtube.com", "musicbrainz.org", "discogs.com", "audioscrobbler.com"):
+        assert host in r.text
+
+def test_network_log_line_parser():
+    from yt_playlist.web.routes.network import _parse
+    row = _parse("2026-06-22 11:00:00,123 verdict=BLOCK via=requests method=POST "
+                 "host=evil.example.com path=/exfil status=None bytes=None")
+    assert row["ts"] == "2026-06-22 11:00:00,123"
+    assert row["verdict"] == "BLOCK" and row["host"] == "evil.example.com"
+    assert row["method"] == "POST" and row["path"] == "/exfil"
 
 
 # --- vendored front-end assets (no third-party CDN at runtime) ---

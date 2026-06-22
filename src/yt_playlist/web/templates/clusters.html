@@ -4,7 +4,7 @@
   <span class="eyebrow">Clusters</span>
   <h1>Build a playlist by exploring your taste</h1>
   <p>Clusters needs your taste model, and it isn't built yet. Sync your library and let the
-     recommendation model build (the Home page shows its progress), then come back — you'll be able to
+     recommendation model build (the Home page shows its progress), then come back. You'll be able to
      seed a cluster and grow it into a playlist.</p>
 </div>
 {% else %}
@@ -66,10 +66,10 @@
             <button type="button" class="cn-btn play" x-show="n.vid && n.state !== 'pruned'" @click="play(n)"
                     title="Play on YouTube Music">▶</button>
             <button type="button" class="cn-btn grow" x-show="n.state !== 'pruned'" @click="grow(n.id)"
-                    title="Grow — add a ring of nearby tracks">＋</button>
+                    title="Grow: add a ring of nearby tracks">＋</button>
             <button type="button" class="cn-btn prune" x-show="n.kind === 'track'"
                     :class="{ on: n.state === 'pruned' }" @click="prune(n.id)"
-                    title="Prune — remove and push this branch away">✕</button>
+                    title="Prune: remove and push this branch away">✕</button>
           </div>
         </div>
       </template>

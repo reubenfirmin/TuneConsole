@@ -17,6 +17,7 @@ def build(ctx) -> APIRouter:
             "rows": rows, "master_idx": master_idx, "error": error,
             "configured": (setup.configured if setup else True),
             "has_credentials": bool(setup and setup.credentials_present),
+            "flash": request.query_params.get("flash"),
         }, status_code=status_code)
 
     @router.get("/setup")
@@ -46,6 +47,17 @@ def build(ctx) -> APIRouter:
         resp = templates.TemplateResponse(request, "_partials/setup_check.html", {"account": account})
         resp.headers["HX-Trigger"] = json.dumps({"setup-checked": {"ok": True, "account": account}})
         return resp
+
+    @router.post("/setup/signout")
+    def setup_signout(request: Request):
+        # Sign out = delete the locally-saved sign-in (cookies). Identity config is kept so
+        # re-signing in just means pasting a fresh capture.
+        if setup is None:
+            raise HTTPException(status_code=404, detail="setup not available")
+        setup.sign_out()
+        ctx.auth_expired.clear()
+        return RedirectResponse(f"/setup?flash={quote('Signed out — your saved sign-in was deleted.')}",
+                                status_code=303)
 
     @router.post("/setup")
     async def setup_submit(request: Request):

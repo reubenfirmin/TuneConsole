@@ -53,6 +53,10 @@ def parse_args(argv=None):
 def build_app():
     """Construct the ASGI app from on-disk config. Importable so uvicorn --reload can re-import it."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    # Install the egress guard before anything can make a network call: from here on every
+    # server-side HTTP request is allowlisted and logged (see yt_playlist.egress, read at /network).
+    from yt_playlist import egress
+    egress.install()
     store = Store(paths.db_path())
     store.init_schema()
     config_path = paths.config_path()

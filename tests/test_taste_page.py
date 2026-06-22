@@ -85,18 +85,18 @@ def test_taste_genre_weight_uses_genre_band(store):
 
 def test_taste_reset_param_restores_default(store):
     c = _client(store)
-    rec_params.set_param(store, "explore_top_artists", 3)
-    assert c.post("/taste/reset-param", data={"name": "explore_top_artists"}).status_code == 200
-    assert rec_params.get_param(store, "explore_top_artists") == 25
+    rec_params.set_param(store, "comfort_min_plays", 3)
+    assert c.post("/taste/reset-param", data={"name": "comfort_min_plays"}).status_code == 200
+    assert rec_params.get_param(store, "comfort_min_plays") == 4
 
 
 def test_taste_reset_all_clears_weights_and_params(store):
     c = _client(store)
     store.set_weight("lane:deep_cut", 0.5)
-    rec_params.set_param(store, "explore_top_artists", 3)
+    rec_params.set_param(store, "comfort_min_plays", 3)
     assert c.post("/taste/reset-all").status_code == 200
     assert store.get_weights() == {}
-    assert rec_params.get_param(store, "explore_top_artists") == 25
+    assert rec_params.get_param(store, "comfort_min_plays") == 4
 
 
 def test_taste_preview_renders_without_recs(store):

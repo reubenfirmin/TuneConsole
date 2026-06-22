@@ -374,6 +374,10 @@ ol.steps > li::before {
 .muted { color: var(--dim); }
 .empty { color: var(--faint); font-style: italic; padding: 1rem 0; }
 
+/* Sync controls sit in a centered flex row; the progress panel wraps to its own full-width line. */
+.sync-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem; }
+.sync-bar .sync-panel { flex-basis: 100%; }
+
 /* ---- "Sync plays" auto-sync toggle: a pill with a sliding switch, lit when on ---- */
 .sync-toggle { display: inline-flex; align-items: center; gap: 0.55rem;
   background: transparent; color: var(--text); border: 1px solid var(--border-2);
@@ -387,7 +391,7 @@ ol.steps > li::before {
 .sync-toggle.on { border-color: var(--accent); color: var(--text); }
 .sync-toggle.on .sync-toggle-track { background: var(--accent); }
 .sync-toggle.on .sync-toggle-thumb { transform: translateX(0.9rem); background: #fff; }
-.sync-note { color: var(--accent-2); font-size: 0.86rem; font-weight: 600; margin: 0 0 0.2rem; }
+.sync-note { color: var(--accent-2); font-size: 0.86rem; font-weight: 600; margin: 0; }
 
 /* ---- sync progress console ---- */
 .sync-panel { margin: 1rem 0 1.6rem; }
@@ -576,6 +580,8 @@ td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
   gap: 0.7rem; margin-top: 1.4rem; padding: 1rem 0 0.2rem;
   background: linear-gradient(0deg, var(--bg) 60%, transparent); }
 .setup-save { font-size: 1rem; padding: 0.6rem 1.6rem; }
+.setup-signout { display: flex; align-items: center; gap: 0.7rem; margin-top: 1.6rem;
+  padding-top: 1.1rem; border-top: 1px solid var(--border); }
 
 /* genre whitelist editor */
 .genre-add { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }

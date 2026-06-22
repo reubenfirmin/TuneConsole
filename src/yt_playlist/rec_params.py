@@ -43,9 +43,6 @@ PARAMS = [
               "full weight once this many days have passed since its last play; more recent plays "
               "demote it (a track played today barely shows).",
               1, 365, 1, 30, integer=True),
-    ParamSpec("explore_top_artists", "Explore skips top N artists", "discovery",
-              "Explore stays novel by skipping your most-played N artists.",
-              0, 100, 1, 25, integer=True),
     ParamSpec("erosion_view_cap", "Card rotation cap", "discovery",
               "How many times you can reload Home before each card rotates to a fresh set of "
               "suggestions. Lower = the cards turn over faster.",
@@ -126,9 +123,12 @@ STALE_DECAY_HALFLIFE_D = 3     # once sync stale, transient relaxes with this ha
 PLAY_TRANSIENT_W = 0.30        # one recent play's positive push
 DISLIKE_TRANSIENT_W = 1.50     # one recent dislike's negative push (strong, explicit)
 RECENT_PLAY_LIMIT = 50         # how many recent plays feed the transient leans
-# Facet overlay shape (read by _axis_weights_for and roll_recipe)
-FACET_GAIN = 0.6
-FACET_MULT_MIN = 0.1           # a strong negative lean nearly mutes a facet (not a hard ban)
+# Facet overlay shape (read by _axis_weights_for and roll_recipe). The transient overlay DE-RANKS but
+# never banishes: one gentle "less X" roughly halves X in the feed, "a lot"/sustained strongly reduces
+# but always leaves some present. Banishing a facet is the job of dislike (a ban) or graduation
+# (sustained transient → a lasting permanent-weight nudge), not a single transient gesture.
+FACET_GAIN = 0.35
+FACET_MULT_MIN = 0.35          # floor: even the strongest transient lean keeps a facet present, not muted
 FACET_MULT_MAX = 2.5
 # Dislike (permanent suppression side)
 DISLIKE_SUPPRESS_DAYS = 365

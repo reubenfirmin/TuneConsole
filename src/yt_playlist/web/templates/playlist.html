@@ -19,7 +19,7 @@
   </div>
   <div class="head-tools{% if enrich_hint %} enrich-hint{% endif %}">
     <a class="head-icon" href="/playlist/{{ pl.id }}/share.txt" download="{{ pl.title }}.txt"
-       title="Share — download one song URL per line as a .txt" aria-label="Share playlist">
+       title="Share: download one song URL per line as a .txt" aria-label="Share playlist">
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
@@ -108,7 +108,7 @@
          @click="keyModal = false" @keydown.escape.window="keyModal = false">
       <div class="modal" @click.stop x-transition.scale.origin.center>
         <h3>Last.fm API key</h3>
-        <p>Last.fm has dense genre tags. Enrichment needs a free API key — create one at
+        <p>Last.fm has dense genre tags. Enrichment needs a free API key. Create one at
            <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>
            and paste the <strong>API key</strong> here. It's stored locally.</p>
         <input class="modal-input" type="text" x-model="keyValue" placeholder="API key"

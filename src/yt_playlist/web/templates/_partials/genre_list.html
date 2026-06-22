@@ -8,6 +8,6 @@
         hx-post="/genres/remove" hx-vals='{"name": {{ name|tojson }}}'
         hx-target="#genre-list" hx-swap="innerHTML">×</button></span>
   {% else %}
-  <p class="muted">No genres — tags won't be matched. Add some, or reset to defaults.</p>
+  <p class="muted">No genres, so tags won't be matched. Add some, or reset to defaults.</p>
   {% endfor %}
 </div>
