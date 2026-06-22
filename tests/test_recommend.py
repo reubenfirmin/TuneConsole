@@ -267,6 +267,15 @@ def test_sync_status_over_24h_is_stale(store):
     assert st.stale is True and st.message
 
 
+def test_sync_status_urgent_when_drifting(store):
+    store.set_setting("last_sync_at", str(1000.0))
+    assert recommend.sync_status(store, 1000.0 + 3600).urgent is False
+    mild = recommend.sync_status(store, 1000.0 + recommend.SYNC_STALE_S + 3600)
+    assert mild.stale is True and mild.urgent is False
+    bad = recommend.sync_status(store, 1000.0 + recommend.SYNC_STALE_S + 5 * 86400)
+    assert bad.stale is True and bad.urgent is True and "drifting" in bad.message
+
+
 def _seed_two_eras(store):
     """6 nineties + 6 noughties tracks, one playlist each, model built. Returns iid."""
     iid = store.upsert_identity("main", "cred", None, True)

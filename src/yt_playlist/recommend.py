@@ -798,6 +798,7 @@ class SyncStatus:
     last_synced_ago: str | None   # None if never synced
     stale: bool                   # never synced, or older than SYNC_STALE_S
     message: str | None           # highlight copy when stale, else None
+    urgent: bool = False          # stale enough that the transient model is actively decaying
 
 
 def sync_status(store, now) -> SyncStatus:
@@ -806,7 +807,11 @@ def sync_status(store, now) -> SyncStatus:
         return SyncStatus(None, True, "Sync to pull in your library and recommendations.")
     age = now - float(last)
     if age > SYNC_STALE_S:
-        return SyncStatus(_ago(age), True, "It's been a while - sync to refresh.")
+        if age > SYNC_STALE_S + rec_params.STALE_DECAY_HALFLIFE_D * 86400:
+            return SyncStatus(_ago(age), True,
+                              f"We haven't seen your plays in {_ago(age)} — your recommendations are "
+                              "drifting. Sync now.", urgent=True)
+        return SyncStatus(_ago(age), True, "It's been a while — sync to refresh.")
     return SyncStatus(_ago(age), False, None)
 
 

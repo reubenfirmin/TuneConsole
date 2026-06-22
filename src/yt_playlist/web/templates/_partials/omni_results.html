@@ -1,0 +1,27 @@
+{# Omnisearch dropdown body. Rendered into #omni-results by HTMX. `sections` is a list of
+   {kind, title, rows:[{type,label,sub,href,thumbnail,external}]}. Note: section.rows (NOT
+   .items — Jinja resolves `.items` to the dict method). #}
+{% if sections %}
+<ul class="omni-list" role="listbox" aria-label="Search results">
+  {% for s in sections %}
+  <li class="omni-section">
+    <div class="omni-head eyebrow">{{ s.title }}</div>
+    {% for it in s.rows %}
+    <a class="omni-row" role="option" tabindex="-1"
+       href="{{ it.href }}"{% if it.external %} target="_blank" rel="noopener"{% endif %}>
+      <span class="omni-thumb omni-thumb--{{ it.type }}">
+        {% if it.thumbnail %}<img src="{{ it.thumbnail }}" alt="" referrerpolicy="no-referrer"
+             onerror="this.remove()">{% endif %}
+      </span>
+      <span class="omni-text">
+        <span class="omni-label">{{ it.label }}</span>
+        {% if it.sub %}<span class="omni-sub">{{ it.sub }}</span>{% endif %}
+      </span>
+    </a>
+    {% endfor %}
+  </li>
+  {% endfor %}
+</ul>
+{% elif query and query|length >= 2 %}
+<div class="omni-empty">No matches for &ldquo;{{ query }}&rdquo;.</div>
+{% endif %}

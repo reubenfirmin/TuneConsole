@@ -36,24 +36,35 @@
        @pointermove="onPanMove($event)" @pointerup="onPanEnd()" @pointerleave="onPanEnd()">
     <div class="cluster-world" :style="worldStyle()">
       <svg class="cluster-edges" :width="WORLD" :height="WORLD">
-        <template x-for="n in edgeNodes()" :key="'e' + n.id">
-          <line :x1="nodeById(n.parentId).x" :y1="nodeById(n.parentId).y" :x2="n.x" :y2="n.y"
-                class="edge" :class="n.state"></line>
-        </template>
+        <path class="edge-path" :d="edgePath()"></path>
       </svg>
       <template x-for="n in nodes" :key="n.id">
         <div class="cluster-node" :class="[n.kind, n.state]" :style="`left:${n.x}px;top:${n.y}px`">
-          <div class="cn-body">
-            <img class="cn-thumb" :src="n.thumbnail" x-show="n.thumbnail" alt="" loading="lazy">
-            <div class="cn-text">
-              <strong class="cn-label" x-text="n.label"></strong>
-              <span class="cn-sub" x-text="n.sub"></span>
-            </div>
+          <div class="cn-body" @pointerdown.stop="startNodeDrag(n, $event)">
+            <template x-if="n.kind === 'central'">
+              <div class="cn-central">
+                <span class="cn-eyebrow">Central cluster</span>
+                <div class="cn-seeds">
+                  <template x-for="(s, i) in n.seeds" :key="i">
+                    <span class="cn-seed" :class="s.kind" x-text="s.label"></span>
+                  </template>
+                </div>
+              </div>
+            </template>
+            <template x-if="n.kind === 'track'">
+              <div class="cn-track">
+                <img class="cn-thumb" :src="n.thumbnail" x-show="n.thumbnail" alt="" loading="lazy"
+                     @error="n.thumbnail = ''">
+                <div class="cn-text">
+                  <strong class="cn-label" x-text="n.label"></strong>
+                  <span class="cn-sub" x-text="n.sub"></span>
+                </div>
+              </div>
+            </template>
           </div>
           <div class="cn-actions">
-            <button type="button" class="cn-btn pin" x-show="n.kind === 'track'"
-                    :class="{ on: n.state === 'pinned' }" @click="pin(n.id)"
-                    title="Pin — steer this branch toward this track">📌</button>
+            <button type="button" class="cn-btn play" x-show="n.vid && n.state !== 'pruned'" @click="play(n)"
+                    title="Play on YouTube Music">▶</button>
             <button type="button" class="cn-btn grow" x-show="n.state !== 'pruned'" @click="grow(n.id)"
                     title="Grow — add a ring of nearby tracks">＋</button>
             <button type="button" class="cn-btn prune" x-show="n.kind === 'track'"
@@ -74,11 +85,11 @@
         hx-swap="innerHTML" x-show="nodes.length" x-cloak>
     <span class="cluster-count"><strong x-text="keepKeys().length"></strong> tracks</span>
     <input type="text" name="name" x-model="playlistName" placeholder="Cluster name" required>
-    <label class="cluster-incl" x-show="centralKeys().length" x-cloak>
+    <label class="cluster-incl" x-show="centralSongKeys().length" x-cloak>
       <input type="checkbox" name="include_central" x-model="includeCentral">
       Include central tracks</label>
     <input type="hidden" name="keep_keys" :value="JSON.stringify(keepKeys())">
-    <input type="hidden" name="central_keys" :value="JSON.stringify(centralKeys())">
+    <input type="hidden" name="central_keys" :value="JSON.stringify(centralSongKeys())">
     <button type="submit" class="cta">▶ Save &amp; play on YouTube ↗</button>
   </form>
   <div id="cluster-save-result"></div>

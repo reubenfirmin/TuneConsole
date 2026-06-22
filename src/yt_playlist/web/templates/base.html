@@ -10,6 +10,12 @@
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
   <script src="/static/vendor/htmx.min.js"></script>
   <script src="/static/vendor/sortable.min.js"></script>
+  {# d3-force graph layout for the Clusters canvas. Order matters: d3-force reads its deps off the
+     global `d3`, so dispatch/quadtree/timer must load first. #}
+  <script src="/static/vendor/d3-dispatch.min.js"></script>
+  <script src="/static/vendor/d3-quadtree.min.js"></script>
+  <script src="/static/vendor/d3-timer.min.js"></script>
+  <script src="/static/vendor/d3-force.min.js"></script>
   <script src="/static/app.js?v={{ asset_v }}"></script>
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
@@ -17,6 +23,20 @@
   {% set path = request.url.path if request else "/" %}
   <header class="topbar">
     <a class="brand" href="/">yt&#8202;<span class="dot">/</span>&#8202;playlist</a>
+    <form class="omni" role="search" autocomplete="off" x-data="omniSearch()"
+          x-init="$el.addEventListener('htmx:afterSwap', () => onResults())"
+          @click.outside="close()" @keydown.escape.window="close()">
+      <div class="omni-box">
+        <input type="search" name="q" class="omni-input" placeholder="Search your library…"
+               aria-label="Search your library"
+               hx-get="/search/omni" hx-trigger="input changed delay:200ms, focus"
+               hx-target="#omni-results" hx-swap="innerHTML"
+               @focus="onResults()"
+               @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)"
+               @keydown.enter.prevent="choose()">
+        <div id="omni-results" class="omni-results" x-show="open" x-cloak></div>
+      </div>
+    </form>
     {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') %}
     <nav>
       <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>

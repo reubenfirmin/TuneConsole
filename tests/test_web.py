@@ -864,3 +864,40 @@ def test_keep_one_refreshes_and_deletes_other_copies(store):
     r = c.post("/dupe/keep-one", data={"keep": a})
     assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
     assert store.get_playlist(a) is not None and store.get_playlist(b) is None   # other copy deleted
+
+
+def _seed_search(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    r1 = store.upsert_track("r1", "Spektrum", "Ritmo", "Ritmo LP", None,
+                            album_browse_id="MPREb_ritmolp")
+    pl = store.upsert_playlist(iid, "PL1", "Late Night Drive", 1, "h", 0.0)
+    store.set_playlist_tracks(pl, [r1])
+    return iid
+
+
+def test_omni_search_returns_results_partial(store):
+    _seed_search(store)
+    app = create_app(store, lambda: {}, now_fn=lambda: 1000.0)
+    c = TestClient(app)
+    r = c.get("/search/omni", params={"q": "ritmo"})
+    assert r.status_code == 200
+    assert "Tracks by Ritmo" in r.text
+    assert "/artist?name=Ritmo" in r.text
+
+
+def test_omni_search_short_query_renders_nothing(store):
+    _seed_search(store)
+    app = create_app(store, lambda: {}, now_fn=lambda: 1000.0)
+    c = TestClient(app)
+    r = c.get("/search/omni", params={"q": "r"})
+    assert r.status_code == 200
+    assert "omni-row" not in r.text       # no result rows for a 1-char query
+
+
+def test_navbar_has_omni_search(store):
+    app = create_app(store, lambda: {}, now_fn=lambda: 1000.0)
+    c = TestClient(app)
+    r = c.get("/")
+    assert r.status_code == 200
+    assert 'class="omni"' in r.text
+    assert 'hx-get="/search/omni"' in r.text

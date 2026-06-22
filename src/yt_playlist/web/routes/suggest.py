@@ -25,8 +25,10 @@ def build(ctx) -> APIRouter:
         })
 
     @router.get("/track/{vid}/similar")
-    def track_similar(request: Request, vid: str):
-        """'Songs like this' — embedding neighbours of one track, rendered as a modal fragment."""
+    def track_similar(request: Request, vid: str, pid: int | None = None):
+        """'Songs like this' — embedding neighbours of one track, rendered as a modal fragment. When
+        `pid` is given (the playlist the track was opened from) the modal lets you add any neighbour
+        into that playlist, slotted just below `vid`."""
         dao = RecDao(store)
         key = dao.key_for_video(vid)
         nbrs = embed.neighbors(store, key, topn=12) if key else []
@@ -36,7 +38,8 @@ def build(ctx) -> APIRouter:
         items = [meta[k] for k, _ in nbrs if k in meta]
         return templates.TemplateResponse(request, "_partials/similar_modal.html",
                                           {"items": items, "seed": meta.get(key, {}),
-                                           "have_model": store.rec_vectors_count() > 0})
+                                           "have_model": store.rec_vectors_count() > 0,
+                                           "pid": pid, "seed_vid": vid})
 
     @router.post("/recs/rebuild")
     def recs_rebuild():

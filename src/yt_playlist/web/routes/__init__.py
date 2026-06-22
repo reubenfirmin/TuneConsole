@@ -7,13 +7,13 @@ and the setup wizard.
 """
 from yt_playlist.web.routes import (
     actions, album, charts, cleanup, clusters, collection, genres, home, likes, merge, move,
-    playlists, setup, suggest, sync, taste,
+    playlists, search, setup, suggest, sync, taste,
 )
 
 # Order matters only where literal and parameterized paths share a method; the
 # modules here keep those apart, so registration order is otherwise free.
 MODULES = (home, suggest, cleanup, merge, playlists, charts, collection, move, sync, actions,
-           setup, genres, likes, taste, album, clusters)
+           setup, genres, likes, taste, album, clusters, search)
 
 
 def build_all(ctx):

@@ -205,6 +205,25 @@ def test_add_tracks_preserves_album_browse(store):
     assert store.playlist_tracks_detail(a)[0]["album_browse"] == "MPREb_123"
 
 
+def test_add_tracks_inserts_below_anchor(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "X", "Alb", 200, 1),
+                                  store.upsert_track("v1", "Song B", "Y", "Alb", 200, 1)])
+    # the fake client must materialize the added track (with a setVideoId) so the post-add reorder can
+    # find its handle and move it into place — mirroring how YouTube reports the new item.
+    fc = FakeClient(tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},
+                                    {"videoId": "v1", "setVideoId": "sv1"}]},
+                    catalog={"v9": {"videoId": "v9", "setVideoId": "sv9"}})
+    c = _client(store, lambda: {iid: fc})
+    track = json.dumps({"videoId": "v9", "title": "Song A (Live)", "artist": "X"})
+    r = c.post(f"/playlist/{a}/add-tracks", data={"track": track, "after_video_id": "v0"})
+    assert _refreshes(r)
+    # v9 lands directly below the anchor v0, not at the end
+    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v9", "v1"]
+    assert fc.edited[-1] == ("PL1", {"moveItem": ("sv9", "sv1")})
+
+
 def test_add_tracks_empty_returns_toast(store):
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "Mix", 0, "h", 1.0)

@@ -114,7 +114,7 @@ class PlaylistOps:
         client = self._require_client(playlist_id)
         return search_versions(client, track["title"], track["artist"], exclude=video_id)
 
-    def add_tracks(self, playlist_id, tracks) -> dict:
+    def add_tracks(self, playlist_id, tracks, after_video_id=None) -> dict:
         pl = self.store.get_playlist(playlist_id)
         if pl is None:
             raise ValueError("playlist no longer exists")
@@ -123,10 +123,12 @@ class PlaylistOps:
             raise ValueError("no client for that identity")
         # Liked Music is YouTube-managed and won't accept directly-added tracks, so "Add" (from an
         # alternate version or a 'complete this playlist' suggestion) becomes a *like* — the only thing
-        # that actually lands a song in Liked Music. Every other playlist adds normally.
+        # that actually lands a song in Liked Music. Every other playlist adds normally. (Ordering is
+        # meaningless for likes, so after_video_id is ignored on that path.)
         if LikedMusic.is_lm(pl):
             return LikedMusic(self.store).add(playlist_id, tracks, client, self.now_fn())
-        return add_tracks_to_playlist(self.store, playlist_id, tracks, client, self.now_fn())
+        return add_tracks_to_playlist(self.store, playlist_id, tracks, client, self.now_fn(),
+                                      after_video_id)
 
     def remove_track(self, playlist_id, video_id) -> dict:
         pl = self.store.get_playlist(playlist_id)

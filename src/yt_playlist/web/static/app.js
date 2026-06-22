@@ -54,6 +54,15 @@ function rowSort(pid, editBase) {
         { target: '#alt-results', swap: 'innerHTML' }).finally(() => { this.altLoading = false; });
     },
 
+    // "Songs like this" — server renders the modal (with selectable rows + an Add button) into
+    // #similar-modal. Pass the playlist id so the modal can offer "add below this track"; the seed
+    // vid becomes the insert anchor on the server side.
+    songsLike(vid) {
+      this.openMenu = null;
+      htmx.ajax('GET', `/track/${encodeURIComponent(vid)}/similar?pid=${this.pid}`,
+        { target: '#similar-modal', swap: 'innerHTML' });
+    },
+
     // remove-track confirmation modal
     rmOpen: false, rmBusy: false, rmErr: '', rmVid: '', rmTitle: '',
     removeTrack(vid, title) {
@@ -458,22 +467,79 @@ function syncPanel() {
   };
 }
 
+// Navbar omnisearch dropdown: open/close + keyboard nav over the HTMX-rendered result rows.
+// Visibility is driven by results arriving (htmx:afterSwap, wired in x-init on the form) and by
+// focus; we never build markup here — the server owns the dropdown body.
+function omniSearch() {
+  return {
+    open: false,
+    active: -1,
+    rows() { return Array.from(this.$root.querySelectorAll('.omni-row')); },
+    onResults() {
+      this.active = -1;
+      this.rows().forEach(r => r.classList.remove('active'));
+      this.open = this.rows().length > 0;
+    },
+    close() {
+      this.open = false;
+      this.active = -1;
+      this.rows().forEach(r => r.classList.remove('active'));
+    },
+    move(dir) {
+      const rows = this.rows();
+      if (!rows.length) { return; }
+      this.open = true;
+      this.active = (this.active + dir + rows.length) % rows.length;
+      rows.forEach((r, i) => r.classList.toggle('active', i === this.active));
+      rows[this.active].scrollIntoView({ block: 'nearest' });
+    },
+    choose() {
+      const rows = this.rows();
+      const row = rows[this.active] || rows[0];
+      if (row) { row.click(); this.close(); }
+    },
+  };
+}
+
 // Clusters tab: a pannable/zoomable canvas where you seed a central group and grow a tree outward.
 // Each node's next ring = library tracks nearest its pinned-path centroid, pushed away from pruned
-// tracks (server: POST /clusters/expand). Tree state lives here; the server stays stateless.
+// tracks (server: POST /clusters/expand). Tree state lives here; the server stays stateless. Node
+// positions are owned by a live d3-force simulation (link + charge + collide) so the graph lays
+// itself out without overlap and re-settles as you grow/prune — d3 mutates each node's x/y in place,
+// which Alpine renders reactively.
 function clusterCanvas() {
   const WORLD = 8000, CENTER = WORLD / 2;   // big fixed world; we pan/zoom a transform over it
-  const SEED_R = 170, RING_R = 235;         // seed ring radius; parent→child spoke length
-  const GOLDEN = 2.39996323;                // golden angle — fans seeds apart without bookkeeping
+  const LINK_D = 165, NODE_R = 104;         // spoke length; collision radius (no card overlap)
   return {
     WORLD,
-    nodes: [], nextId: 1, seedCount: 0,
+    nodes: [], nextId: 1, rootId: null,
     query: '', results: [],
     playlistName: '', includeCentral: true,
     tx: 0, ty: 0, scale: 1,
-    _pan: null,
+    _pan: null, _drag: null, sim: null,
 
-    init() { this.$nextTick(() => this.resetView()); },
+    init() {
+      // The central group is pinned at CENTER (fx/fy), so it anchors the whole graph: no centering
+      // force needed and the view never drifts off it. Everything else is positioned by charge +
+      // collide (no overlap) + link (spokes), so cards radiate around the centre.
+      const d3 = window.d3;
+      this.sim = d3.forceSimulation([])
+        .force('charge', d3.forceManyBody().strength(-260).distanceMax(1400))
+        .force('collide', d3.forceCollide(NODE_R).strength(0.95).iterations(2))
+        .force('link', d3.forceLink([]).id(n => n.id).distance(LINK_D).strength(0.5))
+        .alphaDecay(0.035);
+      this.sim.stop();                       // started on demand once there are nodes (see _reheat)
+      this.$nextTick(() => this.resetView());
+    },
+    // Feed the current nodes/links to the sim and re-settle. Called after any structural change.
+    _reheat() {
+      const links = this.nodes
+        .filter(n => n.parentId != null && this.nodeById(n.parentId))
+        .map(n => ({ source: n.parentId, target: n.id }));
+      this.sim.nodes(this.nodes);
+      this.sim.force('link').links(links);
+      this.sim.alpha(0.9).restart();
+    },
 
     // --- search / seeding ---
     async search() {
@@ -484,18 +550,22 @@ function clusterCanvas() {
         this.results = await r.json();
       } catch (e) { this.results = []; }
     },
+    // Every selection lands in ONE central group (artist + artist + song + …), pinned at the centre.
+    // Its centroid is the union of all its seeds' keys; growing it pulls the first ring toward that.
     async addSeed(r) {
       this.query = ''; this.results = [];
-      const angle = this.seedCount * GOLDEN; this.seedCount++;
-      const id = this.nextId++;
-      this.nodes.push({
-        id, parentId: null, kind: 'seed', skind: r.kind, label: r.label, sub: r.sub,
-        keys: r.keys, key: null, state: 'pinned', thumbnail: '', angle, depth: 0,
-        x: CENTER + SEED_R * Math.cos(angle), y: CENTER + SEED_R * Math.sin(angle),
-      });
+      let root = this.rootId != null ? this.nodeById(this.rootId) : null;
+      if (!root) {
+        root = { id: this.nextId++, parentId: null, kind: 'central', state: 'central', depth: 0,
+                 seeds: [], keys: [], key: null, vid: null,
+                 x: CENTER, y: CENTER, fx: CENTER, fy: CENTER };
+        this.rootId = root.id;
+        this.nodes.push(root);
+      }
+      root.seeds.push({ label: r.label, kind: r.kind, keys: r.keys });
+      root.keys = [...new Set(root.seeds.flatMap(s => s.keys))];   // combined central centroid
       if (!this.playlistName) this.playlistName = r.label + ' cluster';
-      await this.grow(id);
-      this.focusOn(this.nodeById(id));
+      await this.grow(root.id);
     },
 
     // --- tree growth ---
@@ -508,35 +578,53 @@ function clusterCanvas() {
           body: JSON.stringify({ pos_keys: this.posKeys(node),
                                  neg_keys: this.prunedKeys(), exclude: this.allKeys(), k: 6 }),
         });
-        this.layoutChildren(node, (await r.json()).ring || []);
+        this.addChildren(node, (await r.json()).ring || []);
       } catch (e) { /* a failed grow just adds nothing */ }
     },
-    layoutChildren(parent, ring) {
-      const n = ring.length; if (!n) return;
-      const span = Math.min(Math.PI * 0.9, n * 0.5);
-      ring.forEach((t, i) => {
-        const a = n === 1 ? parent.angle : parent.angle - span / 2 + i * (span / (n - 1));
+    addChildren(parent, ring) {
+      if (!ring.length) return;
+      ring.forEach((t, i) => {              // spawn near the parent; the sim spreads them out
         this.nodes.push({
           id: this.nextId++, parentId: parent.id, kind: 'track', key: t.key,
           label: t.title, sub: t.artist, thumbnail: t.thumbnail, vid: t.video_id,
-          state: 'neutral', angle: a, depth: parent.depth + 1,
-          x: parent.x + RING_R * Math.cos(a), y: parent.y + RING_R * Math.sin(a),
+          state: 'neutral', depth: parent.depth + 1,
+          x: parent.x + Math.cos(i) * 30, y: parent.y + Math.sin(i) * 30 + 40,
         });
       });
+      this._reheat();
     },
-    pin(id) { const n = this.nodeById(id); if (n) n.state = n.state === 'pinned' ? 'neutral' : 'pinned'; },
     prune(id) {
-      const n = this.nodeById(id); if (!n) return;
-      if (n.state === 'pruned') { n.state = 'neutral'; return; }
+      const n = this.nodeById(id); if (!n || n.kind === 'central') return;
+      if (n.state === 'pruned') { n.state = 'neutral'; this.sim.alpha(0.3).restart(); return; }
       n.state = 'pruned';                              // pruning terminates the branch...
       const kill = this.descendants(id);              // ...so drop anything grown below it
       this.nodes = this.nodes.filter(x => !kill.has(x.id));
+      this._reheat();
+    },
+    play(n) {                              // open the track on YouTube Music, reusing one named tab
+      if (n.vid) window.open('https://music.youtube.com/watch?v=' + n.vid, 'ytPlayerTab');
     },
 
     // --- derived keys ---
     nodeById(id) { return this.nodes.find(n => n.id === id); },
-    edgeNodes() { return this.nodes.filter(n => n.parentId !== null && this.nodeById(n.parentId)); },
-    centralKeys() { return this.nodes.filter(n => n.kind === 'seed').flatMap(n => n.keys); },
+    // One SVG <path> for all edges (Alpine can't reliably create per-edge <line> elements inside
+    // <svg> — namespace issues — so we draw a single path bound to one static element).
+    edgePath() {
+      let d = '';
+      for (const n of this.nodes) {
+        if (n.parentId == null) continue;
+        const p = this.nodeById(n.parentId); if (!p) continue;
+        d += `M${p.x} ${p.y}L${n.x} ${n.y}`;
+      }
+      return d;
+    },
+    centralKeys() { const r = this.rootId != null ? this.nodeById(this.rootId) : null; return r ? r.keys : []; },
+    // Only SONG seeds are concrete "central tracks" worth offering to fold into the saved playlist —
+    // an artist/playlist seed steers the centroid but isn't a track you explicitly picked.
+    centralSongKeys() {
+      const r = this.rootId != null ? this.nodeById(this.rootId) : null;
+      return r ? r.seeds.filter(s => s.kind === 'song').flatMap(s => s.keys) : [];
+    },
     prunedKeys() { return this.nodes.filter(n => n.state === 'pruned').map(n => n.key); },
     keepKeys() { return this.nodes.filter(n => n.kind === 'track' && n.state !== 'pruned').map(n => n.key); },
     allKeys() {
@@ -544,12 +632,13 @@ function clusterCanvas() {
       this.nodes.forEach(n => { if (n.key) s.add(n.key); });
       return [...s];
     },
+    // Growing a card IS the positive signal, so a node's children aim at the central group plus
+    // every track on the path you grew through to reach it (no separate "pin").
     posKeys(node) {
-      const keys = new Set(this.centralKeys());        // root seeds are shared across every branch
-      for (let cur = node; cur; cur = cur.parentId != null ? this.nodeById(cur.parentId) : null) {
-        if (cur.kind === 'track' && cur.state === 'pinned') keys.add(cur.key);   // pins along the path steer
+      const keys = new Set(this.centralKeys());
+      for (let cur = node; cur && cur.kind === 'track'; cur = this.nodeById(cur.parentId)) {
+        keys.add(cur.key);
       }
-      if (node.kind === 'track') keys.add(node.key);   // grow from where you clicked
       return [...keys];
     },
     descendants(id) {
@@ -572,16 +661,42 @@ function clusterCanvas() {
       this.ty = my - ((my - this.ty) / this.scale) * ns;
       this.scale = ns;
     },
+    _worldPt(e) {                            // screen → world coords (undo pan + zoom)
+      const rect = document.getElementById('cluster-canvas').getBoundingClientRect();
+      return { x: (e.clientX - rect.left - this.tx) / this.scale,
+               y: (e.clientY - rect.top - this.ty) / this.scale };
+    },
+    startNodeDrag(n, e) {                    // pointerdown on a card body — grab it, not the canvas
+      const p = this._worldPt(e);
+      this._drag = { id: n.id, moved: false, ox: p.x - n.x, oy: p.y - n.y };
+    },
     onPanStart(e) {
       if (e.target.closest('.cluster-node, .cluster-zoombar')) return;   // let nodes/buttons get clicks
       this._pan = { x: e.clientX, y: e.clientY };
     },
     onPanMove(e) {
+      if (this._drag) {                      // dragging a card: pin it under the pointer
+        const n = this.nodeById(this._drag.id); if (!n) return;
+        const p = this._worldPt(e);
+        this._drag.moved = true;
+        n.fx = p.x - this._drag.ox; n.fy = p.y - this._drag.oy;
+        n.x = n.fx; n.y = n.fy;
+        this.sim.alpha(0.2).restart();
+        return;
+      }
       if (!this._pan) return;
       this.tx += e.clientX - this._pan.x; this.ty += e.clientY - this._pan.y;
       this._pan = { x: e.clientX, y: e.clientY };
     },
-    onPanEnd() { this._pan = null; },
+    onPanEnd() {
+      if (this._drag) {
+        const n = this.nodeById(this._drag.id);
+        // a pure click (no move) leaves a track free to flow; a real drag pins it where dropped.
+        if (n && !this._drag.moved && n.kind !== 'central') { n.fx = null; n.fy = null; }
+        this._drag = null;
+      }
+      this._pan = null;
+    },
     zoomBy(f) {
       const el = document.getElementById('cluster-canvas'); const rect = el.getBoundingClientRect();
       const cx = rect.width / 2, cy = rect.height / 2;
@@ -590,7 +705,6 @@ function clusterCanvas() {
       this.ty = cy - ((cy - this.ty) / this.scale) * ns;
       this.scale = ns;
     },
-    focusOn(node) { if (node) this._centerWorld(node.x, node.y, this.scale); },
     resetView() { this._centerWorld(CENTER, CENTER, 1); },
     _centerWorld(wx, wy, scale) {
       const el = document.getElementById('cluster-canvas'); if (!el) return;

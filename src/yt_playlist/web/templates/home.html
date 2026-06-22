@@ -3,7 +3,7 @@
 {% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 <div id="home">
-  <section class="home-control card{% if sync.stale %} sync-stale{% endif %}">
+  <section class="home-control card{% if sync.stale %} sync-stale{% endif %}{% if sync.urgent %} sync-urgent{% endif %}">
     {% include "_syncbar.html" %}
     <div class="sync-status">
       {% if sync.last_synced_ago %}<span class="tag">Last synced {{ sync.last_synced_ago }}</span>

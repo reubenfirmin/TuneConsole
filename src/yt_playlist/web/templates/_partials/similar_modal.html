@@ -1,15 +1,32 @@
+{# "Songs like this" — embedding neighbours of one track, swapped into #similar-modal. When `pid` is
+   set (opened from a playlist) each row carries the track as JSON and the Add button posts the checked
+   ones to /add-tracks with the seed (`seed_vid`) as the insert anchor, so they land below that track. #}
 <div class="modal-backdrop" x-data="{ open: true }" x-show="open" x-cloak x-transition.opacity
      @click="open = false" @keydown.escape.window="open = false">
-  <div class="modal modal-wide" @click.stop x-transition.scale.origin.center>
+  <div class="modal modal-similar" @click.stop x-transition.scale.origin.center>
     <h3>Songs like &ldquo;{{ seed.title or 'this track' }}&rdquo;</h3>
     {% if items %}
-    {% from "_macros.html" import tile %}
-    <p class="section-note">Nearest in your taste space — including tracks that share no playlist with it.</p>
-    <div class="tile-grid">
-      {% for f in items %}
-      {{ tile('neighbourhood', f.thumbnail, f.title, f.artist, "/artist?name=" ~ f.artist|urlencode,
-              "https://music.youtube.com/watch?v=" ~ f.video_id) }}
-      {% endfor %}
+    <p class="section-note">Nearest in your taste space — including tracks that share no playlist with it.{% if pid %}
+      Pick any to add just below this track.{% endif %}</p>
+    <div id="similar-results">
+      {% if pid %}<input type="hidden" name="after_video_id" value="{{ seed_vid }}">{% endif %}
+      <div class="alt-list">
+        {% for f in items %}
+        <label class="alt-row">
+          {% if pid %}<input type="checkbox" name="track"
+                 value='{{ {"videoId": f.video_id, "title": f.title, "artist": f.artist,
+                            "album": f.album, "thumbnail": f.thumbnail}|tojson }}'>{% endif %}
+          {% if f.thumbnail %}<img class="album-thumb" src="{{ f.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+          <span class="alt-meta">
+            <span class="alt-title">{{ f.title }}</span>
+            <span class="alt-sub">{{ f.artist }}{% if f.album %} · {{ f.album }}{% endif %}</span>
+          </span>
+          <span class="mono alt-dur"></span>
+          <a class="alink" href="https://music.youtube.com/watch?v={{ f.video_id }}"
+             target="_blank" rel="noopener" @click.stop title="Play on YouTube Music">Play ↗</a>
+        </label>
+        {% endfor %}
+      </div>
     </div>
     {% elif not have_model %}
     <p class="section-note">No taste model yet — build it from the Sync button or the Taste Model page.</p>
@@ -18,6 +35,11 @@
       it's likely brand new or set aside (a saved-album or generated track not folded in yet).
       Re-sync, then <a href="/taste">Rebuild the model</a> to include it.</p>
     {% endif %}
-    <div class="modal-actions"><button type="button" class="btn-ghost" @click="open = false">Close</button></div>
+    <div class="modal-actions">
+      {% if pid and items %}
+      <button type="button" hx-post="/playlist/{{ pid }}/add-tracks" hx-include="#similar-results">Add to playlist</button>
+      {% endif %}
+      <button type="button" class="btn-ghost" @click="open = false">Close</button>
+    </div>
   </div>
 </div>

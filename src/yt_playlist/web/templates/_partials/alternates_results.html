@@ -1,11 +1,13 @@
 {# Alternate-version search results, swapped into #alt-results by findAlternates. Each checkbox carries
    the full track as JSON so /add-tracks can add the chosen versions without a server-side search cache
-   (the modal's "Add" button hx-includes #alt-results). #}
+   (the modal's "Add" button hx-includes #alt-results). The hidden after_video_id anchors the insert so
+   chosen versions land just below the source track. #}
 {% if error %}
   <p class="notice err">{{ error }}</p>
 {% elif not results %}
   <p class="muted">No other versions found.</p>
 {% else %}
+<input type="hidden" name="after_video_id" value="{{ source_video_id }}">
 <div class="alt-list">
   {% for r in results %}
   <label class="alt-row">

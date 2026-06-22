@@ -609,9 +609,11 @@ def search_versions(client, title, artist, exclude=None, limit=14) -> list:
     return out
 
 
-def add_tracks_to_playlist(store, playlist_id, tracks, client, now) -> dict:
+def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_id=None) -> dict:
     """Append the given tracks (full metadata dicts) to an existing playlist on YouTube, then seed
-    the store directly from what we added (no racing read-back). Returns counts."""
+    the store directly from what we added (no racing read-back). When `after_video_id` is an existing
+    track, the freshly-added tracks are then slotted just below it (preserving their order) rather than
+    left at the end. Returns counts."""
     pl = store.get_playlist(playlist_id)
     if pl is None:
         raise ValueError("playlist no longer exists")
@@ -620,6 +622,14 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now) -> dict:
     items = [t for t in tracks if t.get("videoId")]
     if not items:
         raise ValueError("no tracks to add")
+    # the track currently after the anchor — captured before we append, so we know where to slot the
+    # new tracks back to. None (anchor is last, or absent) means "leave them at the end".
+    successor_vid = None
+    if after_video_id:
+        order = [t["video_id"] for t in store.playlist_tracks_detail(playlist_id)]
+        if after_video_id in order:
+            i = order.index(after_video_id)
+            successor_vid = order[i + 1] if i + 1 < len(order) else None
     added, skipped = _add_items(client, pl.ytm_playlist_id, [t["videoId"] for t in items])
     skipped_set = set(skipped)
     existing = store.get_playlist_track_ids(playlist_id)
@@ -637,6 +647,18 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now) -> dict:
     store.record_action(ADD_TRACKS,
                         json.dumps({"playlist": pl.title, "added": added, "titles": titles}),
                         "{}", "executed", "{}", now)
+    # Move each new track to sit just before the anchor's old successor. Moving them in order before the
+    # same successor preserves their order (each lands right after the previous one). Best-effort: the
+    # add already succeeded, so a positioning hiccup just leaves a track at the end rather than failing.
+    if successor_vid:
+        for t in items:
+            if t["videoId"] in skipped_set:
+                continue
+            try:
+                reorder_track(store, playlist_id, t["videoId"], successor_vid, client, now)
+            except Exception:  # noqa: BLE001 - positioning is best-effort
+                logger.warning("could not slot %s below %s in playlist %s",
+                               t["videoId"], after_video_id, playlist_id)
     return {"added": added, "skipped": len(skipped), "count": len(combined)}
 
 

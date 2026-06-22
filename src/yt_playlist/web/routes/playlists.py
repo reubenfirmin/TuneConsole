@@ -114,7 +114,7 @@ def build(ctx) -> APIRouter:
     @router.get("/playlist/{pid}/alternates")
     def playlist_alternates(request: Request, pid: int, video_id: str):
         """Search YouTube for alternate versions of a track; render the results list for the modal."""
-        ctx_data = {"results": []}
+        ctx_data = {"results": [], "source_video_id": video_id}
         try:
             ctx_data["results"] = ctx.ops().find_alternates(pid, video_id)
         except ValueError as e:
@@ -126,17 +126,20 @@ def build(ctx) -> APIRouter:
 
     @router.post("/playlist/{pid}/add-tracks")
     async def playlist_add_tracks(pid: int, request: Request):
-        # each selected alternate posts as a "track" field carrying its full track JSON
+        # each selected alternate posts as a "track" field carrying its full track JSON; the optional
+        # after_video_id anchors the insert just below that existing track (else they append at the end)
+        form = await request.form()
         tracks = []
-        for raw in (await request.form()).getlist("track"):
+        for raw in form.getlist("track"):
             try:
                 tracks.append(json.loads(raw))
             except (ValueError, TypeError):
                 continue
         if not tracks:
             return _toast(request, "select at least one version to add")
+        after_video_id = form.get("after_video_id") or None
         try:
-            await asyncio.to_thread(ctx.ops().add_tracks, pid, tracks)
+            await asyncio.to_thread(ctx.ops().add_tracks, pid, tracks, after_video_id)
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
