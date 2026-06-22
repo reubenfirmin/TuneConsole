@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from yt_playlist.providers import discogs, lastfm, musicbrainz
-from yt_playlist.rec import rec_params, recommend
+from yt_playlist.rec import journeys, rec_params, recommend
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 
 
@@ -80,13 +80,16 @@ def build(ctx) -> APIRouter:
         tracks = store.playlist_tracks_detail(pid)
         from yt_playlist.repos.rec_query import GENERATED_GROUP
         is_generated = store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP
+        recipe = store.get_recipe(pl.ytm_playlist_id) if is_generated else None
         return templates.TemplateResponse(request, "playlist.html", {
             "pl": pl, "tracks": tracks, "identity": labels.get(pl.identity_id, "?"),
             "is_generated": is_generated,
             "facets": recommend.playlist_facets(store, pid) if is_generated else None,
             "mood_state": recommend.playlist_mood_state(store, pid, now_fn()) if is_generated else 0,
             "mood_states": recommend.track_mood_states(store, now_fn()) if is_generated else {},
-            "recipe": store.get_recipe(pl.ytm_playlist_id) if is_generated else None,
+            "recipe": recipe,
+            "journey_label": journeys.JOURNEY_LABELS.get((recipe or {}).get("journey")) if is_generated else None,
+            "journey_desc": journeys.JOURNEY_DESCRIPTIONS.get((recipe or {}).get("journey")) if is_generated else None,
             "kind": store.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),
             # autosuggest = the editable whitelist plus whatever genres already exist in the library
             "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),

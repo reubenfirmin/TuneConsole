@@ -438,7 +438,7 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
     if recipe is not None:                                # recipe-driven: version the title
         from yt_playlist.rec.recommend import versioned_title
         title = versioned_title(store, title)
-        # NB: the mix is already DJ-ordered in the proto card (recommend.dj_order in home._carded),
+        # NB: the mix is already DJ-ordered in the proto card (recommend.journeys.journey_order in home._carded),
         # so we persist the posted rows in the order the user actually saw — WYSIWYG. Re-ordering here
         # would diverge from the preview (the shuffle is seed-stable but its input differs once rows
         # are pruned). Pruning just drops rows; the survivors keep their already-good spacing.

@@ -262,6 +262,17 @@ def test_sync_status_recent_is_not_stale(store):
     assert st.stale is False and st.message is None and st.last_synced_ago
 
 
+def test_ago_granularity():
+    # Sub-hour ages must report minutes, not collapse to "just now" (a 19-min-old sync
+    # showing "just now" was misleading).
+    assert recommend._ago(30) == "just now"            # under a minute
+    assert recommend._ago(60) == "1 minute ago"
+    assert recommend._ago(19 * 60) == "19 minutes ago"
+    assert recommend._ago(3600) == "1 hour ago"
+    assert recommend._ago(2 * 3600) == "2 hours ago"
+    assert recommend._ago(86400) == "1 day ago"
+
+
 def test_sync_status_over_24h_is_stale(store):
     store.set_setting("last_sync_at", "1000.0")
     st = recommend.sync_status(store, now=1000.0 + 25 * 3600)
