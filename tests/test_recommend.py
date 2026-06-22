@@ -202,6 +202,7 @@ def test_complete_playlist_suggests_fitting_owned_tracks(store):
 def test_take_action_auth_and_cleanup_no_sync(store):
     iid = store.upsert_identity("main", "cred", None, True)
     store.upsert_playlist(iid, "PLEMPTY", "Empties", 0, "h", 0.0)   # empty playlist
+    recommend.refresh_cleanup(store, now=1000.0)      # worker/cleanup-page materialize the cached summary
 
     items = recommend.take_action(store, now=1000.0, auth_expired={iid: "main"})
 

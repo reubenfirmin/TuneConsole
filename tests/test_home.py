@@ -47,6 +47,7 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     now = 200 * day
     store.add_history_snapshot(iid, now - 120 * day, ["gem|x"])
     store.add_history_snapshot(iid, now - 110 * day, ["gem|x"])
+    store.set_setting("last_sync_at", str(now - day))   # synced user -> rec feed renders (not the placeholder)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now)
     c = TestClient(app, base_url="http://127.0.0.1")
 
@@ -61,6 +62,10 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
 
 
 def test_home_feed_fragment_renders_fingerprint_and_respects_stance(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    t = store.upsert_track("v1", "Song", "Band", None, None)
+    store.set_track_genre(t, "Techno")
+    store.add_history_snapshot(iid, 1.0, ["song|band"])   # a played, genre-tagged track -> panel renders
     c = _client(store)
     r = c.get("/home/feed")
     assert r.status_code == 200
@@ -68,7 +73,19 @@ def test_home_feed_fragment_renders_fingerprint_and_respects_stance(store):
     assert 'id="home-feed"' in r.text                    # the re-rank swap-target container
 
     c.post("/home/stance", data={"stance": "explore"})
-    assert store.get_setting("home_stance") == "explore"  # persisted
+    assert store.get_setting("home_stance") == "explore"
+
+
+def test_steering_panel_hidden_until_genres_exist(store):
+    """The wheelhouse steering panel (genre/era sliders) is empty-state until the library has genres."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    c = _client(store)
+    assert 'id="fingerprint"' not in c.get("/home/feed").text     # no genres yet -> panel hidden
+
+    t = store.upsert_track("v1", "Song", "Band", None, None)
+    store.set_track_genre(t, "Techno")
+    store.add_history_snapshot(iid, 1.0, ["song|band"])
+    assert 'id="fingerprint"' in c.get("/home/feed").text          # genres present -> panel appears  # persisted
 
 
 def test_home_page_has_steering_and_fingerprint(store):
@@ -77,6 +94,7 @@ def test_home_page_has_steering_and_fingerprint(store):
     store.set_track_genre(t, "Techno")
     store.set_track_year(t, "1999")
     store.add_history_snapshot(iid, 1.0, ["song|band"])
+    store.set_setting("last_sync_at", "1000")            # synced user -> feed (with fingerprint/steer) renders
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     html = c.get("/").text
@@ -105,18 +123,38 @@ def test_home_feed_has_steer_toast_scaffold(store):
 
 
 def test_new_user_only_gets_full_sync(store):
-    """A never-synced user is offered Full sync only — the 'Sync plays' auto-sync toggle appears once
-    there's been a first sync."""
+    """A never-synced user gets a single green 'Sync now' CTA (no plays to sync yet). After the first
+    sync it becomes the neutral 'Full sync' button and the 'Sync plays' auto-sync toggle appears."""
     c = _client(store)
     html = c.get("/").text
     assert "Never synced" in html
-    assert "Full sync" in html
+    assert "Sync now" in html                # initial CTA label (matches the setup flash)
+    assert "sync-cta" in html                # ...and it's the green CTA
+    assert "Full sync" not in html           # the neutral label is for after the first sync
     assert "Sync plays" not in html          # no plays to sync yet
     assert "sync-toggle" not in html
 
     store.set_setting("last_sync_at", "1000")   # now there's a first sync (now_fn -> 1000.0)
     html = c.get("/").text
+    assert "Full sync" in html and "sync-cta" not in html   # reverts to the neutral ghost button
     assert "Sync plays" in html and "sync-toggle" in html
+
+
+def test_presync_shows_recs_placeholder_not_feed(store):
+    """Pre-sync, Home replaces the recommendation feed with a graphical placeholder; after the first
+    sync the placeholder is gone and the feed renders."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_track("v1", "Gem", "X", None, None)
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+
+    html = c.get("/").text
+    assert 'class="presync card"' in html                                  # placeholder shown
+    assert "we'll start getting you recommendations here" in html          # the copy
+    assert "More in your wheelhouse" not in html                           # feed hidden pre-sync
+
+    store.set_setting("last_sync_at", "1000")
+    assert "presync card" not in c.get("/").text                           # placeholder gone post-sync
 
 
 def test_enrich_nudge_after_first_sync_and_persisted_dismiss(store):

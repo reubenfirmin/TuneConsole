@@ -1,4 +1,8 @@
-"""OverlapRepo — the Cleanup page's overlap state: suppressed pairs, ignored playlists, kept pairs."""
+"""OverlapRepo — the Cleanup page's dismissal state: suppressed overlap pairs, overlap-ignored
+playlists, kept pairs, plus the category-scoped cleanup ignores (per-playlist empty/tiny dismissals
+and per-merge dismissals)."""
+import json
+
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -51,3 +55,53 @@ class OverlapRepo(Repo):
     def get_overlap_kept_pairs(self) -> set:
         rows = self.conn.execute("SELECT a,b FROM overlap_kept").fetchall()
         return {frozenset((r["a"], r["b"])) for r in rows}
+
+    # --- category-scoped per-playlist ignores (Empty / Tiny sections) ---------------------------
+    @synchronized
+    def ignore_cleanup(self, ytm, category, now) -> None:
+        """Dismiss one playlist from ONE cleanup category (e.g. 'this is empty, stop suggesting it').
+        Scoped: it stays eligible in every other category."""
+        self.conn.execute("INSERT OR IGNORE INTO cleanup_ignored(ytm,category,created_at) VALUES (?,?,?)",
+                          (ytm, category, now))
+        self.conn.commit()
+
+    @synchronized
+    def unignore_cleanup(self, ytm, category) -> None:
+        self.conn.execute("DELETE FROM cleanup_ignored WHERE ytm=? AND category=?", (ytm, category))
+        self.conn.commit()
+
+    @synchronized
+    def get_cleanup_ignored(self) -> dict:
+        """{category: set(ytm)} of per-playlist cleanup dismissals."""
+        out: dict = {}
+        for r in self.conn.execute("SELECT ytm,category FROM cleanup_ignored"):
+            out.setdefault(r["category"], set()).add(r["ytm"])
+        return out
+
+    # --- per-merge ignores (Exact / Near-duplicate groups) ---------------------------------------
+    # A merge suggestion is the relationship between a SET of playlists, so it's dismissed by the
+    # group's canonical member signature — not by ignoring the individual playlists. If the cluster's
+    # membership later changes, the signature changes and the (now genuinely different) merge returns.
+    @synchronized
+    def ignore_merge(self, signature, members, now) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO ignored_merges(signature,members,created_at) VALUES (?,?,?)",
+            (signature, json.dumps(list(members)), now))
+        self.conn.commit()
+
+    @synchronized
+    def unignore_merge(self, signature) -> None:
+        self.conn.execute("DELETE FROM ignored_merges WHERE signature=?", (signature,))
+        self.conn.commit()
+
+    @synchronized
+    def get_ignored_merge_sigs(self) -> set:
+        """Just the signatures — for filtering groups out of the cleanup view and the home count."""
+        return {r["signature"] for r in self.conn.execute("SELECT signature FROM ignored_merges")}
+
+    @synchronized
+    def get_ignored_merges(self) -> list:
+        """[{signature, members:[ytm]}] newest-first — for the 'Ignored cleanups' display + un-ignore."""
+        return [{"signature": r["signature"], "members": json.loads(r["members"])}
+                for r in self.conn.execute(
+                    "SELECT signature, members FROM ignored_merges ORDER BY created_at DESC")]

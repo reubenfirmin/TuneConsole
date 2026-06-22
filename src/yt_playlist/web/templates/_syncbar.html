@@ -1,8 +1,9 @@
-<div class="sync-bar" x-data="syncPanel({{ 'true' if auto_sync else 'false' }})" style="margin-bottom:1.6rem">
+<div class="sync-bar" style="margin-bottom:1.6rem">
   {# A brand-new user (never synced) has no plays to sync yet — only offer the Full sync that
      pulls in their library. The "Sync plays" auto-sync toggle appears once there's been a first sync. #}
   {% if sync.last_synced_ago %}
-  <button type="button" class="sync-toggle" :class="{ on: auto }" :aria-pressed="auto" @click="toggleAuto()">
+  <button type="button" class="sync-toggle" :class="{ on: auto }" :aria-pressed="auto" @click="toggleAuto()"
+          title="Auto-sync your play counts from YouTube Music every 30 minutes">
     <span class="sync-toggle-track"><span class="sync-toggle-thumb"></span></span>
     <span>Sync plays</span>
     {# Refresh icon WITHIN the toggle: force an immediate plays sync. @click.stop so clicking the icon
@@ -13,8 +14,12 @@
           @keydown.enter.stop.prevent="!running && start('/sync/plays')">↻</span>
   </button>
   {% endif %}
-  <button type="button" class="btn-ghost" @click="start('/sync')" :disabled="running">
-    <span x-show="!running">Full sync</span>
+  {# Before the first sync this is the primary onboarding CTA: green "Sync now". Once synced it
+     becomes the neutral "Full sync" re-pull button (the green "Sync plays" toggle handles plays). #}
+  <button type="button" class="{{ 'btn-ghost' if sync.last_synced_ago else 'sync-cta' }}"
+          @click="start('/sync')" :disabled="running"
+          title="Pull your playlists, albums, and likes from YouTube Music">
+    <span x-show="!running">{{ 'Full sync' if sync.last_synced_ago else 'Sync now' }}</span>
     <span x-show="running" style="display:none"><span class="spinner"></span>&nbsp;Syncing…</span>
   </button>
   <span class="sync-note" x-show="auto" style="display:none">Will re-sync plays automatically every 30 mins</span>

@@ -1,27 +1,40 @@
 {% extends "base.html" %}{% from "_macros.html" import banner %}
 {% block title %}Home - TuneConsole{% endblock %}
 {% block body %}
-{% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
+{% if flash %}
+{# Setup flash: dismissible, and auto-retires the moment a sync is kicked off (see syncPanel.start). #}
+<div class="notice ok banner" x-data="{ show: true }" x-show="show" x-cloak @sync-started.window="show = false">
+  <span class="banner-body">{{ flash }}</span>
+  <button type="button" class="banner-x" @click="show = false" title="Dismiss" aria-label="Dismiss">×</button>
+</div>
+{% endif %}
 <div id="home">
-  <section class="home-control card{% if sync.stale %} sync-stale{% endif %}{% if sync.urgent %} sync-urgent{% endif %}">
+  <section class="home-control card{% if sync.stale %} sync-stale{% endif %}{% if sync.urgent %} sync-urgent{% endif %}"
+           x-data="syncPanel({{ 'true' if auto_sync else 'false' }})">
     {% include "_syncbar.html" %}
     <div class="sync-status">
+      {# Once the sync is kicked off (running), drop the "Never synced" tag and its nudge — the live
+         sync log takes over as the status. #}
       {% if sync.last_synced_ago %}<span class="tag">Last synced {{ sync.last_synced_ago }}</span>
-      {% else %}<span class="tag red">Never synced</span>{% endif %}
-      {% if sync.message %}<span class="sync-nudge">{{ sync.message }}</span>{% endif %}
+      {% else %}<span class="tag red" x-show="!running">Never synced</span>{% endif %}
+      {% if sync.message %}<span class="sync-nudge" x-show="!running">{{ sync.message }}</span>{% endif %}
     </div>
   </section>
 
   {% if show_enrich_nudge %}
-  <div id="enrich-nudge" class="notice ok banner enrich-nudge">
-    <span class="banner-body">💡 <strong>The more you enrich, the better your recommendations.</strong>
-      Tap the enrich icon on any playlist to pull in richer metadata. We'll keep reminding you here
-      on Home as you go.</span>
-    <button type="button" class="banner-x" title="Dismiss" aria-label="Dismiss"
+  <div id="enrich-nudge" class="enrich-nudge">
+    <span class="enrich-nudge-icon" aria-hidden="true">💡</span>
+    <div class="enrich-nudge-body">
+      <strong>The more you enrich, the better your recommendations.</strong>
+      <span>Tap the enrich icon on any playlist to pull in richer metadata. We'll keep reminding you
+        here on Home as you go.</span>
+    </div>
+    <button type="button" class="banner-x enrich-nudge-x" title="Dismiss" aria-label="Dismiss"
             hx-post="/onboard/enrich/dismiss" hx-target="#enrich-nudge" hx-swap="outerHTML swap:200ms">×</button>
   </div>
   {% endif %}
 
+  {% if sync.last_synced_ago %}
   {% include "_partials/alerts.html" %}
 
   {% include "_partials/home_feed.html" %}
@@ -35,6 +48,22 @@
 
   <div hx-get="/home/discover" hx-trigger="load" hx-swap="innerHTML"></div>
   <div hx-get="/home/new-artists" hx-trigger="load" hx-swap="innerHTML"></div>
+  {% else %}
+  {# Pre-sync onboarding placeholder: no taste data yet, so stand in for the whole rec feed. #}
+  <section class="presync card">
+    <svg class="presync-art" viewBox="0 0 132 72" aria-hidden="true">
+      <defs><linearGradient id="presync-g" x1="0" y1="1" x2="0" y2="0">
+        <stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#a596ff"/>
+      </linearGradient></defs>
+      {% for x, h in [(6,22),(24,40),(42,30),(60,56),(78,34),(96,48),(114,26)] %}
+      <rect class="pbar" style="animation-delay:-{{ loop.index0 * 0.22 }}s"
+            x="{{ x }}" y="{{ 72 - h }}" width="12" height="{{ h }}" rx="4" fill="url(#presync-g)"/>
+      {% endfor %}
+    </svg>
+    <h2 class="presync-title">Recommendations are warming up</h2>
+    <p class="presync-sub">Once you sync your account, we'll start getting you recommendations here.</p>
+  </section>
+  {% endif %}
 
   <footer class="home-footer">
     <a href="/privacy">Privacy</a>

@@ -128,3 +128,60 @@ def test_find_tiny_playlists(store):
     store.set_playlist_tracks(lm, tracks[:2])
     got = [p.ytm_playlist_id for p in find_tiny_playlists(store)]
     assert got == ["PL1", "PL3"]   # 1 then 3 tracks; excludes big, empty, system
+
+
+def test_empty_and_tiny_honor_category_ignore(store):
+    from yt_playlist.library.analysis import find_empty_playlists, find_tiny_playlists
+    iid = store.upsert_identity("main", "cred", None, True)
+    e = store.upsert_playlist(iid, "PLe", "empty one", 0, "h", 1.0)
+    one = store.upsert_playlist(iid, "PL1", "lonely", 1, "h", 1.0)
+    store.set_playlist_tracks(one, [store.upsert_track("v0", "S0", "X", None, 1)])
+    assert [p.ytm_playlist_id for p in find_empty_playlists(store, ignored={"PLe"})] == []
+    assert [p.ytm_playlist_id for p in find_tiny_playlists(store, ignored={"PL1"})] == []
+    # category-scoped: ignoring as 'empty' must NOT suppress it from the tiny list (and vice-versa)
+    assert [p.ytm_playlist_id for p in find_tiny_playlists(store, ignored={"PLe"})] == ["PL1"]
+
+
+def test_merge_signature_is_canonical():
+    from yt_playlist.library.analysis import merge_signature
+    assert merge_signature(["B", "A", "C"]) == merge_signature(["C", "B", "A"]) == "A|B|C"
+
+
+def test_identical_groups_honor_merge_ignore(store):
+    from yt_playlist.library.analysis import find_identical_groups, merge_signature
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Mix", 1, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Mix copy", 1, "h", 1.0)
+    t = store.upsert_track("v1", "S1", "X", None, 1)
+    store.set_playlist_tracks(a, [t]); store.set_playlist_tracks(b, [t])   # identical
+    assert len(find_identical_groups(store)) == 1
+    sig = merge_signature(["PLA", "PLB"])
+    assert find_identical_groups(store, ignored_sigs={sig}) == []          # this merge dismissed
+
+
+def test_ignored_merge_reappears_when_membership_changes(store):
+    """The dismissal is keyed to the exact set: a NEW copy joining the cluster re-surfaces it."""
+    from yt_playlist.library.analysis import find_identical_groups, merge_signature
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Mix", 1, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Mix", 1, "h", 1.0)
+    t = store.upsert_track("v1", "S1", "X", None, 1)
+    store.set_playlist_tracks(a, [t]); store.set_playlist_tracks(b, [t])
+    ignored = {merge_signature(["PLA", "PLB"])}
+    assert find_identical_groups(store, ignored_sigs=ignored) == []
+    c = store.upsert_playlist(iid, "PLC", "Mix", 1, "h", 1.0)              # a third identical copy appears
+    store.set_playlist_tracks(c, [t])
+    groups = find_identical_groups(store, ignored_sigs=ignored)            # {A,B,C} != {A,B} -> reappears
+    assert len(groups) == 1 and {p.ytm_playlist_id for p in groups[0].playlists} == {"PLA", "PLB", "PLC"}
+
+
+def test_near_duplicate_groups_honor_merge_ignore(store):
+    from yt_playlist.library.analysis import find_near_duplicate_groups, merge_signature
+    iid = store.upsert_identity("main", "cred", None, True)
+    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(10)]
+    base = t[:7]
+    for ytm, last in (("PLx", t[7]), ("PLy", t[8]), ("PLz", t[9])):
+        pid = store.upsert_playlist(iid, ytm, "Monkey Juice", 8, "h", 1.0)
+        store.set_playlist_tracks(pid, base + [last])
+    sig = merge_signature(["PLx", "PLy", "PLz"])
+    assert find_near_duplicate_groups(store, ignored_sigs={sig}) == []
