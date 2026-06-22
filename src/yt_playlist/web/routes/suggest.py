@@ -114,4 +114,22 @@ def build(ctx) -> APIRouter:
             recommend.graduate_moods(store, list(keys), signed, now_fn())
         return HTMLResponse("")                        # no swap — the panel stays put (Advanced reachable)
 
+    @router.post("/recs/journey")
+    async def recs_journey(request: Request):
+        """Permanent feedback on a generated mix's JOURNEY (its ordering shape). 👍/👎 nudges that
+        journey's weight via the same graduation ledger as genres/eras, so preferred flows roll more
+        often. Reads the journey from the playlist's stored recipe."""
+        form = await request.form()
+        try:
+            pid = int(form.get("pid"))
+            direction = int(form.get("dir", 1))
+        except (TypeError, ValueError):
+            return HTMLResponse("", status_code=422)
+        pl = store.get_playlist(pid)
+        recipe = store.get_recipe(pl.ytm_playlist_id) if pl else None
+        journey = (recipe or {}).get("journey")
+        if journey:
+            recommend.graduate_facet(store, f"journey:{journey}", 1 if direction >= 0 else -1, now_fn())
+        return HTMLResponse("")
+
     return router

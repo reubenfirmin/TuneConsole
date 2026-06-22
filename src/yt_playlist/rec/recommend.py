@@ -8,7 +8,7 @@ import statistics
 import numpy as np
 
 from yt_playlist.library import analysis
-from yt_playlist.rec import embed, genre_map, rec_params, transient
+from yt_playlist.rec import embed, genre_map, journeys, rec_params, transient
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -506,13 +506,14 @@ def roll_recipe(store, model, seed=None, now=None) -> dict:
 
     genre = pick(taste_breadth(store)["families"], "genre")
     era = pick(dict(era_distribution(store)), "era")
+    journey = pick(dict.fromkeys(journeys.JOURNEYS, 1.0), "journey") or "shuffle"
     facets = {}
     if genre:
         facets["genres"] = [genre]
     if era:
         facets["eras"] = [era]
     axis = {a: w for a, w in weights.items() if a.split(":", 1)[0] in ("genre", "era", "artist")}
-    return {"model": model, "facets": facets, "params": {},
+    return {"model": model, "facets": facets, "params": {}, "journey": journey,
             "dj": {"stickiness": round(rng.random(), 2), "seed": rng.randint(0, 2**31 - 1)},
             "weights": axis}
 
@@ -709,20 +710,27 @@ def apply_dislikes(store, status_map, now) -> None:
             store.clear_dislike(key)
 
 
+def graduate_facet(store, axis, signed, now) -> None:
+    """Accumulate one facet's signed event into the graduation ledger; when its running total
+    crosses THEME_THRESHOLD, graduate it (a gentle permanent weight nudge, then a smooth reset).
+    Model-only — NEVER suppresses."""
+    score = store.bump_theme(axis, signed, now)
+    if abs(score) >= rec_params.THEME_THRESHOLD:
+        factor = rec_params.GRADUATE_UP if score > 0 else rec_params.GRADUATE_DOWN
+        store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
+        store.discount_theme(axis, math.copysign(rec_params.THEME_THRESHOLD, score))
+
+
 def graduate_moods(store, keys, signed, now) -> None:
-    """Accumulate a transient-feeding event into the per-facet graduation ledger (presence-weighted).
-    When a facet's running total crosses THEME_THRESHOLD, graduate it: a gentle permanent nudge, then
-    a smooth reset. Model-only — NEVER suppresses. `signed` carries intensity (±1, ±2 on 'a lot')."""
+    """Accumulate a transient-feeding event into the per-facet graduation ledger (presence-weighted),
+    graduating each facet that crosses the threshold. Model-only — NEVER suppresses. `signed` carries
+    intensity (±1, ±2 on 'a lot')."""
     facets = transient.facets_for(store, keys)
     if not facets:
         return
     n = len(set(keys)) or 1
     for axis, axis_keys in facets.items():
-        score = store.bump_theme(axis, signed * (len(axis_keys) / n), now)
-        if abs(score) >= rec_params.THEME_THRESHOLD:
-            factor = rec_params.GRADUATE_UP if score > 0 else rec_params.GRADUATE_DOWN
-            store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
-            store.discount_theme(axis, math.copysign(rec_params.THEME_THRESHOLD, score))
+        graduate_facet(store, axis, signed * (len(axis_keys) / n), now)
 
 
 # HOME CARD: "Catalog" ("From your catalog") — own-but-under-played tracks, the edge of your palette.
@@ -881,6 +889,9 @@ def _ago(seconds) -> str:
     hours = int(seconds // 3600)
     if hours >= 1:
         return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    minutes = int(seconds // 60)
+    if minutes >= 1:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
     return "just now"
 
 

@@ -51,6 +51,20 @@ class RecQueryRepo(Repo):
         return out
 
     @synchronized
+    def track_last_played(self, keys) -> dict:
+        """{identity_key: newest play timestamp} for the given keys with any play history.
+        Keys never played are absent (caller treats absence as 'coldest')."""
+        keys = list(keys)
+        if not keys:
+            return {}
+        qs = ",".join("?" * len(keys))
+        rows = self.conn.execute(
+            f"SELECT hi.identity_key k, MAX(hs.taken_at) last FROM history_items hi "
+            f"JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
+            f"WHERE hi.identity_key IN ({qs}) GROUP BY hi.identity_key", keys).fetchall()
+        return {r["k"]: r["last"] for r in rows}
+
+    @synchronized
     def track_artists(self, keys) -> dict:
         """{identity_key: artist} for the given keys that have an artist."""
         keys = list(keys)

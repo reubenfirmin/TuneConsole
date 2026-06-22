@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, Request, Response
 
 from yt_playlist.library import executor
-from yt_playlist.rec import rec_params, recommend
+from yt_playlist.rec import genre_map, journeys, rec_params, recommend
 from yt_playlist.rec.rec_dao import RecDao
 
 # How many tracks each generated proto-playlist offers.
@@ -34,19 +34,32 @@ def _proto(lane, label, items, now):
 
 
 def _carded(store, lane, label, items, now):
-    """A proto-card built from a rolled recipe: roll the theme (seeded by the card's rotation epoch so
-    it's stable across steer/stance previews, like the rotation), focus the items on it, DJ-order it
-    (genre-aware, artist-spaced) using the recipe's seed, and attach the recipe so a Save persists
-    exactly how this mix was made. Ordering here — not at save — means the preview IS the playlist
-    (WYSIWYG): a Save just keeps the rows you didn't prune, in the order you see."""
+    """A proto-card built from a rolled recipe: roll the theme + journey (seeded by the card's
+    rotation epoch so it's stable across steer/stance previews), focus the items on the theme, then
+    order them by the rolled JOURNEY (energy arc, eras, deep dive…) with genres attached. Ordering
+    happens here — not at save — so the preview IS the playlist (WYSIWYG): a Save keeps the rows you
+    didn't prune, in the order you see. Recipes predating journeys fall back to 'shuffle'."""
     recipe = recommend.roll_recipe(store, lane, seed=_epoch(store, lane), now=now)
     items = recommend.theme_filter(store, items, recipe.get("facets", {}))
-    dj = recipe.get("dj", {})
-    items = recommend.dj_order(recommend.attach_genres(store, items),
-                               stickiness=dj.get("stickiness", 0.0), seed=dj.get("seed", 0))
+    items = recommend.attach_genres(store, items)
+    # Fresh-card items are unowned proposal dicts with no library key/plays/recency -> journeys have
+    # no signal there; keep Fresh a straight shuffle (scope decision). Owned lanes order by journey.
+    journey = "shuffle" if lane == "fresh" else recipe.get("journey", "shuffle")
+    _f = recommend._field
+    keys = [_f(it, "key") or "" for it in items]
+    dao = RecDao(store)
+    decades, lastp, plays = dao.track_decades(keys), dao.track_last_played(keys), store.play_counts()
+
+    def feat(it):
+        k, g = _f(it, "key") or "", _f(it, "genre") or ""
+        return {"artist": _f(it, "artist") or "", "genre": g, "energy": genre_map.energy(g),
+                "decade": decades.get(k), "plays": plays.get(k, 0), "recency": lastp.get(k, 0.0)}
+
+    seed = recipe.get("dj", {}).get("seed", 0)
+    items = journeys.journey_order(items, journey, seed, feat)
     p = _proto(lane, label, items, now)
     p["recipe"] = recipe
-    p["refreshable"] = True   # a Home rotation card -> show the Refresh (fresh-batch) button
+    p["refreshable"] = True
     return p
 
 

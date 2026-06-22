@@ -308,4 +308,4 @@ def test_generated_playlist_shows_stored_recipe(store):
     c = _client(store, lambda: {iid: FakeClient()})
     html = c.get(f"/playlist/{pid}").text
     assert "Made from" in html and "house" in html and "2010s" in html   # the recipe, not track tags
-    assert "smooth segues" in html                                        # DJ stickiness surfaced
+    assert "smooth segues" not in html                                   # stickiness chip removed; journeys govern ordering

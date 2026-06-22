@@ -24,6 +24,13 @@
     "classical": ["classical", "baroque", "opera", "symphonic", "soundtrack"],
     "experimental": ["experimental", "noise", "noise rock", "industrial", "ebm", "darkwave", "gothic", "spoken word"]
   },
+  "energy": {
+    "ambient": 0.10, "folk-country": 0.20, "classical": 0.30, "jazz": 0.35, "blues": 0.35,
+    "world-latin": 0.45, "experimental": 0.50, "pop": 0.50, "soul-funk": 0.50,
+    "electro-synth": 0.55, "rock-indie": 0.55, "rock-post": 0.55, "hiphop": 0.55,
+    "house": 0.60, "rock-classic": 0.60, "garage-bass": 0.65, "breakbeat": 0.70,
+    "techno": 0.72, "trance": 0.75, "punk": 0.85, "dnb": 0.85, "metal": 0.90
+  },
   "adjacency": {
     "trance": {"techno": 0.3, "house": 0.4, "ambient": 0.4, "electro-synth": 0.4},
     "techno": {"trance": 0.3, "house": 0.3, "electro-synth": 0.4, "ambient": 0.5},

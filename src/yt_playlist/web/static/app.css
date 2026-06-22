@@ -1059,6 +1059,8 @@ button.htmx-request .check-busy { display: inline; }
 .fb-lever button.fb-more:hover { color: #fff; background: var(--accent); border-color: var(--accent); }
 .fb-lever button.fb-less:hover { color: #fff; background: var(--danger); border-color: var(--danger); }
 .fb-lever button.fb-done { color: #fff; background: var(--accent-2); border-color: var(--accent-2); }
+.fb-lever button.fb-more.fb-sel { color: #fff; background: var(--accent); border-color: var(--accent); }
+.fb-lever button.fb-less.fb-sel { color: #fff; background: var(--danger); border-color: var(--danger); }
 .fb-note { color: var(--dim); font-size: 0.76rem; margin: 0.6rem 0 0; line-height: 1.4; }
 .mood-done { background: rgba(91,183,164,0.1); border-style: solid; border-color: transparent; }
 .eyebrow-ok { color: var(--teal); }

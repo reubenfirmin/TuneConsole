@@ -18,3 +18,11 @@ def test_unknown_genre_is_singleton():
     assert gm.family("Totally Made Up Genre").startswith("other:")
     assert gm.distance("Totally Made Up Genre", "Trance") == 1.0
     assert gm.distance("Totally Made Up Genre", "Totally Made Up Genre") == 0.0
+
+
+def test_energy_orders_families_and_defaults():
+    from yt_playlist.rec import genre_map
+    assert genre_map.energy("ambient") < genre_map.energy("metal")   # mellow < intense
+    assert 0.0 <= genre_map.energy("techno") <= 1.0
+    assert genre_map.energy("") == 0.5                                # untagged -> neutral mid
+    assert genre_map.energy("not-a-real-genre") == 0.5               # unknown -> neutral mid

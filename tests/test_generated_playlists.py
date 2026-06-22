@@ -111,11 +111,13 @@ def test_home_renders_generated_cards(store):
     assert "More in your wheelhouse" in r.text and "Save &amp; play on YouTube" in r.text
 
 
-def test_comfort_proto_card_dj_ordered_with_genre(store):
-    """A proto-card must be DJ-ordered BEFORE it's shown: no back-to-back same artist, and genres
+def test_comfort_proto_card_dj_ordered_with_genre(store, monkeypatch):
+    """A proto-card must be ordered BEFORE it's shown: no back-to-back same artist, and genres
     attached so a genre journey is possible. Reproduces the 'comfort playlist clustered by artist,
-    no genre journey' bug — the DJ used to run only at save, on data that had already dropped genre."""
+    no genre journey' bug — the DJ used to run only at save, on data that had already dropped genre.
+    Uses shuffle journey so the within-band artist-spacing guarantee applies to all items together."""
     from yt_playlist.web.routes import home
+    from yt_playlist.rec import recommend
     from yt_playlist.rec.recommend import ForYouItem
     store.upsert_identity("main", "cred", None, True)
     spec = ([("Hermanos", "Latin")] * 4 + [("Younger", "Electronica")] * 3
@@ -126,13 +128,15 @@ def test_comfort_proto_card_dj_ordered_with_genre(store):
         store.set_track_genre(tid, genre)
         items.append(ForYouItem(f"S{i}", art, "", f"v{i}", None, 5, "most-played",
                                 identity_key(f"S{i}", art), "comfort"))
+    monkeypatch.setattr(recommend, "roll_recipe",
+                        lambda *a, **k: {"facets": {}, "journey": "shuffle", "dj": {"seed": 1}})
 
     card = home._carded(store, "comfort", "Comfort listening", items, now=1.0)
 
     out = card["tracks"]
     assert len(out) == len(items)                                   # all rows survive the ordering
     adj_same = sum(1 for a, b in zip(out, out[1:]) if a.artist == b.artist)
-    assert adj_same == 0                                            # DJ spaced the artists in the PREVIEW
+    assert adj_same == 0                                            # artists spaced in the PREVIEW
     assert all(getattr(t, "genre", "") for t in out)               # genres attached -> journey possible
 
 
@@ -271,3 +275,33 @@ def test_gc_deletion_is_undoable(store, monkeypatch, tmp_path):
     executor.undo_action(store, aid, {iid: fc}, now + day)
     assert fc.created and fc.created[0][1] == "Gen mix"     # recreated from backup
     assert store.get_action(aid).status == "undone"
+
+
+def test_carded_orders_by_recipe_journey(store, monkeypatch):
+    """_carded must order the proto by the recipe's journey. Force 'warm_up' and assert the preview
+    rises in energy thirds (and still spaces artists / carries genre)."""
+    from yt_playlist.web.routes import home
+    from yt_playlist.rec import recommend, journeys, genre_map
+    from yt_playlist.rec.recommend import ForYouItem
+    store.upsert_identity("main", "cred", None, True)
+    # mellow vs intense families, interleaved so source order is NOT already sorted.
+    spec = [("ambient", "Calm"), ("metal", "Loud"), ("classical", "Calm"), ("punk", "Loud"),
+            ("folk", "Calm"), ("dnb", "Loud"), ("jazz", "Calm"), ("trance", "Loud"),
+            ("blues", "Calm"), ("techno", "Loud"), ("ambient", "Calm"), ("metal", "Loud")]
+    items = []
+    for i, (genre, artist) in enumerate(spec):
+        tid = store.upsert_track(f"v{i}", f"S{i}", artist, "", None, 1)
+        store.set_track_genre(tid, genre)
+        items.append(ForYouItem(f"S{i}", artist, "", f"v{i}", None, 1, "r",
+                                identity_key(f"S{i}", artist), "comfort"))
+    monkeypatch.setattr(recommend, "roll_recipe",
+                        lambda *a, **k: {"facets": {}, "journey": "warm_up", "dj": {"seed": 1}})
+
+    card = home._carded(store, "comfort", "Comfort listening", list(items), now=1.0)
+
+    out = card["tracks"]
+    assert card["recipe"]["journey"] == "warm_up"
+    e = [genre_map.energy(t.genre) for t in out]
+    thirds = [sum(e[:4]) / 4, sum(e[4:8]) / 4, sum(e[8:]) / 4]
+    assert thirds[0] < thirds[1] < thirds[2]               # warm_up rises across ALL thirds (shuffle ~17%)
+    assert all(getattr(t, "genre", "") for t in out)        # genres still attached
