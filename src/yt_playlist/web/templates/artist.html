@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% block title %}{{ artist }} · yt-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% block title %}{{ artist }} · TuneConsole{% endblock %}{% block body %}
 <div class="artist-head">
   {% if info and info.thumbnail %}<img class="artist-thumb" src="{{ info.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
   <div>
@@ -10,6 +10,12 @@
       {{ info.subscribers }} subscribers{% endif %}
     </p>
     {% if info and info.bio %}<p class="artist-bio">{{ info.bio|linkify }}</p>{% endif %}
+    {% if info and info.browse_id %}
+    <div class="pl-actions" style="margin-top:.7rem">
+      <a class="cta" href="https://music.youtube.com/channel/{{ info.browse_id }}"
+         target="_blank" rel="noopener">▶ Open in YouTube Music ↗</a>
+    </div>
+    {% endif %}
   </div>
 </div>
 
@@ -39,8 +45,7 @@
         <td class="liked-col">{% if s.liked %}<span class="liked-heart" title="In your Liked Music">♥</span>{% endif %}</td>
         <td><a class="ptitle" href="https://music.youtube.com/watch?v={{ s.video_id }}"
                target="_blank" rel="noopener">{{ s.title }}&nbsp;↗</a></td>
-        <td>{% if s.album_browse %}<a class="alink" href="https://music.youtube.com/browse/{{ s.album_browse }}"
-               target="_blank" rel="noopener">{{ s.album }}</a>{% else %}<span class="muted">{{ s.album }}</span>{% endif %}</td>
+        <td>{% if s.album_browse %}<a class="alink" href="/album?browse={{ s.album_browse }}">{{ s.album }}</a>{% else %}<span class="muted">{{ s.album }}</span>{% endif %}</td>
         <td class="small">{% for p in s.playlists %}<a class="alink"
               href="https://music.youtube.com/playlist?list={{ p.ytm }}" target="_blank" rel="noopener">{{ p.title }}</a>{{ ', ' if not loop.last }}{% endfor %}</td>
         <td class="num mono">{{ s.plays }}</td>
@@ -73,16 +78,15 @@
           data-songs="{{ al.songs }}" data-pls="{{ al.n_pls }}" data-plays="{{ al.plays }}"
           data-saved="{{ '1' if al.saved else '0' }}">
         <td>{% if al.thumb %}<img class="album-thumb" src="{{ al.thumb }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
-        <td>{% if al.browse %}<a class="ptitle" href="https://music.youtube.com/browse/{{ al.browse }}"
-               target="_blank" rel="noopener">{{ al.album }}&nbsp;↗</a>{% else %}<span class="ptitle">{{ al.album }}</span>{% endif %}</td>
+        <td>{% if al.browse %}<a class="ptitle" href="/album?browse={{ al.browse }}">{{ al.album }}</a>{% else %}<span class="ptitle">{{ al.album }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>
         <td class="num mono">{{ al.songs or '' }}</td>
         <td class="num mono">{{ al.n_pls or '' }}</td>
         <td class="num mono">{{ al.plays or '' }}</td>
-        <td>{% if al.browse %}<button type="button" class="btn-ghost btn-sm"
-              x-data="saveAlbum({{ 'true' if al.saved else 'false' }})" :disabled="busy"
-              @click="toggle('{{ al.browse }}')" x-text="label()"
-              :title="saved ? 'Remove from your YouTube library' : 'Save to your YouTube library'"></button>{% elif al.saved %}<span class="kind kind-audio" title="Saved in your YouTube library">✓</span>{% endif %}</td>
+        <td>{% if al.browse %}<button type="button" class="btn-ghost btn-sm" hx-disabled-elt="this"
+              hx-post="/collection/{{ 'unsave-album' if al.saved else 'save-album' }}"
+              hx-vals='{"browse_id": {{ al.browse|tojson }}}'
+              title="{{ 'Remove from your YouTube library' if al.saved else 'Save to your YouTube library' }}">{{ 'Unsave' if al.saved else 'Save' }}</button>{% elif al.saved %}<span class="kind kind-audio" title="Saved in your YouTube library">✓</span>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -92,7 +96,7 @@
 
 {% if yt_albums %}
 <h2 class="section">All albums on YouTube <span class="count">{{ yt_albums|length }}</span></h2>
-<p class="section-note">{{ artist }}’s full discography — Save any to your YouTube library.</p>
+<p class="section-note">{{ artist }}’s full discography. Save any to your YouTube library.</p>
 <div class="card">
   <table x-data="rowSort()">
     <thead><tr>
@@ -105,13 +109,12 @@
     {% for al in yt_albums %}
       <tr class="srow" data-album="{{ al.title|lower }}" data-year="{{ al.year or 0 }}">
         <td>{% if al.thumbnail %}<img class="album-thumb" src="{{ al.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
-        <td>{% if al.browse_id %}<a class="ptitle" href="https://music.youtube.com/browse/{{ al.browse_id }}"
-               target="_blank" rel="noopener">{{ al.title }}&nbsp;↗</a>{% else %}<span class="ptitle">{{ al.title }}</span>{% endif %}</td>
+        <td>{% if al.browse_id %}<a class="ptitle" href="/album?browse={{ al.browse_id }}">{{ al.title }}</a>{% else %}<span class="ptitle">{{ al.title }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>
-        <td style="text-align:right">{% if al.browse_id %}<button type="button" class="btn-ghost btn-sm"
-              x-data="saveAlbum({{ 'true' if al.saved else 'false' }})" :disabled="busy"
-              @click="toggle('{{ al.browse_id }}')" x-text="label()"
-              :title="saved ? 'Remove from your YouTube library' : 'Save to your YouTube library'"></button>{% endif %}</td>
+        <td style="text-align:right">{% if al.browse_id %}<button type="button" class="btn-ghost btn-sm" hx-disabled-elt="this"
+              hx-post="/collection/{{ 'unsave-album' if al.saved else 'save-album' }}"
+              hx-vals='{"browse_id": {{ al.browse_id|tojson }}}'
+              title="{{ 'Remove from your YouTube library' if al.saved else 'Save to your YouTube library' }}">{{ 'Unsave' if al.saved else 'Save' }}</button>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>

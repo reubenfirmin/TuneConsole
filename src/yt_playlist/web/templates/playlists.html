@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Playlists · yt-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Playlists · TuneConsole{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
   &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}{% endcall %}{% endif %}
 <div class="page-head">
@@ -7,9 +7,8 @@
   <p>Select playlists to merge, delete, or assign to a group. Sort by name or by your listening,
      and split the view by group.</p>
 </div>
-{% include "_syncbar.html" %}
 
-<div x-data='playlistsTab({{ rows|tojson }})'>
+<div id="pltab" x-data='playlistsTab({{ rows|tojson }})'>
   <div class="card" style="margin-bottom:1.1rem">
     <div class="pl-toolbar">
       <span class="muted" style="font-size:.85rem">Click a column heading to sort.</span>
@@ -30,13 +29,57 @@
       <button type="button" class="btn-sm" :disabled="count() < 2"
               @click="merge()" title="Open the merge editor with the selected playlists">Merge →</button>
       <button type="button" class="btn-sm" @click="openCopy()"
-              :title="count() > 1 ? 'Copy + merge the selected playlists into a new one' : 'Duplicate the selected playlist'"
-              x-text="count() > 1 ? 'Copy + merge…' : 'Copy…'"></button>
+              :title="count() > 1 ? 'Combine the selected playlists into a new one' : 'Duplicate the selected playlist'"
+              x-text="count() > 1 ? 'Combine to new…' : 'Copy…'"></button>
+      <button type="button" class="btn-sm" @click="openCopyInto()"
+              title="Copy the selected playlists' songs into an existing playlist">Copy into…</button>
       <button type="button" class="btn-sm" @click="openGroup()">Group…</button>
       <button type="button" class="btn-danger btn-sm" @click="delModal = true">Delete</button>
       <button type="button" class="btn-ghost btn-sm" @click="selectAll(false)">Clear</button>
     </div>
   </template>
+
+  {% macro pl_row(promote=False) %}
+  <tr :class="{ selrow: sel[r.id] }">
+    <td><input type="checkbox" :checked="sel[r.id]" @change="toggle(r.id)" style="width:auto"></td>
+    <td>
+      <span class="pl-cover">
+        <img class="pl-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
+        <a class="pl-play" :href="'https://music.youtube.com/playlist?list=' + r.ytm"
+           target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
+        <span class="pl-ptype" x-show="r.kind"
+              :title="r.kind" x-text="({ audio: '♪', video: '▦', mixed: '◑', mix: '≋' })[r.kind] || ''"></span>
+      </span>
+      <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in TuneConsole"></a>
+      {% if promote %}<button type="button" class="promote-btn" @click.stop="promote(r)"
+              title="Move into your library so it counts as a real playlist and shapes your recommendations">Promote to library ↑</button>{% endif %}
+    </td>
+    <td><span class="gtag" x-show="r.group" x-text="r.group"></span></td>
+    <td class="num mono" x-text="r.count"></td>
+    <td class="num lastcol" x-text="fmtLast(r.last)"></td>
+    <td class="num mono" x-text="r.listens || ''"></td>
+  </tr>
+  {% endmacro %}
+
+  {# "Generated" lives in its own card above the table — always a separate block, collapsible #}
+  <div class="card gen-grp" x-show="genRows().length" x-cloak>
+    <div class="gen-grp-head" @click="toggleGen()" title="Click to collapse / expand">
+      <span class="eyebrow">Generated</span>
+      <span class="gen-grp-count" x-text="'(' + genRows().length + ')'"></span>
+      <span class="gen-grp-caret" x-text="collapsed.Generated ? '▸' : '▾'"></span>
+    </div>
+    <table x-show="!collapsed.Generated" x-cloak>
+      <tbody>
+        <template x-for="r in genRows()" :key="r.id">{{ pl_row(promote=True) }}</template>
+      </tbody>
+    </table>
+    <p class="section-note gen-gc-note" x-show="!collapsed.Generated" x-cloak>
+      Generated playlists you never play are cleaned up automatically: if fewer than half its tracks
+      are played within {{ gc_days }} day{{ 's' if gc_days != 1 }} of being created, it's deleted here
+      and on YouTube. Each deletion is backed up and can be undone from <a href="/actions">Actions</a>.
+      <strong>Promote</strong> one to your library to keep it.
+    </p>
+  </div>
 
   <div class="card">
     <table>
@@ -48,33 +91,15 @@
         <th class="sorth num" style="width:6rem" @click="sortBy('last')"
             title="Most recent time a song from this playlist showed up in your play history">Last<span x-text="ind('last')"></span></th>
         <th class="sorth num" style="width:5rem" @click="sortBy('listens')"
-            title="Total plays of this playlist's songs across your sync history — sums per-song plays, so big playlists score high. Not playlist-level plays.">Plays<span x-text="ind('listens')"></span></th>
+            title="Total plays of this playlist's songs across your sync history. Sums per-song plays, so big playlists score high. Not playlist-level plays.">Plays<span x-text="ind('listens')"></span></th>
       </tr></thead>
       <template x-for="sec in sections()" :key="sec.name">
         <tbody>
           <tr x-show="split && sec.name" class="group-row"><td colspan="6" x-text="sec.name"></td></tr>
-          <template x-for="r in sec.rows" :key="r.id">
-            <tr :class="{ selrow: sel[r.id] }">
-              <td><input type="checkbox" :checked="sel[r.id]" @change="toggle(r.id)" style="width:auto"></td>
-              <td>
-                <span class="pl-cover">
-                  <img class="pl-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
-                  <a class="pl-play" :href="'https://music.youtube.com/playlist?list=' + r.ytm"
-                     target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
-                  <span class="pl-ptype" x-show="r.kind"
-                        :title="r.kind" x-text="({ audio: '♪', video: '▦', mixed: '◑', mix: '≋' })[r.kind] || ''"></span>
-                </span>
-                <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in yt-playlist"></a>
-              </td>
-              <td><span class="gtag" x-show="r.group" x-text="r.group"></span></td>
-              <td class="num mono" x-text="r.count"></td>
-              <td class="num lastcol" x-text="fmtLast(r.last)"></td>
-              <td class="num mono" x-text="r.listens || ''"></td>
-            </tr>
-          </template>
+          <template x-for="r in sec.rows" :key="r.id">{{ pl_row() }}</template>
         </tbody>
       </template>
-      <tbody x-show="rows.length === 0"><tr><td colspan="7" class="empty">No playlists yet — sync first.</td></tr></tbody>
+      <tbody x-show="rows.length === 0"><tr><td colspan="7" class="empty">No playlists yet. Sync first.</td></tr></tbody>
     </table>
   </div>
 
@@ -83,14 +108,43 @@
     <div class="modal-backdrop" x-show="copyModal" x-cloak x-transition.opacity
          @click="copyModal = false" @keydown.escape.window="copyModal = false">
       <div class="modal" @click.stop x-transition.scale.origin.center>
-        <h3 x-text="copyIds.length > 1 ? 'Copy + merge ' + copyIds.length + ' playlists' : 'Copy playlist'"></h3>
+        <h3 x-text="copyIds.length > 1 ? 'Combine ' + copyIds.length + ' playlists into a new one' : 'Copy playlist'"></h3>
         <p x-show="copyIds.length > 1">A new playlist is created with the combined tracks of the selected
            playlists. The originals are left untouched.</p>
         <input class="modal-input" type="text" x-model="copyName" placeholder="New playlist name"
-               @keydown.enter="doCopy()" x-ref="cname" x-init="$watch('copyModal', v => v && $nextTick(() => $refs.cname.select()))">
+               x-ref="cname" x-init="$watch('copyModal', v => v && $nextTick(() => $refs.cname.select()))"
+               hx-post="/playlists/copy" hx-trigger="keyup[key=='Enter']"
+               hx-vals='js:{ids: plData().copyIds.join(","), name: plData().copyName}'>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="copyModal = false">Cancel</button>
-          <button type="button" @click="doCopy()">Save</button>
+          <button type="button" hx-post="/playlists/copy"
+                  hx-vals='js:{ids: plData().copyIds.join(","), name: plData().copyName}'>Save</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- copy-into modal: copy the selected playlists' songs into an existing playlist -->
+  <template x-teleport="body">
+    <div class="modal-backdrop" x-show="copyIntoModal" x-cloak x-transition.opacity
+         @click="copyIntoModal = false" @keydown.escape.window="copyIntoModal = false">
+      <div class="modal" @click.stop x-transition.scale.origin.center>
+        <h3 x-text="'Copy ' + copyIds.length + ' playlist' + (copyIds.length === 1 ? '' : 's') + ' into…'"></h3>
+        <p>The selected playlists' songs are added to an existing playlist. Songs already there are
+           skipped, and the originals are left untouched.</p>
+        <select class="modal-input" x-model="copyIntoTarget" x-ref="ctarget"
+                x-init="$watch('copyIntoModal', v => v && $nextTick(() => $refs.ctarget.focus()))">
+          <option value="">Choose a destination…</option>
+          <template x-for="t in intoTargets()" :key="t.id">
+            <option :value="t.id" x-text="t.title"></option>
+          </template>
+        </select>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="copyIntoModal = false">Cancel</button>
+          <button type="button" hx-post="/playlists/copy-into"
+                  @htmx:after-request="if ($event.detail.successful) copyIntoModal = false"
+                  hx-vals='js:{ids: plData().copyIds.join(","), target: plData().copyIntoTarget}'
+                  :disabled="!copyIntoTarget">Copy in</button>
         </div>
       </div>
     </div>
@@ -105,11 +159,14 @@
         <p>Type a group name. Existing names are reused; leave blank to remove them from their group.</p>
         <input class="modal-input" type="text" x-model="groupName" placeholder="e.g. Workout"
                list="grouplist" autocomplete="off"
-               @keydown.enter="doGroup()" x-ref="gname" x-init="$watch('groupModal', v => v && $nextTick(() => $refs.gname.focus()))">
+               x-ref="gname" x-init="$watch('groupModal', v => v && $nextTick(() => $refs.gname.focus()))"
+               hx-post="/playlists/group" hx-trigger="keyup[key=='Enter']"
+               hx-vals='js:{ids: plData().selected().map(r => r.id).join(","), name: plData().groupName}'>
         <datalist id="grouplist">{% for g in group_names %}<option value="{{ g }}"></option>{% endfor %}</datalist>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="groupModal = false">Cancel</button>
-          <button type="button" @click="doGroup()">Save</button>
+          <button type="button" hx-post="/playlists/group"
+                  hx-vals='js:{ids: plData().selected().map(r => r.id).join(","), name: plData().groupName}'>Save</button>
         </div>
       </div>
     </div>
@@ -126,10 +183,14 @@
            <strong>hidden</strong> from this tab instead.</p>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="delModal = false">Cancel</button>
-          <button type="button" class="btn-danger" @click="doDelete()">Delete them</button>
+          <button type="button" class="btn-danger" hx-post="/playlists/delete"
+                  hx-vals='js:{ids: plData().selected().map(r => r.id).join(",")}'>Delete them</button>
         </div>
       </div>
     </div>
   </template>
 </div>
+{# htmx evaluates hx-vals js: in the global scope (no $el/this/event bound), so reach the
+   playlistsTab Alpine state by id. The teleported modals share this same component data. #}
+<script>function plData() { return Alpine.$data(document.getElementById('pltab')); }</script>
 {% endblock %}

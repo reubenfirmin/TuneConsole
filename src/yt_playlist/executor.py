@@ -7,8 +7,8 @@ from yt_playlist.matching import fuzzy_ratio, normalize, track_artist, identity_
 from yt_playlist.retry import with_retry
 from yt_playlist import paths
 from yt_playlist.action_kinds import (
-    PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, COPY_PLAYLIST, ADD_TRACKS,
-    REMOVE_TRACK, RENAME_PLAYLIST, UNDO, UNDOABLE_KINDS, is_undoable)
+    PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED, COPY_PLAYLIST,
+    COPY_INTO, ADD_TRACKS, REMOVE_TRACK, RENAME_PLAYLIST, UNDO, UNDOABLE_KINDS, is_undoable)
 from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.thumbnails import best_thumb
 
@@ -80,7 +80,10 @@ def _resolve_in_target(target_client, key, title, artist, source_vid, source_dur
         cand = (within, score, r.get("videoId"))
         if best is None or (cand[0], cand[1]) > (best[0], best[1]):
             best = cand
-    if best is not None:
+    # Only accept a search match we're confident is the SAME recording: either its duration matches
+    # (within 3s) or the title/artist is near-exact. A merely-similar title (e.g. a 7-min extended mix
+    # for the 3-min original) is left unresolved, so a move won't delete the source for a wrong substitute.
+    if best is not None and (best[0] or best[1] >= 0.95):
         return Resolution(key, source_vid, best[2], "search")
     return Resolution(key, source_vid, None, "unresolved")
 
@@ -94,6 +97,11 @@ def _remote_keys(client, ytm_playlist_id):
     except Exception:  # noqa: BLE001 - deleted playlist or ytmusicapi parse failure
         return None
     return {identity_key(t.get("title", ""), track_artist(t)) for t in detail.get("tracks", [])}
+
+def _remote_video_ids(client, ytm_playlist_id):
+    """Current remote videoIds (in order) of a playlist — for capturing prior contents before a merge."""
+    detail = with_retry(lambda: client.get_playlist(ytm_playlist_id, limit=None))
+    return [t.get("videoId") for t in detail.get("tracks", []) if t.get("videoId")]
 
 def _verify_and_delete(store, plan, source_client, target_client, source_ytm_playlist_id, now) -> str:
     # Safety check against LIVE remote state for BOTH playlists (targeted fetches, not a full sync):
@@ -193,23 +201,35 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now) -> d
 
     summary = {"added": 0, "removed": 0, "skipped": 0, "deleted": [],
                "kept_ytm": keepers[0].ytm_playlist_id, "kept_title": keepers[0].title}
-    restored, backups = [], []
-    for pl in keepers:
-        added, removed, prior, skipped = _reconcile(client_for(pl), pl.ytm_playlist_id, result_video_ids)
-        summary["added"] += added
-        summary["removed"] += removed
-        summary["skipped"] += len(skipped)
-        restored.append({"ytm": pl.ytm_playlist_id, "identity": pl.identity_id, "prev": prior})
-    for pl in droppers:
-        backups.append(backup_playlist(store, pl.id, now))
-        logger.warning("apply: deleting %s", pl.ytm_playlist_id)
-        client_for(pl).delete_playlist(pl.ytm_playlist_id)
-        store.remove_playlist(pl.id)
-        summary["deleted"].append(pl.title)
-    store.record_action(APPLY_MERGE,
-                        json.dumps({"kept": summary["kept_title"], "deleted": summary["deleted"],
-                                    "members": [p.title for p in pls]}),
-                        "{}", "executed", json.dumps({"restored": restored, "backups": backups}), now)
+    # Capture every keeper's prior contents BEFORE mutating, so a partial failure (a failed remove, or
+    # a dropper delete that throws mid-loop) still leaves a complete, undoable trail — without this the
+    # function exited before record_action and the user had a half-merged playlist with no undo.
+    restored = [{"ytm": pl.ytm_playlist_id, "identity": pl.identity_id,
+                 "prev": _remote_video_ids(client_for(pl), pl.ytm_playlist_id)} for pl in keepers]
+    backups = []
+
+    def _record(extra=None):
+        store.record_action(APPLY_MERGE,
+                            json.dumps({"kept": summary["kept_title"], "deleted": summary["deleted"],
+                                        "members": [p.title for p in pls], **(extra or {})}),
+                            "{}", "executed", json.dumps({"restored": restored, "backups": backups}), now)
+
+    try:
+        for pl in keepers:
+            added, removed, _prior, skipped = _reconcile(client_for(pl), pl.ytm_playlist_id, result_video_ids)
+            summary["added"] += added
+            summary["removed"] += removed
+            summary["skipped"] += len(skipped)
+        for pl in droppers:
+            backups.append(backup_playlist(store, pl.id, now))
+            logger.warning("apply: deleting %s", pl.ytm_playlist_id)
+            client_for(pl).delete_playlist(pl.ytm_playlist_id)
+            store.remove_playlist(pl.id)
+            summary["deleted"].append(pl.title)
+    except Exception:
+        _record({"partial": True})   # record what we managed, so the partial merge is undoable
+        raise
+    _record()
     return summary
 
 def copy_or_move_playlist(store, playlist_id, target_identity_id, source_client, target_client, now,
@@ -225,7 +245,7 @@ def copy_or_move_playlist(store, playlist_id, target_identity_id, source_client,
     if src.identity_id == target_identity_id:
         raise ValueError("the source and target identity are the same")
     rows = _tracks_with_meta(store, playlist_id)
-    new_pid = target_client.create_playlist(src.title, "Copied by yt-playlist")
+    new_pid = target_client.create_playlist(src.title, "Copied by TuneConsole")
     video_ids, unresolved = [], 0
     for key, vid, title, artist, dur, _avail in rows:
         res = _resolve_in_target(target_client, key, title, artist, vid, dur, fuzzy_threshold)
@@ -268,6 +288,13 @@ def delete_empty_playlist(store, playlist_id, client, now) -> str:
     keys = _remote_keys(client, pl.ytm_playlist_id)
     if keys:
         raise ValueError(f"“{pl.title}” isn't empty anymore ({len(keys)} tracks) — re-sync first")
+    # keys is None only when the remote read failed. That's the EXPECTED look of a genuinely-empty
+    # playlist (ytmusicapi can't parse an empty one) — but it's also what a transient network error
+    # looks like. Only trust "None == empty" when our last sync also saw it empty; if the store still
+    # shows tracks, refuse rather than delete a non-empty playlist on a momentary read failure.
+    if keys is None and pl.track_count:
+        raise ValueError(f"couldn't confirm “{pl.title}” is empty (it last had {pl.track_count} "
+                         "tracks) — re-sync and try again. Nothing was changed.")
     backup_path = backup_playlist(store, playlist_id, now)
     logger.warning("deleting empty playlist %s (backup at %s)", pl.ytm_playlist_id, backup_path)
     client.delete_playlist(pl.ytm_playlist_id)
@@ -295,6 +322,62 @@ def delete_playlist(store, playlist_id, client, now) -> str:
                         "{}", "executed", json.dumps({"backup": backup_path}), now)
     return backup_path
 
+# Keep a generated playlist if at least this fraction of its tracks were played since it was created
+# — evidence you actually played the playlist, not just stumbled across a song or two from it.
+GC_PLAYED_FRACTION = 0.5
+
+
+def gc_generated_playlists(store, clients, now, grace_days=None) -> list[dict]:
+    """Garbage-collect generated playlists that have gone (mostly) unplayed past their grace window.
+
+    A generated playlist (group == GENERATED_GROUP) is collected when BOTH hold:
+      • it's older than the grace window (now - first_seen ≥ grace_days), and
+      • fewer than GC_PLAYED_FRACTION of its tracks have been played since it was created.
+
+    YouTube exposes no per-playlist play count, so "played" is judged at the song level using each
+    track's last-played date: playing the playlist through lights up most of its tracks within the
+    window, whereas a couple of stray plays (a song heard via radio/autoplay) doesn't clear the bar.
+    Each collection backs up, deletes locally + on YouTube, and records an undoable GC_GENERATED
+    action — exactly like a manual delete, just automatic. Returns the collected playlists.
+    """
+    from yt_playlist.repos.rec import GENERATED_GROUP
+    from yt_playlist import rec_params
+    if grace_days is None:
+        grace_days = rec_params.get_param(store, "generated_gc_days")
+    grace_s = grace_days * 86400.0
+    clients = clients or {}
+    groups = store.get_playlist_groups()                 # ytm -> group name
+    recency = store.get_playlist_track_recency()         # pid -> [per-track last-played ts | None, ...]
+    collected = []
+    for pl in store.get_playlists():
+        if groups.get(pl.ytm_playlist_id) != GENERATED_GROUP:
+            continue
+        created = pl.first_seen or now
+        if now - created < grace_s:                      # still inside its grace window — leave it
+            continue
+        lasts = recency.get(pl.id) or []
+        if lasts:                                        # fraction of tracks played since creation
+            played = sum(1 for t in lasts if t is not None and t >= created)
+            if played / len(lasts) >= GC_PLAYED_FRACTION:   # enough of it was played -> keep
+                continue
+        client = clients.get(pl.identity_id)
+        if client is None:                                # can't delete remotely without its client
+            continue
+        try:
+            backup_path = backup_playlist(store, pl.id, now)
+            logger.warning("GC: deleting unplayed generated playlist %s (backup at %s)",
+                           pl.ytm_playlist_id, backup_path)
+            client.delete_playlist(pl.ytm_playlist_id)
+            store.remove_playlist(pl.id)
+            store.record_action(GC_GENERATED,
+                                json.dumps({"ytm": pl.ytm_playlist_id, "title": pl.title}),
+                                "{}", "executed", json.dumps({"backup": backup_path}), now)
+            collected.append({"ytm": pl.ytm_playlist_id, "title": pl.title, "backup": backup_path})
+        except Exception:  # noqa: BLE001 - one playlist's failure must not stop the sweep
+            logger.warning("GC: could not delete generated playlist %s", pl.ytm_playlist_id,
+                           exc_info=True)
+    return collected
+
 def copy_playlist(store, playlist_ids, new_name, client, now) -> dict:
     """Copy one or more playlists into a NEW playlist (non-destructive). With several, it's a
     copy+merge: their tracks are unioned (de-duped, order preserved). Pulled into the store."""
@@ -310,7 +393,7 @@ def copy_playlist(store, playlist_ids, new_name, client, now) -> dict:
                 keys[v] = k
     title = (new_name or "").strip() or (f"{pls[0].title} (copy)" if len(pls) == 1 else "Combined playlist")
     identity = pls[0].identity_id
-    new_pid = client.create_playlist(title, "Copied by yt-playlist")
+    new_pid = client.create_playlist(title, "Copied by TuneConsole")
     added, skipped = _add_items(client, new_pid, vids)
     store.record_action(COPY_PLAYLIST,
                         json.dumps({"title": title, "source": ", ".join(p.title for p in pls),
@@ -329,6 +412,137 @@ def copy_playlist(store, playlist_ids, new_name, client, now) -> dict:
     db_pid = store.upsert_playlist(identity, new_pid, title, len(track_ids), content_hash(track_keys), now)
     store.set_playlist_tracks(db_pid, track_ids)
     return {"new_ytm": new_pid, "title": title, "added": added, "skipped": len(skipped), "from": len(pls)}
+
+def create_generated_playlist(store, title, tracks, client, now, identity_id=None, group=None,
+                              recipe=None) -> dict:
+    """Create a NEW playlist on YouTube from recommendation tracks (dicts with video_id + metadata),
+    tag it `group` ('Generated') so the rec engine quarantines it until it's played, and optimistically
+    materialize it into the store so it shows up in the Playlists tab right away (a later sync
+    reconciles canonical order/metadata). Non-destructive: nothing existing is touched.
+
+    Quarantine makes the optimistic insert safe even for unowned tracks (e.g. 'fresh songs' not yet in
+    your library): the playlist is excluded from playlist-level signals, and its unplayed-only tracks
+    are excluded from the embedding baskets — until you actually play it."""
+    from yt_playlist.repos.rec import GENERATED_GROUP
+    from yt_playlist.sync import content_hash   # local import avoids an import cycle
+    group = group or GENERATED_GROUP
+    uniq, seen = [], set()
+    for t in tracks:
+        v = (t or {}).get("video_id")
+        if v and v not in seen:
+            seen.add(v)
+            uniq.append(t)
+    if not uniq:
+        raise ValueError("no tracks to add")
+    title = (title or "Generated playlist").strip()
+    if recipe is not None:                                # recipe-driven: version the title + DJ-order
+        from yt_playlist.recommend import dj_order, versioned_title
+        title = versioned_title(store, title)
+        dj = recipe.get("dj", {})
+        uniq = dj_order(uniq, stickiness=dj.get("stickiness", 0.0), seed=dj.get("seed", 0))
+    new_pid = client.create_playlist(title, "Generated by TuneConsole")
+    added, skipped = _add_items(client, new_pid, [t["video_id"] for t in uniq])
+    store.set_playlist_group(new_pid, group)             # auto-group (quarantines from the engine)
+    db_pid = None
+    if identity_id is not None:                          # optimistic local materialization
+        skipped_set = set(skipped)
+        track_ids, keys = [], []
+        for t in uniq:
+            if t["video_id"] in skipped_set:
+                continue
+            track_ids.append(store.upsert_track(
+                t["video_id"], t.get("title") or "", t.get("artist") or "", t.get("album") or "",
+                None, thumbnail=t.get("thumbnail")))
+            keys.append(identity_key(t.get("title") or "", t.get("artist") or ""))
+        db_pid = store.upsert_playlist(identity_id, new_pid, title, len(track_ids),
+                                       content_hash(list(dict.fromkeys(keys))), now)
+        store.set_playlist_tracks(db_pid, track_ids)
+    store.record_action(COPY_PLAYLIST,
+                        json.dumps({"title": title, "source": "recommendations", "group": group,
+                                    "added": added, "skipped": len(skipped)}),
+                        "{}", "executed", json.dumps({"new_ytm": new_pid}), now)
+    if recipe is not None:
+        store.set_recipe(new_pid, recipe, now)           # remember exactly how this one was made
+    return {"new_ytm": new_pid, "pid": db_pid, "title": title, "added": added, "skipped": len(skipped)}
+
+def create_playlist_from_album(store, browse_id, name, client, now, identity_id) -> dict:
+    """Create a NEW playlist from an album's tracks (non-destructive). Fetches the album, creates a
+    real (un-grouped) playlist under `identity_id` with its songs, and materializes it into the store
+    so it shows up immediately. Returns the new playlist's local db id for redirecting to its page."""
+    a = with_retry(lambda: client.get_album(browse_id))
+    if not a:
+        raise ValueError("couldn't load that album")
+    artist = ", ".join(x.get("name", "") for x in (a.get("artists") or []) if x.get("name"))
+    vids, seen, meta = [], set(), {}
+    for t in (a.get("tracks") or []):
+        v = t.get("videoId")
+        if v and v not in seen:
+            seen.add(v)
+            vids.append(v)
+            meta[v] = (t.get("title") or "", artist, a.get("title") or "")
+    if not vids:
+        raise ValueError("this album has no playable tracks")
+    title = (name or "").strip() or (a.get("title") or "Album playlist")
+    new_pid = client.create_playlist(title, f"Created from “{a.get('title')}” by TuneConsole")
+    added, skipped = _add_items(client, new_pid, vids)
+    skipped_set = set(skipped)
+    thumb = best_thumb(a.get("thumbnails"))
+    track_ids, keys = [], []
+    for v in vids:
+        if v in skipped_set:
+            continue
+        ti, ar, al = meta[v]
+        track_ids.append(store.upsert_track(v, ti, ar, al, None, thumbnail=thumb))
+        keys.append(identity_key(ti, ar))
+    from yt_playlist.sync import content_hash   # local import avoids an import cycle
+    db_pid = store.upsert_playlist(identity_id, new_pid, title, len(track_ids),
+                                   content_hash(list(dict.fromkeys(keys))), now)
+    store.set_playlist_tracks(db_pid, track_ids)
+    store.record_action(COPY_PLAYLIST,
+                        json.dumps({"title": title, "source": a.get("title") or "album",
+                                    "added": added, "skipped": len(skipped)}),
+                        "{}", "executed", json.dumps({"new_ytm": new_pid, "target_identity": identity_id}), now)
+    return {"new_ytm": new_pid, "db_pid": db_pid, "title": title, "added": added, "skipped": len(skipped)}
+
+def copy_into_playlist(store, source_ids, target_id, client, now) -> dict:
+    """Copy the union of tracks from one or more source playlists INTO an existing target playlist
+    (non-destructive append). Songs already in the target (by identity_key) are skipped, so it's
+    safe to re-run. The source playlists are left untouched."""
+    target = store.get_playlist(target_id)
+    if target is None:
+        raise ValueError("target playlist no longer exists")
+    if target.ytm_playlist_id in SYSTEM_PLAYLIST_IDS:
+        raise ValueError("can't copy into a system playlist")
+    sources = [p for p in (store.get_playlist(i) for i in source_ids) if p is not None and p.id != target_id]
+    if not sources:
+        raise ValueError("no source playlists to copy")
+    # Add with the TARGET's client, so every source video must belong to the target's account. A
+    # cross-account copy would feed account A's videoIds to account B's client — region/upload-scoped
+    # ids silently 400 and land in `skipped`, leaving the destination short. Require one account.
+    if any(p.identity_id != target.identity_id for p in sources):
+        raise ValueError("can only copy into a playlist on the same account")
+    have = set(store.get_playlist_track_keys(target_id))   # songs already in the target
+    vids, seen = [], set()
+    for pl in sources:
+        for (k, v, t, a, d, av) in _tracks_with_meta(store, pl.id):
+            if v and v not in seen and k not in have:
+                seen.add(v)
+                have.add(k)                                # also de-dupe across sources by song
+                vids.append(v)
+    added, skipped = _add_items(client, target.ytm_playlist_id, vids)
+    skipped_set = set(skipped)
+    added_vids = [v for v in vids if v not in skipped_set]
+    tid_by_vid = store.track_ids_for_videos(added_vids)
+    new_ids = [tid_by_vid[v] for v in added_vids if v in tid_by_vid]
+    combined = list(dict.fromkeys(store.get_playlist_track_ids(target_id) + new_ids))
+    store.set_playlist_tracks(target_id, combined)
+    store.set_playlist_track_count(target_id, len(combined), now)
+    store.record_action(COPY_INTO,
+                        json.dumps({"target": target.title, "added": added, "skipped": len(skipped),
+                                    "source": ", ".join(p.title for p in sources)}),
+                        "{}", "executed", "{}", now)
+    return {"target_ytm": target.ytm_playlist_id, "title": target.title, "added": added,
+            "skipped": len(skipped), "from": len(sources), "count": len(combined)}
 
 def _parse_duration(text):
     """'3:45' / '1:02:03' -> seconds, else None."""
@@ -395,9 +609,11 @@ def search_versions(client, title, artist, exclude=None, limit=14) -> list:
     return out
 
 
-def add_tracks_to_playlist(store, playlist_id, tracks, client, now) -> dict:
+def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_id=None) -> dict:
     """Append the given tracks (full metadata dicts) to an existing playlist on YouTube, then seed
-    the store directly from what we added (no racing read-back). Returns counts."""
+    the store directly from what we added (no racing read-back). When `after_video_id` is an existing
+    track, the freshly-added tracks are then slotted just below it (preserving their order) rather than
+    left at the end. Returns counts."""
     pl = store.get_playlist(playlist_id)
     if pl is None:
         raise ValueError("playlist no longer exists")
@@ -406,6 +622,14 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now) -> dict:
     items = [t for t in tracks if t.get("videoId")]
     if not items:
         raise ValueError("no tracks to add")
+    # the track currently after the anchor — captured before we append, so we know where to slot the
+    # new tracks back to. None (anchor is last, or absent) means "leave them at the end".
+    successor_vid = None
+    if after_video_id:
+        order = [t["video_id"] for t in store.playlist_tracks_detail(playlist_id)]
+        if after_video_id in order:
+            i = order.index(after_video_id)
+            successor_vid = order[i + 1] if i + 1 < len(order) else None
     added, skipped = _add_items(client, pl.ytm_playlist_id, [t["videoId"] for t in items])
     skipped_set = set(skipped)
     existing = store.get_playlist_track_ids(playlist_id)
@@ -423,6 +647,18 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now) -> dict:
     store.record_action(ADD_TRACKS,
                         json.dumps({"playlist": pl.title, "added": added, "titles": titles}),
                         "{}", "executed", "{}", now)
+    # Move each new track to sit just before the anchor's old successor. Moving them in order before the
+    # same successor preserves their order (each lands right after the previous one). Best-effort: the
+    # add already succeeded, so a positioning hiccup just leaves a track at the end rather than failing.
+    if successor_vid:
+        for t in items:
+            if t["videoId"] in skipped_set:
+                continue
+            try:
+                reorder_track(store, playlist_id, t["videoId"], successor_vid, client, now)
+            except Exception:  # noqa: BLE001 - positioning is best-effort
+                logger.warning("could not slot %s below %s in playlist %s",
+                               t["videoId"], after_video_id, playlist_id)
     return {"added": added, "skipped": len(skipped), "count": len(combined)}
 
 
@@ -456,7 +692,8 @@ def rename_playlist(store, playlist_id, title, client, now) -> dict:
 
 
 def remove_track(store, playlist_id, video_id, client, now) -> dict:
-    """Remove a single track from a playlist (YouTube + store)."""
+    """Remove a single track from a real playlist (YouTube + store). Liked Music is handled upstream
+    by LikedMusic.remove (an unlike), so by here a system playlist is always a hard error."""
     pl = store.get_playlist(playlist_id)
     if pl is None:
         raise ValueError("playlist no longer exists")
@@ -574,7 +811,7 @@ def _recreate_from_backup(clients, backup_path, store=None, now=None):
     if identity_id is None:
         raise ValueError("backup has no identity; cannot recreate")
     client = _client_for(clients, identity_id)
-    new_pid = client.create_playlist(payload["title"], "Recreated by yt-playlist undo")
+    new_pid = client.create_playlist(payload["title"], "Recreated by TuneConsole undo")
     vids = [t["video_id"] for t in payload.get("tracks", []) if t.get("video_id")]
     if vids:
         client.add_playlist_items(new_pid, vids)
@@ -637,7 +874,7 @@ def undo_action(store, action_id, clients, now) -> None:
                              "backup has no identity; cannot recreate")
         sclient = _client_for(clients, identity_id)
         # create_playlist requires a description (real YTMusic API); non-idempotent, so not retried.
-        new_pid = sclient.create_playlist(payload["title"], "Recreated by yt-playlist undo")
+        new_pid = sclient.create_playlist(payload["title"], "Recreated by TuneConsole undo")
         vids = [t["video_id"] for t in payload.get("tracks", []) if t.get("video_id")]
         if vids:
             sclient.add_playlist_items(new_pid, vids)

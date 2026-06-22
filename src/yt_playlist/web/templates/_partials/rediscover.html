@@ -1,0 +1,41 @@
+{# Spotlight a couple of library playlists you haven't played lately - a teaser (5 tracks each),
+   not the full list, with a Play-on-YouTube CTA and a secondary View/edit button. #}
+{% if rediscover %}
+<section id="rediscover">
+  <h2 class="section">Rediscover in your library</h2>
+  <p class="section-note">Playlists you haven't reached for lately - dip back in.</p>
+  <p class="section-note redis-note">Play times are per track - we rank by the median of when each
+    song was last played, so one recently-heard track won't hide an otherwise-cold playlist.</p>
+  <div class="for-you-grid rediscover-grid">
+    {% for p in rediscover %}
+    <div class="card redis-card">
+      <header class="redis-head">
+        <span class="gen-th{{ ' no-art' if not p.thumbnail }}">{% if p.thumbnail %}<img src="{{ p.thumbnail }}"
+             alt="" loading="lazy" referrerpolicy="no-referrer"
+             onerror="this.closest('.gen-th').classList.add('no-art'); this.remove()">{% endif %}</span>
+        <span class="redis-meta">
+          <a class="redis-title" href="/playlist/{{ p.id }}" title="Open in TuneConsole">{{ p.title }}</a>
+          <span class="redis-sub">{{ p.track_count }} track{{ 's' if p.track_count != 1 }}{% if p.last_played %} · tracks typically last played {{ p.last_played }}{% else %} · mostly never played{% endif %}</span>
+        </span>
+      </header>
+      <ol class="redis-list">
+        {% for t in p.tracks %}
+        <li class="redis-row">
+          <span class="redis-row-title">{{ t.title }}</span>
+          <span class="redis-row-artist">{{ t.artist }}</span>
+        </li>
+        {% endfor %}
+        {% if p.track_count > p.tracks|length %}
+        <li class="redis-more">…and {{ p.track_count - p.tracks|length }} more</li>
+        {% endif %}
+      </ol>
+      <footer class="redis-foot">
+        <a class="cta" href="https://music.youtube.com/playlist?list={{ p.ytm }}"
+           target="_blank" rel="noopener">Play on YouTube ↗</a>
+        <a class="btn-ghost btn-sm" href="/playlist/{{ p.id }}">View / edit</a>
+      </footer>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}

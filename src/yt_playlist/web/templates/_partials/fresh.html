@@ -1,0 +1,10 @@
+{% if building %}
+<div class="gen-card card" hx-get="/home/fresh" hx-trigger="load delay:4s" hx-swap="outerHTML">
+  <header class="gen-head"><span class="eyebrow">Fresh songs <span class="refreshing">finding…</span></span></header>
+  <div class="gen-list">{% for _ in range(6) %}<div class="gen-row skeleton" style="min-height:2.6rem"></div>{% endfor %}</div>
+</div>
+{% elif proto %}
+<div{% if stale %} hx-get="/home/fresh" hx-trigger="load delay:3s" hx-swap="outerHTML"{% endif %}>
+{% with p = proto %}{% include "_partials/generated_playlist.html" %}{% endwith %}
+</div>
+{% endif %}

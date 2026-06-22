@@ -1,0 +1,25 @@
+{# Swapped in for a proto-playlist card after "Save & play" — success or a friendly failure. #}
+<section class="gen-card card gen-done">
+  {% if error %}
+  <header class="gen-head"><span class="eyebrow eyebrow-warn">Couldn't save</span>
+    <h2 class="gen-name">{{ name }}</h2></header>
+  <p class="section-note">{{ error }}</p>
+  {% else %}
+  <header class="gen-head"><span class="eyebrow eyebrow-ok">Saved ✓. Opening YouTube…</span>
+    <h2 class="gen-name">{{ name }}</h2></header>
+  <p class="section-note">{{ added }} track{{ '' if added == 1 else 's' }} added to a new playlist in
+    your <strong>Generated</strong> group. It stays out of your recommendations until you move it into
+    your collection.</p>
+  <div class="gen-foot">
+    <a class="cta" href="https://music.youtube.com/playlist?list={{ ytm }}"
+       target="_blank" rel="noopener">▶ Open on YouTube Music ↗</a>
+  </div>
+  {% if pid %}{% include "_partials/mood_panel.html" %}{% endif %}
+  {# Open YouTube in a new tab (the link above is the popup-blocked fallback), then send THIS tab to
+     the playlist's page in our UI — which carries its own "Open on YouTube Music" link too. #}
+  <script>
+    window.open("https://music.youtube.com/playlist?list={{ ytm }}", "_blank", "noopener");
+    {% if pid %}window.location.assign("/playlist/{{ pid }}");{% endif %}
+  </script>
+  {% endif %}
+</section>

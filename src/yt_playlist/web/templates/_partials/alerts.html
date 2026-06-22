@@ -1,0 +1,24 @@
+{% if actions %}
+<section class="alerts" aria-label="Needs attention">
+  {% for a in actions %}
+  <div class="alert-card card alert-{{ a.severity }}">
+    <button type="button" class="alert-x" aria-label="Snooze" title="Snooze this"
+            hx-post="/recs/feedback" hx-target="closest .alert-card" hx-swap="outerHTML swap:200ms"
+            hx-vals='{"item": {{ a.key|tojson }}, "surface": "alert", "kind": "not_now"}'>×</button>
+    <span class="alert-cover{{ ' no-art' if not a.thumbnail }}">
+      {% if a.thumbnail %}<img src="{{ a.thumbnail }}" alt="" referrerpolicy="no-referrer"
+           onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()">{% endif %}
+    </span>
+    <div class="alert-body">
+      <span class="alert-title">{{ a.title }}</span>
+      <div class="alert-foot">
+        {% if a.badge %}<span class="alert-badge" title="{{ a.detail }}">{{ a.badge }}</span>{% endif %}
+        {% if a.cta_href %}<a class="btn btn-sm alert-go" href="{{ a.cta_href }}">{{ a.cta_label }} →</a>{% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</section>
+{% else %}
+<p class="section-note alerts-clear">✓ All clear - nothing needs your attention.</p>
+{% endif %}

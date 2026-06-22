@@ -27,6 +27,15 @@ def backups_dir() -> Path:
     d.mkdir(parents=True, exist_ok=True)
     return d
 
+def logs_dir() -> Path:
+    d = data_dir() / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def network_log_path() -> Path:
+    """Rotating egress log written by the network guard (see yt_playlist.egress)."""
+    return logs_dir() / "network.log"
+
 def config_path() -> Path:
     override = os.environ.get("YT_PLAYLIST_HOME")
     if override:

@@ -1,0 +1,16 @@
+{# one scalar knob (slider + value + help + reset). Expects `p` = {name,label,help,min,max,step,value,default}. #}
+<div class="knob">
+  <div class="knob-head">
+    <label>{{ p.label }}</label>
+    <output id="out-param-{{ p.name }}">{{ p.value }}</output>
+    <button class="knob-reset" type="button" title="Reset to default"
+            data-target="param-{{ p.name }}" data-default="{{ p.default }}" onclick="resetKnob(this)"
+            hx-post="/taste/reset-param" hx-vals='{"name":"{{ p.name }}"}' hx-swap="none">↺</button>
+  </div>
+  <input type="range" id="param-{{ p.name }}" name="value" value="{{ p.value }}"
+         {% if p.step == 1 %}data-int="1"{% endif %}
+         min="{{ p.min }}" max="{{ p.max }}" step="{{ p.step }}"
+         hx-post="/taste/param" hx-vals='{"name":"{{ p.name }}"}' hx-trigger="change" hx-swap="none"
+         oninput="updateOut(this)">
+  <p class="knob-help">{{ p.help }}</p>
+</div>

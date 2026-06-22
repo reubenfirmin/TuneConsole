@@ -49,6 +49,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     _emit(on_progress, "info", f"{label}: {len(playlists)} playlists", count=len(playlists))
     total = len(playlists)
     seen_ytm = set()
+    rated: dict[str, str] = {}                  # identity_key -> likeStatus; DISLIKE wins on conflict
     for i, pl in enumerate(playlists, 1):
         pid = pl["playlistId"]
         seen_ytm.add(pid)  # mark seen before fetch so a transient read failure doesn't prune it
@@ -65,6 +66,11 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
                                      t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")))
             track_ids.append(tid)
             keys.append(identity_key(t.get("title", ""), _artist(t)))
+            status = t.get("likeStatus")
+            if status:
+                rk = identity_key(t.get("title", ""), _artist(t))
+                if rated.get(rk) != "DISLIKE":
+                    rated[rk] = status
         track_ids = list(dict.fromkeys(track_ids))   # de-dupe (YouTube can repeat a video; see set_playlist_tracks)
         keys = list(dict.fromkeys(keys))
         chash = content_hash(keys)
@@ -99,6 +105,8 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         _emit(on_progress, "auth_expired",
               f"{label}: returned no playlists — session may have expired, re-authenticate", label=label)
 
+    from yt_playlist import recommend            # local import avoids any import cycle
+    recommend.apply_dislikes(store, rated, now)
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history())
@@ -129,6 +137,58 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now) ->
                                    len(track_ids), content_hash(keys), now)
     store.set_playlist_tracks(db_pid, track_ids)
 
+def sync_plays_identity(store, identity_id, client, now, on_progress=None, label=None,
+                        on_auth_expired=None, on_auth_ok=None) -> None:
+    """Fast, lightweight sync: pull only this identity's likes (the Liked Music playlist) and new
+    plays (listening history). Deliberately skips the full-library enumeration, pruning and saved-
+    album work that make `sync_identity` slow — meant to be run often between full syncs."""
+    label = label or f"identity {identity_id}"
+    auth_bad = False
+
+    # Likes: the Liked Music (LM) system playlist's membership *is* your likes, so refreshing that one
+    # playlist captures likes/unlikes made outside the app. Reuse the existing single-playlist refresh.
+    existing = next((p for p in store.get_playlists()
+                     if p.identity_id == identity_id and p.ytm_playlist_id == "LM"), None)
+    _emit(on_progress, "info", f"{label}: refreshing Liked Music…")
+    try:
+        refresh_playlist(store, identity_id, client, "LM", existing.title if existing else "Liked Music", now)
+    except Exception as e:  # noqa: BLE001 - a likes failure shouldn't abort the (best-effort) plays sync
+        if _is_auth_error(e):
+            auth_bad = True
+            if on_auth_expired:
+                on_auth_expired(identity_id, label)
+            _emit(on_progress, "auth_expired",
+                  f"{label}: YouTube session expired — re-authenticate", label=label)
+        else:
+            logger.warning("liked-music refresh failed for %s: %s", identity_id, e)
+            _emit(on_progress, "info", f"{label}: Liked Music unavailable (skipped)")
+
+    # Plays: snapshot the listening history (the "new plays").
+    _emit(on_progress, "info", f"{label}: fetching history…")
+    try:
+        history = with_retry(lambda: client.get_history())
+        hist_keys = [identity_key(t.get("title", ""), _artist(t)) for t in history]
+        store.add_history_snapshot(identity_id, now, hist_keys)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("history fetch failed for %s: %s", identity_id, e)
+        _emit(on_progress, "info", f"{label}: history unavailable (skipped)")
+
+    if not auth_bad:
+        if on_auth_ok:
+            on_auth_ok(identity_id)   # genuine success -> clear any "expired" flag
+        _emit(on_progress, "done", f"{label}: plays synced")
+
+def sync_plays_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None) -> None:
+    """Fast plays/likes sync across all identities. Records its own `last_plays_sync_at` marker and
+    leaves `last_sync_at` (which drives the full-sync nudge) alone."""
+    labels = {idn.id: idn.label for idn in store.get_identities()}
+    for identity_id, client in clients.items():
+        sync_plays_identity(store, identity_id, client, now,
+                            on_progress=on_progress, label=labels.get(identity_id),
+                            on_auth_expired=on_auth_expired, on_auth_ok=on_auth_ok)
+    store.set_setting("last_plays_sync_at", str(now))
+    _emit(on_progress, "done", "plays synced", final=True)
+
 def _sync_saved_albums(store, clients, on_progress) -> None:
     """Pull the albums saved in each account's library and store them (best-effort)."""
     saved = {}
@@ -146,6 +206,41 @@ def _sync_saved_albums(store, clients, on_progress) -> None:
             logger.warning("saved-albums fetch failed: %s", e)
     store.replace_saved_albums(list(saved.values()))
     _emit(on_progress, "info", f"saved albums: {len(saved)}")
+    _materialize_album_tracks(store, clients, saved, on_progress)
+
+
+def _materialize_album_tracks(store, clients, saved, on_progress) -> None:
+    """Fold each saved album's TRACKS into the library so they count in the taste corpus (the model
+    is built from your tracks; metadata alone doesn't). Incremental: only albums not already
+    materialized are fetched (their tracks carry album_browse_id, so we skip them next time)."""
+    client = next(iter(clients.values()), None)
+    if client is None:
+        return
+    todo = [bid for bid in saved if bid not in store.materialized_album_ids()]
+    if not todo:
+        return
+    # Each album is a separate get_album network call, so stream one step per album (named, with a
+    # running counter) instead of going silent for the whole batch — 258 of these is a long wait.
+    _emit(on_progress, "info", f"folding in {len(todo)} saved album(s)…", count=len(todo))
+    added = 0
+    for i, bid in enumerate(todo, 1):
+        meta = saved[bid]
+        _emit(on_progress, "step",
+              f"albums › {i}/{len(todo)} {meta.get('title') or '(album)'} — {meta.get('artist') or '?'}",
+              count=len(todo), index=i)
+        try:
+            album = with_retry(lambda: client.get_album(bid))
+        except Exception as e:  # noqa: BLE001 - one album's failure shouldn't abort the rest
+            logger.warning("album-tracks fetch failed for %s: %s", bid, e)
+            continue
+        for t in (album or {}).get("tracks") or []:
+            if not t.get("title"):
+                continue
+            artist = ", ".join(x.get("name", "") for x in (t.get("artists") or [])) or meta["artist"]
+            store.upsert_track(t.get("videoId"), t.get("title"), artist, meta["title"], None,
+                               album_browse_id=bid, thumbnail=meta["thumbnail"])
+            added += 1
+    _emit(on_progress, "info", f"album tracks folded in: {added} from {len(todo)} album(s)")
 
 def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None) -> None:
     labels = {idn.id: idn.label for idn in store.get_identities()}
@@ -154,4 +249,7 @@ def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_aut
                       on_progress=on_progress, label=labels.get(identity_id),
                       on_auth_expired=on_auth_expired, on_auth_ok=on_auth_ok)
     _sync_saved_albums(store, clients, on_progress)
+    store.set_setting("last_sync_at", str(now))   # drives the Home "Time to sync" nudge
+    # the recommendation model is rebuilt by the decoupled RecWorker (triggered from the sync
+    # route), so a burst of syncs coalesces into one rebuild instead of blocking each sync.
     _emit(on_progress, "done", "sync complete", final=True)

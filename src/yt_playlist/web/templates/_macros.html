@@ -4,8 +4,8 @@
 {% macro kindicon(kind) -%}
 {% if kind == 'audio' %}<span class="kind kind-audio" title="Audio playlist">♪</span>
 {%- elif kind == 'video' %}<span class="kind kind-video" title="Video playlist">▶</span>
-{%- elif kind == 'mixed' %}<span class="kind kind-mixed" title="Mixed — audio &amp; video">♪▶</span>
-{%- elif kind == 'mix' %}<span class="kind kind-mix" title="Auto-mix / radio — YouTube doesn’t tag these track types">≋</span>
+{%- elif kind == 'mixed' %}<span class="kind kind-mixed" title="Mixed: audio &amp; video">♪▶</span>
+{%- elif kind == 'mix' %}<span class="kind kind-mix" title="Auto-mix / radio. YouTube doesn’t tag these track types">≋</span>
 {%- endif %}
 {%- endmacro %}
 
@@ -14,6 +14,34 @@
 <div class="notice {{ cls }} banner" x-data="{ show: true }" x-show="show" x-cloak>
   <span class="banner-body">{{ caller() }}</span>
   <button type="button" class="banner-x" @click="show = false" title="Dismiss" aria-label="Dismiss">×</button>
+</div>
+{%- endmacro %}
+
+{# Graphics-first recommendation tile: cover art + a source badge by default; title/subtitle/note
+   and a ▶ play button reveal on hover. The cover routes into the app (`land`); ▶ opens YouTube
+   Music (`play`). One hue per signal, so the feed scans at a glance. Extras (feedback, Add) via
+   {% call %}. #}
+{% macro tile(source, cover, title, sub, land, play=None, note=None) -%}
+{% set b = {
+  'neighbourhood': ('Taste', 'b-indigo'), 'rotation': ('Rotation', 'b-indigo'),
+  'deep_cut': ('Deep cut', 'b-teal'), 'comfort': ('Comfort', 'b-amber'),
+  'explore': ('New to you', 'b-pink'), 'album': ('New album', 'b-violet'),
+  'fresh': ('Fresh', 'b-cyan'), 'artist': ('New artist', 'b-pink'), 'fit': ('Fits here', 'b-teal')
+}.get(source, (source, 'b-indigo')) -%}
+<div class="tile">
+  <a class="tile-cover{{ ' no-art' if not cover }}" href="{{ land }}"{% if land.startswith('http') %} target="_blank" rel="noopener"{% endif %}>
+    {% if cover %}<img src="{{ cover }}" alt="" loading="lazy" referrerpolicy="no-referrer"
+         onerror="this.closest('.tile-cover').classList.add('no-art'); this.remove()">{% endif %}
+    <span class="tile-badge {{ b[1] }}">{{ b[0] }}</span>
+    <span class="tile-scrim">
+      <span class="tile-title" title="{{ title }}">{{ title }}</span>
+      {% if sub %}<span class="tile-sub">{{ sub }}</span>{% endif %}
+      {% if note %}<span class="tile-note">{{ note }}</span>{% endif %}
+    </span>
+  </a>
+  {% if play %}<a class="tile-play" href="{{ play }}" target="_blank" rel="noopener"
+       title="Play on YouTube Music" aria-label="Play on YouTube Music">▶</a>{% endif %}
+  {% if caller %}{{ caller() }}{% endif %}
 </div>
 {%- endmacro %}
 

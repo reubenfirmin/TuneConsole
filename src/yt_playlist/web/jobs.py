@@ -8,7 +8,8 @@ class SyncJob:
         self.events = []      # list of event dicts; append-only (safe for one producer thread)
         self.done = False
         self.error = None
-        self.playlist_id = None   # set for enrichment jobs, so a refreshed page can rejoin
+        self.playlist_id = None   # set for playlist enrichment jobs, so a refreshed page can rejoin
+        self.album_browse = None  # set for album enrichment jobs (browse_id scope) instead
         self.source = None        # enrichment source (musicbrainz / lastfm / discogs)
 
 class SyncJobs:

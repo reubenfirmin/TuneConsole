@@ -1,10 +1,9 @@
-{% extends "base.html" %}{% block title %}Artists · yt-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% block title %}Artists · TuneConsole{% endblock %}{% block body %}
 <div class="page-head">
   <span class="eyebrow">Artists</span>
   <h1>Artists in your collection</h1>
   <p>Every artist represented across your playlists. Click a heading to sort, or an artist for their page.</p>
 </div>
-{% include "_syncbar.html" %}
 
 <div class="card">
   <table x-data="rowSort()">
@@ -28,7 +27,7 @@
         <td class="num mono">{{ a.plays or '' }}</td>
       </tr>
     {% else %}
-      <tr><td colspan="6" class="empty">No artists yet — sync first.</td></tr>
+      <tr><td colspan="6" class="empty">No artists yet. Sync first.</td></tr>
     {% endfor %}
     </tbody>
   </table>

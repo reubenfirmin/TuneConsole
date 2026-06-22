@@ -4,20 +4,24 @@ version = "0.1.0"
 description = "Local web tool to dedupe, merge, and prune YouTube Music playlists across identities"
 requires-python = ">=3.10"
 dependencies = [
-    "ytmusicapi>=1.12",
+    # Major-capped: the egress guard (yt_playlist.egress) patches the requests/urllib
+    # contract, not ytmusicapi internals, so the security guarantee survives upgrades —
+    # but we cap the major for reproducibility and to review breaking changes deliberately.
+    "ytmusicapi>=1.12,<2",
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "jinja2>=3.1",
     "python-multipart>=0.0.9",
     "rapidfuzz>=3.6",
     "tomli>=2.0; python_version < '3.11'",
+    "numpy>=1.26",
 ]
 
 [project.scripts]
 yt-playlist = "yt_playlist.__main__:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "httpx>=0.27", "watchfiles>=0.21"]  # watchfiles powers `yt-playlist --reload`
+dev = ["pytest>=8", "httpx>=0.27", "watchfiles>=0.21", "pytest-playwright>=0.5"]  # watchfiles powers `yt-playlist --reload`
 
 [build-system]
 requires = ["hatchling"]
@@ -27,6 +31,7 @@ build-backend = "hatchling.build"
 packages = ["src/yt_playlist"]
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q -m 'not browser'"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["browser: live-browser tests via Playwright (run with -m browser)"]

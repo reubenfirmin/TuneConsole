@@ -1,8 +1,8 @@
-"""Cleanup dashboard (`/`) plus the overlap suppress/ignore endpoints it drives."""
+"""Cleanup page (`/cleanup`) plus the overlap suppress/ignore endpoints it drives."""
 import json
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 
 from yt_playlist import analysis
 
@@ -11,8 +11,13 @@ def build(ctx) -> APIRouter:
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
 
+    def _refresh():
+        # htmx does a full page reload; the page recomputes, so a restored comparison
+        # lands back in whichever section now applies (Exact duplicates or Overlaps).
+        return Response(status_code=200, headers={"HX-Refresh": "true"})
+
     @router.get("/cleanup")
-    def dashboard(request: Request):
+    def cleanup(request: Request):
         dupes = analysis.find_dupes(store)
         groups = analysis.find_identical_groups(store)         # exact-duplicate clusters
         empties = analysis.find_empty_playlists(store)
@@ -34,7 +39,7 @@ def build(ctx) -> APIRouter:
                   if a in pl_by_ytm and b in pl_by_ytm]
         ignored = [{"ytm": y, "title": pl_by_ytm[y].title}
                    for y in sorted(ignored_ytm) if y in pl_by_ytm]
-        return templates.TemplateResponse(request, "dashboard.html", {
+        return templates.TemplateResponse(request, "cleanup.html", {
             "groups": groups, "near_groups": near_groups, "overlaps": overlaps,
             "empties": empties, "tiny": tiny, "kinds": kinds,
             "identities": {i.id: i.label for i in store.get_identities()},
@@ -50,24 +55,25 @@ def build(ctx) -> APIRouter:
     @router.post("/overlaps/ignore")
     def ignore_overlap(ytm: str = Form(...)):
         store.ignore_overlap_playlist(ytm, now_fn())
-        return JSONResponse({"ok": True})
+        return _refresh()
 
     @router.post("/overlaps/unignore")
     def unignore_overlap(ytm: str = Form(...)):
         store.unignore_overlap_playlist(ytm)
-        return JSONResponse({"ok": True})   # AJAX: row drops in place
+        return _refresh()   # restore: recompute so the comparison reappears in its section
 
-    @router.post("/overlaps/ignore-except")
-    def ignore_overlaps_except(ytm: str = Form(...), a: str = Form(...), b: str = Form(...)):
-        # Mute every OTHER overlap involving `ytm`, but keep the a–b pair the user is looking at.
+    @router.post("/overlaps/mute-others")
+    def mute_other_overlaps(a: str = Form(...), b: str = Form(...)):
+        # Keep the a–b pair, but mute every OTHER overlap involving either a or b.
         store.keep_overlap_pair(a, b, now_fn())
-        store.ignore_overlap_playlist(ytm, now_fn())
-        return JSONResponse({"ok": True})
+        store.ignore_overlap_playlist(a, now_fn())
+        store.ignore_overlap_playlist(b, now_fn())
+        return _refresh()
 
     @router.post("/overlaps/suppress")
     def suppress_overlap(a: str = Form(...), b: str = Form(...)):
         store.suppress_overlap(a, b, now_fn())
-        return JSONResponse({"ok": True})   # AJAX: row hides in place, no full-page reload
+        return _refresh()   # the pair moves to the "Hidden overlaps" section
 
     @router.post("/overlaps/suppress-many")
     async def suppress_many(request: Request):
@@ -78,16 +84,14 @@ def build(ctx) -> APIRouter:
         except (ValueError, TypeError):
             pairs = []
         now = now_fn()
-        n = 0
         for pair in pairs:
             if isinstance(pair, (list, tuple)) and len(pair) == 2 and all(pair):
                 store.suppress_overlap(pair[0], pair[1], now)
-                n += 1
-        return JSONResponse({"ok": True, "n": n})
+        return _refresh()
 
     @router.post("/overlaps/unsuppress")
     def unsuppress_overlap(a: str = Form(...), b: str = Form(...)):
         store.unsuppress_overlap(a, b)
-        return JSONResponse({"ok": True})   # AJAX: row drops in place
+        return _refresh()   # restore: recompute so the comparison reappears in its section
 
     return router

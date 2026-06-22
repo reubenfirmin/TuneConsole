@@ -1,0 +1,13 @@
+{% from "_macros.html" import pllink with context %}
+{# One empty playlist. htmx: Delete posts and (on success) returns empty -> the row fades out. #}
+<tbody class="empty-row">
+  <tr>
+    <td><span class="tag amber">{{ identities[p.identity_id] }}</span>
+        {{ pllink(p.ytm_playlist_id, p.title) }}</td>
+    <td style="text-align:right; white-space:nowrap">
+      <button type="button" class="btn-danger btn-sm"
+              hx-post="/playlist/delete-empty" hx-vals='{"playlist": {{ p.id }}}'
+              hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Delete</button>
+    </td>
+  </tr>
+</tbody>

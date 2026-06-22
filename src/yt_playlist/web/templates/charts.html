@@ -1,11 +1,10 @@
-{% extends "base.html" %}{% block title %}Charts · yt-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% block title %}Charts · TuneConsole{% endblock %}{% block body %}
 <div class="page-head">
   <span class="eyebrow">Charts</span>
   <h1>Your top charts</h1>
   <p>Ranked by plays captured in your sync history (how often each song turns up in recently-played).
      The more you sync, the richer this gets.</p>
 </div>
-{% include "_syncbar.html" %}
 
 <div x-data="{ view: 'songs' }">
   <div class="card pl-toolbar" style="margin-bottom:1.1rem">
@@ -40,7 +39,7 @@
       {% endfor %}
       </tbody>
     </table>
-    {% else %}<p class="empty" style="margin:0">No play history yet — sync a few times to build it up.</p>{% endif %}
+    {% else %}<p class="empty" style="margin:0">No play history yet. Sync a few times to build it up.</p>{% endif %}
   </div>
 
   <div class="card" x-show="view === 'artists'" x-cloak>

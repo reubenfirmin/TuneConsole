@@ -12,7 +12,11 @@ _WS_RE = re.compile(r"\s+")
 def normalize(s: str) -> str:
     if not s:
         return ""
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    # Fold accented Latin to ASCII (café -> cafe). For an all-non-Latin string (Cyrillic, CJK,
+    # Greek, emoji) the ASCII fold is empty — keep the original there so distinct songs keep
+    # distinct identity_keys instead of every one collapsing to "" (and the key to "|").
+    ascii_s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = ascii_s if ascii_s.strip() else s
     s = s.lower()
     s = _FEAT_RE.sub(" ", s)
     s = _PAREN_NOISE_RE.sub(" ", s)

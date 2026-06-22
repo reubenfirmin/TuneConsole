@@ -1,45 +1,77 @@
-{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Setup · yt-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Setup · TuneConsole{% endblock %}{% block body %}
 <div class="page-head">
   <span class="eyebrow">Connect</span>
-  <h1>Set up yt-playlist</h1>
+  <h1>Set up TuneConsole</h1>
   <p>Paste a signed-in request from YouTube Music, name your identities, and you're in.</p>
 </div>
 
+{% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 {% if error %}{% call banner('err') %}<strong>{{ error }}</strong>{% endcall %}{% endif %}
-{% if configured %}{% call banner('') %}Already configured — saving will update your settings.{% endcall %}{% endif %}
+{% if configured %}{% call banner('') %}Already configured. Saving will update your settings.{% endcall %}{% endif %}
 
 <form method="post" action="/setup"
-      x-data='setupForm({{ rows|tojson }}, {{ master_idx|tojson }}, {{ configured|tojson }})' x-ref="form">
+      x-data='setupForm({{ rows|tojson }}, {{ master_idx|tojson }}, {{ configured|tojson }})' x-ref="form"
+      @setup-checked.window="onChecked($event.detail)">
 
   <div class="card" style="margin-bottom:1.4rem">
     <h2 class="section" style="margin-top:0">1 · Capture your sign-in</h2>
+    <details class="advanced" style="margin-bottom:1rem">
+      <summary>Why sign in this way?</summary>
+      <p class="section-note">YouTube Music has no public, official API for managing your library and
+        playlists. The published YouTube Data API doesn't expose them, and there's no official OAuth
+        flow for the internal endpoints the app actually uses. So instead of OAuth, we reuse the
+        signed-in request your own browser already makes (the <code class="mono">Copy as cURL</code>
+        below), which carries the cookies and headers those endpoints expect. This is the same approach
+        established tools like <code class="mono">ytmusicapi</code> take, out of necessity.</p>
+      <p class="section-note">Your credentials are stored locally and only ever sent to YouTube, never
+        to us or any third party.</p>
+    </details>
+    <details class="advanced" style="margin-bottom:1rem">
+      <summary>What does this give access to?</summary>
+      <p class="section-note">The capture is your Google sign-in itself: the session cookies
+        (<code class="mono">SID</code>, <code class="mono">SAPISID</code>, …) your browser sends to
+        YouTube Music, plus the matching authorization header. These are <strong>Google
+        account-level credentials</strong>, not a YouTube-only token: the same cookies sign you in
+        across Google. There is no narrower, YouTube-scoped credential to capture, which is exactly why
+        there's no OAuth option. Treat the saved file like a password. This is why the app runs
+        locally: we cannot host a service that captures these.</p>
+      <p class="section-note">In practice the app only uses it to read and manage your YouTube Music
+        library and playlists, and it's built so it can't quietly do more. A built-in network guard
+        restricts the app to YouTube and a handful of music-metadata services, blocking anything else
+        before it leaves your machine; you can watch every request it makes on the
+        <a href="/network">Network</a> page (full details in the <a href="/privacy">privacy policy</a>).
+        To revoke the sign-in entirely, sign out of YouTube Music or remove the session from your
+        <a href="https://myaccount.google.com/device-activity" target="_blank" rel="noopener">Google
+        account security page</a>; that invalidates the saved capture.</p>
+    </details>
     <ol class="steps">
       <li>Open <a href="https://music.youtube.com" target="_blank" rel="noopener">music.youtube.com</a>
           signed in, then open DevTools (F12) → <strong>Network</strong>.</li>
-      <li>Click <strong>any playlist</strong> (e.g. in the left sidebar) — that fires a
+      <li>Click <strong>any playlist</strong> (e.g. in the left sidebar). That fires a
           <code class="mono">browse</code> request. Type <code class="mono">browse</code> in the
           filter and click that <code class="mono">browse</code> request <em>row</em>.</li>
       <li>Right-click it → <em>Copy</em> → <strong>Copy as cURL</strong>
           (Windows: <em>Copy as cURL (bash)</em>), then paste below.</li>
     </ol>
     <p class="section-note">It includes everything needed. A raw request-headers block works too.
-      {% if has_credentials %}<br><em>A credential is already saved — leave the box blank to keep it.</em>{% endif %}</p>
+      {% if has_credentials %}<br><em>A credential is already saved. Leave the box blank to keep it.</em>{% endif %}</p>
 
-    <textarea name="headers" rows="7" @change="check()"
+    <textarea name="headers" rows="7"
+              hx-post="/setup/check" hx-include="closest form" hx-trigger="change[this.value.trim().length > 0]"
+              hx-target="#check-result" hx-swap="innerHTML"
               placeholder="Paste your 'Copy as cURL' here…"></textarea>
 
     <div class="btn-row" style="margin-top:.8rem">
-      <button type="button" class="btn-ghost btn-sm" @click="check()"
-              x-text="auth === 'checking' ? 'Checking…' : 'Check sign-in'"></button>
-      <span x-show="auth === 'ok'" class="notice ok" style="padding:.3rem .7rem; display:none">
-        ✓ Signed in as <strong x-text="account"></strong></span>
-      <span x-show="auth === 'error'" class="notice err" style="padding:.3rem .7rem; display:none" x-text="error"></span>
+      <button type="button" class="btn-ghost btn-sm"
+              hx-post="/setup/check" hx-include="closest form" hx-target="#check-result" hx-swap="innerHTML">
+        <span class="check-idle">Check sign-in</span><span class="check-busy">Checking…</span></button>
+      <span id="check-result"></span>
     </div>
   </div>
 
   <div class="card">
     <h2 class="section" style="margin-top:0">2 · Your identities</h2>
-    <p class="section-note">One row per YouTube identity. Exactly one is the <strong>master</strong> —
+    <p class="section-note">One row per YouTube identity. Exactly one is the <strong>master</strong>:
       your main account, where cross-identity merges land (we fill its label in once your sign-in
       checks out). A brand identity also needs its <code class="mono">brand_account_id</code>: open
       <a href="https://myaccount.google.com/brandaccounts" target="_blank" rel="noopener">myaccount.google.com/brandaccounts</a>,
@@ -66,41 +98,38 @@
   </div>
 
   <div class="setup-actions">
-    <span class="muted" x-show="auth === 'ok'" x-cloak>✓ Signed in as <strong x-text="account"></strong> — </span>
+    {% if has_credentials %}
+    {# Sign out lives in the action bar (not a separate form below) so the sticky bar can't hide it.
+       formaction reuses this form to POST /setup/signout; that route ignores the body. #}
+    <button type="submit" class="btn-ghost btn-sm" style="margin-right:auto"
+            formaction="/setup/signout" formmethod="post" formnovalidate
+            title="Deletes the locally-saved sign-in (cookies). Identities are kept."
+            onclick="return confirm('Delete the saved sign-in from this machine? You\'ll need to paste a fresh capture to sign back in.')">Sign out</button>
+    {% endif %}
+    <span class="muted" x-show="signedIn" x-cloak>✓ Signed in as <strong x-text="account"></strong> </span>
     <button type="submit" class="setup-save">{{ 'Save' if configured else 'Save and start →' }}</button>
   </div>
 </form>
 
 <script>
 function setupForm(rows, masterIdx, configured) {
+  // The identity rows (add/remove/master) are pure client state and stay here. The sign-in check
+  // is an htmx POST to /setup/check (it swaps the result into #check-result and fires a
+  // `setup-checked` HX-Trigger); we only react to that event below.
   return {
     rows: rows,
     masterIdx: masterIdx,
     configured: configured,
-    auth: 'idle',        // idle | checking | ok | error
     account: '',
-    error: '',
-    async check() {
-      const fd = new FormData(this.$refs.form);
-      if (!(fd.get('headers') || '').trim()) return;  // nothing pasted yet
-      this.auth = 'checking'; this.error = '';
-      try {
-        const resp = await fetch('/setup/check', { method: 'POST', body: fd });
-        const data = await resp.json();
-        if (data.ok) {
-          this.auth = 'ok'; this.account = data.account;
-          // auto-detect the logged-in (master) identity: fill its label if still blank
-          const m = this.rows[this.masterIdx];
-          if (m && !m.label.trim()) m.label = data.account;
-          // Re-auth: the identities are already configured, so a valid check is everything we need —
-          // commit the new credential straight away (saves, clears the banner, returns to playlists).
-          if (this.configured) this.$nextTick(() => this.$refs.form.requestSubmit());
-        } else {
-          this.auth = 'error'; this.error = data.error || 'sign-in not valid';
-        }
-      } catch (e) {
-        this.auth = 'error'; this.error = String(e);
-      }
+    signedIn: false,
+    onChecked(detail) {
+      if (!detail || !detail.ok) { this.signedIn = false; return; }
+      this.signedIn = true; this.account = detail.account;
+      // auto-detect the logged-in (master) identity: fill its label if still blank
+      const m = this.rows[this.masterIdx];
+      if (m && !m.label.trim()) m.label = detail.account;
+      // Re-auth: identities already configured, so a valid check is all we need — commit now.
+      if (this.configured) this.$nextTick(() => this.$refs.form.requestSubmit());
     },
   };
 }

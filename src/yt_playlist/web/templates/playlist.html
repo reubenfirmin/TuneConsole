@@ -1,16 +1,12 @@
-{% extends "base.html" %}{% block title %}{{ pl.title }} · yt-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% block title %}{{ pl.title }} · TuneConsole{% endblock %}{% block body %}
 <div x-data="enrichPanel({{ pl.id }}, {{ 'true' if lastfm_configured else 'false' }}, {{ active_job.id if active_job else 0 }}, '{{ active_job.source if active_job else '' }}')"
      x-init="rejoinIfActive()">
 <div class="artist-head pl-head" x-data="{ artH: 0 }"
      x-init="const fit = () => artH = $refs.main.offsetHeight; fit(); new ResizeObserver(fit).observe($refs.main)">
   {% if pl.thumbnail %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ pl.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.closest('.pl-art').remove()"></span>{% endif %}
   <div class="pl-headmain" x-ref="main">
-    <span class="eyebrow">Playlist</span>
-    <div x-data="titleEditor({{ pl.id }})">
-      <h1 x-show="!editing" @click="start()" x-ref="h1" class="editable-title" title="Click to rename">{{ pl.title }}</h1>
-      <input x-show="editing" x-cloak class="title-input" x-model="draft" x-ref="inp"
-             @keydown.enter="save()" @keydown.escape="cancel()" @blur="save()">
-    </div>
+    <span class="eyebrow">{% if pl.ytm_playlist_id == 'LM' %}<svg class="lm-heart" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg> Liked Music{% else %}Playlist{% endif %}</span>
+    {% include "_partials/playlist_head.html" %}
     <p class="pl-stats">
       <span class="tag amber">{{ identity }}</span>
       <span class="stat"><strong>{{ tracks|length }}</strong>&nbsp;track{{ '' if tracks|length == 1 else 's' }}</span>
@@ -21,9 +17,9 @@
          target="_blank" rel="noopener">▶ Play on YouTube Music ↗</a>
     </div>
   </div>
-  <div class="head-tools">
+  <div class="head-tools{% if enrich_hint %} enrich-hint{% endif %}">
     <a class="head-icon" href="/playlist/{{ pl.id }}/share.txt" download="{{ pl.title }}.txt"
-       title="Share — download one song URL per line as a .txt" aria-label="Share playlist">
+       title="Share: download one song URL per line as a .txt" aria-label="Share playlist">
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
@@ -64,95 +60,40 @@
     </button>
   </div>
 </div>
+{% if is_generated %}{% with pid = pl.id %}{% include "_partials/feedback_panel.html" %}{% endwith %}{% endif %}
 <div class="enrich-strip" x-show="running || finished" x-cloak x-transition>
   <div class="enrich-bar"><i :style="`width:${pct}%`"></i></div>
   <span class="enrich-status" x-text="status"></span>
 </div>
 
+<style>
+  /* Fixed layout so a wide playlist can't push columns past the card; the three free-text columns
+     truncate with an ellipsis instead of overflowing. Scoped to this table so other tables and the
+     genre/⋯ popups (which need visible overflow) are unaffected, and the sticky header is preserved
+     (no scroll/overflow context is introduced). */
+  .track-table { table-layout: fixed; }
+  /* free-text columns wrap to as many lines as needed (never cropped); fixed layout keeps the
+     column widths bounded so the table still fits the card. break long unspaced tokens too. */
+  .track-table td.t-wrap { white-space: normal; overflow-wrap: anywhere; }
+</style>
 <div x-data="rowSort({{ pl.id }})" x-init="$nextTick(() => initSortable())">
 <div class="card">
-  <table>
+  <table class="track-table{{ ' is-lm' if pl.ytm_playlist_id == 'LM' }}">
     <thead><tr>
-      <th class="num">#</th>
+      <th class="num" style="width:2.6rem">#</th>
       <th style="width:2.6rem"></th>
-      <th style="width:1.6rem"></th>
+      <th class="liked-col" style="width:2.4rem"></th>
       <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
       <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
       <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
-      <th class="sorth num" style="width:5rem" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
-      <th class="sorth" style="width:8rem" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
-      <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
-      <th class="sorth num" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
+      <th class="sorth num" style="width:4.5rem" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth" style="width:6rem" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
+      <th class="sorth num" style="width:4.5rem" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth num" style="width:5rem" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
       <th style="width:2.4rem"></th>
     </tr></thead>
     <tbody x-ref="body">
-    {% for t in tracks %}
-      <tr class="srow" data-vid="{{ t.video_id }}" data-title="{{ t.title|lower }}" data-artist="{{ t.artist|lower }}"
-          data-album="{{ t.album|lower }}" data-plays="{{ t.plays }}" data-len="{{ t.duration or 0 }}"
-          data-year="{{ t.year or 0 }}" data-genre="{{ t.genre|lower }}" :class="{ rowdel: false }">
-        <td class="num drag-handle" title="Drag to reorder"><span class="rownum">{{ loop.index }}</span></td>
-        <td>
-          <span class="pl-cover">
-            {% if t.thumbnail %}<img class="pl-thumb" src="{{ t.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
-            <a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-               target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
-          </span>
-        </td>
-        <td class="liked-col">{% if t.liked %}<span class="liked-heart" title="In your Liked Music">♥</span>{% endif %}</td>
-        <td>
-          <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-             target="_blank" rel="noopener">{{ t.title }}&nbsp;↗</a>
-          {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
-        </td>
-        <td><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
-        <td>{% if t.album_browse %}<a class="alink" href="https://music.youtube.com/browse/{{ t.album_browse }}"
-               target="_blank" rel="noopener">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</td>
-        <td class="num mono mb-year">
-          <span class="ydisplay" x-show="editYearVid !== '{{ t.video_id }}'"
-                @click="startEditYear('{{ t.video_id }}')" title="Click to set year">
-            {% if t.year %}{{ t.year }}{% else %}<span class="muted ghint">＋</span>{% endif %}
-          </span>
-          <input class="yinput" type="text" inputmode="numeric" autocomplete="off" x-cloak
-                 x-show="editYearVid === '{{ t.video_id }}'"
-                 @keydown.enter.prevent="saveYear('{{ t.video_id }}', $event.target.value)"
-                 @keydown.escape="editYearVid = null"
-                 @blur="saveYear('{{ t.video_id }}', $event.target.value)">
-        </td>
-        <td class="mb-genre">
-          <span class="gdisplay" x-show="editVid !== '{{ t.video_id }}'"
-                @click="startEditGenre('{{ t.video_id }}')" title="Click to set genre">
-            {% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">＋</span>{% endif %}
-          </span>
-          <span class="ginput-wrap" x-show="editVid === '{{ t.video_id }}'" x-cloak>
-            <input class="ginput" type="text" autocomplete="off"
-                   @input="filterGenres($event.target.value)"
-                   @keydown.enter.prevent="saveGenre('{{ t.video_id }}', gSel >= 0 ? gSuggest[gSel] : $event.target.value)"
-                   @keydown.escape="editVid = null" @keydown.arrow-down.prevent="moveGenreSel(1)"
-                   @keydown.arrow-up.prevent="moveGenreSel(-1)"
-                   @blur="saveGenre('{{ t.video_id }}', $event.target.value)">
-            <div class="genre-suggest" x-show="gSuggest.length" x-cloak>
-              <template x-for="(g, i) in gSuggest" :key="g">
-                <button type="button" class="genre-opt" :class="{ sel: i === gSel }"
-                        @mousedown.prevent="saveGenre('{{ t.video_id }}', g)" x-text="g"></button>
-              </template>
-            </div>
-          </span>
-        </td>
-        <td class="num mono">{{ t.plays or '' }}</td>
-        <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
-        <td class="rowmenu">
-          <button type="button" class="dots" title="More actions"
-                  @click="openMenu = (openMenu === '{{ t.video_id }}' ? null : '{{ t.video_id }}')">⋯</button>
-          <div class="rowmenu-pop" x-show="openMenu === '{{ t.video_id }}'" x-cloak x-transition.opacity
-               @click.away="openMenu = null">
-            <button type="button" data-vid="{{ t.video_id }}" data-title="{{ t.title }}"
-                    @click="findAlternates($event.currentTarget.dataset.vid, $event.currentTarget.dataset.title)">
-              Find alternate versions…</button>
-            <button type="button" class="danger" data-vid="{{ t.video_id }}" data-title="{{ t.title }}"
-                    @click="removeTrack($event.currentTarget.dataset.vid, $event.currentTarget.dataset.title)">Remove from playlist</button>
-          </div>
-        </td>
-      </tr>
+    {% for t in tracks %}{% set idx = loop.index %}{% include "_partials/track_row.html" %}
     {% else %}
       <tr><td colspan="11" class="empty">This playlist has no tracks.</td></tr>
     {% endfor %}
@@ -167,7 +108,7 @@
          @click="keyModal = false" @keydown.escape.window="keyModal = false">
       <div class="modal" @click.stop x-transition.scale.origin.center>
         <h3>Last.fm API key</h3>
-        <p>Last.fm has dense genre tags. Enrichment needs a free API key — create one at
+        <p>Last.fm has dense genre tags. Enrichment needs a free API key. Create one at
            <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>
            and paste the <strong>API key</strong> here. It's stored locally.</p>
         <input class="modal-input" type="text" x-model="keyValue" placeholder="API key"
@@ -207,35 +148,23 @@
          @click="altOpen = false" @keydown.escape.window="altOpen = false">
       <div class="modal modal-wide" @click.stop x-transition.scale.origin.center>
         <h3>Alternate versions <span class="muted" x-show="altTitle" x-text="'· ' + altTitle"></span></h3>
-        <p class="muted" x-show="altLoading && !altResults.length">Searching YouTube…</p>
-        <p class="notice err" x-show="altErr" x-text="altErr"></p>
-        <div class="alt-list" x-show="altResults.length">
-          <template x-for="r in altResults" :key="r.videoId">
-            <label class="alt-row" :class="{ on: altSel[r.videoId] }">
-              <input type="checkbox" :checked="!!altSel[r.videoId]" @change="toggleAlt(r.videoId)">
-              <img class="album-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
-              <span class="alt-meta">
-                <span class="alt-title" x-text="r.title"></span>
-                <span class="alt-sub">
-                  <span x-text="r.artist"></span>
-                  <template x-if="r.album"><span x-text="' · ' + r.album"></span></template>
-                  <span class="alt-kind" x-text="r.kind"></span>
-                </span>
-              </span>
-              <span class="mono alt-dur" x-text="fmtDur(r.duration)"></span>
-              <a class="alink" :href="'https://music.youtube.com/watch?v=' + r.videoId"
-                 target="_blank" rel="noopener" @click.stop title="Try it on YouTube Music">Play ↗</a>
-            </label>
-          </template>
-        </div>
+        <p class="muted" x-show="altLoading">Searching YouTube…</p>
+        {# htmx swaps the server-rendered results (checkboxes carrying each track's JSON) here #}
+        <div id="alt-results"></div>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="altOpen = false">Cancel</button>
-          <button type="button" :disabled="!altCount() || altLoading" @click="addAlternates()"
-                  x-text="altCount() ? `Add ${altCount()} to playlist` : 'Add to playlist'"></button>
+          {# include the checked results and add them; the server reloads the page with the new tracks #}
+          <button type="button" hx-post="/playlist/{{ pl.id }}/add-tracks" hx-include="#alt-results"
+                  :disabled="altLoading">Add to playlist</button>
         </div>
       </div>
     </div>
   </template>
 </div>
+<section class="pl-suggest" style="margin-top:2.2rem"
+         hx-get="/playlist/{{ pl.id }}/suggestions" hx-trigger="load" hx-swap="innerHTML">
+  <p class="section-note">Finding tracks that fit…</p>
+</section>
+<div id="similar-modal"></div>   {# "Songs like this" modal loads here via htmx #}
 </div>
 {% endblock %}

@@ -59,6 +59,26 @@ def test_apply_setup_blank_headers_no_credential_raises(store, tmp_path):
             {"label": "main", "credential_ref": "browser.json", "brand_account_id": None, "is_master": True}])
 
 
+def test_sign_out_deletes_credential_and_unconfigures(store, monkeypatch, tmp_path):
+    _stub_ytmusic(monkeypatch)
+    rt = Runtime(store, tmp_path / "config.toml", tmp_path)
+    rt.apply_setup("Cookie: SID=abc", [
+        {"label": "main", "credential_ref": "browser.json", "brand_account_id": None, "is_master": True}])
+    assert rt.configured is True
+    rt.sign_out()
+    assert not (tmp_path / "browser.json").exists()   # local cookie file is gone
+    assert (tmp_path / "config.toml").exists()         # identity config is kept
+    assert rt.configured is False                      # no credential -> back to setup
+    with pytest.raises(RuntimeError):
+        rt.clients()
+
+
+def test_sign_out_when_no_credential_is_noop(store, tmp_path):
+    rt = Runtime(store, tmp_path / "config.toml", tmp_path)
+    rt.sign_out()                                      # missing_ok -> no error
+    assert rt.configured is False
+
+
 def test_load_reloads_after_external_config(store, monkeypatch, tmp_path):
     _stub_ytmusic(monkeypatch)
     rt = Runtime(store, tmp_path / "config.toml", tmp_path)

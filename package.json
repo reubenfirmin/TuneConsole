@@ -11,6 +11,10 @@
     "@fontsource-variable/hanken-grotesk": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "alpinejs": "3.14.8",
+    "d3-dispatch": "^3.0.1",
+    "d3-force": "^3.0.0",
+    "d3-quadtree": "^3.0.1",
+    "d3-timer": "^3.0.1",
     "htmx.org": "2.0.4"
   }
 }

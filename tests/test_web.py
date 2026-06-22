@@ -90,37 +90,6 @@ def test_post_with_local_origin_allowed(store):
     r = c.post("/sync", headers={"origin": "http://127.0.0.1"}, follow_redirects=False)
     assert r.status_code == 200  # starts a sync job (JSON), no longer a redirect
 
-def test_rediscover_dismiss_and_restore(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
-    c = _client(store, lambda: {iid: FakeClient()})
-
-    assert "Rediscover" in c.get("/discover").text
-    # candidate appears as an actionable row
-    assert "PLZ" in c.get("/discover").text
-
-    r = c.post("/rediscover/dismiss", data={"ytm": "PLZ"})
-    assert r.status_code == 200 and r.json()["ok"]
-    body = c.get("/discover").text
-    # no longer a candidate row, but shown in the snoozed/dismissed section
-    assert body.count("staleRow()") == 0
-    assert "dismissed" in body and "PLZ" in body
-
-    r = c.post("/rediscover/restore", data={"ytm": "PLZ"}, follow_redirects=False)
-    assert r.status_code == 303
-    assert c.get("/discover").text.count("staleRow()") == 1
-
-def test_rediscover_snooze_expires(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
-    # now_fn = 1.0; snooze 30d hides it now...
-    c = _client(store, lambda: {iid: FakeClient()})
-    assert c.post("/rediscover/snooze", data={"ytm": "PLZ", "days": "30"}).json()["ok"]
-    assert c.get("/discover").text.count("staleRow()") == 0
-    # ...but a far-future snooze is treated as expired (no longer hidden)
-    assert store.get_stale_hidden_ytm(now=1.0) == {"PLZ"}
-    assert store.get_stale_hidden_ytm(now=1.0 + 31 * 86400) == set()
-
 def test_get_with_foreign_host_still_allowed(store):
     # Reads are exempt: the guard only protects state-changing methods.
     store.upsert_identity("main", "cred", None, True)
@@ -155,6 +124,10 @@ class _FakeRuntime:
             raise ValueError(self.raise_value_error)
         self.applied = (headers_raw, identities)
         self._configured = True
+    def sign_out(self):
+        self.signed_out = True
+        self.credentials_present = False
+        self._configured = False
 
 def test_unconfigured_redirects_to_setup(store):
     rt = _FakeRuntime(store, configured=False)
@@ -209,6 +182,48 @@ def test_setup_post_without_collaborator_404(store):
     c = TestClient(app, base_url="http://127.0.0.1")
     assert c.post("/setup", data={"label": "x"}).status_code == 404
 
+def test_signout_button_shows_only_with_credentials(store):
+    app = create_app(store, _FakeRuntime(store, credentials_present=True).clients,
+                      now_fn=lambda: 1.0, setup=_FakeRuntime(store, credentials_present=True))
+    c = TestClient(app, base_url="http://127.0.0.1")
+    assert "/setup/signout" in c.get("/setup").text
+    rt = _FakeRuntime(store, credentials_present=False)
+    app2 = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
+    assert "/setup/signout" not in TestClient(app2, base_url="http://127.0.0.1").get("/setup").text
+
+def test_signout_deletes_credential_and_redirects(store):
+    rt = _FakeRuntime(store, configured=True, credentials_present=True)
+    app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    r = c.post("/setup/signout", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith("/setup?flash=")
+    assert rt.signed_out is True
+
+def test_signout_without_collaborator_404(store):
+    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    assert c.post("/setup/signout").status_code == 404
+
+# --- network transparency page ---
+
+def test_network_page_renders_allowlist(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))   # keep the lazy guard's log off the real FS
+    rt = _FakeRuntime(store, configured=True, credentials_present=True)
+    app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    r = c.get("/network")
+    assert r.status_code == 200
+    for host in ("youtube.com", "musicbrainz.org", "discogs.com", "audioscrobbler.com"):
+        assert host in r.text
+
+def test_network_log_line_parser():
+    from yt_playlist.web.routes.network import _parse
+    row = _parse("2026-06-22 11:00:00,123 verdict=BLOCK via=requests method=POST "
+                 "host=evil.example.com path=/exfil status=None bytes=None")
+    assert row["ts"] == "2026-06-22 11:00:00,123"
+    assert row["verdict"] == "BLOCK" and row["host"] == "evil.example.com"
+    assert row["method"] == "POST" and row["path"] == "/exfil"
+
 
 # --- vendored front-end assets (no third-party CDN at runtime) ---
 
@@ -233,7 +248,9 @@ def test_setup_check_reports_account(store):
     app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/setup/check", data={"headers": "cookie: x"})
-    assert r.status_code == 200 and r.json() == {"ok": True, "account": "Reuben"}
+    assert r.status_code == 200
+    assert "Signed in as" in r.text and "Reuben" in r.text       # result fragment
+    assert "Reuben" in r.headers.get("hx-trigger", "")           # HX-Trigger carries the account
 
 def test_setup_check_reports_error(store):
     rt = _FakeRuntime(store); rt.check_error = "sign-in didn't work (401)"
@@ -241,8 +258,8 @@ def test_setup_check_reports_error(store):
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/setup/check", data={"headers": "bad"})
     assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is False and "sign-in" in body["error"]
+    assert "sign-in" in r.text                                    # error rendered in the fragment
+    assert '"ok": false' in r.headers.get("hx-trigger", "").lower()
 
 
 def test_setup_page_alpine_attr_well_formed(store):
@@ -273,6 +290,20 @@ def test_sync_streams_progress_events(store):
     assert '"type": "end"' in body       # stream terminator
     assert len(store.get_playlists()) == 1
 
+def test_sync_plays_streams_and_records(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    client = FakeClient(tracks={"LM": [_track("v2", "Liked Song", "Artist")]},
+                        history=[_track("v1", "Played Song", "Artist")])
+    app = create_app(store, lambda: {iid: client}, now_fn=lambda: 7.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    jid = c.post("/sync/plays").json()["job_id"]
+    with c.stream("GET", f"/sync/events/{jid}") as s:
+        body = "".join(s.iter_text())
+    assert "plays synced" in body          # final done event
+    assert '"type": "end"' in body         # stream terminator
+    assert store.get_recent_history_keys(0.0) == {"played song|artist"}
+    assert store.get_setting("last_plays_sync_at") == "7.0"
+
 def test_sync_events_unknown_job_404(store):
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
@@ -298,7 +329,7 @@ def test_identical_pair_opens_editor(store):
     store.set_playlist_tracks(a, [t]); store.set_playlist_tracks(b, [t])
     c = _client(store, lambda: {iid: FakeClient()})
     body = c.get(f"/dupe/{a}/{b}").text   # redirects into the N-way editor
-    assert "mergeEditor(" in body and "Keep" in body
+    assert "Where should the result go" in body and "Keep" in body
 
 
 def test_overlap_suppress_and_unsuppress(store):
@@ -310,7 +341,7 @@ def test_overlap_suppress_and_unsuppress(store):
     c = _client(store, lambda: {iid: FakeClient()})
     assert "Little Mix" in c.get("/cleanup").text
     r = c.post("/overlaps/suppress", data={"a": "PLFAV", "b": "PLSML"})
-    assert r.status_code == 200 and r.json()["ok"] is True   # AJAX, no redirect
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"   # pair -> Hidden, recompute
     # check the section header specifically (other copy may mention "hidden")
     assert 'Hidden overlaps <span class="count">' in c.get("/cleanup").text
     c.post("/overlaps/unsuppress", data={"a": "PLSML", "b": "PLFAV"})
@@ -330,11 +361,11 @@ def test_overlaps_suppress_many(store):
     c = _client(store, lambda: {iid: FakeClient()})
     r = c.post("/overlaps/suppress-many",
                data={"pairs": json.dumps([["PLFAV", "PL2"], ["PLFAV", "PL1"]])})
-    assert r.status_code == 200 and r.json() == {"ok": True, "n": 2}
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
     assert "Hidden overlaps" in c.get("/cleanup").text
     # malformed entries are ignored, not fatal
     r = c.post("/overlaps/suppress-many", data={"pairs": json.dumps([["only-one"], "junk", []])})
-    assert r.status_code == 200 and r.json()["n"] == 0
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
 
 
 def test_inline_dupe_delete_ok(store, monkeypatch, tmp_path):
@@ -377,7 +408,7 @@ def test_dupe_keep_one_deletes_whole_cluster(store, monkeypatch, tmp_path):
     client = FakeClient(tracks={ytm: [_track("v1", "Song", "X")] for _, ytm in ids})
     c = _client(store, lambda: {iid: client})
     r = c.post("/dupe/keep-one", data={"keep": keep_id})
-    assert r.status_code == 200 and r.json()["ok"] is True and r.json()["deleted"] == 2
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"   # success -> recompute page
     remaining = {p.ytm_playlist_id for p in store.get_playlists()}
     assert remaining == {"PLa"}                      # only the kept copy survives
     assert sorted(client.deleted) == ["PLb", "PLc"]
@@ -390,7 +421,7 @@ def test_delete_empty_playlist(store, monkeypatch, tmp_path):
     client = FakeClient()                                                     # get_playlist -> {tracks: []}
     c = _client(store, lambda: {iid: client})
     r = c.post("/playlist/delete-empty", data={"playlist": empty})
-    assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.status_code == 200 and r.text.strip() == ""          # empty -> htmx removes the row
     assert client.deleted == ["PLempty"] and store.get_playlist(empty) is None
 
 def test_delete_empty_refuses_if_not_empty(store, monkeypatch, tmp_path):
@@ -400,7 +431,7 @@ def test_delete_empty_refuses_if_not_empty(store, monkeypatch, tmp_path):
     client = FakeClient(tracks={"PLfull": [_track("v1", "S", "X")]})          # has a track remotely
     c = _client(store, lambda: {iid: client})
     r = c.post("/playlist/delete-empty", data={"playlist": pl})
-    assert r.json()["ok"] is False and client.deleted == []
+    assert r.status_code == 422 and client.deleted == []          # refused -> error toast, nothing deleted
 
 
 def test_overlap_ignore_excludes_playlist(store):
@@ -413,7 +444,7 @@ def test_overlap_ignore_excludes_playlist(store):
     c = _client(store, lambda: {iid: FakeClient()})
     assert "Big Mixtape" in c.get("/cleanup").text                       # overlaps present
     r = c.post("/overlaps/ignore", data={"ytm": "PLFAV"})
-    assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
     body = c.get("/cleanup").text
     # overlaps card spans from its header to the next section header
     overlaps_card = body.split('id="overlaps"')[1].split('<h2 class="section')[0]
@@ -437,11 +468,31 @@ def test_merge_apply_route(store, monkeypatch, tmp_path):
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
     b = store.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
-    client = FakeClient(tracks={"PLA": [_track("v1", "One", "X")], "PLB": [_track("v2", "Two", "X")]})
+    t1 = store.upsert_track("v1", "One", "X", None, None, 1)
+    t2 = store.upsert_track("v2", "Two", "X", None, None, 1)
+    store.set_playlist_tracks(a, [t1]); store.set_playlist_tracks(b, [t2])
+    client = FakeClient()
     c = _client(store, lambda: {iid: client})
-    r = c.post("/merge/apply", data={"ids": f"{a},{b}", "result": "v1,v2", "keep": str(a)})
-    assert r.status_code == 200 and r.json()["ok"] is True
+    c.get(f"/merge?ids={a},{b}")                          # create the draft (all included, keep = first = A)
+    r = c.post(f"/merge/apply?ids={a},{b}")
+    assert r.status_code == 200 and "/cleanup" in r.headers.get("hx-redirect", "")   # HX-Redirect on success
     assert client.deleted == ["PLB"] and store.get_playlist(b) is None
+
+
+def test_merge_apply_ignores_stale_ids_in_url(store, monkeypatch, tmp_path):
+    # a non-existent id in ?ids (e.g. a playlist deleted after the link was made) must not break Apply:
+    # the editor renders the existing playlists, and Apply operates on that filtered member set.
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
+    t1 = store.upsert_track("v1", "One", "X", None, None, 1)
+    store.set_playlist_tracks(a, [t1]); store.set_playlist_tracks(b, [t1])
+    c = _client(store, lambda: {iid: FakeClient()})
+    c.get(f"/merge?ids={a},{b},99999")                    # 99999 doesn't exist
+    r = c.post(f"/merge/apply?ids={a},{b},99999")
+    assert r.status_code == 200 and r.headers.get("hx-redirect")   # applied (not the 422 error toast)
+    assert store.get_playlist(b) is None                  # kept A, deleted B -> merge ran
 
 def test_merge_editor_renders_nway(store):
     iid = store.upsert_identity("main", "cred", None, True)
@@ -451,9 +502,45 @@ def test_merge_editor_renders_nway(store):
     store.set_playlist_tracks(a, [t1, t2]); store.set_playlist_tracks(b, [t1])
     c = _client(store, lambda: {iid: FakeClient()})
     body = c.get(f"/merge?ids={a},{b}").text
-    assert "mergeEditor(" in body and "Where should the result go" in body
+    assert "Where should the result go" in body and "One" in body and "Two" in body
     # /dupe redirects into the same editor
     assert c.get(f"/dupe/{a}/{b}").status_code == 200
+
+
+def test_merge_update_toggle_and_setall_persist(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Mix2", 2, "h", 1.0)
+    t1 = store.upsert_track("v1", "One", "X", None, None, 1)
+    t2 = store.upsert_track("v2", "Two", "X", None, None, 1)
+    store.set_playlist_tracks(a, [t1, t2]); store.set_playlist_tracks(b, [t1])
+    c = _client(store, lambda: {iid: FakeClient()})
+    c.get(f"/merge?ids={a},{b}")                          # all included -> count 2 / 2
+    upd = f"/merge/update?ids={a},{b}"
+    r = c.post(upd, data={"field": "toggle", "value": "v:v1"})
+    assert r.status_code == 200 and "1 / 2" in r.text     # one excluded now
+    # the draft survives a "refresh" (re-GET) — v1 still excluded
+    assert "1 / 2" in c.get(f"/merge?ids={a},{b}").text
+    assert "0 / 2" in c.post(upd, data={"field": "setall", "value": "0"}).text   # none
+    assert "2 / 2" in c.post(upd, data={"field": "setall", "value": "1"}).text   # all back
+
+
+def test_merge_update_sort_mode_keep_pick(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Mix2", 1, "h", 1.0)
+    t1 = store.upsert_track("v1", "Beta", "X", None, None, 1)
+    t2 = store.upsert_track("v2", "Alpha", "X", None, None, 1)
+    store.set_playlist_tracks(a, [t1, t2]); store.set_playlist_tracks(b, [t1])
+    c = _client(store, lambda: {iid: FakeClient()})
+    c.get(f"/merge?ids={a},{b}")
+    upd = f"/merge/update?ids={a},{b}"
+    alpha = c.post(upd, data={"field": "sort", "value": "alpha"}).text
+    assert alpha.index("Alpha") < alpha.index("Beta")       # alpha sort orders by title
+    # mode / keep / pick / an unknown field all dispatch and re-render without error
+    for field, value in (("mode", "ducks"), ("keep", "all"), ("pick", "v:v1:1"), ("bogus", "x")):
+        assert c.post(upd, data={"field": field, "value": value}).status_code == 200
+    assert 'value="all" checked' in c.get(f"/merge?ids={a},{b}").text   # keep choice survived the refresh
 
 
 def test_undo_via_dupe_delete(store, monkeypatch, tmp_path):
@@ -483,103 +570,23 @@ def test_overlap_keep_only_mutes_others(store):
     store.set_playlist_tracks(noise, [t[2]])   # shares only with PLFAV (t2), not PLB
     c = _client(store, lambda: {iid: FakeClient()})
     # mute PLFAV's other overlaps but keep the PLFAV–PLB pair
-    r = c.post("/overlaps/ignore-except", data={"ytm": "PLFAV", "a": "PLFAV", "b": "PLB"})
-    assert r.status_code == 200 and r.json()["ok"] is True
+    r = c.post("/overlaps/mute-others", data={"a": "PLFAV", "b": "PLB"})
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
     # scope to the overlaps card only (a 1-track playlist also shows under "Tiny playlists")
     overlaps_card = c.get("/cleanup").text.split('id="overlaps"')[1].split('<h2 class="section')[0]
     assert "Favorite Songs 2" in overlaps_card     # kept pair still shown
     assert "Little Mix" not in overlaps_card       # the noise overlap is muted
 
 
-def test_playlists_is_default_tab(store):
+def test_playlists_tab_renders(store):
     iid = store.upsert_identity("main", "cred", None, True)
     store.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
-    root = c.get("/").text
-    assert "All playlists" in root and "playlistsTab(" in root     # default tab is Playlists
+    page = c.get("/playlists").text                                # Playlists moved off / to /playlists
+    assert "All playlists" in page and "playlistsTab(" in page
     assert c.get("/cleanup").status_code == 200                    # cleanup moved here
-    assert 'href="/cleanup"' in root                              # nav points at it
-
-
-def test_playlists_group_and_delete(store, monkeypatch, tmp_path):
-    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
-    t = store.upsert_track("v1", "S", "X", None, None, 1)
-    store.set_playlist_tracks(a, [t]); store.set_playlist_tracks(b, [t])
-    c = _client(store, lambda: {iid: FakeClient()})
-
-    # group both
-    r = c.post("/playlists/group", data={"ids": f"{a},{b}", "name": "Faves"})
-    assert r.status_code == 200 and r.json()["n"] == 2
-    assert store.get_playlist_groups() == {"PLA": "Faves", "PLB": "Faves"}
-    assert "By group" in c.get("/").text          # split toggle appears once groups exist
-
-    # delete one
-    r = c.post("/playlists/delete", data={"ids": str(a)})
-    assert r.status_code == 200 and r.json() == {"ok": True, "deleted": 1, "hidden": 0, "errors": []}
-    assert store.get_playlist(a) is None
-    # the group assignment is preserved (user curation) so it reattaches if the playlist returns
-    assert store.get_playlist_groups() == {"PLA": "Faves", "PLB": "Faves"}
-
-
-def test_playlists_copy_and_copy_merge(store, monkeypatch, tmp_path):
-    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Pop", 2, "h", 1.0)
-    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
-    store.set_playlist_tracks(a, [t[0], t[1]]); store.set_playlist_tracks(b, [t[1], t[2]])
-    c = _client(store, lambda: {iid: FakeClient()})
-
-    r = c.post("/playlists/copy", data={"ids": str(a), "name": "Rock Copy"})
-    assert r.status_code == 200 and r.json()["ok"] and r.json()["added"] == 2 and r.json()["from"] == 1
-    assert any(p.title == "Rock Copy" for p in store.get_playlists())   # pulled into the store
-
-    # copy + merge: union of the two playlists' tracks (v0,v1,v2) = 3
-    r = c.post("/playlists/copy", data={"ids": f"{a},{b}", "name": "Combined"})
-    assert r.json()["ok"] and r.json()["added"] == 3 and r.json()["from"] == 2
-
-
-def test_find_and_add_alternate_versions(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
-    results = [
-        {"videoId": "v0", "title": "Song A", "artists": [{"name": "Artist X"}], "duration_seconds": 200},
-        {"videoId": "v1", "title": "Song A (Live)", "artists": [{"name": "Artist X"}], "duration": "4:10"},
-        {"videoId": "v2", "title": "Song A (Remix)", "artists": [{"name": "DJ Z"}], "duration_seconds": 190},
-    ]
-    fc = FakeClient(search_results=results)
-    c = _client(store, lambda: {iid: fc})
-
-    # search excludes the source track and de-dupes across the songs/videos passes
-    r = c.get(f"/playlist/{a}/alternates?video_id=v0").json()
-    assert r["ok"] and [x["videoId"] for x in r["results"]] == ["v1", "v2"]
-    assert r["results"][0]["duration"] == 250          # "4:10" parsed to seconds
-
-    # adding the chosen alternates appends them to the playlist (YT + store) and bumps the count
-    chosen = [x for x in r["results"] if x["videoId"] in ("v1", "v2")]
-    add = c.post(f"/playlist/{a}/add-tracks", json={"tracks": chosen}).json()
-    assert add == {"ok": True, "added": 2, "skipped": 0, "count": 3}
-    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v1", "v2"]
-    assert store.get_playlist(a).track_count == 3
-    assert fc.added == [("PL1", ["v1", "v2"])]
-
-    # empty selection is rejected
-    assert c.post(f"/playlist/{a}/add-tracks", json={"tracks": []}).json()["ok"] is False
-
-
-def test_added_alternate_keeps_album_link(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 0, "h", 1.0)
-    c = _client(store, lambda: {iid: FakeClient()})
-    track = {"videoId": "v9", "title": "T", "artist": "A", "album": "The Album",
-             "album_browse": "MPREb_123", "duration": 200, "thumbnail": ""}
-    assert c.post(f"/playlist/{a}/add-tracks", json={"tracks": [track]}).json()["ok"]
-    detail = store.playlist_tracks_detail(a)
-    assert detail[0]["album_browse"] == "MPREb_123"   # album becomes a browse link in the view
+    assert 'href="/cleanup"' in page                              # nav points at it
+    assert c.get("/").status_code == 200                          # / is now the Home tab
 
 
 def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
@@ -623,30 +630,6 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     assert (v0["genre"], v0["year"]) == ("rock", "1998")
 
 
-def test_genres_whitelist_editor(store):
-    import yt_playlist.genres as g
-    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)   # seeds the built-in list
-    c = TestClient(app, base_url="http://127.0.0.1")
-    n = len(g.builtin_names())
-    assert len(store.get_genre_whitelist()) == n
-    page = c.get("/genres").text
-    assert "genresTab" in page and "Rock" in page
-
-    # add a custom genre -> persisted and recognized by the live matcher
-    r = c.post("/genres/add", json={"name": "Phonk"}).json()
-    assert r["ok"] and "Phonk" in r["genres"]
-    assert g.pick_genre(["seen live", "phonk"]) == "Phonk"
-
-    # remove it -> gone and no longer matched
-    c.post("/genres/remove", json={"name": "Phonk"})
-    assert "Phonk" not in store.get_genre_whitelist()
-    assert g.pick_genre(["phonk"]) is None
-
-    # reset restores the built-in list
-    assert c.post("/genres/reset").json()["ok"]
-    assert len(store.get_genre_whitelist()) == n
-
-
 def test_liked_songs_get_a_heart(store):
     iid = store.upsert_identity("main", "cred", None, True)
     mix = store.upsert_playlist(iid, "PLM", "Mix", 2, "h", 1.0)
@@ -659,7 +642,7 @@ def test_liked_songs_get_a_heart(store):
     assert liked == {"v1": True, "v2": False}                       # song in LM is liked
     assert store.artist_songs("A")[0]["liked"] is True             # and wherever the song appears
     c = _client(store, lambda: {iid: FakeClient()})
-    assert "liked-heart" in c.get(f"/playlist/{mix}").text
+    assert "like-btn on" in c.get(f"/playlist/{mix}").text          # the liked song shows a filled heart
 
 
 def test_remove_playlist_preserves_group(store):
@@ -817,23 +800,6 @@ def test_lastfm_enrich_scrapes_release_year(monkeypatch):
     assert fetched == ["https://www.last.fm/music/Ph+1/Sizzling+Love"]   # the album page, not the track
 
 
-def test_lastfm_key_saved_via_ui(store, monkeypatch, tmp_path):
-    monkeypatch.delenv("LASTFM_API_KEY", raising=False)
-    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))   # no env/config key
-    import yt_playlist.lastfm as lf
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
-    c = _client(store, lambda: {iid: FakeClient()})
-
-    # the playlist page reflects "not configured"; after saving a key it flips to configured
-    assert lf.api_key(store) is None
-    assert "enrichPanel(%d, false," % a in c.get(f"/playlist/{a}").text
-    r = c.post("/settings/lastfm-key", json={"key": " abc123 "}).json()
-    assert r == {"ok": True, "configured": True}
-    assert store.get_setting("lastfm_api_key") == "abc123" and lf.api_key(store) == "abc123"
-    assert "enrichPanel(%d, true," % a in c.get(f"/playlist/{a}").text
-
-
 def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
     monkeypatch.delenv("LASTFM_API_KEY", raising=False)
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))   # empty config -> no key
@@ -848,84 +814,136 @@ def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
     assert "Last.fm API key" in body
 
 
-def test_rename_playlist(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Old Name", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "S", "X", "Al", 200, 1)])
-    fc = FakeClient()
-    c = _client(store, lambda: {iid: fc})
-
-    r = c.post(f"/playlist/{a}/rename", json={"title": "  New Name  "}).json()
-    assert r == {"ok": True, "title": "New Name"}            # trimmed
-    assert store.get_playlist(a).title == "New Name"          # store updated
-    assert fc.edited == [("PL1", {"title": "New Name"})]      # YouTube updated
-    assert c.post(f"/playlist/{a}/rename", json={"title": "  "}).json()["ok"] is False
+def test_toasts_region_present_on_every_page(store):
+    store.upsert_identity("main", "cred", None, True)
+    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    assert 'id="toasts"' in c.get("/").text
 
 
-def test_set_track_year(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", "Al", 200, 1)])
-    c = _client(store, lambda: {iid: FakeClient()})
-    assert c.post(f"/playlist/{a}/track-year", json={"video_id": "v0", "year": "1991"}).json()["ok"]
-    assert store.playlist_tracks_detail(a)[0]["year"] == "1991"
+def test_error_toast_partial_renders(store):
+    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
+    tmpl = app.state.ctx.templates.env.get_template("_partials/error_toast.html")
+    html = tmpl.render(message="Boom")
+    assert "Boom" in html
+    assert 'hx-swap-oob="afterbegin:#toasts"' in html
 
 
-def test_set_track_genre_and_suggestions(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
-    t0 = store.upsert_track("v0", "S0", "X", "Al", 200, 1)
-    store.set_playlist_tracks(a, [t0, store.upsert_track("v1", "S1", "Y", "Al", 200, 1)])
-    store.set_track_genre(t0, "Rock")
-    c = _client(store, lambda: {iid: FakeClient()})
-
-    # autosuggest list = distinct genres so far, alpha-sorted; rendered into a datalist
-    assert store.all_genres() == ["Rock"]
-    page = c.get(f"/playlist/{a}").text
-    assert 'id="genrelist"' in page and 'value="Rock"' in page and "startEditGenre" in page
-
-    # set a genre on the second track; it persists and joins the suggestion list
-    assert c.post(f"/playlist/{a}/track-genre", json={"video_id": "v1", "genre": "Jazz"}).json()["ok"]
-    detail = {t["video_id"]: t["genre"] for t in store.playlist_tracks_detail(a)}
-    assert detail["v1"] == "Jazz"
-    assert store.all_genres() == ["Jazz", "Rock"]
-
-
-def test_reorder_and_remove_track(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track(f"v{i}", f"S{i}", "X", "Alb", 200, 1) for i in range(3)])
-    # the YT playlist exposes setVideoIds (what moves/removes are keyed on)
-    fc = FakeClient(tracks={"PL1": [{"videoId": f"v{i}", "setVideoId": f"sv{i}"} for i in range(3)]})
-    c = _client(store, lambda: {iid: fc})
-
-    # move v2 before v0 (to the top)
-    assert c.post(f"/playlist/{a}/reorder", json={"video_id": "v2", "before_video_id": "v0"}).json()["ok"]
-    assert fc.edited[-1] == ("PL1", {"moveItem": ("sv2", "sv0")})
-    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v2", "v0", "v1"]
-
-    # move v2 to the end (empty successor -> bare setVideoId)
-    c.post(f"/playlist/{a}/reorder", json={"video_id": "v2", "before_video_id": ""})
-    assert fc.edited[-1] == ("PL1", {"moveItem": "sv2"})
-    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v1", "v2"]
-
-    # remove v1
-    assert c.post(f"/playlist/{a}/remove-track", json={"video_id": "v1"}).json() == {"ok": True, "count": 2}
-    assert fc.removed == [("PL1", [{"videoId": "v1", "setVideoId": "sv1"}])]
-    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v2"]
-    assert store.get_playlist(a).track_count == 2
-
-
-def test_playlists_delete_hides_system(store, monkeypatch, tmp_path):
-    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
+def _two_identity_move(store):
+    i1 = store.upsert_identity("Main", "c1", None, True)
+    i2 = store.upsert_identity("Alt", "c2", None, False)
+    pid = store.upsert_playlist(i1, "PL1", "Mix", 1, "h", 1.0)
     t = store.upsert_track("v1", "S", "X", None, None, 1)
-    store.set_playlist_tracks(lm, [t])
+    store.set_playlist_tracks(pid, [t])
+    return i1, i2, pid
+
+
+def test_move_run_copy_returns_row_with_message(store):
+    i1, i2, pid = _two_identity_move(store)
+    c = _client(store, lambda: {i1: FakeClient(), i2: FakeClient()})
+    r = c.post("/move/run", data={"playlist": pid, "target_identity": i2, "copy_only": "1"})
+    assert r.status_code == 200
+    assert "Copied" in r.text and "Mix" in r.text       # row re-rendered, still present
+    assert store.get_playlist(pid) is not None
+
+
+def test_move_run_move_removes_row(store):
+    i1, i2, pid = _two_identity_move(store)
+    c = _client(store, lambda: {i1: FakeClient(), i2: FakeClient()})
+    r = c.post("/move/run", data={"playlist": pid, "target_identity": i2})   # move (no copy_only)
+    assert r.status_code == 200
+    assert r.text.strip() == ""                          # deleted -> empty -> htmx removes the row
+    assert store.get_playlist(pid) is None
+
+
+def test_move_run_same_identity_shows_inline_error(store):
+    i1, _i2, pid = _two_identity_move(store)
+    c = _client(store, lambda: {i1: FakeClient()})
+    r = c.post("/move/run", data={"playlist": pid, "target_identity": i1})
+    assert r.status_code == 200
+    assert "same" in r.text.lower() and "move-row" in r.text   # error re-rendered in the row
+
+
+def test_move_run_gone_playlist_drops_row(store):
+    # the playlist was deleted elsewhere between page load and click -> ops().move raises,
+    # and the row must drop cleanly (empty fragment) rather than render a None-deref'd row.
+    i1, i2, _pid = _two_identity_move(store)
+    c = _client(store, lambda: {i1: FakeClient(), i2: FakeClient()})
+    r = c.post("/move/run", data={"playlist": "99999", "target_identity": i2})   # no such playlist
+    assert r.status_code == 200 and r.text.strip() == ""
+
+
+def test_delete_empty_removes_row(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    pid = store.upsert_playlist(iid, "PLE", "Empty One", 0, "h", 1.0)   # no tracks
     c = _client(store, lambda: {iid: FakeClient()})
-    r = c.post("/playlists/delete", data={"ids": str(lm)})
-    # undeletable system playlist is hidden locally, not deleted
-    assert r.json() == {"ok": True, "deleted": 0, "hidden": 1, "errors": []}
-    assert store.get_playlist(lm) is not None      # survives in YouTube
-    assert "LM" in store.get_hidden_playlists()    # but hidden from the tab
-    assert "list=LM" not in c.get("/").text
+    assert c.get("/cleanup").text.count('class="empty-row"') == 1
+    r = c.post("/playlist/delete-empty", data={"playlist": pid})
+    assert r.status_code == 200 and r.text.strip() == ""       # empty -> htmx removes the row
+    assert store.get_playlist(pid) is None
+
+
+def test_unhide_overlap_restores_to_overlaps_section(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Beta", 3, "h", 1.0)
+    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(4)]
+    store.set_playlist_tracks(a, [t[0], t[1], t[2]])           # {0,1,2}
+    store.set_playlist_tracks(b, [t[1], t[2], t[3]])           # {1,2,3}: shared {1,2}, jaccard .5 -> overlap
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    store.suppress_overlap("PLA", "PLB", 1.0)                  # hide the pair
+    assert c.get("/cleanup").text.count('class="ov-row"') == 0  # gone from Overlaps, now Hidden
+
+    r = c.post("/overlaps/unsuppress", data={"a": "PLA", "b": "PLB"})
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"   # recompute, not drop-in-place
+    assert c.get("/cleanup").text.count('class="ov-row"') == 1  # restored to the Overlaps section
+
+
+def test_keep_one_refreshes_and_deletes_other_copies(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Dup A", 2, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Dup B", 2, "h", 1.0)
+    t = [store.upsert_track(f"d{i}", f"D{i}", "X", None, None, 1) for i in range(2)]
+    store.set_playlist_tracks(a, t); store.set_playlist_tracks(b, t)   # identical -> a dup group
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.post("/dupe/keep-one", data={"keep": a})
+    assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
+    assert store.get_playlist(a) is not None and store.get_playlist(b) is None   # other copy deleted
+
+
+def _seed_search(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    r1 = store.upsert_track("r1", "Spektrum", "Ritmo", "Ritmo LP", None,
+                            album_browse_id="MPREb_ritmolp")
+    pl = store.upsert_playlist(iid, "PL1", "Late Night Drive", 1, "h", 0.0)
+    store.set_playlist_tracks(pl, [r1])
+    return iid
+
+
+def test_omni_search_returns_results_partial(store):
+    _seed_search(store)
+    app = create_app(store, lambda: {}, now_fn=lambda: 1000.0)
+    c = TestClient(app)
+    r = c.get("/search/omni", params={"q": "ritmo"})
+    assert r.status_code == 200
+    assert "Tracks by Ritmo" in r.text
+    assert "/artist?name=Ritmo" in r.text
+
+
+def test_omni_search_short_query_renders_nothing(store):
+    _seed_search(store)
+    app = create_app(store, lambda: {}, now_fn=lambda: 1000.0)
+    c = TestClient(app)
+    r = c.get("/search/omni", params={"q": "r"})
+    assert r.status_code == 200
+    assert "omni-row" not in r.text       # no result rows for a 1-char query
+
+
+def test_navbar_has_omni_search(store):
+    app = create_app(store, lambda: {}, now_fn=lambda: 1000.0)
+    c = TestClient(app)
+    r = c.get("/")
+    assert r.status_code == 200
+    assert 'class="omni"' in r.text
+    assert 'hx-get="/search/omni"' in r.text

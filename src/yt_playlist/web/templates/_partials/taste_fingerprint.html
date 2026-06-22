@@ -1,0 +1,45 @@
+<section class="fingerprint card" id="fingerprint">
+  <div class="fp-head">
+    <div class="fp-stance" hx-target="#home-feed" hx-swap="outerHTML">
+      <button type="button" class="seg-btn{{ ' on' if stance != 'explore' }}"
+              hx-post="/home/stance" hx-vals='{"stance":"exploit"}'>More in your wheelhouse</button>
+      <button type="button" class="seg-btn{{ ' on' if stance == 'explore' }}"
+              hx-post="/home/stance" hx-vals='{"stance":"explore"}'>Try something new</button>
+    </div>
+    <a class="fp-tune" href="/taste">Tune your taste model →</a>
+  </div>
+  <p class="fp-hint section-note">Drag a bar to favor or mute it - your picks re-rank instantly.</p>
+  <div class="fp-body">
+    <div class="fp-col">
+      <span class="fp-label">Genres</span>
+      {% for g in fingerprint.families[:6] %}
+      <div class="fp-row">
+        <span class="fp-name" title="{{ '%.0f'|format(g.share*100) }}% of your listening">{{ g.name }}</span>
+        <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ g.weight }}"
+               name="weight" hx-post="/home/steer" hx-vals='{"axis":"genre:{{ g.name }}"}'
+               hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
+               hx-on::before-request="sessionStorage.setItem('steered','1')"
+               aria-label="favor or mute {{ g.name }}">
+      </div>
+      {% endfor %}
+    </div>
+    <div class="fp-col">
+      <span class="fp-label">Eras</span>
+      {% for e in fingerprint.eras[:5] %}
+      <div class="fp-row">
+        <span class="fp-name" title="{{ '%.0f'|format(e.share*100) }}% of your listening">{{ e.name }}s</span>
+        <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ e.weight }}"
+               name="weight" hx-post="/home/steer" hx-vals='{"axis":"era:{{ e.name }}"}'
+               hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
+               hx-on::before-request="sessionStorage.setItem('steered','1')"
+               aria-label="favor or mute the {{ e.name }}s">
+      </div>
+      {% endfor %}
+    </div>
+    <div class="fp-col fp-breadth">
+      <span class="fp-label">Breadth</span>
+      <span class="fp-breadth-val">{{ 'eclectic' if fingerprint.breadth > 0.66 else ('focused' if fingerprint.breadth < 0.33 else 'balanced') }}</span>
+      <span class="fp-bar wide"><i style="width:{{ '%.0f'|format(fingerprint.breadth*100) }}%"></i></span>
+    </div>
+  </div>
+</section>

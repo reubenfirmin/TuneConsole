@@ -6,118 +6,26 @@ function syncTopbarH() {
 window.addEventListener('DOMContentLoaded', syncTopbarH);
 window.addEventListener('resize', syncTopbarH);
 
-// Alpine component factories for the dashboard tabs (loaded globally via base.html).
-function groupCard() {
-  return {
-    state: 'idle', err: '',
-    async keep(id) {
-      if (this.state === 'working') return;
-      this.state = 'working'; this.err = '';
-      try {
-        const fd = new FormData(); fd.append('keep', id);
-        const r = await fetch('/dupe/keep-one', { method: 'POST', body: fd });
-        const j = await r.json();
-        // reload so dependent sections (e.g. overlaps that referenced a deleted copy) recompute
-        if (j.ok) { location.reload(); }
-        else { this.state = 'idle'; this.err = (j.errors || []).join(' · ') || 'failed'; }
-      } catch (e) { this.state = 'idle'; this.err = String(e); }
-    },
-  };
-}
-function emptyRow() {
-  return {
-    state: 'idle', err: '',
-    async del(id) {
-      if (this.state === 'deleting') return;
-      this.state = 'deleting'; this.err = '';
-      try {
-        const fd = new FormData(); fd.append('playlist', id);
-        const r = await fetch('/playlist/delete-empty', { method: 'POST', body: fd });
-        const j = await r.json();
-        if (j.ok) { this.state = 'gone'; } else { this.state = 'idle'; this.err = j.error || 'failed'; }
-      } catch (e) { this.state = 'idle'; this.err = String(e); }
-    },
-  };
-}
-function hideRow() {
-  return {
-    state: 'idle', open: false, mx: 0, my: 0,
-    async hide(a, b) {
-      if (this.state === 'hiding') return;
-      this.state = 'hiding';
-      try {
-        const fd = new FormData(); fd.append('a', a); fd.append('b', b);
-        const r = await fetch('/overlaps/suppress', { method: 'POST', body: fd });
-        if ((await r.json()).ok) { this.state = 'gone'; } else { this.state = 'idle'; }
-      } catch (e) { this.state = 'idle'; }
-    },
-  };
-}
-function staleRow() {
-  return {
-    state: 'idle',
-    async _post(url, fd) {
-      this.state = 'working';
-      try {
-        const r = await fetch(url, { method: 'POST', body: fd });
-        if ((await r.json()).ok) { this.state = 'gone'; } else { this.state = 'idle'; }
-      } catch (e) { this.state = 'idle'; }
-    },
-    dismiss(ytm) {
-      if (this.state === 'working') return;
-      const fd = new FormData(); fd.append('ytm', ytm);
-      return this._post('/rediscover/dismiss', fd);
-    },
-    snooze(ytm, days) {
-      if (this.state === 'working') return;
-      const fd = new FormData(); fd.append('ytm', ytm); fd.append('days', days);
-      return this._post('/rediscover/snooze', fd);
-    },
-  };
-}
-function ajaxRow() {
-  // Generic "POST then drop this row" for restore-style actions (unhide, stop-ignoring).
-  return {
-    gone: false, busy: false,
-    async go(url, data) {
-      if (this.busy) return;
-      this.busy = true;
-      try {
-        const fd = new FormData();
-        Object.entries(data).forEach(([k, v]) => fd.append(k, v));
-        const r = await fetch(url, { method: 'POST', body: fd });
-        if ((await r.json()).ok) { this.gone = true; } else { this.busy = false; }
-      } catch (e) { this.busy = false; }
-    },
-  };
-}
-function saveAlbum(saved) {
-  // Save/unsave a YouTube album to your library, then reload so both album tables refresh.
-  return {
-    saved: !!saved, busy: false,
-    label() { return this.busy ? '…' : (this.saved ? 'Unsave' : 'Save'); },
-    async toggle(browseId) {
-      if (this.busy) return;
-      this.busy = true;
-      const url = this.saved ? '/collection/unsave-album' : '/collection/save-album';
-      try {
-        const fd = new FormData(); fd.append('browse_id', browseId);
-        const j = await (await fetch(url, { method: 'POST', body: fd })).json();
-        if (j.ok) { location.reload(); return; }
-      } catch (e) {}
-      this.busy = false;
-    },
-  };
-}
-function rowSort(pid) {
+// htmx: a 422 carries an OOB error toast. By default htmx won't process a 4xx body,
+// so opt this status in — the server sets `HX-Reswap: none` to keep the primary
+// target untouched while the OOB toast still lands in #toasts. Bind on `document`
+// (not document.body): app.js loads in <head>, before <body> exists.
+document.addEventListener('htmx:beforeSwap', (e) => {
+  if (e.detail.xhr.status === 422) { e.detail.shouldSwap = true; e.detail.isError = false; }
+});
+
+// Alpine component factories for the various pages (loaded globally via base.html).
+function rowSort(pid, editBase) {
   // Generic click-to-sort for a static-row table; reorders <tr class="srow"> by data-<key>.
   // Numeric when both values parse as numbers, else locale string compare.
   // Also hosts the per-row "⋯" menu and the "find alternate versions" flow for the playlist view.
+  // `editBase` is the URL the genre/year edits POST under (defaults to /playlist/<pid>; the album
+  // page passes /album/<browse>). Reorder/remove stay playlist-only.
   return {
-    pid: pid, key: '', dir: 1,
+    pid: pid, editBase: editBase || ('/playlist/' + pid), key: '', dir: 1,
     openMenu: null,                                   // video_id whose ⋯ menu is open
     // alternate-versions modal
-    altOpen: false, altLoading: false, altErr: '', altTitle: '', altResults: [], altSel: {},
+    altOpen: false, altLoading: false, altTitle: '',
     sortBy(k) {
       if (this.key === k) { this.dir = -this.dir; } else { this.key = k; this.dir = 1; }
       const tb = this.$refs.body;
@@ -130,42 +38,30 @@ function rowSort(pid) {
           return (numeric ? na - nb : a.localeCompare(b)) * this.dir;
         })
         .forEach(r => tb.appendChild(r));
+      // A manual drag-reorder only makes sense in the playlist's TRUE order. Once a column sort is
+      // applied, the on-screen order isn't canonical, so persisting a single drag would scramble the
+      // real order — disable dragging until the view is reloaded back to the default order.
+      if (this._sortable) this._sortable.option('disabled', this.key !== '');
     },
     ind(k) { return this.key === k ? (this.dir === 1 ? ' ▲' : ' ▼') : ''; },
 
-    async findAlternates(vid, title) {
+    // Open the modal and let htmx fetch + render the results (server builds the list; we only own the
+    // modal open/close + loading flag). The "Add" button hx-includes the checked results.
+    findAlternates(vid, title) {
       this.openMenu = null;
-      this.altOpen = true; this.altLoading = true; this.altErr = '';
-      this.altResults = []; this.altSel = {}; this.altTitle = title;
-      try {
-        const r = await fetch(`/playlist/${this.pid}/alternates?video_id=${encodeURIComponent(vid)}`);
-        const j = await r.json();
-        if (!j.ok) { this.altErr = j.error || 'search failed'; }
-        else { this.altResults = j.results; if (!j.results.length) this.altErr = 'No other versions found.'; }
-      } catch (e) { this.altErr = 'network error'; }
-      this.altLoading = false;
+      this.altOpen = true; this.altLoading = true; this.altTitle = title;
+      htmx.ajax('GET', `/playlist/${this.pid}/alternates?video_id=${encodeURIComponent(vid)}`,
+        { target: '#alt-results', swap: 'innerHTML' }).finally(() => { this.altLoading = false; });
     },
-    toggleAlt(vid) {
-      const s = { ...this.altSel };
-      if (s[vid]) delete s[vid]; else s[vid] = true;
-      this.altSel = s;
+
+    // "Songs like this" — server renders the modal (with selectable rows + an Add button) into
+    // #similar-modal. Pass the playlist id so the modal can offer "add below this track"; the seed
+    // vid becomes the insert anchor on the server side.
+    songsLike(vid) {
+      this.openMenu = null;
+      htmx.ajax('GET', `/track/${encodeURIComponent(vid)}/similar?pid=${this.pid}`,
+        { target: '#similar-modal', swap: 'innerHTML' });
     },
-    altCount() { return Object.keys(this.altSel).length; },
-    async addAlternates() {
-      const chosen = this.altResults.filter(r => this.altSel[r.videoId]);
-      if (!chosen.length) return;
-      this.altLoading = true; this.altErr = '';
-      try {
-        const r = await fetch(`/playlist/${this.pid}/add-tracks`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tracks: chosen }),
-        });
-        const j = await r.json();
-        if (!j.ok) { this.altErr = j.error || 'add failed'; this.altLoading = false; return; }
-        location.reload();                            // new tracks drop into the table
-      } catch (e) { this.altErr = 'network error'; this.altLoading = false; }
-    },
-    fmtDur(s) { return s ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : ''; },
 
     // remove-track confirmation modal
     rmOpen: false, rmBusy: false, rmErr: '', rmVid: '', rmTitle: '',
@@ -174,24 +70,24 @@ function rowSort(pid) {
       this.rmVid = vid; this.rmTitle = title; this.rmErr = ''; this.rmOpen = true;
     },
     async confirmRemove() {
-      this.rmBusy = true; this.rmErr = '';
+      this.rmBusy = true;
+      const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(this.rmVid)}"]`);
+      // htmx owns request + swap: success returns an empty row -> the <tr> is removed; an error
+      // returns the OOB toast and leaves the row in place.
       try {
-        const r = await fetch(`/playlist/${this.pid}/remove-track`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ video_id: this.rmVid }),
-        });
-        const j = await r.json();
-        if (!j.ok) { this.rmErr = j.error || 'remove failed'; this.rmBusy = false; return; }
-        location.reload();
-      } catch (e) { this.rmErr = 'network error'; this.rmBusy = false; }
+        await htmx.ajax('POST', `/playlist/${this.pid}/remove-track`,
+          { values: { video_id: this.rmVid }, target: tr, swap: 'outerHTML' });
+      } catch (e) { /* leave the row; a reload would resync */ }
+      this.rmBusy = false; this.rmOpen = false;
     },
 
     // --- drag-and-drop reorder via SortableJS (floating drag clone + ghost placeholder) ---
     initSortable() {
       const tb = this.$refs.body;
       if (!tb || typeof Sortable === 'undefined') return;
-      Sortable.create(tb, {
+      this._sortable = Sortable.create(tb, {
         handle: '.drag-handle',
+        disabled: this.key !== '',           // only draggable in the true (unsorted) order
         draggable: 'tr.srow',
         animation: 160,
         // Native drag image (a faithful, full-width snapshot of the row) floats under the cursor —
@@ -205,11 +101,10 @@ function rowSort(pid) {
           const moved = e.item.dataset.vid;
           const next = e.item.nextElementSibling;
           const beforeVid = next && next.classList.contains('srow') ? next.dataset.vid : '';
-          fetch(`/playlist/${this.pid}/reorder`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ video_id: moved, before_video_id: beforeVid }),
-          }).then(r => r.json()).then(j => { if (!j.ok) location.reload(); })
-            .catch(() => location.reload());
+          // htmx persists the new order (no swap — the DOM is already reordered); on failure the
+          // server replies HX-Refresh to reload and resync the true order.
+          htmx.ajax('POST', `/playlist/${this.pid}/reorder`,
+            { values: { video_id: moved, before_video_id: beforeVid }, swap: 'none' });
         },
       });
     },
@@ -249,17 +144,13 @@ function rowSort(pid) {
       this.editVid = null; this.gSuggest = []; this.gSel = -1;
       const genre = (value || '').trim();
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
-      if (tr) {                                   // optimistic update
-        const disp = tr.querySelector('.gdisplay');
-        if (disp) disp.innerHTML = genreChip(genre);
-        tr.dataset.genre = genre.toLowerCase();
-      }
+      if (!tr) return;
+      // htmx owns the request + swap: the server re-renders the whole row, keeping the data-*
+      // the sort reads in sync. (Alpine just triggers it; it never builds the HTML itself.)
       try {
-        await fetch(`/playlist/${this.pid}/track-genre`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ video_id: vid, genre }),
-        });
-      } catch (e) { /* optimistic UI already applied; a reload would resync if needed */ }
+        await htmx.ajax('POST', `${this.editBase}/track-genre`,
+          { values: { video_id: vid, genre }, target: tr, swap: 'outerHTML' });
+      } catch (e) { /* leave the row as-is; a reload would resync */ }
     },
 
     // --- click-to-edit year ---
@@ -278,17 +169,11 @@ function rowSort(pid) {
       this.editYearVid = null;
       const year = (value || '').trim();
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
-      if (tr) {
-        const disp = tr.querySelector('.ydisplay');
-        if (disp) disp.innerHTML = year ? escapeHtml(year) : '<span class="muted ghint">＋</span>';
-        tr.dataset.year = year || 0;
-      }
+      if (!tr) return;
       try {
-        await fetch(`/playlist/${this.pid}/track-year`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ video_id: vid, year }),
-        });
-      } catch (e) { /* optimistic UI already applied */ }
+        await htmx.ajax('POST', `${this.editBase}/track-year`,
+          { values: { video_id: vid, year }, target: tr, swap: 'outerHTML' });
+      } catch (e) { /* leave the row as-is; a reload would resync */ }
     },
   };
 }
@@ -327,29 +212,22 @@ function overlapSort() {
       this.tailMax = this._below.reduce((m, r) => Math.max(m, +r.dataset.shared), 0);
       this.confirmOpen = true;
     },
-    async confirmDismiss() {
-      this.confirmOpen = false;
-      if (!this._below.length) return;
-      const pairs = this._below.map(r => [r.dataset.ay, r.dataset.by]);
-      try {
-        const fd = new FormData(); fd.append('pairs', JSON.stringify(pairs));
-        await fetch('/overlaps/suppress-many', { method: 'POST', body: fd });
-      } catch (e) {}
-      location.hash = 'overlaps'; location.reload();
-    },
+    // the "hide this + all below" pairs, for the confirm modal's htmx post (see cleanup.html)
+    pairsJson() { return JSON.stringify(this._below.map(r => [r.dataset.ay, r.dataset.by])); },
     ind(k) { return this.key === k ? (this.dir === 1 ? ' ▲' : ' ▼') : ''; },
   };
 }
 function playlistsTab(rows) {
   return {
     rows, sel: {}, sortKey: 'title', sortDir: 1, split: false, busy: false,
-    groupModal: false, groupName: '', delModal: false,
+    groupModal: false, groupName: '', delModal: false, collapsed: {},
     init() {
       // remember view preferences across reloads (the tab reloads after group/delete)
       try {
         this.split = localStorage.getItem('pl.split') === '1';
         this.sortKey = localStorage.getItem('pl.sortKey') || 'title';
         this.sortDir = +localStorage.getItem('pl.sortDir') || 1;
+        this.collapsed = JSON.parse(localStorage.getItem('pl.collapsed') || '{}');
       } catch (e) {}
       this.$watch('split', v => { try { localStorage.setItem('pl.split', v ? '1' : '0'); } catch (e) {} });
       this.$watch('sortKey', v => { try { localStorage.setItem('pl.sortKey', v); } catch (e) {} });
@@ -370,11 +248,23 @@ function playlistsTab(rows) {
       return (r ? r * this.sortDir : a.title.localeCompare(b.title));   // stable tiebreak by title
     },
     sorted() { return [...this.rows].sort((a, b) => this.cmp(a, b)); },
+    toggleGen() {
+      this.collapsed.Generated = !this.collapsed.Generated;
+      try { localStorage.setItem('pl.collapsed', JSON.stringify(this.collapsed)); } catch (e) {}
+    },
+    // "Generated" is pinned into its own card above the table (see template) — never in the sections.
+    genRows() { return this.sorted().filter(r => r.group === 'Generated'); },
+    promote(r) {
+      // graduate a Generated playlist into the library (out of the quarantine group), then reload
+      fetch('/playlist/' + r.id + '/promote', { method: 'POST', headers: { 'HX-Request': 'true' } })
+        .then(() => location.reload());
+    },
     sections() {
-      // when split, partition by group name (Ungrouped last); else one "" section
-      if (!this.split) return [{ name: '', rows: this.sorted() }];
+      // the main table holds everything EXCEPT Generated; split partitions by group (Ungrouped last)
+      const rest = this.sorted().filter(r => r.group !== 'Generated');
+      if (!this.split) return [{ name: '', rows: rest }];
       const m = {};
-      this.sorted().forEach(r => { const g = r.group || 'Ungrouped'; (m[g] = m[g] || []).push(r); });
+      rest.forEach(r => { const g = r.group || 'Ungrouped'; (m[g] = m[g] || []).push(r); });
       return Object.keys(m)
         .sort((a, b) => a === 'Ungrouped' ? 1 : b === 'Ungrouped' ? -1 : a.localeCompare(b))
         .map(n => ({ name: n, rows: m[n] }));
@@ -393,178 +283,38 @@ function playlistsTab(rows) {
       if (this.count() < 2) return;
       location.href = '/merge?ids=' + this.selected().map(r => r.id).join(',') + '&return=/';
     },
-    async _post(url, data) {
-      const fd = new FormData();
-      Object.entries(data).forEach(([k, v]) => fd.append(k, v));
-      const r = await fetch(url, { method: 'POST', body: fd });
-      return r.json();
-    },
     copyModal: false, copyName: '', copyIds: [],
     openCopy() {
       const sel = this.selected();
       if (!sel.length) return;
       this.copyIds = sel.map(r => r.id);
-      // single -> "Title (copy)"; multiple -> a copy+merge, prefilled with the joined names
+      // single -> "Title (copy)"; multiple -> combine-to-new, prefilled with the joined names
       this.copyName = sel.length === 1 ? sel[0].title + ' (copy)' : sel.map(r => r.title).join(' + ');
       this.copyModal = true;
     },
-    async doCopy() {
-      this.copyModal = false;
-      await this._post('/playlists/copy', { ids: this.copyIds.join(','), name: this.copyName });
-      location.reload();                      // new playlist drops into the table
+    copyIntoModal: false, copyIntoTarget: '',
+    openCopyInto() {
+      const sel = this.selected();
+      if (!sel.length) return;
+      this.copyIds = sel.map(r => r.id);
+      this.copyIntoTarget = '';
+      this.copyIntoModal = true;
+    },
+    // destinations for "Copy into…": every playlist except the selected sources, by title
+    intoTargets() {
+      const src = new Set(this.copyIds);
+      return [...this.rows].filter(r => !src.has(r.id))
+        .sort((a, b) => a.title.localeCompare(b.title));
     },
     openGroup() { if (this.count()) { this.groupName = ''; this.groupModal = true; } },
-    async doGroup() {
-      this.groupModal = false;
-      await this._post('/playlists/group', { ids: this.selected().map(r => r.id).join(','), name: this.groupName });
-      location.reload();
-    },
-    async doDelete() {
-      this.delModal = false;
-      await this._post('/playlists/delete', { ids: this.selected().map(r => r.id).join(',') });
-      location.reload();
-    },
   };
 }
 function moveTab(fromId, toId) {
+  // Move page: the from/to identity selection and the "two different identities" gate.
+  // The copy/move actions themselves are htmx (see _partials/move_row.html).
   return {
-    from: fromId, to: toId, rows: {},
+    from: fromId, to: toId,
     canMove() { return this.from != null && this.to != null && this.from !== this.to; },
-    st(id) { if (!this.rows[id]) this.rows[id] = { state: 'idle', err: '', msg: '' }; return this.rows[id]; },
-    async run(id, copyOnly) {
-      if (!this.canMove()) return;
-      const r = this.st(id);
-      if (r.state === 'working') return;
-      r.state = 'working'; r.err = ''; r.msg = '';
-      try {
-        const fd = new FormData();
-        fd.append('playlist', id); fd.append('target_identity', this.to);
-        if (copyOnly) fd.append('copy_only', '1');
-        const resp = await fetch('/move/run', { method: 'POST', body: fd });
-        const j = await resp.json();
-        if (j.ok) { r.state = copyOnly ? 'done' : 'gone'; r.msg = j.message || 'done'; }
-        else { r.state = 'idle'; r.err = j.error || 'failed'; }
-      } catch (e) { r.state = 'idle'; r.err = String(e); }
-    },
-  };
-}
-function _reloadOverlaps() { location.hash = 'overlaps'; location.reload(); }
-async function _ignoreExcept(ytm, a, b) {
-  const fd = new FormData(); fd.append('ytm', ytm); fd.append('a', a); fd.append('b', b);
-  await fetch('/overlaps/ignore-except', { method: 'POST', body: fd });
-}
-async function muteOtherOverlaps(a, b) {
-  // keep the a–b pair, mute every other overlap involving EITHER a or b, then reload
-  try { await _ignoreExcept(a, a, b); await _ignoreExcept(b, a, b); } catch (e) {}
-  _reloadOverlaps();
-}
-async function neverShowOverlaps(ytm) {
-  // ignore a playlist's overlaps entirely (including this pair), then reload
-  const fd = new FormData(); fd.append('ytm', ytm);
-  try { await fetch('/overlaps/ignore', { method: 'POST', body: fd }); } catch (e) {}
-  _reloadOverlaps();
-}
-// distinct colors for member badges A,B,C…N (index → palette)
-function memberColor(i) {
-  const palette = ['#7c6cff', '#4fd6e0', '#ff6b8b', '#6bffab', '#f4c66a', '#c08cff', '#ff9d5c', '#5cc8ff'];
-  return palette[i % palette.length];
-}
-function mergeEditor(members, tracks, returnTo) {
-  return {
-    members, tracks, returnTo: returnTo || '/cleanup',
-    keep: String(members[0].id), busy: false, err: '', inc: {}, pick: {},
-    // Two independent axes:
-    //   sort: 'alpha' (by title) | 'playlist' (order-preserving merge by position)
-    //   mode: 'interleaved' (all together) | 'ducks' (shared first, odd ducks pushed to the end)
-    sort: 'playlist', mode: 'interleaved',
-    init() { this.tracks.forEach(t => { this.inc[t.tid] = true; }); },   // default: include everything
-    presentCount(t) { return t.present.filter(Boolean).length; },
-    // Effective normalized position: a per-track chosen playlist's position, else the average.
-    effPos(t) {
-      const p = this.pick[t.tid];
-      if (p != null && t.npos && t.npos[p] != null) return t.npos[p];
-      const vals = (t.npos || []).filter(v => v != null);
-      return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 1;
-    },
-    pickPos(t, i) {
-      if (!t.present[i] || this.presentCount(t) < 2) return;   // nothing to choose
-      this.pick[t.tid] = (this.pick[t.tid] === i) ? null : i;  // toggle
-    },
-    isPicked(t, i) { return this.pick[t.tid] === i; },
-    isIn(t) { return !!this.inc[t.tid]; },
-    toggle(t) { this.inc[t.tid] = !this.inc[t.tid]; },
-    setAll(v) { this.tracks.forEach(t => { this.inc[t.tid] = v; }); },
-    count() { return this.tracks.filter(t => this.isIn(t)).length; },
-    letters(t) { return this.members.filter((m, i) => t.present[i]).map(m => m.letter); },
-    colorOf(letter) { return memberColor(letter.charCodeAt(0) - 65); },
-    posOf(t, letter) { return (t.pos && t.pos[letter.charCodeAt(0) - 65]) || ''; },   // 1-based index in that playlist
-    fmtDur(s) {
-      if (s == null || isNaN(s) || s <= 0) return '';
-      s = Math.round(s);
-      const m = Math.floor(s / 60), sec = s % 60;
-      return m + ':' + String(sec).padStart(2, '0');
-    },
-    ordered() {
-      const byTitle = (a, b) => (a.title || '').localeCompare(b.title || '');
-      const byPos = (a, b) => this.effPos(a) - this.effPos(b) || byTitle(a, b);
-      const within = this.sort === 'playlist' ? byPos : byTitle;   // sort axis
-      const cnt = t => t.present.filter(Boolean).length;
-      if (this.mode === 'ducks') {                                   // shared first, odd ducks last
-        const grp = t => (cnt(t) >= 2 ? 0 : 1);
-        return [...this.tracks].sort((a, b) => (grp(a) - grp(b)) || within(a, b));
-      }
-      return [...this.tracks].sort(within);                         // interleaved: one combined list
-    },
-    async apply() {
-      if (this.busy) return; this.busy = true; this.err = '';
-      const vids = this.ordered().filter(t => this.isIn(t)).map(t => t.video_id).filter(Boolean);
-      const ids = this.members.map(m => m.id).join(',');
-      const fd = new FormData();
-      fd.append('ids', ids); fd.append('result', vids.join(',')); fd.append('keep', this.keep);
-      try {
-        const r = await fetch('/merge/apply', { method: 'POST', body: fd });
-        const j = await r.json();
-        if (j.ok) {
-          const sep = this.returnTo.includes('?') ? '&' : '?';
-          let u = this.returnTo + sep + 'flash=' + encodeURIComponent(j.message);
-          if (j.playlist) u += '&flash_pl=' + encodeURIComponent(j.playlist);
-          location.href = u;
-        } else { this.busy = false; this.err = j.error || 'failed'; }
-      } catch (e) { this.busy = false; this.err = String(e); }
-    },
-  };
-}
-function genresTab(rows) {
-  // Tools > Genres: edit the whitelist used to pin genres from Last.fm/Discogs tags.
-  return {
-    list: rows, newName: '', err: '',
-    async add() {
-      const name = (this.newName || '').trim();
-      if (!name) return;
-      this.err = '';
-      try {
-        const j = await (await fetch('/genres/add', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
-        })).json();
-        if (!j.ok) { this.err = j.error || 'could not add'; return; }
-        this.list = j.genres; this.newName = '';
-        this.$nextTick(() => this.$refs.inp.focus());
-      } catch (e) { this.err = 'network error'; }
-    },
-    async remove(name) {
-      this.list = this.list.filter(g => g !== name);    // optimistic
-      try {
-        await fetch('/genres/remove', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
-        });
-      } catch (e) { /* optimistic UI already applied */ }
-    },
-    async reset() {
-      try {
-        const j = await (await fetch('/genres/reset', { method: 'POST' })).json();
-        if (j.ok) this.list = j.genres;
-      } catch (e) { this.err = 'network error'; }
-    },
   };
 }
 function titleEditor(pid) {
@@ -577,28 +327,15 @@ function titleEditor(pid) {
       this.editing = true;
       this.$nextTick(() => { this.$refs.inp.focus(); this.$refs.inp.select(); });
     },
-    cancel() { this.editing = false; },
-    async save() {
-      if (!this.editing) return;                 // ignore trailing blur after enter/escape
-      this.editing = false;
-      const t = (this.draft || '').trim();
-      const cur = this.$refs.h1.textContent.trim();
-      if (!t || t === cur) return;
-      try {
-        const r = await fetch(`/playlist/${this.pid}/rename`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: t }),
-        });
-        const j = await r.json();
-        if (j.ok) { this.$refs.h1.textContent = t; document.title = t + ' · yt-playlist'; }
-      } catch (e) { /* leave the old title in place */ }
-    },
   };
 }
-function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
-  // MusicBrainz enrichment: background job streamed over SSE. Updates the Year/Genre cells live
-  // as each track resolves, and drives a determinate progress bar.
+function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBase) {
+  // Enrichment: background job streamed over SSE. Updates the Year/Genre cells live as each track
+  // resolves, and drives a determinate progress bar. `enrichBase` is the URL the start POSTs under
+  // (defaults to /playlist/<pid>; album pages pass /album/<browse>). The events stream is shared.
   return {
-    pid: pid, lastfmConfigured: lastfmConfigured, running: false, finished: false, pct: 0, status: '', source: '',
+    pid: pid, enrichBase: enrichBase || ('/playlist/' + pid),
+    lastfmConfigured: lastfmConfigured, running: false, finished: false, pct: 0, status: '', source: '',
     // Last.fm API key modal
     keyModal: false, keyValue: '', keyBusy: false, keyErr: '',
     lastfmClick() {
@@ -610,15 +347,11 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
       if (!key) { this.keyErr = 'Enter a key.'; return; }
       this.keyBusy = true; this.keyErr = '';
       try {
-        const r = await fetch('/settings/lastfm-key', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key }),
-        });
-        const j = await r.json();
+        await htmx.ajax('POST', '/settings/lastfm-key', { values: { key }, swap: 'none' });
         this.keyBusy = false;
-        if (!j.configured) { this.keyErr = 'Could not save that key.'; return; }
         this.lastfmConfigured = true; this.keyModal = false; this.keyValue = '';
         this.start('lastfm');                       // saved — run it now
-      } catch (e) { this.keyBusy = false; this.keyErr = 'Network error.'; }
+      } catch (e) { this.keyBusy = false; this.keyErr = 'Could not save that key.'; }
     },
     // if the page was refreshed while a job is running, reattach to it and resume the progress UI
     rejoinIfActive() {
@@ -634,7 +367,7 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
       this.status = source === 'lastfm' ? 'Starting Last.fm tagging…' : 'Starting enrichment…';
       let job;
       try {
-        const r = await fetch(`/playlist/${this.pid}/enrich/${source}`, { method: 'POST' });
+        const r = await fetch(`${this.enrichBase}/enrich/${source}`, { method: 'POST' });
         job = (await r.json()).job_id;
       } catch (e) { this.status = 'Could not start.'; this.running = false; return; }
       this.listen(job, source);
@@ -642,7 +375,9 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
     listen(job, source) {
       this.source = source; this.running = true; this.finished = false;
       const es = new EventSource(`/playlist/enrich/events/${job}`);
+      let errs = 0;
       es.onmessage = (m) => {
+        errs = 0;                          // a delivered event means we're reconnected — reset backoff
         const ev = JSON.parse(m.data);
         if (ev.type === 'track') {
           this.applyRow(ev);
@@ -662,31 +397,22 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource) {
           if (!ev.error) setTimeout(() => { this.finished = false; }, 4000);
         }
       };
-      es.onerror = () => { es.close(); this.running = false; this.status = 'Stream interrupted.'; };
+      es.onerror = () => {
+        // A transient drop (e.g. a proxy idle-timeout): let EventSource auto-reconnect — the server
+        // replays events idempotently and sends 'end' once the job finishes — so a successful
+        // background job no longer looks failed. Give up only after several consecutive failures.
+        this.status = 'Reconnecting…';
+        if (++errs >= 5) { es.close(); this.running = false; this.status = 'Stream interrupted. Reload to check.'; }
+      };
     },
-    // patch a row's Year/Genre cells live — but only the fields this event carries (MusicBrainz
-    // sends both, Last.fm sends only genre, so we must not blank year on a Last.fm run)
+    // The SSE event carries the server-rendered row HTML (same partial as a manual edit), so we just
+    // drop it in — Alpine re-inits the replaced <tr>, and its data-* (which sort reads) come along.
     applyRow(ev) {
+      if (!ev.row_html) return;
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(ev.video_id)}"]`);
-      if (!tr) return;
-      if ('year' in ev) {
-        const y = tr.querySelector('.ydisplay');
-        if (y) y.innerHTML = ev.year ? escapeHtml(ev.year) : '<span class="muted ghint">＋</span>';
-        tr.dataset.year = ev.year || 0;
-      }
-      if ('genre' in ev) {
-        const g = tr.querySelector('.gdisplay');
-        if (g) g.innerHTML = genreChip(ev.genre);
-        tr.dataset.genre = (ev.genre || '').toLowerCase();
-      }
+      if (tr) tr.outerHTML = ev.row_html;
     },
   };
-}
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-}
-function genreChip(genre) {
-  return genre ? `<span class="gtag">${escapeHtml(genre)}</span>` : '<span class="muted ghint">＋</span>';
 }
 function authBanner(initial) {
   // The "session expired" bar — seeded from the server, and updated live by the sync panel so it
@@ -696,11 +422,24 @@ function authBanner(initial) {
     add(label) { if (label && !this.labels.includes(label)) this.labels.push(label); },
   };
 }
-function syncPanel() {
+function syncPanel(autoOn = false) {
   return {
     running: false,
     failed: false,
+    auto: autoOn,
     lines: [],
+    async toggleAuto() {
+      const next = !this.auto;
+      this.auto = next;   // optimistic: flip immediately so the note appears/disappears
+      try {
+        await fetch('/sync/auto', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'enabled=' + (next ? '1' : '0'),
+        });
+      } catch (e) { this.auto = !next; return; }   // revert if the server didn't take it
+      if (next) this.start('/sync/plays');   // turning it on also runs an immediate live sync, as before
+    },
     push(ev) {
       const bad = ev.type === 'err' || ev.type === 'auth_expired';
       const pip = bad ? '✗' : ev.type === 'done' || ev.type === 'end' ? '✓'
@@ -709,13 +448,13 @@ function syncPanel() {
       this.lines.push({ text: ev.text || '', pip, cls });
       this.$nextTick(() => { const l = this.$refs.log; if (l) l.scrollTop = l.scrollHeight; });
     },
-    async start() {
+    async start(endpoint = '/sync') {
       if (this.running) return;
       this.running = true; this.failed = false; this.lines = [];
       this.push({ type: 'info', text: 'starting sync…' });
       let job;
       try {
-        const r = await fetch('/sync', { method: 'POST' });
+        const r = await fetch(endpoint, { method: 'POST' });
         job = (await r.json()).job_id;
       } catch (e) { this.push({ type: 'err', text: String(e) }); this.running = false; this.failed = true; return; }
       const es = new EventSource(`/sync/events/${job}`);
@@ -730,13 +469,262 @@ function syncPanel() {
             this.push({ type: 'done', text: 'reloading…' });
             setTimeout(() => location.reload(), 700);
           } else {
-            this.push({ type: 'err', text: 'finished with errors — log kept open. Reload when ready.' });
+            this.push({ type: 'err', text: 'finished with errors. Log kept open. Reload when ready.' });
           }
           return;
         }
         this.push(ev);
       };
       es.onerror = () => { es.close(); this.running = false; this.failed = true; this.push({ type: 'err', text: 'stream interrupted' }); };
+    },
+  };
+}
+
+// Navbar omnisearch dropdown: open/close + keyboard nav over the HTMX-rendered result rows.
+// Visibility is driven by results arriving (htmx:afterSwap, wired in x-init on the form) and by
+// focus; we never build markup here — the server owns the dropdown body.
+function omniSearch() {
+  return {
+    open: false,
+    active: -1,
+    rows() { return Array.from(this.$root.querySelectorAll('.omni-row')); },
+    onResults() {
+      this.active = -1;
+      this.rows().forEach(r => r.classList.remove('active'));
+      this.open = this.rows().length > 0;
+    },
+    close() {
+      this.open = false;
+      this.active = -1;
+      this.rows().forEach(r => r.classList.remove('active'));
+    },
+    move(dir) {
+      const rows = this.rows();
+      if (!rows.length) { return; }
+      this.open = true;
+      this.active = (this.active + dir + rows.length) % rows.length;
+      rows.forEach((r, i) => r.classList.toggle('active', i === this.active));
+      rows[this.active].scrollIntoView({ block: 'nearest' });
+    },
+    choose() {
+      const rows = this.rows();
+      const row = rows[this.active] || rows[0];
+      if (row) { row.click(); this.close(); }
+    },
+  };
+}
+
+// Clusters tab: a pannable/zoomable canvas where you seed a central group and grow a tree outward.
+// Each node's next ring = library tracks nearest its pinned-path centroid, pushed away from pruned
+// tracks (server: POST /clusters/expand). Tree state lives here; the server stays stateless. Node
+// positions are owned by a live d3-force simulation (link + charge + collide) so the graph lays
+// itself out without overlap and re-settles as you grow/prune — d3 mutates each node's x/y in place,
+// which Alpine renders reactively.
+function clusterCanvas() {
+  const WORLD = 8000, CENTER = WORLD / 2;   // big fixed world; we pan/zoom a transform over it
+  const LINK_D = 165, NODE_R = 104;         // spoke length; collision radius (no card overlap)
+  return {
+    WORLD,
+    nodes: [], nextId: 1, rootId: null,
+    query: '', results: [],
+    playlistName: '', includeCentral: true,
+    tx: 0, ty: 0, scale: 1,
+    _pan: null, _drag: null, sim: null,
+
+    init() {
+      // The central group is pinned at CENTER (fx/fy), so it anchors the whole graph: no centering
+      // force needed and the view never drifts off it. Everything else is positioned by charge +
+      // collide (no overlap) + link (spokes), so cards radiate around the centre.
+      const d3 = window.d3;
+      this.sim = d3.forceSimulation([])
+        .force('charge', d3.forceManyBody().strength(-260).distanceMax(1400))
+        .force('collide', d3.forceCollide(NODE_R).strength(0.95).iterations(2))
+        .force('link', d3.forceLink([]).id(n => n.id).distance(LINK_D).strength(0.5))
+        .alphaDecay(0.035);
+      this.sim.stop();                       // started on demand once there are nodes (see _reheat)
+      this.$nextTick(() => this.resetView());
+    },
+    // Feed the current nodes/links to the sim and re-settle. Called after any structural change.
+    _reheat() {
+      const links = this.nodes
+        .filter(n => n.parentId != null && this.nodeById(n.parentId))
+        .map(n => ({ source: n.parentId, target: n.id }));
+      this.sim.nodes(this.nodes);
+      this.sim.force('link').links(links);
+      this.sim.alpha(0.9).restart();
+    },
+
+    // --- search / seeding ---
+    async search() {
+      const q = this.query.trim();
+      if (!q) { this.results = []; return; }
+      try {
+        const r = await fetch('/clusters/search?q=' + encodeURIComponent(q));
+        this.results = await r.json();
+      } catch (e) { this.results = []; }
+    },
+    // Every selection lands in ONE central group (artist + artist + song + …), pinned at the centre.
+    // Its centroid is the union of all its seeds' keys; growing it pulls the first ring toward that.
+    async addSeed(r) {
+      this.query = ''; this.results = [];
+      let root = this.rootId != null ? this.nodeById(this.rootId) : null;
+      if (!root) {
+        root = { id: this.nextId++, parentId: null, kind: 'central', state: 'central', depth: 0,
+                 seeds: [], keys: [], key: null, vid: null,
+                 x: CENTER, y: CENTER, fx: CENTER, fy: CENTER };
+        this.rootId = root.id;
+        this.nodes.push(root);
+      }
+      root.seeds.push({ label: r.label, kind: r.kind, keys: r.keys });
+      root.keys = [...new Set(root.seeds.flatMap(s => s.keys))];   // combined central centroid
+      if (!this.playlistName) this.playlistName = r.label + ' cluster';
+      await this.grow(root.id);
+    },
+
+    // --- tree growth ---
+    async grow(nodeId) {
+      const node = this.nodeById(nodeId);
+      if (!node || node.state === 'pruned') return;
+      try {
+        const r = await fetch('/clusters/expand', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pos_keys: this.posKeys(node),
+                                 neg_keys: this.prunedKeys(), exclude: this.allKeys(), k: 6 }),
+        });
+        this.addChildren(node, (await r.json()).ring || []);
+      } catch (e) { /* a failed grow just adds nothing */ }
+    },
+    addChildren(parent, ring) {
+      if (!ring.length) return;
+      ring.forEach((t, i) => {              // spawn near the parent; the sim spreads them out
+        this.nodes.push({
+          id: this.nextId++, parentId: parent.id, kind: 'track', key: t.key,
+          label: t.title, sub: t.artist, thumbnail: t.thumbnail, vid: t.video_id,
+          state: 'neutral', depth: parent.depth + 1,
+          x: parent.x + Math.cos(i) * 30, y: parent.y + Math.sin(i) * 30 + 40,
+        });
+      });
+      this._reheat();
+    },
+    prune(id) {
+      const n = this.nodeById(id); if (!n || n.kind === 'central') return;
+      if (n.state === 'pruned') { n.state = 'neutral'; this.sim.alpha(0.3).restart(); return; }
+      n.state = 'pruned';                              // pruning terminates the branch...
+      const kill = this.descendants(id);              // ...so drop anything grown below it
+      this.nodes = this.nodes.filter(x => !kill.has(x.id));
+      this._reheat();
+    },
+    play(n) {                              // open the track on YouTube Music, reusing one named tab
+      if (n.vid) window.open('https://music.youtube.com/watch?v=' + n.vid, 'ytPlayerTab');
+    },
+
+    // --- derived keys ---
+    nodeById(id) { return this.nodes.find(n => n.id === id); },
+    // One SVG <path> for all edges (Alpine can't reliably create per-edge <line> elements inside
+    // <svg> — namespace issues — so we draw a single path bound to one static element).
+    edgePath() {
+      let d = '';
+      for (const n of this.nodes) {
+        if (n.parentId == null) continue;
+        const p = this.nodeById(n.parentId); if (!p) continue;
+        d += `M${p.x} ${p.y}L${n.x} ${n.y}`;
+      }
+      return d;
+    },
+    centralKeys() { const r = this.rootId != null ? this.nodeById(this.rootId) : null; return r ? r.keys : []; },
+    // Only SONG seeds are concrete "central tracks" worth offering to fold into the saved playlist —
+    // an artist/playlist seed steers the centroid but isn't a track you explicitly picked.
+    centralSongKeys() {
+      const r = this.rootId != null ? this.nodeById(this.rootId) : null;
+      return r ? r.seeds.filter(s => s.kind === 'song').flatMap(s => s.keys) : [];
+    },
+    prunedKeys() { return this.nodes.filter(n => n.state === 'pruned').map(n => n.key); },
+    keepKeys() { return this.nodes.filter(n => n.kind === 'track' && n.state !== 'pruned').map(n => n.key); },
+    allKeys() {
+      const s = new Set(this.centralKeys());
+      this.nodes.forEach(n => { if (n.key) s.add(n.key); });
+      return [...s];
+    },
+    // Growing a card IS the positive signal, so a node's children aim at the central group plus
+    // every track on the path you grew through to reach it (no separate "pin").
+    posKeys(node) {
+      const keys = new Set(this.centralKeys());
+      for (let cur = node; cur && cur.kind === 'track'; cur = this.nodeById(cur.parentId)) {
+        keys.add(cur.key);
+      }
+      return [...keys];
+    },
+    descendants(id) {
+      const out = new Set(); const stack = [id];
+      while (stack.length) {
+        const p = stack.pop();
+        this.nodes.filter(n => n.parentId === p).forEach(c => { out.add(c.id); stack.push(c.id); });
+      }
+      return out;
+    },
+
+    // --- pan / zoom ---
+    worldStyle() { return `transform: translate(${this.tx}px, ${this.ty}px) scale(${this.scale}); transform-origin: 0 0;`; },
+    onWheel(e) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      const factor = Math.exp(-e.deltaY * 0.0015);
+      const ns = Math.min(2.5, Math.max(0.2, this.scale * factor));
+      this.tx = mx - ((mx - this.tx) / this.scale) * ns;
+      this.ty = my - ((my - this.ty) / this.scale) * ns;
+      this.scale = ns;
+    },
+    _worldPt(e) {                            // screen → world coords (undo pan + zoom)
+      const rect = document.getElementById('cluster-canvas').getBoundingClientRect();
+      return { x: (e.clientX - rect.left - this.tx) / this.scale,
+               y: (e.clientY - rect.top - this.ty) / this.scale };
+    },
+    startNodeDrag(n, e) {                    // pointerdown on a card body — grab it, not the canvas
+      const p = this._worldPt(e);
+      this._drag = { id: n.id, moved: false, ox: p.x - n.x, oy: p.y - n.y };
+    },
+    onPanStart(e) {
+      if (e.target.closest('.cluster-node, .cluster-zoombar')) return;   // let nodes/buttons get clicks
+      this._pan = { x: e.clientX, y: e.clientY };
+    },
+    onPanMove(e) {
+      if (this._drag) {                      // dragging a card: pin it under the pointer
+        const n = this.nodeById(this._drag.id); if (!n) return;
+        const p = this._worldPt(e);
+        this._drag.moved = true;
+        n.fx = p.x - this._drag.ox; n.fy = p.y - this._drag.oy;
+        n.x = n.fx; n.y = n.fy;
+        this.sim.alpha(0.2).restart();
+        return;
+      }
+      if (!this._pan) return;
+      this.tx += e.clientX - this._pan.x; this.ty += e.clientY - this._pan.y;
+      this._pan = { x: e.clientX, y: e.clientY };
+    },
+    onPanEnd() {
+      if (this._drag) {
+        const n = this.nodeById(this._drag.id);
+        // a pure click (no move) leaves a track free to flow; a real drag pins it where dropped.
+        if (n && !this._drag.moved && n.kind !== 'central') { n.fx = null; n.fy = null; }
+        this._drag = null;
+      }
+      this._pan = null;
+    },
+    zoomBy(f) {
+      const el = document.getElementById('cluster-canvas'); const rect = el.getBoundingClientRect();
+      const cx = rect.width / 2, cy = rect.height / 2;
+      const ns = Math.min(2.5, Math.max(0.2, this.scale * f));
+      this.tx = cx - ((cx - this.tx) / this.scale) * ns;
+      this.ty = cy - ((cy - this.ty) / this.scale) * ns;
+      this.scale = ns;
+    },
+    resetView() { this._centerWorld(CENTER, CENTER, 1); },
+    _centerWorld(wx, wy, scale) {
+      const el = document.getElementById('cluster-canvas'); if (!el) return;
+      const rect = el.getBoundingClientRect();
+      this.scale = scale;
+      this.tx = rect.width / 2 - wx * scale;
+      this.ty = rect.height / 2 - wy * scale;
     },
   };
 }

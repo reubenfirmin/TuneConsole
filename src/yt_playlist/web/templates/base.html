@@ -3,27 +3,60 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}yt-playlist{% endblock %}</title>
+  <title>{% block title %}TuneConsole{% endblock %}</title>
   <!-- Vendored from npm (see package.json); refresh with `npm run sync-assets`. Served locally
        so nothing is fetched from a third-party CDN at runtime. -->
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
   <script src="/static/vendor/htmx.min.js"></script>
   <script src="/static/vendor/sortable.min.js"></script>
+  {# d3-force graph layout for the Clusters canvas. Order matters: d3-force reads its deps off the
+     global `d3`, so dispatch/quadtree/timer must load first. #}
+  <script src="/static/vendor/d3-dispatch.min.js"></script>
+  <script src="/static/vendor/d3-quadtree.min.js"></script>
+  <script src="/static/vendor/d3-timer.min.js"></script>
+  <script src="/static/vendor/d3-force.min.js"></script>
   <script src="/static/app.js?v={{ asset_v }}"></script>
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
 <body>
   {% set path = request.url.path if request else "/" %}
   <header class="topbar">
-    <a class="brand" href="/">yt&#8202;<span class="dot">/</span>&#8202;playlist</a>
-    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') %}
+    <a class="brand" href="/" aria-label="TuneConsole — home">
+      <svg class="brand-eq" viewBox="0 0 28 24" width="28" height="24" aria-hidden="true">
+        <defs><linearGradient id="eqg" x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#a596ff"/>
+        </linearGradient></defs>
+        <rect class="eqbar" style="animation-delay:-.9s" x="0"  y="9"  width="4" height="15" rx="2" fill="url(#eqg)"/>
+        <rect class="eqbar" style="animation-delay:-.3s" x="6"  y="3"  width="4" height="21" rx="2" fill="url(#eqg)"/>
+        <rect class="eqbar" style="animation-delay:-.6s" x="12" y="12" width="4" height="12" rx="2" fill="url(#eqg)"/>
+        <rect class="eqbar" style="animation-delay:0s"   x="18" y="6"  width="4" height="18" rx="2" fill="url(#eqg)"/>
+        <rect class="eqbar" style="animation-delay:-.45s" x="24" y="14" width="4" height="10" rx="2" fill="url(#eqg)"/>
+      </svg>
+      <span class="b-word"><span class="b-tune">Tune</span><span class="b-console">Console</span></span>
+    </a>
+    <form class="omni" role="search" autocomplete="off" x-data="omniSearch()"
+          x-init="$el.addEventListener('htmx:afterSwap', () => onResults())"
+          @click.outside="close()" @keydown.escape.window="close()">
+      <div class="omni-box">
+        <input type="search" name="q" class="omni-input" placeholder="Search your library…"
+               aria-label="Search your library"
+               hx-get="/search/omni" hx-trigger="input changed delay:200ms, focus"
+               hx-target="#omni-results" hx-swap="innerHTML"
+               @focus="onResults()"
+               @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)"
+               @keydown.enter.prevent="choose()">
+        <div id="omni-results" class="omni-results" x-show="open" x-cloak></div>
+      </div>
+    </form>
+    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') or path.startswith('/network') %}
     <nav>
-      <a href="/" class="{{ 'active' if path == '/' else '' }}">Playlists</a>
+      <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>
+      <a href="/playlists" class="{{ 'active' if path.startswith('/playlist') else '' }}">Playlists</a>
       <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
       <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
       <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
-      <a href="/discover" class="{{ 'active' if path.startswith('/discover') else '' }}">Rediscover</a>
+      <a href="/clusters" class="{{ 'active' if path.startswith('/clusters') else '' }}">Clusters</a>
       <div class="tools-menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
         <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"
                 @click="open = !open" :aria-expanded="open">Tools <span class="caret" :class="{ up: open }">▾</span></button>
@@ -32,6 +65,8 @@
           <a href="/move" class="{{ 'active' if path.startswith('/move') else '' }}">Move</a>
           <a href="/actions" class="{{ 'active' if path.startswith('/actions') else '' }}">Actions</a>
           <a href="/genres" class="{{ 'active' if path.startswith('/genres') else '' }}">Genres</a>
+          <a href="/taste" class="{{ 'active' if path.startswith('/taste') else '' }}">Taste Model</a>
+          <a href="/network" class="{{ 'active' if path.startswith('/network') else '' }}">Network</a>
           <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
         </div>
       </div>
@@ -39,10 +74,11 @@
   </header>
   <div class="authbar" x-data='authBanner({{ (auth_expired.values()|list)|tojson }})'
        x-show="labels.length && !dismissed" x-cloak @auth-expired.window="add($event.detail.label)">
-    <span class="authbar-body">⚠ YouTube session expired for <strong x-text="labels.join(', ')"></strong> —
+    <span class="authbar-body">⚠ YouTube session expired for <strong x-text="labels.join(', ')"></strong> -
       its data is stale until you reconnect. <a href="/setup">Re-authenticate →</a></span>
     <button type="button" class="authbar-x" @click="dismissed = true" title="Dismiss" aria-label="Dismiss">×</button>
   </div>
   <main>{% block body %}{% endblock %}</main>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
 </body>
 </html>

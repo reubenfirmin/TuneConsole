@@ -1,0 +1,27 @@
+{# Alternate-version search results, swapped into #alt-results by findAlternates. Each checkbox carries
+   the full track as JSON so /add-tracks can add the chosen versions without a server-side search cache
+   (the modal's "Add" button hx-includes #alt-results). The hidden after_video_id anchors the insert so
+   chosen versions land just below the source track. #}
+{% if error %}
+  <p class="notice err">{{ error }}</p>
+{% elif not results %}
+  <p class="muted">No other versions found.</p>
+{% else %}
+<input type="hidden" name="after_video_id" value="{{ source_video_id }}">
+<div class="alt-list">
+  {% for r in results %}
+  <label class="alt-row">
+    <input type="checkbox" name="track" value='{{ r|tojson }}'>
+    {% if r.thumbnail %}<img class="album-thumb" src="{{ r.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+    <span class="alt-meta">
+      <span class="alt-title">{{ r.title }}</span>
+      <span class="alt-sub">{{ r.artist }}{% if r.album %} · {{ r.album }}{% endif %}
+        {% if r.kind %}<span class="alt-kind">{{ r.kind }}</span>{% endif %}</span>
+    </span>
+    <span class="mono alt-dur">{% if r.duration %}{{ '%d:%02d'|format(r.duration // 60, r.duration % 60) }}{% endif %}</span>
+    <a class="alink" href="https://music.youtube.com/watch?v={{ r.videoId }}"
+       target="_blank" rel="noopener" @click.stop title="Try it on YouTube Music">Play ↗</a>
+  </label>
+  {% endfor %}
+</div>
+{% endif %}

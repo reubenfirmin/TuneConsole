@@ -11,14 +11,17 @@ APPLY_MERGE = "apply_merge"      # N-way merge editor applied: keepers set to a 
 MOVE_IDENTITY = "move_identity"  # playlist copied/moved to another identity
 DELETE_EMPTY = "delete_empty"    # an empty playlist deleted
 DELETE_PLAYLIST = "delete_playlist"  # a playlist deleted outright (e.g. from the Playlists tab)
+GC_GENERATED = "gc_generated"    # an unplayed generated playlist auto-collected by the daily GC worker
 COPY_PLAYLIST = "copy_playlist"  # a playlist duplicated into a new one (same identity)
+COPY_INTO = "copy_into"          # selected playlists' songs copied into an existing playlist
 ADD_TRACKS = "add_tracks"        # one or more tracks added to an existing playlist (e.g. alternate versions)
 REMOVE_TRACK = "remove_track"    # a single track removed from a playlist
 RENAME_PLAYLIST = "rename_playlist"  # a playlist renamed
 UNDO = "undo"                    # an undo of a previous action (itself not undoable)
 
 # Kinds whose effects can be reversed from the Actions page.
-UNDOABLE_KINDS = (PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, COPY_PLAYLIST)
+UNDOABLE_KINDS = (PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED,
+                  COPY_PLAYLIST)
 
 
 def is_undoable(kind) -> bool:

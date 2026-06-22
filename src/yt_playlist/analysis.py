@@ -23,11 +23,6 @@ class OverlapFinding:
     def pct_b(self) -> int:
         return round(len(self.shared) / self.count_b * 100) if self.count_b else 0
 
-@dataclass
-class StaleFinding:
-    playlist: Playlist; played_recently: bool
-    age_days: float; days_since_changed: float; score: float
-
 # YouTube system playlists (can't be deleted, not real user playlists): Liked Music, Episodes for Later
 SYSTEM_PLAYLIST_IDS = {"LM", "SE"}
 
@@ -157,17 +152,3 @@ def find_overlaps(store, dupe_threshold=0.70, exclude_playlist_ids=None, suppres
             out.append(OverlapFinding(pa, pb, shared, len(ka), len(kb)))
     return sorted(out, key=lambda f: len(f.shared), reverse=True)
 
-def find_stale(store, now, history_window_days=90, exclude_ytm=None):
-    recent = store.get_recent_history_keys(now - history_window_days * 86400.0)
-    exclude_ytm = exclude_ytm or set()
-    out = []
-    for p in store.get_playlists():
-        if p.ytm_playlist_id in exclude_ytm:
-            continue
-        keys = store.get_playlist_track_keys(p.id)
-        played_recently = bool(keys & recent)
-        age_days = (now - p.first_seen) / 86400.0
-        days_since_changed = (now - p.last_changed) / 86400.0
-        score = (0 if played_recently else 100) + min(age_days, 365) / 10 + min(days_since_changed, 365) / 10
-        out.append(StaleFinding(p, played_recently, age_days, days_since_changed, score))
-    return sorted(out, key=lambda f: f.score, reverse=True)

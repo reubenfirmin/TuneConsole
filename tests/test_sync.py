@@ -1,5 +1,60 @@
-from yt_playlist.sync import sync_identity, content_hash
+from yt_playlist.sync import sync_identity, sync_all, sync_plays_all, content_hash
 from tests.conftest import FakeClient, _track
+
+
+def test_sync_plays_records_history_and_likes(store):
+    """The fast plays sync pulls listening history and the Liked Music playlist, and records its
+    own timestamp without disturbing the full-sync 'time to sync' nudge (last_sync_at)."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    client = FakeClient(tracks={"LM": [_track("v2", "Liked Song", "Artist")]},
+                        history=[_track("v1", "Played Song", "Artist")])
+    sync_plays_all(store, {iid: client}, now=1500.0)
+
+    assert store.get_recent_history_keys(0.0) == {"played song|artist"}
+    lm = [p for p in store.get_playlists() if p.ytm_playlist_id == "LM"]
+    assert len(lm) == 1
+    assert store.get_playlist_track_keys(lm[0].id) == {"liked song|artist"}
+    assert store.get_setting("last_plays_sync_at") == "1500.0"
+    assert store.get_setting("last_sync_at") is None      # full-sync nudge left untouched
+
+
+def test_sync_plays_skips_full_library_enumeration(store):
+    """The fast path must never enumerate the whole library — that's the slow work it exists to skip."""
+    iid = store.upsert_identity("main", "cred", None, True)
+
+    class SpyClient(FakeClient):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.library_calls = 0
+
+        def get_library_playlists(self, limit=25):
+            self.library_calls += 1
+            return super().get_library_playlists(limit)
+
+    client = SpyClient(tracks={"LM": [_track("v2", "Liked", "Artist")]},
+                       history=[_track("v1", "Played", "Artist")])
+    sync_plays_all(store, {iid: client}, now=1.0)
+    assert client.library_calls == 0
+
+
+def test_sync_all_records_last_sync_at(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    client = FakeClient(playlists=[{"playlistId": "PL1", "title": "Mix", "count": 1}],
+                        tracks={"PL1": [_track("v1", "A", "X")]})
+    sync_all(store, {iid: client}, now=1234.0)
+    assert store.get_setting("last_sync_at") == "1234.0"
+
+
+def test_sync_status_uses_most_recent_of_either_sync(store):
+    """The 'Last synced' badge reflects the most recent sync of either kind — a recent plays/auto sync
+    must not be eclipsed by an older full sync (and resets staleness too)."""
+    from yt_playlist.recommend import sync_status
+    now = 100_000.0
+    store.set_setting("last_sync_at", str(now - 17 * 3600))        # full sync 17h ago
+    store.set_setting("last_plays_sync_at", str(now - 2 * 3600))   # plays synced 2h ago
+    st = sync_status(store, now)
+    assert st.last_synced_ago == "2 hours ago"   # not "17 hours ago"
+    assert st.stale is False and st.message is None
 
 
 def test_content_hash_is_order_independent():

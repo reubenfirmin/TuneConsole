@@ -1,0 +1,36 @@
+{% if building %}
+<div hx-get="/home/new-artists" hx-trigger="load delay:4s" hx-swap="outerHTML">
+  <h2 class="section">New artists for you <span class="refreshing">finding…</span></h2>
+  <div class="tile-grid">{% for _ in range(5) %}<div class="tile"><div class="tile-cover skeleton"></div></div>{% endfor %}</div>
+</div>
+{% elif artists %}
+{% from "_macros.html" import tile %}
+<div{% if stale %} hx-get="/home/new-artists" hx-trigger="load delay:3s" hx-swap="outerHTML"{% endif %}>
+<h2 class="section">New artists for you{% if stale %} <span class="refreshing">refreshing…</span>{% endif %}</h2>
+<p class="section-note">Pinned to your taste - artists similar to the ones you actually play, fitting the playlists you actually listen to.</p>
+<div class="tile-grid" id="new-artist-grid">
+  {% for a in artists %}
+  {{ tile('artist', a.thumbnail, a.artist,
+          ('because you play ' ~ a.because|join(', ')) if a.because else none,
+          "/artist?name=" ~ a.artist|urlencode, none,
+          ('fits your ' ~ a.fits|join(', ')) if a.fits else none) }}
+  {% endfor %}
+</div>
+{# Always 2 rows tall: columns flow with the viewport (capped at 5), anything past row 2 is hidden. #}
+<script>
+(function () {
+  function clamp() {
+    var g = document.getElementById('new-artist-grid'); if (!g) return;
+    var items = Array.prototype.slice.call(g.children); if (!items.length) return;
+    var top0 = items[0].offsetTop;
+    var cols = Math.max(1, items.filter(function (el) { return el.offsetTop === top0; }).length);
+    items.forEach(function (el, i) { el.style.display = i < 2 * cols ? '' : 'none'; });
+  }
+  if (window.__artistClamp) window.removeEventListener('resize', window.__artistClamp);
+  window.__artistClamp = clamp;
+  window.addEventListener('resize', clamp);
+  clamp();
+})();
+</script>
+</div>
+{% endif %}

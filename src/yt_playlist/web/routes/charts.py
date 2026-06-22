@@ -30,6 +30,7 @@ def _fetch_artist_info(ctx, name, browse_id=None):
                 "thumbnail": best_thumb(a.get("thumbnails")),
                 "subscribers": a.get("subscribers"),
                 "name": a.get("name") or name,
+                "browse_id": browse_id,            # the artist's channel — for the "Open in YouTube" link
                 "albums": albums}
     except Exception:  # noqa: BLE001 - network/parse/missing-method all degrade to "no info"
         ctx.logger.info("artist info fetch failed for %r (non-fatal)", name)

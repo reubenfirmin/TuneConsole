@@ -1,0 +1,13 @@
+{% if items %}
+<ol class="preview-list">
+  {% for i in items %}
+  <li>
+    <span class="preview-lane">{{ i.lane or 'pick' }}</span>
+    <span class="preview-song"><strong>{{ i.title }}</strong> · {{ i.artist }}</span>
+    <span class="preview-reason">{{ i.reason }}</span>
+  </li>
+  {% endfor %}
+</ol>
+{% else %}
+<p class="section-note">No recommendations under the current knobs yet. Build the model, or loosen a few sliders.</p>
+{% endif %}

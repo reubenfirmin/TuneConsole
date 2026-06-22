@@ -1,0 +1,49 @@
+{% extends "base.html" %}{% block title %}Network · TuneConsole{% endblock %}{% block body %}
+<div class="page-head">
+  <span class="eyebrow">Transparency</span>
+  <h1>Network log</h1>
+  <p>Every request the server makes is checked against a fixed allowlist <em>before</em> it leaves the
+    machine, and recorded here. This is how the app proves it only talks to YouTube and the
+    metadata-enrichment services, and never sends your sign-in anywhere else.</p>
+</div>
+
+<div class="card" style="margin-bottom:1.4rem">
+  <h2 class="section" style="margin-top:0">Allowlist</h2>
+  <p class="section-note">The only hosts the server is permitted to reach. Anything else is blocked
+    and shows up below in red. To change this list you have to edit the source
+    (<code class="mono">yt_playlist/egress.py</code>) and restart; it can't be widened at runtime.</p>
+  <p>
+    {% for d in allowlist %}<span class="tag teal mono">{{ d }}</span> {% endfor %}
+  </p>
+</div>
+
+<div class="card">
+  <h2 class="section" style="margin-top:0">Recent requests <span class="muted">(newest first)</span></h2>
+  <table>
+    <thead><tr><th>When</th><th>Verdict</th><th>Via</th><th>Method</th><th>Host</th><th>Path</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td class="mono" style="white-space:nowrap; color:var(--dim)">{{ r.ts }}</td>
+        <td>{% if r.verdict == 'BLOCK' %}<span class="tag" style="background:var(--err,#c0392b); color:#fff">BLOCK</span>
+            {% elif r.verdict == 'ALLOW' %}<span class="tag teal">ALLOW</span>
+            {% else %}{{ r.raw }}{% endif %}</td>
+        <td><span class="muted">{{ r.via }}</span></td>
+        <td class="mono">{{ r.method }}</td>
+        <td class="mono">{{ r.host }}</td>
+        <td class="mono" style="color:var(--dim); word-break:break-all">{{ r.path }}</td>
+        <td class="mono">{{ r.status if r.status not in (None, 'None') else '' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="empty">No requests logged yet. They'll appear here once the app talks to YouTube (e.g. a sync).</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<p class="section-note" style="margin-top:1rem">
+  <strong>One honest caveat:</strong> this logs traffic the <em>server</em> makes. Cover-art thumbnails
+  in the UI are loaded directly by your browser from Google's image CDNs and never pass through the
+  server, so they don't appear here, and no credentials are attached to those image loads. The log
+  rotates daily and keeps 7 days.</p>
+{% endblock %}

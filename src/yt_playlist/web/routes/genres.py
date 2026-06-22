@@ -1,6 +1,5 @@
 """Genres tab: view and edit the genre whitelist that Last.fm/Discogs tags are matched against."""
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 
 from yt_playlist import genres as genre_lib
 
@@ -8,6 +7,15 @@ from yt_playlist import genres as genre_lib
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates = ctx.store, ctx.templates
+
+    def _list(request):
+        return templates.TemplateResponse(request, "_partials/genre_list.html",
+                                          {"genres": store.get_genre_whitelist()})
+
+    def _toast(request, message):
+        return templates.TemplateResponse(
+            request, "_partials/error_toast.html", {"message": message},
+            status_code=422, headers={"HX-Reswap": "none"})
 
     @router.get("/genres")
     def genres_page(request: Request):
@@ -18,25 +26,25 @@ def build(ctx) -> APIRouter:
 
     @router.post("/genres/add")
     async def genres_add(request: Request):
-        body = await request.json()
-        name = (body.get("name") or "").strip()
+        form = await request.form()
+        name = (form.get("name") or "").strip()
         if not name:
-            return JSONResponse({"ok": False, "error": "enter a genre name"})
+            return _toast(request, "enter a genre name")
         store.add_genre(name)
         genre_lib.configure(store)                     # rebuild the active matcher
-        return JSONResponse({"ok": True, "genres": store.get_genre_whitelist()})
+        return _list(request)
 
     @router.post("/genres/remove")
     async def genres_remove(request: Request):
-        body = await request.json()
-        store.remove_genre((body.get("name") or "").strip())
+        form = await request.form()
+        store.remove_genre((form.get("name") or "").strip())
         genre_lib.configure(store)
-        return JSONResponse({"ok": True, "genres": store.get_genre_whitelist()})
+        return _list(request)
 
     @router.post("/genres/reset")
-    def genres_reset():
+    def genres_reset(request: Request):
         store.set_genres(genre_lib.builtin_names())
         genre_lib.configure(store)
-        return JSONResponse({"ok": True, "genres": store.get_genre_whitelist()})
+        return _list(request)
 
     return router

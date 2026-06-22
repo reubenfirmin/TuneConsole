@@ -13,6 +13,7 @@ import time
 import urllib.parse
 import urllib.request
 
+from yt_playlist import net
 from yt_playlist.enrich_queue import PriorityGate
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ _MIN_INTERVAL = 1.1                       # seconds between requests (just over 
 _pace_lock = threading.Lock()
 _last_call = [0.0]
 _gate = PriorityGate()                    # newest enrichment job preempts older ones
+_breaker = net.CircuitBreaker()           # stop a run once the host looks unreachable
 
 
 def _get(path, params):
@@ -34,8 +36,14 @@ def _get(path, params):
         _last_call[0] = time.monotonic()
     url = f"{_API}/{path}?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp)
+    except Exception as e:                # report the outcome to the breaker, then let callers handle it
+        _breaker.record(e)
+        raise
+    _breaker.record()
+    return data
 
 
 def _lucene_escape(text):
@@ -82,14 +90,13 @@ def _artist_genre(mbid):
     if not mbid:
         return None
     if mbid not in _artist_genre_cache:
-        genre = None
         try:
             art = _get(f"artist/{mbid}", {"inc": "genres+tags", "fmt": "json"})
-            genre = _top_label(art)
         except Exception as e:  # noqa: BLE001
             logger.warning("MB artist lookup failed for %s: %s", mbid, e)
-        _artist_genre_cache[mbid] = genre
-    return _artist_genre_cache[mbid]
+            return None        # transient failure — don't cache, so a later track retries
+        _artist_genre_cache[mbid] = _top_label(art)   # cache only on success (incl. a legit None)
+    return _artist_genre_cache.get(mbid)
 
 
 _PARENS = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
@@ -132,7 +139,8 @@ def _lookup(title, artist):
     rec = recordings[0]                          # best match drives genre/artist
     year = _earliest_year(recordings)            # but year comes from the earliest candidate
     credit = rec.get("artist-credit") or []
-    artist_mbid = (credit[0].get("artist") or {}).get("id") if credit else None
+    first = credit[0] if credit else None        # MB sometimes returns bare join-phrase strings here
+    artist_mbid = (first.get("artist") or {}).get("id") if isinstance(first, dict) else None
     genre = None
     mbid = rec.get("id")
     if mbid:
@@ -147,16 +155,18 @@ def _lookup(title, artist):
     return (genre, year)
 
 
-def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop=None):
-    """Walk a playlist's not-yet-enriched tracks, fetch genre+year for each, persist, and report
-    progress. `on_progress(event_dict)` receives info/track/done events for the SSE stream."""
+def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop=None, pending=None):
+    """Walk a track set's not-yet-enriched tracks, fetch genre+year for each, persist, and report
+    progress. Scope is a playlist (playlist_id) or an explicit `pending` list (e.g. an album's tracks).
+    `on_progress(event_dict)` receives info/track/done events for the SSE stream."""
     enrich_fn = enrich_fn or enrich        # resolved here so tests can monkeypatch module-level enrich
-    pending = store.tracks_to_enrich(playlist_id)
+    pending = store.tracks_to_enrich(playlist_id) if pending is None else pending
     total = len(pending)
     if not total:
         on_progress({"type": "done", "text": "Everything is already enriched.", "total": 0})
         return
     on_progress({"type": "info", "text": f"Enriching {total} track(s) via MusicBrainz…", "total": total})
+    _breaker.reset()                       # fresh chance each run — a past outage shouldn't pre-trip it
     seq = _gate.enter()
     try:
         for i, t in enumerate(pending, 1):
@@ -164,8 +174,12 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
                 on_progress({"type": "info", "text": "Stopped."})
                 return
             _gate.wait_turn(seq, on_wait=lambda: on_progress(
-                {"type": "info", "text": "Waiting — a newer playlist is enriching first…"}))
+                {"type": "info", "text": "Waiting: a newer playlist is enriching first…"}))
             genre, year = enrich_fn(t["title"], t["artist"])
+            if _breaker.tripped():         # host unreachable — the rest would all fail too, so stop
+                on_progress({"type": "err", "text": "MusicBrainz looks unreachable; enrichment stopped. "
+                             "The remaining tracks will retry next time."})
+                return
             store.set_track_enrichment(t["id"], genre, year)
             eff_genre, eff_year = store.get_track_enrichment(t["id"])    # report what actually stuck
             bits = " · ".join(x for x in (genre, year) if x) or "no match"

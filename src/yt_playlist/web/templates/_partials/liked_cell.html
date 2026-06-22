@@ -1,0 +1,17 @@
+{# Clickable Liked-Music toggle for a song row. Optimistic: the heart fills/empties INSTANTLY on
+   click (Alpine), then persists via htmx in the background (eventual consistency); it reverts only
+   if the server rejects. Static attrs hold the initial server state. Heart: Feather/Lucide (MIT).
+   Needs: video_id, liked. #}
+<td class="liked-col" x-data="{ liked: {{ 'true' if liked else 'false' }} }">
+  <button type="button" class="like-btn{{ ' on' if liked }}" :class="{ on: liked }"
+          aria-pressed="{{ 'true' if liked else 'false' }}" :aria-pressed="liked"
+          title="{{ 'Remove from your Liked Music' if liked else 'Add to your Liked Music' }}"
+          :title="liked ? 'Remove from your Liked Music' : 'Add to your Liked Music'"
+          @click="liked = !liked; htmx.ajax('POST', '/track/like', {source: $el, values: {video_id: '{{ video_id }}', on: liked ? '1' : ''}, swap: 'none'})"
+          @htmx:after-request="if (!$event.detail.successful) liked = !liked">
+    <svg viewBox="0 0 24 24" fill="{{ 'currentColor' if liked else 'none' }}" :fill="liked ? 'currentColor' : 'none'"
+         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+    </svg>
+  </button>
+</td>

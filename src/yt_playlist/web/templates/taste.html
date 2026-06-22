@@ -1,0 +1,128 @@
+{% extends "base.html" %}{% block title %}Taste Model · TuneConsole{% endblock %}{% block body %}
+<div class="page-head">
+  <span class="eyebrow">Tools</span>
+  <h1>Taste Model</h1>
+  <p>Your recommender's control room. Every number here is built from your own library. Nothing comes
+     from outside. The <strong>track vectors</strong> below underlie <em>every</em> recommendation surface
+     (For You, Explore, Discover, "more like this"). The <strong>knobs</strong>, however, are narrower;
+     each section says exactly what it touches. Changes apply immediately; the live sample recomputes when
+     you click <em>Refresh</em>. Start over any time with one button:</p>
+  <div class="pl-actions">
+    <button class="btn-ghost" hx-post="/taste/reset-all" hx-swap="none"
+            hx-confirm="Reset every weight and knob on this page back to its default? Your vectors and feedback are left alone.">↺ Reset everything to defaults</button>
+  </div>
+</div>
+
+<h2 class="section">Model status <span class="scope-tag">All surfaces</span></h2>
+<div class="card stat-grid">
+  <div><strong>{{ vectors }}</strong><span>track vectors</span></div>
+  <div><strong>{{ baskets }}</strong><span>co-occurrence baskets</span></div>
+  <div><strong>{{ '%.0f'|format(coverage * 100) }}%</strong><span>genre coverage ({{ tagged }}/{{ tracks_total }})</span></div>
+  <div><strong>{{ '%.2f'|format(breadth) }}</strong><span>taste breadth (0=narrow, 1=eclectic)</span></div>
+  <div hx-get="/taste/recall" hx-trigger="load" hx-swap="innerHTML"><strong>…</strong><span>recall@20 (computing)</span></div>
+</div>
+<div class="pl-actions" style="margin-top:1rem">
+  <span id="rebuild-ctl"><button hx-post="/taste/rebuild" hx-target="#rebuild-ctl" hx-swap="outerHTML">Rebuild model</button></span>
+  <button class="btn-ghost" hx-post="/taste/autotune" hx-swap="none"
+          hx-confirm="Grid-search the embedding dimension by recall@k and rebuild on the best? Takes a few seconds.">Auto-tune (recall@k)</button>
+  <button class="btn-ghost" hx-post="/taste/purge-vectors" hx-swap="none"
+          hx-confirm="Delete all taste vectors? They rebuild on next sync.">Purge vectors</button>
+</div>
+
+<h2 class="section">Live sample · For You</h2>
+<div class="card">
+  <div id="foryou-sample" class="foryou-sample">
+    <div class="sample-head">
+      <button class="btn-ghost btn-sm" hx-get="/taste/preview" hx-target="#sample-body" hx-indicator="#sample-spin">
+        <span id="sample-spin" class="htmx-indicator">⟳</span> Refresh sample
+      </button>
+      <span class="sample-note">Move a knob, then refresh to see how it changes your top picks.</span>
+    </div>
+    <div id="sample-body" hx-get="/taste/preview" hx-trigger="load">
+      <p class="section-note">Loading…</p>
+    </div>
+  </div>
+</div>
+
+<h2 class="section">Blend weights <span class="scope-tag">For You only</span></h2>
+<p class="section-note">How much each candidate lane contributes to the <strong>For You</strong> feed (and nothing else). 1.0 = neutral; feedback nudges these too, or set them yourself.</p>
+<div class="card knob-list">
+  {% for lane in lanes %}
+  <div class="knob">
+    <div class="knob-head">
+      <label>{{ lane.label }}</label>
+      <output id="out-lane-{{ lane.name }}">{{ '%.2f'|format(lane.value) }}</output>
+      <button class="knob-reset" type="button" title="Reset to default"
+              data-target="lane-{{ lane.name }}" data-default="{{ lane_default }}" onclick="resetKnob(this)"
+              hx-post="/taste/weight" hx-vals='{"axis":"lane:{{ lane.name }}","weight":"{{ lane_default }}"}' hx-swap="none">↺</button>
+    </div>
+    <input type="range" id="lane-{{ lane.name }}" name="weight" value="{{ '%.2f'|format(lane.value) }}"
+           min="{{ lane_min }}" max="{{ lane_max }}" step="{{ lane_step }}"
+           hx-post="/taste/weight" hx-vals='{"axis":"lane:{{ lane.name }}"}' hx-trigger="change" hx-swap="none"
+           oninput="updateOut(this)">
+    <p class="knob-help">{{ lane.help }}</p>
+  </div>
+  {% endfor %}
+</div>
+
+<h2 class="section">Genre families <span class="scope-tag">For You only</span></h2>
+<p class="section-note">Each knob multiplies the taste-match score of every track in that family when ranking the <strong>For You</strong> feed (and nothing else): 1.0 = neutral, 0 mutes the family (sinks to the bottom), 2 doubles its scores (floats to the top). The % is that family's share of your listening, shown for context only; it does not set the knob.</p>
+<div class="card knob-list">
+  {% for g in genres[:20] %}
+  <div class="knob">
+    <div class="knob-head">
+      <label>{{ g.family }} <span class="knob-sub">{{ '%.0f'|format(g.share * 100) }}% of your listening</span></label>
+      <output id="out-genre-{{ loop.index }}">{{ '%.1f'|format(g.weight) }}</output>
+      <button class="knob-reset" type="button" title="Reset to neutral"
+              data-target="genre-{{ loop.index }}" data-default="{{ genre_default }}" onclick="resetKnob(this)"
+              hx-post="/taste/weight" hx-vals='{"axis":"genre:{{ g.family }}","weight":"{{ genre_default }}"}' hx-swap="none">↺</button>
+    </div>
+    <input type="range" id="genre-{{ loop.index }}" name="weight" value="{{ g.weight }}"
+           min="{{ genre_min }}" max="{{ genre_max }}" step="{{ genre_step }}"
+           hx-post="/taste/weight" hx-vals='{"axis":"genre:{{ g.family }}"}' hx-trigger="change" hx-swap="none"
+           oninput="updateOut(this)">
+  </div>
+  {% else %}
+  <p class="section-note">No genre tags yet. Enrich your library to unlock per-genre controls.</p>
+  {% endfor %}
+</div>
+
+<h2 class="section">Discovery &amp; timing <span class="scope-tag">For You + Explore</span></h2>
+<p class="section-note">When and how candidates are surfaced in the <strong>For You</strong> and <strong>Explore</strong> feeds. (The outward <em>Discover</em> page, for new artists/albums, uses your vectors but ignores these knobs.) Defaults are sensible; nudge to reshape what those two feeds dig up.</p>
+<div class="card knob-list">
+  {% for p in params %}{% include "_partials/taste_knob.html" %}{% endfor %}
+  <details class="advanced">
+    <summary>Advanced</summary>
+    {% for p in advanced_params %}{% include "_partials/taste_knob.html" %}{% endfor %}
+  </details>
+</div>
+
+<h2 class="section">Feedback</h2>
+<div class="card">
+  {% if feedback %}
+  <p>{% for kind, c in feedback.items() %}<span class="tag">{{ kind }}: {{ c }}</span> {% endfor %}</p>
+  {% else %}<p class="section-note">No feedback recorded yet.</p>{% endif %}
+  <button class="btn-ghost btn-sm" hx-post="/taste/clear-feedback" hx-swap="none"
+          hx-confirm="Clear all dismissals, mutes, and impression history?">Clear feedback &amp; impressions</button>
+</div>
+
+<script>
+function updateOut(s){
+  var o = document.getElementById('out-' + s.id);
+  if(o) o.textContent = s.dataset.int ? Math.round(s.value) : (+s.value).toFixed(2);
+}
+function resetKnob(btn){
+  var s = document.getElementById(btn.dataset.target);
+  if(s){ s.value = btn.dataset.default; updateOut(s); }
+}
+// A knob change marks the sample stale (no auto-recompute); refreshing it clears the state.
+document.body.addEventListener('taste-stale', function(){
+  var p = document.getElementById('foryou-sample'); if(p) p.classList.add('stale');
+});
+document.body.addEventListener('htmx:afterSwap', function(e){
+  if(e.target && e.target.id === 'sample-body'){
+    var p = document.getElementById('foryou-sample'); if(p) p.classList.remove('stale');
+  }
+});
+</script>
+{% endblock %}
