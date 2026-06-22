@@ -40,7 +40,8 @@ def build(ctx) -> APIRouter:
         for i, t in enumerate(store.playlist_tracks_detail(pid), start=1):
             if t["video_id"] == video_id:
                 return templates.TemplateResponse(request, "_partials/track_row.html",
-                                                  {"t": t, "idx": i, "is_generated": gen})
+                    {"t": t, "idx": i, "is_generated": gen,
+                     "mood_states": recommend.track_mood_states(store, now_fn()) if gen else {}})
         return Response(status_code=204)         # row no longer present — nothing to swap
 
     @router.get("/playlists")
@@ -82,6 +83,7 @@ def build(ctx) -> APIRouter:
             "is_generated": is_generated,
             "facets": recommend.playlist_facets(store, pid) if is_generated else None,
             "mood_state": recommend.playlist_mood_state(store, pid, now_fn()) if is_generated else 0,
+            "mood_states": recommend.track_mood_states(store, now_fn()) if is_generated else {},
             "recipe": store.get_recipe(pl.ytm_playlist_id) if is_generated else None,
             "kind": store.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),
             # autosuggest = the editable whitelist plus whatever genres already exist in the library
@@ -191,6 +193,7 @@ def build(ctx) -> APIRouter:
             row_tmpl = templates.env.get_template("_partials/track_row.html")
             rows = store.playlist_tracks_detail(job.playlist_id) if job.playlist_id is not None else []
         gen_flag = _is_generated(job.playlist_id) if job.playlist_id is not None else False
+        mood_states = recommend.track_mood_states(store, now_fn()) if gen_flag else {}
         base, idx_of = {}, {}
         for i, t in enumerate(rows, start=1):
             base[t["video_id"]] = t
@@ -205,7 +208,8 @@ def build(ctx) -> APIRouter:
                 t["genre"] = ev["genre"]
             if "year" in ev:
                 t["year"] = ev["year"]
-            return {**ev, "row_html": row_tmpl.render(t=t, idx=idx_of[vid], is_generated=gen_flag)}
+            return {**ev, "row_html": row_tmpl.render(t=t, idx=idx_of[vid], is_generated=gen_flag,
+                                                       mood_states=mood_states)}
 
         async def gen():
             sent = 0

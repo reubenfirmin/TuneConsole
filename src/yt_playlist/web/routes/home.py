@@ -11,8 +11,8 @@ from yt_playlist.rec_dao import RecDao
 # How many tracks each generated proto-playlist offers.
 PROTO_SIZE = 12
 ROTATION_POOL = PROTO_SIZE * 5      # fetch this deep so each epoch's random slice is genuinely fresh
-ARTISTS_PER_CARD = 8               # new-artist tiles shown per epoch
-ALBUMS_PER_CARD = 12               # discover album tiles per epoch (the page grid clamps to 3 rows)
+ARTISTS_PER_CARD = 10              # new-artist tiles fetched per epoch (grid caps 5 cols, clamps to 2 rows)
+ALBUMS_PER_CARD = 15               # discover album tiles fetched per epoch (grid caps 5 cols, clamps to 3 rows)
 # Home cards that rotate. Each holds its content for erosion_view_cap real Home visits, then advances
 # to a fresh epoch. They tick together (once per visit, in GET /) but each rotates its OWN pool at its
 # own size — so the small new-artist pool cycles through faster than the deep playlist pool.
@@ -90,6 +90,7 @@ def build(ctx) -> APIRouter:
             "actions": recommend.take_action(store, now, ctx.auth_expired),
             "sync": recommend.sync_status(store, now),
             "muted_count": len(store.muted_artists()),   # transparency: what's being hidden
+            "rediscover": recommend.rediscover_playlists(store, now),
             "flash": request.query_params.get("flash"),
             **_feed_context(now),
         })

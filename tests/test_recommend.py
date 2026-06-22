@@ -357,3 +357,50 @@ def test_playlist_facets_groups_genres_eras_tracks(store):
     assert {t["title"] for t in f["tracks"]} == {"SongA", "SongB", "SongC"}
     techno = next(g for g in f["genres"] if g["name"] == genre_map.family("Techno"))
     assert len(techno["keys"]) == 2            # both techno tracks' keys, to tilt that subset
+
+
+def _seed_pl(store, iid, ytm, title, n, now, played_at=None, group=None):
+    """Make a library playlist of `n` tracks; optionally record one play of it at `played_at`."""
+    from yt_playlist.matching import identity_key
+    keys, tids = [], []
+    for i in range(n):
+        t, a = f"{ytm} song {i}", f"{ytm} artist"
+        tids.append(store.upsert_track(f"v_{ytm}_{i}", t, a, None, None))
+        keys.append(identity_key(t, a))
+    pid = store.upsert_playlist(iid, ytm, title, n, f"h_{ytm}", now)
+    store.set_playlist_tracks(pid, tids)
+    if group:
+        store.set_playlist_group(ytm, group)
+    if played_at is not None:
+        store.add_history_snapshot(iid, played_at, [keys[0]])
+    return pid
+
+
+def test_rediscover_picks_least_recently_played_library_playlists(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0
+    now = 300 * day
+    _seed_pl(store, iid, "PA", "Ancient", 8, now, played_at=now - 200 * day)
+    _seed_pl(store, iid, "PB", "Dusty", 8, now, played_at=now - 150 * day)
+    _seed_pl(store, iid, "PC", "Fresh", 8, now, played_at=now - 3 * day)
+    _seed_pl(store, iid, "LM", "Liked Music", 8, now, played_at=now - 400 * day)   # system -> skip
+    store.upsert_playlist(iid, "PE", "Empty", 0, "h_pe", now)                       # empty -> skip
+    _seed_pl(store, iid, "PG", "Gen", 8, now, played_at=now - 500 * day, group="Generated")  # skip
+
+    out = recommend.rediscover_playlists(store, now, count=2, per=5)
+    assert [p["title"] for p in out] == ["Ancient", "Dusty"]   # oldest-played first; others excluded
+    assert len(out[0]["tracks"]) == 5                          # a teaser, not the full 8
+    assert out[0]["track_count"] == 8 and out[0]["last_played"]
+
+
+def test_rediscover_falls_back_to_never_played(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0
+    now = 100 * day
+    _seed_pl(store, iid, "PP", "Played", 3, now, played_at=now - 10 * day)
+    _seed_pl(store, iid, "PN", "Untouched", 3, now)            # never played -> fills the second slot
+
+    out = recommend.rediscover_playlists(store, now, count=2, per=5)
+    assert {p["title"] for p in out} == {"Played", "Untouched"}
+    never = next(p for p in out if p["title"] == "Untouched")
+    assert never["last_played"] is None

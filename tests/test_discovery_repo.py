@@ -73,6 +73,30 @@ def test_pick_discovered_albums_biases_recent_mixes_older_and_avoids_repeats(sto
     assert "nevr" in again            # never-shown surfaces; "shown" is pushed down by last_shown
 
 
+def test_pick_discovered_albums_varies_artists(store):
+    from yt_playlist import discover
+    # Six distinct artists, plus a second album from Art0 — the "mixed" vs "split" pair of one release.
+    for i in range(6):
+        store.upsert_discovered_album(f"b{i}", f"Art{i}", f"Alb {i}", "2025", None, now=1.0)
+    store.upsert_discovered_album("b0-mixed", "Art0", "Alb 0 (Mixed)", "2025", None, now=1.0)
+    picks = discover.pick_discovered_albums(store, n=5, now=10.0)
+    arts = [p["artist"] for p in picks]
+    assert len(picks) == 5
+    assert len(set(arts)) == 5         # one album per artist while the pool can supply distinct ones
+    assert arts.count("Art0") == 1     # the mixed + split pair never both surface
+
+
+def test_pick_discovered_albums_repeats_artist_only_when_forced(store):
+    from yt_playlist import discover
+    # Just two artists but n=4 -> must reuse artists to fill, rather than return fewer than asked.
+    for a in ("X", "Y"):
+        for i in range(3):
+            store.upsert_discovered_album(f"{a}{i}", a, f"{a} {i}", "2025", None, now=1.0)
+    picks = discover.pick_discovered_albums(store, n=4, now=10.0)
+    assert len(picks) == 4
+    assert len({p["browse_id"] for p in picks}) == 4   # distinct albums even though artists repeat
+
+
 class _Ctx:
     def __init__(self, store):
         self.store = store

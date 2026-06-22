@@ -21,6 +21,8 @@
     <a href="/taste">manage on the Taste Model page</a>.</p>
   {% endif %}
 
+  {% include "_partials/rediscover.html" %}
+
   <div hx-get="/home/auto-playlists" hx-trigger="load" hx-swap="innerHTML">
     <p class="section-note">Finding coherent groups in your library…</p>
   </div>

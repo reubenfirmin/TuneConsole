@@ -206,10 +206,32 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
     cut = ymax - 2                                                            # "recent" = last ~3 years
     recent = sorted([a for a in albums if yr(a) >= cut], key=lambda a: (yr(a), -fresh(a)), reverse=True)
     older = sorted([a for a in albums if yr(a) < cut], key=fresh)             # least-recently-shown first
+
+    seen_art, picked = set(), set()
+
+    def fill(src, k):
+        # Take up to k from src, one album per artist first — so a "mixed" + "split" pair of the same
+        # release (same artist) won't both surface. Only repeats an artist to reach k if this bucket
+        # can't supply k distinct ones, so the recent/older balance below is preserved either way.
+        out = []
+        for varied in (True, False):
+            for a in src:
+                if len(out) >= k or a["browse_id"] in picked:
+                    continue
+                art = (a.get("artist") or "").strip().lower()
+                if varied and art and art in seen_art:
+                    continue
+                if art:
+                    seen_art.add(art)
+                picked.add(a["browse_id"])
+                out.append(a)
+        return out
+
     n_recent = max(1, round(n * recent_frac))
-    chosen = recent[:n_recent] + older[:n - n_recent]
-    if len(chosen) < n:                                                       # backfill if a bucket is thin
-        chosen += [a for a in recent[n_recent:] + older[max(0, n - n_recent):] if a not in chosen]
+    chosen = fill(recent, n_recent)
+    chosen += fill(older, n - len(chosen))
+    if len(chosen) < n:                                          # a bucket was thin — top up from the rest
+        chosen += fill(recent + older, n - len(chosen))
     chosen = chosen[:n]
     store.mark_shown("album", [a["browse_id"] for a in chosen], now)
     return chosen

@@ -192,6 +192,18 @@ def playlist_mood_state(store, playlist_id, now) -> int:
     return state
 
 
+def track_mood_states(store, now) -> dict:
+    """Map identity_key -> +1/-1 for active *per-track* mood signals (the "🔥 More / 🙅 Less like this"
+    row levers), so a generated playlist can flag which rows you nudged. Those buttons seed a single
+    key, so single-key events are exactly the per-track ones — whole-mix and facet tilts (many keys)
+    are excluded. Latest wins; decays out of the window with the rest."""
+    out = {}
+    for _created, direction, mkeys in sorted(RecDao(store).active_mood(now)):
+        if len(mkeys) == 1:
+            out[mkeys[0]] = 1 if direction > 0 else -1
+    return out
+
+
 def taste_breadth(store) -> dict:
     """How narrow vs eclectic this library is, from the entropy of its genre-family mix.
 
@@ -400,6 +412,38 @@ def comfort_listening(store, now, limit=24) -> list[ForYouItem]:
             thumbnail=r["thumbnail"], plays=r["plays"],
             reason="One of your most-played — you haven't reached for it lately",
             key=r["key"], lane="comfort"))
+    return out
+
+
+def rediscover_playlists(store, now, count=2, per=5) -> list[dict]:
+    """Spotlight real library playlists you haven't reached for lately, to nudge a rediscover.
+
+    Picks the `count` playlists with the oldest last-listen (played-but-stale first; never-played
+    only fills in when there aren't enough stale ones), and highlights `per` tracks from each so the
+    card is a teaser, not the full tracklist. Skips system playlists (Liked Music, Episodes for
+    Later), Generated proto-playlists, and empties — none of those are a library playlist to revisit.
+    """
+    from yt_playlist.repos.rec_query import GENERATED_GROUP
+    stats = store.get_playlist_listen_stats()            # {pid: (last_ts, listen_count)}
+    groups = store.get_playlist_groups()                 # ytm -> group name
+    candidates = []
+    for p in store.get_playlists():
+        if (p.ytm_playlist_id in analysis.SYSTEM_PLAYLIST_IDS
+                or groups.get(p.ytm_playlist_id) == GENERATED_GROUP
+                or not p.track_count):
+            continue
+        last, _listens = stats.get(p.id, (None, 0))
+        candidates.append((p, last))
+    # Played-but-stale first (oldest last-listen leads); never-played only fills empty slots.
+    played = sorted((c for c in candidates if c[1] is not None), key=lambda c: c[1])
+    never = [c for c in candidates if c[1] is None]
+    picked = (played + never)[:count]
+    out = []
+    for p, last in picked:
+        out.append({"id": p.id, "ytm": p.ytm_playlist_id, "title": p.title,
+                    "track_count": p.track_count, "thumbnail": p.thumbnail,
+                    "last_played": _ago(now - last) if last else None,
+                    "tracks": store.playlist_tracks_detail(p.id)[:per]})
     return out
 
 

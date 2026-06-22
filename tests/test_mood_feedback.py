@@ -86,3 +86,17 @@ def test_playlist_mood_state_reflects_active_whole_mix_mood(store):
     assert recommend.playlist_mood_state(store, pid, now=1000.0) == 1     # remembered: more
     store.record_mood(keys, -1, now=1001.0)
     assert recommend.playlist_mood_state(store, pid, now=1001.0) == -1    # latest wins: less
+
+
+def test_track_mood_states_flags_per_track_levers_only(store):
+    # Per-track "more/less like this" seed a single key -> flagged; whole-mix/facet (many keys) don't.
+    store.record_mood(["solo|x"], 1, now=1000.0)               # 🔥 more on one track
+    store.record_mood(["down|x"], -1, now=1000.0)              # 🙅 less on one track
+    store.record_mood(["m1|x", "m2|x"], 1, now=1000.0)         # whole-mix / facet tilt (multi-key)
+    states = recommend.track_mood_states(store, now=1000.0)
+    assert states == {"solo|x": 1, "down|x": -1}               # only the single-key per-track levers
+    assert "m1|x" not in states and "m2|x" not in states
+
+    store.record_mood(["solo|x"], -1, now=1001.0)              # flip it: latest wins
+    assert recommend.track_mood_states(store, now=1001.0)["solo|x"] == -1
+    assert recommend.track_mood_states(store, now=1000.0 + 9 * 3600) == {}   # decays out of the window

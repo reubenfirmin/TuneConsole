@@ -54,7 +54,11 @@
   </td>
   <td class="num mono">{{ t.plays or '' }}</td>
   <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
-  <td class="rowmenu">
+  <td class="rowmenu"{% if is_generated and t.identity_key %} x-data="{ mood: {{ (mood_states|default({})).get(t.identity_key, 0) }} }"{% endif %}>
+    {% if is_generated and t.identity_key %}
+    <span class="mood-flag" x-show="mood !== 0" x-cloak x-text="mood > 0 ? '🔥' : '🙅'"
+          :title="mood > 0 ? 'You asked for more like this (tuning your Home picks)' : 'You asked for less like this (tuning your Home picks)'"></span>
+    {% endif %}
     <button type="button" class="dots" title="More actions"
             @click="openMenu = (openMenu === '{{ t.video_id }}' ? null : '{{ t.video_id }}')">⋯</button>
     <div class="rowmenu-pop" x-show="openMenu === '{{ t.video_id }}'" x-cloak x-transition.opacity
@@ -68,9 +72,9 @@
               @click="removeTrack($event.currentTarget.dataset.vid, $event.currentTarget.dataset.title)">Remove from playlist</button>
       {% if is_generated and t.identity_key %}
       <div class="rowmenu-sep">Tune your Home picks (for a few hours)</div>
-      <button type="button" hx-post="/recs/mood" hx-swap="none" @click="openMenu = null"
+      <button type="button" hx-post="/recs/mood" hx-swap="none" @click="openMenu = null; mood = 1"
               hx-vals='{"keys": {{ [t.identity_key]|tojson|tojson }}, "dir": 1}'>🔥 More like this</button>
-      <button type="button" hx-post="/recs/mood" hx-swap="none" @click="openMenu = null"
+      <button type="button" hx-post="/recs/mood" hx-swap="none" @click="openMenu = null; mood = -1"
               hx-vals='{"keys": {{ [t.identity_key]|tojson|tojson }}, "dir": -1}'>🙅 Less like this</button>
       {% endif %}
     </div>

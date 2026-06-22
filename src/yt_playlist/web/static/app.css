@@ -551,6 +551,8 @@ td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
 
 /* per-row "⋯" actions menu */
 .rowmenu { position: relative; text-align: right; overflow: visible; }
+/* Per-track "more/less like this" marker, shown left of the ⋯ on generated playlists. */
+.mood-flag { font-size: 0.95rem; line-height: 1; margin-right: 0.15rem; vertical-align: middle; cursor: default; }
 .dots { background: transparent; border: none; box-shadow: none; color: var(--faint);
   font-size: 1.15rem; line-height: 1; padding: 0.15rem 0.4rem; border-radius: 6px; cursor: pointer; }
 .dots:hover { background: var(--surface-2); color: var(--text); box-shadow: none; }
@@ -774,9 +776,13 @@ button.htmx-request .check-busy { display: inline; }
 /* ============ Recommendation tiles (graphics-first, hover-reveal) ============ */
 .tile-grid { display: grid; gap: 0.9rem; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); }
 /* "New from artists you play": a responsive album grid of normal-sized covers that flows by width
-   (more columns on a wider screen — e.g. ~5 across on large res, fewer as it narrows). */
+   (5 across at most on a wide screen, stepping down to 4 / 3 / 2 as it narrows). max-width caps the
+   column count at 5; a small script in the partial then clamps the rows. */
 .album-grid { display: grid; gap: 0.9rem;
-  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); margin-bottom: 1.4rem; }
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  max-width: calc(5 * 11rem + 4 * 0.9rem); margin-bottom: 1.4rem; }
+/* New-artists tile grid: same 5-column cap (the shared .tile-grid stays uncapped elsewhere). */
+#new-artist-grid { max-width: calc(5 * 10.5rem + 4 * 0.9rem); }
 .tile { position: relative; }
 .tile-cover { display: block; position: relative; aspect-ratio: 1 / 1; overflow: hidden;
   border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border); }
@@ -885,6 +891,31 @@ button.htmx-request .check-busy { display: inline; }
   align-items: flex-start; gap: 0.5rem; }
 .gen-foot-note { color: var(--dim); font-size: 0.78rem; line-height: 1.4; }
 .gen-done { justify-content: center; }
+
+/* --- Rediscover: a couple of stale library playlists spotlighted above auto-playlists --- */
+.rediscover-grid { grid-template-columns: 1fr 1fr; gap: 1.4rem; margin-bottom: 1.4rem; }
+@media (max-width: 60rem) { .rediscover-grid { grid-template-columns: 1fr; } }
+.redis-card { display: flex; flex-direction: column; }
+.redis-head { display: flex; gap: 0.7rem; align-items: center; margin-bottom: 0.7rem; }
+.redis-head .gen-th { width: 3rem; height: 3rem; }
+.redis-meta { min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+.redis-title { font-family: var(--font-display); font-size: 1.05rem; line-height: 1.25;
+  letter-spacing: -0.01em; color: var(--text); font-weight: 650; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.redis-title:hover { color: var(--accent-2); text-decoration: none; }
+.redis-sub { font-size: 0.78rem; color: var(--dim); }
+.redis-list { list-style: none; margin: 0 0 0.2rem; padding: 0; }
+.redis-row { display: flex; gap: 0.5rem; align-items: baseline; padding: 0.35rem 0.2rem;
+  border-bottom: 1px solid var(--border); }
+.redis-row:last-child { border-bottom: none; }
+.redis-row-title { font-size: 0.86rem; color: var(--text); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
+.redis-row-artist { font-size: 0.76rem; color: var(--dim); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; flex: 0 1 auto; }
+.redis-more { font-size: 0.76rem; color: var(--faint); padding: 0.4rem 0.2rem 0; font-style: italic; }
+.redis-foot { margin-top: auto; padding-top: 0.8rem; display: flex; flex-wrap: wrap;
+  align-items: center; gap: 0.6rem; }
+
 /* transient mood feedback panel (post-save card + generated playlist page) */
 .mood-panel { margin-top: 1rem; padding: 0.9rem 1rem; border: 1px dashed var(--border-2);
   border-radius: var(--radius-sm); background: var(--accent-soft); }
