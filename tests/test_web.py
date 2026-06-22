@@ -279,6 +279,20 @@ def test_sync_streams_progress_events(store):
     assert '"type": "end"' in body       # stream terminator
     assert len(store.get_playlists()) == 1
 
+def test_sync_plays_streams_and_records(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    client = FakeClient(tracks={"LM": [_track("v2", "Liked Song", "Artist")]},
+                        history=[_track("v1", "Played Song", "Artist")])
+    app = create_app(store, lambda: {iid: client}, now_fn=lambda: 7.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    jid = c.post("/sync/plays").json()["job_id"]
+    with c.stream("GET", f"/sync/events/{jid}") as s:
+        body = "".join(s.iter_text())
+    assert "plays synced" in body          # final done event
+    assert '"type": "end"' in body         # stream terminator
+    assert store.get_recent_history_keys(0.0) == {"played song|artist"}
+    assert store.get_setting("last_plays_sync_at") == "7.0"
+
 def test_sync_events_unknown_job_404(store):
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")

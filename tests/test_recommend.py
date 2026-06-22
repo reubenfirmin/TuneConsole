@@ -1,4 +1,4 @@
-from yt_playlist import embed, genre_map, rec_params, recommend
+from yt_playlist import embed, genre_map, recommend
 from yt_playlist.store import Store
 
 
@@ -7,13 +7,14 @@ def test_wheelhouse_excludes_play_recency_lane(store):
     a deep cut or taste neighbour must NOT surface in for_you (it belongs to Comfort Listening)."""
     iid = store.upsert_identity("main", "cred", None, True)
     store.upsert_track("v1", "Gem", "X", None, None)         # key "gem|x" — played a lot, then dormant
+    store.upsert_track("v2", "Bench", "X", None, None)       # X's never-played track -> X's deep cut
     day = 86400.0
     now = 200 * day
     for d in (120, 100, 80, 60):                              # 4 plays, last 60 days ago
         store.add_history_snapshot(iid, now - d * day, ["gem|x"])
 
-    # Gem is its artist's only/most-played track, so it's not a deep cut; with no playlists it's not
-    # a neighbour either. Wheelhouse must not resurface it on play-recency alone.
+    # Bench (never played) is X's deep cut, so Gem isn't; with no playlists Gem isn't a neighbour
+    # either. Wheelhouse must not resurface Gem on play-recency alone.
     assert "Gem" not in {i.title for i in recommend.for_you(store, now=now, limit=10)}
     # ...but Comfort Listening is exactly where it belongs.
     assert "Gem" in {i.title for i in recommend.comfort_listening(store, now=now, limit=10)}
@@ -140,19 +141,25 @@ def test_for_you_never_empty_without_history_depth(store):
     assert items, "for_you must not be empty on a fresh library with plays"
 
 
-def test_for_you_erode_false_shows_eroded_items(store):
-    """The taste-page preview passes erode=False so knob effects aren't masked by anti-staleness."""
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_track("v1", "Hit", "Fav", None, None)
-    store.upsert_track("v2", "Neglected", "Fav", None, None)   # Fav's deep cut -> a for_you candidate
-    now = 1000.0
-    store.add_history_snapshot(iid, now - 100, ["hit|fav"])
-    store.add_history_snapshot(iid, now - 50, ["hit|fav"])
-    for t in range(3):                                          # show "Neglected" past the erosion cap
-        store.record_impressions("for_you", ["neglected|fav"], now + t * 400)
+def test_rotate_sample_is_stable_per_epoch_then_changes(store):
+    """A list card holds its content within an epoch, and reseeds to a different slice the next one."""
+    items = list(range(40))
+    e0a = recommend.rotate_sample(items, 12, epoch=0)
+    e0b = recommend.rotate_sample(items, 12, epoch=0)
+    e1 = recommend.rotate_sample(items, 12, epoch=1)
+    assert e0a == e0b                      # same epoch -> identical (the "refresh twice = same" rule)
+    assert e0a != e1                       # next epoch -> a fresh random slice
+    assert len(e0a) == 12 and set(e0a) <= set(items)
+    assert recommend.rotate_sample([1, 2, 3], 12, epoch=5) == [1, 2, 3]   # pool smaller than card: as-is
 
-    assert "Neglected" not in {i.title for i in recommend.for_you(store, now + 2000, limit=10)}
-    assert "Neglected" in {i.title for i in recommend.for_you(store, now + 2000, limit=10, erode=False)}
+
+def test_rotate_page_advances_and_wraps(store):
+    """A grid card pages forward each epoch and wraps once the pool is exhausted (rotate, not empty)."""
+    items = list(range(10))
+    assert recommend.rotate_page(items, 4, epoch=0) == [0, 1, 2, 3]
+    assert recommend.rotate_page(items, 4, epoch=1) == [4, 5, 6, 7]
+    assert recommend.rotate_page(items, 4, epoch=2) == [8, 9, 0, 1]      # wraps through the end
+    assert recommend.rotate_page([], 4, epoch=3) == []
 
 
 def test_taste_sample_is_a_rotating_slice_not_the_top_n(store):
@@ -227,7 +234,7 @@ def test_take_action_enrichment_ranked_by_playcount(store):
     assert all(i.severity == "low" for i in enrich)
     assert "Hot List" in enrich[0].title              # ranked by playcount: Hot List first
     assert "Cold List" in enrich[1].title
-    assert enrich[0].cta_href == f"/playlist/{php}"
+    assert enrich[0].cta_href == f"/playlist/{php}?enrich=1"
     assert enrich[0].thumbnail == "http://t/hot.jpg"  # card carries the playlist thumbnail
 
 
@@ -332,3 +339,21 @@ def test_complete_playlist_caps_flooding_artist_on_eclectic_playlist(store):
     by_artist = Counter(i.artist for i in items)
     assert by_artist.get("WL", 0) <= 2     # the big-catalog artist no longer floods (was ~9)
     assert len(by_artist) >= 4             # eclectic variety preserved
+
+
+def test_playlist_facets_groups_genres_eras_tracks(store):
+    """The transient feedback panel needs the mix's facets (genres/eras/tracks) + the keys to tilt."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_track("v1", "SongA", "ArtA", None, None); store.set_track_genre(a, "Techno"); store.set_track_year(a, "1995")
+    b = store.upsert_track("v2", "SongB", "ArtB", None, None); store.set_track_genre(b, "Techno"); store.set_track_year(b, "2005")
+    c = store.upsert_track("v3", "SongC", "ArtC", None, None); store.set_track_genre(c, "Folk"); store.set_track_year(c, "1995")
+    pid = store.upsert_playlist(iid, "PL", "Mix", 3, "h", 0.0)
+    store.set_playlist_tracks(pid, [a, b, c])
+
+    f = recommend.playlist_facets(store, pid)
+    gnames = {g["name"] for g in f["genres"]}
+    assert genre_map.family("Techno") in gnames and genre_map.family("Folk") in gnames
+    assert {"1990", "2000"} <= {e["name"] for e in f["eras"]}
+    assert {t["title"] for t in f["tracks"]} == {"SongA", "SongB", "SongC"}
+    techno = next(g for g in f["genres"] if g["name"] == genre_map.family("Techno"))
+    assert len(techno["keys"]) == 2            # both techno tracks' keys, to tilt that subset

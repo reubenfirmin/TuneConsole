@@ -1,0 +1,66 @@
+{# Transient feedback control panel for a Generated playlist: a simple whole-mix mood plus an
+   expandable set of per-genre / per-era levers. Everything here tilts the Home lanes for a few
+   hours, then decays — NOT a permanent taste signal. The simple buttons record without swapping the
+   panel (so Advanced stays reachable) and reflect your choice as 'selected', persisted from the
+   active mood across a refresh. Per-track feedback lives in the track listing, not here.
+   Expects `pid`, `facets` ({genres, eras}), and `mood_state` (+1/-1/0). #}
+<section class="fb-panel card" id="fb-{{ pid }}">
+  {% if recipe and recipe.facets %}
+  <p class="fb-recipe">Made from
+    {% if recipe.facets.genres %}<span class="fb-chip">{{ recipe.facets.genres|join(' · ') }}</span>{% endif %}
+    {% if recipe.facets.eras %}<span class="fb-chip">{{ recipe.facets.eras|join(' · ') }}s</span>{% endif %}
+    {% if recipe.facets.artists %}<span class="fb-chip">{{ recipe.facets.artists|join(' · ') }}</span>{% endif %}
+    {% if recipe.dj and recipe.dj.stickiness is not none %}<span class="fb-chip">{{ 'smooth segues' if recipe.dj.stickiness > 0.6 else ('shuffled' if recipe.dj.stickiness < 0.34 else 'mixed flow') }}</span>{% endif %}
+  </p>
+  {% endif %}
+  <div class="fb-simple" x-data="{ sel: {{ mood_state|default(0) }} }">
+    <span class="fb-q">How's this mix landing right now?</span>
+    <div class="fb-btns">
+      <button type="button" class="mood-btn" :class="{ 'fb-sel': sel === 1 }" @click="sel = 1"
+              hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": 1}' hx-swap="none">🔥 More of this vibe</button>
+      <button type="button" class="mood-btn" :class="{ 'fb-sel': sel === -1 }" @click="sel = -1"
+              hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": -1}' hx-swap="none">🙅 Not my mood</button>
+    </div>
+  </div>
+
+  <details class="fb-detailed">
+    <summary>Detailed feedback</summary>
+    {% if facets and (facets.genres or facets.eras) %}
+    <p class="fb-sub">Tilt your Home picks toward or away from parts of this mix. Like the buttons above,
+      these are transient — they fade after a few hours.</p>
+    {% if facets.genres %}
+    <div class="fb-group"><span class="fb-grouphead">By genre</span>
+      {% for g in facets.genres %}
+      <div class="fb-lever"><span class="fb-name">{{ g.name }}</span>
+        <button type="button" class="fb-less" hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
+                hx-vals='{"keys": {{ g['keys']|tojson|tojson }}, "dir": -1}'>less</button>
+        <button type="button" class="fb-more" hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
+                hx-vals='{"keys": {{ g['keys']|tojson|tojson }}, "dir": 1}'>more</button>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if facets.eras %}
+    <div class="fb-group"><span class="fb-grouphead">By era</span>
+      {% for e in facets.eras %}
+      <div class="fb-lever"><span class="fb-name">{{ e.name }}s</span>
+        <button type="button" class="fb-less" hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
+                hx-vals='{"keys": {{ e['keys']|tojson|tojson }}, "dir": -1}'>less</button>
+        <button type="button" class="fb-more" hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
+                hx-vals='{"keys": {{ e['keys']|tojson|tojson }}, "dir": 1}'>more</button>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% else %}
+    <p class="fb-sub">These tracks aren't tagged with genre or era yet — <strong>enrich it</strong>
+      (the ✨ icons above) to get per-genre and per-era levers here.</p>
+    {% endif %}
+  </details>
+
+  <p class="fb-note">All of the feedback here is transient — it tilts your Home picks for a few hours,
+    then fades. To steer your lasting taste, use the more / less controls on the Home page.</p>
+</section>
+<script>
+function fbFlash(btn){ btn.classList.add('fb-done'); setTimeout(function(){ btn.classList.remove('fb-done'); }, 900); }
+</script>

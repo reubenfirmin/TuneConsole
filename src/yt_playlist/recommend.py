@@ -154,6 +154,44 @@ def taste_fingerprint(store) -> dict:
     return {"families": families, "eras": eras, "breadth": bd["breadth"]}
 
 
+def playlist_facets(store, playlist_id) -> dict:
+    """The mix's facets for the transient feedback panel: the genres, eras, and tracks present, each
+    with the identity_keys to tilt toward/away. Genres are by descending presence; eras chronological.
+    """
+    keys = store.get_playlist_track_keys(playlist_id)
+    dao = RecDao(store)
+    meta = store.tracks_by_keys(keys)
+    genres, decades = dao.track_genres(keys), dao.track_decades(keys)
+    fam_keys, era_keys = {}, {}
+    for k in keys:
+        if k in genres:
+            fam_keys.setdefault(genre_map.family(genres[k]), []).append(k)
+        if k in decades:
+            era_keys.setdefault(decades[k], []).append(k)
+    return {
+        "genres": [{"name": f, "keys": ks} for f, ks in sorted(fam_keys.items(), key=lambda x: -len(x[1]))],
+        "eras": [{"name": d, "keys": ks} for d, ks in sorted(era_keys.items())],
+        "tracks": [{"key": k, "title": meta[k]["title"], "artist": meta[k]["artist"]}
+                   for k in keys if k in meta],
+    }
+
+
+def playlist_mood_state(store, playlist_id, now) -> int:
+    """+1/-1 if there's an active *whole-mix* mood for this playlist (its full key set), else 0.
+
+    Lets the feedback panel show your choice as 'selected' so it survives a refresh — until the
+    transient signal decays out of the window (a few hours), which is the whole point.
+    """
+    keys = set(store.get_playlist_track_keys(playlist_id))
+    if not keys:
+        return 0
+    state = 0
+    for _created, direction, mkeys in sorted(RecDao(store).active_mood(now)):
+        if set(mkeys) == keys:                       # whole-mix feedback (not a facet subset); latest wins
+            state = 1 if direction > 0 else -1
+    return state
+
+
 def taste_breadth(store) -> dict:
     """How narrow vs eclectic this library is, from the entropy of its genre-family mix.
 
@@ -242,24 +280,46 @@ class ForYouItem:
     plays: int
     reason: str        # why this was recommended (human-readable)
     key: str = ""      # track identity_key, for feedback (dismiss/less/mute)
-    lane: str = ""     # source lane (resurface/neighbourhood/rotation/deep_cut), for weighting
+    lane: str = ""     # source lane (neighbourhood/rotation/deep_cut/comfort), for weighting
 
 
-def for_you(store, now, limit=24, erode=True) -> list[ForYouItem]:
-    """Blended local recommendations from your taste model, interleaved and deduped.
+def rotate_sample(items, size, epoch):
+    """A stable-per-epoch random slice of `items` — how a Home list card 'regenerates with a random
+    seed'. Within an erosion epoch (a window of erosion_view_cap views) the seed is fixed, so the
+    card holds steady; the next epoch reseeds to a fresh set. Order within the slice is preserved
+    (the pool stays ranked). Returns up to `size` items; a no-op when the pool already fits."""
+    items = list(items)
+    if len(items) <= size:
+        return items
+    rng = random.Random(epoch)
+    return [items[i] for i in sorted(rng.sample(range(len(items)), size))]
+
+
+def rotate_page(items, size, epoch):
+    """Ordered rotation for a grid card (new artists / albums): show `size` items, advancing one page
+    per epoch and wrapping once the pool is exhausted — so we cycle back through them rather than
+    going empty. Returns up to `size` items (fewer only when the whole pool is smaller)."""
+    items = list(items)
+    n = len(items)
+    if n == 0:
+        return []
+    start = (epoch * size) % n
+    return [items[(start + i) % n] for i in range(min(size, n))]
+
+
+def for_you(store, now, limit=24) -> list[ForYouItem]:
+    """Blended local recommendations from your taste model, interleaved and deduped, best-ranked
+    first. Returns a deep, ranked pool; per-card rotation (a random epoch-seeded slice) happens at
+    the surface, not here — for_you itself carries no anti-staleness state.
 
     Wheelhouse is your taste/genre model — not play-recency (that's the Comfort Listening card).
     Sources, strongest-available first:
       - taste neighbourhood: tracks near what you play most, re-ranked by your per-playlist taste
         and genre/era weights (falls back to plain rotation co-occurrence until the model is built)
       - deep cuts: the most-neglected track of each artist you play a lot
-
-    erode=True applies anti-staleness (hide items shown a lot lately) for the live feed. The Taste
-    page preview passes erode=False so it shows the model's true ranking — otherwise erosion masks
-    the effect of the knobs you're tuning.
     """
     gp = rec_params.get_param
-    pool = limit * gp(store, "candidate_pool_factor")   # fetch deeper than we show, so erosion can rotate
+    pool = limit * gp(store, "candidate_pool_factor")   # fetch deeper than we show, so rotation has slack
     sources = []
     # the taste-embedding lane: tracks in the neighbourhood of what you play most.
     # Falls back to the plain co-occurrence query until the model has been built.
@@ -285,13 +345,10 @@ def for_you(store, now, limit=24, erode=True) -> list[ForYouItem]:
                 rows.sort(key=lambda r: -sims.get(r["key"], -1.0))
 
     weights = store.get_weights()
-    # suppress dismissed/snoozed/muted, eroded items (shown enough lately), and anything already
-    # bundled into a generated playlist (don't re-offer what you just saved) — anti-staleness
+    # Never show these: dismissed/snoozed/muted, and anything already bundled into a generated
+    # playlist (don't re-offer what you just saved). Anti-staleness is per-card rotation, not here.
     dao = RecDao(store)
-    suppressed = store.suppressed_keys("for_you", now) | dao.generated_track_keys()
-    if erode:   # anti-staleness for the live feed; the taste-page preview turns this off
-        suppressed |= dao.eroded_keys("for_you", now, view_cap=gp(store, "erosion_view_cap"),
-                                      cooldown_days=gp(store, "erosion_cooldown_days"))
+    hard = store.suppressed_keys("for_you", now) | dao.generated_track_keys()
     muted = store.muted_artists()
     # weighted fair queuing: each lane gets turns ∝ its learned weight (default 1.0 => round-robin)
     queues = [[list(rows), reason, lane, weights.get(f"lane:{lane}", 1.0), 0]
@@ -305,7 +362,7 @@ def for_you(store, now, limit=24, erode=True) -> list[ForYouItem]:
         q = max(live, key=lambda q: q[3] / (q[4] + 1))   # weight / (taken + 1)
         rows, reason, lane, _, _ = q
         r = rows.pop(0)
-        if r["key"] in seen or r["key"] in suppressed or r["artist"] in muted:
+        if r["key"] in seen or r["key"] in hard or r["artist"] in muted:
             seen.add(r["key"])
             continue
         seen.add(r["key"])
@@ -349,13 +406,102 @@ def comfort_listening(store, now, limit=24) -> list[ForYouItem]:
 def taste_sample(store, now, limit=8, pool_factor=8) -> list[ForYouItem]:
     """A random *slice* of the tracks that match the current taste model — backs the Taste page's
     'refresh sample'. Unlike for_you (a deterministic ranking), this draws a deeper matching pool and
-    samples from it, so every refresh is a new set even when the knobs are unchanged. erode=False:
-    judge the model's true fit, not the anti-staleness-filtered live feed.
+    samples from it, so every refresh is a new set even when the knobs are unchanged.
     """
-    pool = for_you(store, now, limit=limit * pool_factor, erode=False)
+    pool = for_you(store, now, limit=limit * pool_factor)
     if len(pool) <= limit:
         return pool
     return [pool[i] for i in sorted(random.sample(range(len(pool)), limit))]  # keep ranked order in-slice
+
+
+def roll_recipe(store, model, seed=None) -> dict:
+    """Roll a per-playlist theme for a generated-playlist model. Preference-weighted: facets are
+    sampled by your play-weighted genre/era distribution scaled by your stored axis weights, so
+    common facets come up often, the long tail occasionally surprises, and a muted facet never
+    rolls. Returns a Recipe (the model's input + what's stored/surfaced/re-run)."""
+    rng = random.Random(seed)
+    weights = store.get_weights()
+
+    def pick(dist, prefix):
+        items = [(k, share * weights.get(f"{prefix}:{k}", 1.0)) for k, share in dist.items()]
+        items = [(k, w) for k, w in items if w > 0]
+        if not items:
+            return None
+        r = rng.random() * sum(w for _, w in items)
+        acc = 0.0
+        for k, w in items:
+            acc += w
+            if r <= acc:
+                return k
+        return items[-1][0]
+
+    genre = pick(taste_breadth(store)["families"], "genre")
+    era = pick(dict(era_distribution(store)), "era")
+    facets = {}
+    if genre:
+        facets["genres"] = [genre]
+    if era:
+        facets["eras"] = [era]
+    axis = {a: w for a, w in weights.items() if a.split(":", 1)[0] in ("genre", "era", "artist")}
+    return {"model": model, "facets": facets, "params": {},
+            "dj": {"stickiness": round(rng.random(), 2), "seed": rng.randint(0, 2**31 - 1)},
+            "weights": axis}
+
+
+def theme_filter(store, items, facets, limit=None):
+    """Focus a model's candidate items on the rolled theme: items whose genre family / decade match
+    the recipe come first, the rest follow (so the card still fills if the theme is thin). Items are
+    ForYouItems (use .key). A no-op for un-keyed/un-tagged candidates (e.g. fresh songs)."""
+    fam_want, era_want = set(facets.get("genres", [])), set(facets.get("eras", []))
+    if not fam_want and not era_want:
+        return list(items)
+    keys = [i.key for i in items if getattr(i, "key", "")]
+    dao = RecDao(store)
+    genres, decades = dao.track_genres(keys), dao.track_decades(keys)
+
+    def matches(i):
+        fam = genre_map.family(genres[i.key]) if getattr(i, "key", "") in genres else None
+        g_ok = (not fam_want) or (fam in fam_want)
+        e_ok = (not era_want) or (decades.get(getattr(i, "key", "")) in era_want)
+        return g_ok and e_ok
+
+    hit = [i for i in items if matches(i)]
+    miss = [i for i in items if not matches(i)]
+    out = hit + miss
+    return out[:limit] if limit else out
+
+
+def versioned_title(store, prefix) -> str:
+    """'{prefix} #{n}', where n increments over existing playlists sharing that prefix — so every
+    regenerate of a type that day gets its own version (e.g. 'Fresh songs - June 21 2026 #2')."""
+    n = 1 + sum(1 for p in store.get_playlists() if p.title.startswith(prefix))
+    return f"{prefix} #{n}"
+
+
+def dj_order(tracks, stickiness=0.0, seed=0):
+    """Order a chosen track set like a DJ. Start from a seeded shuffle, then greedily (a) avoid
+    back-to-back same-artist tracks and (b) — scaled by `stickiness` in [0,1] — prefer smooth genre
+    transitions: 0 = essentially a shuffle, 1 = careful genre segues using the genre map. Pure;
+    returns a new list that is a permutation of `tracks`. Items need 'artist' and 'genre' keys.
+    """
+    items = list(tracks)
+    if len(items) <= 2:
+        return items
+    rng = random.Random(seed)
+    rng.shuffle(items)
+    out = [items.pop(0)]
+    while items:
+        last = out[-1]
+
+        def score(c):
+            same = 5.0 if (c.get("artist") and c.get("artist") == last.get("artist")) else 0.0
+            lg, cg = last.get("genre") or "", c.get("genre") or ""
+            gd = genre_map.distance(lg, cg) if (lg and cg) else 0.0
+            return same + stickiness * gd + (1.0 - stickiness) * rng.random()
+
+        items.sort(key=score)
+        out.append(items.pop(0))
+    return out
 
 
 def _rotation_reason(n) -> str:
@@ -386,11 +532,12 @@ def new_albums_from_favorites(ctx, limit_artists=10, limit=18) -> list[dict]:
     return out
 
 
-def fresh_songs(ctx, limit=10) -> list[dict]:
+def fresh_songs(ctx, limit=12) -> list[dict]:
     """Outward (Phase 2): songs from YTM radios seeded by your top tracks that you don't own.
 
     Uses the client (network) — runs in the background worker, never per request. Degrades to []
-    with no client/network. Spec §8 '10 fresh songs not in your library'."""
+    with no client/network. limit matches the Home proto-card size (PROTO_SIZE) so the Fresh card
+    can actually fill, rather than topping out short."""
     from yt_playlist.matching import identity_key
     from yt_playlist.thumbnails import best_thumb
     client = next(iter((ctx.client_provider() or {}).values()), None)
@@ -523,8 +670,6 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     familiar = {a["artist"] for a in store.top_artists(rec_params.get_param(store, "explore_top_artists"))}
     dao = RecDao(store)
     suppressed = (store.suppressed_keys("for_you", now)
-                  | dao.eroded_keys("explore", now, view_cap=rec_params.get_param(store, "erosion_view_cap"),
-                                    cooldown_days=rec_params.get_param(store, "erosion_cooldown_days"))
                   | dao.generated_track_keys())                 # don't re-offer saved-proto tracks
     muted = store.muted_artists()
     cand = [keys[i] for i in order[:limit * 12]]
@@ -705,14 +850,14 @@ def take_action(store, now, auth_expired) -> list[ActionItem]:
             f"{e['gaps']} of {e['total']} tracks are missing genre tags — and it's one of your "
             f"most-played playlists ({e['plays']} plays). Enriching it sharpens recommendations, "
             "since recs lean on genre and year.",
-            "Enrich", f"/playlist/{e['id']}", thumbnail=e["thumbnail"], key=f"enrich:{e['id']}",
+            "Enrich", f"/playlist/{e['id']}?enrich=1", thumbnail=e["thumbnail"], key=f"enrich:{e['id']}",
             badge=f"{e['gaps']}/{e['total']}"))
     for e in store.album_enrichment_candidates(limit=3):
         enrich.append(ActionItem(
             "enrich", "low", e["title"],
             f"{e['gaps']} of {e['total']} tracks on this saved album are missing genre tags. "
             "Enriching it sharpens recommendations, since the model now leans on these tracks too.",
-            "Enrich", f"/album?browse={e['browse_id']}", thumbnail=e["thumbnail"],
+            "Enrich", f"/album?browse={e['browse_id']}&enrich=1", thumbnail=e["thumbnail"],
             key=f"enrich-album:{e['browse_id']}", badge=f"{e['gaps']}/{e['total']}"))
     items += [i for i in enrich if i.key not in snoozed][:3]
 

@@ -10,6 +10,23 @@ def _client(store):
     return TestClient(app, base_url="http://127.0.0.1")
 
 
+def test_home_visit_ticks_card_rotation_but_previews_dont(store):
+    """A genuine Home visit advances each card's rotation counter once; steer/stance previews and the
+    feed fragment re-render the same epoch without ticking — so tuning your taste never churns cards."""
+    from yt_playlist.rec_dao import RecDao
+    c = _client(store)
+    dao = RecDao(store)
+    assert dao.card_views("wheelhouse") == 0
+    c.get("/")
+    c.get("/")
+    assert dao.card_views("wheelhouse") == 2 and dao.card_views("new_artists") == 2   # all cards tick
+    c.post("/home/stance", data={"stance": "explore"})    # previews must not advance rotation
+    c.post("/home/steer", data={"axis": "genre:Rock", "weight": "1.5"})
+    c.get("/home/feed")
+    c.get("/home/fresh")                                   # lazy re-fetch (e.g. from a steer) — read-only
+    assert dao.card_views("wheelhouse") == 2 and dao.card_views("fresh") == 2
+
+
 def test_home_is_default_route(store):
     c = _client(store)
     r = c.get("/")

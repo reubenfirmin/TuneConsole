@@ -8,7 +8,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
-from yt_playlist import discogs, lastfm, musicbrainz
+from yt_playlist import discogs, lastfm, musicbrainz, recommend
 from yt_playlist.analysis import SYSTEM_PLAYLIST_IDS
 
 
@@ -29,11 +29,18 @@ def build(ctx) -> APIRouter:
             request, "_partials/error_toast.html", {"message": message},
             status_code=422, headers={"HX-Reswap": "none"})
 
+    def _is_generated(pid):
+        from yt_playlist.repos.rec_query import GENERATED_GROUP
+        pl = store.get_playlist(pid)
+        return pl is not None and store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP
+
     def _track_row(request, pid, video_id):
         # Re-render one track's <tr> (the shared swap unit for manual edits and enrich).
+        gen = _is_generated(pid)
         for i, t in enumerate(store.playlist_tracks_detail(pid), start=1):
             if t["video_id"] == video_id:
-                return templates.TemplateResponse(request, "_partials/track_row.html", {"t": t, "idx": i})
+                return templates.TemplateResponse(request, "_partials/track_row.html",
+                                                  {"t": t, "idx": i, "is_generated": gen})
         return Response(status_code=204)         # row no longer present — nothing to swap
 
     @router.get("/playlists")
@@ -69,14 +76,20 @@ def build(ctx) -> APIRouter:
         labels = {i.id: i.label for i in store.get_identities()}
         tracks = store.playlist_tracks_detail(pid)
         from yt_playlist.repos.rec_query import GENERATED_GROUP
+        is_generated = store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP
         return templates.TemplateResponse(request, "playlist.html", {
             "pl": pl, "tracks": tracks, "identity": labels.get(pl.identity_id, "?"),
-            "is_generated": store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP,
+            "is_generated": is_generated,
+            "facets": recommend.playlist_facets(store, pid) if is_generated else None,
+            "mood_state": recommend.playlist_mood_state(store, pid, now_fn()) if is_generated else 0,
+            "recipe": store.get_recipe(pl.ytm_playlist_id) if is_generated else None,
             "kind": store.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),
             # autosuggest = the editable whitelist plus whatever genres already exist in the library
             "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
             "active_job": ctx.jobs.find_active(pid),     # an in-progress enrichment to rejoin, if any
+            # arrived via a home "Enrich" CTA — tint the enrich icons CTA-green so it's clear what to click
+            "enrich_hint": request.query_params.get("enrich") == "1",
         })
 
     @router.get("/playlist/{pid}/share.txt")
@@ -177,6 +190,7 @@ def build(ctx) -> APIRouter:
         else:
             row_tmpl = templates.env.get_template("_partials/track_row.html")
             rows = store.playlist_tracks_detail(job.playlist_id) if job.playlist_id is not None else []
+        gen_flag = _is_generated(job.playlist_id) if job.playlist_id is not None else False
         base, idx_of = {}, {}
         for i, t in enumerate(rows, start=1):
             base[t["video_id"]] = t
@@ -191,7 +205,7 @@ def build(ctx) -> APIRouter:
                 t["genre"] = ev["genre"]
             if "year" in ev:
                 t["year"] = ev["year"]
-            return {**ev, "row_html": row_tmpl.render(t=t, idx=idx_of[vid])}
+            return {**ev, "row_html": row_tmpl.render(t=t, idx=idx_of[vid], is_generated=gen_flag)}
 
         async def gen():
             sent = 0

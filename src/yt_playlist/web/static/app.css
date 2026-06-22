@@ -421,6 +421,10 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 .head-icon:hover { color: var(--accent); background: var(--surface-2); transform: translateY(-1px); }
 .head-icon.on, .head-icon:disabled { color: var(--accent-2); transform: none; }
 .head-icon:disabled { cursor: default; }
+/* Arrived from a home "Enrich" CTA: the enrich buttons (the share icon is an <a>) glow CTA-green so
+   it's obvious what to click. Drops once a source starts running (.on) or is unavailable (:disabled). */
+.head-tools.enrich-hint button.head-icon:not(.on):not(:disabled) { color: #15e98c; }
+.head-tools.enrich-hint button.head-icon:not(.on):not(:disabled):hover { color: #6bffab; }
 
 /* enrichment progress strip below the header */
 .enrich-strip { display: flex; align-items: center; gap: 0.8rem; margin: -0.6rem 0 1.6rem; }
@@ -890,6 +894,30 @@ button.htmx-request .check-busy { display: inline; }
   border: 1px solid var(--border-2); border-radius: 999px; padding: 0.35rem 0.8rem; box-shadow: none; }
 .mood-btn:hover { background: var(--accent); box-shadow: none; }
 .mood-note { color: var(--dim); font-size: 0.76rem; margin: 0.3rem 0 0; line-height: 1.4; }
+
+/* Transient feedback control panel (Generated playlist). Generous margins so the enriching UI
+   above and the track table below both keep clear room around it. */
+.fb-panel { margin: 1.2rem 0; padding: 1rem 1.1rem; border: 1px dashed var(--border-2);
+  border-radius: var(--radius-sm); background: var(--accent-soft); }
+.fb-simple { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem; }
+.fb-q { font-weight: 650; font-size: 0.92rem; color: var(--text); }
+.fb-btns { display: inline-flex; flex-wrap: wrap; gap: 0.5rem; margin-left: auto; }
+.mood-btn.fb-sel { background: var(--accent); color: #fff; border-color: var(--accent); }
+.rowmenu-sep { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint);
+  padding: 0.35rem 0.6rem 0.15rem; border-top: 1px solid var(--border); margin-top: 0.2rem; }
+.fb-detailed { margin-top: 0.8rem; }
+.fb-detailed > summary { cursor: pointer; color: var(--accent-2); font-weight: 600; font-size: 0.85rem; }
+.fb-sub { color: var(--dim); font-size: 0.8rem; margin: 0.5rem 0 0.6rem; }
+.fb-group { margin: 0.5rem 0 0.8rem; }
+.fb-group .fb-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--faint); }
+.fb-lever { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.3rem; }
+.fb-name { flex: 1; font-size: 0.85rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-lever button { background: none; border: 1px solid var(--border-2); color: var(--faint);
+  border-radius: 6px; padding: 0.05rem 0.55rem; font-size: 0.8rem; cursor: pointer; }
+.fb-lever button.fb-more:hover { color: #fff; background: var(--accent); border-color: var(--accent); }
+.fb-lever button.fb-less:hover { color: #fff; background: var(--danger); border-color: var(--danger); }
+.fb-lever button.fb-done { color: #fff; background: var(--accent-2); border-color: var(--accent-2); }
+.fb-note { color: var(--dim); font-size: 0.76rem; margin: 0.6rem 0 0; line-height: 1.4; }
 .mood-done { background: rgba(91,183,164,0.1); border-style: solid; border-color: transparent; }
 .eyebrow-ok { color: var(--teal); }
 .eyebrow-warn { color: var(--danger); }
@@ -967,3 +995,8 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .promote-btn { margin-left: 0.6rem; background: var(--accent-soft); border: 1px solid var(--border-2);
   color: var(--accent-2); border-radius: 6px; padding: 0.05rem 0.5rem; font-size: 0.8rem; cursor: pointer; }
 .promote-btn:hover { border-color: var(--accent); color: #fff; background: var(--accent); }
+
+/* "Made from" recipe line on a generated playlist's feedback panel */
+.fb-recipe { margin: 0 0 0.6rem; font-size: 0.85rem; color: var(--dim); }
+.fb-recipe .fb-chip { display: inline-block; background: var(--accent-soft); color: var(--accent-2);
+  border-radius: 6px; padding: 0.05rem 0.5rem; margin: 0 0.15rem; }

@@ -26,33 +26,36 @@ def _seed_generated(store, iid, n=3):
     return pid, "PLG", {identity_key(f"G{i}", "GenArt") for i in range(n)}
 
 
-def test_generated_excluded_until_played_or_regrouped(store):
+def test_generated_excluded_until_promoted(store):
     iid = store.upsert_identity("main", "cred", None, True)
     pid, ytm, gkeys = _seed_generated(store, iid, n=2)
     dao = RecDao(store)
 
     assert dao.excluded_playlist_ids() == {pid}                 # quarantined while "Generated"
 
-    store.set_playlist_group(ytm, "Faves")                      # re-grouping = endorsement
-    assert dao.excluded_playlist_ids() == set()
-
-    store.set_playlist_group(ytm, "Generated")                  # back to quarantine
-    assert dao.excluded_playlist_ids() == {pid}
-    for _ in range(2):                                          # avg 2 plays/track => graduates
+    # Playing it does NOT graduate it — adoption is an explicit act, not a side effect of listening.
+    for _ in range(5):
         store.add_history_snapshot(iid, 1.0, list(gkeys))
+    assert dao.excluded_playlist_ids() == {pid}                 # still quarantined despite heavy plays
+
+    store.set_playlist_group(ytm, "Faves")                      # promotion out of the group = adoption
     assert dao.excluded_playlist_ids() == set()
 
+    store.set_playlist_group(ytm, "Generated")                  # back into quarantine
+    assert dao.excluded_playlist_ids() == {pid}
 
-def test_unplayed_generated_tracks_in_no_basket_then_graduate(store):
+
+def test_generated_tracks_in_no_basket_until_promoted(store):
     iid = store.upsert_identity("main", "cred", None, True)
-    _pid, _ytm, gkeys = _seed_generated(store, iid, n=3)
+    _pid, ytm, gkeys = _seed_generated(store, iid, n=3)
     dao = RecDao(store)
 
-    keys = {k for b in dao.rec_baskets() for k in b}
-    assert not (keys & gkeys)                                   # unplayed generated songs pollute nothing
-
     for _ in range(2):
-        store.add_history_snapshot(iid, 1.0, list(gkeys))      # now genuinely played
+        store.add_history_snapshot(iid, 1.0, list(gkeys))      # even played, while still "Generated"...
+    keys = {k for b in dao.rec_baskets() for k in b}
+    assert not (keys & gkeys)                                   # ...generated songs pollute no basket
+
+    store.set_playlist_group(ytm, "Faves")                     # promote it into the collection
     keys2 = {k for b in dao.rec_baskets() for k in b}
     assert gkeys & keys2                                        # ...so they rejoin the signal
 
@@ -105,3 +108,19 @@ def test_home_renders_generated_cards(store):
     r = c.get("/")
     assert r.status_code == 200
     assert "More in your wheelhouse" in r.text and "Save &amp; play on YouTube" in r.text
+
+
+def test_create_generated_playlist_stores_recipe_and_versions(store):
+    from yt_playlist import executor
+    iid = store.upsert_identity("main", "cred", None, True)
+    fc = FakeClient()
+    tracks = [{"video_id": f"v{i}", "title": f"S{i}", "artist": "A" if i % 2 else "B"} for i in range(4)]
+    recipe = {"model": "fresh", "facets": {"genres": ["house"], "eras": ["2010"]},
+              "dj": {"stickiness": 0.0, "seed": 5}}
+    r1 = executor.create_generated_playlist(store, "Fresh songs - June 21 2026", list(tracks),
+                                            fc, now=1.0, identity_id=iid, recipe=recipe)
+    assert r1["title"] == "Fresh songs - June 21 2026 #1"          # versioned at save
+    assert store.get_recipe(r1["new_ytm"])["facets"]["genres"] == ["house"]   # recipe stored
+    r2 = executor.create_generated_playlist(store, "Fresh songs - June 21 2026", list(tracks),
+                                            fc, now=2.0, identity_id=iid, recipe=recipe)
+    assert r2["title"] == "Fresh songs - June 21 2026 #2"          # next version that day

@@ -1,10 +1,12 @@
 """Album landing page — cover, track table, save/open, "create a playlist from this album", and
 (for saved albums folded into the library) genre/year enrichment with the same live flow as playlists."""
 import asyncio
+import re
 import threading
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from yt_playlist import discogs, lastfm, musicbrainz
 from yt_playlist.rec_dao import RecDao
@@ -42,7 +44,11 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001 - no client / network / parse all degrade gracefully
             ctx.logger.info("album fetch failed for %r (non-fatal)", browse_id)
         saved = browse_id in RecDao(store).saved_album_ids()
-        tracks = store.album_tracks_detail(browse_id) if browse_id else []
+        # The editable "folded-in library" table is only for SAVED albums (whose full track list has
+        # been materialized for enrichment). For an unsaved album, regular sync may still have stamped
+        # one incidental track with this album_browse_id (because it's in one of your playlists) — that
+        # partial subset must NOT shadow the full live-fetched album, so only read it when saved.
+        tracks = store.album_tracks_detail(browse_id) if (browse_id and saved) else []
         # Fold a saved album's tracks into the library ON DEMAND (using the tracks we just fetched
         # live), so enrichment is available the moment you open it — no waiting for a full sync.
         if saved and not tracks and album and album.get("tracks"):
@@ -61,7 +67,39 @@ def build(ctx) -> APIRouter:
             "album": album, "browse_id": browse_id, "tracks": tracks, "saved": saved,
             "gaps": sum(1 for t in tracks if not t["genre"]),
             "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
-            "lastfm_configured": lastfm.api_key(store) is not None})
+            "lastfm_configured": lastfm.api_key(store) is not None,
+            # arrived via a home "Enrich" CTA — tint the enrich icons CTA-green so it's clear what to click
+            "enrich_hint": request.query_params.get("enrich") == "1"})
+
+    @router.get("/album/{browse}/share.txt")
+    def album_share(browse: str):
+        """Download the album as a plain .txt — one song URL per line — for easy sharing. Uses the
+        folded-in library tracks when saved, else the live album fetch (so unsaved albums share too)."""
+        title, vids = None, []
+        # Only trust the library track list for SAVED albums (whose full track list is materialized).
+        # For an unsaved album, album_tracks_detail may hold a single incidental track stamped with
+        # this browse_id by playlist sync — sharing that would drop the rest of the album, so fetch live.
+        if browse in RecDao(store).saved_album_ids():
+            tracks = store.album_tracks_detail(browse)
+            vids = [t["video_id"] for t in tracks if t.get("video_id")]
+            meta = next((a for a in store.get_saved_albums() if a["browse"] == browse), {})
+            title = meta.get("title") or (tracks[0]["album"] if tracks else None)
+        if not vids:
+            try:
+                client = next(iter((ctx.client_provider() or {}).values()), None)
+                a = client.get_album(browse) if client else {}
+                title = title or a.get("title")
+                vids = [t.get("videoId") for t in (a.get("tracks") or []) if t.get("videoId")]
+            except Exception:  # noqa: BLE001 - no client / network all degrade to a 404
+                ctx.logger.info("album share fetch failed for %r (non-fatal)", browse)
+        if not vids:
+            raise HTTPException(status_code=404, detail="album not found")
+        lines = [f"https://music.youtube.com/watch?v={v}" for v in vids]
+        safe = re.sub(r'[\\/:*?"<>|]', "_", title or "album").strip() or "album"
+        ascii_name = safe.encode("ascii", "ignore").decode() or "album"
+        return PlainTextResponse("\n".join(lines) + "\n", headers={
+            "Content-Disposition": f'attachment; filename="{ascii_name}.txt"; '
+                                   f"filename*=UTF-8''{quote(safe)}.txt"})
 
     def _album_row(request, browse, vid):
         for i, t in enumerate(store.album_tracks_detail(browse), start=1):

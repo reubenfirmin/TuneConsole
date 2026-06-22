@@ -21,8 +21,7 @@ def test_discover_building_polls_when_worker_busy(store):
 
 def test_discover_serves_cached_with_no_poll_when_idle(store):
     app = _app(store)
-    RecDao(store).put_proposals("discover", [{"artist": "X", "title": "LP", "year": "2024",
-                                              "browse_id": "B", "thumbnail": None}], now=1.0)
+    store.upsert_discovered_album("B", "X", "LP", "2024", None, now=1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     html = c.get("/home/discover").text
     assert "LP" in html

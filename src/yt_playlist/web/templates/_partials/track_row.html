@@ -66,6 +66,13 @@
         Find alternate versions…</button>
       <button type="button" class="danger" data-vid="{{ t.video_id }}" data-title="{{ t.title }}"
               @click="removeTrack($event.currentTarget.dataset.vid, $event.currentTarget.dataset.title)">Remove from playlist</button>
+      {% if is_generated and t.identity_key %}
+      <div class="rowmenu-sep">Tune your Home picks (for a few hours)</div>
+      <button type="button" hx-post="/recs/mood" hx-swap="none" @click="openMenu = null"
+              hx-vals='{"keys": {{ [t.identity_key]|tojson|tojson }}, "dir": 1}'>🔥 More like this</button>
+      <button type="button" hx-post="/recs/mood" hx-swap="none" @click="openMenu = null"
+              hx-vals='{"keys": {{ [t.identity_key]|tojson|tojson }}, "dir": -1}'>🙅 Less like this</button>
+      {% endif %}
     </div>
   </td>
 </tr>

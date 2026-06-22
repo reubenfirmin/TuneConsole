@@ -56,12 +56,10 @@ PARAMS = [
     ParamSpec("explore_top_artists", "Explore skips top N artists", "discovery",
               "Explore stays novel by skipping your most-played N artists.",
               0, 100, 1, 25, integer=True),
-    ParamSpec("erosion_view_cap", "Erosion view cap", "discovery",
-              "How many times a suggestion can appear before it's rested to keep things fresh.",
+    ParamSpec("erosion_view_cap", "Card rotation cap", "discovery",
+              "How many times you can reload Home before each card rotates to a fresh set of "
+              "suggestions. Lower = the cards turn over faster.",
               1, 10, 1, 3, integer=True),
-    ParamSpec("erosion_cooldown_days", "Erosion cooldown (days)", "discovery",
-              "How long a rested suggestion stays hidden before it can return.",
-              1, 90, 1, 14, integer=True),
     ParamSpec("palette_absence_penalty", "Out-of-palette penalty", "discovery",
               "How hard to penalize genres absent from your library (scaled by how eclectic you "
               "are). Higher = stick closer to genres you already have.",

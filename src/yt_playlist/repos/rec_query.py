@@ -8,12 +8,11 @@ grouped here because the generators all depend on the same exclusion logic (excl
 from yt_playlist.repos.base import Repo, synchronized
 
 # Auto-assigned group for playlists this app generates from recommendations. Anything in this group
-# is quarantined from every taste signal (groupings/analysis/scores) until it "becomes highly
-# played" — so the engine never feeds on its own suggestions. A generated playlist graduates either
-# by being moved out of this group, or by its tracks accumulating real plays: total history plays
-# >= GRADUATE_PLAYS_PER_TRACK x track_count (avg this many plays per track).
+# is quarantined from every taste signal (groupings/analysis/scores) — so the engine never feeds on
+# its own suggestions. A generated playlist graduates ONLY when you promote it: move it out of this
+# group (it then counts as one of your real playlists). Playing it does not graduate it — adoption is
+# an explicit act, so a saved suggestion you never endorse can't quietly reshape your taste model.
 GENERATED_GROUP = "Generated"
-GRADUATE_PLAYS_PER_TRACK = 2
 
 
 class RecQueryRepo(Repo):
@@ -200,23 +199,15 @@ class RecQueryRepo(Repo):
 
     # --- generated-playlist quarantine (so the engine never feeds on its own suggestions) ---
     @synchronized
-    def excluded_playlist_ids(self, factor=GRADUATE_PLAYS_PER_TRACK, group=GENERATED_GROUP) -> set:
-        """DB ids of generated playlists that haven't graduated into the rec engine — to be hidden
-        from every taste signal. A generated playlist (group == `group`) is excluded until it earns
-        its way in: you move it out of the group (so it's no longer generated), OR its tracks rack up
-        real plays — total history plays >= factor x track_count. An empty/never-played one stays out.
-        """
+    def excluded_playlist_ids(self, group=GENERATED_GROUP) -> set:
+        """DB ids of generated playlists still quarantined from every taste signal. A generated
+        playlist (group == `group`) is excluded until you promote it — move it out of the group so
+        it counts as one of your real playlists. Playing it does NOT graduate it; only the explicit
+        move into your library does (see /playlist/{id}/promote)."""
         rows = self.conn.execute(
-            "WITH gen AS (SELECT p.id id FROM playlists p "
-            "  JOIN playlist_group g ON g.ytm=p.ytm_playlist_id WHERE g.name=:grp), "
-            " plays AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key), "
-            " graded AS (SELECT gen.id FROM gen "
-            "   JOIN playlist_tracks pt ON pt.playlist_id=gen.id "
-            "   JOIN tracks t ON t.id=pt.track_id "
-            "   LEFT JOIN plays ON plays.identity_key=t.identity_key "
-            "   GROUP BY gen.id HAVING SUM(COALESCE(plays.c,0)) >= :factor*COUNT(*)) "
-            "SELECT id FROM gen WHERE id NOT IN (SELECT id FROM graded)",
-            {"grp": group, "factor": factor}).fetchall()
+            "SELECT p.id id FROM playlists p "
+            "JOIN playlist_group g ON g.ytm=p.ytm_playlist_id WHERE g.name=:grp",
+            {"grp": group}).fetchall()
         return {r["id"] for r in rows}
 
     @synchronized
@@ -230,21 +221,19 @@ class RecQueryRepo(Repo):
             "JOIN playlist_group g ON g.ytm=p.ytm_playlist_id WHERE g.name=?", (group,))}
 
     @synchronized
-    def generated_only_unplayed_keys(self, factor=GRADUATE_PLAYS_PER_TRACK, group=GENERATED_GROUP) -> set:
-        """Track keys that live ONLY in excluded generated playlists and have no plays — mirrors
-        excluded_playlist_ids at the track level, so an unplayed generated song pollutes no embedding
-        basket (album/artist/genre/year) either. Once it's played, or also lands in a real playlist,
-        it counts again."""
-        excl = self.excluded_playlist_ids(factor, group)
+    def generated_only_keys(self, group=GENERATED_GROUP) -> set:
+        """Track keys that live ONLY in quarantined generated playlists — mirrors excluded_playlist_ids
+        at the track level, so a generated song pollutes no embedding basket (album/artist/genre/year/
+        session) until its playlist is promoted. Once the playlist is promoted, or the track also lands
+        in a real playlist, it counts again. Plays don't lift the quarantine — promotion does."""
+        excl = self.excluded_playlist_ids(group)
         if not excl:
             return set()
         qs = ",".join("?" * len(excl))
         rows = self.conn.execute(
-            "WITH plays AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key) "
             "SELECT t.identity_key k FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
             "GROUP BY t.identity_key "
-            f"HAVING SUM(CASE WHEN pt.playlist_id IN ({qs}) THEN 0 ELSE 1 END)=0 "
-            "  AND COALESCE((SELECT c FROM plays WHERE identity_key=t.identity_key),0)=0",
+            f"HAVING SUM(CASE WHEN pt.playlist_id IN ({qs}) THEN 0 ELSE 1 END)=0",
             list(excl)).fetchall()
         return {r["k"] for r in rows}
 
@@ -262,7 +251,7 @@ class RecQueryRepo(Repo):
             "SELECT DISTINCT identity_key k FROM tracks "
             "WHERE (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
             "AND (duration_s IS NULL OR duration_s <= 1200)")}
-        good -= self.generated_only_unplayed_keys()      # quarantine unplayed generated songs
+        good -= self.generated_only_keys()               # quarantine generated songs until promoted
         excl = self.excluded_playlist_ids()              # ...and the generated playlists themselves
         pl_where = (" WHERE pt.playlist_id NOT IN (%s)" % ",".join(str(i) for i in excl)) if excl else ""
         out = []

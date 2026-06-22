@@ -426,13 +426,13 @@ function syncPanel() {
       this.lines.push({ text: ev.text || '', pip, cls });
       this.$nextTick(() => { const l = this.$refs.log; if (l) l.scrollTop = l.scrollHeight; });
     },
-    async start() {
+    async start(endpoint = '/sync') {
       if (this.running) return;
       this.running = true; this.failed = false; this.lines = [];
       this.push({ type: 'info', text: 'starting sync…' });
       let job;
       try {
-        const r = await fetch('/sync', { method: 'POST' });
+        const r = await fetch(endpoint, { method: 'POST' });
         job = (await r.json()).job_id;
       } catch (e) { this.push({ type: 'err', text: String(e) }); this.running = false; this.failed = true; return; }
       const es = new EventSource(`/sync/events/${job}`);

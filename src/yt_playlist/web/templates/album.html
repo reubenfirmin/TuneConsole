@@ -11,10 +11,11 @@
 {# enrichPanel drives the live genre/year enrichment for the folded-in tracks (pid unused for albums;
    enrichBase scopes the start POST to this album). #}
 <div x-data="enrichPanel(0, {{ 'true' if lastfm_configured else 'false' }}, 0, '', '/album/{{ browse_id }}')">
-<div class="artist-head pl-head">
-  {% if album.thumbnail %}<span class="pl-art"><img src="{{ album.thumbnail }}" alt=""
+<div class="artist-head pl-head" x-data="{ artH: 0 }"
+     x-init="const fit = () => artH = $refs.main.offsetHeight; fit(); new ResizeObserver(fit).observe($refs.main)">
+  {% if album.thumbnail %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ album.thumbnail }}" alt=""
        referrerpolicy="no-referrer" onerror="this.closest('.pl-art').remove()"></span>{% endif %}
-  <div class="pl-headmain">
+  <div class="pl-headmain" x-ref="main">
     <span class="eyebrow">Album</span>
     <h1>{{ album.title }}</h1>
     <p class="pl-stats">
@@ -33,11 +34,21 @@
       </form>{% endif %}
     </div>
   </div>
-  {% if tracks %}
-  <div class="head-tools">
+  {# Enrichment runs over the album's tracks once they're folded into the library, which happens when
+     you save it — so the icons are always shown (parity with playlists) but disabled until saved. #}
+  <div class="head-tools{% if enrich_hint %} enrich-hint{% endif %}">
+    <a class="head-icon" href="/album/{{ browse_id }}/share.txt" download="{{ album.title }}.txt"
+       title="Share — download one song URL per line as a .txt" aria-label="Share album">
+      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+        <line x1="8.6" y1="10.7" x2="15.4" y2="6.3"/><line x1="8.6" y1="13.3" x2="15.4" y2="17.7"/>
+      </svg>
+    </a>
     <button type="button" class="head-icon" :class="{ on: running && source === 'musicbrainz' }"
-            @click="start('musicbrainz')" :disabled="running"
-            title="Enrich genre &amp; year from MusicBrainz" aria-label="Enrich via MusicBrainz">
+            @click="start('musicbrainz')" :disabled="running{% if not saved %} || true{% endif %}"
+            title="{{ 'Save to library first to enrich genre &amp; year' if not saved else 'Enrich genre &amp; year from MusicBrainz' }}"
+            aria-label="Enrich via MusicBrainz">
       <span class="spinner" x-show="running && source === 'musicbrainz'" x-cloak></span>
       <svg x-show="!(running && source === 'musicbrainz')" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
            stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -47,8 +58,8 @@
       </svg>
     </button>
     <button type="button" class="head-icon" :class="{ on: running && source === 'lastfm' }"
-            @click="lastfmClick()" :disabled="running"
-            :title="lastfmConfigured ? 'Enrich genre &amp; year from Last.fm' : 'Set a Last.fm API key to enrich from Last.fm'"
+            @click="lastfmClick()" :disabled="running{% if not saved %} || true{% endif %}"
+            :title="{% if not saved %}'Save to library first to enrich genre &amp; year'{% else %}(lastfmConfigured ? 'Enrich genre &amp; year from Last.fm' : 'Set a Last.fm API key to enrich from Last.fm'){% endif %}"
             aria-label="Enrich via Last.fm">
       <span class="spinner" x-show="running && source === 'lastfm'" x-cloak></span>
       <svg x-show="!(running && source === 'lastfm')" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
@@ -58,8 +69,9 @@
       </svg>
     </button>
     <button type="button" class="head-icon" :class="{ on: running && source === 'discogs' }"
-            @click="start('discogs')" :disabled="running"
-            title="Enrich genre &amp; year from Discogs" aria-label="Enrich via Discogs">
+            @click="start('discogs')" :disabled="running{% if not saved %} || true{% endif %}"
+            title="{{ 'Save to library first to enrich genre &amp; year' if not saved else 'Enrich genre &amp; year from Discogs' }}"
+            aria-label="Enrich via Discogs">
       <span class="spinner" x-show="running && source === 'discogs'" x-cloak></span>
       <svg x-show="!(running && source === 'discogs')" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
            stroke-width="1.6" aria-hidden="true">
@@ -68,7 +80,6 @@
       </svg>
     </button>
   </div>
-  {% endif %}
 </div>
 
 {% if tracks %}

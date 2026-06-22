@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS rec_mood (
   direction INTEGER NOT NULL,             -- +1 = more of this vibe, -1 = not my mood
   keys TEXT NOT NULL                      -- JSON list of the playlist's track identity_keys (the seed)
 );
+CREATE TABLE IF NOT EXISTS rec_recipes (
+  playlist_ytm TEXT PRIMARY KEY,          -- the generated playlist's YouTube id
+  recipe TEXT NOT NULL,                   -- JSON: the rolled theme + params + dj seed + version
+  created_at REAL
+);
 """
 
 
@@ -38,6 +43,21 @@ class RecSurfaceRepo(Repo):
         super().__init__(db)
         with self._lock:
             self.conn.executescript(_SCHEMA)   # this DAO owns its tables (idempotent)
+
+    # --- recipes: the exact theme/params a generated playlist was made from (legible + re-runnable) ---
+    @synchronized
+    def set_recipe(self, playlist_ytm, recipe, now=None) -> None:
+        self.conn.execute(
+            "INSERT INTO rec_recipes(playlist_ytm, recipe, created_at) VALUES (?,?,?) "
+            "ON CONFLICT(playlist_ytm) DO UPDATE SET recipe=excluded.recipe, created_at=excluded.created_at",
+            (playlist_ytm, json.dumps(recipe), now))
+        self.conn.commit()
+
+    @synchronized
+    def get_recipe(self, playlist_ytm):
+        row = self.conn.execute("SELECT recipe FROM rec_recipes WHERE playlist_ytm=?",
+                                (playlist_ytm,)).fetchone()
+        return json.loads(row["recipe"]) if row else None
 
     # --- transient mood: short-lived, decaying tilt on the recommendation lanes (NOT permanent taste) ---
     @synchronized
@@ -59,33 +79,32 @@ class RecSurfaceRepo(Repo):
                 for r in self.conn.execute(
                     "SELECT created_at, direction, keys FROM rec_mood WHERE created_at >= ?", (cutoff,))]
 
-    # --- impressions (anti-staleness erosion) ---
+    # --- per-card rotation (the rec_impressions table, surface='card') ---
     @synchronized
-    def record_impressions(self, surface, keys, now, debounce_s=300) -> None:
-        """Count that these items were shown. Debounced: a re-show within debounce_s doesn't
-        re-count, so htmx lazy-load / polling don't inflate the view count."""
-        for k in keys:
-            row = self.conn.execute(
-                "SELECT views, last_shown FROM rec_impressions WHERE surface=? AND item_key=?",
-                (surface, k)).fetchone()
-            if row is None:
-                self.conn.execute(
-                    "INSERT INTO rec_impressions(surface,item_key,views,last_shown) VALUES (?,?,1,?)",
-                    (surface, k, now))
-            elif row["last_shown"] is None or now - row["last_shown"] >= debounce_s:
-                self.conn.execute(
-                    "UPDATE rec_impressions SET views=views+1, last_shown=? "
-                    "WHERE surface=? AND item_key=?", (now, surface, k))
+    def bump_card_view(self, card, now) -> int:
+        """Count one real view of a Home card (one row per card, surface='card') and return its new
+        total. Drives per-card rotation: a card holds its content for erosion_view_cap views, then
+        epoch = (views-1)//cap advances and it regenerates. Ticked once per genuine Home visit —
+        never on steer/stance previews — so tuning your taste model doesn't churn the cards."""
+        row = self.conn.execute(
+            "SELECT views FROM rec_impressions WHERE surface='card' AND item_key=?", (card,)).fetchone()
+        n = (row["views"] + 1) if row else 1
+        if row:
+            self.conn.execute("UPDATE rec_impressions SET views=?, last_shown=? "
+                              "WHERE surface='card' AND item_key=?", (n, now, card))
+        else:
+            self.conn.execute("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
+                              "VALUES('card',?,1,?)", (card, now))
         self.conn.commit()
+        return n
 
     @synchronized
-    def eroded_keys(self, surface, now, view_cap=3, cooldown_days=14) -> set:
-        """Items shown >= view_cap times whose cooldown hasn't elapsed — hide them to keep the
-        surface fresh, then recycle once the cooldown passes."""
-        cutoff = now - cooldown_days * 86400
-        return {r["item_key"] for r in self.conn.execute(
-            "SELECT item_key FROM rec_impressions WHERE surface=? AND views>=? AND last_shown>?",
-            (surface, view_cap, cutoff))}
+    def card_views(self, card) -> int:
+        """Current view total for a Home card (0 if never shown) — read-only, so previews and
+        re-renders can compute the card's rotation epoch without advancing it."""
+        row = self.conn.execute(
+            "SELECT views FROM rec_impressions WHERE surface='card' AND item_key=?", (card,)).fetchone()
+        return row["views"] if row else 0
 
     # --- materialized proposals (rec worker writes, routes read last-good) ---
     @synchronized

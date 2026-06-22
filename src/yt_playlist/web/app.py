@@ -91,6 +91,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
               templates=templates, jobs=SyncJobs(), setup=setup)
     from yt_playlist.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx)                            # decoupled rec computation
+    ctx.rec_worker.start_ticker()                             # periodic background discovery scan
     templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync
     app.state.ctx = ctx                                        # exposed for tests/introspection
     for router in build_all(ctx):

@@ -1,4 +1,6 @@
 """Recommendation-serving endpoints, returned as lazy htmx fragments."""
+import json
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -77,17 +79,33 @@ def build(ctx) -> APIRouter:
 
     @router.post("/recs/mood")
     async def recs_mood(request: Request):
-        """Transient mood feedback on a generated playlist: tilts the Home lanes toward (+1) or away
-        from (-1) this mix's vibe for a few hours, then decays. NOT a permanent taste signal."""
+        """Transient mood feedback: tilts the Home lanes toward (+) or away (-) from a vibe for a few
+        hours, then decays. NOT a permanent taste signal. Two shapes:
+          - whole-mix (simple panel): `pid` -> seeds with the whole playlist; swaps in a confirmation.
+          - facet/track levers: explicit `keys` (JSON list) of just that subset; returns a light ack.
+        `intensity=lot` doubles the magnitude (a stronger, still-transient tilt)."""
         form = await request.form()
         try:
-            pid, direction = int(form.get("pid")), int(form.get("dir", 1))
+            direction = int(form.get("dir", 1))
+        except (TypeError, ValueError):
+            return HTMLResponse("", status_code=422)
+        signed = (1 if direction >= 0 else -1) * (2 if form.get("intensity") == "lot" else 1)
+        keys_raw = form.get("keys")
+        if keys_raw:                                  # facet / per-track lever — tilt just this subset
+            try:
+                keys = json.loads(keys_raw)
+            except (ValueError, TypeError):
+                keys = []
+            if keys:
+                store.record_mood(keys, signed, now_fn())
+            return HTMLResponse("")
+        try:                                          # whole-mix simple buttons
+            pid = int(form.get("pid"))
         except (TypeError, ValueError):
             return HTMLResponse("", status_code=422)
         keys = store.get_playlist_track_keys(pid)
         if keys:
-            store.record_mood(keys, 1 if direction >= 0 else -1, now_fn())
-        return templates.TemplateResponse(request, "_partials/mood_panel.html",
-                                          {"pid": pid, "done": True, "dir": direction})
+            store.record_mood(keys, signed, now_fn())
+        return HTMLResponse("")                        # no swap — the panel stays put (Advanced reachable)
 
     return router

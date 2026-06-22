@@ -13,12 +13,32 @@ from yt_playlist.rec_dao import RecDao
 
 
 class RecWorker:
-    def __init__(self, ctx, debounce_s=2.0):
+    def __init__(self, ctx, debounce_s=2.0, discovery_tick_s=1800):
         self.ctx = ctx
         self.debounce_s = debounce_s
+        self.discovery_tick_s = discovery_tick_s   # background discovery scan cadence (~30 min)
         self._lock = threading.Lock()
         self._pending = False
         self._running = False
+        self._ticker_started = False
+
+    def start_ticker(self):
+        """Start the periodic background discovery scan (idempotent). A daemon timer runs one budgeted
+        discovery pass every discovery_tick_s, so the album/artist pools keep filling between syncs."""
+        with self._lock:
+            if self._ticker_started:
+                return
+            self._ticker_started = True
+        threading.Thread(target=self._tick_loop, daemon=True).start()
+
+    def _tick_loop(self):
+        from yt_playlist import discover
+        while True:
+            time.sleep(self.discovery_tick_s)
+            try:
+                discover.run_discovery(self.ctx, self.ctx.now_fn())
+            except Exception:  # noqa: BLE001 - a scan failure must never crash the ticker
+                self.ctx.logger.warning("discovery tick failed", exc_info=True)
 
     @property
     def busy(self):
@@ -82,11 +102,11 @@ class RecWorker:
         log.info("rec rebuild: starting")
         n = embed.build_and_store(store)
         log.info("rec rebuild: embedded %d vectors in %.1fs", n, time.monotonic() - t0)
+        # Materialize deeper pools than a single card shows, so each surface has several epochs of
+        # material to rotate through before it has to wrap.
         surfaces = (
             ("auto_playlists", lambda: recommend.auto_playlists(store, k=40)),
-            ("discover", lambda: recommend.new_albums_from_favorites(self.ctx)),
-            ("fresh_songs", lambda: recommend.fresh_songs(self.ctx)),
-            ("new_artists", lambda: discover.new_artists(self.ctx)),
+            ("fresh_songs", lambda: recommend.fresh_songs(self.ctx, limit=36)),
         )
         for surface, build in surfaces:
             ts = time.monotonic()
@@ -96,4 +116,11 @@ class RecWorker:
                 log.info("rec rebuild: %s → %d items in %.1fs", surface, len(items), time.monotonic() - ts)
             except Exception:  # noqa: BLE001 - one surface's failure must not starve the others
                 log.warning("rec rebuild: %s failed after %.1fs", surface, time.monotonic() - ts, exc_info=True)
+        # Outward discovery (new albums + new artists) is now an accumulating, scan-ledger-backed pass
+        # over ALL interested artists, a budgeted batch at a time — not a top-10 overwrite each sync.
+        try:
+            res = discover.run_discovery(self.ctx, now)
+            log.info("rec rebuild: discovery scanned %d artists", res.get("scanned", 0))
+        except Exception:  # noqa: BLE001
+            log.warning("rec rebuild: discovery pass failed", exc_info=True)
         log.info("rec rebuild: done in %.1fs", time.monotonic() - t0)

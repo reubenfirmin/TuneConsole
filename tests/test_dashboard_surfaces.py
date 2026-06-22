@@ -40,9 +40,8 @@ def test_library_clusters_are_saveable(store):
 
 def test_new_artists_render_with_thumbnail(store):
     _iid, c = _client(store)
-    RecDao(store).put_proposals("new_artists", [
-        {"artist": "Donato Dozzy", "score": 1.0, "because": ["Recondite"], "fits": ["Deep Focus"],
-         "thumbnail": "https://img/dozzy.jpg"}], now=1.0)
+    store.upsert_discovered_artist("Donato Dozzy", 1.0, ["Recondite"], ["Deep Focus"],
+                                  "https://img/dozzy.jpg", now=1.0)
     html = c.get("/home/new-artists").text
     assert "https://img/dozzy.jpg" in html          # graphical card uses the artist image
     assert "Donato Dozzy" in html

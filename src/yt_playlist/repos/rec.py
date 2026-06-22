@@ -14,7 +14,7 @@ RecRepo composes the three and delegates by attribute, so existing `RecDao(store
 from yt_playlist.repos.base import Repo
 from yt_playlist.repos.rec_model import RecModelRepo
 from yt_playlist.repos.rec_query import (  # noqa: F401  (re-exported for existing importers)
-    GENERATED_GROUP, GRADUATE_PLAYS_PER_TRACK, RecQueryRepo)
+    GENERATED_GROUP, RecQueryRepo)
 from yt_playlist.repos.rec_surface import RecSurfaceRepo
 
 

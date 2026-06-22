@@ -7,8 +7,7 @@ from tests.conftest import FakeClient
 
 def test_new_artists_fragment_serves_cached(store):
     iid = store.upsert_identity("main", "cred", None, True)
-    RecDao(store).put_proposals("new_artists", [{"artist": "Donato Dozzy", "score": 1.0,
-                                                 "because": ["Recondite", "Rrose"], "fits": ["Deep Focus"]}], now=1.0)
+    store.upsert_discovered_artist("Donato Dozzy", 1.0, ["Recondite", "Rrose"], ["Deep Focus"], None, now=1.0)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     html = c.get("/home/new-artists").text

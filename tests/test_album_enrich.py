@@ -21,7 +21,7 @@ def test_album_enrich_candidates_and_card(store):
     cands = store.album_enrichment_candidates(min_gaps=3)
     assert cands and cands[0]["browse_id"] == "BID" and cands[0]["gaps"] == 4
     cards = recommend.take_action(store, now=1.0, auth_expired={})
-    assert any(c.key == "enrich-album:BID" and c.cta_href == "/album?browse=BID" for c in cards)
+    assert any(c.key == "enrich-album:BID" and c.cta_href == "/album?browse=BID&enrich=1" for c in cards)
 
 
 def test_album_enrich_runner_fills_genres(store, monkeypatch):

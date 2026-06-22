@@ -1,7 +1,8 @@
 {# A dated, saveable proto-playlist built from a For-You lane. Rows can be pruned via feedback;
    "Save & play" posts the surviving rows to /home/generate, which creates the real YouTube
    playlist (auto-grouped "Generated") and swaps this card for the saved-state confirmation. #}
-<section class="gen-card card" id="gen-{{ p.lane }}" data-name="{{ p.name }}">
+<section class="gen-card card" id="gen-{{ p.lane }}" data-name="{{ p.name }}"
+         {% if p.recipe %}data-recipe='{{ p.recipe|tojson }}'{% endif %}>
   <header class="gen-head">
     <h2 class="gen-name">{{ p.name }}</h2>
     {% if p.note %}<p class="section-note">{{ p.note }}</p>{% endif %}
@@ -27,9 +28,9 @@
   <footer class="gen-foot">
     <button type="button" class="cta" hx-post="/home/generate" hx-target="#gen-{{ p.lane }}"
             hx-swap="outerHTML" hx-disabled-elt="this"
-            hx-vals='js:{name: genName("gen-{{ p.lane }}"), tracks: genTracks("gen-{{ p.lane }}")}'>Save &amp; play on YouTube ↗</button>
+            hx-vals='js:{name: genName("gen-{{ p.lane }}"), tracks: genTracks("gen-{{ p.lane }}"), recipe: genRecipe("gen-{{ p.lane }}")}'>Save &amp; play on YouTube ↗</button>
     <span class="gen-foot-note">Lands in your <strong>Generated</strong> group. It won't sway your
-      recommendations until you actually play it.</span>
+      recommendations until you move it into your collection.</span>
   </footer>
   {% else %}
   <p class="section-note">Nothing to bundle yet — sync your library to get started.</p>

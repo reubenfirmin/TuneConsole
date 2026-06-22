@@ -33,23 +33,15 @@ def test_rec_dao_alias(store):
     assert RecDao is RecRepo
 
 
-def test_impressions_debounced(store):
+def test_card_view_counter_ticks_and_reads(store):
     dao = RecRepo(store)
-    dao.record_impressions("for_you", ["a", "b"], now=1000.0)
-    dao.record_impressions("for_you", ["a"], now=1100.0)          # within debounce → no re-count
-    dao.record_impressions("a" and "for_you", ["a"], now=1000.0 + 400)  # past debounce → counts
-    rows = {r["item_key"]: r["views"] for r in store.conn.execute(
-        "SELECT item_key, views FROM rec_impressions WHERE surface='for_you'")}
-    assert rows == {"a": 2, "b": 1}
-
-
-def test_eroded_keys_honors_cap_and_cooldown(store):
-    dao = RecRepo(store)
-    for _ in range(3):                                            # cross the view_cap
-        dao.record_impressions("explore", ["hot"], now=10_000.0, debounce_s=0)
-    assert dao.eroded_keys("explore", now=10_000.0, view_cap=3) == {"hot"}
-    # once the cooldown elapses the item recycles back in (no longer eroded)
-    assert dao.eroded_keys("explore", now=10_000.0 + 15 * 86400, view_cap=3) == set()
+    assert dao.card_views("wheelhouse") == 0                      # never shown
+    assert dao.bump_card_view("wheelhouse", now=1000.0) == 1      # first tick
+    assert dao.bump_card_view("wheelhouse", now=1100.0) == 2
+    assert dao.card_views("wheelhouse") == 2                      # read-only, doesn't advance
+    assert dao.card_views("wheelhouse") == 2
+    assert dao.bump_card_view("comfort", now=1000.0) == 1         # independent per card
+    assert dao.card_views("wheelhouse") == 2
 
 
 def test_proposals_roundtrip_and_missing(store):

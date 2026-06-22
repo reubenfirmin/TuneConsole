@@ -231,3 +231,62 @@ def test_lastfm_key_saved_via_form(store, monkeypatch, tmp_path):
     assert r.status_code == 204
     assert store.get_setting("lastfm_api_key") == "abc123" and lf.api_key(store) == "abc123"
     assert "enrichPanel(%d, true," % a in c.get(f"/playlist/{a}").text       # page now reflects configured
+
+
+def test_generated_playlist_shows_feedback_control_panel(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_track("v1", "A", "ArtA", None, None)
+    store.set_track_genre(a, "Techno"); store.set_track_year(a, "1995")
+    pid = store.upsert_playlist(iid, "PLG", "Gen", 1, "h", 0.0)
+    store.set_playlist_tracks(pid, [a])
+    store.set_playlist_group("PLG", "Generated")          # mark it generated
+    c = _client(store, lambda: {iid: FakeClient()})
+    html = c.get(f"/playlist/{pid}").text
+    assert 'id="fb-' in html                              # the feedback control panel
+    assert "More of this vibe" in html                   # simple mood (kept)
+    assert "a lot" not in html.lower().split("landing")[-1][:80]   # no intensity checkbox near the buttons
+    assert "Detailed feedback" in html                   # advanced disclosure
+    assert "By genre" in html and "By era" in html       # facet levers (no 'By track' in the panel)
+    assert "More like this" in html                      # per-track feedback moved INTO the track listing
+    assert "/recs/mood" in html                          # feeds the transient model
+
+
+def test_non_generated_playlist_has_no_feedback_panel(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_track("v1", "A", "ArtA", None, None)
+    pid = store.upsert_playlist(iid, "PLN", "Normal", 1, "h", 0.0)
+    store.set_playlist_tracks(pid, [a])
+    c = _client(store, lambda: {iid: FakeClient()})
+    html = c.get(f"/playlist/{pid}").text
+    assert 'id="fb-' not in html                          # panel only on Generated playlists
+    assert "More like this" not in html                   # ...and no per-track mood feedback either
+
+
+def test_generated_playlist_unenriched_nudges_to_enrich(store):
+    # A "Fresh songs" generated playlist with untagged tracks: Detailed feedback still shows, but
+    # explains there are no genre/era levers until you enrich (the 531 confusion).
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_track("v1", "Fresh", "NewArtist", None, None)   # no genre, no year
+    pid = store.upsert_playlist(iid, "PLF", "Fresh songs", 1, "h", 0.0)
+    store.set_playlist_tracks(pid, [a])
+    store.set_playlist_group("PLF", "Generated")
+    c = _client(store, lambda: {iid: FakeClient()})
+    html = c.get(f"/playlist/{pid}").text
+    assert "Detailed feedback" in html                   # the section is shown, not hidden
+    assert "enrich it" in html.lower()                   # ...with a nudge to enrich
+    assert "By genre" not in html                        # no empty levers
+
+
+def test_generated_playlist_shows_stored_recipe(store):
+    # Even an un-tagged "Fresh songs" playlist surfaces HOW it was made (the 531 fix at the root).
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_track("v1", "Fresh", "NewArtist", None, None)   # no genre/year tags
+    pid = store.upsert_playlist(iid, "PLF", "Fresh songs - June 21 2026 #1", 1, "h", 0.0)
+    store.set_playlist_tracks(pid, [a])
+    store.set_playlist_group("PLF", "Generated")
+    store.set_recipe("PLF", {"model": "fresh", "facets": {"genres": ["house"], "eras": ["2010"]},
+                             "dj": {"stickiness": 0.8}}, now=1.0)
+    c = _client(store, lambda: {iid: FakeClient()})
+    html = c.get(f"/playlist/{pid}").text
+    assert "Made from" in html and "house" in html and "2010s" in html   # the recipe, not track tags
+    assert "smooth segues" in html                                        # DJ stickiness surfaced

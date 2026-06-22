@@ -17,7 +17,7 @@
          target="_blank" rel="noopener">▶ Play on YouTube Music ↗</a>
     </div>
   </div>
-  <div class="head-tools">
+  <div class="head-tools{% if enrich_hint %} enrich-hint{% endif %}">
     <a class="head-icon" href="/playlist/{{ pl.id }}/share.txt" download="{{ pl.title }}.txt"
        title="Share — download one song URL per line as a .txt" aria-label="Share playlist">
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
@@ -60,7 +60,7 @@
     </button>
   </div>
 </div>
-{% if is_generated %}{% with pid = pl.id %}{% include "_partials/mood_panel.html" %}{% endwith %}{% endif %}
+{% if is_generated %}{% with pid = pl.id %}{% include "_partials/feedback_panel.html" %}{% endwith %}{% endif %}
 <div class="enrich-strip" x-show="running || finished" x-cloak x-transition>
   <div class="enrich-bar"><i :style="`width:${pct}%`"></i></div>
   <span class="enrich-status" x-text="status"></span>

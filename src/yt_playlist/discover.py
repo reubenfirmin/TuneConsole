@@ -10,6 +10,8 @@ it, and which of your playlists it fits. Runs in the background worker; Last.fm 
 import numpy as np
 
 from yt_playlist import embed, genre_map, lastfm, recommend
+from yt_playlist.rec_dao import RecDao
+from yt_playlist.web.routes.charts import _fetch_artist_info   # module-level so it's patchable in tests
 from yt_playlist.matching import normalize
 from yt_playlist.rec_dao import RecDao
 
@@ -157,3 +159,68 @@ def new_artists(ctx, limit=15, max_anchors=30):
     for c in out:                                       # enrich the shown few with an artist image
         c["thumbnail"] = _artist_thumb(ctx, c["artist"])
     return out
+
+
+def run_discovery(ctx, now, budget=25) -> dict:
+    """One background discovery pass: scan the next batch of interest-ranked artists due for a re-look
+    (>5 days since last scan), accumulating their unowned albums into the pool; refresh the taste-
+    bridged new-artist pool; prune anything since acquired. Bounded by `budget` so each pass is cheap
+    and the pools fill in over many runs rather than re-scanning everything every sync."""
+    store = ctx.store
+    dao = RecDao(store)
+    owned_albums, saved = dao.owned_albums(), dao.saved_album_ids()
+    due = store.artists_due_for_scan(now, budget=budget)
+    for artist in due:
+        try:
+            info = _fetch_artist_info(ctx, artist)
+        except Exception:  # noqa: BLE001 - one bad artist must not abort the pass
+            info = None
+        for alb in (info or {}).get("albums") or []:
+            bid, title = alb.get("browse_id"), (alb.get("title") or "").strip()
+            if not bid or not title or title.lower() in owned_albums or bid in saved:
+                continue
+            store.upsert_discovered_album(bid, artist, title, alb.get("year"), alb.get("thumbnail"), now)
+        store.mark_scanned(artist, now)
+    for a in new_artists(ctx):                            # taste-bridged new artists, accumulated
+        store.upsert_discovered_artist(a["artist"], a["score"], a.get("because"), a.get("fits"),
+                                       a.get("thumbnail"), now)
+    store.prune_discovered(owned_albums, saved, dao.library_artists())
+    return {"scanned": len(due)}
+
+
+def pick_discovered_albums(store, n, now, recent_frac=0.7):
+    """Surface n albums from the discovered pool: recency-biased (so new releases reliably pop), with
+    some older ones mixed in, de-prioritizing what was shown most recently. Stamps last_shown."""
+    albums = store.get_discovered_albums()
+    if not albums:
+        return []
+    yrs = [int(a["year"]) for a in albums if (a.get("year") or "").isdigit()]
+    ymax = max(yrs) if yrs else 0
+
+    def yr(a):
+        return int(a["year"]) if (a.get("year") or "").isdigit() else ymax - 10
+
+    def fresh(a):
+        return a.get("last_shown") or 0.0
+
+    cut = ymax - 2                                                            # "recent" = last ~3 years
+    recent = sorted([a for a in albums if yr(a) >= cut], key=lambda a: (yr(a), -fresh(a)), reverse=True)
+    older = sorted([a for a in albums if yr(a) < cut], key=fresh)             # least-recently-shown first
+    n_recent = max(1, round(n * recent_frac))
+    chosen = recent[:n_recent] + older[:n - n_recent]
+    if len(chosen) < n:                                                       # backfill if a bucket is thin
+        chosen += [a for a in recent[n_recent:] + older[max(0, n - n_recent):] if a not in chosen]
+    chosen = chosen[:n]
+    store.mark_shown("album", [a["browse_id"] for a in chosen], now)
+    return chosen
+
+
+def pick_discovered_artists(store, n, now):
+    """Surface n new artists from the pool: best taste-score first, de-prioritizing recently-shown."""
+    arts = store.get_discovered_artists()
+    if not arts:
+        return []
+    arts.sort(key=lambda a: (-(a.get("score") or 0.0), a.get("last_shown") or 0.0))
+    chosen = arts[:n]
+    store.mark_shown("artist", [a["artist"] for a in chosen], now)
+    return chosen

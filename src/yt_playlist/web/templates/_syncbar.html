@@ -1,6 +1,10 @@
 <div class="sync-bar" x-data="syncPanel()" style="margin-bottom:1.6rem">
-  <button type="button" @click="start()" :disabled="running">
-    <span x-show="!running">Sync now</span>
+  <button type="button" @click="start('/sync/plays')" :disabled="running">
+    <span x-show="!running">Sync plays</span>
+    <span x-show="running" style="display:none"><span class="spinner"></span>&nbsp;Syncing…</span>
+  </button>
+  <button type="button" class="btn-ghost" @click="start('/sync')" :disabled="running">
+    <span x-show="!running">Full sync</span>
     <span x-show="running" style="display:none"><span class="spinner"></span>&nbsp;Syncing…</span>
   </button>
   <div class="sync-panel" x-show="running || lines.length" style="display:none; margin-top:1rem">

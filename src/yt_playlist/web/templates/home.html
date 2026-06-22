@@ -32,6 +32,7 @@
    by id — pruned (feedback-dismissed) rows are gone from the DOM, so they're naturally excluded. #}
 <script>
 function genName(id) { return document.getElementById(id).dataset.name; }
+function genRecipe(id) { return document.getElementById(id).dataset.recipe || ''; }
 function genTracks(id) {
   return JSON.stringify([...document.getElementById(id).querySelectorAll('.gen-row')].map(r => ({
     video_id: r.dataset.vid, title: r.dataset.title, artist: r.dataset.artist,

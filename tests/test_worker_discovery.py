@@ -46,16 +46,15 @@ def test_worker_materializes_proposals(store):
     store.set_playlist_tracks(store.upsert_playlist(iid, "P", "P", 1, "h", 0.0), [t])
     store.add_history_snapshot(iid, 1.0, ["song|fav"])
 
-    RecWorker(ctx).rebuild()               # synchronous rebuild + materialize
-    dao = RecDao(store)
-    assert dao.get_proposals("discover") is not None
-    assert any(a["title"] == "Brand New LP" for a in dao.get_proposals("discover"))
+    RecWorker(ctx).rebuild()               # synchronous rebuild + discovery pass
+    # discovery now accumulates into the pool (scan-ledger backed), not the overwrite proposals
+    titles = {a["title"] for a in store.get_discovered_albums()}
+    assert "Brand New LP" in titles        # the new album was scanned into the pool
 
 
 def test_home_discover_serves_cached(store):
     iid = store.upsert_identity("main", "cred", None, True)
-    RecDao(store).put_proposals("discover", [{"artist": "X", "title": "Cached LP",
-                                              "year": "2024", "browse_id": "B", "thumbnail": None}], now=1.0)
+    store.upsert_discovered_album("B", "X", "Cached LP", "2024", None, now=1.0)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     assert "Cached LP" in c.get("/home/discover").text     # served from materialized proposals, no fetch
