@@ -1,5 +1,5 @@
 """Recipe storage (how a generated playlist was made) + per-day version numbering."""
-from yt_playlist import recommend
+from yt_playlist.rec import recommend
 
 
 def test_recipe_round_trips(store):

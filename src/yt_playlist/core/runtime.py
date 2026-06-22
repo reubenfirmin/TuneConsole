@@ -2,9 +2,9 @@
 import logging
 from pathlib import Path
 
-from yt_playlist.config import load_identities, credential_path
-from yt_playlist.identities import build_client
-from yt_playlist.setup import (
+from yt_playlist.core.config import load_identities, credential_path
+from yt_playlist.core.identities import build_client
+from yt_playlist.core.setup import (
     store_credentials, write_config, validate_identities, verify_capture,
     BROWSER_CREDENTIAL_FILENAME)
 

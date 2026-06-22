@@ -13,8 +13,8 @@ import time
 import urllib.parse
 import urllib.request
 
-from yt_playlist import net
-from yt_playlist.enrich_queue import PriorityGate
+from yt_playlist.util import net
+from yt_playlist.providers.enrich_queue import PriorityGate
 
 logger = logging.getLogger(__name__)
 

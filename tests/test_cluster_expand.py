@@ -8,7 +8,7 @@ import math
 
 import numpy as np
 
-from yt_playlist import embed
+from yt_playlist.rec import embed
 
 
 def _put(store, vecs):

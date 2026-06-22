@@ -7,8 +7,8 @@ import json
 
 from fastapi.testclient import TestClient
 
-from yt_playlist.matching import identity_key
-from yt_playlist.rec_dao import RecDao
+from yt_playlist.util.matching import identity_key
+from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
@@ -111,7 +111,7 @@ def test_home_renders_generated_cards(store):
 
 
 def test_create_generated_playlist_stores_recipe_and_versions(store):
-    from yt_playlist import executor
+    from yt_playlist.library import executor
     iid = store.upsert_identity("main", "cred", None, True)
     fc = FakeClient()
     tracks = [{"video_id": f"v{i}", "title": f"S{i}", "artist": "A" if i % 2 else "B"} for i in range(4)]
@@ -139,8 +139,8 @@ def _seed_generated_at(store, iid, created, n=3, ytm="PLG"):
 
 def test_gc_deletes_stale_unplayed_generated(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist import executor
-    from yt_playlist.action_kinds import is_undoable
+    from yt_playlist.library import executor
+    from yt_playlist.util.action_kinds import is_undoable
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 100 * day
     pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day)   # 10d old, never played
@@ -157,7 +157,7 @@ def test_gc_deletes_stale_unplayed_generated(store, monkeypatch, tmp_path):
 
 def test_gc_keeps_young_generated(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist import executor
+    from yt_playlist.library import executor
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 100 * day
     pid, _ytm, _ = _seed_generated_at(store, iid, created=now - 2 * day)   # still inside the grace window
@@ -169,7 +169,7 @@ def test_gc_keeps_young_generated(store, monkeypatch, tmp_path):
 
 def test_gc_keeps_generated_played_since_creation(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist import executor
+    from yt_playlist.library import executor
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 100 * day
     pid, _ytm, keys = _seed_generated_at(store, iid, created=now - 10 * day)
@@ -181,7 +181,7 @@ def test_gc_keeps_generated_played_since_creation(store, monkeypatch, tmp_path):
 
 def test_gc_keeps_generated_when_at_least_half_played(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist import executor
+    from yt_playlist.library import executor
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 100 * day
     pid, _ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day, n=4)
@@ -194,7 +194,7 @@ def test_gc_keeps_generated_when_at_least_half_played(store, monkeypatch, tmp_pa
 
 def test_gc_deletes_generated_when_under_half_played(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist import executor
+    from yt_playlist.library import executor
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 100 * day
     _pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day, n=4)
@@ -207,7 +207,7 @@ def test_gc_deletes_generated_when_under_half_played(store, monkeypatch, tmp_pat
 
 def test_gc_ignores_plays_before_creation(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist import executor
+    from yt_playlist.library import executor
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 100 * day
     _pid, ytm, keys = _seed_generated_at(store, iid, created=now - 10 * day)
@@ -220,7 +220,7 @@ def test_gc_ignores_plays_before_creation(store, monkeypatch, tmp_path):
 
 def test_gc_ignores_non_generated_playlists(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist import executor
+    from yt_playlist.library import executor
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 100 * day
     t = store.upsert_track("v1", "S", "A", None, None, 1)
@@ -234,7 +234,7 @@ def test_gc_ignores_non_generated_playlists(store, monkeypatch, tmp_path):
 
 def test_gc_deletion_is_undoable(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    from yt_playlist import executor
+    from yt_playlist.library import executor
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 100 * day
     _pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day)

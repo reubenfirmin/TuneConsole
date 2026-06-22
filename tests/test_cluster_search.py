@@ -6,7 +6,7 @@ a seed with no vector would contribute nothing to the centroid.
 """
 import numpy as np
 
-from yt_playlist.matching import identity_key
+from yt_playlist.util.matching import identity_key
 
 
 def _vec(store, keys):

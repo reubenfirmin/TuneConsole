@@ -1,4 +1,4 @@
-from yt_playlist import embed, recommend
+from yt_playlist.rec import embed, recommend
 
 
 def test_catalog_ranks_under_played_first_weighted_not_filtered(store):

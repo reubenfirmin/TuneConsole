@@ -8,7 +8,7 @@ Coverage moved here from the old JSON-based test_web.py::test_genres_whitelist_e
 """
 from fastapi.testclient import TestClient
 
-import yt_playlist.genres as g
+import yt_playlist.providers.genres as g
 from yt_playlist.web.app import create_app
 
 

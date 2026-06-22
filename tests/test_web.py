@@ -454,7 +454,7 @@ def test_overlap_ignore_excludes_playlist(store):
     assert "Big Mixtape" in c.get("/cleanup").text                       # back
 
 def test_system_playlist_excluded_from_overlaps(store):
-    from yt_playlist.analysis import find_overlaps
+    from yt_playlist.library.analysis import find_overlaps
     iid = store.upsert_identity("main", "cred", None, True)
     lm = store.upsert_playlist(iid, "LM", "Liked Music", 2, "h", 1.0)   # system
     a = store.upsert_playlist(iid, "PLa", "A", 1, "h", 1.0)
@@ -591,7 +591,7 @@ def test_playlists_tab_renders(store):
 
 def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     import json as _json
-    import yt_playlist.musicbrainz as mb
+    import yt_playlist.providers.musicbrainz as mb
     # stub MusicBrainz so the test never hits the network
     monkeypatch.setattr(mb, "enrich",
                         lambda title, artist: {"S0": ("rock", "1998"), "S1": ("jazz", "2003")}.get(title, (None, None)))
@@ -659,7 +659,7 @@ def test_remove_playlist_preserves_group(store):
 
 def test_sync_keeps_playlists_when_library_comes_back_empty(store):
     # Regression: an empty get_library_playlists (session glitch, not a 401) must NOT prune the store.
-    from yt_playlist import sync as sync_mod
+    from yt_playlist.library import sync as sync_mod
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "Keep Me", 1, "h", 1.0)
     store.set_playlist_tracks(a, [store.upsert_track("v0", "S", "X", None, None, 1)])
@@ -669,7 +669,7 @@ def test_sync_keeps_playlists_when_library_comes_back_empty(store):
 
 def test_sync_flags_reauth_when_known_identity_returns_empty(store):
     # An identity that HAD playlists but now returns empty is flagged for re-auth (not silently empty).
-    from yt_playlist import sync as sync_mod
+    from yt_playlist.library import sync as sync_mod
     iid = store.upsert_identity("main", "cred", None, True)
     store.upsert_playlist(iid, "PL1", "Keep Me", 1, "h", 1.0)
     expired = {}
@@ -681,7 +681,7 @@ def test_sync_flags_reauth_when_known_identity_returns_empty(store):
 
 def test_sync_prunes_when_library_is_real(store):
     # A genuine, non-empty library still prunes playlists that are actually gone.
-    from yt_playlist import sync as sync_mod
+    from yt_playlist.library import sync as sync_mod
     iid = store.upsert_identity("main", "cred", None, True)
     store.upsert_playlist(iid, "GONE", "Deleted Remotely", 0, "h", 1.0)
     client = FakeClient(playlists=[{"playlistId": "PL2", "title": "New", "count": 1}],
@@ -733,7 +733,7 @@ def test_page_rejoins_active_enrichment(store):
 
 def test_discogs_fills_genre_and_year(store, monkeypatch):
     import json as _json
-    import yt_playlist.discogs as dc
+    import yt_playlist.providers.discogs as dc
     # stub Discogs search: styles map to the whitelist, earliest year wins
     monkeypatch.setattr(dc, "_search", lambda q, tok: [
         {"year": "1996", "genre": ["Electronic"], "style": ["Techno", "Drum n Bass"]},
@@ -757,7 +757,7 @@ def test_discogs_fills_genre_and_year(store, monkeypatch):
 
 def test_lastfm_fills_missing_genre_and_year(store, monkeypatch):
     import json as _json
-    import yt_playlist.lastfm as lf
+    import yt_playlist.providers.lastfm as lf
     monkeypatch.setenv("LASTFM_API_KEY", "testkey")
     # stub the Last.fm lookup: (genre, year) per track; one fully unknown
     monkeypatch.setattr(lf, "enrich", lambda title, artist, key:
@@ -785,7 +785,7 @@ def test_lastfm_fills_missing_genre_and_year(store, monkeypatch):
 
 
 def test_lastfm_enrich_scrapes_release_year(monkeypatch):
-    import yt_playlist.lastfm as lf
+    import yt_playlist.providers.lastfm as lf
     # one getInfo gives tags + the album page URL; the album page carries the Release Date
     monkeypatch.setattr(lf, "_get", lambda params: {"track": {
         "album": {"url": "https://www.last.fm/music/Ph+1/Sizzling+Love"},

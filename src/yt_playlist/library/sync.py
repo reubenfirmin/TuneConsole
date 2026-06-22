@@ -1,8 +1,8 @@
 import hashlib
 import logging
-from yt_playlist.matching import identity_key, track_artist, track_album
-from yt_playlist.retry import with_retry
-from yt_playlist.thumbnails import best_thumb
+from yt_playlist.util.matching import identity_key, track_artist, track_album
+from yt_playlist.util.retry import with_retry
+from yt_playlist.util.thumbnails import best_thumb
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         _emit(on_progress, "auth_expired",
               f"{label}: returned no playlists — session may have expired, re-authenticate", label=label)
 
-    from yt_playlist import recommend            # local import avoids any import cycle
+    from yt_playlist.rec import recommend            # local import avoids any import cycle
     recommend.apply_dislikes(store, rated, now)
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync

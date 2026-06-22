@@ -1,6 +1,6 @@
 import pytest
-from yt_playlist.config import load_identities
-from yt_playlist.retry import with_retry
+from yt_playlist.core.config import load_identities
+from yt_playlist.util.retry import with_retry
 
 def test_load_identities_requires_one_master(tmp_path):
     p = tmp_path / "config.toml"
@@ -38,16 +38,16 @@ def test_with_retry_retries_then_succeeds():
 
 
 def test_credential_path_inside_base_ok(tmp_path):
-    from yt_playlist.config import credential_path
+    from yt_playlist.core.config import credential_path
     (tmp_path / "cred.json").write_text("{}")
     assert credential_path(tmp_path, "cred.json") == (tmp_path / "cred.json").resolve()
 
 def test_credential_path_rejects_traversal(tmp_path):
-    from yt_playlist.config import credential_path
+    from yt_playlist.core.config import credential_path
     with pytest.raises(ValueError):
         credential_path(tmp_path, "../../../../etc/passwd")
 
 def test_credential_path_rejects_absolute(tmp_path):
-    from yt_playlist.config import credential_path
+    from yt_playlist.core.config import credential_path
     with pytest.raises(ValueError):
         credential_path(tmp_path, "/etc/passwd")

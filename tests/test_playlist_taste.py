@@ -1,4 +1,4 @@
-from yt_playlist import embed, recommend
+from yt_playlist.rec import embed, recommend
 
 
 def test_playlist_taste_weights_by_play_and_scores(store):

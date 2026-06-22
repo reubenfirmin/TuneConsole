@@ -6,10 +6,10 @@ import time
 import uvicorn
 import webbrowser
 from pathlib import Path
-from yt_playlist import paths
-from yt_playlist.store import Store
-from yt_playlist.config import credential_path
-from yt_playlist.runtime import Runtime
+from yt_playlist.core import paths
+from yt_playlist.core.store import Store
+from yt_playlist.core.config import credential_path
+from yt_playlist.core.runtime import Runtime
 from yt_playlist.web.app import create_app
 
 def sync_identities_into_store(store, identity_configs):

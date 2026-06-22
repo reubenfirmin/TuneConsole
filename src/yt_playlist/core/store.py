@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS rec_weights (
 """
 
 # Row dataclasses live in repos.models (avoids a Store<->repo cycle); re-exported here so existing
-# `from yt_playlist.store import Playlist` callers keep working.
+# `from yt_playlist.core.store import Playlist` callers keep working.
 from yt_playlist.repos.models import Action, Identity, Playlist, Track  # noqa: E402
 
 

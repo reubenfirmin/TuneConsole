@@ -9,11 +9,12 @@ it, and which of your playlists it fits. Runs in the background worker; Last.fm 
 """
 import numpy as np
 
-from yt_playlist import embed, genre_map, lastfm, recommend
-from yt_playlist.rec_dao import RecDao
+from yt_playlist.rec import embed, genre_map, recommend
+from yt_playlist.providers import lastfm
+from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.web.routes.charts import _fetch_artist_info   # module-level so it's patchable in tests
-from yt_playlist.matching import normalize
-from yt_playlist.rec_dao import RecDao
+from yt_playlist.util.matching import normalize
+from yt_playlist.rec.rec_dao import RecDao
 
 
 class ContentProjection:
@@ -94,7 +95,7 @@ def _artist_thumb(ctx, name):
     """Best-effort artist image from a YTM artist search — for the graphical new-artist cards.
     Cheap (the search result already carries thumbnails; no second get_artist call). None on any miss."""
     try:
-        from yt_playlist.thumbnails import best_thumb
+        from yt_playlist.util.thumbnails import best_thumb
         client = next(iter((ctx.client_provider() or {}).values()), None)
         if client is None:
             return None

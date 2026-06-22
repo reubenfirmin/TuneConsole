@@ -1,5 +1,5 @@
 import pytest
-from yt_playlist.store import Store
+from yt_playlist.core.store import Store
 
 @pytest.fixture
 def store():

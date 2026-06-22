@@ -1,5 +1,5 @@
 import os
-from yt_playlist import paths
+from yt_playlist.core import paths
 
 def test_paths_honor_home_override(tmp_path, monkeypatch):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))

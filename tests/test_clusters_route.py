@@ -5,7 +5,7 @@ import math
 import numpy as np
 from fastapi.testclient import TestClient
 
-from yt_playlist.matching import identity_key
+from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 

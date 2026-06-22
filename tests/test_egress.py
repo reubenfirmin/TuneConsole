@@ -14,6 +14,7 @@ def test_allowlist_membership():
     assert host_allowed("music.youtube.com")        # subdomain of youtube.com
     assert host_allowed("YouTube.com")              # case-insensitive
     assert host_allowed("ws.audioscrobbler.com")
+    assert host_allowed("www.last.fm")              # album HTML page, for the Release Date
     assert not host_allowed("evil.com")
     assert not host_allowed("notyoutube.com")       # suffix must fall on a dot boundary
     assert not host_allowed("youtube.com.evil.com")

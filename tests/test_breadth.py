@@ -1,4 +1,4 @@
-from yt_playlist import recommend
+from yt_playlist.rec import recommend
 
 
 def _tag(store, iid, n, genre, prefix):

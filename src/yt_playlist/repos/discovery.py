@@ -121,7 +121,7 @@ class DiscoveryRepo(Repo):
             if r["browse_id"] in saved_browse_ids or (r["title"] or "").lower() in owned_albums:
                 self.conn.execute("DELETE FROM discovered_albums WHERE browse_id=?", (r["browse_id"],))
         if owned_artists:
-            from yt_playlist.matching import normalize
+            from yt_playlist.util.matching import normalize
             for r in self.conn.execute("SELECT artist FROM discovered_artists").fetchall():
                 if normalize(r["artist"]) in owned_artists:
                     self.conn.execute("DELETE FROM discovered_artists WHERE artist=?", (r["artist"],))

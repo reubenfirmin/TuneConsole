@@ -7,8 +7,9 @@ import statistics
 
 import numpy as np
 
-from yt_playlist import analysis, embed, genre_map, rec_params, transient
-from yt_playlist.rec_dao import RecDao
+from yt_playlist.library import analysis
+from yt_playlist.rec import embed, genre_map, rec_params, transient
+from yt_playlist.rec.rec_dao import RecDao
 
 
 class PlaylistTaste:
@@ -606,8 +607,8 @@ def fresh_songs(ctx, limit=12) -> list[dict]:
     Uses the client (network) — runs in the background worker, never per request. Degrades to []
     with no client/network. limit matches the Home proto-card size (PROTO_SIZE) so the Fresh card
     can actually fill, rather than topping out short."""
-    from yt_playlist.matching import identity_key
-    from yt_playlist.thumbnails import best_thumb
+    from yt_playlist.util.matching import identity_key
+    from yt_playlist.util.thumbnails import best_thumb
     client = next(iter((ctx.client_provider() or {}).values()), None)
     if client is None:
         return []

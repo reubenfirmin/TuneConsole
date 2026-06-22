@@ -8,9 +8,9 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from yt_playlist import discogs, lastfm, musicbrainz
-from yt_playlist.rec_dao import RecDao
-from yt_playlist.thumbnails import best_thumb
+from yt_playlist.providers import discogs, lastfm, musicbrainz
+from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.util.thumbnails import best_thumb
 
 
 def build(ctx) -> APIRouter:

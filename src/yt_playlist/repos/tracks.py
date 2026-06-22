@@ -1,5 +1,5 @@
 """TrackRepo — track rows and their genre/year enrichment."""
-from yt_playlist.matching import identity_key
+from yt_playlist.util.matching import identity_key
 from yt_playlist.repos.base import Repo, synchronized
 
 

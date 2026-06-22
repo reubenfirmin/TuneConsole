@@ -1,5 +1,5 @@
-from yt_playlist import embed, genre_map, recommend
-from yt_playlist.store import Store
+from yt_playlist.rec import embed, genre_map, recommend
+from yt_playlist.core.store import Store
 
 
 def test_wheelhouse_excludes_play_recency_lane(store):
@@ -375,7 +375,7 @@ def _seed_pl(store, iid, ytm, title, n, now, played_at=None, group=None, play_ea
                   (None entry = that track was never played). One snapshot per played track.
     played_at:    legacy shorthand — play just the *first* track at this time (the rest never played).
     """
-    from yt_playlist.matching import identity_key
+    from yt_playlist.util.matching import identity_key
     keys, tids = [], []
     for i in range(n):
         t, a = f"{ytm} song {i}", f"{ytm} artist"

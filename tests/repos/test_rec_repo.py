@@ -29,7 +29,7 @@ def test_unified_onto_repo_base(store):
 
 
 def test_rec_dao_alias(store):
-    from yt_playlist.rec_dao import RecDao
+    from yt_playlist.rec.rec_dao import RecDao
     assert RecDao is RecRepo
 
 

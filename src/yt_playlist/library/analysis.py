@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from itertools import combinations
-from yt_playlist.store import Playlist
+from yt_playlist.core.store import Playlist
 
 @dataclass
 class DupeFinding:

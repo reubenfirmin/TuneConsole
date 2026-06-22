@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from fastapi import HTTPException
 from fastapi.templating import Jinja2Templates
 
-from yt_playlist.ops import PlaylistOps
+from yt_playlist.library.ops import PlaylistOps
 from yt_playlist.web.jobs import SyncJobs
 
 logger = logging.getLogger("yt_playlist.web")

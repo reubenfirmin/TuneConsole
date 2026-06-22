@@ -5,7 +5,8 @@ import urllib.error
 
 import pytest
 
-from yt_playlist import discogs, lastfm, musicbrainz, net
+from yt_playlist.providers import discogs, lastfm, musicbrainz
+from yt_playlist.util import net
 
 
 def test_breaker_trips_only_after_threshold_consecutive_failures():

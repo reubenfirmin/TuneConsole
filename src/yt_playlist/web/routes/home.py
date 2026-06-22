@@ -5,8 +5,9 @@ from datetime import datetime
 
 from fastapi import APIRouter, Request, Response
 
-from yt_playlist import executor, rec_params, recommend
-from yt_playlist.rec_dao import RecDao
+from yt_playlist.library import executor
+from yt_playlist.rec import rec_params, recommend
+from yt_playlist.rec.rec_dao import RecDao
 
 # How many tracks each generated proto-playlist offers.
 PROTO_SIZE = 12
@@ -125,8 +126,18 @@ def build(ctx) -> APIRouter:
             "muted_count": len(store.muted_artists()),   # transparency: what's being hidden
             "rediscover": recommend.rediscover_playlists(store, now, epoch=_epoch(store, "rediscover")),
             "flash": request.query_params.get("flash"),
+            # One-time onboarding nudge: once they've synced, point new users at enrichment until
+            # they dismiss it (the flag persists across reloads).
+            "show_enrich_nudge": bool(store.get_setting("last_sync_at"))
+                                 and store.get_setting("enrich_nudge_dismissed") != "1",
             **_feed_context(now),
         })
+
+    @router.post("/onboard/enrich/dismiss")
+    def dismiss_enrich_nudge():
+        """Permanently dismiss the Home enrichment nudge. Empty 200 so HTMX swaps it out."""
+        store.set_setting("enrich_nudge_dismissed", "1")
+        return Response(status_code=200)
 
     @router.get("/privacy")
     def privacy(request: Request):
@@ -201,7 +212,7 @@ def build(ctx) -> APIRouter:
     def home_discover(request: Request):
         # From the accumulating discovery pool: recency-biased, repeat-aware, filled in by the
         # background scan of every artist you're interested in (not a top-10 overwrite).
-        from yt_playlist import discover
+        from yt_playlist.rec import discover
         albums = discover.pick_discovered_albums(store, ALBUMS_PER_CARD, now_fn())
         return templates.TemplateResponse(request, "_partials/discover.html",
                                           {"albums": albums,
@@ -222,7 +233,7 @@ def build(ctx) -> APIRouter:
     @router.get("/home/new-artists")
     def home_new_artists(request: Request):
         # From the accumulating new-artist pool: best taste-fit first, de-prioritizing recently-shown.
-        from yt_playlist import discover
+        from yt_playlist.rec import discover
         artists = discover.pick_discovered_artists(store, ARTISTS_PER_CARD, now_fn())
         return templates.TemplateResponse(request, "_partials/new_artists.html",
                                           {"artists": artists,

@@ -4,7 +4,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from yt_playlist.merge_order import track_positions
+from yt_playlist.library.merge_order import track_positions
 
 
 def build(ctx) -> APIRouter:

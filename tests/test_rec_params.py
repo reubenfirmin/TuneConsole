@@ -1,8 +1,8 @@
 """Unit tests for the recommender parameter registry and per-genre score weighting."""
 import pytest
 
-from yt_playlist import rec_params
-from yt_playlist.recommend import genre_adjusted_scores
+from yt_playlist.rec import rec_params
+from yt_playlist.rec.recommend import genre_adjusted_scores
 
 
 # --- registry / get_param ---

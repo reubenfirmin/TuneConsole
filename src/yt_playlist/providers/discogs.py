@@ -16,8 +16,10 @@ import time
 import urllib.parse
 import urllib.request
 
-from yt_playlist import genres, net, paths
-from yt_playlist.enrich_queue import PriorityGate
+from yt_playlist.providers import genres
+from yt_playlist.util import net
+from yt_playlist.core import paths
+from yt_playlist.providers.enrich_queue import PriorityGate
 
 if sys.version_info >= (3, 11):
     import tomllib

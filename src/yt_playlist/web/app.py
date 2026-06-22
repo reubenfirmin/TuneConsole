@@ -84,12 +84,12 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 return PlainTextResponse("cross-origin request blocked", status_code=403)
         return await call_next(request)
 
-    from yt_playlist import genres as genre_lib
+    from yt_playlist.providers import genres as genre_lib
     genre_lib.configure(store)                                 # load (and seed) the genre whitelist
 
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
               templates=templates, jobs=SyncJobs(), setup=setup)
-    from yt_playlist.rec_worker import RecWorker
+    from yt_playlist.rec.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx)                            # decoupled rec computation
     ctx.rec_worker.start_ticker()                             # periodic background discovery scan
     templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync

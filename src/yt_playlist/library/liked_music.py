@@ -9,8 +9,8 @@ class and get translated into the right rate_song + local-membership update.
 """
 import json
 
-from yt_playlist.action_kinds import ADD_TRACKS, REMOVE_TRACK
-from yt_playlist.retry import with_retry
+from yt_playlist.util.action_kinds import ADD_TRACKS, REMOVE_TRACK
+from yt_playlist.util.retry import with_retry
 
 LM_PLAYLIST_ID = "LM"
 

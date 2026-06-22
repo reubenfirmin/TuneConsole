@@ -1,4 +1,4 @@
-from yt_playlist import genre_map as gm
+from yt_playlist.rec import genre_map as gm
 
 
 def test_related_genres_share_a_family():

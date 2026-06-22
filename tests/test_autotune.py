@@ -1,4 +1,4 @@
-from yt_playlist import eval_recs
+from yt_playlist.rec import eval_recs
 
 
 def test_autotune_ab_method_and_dim(store):

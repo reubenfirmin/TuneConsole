@@ -8,8 +8,8 @@ rebuild — so frequent syncs never pile up.
 import threading
 import time
 
-from yt_playlist import embed, recommend
-from yt_playlist.rec_dao import RecDao
+from yt_playlist.rec import embed, recommend
+from yt_playlist.rec.rec_dao import RecDao
 
 
 class RecWorker:
@@ -38,7 +38,7 @@ class RecWorker:
         threading.Thread(target=self._auto_sync_loop, daemon=True).start()
 
     def _tick_loop(self):
-        from yt_playlist import discover
+        from yt_playlist.rec import discover
         while True:
             time.sleep(self.discovery_tick_s)
             try:
@@ -49,7 +49,7 @@ class RecWorker:
     def _gc_loop(self):
         """Daily sweep that deletes generated playlists you never played. An initial pass runs soon
         after start so a daily-restarted app still collects them, then once per gc_tick_s."""
-        from yt_playlist import executor
+        from yt_playlist.library import executor
         time.sleep(self.gc_initial_s)
         while True:
             try:
@@ -68,7 +68,7 @@ class RecWorker:
         likes every auto_sync_tick_s so the taste model stays current without a manual sync. The setting
         is re-read each tick, so toggling off takes effect on the next cycle; while off — or before any
         account is connected — the tick is a cheap no-op."""
-        from yt_playlist import sync as sync_mod
+        from yt_playlist.library import sync as sync_mod
         while True:
             time.sleep(self.auto_sync_tick_s)
             try:
@@ -138,7 +138,7 @@ class RecWorker:
         fail (network, rate-limit, parse), and a single failure must not block the surfaces after it
         from refreshing — otherwise e.g. a flaky album fetch would leave new-artist thumbnails stuck
         on stale cache forever. A failed surface keeps its last-good proposals."""
-        from yt_playlist import discover
+        from yt_playlist.rec import discover
         log = self.ctx.logger
         store = self.ctx.store
         dao = RecDao(store)

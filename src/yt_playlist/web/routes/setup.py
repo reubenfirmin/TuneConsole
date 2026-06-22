@@ -5,7 +5,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from yt_playlist.setup import BROWSER_CREDENTIAL_FILENAME
+from yt_playlist.core.setup import BROWSER_CREDENTIAL_FILENAME
 
 
 def build(ctx) -> APIRouter:

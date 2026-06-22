@@ -1,6 +1,6 @@
 import pytest
 from yt_playlist.__main__ import sync_identities_into_store, validate_credentials
-from yt_playlist.config import IdentityConfig
+from yt_playlist.core.config import IdentityConfig
 
 def test_sync_identities_into_store_inserts_once(store):
     cfgs = [IdentityConfig("main", "cred.json", None, True),

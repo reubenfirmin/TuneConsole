@@ -1,8 +1,8 @@
 """roll_recipe: preference-weighted sampling of a per-playlist theme (genre/era) from your taste."""
 from collections import Counter
 
-from yt_playlist import recommend
-from yt_playlist.matching import identity_key
+from yt_playlist.rec import recommend
+from yt_playlist.util.matching import identity_key
 
 
 def _seed_two_genres(store):
@@ -31,7 +31,7 @@ def test_roll_recipe_shapes_and_facets(store):
 
 def test_roll_recipe_is_preference_weighted(store):
     _seed_two_genres(store)
-    from yt_playlist import genre_map
+    from yt_playlist.rec import genre_map
     techno_fam = genre_map.family("Techno")
     picks = Counter(recommend.roll_recipe(store, "fresh", seed=s)["facets"]["genres"][0] for s in range(60))
     # techno is played far more, so it should be rolled far more often than folk
@@ -40,7 +40,7 @@ def test_roll_recipe_is_preference_weighted(store):
 
 def test_roll_recipe_respects_muted_genre(store):
     _seed_two_genres(store)
-    from yt_playlist import genre_map
+    from yt_playlist.rec import genre_map
     folk_fam = genre_map.family("Folk")
     store.set_weight(f"genre:{folk_fam}", 0.0, lo=0.0, hi=2.0)    # mute folk
     picks = Counter(recommend.roll_recipe(store, "fresh", seed=s)["facets"]["genres"][0] for s in range(40))
@@ -69,7 +69,7 @@ def test_roll_recipe_transient_suppresses_disfavored_genre(store):
 
 
 def test_theme_filter_puts_matching_genre_first(store):
-    from yt_playlist import genre_map, recommend
+    from yt_playlist.rec import genre_map, recommend
     iid = store.upsert_identity("main", "cred", None, True)
     h = store.upsert_track("v1", "H", "HArt", None, None); store.set_track_genre(h, "House")
     f = store.upsert_track("v2", "F", "FArt", None, None); store.set_track_genre(f, "Folk")

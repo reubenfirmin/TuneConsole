@@ -89,7 +89,7 @@ def test_track_year_returns_row_fragment(store):
 
 def test_enrich_track_events_carry_rendered_row(store, monkeypatch):
     import json as _json
-    import yt_playlist.musicbrainz as mb
+    import yt_playlist.providers.musicbrainz as mb
     monkeypatch.setattr(mb, "enrich", lambda title, artist: ("Rock", "1998") if title == "S0" else (None, None))
     iid, a = _seed_one_track(store)
     c = _client(store, lambda: {iid: FakeClient()})
@@ -236,7 +236,7 @@ def test_add_tracks_empty_returns_toast(store):
 # --- Last.fm API key ---
 
 def test_lastfm_key_saved_via_form(store, monkeypatch, tmp_path):
-    import yt_playlist.lastfm as lf
+    import yt_playlist.providers.lastfm as lf
     monkeypatch.delenv("LASTFM_API_KEY", raising=False)
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     iid = store.upsert_identity("main", "cred", None, True)

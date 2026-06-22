@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
-from yt_playlist.thumbnails import best_thumb
+from yt_playlist.util.thumbnails import best_thumb
 
 
 def build(ctx) -> APIRouter:

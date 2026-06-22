@@ -1,4 +1,4 @@
-from yt_playlist import embed, eval_recs
+from yt_playlist.rec import embed, eval_recs
 
 
 def test_recall_recovers_held_out_cluster_track(store):

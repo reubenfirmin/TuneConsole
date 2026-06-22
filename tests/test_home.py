@@ -13,7 +13,7 @@ def _client(store):
 def test_home_visit_ticks_card_rotation_but_previews_dont(store):
     """A genuine Home visit advances each card's rotation counter once; steer/stance previews and the
     feed fragment re-render the same epoch without ticking — so tuning your taste never churns cards."""
-    from yt_playlist.rec_dao import RecDao
+    from yt_playlist.rec.rec_dao import RecDao
     c = _client(store)
     dao = RecDao(store)
     assert dao.card_views("wheelhouse") == 0
@@ -117,6 +117,24 @@ def test_new_user_only_gets_full_sync(store):
     store.set_setting("last_sync_at", "1000")   # now there's a first sync (now_fn -> 1000.0)
     html = c.get("/").text
     assert "Sync plays" in html and "sync-toggle" in html
+
+
+def test_enrich_nudge_after_first_sync_and_persisted_dismiss(store):
+    """After the first sync, Home shows a one-time 'enrich improves recs' nudge. Dismissing it
+    persists (settings flag) so it never returns. A never-synced user doesn't see it."""
+    c = _client(store)
+    assert "enrich-nudge" not in c.get("/").text          # never synced -> no nudge yet
+
+    store.set_setting("last_sync_at", "1000")             # first sync happened
+    html = c.get("/").text
+    assert "enrich-nudge" in html
+    assert "better your recommendations" in html          # the message landed
+
+    r = c.post("/onboard/enrich/dismiss")                 # dismiss it
+    assert r.status_code == 200
+    assert store.get_setting("enrich_nudge_dismissed") == "1"
+
+    assert "enrich-nudge" not in c.get("/").text          # gone for good
 
 
 def test_auto_sync_toggle_persists_and_renders(store):

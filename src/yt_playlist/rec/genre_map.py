@@ -8,7 +8,7 @@ import functools
 import json
 from pathlib import Path
 
-_DATA = Path(__file__).parent / "data" / "genre_families.json"
+_DATA = Path(__file__).parent.parent / "data" / "genre_families.json"   # data/ lives at the package root
 
 
 @functools.lru_cache(maxsize=1)
