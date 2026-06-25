@@ -9,7 +9,7 @@ def store():
 
 
 def only_provider(store, name):
-    """Configure the enrichment waterfall to run exactly one provider (others disabled) — lets a
+    """Configure the enrichment waterfall to run exactly one provider (others disabled), lets a
     route-level test exercise the single-icon waterfall while isolating one provider's behavior."""
     from yt_playlist.providers import enrichment as E
     E.save_config(store, [{"name": p["name"], "enabled": p["name"] == name} for p in E.PROVIDERS])

@@ -1,10 +1,10 @@
-{# Swapped in for a proto-playlist card after "Save & play" — success or a friendly failure. #}
+{# Swapped in for a proto-playlist card after "Save & play": success or a friendly failure. #}
 <section class="gen-card card gen-done">
   {% if error %}
   <header class="gen-head"><span class="eyebrow eyebrow-warn">Couldn't save</span>
     <h2 class="gen-name">{{ name }}</h2></header>
   <p class="section-note">{{ error }}</p>
-  {# Nothing to play — discard the blank tab we opened on click so no stray about:blank is left behind. #}
+  {# Nothing to play. Discard the blank tab we opened on click so no stray about:blank is left behind. #}
   <script>(function () { var t = window.__ytTab; window.__ytTab = null;
     if (t && !t.closed) try { t.close(); } catch (e) {} })();</script>
   {% else %}
@@ -19,7 +19,7 @@
   </div>
   {% if pid %}{% include "_partials/mood_panel.html" %}{% endif %}
   {# Point the tab we opened on click (genOpenYT) at the new playlist, then send THIS tab to the
-     playlist's page in our UI — which carries its own "Open on YouTube Music" link too. If that tab
+     playlist's page in our UI, which carries its own "Open on YouTube Music" link too. If that tab
      is missing (no handle / it was closed), fall back to a bare window.open; should the browser block
      THAT, the "Open on YouTube Music" link above is the manual fallback. Until this fires the popup
      shows our /generating placeholder (a spinner card), not a stark white about:blank. #}

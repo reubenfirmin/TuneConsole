@@ -1,0 +1,378 @@
+"""Home recommendation surfaces (cards): Wheelhouse, Comfort, Catalog, Fresh, Rediscover, plus
+playlist completion and the Taste-page sample. Each returns a ranked pool; per-card rotation is here."""
+import random
+import statistics
+from collections import Counter
+from dataclasses import dataclass
+
+from yt_playlist.library import analysis
+from yt_playlist.util.duration import ago as _ago
+from yt_playlist.util.matching import identity_key
+from yt_playlist.util.thumbnails import best_thumb
+from yt_playlist.rec import embed, rec_params
+from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.rec.scoring import _apply_axis_weights, _apply_mood, _SCORE_SHIFT_EPS, playlist_taste
+from yt_playlist.repos.base import GENERATED_GROUP
+
+
+@dataclass
+class ForYouItem:
+    title: str
+    artist: str
+    album: str
+    video_id: str | None
+    thumbnail: str | None
+    plays: int
+    reason: str        # why this was recommended (human-readable)
+    key: str = ""      # track identity_key, for feedback (dismiss/less/mute)
+    lane: str = ""     # source lane (neighbourhood/rotation/deep_cut/comfort), for weighting
+    genre: str = ""    # filled in at DJ-ordering time (attach_genres) so dj_order can do genre segues
+
+
+def rotate_sample(items, size, epoch):
+    """A stable-per-epoch random slice of `items`: how a Home list card 'regenerates with a random
+    seed'. Within an erosion epoch (a window of erosion_view_cap views) the seed is fixed, so the
+    card holds steady; the next epoch reseeds to a fresh set. Order within the slice is preserved
+    (the pool stays ranked). Returns up to `size` items; a no-op when the pool already fits."""
+    items = list(items)
+    if len(items) <= size:
+        return items
+    rng = random.Random(epoch)
+    return [items[i] for i in sorted(rng.sample(range(len(items)), size))]
+
+
+def rotate_page(items, size, epoch):
+    """Ordered rotation for a grid card (new artists / albums): show `size` items, advancing one page
+    per epoch and wrapping once the pool is exhausted, so we cycle back through them rather than
+    going empty. Returns up to `size` items (fewer only when the whole pool is smaller)."""
+    items = list(items)
+    n = len(items)
+    if n == 0:
+        return []
+    start = (epoch * size) % n
+    return [items[(start + i) % n] for i in range(min(size, n))]
+
+
+# HOME CARD: "Wheelhouse" ("More in your wheelhouse"). Deeper into what you already love.
+# Internal lanes here are 'neighbourhood' + 'deep_cut'. When naming new code/vars, prefer the home
+# heading "wheelhouse" over the legacy function name "for_you".
+def for_you(store, now, limit=24) -> list[ForYouItem]:
+    """Blended local recommendations from your taste model, interleaved and deduped, best-ranked
+    first. Returns a deep, ranked pool; per-card rotation (a random epoch-seeded slice) happens at
+    the surface, not here: for_you itself carries no anti-staleness state.
+
+    Wheelhouse is your taste/genre model, not play-recency (that's the Comfort Listening card).
+    Sources, strongest-available first:
+      - taste neighbourhood: tracks near what you play most, re-ranked by your per-playlist taste
+        and genre/era weights (falls back to plain rotation co-occurrence until the model is built)
+      - deep cuts: the most-neglected track of each artist you play a lot
+    """
+    gp = rec_params.get_param
+    pool = limit * gp(store, "candidate_pool_factor")   # fetch deeper than we show, so rotation has slack
+    sources = []
+    # The taste-embedding scores: per-playlist taste fit, tilted by the transient model (mood centroid
+    # + genre/era/artist facet leans, staleness-gated). This single score drives both the neighbourhood
+    # lane's candidate selection AND every lane's final ordering: no separate recency mechanism.
+    sims = None
+    if store.rec_vectors_count():
+        pt = playlist_taste(store)
+        keys, V, idx = embed.load_vectors(store)
+        if pt and V is not None:
+            allscores = _apply_mood(pt.score_all(V), store, now, V, idx)   # taste, tilted by transient mood
+            sims = _apply_axis_weights(store, {keys[i]: float(allscores[i]) for i in range(len(keys))}, now)
+
+    if sims is not None:
+        # Neighbourhood lane: top tracks by taste×transient, excluding your most-played (so it's the
+        # *neighbourhood* of your taste, not your hits).
+        seeds = set(store.top_played_keys(limit=8))
+        top = [k for k in sorted(sims, key=lambda k: -sims[k]) if k not in seeds][:pool]
+        meta = store.tracks_by_keys(top)
+        nbrs = [{"key": k, "plays": 0, **meta[k]} for k in top if k in meta]
+        sources.append((nbrs, lambda r: "In your taste neighbourhood", "neighbourhood"))
+    else:
+        # Until the embedding model is built, fall back to plain rotation co-occurrence.
+        sources.append((store.more_like_rotation(limit=pool),
+                        lambda r: _rotation_reason(r["shared_playlists"]), "rotation"))
+    sources.append((store.deep_cuts(limit=pool),
+                    lambda r: f"A deep cut from {r['artist']}, who you play a lot", "deep_cut"))
+
+    # Re-rank every lane's candidates by the same taste×transient score.
+    if sims is not None:
+        for rows, _, _ in sources:
+            rows.sort(key=lambda r: -sims.get(r["key"], -1.0))
+
+    weights = store.get_weights()
+    # Never show these: dismissed/snoozed/muted, and anything already bundled into a generated
+    # playlist (don't re-offer what you just saved). Anti-staleness is per-card rotation, not here.
+    dao = RecDao(store)
+    hard = store.suppressed_keys("for_you", now) | dao.generated_track_keys()
+    muted = store.muted_artists()
+    # weighted fair queuing: each lane gets turns ∝ its learned weight (default 1.0 => round-robin)
+    queues = [[list(rows), reason, lane, weights.get(f"lane:{lane}", 1.0), 0]
+              for rows, reason, lane in sources]
+    seen: set = set()
+    out: list[ForYouItem] = []
+    while len(out) < limit:
+        live = [q for q in queues if q[0]]
+        if not live:
+            break
+        q = max(live, key=lambda q: q[3] / (q[4] + 1))   # weight / (taken + 1)
+        rows, reason, lane, _, _ = q
+        r = rows.pop(0)
+        if r["key"] in seen or r["key"] in hard or r["artist"] in muted:
+            seen.add(r["key"])
+            continue
+        seen.add(r["key"])
+        q[4] += 1
+        out.append(ForYouItem(
+            title=r["title"], artist=r["artist"], album=r["album"], video_id=r["video_id"],
+            thumbnail=r["thumbnail"], plays=r["plays"], reason=reason(r), key=r["key"], lane=lane))
+    return out
+
+
+# HOME CARD: "Comfort" ("Comfort listening"). Most-played favourites that have gone quiet.
+def comfort_listening(store, now, limit=24) -> list[ForYouItem]:
+    """High-rotation favorites you haven't reached for lately, your comfort listening.
+
+    Ranks your most-played tracks, demoted the more recently you've heard them (see
+    store.comfort_candidates), so the card surfaces reliable favorites that have gone quiet rather
+    than whatever's already in heavy rotation. Single-source, so no lane fair-queuing; it still
+    honours the for_you suppression set (dismissed/snoozed/muted) and never re-offers a track
+    already bundled into a generated playlist. No erosion: the recency demotion is its own freshness.
+    """
+    gp = rec_params.get_param
+    pool = limit * gp(store, "candidate_pool_factor")
+    rows = store.comfort_candidates(now, min_plays=gp(store, "comfort_min_plays"),
+                                    recency_full_days=gp(store, "comfort_recency_full_days"), limit=pool)
+    dao = RecDao(store)
+    suppressed = store.suppressed_keys("for_you", now) | dao.generated_track_keys()
+    muted = store.muted_artists()
+    out: list[ForYouItem] = []
+    for r in rows:
+        if len(out) >= limit:
+            break
+        if r["key"] in suppressed or r["artist"] in muted:
+            continue
+        out.append(ForYouItem(
+            title=r["title"], artist=r["artist"], album=r["album"], video_id=r["video_id"],
+            thumbnail=r["thumbnail"], plays=r["plays"],
+            reason="One of your most-played - you haven't reached for it lately",
+            key=r["key"], lane="comfort"))
+    return out
+
+
+def rediscover_playlists(store, now, count=2, per=5, epoch=0, pool=8) -> list[dict]:
+    """Spotlight real library playlists you haven't reached for lately, to nudge a rediscover.
+
+    Ranks by *aggregate* track staleness (the median of when each track was last played, with
+    never-played tracks counted as cold), so a playlist leads only when most of it has gone unplayed,
+    not because one track was heard recently. Then rotates like the other Home cards: pages through
+    the coldest `pool` playlists `count` at a time, advancing one page per rotation `epoch` (wrapping),
+    so you cycle through only the genuinely-cold tail rather than ever drifting into warmer playlists.
+    Highlights `per` tracks from each page as a teaser. Skips system playlists (Liked Music, Episodes
+    for Later), Generated proto-playlists, and empties. None of those are a library playlist to revisit.
+    """
+    recency = store.get_playlist_track_recency()         # {pid: [per-track last-played ts | None, ...]}
+    groups = store.get_playlist_groups()                 # ytm -> group name
+    candidates = []
+    for p in store.get_playlists():
+        if (p.ytm_playlist_id in analysis.SYSTEM_PLAYLIST_IDS
+                or groups.get(p.ytm_playlist_id) == GENERATED_GROUP
+                or not p.track_count):
+            continue
+        # Never-played tracks count as cold: a 0.0 sentinel sorts older than any real timestamp.
+        lasts = [t if t is not None else 0.0 for t in (recency.get(p.id) or [0.0])]
+        candidates.append((p, statistics.median(lasts)))
+    candidates.sort(key=lambda c: c[1])                  # coldest aggregate (oldest median) leads
+    cold = candidates[:max(count, pool)]                 # rotate within the coldest tail only
+    out = []
+    for p, med in rotate_page(cold, count, epoch):       # rotate through the ranked cold pool
+        out.append({"id": p.id, "ytm": p.ytm_playlist_id, "title": p.title,
+                    "track_count": p.track_count, "thumbnail": p.thumbnail,
+                    # the median is per-track; 0.0 means most tracks have never been played
+                    "last_played": _ago(now - med) if med > 0 else None,
+                    "tracks": store.playlist_tracks_detail(p.id)[:per]})
+    return out
+
+
+def rediscover_albums(store, now, count=3, epoch=0, pool=9) -> list[dict]:
+    """Spotlight saved albums you haven't played lately, to nudge a revisit, the album cousin of
+    rediscover_playlists. Ranks each saved album by its newest play across the album's tracks
+    (never-played counts as coldest), then rotates through the coldest `pool` like the other Home
+    cards: `count` at a time, advancing one page per rotation `epoch` (wrapping). Returns [] when
+    nothing is saved. Tiles carry just metadata + thumbnail (no track teaser)."""
+    saved = store.get_saved_albums()
+    if not saved:
+        return []
+    recency = store.saved_albums_recency()               # {browse: newest play ts | None}
+    # Never-played (None) sorts older than any real timestamp -> coldest leads.
+    ranked = sorted(saved, key=lambda a: recency.get(a["browse"]) or 0.0)
+    cold = ranked[:max(count, pool)]                      # rotate within the coldest tail only
+    return [{"browse_id": a["browse"], "title": a["title"], "artist": a["artist"],
+             "year": a["year"], "thumbnail": a["thumbnail"]}
+            for a in rotate_page(cold, count, epoch)]
+
+
+def taste_sample(store, now, limit=8, pool_factor=8) -> list[ForYouItem]:
+    """A random *slice* of the tracks that match the current taste model. Backs the Taste page's
+    'refresh sample'. Unlike for_you (a deterministic ranking), this draws a deeper matching pool and
+    samples from it, so every refresh is a new set even when the knobs are unchanged.
+    """
+    pool = for_you(store, now, limit=limit * pool_factor)
+    if len(pool) <= limit:
+        return pool
+    return [pool[i] for i in sorted(random.sample(range(len(pool)), limit))]  # keep ranked order in-slice
+
+
+def _rotation_reason(n) -> str:
+    return f"Sits with your favorites in {n} of your playlist{'s' if n != 1 else ''}"
+
+
+# HOME CARD: "Fresh" ("Fresh songs"). Tracks NOT in your collection yet (outward discovery).
+def fresh_songs(ctx, limit=12) -> list[dict]:
+    """Outward (Phase 2): songs from YTM radios seeded by your top tracks that you don't own.
+
+    Uses the client (network). Runs in the background worker, never per request. Degrades to []
+    with no client/network. limit matches the Home proto-card size (PROTO_SIZE) so the Fresh card
+    can actually fill, rather than topping out short."""
+    client = next(iter((ctx.client_provider() or {}).values()), None)
+    if client is None:
+        return []
+    owned = RecDao(ctx.store).library_keys()
+    out, seen = [], set()
+    for t in ctx.store.top_tracks(6):
+        vid = t.get("video_id")
+        if not vid:
+            continue
+        try:
+            radio = client.get_watch_playlist(vid) or {}
+        except Exception:  # noqa: BLE001 - network/parse/missing-method -> skip this seed
+            continue
+        for r in radio.get("tracks") or []:
+            v, title = r.get("videoId"), (r.get("title") or "").strip()
+            artist = ((r.get("artists") or [{}])[0] or {}).get("name", "")
+            if not v or not title:
+                continue
+            key = identity_key(title, artist)
+            if key in owned or key in seen:
+                continue
+            seen.add(key)
+            # watch-playlist tracks carry their art under `thumbnail` (singular); search/playlist
+            # tracks use `thumbnails`. Try both so the fresh cards actually get cover art.
+            out.append({"video_id": v, "title": title, "artist": artist,
+                        "thumbnail": best_thumb(r.get("thumbnail") or r.get("thumbnails"))})
+            if len(out) >= limit:
+                return out
+    return out
+
+
+# HOME CARD: "Catalog" ("From your catalog"). Own-but-under-played tracks, the edge of your palette.
+# This powers the Catalog card, NOT a separate "Explore" surface; the internal lane name 'explore' is
+# the source of the naming confusion. The home page dedups this pool against the Wheelhouse pool
+# (see web/routes/home.py), so Catalog displays only what Wheelhouse didn't. When naming new
+# code/vars, prefer the home heading "catalog" over "explore".
+def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
+    """Catalog: your OWN under-played tracks, surfaced primarily by LACK OF PLAYS and *weighted*
+    (never filtered) by the taste model. So a never-played track that fits your taste tops the card,
+    an off-taste never-played track still appears (just lower), and a heavily-played track stays low
+    no matter how well it fits. That's the Wheelhouse's job, not Catalog's. Empty until the
+    embedding model is built. Distinct from Wheelhouse by signal (plays vs taste), not by a filter.
+    """
+    pt = playlist_taste(store)
+    if not pt:
+        return []
+    keys, V, idx = embed.load_vectors(store)
+    if V is None:
+        return []
+    # taste WEIGHT (taste-fit + transient mood + permanent×transient facets): modulates, never filters
+    scores = _apply_mood(pt.score_all(V), store, now, V, idx)
+    sims = _apply_axis_weights(store, {keys[i]: float(scores[i]) for i in range(len(keys))}, now)
+    smin = min(sims.values()) if sims else 0.0
+    plays = store.play_counts()                                  # {key: count}; absent = never played
+    # Catalog score = novelty(lack of plays, PRIMARY) × taste-fit weight (shifted positive so it only
+    # ever scales, never zeroes: "weighted, not filtered").
+    scored = {k: (1.0 / (1.0 + plays.get(k, 0))) * (sims.get(k, smin) - smin + _SCORE_SHIFT_EPS) for k in keys}
+    order = sorted(scored, key=lambda k: -scored[k])
+    dao = RecDao(store)
+    suppressed = store.suppressed_keys("for_you", now) | dao.generated_track_keys()
+    muted = store.muted_artists()
+    meta = store.tracks_by_keys(order[:limit * 8])
+    out: list[ForYouItem] = []
+    for k in order[:limit * 8]:
+        m = meta.get(k)
+        if not m or k in suppressed or m["artist"] in muted:
+            continue
+        p = plays.get(k, 0)
+        reason = "Never played, sits near your taste" if p == 0 else f"Barely played ({p}×), worth another spin"
+        out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"], m["thumbnail"],
+                              p, reason, k, "explore"))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem]:
+    """Tracks you own that fit a given playlist but aren't in it yet.
+
+    Uses the taste-embedding model (nearest to the playlist's centroid) once it's built;
+    falls back to the artist/co-occurrence heuristic until then.
+    """
+    members = store.get_playlist_track_keys(playlist_id)
+    scope = str(playlist_id)
+    suppressed = store.suppressed_keys("suggest", now or 0, scope=scope)
+    muted = store.muted_artists()
+    member_meta = store.tracks_by_keys(members)
+    member_artists = {m["artist"] for m in member_meta.values()}
+    # Spread `limit` suggestions across the playlist's distinct artists (>=2 each) so a tightly-
+    # clustered artist can't flood an eclectic playlist's completion (the '529 repeats' bug). A
+    # single-artist playlist has 1 distinct artist, so the cap is the whole limit. It still gets
+    # plenty of that artist.
+    distinct = len({m["artist"] for m in member_meta.values()}) or 1
+    per_artist_cap = max(2, round(limit / distinct))
+
+    def keep(key, artist):
+        return key not in suppressed and artist not in muted
+
+    if store.rec_vectors_count() and members:
+        nbrs = embed.centroid_neighbors(store, list(members), topn=limit * 8, exclude=members)
+        if nbrs:
+            meta = store.tracks_by_keys([k for k, _ in nbrs])
+            out, taken = [], Counter()
+            for k, _ in nbrs:
+                m = meta.get(k)
+                if not m or not keep(k, m["artist"]) or taken[m["artist"]] >= per_artist_cap:
+                    continue
+                taken[m["artist"]] += 1
+                reason = (f"More from {m['artist']}, already here" if m["artist"] in member_artists
+                          else "Matches the sound of this playlist")
+                out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"],
+                                      m["thumbnail"], 0, reason, k))
+                if len(out) >= limit:
+                    break
+            if out:                 # if every embedding neighbor was muted/suppressed, don't return
+                return out          # an empty list, fall through to the co-occurrence heuristic
+
+
+    out, taken = [], Counter()
+    for r in store.complete_playlist(playlist_id, limit=limit * 8):
+        if not keep(r["key"], r["artist"]) or taken[r["artist"]] >= per_artist_cap:
+            continue
+        taken[r["artist"]] += 1
+        if r["same_artist"] and r["cooc"]:
+            reason = f"By {r['artist']} (already here), and in {r['cooc']} related playlist(s)"
+        elif r["same_artist"]:
+            reason = f"More from {r['artist']}, already in this playlist"
+        else:
+            reason = f"Sits with these tracks in {r['cooc']} of your playlists"
+        out.append(ForYouItem(
+            title=r["title"], artist=r["artist"], album=r["album"], video_id=r["video_id"],
+            thumbnail=r["thumbnail"], plays=0, reason=reason, key=r["key"]))
+        if len(out) >= limit:
+            break
+    return out
+
+
+# Canonical home-card names (code vocabulary == product wording). The legacy function names are kept
+# as the definitions to avoid churning internal callers; prefer wheelhouse/catalog in new code.
+wheelhouse = for_you          # Home card "More in your wheelhouse"
+catalog = explore_for_you     # Home card "From your catalog"

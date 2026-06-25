@@ -20,6 +20,15 @@ from yt_playlist.web.jobs import SyncJobs
 logger = logging.getLogger("yt_playlist.web")
 
 
+def form_float(value):
+    """Parse a form field to float, or None when it is missing or non-numeric. Lets a handler treat
+    a malformed POST (a garbage slider value) as a no-op instead of raising and returning a 500."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class Ctx:
     store: object

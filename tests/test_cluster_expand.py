@@ -1,4 +1,4 @@
-"""embed.cluster_expand — the seeded, push-away ring used by the Clusters canvas.
+"""embed.cluster_expand: the seeded, push-away ring used by the Clusters canvas.
 
 A node's next ring = library tracks nearest the centroid of its PINNED path, minus a push-away
 tilt toward the centroid of the PRUNED ("negative model") set. Geometry is injected directly as
@@ -38,7 +38,7 @@ def test_ranks_by_positive_centroid(store):
 
 def test_pushes_away_from_negative(store):
     # a and b are symmetric about p (equal positive score). A pruned seed n sits right on top of a,
-    # so push-away must demote a below b — the whole point of "prune as negative signal".
+    # so push-away must demote a below b: the whole point of "prune as negative signal".
     _put(store, {"p": _unit(0), "a": _unit(20), "b": _unit(-20), "n": _unit(18)})
     plain = [k for k, _ in embed.cluster_expand(
         store, pos_keys=["p"], neg_keys=[], exclude=["n"], topn=2)]

@@ -1,11 +1,11 @@
 <!doctype html>
 <html lang="en">
 {# Standalone interstitial shown in the popup we open on the "Save & play on YouTube" click. The save
-   round-trip (create the playlist, add tracks — one by one on a batch-add failure) can take many
+   round-trip (create the playlist, add tracks, one by one on a batch-add failure) can take many
    seconds; until the home tab redirects this window to YouTube, a raw about:blank reads as a broken
    white screen. This gives that wait a branded face in the app's console / deep-space idiom: the
    playlist's own thumbnails orbit a glowing hub, edges carrying green "data" pulses inward, while the
-   real playlist is wired up on YouTube. No nav/htmx/alpine — it's a momentary page the opener leaves. #}
+   real playlist is wired up on YouTube. No nav/htmx/alpine: it's a momentary page the opener leaves. #}
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -24,13 +24,13 @@
         radial-gradient(46% 40% at 60% 70%, rgba(45,255,163,0.06), transparent 72%),
         radial-gradient(130% 110% at 50% -6%, #16132f 0%, #0b0a23 55%, #06051a 100%);
     }
-    /* Drifting parallax starfield — reuses the Clusters starfield (.cluster-stars) wholesale. */
+    /* Drifting parallax starfield: reuses the Clusters starfield (.cluster-stars) wholesale. */
     .gen-stage .cluster-stars { z-index: 0; }
     /* Canvas: warped dot-grid + edges with inward green pulses. Behind the thumbnail nodes. */
     .gen-fx { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
     .gen-orbit { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
 
-    /* Central hub: the playlist being assembled — the brand EQ mark in a pulsing green ring. */
+    /* Central hub: the playlist being assembled, the brand EQ mark in a pulsing green ring. */
     .gen-hub {
       position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 3;
       width: 84px; height: 84px; border-radius: 50%; display: grid; place-items: center;
@@ -71,7 +71,7 @@
     /* Brand, top-left. */
     .gen-brand { position: absolute; z-index: 5; top: clamp(1.2rem, 4vh, 2.2rem); left: clamp(1.4rem, 5vw, 4rem); }
 
-    /* Console status block, bottom-left — left-aligned, mono eyebrow with a live dot + blinking cursor. */
+    /* Console status block, bottom-left: left-aligned, mono eyebrow with a live dot + blinking cursor. */
     .gen-copy { position: absolute; z-index: 5; left: clamp(1.4rem, 5vw, 4rem); bottom: clamp(1.4rem, 6vh, 4rem);
       max-width: 32rem; }
     .gen-eyebrow {
@@ -132,7 +132,7 @@
       <span class="gen-eyebrow"><span class="gen-dot"></span>building on youtube<span class="gen-cursor"></span></span>
       <h1 class="gen-title">Wiring up your playlist</h1>
       <p class="gen-sub">Pulling your picks together on YouTube Music. This tab opens the playlist the
-        moment it's ready — keep it open.</p>
+        moment it's ready. Keep it open.</p>
     </div>
   </div>
 
@@ -149,7 +149,7 @@
     try { thumbs = JSON.parse(localStorage.getItem('tc_gen_thumbs') || '[]'); } catch (e) {}
     if (!Array.isArray(thumbs)) thumbs = [];
 
-    // Build the orbiting nodes — real thumbnails when we have them, else gradient "♪" tiles so the
+    // Build the orbiting nodes: real thumbnails when we have them, else gradient "♪" tiles so the
     // graph still feels populated. Two interleaved rings give the swirl some depth.
     var COUNT = thumbs.length ? Math.min(thumbs.length, 14) : 9;
     var nodes = [];
@@ -190,7 +190,7 @@
     resize();
 
     function drawGrid() {
-      // Faint dot-grid that fades out from the hub — a quiet nod to the Clusters spacetime grid.
+      // Faint dot-grid that fades out from the hub, a quiet nod to the Clusters spacetime grid.
       var step = 36, maxD = Math.max(W, H) * 0.62;
       for (var gx = cx % step; gx < W; gx += step) {
         for (var gy = cy % step; gy < H; gy += step) {

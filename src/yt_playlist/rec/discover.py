@@ -3,26 +3,58 @@
 External sources (Last.fm) supply similarity *edges*; our embedding + play-weighted per-playlist
 taste model supply the *judgement*. A candidate new artist is grounded by a match-weighted centroid
 of the user's artists it is similar to (the bridge anchors), then scored against the play-weighted
-per-playlist taste — so it only surfaces if it fits contexts the user actually plays, and a low-play
+per-playlist taste, so it only surfaces if it fits contexts the user actually plays, and a low-play
 playlist can't drag in off-taste artists. Each result explains itself: which of your artists bridged
 it, and which of your playlists it fits. Runs in the background worker; Last.fm results cached 14d.
 """
 import numpy as np
 
 from yt_playlist.util import genre_map
+from yt_playlist.util.matching import identity_key, normalize
+from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.rec import embed, recommend
 from yt_playlist.providers import lastfm
 from yt_playlist.rec.rec_dao import RecDao
-from yt_playlist.web.routes.charts import _fetch_artist_info   # module-level so it's patchable in tests
-from yt_playlist.util.matching import identity_key, normalize
-from yt_playlist.rec.rec_dao import RecDao
+
+
+def fetch_artist_info(ctx, name, browse_id=None):
+    """Best-effort bio + thumbnail + album list from YouTube. Uses the stored artist browseId when we
+    have it (accurate); else searches the name. Returns None on any failure (no client, network, etc.).
+
+    Lives here (not in the web layer) so outward discovery can reach it without a rec -> web import; the
+    artist page in web/routes/charts imports it from here. Module-level so tests can patch it."""
+    try:
+        clients = ctx.client_provider() or {}
+        client = next(iter(clients.values()), None)
+        if client is None:
+            return None
+        if not browse_id:
+            results = client.search(name, filter="artists") or []
+            browse_id = results[0].get("browseId") if results else None
+        if not browse_id:
+            return None
+        a = client.get_artist(browse_id)
+        albums = []
+        for x in (a.get("albums") or {}).get("results") or []:
+            albums.append({"title": x.get("title"), "year": x.get("year"),
+                           "browse_id": x.get("browseId"),
+                           "thumbnail": best_thumb(x.get("thumbnails"))})
+        return {"bio": a.get("description"),
+                "thumbnail": best_thumb(a.get("thumbnails")),
+                "subscribers": a.get("subscribers"),
+                "name": a.get("name") or name,
+                "browse_id": browse_id,            # the artist's channel, for the "Open in YouTube" link
+                "albums": albums}
+    except Exception:  # noqa: BLE001 - network/parse/missing-method all degrade to "no info"
+        ctx.logger.info("artist info fetch failed for %r (non-fatal)", name)
+        return None
 
 
 class ContentProjection:
     """Learned cold-start grounding (ACARec-flavored): a ridge map from content features
     (genre-family + year-decade, one-hot) to the collaborative embedding, fit on the library's own
     (content, vector) pairs. Lets an *enriched* cold candidate get a predicted taste vector to score
-    against the per-playlist model — an alternative to the heuristic bridge proxy, kept only if it
+    against the per-playlist model, an alternative to the heuristic bridge proxy, kept only if it
     beats it on recall@k (eval_recs.projection_recall). Sharpens as genre enrichment densifies.
     """
 
@@ -66,7 +98,7 @@ class ContentProjection:
 
 
 def _anchors(store, V, idx, top_n=30):
-    """[(display_name, weight, unit_vector)] — your artists weighted by play × taste-centrality, so
+    """[(display_name, weight, unit_vector)]: your artists weighted by play × taste-centrality, so
     the *core* of your taste anchors discovery (not one-off saves)."""
     seeds = store.top_played_keys(limit=12)
     centre = embed._centroid(V, idx, [(seeds, 1.0)]) if seeds else None
@@ -93,10 +125,9 @@ def _anchors(store, V, idx, top_n=30):
 
 
 def _artist_thumb(ctx, name):
-    """Best-effort artist image from a YTM artist search — for the graphical new-artist cards.
+    """Best-effort artist image from a YTM artist search, for the graphical new-artist cards.
     Cheap (the search result already carries thumbnails; no second get_artist call). None on any miss."""
     try:
-        from yt_playlist.util.thumbnails import best_thumb
         client = next(iter((ctx.client_provider() or {}).values()), None)
         if client is None:
             return None
@@ -151,7 +182,7 @@ def new_artists(ctx, limit=15, max_anchors=30):
             continue
         taste, fits = pt.score(proxy)                       # play-weighted per-playlist fit (direction)
         score = taste * strength                            # judged-by-taste × bridge-strength
-        if score <= 0:                                      # off-taste (negative cosine) — don't surface
+        if score <= 0:                                      # off-taste (negative cosine). Don't surface
             continue                                        # it as a recommendation with a "fits you" label
         because = [n for _, _, n in sorted(bl, key=lambda x: -x[1])[:3]]
         out.append({"artist": cand, "score": round(float(score), 4),
@@ -176,7 +207,7 @@ def run_discovery(ctx, now, budget=25) -> dict:
     due = store.artists_due_for_scan(now, budget=budget)
     for artist in due:
         try:
-            info = _fetch_artist_info(ctx, artist)
+            info = fetch_artist_info(ctx, artist)
         except Exception:  # noqa: BLE001 - one bad artist must not abort the pass
             info = None
         for alb in (info or {}).get("albums") or []:
@@ -242,7 +273,7 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
     """Surface n albums from the discovered pool: recency-biased (so new releases reliably pop), with
     some older ones mixed in, de-prioritizing what was shown most recently. Stamps last_shown.
 
-    #18: the FACET overlay applies — albums in a muted genre-family are excluded, and the family
+    #18: the FACET overlay applies: albums in a muted genre-family are excluded, and the family
     weight is a secondary bias within the recency buckets (recency stays primary)."""
     albums = store.get_discovered_albums()
     if not albums:
@@ -251,7 +282,7 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
     kept = []
     for a in albums:
         w = _discovery_facet_w(store, a.get("genre"), now)
-        if w is None:                                    # muted family — excluded from discovery
+        if w is None:                                    # muted family: excluded from discovery
             continue
         wmap[a["browse_id"]] = w
         kept.append(a)
@@ -276,7 +307,7 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
     seen_art, picked = set(), set()
 
     def fill(src, k):
-        # Take up to k from src, one album per artist first — so a "mixed" + "split" pair of the same
+        # Take up to k from src, one album per artist first, so a "mixed" + "split" pair of the same
         # release (same artist) won't both surface. Only repeats an artist to reach k if this bucket
         # can't supply k distinct ones, so the recent/older balance below is preserved either way.
         out = []
@@ -296,7 +327,7 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
     n_recent = max(1, round(n * recent_frac))
     chosen = fill(recent, n_recent)
     chosen += fill(older, n - len(chosen))
-    if len(chosen) < n:                                          # a bucket was thin — top up from the rest
+    if len(chosen) < n:                                          # a bucket was thin, top up from the rest
         chosen += fill(recent + older, n - len(chosen))
     chosen = chosen[:n]
     store.mark_shown("album", [a["browse_id"] for a in chosen], now)
@@ -306,7 +337,7 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
 def pick_discovered_artists(store, n, now):
     """Surface n new artists from the pool: best taste-score first, de-prioritizing recently-shown.
 
-    #18: the FACET overlay applies — artists in a muted genre-family are excluded, and the family
+    #18: the FACET overlay applies: artists in a muted genre-family are excluded, and the family
     weight multiplies the taste score (favored families rise, 'less X lately' gently lowers X)."""
     arts = store.get_discovered_artists()
     if not arts:
@@ -314,7 +345,7 @@ def pick_discovered_artists(store, n, now):
     scored = []
     for a in arts:
         w = _discovery_facet_w(store, a.get("genre"), now)
-        if w is None:                                    # muted family — excluded from discovery
+        if w is None:                                    # muted family: excluded from discovery
             continue
         scored.append((a, (a.get("score") or 0.0) * w))
     scored.sort(key=lambda t: (-t[1], t[0].get("last_shown") or 0.0))

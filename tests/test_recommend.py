@@ -7,7 +7,7 @@ def test_wheelhouse_excludes_play_recency_lane(store):
     """Wheelhouse is the taste/genre model, not play-recency: a high-play dormant track that isn't
     a deep cut or taste neighbour must NOT surface in for_you (it belongs to Comfort Listening)."""
     iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_track("v1", "Gem", "X", None, None)         # key "gem|x" — played a lot, then dormant
+    store.upsert_track("v1", "Gem", "X", None, None)         # key "gem|x": played a lot, then dormant
     store.upsert_track("v2", "Bench", "X", None, None)       # X's never-played track -> X's deep cut
     day = 86400.0
     now = 200 * day
@@ -340,7 +340,7 @@ def test_axis_adjusted_scores_neutral_is_noop(store):
 
 
 def test_complete_playlist_caps_flooding_artist_on_eclectic_playlist(store):
-    """An eclectic playlist (many artists) shouldn't get flooded by one artist's big catalog — the
+    """An eclectic playlist (many artists) shouldn't get flooded by one artist's big catalog: the
     '529 repeats' bug, where a 12-track/10-artist playlist returned 9 tracks by one band."""
     from collections import Counter
     iid = store.upsert_identity("main", "cred", None, True)
@@ -384,9 +384,9 @@ def test_playlist_facets_groups_genres_eras_tracks(store):
 def _seed_pl(store, iid, ytm, title, n, now, played_at=None, group=None, play_each_at=None):
     """Make a library playlist of `n` tracks, optionally with play history.
 
-    play_each_at: list aligned to the n tracks — play_each_at[i] is when track i was last played
+    play_each_at: list aligned to the n tracks, play_each_at[i] is when track i was last played
                   (None entry = that track was never played). One snapshot per played track.
-    played_at:    legacy shorthand — play just the *first* track at this time (the rest never played).
+    played_at:    legacy shorthand, play just the *first* track at this time (the rest never played).
     """
     from yt_playlist.util.matching import identity_key
     keys, tids = [], []
@@ -455,7 +455,7 @@ def test_rediscover_treats_never_played_as_coldest(store):
 
 def test_rediscover_rotates_through_cold_pool_by_epoch(store):
     # Same erosion/rotation as other Home cards: page through the ranked-by-coldness pool, one page
-    # per epoch, wrapping — so you cycle through cold playlists instead of always seeing the same two.
+    # per epoch, wrapping, so you cycle through cold playlists instead of always seeing the same two.
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0
     now = 400 * day

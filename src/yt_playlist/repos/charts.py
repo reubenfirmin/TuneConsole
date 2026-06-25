@@ -1,4 +1,4 @@
-"""ChartsRepo — play-history statistics for the charts / artist / playlist UI pages
+"""ChartsRepo: play-history statistics for the charts / artist / playlist UI pages
 (most-played songs and artists, per-playlist listen stats, and per-track detail views).
 """
 from yt_playlist.repos.base import LIKED_EXISTS, Repo, synchronized
@@ -15,7 +15,7 @@ _CAT_EXPR = {
              "THEN CAST(CAST(substr(MIN(NULLIF(mb_year,'')),1,4) AS INTEGER)/10*10 AS TEXT) "
              "END"),
 }
-# Distinct (song, playlist) membership — dedups dup track rows so a play counts once per playlist.
+# Distinct (song, playlist) membership: dedups dup track rows so a play counts once per playlist.
 _PL_MEMBERSHIP = ("SELECT DISTINCT t.identity_key ik, pt.playlist_id pid "
                   "FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id")
 
@@ -23,7 +23,7 @@ _PL_MEMBERSHIP = ("SELECT DISTINCT t.identity_key ik, pt.playlist_id pid "
 class ChartsRepo(Repo):
     @synchronized
     def album_browse_ids(self) -> dict:
-        """{album_title: a representative album_browse_id} for albums that have one — lets the
+        """{album_title: a representative album_browse_id} for albums that have one, lets the
         Albums ticker link each row to its /album page. Titles without a browse id are omitted."""
         rows = self.conn.execute(
             "SELECT album, MIN(album_browse_id) b FROM tracks "
@@ -106,7 +106,7 @@ class ChartsRepo(Repo):
 
     @synchronized
     def get_playlist_track_recency(self) -> dict:
-        """Per-playlist {playlist_id: [per-track last-played ts | None, ...]} — one entry per distinct
+        """Per-playlist {playlist_id: [per-track last-played ts | None, ...]}, one entry per distinct
         track, its newest snapshot (None = never played). Unlike get_playlist_listen_stats (which
         collapses to the single freshest track), this keeps every track's recency so callers can judge
         a playlist by the *aggregate* staleness of its tracks, not its one most-recently-played song.
@@ -125,7 +125,7 @@ class ChartsRepo(Repo):
 
     @synchronized
     def top_tracks(self, limit=100, since=None) -> list[dict]:
-        """Most-played songs from sync history — play count = appearances across history snapshots.
+        """Most-played songs from sync history: play count = appearances across history snapshots.
 
         `since` (unix ts) limits to snapshots at/after that time, for a time-windowed chart.
         """
@@ -143,7 +143,7 @@ class ChartsRepo(Repo):
 
     @synchronized
     def top_artists(self, limit=100, since=None) -> list[dict]:
-        """Most-played artists from sync history — play count summed over the artist's songs."""
+        """Most-played artists from sync history: play count summed over the artist's songs."""
         rows = self.conn.execute(
             "WITH plays AS (SELECT hi.identity_key, COUNT(*) c FROM history_items hi "
             "  JOIN history_snapshots hs ON hs.id=hi.snapshot_id "

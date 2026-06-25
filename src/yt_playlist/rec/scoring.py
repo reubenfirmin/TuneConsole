@@ -1,0 +1,282 @@
+"""Taste-model scoring: build the per-playlist taste model and turn it into per-track scores,
+re-weighted by genre/era/artist preferences, the breadth steer, and the transient mood/facet overlay.
+
+Split out of the former monolithic recommend.py; recommend re-exports these for existing callers."""
+import numpy as np
+
+from yt_playlist.util import genre_map
+from yt_playlist.rec import embed, rec_params, transient
+from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.rec.taste_analysis import taste_breadth
+
+
+# Added to an L2 norm before dividing so a zero/degenerate vector normalises to ~0 rather than raising
+# or producing NaNs. Tiny relative to any real unit vector, so it never perturbs a result.
+_NORM_EPS = 1e-9
+
+
+# A small positive shift applied when re-weighting taste scores (which can be negative cosines): after
+# shifting every score to a non-negative base we add this so a muted family lands just above 0 instead
+# of exactly 0, keeping the ordering well-defined. Negligible next to real score gaps.
+_SCORE_SHIFT_EPS = 1e-6
+
+
+class PlaylistTaste:
+    """Play-weighted per-playlist taste model: each playlist is one taste *context* (its embedding
+    centroid), weighted by how much you actually listen to it. Scoring a candidate against this
+    rewards fit to the contexts you play, so a low-play playlist (the 'vacation with Dad' problem)
+    can't drag in off-taste recommendations, and distinct high-play contexts aren't blurred into one
+    average. Catch-all playlists (too big to be a coherent context) are excluded.
+    """
+
+    def __init__(self, titles, centroids, weights, pids=()):
+        self.titles = list(titles)               # playlist titles, one per context
+        self.centroids = centroids               # (n, dim) L2-normalised rows, or empty
+        self.weights = weights                   # (n,) sums to 1, or empty
+        self.pids = list(pids)                   # playlist ids, aligned with titles (for the viz)
+
+    def __bool__(self):
+        return len(self.titles) > 0
+
+    def score(self, vec, top=3):
+        """(total, [(playlist_title, contribution), ...]) for a candidate taste vector."""
+        if not self.titles:
+            return 0.0, []
+        v = vec / (np.linalg.norm(vec) + _NORM_EPS)
+        contrib = self.weights * (self.centroids @ v)        # play-weighted cosine per context
+        order = np.argsort(-contrib)[:top]
+        because = [(self.titles[i], float(contrib[i])) for i in order if contrib[i] > 0]
+        return float(contrib.sum()), because
+
+    def score_all(self, V):
+        """Per-context taste score for every row of V (N, dim) -> (N,). Vectorized."""
+        if not self.titles or len(V) == 0:
+            return np.zeros(len(V))
+        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
+        return self.weights @ (self.centroids @ Vn.T)        # (P,)·(P,N) -> (N,)
+
+
+def playlist_taste(store, max_tracks=120) -> PlaylistTaste:
+    """Build the per-playlist taste model from the embedding + listen history."""
+    keys, V, idx = embed.load_vectors(store)
+    if V is None:
+        return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
+    stats = store.get_playlist_listen_stats()                # {pid: (last_ts, listen_count)}
+    excluded = RecDao(store).excluded_playlist_ids()         # generated playlists don't shape taste
+    titles, cents, ws, pids = [], [], [], []
+    for p in store.get_playlists():
+        if p.id in excluded:
+            continue
+        members = store.get_playlist_track_keys(p.id)
+        if len(members) > max_tracks:                        # skip catch-alls: not a coherent context
+            continue
+        rows = [idx[k] for k in members if k in idx]
+        if not rows:
+            continue
+        c = V[rows].mean(0)
+        n = np.linalg.norm(c)
+        if n == 0:
+            continue
+        titles.append(p.title)
+        cents.append(c / n)
+        ws.append(stats.get(p.id, (None, 0))[1] or 0)        # how much you listen to this playlist
+        pids.append(p.id)
+    if not titles:
+        return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
+    w = np.asarray(ws, dtype=np.float64)
+    w = w / w.sum() if w.sum() > 0 else np.full(len(titles), 1.0 / len(titles))   # uniform if no plays
+    return PlaylistTaste(titles, np.asarray(cents), w, pids)
+
+
+def genre_adjusted_scores(scores, genre_of, gweights):
+    """Re-weight per-track taste scores by the user's per-genre-family preferences.
+
+    `gweights` maps genre family -> weight (1.0 = neutral, 0 = mute, >1 = favor). Because raw taste
+    scores can be negative (cosine), every score is first shifted to a common non-negative base, then
+    scaled by its family's weight, so ordering stays well-defined regardless of sign: a muted family
+    sinks to 0, a boosted one rises. Returns a new {key: score}; a pure no-op when all weights are
+    neutral, so the default path is untouched.
+    """
+    if not scores or not gweights or all(w == 1.0 for w in gweights.values()):
+        return scores
+    smin = min(scores.values())
+    eps = _SCORE_SHIFT_EPS
+    return {k: (s - smin + eps) * gweights.get(genre_of.get(k), 1.0) for k, s in scores.items()}
+
+
+def axis_adjusted_scores(scores, mult):
+    """Re-weight taste scores by a precomputed per-key multiplier (generalizes genre weighting).
+
+    Shift to a common non-negative base then scale, so ordering is well-defined for negative cosines.
+    No-op when `mult` is falsy. Returns a new {key: score}.
+    """
+    if not scores or not mult or all(m == 1.0 for m in mult.values()):
+        return scores
+    smin = min(scores.values())
+    eps = _SCORE_SHIFT_EPS
+    return {k: (s - smin + eps) * mult.get(k, 1.0) for k, s in scores.items()}
+
+
+# Breadth steering (#7): how far one full drag of the bias can push a single family's weight. The
+# raw factor is share**(-bias*gain); these clamp it so a vanishingly rare family can't explode (nor a
+# dominant one collapse) before it folds in with the manual genre weights.
+BREADTH_FACTOR_MIN = 0.25
+
+
+BREADTH_FACTOR_MAX = 4.0
+
+
+def _breadth_factors(shares, bias, gain):
+    """Per-genre-family multiplier that tilts how broad vs focused the feed's genre mix is (#7).
+
+    This is the math kernel behind the interactive Breadth bar. It redistributes weight *across the
+    families you already listen to* (it never invents genres you don't have):
+
+      factor(fam) = clamp( r(fam) ** (-bias * gain) ),  where r(fam) = share(fam) * n_families
+
+    `r` is a family's prominence relative to an even split (r=1 means exactly average). The exponent
+    is what makes the dial work:
+      - bias = 0  -> exponent 0 -> every factor is 1.0 (returned as {} so callers no-op): no change.
+      - bias > 0  (eclectic) -> negative exponent -> rare families (r<1) lift above 1, dominant
+        families (r>1) drop below 1. The genre distribution flattens toward uniform (higher entropy =
+        more breadth), so your under-played families surface more.
+      - bias < 0  (focused) -> the mirror image: dominant families are boosted, rare ones damped, so
+        the feed concentrates on your core.
+
+    Args:
+        shares: {family: play_share} from `taste_breadth` (shares sum to ~1 over present families).
+        bias:   the steer in [-1, +1] (0 neutral, + eclectic, - focused).
+        gain:   sensitivity; one full drag roughly doubles a half/double-average family at gain=1.
+
+    Returns {family: multiplier}, or {} when there's nothing to redistribute (neutral bias, or one
+    family or fewer -> no spread to tilt). Callers treat a missing family as a neutral 1.0.
+    """
+    n = len(shares)
+    if bias == 0.0 or n <= 1:
+        return {}
+    factors = {}
+    for fam, share in shares.items():
+        r = share * n                                  # prominence vs an even split (1.0 = average)
+        raw = r ** (-bias * gain) if r > 0 else BREADTH_FACTOR_MAX   # r==0 -> maximally rare -> ceiling
+        factors[fam] = max(BREADTH_FACTOR_MIN, min(BREADTH_FACTOR_MAX, raw))
+    return factors
+
+
+def _axis_weights_for(store, keys, now=None):
+    """{key: genre_w * era_w * artist_w}, where each axis weight is permanent x standing lean x the
+    transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
+    w = store.get_weights()
+    gw = {a[len("genre:"):]: v for a, v in w.items() if a.startswith("genre:")}
+    ew = {a[len("era:"):]: v for a, v in w.items() if a.startswith("era:")}
+    aw = {a[len("artist:"):]: v for a, v in w.items() if a.startswith("artist:")}
+    leans = transient.facet_leans(store, now) if now is not None else {}
+    standing = store.get_leans()
+    # Breadth steer (#7): a per-family tilt derived from your current genre spread. Only computed when
+    # the bias is off-center (the taste_breadth query isn't worth running at the neutral default), and
+    # it must keep the overlay alive below even when every genre/era/artist weight is neutral.
+    bias = rec_params.get_param(store, "breadth_bias")
+    bfac = _breadth_factors(taste_breadth(store)["families"], bias,
+                            rec_params.get_param(store, "breadth_gain")) if bias else {}
+    perm_neutral = all(v == 1.0 for v in list(gw.values()) + list(ew.values()) + list(aw.values()))
+    if perm_neutral and not leans and not standing and not bfac:
+        return None
+    keys = list(keys)
+    dao = RecDao(store)
+    genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
+    lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
+    fgain = rec_params.get_param(store, "facet_gain")
+    fmin = rec_params.get_param(store, "facet_mult_min")
+    fmax = rec_params.get_param(store, "facet_mult_max")
+
+    def tm(token):                                      # live transient facet multiplier for a token
+        return transient.facet_multiplier(leans.get(token, 0.0), fgain, fmin, fmax)
+
+    def sl(token):                                       # standing (held-slider) lean for a token
+        return standing.get(token, 1.0)
+
+    def axis_mult(weights, kind, token):
+        """One axis's multiplier: permanent weight x standing lean x transient facet multiplier, or a
+        neutral 1.0 when the track has no value on that axis (token is None). Unifies the identical
+        chain used for genre family, sub-genre, era and artist."""
+        if token is None:
+            return 1.0
+        full = f"{kind}:{token}"
+        return weights.get(token, 1.0) * sl(full) * tm(full)
+
+    mult = {}
+    for k in keys:
+        fam = genre_map.family(genres[k]) if k in genres else None
+        sub = genre_map.subgenre(genres[k]) if k in genres else None
+        gm = axis_mult(gw, "genre", fam) * bfac.get(fam, 1.0)   # breadth steer folds in atop genre weight
+        if sub and sub != fam:
+            gm *= axis_mult(gw, "genre", sub)
+        em = axis_mult(ew, "era", decades.get(k))
+        am = axis_mult(aw, "artist", artists.get(k))
+        mult[k] = max(lo, min(hi, gm)) * max(lo, min(hi, em)) * max(lo, min(hi, am))
+    return mult
+
+
+def _apply_axis_weights(store, sims, now=None):
+    """Re-weight a {key: taste-score} map by permanent preferences × the live transient facet leans."""
+    mult = _axis_weights_for(store, list(sims), now=now)
+    return sims if mult is None else axis_adjusted_scores(sims, mult)
+
+
+def discovery_facet_weight(store, family, now):
+    """#18: the facet overlay for OUTWARD discovery (new artists/albums), at genre-family granularity.
+
+    Returns a positive multiplier to scale a candidate's surfacing score by, or None to HARD-EXCLUDE
+    it (when the family's permanent `genre:` weight is exactly 0: muting techno on the Taste tab
+    yields zero techno discovery, stronger than the in-library de-rank). The multiplier is
+    permanent_weight × standing_lean × a DAMPED transient multiplier, so 'mute' bends hard while
+    'less house lately' only nudges. An untagged candidate (family falsy) is neutral (1.0) and never
+    excluded. We don't banish what we can't classify."""
+    if not family:
+        return 1.0
+    perm = store.get_weights().get(f"genre:{family}", 1.0)
+    if perm == 0:
+        return None
+    standing = store.get_lean(f"genre:{family}")
+    lean = transient.facet_leans(store, now).get(f"genre:{family}", 0.0)
+    tmult = transient.facet_multiplier(lean * rec_params.DISCOVERY_TRANSIENT_DAMP,
+                                       rec_params.FACET_GAIN, rec_params.FACET_MULT_MIN,
+                                       rec_params.FACET_MULT_MAX)
+    return max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, perm * standing * tmult))
+
+
+def genre_distance_fn(store, alpha=0.5):
+    """A genre-distance function blending the static meta-genre map with this library's own
+    co-occurrence: genres you repeatedly playlist together are pulled closer. alpha = static
+    weight. Falls back to the static map for pairs you've never grouped. Spec §2.1/§5.3.
+    """
+    co = store.genre_cooccurrence()
+    pairs, occ = co["pairs"], co["occ"]
+
+    def dist(g1, g2):
+        base = genre_map.distance(g1, g2)
+        a, b = (g1, g2) if g1 <= g2 else (g2, g1)
+        c = pairs.get((a, b), 0)
+        if c == 0 or not occ.get(g1) or not occ.get(g2):
+            return base
+        jaccard = c / (occ[g1] + occ[g2] - c)
+        return alpha * base + (1 - alpha) * (1 - jaccard)
+
+    return dist
+
+
+MOOD_ALPHA = 0.35   # how hard a mood event tilts the lanes, relative to the taste score
+
+
+mood_tilt = transient.centroid_tilt   # back-compat: tests/callers use recommend.mood_tilt(store, now, V, idx)
+
+
+def _apply_mood(scores, store, now, V, idx):
+    """Blend the transient centroid tilt into per-track scores, scaled down as sync goes stale."""
+    tilt = transient.centroid_tilt(store, now, V, idx)
+    if tilt is None:
+        return scores
+    factor = transient.staleness_factor(store, now)
+    if factor <= 0:
+        return scores
+    Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
+    return scores + MOOD_ALPHA * factor * (Vn @ tilt)

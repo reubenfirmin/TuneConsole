@@ -1,4 +1,4 @@
-"""RecModelRepo — the learned taste model: blend weights, feedback events, and embedding vectors.
+"""RecModelRepo: the learned taste model: blend weights, feedback events, and embedding vectors.
 
 Owns the rec_weights / rec_feedback / rec_vectors tables (created in store.py's central SCHEMA).
 Split out of the former monolithic RecRepo so each rec concern is its own focused DAO.
@@ -97,7 +97,7 @@ class RecModelRepo(Repo):
 
     @synchronized
     def list_dislikes(self) -> list:
-        """Active dislike bans (item_key, until, created_at), newest first — for the Taste Model page."""
+        """Active dislike bans (item_key, until, created_at), newest first, for the Taste Model page."""
         return self.conn.execute(
             "SELECT item_key, until, created_at FROM rec_feedback WHERE kind='dislike' "
             "ORDER BY created_at DESC").fetchall()
@@ -168,7 +168,7 @@ class RecModelRepo(Repo):
 
     @synchronized
     def clear_all_leans(self) -> None:
-        """Wipe every standing lean (Home 'Reset to default' — bars back to neutral). Does NOT touch
+        """Wipe every standing lean (Home 'Reset to default', bars back to neutral). Does NOT touch
         permanent weights (those are the long-term taste model, edited on the Taste page)."""
         self.conn.execute("DELETE FROM rec_lean")
         self.conn.commit()
@@ -202,7 +202,7 @@ class RecModelRepo(Repo):
 
     @synchronized
     def feedback_summary(self) -> dict:
-        """{kind: count} of stored feedback events — for the Taste Model page."""
+        """{kind: count} of stored feedback events, for the Taste Model page."""
         return {r["kind"]: r["c"] for r in self.conn.execute(
             "SELECT kind, COUNT(*) c FROM rec_feedback GROUP BY kind")}
 

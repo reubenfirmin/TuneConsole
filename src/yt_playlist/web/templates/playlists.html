@@ -61,7 +61,7 @@
   </tr>
   {% endmacro %}
 
-  {# "Generated" lives in its own card above the table — always a separate block, collapsible #}
+  {# "Generated" lives in its own card above the table, always a separate block, collapsible #}
   <div class="card gen-grp" x-show="genRows().length" x-cloak>
     <div class="gen-grp-head" @click="toggleGen()" title="Click to collapse / expand">
       <span class="eyebrow">Generated</span>

@@ -68,7 +68,7 @@ def test_execute_planned_delete_refuses_if_not_subset(store, monkeypatch, tmp_pa
                                 "DEL": [_track("v1", "Song", "Artist"), _track("v2", "Other", "Artist")]})
     plan = MergePlan(dele, keep, [], [])
     aid = store_plan(store, plan, "delete", "DEL", now=1.0)
-    with pytest.raises(ValueError, match="refusing to delete"):
+    with pytest.raises(ValueError, match="[Rr]efusing to delete"):
         execute_planned(store, aid, {iid: client}, now=2.0)
     assert client.deleted == []                            # nothing deleted
 
@@ -149,7 +149,7 @@ def test_resolve_in_target_rejects_low_confidence_match():
 
 def test_apply_result_partial_failure_records_undoable_action(store, monkeypatch, tmp_path):
     # If a mutation throws mid-merge (here: a dropper delete fails), apply_result must still record an
-    # undoable APPLY_MERGE with the kept playlist's prior contents — not exit leaving no undo trail.
+    # undoable APPLY_MERGE with the kept playlist's prior contents, not exit leaving no undo trail.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library.executor import apply_result
     iid = store.upsert_identity("main", "cred", None, True)

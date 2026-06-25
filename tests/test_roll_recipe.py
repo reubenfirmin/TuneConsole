@@ -70,7 +70,7 @@ def test_roll_recipe_transient_suppresses_disfavored_genre(store):
 
 def test_roll_recipe_fresh_is_always_shuffle(store):
     # Fresh playlists are unowned proposals with no plays/recency, so data-dependent journeys
-    # (rediscovery, deep dive…) must never be rolled — every seed yields a straight shuffle (#32).
+    # (rediscovery, deep dive…) must never be rolled. Every seed yields a straight shuffle (#32).
     _seed_two_genres(store)
     journeys = {recommend.roll_recipe(store, "fresh", seed=s)["journey"] for s in range(60)}
     assert journeys == {"shuffle"}

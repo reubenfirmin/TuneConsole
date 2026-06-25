@@ -2,13 +2,13 @@
    appended past the top 6 by taste_fingerprint) so an added bar always shows even in a deep library.
    Rendered standalone by /home/fingerprint/{add,remove} so a swap can replace just #fp-genre-bars and
    leave the live genre picker alive. Each family can drill into its subgenres (eager-rendered, hidden,
-   toggled client-side — a leaned subgenre is promoted to its own top bar instead, so no duplication). #}
+   toggled client-side, a leaned subgenre is promoted to its own top bar instead, so no duplication). #}
 {% set pinned = fingerprint.families[6:] | selectattr('pinned') | list %}
 {% macro tools(axis, name, expandable) %}
   {# Over-the-label tools, revealed only on label hover (CSS). Remove works on any bar/subgenre. #}
   <span class="fp-row-tools">
     {% if expandable %}
-    <button type="button" class="fp-icon-btn fp-expand-btn" :class="{ on: open }" @click="open = !open"
+    <button type="button" class="fp-icon-btn fp-expand-btn" :class="{ on: open }" @click="toggle()"
             title="Show / hide {{ name }} subgenres" aria-label="toggle {{ name }} subgenres">&#9662;</button>
     {% endif %}
     <button type="button" class="fp-icon-btn fp-remove-btn"
@@ -19,16 +19,17 @@
 {% endmacro %}
 {% macro bar(axis, name, effective, tooltip) %}
   <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ effective }}"
+         style="--p:{{ '%.0f'|format(effective / 2 * 100) }}%"
          name="weight" hx-post="/home/steer" hx-vals='{"axis":"{{ axis }}"}'
          hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
          hx-on::before-request="sessionStorage.setItem('steered','1')"
          aria-label="favor or mute {{ name }}" title="{{ tooltip }}">
 {% endmacro %}
 {% for g in fingerprint.families[:6] + pinned %}
-<div class="fp-genre"{% if g.expandable %} x-data="{ open: false }"{% endif %}>
+<div class="fp-genre"{% if g.expandable %} x-data="fpGenre()" data-fam="{{ g.name }}"{% endif %}>
   <div class="fp-row">
     <span class="fp-name-wrap">
-      <span class="fp-name" title="{{ g.name }} — {{ '%.0f'|format(g.share*100) }}% of your listening">{{ g.name }}</span>
+      <span class="fp-name" title="{{ g.name }}, {{ '%.0f'|format(g.share*100) }}% of your listening">{{ g.name }}</span>
       {{ tools("genre:" + g.name, g.name, g.expandable) }}
     </span>
     {{ bar("genre:" + g.name, g.name, g.effective, "favor or mute " + g.name) }}

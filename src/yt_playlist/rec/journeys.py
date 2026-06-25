@@ -2,12 +2,13 @@
 chosen by weighted-random at generation and learnable via feedback.
 
 Pure: `journey_order` takes a `feat(item) -> dict` accessor, so this module needs no Store and is
-trivially testable. Only dependency is genre_map (+ a LAZY import of recommend.dj_order for the
-within-band artist spacer — lazy to avoid a circular import, since recommend imports this module).
+trivially testable. Dependencies are genre_map and ordering.dj_order (the within-band artist spacer);
+both are leaf modules, so there is no longer a circular import to dodge.
 """
 import random
 
 from yt_playlist.util import genre_map
+from yt_playlist.rec.ordering import dj_order
 
 JOURNEYS = ["energy_arc", "warm_up", "wind_down", "smooth_segue", "odyssey",
             "time_machine", "throwback", "deep_dive", "rediscovery", "shuffle"]
@@ -65,13 +66,12 @@ def _space(items, seed):
     engine. <=2 items: nothing to space."""
     if len(items) <= 2:
         return list(items)
-    from yt_playlist.rec.recommend import dj_order   # lazy: avoid circular import
     return dj_order(items, stickiness=0.4, seed=seed)
 
 
 def _split_bands(items, value_of, min_bands=1):
     """Sort items with a non-None value ascending and cut into ~_BAND_SIZE contiguous bands.
-    Returns (value_bands_low_to_high, none_band). `min_bands` floors the band count — the arc needs
+    Returns (value_bands_low_to_high, none_band). `min_bands` floors the band count: the arc needs
     >=4 bands to rise AND fall."""
     have = [it for it in items if value_of(it) is not None]
     none = [it for it in items if value_of(it) is None]

@@ -51,7 +51,7 @@ def test_within_bucket_no_rebuild(monkeypatch):
     s = CovStore(tagged=10, total=100)
     _patch(monkeypatch, s)
     embed.maybe_rebuild_content_vectors(s)                   # bucket 2
-    s._tagged = 12                                           # 12% — still bucket 2
+    s._tagged = 12                                           # 12%, still bucket 2
     assert embed.maybe_rebuild_content_vectors(s) is False
     assert s.builds == 1
 
@@ -60,7 +60,7 @@ def test_crossing_boundary_rebuilds_once(monkeypatch):
     s = CovStore(tagged=10, total=100)
     _patch(monkeypatch, s)
     embed.maybe_rebuild_content_vectors(s)                   # bucket 2
-    s._tagged = 16                                           # 16% — bucket 3
+    s._tagged = 16                                           # 16%, bucket 3
     assert embed.maybe_rebuild_content_vectors(s) is True
     assert s.builds == 2
     assert s.get_setting("rec_content_cov_bucket") == "3"

@@ -5,7 +5,7 @@ only what it *found* (never writing to the store). The harness logs every findin
 canonical track fill-only, and compares results across providers to surface disagreements. Field
 comparison is declared in ``FIELD_SPECS`` so the harness stays provider-agnostic.
 
-A "field" is a neutral concept name (``genre``, ``year``, ``bpm``, …), not a DB column — the store
+A "field" is a neutral concept name (``genre``, ``year``, ``bpm``, …), not a DB column. The store
 layer maps it to a column (``year`` -> ``mb_year``). Fields absent from ``FIELD_SPECS`` are logged
 and filled but never conflict-checked (e.g. single-source audio features can't disagree).
 """
@@ -55,7 +55,7 @@ class Discrete:
 
 
 class Numeric:
-    """Two numbers agree iff within an absolute tolerance — trivial float drift isn't a conflict."""
+    """Two numbers agree iff within an absolute tolerance: trivial float drift isn't a conflict."""
     def __init__(self, tol):
         self.tol = tol
 
@@ -143,7 +143,7 @@ def run_enrich_loop(store, on_progress, pending, *, gate, breaker, start_text, e
         on_progress({"type": "done", "text": empty_text, "total": 0})
         return
     on_progress({"type": "info", "text": start_text(total), "total": total})
-    breaker.reset()                            # fresh chance each run — a past outage shouldn't pre-trip it
+    breaker.reset()                            # fresh chance each run: a past outage shouldn't pre-trip it
     seq = gate.enter()
     try:
         for i, t in enumerate(pending, 1):

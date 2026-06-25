@@ -77,7 +77,7 @@ def build(ctx) -> APIRouter:
 
     def _liked_id(members):
         # Liked Music can't be deleted, so a merge that includes it can only keep Liked (delete the
-        # others) or keep all — the per-other "keep" options are dropped. Returns LM's member id or None.
+        # others) or keep all. The per-other "keep" options are dropped. Returns LM's member id or None.
         return next((m["id"] for m in members if m["ytm"] == "LM"), None)
 
     def _draft(ids, members, *, return_to=None):
@@ -192,7 +192,7 @@ def build(ctx) -> APIRouter:
             parts.append(f"{s['skipped']} skipped (unavailable)")
         if s["deleted"]:
             parts.append("deleted " + ", ".join(f"“{t}”" for t in s["deleted"]))
-        detail = (" — " + ", ".join(parts)) if parts else ""
+        detail = (", " + ", ".join(parts)) if parts else ""
         msg = f"Merged into “{s['kept_title']}”{detail}."
         sep = "&" if "?" in draft_params["return_to"] else "?"
         url = f"{draft_params['return_to']}{sep}flash={quote(msg)}&flash_pl={quote(s['kept_ytm'])}"

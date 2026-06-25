@@ -4,14 +4,14 @@
   <div class="fp-bar">
     <button type="button" class="fp-collapse" @click="toggle()"
             :aria-expanded="(!collapsed).toString()" :title="collapsed ? 'Expand taste panel' : 'Collapse taste panel'">
-      <span class="fp-caret" x-text="collapsed ? '▸' : '▾'"></span> Your taste
+      <span class="fp-caret" x-text="collapsed ? '▸' : '▾'"></span> Your listening mood
     </button>
     {# Always available (a header-level global control, not per-row): clears leans, un-hides removed
        bars, re-centers breadth. A no-op when nothing is steered. #}
     <button type="button" class="fp-reset" x-show="!collapsed" x-cloak
             hx-post="/home/fingerprint/reset" hx-target="#home-feed" hx-swap="outerHTML"
             hx-on::before-request="sessionStorage.setItem('steered','1')"
-            title="Clear all your steering — every bar back to neutral">Reset to default</button>
+            title="Clear all your steering: every bar back to neutral">Reset to default</button>
   </div>
   <div class="fp-collapsible" x-show="!collapsed" x-cloak>
   {# Header pairs the two GLOBAL controls: Breadth (the focused<->eclectic master dial, #7) on the
@@ -21,11 +21,19 @@
     <div class="fp-breadth">
       <span class="fp-label">Breadth</span>
       <span class="fp-breadth-end">Focused</span>
-      <input type="range" class="fp-breadth-slider" min="-1" max="1" step="0.05"
-             value="{{ fingerprint.breadth_bias }}" name="breadth_bias"
-             hx-post="/home/breadth" hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
-             hx-on::before-request="sessionStorage.setItem('steered','1')"
-             aria-label="steer the feed from focused to eclectic">
+      <span class="fp-breadth-track">
+        <input type="range" class="fp-breadth-slider" min="-1" max="1" step="0.05"
+               value="{{ fingerprint.breadth_bias }}" name="breadth_bias"
+               style="--p:{{ '%.0f'|format((fingerprint.breadth_bias + 1) / 2 * 100) }}%"
+               hx-post="/home/breadth" hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
+               hx-on::before-request="sessionStorage.setItem('steered','1')"
+               aria-label="steer the feed from focused to eclectic">
+        {# Tick at the transient model's current measured breadth (0=focused..1=eclectic), so you see
+           where you naturally sit vs the thumb (your bias steer). Inset 8px each side for the thumb. #}
+        <span class="fp-breadth-tick"
+              style="left:calc(8px + {{ '%.3f'|format(fingerprint.breadth) }} * (100% - 16px))"
+              title="your current breadth: {{ 'eclectic' if fingerprint.breadth > 0.66 else ('focused' if fingerprint.breadth < 0.33 else 'balanced') }}"></span>
+      </span>
       <span class="fp-breadth-end">Eclectic</span>
       {# Measured spread, as plain context for the relative dial (no second bar to compete with it). #}
       <span class="fp-breadth-note">naturally {{ 'eclectic' if fingerprint.breadth > 0.66 else ('focused' if fingerprint.breadth < 0.33 else 'balanced') }}</span>
@@ -37,8 +45,8 @@
     <div class="fp-col">
       <span class="fp-label">Genres</span>
       {# Bars live in their own container so a pick can swap JUST these (server-authoritative re-render)
-         and leave the picker below untouched — the picker never gets destroyed/re-initialised. #}
-      <div id="fp-genre-bars">{% include "_partials/fingerprint_genre_bars.html" %}</div>
+         and leave the picker below untouched. The picker never gets destroyed/re-initialised. #}
+      <div id="fp-genre-bars" class="fp-barset">{% include "_partials/fingerprint_genre_bars.html" %}</div>
       {# Genre picker: an autosuggest combo (same widget family as the Clusters genre filter). Filters
          the full taxonomy client-side so reset/close are instant; a pick POSTs to /home/fingerprint/add
          and swaps #fp-genre-bars with the re-rendered bars (the new one included). #}
@@ -67,16 +75,19 @@
     </div>
     <div class="fp-col">
       <span class="fp-label">Eras</span>
+      <div class="fp-barset">
       {% for e in fingerprint.eras[:5] %}
       <div class="fp-row">
         <span class="fp-name" title="{{ '%.0f'|format(e.share*100) }}% of your listening">{{ e.name }}s</span>
         <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ e.effective }}"
+               style="--p:{{ '%.0f'|format(e.effective / 2 * 100) }}%"
                name="weight" hx-post="/home/steer" hx-vals='{"axis":"era:{{ e.name }}"}'
                hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
                hx-on::before-request="sessionStorage.setItem('steered','1')"
                aria-label="favor or mute the {{ e.name }}s">
       </div>
       {% endfor %}
+      </div>
     </div>
   </div>
   </div>

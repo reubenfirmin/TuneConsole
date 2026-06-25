@@ -15,7 +15,7 @@
       <form hx-post="{{ resolve_url }}" hx-target="#conflicts-modal" hx-swap="innerHTML">
         {% for _tid, items in conflicts|groupby('track_id') %}
         <div class="conflict-track">
-          <strong>{{ items[0].artist }} — {{ items[0].title }}</strong>
+          <strong>{{ items[0].artist }}, {{ items[0].title }}</strong>
           {% for c in items %}
           <div class="conflict-field">
             <span class="conflict-label">{{ c.field|capitalize }}</span>

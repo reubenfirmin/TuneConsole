@@ -53,7 +53,7 @@ def test_upsert_track_null_video_id_dedup(store):
 
 def test_upsert_track_backfills_duration_on_resync(store):
     # A track can enter the store without a duration (history/plays sync inserts duration_s=None).
-    # Re-upserting it later WITH a duration — e.g. adding it via "find alternate version" — must
+    # Re-upserting it later WITH a duration, e.g. adding it via "find alternate version", must
     # backfill duration_s, otherwise its time never shows in the playlist (issue #26).
     t = store.upsert_track("v1", "Song A", "Artist X", "Alb", None, 1)
     again = store.upsert_track("v1", "Song A", "Artist X", "Alb", 250, 1)

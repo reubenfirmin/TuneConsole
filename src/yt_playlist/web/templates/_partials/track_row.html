@@ -1,5 +1,5 @@
 {# One playlist track row. Rendered by the page (in the loop), by /playlist/{id}/track-genre and
-   /track-year (htmx row swap after an edit), and by the enrich SSE stream (live cell updates) — so
+   /track-year (htmx row swap after an edit), and by the enrich SSE stream (live cell updates), so
    manual edit and enrichment always render the genre/year cells identically. The whole <tr> is the
    swap unit, keeping the data-* attributes the client sort reads in sync. Needs: t, idx. #}
 <tr class="srow" data-vid="{{ t.video_id }}" data-title="{{ t.title|lower }}" data-artist="{{ t.artist|lower }}"

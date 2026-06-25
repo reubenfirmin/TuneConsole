@@ -51,7 +51,7 @@ def test_enrich_none_when_no_data(monkeypatch):
         raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
     monkeypatch.setattr(ab, "_get_json", fake_get_json)
     assert ab.enrich("mbid-unknown") == ab._empty()
-    assert not ab._breaker.tripped()   # a 404 is "reachable" — must not trip the breaker
+    assert not ab._breaker.tripped()   # a 404 is "reachable", must not trip the breaker
 
 
 def test_enrich_playlist_resolves_mbid_then_fills(store, monkeypatch):

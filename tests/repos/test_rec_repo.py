@@ -1,6 +1,6 @@
 """DAO suite for RecRepo (recommendation persistence: impressions, proposals, taste queries).
 
-Confirms the recs DAO is unified onto the shared Repo base — it binds the Store's connection +
+Confirms the recs DAO is unified onto the shared Repo base. It binds the Store's connection +
 lock (constructed as RecRepo(store)) and owns its own rec tables. RecDao is kept as an alias.
 """
 from yt_playlist.repos.base import Repo

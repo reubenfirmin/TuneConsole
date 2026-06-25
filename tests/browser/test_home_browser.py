@@ -1,7 +1,7 @@
 def test_home_is_landing_with_sync_and_sections(live_app, page):
     page.goto(f"{live_app}/")
     # Home is the default tab and owns the Sync control. This live_app has never synced, so a brand-new
-    # user is offered Full sync only — the "Sync plays" auto-sync toggle appears after a first sync.
+    # user is offered Full sync only. The "Sync plays" auto-sync toggle appears after a first sync.
     assert page.get_by_role("button", name="Full sync").is_visible()
     assert page.get_by_role("button", name="Sync plays").count() == 0
     assert page.get_by_role("heading", name="More in your wheelhouse").is_visible()

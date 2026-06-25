@@ -12,6 +12,7 @@ def test_source_weights_seeded():
 
 from yt_playlist.core.store import Store
 from yt_playlist.rec import recommend, rec_params
+from yt_playlist.util.matching import identity_key
 
 
 def _store_with_genre(keys_genre):
@@ -21,6 +22,23 @@ def _store_with_genre(keys_genre):
         tid = s.upsert_track(vid, title, artist, None, None)
         s.set_track_genre(tid, genre)
     return s
+
+
+def _store_with_play_history(genre="Techno", n=10, now=1000.0, w_play=0.5):
+    """A fresh store whose recent history is n distinct tracks of one genre (a dominant family), with
+    source_w_play raised so a handful of daily exposures crosses THEME_THRESHOLD (the 0.08 default
+    would need ~18 days, too slow for a unit test). Returns (store, now, axis)."""
+    s = Store(":memory:")
+    s.init_schema()
+    iid = s.identities.upsert_identity("me", "cred", None, True)
+    keys = []
+    for i in range(n):
+        tid = s.upsert_track(f"v{i}", f"song{i}", "band", None, None)
+        s.set_track_genre(tid, genre)
+        keys.append(identity_key(f"song{i}", "band"))
+    s.add_history_snapshot(iid, now, keys)
+    rec_params.set_param(s, "source_w_play", w_play)
+    return s, now, f"genre:{recommend.genre_map.family(genre)}"
 
 
 def test_vibe_graduation_unchanged_regression():
@@ -62,6 +80,15 @@ def test_plays_graduate_only_over_several_sessions():
     # 1.05 (GRADUATE_UP). Assert "graduated exactly once": weight is between 1.0 and GRADUATE_UP.
     w = s.get_weights().get(f"genre:{fam}")
     assert w is not None and 1.0 < w < rec_params.GRADUATE_UP
+
+
+def test_play_graduated_day_roundtrip():
+    s = _store_with_genre({"song|band": ("v1", "song", "band", "Techno")})
+    assert s.get_play_graduated_day("genre:techno") is None
+    s.set_play_graduated_day("genre:techno", "2026-06-25")
+    assert s.get_play_graduated_day("genre:techno") == "2026-06-25"
+    s.set_play_graduated_day("genre:techno", "2026-06-26")     # upsert, not duplicate
+    assert s.get_play_graduated_day("genre:techno") == "2026-06-26"
 
 
 def test_axis_weights_fold_standing_lean():

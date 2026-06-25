@@ -6,7 +6,7 @@
   <header class="gen-head">
     <h2 class="gen-name">{{ p.name }}</h2>
     {% if p.refreshable %}
-    <button type="button" class="gen-refresh" title="Refresh — a fresh batch from this model"
+    <button type="button" class="gen-refresh" title="Refresh: a fresh batch from this model"
             aria-label="Refresh this card" hx-post="/home/refresh-card/{{ p.lane }}"
             hx-target="#gen-{{ p.lane }}" hx-swap="outerHTML" hx-disabled-elt="this">↻</button>
     {% endif %}

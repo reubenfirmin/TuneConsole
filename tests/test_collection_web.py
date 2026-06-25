@@ -1,7 +1,7 @@
 """Contract tests for the htmx Save/Unsave album actions (/collection/save-album|unsave-album).
 
 The routes now do their YouTube/store work and return an empty 200 with HX-Refresh: true
-(htmx reloads, keeping both album tables + the saved column in sync — parity with the old
+(htmx reloads, keeping both album tables + the saved column in sync, parity with the old
 location.reload()), and surface failures via the standard 422 OOB error toast, instead of
 the old JSON payloads.
 """

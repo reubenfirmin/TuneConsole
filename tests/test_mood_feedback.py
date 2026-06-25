@@ -37,7 +37,7 @@ def test_mood_endpoint_records_and_confirms(store):
                    base_url="http://127.0.0.1")
 
     r = c.post("/recs/mood", data={"pid": pid, "dir": 1})
-    # No swap now — the panel stays put so Advanced is reachable; the choice persists via mood state.
+    # No swap now. The panel stays put so Advanced is reachable; the choice persists via mood state.
     assert r.status_code == 200 and r.text == ""
     assert len(store.recent_mood_events()) == 1             # the mood was recorded
 

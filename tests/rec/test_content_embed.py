@@ -51,7 +51,7 @@ def test_build_content_vectors_excludes_untagged(tmp_path, monkeypatch):
 
 def test_audio_features_sharpen_within_genre(tmp_path, monkeypatch):
     """Same genre, but audio (energy/bpm) separates: a high-energy track should be MORE similar to
-    another high-energy track than to a low-energy one — even though all three share the genre."""
+    another high-energy track than to a low-energy one, even though all three share the genre."""
     from yt_playlist.core.store import Store
     s = Store(str(tmp_path / "t.db")); s.init_schema()
     content = {k: ("Techno", "2000") for k in ("hi1", "hi2", "lo")}

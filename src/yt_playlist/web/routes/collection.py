@@ -10,7 +10,7 @@ def build(ctx) -> APIRouter:
     store, templates = ctx.store, ctx.templates
 
     def _refresh():
-        # htmx reloads on this header — exact parity with the old location.reload(), which keeps the
+        # htmx reloads on this header: exact parity with the old location.reload(), which keeps the
         # collection table, the saved column, and the discography table in sync after a save/unsave.
         return Response(status_code=200, headers={"HX-Refresh": "true"})
 

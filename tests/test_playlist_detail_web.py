@@ -123,8 +123,8 @@ def test_enrich_track_events_carry_rendered_row(store, monkeypatch):
     import json as _json
     import yt_playlist.providers.musicbrainz as mb
     from tests.conftest import only_provider
-    monkeypatch.setattr(mb, "enrich", lambda title, artist: ("Rock", "1998") if title == "S0" else (None, None))
-    monkeypatch.setattr(mb, "recording_mbid", lambda title, artist: None)
+    monkeypatch.setattr(mb, "enrich_full",
+                        lambda title, artist: ("Rock", "1998", None) if title == "S0" else (None, None, None))
     iid, a = _seed_one_track(store)
     only_provider(store, "musicbrainz")
     c = _client(store, lambda: {iid: FakeClient()})
@@ -159,7 +159,7 @@ def test_remove_track_returns_empty_and_drops_row(store):
 
 
 def test_remove_track_from_liked_music_unlikes(store):
-    # On the Liked Music (LM) list "remove" has no playlist item to delete — it unlikes the song.
+    # On the Liked Music (LM) list "remove" has no playlist item to delete. It unlikes the song.
     iid = store.upsert_identity("main", "cred", None, True)
     lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
     store.set_playlist_tracks(lm, [store.upsert_track("v0", "S0", "X", "Alb", 200, 1)])
@@ -233,7 +233,7 @@ def test_add_tracks_appends_and_refreshes(store):
 def test_add_tracks_backfills_duration_for_known_trackless_time(store):
     # Regression for #26: an alternate that's already in the store with no duration (e.g. previously
     # seen via plays/history sync, which inserts duration_s=None) must get its time filled in when
-    # added via "find alternate version" — otherwise the playlist row shows a blank time.
+    # added via "find alternate version". Otherwise the playlist row shows a blank time.
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
     store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
@@ -276,7 +276,7 @@ def test_add_tracks_inserts_below_anchor(store):
     store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "X", "Alb", 200, 1),
                                   store.upsert_track("v1", "Song B", "Y", "Alb", 200, 1)])
     # the fake client must materialize the added track (with a setVideoId) so the post-add reorder can
-    # find its handle and move it into place — mirroring how YouTube reports the new item.
+    # find its handle and move it into place, mirroring how YouTube reports the new item.
     fc = FakeClient(tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},
                                     {"videoId": "v1", "setVideoId": "sv1"}]},
                     catalog={"v9": {"videoId": "v9", "setVideoId": "sv9"}})
@@ -299,7 +299,7 @@ def test_add_tracks_inserts_below_anchor_despite_indexing_lag(store):
     store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "X", "Alb", 200, 1),
                                   store.upsert_track("v1", "Song B", "Y", "Alb", 200, 1)])
     # the fake client knows only the pre-existing tracks; the freshly-added v9 has no catalog entry,
-    # so add_playlist_items can't materialize it on the read-back — i.e. it stays invisible (lag).
+    # so add_playlist_items can't materialize it on the read-back, i.e. it stays invisible (lag).
     fc = FakeClient(tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},
                                     {"videoId": "v1", "setVideoId": "sv1"}]})
     c = _client(store, lambda: {iid: fc})

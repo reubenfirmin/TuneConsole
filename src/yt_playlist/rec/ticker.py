@@ -5,7 +5,7 @@ The chart reads as a ranked bar chart (like the Songs/Artists tabs): bar length 
 recent listen share, so rows visibly shrink down the ranking. Layered on top: a per-row dashed
 tick at the category's CORPUS share (bar past the tick = over-indexed, "punching above its
 weight"), a faint marker for where it sat a year ago, and a thin whisker for its min/max share
-across the periods. Pure functions — DB queries live in ChartsRepo, SVG/CSS in the template.
+across the periods. Pure functions. DB queries live in ChartsRepo, SVG/CSS in the template.
 """
 def _shares(dist: dict) -> dict:
     """Normalize a {category: count} distribution to {category: fraction-of-total}."""
@@ -20,7 +20,7 @@ def ticker_rows(corpus: dict, windows: dict) -> dict:
 
     corpus:  {category: song_count} (library composition; the per-row baseline tick).
     windows: ordered {period_label: {category: play_count}}, NEWEST first. A period with no plays
-             at all (empty dict) is treated as NULL — skipped, not counted as 0% — so a young
+             at all (empty dict) is treated as NULL (skipped, not counted as 0%), so a young
              library's empty older periods don't fabricate a flat "earlier" reading.
 
     Returns {"rows": [row, ...], "axis_max": float}. Rows sort by recent share (close) desc.

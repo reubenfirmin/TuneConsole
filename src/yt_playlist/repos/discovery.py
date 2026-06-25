@@ -1,4 +1,4 @@
-"""DiscoveryRepo — the background outward-discovery state: which artists we've scanned (and when),
+"""DiscoveryRepo: the background outward-discovery state: which artists we've scanned (and when),
 and the accumulating pools of new albums / new artists we've found, with last-shown bookkeeping.
 
 Owns its own tables (created lazily/idempotently). The interest signal (which artists are worth

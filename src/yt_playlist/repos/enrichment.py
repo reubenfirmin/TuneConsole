@@ -1,4 +1,4 @@
-"""EnrichmentRepo — the parseable per-provider response log and the derived disagreement records.
+"""EnrichmentRepo: the parseable per-provider response log and the derived disagreement records.
 
 The waterfall harness writes one `enrichment_log` row per (run, track, provider, field) and, when
 providers disagree on a field, upserts an `enrichment_conflict` (one per track+field). The playlist /
@@ -136,7 +136,7 @@ class EnrichmentRepo(Repo):
 
     @synchronized
     def next_enrich_batch(self, limit) -> list:
-        """The worker's priority queue: up to `limit` not-yet-processed tracks, ordered by tier —
+        """The worker's priority queue: up to `limit` not-yet-processed tracks, ordered by tier:
         (0) new arrivals (created after the worker last caught up), (1) played songs by playcount,
         (2) zero-play songs in a played playlist/album/artist by that container's plays, (3) orphans."""
         row = self.conn.execute(
@@ -164,7 +164,7 @@ class EnrichmentRepo(Repo):
     @synchronized
     def resweep_batch(self, limit, stale_before) -> list:
         """Already-processed tracks that are stale (last_enriched_at < stale_before) AND still missing
-        a core field — re-attempted only when the primary queue is empty. Oldest-checked first."""
+        a core field, re-attempted only when the primary queue is empty. Oldest-checked first."""
         rows = self.conn.execute(
             "SELECT id, video_id, title, artist, mb_recording_id FROM tracks "
             "WHERE first_enriched_at IS NOT NULL AND last_enriched_at < ? "
@@ -208,7 +208,7 @@ class EnrichmentRepo(Repo):
 
     @synchronized
     def processed_timeline(self, buckets=40) -> list:
-        """Cumulative processed-track count over time, as up to `buckets` (t, cumulative) points —
+        """Cumulative processed-track count over time, as up to `buckets` (t, cumulative) points,
         for the trend sparkline. Empty list when nothing's been processed yet."""
         rng = self.conn.execute(
             "SELECT MIN(first_enriched_at) lo, MAX(first_enriched_at) hi, COUNT(*) n "

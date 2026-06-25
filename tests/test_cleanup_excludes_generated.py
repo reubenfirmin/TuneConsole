@@ -1,7 +1,7 @@
-"""#21 — app-generated (quarantined) playlists are excluded from every Cleanup category.
+"""#21: app-generated (quarantined) playlists are excluded from every Cleanup category.
 
 A generated playlist is built FROM your library, so it trivially overlaps/duplicates its source
-playlists, and it's app-managed — not yours to tidy. So it must never surface as an overlap, dupe,
+playlists, and it's app-managed, not yours to tidy. So it must never surface as an overlap, dupe,
 near-dup, identical-group member, empty, or tiny candidate, nor in the cleanup summary.
 """
 from yt_playlist.library import analysis

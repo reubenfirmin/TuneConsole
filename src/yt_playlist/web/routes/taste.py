@@ -4,6 +4,7 @@ from fastapi.responses import Response
 
 from yt_playlist.rec import autotune_run, eval_recs, rec_params, recommend, rose, taste_viz
 from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.web.context import form_float
 
 
 def build(ctx) -> APIRouter:
@@ -90,7 +91,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/taste/recall")
     def taste_recall(request: Request):
-        # the expensive stats — lazy-loaded so the page paints instantly
+        # the expensive stats, lazy-loaded so the page paints instantly
         return templates.TemplateResponse(request, "_partials/taste_recall.html",
                                           {"recall": eval_recs.recall_at_k(store, k=20),
                                            "proj": eval_recs.projection_recall(store, k=20)})
@@ -98,7 +99,7 @@ def build(ctx) -> APIRouter:
     @router.get("/taste/preview")
     def taste_preview(request: Request):
         # Manual-refresh live sample of For You under the current knobs (recomputed only on demand).
-        # A random slice of the matching pool — not the top-N — so every refresh shows a new set,
+        # A random slice of the matching pool (not the top-N) so every refresh shows a new set,
         # even when the knobs haven't changed.
         items = recommend.taste_sample(store, ctx.now(), limit=8)
         return templates.TemplateResponse(request, "_partials/taste_preview.html", {"items": items})
@@ -106,12 +107,12 @@ def build(ctx) -> APIRouter:
     @router.post("/taste/weight")
     async def taste_weight(request: Request):
         form = await request.form()
-        axis, val = form.get("axis"), form.get("weight")
-        if axis and val:
+        axis, weight = form.get("axis"), form_float(form.get("weight"))
+        if axis and weight is not None:
             if axis.startswith("genre:"):     # genre weights use the [0,2] band so a family can be muted
-                store.set_weight(axis, float(val), lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
+                store.set_weight(axis, weight, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
             else:
-                store.set_weight(axis, float(val))
+                store.set_weight(axis, weight)
         return _stale()
 
     @router.post("/taste/param")

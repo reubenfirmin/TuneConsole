@@ -1,5 +1,5 @@
 """When an enrichment host goes unreachable, the playlist loop stops instead of plowing through
-every remaining track (one wasted pace-interval each). A server response — even an error — or any
+every remaining track (one wasted pace-interval each). A server response, even an error, or any
 success clears the streak, so a real outage trips it but a per-track miss never does."""
 import urllib.error
 
@@ -24,10 +24,10 @@ def test_server_response_or_success_resets_the_streak():
     dns = urllib.error.URLError("down")
     http = urllib.error.HTTPError("u", 503, "busy", {}, None)
     b.record(dns)
-    b.record(http)                 # server answered (a 503) — host reachable, streak cleared
+    b.record(http)                 # server answered (a 503), host reachable, streak cleared
     assert b.consecutive == 0
     b.record(dns)
-    b.record()                     # success — streak cleared
+    b.record()                     # success, streak cleared
     assert b.consecutive == 0
 
 
@@ -46,13 +46,15 @@ def test_enrich_loop_aborts_when_host_unreachable(provider, store, monkeypatch):
     calls = []
     dns = urllib.error.URLError("Name or service not known")
 
+    # musicbrainz's loop pulls genre, year and MBID from one enrich_full call; others use enrich.
+    seam = "enrich_full" if provider is musicbrainz else "enrich"
+
     def fake_enrich(title, artist, *extra):       # discogs/lastfm pass a token/key as a 3rd arg
         calls.append(title)
         provider._breaker.record(dns)             # stand in for the failing network call
-        return (None, None)
+        return (None, None, None) if provider is musicbrainz else (None, None)
 
-    monkeypatch.setattr(provider, "enrich", fake_enrich)
-    monkeypatch.setattr(musicbrainz, "recording_mbid", lambda *a, **k: None)
+    monkeypatch.setattr(provider, seam, fake_enrich)
     # lastfm refuses to start without a key; give it one so we reach the loop
     monkeypatch.setattr(lastfm, "api_key", lambda *a, **k: "k", raising=False)
 
@@ -66,20 +68,21 @@ def test_enrich_loop_aborts_when_host_unreachable(provider, store, monkeypatch):
 
 @pytest.mark.parametrize("provider", [musicbrainz, discogs, lastfm])
 def test_enrich_loop_completes_when_host_reachable(provider, store, monkeypatch):
-    """A genuine no-match (host up, empty result) must NOT trip the breaker — all tracks processed."""
+    """A genuine no-match (host up, empty result) must NOT trip the breaker: all tracks processed."""
     ids = [store.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(8)]
     pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art"}
                for i, tid in enumerate(ids)]
 
     calls = []
 
+    seam = "enrich_full" if provider is musicbrainz else "enrich"
+
     def fake_enrich(title, artist, *extra):
         calls.append(title)
         provider._breaker.record()                # reachable, just no match for this track
-        return (None, None)
+        return (None, None, None) if provider is musicbrainz else (None, None)
 
-    monkeypatch.setattr(provider, "enrich", fake_enrich)
-    monkeypatch.setattr(musicbrainz, "recording_mbid", lambda *a, **k: None)
+    monkeypatch.setattr(provider, seam, fake_enrich)
     monkeypatch.setattr(lastfm, "api_key", lambda *a, **k: "k", raising=False)
 
     events = []

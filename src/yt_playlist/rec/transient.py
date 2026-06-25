@@ -1,6 +1,6 @@
 """The transient model: a reactive, persistent read on recent interaction.
 
-Inputs are signed track-key events at a point in recency — mood feedback (rec_mood), recent plays
+Inputs are signed track-key events at a point in recency: mood feedback (rec_mood), recent plays
 (history), recent dislikes (rec_feedback kind='dislike'). Two derived views: facet leans
 (genre/era/artist tokens) and an embedding centroid tilt. Lifecycle: persistent (no wall-clock
 expiry), reactive by interaction rank, relaxes only as sync goes stale. See the design spec.
@@ -56,7 +56,7 @@ def staleness_factor(store, now) -> float:
 
 
 def facet_leans(store, now) -> dict:
-    """{facet: signed strength} — the token view of the transient model, from mood feedback (rank-
+    """{facet: signed strength}: the token view of the transient model, from mood feedback (rank-
     weighted), recent plays (positive), and recent dislikes (negative), scaled by staleness."""
     gp = rec_params.get_param
     a = gp(store, "mood_recency_alpha")
@@ -86,13 +86,35 @@ def facet_leans(store, now) -> dict:
     return {f: v * s for f, v in leans.items()}
 
 
+def play_facet_leans(store, now) -> dict:
+    """The recent-plays slice of `facet_leans`, in isolation, staleness-scaled.
+
+    `facet_leans` blends every transient source (mood, plays, likes, dislikes). The play-exposure
+    graduation funnel (graduation.graduate_play_exposure) must graduate plays SPECIFICALLY, because
+    likes / dislikes / vibe taps already graduate at event time and would otherwise double-count. So
+    this returns only the positive, recency-weighted, staleness-scaled push from recent plays. When
+    listening stops the recent window drains (and staleness damps it), so this falls to {} on its own,
+    which is the funnel's natural off-switch.
+    """
+    gp = rec_params.get_param
+    a = gp(store, "mood_recency_alpha")
+    play_w = gp(store, "play_transient_w")
+    limit = gp(store, "recent_play_limit")
+    leans: dict = {}
+    for rank, k in enumerate(store.recent_keys_ordered(0, limit=limit)):
+        for f in facets_for(store, [k]):                # one key -> its facets, each gets the play push
+            leans[f] = leans.get(f, 0.0) + play_w * ((1.0 - a) ** rank)
+    s = staleness_factor(store, now)
+    return {f: v * s for f, v in leans.items()}
+
+
 def facet_multiplier(lean, gain, lo, hi) -> float:
     """Map a signed facet lean to a positive ranking multiplier; 1.0 = neutral, clamped to [lo, hi]."""
     return max(lo, min(hi, 1.0 + gain * lean))
 
 
 def centroid_tilt(store, now, V, idx):
-    """Unit embedding direction from the unified transient stream — mood events, recent plays, and
+    """Unit embedding direction from the unified transient stream: mood events, recent plays, and
     recent likes, all interaction-rank weighted. None if quiet. Staleness is applied by the caller."""
     gp = rec_params.get_param
     limit = gp(store, "recent_play_limit")

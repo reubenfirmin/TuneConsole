@@ -63,7 +63,7 @@ def build_app():
     runtime = Runtime(store, config_path, config_path.parent)
     runtime.load()
     if not runtime.configured:
-        logging.getLogger(__name__).warning("no usable config yet — open /setup to finish setup")
+        logging.getLogger(__name__).warning("no usable config yet. Open /setup to finish setup")
     return create_app(store, runtime.clients, now_fn=time.time, setup=runtime)
 
 def _open_browser_when_ready(host, port):

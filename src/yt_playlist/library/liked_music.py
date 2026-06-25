@@ -2,7 +2,7 @@
 
 Liked Music (the YouTube "LM" system playlist) is special: YouTube owns its membership and rejects
 any direct add/remove of playlist items. The only lever the app has is *liking* and *unliking*
-songs. So we fake LM membership — rate the song on YouTube and mirror that in the local LM playlist
+songs. So we fake LM membership: rate the song on YouTube and mirror that in the local LM playlist
 so the UI flips immediately (a later sync reconciles with YouTube). Concentrating these shims here
 lets the rest of the app keep treating LM like an ordinary playlist: add/remove calls land in this
 class and get translated into the right rate_song + local-membership update.
@@ -34,7 +34,7 @@ class LikedMusic:
         self.store.set_song_liked(identity_id, video_id, on)
 
     def add(self, playlist_id, tracks, client, now) -> dict:
-        """"Add" on Liked Music = like each song — YouTube rejects directly-added LM items, so this is
+        """"Add" on Liked Music = like each song. YouTube rejects directly-added LM items, so this is
         what actually lands a song there. Used when adding an alternate version or a 'complete this
         playlist' suggestion while viewing Liked Music. Counterpart to executor.add_tracks_to_playlist.
         """
@@ -57,7 +57,7 @@ class LikedMusic:
         return {"added": len(items), "skipped": 0, "count": len(items)}
 
     def remove(self, playlist_id, video_id, client, now) -> dict:
-        """"Remove" on Liked Music = unlike the song — LM has no removable playlist item to delete.
+        """"Remove" on Liked Music = unlike the song. LM has no removable playlist item to delete.
         Counterpart to executor.remove_track for the LM case."""
         pl = self._require_lm(playlist_id)
         self.set_rating(pl.identity_id, video_id, False, client)

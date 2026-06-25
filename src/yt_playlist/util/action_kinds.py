@@ -1,8 +1,8 @@
 """Central registry of action kinds recorded in the actions log.
 
 Every mutation records an Action with one of these kinds. Single-sourcing the
-constants and the undoable set here — rather than repeating string literals across
-the executor, the web routes, and the actions template — keeps the taxonomy in one
+constants and the undoable set here (rather than repeating string literals across
+the executor, the web routes, and the actions template) keeps the taxonomy in one
 place and lets the undoable check evolve without hunting down duplicated lists.
 """
 

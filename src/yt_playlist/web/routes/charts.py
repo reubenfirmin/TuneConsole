@@ -4,14 +4,14 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 
+from yt_playlist.rec.discover import fetch_artist_info
 from yt_playlist.rec.ticker import candle_geometry, ticker_rows
-from yt_playlist.util.thumbnails import best_thumb
 
 
 _WINDOWS = {"all": None, "90d": 90, "30d": 30, "7d": 7}
 
 _TICKER_DIMS = ("genre", "year", "album", "playlist", "artist")
-# Only these show the corpus baseline tick + over/under ratio — a "share of your library" baseline
+# Only these show the corpus baseline tick + over/under ratio, a "share of your library" baseline
 # is intuitive for broad buckets (genre/year/artist) but not for a single album or playlist.
 _TICKER_COMPARE = {"genre", "year", "artist"}
 _TICKER_TOP = 100     # cap rows per tab (ranked by recent share); genres/years have fewer anyway
@@ -65,36 +65,6 @@ def _build_ticker(store, dim, periods):
     return {"rows": rows, "axis_max": data["axis_max"]}
 
 
-def _fetch_artist_info(ctx, name, browse_id=None):
-    """Best-effort bio + thumbnail + album list from YouTube. Uses the stored artist browseId when we
-    have it (accurate); else searches the name. Returns None on any failure (no client, network, etc.)."""
-    try:
-        clients = ctx.client_provider() or {}
-        client = next(iter(clients.values()), None)
-        if client is None:
-            return None
-        if not browse_id:
-            results = client.search(name, filter="artists") or []
-            browse_id = results[0].get("browseId") if results else None
-        if not browse_id:
-            return None
-        a = client.get_artist(browse_id)
-        albums = []
-        for x in (a.get("albums") or {}).get("results") or []:
-            albums.append({"title": x.get("title"), "year": x.get("year"),
-                           "browse_id": x.get("browseId"),
-                           "thumbnail": best_thumb(x.get("thumbnails"))})
-        return {"bio": a.get("description"),
-                "thumbnail": best_thumb(a.get("thumbnails")),
-                "subscribers": a.get("subscribers"),
-                "name": a.get("name") or name,
-                "browse_id": browse_id,            # the artist's channel — for the "Open in YouTube" link
-                "albums": albums}
-    except Exception:  # noqa: BLE001 - network/parse/missing-method all degrade to "no info"
-        ctx.logger.info("artist info fetch failed for %r (non-fatal)", name)
-        return None
-
-
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates, now_fn = ctx.store, ctx.templates, ctx.now_fn
@@ -123,13 +93,13 @@ def build(ctx) -> APIRouter:
         if not name:
             raise HTTPException(status_code=404, detail="no artist specified")
         songs = store.artist_songs(name)
-        info = _fetch_artist_info(ctx, name, store.artist_browse_id(name))
+        info = fetch_artist_info(ctx, name, store.artist_browse_id(name))
 
-        # "Saved" is a single source of truth — membership in the saved-album set, keyed by browse_id —
+        # "Saved" is a single source of truth (membership in the saved-album set, keyed by browse_id)
         # so the collection table and the YouTube-discography table below always agree.
         saved_ids = store.saved_album_ids()
 
-        # Section 1 — your collection: albums from your playlist tracks, merged with saved albums.
+        # Section 1, your collection: albums from your playlist tracks, merged with saved albums.
         coll = {}
         for s in songs:
             key = s["album"] or "Singles / no album"
@@ -161,7 +131,7 @@ def build(ctx) -> APIRouter:
             d["saved"] = d["browse"] in saved_ids if d["browse"] else False
         collection = sorted(coll.values(), key=lambda d: (-d["plays"], (d["album"] or "").lower()))
 
-        # Section 2 — full discography pulled live from YouTube; mark which you've already saved.
+        # Section 2, full discography pulled live from YouTube; mark which you've already saved.
         yt_albums = info["albums"] if info and info.get("albums") else []
         for ya in yt_albums:
             ya["saved"] = ya.get("browse_id") in saved_ids

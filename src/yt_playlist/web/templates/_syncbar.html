@@ -1,5 +1,5 @@
 <div class="sync-bar" style="margin-bottom:1.6rem">
-  {# A brand-new user (never synced) has no plays to sync yet — only offer the Full sync that
+  {# A brand-new user (never synced) has no plays to sync yet. Only offer the Full sync that
      pulls in their library. The "Sync plays" auto-sync toggle appears once there's been a first sync. #}
   {% if sync.last_synced_ago %}
   <button type="button" class="sync-toggle" :class="{ on: auto }" :aria-pressed="auto" @click="toggleAuto()"

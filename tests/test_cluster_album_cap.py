@@ -1,4 +1,4 @@
-"""#14 — a single grow (ring) won't pull too many tracks from the same album.
+"""#14: a single grow (ring) won't pull too many tracks from the same album.
 
 The expand route over-fetches candidates and caps how many share an album (ALBUM_CAP), so an album
 can't dominate a ring. Untagged-album tracks aren't capped (each is its own thing).
@@ -57,7 +57,7 @@ def test_untagged_album_not_capped(store):
 
 def test_album_cap_is_cluster_wide_not_just_per_ring(store):
     # Two tracks from "Greatest Hits" are already on the canvas (passed as `exclude`); a further grow
-    # must add ZERO more from that album — the cap spans the whole playlist, not one ring.
+    # must add ZERO more from that album. The cap spans the whole playlist, not one ring.
     c, _ = _client(store)
     kp = _modelled(store, "p", "Seed", "P", "", _unit(0))
     on1 = _modelled(store, "h0", "On 0", "A", "Greatest Hits", _unit(40))
@@ -72,7 +72,7 @@ def test_album_cap_is_cluster_wide_not_just_per_ring(store):
 
 def test_cap_basis_excludes_central_seeds(store):
     # Seed-album tracks are on the canvas (in `exclude`) but they're central SEEDS, not grown tracks,
-    # so `count_keys` omits them — they must not pre-spend the album's budget.
+    # so `count_keys` omits them. They must not pre-spend the album's budget.
     c, _ = _client(store)
     kp = _modelled(store, "p", "Seed", "P", "", _unit(0))
     s1 = _modelled(store, "s1", "Seed A", "P", "Greatest Hits", _unit(40))

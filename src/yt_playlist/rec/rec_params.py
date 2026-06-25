@@ -207,7 +207,6 @@ def reset_all_params(store) -> None:
 # --- Transient model (lifecycle / recency) ---
 SYNC_STALE_S = 24 * 3600       # sync older than this is "stale" (also used by recommend.sync_status)
 MOOD_RECENCY_ALPHA = 0.35      # EMA over interaction RANK; newest pick ~35% of the blend
-MOOD_EVENT_CAP = 200           # bound the rec_mood table (count, not age)
 STALE_DECAY_HALFLIFE_D = 3     # once sync stale, transient relaxes with this half-life (days)
 # Source weights into the transient leans
 PLAY_TRANSIENT_W = 0.30        # one recent play's positive push

@@ -5,7 +5,7 @@ songs", artist names, etc. We can't trust the top tag blindly. Instead we match 
 first) against this whitelist and take the first hit, so the result is always a recognized genre.
 
 Each entry is `(Display Name, [extra aliases])`. Matching is done on a normalized form (lowercase,
-alphanumerics only), so "Hip-Hop", "hip hop" and "hiphop" all map to one entry — list aliases only
+alphanumerics only), so "Hip-Hop", "hip hop" and "hiphop" all map to one entry. List aliases only
 for genuinely different spellings (abbreviations, &-vs-and, etc.).
 """
 

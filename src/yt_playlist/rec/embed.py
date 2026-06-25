@@ -1,7 +1,7 @@
 """Taste-embedding model: PPMI co-occurrence + truncated SVD over the user's own curation.
 
 Builds a dense vector per track from how tracks co-occur across the user's playlists, albums,
-and listening sessions — a latent model of *their* taste, not the crowd's. Neighbours in this
+and listening sessions, a latent model of *their* taste, not the crowd's. Neighbours in this
 space capture second-order similarity (tracks that never share a playlist but both sit near a
 third), which plain co-occurrence cannot. CPU-only, no GPU, no external models.
 """
@@ -10,6 +10,7 @@ import json
 import numpy as np
 
 from yt_playlist.util import genre_map
+from yt_playlist.rec import rec_params
 from yt_playlist.rec.rec_dao import RecDao
 
 # Default embedding dimensionality. 48 is the recall@k-tuned default for manual builds; Auto-tune
@@ -191,7 +192,7 @@ def content_features(content):
 
 
 # Continuous audio features that form the "sounds-like" block (z-scored across the corpus). Captures
-# tempo, intensity, mood and production texture — the signal a genre tag can't express.
+# tempo, intensity, mood and production texture, the signal a genre tag can't express.
 CONTINUOUS_AUDIO = ("bpm", "energy", "danceability", "mood_happy", "mood_sad", "mood_relaxed",
                     "mood_acoustic", "instrumental", "loudness", "dynamic_complexity")
 AUDIO_DIM_W = 0.5      # per-audio-dim weight (z-score units) relative to a genre one-hot (1.0): audio
@@ -204,8 +205,8 @@ def build_content_model(content, audio):
     Persisted so that OUT-OF-CORPUS tracks (Phase 2) encode into the SAME space and their cosine to
     library vectors is meaningful. Returns {'cat': {token: col}, 'ncat': int, 'cont': [[feat,mu,sd]]}.
 
-      • categorical one-hots — genre family, sub-genre, decade, musical key & scale;
-      • continuous "sounds-like" features — bpm / energy / danceability / 4 moods / instrumental /
+      • categorical one-hots: genre family, sub-genre, decade, musical key & scale;
+      • continuous "sounds-like" features: bpm / energy / danceability / 4 moods / instrumental /
         loudness / dynamic-complexity, z-scored across the tracks that have them (zero-variance skipped).
     """
     cat, _ = content_features(content)               # genre/decade tokens → col
@@ -374,7 +375,7 @@ def neighbors(store, key, topn=12, exclude=None):
 
 
 def neighbors_for_unmodeled(store, key, topn=12):
-    """Neighbours for a seed track that has no vector of its own — it's brand new, or quarantined out
+    """Neighbours for a seed track that has no vector of its own: it's brand new, or quarantined out
     of the embedding (an unplayed generated track). Query with a proxy: the centroid of the seed
     artist's tracks that ARE modeled. Lets 'songs like this' work for such tracks without putting the
     track itself into the model. Empty if the artist has nothing modeled."""
@@ -418,7 +419,7 @@ def sims_for(store, seed_groups, keys):
 def blended_neighbors(store, seed_groups, topn=12, exclude=None):
     """Rank by a weighted blend of several seed centroids.
 
-    seed_groups = [(keys, weight), ...] — e.g. slow all-time taste at 0.6 + fast recent-mood at
+    seed_groups = [(keys, weight), ...]: e.g. slow all-time taste at 0.6 + fast recent-mood at
     0.4. Each group's centroid is normalised before weighting, so a small recent set still counts.
     """
     keys, V, idx = load_vectors(store)
@@ -442,7 +443,7 @@ def blended_neighbors(store, seed_groups, topn=12, exclude=None):
 CLUSTER_BETA = 0.6   # how hard a pruned ("negative model") track pushes a branch's ring away
 SEED_FANOUT = 0.5    # for a MULTI-seed node, how much the ring is drawn to the NEAREST single seed
                      # vs the averaged centroid. >0 stops a minority seed (e.g. one psytrance pick
-                     # among brit-rock) being averaged away — it reaches its own genre too. Self-
+                     # among brit-rock) being averaged away. It reaches its own genre too. Self-
                      # adapting: when seeds are coherent (a focused path) max≈centroid, so it's a no-op.
 
 
@@ -512,7 +513,6 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=CLU
     `allow`, when given, restricts candidates to a whitelist (#29 genre filter).
     `include_new` (Phase 2) widens the candidate pool with OUT-OF-CORPUS discovered tracks: they have
     no collaborative vector, so they're scored on the content term alone (in the same model space)."""
-    from yt_playlist.rec import rec_params
     keys, V, idx = load_vectors(store)
     if V is None:
         return []
@@ -537,12 +537,12 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=CLU
 
 
 def connection_geometry(store, key, path_keys, exclude=()):
-    """Explain a Clusters edge in taste space: how close the child is to its pinned path, and — when
-    there's no direct shared basket — the track that BRIDGES them.
+    """Explain a Clusters edge in taste space: how close the child is to its pinned path, and, when
+    there's no direct shared basket, the track that BRIDGES them.
 
     Returns {"score": cos(child, path_centroid) in [-1, 1], "bridge": key|None}. The bridge is the
     modelled track closest to BOTH ends, argmax over T of min(cos(child, T), cos(path_centroid, T)),
-    excluding the child, the path, and `exclude` — i.e. the 'third track both sit near' that the
+    excluding the child, the path, and `exclude`, i.e. the 'third track both sit near' that the
     second-order embedding is built to capture. Both fields are None until the model is built or if
     the child / path aren't modelled."""
     keys, V, idx = load_vectors(store)

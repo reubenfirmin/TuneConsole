@@ -1,7 +1,7 @@
-"""store.cluster_search — autosuggest over the user's library for seeding a cluster.
+"""store.cluster_search: autosuggest over the user's library for seeding a cluster.
 
 Returns vector-backed seeds across three kinds (artist / playlist / song); each result carries the
-identity_keys it contributes to a node's centroid. Only keys that have a built vector are eligible —
+identity_keys it contributes to a node's centroid. Only keys that have a built vector are eligible:
 a seed with no vector would contribute nothing to the centroid.
 """
 import numpy as np

@@ -19,8 +19,8 @@ def test_sync_plays_records_history_and_likes(store):
 
 
 def test_sync_plays_feeds_graduation_and_like_model(store):
-    """Regression for #39: the fast plays/likes sync must feed #19's signals — graduate plays and
-    record+graduate newly-captured likes (the like channel) — not only the rarer full sync."""
+    """Regression for #39: the fast plays/likes sync must feed #19's signals, graduate plays and
+    record+graduate newly-captured likes (the like channel), not only the rarer full sync."""
     from yt_playlist.rec import recommend
     iid = store.upsert_identity("main", "cred", None, True)
 
@@ -45,7 +45,7 @@ def test_sync_plays_feeds_graduation_and_like_model(store):
 
 
 def test_sync_plays_skips_full_library_enumeration(store):
-    """The fast path must never enumerate the whole library — that's the slow work it exists to skip."""
+    """The fast path must never enumerate the whole library. That's the slow work it exists to skip."""
     iid = store.upsert_identity("main", "cred", None, True)
 
     class SpyClient(FakeClient):
@@ -72,7 +72,7 @@ def test_sync_all_records_last_sync_at(store):
 
 
 def test_sync_status_uses_most_recent_of_either_sync(store):
-    """The 'Last synced' badge reflects the most recent sync of either kind — a recent plays/auto sync
+    """The 'Last synced' badge reflects the most recent sync of either kind: a recent plays/auto sync
     must not be eclipsed by an older full sync (and resets staleness too)."""
     from yt_playlist.rec.recommend import sync_status
     now = 100_000.0
@@ -106,11 +106,11 @@ def test_sync_identity_no_truncation_beyond_defaults(store):
     not silently truncated by ytmusicapi's defaults."""
     iid = store.upsert_identity("main", "cred", None, True)
 
-    # 30 playlists — exceeds the get_library_playlists default of 25
+    # 30 playlists, exceeds the get_library_playlists default of 25
     playlists = [{"playlistId": f"PL{i}", "title": f"Playlist {i}", "count": 150}
                  for i in range(30)]
 
-    # 150 tracks in each playlist — exceeds the get_playlist default of 100
+    # 150 tracks in each playlist, exceeds the get_playlist default of 100
     tracks_per_pl = {
         f"PL{i}": [_track(f"v{i}_{j}", f"Song {j}", "Artist") for j in range(150)]
         for i in range(30)

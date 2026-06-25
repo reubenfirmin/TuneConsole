@@ -1,4 +1,4 @@
-"""EnrichWorker drain logic — exercised synchronously via drain_once with a fake waterfall."""
+"""EnrichWorker drain logic, exercised synchronously via drain_once with a fake waterfall."""
 import logging
 from types import SimpleNamespace
 

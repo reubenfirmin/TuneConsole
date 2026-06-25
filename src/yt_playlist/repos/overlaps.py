@@ -1,4 +1,4 @@
-"""OverlapRepo — the Cleanup page's dismissal state: suppressed overlap pairs, overlap-ignored
+"""OverlapRepo: the Cleanup page's dismissal state: suppressed overlap pairs, overlap-ignored
 playlists, kept pairs, plus the category-scoped cleanup ignores (per-playlist empty/tiny dismissals
 and per-merge dismissals)."""
 import json
@@ -80,7 +80,7 @@ class OverlapRepo(Repo):
 
     # --- per-merge ignores (Exact / Near-duplicate groups) ---------------------------------------
     # A merge suggestion is the relationship between a SET of playlists, so it's dismissed by the
-    # group's canonical member signature — not by ignoring the individual playlists. If the cluster's
+    # group's canonical member signature, not by ignoring the individual playlists. If the cluster's
     # membership later changes, the signature changes and the (now genuinely different) merge returns.
     @synchronized
     def ignore_merge(self, signature, members, now) -> None:
@@ -96,12 +96,12 @@ class OverlapRepo(Repo):
 
     @synchronized
     def get_ignored_merge_sigs(self) -> set:
-        """Just the signatures — for filtering groups out of the cleanup view and the home count."""
+        """Just the signatures, for filtering groups out of the cleanup view and the home count."""
         return {r["signature"] for r in self.conn.execute("SELECT signature FROM ignored_merges")}
 
     @synchronized
     def get_ignored_merges(self) -> list:
-        """[{signature, members:[ytm]}] newest-first — for the 'Ignored cleanups' display + un-ignore."""
+        """[{signature, members:[ytm]}] newest-first, for the 'Ignored cleanups' display + un-ignore."""
         return [{"signature": r["signature"], "members": json.loads(r["members"])}
                 for r in self.conn.execute(
                     "SELECT signature, members FROM ignored_merges ORDER BY created_at DESC")]

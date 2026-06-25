@@ -1,5 +1,5 @@
 {# Enrichment provider cards: drag to reorder, toggle to enable. Order + enabled flags persist to
-   /setup/enrichment (config only — a future worker runs them in this order). The Last.fm card holds
+   /setup/enrichment (config only, a future worker runs them in this order). The Last.fm card holds
    its API-key field inline. Re-rendered standalone by the /setup/enrichment route after a save. #}
 <div id="enrich-panel"
      x-data='enrichmentTab({{ enrichment|tojson }})'
@@ -27,8 +27,8 @@
           </p>
           <div class="provider-key-edit" x-show="editing" x-cloak>
             <p class="section-note">Free key from
-              <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>
-              — paste the <strong>API key</strong>. Stored locally.</p>
+              <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>:
+              paste the <strong>API key</strong>. Stored locally.</p>
             <div class="btn-row">
               <input type="text" x-model="val" placeholder="API key" autocomplete="off" spellcheck="false"
                      @keydown.enter.prevent="save()">

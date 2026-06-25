@@ -1,4 +1,4 @@
-"""#15 — a saved cluster lands in Generated with its own tunable 'cluster' recipe.
+"""#15: a saved cluster lands in Generated with its own tunable 'cluster' recipe.
 
 The recipe gives the playlist a distinct type, an energy-arc journey (so the Flow lever is real),
 and a 'Made from' line built from the seeds you used, the genre families you restricted to (#29),

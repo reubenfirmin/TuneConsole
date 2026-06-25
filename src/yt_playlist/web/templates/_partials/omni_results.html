@@ -1,6 +1,6 @@
 {# Omnisearch dropdown body. Rendered into #omni-results by HTMX. `sections` is a list of
    {kind, title, rows:[{type,label,sub,href,thumbnail,external}]}. Note: section.rows (NOT
-   .items — Jinja resolves `.items` to the dict method). #}
+   .items: Jinja resolves `.items` to the dict method). #}
 {% if sections %}
 <ul class="omni-list" role="listbox" aria-label="Search results">
   {% for s in sections %}

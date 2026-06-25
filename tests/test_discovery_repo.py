@@ -75,7 +75,7 @@ def test_pick_discovered_albums_biases_recent_mixes_older_and_avoids_repeats(sto
 
 def test_pick_discovered_albums_varies_artists(store):
     from yt_playlist.rec import discover
-    # Six distinct artists, plus a second album from Art0 — the "mixed" vs "split" pair of one release.
+    # Six distinct artists, plus a second album from Art0, the "mixed" vs "split" pair of one release.
     for i in range(6):
         store.upsert_discovered_album(f"b{i}", f"Art{i}", f"Alb {i}", "2025", None, now=1.0)
     store.upsert_discovered_album("b0-mixed", "Art0", "Alb 0 (Mixed)", "2025", None, now=1.0)
@@ -113,7 +113,7 @@ def test_run_discovery_accumulates_and_skips_fresh(store, monkeypatch):
         t = store.upsert_track(f"v{n}", f"S{n}", n, None, None)
         store.set_playlist_tracks(store.upsert_playlist(iid, f"P{n}", "p", 1, "h", 0.0), [t])
     # fake the network: each artist has one unowned album; no new-artist fetch
-    monkeypatch.setattr(discover, "_fetch_artist_info",
+    monkeypatch.setattr(discover, "fetch_artist_info",
                         lambda ctx, name, browse_id=None: {"albums": [
                             {"browse_id": f"alb_{name}", "title": f"{name} Album", "year": "2024", "thumbnail": None}]})
     monkeypatch.setattr(discover, "new_artists", lambda ctx: [])

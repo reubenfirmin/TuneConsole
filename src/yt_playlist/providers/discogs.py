@@ -6,7 +6,7 @@ the earliest year across the top matches (avoids reissue dates) and the first st
 recognized genre.
 
 Works anonymously (25 requests/min) or, with a free personal access token, faster (60/min). Set a
-token via $DISCOGS_TOKEN or `discogs_token` in config.toml / the settings table — it's optional.
+token via $DISCOGS_TOKEN or `discogs_token` in config.toml / the settings table. It's optional.
 """
 import json
 import logging
@@ -117,7 +117,7 @@ def enrich(title, artist, tok=None):
             break
     years = [int(str(r.get("year"))) for r in results
              if str(r.get("year") or "").isdigit() and 1900 <= int(r["year"]) <= 2099]
-    year = str(min(years)) if years else None  # earliest release — avoids reissue dates
+    year = str(min(years)) if years else None  # earliest release: avoids reissue dates
     return (genre, year)
 
 
@@ -131,20 +131,20 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, tok=None, s
 
     def _per_item(i, total, t):
         genre, year = enrich_fn(t["title"], t["artist"], tok)
-        if _breaker.tripped():             # host unreachable — the rest would all fail too, so stop
-            on_progress({"type": "err", "text": "Discogs looks unreachable — stopped. "
+        if _breaker.tripped():             # host unreachable. The rest would all fail too, so stop
+            on_progress({"type": "err", "text": "Discogs looks unreachable. Stopped. "
                          "The remaining tracks will retry next time."})
             return False
         store.set_track_enrichment(t["id"], genre, year)
         eff_genre, eff_year = store.get_track_enrichment(t["id"])
         bits = " · ".join(x for x in (genre, year) if x) or "no match"
         on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']} — {bits}"})
+                     "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']}: {bits}"})
 
     run_enrich_loop(
         store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
         empty_text="Every track already has genre & year.",
         start_text=lambda n: f"Looking up {n} track(s) on Discogs {auth}…",
         done_text=lambda n: f"Looked up {n} track(s).",
-        wait_text="Waiting — a newer playlist is looking up first…",
+        wait_text="Waiting: a newer playlist is looking up first…",
         per_item=_per_item)

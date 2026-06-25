@@ -7,7 +7,7 @@ from tests.conftest import FakeClient
 
 def test_generated_playlist_reuses_known_duration(store):
     # A library track already has a time under one videoId; a recommendation surfaces the same song
-    # under a different videoId with no duration. We reuse the known time — no network call needed.
+    # under a different videoId with no duration. We reuse the known time. No network call needed.
     iid = store.upsert_identity("main", "cred", None, True)
     store.upsert_track("vOLD", "Song", "Artist", "Alb", 240, 1)   # known time, different videoId
     fc = FakeClient()                                             # get_song would return no length
@@ -31,8 +31,8 @@ def test_generated_playlist_fetches_missing_duration_for_fresh_track(store):
 
 
 def test_generated_playlist_survives_unfetchable_duration(store):
-    # If the time is unknown everywhere and the fetch comes back empty, the track still lands —
-    # a missing duration must never block playlist creation.
+    # If the time is unknown everywhere and the fetch comes back empty, the track still lands.
+    # A missing duration must never block playlist creation.
     iid = store.upsert_identity("main", "cred", None, True)
     fc = FakeClient()                                            # no known time, get_song empty
     res = create_generated_playlist(

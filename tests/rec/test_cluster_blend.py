@@ -24,7 +24,7 @@ def _unit(*xs):
 
 
 def test_content_blend_pulls_same_genre_non_cooccurring_track():
-    # Collaborative space: seed S sits near BRIT (cos≈0.9), far from PSY (cos≈0.1 — they rarely
+    # Collaborative space: seed S sits near BRIT (cos≈0.9), far from PSY (cos≈0.1, they rarely
     # co-occur in playlists). Content space: S and PSY share a genre (cos≈0.99); BRIT is a
     # different genre (cos≈0.1). At w=0.6 the content pull should flip PSY above BRIT.
     collab = {"S": _unit(1, 0), "BRIT": _unit(0.9, 0.436), "PSY": _unit(0.1, 0.995)}
@@ -56,7 +56,7 @@ def test_candidate_without_content_vector_falls_back_to_collab():
 def test_diverse_seeds_surface_each_genre_not_the_blend():
     """With two DISSIMILAR seeds (R rock-ish at angle 0, P psy-ish at angle 90), seed-fanout should
     rank tracks near EITHER seed (A near R, B near P) above a track that merely sits at the averaged
-    midpoint (M) — so a minority seed reaches its own genre instead of being averaged away."""
+    midpoint (M), so a minority seed reaches its own genre instead of being averaged away."""
     R, P = _unit(1, 0), _unit(0, 1)
     A, B, M = _unit(0.95, 0.31), _unit(0.31, 0.95), _unit(0.707, 0.707)
     collab = {"R": R, "P": P, "A": A, "B": B, "M": M}

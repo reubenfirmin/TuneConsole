@@ -1,8 +1,8 @@
-"""SearchRepo — omnisearch over the user's library (the navbar typeahead).
+"""SearchRepo: omnisearch over the user's library (the navbar typeahead).
 
 LinkedIn-style: a query that matches an artist pivots into that artist's tracks /
 albums / playlists; direct title matches on songs and playlists get their own
-sections. Read-only and LIKE-based (no FTS) — escaping mirrors
+sections. Read-only and LIKE-based (no FTS). Escaping mirrors
 RecQuery.cluster_search, and Generated playlists are excluded the same way.
 
 The result is a generic {query, primary_artist, sections:[{kind,title,rows}]} shape
@@ -12,9 +12,8 @@ Jinja attribute lookup resolves `section.items` to the dict's .items() METHOD.
 import random
 from urllib.parse import quote
 
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized
 
-GENERATED_GROUP = "Generated"   # parity with cluster_search: these playlists are quarantined
 MIN_QUERY = 2                   # shorter queries are too noisy to bother
 CANDIDATE_CAP = 50              # rows fetched per section before the seeded sample
 

@@ -38,7 +38,7 @@ def test_populate_discovered_tracks_builds_candidates_and_vectors(store):
 
 def test_populate_skips_owned_tracks(store):
     store.set_track_genre(store.upsert_track("vL", "LibT", "LibArtist", None, None), "Techno")
-    # an owned track that the album also contains — must not be re-added as out-of-corpus
+    # an owned track that the album also contains, must not be re-added as out-of-corpus
     from yt_playlist.util.matching import identity_key
     store.upsert_track("vOwned", "Track One", "New Artist", None, None)
     embed.build_content_and_store(store)

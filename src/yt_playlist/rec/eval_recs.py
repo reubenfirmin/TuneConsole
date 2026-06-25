@@ -2,7 +2,7 @@
 
 Ground truth is the user's own playlists: hold out one track from each playlist, rank all
 library tracks by similarity to the centroid of the rest, and check whether the held-out
-track lands in the top-k. recall@k is the share of playlists where it does — a single number
+track lands in the top-k. recall@k is the share of playlists where it does, a single number
 that says "does the model put tracks that genuinely belong together near each other?".
 """
 import numpy as np
@@ -41,7 +41,7 @@ def recall_at_k(store, k=20, min_size=5, seed=0) -> dict:
 def projection_recall(store, k=20) -> dict:
     """How well content predicts the embedding (the ACARec-flavored learned grounding's quality):
     hold out each tagged track, predict its vector from genre/year, and check whether the true track
-    lands in the top-k by cosine. This is the 'groundability' of cold items — high means the learned
+    lands in the top-k by cosine. This is the 'groundability' of cold items: high means the learned
     projection is a viable cold-start grounding to compare against the bridge heuristic."""
     from yt_playlist.rec.discover import ContentProjection
     from yt_playlist.rec.rec_dao import RecDao

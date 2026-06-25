@@ -1,4 +1,4 @@
-"""Home tab: the default landing page — Sync control, Take-Action triage, and For-You recs."""
+"""Home tab: the default landing page: Sync control, Take-Action triage, and For-You recs."""
 import asyncio
 import json
 from datetime import datetime
@@ -10,6 +10,7 @@ from yt_playlist.library import executor
 from yt_playlist.util import genre_map
 from yt_playlist.rec import arc_energy, journeys, rec_params, recommend
 from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.web.context import form_float
 
 # How many tracks each generated proto-playlist offers.
 PROTO_SIZE = 12
@@ -18,7 +19,7 @@ ARTISTS_PER_CARD = 10              # new-artist tiles fetched per epoch (grid ca
 ALBUMS_PER_CARD = 15               # discover album tiles fetched per epoch (grid caps 5 cols, clamps to 3 rows)
 # Home cards that rotate. Each holds its content for erosion_view_cap real Home visits, then advances
 # to a fresh epoch. They tick together (once per visit, in GET /) but each rotates its OWN pool at its
-# own size — so the small new-artist pool cycles through faster than the deep playlist pool.
+# own size, so the small new-artist pool cycles through faster than the deep playlist pool.
 ROTATING_CARDS = ("wheelhouse", "explore", "comfort", "fresh", "new_artists", "discover", "rediscover")
 _NOTES = {
     "wheelhouse": "Deeper into what you already love.",
@@ -39,7 +40,7 @@ def _carded(store, lane, label, items, now):
     """A proto-card built from a rolled recipe: roll the theme + journey (seeded by the card's
     rotation epoch so it's stable across steer/stance previews), focus the items on the theme, then
     order them by the rolled JOURNEY (energy arc, eras, deep dive…) with genres attached. Ordering
-    happens here — not at save — so the preview IS the playlist (WYSIWYG): a Save keeps the rows you
+    happens here, not at save, so the preview IS the playlist (WYSIWYG): a Save keeps the rows you
     didn't prune, in the order you see. Recipes predating journeys fall back to 'shuffle'."""
     recipe = recommend.roll_recipe(store, lane, seed=_epoch(store, lane), now=now)
     items = recommend.theme_filter(store, items, recipe.get("facets", {}))
@@ -95,7 +96,7 @@ def _one_card(store, card, now):
 
 def _epoch(store, card):
     """The card's current rotation epoch: it holds content for erosion_view_cap views, then advances.
-    Read-only — the view tick happens in GET / so previews/re-renders don't churn the cards."""
+    Read-only. The view tick happens in GET / so previews/re-renders don't churn the cards."""
     cap = max(1, rec_params.get_param(store, "erosion_view_cap"))
     return max(0, RecDao(store).card_views(card) - 1) // cap
 
@@ -109,11 +110,11 @@ def build(ctx) -> APIRouter:
         recommend.graduate_slider_exposure(store, now)
         # Each list card shows a stable random slice of its ranked pool, reseeded once its rotation
         # epoch advances (every erosion_view_cap real Home visits). The epoch is read here, never
-        # ticked — the tick happens only in GET /, so steer/stance previews re-render the same slice
+        # ticked. The tick happens only in GET /, so steer/stance previews re-render the same slice
         # and tuning your taste model never churns the cards.
         # HOME CARD MAP (heading <- function): Wheelhouse <- for_you, Catalog <- explore_for_you,
         # Comfort <- comfort_listening, Fresh <- fresh_songs. Catalog ('ex_pool') is DEDUPED against
-        # the Wheelhouse pool below, so the two cards never show the same track — but note both rank
+        # the Wheelhouse pool below, so the two cards never show the same track, but note both rank
         # off the same taste×transient score, so Catalog is currently "Wheelhouse's leftovers by
         # under-played artists" rather than a distinct novelty signal (a known differentiation gap).
         fy_pool = recommend.for_you(store, now, limit=ROTATION_POOL)            # Wheelhouse pool
@@ -130,7 +131,7 @@ def build(ctx) -> APIRouter:
         comfort_items = recommend.rotate_sample(cf_pool, PROTO_SIZE, _epoch(store, "comfort"))
 
         # Fixed order: wheelhouse first, then catalog (the old explore/exploit toggle that reordered
-        # these was removed in #7 — breadth steering is the real focused<->eclectic control now).
+        # these was removed in #7. Breadth steering is the real focused<->eclectic control now).
         wheel = _carded(store, "wheelhouse", "More in your wheelhouse", wheel_items, now)
         catalog = _carded(store, "explore", "From your catalog", catalog_items, now) if catalog_items else None
         generated = [wheel] + ([catalog] if catalog else [])
@@ -150,7 +151,7 @@ def build(ctx) -> APIRouter:
             "auto_sync": store.get_setting("auto_sync_plays") == "1",
             "muted_count": len(store.muted_artists()),   # transparency: what's being hidden
             "rediscover": recommend.rediscover_playlists(store, now, epoch=_epoch(store, "rediscover")),
-            # Saved albums you haven't played lately — rendered above the playlists in the same
+            # Saved albums you haven't played lately, rendered above the playlists in the same
             # section, rotating on the same "rediscover" epoch so the whole block advances together.
             "rediscover_albums": recommend.rediscover_albums(store, now, epoch=_epoch(store, "rediscover")),
             "flash": request.query_params.get("flash"),
@@ -213,8 +214,8 @@ def build(ctx) -> APIRouter:
         # on the Taste Model page. The held lean bakes into permanent over days (graduate_slider_exposure).
         form = await request.form()
         axis, weight = form.get("axis"), form.get("weight")
-        if axis and weight and axis.split(":", 1)[0] in ("genre", "era", "artist"):
-            target = float(weight)
+        target = form_float(weight)
+        if axis and target is not None and axis.split(":", 1)[0] in ("genre", "era", "artist"):
             perm = store.get_weights().get(axis, 1.0)
             lean = target / perm if perm > 0 else target
             lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
@@ -227,13 +228,13 @@ def build(ctx) -> APIRouter:
         """Pin an axis (e.g. 'genre:gqom') so it appears as a steerable bar even with zero plays. Writes
         a neutral lean (1.0) so it persists, then returns ONLY the re-rendered genre bars (server-
         authoritative, so dedup/ordering are correct). The client swaps #fp-genre-bars with this and
-        leaves the live genre picker untouched — a neutral add doesn't change rankings, so there's no
+        leaves the live genre picker untouched. A neutral add doesn't change rankings, so there's no
         need to re-render the whole feed (and re-rendering it would churn the picker)."""
         form = await request.form()
         axis = (form.get("axis") or "").strip()
         if axis and axis.split(":", 1)[0] in ("genre", "era", "artist"):
             store.unhide_facet(axis)                  # re-adding an axis un-hides it (it was removed before)
-            # Only write if not already present — don't overwrite a user-set lean.
+            # Only write if not already present. Don't overwrite a user-set lean.
             if store.get_lean(axis) == 1.0 and axis not in store.get_leans():
                 store.set_lean(axis, 1.0, now_fn())
         return templates.TemplateResponse(
@@ -243,8 +244,8 @@ def build(ctx) -> APIRouter:
     @router.post("/home/fingerprint/remove")
     async def fingerprint_remove(request: Request):
         """Remove one bar from the Home panel: hide the axis (display-only) AND clear any standing lean
-        so it stops steering. Works for ANY bar — a top played family, a steered family, or an added
-        niche — all simply disappear. Returns the re-rendered bars (#fp-genre-bars swap, picker left
+        so it stops steering. Works for ANY bar: a top played family, a steered family, or an added
+        niche, all simply disappear. Returns the re-rendered bars (#fp-genre-bars swap, picker left
         alive). Permanent taste (the Taste page) is untouched; the genre picker re-adds it any time."""
         axis = ((await request.form()).get("axis") or "").strip()
         if axis:

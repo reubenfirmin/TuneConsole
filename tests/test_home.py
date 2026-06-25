@@ -12,7 +12,7 @@ def _client(store):
 
 def test_home_visit_ticks_card_rotation_but_previews_dont(store):
     """A genuine Home visit advances each card's rotation counter once; steer/breadth previews and the
-    feed fragment re-render the same epoch without ticking — so tuning your taste never churns cards."""
+    feed fragment re-render the same epoch without ticking, so tuning your taste never churns cards."""
     from yt_playlist.rec.rec_dao import RecDao
     c = _client(store)
     dao = RecDao(store)
@@ -23,7 +23,7 @@ def test_home_visit_ticks_card_rotation_but_previews_dont(store):
     c.post("/home/breadth", data={"breadth_bias": "0.5"})  # previews must not advance rotation
     c.post("/home/steer", data={"axis": "genre:Rock", "weight": "1.5"})
     c.get("/home/feed")
-    c.get("/home/fresh")                                   # lazy re-fetch (e.g. from a steer) — read-only
+    c.get("/home/fresh")                                   # lazy re-fetch (e.g. from a steer), read-only
     assert dao.card_views("wheelhouse") == 2 and dao.card_views("fresh") == 2
 
 
@@ -226,11 +226,12 @@ def test_fingerprint_subgenres_attached_and_deduped(store):
     family token itself is excluded (no self-duplicate), and a subgenre with a lean is promoted to its
     own top bar instead of appearing under the family."""
     from yt_playlist.rec import recommend
-    store.upsert_identity("main", "cred", None, True)
+    iid = store.upsert_identity("main", "cred", None, True)
+    t = store.upsert_track("v1", "Song", "Band", None, None)
+    store.set_track_genre(t, "techno")
+    store.add_history_snapshot(iid, 1.0, ["song|band"])   # techno is now a played family
     fp = recommend.taste_fingerprint(store)
-    techno = next((f for f in fp["families"] if f["name"] == "techno"), None)
-    if techno is None:                      # techno may not be a top family in a bare store; skip then
-        import pytest; pytest.skip("techno not present in this store's fingerprint")
+    techno = next(f for f in fp["families"] if f["name"] == "techno")
     subnames = [s["name"] for s in techno["subgenres"]]
     assert "minimal techno" in subnames          # a real subgenre is offered
     assert "techno" not in subnames              # the family token is not duplicated as its own subgenre
@@ -277,7 +278,7 @@ def test_fingerprint_renders_pinned_genre_beyond_top6():
 
 
 def test_home_breadth_bar_is_interactive(store):
-    """#7: the Breadth bar steers the feed — it posts to /home/breadth bound to the breadth_bias param,
+    """#7: the Breadth bar steers the feed. It posts to /home/breadth bound to the breadth_bias param,
     and a post persists the bias and re-renders the feed (a preview, exactly like /home/steer)."""
     from yt_playlist.rec import rec_params
     iid = store.upsert_identity("main", "cred", None, True)

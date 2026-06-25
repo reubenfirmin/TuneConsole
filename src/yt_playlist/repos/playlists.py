@@ -1,4 +1,4 @@
-"""PlaylistRepo — playlists, their track membership/ordering, groups, and hidden flags."""
+"""PlaylistRepo: playlists, their track membership/ordering, groups, and hidden flags."""
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.models import Playlist
 
@@ -9,7 +9,7 @@ class PlaylistRepo(Repo):
         """Classify a playlist by its tracks' YouTube videoType.
 
         Returns 'audio' (all ATV), 'video' (all OMV/UGC/…), 'mixed' (both), 'mix' (has tracks but
-        YouTube tagged none — i.e. an auto-generated radio/mix playlist), or '' (no tracks).
+        YouTube tagged none, i.e. an auto-generated radio/mix playlist), or '' (no tracks).
         """
         rows = self.conn.execute(
             "SELECT t.video_type FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
@@ -49,7 +49,7 @@ class PlaylistRepo(Repo):
 
     @synchronized
     def set_playlist_tracks(self, playlist_id, track_ids) -> None:
-        # de-dupe by track id, keeping first position — YouTube's get_playlist can return the same
+        # de-dupe by track id, keeping first position: YouTube's get_playlist can return the same
         # video many times (pagination duplication), which would otherwise inflate the playlist.
         seen = set()
         unique = [t for t in track_ids if not (t in seen or seen.add(t))]
@@ -112,7 +112,7 @@ class PlaylistRepo(Repo):
         We deliberately KEEP the playlist's group assignment (playlist_group, keyed by the YouTube
         id): groups are user curation that can't be reconstructed from YouTube, and a playlist that
         disappears (a transient sync, or one re-added later) should get its group back automatically.
-        An orphaned group row is harmless — it just isn't shown until a matching playlist exists.
+        An orphaned group row is harmless. It just isn't shown until a matching playlist exists.
         """
         with self.conn:
             row = self.conn.execute("SELECT ytm_playlist_id FROM playlists WHERE id=?",

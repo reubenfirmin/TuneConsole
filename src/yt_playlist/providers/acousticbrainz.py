@@ -2,11 +2,11 @@
 recording MBID.
 
 AcousticBrainz is a frozen (2022) but still-served CC0 dataset of Essentia acoustic descriptors. It
-has no name-based lookup — every query is by MusicBrainz *recording* MBID — so for a track without a
+has no name-based lookup (every query is by MusicBrainz *recording* MBID) so for a track without a
 stored MBID we resolve one live via the MusicBrainz provider, persist it, then query two endpoints:
 low-level (rhythm.bpm) and high-level (mood/danceability classifiers). AcousticBrainz has no native
 "energy" scalar, so we derive one from its mood models (see derive_energy). A 404 means "no data for
-this MBID" (common, given frozen coverage) — a clean miss, not an outage. Failures degrade to Nones.
+this MBID" (common, given frozen coverage): a clean miss, not an outage. Failures degrade to Nones.
 """
 import json
 import logging
@@ -161,7 +161,7 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, mbid_fn=Non
                 store.set_track_mbid(t["id"], mbid)
         feat = enrich_fn(mbid) if mbid else _empty()
         if _breaker.tripped():
-            on_progress({"type": "err", "text": "AcousticBrainz looks unreachable — stopped. "
+            on_progress({"type": "err", "text": "AcousticBrainz looks unreachable. Stopped. "
                          "The remaining tracks will retry next time."})
             return False
         store.set_track_audio(t["id"], **feat)
@@ -174,12 +174,12 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, mbid_fn=Non
             bits.append(f"{feat['music_key']} {feat['music_scale'] or ''}".strip())
         shown = " · ".join(bits) or "no data"
         on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "text": f"{i}/{total} {t['title']} — {shown}"})
+                     "text": f"{i}/{total} {t['title']}: {shown}"})
 
     run_enrich_loop(
         store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
         empty_text="Every track already has audio features.",
         start_text=lambda n: f"Fetching audio features for {n} track(s) from AcousticBrainz…",
         done_text=lambda n: f"Fetched {n} track(s).",
-        wait_text="Waiting — a newer playlist is looking up first…",
+        wait_text="Waiting: a newer playlist is looking up first…",
         per_item=_per_item)

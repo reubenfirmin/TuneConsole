@@ -1,6 +1,6 @@
 """Deezer enrichment: tempo (BPM) for a track, free and without authentication.
 
-Deezer's public API needs no API key for catalog reads. We resolve a track in two calls — an
+Deezer's public API needs no API key for catalog reads. We resolve a track in two calls: an
 advanced track search (artist + title) to get its id, then a track lookup whose object carries the
 `bpm` field (search/listing responses omit it). Deezer reports bpm=0 for tracks it hasn't analysed,
 which we treat as unknown. Deezer also signals quota/errors via an {"error": ...} body on an HTTP
@@ -128,7 +128,7 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
     def _per_item(i, total, t):
         feat = enrich_fn(t["title"], t["artist"])
         if _breaker.tripped():
-            on_progress({"type": "err", "text": "Deezer looks unreachable — stopped. "
+            on_progress({"type": "err", "text": "Deezer looks unreachable. Stopped. "
                          "The remaining tracks will retry next time."})
             return False
         store.set_track_audio(t["id"], **feat)
@@ -136,12 +136,12 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
         if feat["popularity"]:
             shown += f" · pop {feat['popularity']}"
         on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "text": f"{i}/{total} {t['title']} — {shown}"})
+                     "text": f"{i}/{total} {t['title']}: {shown}"})
 
     run_enrich_loop(
         store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
         empty_text="Every track already has audio features.",
         start_text=lambda n: f"Looking up BPM for {n} track(s) on Deezer…",
         done_text=lambda n: f"Looked up {n} track(s).",
-        wait_text="Waiting — a newer playlist is looking up first…",
+        wait_text="Waiting: a newer playlist is looking up first…",
         per_item=_per_item)

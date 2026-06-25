@@ -1,4 +1,4 @@
-"""HistoryRepo — listening-history snapshots and their item keys."""
+"""HistoryRepo: listening-history snapshots and their item keys."""
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -40,7 +40,7 @@ class HistoryRepo(Repo):
     @synchronized
     def recent_keys_ordered(self, since_ts, limit=None) -> list[str]:
         """Identity keys played at/after since_ts, MOST-RECENT first (deduped by latest snapshot).
-        For the recent-mood centroid, which wants the latest plays — not an arbitrary subset of a set."""
+        For the recent-mood centroid, which wants the latest plays, not an arbitrary subset of a set."""
         rows = self.conn.execute(
             "SELECT hi.identity_key k, MAX(hs.taken_at) last FROM history_items hi "
             "JOIN history_snapshots hs ON hs.id=hi.snapshot_id WHERE hs.taken_at>=? "

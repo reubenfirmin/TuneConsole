@@ -26,7 +26,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/track/{vid}/similar")
     def track_similar(request: Request, vid: str, pid: int | None = None):
-        """'Songs like this' — embedding neighbours of one track, rendered as a modal fragment. When
+        """'Songs like this': embedding neighbours of one track, rendered as a modal fragment. When
         `pid` is given (the playlist the track was opened from) the modal lets you add any neighbour
         into that playlist, slotted just below `vid`."""
         dao = RecDao(store)
@@ -65,7 +65,7 @@ def build(ctx) -> APIRouter:
         until = now + _SNOOZE_DAYS * 86400 if kind == "not_now" else None
         store.record_feedback(form.get("surface", "for_you"), item, kind,
                               reason=reason, scope=form.get("scope", ""), until=until, now=now)
-        # online weight update — but 'already know it' (own_it) suppresses WITHOUT a taste penalty
+        # online weight update, but 'already know it' (own_it) suppresses WITHOUT a taste penalty
         lane = form.get("lane")
         if lane and reason != "own_it":
             if kind in ("dismiss", "less", "not_now"):
@@ -83,7 +83,7 @@ def build(ctx) -> APIRouter:
     @router.post("/recs/mood")
     async def recs_mood(request: Request):
         """Transient mood feedback: tilts the Home lanes toward (+) or away (-) from a vibe. It sticks
-        until you change it (and only relaxes once your sync goes stale) — reactive, but NOT a
+        until you change it (and only relaxes once your sync goes stale), reactive, but NOT a
         permanent taste signal. Two shapes:
           - whole-mix (simple panel): `pid` -> seeds with the whole playlist; swaps in a confirmation.
           - facet/track levers: explicit `keys` (JSON list) of just that subset; returns a light ack.
@@ -95,7 +95,7 @@ def build(ctx) -> APIRouter:
             return HTMLResponse("", status_code=422)
         signed = (1 if direction >= 0 else -1) * (2 if form.get("intensity") == "lot" else 1)
         keys_raw = form.get("keys")
-        if keys_raw:                                  # facet / per-track lever — tilt just this subset
+        if keys_raw:                                  # facet / per-track lever: tilt just this subset
             try:
                 keys = json.loads(keys_raw)
             except (ValueError, TypeError):
@@ -112,7 +112,7 @@ def build(ctx) -> APIRouter:
         if keys:
             store.record_mood(keys, signed, now_fn())
             recommend.graduate_moods(store, list(keys), signed, now_fn(), source=rec_params.get_param(store, "source_w_vibe"))
-        return HTMLResponse("")                        # no swap — the panel stays put (Advanced reachable)
+        return HTMLResponse("")                        # no swap: the panel stays put (Advanced reachable)
 
     @router.post("/recs/journey")
     async def recs_journey(request: Request):

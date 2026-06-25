@@ -1,23 +1,19 @@
-"""RecQueryRepo — read-only library queries and recommendation candidate generators.
+"""RecQueryRepo: read-only library queries and recommendation candidate generators.
 
 These are the rec engine's reads over the library (tracks / playlist_tracks / history_items):
 library primitives (keys, genres, distributions), the generated-playlist quarantine, and the
 candidate-surface generators (comfort / rotation / deep cuts / completion / enrichment). They're
 grouped here because the generators all depend on the same exclusion logic (excluded_playlist_ids).
 """
-from yt_playlist.repos.base import Repo, synchronized
-from yt_playlist.util import genre_map
+from collections import Counter
 
-# Auto-assigned group for playlists this app generates from recommendations. Anything in this group
-# is quarantined from every taste signal (groupings/analysis/scores) — so the engine never feeds on
-# its own suggestions. A generated playlist graduates ONLY when you promote it: move it out of this
-# group (it then counts as one of your real playlists). Playing it does not graduate it — adoption is
-# an explicit act, so a saved suggestion you never endorse can't quietly reshape your taste model.
-GENERATED_GROUP = "Generated"
+from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized  # noqa: F401  (GENERATED_GROUP re-exported)
+from yt_playlist.util import genre_map
+from yt_playlist.util.matching import normalize
 
 
 def _join_names(names, total) -> str:
-    """'Ritmo', 'Ritmo & Shpongle', 'Ritmo, Shpongle & 3 more' — for a connection reason sentence."""
+    """'Ritmo', 'Ritmo & Shpongle', 'Ritmo, Shpongle & 3 more', for a connection reason sentence."""
     if not names:
         return ""
     extra = total - len(names)
@@ -146,7 +142,7 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def owned_albums(self) -> set:
-        """Lowercased album titles already in the library or saved — to filter outward discovery."""
+        """Lowercased album titles already in the library or saved, to filter outward discovery."""
         rows = self.conn.execute(
             "SELECT LOWER(album) a FROM tracks WHERE album<>'' "
             "UNION SELECT LOWER(title) FROM saved_albums").fetchall()
@@ -154,14 +150,13 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def library_keys(self) -> set:
-        """All track identity_keys in the library — to filter 'fresh' (unowned) discovery."""
+        """All track identity_keys in the library, to filter 'fresh' (unowned) discovery."""
         return {r["identity_key"] for r in self.conn.execute(
             "SELECT DISTINCT identity_key FROM tracks")}
 
     @synchronized
     def library_artists(self) -> set:
-        """Normalized artist names already in the library — to exclude from new-artist discovery."""
-        from yt_playlist.util.matching import normalize
+        """Normalized artist names already in the library, to exclude from new-artist discovery."""
         rows = self.conn.execute("SELECT DISTINCT artist FROM tracks WHERE artist<>''").fetchall()
         return {normalize(r["artist"]) for r in rows}
 
@@ -172,7 +167,7 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def track_content(self) -> dict:
-        """{identity_key: (genre, year4)} for tagged tracks — features for the content→embedding map."""
+        """{identity_key: (genre, year4)} for tagged tracks, features for the content→embedding map."""
         rows = self.conn.execute(
             "SELECT identity_key k, MIN(genre) g, MIN(mb_year) y FROM tracks "
             "WHERE genre<>'' GROUP BY identity_key").fetchall()
@@ -189,7 +184,7 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def artist_genres(self) -> dict:
-        """{artist: dominant genre} over the library — the most common non-empty genre per artist.
+        """{artist: dominant genre} over the library, the most common non-empty genre per artist.
         Lets outward discovery tag a new ALBUM by its (owned) artist's known genre, no network."""
         rows = self.conn.execute(
             "SELECT artist, genre, COUNT(*) c FROM tracks WHERE artist<>'' AND genre<>'' "
@@ -235,14 +230,14 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def connection_facts(self, key, path_keys, max_playlist=120, max_artists=3) -> list[dict]:
-        """Why are two Clusters tracks linked? — the grounded co-occurrence facts behind an edge.
+        """Why are two Clusters tracks linked? The grounded co-occurrence facts behind an edge.
 
         Reads the same baskets that fed the taste embedding (`rec_baskets`) and turns the concrete
         ones into human-readable reasons: same artist, shared playlists (naming the co-occurring
         path artists), shared album, same listening session, genre family, decade. `key` = the
         child track; `path_keys` = its PINNED path (central seeds + ancestors). Returned
-        strongest-first as [{kind, text}, ...]. Empty when the link is purely second-order — no
-        direct shared basket — and the caller falls back to an embedding 'bridge'
+        strongest-first as [{kind, text}, ...]. Empty when the link is purely second-order (no
+        direct shared basket) and the caller falls back to an embedding 'bridge'
         (see embed.connection_geometry). Catch-all playlists (> max_playlist tracks) and quarantined
         generated playlists are excluded, mirroring the embedding's own basket filtering."""
         path = [k for k in dict.fromkeys(path_keys) if k and k != key]
@@ -257,7 +252,7 @@ class RecQueryRepo(Repo):
         c_artist = (crow["artist"] or "").strip()
         facts = []
 
-        # 1) same artist as something else on the branch — the most certain explanation
+        # 1) same artist as something else on the branch, the most certain explanation
         row = self.conn.execute(
             f"SELECT t2.artist a FROM tracks t1 JOIN tracks t2 "
             f"ON LOWER(TRIM(t2.artist))=LOWER(TRIM(t1.artist)) "
@@ -267,7 +262,7 @@ class RecQueryRepo(Repo):
             facts.append({"kind": "same_artist",
                           "text": f"Same artist ({row['a']}) as elsewhere on this branch."})
 
-        # 2) shared playlists — count distinct, naming the co-occurring path artists ("bands like…")
+        # 2) shared playlists: count distinct, naming the co-occurring path artists ("bands like…")
         excl = self.excluded_playlist_ids()
         rows = self.conn.execute(
             f"SELECT cp.pid pid, t.artist artist FROM "
@@ -310,7 +305,7 @@ class RecQueryRepo(Repo):
                 [key, *path]).fetchone():
             facts.append({"kind": "session", "text": "You played them in the same listening session."})
 
-        # 5) genre family (meta-genre map) — both sit in the same family
+        # 5) genre family (meta-genre map): both sit in the same family
         if crow["genre"]:
             cf = genre_map.family(crow["genre"])
             prows = self.conn.execute(
@@ -332,7 +327,7 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def library_genre_families(self) -> list[dict]:
-        """Genre families present in the library, each with its track count — the option list for the
+        """Genre families present in the library, each with its track count, the option list for the
         Clusters genre-family filter (#29). Untagged tracks contribute nothing. Sorted most-common
         first, then alphabetically."""
         fams = {}
@@ -347,7 +342,7 @@ class RecQueryRepo(Repo):
     @synchronized
     def keys_in_families(self, families) -> set:
         """Identity_keys whose genre maps into one of `families` (#29 whitelist). Untagged tracks are
-        never included — a track with no genre can't be vouched into a restricted cluster."""
+        never included. A track with no genre can't be vouched into a restricted cluster."""
         fams = set(families)
         if not fams:
             return set()
@@ -357,7 +352,7 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def library_genres(self) -> list[dict]:
-        """Individual genres (sub-genres) present in the library, each with its family and track count —
+        """Individual genres (sub-genres) present in the library, each with its family and track count,
         the fine-grained options for the Clusters genre filter (#29), alongside the coarse families.
         Sorted most-common first, then alphabetically."""
         rows = self.conn.execute(
@@ -387,7 +382,7 @@ class RecQueryRepo(Repo):
         """Autosuggest seeds for the Clusters canvas. Up to `limit` results per kind, each a dict
         {kind, label, sub, keys}: an artist (all their modelled tracks), a playlist (its modelled
         tracks, excluding the quarantined Generated group), or a single song. Only vector-backed
-        identity_keys are returned — a seed with no vector adds nothing to a node's centroid."""
+        identity_keys are returned. A seed with no vector adds nothing to a node's centroid."""
         q = (q or "").strip()
         if not q:
             return []
@@ -434,7 +429,7 @@ class RecQueryRepo(Repo):
     @synchronized
     def play_counts(self) -> dict:
         """{identity_key: total play count} from listening history. A key absent from the map has
-        never been played (count 0) — the primary signal for the Catalog card (your under-played
+        never been played (count 0), the primary signal for the Catalog card (your under-played
         catalog)."""
         return {r["identity_key"]: r["c"] for r in self.conn.execute(
             "SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key")}
@@ -442,13 +437,13 @@ class RecQueryRepo(Repo):
     # --- genre distributions / adjacency ---
     @synchronized
     def genre_distribution(self) -> dict:
-        """{genre: track_count} over tagged tracks — feeds the taste-breadth/palette computation."""
+        """{genre: track_count} over tagged tracks, feeds the taste-breadth/palette computation."""
         return {r["genre"]: r["c"] for r in self.conn.execute(
             "SELECT genre, COUNT(*) c FROM tracks WHERE genre<>'' GROUP BY genre")}
 
     @synchronized
     def genre_play_distribution(self) -> dict:
-        """{genre: Σ (1 + play_count)} over tagged tracks — play-weighted so a barely-played
+        """{genre: Σ (1 + play_count)} over tagged tracks, play-weighted so a barely-played
         context counts toward breadth/palette far less than one you actually listen to (the +1 keeps
         owned-but-unplayed tracks from vanishing entirely)."""
         # Collapse to one row per (song, genre) FIRST: a song commonly has several `tracks` rows
@@ -463,12 +458,11 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def genre_cooccurrence(self) -> dict:
-        """How often each unordered genre pair shares a playlist — the corpus adjacency signal.
+        """How often each unordered genre pair shares a playlist: the corpus adjacency signal.
 
         Returns {"pairs": {(g1,g2): count}, "occ": {genre: #playlists}}. Used to pull genres the
         user repeatedly playlists together closer than the static map alone (spec §2.1/§5.3).
         """
-        from collections import Counter
         excl = self.excluded_playlist_ids()
         pl = {}
         for r in self.conn.execute(
@@ -498,7 +492,7 @@ class RecQueryRepo(Repo):
     @synchronized
     def excluded_playlist_ids(self, group=GENERATED_GROUP) -> set:
         """DB ids of generated playlists still quarantined from every taste signal. A generated
-        playlist (group == `group`) is excluded until you promote it — move it out of the group so
+        playlist (group == `group`) is excluded until you promote it. Move it out of the group so
         it counts as one of your real playlists. Playing it does NOT graduate it; only the explicit
         move into your library does (see /playlist/{id}/promote)."""
         rows = self.conn.execute(
@@ -509,7 +503,7 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def generated_track_keys(self, group=GENERATED_GROUP) -> set:
-        """Identity_keys of every track already sitting in a generated-group playlist — so the
+        """Identity_keys of every track already sitting in a generated-group playlist, so the
         recommendation lanes never re-offer songs you've just bundled into one (you saved it; don't
         suggest it back). Independent of graduation: once it's in a generated playlist, it's spoken for."""
         return {r["identity_key"] for r in self.conn.execute(
@@ -519,10 +513,10 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def generated_only_keys(self, group=GENERATED_GROUP) -> set:
-        """Track keys that live ONLY in quarantined generated playlists — mirrors excluded_playlist_ids
+        """Track keys that live ONLY in quarantined generated playlists, mirrors excluded_playlist_ids
         at the track level, so a generated song pollutes no embedding basket (album/artist/genre/year/
         session) until its playlist is promoted. Once the playlist is promoted, or the track also lands
-        in a real playlist, it counts again. Plays don't lift the quarantine — promotion does."""
+        in a real playlist, it counts again. Plays don't lift the quarantine. Promotion does."""
         excl = self.excluded_playlist_ids(group)
         if not excl:
             return set()
@@ -538,7 +532,7 @@ class RecQueryRepo(Repo):
     def rec_baskets(self, max_playlist=120, max_album=30, max_session=120) -> list[list[str]]:
         """Co-occurrence baskets for the embedding model: playlists, albums, listening sessions.
 
-        Catch-all playlists (more than max_playlist tracks) are excluded — they link everything to
+        Catch-all playlists (more than max_playlist tracks) are excluded. They link everything to
         everything and only add noise. Live sets, full-performance uploads (UGC), and over-long
         "tracks" that are really DJ mixes/compilations are dropped too, since they co-occur with
         unrelated songs and blur the model. Each basket is a list of track identity_keys.
@@ -582,12 +576,12 @@ class RecQueryRepo(Repo):
     @synchronized
     def comfort_candidates(self, now, min_plays=4, recency_full_days=30, limit=50) -> list[dict]:
         """'Comfort listening': your high-rotation favorites, demoted the more recently you've heard
-        them — reliable tracks you haven't reached for lately.
+        them, reliable tracks you haven't reached for lately.
 
         play count = appearances across history snapshots; last_played = newest snapshot containing
         the song. Each track scores plays * min(1, days_since_last / recency_full_days): heavy
         rotation pushes it up, a recent play pulls it down (a track played today scores ~0). Only
-        tracks with >= min_plays qualify, so this is always grounded in real listening — never-played
+        tracks with >= min_plays qualify, so this is always grounded in real listening. Never-played
         library tracks don't surface here (that's resurface/explore territory).
         """
         full_secs = max(1.0, recency_full_days * 86400.0)
@@ -640,7 +634,7 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def deep_cuts(self, limit=40) -> list[dict]:
-        """The least-played track of each artist you play a lot — 'you love them, revisit this.'
+        """The least-played track of each artist you play a lot, 'you love them, revisit this.'
 
         Content/affinity signal that needs no history depth: ranks artists by total plays,
         surfaces each one's most-neglected track. Works on day one.
@@ -698,7 +692,7 @@ class RecQueryRepo(Repo):
 
         Only playlists with a meaningful share of missing genre tags qualify (>= min_ratio of
         tracks, and at least min_gaps). This stops nagging about playlists you've already enriched
-        down to a handful of untaggable residuals — what's left there isn't worth another pass,
+        down to a handful of untaggable residuals. What's left there isn't worth another pass,
         regardless of which providers ran. Enriching the most-played gappy playlists first gives
         the biggest recommendation lift, since recs lean on genre/year.
         """
@@ -721,7 +715,7 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def album_enrichment_candidates(self, limit=3, min_gaps=3, min_ratio=0.25) -> list[dict]:
-        """Saved albums (folded into the library) with a meaningful share of missing genre tags —
+        """Saved albums (folded into the library) with a meaningful share of missing genre tags,
         the album twin of enrichment_candidates. Enriching them sharpens recs, since the model now
         leans on these tracks too."""
         rows = self.conn.execute(

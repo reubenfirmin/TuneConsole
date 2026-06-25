@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Res
 
 from yt_playlist.providers import enrichment, lastfm, waterfall
 from yt_playlist.rec import journeys, rec_params, recommend
+from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 
 
@@ -21,7 +22,7 @@ def build(ctx) -> APIRouter:
         return [int(x) for x in (form.get("ids", "") or "").split(",") if x.strip().isdigit()]
 
     def _refresh():
-        # htmx sees this header and does a full page reload — exact parity with the old
+        # htmx sees this header and does a full page reload, exact parity with the old
         # location.reload(); the list re-renders from the server as it did before.
         return Response(status_code=200, headers={"HX-Refresh": "true"})
 
@@ -31,7 +32,6 @@ def build(ctx) -> APIRouter:
             status_code=422, headers={"HX-Reswap": "none"})
 
     def _is_generated(pid):
-        from yt_playlist.repos.rec_query import GENERATED_GROUP
         pl = store.get_playlist(pid)
         return pl is not None and store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP
 
@@ -43,7 +43,7 @@ def build(ctx) -> APIRouter:
                 return templates.TemplateResponse(request, "_partials/track_row.html",
                     {"t": t, "idx": i, "is_generated": gen,
                      "mood_states": recommend.track_mood_states(store, now_fn()) if gen else {}})
-        return Response(status_code=204)         # row no longer present — nothing to swap
+        return Response(status_code=204)         # row no longer present, nothing to swap
 
     @router.get("/playlists")
     def playlists_page(request: Request):
@@ -80,7 +80,6 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="playlist not found")
         labels = {i.id: i.label for i in store.get_identities()}
         tracks = store.playlist_tracks_detail(pid)
-        from yt_playlist.repos.rec_query import GENERATED_GROUP
         is_generated = store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP
         recipe = store.get_recipe(pl.ytm_playlist_id) if is_generated else None
         return templates.TemplateResponse(request, "playlist.html", {
@@ -98,13 +97,13 @@ def build(ctx) -> APIRouter:
             "lastfm_configured": lastfm.api_key(store) is not None,
             "conflict_count": store.conflict_count_for_playlist(pid),  # drives the header conflict icon
             "active_job": ctx.jobs.find_active(pid),     # an in-progress enrichment to rejoin, if any
-            # arrived via a home "Enrich" CTA — tint the enrich icons CTA-green so it's clear what to click
+            # arrived via a home "Enrich" CTA. Tint the enrich icons CTA-green so it's clear what to click
             "enrich_hint": request.query_params.get("enrich") == "1",
         })
 
     @router.get("/playlist/{pid}/share.txt")
     def playlist_share(pid: int):
-        """Download the playlist as a plain .txt — one song URL per line — for easy sharing."""
+        """Download the playlist as a plain .txt (one song URL per line) for easy sharing."""
         pl = store.get_playlist(pid)
         if pl is None:
             raise HTTPException(status_code=404, detail="playlist not found")
@@ -217,7 +216,7 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="no such enrichment job")
 
         # Render each track's <tr> server-side so the live enrich update and a manual edit produce
-        # identical cells (the page's applyRow just drops in row_html — no client HTML building).
+        # identical cells (the page's applyRow just drops in row_html, no client HTML building).
         # Album jobs render the album row partial from the album's folded-in tracks instead.
         if job.album_browse is not None:
             row_tmpl = templates.env.get_template("_partials/album_track_row.html")
@@ -423,7 +422,7 @@ def build(ctx) -> APIRouter:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001  (errors surface on the reloaded page, as before)
             logger.exception("copy-into %s -> %s failed", ids, target)
-            return _toast(request, "Copy failed — see the log.")
+            return _toast(request, "Copy failed. See the log.")
         return _refresh()
 
     @router.post("/playlists/delete")

@@ -1,4 +1,4 @@
-"""IdentityRepo — the YouTube Music accounts (identities) the app manages."""
+"""IdentityRepo: the YouTube Music accounts (identities) the app manages."""
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.models import Identity
 

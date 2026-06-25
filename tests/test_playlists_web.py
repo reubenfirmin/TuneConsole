@@ -1,7 +1,7 @@
 """Contract tests for the htmx Playlists bulk actions (/playlists/copy|group|delete).
 
 The bulk routes now do their store/YouTube work and return an empty 200 with
-HX-Refresh: true (htmx then does a full page reload — parity with the old
+HX-Refresh: true (htmx then does a full page reload, parity with the old
 location.reload()), instead of the old JSON payloads. Fast TestClient assertions
 on the header + the store mutation.
 
@@ -31,7 +31,7 @@ def test_group_assigns_and_refreshes(store):
 
     r = c.post("/playlists/group", data={"ids": f"{a},{b}", "name": "Faves"})
     assert _refreshes(r)
-    assert r.text == ""                                # no JSON body — htmx just reloads
+    assert r.text == ""                                # no JSON body, htmx just reloads
     assert store.get_playlist_groups() == {"PLA": "Faves", "PLB": "Faves"}
 
 

@@ -45,7 +45,7 @@ class EnrichWorker:
             return 30.0
 
     def _stop(self) -> bool:
-        """should_stop for run_waterfall — abort the in-flight batch on pause or shutdown."""
+        """should_stop for run_waterfall: abort the in-flight batch on pause or shutdown."""
         return self._shutdown or not self._enabled()
 
     @property
@@ -69,7 +69,7 @@ class EnrichWorker:
         threading.Thread(target=self._loop, daemon=True).start()
 
     def trigger(self):
-        """Wake the drain loop (e.g. after a sync adds tracks). Coalesces — a no-op if already awake."""
+        """Wake the drain loop (e.g. after a sync adds tracks). Coalesces: a no-op if already awake."""
         self._wake.set()
 
     def shutdown(self):
@@ -87,7 +87,7 @@ class EnrichWorker:
             except Exception:  # noqa: BLE001 - a batch failure must never crash the worker
                 self.ctx.logger.warning("enrich worker batch failed", exc_info=True)
                 n = 0
-            if n == 0:                       # caught up (or paused mid-batch) — idle until woken
+            if n == 0:                       # caught up (or paused mid-batch). Idle until woken
                 self._wake.wait(self.idle_sleep_s)
                 self._wake.clear()
 
@@ -102,7 +102,7 @@ class EnrichWorker:
         if batch:
             self._had_work = True
         else:
-            if self._had_work:               # just drained the primary queue — mark the catch-up point
+            if self._had_work:               # just drained the primary queue. Mark the catch-up point
                 store.set_setting("enrich_caught_up_at", str(self.ctx.now_fn()))
                 self._had_work = False
             stale_before = self.ctx.now_fn() - self._resweep_days() * 86400
@@ -115,7 +115,7 @@ class EnrichWorker:
                               on_progress=lambda e: None, should_stop=self._stop)
         finally:
             self._busy = False
-        if self._stop():                     # paused/shutting down mid-batch — re-queue it next time
+        if self._stop():                     # paused/shutting down mid-batch. Re-queue it next time
             return 0
         store.mark_enriched([t["id"] for t in batch], self.ctx.now_fn())
         try:                                  # keep the content (genre/era) cluster space current as

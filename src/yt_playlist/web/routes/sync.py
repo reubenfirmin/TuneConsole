@@ -32,7 +32,7 @@ def build(ctx) -> APIRouter:
                 job.done = True
                 if ctx.rec_worker:                  # rebuild recs off the sync path (debounced)
                     ctx.rec_worker.trigger()
-                if ctx.enrich_worker:               # new tracks arrived — drain them (queue-jumped)
+                if ctx.enrich_worker:               # new tracks arrived. Drain them (queue-jumped)
                     ctx.enrich_worker.trigger()
 
         threading.Thread(target=run, daemon=True).start()
@@ -56,7 +56,7 @@ def build(ctx) -> APIRouter:
                 job.events.append({"type": "err", "text": f"sync failed: {detail}"})
             finally:
                 job.done = True
-                if ctx.rec_worker:                  # new plays/likes feed the taste model — rebuild (debounced)
+                if ctx.rec_worker:                  # new plays/likes feed the taste model. Rebuild (debounced)
                     ctx.rec_worker.trigger()
 
         threading.Thread(target=run, daemon=True).start()
@@ -85,7 +85,7 @@ def build(ctx) -> APIRouter:
                 if job.done:
                     yield f"data: {json.dumps({'type': 'end', 'error': job.error})}\n\n"
                     return
-                if await request.is_disconnected():   # browser navigated away — stop streaming
+                if await request.is_disconnected():   # browser navigated away. Stop streaming
                     return
                 await asyncio.sleep(0.1)
 

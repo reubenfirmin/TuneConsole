@@ -12,7 +12,7 @@ from yt_playlist.util import genre_map
 from yt_playlist.rec import embed, recommend
 from yt_playlist.library import executor
 
-RING_SIZE = 6        # tracks added per "grow" — a small ring keeps the canvas legible
+RING_SIZE = 6        # tracks added per "grow", a small ring keeps the canvas legible
 ALBUM_CAP = 2        # #14: at most this many tracks from one album per ring (untagged albums uncapped)
 
 
@@ -45,7 +45,7 @@ def build(ctx) -> APIRouter:
     async def clusters_expand(request: Request):
         """A node's next ring. Body: {pos_keys, neg_keys, exclude, k, allow_families}. pos_keys = the
         pinned path's keys (its centroid); neg_keys = every pruned key (push-away); exclude = keys
-        already on the canvas; allow_families = optional genre-family whitelist (#29) — when set, the
+        already on the canvas; allow_families = optional genre-family whitelist (#29), when set, the
         ring is restricted to tracks in those families (untagged tracks dropped). Returns
         {ring: [{key, video_id, title, artist, album, thumbnail, score}]}."""
         body = await request.json()
@@ -63,7 +63,7 @@ def build(ctx) -> APIRouter:
         # anywhere in the playlist, no further grow can add more of it.
         nbrs = embed.cluster_expand(store, pos_keys=pos, neg_keys=neg, exclude=exclude,
                                     topn=max(k * 4, k + 12), allow=allow, include_new=include_new)
-        # cap basis = the grown tracks already kept (count_keys), NOT the central seeds — a seed
+        # cap basis = the grown tracks already kept (count_keys), NOT the central seeds. A seed
         # artist's album shouldn't pre-spend the per-album budget. Falls back to non-pruned canvas keys.
         basis = body.get("count_keys")
         if basis is None:
@@ -116,7 +116,7 @@ def build(ctx) -> APIRouter:
             bm = store.tracks_by_keys([geo["bridge"]]).get(geo["bridge"])
             if bm:
                 reasons.append({"kind": "bridge",
-                                "text": f"Linked through “{bm['title']}” by {bm['artist']} — "
+                                "text": f"Linked through “{bm['title']}” by {bm['artist']}, "
                                         f"a track that sits near both."})
         headline = reasons[0]["text"] if reasons else "A close match in your taste space."
         meta = store.tracks_by_keys([key]).get(key, {})
@@ -156,7 +156,7 @@ def build(ctx) -> APIRouter:
         identity_id, client = next(iter((ctx.client_provider() or {}).items()), (None, None))
         result = {"name": name}
         if client is None or not tracks:
-            result["error"] = "Couldn't create it — connect an account and keep at least one track."
+            result["error"] = "Couldn't create it. Connect an account and keep at least one track."
         else:
             try:
                 res = await asyncio.to_thread(

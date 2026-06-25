@@ -78,7 +78,7 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="setup not available")
         setup.sign_out()
         ctx.auth_expired.clear()
-        return RedirectResponse(f"/setup?flash={quote('Signed out — your saved sign-in was deleted.')}",
+        return RedirectResponse(f"/setup?flash={quote('Signed out. Your saved sign-in was deleted.')}",
                                 status_code=303)
 
     @router.post("/setup")
@@ -109,15 +109,15 @@ def build(ctx) -> APIRouter:
         ctx.auth_expired.clear()                    # success clears the stale-session banner (in place)
         # Tailor the confirmation to context. "Has synced before" (the same signal that turns the
         # syncbar's green "Sync now" CTA into a neutral "Full sync") tells a re-auth apart from a
-        # first-time setup — so we never point at a "Sync now" button that isn't on the page.
+        # first-time setup, so we never point at a "Sync now" button that isn't on the page.
         has_synced = bool(store.get_setting("last_sync_at"))
         auto_sync = store.get_setting("auto_sync_plays") == "1"
         if has_synced and auto_sync:
-            # Nothing for them to do — auto-sync will catch up. A transient toast, not a banner.
+            # Nothing for them to do. Auto-sync will catch up. A transient toast, not a banner.
             return RedirectResponse(f"/?toast={quote('You’re authenticated again.')}", status_code=303)
         if has_synced:
-            # Re-authed but auto-sync is off, so they need to act — keep a persistent banner.
-            msg = "You’re authenticated again. Click “Full sync” to catch up — or turn on “Sync plays” to keep it automatic."
+            # Re-authed but auto-sync is off, so they need to act. Keep a persistent banner.
+            msg = "You’re authenticated again. Click “Full sync” to catch up, or turn on “Sync plays” to keep it automatic."
         else:
             n = len(identities)
             msg = f"Saved {n} identit{'y' if n == 1 else 'ies'}. Click “Sync now” to pull your playlists."

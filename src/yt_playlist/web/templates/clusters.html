@@ -64,7 +64,7 @@
       </label>
       <!-- explicit reset: wipe the canvas back to a blank slate -->
       <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
-              @click="reset()" title="Reset — clear the whole canvas">⟲ Reset</button>
+              @click="reset()" title="Reset: clear the whole canvas">⟲ Reset</button>
     </div>
   </div>
 
@@ -90,7 +90,7 @@
                        trunk: isTrunkNode(n.id) && n.kind !== 'central', filtered: n.gpruned, boosted: isBoosted(n) }"
              :style="`left:${n.x}px;top:${n.y}px;${nodeStyle(n)}`">
           <div class="cn-body" @pointerdown.stop="startNodeDrag(n, $event)"
-               :title="n.kind === 'track' && n.state === 'pruned' ? n.label + ' — ' + n.sub + (n.gpruned ? ' (filtered out — click ↺ to restore)' : '') : ''">
+               :title="n.kind === 'track' && n.state === 'pruned' ? n.label + ', ' + n.sub + (n.gpruned ? ' (filtered out: click ↺ to restore)' : '') : ''">
             <template x-if="n.kind === 'central'">
               <div class="cn-central">
                 <span class="cn-eyebrow">Central cluster</span>
@@ -104,7 +104,7 @@
             <template x-if="n.kind === 'track'">
               <div class="cn-track" :class="{ 'new-music': n.newMusic }">
                 <span class="cn-new" x-show="n.newMusic" x-cloak
-                      title="New — not in your library yet">✨</span>
+                      title="New: not in your library yet">✨</span>
                 <img class="cn-thumb" :src="n.thumbnail" x-show="n.thumbnail" alt="" loading="lazy"
                      @error="n.thumbnail = ''">
                 <div class="cn-text">
@@ -119,7 +119,7 @@
                     title="Play on YouTube Music">▶</button>
             <button type="button" class="cn-btn boost" x-show="n.kind === 'track' && n.state !== 'pruned'"
                     :class="{ on: isBoosted(n) }" @click="toggleBoost(n)"
-                    :title="isBoosted(n) ? 'Emphasized — steering new picks toward this' : 'Emphasize: steer new picks toward this track'">🔥</button>
+                    :title="isBoosted(n) ? 'Emphasized: steering new picks toward this' : 'Emphasize: steer new picks toward this track'">🔥</button>
             <button type="button" class="cn-btn grow" x-show="n.state !== 'pruned'" @click="grow(n.id)"
                     :disabled="exhaustedIds.includes(n.id)"
                     :title="exhaustedIds.includes(n.id) ? 'Genre filters are exhausted' : 'Grow: add a ring of nearby tracks'">＋</button>

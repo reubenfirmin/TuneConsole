@@ -1,6 +1,6 @@
 """Last.fm enrichment: pin a clean genre from a track's (or artist's) top tags.
 
-Last.fm has dense, crowd-sourced tags where MusicBrainz genres are sparse — but the tags are noisy
+Last.fm has dense, crowd-sourced tags where MusicBrainz genres are sparse, but the tags are noisy
 (moods, decades, "seen live"...). We match them against genres.py's whitelist and take the highest-
 count tag that is a recognized genre. Last.fm doesn't give reliable release years, so this only sets
 genre (MusicBrainz still owns year); it fills tracks that have no genre yet rather than overwriting.
@@ -105,14 +105,14 @@ def _get(params):
 
 
 def _fetch_text(url):
-    for attempt in (1, 2):                         # Last.fm pages 502 transiently — retry once
+    for attempt in (1, 2):                         # Last.fm pages 502 transiently. Retry once
         _pacer.wait()
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
         try:
             with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
                 text = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            _breaker.record(e)                     # server answered (an error) — host is reachable
+            _breaker.record(e)                     # server answered (an error). Host is reachable
             if e.code >= 500 and attempt == 1:
                 time.sleep(1.0)
                 continue
@@ -152,7 +152,7 @@ def _year_from_tags(names):
 
 def artist_genre(artist, key):
     """Best whitelisted genre from an artist's Last.fm top tags, or None. For #18: tagging a new
-    (unowned) discovered artist so the facet overlay can steer it. Best-effort — None on any failure."""
+    (unowned) discovered artist so the facet overlay can steer it. Best-effort: None on any failure."""
     if not key or not artist:
         return None
     common = {"api_key": key, "format": "json", "autocorrect": "1"}
@@ -177,7 +177,7 @@ def enrich(title, artist, key):
     track = (info or {}).get("track") or {}
     track_tags = _tag_names(track)   # _tag_names guards the single-tag-as-dict case the API returns
     genre = genres.pick_genre(track_tags)
-    if not genre and artist:                      # no track-level genre — fall back to artist tags
+    if not genre and artist:                      # no track-level genre. Fall back to artist tags
         try:
             genre = genres.pick_genre(_tag_names(
                 _get({"method": "artist.gettoptags", "artist": artist, **common})))
@@ -209,22 +209,22 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, key=None, s
 
     def _per_item(i, total, t):
         genre, year = enrich_fn(t["title"], t["artist"], key)
-        if _breaker.tripped():             # host unreachable — the rest would all fail too, so stop
-            on_progress({"type": "err", "text": "Last.fm looks unreachable — stopped. "
+        if _breaker.tripped():             # host unreachable. The rest would all fail too, so stop
+            on_progress({"type": "err", "text": "Last.fm looks unreachable. Stopped. "
                          "The remaining tracks will retry next time."})
             return False
         store.set_track_enrichment(t["id"], genre, year)
         eff_genre, eff_year = store.get_track_enrichment(t["id"])    # report what actually stuck
         bits = " · ".join(x for x in (genre, year) if x) or "no tags"
         on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']} — {bits}"})
+                     "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']}: {bits}"})
 
     run_enrich_loop(
         store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
         empty_text="Every track already has genre & year.",
         start_text=lambda n: f"Tagging {n} track(s) via Last.fm…",
         done_text=lambda n: f"Tagged {n} track(s).",
-        wait_text="Waiting — a newer playlist is tagging first…",
+        wait_text="Waiting: a newer playlist is tagging first…",
         per_item=_per_item)
 
 

@@ -2,8 +2,8 @@
 
 Rec computation runs OFF the sync/request path here: a single background thread rebuilds the
 taste vectors and materializes the heavy/slow surfaces (fresh songs, outward discovery) into
-rec_proposals for last-good serving. Triggers coalesce — many syncs in a row collapse into one
-rebuild — so frequent syncs never pile up.
+rec_proposals for last-good serving. Triggers coalesce: many syncs in a row collapse into one
+rebuild, so frequent syncs never pile up.
 """
 import threading
 import time
@@ -97,7 +97,7 @@ class RecWorker:
 
     @property
     def busy(self):
-        """True while a rebuild is scheduled or running — drives the 'refreshing…' UI state."""
+        """True while a rebuild is scheduled or running, driving the 'refreshing…' UI state."""
         return self._running
 
     def trigger(self):
@@ -180,7 +180,7 @@ class RecWorker:
         except Exception:  # noqa: BLE001 - never let the cleanup scan crash a rebuild
             log.warning("rec rebuild: cleanup summary failed", exc_info=True)
         # Outward discovery (new albums + new artists) is now an accumulating, scan-ledger-backed pass
-        # over ALL interested artists, a budgeted batch at a time — not a top-10 overwrite each sync.
+        # over ALL interested artists, a budgeted batch at a time, not a top-10 overwrite each sync.
         try:
             res = discover.run_discovery(self.ctx, now)
             log.info("rec rebuild: discovery scanned %d artists", res.get("scanned", 0))

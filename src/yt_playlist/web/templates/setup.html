@@ -31,7 +31,7 @@
         <summary>Why sign in this way?</summary>
         <p class="section-note">YouTube Music has no public, official API for managing your library and
           playlists. Google does offer an OAuth path (the YouTube Data API), and it can create and edit
-          playlists — but it <strong>can't read your listening history</strong>, the "listens" data our
+          playlists, but it <strong>can't read your listening history</strong>, the "listens" data our
           recommendation models depend on, so it can't fully drive this app. So instead the app reuses the
           signed-in request your own browser already makes (the <code class="mono">Copy as cURL</code>
           below), which carries the cookies and headers those endpoints expect. This is the same approach
@@ -155,7 +155,7 @@ function setupForm(rows, masterIdx, configured) {
       // auto-detect the logged-in (master) identity: fill its label if still blank
       const m = this.rows[this.masterIdx];
       if (m && !m.label.trim()) m.label = detail.account;
-      // Re-auth: identities already configured, so a valid check is all we need — commit now.
+      // Re-auth: identities already configured, so a valid check is all we need. Commit now.
       if (this.configured) this.$nextTick(() => this.$refs.form.requestSubmit());
     },
   };

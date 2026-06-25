@@ -1,7 +1,7 @@
 """Generated proto-playlists: the two dated, saveable lanes on Home.
 
-Covers the load-bearing constraint — a playlist this app generates (auto-grouped "Generated") must
-NOT feed the recommendation engine until it's played or re-grouped — plus the create endpoint.
+Covers the load-bearing constraint: a playlist this app generates (auto-grouped "Generated") must
+NOT feed the recommendation engine until it's played or re-grouped, plus the create endpoint.
 """
 import json
 
@@ -33,7 +33,7 @@ def test_generated_excluded_until_promoted(store):
 
     assert dao.excluded_playlist_ids() == {pid}                 # quarantined while "Generated"
 
-    # Playing it does NOT graduate it — adoption is an explicit act, not a side effect of listening.
+    # Playing it does NOT graduate it. Adoption is an explicit act, not a side effect of listening.
     for _ in range(5):
         store.add_history_snapshot(iid, 1.0, list(gkeys))
     assert dao.excluded_playlist_ids() == {pid}                 # still quarantined despite heavy plays
@@ -82,7 +82,7 @@ def test_generate_endpoint_creates_and_groups(store):
 def test_generate_result_reuses_preopened_tab(store):
     """Regression: the post-save swap must point an ALREADY-OPEN tab at the playlist, not call a bare
     window.open() itself. A window.open() fired from the htmx response runs after the save round-trip,
-    which — once the batch-add falls back to slow per-item retries — outlives the browser's user-
+    which, once the batch-add falls back to slow per-item retries, outlives the browser's user-
     activation window and gets popup-blocked (the YouTube tab never opens, only the same-tab redirect
     survives). So the success path reuses the tab opened synchronously during the click."""
     iid = store.upsert_identity("main", "cred", None, True)
@@ -149,7 +149,7 @@ def test_home_renders_generated_cards(store):
 def test_comfort_proto_card_dj_ordered_with_genre(store, monkeypatch):
     """A proto-card must be ordered BEFORE it's shown: no back-to-back same artist, and genres
     attached so a genre journey is possible. Reproduces the 'comfort playlist clustered by artist,
-    no genre journey' bug — the DJ used to run only at save, on data that had already dropped genre.
+    no genre journey' bug. The DJ used to run only at save, on data that had already dropped genre.
     Uses shuffle journey so the within-band artist-spacing guarantee applies to all items together."""
     from yt_playlist.web.routes import home
     from yt_playlist.rec import recommend

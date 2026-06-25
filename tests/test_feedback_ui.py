@@ -18,7 +18,7 @@ def _seed(store):
 
 def test_home_proto_curation_not_pre_listen_taste_chips(store):
     # The Home proto-playlists are drafts you curate before listening, so each row offers a plain
-    # "remove from this playlist" — NOT taste feedback that only makes sense after hearing a track.
+    # "remove from this playlist", NOT taste feedback that only makes sense after hearing a track.
     _, c = _seed(store)
     html = c.get("/").text
     assert "gen-rm" in html and "Remove from this playlist" in html

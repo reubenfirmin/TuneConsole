@@ -68,7 +68,7 @@ def test_zero_recent_share_is_zero_not_pinned():
 
 def test_open_is_none_when_no_earlier_data():
     # Young library: only the newest period has any plays. There's no "earlier" to compare to,
-    # so open is None (null) — distinct from 0.0 — and there's no trend.
+    # so open is None (null), distinct from 0.0, and there's no trend.
     corpus = {"a": 1, "b": 1}
     windows = {"w0": {"a": 1, "b": 1}, "w1": {}, "w2": {}}   # w1/w2 are null (no snapshots)
     r = _by_cat(ticker_rows(corpus, windows))["a"]

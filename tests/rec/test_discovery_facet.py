@@ -22,7 +22,7 @@ def test_neutral_family_is_one(store):
 
 def test_transient_lean_is_damped(store, monkeypatch):
     """A positive transient lean nudges the weight up, but by LESS than the full in-library facet
-    multiplier — discovery stays deliberately stable."""
+    multiplier. Discovery stays deliberately stable."""
     monkeypatch.setattr(recommend.transient, "facet_leans", lambda s, now: {"genre:house": 1.0})
     w = recommend.discovery_facet_weight(store, "house", now=1.0)
     full = recommend.transient.facet_multiplier(

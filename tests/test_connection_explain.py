@@ -1,4 +1,4 @@
-"""Why is this Clusters edge here? — grounded co-occurrence facts + an embedding 'bridge' fallback.
+"""Why is this Clusters edge here? Grounded co-occurrence facts + an embedding 'bridge' fallback.
 
 `connection_facts` reads the same baskets that fed the taste embedding (shared playlists, album,
 session, same artist, genre family, decade) and turns them into human-readable reasons. When a link

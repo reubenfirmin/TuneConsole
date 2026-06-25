@@ -3,7 +3,7 @@
 This is the reusable orchestrator the background worker will call. For each track it walks the
 enabled providers in the user's configured order; each provider's read-only ``probe`` returns what it
 found, which the harness (a) writes to the parseable ``enrichment_log``, (b) applies to the canonical
-track fill-only — so a later provider sees an MBID an earlier one resolved — and (c) compares across
+track fill-only (so a later provider sees an MBID an earlier one resolved) and (c) compares across
 providers to record disagreements as ``enrichment_conflict`` rows.
 
 Web-agnostic: it takes a track list, an ``on_progress`` callback (same event shapes the SSE renderer
@@ -53,7 +53,7 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
             continue
         if not mod.available(store):
             on_progress({"type": "info",
-                         "text": f"{p.get('label', p['name'])} is enabled but has no API key — skipping."})
+                         "text": f"{p.get('label', p['name'])} is enabled but has no API key, skipping."})
             continue
         chosen.append(mod)
 
@@ -78,7 +78,7 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 on_progress({"type": "info", "text": "Stopped."})
                 return
             _gate.wait_turn(seq, on_wait=lambda: on_progress(
-                {"type": "info", "text": "Waiting — a newer run is enriching first…"}))
+                {"type": "info", "text": "Waiting: a newer run is enriching first…"}))
             results = []
             for m in chosen:
                 if m.name in dead:
@@ -88,10 +88,10 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                     store.log_enrichment(t["id"], run_id, m.name, fld, val)
                 _apply(store, t, res)
                 results.append(res)
-                if m.tripped():                   # host unreachable — drop it for the rest of the run
+                if m.tripped():                   # host unreachable. Drop it for the rest of the run
                     dead.add(m.name)
-                    on_progress({"type": "info", "text": f"{m.name} looks unreachable — "
-                                 "skipping it for the rest of this run."})
+                    on_progress({"type": "info", "text": f"{m.name} looks unreachable. "
+                                 "Skipping it for the rest of this run."})
             for fld, candidates in base.detect_conflicts(results).items():
                 store.upsert_conflict(t["id"], fld, candidates)
                 conflicts_found += 1

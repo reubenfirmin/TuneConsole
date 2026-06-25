@@ -37,7 +37,7 @@ def _linkify(text):
 def create_app(store, client_provider, *, now_fn=time.time,
                allowed_hosts=("localhost", "127.0.0.1"), setup=None) -> FastAPI:
     # setup: optional Runtime-like collaborator (.configured, .credentials_present, .apply_setup).
-    # When None, the app is treated as already configured and the /setup wizard is inert — this
+    # When None, the app is treated as already configured and the /setup wizard is inert. This
     # keeps the existing two-arg call sites (and their tests) working unchanged.
     web_dir = Path(__file__).parent
     static_dir = web_dir / "static"
@@ -47,7 +47,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
     allowed = set(allowed_hosts)
     # Cache-bust app.js/app.css by the newest mtime so browsers always fetch the current build
     # after an edit (otherwise a stale cached app.js silently diverges from the templates).
-    # Evaluated LAZILY per render (str()) — not once at startup — so editing a static file busts the
+    # Evaluated LAZILY per render (str()), not once at startup, so editing a static file busts the
     # cache even without a server restart; `{{ asset_v }}` in templates calls __str__ each time.
     class _AssetVersion:
         def __str__(self):

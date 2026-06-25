@@ -7,7 +7,7 @@ window.addEventListener('DOMContentLoaded', syncTopbarH);
 window.addEventListener('resize', syncTopbarH);
 
 // htmx: a 422 carries an OOB error toast. By default htmx won't process a 4xx body,
-// so opt this status in — the server sets `HX-Reswap: none` to keep the primary
+// so opt this status in. The server sets `HX-Reswap: none` to keep the primary
 // target untouched while the OOB toast still lands in #toasts. Bind on `document`
 // (not document.body): app.js loads in <head>, before <body> exists.
 document.addEventListener('htmx:beforeSwap', (e) => {
@@ -40,7 +40,7 @@ function rowSort(pid, editBase) {
         .forEach(r => tb.appendChild(r));
       // A manual drag-reorder only makes sense in the playlist's TRUE order. Once a column sort is
       // applied, the on-screen order isn't canonical, so persisting a single drag would scramble the
-      // real order — disable dragging until the view is reloaded back to the default order.
+      // real order. Disable dragging until the view is reloaded back to the default order.
       if (this._sortable) this._sortable.option('disabled', this.key !== '');
     },
     ind(k) { return this.key === k ? (this.dir === 1 ? ' ▲' : ' ▼') : ''; },
@@ -54,7 +54,7 @@ function rowSort(pid, editBase) {
         { target: '#alt-results', swap: 'innerHTML' }).finally(() => { this.altLoading = false; });
     },
 
-    // "Songs like this" — server renders the modal (with selectable rows + an Add button) into
+    // "Songs like this": server renders the modal (with selectable rows + an Add button) into
     // #similar-modal. Pass the playlist id so the modal can offer "add below this track"; the seed
     // vid becomes the insert anchor on the server side.
     songsLike(vid) {
@@ -90,8 +90,8 @@ function rowSort(pid, editBase) {
         disabled: this.key !== '',           // only draggable in the true (unsorted) order
         draggable: 'tr.srow',
         animation: 160,
-        // Native drag image (a faithful, full-width snapshot of the row) floats under the cursor —
-        // a fallback clone would detach the <tr> from the table and collapse its columns.
+        // Native drag image (a faithful, full-width snapshot of the row) floats under the cursor.
+        // A fallback clone would detach the <tr> from the table and collapse its columns.
         ghostClass: 'srow-ghost',            // the placeholder shown at the insert point
         chosenClass: 'srow-chosen',
         onEnd: (e) => {
@@ -101,7 +101,7 @@ function rowSort(pid, editBase) {
           const moved = e.item.dataset.vid;
           const next = e.item.nextElementSibling;
           const beforeVid = next && next.classList.contains('srow') ? next.dataset.vid : '';
-          // htmx persists the new order (no swap — the DOM is already reordered); on failure the
+          // htmx persists the new order (no swap: the DOM is already reordered); on failure the
           // server replies HX-Refresh to reload and resync the true order.
           htmx.ajax('POST', `/playlist/${this.pid}/reorder`,
             { values: { video_id: moved, before_video_id: beforeVid }, swap: 'none' });
@@ -218,7 +218,7 @@ function rowSort(pid, editBase) {
 }
 function overlapSort() {
   // Client-side sort of the overlaps table by reordering the per-row <tbody> nodes
-  // (which preserves each row's Alpine state — pie menu, hide animation, etc.).
+  // (which preserves each row's Alpine state, pie menu, hide animation, etc.).
   return {
     key: 'shared', dir: -1,   // default: most-overlapping first
     tail: 0, tailMax: 0, _below: [], confirmOpen: false,
@@ -291,7 +291,7 @@ function playlistsTab(rows) {
       this.collapsed.Generated = !this.collapsed.Generated;
       try { localStorage.setItem('pl.collapsed', JSON.stringify(this.collapsed)); } catch (e) {}
     },
-    // "Generated" is pinned into its own card above the table (see template) — never in the sections.
+    // "Generated" is pinned into its own card above the table (see template), never in the sections.
     // Always newest-first by creation time (independent of the main table's column sort).
     genRows() {
       return this.rows.filter(r => r.group === 'Generated')
@@ -314,7 +314,7 @@ function playlistsTab(rows) {
     },
     selectAll(on) { this.rows.forEach(r => { this.sel[r.id] = on; }); },
     fmtLast(ts) {
-      if (!ts) return '—';
+      if (!ts) return '-';
       const days = Math.floor((Date.now() / 1000 - ts) / 86400);
       if (days <= 0) return 'today';
       if (days === 1) return 'yesterday';
@@ -351,7 +351,7 @@ function playlistsTab(rows) {
     },
     openGroup() { if (this.count()) { this.groupName = ''; this.groupModal = true; } },
     // Modal "save" actions go through htmx.ajax so the server's HX-Refresh reload (success) and
-    // 422 OOB error toast (copy-into) behave exactly as the inline hx-post did — but the values
+    // 422 OOB error toast (copy-into) behave exactly as the inline hx-post did, but the values
     // come straight from this component's state, not a global Alpine.$data() reach-in.
     copy() { htmx.ajax('POST', '/playlists/copy', { values: { ids: this.copyIds.join(','), name: this.copyName } }); },
     copyInto() { htmx.ajax('POST', '/playlists/copy-into', { values: { ids: this.copyIds.join(','), target: this.copyIntoTarget } }); },
@@ -405,7 +405,7 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
         await htmx.ajax('POST', '/settings/lastfm-key', { values: { key }, swap: 'none' });
         this.keyBusy = false;
         this.lastfmConfigured = true; this.keyModal = false; this.keyValue = '';
-        this.start('lastfm');                       // saved — run it now
+        this.start('lastfm');                       // saved, run it now
       } catch (e) { this.keyBusy = false; this.keyErr = 'Could not save that key.'; }
     },
     // if the page was refreshed while a job is running, reattach to it and resume the progress UI
@@ -432,7 +432,7 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
       const es = new EventSource(`/playlist/enrich/events/${job}`);
       let errs = 0;
       es.onmessage = (m) => {
-        errs = 0;                          // a delivered event means we're reconnected — reset backoff
+        errs = 0;                          // a delivered event means we're reconnected: reset backoff
         const ev = JSON.parse(m.data);
         if (ev.type === 'track') {
           this.applyRow(ev);
@@ -445,7 +445,7 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
           if (typeof ev.conflicts === 'number') this.conflictCount = ev.conflicts;
         } else if (ev.type === 'err') {
           this.status = ev.text;
-          if (ev.text && ev.text.includes('Last.fm API key')) {   // key missing/invalid — prompt for it
+          if (ev.text && ev.text.includes('Last.fm API key')) {   // key missing/invalid: prompt for it
             this.lastfmConfigured = false; this.keyModal = true;
           }
         } else if (ev.type === 'end') {
@@ -454,15 +454,15 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
         }
       };
       es.onerror = () => {
-        // A transient drop (e.g. a proxy idle-timeout): let EventSource auto-reconnect — the server
-        // replays events idempotently and sends 'end' once the job finishes — so a successful
+        // A transient drop (e.g. a proxy idle-timeout): let EventSource auto-reconnect. The server
+        // replays events idempotently and sends 'end' once the job finishes, so a successful
         // background job no longer looks failed. Give up only after several consecutive failures.
         this.status = 'Reconnecting…';
         if (++errs >= 5) { es.close(); this.running = false; this.status = 'Stream interrupted. Reload to check.'; }
       };
     },
     // The SSE event carries the server-rendered row HTML (same partial as a manual edit), so we just
-    // drop it in — Alpine re-inits the replaced <tr>, and its data-* (which sort reads) come along.
+    // drop it in. Alpine re-inits the replaced <tr>, and its data-* (which sort reads) come along.
     applyRow(ev) {
       if (!ev.row_html) return;
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(ev.video_id)}"]`);
@@ -471,7 +471,7 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
   };
 }
 function authBanner(initial) {
-  // The "session expired" bar — seeded from the server, and updated live by the sync panel so it
+  // The "session expired" bar, seeded from the server, and updated live by the sync panel so it
   // pops up during an AJAX sync (no page reload needed).
   return {
     labels: initial || [],
@@ -542,7 +542,7 @@ function syncPanel(autoOn = false) {
 
 // Navbar omnisearch dropdown: open/close + keyboard nav over the HTMX-rendered result rows.
 // Visibility is driven by results arriving (htmx:afterSwap, wired in x-init on the form) and by
-// focus; we never build markup here — the server owns the dropdown body.
+// focus; we never build markup here. The server owns the dropdown body.
 function omniSearch() {
   return {
     open: false,
@@ -573,6 +573,39 @@ function omniSearch() {
     },
   };
 }
+
+// A genre row's subgenre drill-down toggle. The open/closed state is kept per-family on `window`
+// (not localStorage: it's session-scoped, not worth persisting across reloads) so it survives the
+// #home-feed re-render that fires when you steer a bar. Without this, adjusting a subgenre would
+// re-render the panel and collapse the drill-down you were working in. Family name comes from
+// data-fam (safe for any name; no string interpolation into the expression).
+function fpGenre() {
+  return {
+    open: false,
+    fam: '',
+    // Capture the family name at init, where $el is the component root (in a method fired from the
+    // button's @click, $el would be the button instead, which has no data-fam).
+    init() {
+      this.fam = this.$el.dataset.fam || '';
+      this.open = !!(window.__fpOpen && window.__fpOpen[this.fam]);
+    },
+    toggle() {
+      this.open = !this.open;
+      (window.__fpOpen = window.__fpOpen || {})[this.fam] = this.open;
+    },
+  };
+}
+
+// Live center-anchored fill for the Home nudge sliders (#2): update --p (thumb position as a %) on
+// drag so the track fills from neutral out to the thumb in real time. Delegated on document so it
+// covers sliders re-rendered by htmx swaps; the initial value is set inline per-render server-side.
+document.addEventListener('input', function (e) {
+  var s = e.target;
+  if (s && s.classList && (s.classList.contains('fp-slider') || s.classList.contains('fp-breadth-slider'))) {
+    var pct = (s.value - s.min) / (s.max - s.min) * 100;
+    s.style.setProperty('--p', pct + '%');
+  }
+});
 
 // The Home "Your taste" panel's collapse toggle. State persists in localStorage so it survives full
 // reloads AND every #home-feed htmx swap (each swap re-creates this component, which re-reads the
@@ -638,7 +671,7 @@ function genrePicker() {
 // Each node's next ring = library tracks nearest its pinned-path centroid, pushed away from pruned
 // tracks (server: POST /clusters/expand). Tree state lives here; the server stays stateless. Node
 // positions are owned by a live d3-force simulation (link + charge + collide) so the graph lays
-// itself out without overlap and re-settles as you grow/prune — d3 mutates each node's x/y in place,
+// itself out without overlap and re-settles as you grow/prune. D3 mutates each node's x/y in place,
 // which Alpine renders reactively.
 function clusterCanvas() {
   const WORLD = 8000, CENTER = WORLD / 2;   // big fixed world; we pan/zoom a transform over it
@@ -651,13 +684,13 @@ function clusterCanvas() {
     journey: 'auto', journeyName: 'Pick for me', journeyOpen: false,   // DJ-journey ordering pick
     tx: 0, ty: 0, scale: 1,
     _pan: null, _drag: null, sim: null,
-    explain: null,            // {childId, loading, data} — the "why this edge?" popover
+    explain: null,            // {childId, loading, data}: the "why this edge?" popover
     families: [], genres: [], allowedFamilies: [], genreOpen: false, genreQuery: '',   // #29 genre whitelist (families + sub-genres)
     includeNew: false,        // #13 P2: opt in to reaching out-of-corpus (not-in-library) tracks
     trunk: [],                // #30 ids of grown nodes; the edge leading into each lights as trunk
     subHues: {}, _subHueN: 0,  // #14 parentId -> hue: every grown ring (sub-cluster) gets its own colour
     exhaustedIds: [],          // nodes whose + found nothing left under the active genre filter
-    boosted: [],               // 🔥 track keys to emphasize — every future grow leans toward them
+    boosted: [],               // 🔥 track keys to emphasize. Every future grow leans toward them
 
     init() {
       // The central group is pinned at CENTER (fx/fy), so it anchors the whole graph: no centering
@@ -692,7 +725,7 @@ function clusterCanvas() {
     },
 
     // --- persistence: the whole canvas survives a refresh (localStorage) ---
-    // Debounced: one interaction fires persist() many times (reheat, settle, drag/zoom end) — coalesce
+    // Debounced: one interaction fires persist() many times (reheat, settle, drag/zoom end): coalesce
     // the bursts into a single write a beat after you stop. _flushState (pagehide) lands the latest
     // state even if you navigate away mid-debounce.
     persist() {
@@ -709,7 +742,7 @@ function clusterCanvas() {
           playlistName: this.playlistName, includeCentral: this.includeCentral, saveMode: this.saveMode,
           journey: this.journey, journeyName: this.journeyName, tx: this.tx, ty: this.ty, scale: this.scale,
         }));
-      } catch (e) { /* private mode / quota — just don't persist */ }
+      } catch (e) { /* private mode / quota: just don't persist */ }
     },
     _flushState() { if (this._persistT) { clearTimeout(this._persistT); this._persistT = 0; this._writeState(); } },
     restore() {
@@ -723,7 +756,7 @@ function clusterCanvas() {
       this.saveMode = s.saveMode || 'all';
       this.journey = s.journey || 'auto'; this.journeyName = s.journeyName || 'Pick for me';
       this.tx = s.tx || 0; this.ty = s.ty || 0; this.scale = s.scale || 1;
-      this._syncSim();                       // feed the sim WITHOUT re-energizing — exact restore
+      this._syncSim();                       // feed the sim WITHOUT re-energizing: exact restore
       return true;
     },
     _clearState() { clearTimeout(this._persistT); this._persistT = 0; try { localStorage.removeItem('tc:cluster'); } catch (e) {} },
@@ -750,7 +783,7 @@ function clusterCanvas() {
       this.sim.alpha(alpha).restart();
       this.persist();
     },
-    // Update the sim's node/link sets WITHOUT re-energizing it — removed nodes leave the simulation
+    // Update the sim's node/link sets WITHOUT re-energizing it. Removed nodes leave the simulation
     // but everything else holds its exact position (#14: pruning must not jiggle the layout).
     _syncSim() {
       const links = this.nodes
@@ -763,7 +796,7 @@ function clusterCanvas() {
 
     // --- warped "spacetime" grid (a <canvas> behind the graph) ----------------------------------
     _initGrid() {
-      if (this._gridCtx) return;             // idempotent — only wire up the canvas + resize listener once
+      if (this._gridCtx) return;             // idempotent: only wire up the canvas + resize listener once
       this._gridEl = this.$refs.grid; if (!this._gridEl) return;
       this._gridCtx = this._gridEl.getContext('2d');
       this._resizeGrid();
@@ -781,14 +814,14 @@ function clusterCanvas() {
       this._gridEl.style.height = r.height + 'px';
       this._gW = r.width; this._gH = r.height; this._gDpr = dpr;
     },
-    // Coalesce redraws to one per frame — drawing on every pointermove during a pan can saturate the
+    // Coalesce redraws to one per frame. Drawing on every pointermove during a pan can saturate the
     // main thread (big glow gradients × wells × hi-DPI) and freeze the drag. rAF throttles it.
     _scheduleGrid() {
       if (this._gridRAF) return;
       this._gridRAF = requestAnimationFrame(() => { this._gridRAF = 0; this.drawGrid(); });
     },
     // Draw a grid that warps toward each cluster centre (gravity-well "spacetime curvature"). Each
-    // cluster's centre — the central group and every grown node — is a well whose depth grows with the
+    // cluster's centre (the central group and every grown node) is a well whose depth grows with the
     // size of the cluster hanging off it; grid lines are pulled in (and a soft glow sinks the well) for
     // a 3-D dented-sheet read. The grid is world-attached (pans/zooms with the graph).
     drawGrid() {
@@ -805,7 +838,7 @@ function clusterCanvas() {
           wells.push({ x: n.x, y: n.y, m: (n.kind === 'central' ? 2.4 : 0.7) + this.descendants(n.id).size * 0.3 });
         }
       }
-      // cap the well count on huge clusters — the warp sums over every well per grid sample (O(pts·wells));
+      // cap the well count on huge clusters: the warp sums over every well per grid sample (O(pts·wells));
       // the heaviest few dominate the look anyway, so the rest add cost without visible benefit.
       if (wells.length > 24) wells = wells.sort((a, b) => b.m - a.m).slice(0, 24);
       const GRID = 88, R0 = 320, R0SQ = R0 * R0, PULL = 60;   // larger R0 ⇒ the well's pull reaches much further out
@@ -813,7 +846,7 @@ function clusterCanvas() {
         let dx = 0, dy = 0;
         for (const w of wells) {
           const ex = w.x - px, ey = w.y - py, d2 = ex * ex + ey * ey, d = Math.sqrt(d2) || 1;
-          // displacement magnitude peaks AT the well (PULL·m) and decays with distance — so the dent
+          // displacement magnitude peaks AT the well (PULL·m) and decays with distance, so the dent
           // is deepest UNDER each cluster centre, not in a ring between them. f = mag / d.
           const f = (PULL * w.m) * R0SQ / (d2 + R0SQ) / d;
           dx += ex * f; dy += ey * f;
@@ -831,7 +864,7 @@ function clusterCanvas() {
         g.addColorStop(0, 'rgba(66,70,150,0.20)'); g.addColorStop(1, 'rgba(66,70,150,0)');
         ctx.fillStyle = g; ctx.beginPath(); ctx.arc(sx, sy, rad, 0, 7); ctx.fill();
       }
-      ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(74,78,158,0.16)';   // dark blue-indigo — distinct from the neutral-gray edges
+      ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(74,78,158,0.16)';   // dark blue-indigo, distinct from the neutral-gray edges
       for (let gx = X0; gx <= X1; gx += GRID) {        // vertical lines (constant world x)
         ctx.beginPath();
         for (let wy = Y0, first = true; wy <= Y1; wy += STEP) {
@@ -902,7 +935,7 @@ function clusterCanvas() {
     },
     // Every selection lands in ONE central group (artist + artist + song + …), pinned at the centre.
     // Its centroid is the union of all its seeds' keys. The FIRST seed grows the opening ring; each
-    // ADDED seed refines the core's taste direction (#12) — it re-ranks the whole tree in place
+    // ADDED seed refines the core's taste direction (#12). It re-ranks the whole tree in place
     // rather than bolting on another ring of cards.
     async addSeed(r) {
       this.query = ''; this.results = [];
@@ -926,13 +959,13 @@ function clusterCanvas() {
     // restricted to the genre-family whitelist (#29), minus everything already on the canvas.
     async expandRing(node, k) {
       // 🔥 emphasized tracks are folded into the positive centroid of EVERY grow (doubled for weight),
-      // so they steer all subsequent picks toward themselves — independent of which node you grow.
+      // so they steer all subsequent picks toward themselves, independent of which node you grow.
       const pos = this.posKeys(node);
       const pos_keys = this.boosted.length ? [...pos, ...this.boosted, ...this.boosted] : pos;
       try {
         const r = await fetch('/clusters/expand', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          // count_keys = grown, non-pruned tracks only (NOT the central seeds) — the per-album cap
+          // count_keys = grown, non-pruned tracks only (NOT the central seeds): the per-album cap
           // counts the playlist being built, so a seed artist's album doesn't pre-spend the budget.
           body: JSON.stringify({ pos_keys, neg_keys: this.prunedKeys(), exclude: this.allKeys(),
                                  count_keys: this.keepKeys(), k, allow_genres: this.allowedFamilies,
@@ -941,7 +974,7 @@ function clusterCanvas() {
         return (await r.json()).ring || [];
       } catch (e) { return []; }
     },
-    // 🔥 emphasis toggle — steers FUTURE grows toward this track; doesn't touch the current canvas.
+    // 🔥 emphasis toggle: steers FUTURE grows toward this track; doesn't touch the current canvas.
     isBoosted(n) { return !!n.key && this.boosted.includes(n.key); },
     toggleBoost(n) {
       if (!n.key) return;
@@ -954,7 +987,7 @@ function clusterCanvas() {
       if (!node || node.state === 'pruned') return;
       const ring = await this.expandRing(node, 6);
       if (!ring.length) {
-        // Nothing left to add. Under a genre filter that means the genre's pool is spent here — flag
+        // Nothing left to add. Under a genre filter that means the genre's pool is spent here. Flag
         // the node so its + greys out with an explanation (otherwise it just looks like a dead button).
         if (this.allowedFamilies.length && !this.exhaustedIds.includes(nodeId)) {
           this.exhaustedIds = [...this.exhaustedIds, nodeId];
@@ -967,7 +1000,7 @@ function clusterCanvas() {
       if (node.kind !== 'central' && !this.trunk.includes(nodeId)) this.trunk = [...this.trunk, nodeId];
       this.addChildren(node, ring);
     },
-    // Re-rank every grown ring against the (now updated) centroids — refine, don't add (#12). Cards
+    // Re-rank every grown ring against the (now updated) centroids: refine, don't add (#12). Cards
     // you've shaped the tree with survive: pruned markers, drag-pinned cards, and any card you've
     // already grown beneath (a branch). Only the loose leaf cards get swapped for fresher picks, so
     // the card COUNT holds steady while the suggestions tighten around the refined core.
@@ -989,7 +1022,7 @@ function clusterCanvas() {
 
     // --- #29 genre whitelist (autosuggest combo: families AND sub-genres) ---
     // The full pick list: coarse families first, then individual genres; a name shown once (a family
-    // and a like-named genre collapse to one token — picking it matches either).
+    // and a like-named genre collapse to one token, picking it matches either).
     genreOptions() {
       const byName = new Map();
       for (const f of this.families) byName.set(f.family.toLowerCase(), { name: f.family, kind: 'family', n: f.n });
@@ -1006,7 +1039,7 @@ function clusterCanvas() {
         .filter(o => !this.allowedFamilies.includes(o.name) && (!q || o.name.toLowerCase().includes(q)))
         .slice(0, 10);
     },
-    // The genre filter PRUNES off-genre leaves (reversibly) and constrains future grows — it does NOT
+    // The genre filter PRUNES off-genre leaves (reversibly) and constrains future grows. It does NOT
     // refetch to refill rings, so the genre's pool stays available for + to grow into.
     _genreChanged() { this.exhaustedIds = []; this.applyGenrePrune(); this.persist(); },   // pool changed; re-prune off-genre
     pickFamily(fam) {
@@ -1037,9 +1070,9 @@ function clusterCanvas() {
       const toks = this.allowedFamilies.map(t => t.toLowerCase());
       return toks.includes((n.genre || '').toLowerCase()) || toks.includes((n.family || '').toLowerCase());
     },
-    // The genre filter doesn't HIDE off-genre cards — it PRUNES them (the same struck-through removed
+    // The genre filter doesn't HIDE off-genre cards. It PRUNES them (the same struck-through removed
     // state as the ✕), so they stay visible (paths intact), drop out of the save, and you can bring any
-    // back with the ✕. Only loose leaves are touched — the trunk and structural nodes are left alone.
+    // back with the ✕. Only loose leaves are touched. The trunk and structural nodes are left alone.
     // gpruned marks a prune the FILTER made, so flipping/clearing the filter can undo exactly those
     // (a card you ✕'d or kept by hand stays as you left it).
     applyGenrePrune() {
@@ -1069,7 +1102,7 @@ function clusterCanvas() {
     },
     prune(id) {
       const n = this.nodeById(id); if (!n || n.kind === 'central') return;
-      // Toggling state changes only the card's look, not the layout — so don't restart the sim at
+      // Toggling state changes only the card's look, not the layout, so don't restart the sim at
       // all (#14: no jiggle). Un-prune is a pure visual flip. A hand toggle clears gpruned so the
       // genre filter won't silently flip it back.
       if (n.state === 'pruned') { n.state = 'neutral'; n.gpruned = false; this.persist(); return; }
@@ -1080,7 +1113,7 @@ function clusterCanvas() {
       if (this.explain && kill.has(this.explain.childId)) this.explain = null;
       this.nodes = this.nodes.filter(x => !kill.has(x.id));
       this.trunk = this.trunk.filter(t => !kill.has(t));
-      this._syncSim();                                 // drop the removed nodes without re-energizing — no jiggle
+      this._syncSim();                                 // drop the removed nodes without re-energizing, no jiggle
     },
     play(n) {                              // open the track on YouTube Music, reusing one named tab
       if (n.vid) window.open('https://music.youtube.com/watch?v=' + n.vid, 'ytPlayerTab');
@@ -1096,7 +1129,7 @@ function clusterCanvas() {
       while (cur && cur.parentId != null && cur.parentId !== this.rootId) cur = this.nodeById(cur.parentId);
       return cur ? cur.id : null;
     },
-    // #14 colour-coding: a card takes the hue of the SUB-CLUSTER it belongs to — i.e. the grown ring
+    // #14 colour-coding: a card takes the hue of the SUB-CLUSTER it belongs to, i.e. the grown ring
     // that spawned it, keyed by its parent. Each ring has its own vivid hue (assigned in addChildren),
     // so three sub-clusters down a trunk read as three clearly different colours, not shades of one.
     nodeStyle(n) {
@@ -1105,12 +1138,12 @@ function clusterCanvas() {
       if (hue == null) return '';
       return `--node-hue:${hue};--node-sat:70%;--node-light:60%;`;
     },
-    // #30 The "trunk" is the spine you GROW out (via the + button — see grow()): each node you grow
+    // #30 The "trunk" is the spine you GROW out (via the + button, see grow()): each node you grow
     // through lights the bright-green line leading into it, so the path you explored glows edge by edge.
     isTrunkNode(id) { return this.trunk.includes(id); },
     isTrunkEdge(n) { return n.parentId != null && this.trunk.includes(n.id); },
     // Two SVG <path>s: the faint branches and the bright trunk over them (Alpine can't reliably make
-    // per-edge <line> elements inside <svg> — namespace issues — so each is one path on a static node).
+    // per-edge <line> elements inside <svg>, namespace issues, so each is one path on a static node).
     edgePath() { return this._edgeD(false); },
     trunkPath() { return this._edgeD(true); },
     _edgeD(trunk) {
@@ -1135,7 +1168,7 @@ function clusterCanvas() {
       return out;
     },
     // Open the "why this edge?" popover: ask the server to explain the child against its pinned path
-    // (the same positive centroid that grew it — central group + every ancestor up the branch).
+    // (the same positive centroid that grew it: central group + every ancestor up the branch).
     async openExplain(childId) {
       const child = this.nodeById(childId); if (!child) return;
       const parent = this.nodeById(child.parentId); if (!parent) return;
@@ -1161,14 +1194,14 @@ function clusterCanvas() {
       return { x: (p.x + n.x) / 2, y: (p.y + n.y) / 2 };
     },
     centralKeys() { const r = this.rootId != null ? this.nodeById(this.rootId) : null; return r ? r.keys : []; },
-    // The seed labels (artist/playlist/song names) you built the cluster from — for its recipe's
+    // The seed labels (artist/playlist/song names) you built the cluster from, for its recipe's
     // "Made from" line on save (#15).
     seedLabels() {
       const r = this.rootId != null ? this.nodeById(this.rootId) : null;
       return r ? [...new Set(r.seeds.map(s => s.label))] : [];
     },
-    // Only SONG seeds are concrete "central tracks" worth offering to fold into the saved playlist —
-    // an artist/playlist seed steers the centroid but isn't a track you explicitly picked.
+    // Only SONG seeds are concrete "central tracks" worth offering to fold into the saved playlist.
+    // An artist/playlist seed steers the centroid but isn't a track you explicitly picked.
     centralSongKeys() {
       const r = this.rootId != null ? this.nodeById(this.rootId) : null;
       return r ? r.seeds.filter(s => s.kind === 'song').flatMap(s => s.keys) : [];
@@ -1224,7 +1257,7 @@ function clusterCanvas() {
       return { x: (e.clientX - rect.left - this.tx) / this.scale,
                y: (e.clientY - rect.top - this.ty) / this.scale };
     },
-    startNodeDrag(n, e) {                    // pointerdown on a card body — grab it, not the canvas
+    startNodeDrag(n, e) {                    // pointerdown on a card body: grab it, not the canvas
       const p = this._worldPt(e);
       this._drag = { id: n.id, moved: false, ox: p.x - n.x, oy: p.y - n.y, sx: e.clientX, sy: e.clientY };
       // capture on the canvas (which owns pointermove/up) so the drag survives the pointer leaving the card
@@ -1243,7 +1276,7 @@ function clusterCanvas() {
           if (dx * dx + dy * dy < 25) return;                                     // toggles the trunk)
           this._drag.moved = true;
         }
-        const p = this._worldPt(e);          // past the threshold: it's a drag — pin under the pointer
+        const p = this._worldPt(e);          // past the threshold: it's a drag, pin under the pointer
         n.fx = p.x - this._drag.ox; n.fy = p.y - this._drag.oy;
         n.x = n.fx; n.y = n.fy;
         this.sim.alpha(0.2).restart();
@@ -1393,7 +1426,7 @@ function initVizTooltip() {
          + '<span class="vt-l">' + esc(row.l) + '</span>'
          + '<span class="vt-v' + (row.t ? ' ' + row.t : '') + '">' + esc(row.v) + '</span></div>';
       if (row.n) h += '<div class="vt-n">' + esc(row.n) + '</div>';
-      lines.push(row.l + ': ' + row.v + (row.n ? ' — ' + row.n : ''));
+      lines.push(row.l + ': ' + row.v + (row.n ? ', ' + row.n : ''));
     }
     plainText = lines.join('\n');
     ensure().innerHTML = h;
