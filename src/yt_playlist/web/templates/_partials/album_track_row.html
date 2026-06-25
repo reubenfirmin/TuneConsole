@@ -1,7 +1,10 @@
-{# One album track row — display-only genre/year (filled live by enrichment) plus 'songs like this'.
-   class 'srow' + data-vid so the enrich SSE applyRow can replace it, identical to the playlist flow.
-   Needs: t, idx. (No reorder/remove/liked — those are playlist-only.) #}
-<tr class="srow" data-vid="{{ t.video_id }}">
+{# One album track row — mirrors the playlist track_row (liked toggle, click-to-edit genre/year,
+   sortable data-* attrs, ⋯ menu) so the two views render alike. class 'srow' + data-vid lets the
+   enrich SSE applyRow replace it, identical to the playlist flow. Needs: t, idx.
+   (No reorder/remove/alternates/mood — those are playlist-only.) #}
+<tr class="srow" data-vid="{{ t.video_id }}" data-title="{{ t.title|lower }}" data-artist="{{ t.artist|lower }}"
+    data-plays="{{ t.plays }}" data-len="{{ t.duration or 0 }}" data-year="{{ t.year or 0 }}"
+    data-genre="{{ t.genre|lower }}">
   <td class="num"><span class="rownum">{{ idx }}</span></td>
   <td>
     <span class="pl-cover">
@@ -10,9 +13,11 @@
          target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
     </span>
   </td>
+  {% with video_id = t.video_id, liked = t.liked %}{% include "_partials/liked_cell.html" %}{% endwith %}
   <td class="t-wrap" title="{{ t.title }}">
     <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
        target="_blank" rel="noopener">{{ t.title }}&nbsp;↗</a>
+    {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
   </td>
   <td class="t-wrap" title="{{ t.artist }}"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
   <td class="num mono mb-year">
@@ -46,9 +51,15 @@
       </div>
     </span>
   </td>
+  <td class="num mono">{{ t.plays or '' }}</td>
   <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
   <td class="rowmenu">
-    <button type="button" class="dots" title="Songs like this"
-            hx-get="/track/{{ t.video_id }}/similar" hx-target="#similar-modal" hx-swap="innerHTML">≈</button>
+    <button type="button" class="dots" title="More actions"
+            @click="openMenu = (openMenu === '{{ t.video_id }}' ? null : '{{ t.video_id }}')">⋯</button>
+    <div class="rowmenu-pop" x-show="openMenu === '{{ t.video_id }}'" x-cloak x-transition.opacity
+         @click.away="openMenu = null">
+      <button type="button" data-vid="{{ t.video_id }}"
+              @click="songsLike($event.currentTarget.dataset.vid)">Songs like this</button>
+    </div>
   </td>
 </tr>

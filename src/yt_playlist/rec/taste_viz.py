@@ -162,18 +162,31 @@ def model_transparency(store, now, recent_window=RECENT_PLAYS_WINDOW) -> dict:
     }
 
 
-def engine_panel(store) -> dict:
+def _dominant_family(store, pid) -> str:
+    """The genre family a playlist leans on most - a concrete handle on its 'sound' for the viz."""
+    from collections import Counter
+    fams = Counter(genre_map.family(g) for g in store.playlist_track_genres(pid) if g)
+    return fams.most_common(1)[0][0] if fams else ""
+
+
+def engine_panel(store, top=12) -> dict:
     """The permanent embedding 'engine' - vectors/baskets/dim/method, recall@k, and the per-playlist
-    taste contexts (which playlists shape taste, weighted by how much you play them)."""
-    contexts = []
+    taste contexts: which playlists the recommender blends to model your taste, each weighted by how
+    much you listen to it, tagged with its dominant genre so the blend is legible."""
+    contexts, total_contexts = [], 0
     pt = recommend.playlist_taste(store)
     if pt:
-        order = np.argsort(-pt.weights)
-        contexts = [{"title": pt.titles[i], "weight": float(pt.weights[i])} for i in order]
+        order = list(np.argsort(-pt.weights))
+        total_contexts = len(order)
+        for i in order[:top]:
+            pid = pt.pids[i] if i < len(pt.pids) else None
+            contexts.append({"title": pt.titles[i], "weight": float(pt.weights[i]),
+                             "genre": _dominant_family(store, pid) if pid is not None else ""})
     return {"vectors": store.rec_vectors_count(), "baskets": len(store.rec_baskets()),
             "dim": int(store.get_setting("rec_dim") or embed.DIM),
             "method": store.get_setting("rec_embed_method") or "auto",
-            "recall": eval_recs.recall_at_k(store), "contexts": contexts}
+            "recall": eval_recs.recall_at_k(store), "contexts": contexts,
+            "contexts_total": total_contexts}
 
 
 def centroid_tilt_panel(store, now) -> dict:

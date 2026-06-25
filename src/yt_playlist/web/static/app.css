@@ -506,6 +506,7 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 .dim-year .tk-bar { background: linear-gradient(90deg, #2ba3b8, var(--teal)); }
 .dim-album .tk-bar { background: linear-gradient(90deg, #d99a4e, #f6c177); }
 .dim-playlist .tk-bar { background: linear-gradient(90deg, #8d63e6, #bb9af7); }
+.dim-artist .tk-bar { background: linear-gradient(90deg, #3d6fd0, #7aa2f7); }
 .tkratio .tk-over { color: var(--up); }
 .tkratio .tk-under { color: var(--down); }
 .tkratio .tk-even { color: var(--dim); }
@@ -1641,15 +1642,6 @@ figure.rose { margin: 0; text-align: center; }
 .vb-div i.neg { right: 50%; background: var(--danger); border-radius: 3px 0 0 3px; }
 .vb-legend { margin: 0.5rem 0 0; font-size: 0.75rem; }
 
-.gauge { display: flex; align-items: center; gap: 0.6rem; margin: 0.5rem 0; }
-.gauge-lbl { flex: none; width: 13rem; font-size: 0.82rem; color: var(--text); }
-.gauge-lbl .muted { color: var(--dim); font-weight: 400; }
-.gauge-bar { flex: 1; height: 0.6rem; background: var(--surface); border-radius: 3px; overflow: hidden; }
-.gauge-bar i { display: block; height: 100%; background: var(--grad); border-radius: 3px; }
-.gauge-bar.warn i { background: linear-gradient(135deg, var(--danger), #ff9a6b); }
-.gauge-val { flex: none; width: 3rem; text-align: right; font-size: 0.8rem; color: var(--dim); }
-@media (max-width: 640px) { .gauge-lbl { width: 9rem; } }
-
 /* ── Enrichment conflicts: header badge icon + resolver modal ──────────────────────── */
 .head-icon.conflict-icon { position: relative; color: var(--amber, #e0a83b); }
 .conflict-badge {
@@ -1752,13 +1744,18 @@ figure.rose { margin: 0; text-align: center; }
   border-radius: var(--radius-sm); padding: 0.7rem 1rem; min-width: 7rem; }
 .enrich-tiles .metric .v { font-family: var(--font-display); font-size: 1.4rem; color: var(--text); }
 .cov-grid { display: flex; flex-direction: column; gap: 0.55rem; }
-.cov-row { display: grid; grid-template-columns: 7rem 1fr auto; align-items: center; gap: 0.7rem; }
+/* Fixed columns: label · bar (1fr, so every bar shares the same max width) · percent · raw count.
+   Percent and raw count each get their own column so they align down the list. */
+.cov-row { display: grid; grid-template-columns: 7rem 1fr 2.8rem 4.5rem; align-items: center;
+  gap: 0.7rem; }
 .cov-label { color: var(--dim); font-size: 0.85rem; }
 .cov-bar { height: 0.7rem; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
 .cov-bar > i { display: block; height: 100%; background: var(--grad); border-radius: 999px;
   transition: width 0.4s ease; }
-.cov-num { font-size: 0.8rem; color: var(--text); white-space: nowrap; }
-.cov-num .cov-sub { color: var(--faint); }
+.cov-pct, .cov-raw { font-size: 0.8rem; white-space: nowrap; text-align: right;
+  font-variant-numeric: tabular-nums; }
+.cov-pct { color: var(--text); }
+.cov-raw { color: var(--faint); }
 .cov-trend { margin-top: 1.3rem; }
 .cov-trend .spark { width: 100%; height: 90px; display: block; margin-top: 0.4rem; }
 .spark-area { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }

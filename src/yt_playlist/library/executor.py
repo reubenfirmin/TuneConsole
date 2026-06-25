@@ -3,6 +3,7 @@ import logging
 import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.matching import fuzzy_ratio, normalize, track_artist, identity_key
 from yt_playlist.util.retry import with_retry
 from yt_playlist.core import paths
@@ -554,20 +555,6 @@ def copy_into_playlist(store, source_ids, target_id, client, now) -> dict:
     return {"target_ytm": target.ytm_playlist_id, "title": target.title, "added": added,
             "skipped": len(skipped), "from": len(sources), "count": len(combined)}
 
-def _parse_duration(text):
-    """'3:45' / '1:02:03' -> seconds, else None."""
-    if not text:
-        return None
-    try:
-        parts = [int(p) for p in str(text).split(":")]
-    except ValueError:
-        return None
-    secs = 0
-    for p in parts:
-        secs = secs * 60 + p
-    return secs
-
-
 def _fetch_song_duration(client, video_id):
     """Best-effort single-track duration (seconds) via get_song, for a track whose search result
     carried no time (YouTube's unfiltered search often omits it). Returns None on any failure — a
@@ -615,7 +602,7 @@ def search_versions(client, title, artist, exclude=None, limit=14) -> list:
             vid = r.get("videoId")
             if not vid or vid == exclude:
                 continue
-            dur = r.get("duration_seconds") or _parse_duration(r.get("duration"))
+            dur = r.get("duration_seconds") or parse_duration(r.get("duration"))
             cand = by_vid.get(vid)
             if cand is not None:                  # seen in an earlier pass — top up a missing duration
                 if cand["duration"] is None and dur is not None:

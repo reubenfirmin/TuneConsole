@@ -22,10 +22,11 @@ class PlaylistTaste:
     average. Catch-all playlists (too big to be a coherent context) are excluded.
     """
 
-    def __init__(self, titles, centroids, weights):
+    def __init__(self, titles, centroids, weights, pids=()):
         self.titles = list(titles)               # playlist titles, one per context
         self.centroids = centroids               # (n, dim) L2-normalised rows, or empty
         self.weights = weights                   # (n,) sums to 1, or empty
+        self.pids = list(pids)                   # playlist ids, aligned with titles (for the viz)
 
     def __bool__(self):
         return len(self.titles) > 0
@@ -55,7 +56,7 @@ def playlist_taste(store, max_tracks=120) -> PlaylistTaste:
         return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
     stats = store.get_playlist_listen_stats()                # {pid: (last_ts, listen_count)}
     excluded = RecDao(store).excluded_playlist_ids()         # generated playlists don't shape taste
-    titles, cents, ws = [], [], []
+    titles, cents, ws, pids = [], [], [], []
     for p in store.get_playlists():
         if p.id in excluded:
             continue
@@ -72,11 +73,12 @@ def playlist_taste(store, max_tracks=120) -> PlaylistTaste:
         titles.append(p.title)
         cents.append(c / n)
         ws.append(stats.get(p.id, (None, 0))[1] or 0)        # how much you listen to this playlist
+        pids.append(p.id)
     if not titles:
         return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
     w = np.asarray(ws, dtype=np.float64)
     w = w / w.sum() if w.sum() > 0 else np.full(len(titles), 1.0 / len(titles))   # uniform if no plays
-    return PlaylistTaste(titles, np.asarray(cents), w)
+    return PlaylistTaste(titles, np.asarray(cents), w, pids)
 
 
 def genre_adjusted_scores(scores, genre_of, gweights):

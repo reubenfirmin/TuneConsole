@@ -10,6 +10,7 @@ from yt_playlist.repos.base import LIKED_EXISTS, Repo, synchronized
 _CAT_EXPR = {
     "genre": "MIN(NULLIF(genre,''))",
     "album": "MIN(NULLIF(album,''))",
+    "artist": "MIN(NULLIF(artist,''))",
     "year": ("CASE WHEN substr(MIN(NULLIF(mb_year,'')),1,4) GLOB '[0-9][0-9][0-9][0-9]' "
              "THEN CAST(CAST(substr(MIN(NULLIF(mb_year,'')),1,4) AS INTEGER)/10*10 AS TEXT) "
              "END"),
@@ -20,6 +21,16 @@ _PL_MEMBERSHIP = ("SELECT DISTINCT t.identity_key ik, pt.playlist_id pid "
 
 
 class ChartsRepo(Repo):
+    @synchronized
+    def album_browse_ids(self) -> dict:
+        """{album_title: a representative album_browse_id} for albums that have one — lets the
+        Albums ticker link each row to its /album page. Titles without a browse id are omitted."""
+        rows = self.conn.execute(
+            "SELECT album, MIN(album_browse_id) b FROM tracks "
+            "WHERE album<>'' AND album_browse_id IS NOT NULL AND album_browse_id<>'' "
+            "GROUP BY album").fetchall()
+        return {r["album"]: r["b"] for r in rows}
+
     @synchronized
     def history_bounds(self) -> tuple:
         """(earliest, latest) snapshot taken_at across all sync history, or (None, None) if empty.

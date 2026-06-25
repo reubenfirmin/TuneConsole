@@ -23,7 +23,6 @@
       <span class="tag amber">{{ album.artist }}</span>
       {% if album.year %}<span class="stat">{{ album.year }}</span>{% endif %}
       <span class="stat"><strong>{{ album.tracks|length }}</strong>&nbsp;track{{ '' if album.tracks|length == 1 else 's' }}</span>
-      {% if tracks and gaps %}<span class="stat">{{ gaps }} missing genre</span>{% endif %}
     </p>
     <div class="pl-actions">
       <a class="cta" href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">▶ Play on YouTube Music ↗</a>
@@ -37,7 +36,36 @@
   </div>
   {# Enrichment runs over the album's tracks once they're folded into the library, which happens when
      you save it — so the icons are always shown (parity with playlists) but disabled until saved. #}
-  <div class="head-tools{% if enrich_hint %} enrich-hint{% endif %}">
+  <div class="head-tools{% if enrich_hint %} enrich-hint{% endif %}" x-data="{ cpOpen: false }">
+    <button type="button" class="head-icon" @click="cpOpen = true"
+            title="Create a playlist from this album" aria-label="Create a playlist from this album">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <line x1="4" y1="6" x2="15" y2="6"/><line x1="4" y1="12" x2="12" y2="12"/>
+        <line x1="4" y1="18" x2="12" y2="18"/><line x1="18" y1="14" x2="18" y2="22"/><line x1="14" y1="18" x2="22" y2="18"/>
+      </svg>
+    </button>
+    {# Create-a-playlist-from-album modal: prefilled with the album title (the server falls back to it
+       if cleared), posts to the existing endpoint which HX-Redirects to the new playlist. #}
+    <template x-teleport="body">
+      <div class="modal-backdrop" x-show="cpOpen" x-cloak x-transition.opacity
+           @click="cpOpen = false" @keydown.escape.window="cpOpen = false">
+        <div class="modal" @click.stop x-transition.scale.origin.center>
+          <h3>Create a playlist from this album</h3>
+          <p>Make a new playlist seeded with every track on <strong>{{ album.title }}</strong>.</p>
+          <form hx-post="/album/create-playlist" hx-swap="none">
+            <input type="hidden" name="browse_id" value="{{ browse_id }}">
+            <input class="modal-input" type="text" name="name" value="{{ album.title }}"
+                   placeholder="Playlist name" autocomplete="off"
+                   x-ref="cpName" x-init="$watch('cpOpen', v => v && $nextTick(() => $refs.cpName.focus()))">
+            <div class="modal-actions">
+              <button type="button" class="btn-ghost" @click="cpOpen = false">Cancel</button>
+              <button type="submit">Create playlist</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </template>
     <a class="head-icon" href="/album/{{ browse_id }}/share.txt" download="{{ album.title }}.txt"
        title="Share: download one song URL per line as a .txt" aria-label="Share album">
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
@@ -76,19 +104,6 @@
 </div>
 {% endif %}
 
-{# Create a playlist from this album — prefilled with the album title (the server falls back to it
-   if the field is cleared), so the button is always usable. Lands on the new playlist. #}
-<div class="card" style="margin-top:1.1rem">
-  <form class="album-make" hx-post="/album/create-playlist" hx-swap="none"
-        style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
-    <input type="hidden" name="browse_id" value="{{ browse_id }}">
-    <strong>Create a playlist from this album</strong>
-    <input class="modal-input" type="text" name="name" value="{{ album.title }}" placeholder="Playlist name"
-           style="flex:1;min-width:12rem;margin:0">
-    <button type="submit">Create playlist</button>
-  </form>
-</div>
-
 <div class="card" style="margin-top:1.1rem">
   {% if tracks %}
   {# Folded-in library tracks: genre/year columns that fill in live as enrichment runs, and are
@@ -97,11 +112,14 @@
     <thead><tr>
       <th class="num" style="width:2.6rem">#</th>
       <th style="width:2.6rem"></th>
-      <th>Song</th><th>Artist</th>
-      <th class="num" style="width:4rem">Year</th>
-      <th style="width:9rem">Genre</th>
-      <th class="num" style="width:4.5rem">Length</th>
-      <th style="width:2.6rem"></th>
+      <th class="liked-col" style="width:2.4rem"></th>
+      <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
+      <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
+      <th class="sorth num" style="width:4.5rem" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth" style="width:6rem" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
+      <th class="sorth num" style="width:4.5rem" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth num" style="width:5rem" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
+      <th style="width:2.4rem"></th>
     </tr></thead>
     <tbody x-ref="body">
       {% for t in tracks %}{% set idx = loop.index %}{% include "_partials/album_track_row.html" %}{% endfor %}

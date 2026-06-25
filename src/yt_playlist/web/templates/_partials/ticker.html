@@ -1,50 +1,49 @@
 {# Ranked "ticker" chart: one row per category. Reads as a ranked bar chart (bar length = recent
-   listen share, like Songs/Artists). Overlaid: a dashed tick at the category's CORPUS share (bar
-   past it = over-indexed), a faint marker for where it sat a year ago, and a thin range whisker.
-   Per-dimension bar color via .dim-<dim>. t = {"rows":[...], "axis_max":float}. #}
+   listen share, like Top songs). Always overlaid: a faint ◦ for where it sat earlier, and a thin
+   range whisker. ONLY when t.compare (genre/year/artist — broad buckets where "share of library"
+   is intuitive): a dashed corpus tick + over/under ratio column. Per-dimension color via .dim-<dim>.
+   t = {"rows":[...], "compare":bool, "close_days":int, "span_days":int}. #}
 {% import "_partials/_viz_tip.html" as vt %}
 {% macro ticker_chart(t, dim) %}
-{% set heads = {'genre': 'Sub-genre', 'year': 'Decade', 'album': 'Album', 'playlist': 'Playlist'} %}
-{% set hist = dim != 'playlist' %}
+{% set heads = {'genre': 'Sub-genre', 'year': 'Decade', 'album': 'Album', 'playlist': 'Playlist', 'artist': 'Artist'} %}
+{% set cmp = t.compare %}
 {% set cd = t.close_days %}{% set sd = t.span_days %}
 {% if t.rows %}
 <p class="small" style="color:var(--faint);margin:0 0 0.7rem">
-  Ranked by your last-{{ cd }}-day listening. The bar is each {{ heads[dim]|lower }}'s share of
-  recent plays; the dashed <span style="color:var(--teal)">tick</span> is its share of your
-  library — bar past the tick = you're playing it more than
-  {{ "its size" if dim == 'playlist' else "you own" }} (over-indexed).{% if hist %} The faint
-  <span style="color:var(--dim)">◦</span> marks where it sat earlier, and the thin whisker is its
-  range over your {{ sd }}d of history.{% else %} (Playlists have no long-term trend here —
-  membership is a current snapshot.){% endif %} Hover for detail.
+  Ranked by your last-{{ cd }}-day listening — the bar is each {{ heads[dim]|lower }}'s share of
+  recent plays.{% if cmp %} The dashed <span style="color:var(--teal)">tick</span> is its share of
+  your library; bar past the tick = you're playing it more than you own (over-indexed).{% endif %}
+  The faint <span style="color:var(--dim)">◦</span> marks where it sat earlier, and the thin
+  whisker is its range over your {{ sd }}d of history. Hover for detail.
 </p>
 <table class="chart ticker">
   <thead><tr>
     <th class="rank">#</th>
     <th>{{ heads[dim] }}</th>
-    <th class="tickhead">recent listening share &nbsp;·&nbsp; <span style="color:var(--teal)">┊</span> library</th>
+    <th class="tickhead">recent listening share{% if cmp %} &nbsp;·&nbsp; <span style="color:var(--teal)">┊</span> library{% endif %}</th>
     <th class="num">{{ cd }}d</th>
-    <th class="num">vs library</th>
+    {% if cmp %}<th class="num">vs library</th>{% endif %}
   </tr></thead>
   <tbody>
   {% for r in t.rows %}{% set g = r.geo %}
     <tr>
       <td class="rank">{{ loop.index }}</td>
-      <td class="tklabel">{% if dim == 'year' %}{{ r.cat }}s{% else %}{{ r.cat }}{% endif %}</td>
+      <td class="tklabel">{% set lbl = (r.cat ~ 's') if dim == 'year' else r.cat %}{% if r.link %}<a class="alink" href="{{ r.link }}">{{ lbl }}</a>{% else %}{{ lbl }}{% endif %}</td>
       <td class="tkcell">
-        <span class="ticker-candle dim-{{ dim }}" {{ vt.ticker_tip(r, dim, cd, sd) }}>
-          {% if hist and r.high > r.low %}<i class="tk-whisker" style="left:{{ g.whisker_lo_pct|round(2) }}%;width:{{ (g.whisker_hi_pct - g.whisker_lo_pct)|round(2) }}%"></i>{% endif %}
-          <i class="tk-bar{% if g.over %} over{% endif %}" style="width:{{ g.bar_pct|round(2) }}%"></i>
-          {% if hist and g.open_pct is not none %}<i class="tk-open" style="left:{{ g.open_pct|round(2) }}%"></i>{% endif %}
-          {% if r.corpus_share > 0 %}<i class="tk-corpus" style="left:{{ g.corpus_pct|round(2) }}%"></i>{% endif %}
+        <span class="ticker-candle dim-{{ dim }}" {{ vt.ticker_tip(r, dim, cd, sd, cmp) }}>
+          {% if r.high > r.low %}<i class="tk-whisker" style="left:{{ g.whisker_lo_pct|round(2) }}%;width:{{ (g.whisker_hi_pct - g.whisker_lo_pct)|round(2) }}%"></i>{% endif %}
+          <i class="tk-bar{% if cmp and g.over %} over{% endif %}" style="width:{{ g.bar_pct|round(2) }}%"></i>
+          {% if g.open_pct is not none %}<i class="tk-open" style="left:{{ g.open_pct|round(2) }}%"></i>{% endif %}
+          {% if cmp and r.corpus_share > 0 %}<i class="tk-corpus" style="left:{{ g.corpus_pct|round(2) }}%"></i>{% endif %}
         </span>
       </td>
       <td class="num mono">{{ (r.close * 100)|round(1) }}%</td>
-      <td class="num mono tkratio">
+      {% if cmp %}<td class="num mono tkratio">
         {%- if r.ratio is none %}<span class="tk-new">new</span>
         {%- elif r.ratio >= 1.05 %}<span class="tk-over">▲ {{ r.ratio|round(1) }}×</span>
         {%- elif r.ratio <= 0.95 %}<span class="tk-under">▼ {{ r.ratio|round(1) }}×</span>
         {%- else %}<span class="tk-even">◦ ~1×</span>{% endif %}
-      </td>
+      </td>{% endif %}
     </tr>
   {% endfor %}
   </tbody>

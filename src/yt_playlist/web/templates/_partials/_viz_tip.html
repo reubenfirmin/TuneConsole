@@ -46,39 +46,36 @@ data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows"
 {# Charts ticker candle: corpus baseline vs recent listening, with the candle's open/close/range
    spelled out, the over/under-corpus ratio, and the heating/cooling trend. `r` is a ticker row;
    `dim` adds the trailing 's' for year decades. #}
-{% macro ticker_tip(r, dim, close_days=7, span_days=365) -%}
+{% macro ticker_tip(r, dim, close_days=7, span_days=365, compare=true) -%}
 {%- set name = (r.cat ~ 's') if dim == 'year' else r.cat -%}
-{# Playlists are a CURRENT membership snapshot, so attributing older plays to them (and any
-   "earlier" / range / heating-cooling trend) is meaningless — drop the historical rows.
-   Periods are sized to the real history span, so the labels are dynamic (close_days / span_days)
-   and the "earlier" / range rows only appear when there's actually older data. #}
-{%- set hist = dim != 'playlist' -%}
-{%- set libnote = "its share of your library by track count" if dim == 'playlist' else "your corpus baseline — the dashed tick" -%}
-{%- set rows = [
-  {"l": ("Playlist size" if dim == 'playlist' else "In your library"), "v": "%.1f"|format(r.corpus_share * 100) ~ "%", "n": libnote},
-  {"l": "Now · last " ~ close_days ~ "d", "v": "%.1f"|format(r.close * 100) ~ "%", "n": "share of your recent listening"},
-] -%}
-{%- if hist and r.open is not none -%}
+{# `compare` (genre/year/artist) adds the library baseline + over/under ratio. Albums/playlists
+   skip it — "share of library" isn't intuitive for a single album or playlist. The ◦ "earlier"
+   and range rows are always available (when there's older data); labels are dynamic. #}
+{%- set rows = [] -%}
+{%- if compare -%}
+{%- set rows = rows + [{"l": "In your library", "v": "%.1f"|format(r.corpus_share * 100) ~ "%", "n": "your corpus baseline — the dashed tick"}] -%}
+{%- endif -%}
+{%- set rows = rows + [{"l": "Now · last " ~ close_days ~ "d", "v": "%.1f"|format(r.close * 100) ~ "%", "n": "share of your recent listening"}] -%}
+{%- if r.open is not none -%}
 {%- set rows = rows + [{"l": "Earlier", "v": "%.1f"|format(r.open * 100) ~ "%", "n": "where it sat at the start of your " ~ span_days ~ "d of history (the ◦ marker)"}] -%}
 {%- endif -%}
-{%- if hist and r.high > r.low -%}
+{%- if r.high > r.low -%}
 {%- set rows = rows + [{"l": "Range", "v": "%.1f"|format(r.low * 100) ~ "%–" ~ "%.1f"|format(r.high * 100) ~ "%", "n": "min–max over your " ~ span_days ~ "d of history (the whisker)"}] -%}
 {%- endif -%}
-{%- if r.ratio is none -%}
 {%- set accent = "" -%}
+{%- if compare and r.ratio is none -%}
 {%- set rows = rows + [{"l": "vs library", "v": "new", "n": "played, but not in your library yet", "t": "strong", "div": true}] -%}
-{%- else -%}
-{%- set otone = "pos" if r.ratio >= 1.05 else ("neg" if r.ratio <= 0.95 else "") -%}
+{%- elif compare -%}
+{%- set accent = "pos" if r.ratio >= 1.05 else ("neg" if r.ratio <= 0.95 else "") -%}
 {%- set olabel = "over-indexed" if r.ratio >= 1.05 else ("under-indexed" if r.ratio <= 0.95 else "about even") -%}
-{%- set olnote = (olabel ~ " — recent share ÷ size") if dim == 'playlist' else (olabel ~ " — recent share ÷ library share") -%}
-{%- set accent = otone -%}
-{%- set rows = rows + [{"l": "vs library", "v": "×" ~ "%.1f"|format(r.ratio), "n": olnote, "t": otone, "div": true}] -%}
+{%- set rows = rows + [{"l": "vs library", "v": "×" ~ "%.1f"|format(r.ratio), "n": olabel ~ " — recent share ÷ library share", "t": accent, "div": true}] -%}
 {%- endif -%}
-{%- if hist and r.open is not none and r.trend != 'flat' -%}
+{%- if r.open is not none and r.trend != 'flat' -%}
 {%- set ttone = "pos" if r.trend == "up" else "neg" -%}
 {%- set tval = "▲ heating" if r.trend == "up" else "▼ cooling" -%}
 {%- set tnote = "playing it more than earlier" if r.trend == "up" else "playing it less than earlier" -%}
-{%- set rows = rows + [{"l": "Trend", "v": tval, "n": tnote, "t": ttone}] -%}
+{%- if not compare -%}{%- set accent = ttone -%}{%- endif -%}
+{%- set rows = rows + [{"l": "Trend", "v": tval, "n": tnote, "t": ttone, "div": not compare}] -%}
 {%- endif -%}
 {{ _attr(name, rows, accent) }}
 {%- endmacro %}

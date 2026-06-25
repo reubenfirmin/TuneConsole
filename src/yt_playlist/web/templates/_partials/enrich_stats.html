@@ -1,5 +1,6 @@
 {# Live enrichment stats: worker state + pause, coverage bars, queue/conflict tiles, trend sparkline.
    Re-rendered standalone by /enrich/stats (the page polls it) and by /enrich/toggle. #}
+{% from "_partials/_viz_tip.html" import tip %}
 <div class="enrich-head">
   <span class="enrich-state state-{{ state }}">
     {% if state == 'running' %}● Enriching{% elif state == 'paused' %}❙❙ Paused{% else %}✓ Caught up{% endif %}
@@ -21,16 +22,22 @@
   <div class="cov-row">
     <span class="cov-label">{{ label }}</span>
     <div class="cov-bar"><i style="width:{{ pct[key] }}%"></i></div>
-    <span class="cov-num">{{ pct[key] }}%<span class="cov-sub"> · {{ cov[key] }}/{{ cov.total }}</span></span>
+    <span class="cov-pct">{{ pct[key] }}%</span>
+    <span class="cov-raw">{{ cov[key] }}/{{ cov.total }}</span>
   </div>
   {% endfor %}
 </div>
 
 <div class="cov-trend">
   <span class="section-note">Tracks processed over time</span>
-  {% if spark %}
-  <svg viewBox="0 0 520 90" preserveAspectRatio="none" class="spark" aria-hidden="true">
-    <path d="{{ spark }}" class="spark-area"/>
+  {% if spark.path %}
+  <svg viewBox="0 0 520 90" preserveAspectRatio="none" class="spark">
+    <path d="{{ spark.path }}" class="spark-area"/>
+    {# Invisible full-height bands, one per point, carry the shared [data-tip] tooltip (date + count). #}
+    {% for b in spark.bands %}
+    <rect x="{{ b.x }}" y="0" width="{{ b.w }}" height="90" fill="transparent" pointer-events="all"
+          {{ tip(b.label, [{"l": "Processed", "v": b.n, "n": "cumulative by this point"}]) }}/>
+    {% endfor %}
   </svg>
   {% else %}
   <p class="section-note">Not enough processed yet to chart.</p>

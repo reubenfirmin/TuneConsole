@@ -46,6 +46,13 @@ def test_listen_distribution_genre_alltime_includes_old(store):
     assert store.listen_distribution("genre", since=None) == {"techno": 3, "house": 1}
 
 
+def test_album_browse_ids_maps_title_to_browse(store):
+    store.upsert_identity("me", "c", None, True)
+    store.upsert_track("v1", "Song", "Art", "Cool Album", 200, album_browse_id="MPREb_X")
+    store.upsert_track("v2", "Single", "Art", "Loose Single", 200)   # no browse -> excluded
+    assert store.album_browse_ids() == {"Cool Album": "MPREb_X"}
+
+
 def test_history_bounds_spans_earliest_to_latest(store):
     _seed(store)   # snapshots at NOW and NOW - 100d
     lo, hi = store.history_bounds()
@@ -82,6 +89,16 @@ def test_listen_distribution_playlist_counts_per_membership(store):
 
 
 # --- corpus_distribution -------------------------------------------------------
+
+def test_listen_distribution_artist(store):
+    _seed(store)   # Alpha/Gamma = Artist A, Beta = Artist B; recent plays Alpha x2, Beta x1
+    assert store.listen_distribution("artist", since=None) == {"Artist A": 3, "Artist B": 1}
+
+
+def test_corpus_distribution_artist_counts_distinct_songs(store):
+    _seed(store)
+    assert store.corpus_distribution("artist") == {"Artist A": 2, "Artist B": 1}
+
 
 def test_corpus_distribution_genre_counts_distinct_songs(store):
     _seed(store)

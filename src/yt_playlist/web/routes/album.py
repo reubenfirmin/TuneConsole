@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from yt_playlist.providers import enrichment, lastfm, waterfall
 from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.thumbnails import best_thumb
 
 
@@ -53,8 +54,8 @@ def build(ctx) -> APIRouter:
             for t in album["tracks"]:
                 if t.get("video_id") and t.get("title"):
                     store.upsert_track(t["video_id"], t["title"], t.get("artist") or album.get("artist") or "",
-                                       album.get("title") or "", None, album_browse_id=browse_id,
-                                       thumbnail=album.get("thumbnail"))
+                                       album.get("title") or "", parse_duration(t.get("duration")),
+                                       album_browse_id=browse_id, thumbnail=album.get("thumbnail"))
             tracks = store.album_tracks_detail(browse_id)
         if tracks and not (album and album.get("title")):   # live fetch missing/empty but it's in our library
             meta = next((a for a in store.get_saved_albums() if a["browse"] == browse_id), {})
@@ -63,7 +64,6 @@ def build(ctx) -> APIRouter:
                      "thumbnail": meta.get("thumbnail") or tracks[0]["thumbnail"], "tracks": tracks}
         return templates.TemplateResponse(request, "album.html", {
             "album": album, "browse_id": browse_id, "tracks": tracks, "saved": saved,
-            "gaps": sum(1 for t in tracks if not t["genre"]),
             "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
             "conflict_count": store.conflict_count_for_album(browse_id),
