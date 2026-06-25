@@ -22,7 +22,7 @@
 <body>
   {% set path = request.url.path if request else "/" %}
   <header class="topbar">
-    <a class="brand" href="/" aria-label="TuneConsole — home">
+    <a class="brand" href="/" aria-label="TuneConsole home">
       <svg class="brand-eq" viewBox="0 0 28 24" width="28" height="24" aria-hidden="true">
         <defs><linearGradient id="eqg" x1="0" y1="1" x2="0" y2="0">
           <stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#a596ff"/>
@@ -52,7 +52,7 @@
       </div>
     </form>
     {% endif %}
-    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') or path.startswith('/network') %}
+    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') %}
     <nav>
       <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>
       <a href="/playlists" class="{{ 'active' if path.startswith('/playlist') else '' }}">Playlists</a>
@@ -68,6 +68,7 @@
           <a href="/move" class="{{ 'active' if path.startswith('/move') else '' }}">Move</a>
           <a href="/actions" class="{{ 'active' if path.startswith('/actions') else '' }}">Actions</a>
           <a href="/genres" class="{{ 'active' if path.startswith('/genres') else '' }}">Genres</a>
+          <a href="/enrich" class="{{ 'active' if path.startswith('/enrich') else '' }}">Enrichment</a>
           <a href="/taste" class="{{ 'active' if path.startswith('/taste') else '' }}">Taste Model</a>
           <a href="/network" class="{{ 'active' if path.startswith('/network') else '' }}">Network</a>
           <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
@@ -82,6 +83,10 @@
     <button type="button" class="authbar-x" @click="dismissed = true" title="Dismiss" aria-label="Dismiss">×</button>
   </div>
   <main>{% block body %}{% endblock %}</main>
+  {# Enrichment conflict resolver loads here, OUTSIDE <main>: main's entrance animation keeps a
+     transform (its fill state), which would otherwise become this fixed modal's containing block
+     and push it off-screen. At body level the backdrop is viewport-relative. #}
+  <div id="conflicts-modal"></div>
   <div id="toasts" class="toasts" aria-live="polite">{% block toasts %}{% endblock %}</div>
 </body>
 </html>

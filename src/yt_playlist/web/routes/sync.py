@@ -32,6 +32,8 @@ def build(ctx) -> APIRouter:
                 job.done = True
                 if ctx.rec_worker:                  # rebuild recs off the sync path (debounced)
                     ctx.rec_worker.trigger()
+                if ctx.enrich_worker:               # new tracks arrived — drain them (queue-jumped)
+                    ctx.enrich_worker.trigger()
 
         threading.Thread(target=run, daemon=True).start()
         return JSONResponse({"job_id": job.id})

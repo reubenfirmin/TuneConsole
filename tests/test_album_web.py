@@ -61,7 +61,7 @@ def test_album_head_tools_show_share_and_enrich_icons(store):
     r = c.get("/album?browse=MPREb_x")
     assert r.status_code == 200
     assert "/album/MPREb_x/share.txt" in r.text          # share icon links to the album .txt
-    assert "Enrich via MusicBrainz" in r.text            # enrich icons present
+    assert 'aria-label="Enrich"' in r.text               # the single waterfall enrich icon
 
 
 def test_album_share_txt_lists_live_track_urls(store):

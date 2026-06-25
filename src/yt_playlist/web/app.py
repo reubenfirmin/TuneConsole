@@ -47,12 +47,16 @@ def create_app(store, client_provider, *, now_fn=time.time,
     allowed = set(allowed_hosts)
     # Cache-bust app.js/app.css by the newest mtime so browsers always fetch the current build
     # after an edit (otherwise a stale cached app.js silently diverges from the templates).
-    try:
-        asset_v = str(int(max((static_dir / f).stat().st_mtime
-                              for f in ("app.js", "app.css", "favicon.svg"))))
-    except OSError:
-        asset_v = "0"
-    templates.env.globals["asset_v"] = asset_v
+    # Evaluated LAZILY per render (str()) — not once at startup — so editing a static file busts the
+    # cache even without a server restart; `{{ asset_v }}` in templates calls __str__ each time.
+    class _AssetVersion:
+        def __str__(self):
+            try:
+                return str(int(max((static_dir / f).stat().st_mtime
+                                   for f in ("app.js", "app.css", "favicon.svg"))))
+            except OSError:
+                return "0"
+    templates.env.globals["asset_v"] = _AssetVersion()
     templates.env.filters["linkify"] = _linkify
 
     @app.middleware("http")
@@ -92,6 +96,9 @@ def create_app(store, client_provider, *, now_fn=time.time,
     from yt_playlist.rec.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx)                            # decoupled rec computation
     ctx.rec_worker.start_ticker()                             # periodic background discovery scan
+    from yt_playlist.enrich.enrich_worker import EnrichWorker
+    ctx.enrich_worker = EnrichWorker(ctx)                      # drains the corpus through the waterfall
+    ctx.enrich_worker.start_ticker()
     templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync
     app.state.ctx = ctx                                        # exposed for tests/introspection
     for router in build_all(ctx):

@@ -10,7 +10,8 @@
 {% else %}
 {# enrichPanel drives the live genre/year enrichment for the folded-in tracks (pid unused for albums;
    enrichBase scopes the start POST to this album). #}
-<div x-data="enrichPanel(0, {{ 'true' if lastfm_configured else 'false' }}, 0, '', '/album/{{ browse_id }}')">
+<div x-data="enrichPanel(0, {{ 'true' if lastfm_configured else 'false' }}, 0, '', '/album/{{ browse_id }}', {{ conflict_count }})"
+     @conflicts-count.window="conflictCount = $event.detail.count">
 <div class="artist-head pl-head" x-data="{ artH: 0 }"
      x-init="const fit = () => artH = $refs.main.offsetHeight; fit(); new ResizeObserver(fit).observe($refs.main)">
   {% if album.thumbnail %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ album.thumbnail }}" alt=""
@@ -45,39 +46,25 @@
         <line x1="8.6" y1="10.7" x2="15.4" y2="6.3"/><line x1="8.6" y1="13.3" x2="15.4" y2="17.7"/>
       </svg>
     </a>
-    <button type="button" class="head-icon" :class="{ on: running && source === 'musicbrainz' }"
-            @click="start('musicbrainz')" :disabled="running{% if not saved %} || true{% endif %}"
-            title="{{ 'Save to library first to enrich genre &amp; year' if not saved else 'Enrich genre &amp; year from MusicBrainz' }}"
-            aria-label="Enrich via MusicBrainz">
-      <span class="spinner" x-show="running && source === 'musicbrainz'" x-cloak></span>
-      <svg x-show="!(running && source === 'musicbrainz')" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+    <button type="button" class="head-icon" :class="{ on: running }"
+            @click="start()" :disabled="running{% if not saved %} || true{% endif %}"
+            title="{{ 'Save to library first to enrich' if not saved else 'Enrich genre, year &amp; audio features — runs every enabled provider in order' }}"
+            aria-label="Enrich">
+      <span class="spinner" x-show="running" x-cloak></span>
+      <svg x-show="!running" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
            stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 5a2.5 2.5 0 0 0-4.6-1.3A2.6 2.6 0 0 0 4 6.2 2.7 2.7 0 0 0 3 11a2.7 2.7 0 0 0 1.3 4.7A2.5 2.5 0 0 0 7 19a2.4 2.4 0 0 0 5 .5Z"/>
-        <path d="M12 5a2.5 2.5 0 0 1 4.6-1.3A2.6 2.6 0 0 1 20 6.2 2.7 2.7 0 0 1 21 11a2.7 2.7 0 0 1-1.3 4.7A2.5 2.5 0 0 1 17 19a2.4 2.4 0 0 1-5 .5Z"/>
-        <path d="M12 5v14.5M8 9h1.5M14.5 9H16M7.5 13H9M15 13h1.5"/>
+        <path d="M5 3v4M3 5h4M6 17v4M4 19h4M13 3l2.5 6.5L22 12l-6.5 2.5L13 21l-2.5-6.5L4 12l6.5-2.5z"/>
       </svg>
     </button>
-    <button type="button" class="head-icon" :class="{ on: running && source === 'lastfm' }"
-            @click="lastfmClick()" :disabled="running{% if not saved %} || true{% endif %}"
-            :title="{% if not saved %}'Save to library first to enrich genre &amp; year'{% else %}(lastfmConfigured ? 'Enrich genre &amp; year from Last.fm' : 'Set a Last.fm API key to enrich from Last.fm'){% endif %}"
-            aria-label="Enrich via Last.fm">
-      <span class="spinner" x-show="running && source === 'lastfm'" x-cloak></span>
-      <svg x-show="!(running && source === 'lastfm')" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
+    <button type="button" class="head-icon conflict-icon" x-show="conflictCount > 0" x-cloak
+            @click="openConflicts()"
+            :title="conflictCount + ' provider disagreement(s) — click to resolve'"
+            aria-label="Resolve enrichment disagreements">
+      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
            stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M20.6 13.4 13 21a2 2 0 0 1-2.8 0l-7-7a2 2 0 0 1 0-2.8l7.6-7.6a2 2 0 0 1 1.4-.6H19a2 2 0 0 1 2 2v5.6a2 2 0 0 1-.4 1.2Z"/>
-        <circle cx="16.5" cy="7.5" r="1.3"/>
+        <path d="M12 3 2 20h20L12 3z"/><line x1="12" y1="10" x2="12" y2="14"/><line x1="12" y1="17" x2="12" y2="17"/>
       </svg>
-    </button>
-    <button type="button" class="head-icon" :class="{ on: running && source === 'discogs' }"
-            @click="start('discogs')" :disabled="running{% if not saved %} || true{% endif %}"
-            title="{{ 'Save to library first to enrich genre &amp; year' if not saved else 'Enrich genre &amp; year from Discogs' }}"
-            aria-label="Enrich via Discogs">
-      <span class="spinner" x-show="running && source === 'discogs'" x-cloak></span>
-      <svg x-show="!(running && source === 'discogs')" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
-           stroke-width="1.6" aria-hidden="true">
-        <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.3"/>
-        <circle cx="12" cy="12" r="0.9" fill="currentColor" stroke="none"/>
-      </svg>
+      <span class="conflict-badge" x-text="conflictCount"></span>
     </button>
   </div>
 </div>

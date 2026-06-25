@@ -61,9 +61,13 @@ def build(ctx) -> APIRouter:
         # anywhere in the playlist, no further grow can add more of it.
         nbrs = embed.cluster_expand(store, pos_keys=pos, neg_keys=neg, exclude=exclude,
                                     topn=max(k * 4, k + 12), allow=allow)
-        on_canvas = [key for key in (set(exclude) - set(neg))]
+        # cap basis = the grown tracks already kept (count_keys), NOT the central seeds — a seed
+        # artist's album shouldn't pre-spend the per-album budget. Falls back to non-pruned canvas keys.
+        basis = body.get("count_keys")
+        if basis is None:
+            basis = list(set(exclude) - set(neg))
         album_count = {}
-        for m in store.tracks_by_keys(on_canvas).values():
+        for m in store.tracks_by_keys(basis).values():
             alb = (m.get("album") or "").strip().lower()
             if alb:
                 album_count[alb] = album_count.get(alb, 0) + 1
@@ -156,6 +160,9 @@ def build(ctx) -> APIRouter:
             except Exception:  # noqa: BLE001 - surface a friendly card, log the detail
                 ctx.logger.exception("save cluster %r failed", name)
                 result["error"] = "YouTube returned an unexpected response."
-        return templates.TemplateResponse(request, "_partials/generated_result.html", result)
+        resp = templates.TemplateResponse(request, "_partials/generated_result.html", result)
+        if not result.get("error"):
+            resp.headers["HX-Trigger"] = "cluster-saved"   # tell the canvas to clear (it was created)
+        return resp
 
     return router

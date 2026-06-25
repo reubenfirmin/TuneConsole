@@ -3,8 +3,80 @@
 """
 from yt_playlist.repos.base import LIKED_EXISTS, Repo, synchronized
 
+# Per-identity category expression for the non-playlist ticker dimensions. Each picks one
+# representative value per identity_key (dup uploads of the same song collapse to one), and
+# yields NULL for untagged songs so they drop out of the distribution rather than bucketing
+# as ''. `year` floors the 4-digit mb_year to its decade ("1995" -> "1990").
+_CAT_EXPR = {
+    "genre": "MIN(NULLIF(genre,''))",
+    "album": "MIN(NULLIF(album,''))",
+    "year": ("CASE WHEN substr(MIN(NULLIF(mb_year,'')),1,4) GLOB '[0-9][0-9][0-9][0-9]' "
+             "THEN CAST(CAST(substr(MIN(NULLIF(mb_year,'')),1,4) AS INTEGER)/10*10 AS TEXT) "
+             "END"),
+}
+# Distinct (song, playlist) membership — dedups dup track rows so a play counts once per playlist.
+_PL_MEMBERSHIP = ("SELECT DISTINCT t.identity_key ik, pt.playlist_id pid "
+                  "FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id")
+
 
 class ChartsRepo(Repo):
+    @synchronized
+    def history_bounds(self) -> tuple:
+        """(earliest, latest) snapshot taken_at across all sync history, or (None, None) if empty.
+        Lets the ticker size its candle periods to how much history actually exists."""
+        r = self.conn.execute(
+            "SELECT MIN(taken_at) lo, MAX(taken_at) hi FROM history_snapshots").fetchone()
+        if r is None or r["lo"] is None:
+            return (None, None)
+        return (r["lo"], r["hi"])
+
+    @synchronized
+    def corpus_distribution(self, dimension) -> dict:
+        """Library composition for a ticker dimension: {category: song_count}, counted per
+        distinct identity_key (one song = one unit) so it's comparable with listen_distribution.
+
+        dimension: 'genre' | 'year' | 'album' | 'playlist'. Untagged songs are excluded.
+        Playlist counts a song once per playlist it belongs to (memberships sum > #songs).
+        """
+        if dimension == "playlist":
+            rows = self.conn.execute(
+                f"WITH pl AS ({_PL_MEMBERSHIP}) "
+                "SELECT p.title cat, COUNT(DISTINCT pl.ik) c "
+                "FROM pl JOIN playlists p ON p.id=pl.pid GROUP BY p.id").fetchall()
+        else:
+            rows = self.conn.execute(
+                f"WITH ident AS (SELECT identity_key, {_CAT_EXPR[dimension]} cat "
+                "FROM tracks GROUP BY identity_key) "
+                "SELECT cat, COUNT(*) c FROM ident WHERE cat IS NOT NULL GROUP BY cat").fetchall()
+        return {r["cat"]: r["c"] for r in rows}
+
+    @synchronized
+    def listen_distribution(self, dimension, since=None, until=None) -> dict:
+        """Plays per category in a time window: {category: play_count}, a "play" = one history-item
+        appearance whose snapshot taken_at is in [since, until) (None bound = open that side).
+        Same dimensions/units as corpus_distribution, so shares of the two are directly comparable.
+        Disjoint [since, until) periods give the ticker candle its open/close/high/low.
+        """
+        bounds = "(:since IS NULL OR hs.taken_at>=:since) AND (:until IS NULL OR hs.taken_at<:until)"
+        args = {"since": since, "until": until}
+        if dimension == "playlist":
+            rows = self.conn.execute(
+                f"WITH pl AS ({_PL_MEMBERSHIP}) "
+                "SELECT p.title cat, COUNT(*) c "
+                "FROM history_items hi JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
+                "JOIN pl ON pl.ik=hi.identity_key JOIN playlists p ON p.id=pl.pid "
+                f"WHERE {bounds} GROUP BY p.id", args).fetchall()
+        else:
+            rows = self.conn.execute(
+                f"WITH ident AS (SELECT identity_key, {_CAT_EXPR[dimension]} cat "
+                "FROM tracks GROUP BY identity_key) "
+                "SELECT i.cat, COUNT(*) c "
+                "FROM history_items hi JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
+                "JOIN ident i ON i.identity_key=hi.identity_key "
+                f"WHERE i.cat IS NOT NULL AND {bounds} "
+                "GROUP BY i.cat", args).fetchall()
+        return {r["cat"]: r["c"] for r in rows}
+
     @synchronized
     def get_playlist_listen_stats(self) -> dict:
         """Per-playlist {playlist_id: (last_listen_ts | None, listen_count)} from sync history.

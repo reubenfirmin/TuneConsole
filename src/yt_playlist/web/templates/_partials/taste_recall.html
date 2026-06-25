@@ -3,5 +3,5 @@
 <span>recall@{{ recall.k }} ({{ '%.0f'|format(recall.lift) }}× random, {{ recall.trials }} playlists)
 {% if proj.recall is not none %}· content-grounding {{ '%.0f'|format(proj.recall * 100) }}%{% endif %}</span>
 {% else %}
-<strong>—</strong><span>recall@20 (build vectors first)</span>
+<strong>-</strong><span>recall@20 (build vectors first)</span>
 {% endif %}

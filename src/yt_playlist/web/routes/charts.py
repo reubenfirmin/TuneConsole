@@ -1,10 +1,47 @@
-"""Charts tab: top songs/artists by play count, plus per-artist pages."""
+"""Charts tab: top songs/artists by play count, ticker charts (genre/year/album/playlist
+listens vs corpus), plus per-artist pages."""
 from fastapi import APIRouter, HTTPException, Request
 
+from yt_playlist.rec.ticker import candle_geometry, ticker_rows
 from yt_playlist.util.thumbnails import best_thumb
 
 
 _WINDOWS = {"all": None, "90d": 90, "30d": 30, "7d": 7}
+
+_TICKER_DIMS = ("genre", "year", "album", "playlist")
+_TICKER_TOP = 30      # cap rows per tab (ranked by recent share)
+_TICKER_BUCKETS = 4   # candle periods, sliced across the actual history span
+
+
+def _ticker_periods(earliest, now):
+    """DISJOINT, newest-first [since, until) periods sized to the ACTUAL history span (earliest ->
+    now), so a young library doesn't get mostly-empty fixed 90d/1y windows. Returns
+    (periods, close_days, span_days); periods is [] when there's no history.
+
+    Slicing the real span keeps every period populated, so the 'earlier' marker and range whisker
+    reflect real data instead of collapsing on null windows.
+    """
+    if earliest is None or earliest >= now:
+        return [], 1, 1
+    span = now - earliest
+    periods = [(f"w{k}", (now - span * (k + 1) / _TICKER_BUCKETS,
+                          None if k == 0 else now - span * k / _TICKER_BUCKETS))
+               for k in range(_TICKER_BUCKETS)]
+    close_days = max(1, round(span / _TICKER_BUCKETS / 86400.0))
+    span_days = max(1, round(span / 86400.0))
+    return periods, close_days, span_days
+
+
+def _build_ticker(store, dim, periods):
+    """Assemble one ticker tab: corpus baseline + per-period listen distributions -> ranked rows
+    (only categories played at least once in some period, top N by recent share)."""
+    corpus = store.corpus_distribution(dim)
+    windows = {label: store.listen_distribution(dim, since=lo, until=hi) for label, (lo, hi) in periods}
+    data = ticker_rows(corpus, windows)
+    rows = [r for r in data["rows"] if r["high"] > 0][:_TICKER_TOP]
+    for r in rows:
+        r["geo"] = candle_geometry(r, data["axis_max"])
+    return {"rows": rows, "axis_max": data["axis_max"]}
 
 
 def _fetch_artist_info(ctx, name, browse_id=None):
@@ -45,11 +82,18 @@ def build(ctx) -> APIRouter:
     def charts_page(request: Request):
         win = request.query_params.get("window", "all")
         days = _WINDOWS.get(win, None)
-        since = None if days is None else now_fn() - days * 86400.0
+        now = now_fn()
+        since = None if days is None else now - days * 86400.0
+        earliest, _latest = store.history_bounds()
+        periods, close_days, span_days = _ticker_periods(earliest, now)
+        tickers = {dim: _build_ticker(store, dim, periods) for dim in _TICKER_DIMS}
+        for t in tickers.values():
+            t["close_days"], t["span_days"] = close_days, span_days
         return templates.TemplateResponse(request, "charts.html", {
             "songs": store.top_tracks(100, since=since),
             "artists": store.top_artists(100, since=since),
             "window": win if win in _WINDOWS else "all",
+            "tickers": tickers,
         })
 
     @router.get("/artist")

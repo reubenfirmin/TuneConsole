@@ -71,3 +71,14 @@ def test_centroid_tilt_includes_recent_plays():
     tilt = transient.centroid_tilt(s, 1000.0, V, idx)
     assert tilt is not None
     assert tilt[0] > tilt[1]     # leans toward the played track's direction
+
+
+def test_staleness_uses_most_recent_of_either_sync(store):
+    # Regression: freshness/decay read only last_sync_at (full sync), so a recent quick auto-sync
+    # (last_plays_sync_at) still read as stale. It must use the most recent of EITHER, like sync_status.
+    from yt_playlist.rec import transient
+    now = 1_000_000.0
+    store.set_setting("last_sync_at", str(now - 10 * 86400))     # full sync 10 days ago
+    assert transient.staleness_factor(store, now) < 1.0          # stale on its own
+    store.set_setting("last_plays_sync_at", str(now - 600))      # auto-synced 10 min ago
+    assert transient.staleness_factor(store, now) == 1.0         # fresh again

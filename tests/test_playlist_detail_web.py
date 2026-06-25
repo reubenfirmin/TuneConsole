@@ -90,10 +90,13 @@ def test_track_year_returns_row_fragment(store):
 def test_enrich_track_events_carry_rendered_row(store, monkeypatch):
     import json as _json
     import yt_playlist.providers.musicbrainz as mb
+    from tests.conftest import only_provider
     monkeypatch.setattr(mb, "enrich", lambda title, artist: ("Rock", "1998") if title == "S0" else (None, None))
+    monkeypatch.setattr(mb, "recording_mbid", lambda title, artist: None)
     iid, a = _seed_one_track(store)
+    only_provider(store, "musicbrainz")
     c = _client(store, lambda: {iid: FakeClient()})
-    jid = c.post(f"/playlist/{a}/enrich/musicbrainz").json()["job_id"]
+    jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
     track_evs = [_json.loads(l[6:]) for l in body.splitlines()

@@ -8,7 +8,7 @@
      seed a cluster and grow it into a playlist.</p>
 </div>
 {% else %}
-<div class="cluster-page" x-data="clusterCanvas()" x-init="init()">
+<div class="cluster-page" x-data="clusterCanvas()" x-init="init()" @cluster-saved.window="reset()">
 
   <div class="cluster-search" :class="{ docked: nodes.length }">
     <div class="cluster-search-row">
@@ -56,12 +56,17 @@
           </template>
         </ul>
       </div>
+      <!-- explicit reset: wipe the canvas back to a blank slate -->
+      <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
+              @click="reset()" title="Reset — clear the whole canvas">⟲ Reset</button>
     </div>
   </div>
 
   <div class="cluster-canvas" id="cluster-canvas"
        @wheel.prevent="onWheel($event)" @pointerdown="onPanStart($event)"
        @pointermove="onPanMove($event)" @pointerup="onPanEnd()" @pointerleave="onPanEnd()">
+    <div class="cluster-stars" aria-hidden="true"></div>
+    <canvas class="cluster-grid" x-ref="grid" aria-hidden="true"></canvas>
     <div class="cluster-world" :style="worldStyle()">
       <svg class="cluster-edges" :width="WORLD" :height="WORLD">
         <path class="edge-path" :d="edgePath()"></path>
@@ -75,7 +80,8 @@
       </template>
       <template x-for="n in nodes" :key="n.id">
         <div class="cluster-node"
-             :class="[n.kind, n.state, { trunk: isTrunkNode(n.id) && n.kind !== 'central', filtered: n.gpruned }]"
+             :class="{ central: n.kind === 'central', track: n.kind === 'track', pruned: n.state === 'pruned',
+                       trunk: isTrunkNode(n.id) && n.kind !== 'central', filtered: n.gpruned, boosted: isBoosted(n) }"
              :style="`left:${n.x}px;top:${n.y}px;${nodeStyle(n)}`">
           <div class="cn-body" @pointerdown.stop="startNodeDrag(n, $event)"
                :title="n.kind === 'track' && n.state === 'pruned' ? n.label + ' — ' + n.sub + (n.gpruned ? ' (filtered out — click ↺ to restore)' : '') : ''">
@@ -103,6 +109,9 @@
           <div class="cn-actions">
             <button type="button" class="cn-btn play" x-show="n.vid && n.state !== 'pruned'" @click="play(n)"
                     title="Play on YouTube Music">▶</button>
+            <button type="button" class="cn-btn boost" x-show="n.kind === 'track' && n.state !== 'pruned'"
+                    :class="{ on: isBoosted(n) }" @click="toggleBoost(n)"
+                    :title="isBoosted(n) ? 'Emphasized — steering new picks toward this' : 'Emphasize: steer new picks toward this track'">🔥</button>
             <button type="button" class="cn-btn grow" x-show="n.state !== 'pruned'" @click="grow(n.id)"
                     :disabled="exhaustedIds.includes(n.id)"
                     :title="exhaustedIds.includes(n.id) ? 'Genre filters are exhausted' : 'Grow: add a ring of nearby tracks'">＋</button>
@@ -142,13 +151,13 @@
   </div>
 
   <form class="cluster-savebar" hx-post="/clusters/save" hx-target="#cluster-save-result"
-        hx-swap="innerHTML" x-show="nodes.length" x-cloak>
+        hx-swap="innerHTML" hx-disabled-elt="find .cta" x-show="nodes.length" x-cloak>
     <!-- save the whole cluster, or just the trunk you grew -->
     <div class="cluster-mode">
-      <button type="button" :class="{ on: saveMode === 'all' }" @click="saveMode = 'all'">
+      <button type="button" :class="{ on: saveMode === 'all' }" @click="saveMode = 'all'; persist()">
         <strong x-text="keepKeys().length"></strong><span>all non-hidden</span>
       </button>
-      <button type="button" :class="{ on: saveMode === 'trunk' }" @click="saveMode = 'trunk'"
+      <button type="button" :class="{ on: saveMode === 'trunk' }" @click="saveMode = 'trunk'; persist()"
               :disabled="!trunkKeys().length" title="Only the trunk you grew">
         <strong x-text="trunkKeys().length"></strong><span>trunk only</span>
       </button>
@@ -162,12 +171,12 @@
       </button>
       <div class="cj-panel" x-show="journeyOpen" x-cloak>
         <button type="button" class="cj-item" :class="{ on: journey === 'auto' }"
-                @click="journey = 'auto'; journeyName = 'Pick for me'; journeyOpen = false">
+                @click="journey = 'auto'; journeyName = 'Pick for me'; journeyOpen = false; persist()">
           <strong>Pick for me</strong><span>Let the DJ choose the arc</span>
         </button>
         {% for j in journeys %}
         <button type="button" class="cj-item" :class="{ on: journey === '{{ j.key }}' }"
-                @click="journey = '{{ j.key }}'; journeyName = '{{ j.label }}'; journeyOpen = false">
+                @click="journey = '{{ j.key }}'; journeyName = '{{ j.label }}'; journeyOpen = false; persist()">
           <strong>{{ j.label }}</strong><span>{{ j.hint }}</span>
         </button>
         {% endfor %}
@@ -182,7 +191,10 @@
     <input type="hidden" name="central_keys" :value="JSON.stringify(centralSongKeys())">
     <input type="hidden" name="seed_labels" :value="JSON.stringify(seedLabels())">
     <input type="hidden" name="allow_families" :value="JSON.stringify(allowedFamilies)">
-    <button type="submit" class="cta">▶ Save &amp; play on YouTube ↗</button>
+    <button type="submit" class="cta">
+      <span class="cta-txt">▶ Save &amp; play on YouTube ↗</span>
+      <span class="cta-spin" aria-hidden="true"></span>
+    </button>
   </form>
   <div id="cluster-save-result"></div>
 </div>

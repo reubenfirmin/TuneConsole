@@ -1,22 +1,24 @@
-{# Taste model — full transparency. Left = permanent (durable) taste; right = right now (transient
-   mood). Every petal/bar's <title> carries the exact layer stack. Read-only; tune on Controls. #}
+{# Taste model - full transparency. Left = permanent (durable) taste; right = right now (transient
+   mood). Hover any petal or bar for a formatted readout of the full layer stack (see _viz_tip.html). #}
+{% import "_partials/_viz_tip.html" as vt %}
 
-{% macro layer_title(r) -%}
-{{ r.name }} — {{ '%.1f'|format(r.share*100) }}% of plays · permanent ×{{ '%.2f'|format(r.permanent_weight) }} · standing ×{{ '%.2f'|format(r.standing_lean) }} · right-now {{ '%+.2f'|format(r.transient_lean) }} (×{{ '%.2f'|format(r.transient_mult) }}) · effective ×{{ '%.2f'|format(r.effective) }}{% if r.graduation.score %} · graduating {{ '%+.0f'|format(r.graduation.frac*100) }}%{% endif %}
-{%- endmacro %}
-
+{# One categorical color per petal, assigned by position. Both roses of a dimension iterate the same
+   ordered rows, so a given genre/decade gets the SAME color on the left (permanent) and right (right-now)
+   rose - making them directly comparable. On the right rose, sign is carried by the geometry (beyond the
+   neutral ring = leaning in, inside = leaning away), so color is free to encode identity. #}
+{% set ROSE_PALETTE = ['#7c6cff', '#4fd6e0', '#ff6b8b', '#f6c177', '#9ece6a', '#bb9af7', '#7aa2f7', '#e0af68', '#ff9e64', '#2ac3de'] %}
 {% macro rose(rows, signed) -%}
 <svg viewBox="-112 -112 224 224" class="rose-svg" role="img">
   {% if signed and rows and rows[0].petal_t %}<circle r="{{ '%.1f'|format(rows[0].petal_t.neutral_r) }}" class="rose-neutral"/>{% endif %}
-  {% for r in rows %}{% set p = r.petal_t if signed else r.petal %}
-  <path d="{{ p.path }}" class="petal{% if signed %}{{ ' pos' if p.sign > 0 else (' neg' if p.sign < 0 else ' zero') }}{% endif %}"><title>{{ layer_title(r) }}</title></path>
+  {% for r in rows %}{% set p = r.petal_t if signed else r.petal %}{% set pc = ROSE_PALETTE[loop.index0 % ROSE_PALETTE|length] %}
+  {% if p.path %}<path d="{{ p.path }}" class="petal{% if signed and p.sign < 0 %} away{% endif %}" style="--petal-c:{{ pc }}" {{ vt.transient_tip(r, pc) if signed else vt.perm_tip(r, pc) }}></path>{% endif %}
   {% endfor %}
 </svg>
 {%- endmacro %}
 
 <p class="section-note" style="margin-bottom:1.2rem">
   Everything the recommender knows about you, built only from your own library. <strong>Left</strong> is
-  your <strong>permanent</strong> taste; <strong>right</strong> is <strong>right now</strong> — your
+  your <strong>permanent</strong> taste; <strong>right</strong> is <strong>right now</strong> - your
   current mood, which decays back toward neutral as your sync ages. Hover any shape for the exact numbers.
   This view is read-only; adjust anything on the <em>Controls</em> tab.
 </p>
@@ -26,13 +28,15 @@
   <h2 class="section" style="margin-top:0">Genre families</h2>
   {% if viz.genres %}
   <div class="viz-pair">
-    <figure class="rose"><div class="rose-cap">Permanent <span class="muted">— share of your plays</span></div>{{ rose(viz.genres, false) }}</figure>
+    <figure class="rose"><div class="rose-cap">Permanent <span class="muted"> - share of your plays</span></div>{{ rose(viz.genres, false) }}</figure>
     <figure class="rose">
-      <div class="rose-cap">Right now <span class="muted">— mood lean</span></div>
+      <div class="rose-cap">Right now <span class="muted"> - shift vs your usual</span></div>
       {{ rose(viz.genres, true) }}
-      {% if not viz.has_transient %}<p class="rose-quiet">Quiet right now — no recent mood signal.</p>{% endif %}
+      {% if not viz.recent_exists %}<p class="rose-quiet">Quiet - nothing played recently.</p>
+      {% elif not viz.has_transient %}<p class="rose-quiet">Your recent mix matches your usual.</p>{% endif %}
     </figure>
   </div>
+  <p class="vb-legend"><span class="muted">right rose: petals reach <strong>out</strong> past the ring when you're into a genre more than usual lately, <strong>in</strong> when less. The shifts sum to zero.</span></p>
   {% else %}<p class="section-note">No genre tags yet. Enrich your library to populate this.</p>{% endif %}
 </section>
 
@@ -41,11 +45,12 @@
   <h2 class="section" style="margin-top:0">Eras</h2>
   {% if viz.eras %}
   <div class="viz-pair">
-    <figure class="rose"><div class="rose-cap">Permanent <span class="muted">— share of your plays</span></div>{{ rose(viz.eras, false) }}</figure>
+    <figure class="rose"><div class="rose-cap">Permanent <span class="muted"> - share of your plays</span></div>{{ rose(viz.eras, false) }}</figure>
     <figure class="rose">
-      <div class="rose-cap">Right now <span class="muted">— mood lean</span></div>
+      <div class="rose-cap">Right now <span class="muted"> - shift vs your usual</span></div>
       {{ rose(viz.eras, true) }}
-      {% if not viz.has_transient %}<p class="rose-quiet">Quiet right now.</p>{% endif %}
+      {% if not viz.recent_exists %}<p class="rose-quiet">Quiet - nothing played recently.</p>
+      {% elif not viz.has_transient %}<p class="rose-quiet">Your recent mix matches your usual.</p>{% endif %}
     </figure>
   </div>
   {% else %}<p class="section-note">No decade data yet.</p>{% endif %}
@@ -55,27 +60,35 @@
 <section class="card viz-dim">
   <h2 class="section" style="margin-top:0">Artists</h2>
   {% if viz.artists %}
+  {# Shares are full-population (tiny for big libraries), so scale the play bar to your top artist for
+     legibility; the exact % is in the tooltip. Rows are sorted by share, so the first is the max. #}
+  {% set amax = viz.artists[0].share or 1 %}
   <div class="viz-bars">
     {% for r in viz.artists %}
-    <div class="viz-bar-row" title="{{ layer_title(r) }}">
+    <div class="viz-bar-row" {{ vt.axis_tip(r) }}>
       <span class="vb-name">{{ r.name }}</span>
-      <span class="vb-perm"><i style="width:{{ '%.0f'|format(r.share*100) }}%"></i></span>
-      <span class="vb-div"><i class="{{ 'pos' if r.transient_lean > 0 else ('neg' if r.transient_lean < 0 else '') }}"
-            style="width:{{ '%.0f'|format((r.transient_lean|abs / 2.0 if r.transient_lean|abs < 2.0 else 1.0)*50) }}%"></i></span>
+      <span class="vb-perm"><i style="width:{{ '%.0f'|format(r.share / amax * 100) }}%"></i></span>
+      <span class="vb-div"><i class="{{ 'pos' if r.transient_dev > 0 else ('neg' if r.transient_dev < 0 else '') }}"
+            style="width:{{ '%.0f'|format((r.transient_dev|abs / 0.12 * 50) if r.transient_dev|abs < 0.12 else 50) }}%"></i></span>
     </div>
     {% endfor %}
   </div>
-  <p class="vb-legend"><span class="muted">left bar = share of plays · right bar = current-mood lean (teal = toward, red = away)</span></p>
+  <p class="vb-legend"><span class="muted">left bar = share of plays · right bar = shift vs your usual (teal = more lately, red = less)</span></p>
   {% else %}<p class="section-note">No artist play data yet.</p>{% endif %}
 </section>
 
-{# ── Lanes (permanent only) + Breadth/Freshness gauges ───────────────────── #}
+{# ── Candidate lanes + Taste breadth (both permanent, but unrelated → own cards) ── #}
 <div class="viz-pair-cards">
   <section class="card viz-dim">
     <h2 class="section" style="margin-top:0">Candidate lanes <span class="scope-tag">permanent</span></h2>
+    <p class="section-note">Your Home feed is drafted from four <strong>lanes</strong>, each digging up
+      candidates a different way. The weight sets how often a lane wins a slot - 1.0 is neutral, higher
+      favors it, lower mutes it. Hover a lane to see what it finds.</p>
     <div class="viz-bars">
       {% for l in viz.lanes %}
-      <div class="viz-bar-row" title="{{ l.label }} weight ×{{ '%.2f'|format(l.weight) }}">
+      <div class="viz-bar-row" {{ vt.tip(l.label, [
+            {"l": "Weight", "v": "×" ~ "%.2f"|format(l.weight), "t": "strong"},
+            {"l": "Effect", "v": ("favored" if l.weight > 1.05 else ("muted" if l.weight < 0.95 else "neutral")), "n": "how often this lane wins a slot in your feed"}], desc=l.help) }}>
         <span class="vb-name">{{ l.label }}</span>
         <span class="vb-perm"><i style="width:{{ '%.0f'|format(l.weight / 3.0 * 100) }}%"></i></span>
         <span class="vb-val mono">×{{ '%.2f'|format(l.weight) }}</span>
@@ -84,21 +97,30 @@
     </div>
   </section>
   <section class="card viz-dim">
-    <h2 class="section" style="margin-top:0">Breadth &amp; freshness</h2>
-    <div class="gauge">
-      <span class="gauge-lbl">Taste breadth <span class="muted">(focused → eclectic)</span></span>
-      <span class="gauge-bar"><i style="width:{{ '%.0f'|format(viz.breadth*100) }}%"></i></span>
-      <span class="gauge-val mono">{{ '%.2f'|format(viz.breadth) }}</span>
+    <h2 class="section" style="margin-top:0">Taste breadth <span class="scope-tag">permanent</span></h2>
+    {% if viz.genres %}
+    {% set bword = "eclectic" if viz.breadth > 0.66 else ("focused" if viz.breadth < 0.33 else "balanced") %}
+    {% set shown = viz.genres | sum(attribute='share') %}
+    <div class="breadth-head" {{ vt.tip("Taste breadth", [
+          {"l": "Reads as", "v": bword, "t": "strong"},
+          {"l": "Index", "v": "%.2f"|format(viz.breadth) ~ " / 1.00", "n": "0 = one genre only, 1 = evenly spread across many"},
+          {"l": "Top genre", "v": viz.genres[0].name ~ " · " ~ "%.0f"|format(viz.genres[0].share*100) ~ "%"},
+          {"l": "Families", "v": viz.n_families ~ " genres"}], desc="Each band below is a genre family, sized by share of plays. The shape is your breadth.") }}>
+      <span class="breadth-word">{{ bword }}</span>
+      <span class="breadth-idx mono">{{ '%.2f'|format(viz.breadth) }}<small> / 1.00</small></span>
     </div>
-    <div class="gauge">
-      <span class="gauge-lbl">Mood freshness <span class="muted">(how live the right-now read is)</span></span>
-      <span class="gauge-bar {{ 'warn' if not viz.freshness.live }}"><i style="width:{{ '%.0f'|format(viz.freshness.factor*100) }}%"></i></span>
-      <span class="gauge-val mono">{{ '%.0f'|format(viz.freshness.factor*100) }}%</span>
+    <div class="breadth-ribbon">
+      {% for g in viz.genres %}{% set pc = ROSE_PALETTE[loop.index0 % ROSE_PALETTE|length] %}<i class="seg" style="width:{{ '%.1f'|format(g.share*100) }}%; --petal-c:{{ pc }}" {{ vt.tip(g.name, [
+            {"l": "Share of plays", "v": "%.1f"|format(g.share*100) ~ "%", "t": "strong"},
+            {"l": "Rank", "v": "#" ~ loop.index ~ " of " ~ viz.n_families, "n": "by how much you play it"}], dot=pc) }}></i>{% endfor %}
+      {% if shown < 0.995 %}<i class="seg other" {{ vt.tip("Other genres", [
+            {"l": "Share of plays", "v": "%.1f"|format((1-shown)*100) ~ "%", "t": "strong"},
+            {"l": "Families", "v": (viz.n_families - viz.genres|length) ~ " smaller ones", "n": "everything outside your top " ~ viz.genres|length}]) }} style="width:{{ '%.1f'|format((1-shown)*100) }}%"></i>{% endif %}
     </div>
-    <p class="section-note" style="margin:.4rem 0 0">
-      {% if viz.freshness.live %}Sync is fresh — the current-mood model is at full strength.
-      {% else %}Sync is stale — the mood model is relaxing toward neutral ({{ viz.freshness.halflife_days }}-day half-life).{% endif %}
-    </p>
+    <p class="section-note" style="margin:.55rem 0 0">Each band is a genre family, sized by share of plays.
+      A few wide bands means <strong>focused</strong>; many even bands means <strong>eclectic</strong>.
+      Your top genre is {{ '%.0f'|format(viz.genres[0].share*100) }}% of plays, across {{ viz.n_families }} families.</p>
+    {% else %}<p class="section-note">No genre tags yet. Enrich your library to populate this.</p>{% endif %}
   </section>
 </div>
 
@@ -107,18 +129,20 @@
   <h2 class="section" style="margin-top:0">Graduation funnel <span class="scope-tag">transient → permanent</span></h2>
   <p class="section-note">Repeated leans accumulate here; when a facet crosses the threshold it nudges
     its <em>permanent</em> weight up or down. This is how a passing mood becomes lasting taste.
-    Sources graduate at different speeds — like/dislike fast, a single play barely at all.</p>
+    Sources graduate at different speeds - like/dislike fast, a single play barely at all.</p>
   {% if viz.funnel %}
   <div class="viz-bars">
     {% for f in viz.funnel %}
-    <div class="viz-bar-row" title="{{ f.facet }} — ledger {{ '%+.2f'|format(f.score) }} of ±{{ '%.2f'|format(f.threshold) }}">
+    <div class="viz-bar-row" {{ vt.tip(f.facet, [
+          {"l": "Ledger", "v": "%+.2f"|format(f.score) ~ "  of  ±" ~ "%.2f"|format(f.threshold), "t": ("pos" if f.frac > 0 else "neg")},
+          {"l": "Progress", "v": "%+.0f"|format(f.frac*100) ~ "%", "n": ("toward favoring this facet permanently" if f.frac > 0 else "toward demoting this facet permanently"), "t": "strong", "div": true}]) }}>
       <span class="vb-name">{{ f.facet }}</span>
       <span class="vb-div"><i class="{{ 'pos' if f.frac > 0 else 'neg' }}" style="width:{{ '%.0f'|format(f.frac|abs*50) }}%"></i></span>
       <span class="vb-val mono">{{ '%+.0f'|format(f.frac*100) }}%</span>
     </div>
     {% endfor %}
   </div>
-  {% else %}<p class="section-note">Nothing accumulating yet — interact with recommendations and it fills in.</p>{% endif %}
+  {% else %}<p class="section-note">Nothing accumulating yet - interact with recommendations and it fills in.</p>{% endif %}
 </section>
 
 {# ── Transient sources: what's feeding "right now" ───────────────────────── #}
@@ -130,9 +154,19 @@
     <span class="tag">▶ recent plays {{ viz.sources.plays }}</span>
     <span class="tag">♥ likes {{ viz.sources.likes }}</span>
     <span class="tag">⃠ dislikes {{ viz.sources.dislikes }}</span>
-    <span class="tag" title="EMA over interaction rank — the newest signal carries this share of the blend">recency α {{ '%.2f'|format(viz.sources.alpha) }}</span>
+    <span class="tag" {{ vt.tip("Recency weighting", [
+          {"l": "α", "v": "%.2f"|format(viz.sources.alpha), "t": "strong"},
+          {"l": "Means", "v": "newest signal ≈ " ~ "%.0f"|format(viz.sources.alpha*100) ~ "%", "n": "of the blend - older interactions count for less"}]) }}>recency α {{ '%.2f'|format(viz.sources.alpha) }}</span>
   </p>
-  <p class="section-note" style="margin:0">Newer interactions dominate (rank-weighted); the whole read is then scaled by sync freshness above.</p>
+  <p class="section-note" style="margin:.2rem 0 .8rem">Newer interactions dominate (rank-weighted); the whole read is then scaled by its <strong>freshness</strong> - how recently you synced:</p>
+  <div class="freshness {{ 'fading' if not viz.freshness.live }}" {{ vt.tip("Mood freshness", [
+        {"l": "Strength", "v": "%.0f"|format(viz.freshness.factor*100) ~ "%", "t": "strong"},
+        {"l": "Status", "v": ("live" if viz.freshness.live else "fading"), "n": ("at full strength - sync is current" if viz.freshness.live else "relaxing toward neutral on a " ~ viz.freshness.halflife_days ~ "-day half-life since your last sync")}], desc="Scales everything above. A stale sync fades the whole 'right now' read back toward neutral.") }}>
+    <span class="fr-dot"></span>
+    <span class="fr-status">{{ 'Live' if viz.freshness.live else 'Fading' }}</span>
+    <span class="fr-meter"><i style="width:{{ '%.0f'|format(viz.freshness.factor*100) }}%"></i></span>
+    <span class="fr-val mono">{{ '%.0f'|format(viz.freshness.factor*100) }}%</span>
+  </div>
 </section>
 
 {# ── Embedding engine + centroid tilt (expensive → lazy) ──────────────────── #}

@@ -1,9 +1,7 @@
 """Read-only transparency view of the recommendation model for the Taste page.
 
 Pure functions over a Store (no web imports), like recommend.py. Assembles, per shared axis
-(genre family / era decade / artist), the full ranking-multiplier stack —
-  effective = permanent_weight x standing_lean x transient_facet_multiplier (each clamped) —
-plus the graduation funnel (transient -> permanent) and the live transient sources. Nothing hidden:
+(genre family / era decade / artist), the full ranking-multiplier stack -   effective = permanent_weight x standing_lean x transient_facet_multiplier (each clamped) - plus the graduation funnel (transient -> permanent) and the live transient sources. Nothing hidden:
 this is the first place the transient model is ever surfaced (it otherwise only shapes ranking).
 """
 import numpy as np
@@ -12,9 +10,13 @@ from yt_playlist.rec import embed, eval_recs, genre_map, rec_params, recommend, 
 from yt_playlist.rec.rec_dao import RecDao
 
 
-# Below this max-absolute lean the transient model is treated as quiet: the signed roses normalize to
-# max-abs, so a near-dead mood would otherwise still render a full-amplitude (misleading) shape.
-QUIET_LEAN_EPS = 0.02
+# Below this max-absolute share deviation (in share fraction, ~1 point) the right rose is treated as
+# quiet - your recent mix matches your usual one, so there's nothing meaningful to draw.
+QUIET_DEV_EPS = 0.01
+# "Recent" = the last this-many play events (frequency-weighted). Large enough to be a representative
+# recent mix, small enough to differ from your all-time mix for an active listener.
+RECENT_PLAYS_WINDOW = 400
+_ALLTIME_LIMIT = 1_000_000_000   # effectively unbounded - the all-time play-count basis
 
 
 def _clamp(v):
@@ -44,13 +46,53 @@ def _attach_graduation(rows, prefix, theme):
     return rows
 
 
+def _axis_dist(store, counts, axis) -> dict:
+    """Normalize a {identity_key: play count} map onto an axis (genre family / decade / artist),
+    summing to 1. Play-frequency weighted - a track played 10× counts 10× - so recent and all-time
+    are measured the same way and their difference is an honest 'more/less than usual'."""
+    if not counts:
+        return {}
+    dao = RecDao(store)
+    keys = list(counts)
+    if axis == "genre":
+        m, name_of = dao.track_genres(keys), genre_map.family
+    elif axis == "era":
+        m, name_of = dao.track_decades(keys), lambda d: d
+    else:
+        m, name_of = dao.track_artists(keys), lambda x: x
+    w: dict = {}
+    for k, c in counts.items():
+        if k in m:
+            name = name_of(m[k])
+            if name not in (None, ""):
+                w[name] = w.get(name, 0.0) + c
+    total = sum(w.values())
+    return {n: x / total for n, x in w.items()} if total else {}
+
+
+def _attach_deviation(rows, recent, alltime):
+    """Per axis row, attach `recent_share`, `alltime_share`, and `transient_dev` = recent - all-time
+    (both play-frequency shares). The deviation is the zero-sum 'right now vs usual' signal the right
+    rose draws. With no recent plays, deviation is 0 (not all-negative) so the rose is flat."""
+    for r in rows:
+        rs = recent.get(r["name"], 0.0)
+        at = alltime.get(r["name"], 0.0)
+        r["recent_share"] = rs
+        r["alltime_share"] = at
+        r["transient_dev"] = (rs - at) if recent else 0.0
+    return rows
+
+
 def _artist_shares(store, top=12):
-    """Top artists by play share (mirrors the play-weighted genre/era shares)."""
-    counts = {a["artist"]: a.get("total", 0) for a in store.top_artists(top)}
-    total = sum(counts.values())
+    """Top artists by play share. Normalized over ALL artists (not just the displayed top-N), so the
+    shares are directly comparable to the recency-weighted recent distribution - otherwise the recent
+    side (full population) sits systematically below this one and every artist reads as 'less than
+    usual'. Mirrors how the genre/era shares are full-population."""
+    alla = store.top_artists(limit=1_000_000)          # all artists, play-desc (LIMIT only truncates output)
+    total = sum(a.get("plays", 0) for a in alla)
     if not total:
         return []
-    return sorted(((a, c / total) for a, c in counts.items()), key=lambda x: -x[1])
+    return [(a["artist"], a["plays"] / total) for a in alla[:top]]
 
 
 def _sources(store):
@@ -69,7 +111,7 @@ def _sources(store):
     }
 
 
-def model_transparency(store, now) -> dict:
+def model_transparency(store, now, recent_window=RECENT_PLAYS_WINDOW) -> dict:
     """The cheap transparency payload: per-axis layer stacks, lanes, breadth, freshness, sources, and
     the graduation funnel. Expensive panels (embedding/recall, playlist contexts, centroid tilt) are
     separate (engine_panel / centroid_tilt_panel), htmx-lazy on the page."""
@@ -86,20 +128,29 @@ def model_transparency(store, now) -> dict:
     artists = _attach_graduation(
         _axis_rows("artist", _artist_shares(store), weights, standing, leans), "artist", theme)
 
+    # The right rose / right bar plot 'right now vs your usual' as a zero-sum deviation: each facet's
+    # share of your RECENT plays minus its share of all your plays - both play-frequency weighted, so
+    # the difference is honest. Two count queries (recent window + all-time), mapped onto each axis.
+    recent_counts = store.recent_play_counts(recent_window)
+    alltime_counts = store.recent_play_counts(_ALLTIME_LIMIT)
+    _attach_deviation(genres, _axis_dist(store, recent_counts, "genre"), _axis_dist(store, alltime_counts, "genre"))
+    _attach_deviation(eras, _axis_dist(store, recent_counts, "era"), _axis_dist(store, alltime_counts, "era"))
+    _attach_deviation(artists, _axis_dist(store, recent_counts, "artist"), _axis_dist(store, alltime_counts, "artist"))
+    recent_exists = bool(recent_counts)
+
     factor = transient.staleness_factor(store, now)
     sources = _sources(store)
-    # Gates the roses' "Quiet right now" overlay: true iff the transient leans the roses draw are
-    # meaningfully nonzero. A very stale sync decays every lean toward ~0; below QUIET_LEAN_EPS we
-    # honestly say it's quiet rather than normalize a dead mood into a dramatic shape. Source counts
-    # render in their own panel either way.
-    max_lean = max((abs(r["transient_lean"]) for r in genres + eras + artists), default=0.0)
-    has_transient = max_lean > QUIET_LEAN_EPS
+    # Gates the roses' "Quiet right now" overlay: true iff you've played something recently AND your
+    # recent mix actually differs from your usual one (otherwise every deviation is ~0 and the rose is
+    # a flat ring - "same as usual", not a dramatic shape).
+    max_dev = max((abs(r["transient_dev"]) for r in genres + eras + artists), default=0.0)
+    has_transient = recent_exists and max_dev > QUIET_DEV_EPS
 
     return {
         "genres": genres, "eras": eras, "artists": artists,
-        "lanes": [{"name": n, "label": lbl, "weight": weights.get(f"lane:{n}", 1.0)}
-                  for n, lbl, _ in rec_params.LANES],
-        "breadth": bd["breadth"],
+        "lanes": [{"name": n, "label": lbl, "help": h, "weight": weights.get(f"lane:{n}", 1.0)}
+                  for n, lbl, h in rec_params.LANES],
+        "breadth": bd["breadth"], "n_families": bd["n_families"],
         "freshness": {"factor": factor, "halflife_days": rec_params.STALE_DECAY_HALFLIFE_D,
                       "live": factor >= 0.999},
         "sources": sources,
@@ -107,11 +158,12 @@ def model_transparency(store, now) -> dict:
                     "frac": max(-1.0, min(1.0, s / rec_params.THEME_THRESHOLD))}
                    for f, s in sorted(theme.items(), key=lambda x: -abs(x[1]))],
         "has_transient": has_transient,
+        "recent_exists": recent_exists,
     }
 
 
 def engine_panel(store) -> dict:
-    """The permanent embedding 'engine' — vectors/baskets/dim/method, recall@k, and the per-playlist
+    """The permanent embedding 'engine' - vectors/baskets/dim/method, recall@k, and the per-playlist
     taste contexts (which playlists shape taste, weighted by how much you play them)."""
     contexts = []
     pt = recommend.playlist_taste(store)
@@ -126,7 +178,7 @@ def engine_panel(store) -> dict:
 
 def centroid_tilt_panel(store, now) -> dict:
     """The transient embedding pull: magnitude of the current-mood centroid tilt (staleness-scaled),
-    and its projection onto your top genre-family centroids — 'which way the mood leans'. Quiet -> 0."""
+    and its projection onto your top genre-family centroids - 'which way the mood leans'. Quiet -> 0."""
     keys, V, idx = embed.load_vectors(store)
     if V is None:
         return {"magnitude": 0.0, "projection": []}

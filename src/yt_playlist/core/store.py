@@ -247,9 +247,22 @@ class Store:
                        ("mood_relaxed", "REAL"), ("mood_acoustic", "REAL"),
                        ("instrumental", "REAL"), ("loudness", "REAL"),
                        ("dynamic_complexity", "REAL"), ("popularity", "INTEGER"),
-                       ("gain", "REAL"), ("label", "TEXT")):
+                       ("gain", "REAL"), ("label", "TEXT"),
+                       # enrichment-worker bookkeeping: created_at marks "new" arrivals (queue-jump);
+                       # first/last_enriched_at mark processed (for "% processed" + trend) and re-sweep.
+                       ("created_at", "REAL"), ("first_enriched_at", "REAL"),
+                       ("last_enriched_at", "REAL")):
             if _c not in cols:
                 self.conn.execute(f"ALTER TABLE tracks ADD COLUMN {_c} {_t}")
+        # One-time backfill: tracks enriched before the worker existed (they have enrichment_log rows
+        # but null timestamps) should count as processed. Guarded by a settings flag so it runs once.
+        if "first_enriched_at" not in cols and not self.get_setting("enrich_ts_backfilled"):
+            self.conn.execute(
+                "UPDATE tracks SET "
+                "  first_enriched_at = (SELECT MIN(created_at) FROM enrichment_log el WHERE el.track_id=tracks.id), "
+                "  last_enriched_at  = (SELECT MAX(created_at) FROM enrichment_log el WHERE el.track_id=tracks.id) "
+                "WHERE id IN (SELECT DISTINCT track_id FROM enrichment_log)")
+            self.set_setting("enrich_ts_backfilled", "1")
         pcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(playlists)")}
         if "thumbnail" not in pcols:
             self.conn.execute("ALTER TABLE playlists ADD COLUMN thumbnail TEXT")

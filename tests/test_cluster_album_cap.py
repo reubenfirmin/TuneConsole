@@ -70,6 +70,21 @@ def test_album_cap_is_cluster_wide_not_just_per_ring(store):
     assert albums.count("Greatest Hits") == 0          # album already at the cap on the canvas
 
 
+def test_cap_basis_excludes_central_seeds(store):
+    # Seed-album tracks are on the canvas (in `exclude`) but they're central SEEDS, not grown tracks,
+    # so `count_keys` omits them — they must not pre-spend the album's budget.
+    c, _ = _client(store)
+    kp = _modelled(store, "p", "Seed", "P", "", _unit(0))
+    s1 = _modelled(store, "s1", "Seed A", "P", "Greatest Hits", _unit(40))
+    s2 = _modelled(store, "s2", "Seed B", "P", "Greatest Hits", _unit(41))
+    for i in range(3):
+        _modelled(store, f"c{i}", f"Cand {i}", "A", "Greatest Hits", _unit(2 + i))
+    res = c.post("/clusters/expand",
+                 json={"pos_keys": [kp], "exclude": [kp, s1, s2], "count_keys": [], "k": 6}).json()
+    albums = [t["album"] for t in res["ring"]]
+    assert albums.count("Greatest Hits") == 2          # seeds didn't consume the budget; 2 fresh allowed
+
+
 def test_pruned_canvas_tracks_dont_count_toward_cap(store):
     # A canvas track that's pruned (in neg_keys) won't be saved, so it must NOT consume album budget.
     c, _ = _client(store)

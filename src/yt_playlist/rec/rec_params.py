@@ -5,7 +5,7 @@ explanation, range, step, and default live here, and every consumer reads its va
 `get_param(store, name)` (falling back to the default). This replaces magic numbers that were
 scattered across recommend.py, so the page can render the knobs generically and reset them.
 
-Lane and genre *weights* are NOT here — those are multiplicative weights stored in the
+Lane and genre *weights* are NOT here - those are multiplicative weights stored in the
 `rec_weights` table (axes `lane:*` / `genre:*`); see LANES below for their labels/help. This
 module owns the scalar params (windows, ratios, counts, penalties), stored in the `settings`
 table as `rec_param:<name>` keys.
@@ -36,7 +36,7 @@ class ParamSpec:
 PARAMS = [
     ParamSpec("comfort_min_plays", "Comfort min plays", "discovery",
               "Comfort Listening surfaces your high-rotation favorites that have gone quiet. This is "
-              "the fewest past plays a track needs to qualify — higher = only your most-worn tracks.",
+              "the fewest past plays a track needs to qualify - higher = only your most-worn tracks.",
               1, 50, 1, 4, integer=True),
     ParamSpec("comfort_recency_full_days", "Comfort recency window (days)", "discovery",
               "Comfort Listening favors tracks you haven't played in a while. A track reaches its "
@@ -72,7 +72,7 @@ PARAMS_BY_NAME = {p.name: p for p in PARAMS}
 # Lane weights (rec_weights table, axis `lane:<name>`): labels + help for the page. Clamp [0.2, 3.0].
 LANES = [
     ("neighbourhood", "Neighbourhood", "Tracks close to what you've been playing recently."),
-    ("rotation", "Rotation", "More of what you play most — your steady rotation."),
+    ("rotation", "Rotation", "More of what you play most - your steady rotation."),
     ("deep_cut", "Deep cuts", "Overlooked tracks by artists you already have."),
     ("explore", "Explore", "New-to-you music that still sits near your taste."),
 ]
@@ -88,7 +88,7 @@ def _clamp(spec, value) -> float:
 
 
 def get_param(store, name):
-    """Current value of a scalar knob — the stored override, clamped, or the registry default."""
+    """Current value of a scalar knob - the stored override, clamped, or the registry default."""
     spec = PARAMS_BY_NAME[name]
     raw = store.get_setting(SETTING_PREFIX + name)
     if raw is None or raw == "":
@@ -145,8 +145,8 @@ GRADUATE_DOWN = 0.95
 # immediate; graduation is gated by accumulation past THEME_THRESHOLD. Calibrated so today's vibe
 # lever is preserved (a mood event still contributes ±1 with SOURCE_W_VIBE=1.0).
 SOURCE_W_VIBE = 1.0       # vibe / facet lever (unchanged from today)
-SOURCE_W_LIKE = 1.0       # explicit thumbs-up — strong
-SOURCE_W_DISLIKE = 1.0    # thumbs-down (sign supplied by caller) — strong
+SOURCE_W_LIKE = 1.0       # explicit thumbs-up - strong
+SOURCE_W_DISLIKE = 1.0    # thumbs-down (sign supplied by caller) - strong
 SOURCE_W_SLIDER = 0.5     # per held-day of a full lean (~2-3 held days -> one graduation step)
-SOURCE_W_PLAY = 0.08      # one play — weak; passive listening must not silently rewrite taste
+SOURCE_W_PLAY = 0.08      # one play - weak; passive listening must not silently rewrite taste
 PLAY_GRAD_SESSION_CAP = 0.4   # max play-graduation contribution per session (a binge can't graduate)

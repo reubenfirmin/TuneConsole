@@ -6,7 +6,8 @@ from yt_playlist.repos.base import Repo, synchronized
 class TrackRepo(Repo):
     @synchronized
     def upsert_track(self, video_id, title, artist, album, duration_s, available=None,
-                     video_type=None, artist_browse_id=None, album_browse_id=None, thumbnail=None) -> int:
+                     video_type=None, artist_browse_id=None, album_browse_id=None, thumbnail=None,
+                     created_at=None) -> int:
         key = identity_key(title, artist)
         row = self.conn.execute(
             "SELECT id FROM tracks WHERE identity_key=? AND IFNULL(video_id,'')=IFNULL(?,'')",
@@ -25,12 +26,22 @@ class TrackRepo(Repo):
             return row["id"]
         cur = self.conn.execute(
             "INSERT INTO tracks(video_id,title,artist,album,duration_s,identity_key,available,"
-            "video_type,artist_browse_id,album_browse_id,thumbnail) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "video_type,artist_browse_id,album_browse_id,thumbnail,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, strftime('%s','now')))",
             (video_id, title, artist, album, duration_s, key,
              None if available is None else int(available), video_type,
-             artist_browse_id, album_browse_id, thumbnail))
+             artist_browse_id, album_browse_id, thumbnail, created_at))
         self.conn.commit()
         return cur.lastrowid
+
+    @synchronized
+    def known_duration(self, title, artist):
+        """A duration (seconds) we already hold for this song under ANY stored row, else None. Lets a
+        generated playlist reuse a time we know from one videoId for the same song under another."""
+        row = self.conn.execute(
+            "SELECT MAX(duration_s) d FROM tracks WHERE identity_key=?",
+            (identity_key(title, artist),)).fetchone()
+        return row["d"] if row and row["d"] is not None else None
 
     @synchronized
     def tracks_to_enrich(self, playlist_id) -> list:

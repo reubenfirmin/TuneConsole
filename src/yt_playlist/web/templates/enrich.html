@@ -1,0 +1,15 @@
+{% extends "base.html" %}{% block title %}Enrichment · TuneConsole{% endblock %}{% block body %}
+<div class="page-head">
+  <span class="eyebrow">Tools</span>
+  <h1>Enrichment</h1>
+  <p>A background worker fills genre, year, and audio features across your library — most-played first,
+    then the long tail, with new arrivals jumping the queue. Coverage updates live as it runs.</p>
+</div>
+
+<div class="card">
+  {# The worker drains continuously; this panel polls itself so the bars advance without a reload. #}
+  <div id="enrich-stats" hx-get="/enrich/stats" hx-trigger="every 3s" hx-swap="innerHTML">
+    {% include "_partials/enrich_stats.html" %}
+  </div>
+</div>
+{% endblock %}

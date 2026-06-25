@@ -452,10 +452,18 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
         for t in uniq:
             if t["video_id"] in skipped_set:
                 continue
+            ti, ar = t.get("title") or "", t.get("artist") or ""
+            # Recommendation tracks arrive without a time (the rec pipeline doesn't carry one). Reuse a
+            # duration we already know for this song (free), else fetch it once — so the generated
+            # playlist's rows show their length instead of a blank (#26).
+            dur = t.get("duration")
+            if dur is None:
+                dur = store.known_duration(ti, ar)
+            if dur is None:
+                dur = _fetch_song_duration(client, t["video_id"])
             track_ids.append(store.upsert_track(
-                t["video_id"], t.get("title") or "", t.get("artist") or "", t.get("album") or "",
-                None, thumbnail=t.get("thumbnail")))
-            keys.append(identity_key(t.get("title") or "", t.get("artist") or ""))
+                t["video_id"], ti, ar, t.get("album") or "", dur, thumbnail=t.get("thumbnail")))
+            keys.append(identity_key(ti, ar))
         db_pid = store.upsert_playlist(identity_id, new_pid, title, len(track_ids),
                                        content_hash(list(dict.fromkeys(keys))), now)
         store.set_playlist_tracks(db_pid, track_ids)

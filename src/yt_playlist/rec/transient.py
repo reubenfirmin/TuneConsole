@@ -37,11 +37,17 @@ def facets_for(store, keys) -> dict:
 
 
 def staleness_factor(store, now) -> float:
-    """1.0 while sync is fresh; decays past SYNC_STALE_S with a STALE_DECAY_HALFLIFE_D half-life."""
-    last = store.get_setting("last_sync_at")
-    if last is None:
+    """1.0 while sync is fresh; decays past SYNC_STALE_S with a STALE_DECAY_HALFLIFE_D half-life.
+
+    Uses the most recent sync of EITHER kind - a full sync (`last_sync_at`) or a quick plays/auto
+    sync (`last_plays_sync_at`) - mirroring recommend.sync_status. A recent auto-sync brings fresh
+    play data, so it must keep the transient model live (otherwise the model decays even though plays
+    are current)."""
+    stamps = [float(s) for s in (store.get_setting("last_sync_at"),
+                                 store.get_setting("last_plays_sync_at")) if s is not None]
+    if not stamps:
         return 1.0
-    age = now - float(last)
+    age = now - max(stamps)
     if age <= rec_params.SYNC_STALE_S:
         return 1.0
     return 0.5 ** ((age - rec_params.SYNC_STALE_S) / (rec_params.STALE_DECAY_HALFLIFE_D * 86400.0))

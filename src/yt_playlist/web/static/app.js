@@ -253,7 +253,11 @@ function playlistsTab(rows) {
       try { localStorage.setItem('pl.collapsed', JSON.stringify(this.collapsed)); } catch (e) {}
     },
     // "Generated" is pinned into its own card above the table (see template) — never in the sections.
-    genRows() { return this.sorted().filter(r => r.group === 'Generated'); },
+    // Always newest-first by creation time (independent of the main table's column sort).
+    genRows() {
+      return this.rows.filter(r => r.group === 'Generated')
+        .sort((a, b) => (b.created || 0) - (a.created || 0));
+    },
     promote(r) {
       // graduate a Generated playlist into the library (out of the quarantine group), then reload
       fetch('/playlist/' + r.id + '/promote', { method: 'POST', headers: { 'HX-Request': 'true' } })
@@ -329,13 +333,18 @@ function titleEditor(pid) {
     },
   };
 }
-function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBase) {
-  // Enrichment: background job streamed over SSE. Updates the Year/Genre cells live as each track
-  // resolves, and drives a determinate progress bar. `enrichBase` is the URL the start POSTs under
-  // (defaults to /playlist/<pid>; album pages pass /album/<browse>). The events stream is shared.
+function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBase, conflictCount) {
+  // Enrichment: one background job runs the configured provider waterfall and streams over SSE.
+  // Updates the Year/Genre cells live as each track resolves, drives a determinate progress bar, and
+  // surfaces a conflict count (provider disagreements) that lights up the header's resolve icon.
+  // `enrichBase` defaults to /playlist/<pid>; album pages pass /album/<browse>.
   return {
     pid: pid, enrichBase: enrichBase || ('/playlist/' + pid),
     lastfmConfigured: lastfmConfigured, running: false, finished: false, pct: 0, status: '', source: '',
+    conflictCount: conflictCount || 0,
+    openConflicts() {
+      htmx.ajax('GET', `${this.enrichBase}/conflicts`, { target: '#conflicts-modal', swap: 'innerHTML' });
+    },
     // Last.fm API key modal
     keyModal: false, keyValue: '', keyBusy: false, keyErr: '',
     lastfmClick() {
@@ -360,17 +369,17 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
         this.listen(activeJobId, activeSource);
       }
     },
-    async start(source) {
+    async start() {
       if (this.running) return;
-      this.source = source;
+      this.source = 'waterfall';
       this.running = true; this.finished = false; this.pct = 0;
-      this.status = source === 'lastfm' ? 'Starting Last.fm tagging…' : 'Starting enrichment…';
+      this.status = 'Starting enrichment…';
       let job;
       try {
-        const r = await fetch(`${this.enrichBase}/enrich/${source}`, { method: 'POST' });
+        const r = await fetch(`${this.enrichBase}/enrich`, { method: 'POST' });
         job = (await r.json()).job_id;
       } catch (e) { this.status = 'Could not start.'; this.running = false; return; }
-      this.listen(job, source);
+      this.listen(job, 'waterfall');
     },
     listen(job, source) {
       this.source = source; this.running = true; this.finished = false;
@@ -387,6 +396,7 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
           this.status = ev.text;
         } else if (ev.type === 'done') {
           this.pct = 100; this.status = ev.text;
+          if (typeof ev.conflicts === 'number') this.conflictCount = ev.conflicts;
         } else if (ev.type === 'err') {
           this.status = ev.text;
           if (ev.text && ev.text.includes('Last.fm API key')) {   // key missing/invalid — prompt for it
@@ -540,6 +550,7 @@ function clusterCanvas() {
     trunk: [],                // #30 ids of grown nodes; the edge leading into each lights as trunk
     subHues: {}, _subHueN: 0,  // #14 parentId -> hue: every grown ring (sub-cluster) gets its own colour
     exhaustedIds: [],          // nodes whose + found nothing left under the active genre filter
+    boosted: [],               // 🔥 track keys to emphasize — every future grow leans toward them
 
     init() {
       // The central group is pinned at CENTER (fx/fy), so it anchors the whole graph: no centering
@@ -559,9 +570,66 @@ function clusterCanvas() {
         .force('separate', this._clusterForce())   // keep distinct branches from overlapping
         .alphaDecay(0.035);
       this.sim.stop();                       // started on demand once there are nodes (see _reheat)
-      this.$nextTick(() => { this.resetView(); this.$refs.seedInput && this.$refs.seedInput.focus(); });
+      this.sim.on('end', () => this.persist());   // save settled positions
+      this.sim.on('tick.grid', () => this._scheduleGrid());   // redraw the warped spacetime grid (throttled to rAF)
+      window.addEventListener('pagehide', () => this._flushState());   // land the latest state on navigation
+      const restored = this.restore();       // bring back a canvas from a previous visit (localStorage)
+      this.$nextTick(() => {
+        this._initGrid();
+        if (restored) { this.drawGrid(); return; }   // keep the saved view; nothing to focus into
+        this.resetView();
+        this.$refs.seedInput && this.$refs.seedInput.focus();
+      });
       fetch('/clusters/genres').then(r => r.json())
         .then(d => { this.families = d.families || []; this.genres = d.genres || []; }).catch(() => {});
+    },
+
+    // --- persistence: the whole canvas survives a refresh (localStorage) ---
+    // Debounced: one interaction fires persist() many times (reheat, settle, drag/zoom end) — coalesce
+    // the bursts into a single write a beat after you stop. _flushState (pagehide) lands the latest
+    // state even if you navigate away mid-debounce.
+    persist() {
+      clearTimeout(this._persistT);
+      this._persistT = setTimeout(() => { this._persistT = 0; this._writeState(); }, 300);
+    },
+    _writeState() {
+      if (!this.nodes.length) { try { localStorage.removeItem('tc:cluster'); } catch (e) {} return; }  // nothing to keep
+      try {
+        localStorage.setItem('tc:cluster', JSON.stringify({
+          v: 1, nodes: this.nodes, nextId: this.nextId, rootId: this.rootId, trunk: this.trunk,
+          subHues: this.subHues, subHueN: this._subHueN, allowedFamilies: this.allowedFamilies,
+          boosted: this.boosted,
+          playlistName: this.playlistName, includeCentral: this.includeCentral, saveMode: this.saveMode,
+          journey: this.journey, journeyName: this.journeyName, tx: this.tx, ty: this.ty, scale: this.scale,
+        }));
+      } catch (e) { /* private mode / quota — just don't persist */ }
+    },
+    _flushState() { if (this._persistT) { clearTimeout(this._persistT); this._persistT = 0; this._writeState(); } },
+    restore() {
+      let s;
+      try { s = JSON.parse(localStorage.getItem('tc:cluster')); } catch (e) { return false; }
+      if (!s || s.v !== 1 || !Array.isArray(s.nodes) || !s.nodes.length) return false;
+      this.nodes = s.nodes; this.nextId = s.nextId; this.rootId = s.rootId; this.trunk = s.trunk || [];
+      this.subHues = s.subHues || {}; this._subHueN = s.subHueN || 0;
+      this.allowedFamilies = s.allowedFamilies || []; this.boosted = s.boosted || [];
+      this.playlistName = s.playlistName || ''; this.includeCentral = s.includeCentral !== false;
+      this.saveMode = s.saveMode || 'all';
+      this.journey = s.journey || 'auto'; this.journeyName = s.journeyName || 'Pick for me';
+      this.tx = s.tx || 0; this.ty = s.ty || 0; this.scale = s.scale || 1;
+      this._syncSim();                       // feed the sim WITHOUT re-energizing — exact restore
+      return true;
+    },
+    _clearState() { clearTimeout(this._persistT); this._persistT = 0; try { localStorage.removeItem('tc:cluster'); } catch (e) {} },
+    // Wipe the canvas back to a blank slate (explicit Reset button, and after a Save).
+    reset() {
+      this.nodes = []; this.nextId = 1; this.rootId = null; this.trunk = [];
+      this.subHues = {}; this._subHueN = 0; this.exhaustedIds = []; this.boosted = [];
+      this.allowedFamilies = []; this.genreQuery = ''; this.genreOpen = false;
+      this.query = ''; this.results = []; this.playlistName = ''; this.saveMode = 'all';
+      this.journey = 'auto'; this.journeyName = 'Pick for me'; this.explain = null;
+      this._clearState();
+      this._syncSim();
+      this.$nextTick(() => { this.resetView(); this.$refs.seedInput && this.$refs.seedInput.focus(); });
     },
     // Feed the current nodes/links to the sim and re-settle. `alpha` controls how much the layout is
     // allowed to move: ~0.9 for a real grow (spread the new ring), but a small value for a removal so
@@ -573,6 +641,7 @@ function clusterCanvas() {
       this.sim.nodes(this.nodes);
       this.sim.force('link').links(links);
       this.sim.alpha(alpha).restart();
+      this.persist();
     },
     // Update the sim's node/link sets WITHOUT re-energizing it — removed nodes leave the simulation
     // but everything else holds its exact position (#14: pruning must not jiggle the layout).
@@ -582,6 +651,97 @@ function clusterCanvas() {
         .map(n => ({ source: n.parentId, target: n.id }));
       this.sim.nodes(this.nodes);
       this.sim.force('link').links(links);
+      this.persist();
+    },
+
+    // --- warped "spacetime" grid (a <canvas> behind the graph) ----------------------------------
+    _initGrid() {
+      if (this._gridCtx) return;             // idempotent — only wire up the canvas + resize listener once
+      this._gridEl = this.$refs.grid; if (!this._gridEl) return;
+      this._gridCtx = this._gridEl.getContext('2d');
+      this._resizeGrid();
+      window.addEventListener('resize', () => { this._resizeGrid(); this.drawGrid(); });
+      this.drawGrid();
+    },
+    _resizeGrid() {
+      const el = document.getElementById('cluster-canvas');
+      if (!el || !this._gridEl) return;
+      const r = el.getBoundingClientRect();
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      this._gridEl.width = Math.max(1, Math.round(r.width * dpr));
+      this._gridEl.height = Math.max(1, Math.round(r.height * dpr));
+      this._gridEl.style.width = r.width + 'px';        // pin CSS size so backing-store ≠ display (hi-DPI)
+      this._gridEl.style.height = r.height + 'px';
+      this._gW = r.width; this._gH = r.height; this._gDpr = dpr;
+    },
+    // Coalesce redraws to one per frame — drawing on every pointermove during a pan can saturate the
+    // main thread (big glow gradients × wells × hi-DPI) and freeze the drag. rAF throttles it.
+    _scheduleGrid() {
+      if (this._gridRAF) return;
+      this._gridRAF = requestAnimationFrame(() => { this._gridRAF = 0; this.drawGrid(); });
+    },
+    // Draw a grid that warps toward each cluster centre (gravity-well "spacetime curvature"). Each
+    // cluster's centre — the central group and every grown node — is a well whose depth grows with the
+    // size of the cluster hanging off it; grid lines are pulled in (and a soft glow sinks the well) for
+    // a 3-D dented-sheet read. The grid is world-attached (pans/zooms with the graph).
+    drawGrid() {
+      const ctx = this._gridCtx; if (!ctx) return;
+      try {
+      const W = this._gW, H = this._gH;
+      ctx.setTransform(this._gDpr, 0, 0, this._gDpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+      const scale = this.scale, tx = this.tx, ty = this.ty;
+      const proj = (wx, wy) => [wx * scale + tx, wy * scale + ty];
+      let wells = [];
+      for (const n of this.nodes) {
+        if (n.kind === 'central' || this.children(n.id).length) {
+          wells.push({ x: n.x, y: n.y, m: (n.kind === 'central' ? 2.4 : 0.7) + this.descendants(n.id).size * 0.3 });
+        }
+      }
+      // cap the well count on huge clusters — the warp sums over every well per grid sample (O(pts·wells));
+      // the heaviest few dominate the look anyway, so the rest add cost without visible benefit.
+      if (wells.length > 24) wells = wells.sort((a, b) => b.m - a.m).slice(0, 24);
+      const GRID = 88, R0 = 320, R0SQ = R0 * R0, PULL = 60;   // larger R0 ⇒ the well's pull reaches much further out
+      const warp = (px, py) => {                       // pull a world point toward the wells
+        let dx = 0, dy = 0;
+        for (const w of wells) {
+          const ex = w.x - px, ey = w.y - py, d2 = ex * ex + ey * ey, d = Math.sqrt(d2) || 1;
+          // displacement magnitude peaks AT the well (PULL·m) and decays with distance — so the dent
+          // is deepest UNDER each cluster centre, not in a ring between them. f = mag / d.
+          const f = (PULL * w.m) * R0SQ / (d2 + R0SQ) / d;
+          dx += ex * f; dy += ey * f;
+        }
+        return [px + dx, py + dy];
+      };
+      const mg = GRID * 2;                             // visible world bounds (+ margin)
+      const X0 = Math.floor(((0 - tx) / scale - mg) / GRID) * GRID, X1 = Math.ceil(((W - tx) / scale + mg) / GRID) * GRID;
+      const Y0 = Math.floor(((0 - ty) / scale - mg) / GRID) * GRID, Y1 = Math.ceil(((H - ty) / scale + mg) / GRID) * GRID;
+      const STEP = GRID / 7;
+      // depth: a soft blue-gray glow that sinks each well (the bottom of the dent), centred on the node
+      for (const w of wells) {
+        const [sx, sy] = proj(w.x, w.y), rad = Math.max(40, R0 * scale * 0.85);
+        const g = ctx.createRadialGradient(sx, sy, rad * 0.06, sx, sy, rad);
+        g.addColorStop(0, 'rgba(66,70,150,0.20)'); g.addColorStop(1, 'rgba(66,70,150,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(sx, sy, rad, 0, 7); ctx.fill();
+      }
+      ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(74,78,158,0.16)';   // dark blue-indigo — distinct from the neutral-gray edges
+      for (let gx = X0; gx <= X1; gx += GRID) {        // vertical lines (constant world x)
+        ctx.beginPath();
+        for (let wy = Y0, first = true; wy <= Y1; wy += STEP) {
+          const wp = warp(gx, wy), s = proj(wp[0], wp[1]);
+          if (first) { ctx.moveTo(s[0], s[1]); first = false; } else ctx.lineTo(s[0], s[1]);
+        }
+        ctx.stroke();
+      }
+      for (let gy = Y0; gy <= Y1; gy += GRID) {        // horizontal lines (constant world y)
+        ctx.beginPath();
+        for (let wx = X0, first = true; wx <= X1; wx += STEP) {
+          const wp = warp(wx, gy), s = proj(wp[0], wp[1]);
+          if (first) { ctx.moveTo(s[0], s[1]); first = false; } else ctx.lineTo(s[0], s[1]);
+        }
+        ctx.stroke();
+      }
+      } catch (e) { /* never let a draw error break panning/interaction */ }
     },
     // A d3 force that shoves cards of DIFFERENT branches apart when they crowd, so each sub-cluster
     // claims its own region instead of interleaving with a neighbour. Same-branch cards (and the
@@ -658,14 +818,28 @@ function clusterCanvas() {
     // The shared ring fetch: tracks nearest `node`'s pinned-path centroid, pushed off the pruned set,
     // restricted to the genre-family whitelist (#29), minus everything already on the canvas.
     async expandRing(node, k) {
+      // 🔥 emphasized tracks are folded into the positive centroid of EVERY grow (doubled for weight),
+      // so they steer all subsequent picks toward themselves — independent of which node you grow.
+      const pos = this.posKeys(node);
+      const pos_keys = this.boosted.length ? [...pos, ...this.boosted, ...this.boosted] : pos;
       try {
         const r = await fetch('/clusters/expand', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pos_keys: this.posKeys(node), neg_keys: this.prunedKeys(),
-                                 exclude: this.allKeys(), k, allow_genres: this.allowedFamilies }),
+          // count_keys = grown, non-pruned tracks only (NOT the central seeds) — the per-album cap
+          // counts the playlist being built, so a seed artist's album doesn't pre-spend the budget.
+          body: JSON.stringify({ pos_keys, neg_keys: this.prunedKeys(), exclude: this.allKeys(),
+                                 count_keys: this.keepKeys(), k, allow_genres: this.allowedFamilies }),
         });
         return (await r.json()).ring || [];
       } catch (e) { return []; }
+    },
+    // 🔥 emphasis toggle — steers FUTURE grows toward this track; doesn't touch the current canvas.
+    isBoosted(n) { return !!n.key && this.boosted.includes(n.key); },
+    toggleBoost(n) {
+      if (!n.key) return;
+      this.boosted = this.boosted.includes(n.key)
+        ? this.boosted.filter(key => key !== n.key) : [...this.boosted, n.key];
+      this.persist();
     },
     async grow(nodeId) {
       const node = this.nodeById(nodeId);
@@ -726,7 +900,7 @@ function clusterCanvas() {
     },
     // The genre filter PRUNES off-genre leaves (reversibly) and constrains future grows — it does NOT
     // refetch to refill rings, so the genre's pool stays available for + to grow into.
-    _genreChanged() { this.exhaustedIds = []; this.applyGenrePrune(); },   // pool changed; re-prune off-genre
+    _genreChanged() { this.exhaustedIds = []; this.applyGenrePrune(); this.persist(); },   // pool changed; re-prune off-genre
     pickFamily(fam) {
       if (!this.allowedFamilies.includes(fam)) this.allowedFamilies = [...this.allowedFamilies, fam];
       this.genreQuery = ''; this.genreSel = -1;
@@ -789,11 +963,11 @@ function clusterCanvas() {
       // Toggling state changes only the card's look, not the layout — so don't restart the sim at
       // all (#14: no jiggle). Un-prune is a pure visual flip. A hand toggle clears gpruned so the
       // genre filter won't silently flip it back.
-      if (n.state === 'pruned') { n.state = 'neutral'; n.gpruned = false; return; }
+      if (n.state === 'pruned') { n.state = 'neutral'; n.gpruned = false; this.persist(); return; }
       n.state = 'pruned'; n.gpruned = false;           // pruning terminates the branch...
       this.trunk = this.trunk.filter(t => t !== id);   // ...a pushed-away node is no longer trunk
       const kill = this.descendants(id);              // ...so drop anything grown below it
-      if (!kill.size) return;                          // pruning a leaf: nothing moves, nothing to do
+      if (!kill.size) { this.persist(); return; }      // pruning a leaf: nothing moves, nothing to do
       if (this.explain && kill.has(this.explain.childId)) this.explain = null;
       this.nodes = this.nodes.filter(x => !kill.has(x.id));
       this.trunk = this.trunk.filter(t => !kill.has(t));
@@ -934,6 +1108,7 @@ function clusterCanvas() {
       this.tx = mx - ((mx - this.tx) / this.scale) * ns;
       this.ty = my - ((my - this.ty) / this.scale) * ns;
       this.scale = ns;
+      this._scheduleGrid(); this.persist();
     },
     _worldPt(e) {                            // screen → world coords (undo pan + zoom)
       const rect = document.getElementById('cluster-canvas').getBoundingClientRect();
@@ -943,10 +1118,13 @@ function clusterCanvas() {
     startNodeDrag(n, e) {                    // pointerdown on a card body — grab it, not the canvas
       const p = this._worldPt(e);
       this._drag = { id: n.id, moved: false, ox: p.x - n.x, oy: p.y - n.y, sx: e.clientX, sy: e.clientY };
+      // capture on the canvas (which owns pointermove/up) so the drag survives the pointer leaving the card
+      try { document.getElementById('cluster-canvas').setPointerCapture(e.pointerId); } catch (_) {}
     },
     onPanStart(e) {
       if (e.target.closest('.cluster-node, .cluster-zoombar, .edge-dot, .cluster-explain')) return;   // let nodes/buttons/dots get clicks
       this._pan = { x: e.clientX, y: e.clientY };
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}   // keep the drag even over text/cards
     },
     onPanMove(e) {
       if (this._drag) {                      // pointer down on a card
@@ -965,6 +1143,7 @@ function clusterCanvas() {
       if (!this._pan) return;
       this.tx += e.clientX - this._pan.x; this.ty += e.clientY - this._pan.y;
       this._pan = { x: e.clientX, y: e.clientY };
+      this._scheduleGrid();
     },
     onPanEnd() {
       if (this._drag) {
@@ -974,6 +1153,7 @@ function clusterCanvas() {
         this._drag = null;
       }
       this._pan = null;
+      this.persist();                          // save dragged positions / pan offset
     },
     zoomBy(f) {
       const el = document.getElementById('cluster-canvas'); const rect = el.getBoundingClientRect();
@@ -982,6 +1162,7 @@ function clusterCanvas() {
       this.tx = cx - ((cx - this.tx) / this.scale) * ns;
       this.ty = cy - ((cy - this.ty) / this.scale) * ns;
       this.scale = ns;
+      this._scheduleGrid(); this.persist();
     },
     resetView() { this._centerWorld(CENTER, CENTER, 1); },
     _centerWorld(wx, wy, scale) {
@@ -990,6 +1171,7 @@ function clusterCanvas() {
       this.scale = scale;
       this.tx = rect.width / 2 - wx * scale;
       this.ty = rect.height / 2 - wy * scale;
+      this._scheduleGrid();
     },
   };
 }
@@ -1049,3 +1231,89 @@ function lastfmKey(configured) {
     },
   };
 }
+
+// ── Taste-model visualization tooltips ──────────────────────────────────────
+// A single floating div, formatted from each element's data-tip JSON (title + labelled rows).
+// Document-level delegation so it also covers the lazily htmx-swapped embedding-engine panel.
+function initVizTooltip() {
+  let tip = null, current = null, hideTimer = null, plainText = '';
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  // A copy glyph so the user can grab the tooltip's text verbatim (to paste back as an example).
+  const COPY_ICON = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"'
+    + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<rect x="9" y="9" width="11" height="11" rx="2"/>'
+    + '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+
+  function cancelHide() { clearTimeout(hideTimer); }
+  function scheduleHide() { clearTimeout(hideTimer); hideTimer = setTimeout(hide, 240); }
+  function hide() { if (tip) tip.classList.remove('on'); current = null; }
+
+  function ensure() {
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.className = 'viz-tip';
+      tip.setAttribute('role', 'tooltip');
+      // Interactive: the cursor can leave the source and move INTO the tip (to click copy)
+      // without it vanishing.
+      tip.addEventListener('mouseenter', cancelHide);
+      tip.addEventListener('mouseleave', hide);
+      tip.addEventListener('click', (e) => {
+        const btn = e.target.closest('.vt-copy');
+        if (!btn || !navigator.clipboard) return;
+        navigator.clipboard.writeText(plainText).then(() => {
+          btn.classList.add('done');
+          setTimeout(() => btn.classList.remove('done'), 1200);
+        }).catch(() => {});
+      });
+      document.body.appendChild(tip);
+    }
+    return tip;
+  }
+  function render(d) {
+    const dot = /^#[0-9a-fA-F]{3,8}$/.test(d.dot || '') ? d.dot : '';
+    const lines = [d.title];
+    if (d.desc) lines.push(d.desc);
+    let h = '<button class="vt-copy" type="button" title="Copy to clipboard" aria-label="Copy">'
+          + COPY_ICON + '</button>';
+    h += '<div class="vt-title' + (d.accent ? ' ' + d.accent : '') + '"'
+       + (dot ? ' style="--dot:' + dot + '"' : '') + '>' + esc(d.title) + '</div>';
+    if (d.desc) h += '<div class="vt-desc">' + esc(d.desc) + '</div>';
+    for (const row of (d.rows || [])) {
+      h += '<div class="vt-row' + (row.div ? ' vt-div' : '') + '">'
+         + '<span class="vt-l">' + esc(row.l) + '</span>'
+         + '<span class="vt-v' + (row.t ? ' ' + row.t : '') + '">' + esc(row.v) + '</span></div>';
+      if (row.n) h += '<div class="vt-n">' + esc(row.n) + '</div>';
+      lines.push(row.l + ': ' + row.v + (row.n ? ' — ' + row.n : ''));
+    }
+    plainText = lines.join('\n');
+    ensure().innerHTML = h;
+  }
+  function place(e) {
+    if (!tip) return;
+    const pad = 16, w = tip.offsetWidth, h = tip.offsetHeight;
+    let x = e.clientX + pad, y = e.clientY + pad;
+    if (x + w > window.innerWidth - 8) x = e.clientX - w - pad;
+    if (y + h > window.innerHeight - 8) y = e.clientY - h - pad;
+    tip.style.left = Math.max(8, x) + 'px';
+    tip.style.top = Math.max(8, y) + 'px';
+  }
+
+  document.addEventListener('mouseover', (e) => {
+    const el = e.target.closest && e.target.closest('[data-tip]');
+    if (!el) return;
+    cancelHide();                       // re-entering a source (or hopping between them) keeps it up
+    if (el === current) return;
+    let d; try { d = JSON.parse(el.getAttribute('data-tip')); } catch (_) { return; }
+    current = el; render(d); ensure().classList.add('on'); place(e);
+  });
+  // Pinned (no cursor-follow) so it's reachable; a short grace lets the pointer cross into the tip.
+  document.addEventListener('mouseout', (e) => {
+    const el = e.target.closest && e.target.closest('[data-tip]');
+    if (el && el === current && !el.contains(e.relatedTarget)) scheduleHide();
+  });
+  // A scroll or htmx swap can pull the hovered element out from under the cursor.
+  document.addEventListener('scroll', hide, true);
+  document.body.addEventListener('htmx:beforeSwap', hide);
+}
+window.addEventListener('DOMContentLoaded', initVizTooltip);

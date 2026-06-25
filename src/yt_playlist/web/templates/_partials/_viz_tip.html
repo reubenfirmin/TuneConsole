@@ -1,0 +1,97 @@
+{# Shared helpers that emit a `data-tip='...'` attribute carrying structured tooltip data (title +
+   labelled rows). The floating tooltip (app.js initVizTooltip) reads and formats it. Each row:
+   {l: label, v: value, n: note?, t: tone? (pos|neg|strong), div: true? (hairline above)}.
+   `dot` is an optional hex color for the title marker (used to match a rose petal's color).
+   Imported by taste_viz.html and taste_viz_engine.html so both render identical popups. #}
+
+{% macro _attr(title, rows, accent='', dot='', desc='') -%}
+data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows": rows}|tojson }}'
+{%- endmacro %}
+
+{% macro tip(title, rows, accent='', desc='', dot='') -%}
+{{ _attr(title, rows, accent, dot, desc) }}
+{%- endmacro %}
+
+{# Left (permanent) rose: explains the DURABLE side - share, learned weight, held lean, lasting bias. #}
+{% macro perm_tip(r, dot='') -%}
+{%- set standing = r.permanent_weight * r.standing_lean -%}
+{%- set rows = [
+  {"l": "Share of your plays", "v": "%.1f"|format(r.share * 100) ~ "%", "n": "how much of your listening this is"},
+  {"l": "Permanent weight", "v": "×" ~ "%.2f"|format(r.permanent_weight), "n": "durable, learned slowly from your history"},
+  {"l": "Standing lean", "v": "×" ~ "%.2f"|format(r.standing_lean), "n": "the slider you're holding on the Controls tab"},
+  {"l": "Lasting bias", "v": "×" ~ "%.2f"|format(standing), "n": "weight × lean, before today's mood is layered on", "t": "strong", "div": true},
+  {"l": "Lately", "v": "see right rose →", "n": "the matching slice shows how your recent mix has shifted"},
+] -%}
+{{ _attr("Permanent · " ~ r.name, rows, '', dot) }}
+{%- endmacro %}
+
+{# Right (transient) rose: 'right now vs your usual' as a zero-sum share shift (recent listening mix
+   vs all-time mix). The petal is the deviation; the popup spells it out and links it to the ranking tilt. #}
+{% macro transient_tip(r, dot='') -%}
+{%- set tone = "pos" if r.transient_dev > 0 else ("neg" if r.transient_dev < 0 else "") -%}
+{%- set rows = [
+  {"l": "Recent listening", "v": "%.1f"|format(r.recent_share * 100) ~ "%", "n": "share of what you've played lately"},
+  {"l": "All-time", "v": "%.1f"|format(r.alltime_share * 100) ~ "%", "n": "your usual share for this"},
+  {"l": "Shift", "v": "%+.1f"|format(r.transient_dev * 100) ~ " pts", "n": ("into this more than usual right now" if r.transient_dev > 0 else ("less than usual right now" if r.transient_dev < 0 else "right on your usual")), "t": tone, "div": true},
+] -%}
+{%- if r.transient_mult != 1.0 -%}
+{%- set rows = rows + [{"l": "Tilts ranking", "v": "×" ~ "%.2f"|format(r.transient_mult), "n": "the live boost the model applies (plays, likes & mood)"}] -%}
+{%- endif -%}
+{%- if r.graduation.score -%}
+{%- set rows = rows + [{"l": "Graduating", "v": "%+.0f"|format(r.graduation.frac * 100) ~ "%", "n": "sustained, this nudges your permanent weight", "t": ("pos" if r.graduation.frac > 0 else "neg")}] -%}
+{%- endif -%}
+{{ _attr("Right now · " ~ r.name, rows, '', dot) }}
+{%- endmacro %}
+
+{# Charts ticker candle: corpus baseline vs recent listening, with the candle's open/close/range
+   spelled out, the over/under-corpus ratio, and the heating/cooling trend. `r` is a ticker row;
+   `dim` adds the trailing 's' for year decades. #}
+{% macro ticker_tip(r, dim, close_days=7, span_days=365) -%}
+{%- set name = (r.cat ~ 's') if dim == 'year' else r.cat -%}
+{# Playlists are a CURRENT membership snapshot, so attributing older plays to them (and any
+   "earlier" / range / heating-cooling trend) is meaningless — drop the historical rows.
+   Periods are sized to the real history span, so the labels are dynamic (close_days / span_days)
+   and the "earlier" / range rows only appear when there's actually older data. #}
+{%- set hist = dim != 'playlist' -%}
+{%- set libnote = "its share of your library by track count" if dim == 'playlist' else "your corpus baseline — the dashed tick" -%}
+{%- set rows = [
+  {"l": ("Playlist size" if dim == 'playlist' else "In your library"), "v": "%.1f"|format(r.corpus_share * 100) ~ "%", "n": libnote},
+  {"l": "Now · last " ~ close_days ~ "d", "v": "%.1f"|format(r.close * 100) ~ "%", "n": "share of your recent listening"},
+] -%}
+{%- if hist and r.open is not none -%}
+{%- set rows = rows + [{"l": "Earlier", "v": "%.1f"|format(r.open * 100) ~ "%", "n": "where it sat at the start of your " ~ span_days ~ "d of history (the ◦ marker)"}] -%}
+{%- endif -%}
+{%- if hist and r.high > r.low -%}
+{%- set rows = rows + [{"l": "Range", "v": "%.1f"|format(r.low * 100) ~ "%–" ~ "%.1f"|format(r.high * 100) ~ "%", "n": "min–max over your " ~ span_days ~ "d of history (the whisker)"}] -%}
+{%- endif -%}
+{%- if r.ratio is none -%}
+{%- set accent = "" -%}
+{%- set rows = rows + [{"l": "vs library", "v": "new", "n": "played, but not in your library yet", "t": "strong", "div": true}] -%}
+{%- else -%}
+{%- set otone = "pos" if r.ratio >= 1.05 else ("neg" if r.ratio <= 0.95 else "") -%}
+{%- set olabel = "over-indexed" if r.ratio >= 1.05 else ("under-indexed" if r.ratio <= 0.95 else "about even") -%}
+{%- set olnote = (olabel ~ " — recent share ÷ size") if dim == 'playlist' else (olabel ~ " — recent share ÷ library share") -%}
+{%- set accent = otone -%}
+{%- set rows = rows + [{"l": "vs library", "v": "×" ~ "%.1f"|format(r.ratio), "n": olnote, "t": otone, "div": true}] -%}
+{%- endif -%}
+{%- if hist and r.open is not none and r.trend != 'flat' -%}
+{%- set ttone = "pos" if r.trend == "up" else "neg" -%}
+{%- set tval = "▲ heating" if r.trend == "up" else "▼ cooling" -%}
+{%- set tnote = "playing it more than earlier" if r.trend == "up" else "playing it less than earlier" -%}
+{%- set rows = rows + [{"l": "Trend", "v": tval, "n": tnote, "t": ttone}] -%}
+{%- endif -%}
+{{ _attr(name, rows, accent) }}
+{%- endmacro %}
+
+{# Combined bar rows (artists): durable side + the same zero-sum shift + the effective multiplier. #}
+{% macro axis_tip(r) -%}
+{%- set tone = "pos" if r.transient_dev > 0 else ("neg" if r.transient_dev < 0 else "") -%}
+{%- set rows = [
+  {"l": "All-time share", "v": "%.1f"|format(r.alltime_share * 100) ~ "%", "n": "your usual"},
+  {"l": "Recent share", "v": "%.1f"|format(r.recent_share * 100) ~ "%", "n": "of what you've played lately"},
+  {"l": "Shift", "v": "%+.1f"|format(r.transient_dev * 100) ~ " pts", "n": ("more than usual right now" if r.transient_dev > 0 else ("less than usual right now" if r.transient_dev < 0 else "on your usual")), "t": tone, "div": true},
+  {"l": "Permanent weight", "v": "×" ~ "%.2f"|format(r.permanent_weight), "n": "durable, learned from your history"},
+  {"l": "Effective multiplier", "v": "×" ~ "%.2f"|format(r.effective), "n": "what ranking actually applies", "t": "strong"},
+] -%}
+{{ _attr(r.name, rows, tone) }}
+{%- endmacro %}

@@ -24,6 +24,20 @@ class HistoryRepo(Repo):
         return {r["identity_key"] for r in rows}
 
     @synchronized
+    def recent_play_counts(self, limit) -> dict:
+        """{identity_key: play count} over the most recent `limit` play events (one row per history
+        item, newest-first). Frequency-weighted recent listening - repeats count - for the taste page's
+        'recent mix vs usual' deviation. A very large `limit` yields the all-time play-count basis, so
+        both sides of the deviation can be computed the same way."""
+        rows = self.conn.execute(
+            "SELECT identity_key k, COUNT(*) c FROM ("
+            "  SELECT hi.identity_key FROM history_items hi "
+            "  JOIN history_snapshots hs ON hs.id = hi.snapshot_id "
+            "  ORDER BY hs.taken_at DESC, hi.rowid DESC LIMIT ?"
+            ") GROUP BY identity_key", (limit,)).fetchall()
+        return {r["k"]: r["c"] for r in rows}
+
+    @synchronized
     def recent_keys_ordered(self, since_ts, limit=None) -> list[str]:
         """Identity keys played at/after since_ts, MOST-RECENT first (deduped by latest snapshot).
         For the recent-mood centroid, which wants the latest plays — not an arbitrary subset of a set."""

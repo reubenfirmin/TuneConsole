@@ -51,6 +51,7 @@ def build(ctx) -> APIRouter:
         groups = store.get_playlist_groups()                 # ytm -> group name
         stats = store.get_playlist_listen_stats()            # pid -> (last_ts, count)
         hidden = store.get_hidden_playlists()                # ytm of playlists hidden from this tab
+        created = store.get_recipe_created_ats()             # ytm -> created_at (generated playlists)
         rows = []
         for p in store.get_playlists():
             if p.ytm_playlist_id in hidden:
@@ -62,6 +63,7 @@ def build(ctx) -> APIRouter:
                 "count": p.track_count, "kind": store.playlist_kind(p.id),
                 "group": groups.get(p.ytm_playlist_id, ""),
                 "last": last, "listens": listens,
+                "created": created.get(p.ytm_playlist_id),   # for newest-first Generated ordering
             })
         group_names = sorted({g for g in groups.values() if g}, key=str.lower)
         return templates.TemplateResponse(request, "playlists.html", {

@@ -1,0 +1,43 @@
+{# Conflict resolver: provider disagreements for a playlist/album, grouped by track. Each field is a
+   radio group named "<track_id>:<field>"; the current canonical value (the waterfall's first pick)
+   is preselected. Submitting posts to resolve_url and swaps this same partial back in, so the list
+   shrinks as conflicts are resolved. Its x-init re-broadcasts the remaining count to the header icon. #}
+<div class="modal-backdrop" x-data="{ open: true }" x-show="open" x-cloak x-transition.opacity
+     @click="open = false" @keydown.escape.window="open = false"
+     x-init="$dispatch('conflicts-count', { count: {{ count_left }} })">
+  <div class="modal modal-wide" @click.stop x-transition.scale.origin.center>
+    <h3>Resolve enrichment disagreements</h3>
+    {% if not conflicts %}
+      <p class="section-note">Nothing left to resolve. 🎉</p>
+      <div class="modal-actions"><button type="button" @click="open = false">Close</button></div>
+    {% else %}
+      <p class="section-note">Providers returned different values. Pick the one to keep for each track.</p>
+      <form hx-post="{{ resolve_url }}" hx-target="#conflicts-modal" hx-swap="innerHTML">
+        {% for _tid, items in conflicts|groupby('track_id') %}
+        <div class="conflict-track">
+          <strong>{{ items[0].artist }} — {{ items[0].title }}</strong>
+          {% for c in items %}
+          <div class="conflict-field">
+            <span class="conflict-label">{{ c.field|capitalize }}</span>
+            <div class="conflict-options">
+              {% for cand in c.candidates %}
+              <label class="conflict-option">
+                <input type="radio" name="{{ c.track_id }}:{{ c.field }}"
+                       value="{{ cand.value }}"{% if loop.first %} checked{% endif %}>
+                <span class="conflict-value">{{ cand.value }}</span>
+                <span class="muted conflict-prov">{{ cand.provider }}</span>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        {% endfor %}
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="open = false">Cancel</button>
+          <button type="submit">Save choices</button>
+        </div>
+      </form>
+    {% endif %}
+  </div>
+</div>

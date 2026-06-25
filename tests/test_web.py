@@ -629,18 +629,21 @@ def test_playlists_tab_renders(store):
 def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     import json as _json
     import yt_playlist.providers.musicbrainz as mb
-    # stub MusicBrainz so the test never hits the network
+    from tests.conftest import only_provider
+    # stub MusicBrainz so the test never hits the network (enrich + the MBID search)
     monkeypatch.setattr(mb, "enrich",
                         lambda title, artist: {"S0": ("rock", "1998"), "S1": ("jazz", "2003")}.get(title, (None, None)))
+    monkeypatch.setattr(mb, "recording_mbid", lambda title, artist: None)
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
     store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", "Al", 200, 1),
                                   store.upsert_track("v1", "S1", "Y", "Al", 200, 1),
                                   store.upsert_track("v2", "Sx", "Z", "Al", 200, 1)])
+    only_provider(store, "musicbrainz")          # the waterfall runs MusicBrainz only
     c = _client(store, lambda: {iid: FakeClient()})
 
     assert len(store.tracks_to_enrich(a)) == 3
-    jid = c.post(f"/playlist/{a}/enrich/musicbrainz").json()["job_id"]
+    jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
     types = [_json.loads(l[6:])["type"] for l in body.splitlines() if l.startswith("data: ")]
@@ -654,7 +657,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
 
     # re-run after MusicBrainz gains a genre for v2 — it fills the gap and v2 is now complete
     monkeypatch.setattr(mb, "enrich", lambda title, artist: ("ambient", "2010") if title == "Sx" else (None, None))
-    jid2 = c.post(f"/playlist/{a}/enrich/musicbrainz").json()["job_id"]
+    jid2 = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid2}") as st:
         "".join(st.iter_text())
     v2 = next(t for t in store.playlist_tracks_detail(a) if t["video_id"] == "v2")
@@ -762,12 +765,12 @@ def test_page_rejoins_active_enrichment(store):
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
 
-    assert f"enrichPanel({a}, false, 0, '')" in c.get(f"/playlist/{a}").text   # nothing to rejoin
-    job = app.state.ctx.jobs.create(); job.playlist_id = a; job.source = "discogs"
+    assert f"enrichPanel({a}, false, 0, '', null, 0)" in c.get(f"/playlist/{a}").text   # nothing to rejoin
+    job = app.state.ctx.jobs.create(); job.playlist_id = a; job.source = "waterfall"
     page = c.get(f"/playlist/{a}").text
-    assert f"enrichPanel({a}, false, {job.id}, 'discogs')" in page and "rejoinIfActive()" in page
+    assert f"enrichPanel({a}, false, {job.id}, 'waterfall', null, 0)" in page and "rejoinIfActive()" in page
     job.done = True
-    assert f"enrichPanel({a}, false, 0, '')" in c.get(f"/playlist/{a}").text   # finished -> no rejoin
+    assert f"enrichPanel({a}, false, 0, '', null, 0)" in c.get(f"/playlist/{a}").text   # finished -> no rejoin
 
 
 def test_discogs_fills_genre_and_year(store, monkeypatch):
@@ -782,9 +785,11 @@ def test_discogs_fills_genre_and_year(store, monkeypatch):
     a = store.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
     store.set_playlist_tracks(a, [store.upsert_track("v0", "Born Slippy", "Underworld", "Al", 200, 1),
                                   store.upsert_track("v1", "Unknown", "Nobody", "Al", 200, 1)])
+    from tests.conftest import only_provider
+    only_provider(store, "discogs")
     c = _client(store, lambda: {iid: FakeClient()})
 
-    jid = c.post(f"/playlist/{a}/enrich/discogs").json()["job_id"]
+    jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
     types = [_json.loads(l[6:])["type"] for l in body.splitlines() if l.startswith("data: ")]
@@ -807,9 +812,11 @@ def test_lastfm_fills_missing_genre_and_year(store, monkeypatch):
     store.set_playlist_tracks(a, [t0, store.upsert_track("v1", "S1", "Y", "Al", 200, 1),
                                   store.upsert_track("v2", "S?", "Z", "Al", 200, 1)])
     store.set_track_year(t0, "1998")                 # fill-only must not clobber this
+    from tests.conftest import only_provider
+    only_provider(store, "lastfm")
     c = _client(store, lambda: {iid: FakeClient()})
 
-    jid = c.post(f"/playlist/{a}/enrich/lastfm").json()["job_id"]
+    jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
     evs = [_json.loads(l[6:]) for l in body.splitlines() if l.startswith("data: ")]
@@ -846,11 +853,13 @@ def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", "Al", 200, 1)])
+    from tests.conftest import only_provider
+    only_provider(store, "lastfm")
     c = _client(store, lambda: {iid: FakeClient()})
-    jid = c.post(f"/playlist/{a}/enrich/lastfm").json()["job_id"]
+    jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
-    assert "Last.fm API key" in body
+    assert "no API key" in body                       # Last.fm enabled but keyless -> skipped, not run
 
 
 def test_toasts_region_present_on_every_page(store):

@@ -2,7 +2,7 @@
 
 A rose draws one equal-width petal per category around a circle; the petal's outer radius encodes
 its value. `rose_geometry` is the unsigned (distribution) form; `rose_geometry_signed` is the
-diverging form for signed transient leans — 0 sits on a neutral ring, + grows outward, - pulls in.
+diverging form for signed transient leans - 0 sits on a neutral ring, + grows outward, - pulls in.
 Geometry is emitted as SVG path strings in a viewBox centred on (0,0); the template wraps them.
 """
 import math
@@ -46,21 +46,30 @@ def rose_geometry(values, *, radius=100.0, inner=18.0, gap_deg=4.0, start_deg=-9
     return petals
 
 
-def rose_geometry_signed(values, *, radius=100.0, inner=18.0, neutral=0.5,
-                         gap_deg=4.0, start_deg=-90.0) -> list:
-    """Diverging rose for signed values. frac = value / max(|values|); petals reach beyond the neutral
-    ring for +, fall inside it for -. Each petal adds {sign, neutral_r}."""
+def rose_geometry_deviation(values, *, scale, radius=100.0, inner=18.0, neutral=0.5,
+                            gap_deg=4.0, start_deg=-90.0, eps=0.03) -> list:
+    """Deviation rose for signed values measured against an ABSOLUTE `scale` (not the per-rose max, so
+    a near-flat set stays small instead of being blown up to full amplitude). Each petal is a *band*
+    from the neutral baseline ring: positive grows outward, negative inward, and a value at/near zero
+    draws nothing (empty path) - it simply sits on the ring. frac = clamp(value / scale, -1, 1).
+    Each petal adds {sign, neutral_r}."""
     values = list(values)
     if not values:
         return []
-    mx = max((abs(v) for v in values), default=0.0)
-    fracs = [(v / mx) if mx > 0 else 0.0 for v in values]
+    fracs = [max(-1.0, min(1.0, (v / scale) if scale else 0.0)) for v in values]
     petals = _petals(values, gap_deg, start_deg, fracs)
     span = radius - inner
     neutral_r = inner + neutral * span
     for p in petals:
-        outer = max(inner + 0.5, inner + (neutral + 0.5 * p["frac"]) * span)
-        p["sign"] = 1 if p["frac"] > 0 else (-1 if p["frac"] < 0 else 0)
+        f = p["frac"]
+        p["sign"] = 1 if f > 0 else (-1 if f < 0 else 0)
         p["neutral_r"] = neutral_r
-        p["path"] = _arc_path(inner, outer, p["a0"], p["a1"])
+        if abs(f) < eps:
+            p["path"] = ""                      # no meaningful change -> no petal, rests on the ring
+            continue
+        if f > 0:
+            r0, r1 = neutral_r, neutral_r + f * (radius - neutral_r)
+        else:
+            r0, r1 = neutral_r + f * (neutral_r - inner), neutral_r
+        p["path"] = _arc_path(min(r0, r1), max(r0, r1), p["a0"], p["a1"])
     return petals

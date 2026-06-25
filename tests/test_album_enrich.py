@@ -45,7 +45,7 @@ def test_album_page_renders_enrichable_table(store):
                    base_url="http://127.0.0.1")
     html = c.get("/album?browse=BID").text                    # FakeClient has no get_album -> store fallback
     assert "Greatest Hits" in html and "Genre" in html        # enrichable view, not "unavailable"
-    assert "Enrich via MusicBrainz" in html
+    assert 'aria-label="Enrich"' in html                       # the single waterfall enrich icon
 
 
 def test_album_enrich_endpoint_starts_job(store):
@@ -53,7 +53,7 @@ def test_album_enrich_endpoint_starts_job(store):
     _fold_album(store)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
-    r = c.post("/album/BID/enrich/musicbrainz")
+    r = c.post("/album/BID/enrich")
     assert r.status_code == 200 and "job_id" in r.json()
 
 

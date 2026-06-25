@@ -11,11 +11,15 @@ def build(ctx) -> APIRouter:
     store, templates = ctx.store, ctx.templates
 
     def _rose_rows(rows, n=10):
-        """Augment the top-n axis rows in place with `petal` (share, unsigned) and `petal_t`
-        (transient lean, signed-diverging) SVG geometry, so the template stays logic-light."""
+        """Augment the top-n axis rows in place with `petal` (all-time share) and `petal_t` (the
+        right-now deviation = recent share - all-time share) SVG geometry, so the template stays
+        logic-light. The deviation rose uses an absolute scale (floored) so a near-flat recent mix
+        stays small rather than being normalized up to full amplitude."""
         rows = rows[:n]
+        devs = [r["transient_dev"] for r in rows]
+        scale = max(0.12, max((abs(d) for d in devs), default=0.0))   # 12 pts fills the rose, or more
         unsigned = rose.rose_geometry([r["share"] for r in rows])
-        signed = rose.rose_geometry_signed([r["transient_lean"] for r in rows])
+        signed = rose.rose_geometry_deviation(devs, scale=scale)
         for r, p, pt in zip(rows, unsigned, signed):
             r["petal"], r["petal_t"] = p, pt
         return rows

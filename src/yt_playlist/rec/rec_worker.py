@@ -14,13 +14,14 @@ from yt_playlist.rec.rec_dao import RecDao
 
 class RecWorker:
     def __init__(self, ctx, debounce_s=2.0, discovery_tick_s=1800, gc_tick_s=86400, gc_initial_s=60,
-                 auto_sync_tick_s=1800):
+                 auto_sync_tick_s=1800, auto_sync_poll_s=60):
         self.ctx = ctx
         self.debounce_s = debounce_s
         self.discovery_tick_s = discovery_tick_s   # background discovery scan cadence (~30 min)
         self.gc_tick_s = gc_tick_s                 # generated-playlist GC cadence (daily)
         self.gc_initial_s = gc_initial_s           # first GC pass shortly after start (catches restarts)
         self.auto_sync_tick_s = auto_sync_tick_s   # auto-sync-plays cadence when the user opts in (~30 min)
+        self.auto_sync_poll_s = auto_sync_poll_s   # how often the loop checks whether a sync is DUE
         self._lock = threading.Lock()
         self._pending = False
         self._running = False
@@ -63,22 +64,31 @@ class RecWorker:
                 self.ctx.logger.warning("generated-playlist GC tick failed", exc_info=True)
             time.sleep(self.gc_tick_s)
 
+    def _auto_sync_due(self, now) -> bool:
+        """Whether an auto-sync of plays should run NOW: the user has opted in (settings key
+        `auto_sync_plays`), an account is connected, and it's been at least one tick since the last
+        plays sync (or there's never been one). Due-based on the stored stamp - NOT a fixed sleep - so
+        an app restart can't postpone it: on restart, if it's overdue, the next poll runs it."""
+        if self.ctx.store.get_setting("auto_sync_plays") != "1":
+            return False
+        if not (self.ctx.client_provider() or {}):     # no account connected yet -> nothing to pull
+            return False
+        last = self.ctx.store.get_setting("last_plays_sync_at")
+        return last is None or (now - float(last)) >= self.auto_sync_tick_s
+
     def _auto_sync_loop(self):
-        """When the user has toggled auto-sync on (settings key `auto_sync_plays`), pull new plays and
-        likes every auto_sync_tick_s so the taste model stays current without a manual sync. The setting
-        is re-read each tick, so toggling off takes effect on the next cycle; while off — or before any
-        account is connected — the tick is a cheap no-op."""
+        """Keeps plays/likes current without a manual sync when auto-sync is on. Polls every
+        auto_sync_poll_s and runs a sync whenever one is DUE (see _auto_sync_due). Polling on a short
+        interval (rather than sleeping a full tick first) means restarting the app no longer pushes the
+        next sync 30 minutes out - it catches up within a poll of being overdue, then holds the cadence."""
         from yt_playlist.library import sync as sync_mod
         while True:
-            time.sleep(self.auto_sync_tick_s)
+            time.sleep(self.auto_sync_poll_s)
             try:
-                if self.ctx.store.get_setting("auto_sync_plays") != "1":
-                    continue
-                clients = self.ctx.client_provider() or {}
-                if not clients:        # no account connected yet -> nothing to pull
+                if not self._auto_sync_due(self.ctx.now_fn()):
                     continue
                 sync_mod.sync_plays_all(
-                    self.ctx.store, clients, self.ctx.now_fn(),
+                    self.ctx.store, self.ctx.client_provider() or {}, self.ctx.now_fn(),
                     on_auth_expired=lambda iid, label: self.ctx.auth_expired.__setitem__(iid, label or str(iid)),
                     on_auth_ok=lambda iid: self.ctx.auth_expired.pop(iid, None))
                 self.trigger()         # fold the new plays/likes into the taste model (debounced)

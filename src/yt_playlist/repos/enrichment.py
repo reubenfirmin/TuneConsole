@@ -117,3 +117,117 @@ class EnrichmentRepo(Repo):
             "WHERE t.album_browse_id=? AND c.resolved=0 ORDER BY t.title, c.field",
             (album_browse_id,)).fetchall()
         return self._conflicts(rows)
+
+    # --- enrichment worker: priority queue, processed bookkeeping, coverage stats ----------------
+
+    # Per-track song plays + the play sums of the containers it belongs to (playlist / album / artist).
+    # Reused by the priority queue. `tp` = track plays; the three container CTEs aggregate over members.
+    _QUEUE_CTES = """
+        WITH plays AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key),
+        tp AS (SELECT t.id, COALESCE(p.c,0) sp FROM tracks t
+               LEFT JOIN plays p ON p.identity_key=t.identity_key),
+        pl_plays AS (SELECT pt.playlist_id, SUM(tp.sp) c FROM playlist_tracks pt
+                     JOIN tp ON tp.id=pt.track_id GROUP BY pt.playlist_id),
+        al_plays AS (SELECT t.album_browse_id ab, SUM(tp.sp) c FROM tracks t JOIN tp ON tp.id=t.id
+                     WHERE t.album_browse_id IS NOT NULL GROUP BY t.album_browse_id),
+        ar_plays AS (SELECT t.artist ar, SUM(tp.sp) c FROM tracks t JOIN tp ON tp.id=t.id
+                     WHERE t.artist IS NOT NULL AND t.artist<>'' GROUP BY t.artist)
+    """
+
+    @synchronized
+    def next_enrich_batch(self, limit) -> list:
+        """The worker's priority queue: up to `limit` not-yet-processed tracks, ordered by tier —
+        (0) new arrivals (created after the worker last caught up), (1) played songs by playcount,
+        (2) zero-play songs in a played playlist/album/artist by that container's plays, (3) orphans."""
+        row = self.conn.execute(
+            "SELECT value FROM settings WHERE key='enrich_caught_up_at'").fetchone()
+        caught_up = float(row["value"]) if row and row["value"] else 0.0
+        rows = self.conn.execute(self._QUEUE_CTES + """
+            SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id, tp.sp,
+              MAX(COALESCE((SELECT MAX(plp.c) FROM playlist_tracks pt JOIN pl_plays plp
+                            ON plp.playlist_id=pt.playlist_id WHERE pt.track_id=t.id), 0),
+                  COALESCE((SELECT c FROM al_plays WHERE ab=t.album_browse_id), 0),
+                  COALESCE((SELECT c FROM ar_plays WHERE ar=t.artist), 0)) AS best
+            FROM tracks t JOIN tp ON tp.id=t.id
+            WHERE t.first_enriched_at IS NULL
+            ORDER BY
+              CASE WHEN t.created_at IS NOT NULL AND t.created_at > ? THEN 0
+                   WHEN tp.sp > 0 THEN 1
+                   WHEN best > 0 THEN 2 ELSE 3 END ASC,
+              CASE WHEN t.created_at IS NOT NULL AND t.created_at > ? THEN -t.created_at
+                   WHEN tp.sp > 0 THEN -tp.sp ELSE -best END ASC,
+              t.id ASC
+            LIMIT ?""", (caught_up, caught_up, limit)).fetchall()
+        return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"],
+                 "artist": r["artist"], "mb_recording_id": r["mb_recording_id"]} for r in rows]
+
+    @synchronized
+    def resweep_batch(self, limit, stale_before) -> list:
+        """Already-processed tracks that are stale (last_enriched_at < stale_before) AND still missing
+        a core field — re-attempted only when the primary queue is empty. Oldest-checked first."""
+        rows = self.conn.execute(
+            "SELECT id, video_id, title, artist, mb_recording_id FROM tracks "
+            "WHERE first_enriched_at IS NOT NULL AND last_enriched_at < ? "
+            "AND (genre IS NULL OR genre='' OR mb_year IS NULL OR mb_year='' "
+            "     OR bpm IS NULL OR energy IS NULL OR danceability IS NULL) "
+            "ORDER BY last_enriched_at ASC LIMIT ?", (stale_before, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    @synchronized
+    def mark_enriched(self, track_ids, now) -> None:
+        """Stamp a processed pass: set first_enriched_at once, bump last_enriched_at every time."""
+        if not track_ids:
+            return
+        qs = ",".join("?" * len(track_ids))
+        self.conn.execute(
+            f"UPDATE tracks SET first_enriched_at = COALESCE(first_enriched_at, ?), "
+            f"last_enriched_at = ? WHERE id IN ({qs})", [now, now, *track_ids])
+        self.conn.commit()
+
+    @synchronized
+    def coverage_stats(self) -> dict:
+        r = self.conn.execute(
+            "SELECT COUNT(*) total, "
+            "  SUM(first_enriched_at IS NOT NULL) processed, "
+            "  SUM(genre IS NOT NULL AND genre<>'') genre, "
+            "  SUM(mb_year IS NOT NULL AND mb_year<>'') year, "
+            "  SUM(bpm IS NOT NULL) bpm, SUM(energy IS NOT NULL) energy, "
+            "  SUM(danceability IS NOT NULL) danceability FROM tracks").fetchone()
+        return {k: (r[k] or 0) for k in
+                ("total", "processed", "genre", "year", "bpm", "energy", "danceability")}
+
+    @synchronized
+    def queue_remaining(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) n FROM tracks WHERE first_enriched_at IS NULL").fetchone()["n"]
+
+    @synchronized
+    def outstanding_conflicts(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) n FROM enrichment_conflict WHERE resolved=0").fetchone()["n"]
+
+    @synchronized
+    def processed_timeline(self, buckets=40) -> list:
+        """Cumulative processed-track count over time, as up to `buckets` (t, cumulative) points —
+        for the trend sparkline. Empty list when nothing's been processed yet."""
+        rng = self.conn.execute(
+            "SELECT MIN(first_enriched_at) lo, MAX(first_enriched_at) hi, COUNT(*) n "
+            "FROM tracks WHERE first_enriched_at IS NOT NULL").fetchone()
+        if not rng["n"] or rng["lo"] is None:
+            return []
+        lo, hi, total = rng["lo"], rng["hi"], rng["n"]
+        if hi <= lo:
+            return [{"t": hi, "n": total}]
+        width = (hi - lo) / buckets
+        out, cum, i = [], 0, 0
+        rows = self.conn.execute(
+            "SELECT first_enriched_at e FROM tracks WHERE first_enriched_at IS NOT NULL "
+            "ORDER BY first_enriched_at").fetchall()
+        for b in range(1, buckets + 1):
+            edge = lo + width * b
+            while i < len(rows) and rows[i]["e"] <= edge:
+                cum += 1
+                i += 1
+            out.append({"t": edge, "n": cum})
+        out[-1]["n"] = total
+        return out

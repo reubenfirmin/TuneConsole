@@ -71,6 +71,7 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
     on_progress({"type": "info", "text": f"Enriching {total} track(s) via {names}…", "total": total})
     seq = _gate.enter()
     dead = set()                                  # providers whose breaker tripped mid-run
+    conflicts_found = 0
     try:
         for i, t in enumerate(tracks, 1):
             if should_stop and should_stop():
@@ -93,9 +94,12 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                                  "skipping it for the rest of this run."})
             for fld, candidates in base.detect_conflicts(results).items():
                 store.upsert_conflict(t["id"], fld, candidates)
+                conflicts_found += 1
             eff_genre, eff_year = store.get_track_enrichment(t["id"])
             on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
                          "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']}"})
-        on_progress({"type": "done", "text": f"Enriched {total} track(s).", "total": total})
+        note = f" · {conflicts_found} disagreement(s) to review" if conflicts_found else ""
+        on_progress({"type": "done", "text": f"Enriched {total} track(s).{note}",
+                     "total": total, "conflicts": conflicts_found})
     finally:
         _gate.leave(seq)

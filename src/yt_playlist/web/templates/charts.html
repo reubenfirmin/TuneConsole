@@ -1,4 +1,5 @@
-{% extends "base.html" %}{% block title %}Charts · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_partials/ticker.html" import ticker_chart %}
+{% block title %}Charts · TuneConsole{% endblock %}{% block body %}
 <div class="page-head">
   <span class="eyebrow">Charts</span>
   <h1>Your top charts</h1>
@@ -11,9 +12,14 @@
     <span class="seg">
       <button type="button" :class="{ on: view === 'songs' }" @click="view = 'songs'">Top songs</button>
       <button type="button" :class="{ on: view === 'artists' }" @click="view = 'artists'">Top artists</button>
+      <button type="button" :class="{ on: view === 'genres' }" @click="view = 'genres'">Genres</button>
+      <button type="button" :class="{ on: view === 'years' }" @click="view = 'years'">Years</button>
+      <button type="button" :class="{ on: view === 'albums' }" @click="view = 'albums'">Albums</button>
+      <button type="button" :class="{ on: view === 'playlists' }" @click="view = 'playlists'">Playlists</button>
     </span>
     <span style="margin-left:auto"></span>
-    <span class="seg" title="Limit to plays in this window of your sync history">
+    <span class="seg" title="Limit to plays in this window of your sync history"
+          x-show="view === 'songs' || view === 'artists'">
       <a href="/charts?window=all" class="{{ 'on' if window == 'all' }}">All time</a>
       <a href="/charts?window=90d" class="{{ 'on' if window == '90d' }}">90d</a>
       <a href="/charts?window=30d" class="{{ 'on' if window == '30d' }}">30d</a>
@@ -60,5 +66,10 @@
     </table>
     {% else %}<p class="empty" style="margin:0">No play history yet.</p>{% endif %}
   </div>
+
+  <div class="card" x-show="view === 'genres'" x-cloak>{{ ticker_chart(tickers.genre, 'genre') }}</div>
+  <div class="card" x-show="view === 'years'" x-cloak>{{ ticker_chart(tickers.year, 'year') }}</div>
+  <div class="card" x-show="view === 'albums'" x-cloak>{{ ticker_chart(tickers.album, 'album') }}</div>
+  <div class="card" x-show="view === 'playlists'" x-cloak>{{ ticker_chart(tickers.playlist, 'playlist') }}</div>
 </div>
 {% endblock %}
