@@ -58,6 +58,21 @@
         <circle cx="12" cy="12" r="0.9" fill="currentColor" stroke="none"/>
       </svg>
     </button>
+    <button type="button" class="head-icon" :class="{ on: running && source === 'deezer' }"
+            @click="start('deezer')" :disabled="running"
+            title="Enrich BPM from Deezer" aria-label="Enrich via Deezer">
+      <span class="spinner" x-show="running && source === 'deezer'" x-cloak></span>
+      <svg x-show="!(running && source === 'deezer')" viewBox="0 0 24 24" width="19" height="19"
+           fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>
+    </button>
+    <button type="button" class="head-icon" :class="{ on: running && source === 'acousticbrainz' }"
+            @click="start('acousticbrainz')" :disabled="running"
+            title="Enrich BPM, energy &amp; danceability from AcousticBrainz" aria-label="Enrich via AcousticBrainz">
+      <span class="spinner" x-show="running && source === 'acousticbrainz'" x-cloak></span>
+      <svg x-show="!(running && source === 'acousticbrainz')" viewBox="0 0 24 24" width="19"
+           height="19" fill="none" stroke="currentColor" stroke-width="2"><path
+           d="M4 12h2l2-6 3 12 3-9 2 5h4"/></svg>
+    </button>
   </div>
 </div>
 {% if is_generated %}{% with pid = pl.id %}{% include "_partials/feedback_panel.html" %}{% endwith %}{% endif %}

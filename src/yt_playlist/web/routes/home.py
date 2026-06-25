@@ -101,6 +101,8 @@ def build(ctx) -> APIRouter:
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
 
     def _feed_context(now):
+        # Bake any held-day slider exposure into the graduation ledger (once per UTC day per axis).
+        recommend.graduate_slider_exposure(store, now)
         # Each list card shows a stable random slice of its ranked pool, reseeded once its rotation
         # epoch advances (every erosion_view_cap real Home visits). The epoch is read here, never
         # ticked — the tick happens only in GET /, so steer/stance previews re-render the same slice
@@ -144,7 +146,11 @@ def build(ctx) -> APIRouter:
             "auto_sync": store.get_setting("auto_sync_plays") == "1",
             "muted_count": len(store.muted_artists()),   # transparency: what's being hidden
             "rediscover": recommend.rediscover_playlists(store, now, epoch=_epoch(store, "rediscover")),
+            # Saved albums you haven't played lately — rendered above the playlists in the same
+            # section, rotating on the same "rediscover" epoch so the whole block advances together.
+            "rediscover_albums": recommend.rediscover_albums(store, now, epoch=_epoch(store, "rediscover")),
             "flash": request.query_params.get("flash"),
+            "toast": request.query_params.get("toast"),   # transient success (e.g. re-auth w/ auto-sync)
             # One-time onboarding nudge: once they've synced, point new users at enrichment until
             # they dismiss it (the flag persists across reloads).
             "show_enrich_nudge": bool(store.get_setting("last_sync_at"))
@@ -187,13 +193,68 @@ def build(ctx) -> APIRouter:
 
     @router.post("/home/steer")
     async def home_steer(request: Request):
-        # Drag a fingerprint bar -> set that genre/era weight and return the re-ranked feed in one
-        # request. Re-ranks in place (no rotation tick), so the change is felt. [0,2] band.
+        # Drag a fingerprint bar -> set a STANDING TRANSIENT LEAN (not a permanent weight) and return
+        # the re-ranked feed in one request. The bar shows the EFFECTIVE multiplier (permanent x lean);
+        # we store the lean so permanent x lean == the dragged target. Long-term taste is edited only
+        # on the Taste Model page. The held lean bakes into permanent over days (graduate_slider_exposure).
         form = await request.form()
         axis, weight = form.get("axis"), form.get("weight")
         if axis and weight and axis.split(":", 1)[0] in ("genre", "era", "artist"):
-            store.set_weight(axis, float(weight), lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
+            target = float(weight)
+            perm = store.get_weights().get(axis, 1.0)
+            lean = target / perm if perm > 0 else target
+            lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
+            lean = max(lo, min(hi, lean))
+            store.set_lean(axis, lean, now_fn())
         return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(now_fn()))
+
+    @router.post("/home/fingerprint/expand")
+    async def fingerprint_expand(request: Request):
+        """Drill into a genre family: return fp-row sliders for each of its subgenres.
+        POSTed form field: `family` (e.g. 'techno'). Responds with the subgenre partial."""
+        form = await request.form()
+        fam = (form.get("family") or "").strip().lower()
+        subs = genre_map.subgenres_of(fam)
+        w = store.get_weights()
+        rows = []
+        for sub in subs:
+            axis = f"genre:{sub}"
+            weight = w.get(axis, 1.0)
+            lean = store.get_lean(axis)
+            effective = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, weight * lean))
+            rows.append({"name": sub, "axis": axis, "effective": effective})
+        return templates.TemplateResponse(
+            request, "_partials/fingerprint_subgenres.html",
+            {"family": fam, "rows": rows})
+
+    @router.post("/home/fingerprint/add")
+    async def fingerprint_add(request: Request):
+        """Pin an axis (e.g. 'genre:gqom' or 'era:1990') so it appears as a steerable bar even with
+        zero plays. Writes a neutral lean (1.0) so it persists; returns the updated fingerprint feed."""
+        form = await request.form()
+        axis = (form.get("axis") or "").strip()
+        if axis and axis.split(":", 1)[0] in ("genre", "era", "artist"):
+            # Only write if not already present — don't overwrite a user-set lean.
+            if store.get_lean(axis) == 1.0 and axis not in store.get_leans():
+                store.set_lean(axis, 1.0, now_fn())
+        return templates.TemplateResponse(
+            request, "_partials/home_feed.html", _feed_context(now_fn()))
+
+    @router.get("/home/fingerprint/search")
+    def fingerprint_search(request: Request):
+        """Typeahead: return genre tags (families + subgenres) matching the query `q` (case-insensitive
+        substring). Each result has an 'add' button that posts to /home/fingerprint/add."""
+        q = (request.query_params.get("q") or "").strip().lower()
+        matches: list[str] = []
+        if q:
+            for tag in genre_map.all_genres():
+                if q in tag:
+                    matches.append(tag)
+                    if len(matches) >= 20:   # cap results for a clean dropdown
+                        break
+        return templates.TemplateResponse(
+            request, "_partials/fingerprint_search_results.html",
+            {"matches": matches, "q": q})
 
     @router.post("/home/generate")
     async def home_generate(request: Request):

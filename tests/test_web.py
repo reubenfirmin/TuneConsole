@@ -20,6 +20,14 @@ def test_dashboard_and_sync(store):
     assert '"type": "end"' in body
     assert len(store.get_playlists()) == 1
 
+def test_home_renders_toast_from_query_param(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    html = c.get("/?toast=You%E2%80%99re+authenticated+again.").text
+    assert "toast-ok" in html and "authenticated again" in html
+    assert "toast-ok" not in c.get("/").text          # absent without the param
+
 def test_auth_expired_shows_reauth_banner(store):
     class Expired:   # a client whose session has lapsed
         def get_library_playlists(self, limit=None):
@@ -153,6 +161,35 @@ def test_setup_post_applies_and_redirects(store):
     assert [i["label"] for i in identities] == ["main", "brand"]
     assert identities[0]["is_master"] and not identities[1]["is_master"]
     assert identities[1]["brand_account_id"] == "UC9"
+
+def _setup_redirect(store, rt):
+    """POST a valid single-identity setup and return (key, value) of the redirect's query param."""
+    from urllib.parse import urlsplit, parse_qsl
+    app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    r = c.post("/setup", data={"headers": "h", "label": "main", "brand_account_id": "", "master": "0"},
+               follow_redirects=False)
+    assert r.status_code == 303
+    (key, value), = parse_qsl(urlsplit(r.headers["location"]).query)
+    return key, value
+
+def test_setup_first_time_banners_sync_now(store):
+    # Never synced -> the green "Sync now" CTA is on the page, so point at it via a persistent banner.
+    key, value = _setup_redirect(store, _FakeRuntime(store, configured=False))
+    assert key == "flash" and "Sync now" in value
+
+def test_setup_reauth_with_autosync_shows_toast(store):
+    # Synced before + auto-sync on -> nothing to do, so a transient toast (not a banner).
+    store.set_setting("last_sync_at", "1.0")
+    store.set_setting("auto_sync_plays", "1")
+    key, value = _setup_redirect(store, _FakeRuntime(store, configured=True))
+    assert key == "toast" and "authenticated again" in value
+
+def test_setup_reauth_without_autosync_banners_action(store):
+    # Synced before but auto-sync off -> they must act, so a persistent banner pointing at Full sync.
+    store.set_setting("last_sync_at", "1.0")
+    key, value = _setup_redirect(store, _FakeRuntime(store, configured=True))
+    assert key == "flash" and "authenticated again" in value and "Full sync" in value
 
 def test_setup_post_skips_blank_label_rows(store):
     rt = _FakeRuntime(store, configured=False)
@@ -692,6 +729,7 @@ def test_sync_prunes_when_library_is_real(store):
 
 def test_resignin_clears_banner_and_flashes(store):
     rt = _FakeRuntime(store, configured=True)
+    store.set_setting("last_sync_at", "1.0")             # has synced before -> a genuine re-signin
     app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
     app.state.ctx.auth_expired["main"] = "Main"          # simulate an expired session (banner shown)
     c = TestClient(app, base_url="http://127.0.0.1")
@@ -699,8 +737,9 @@ def test_resignin_clears_banner_and_flashes(store):
     r = c.post("/setup", data={"headers": "Cookie: SID=abc", "label": ["main"],
                                "brand_account_id": [""], "master": "0"}, follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/?flash=Signed%20back%20in."   # re-signin message, back to playlists
-    assert app.state.ctx.auth_expired == {}                          # banner cleared
+    # Auto-sync off, so they must act -> persistent banner pointing at Full sync, back to the dashboard.
+    assert r.headers["location"].startswith("/?flash=") and "authenticated%20again" in r.headers["location"]
+    assert app.state.ctx.auth_expired == {}                          # stale-session banner cleared
 
 
 def test_jobs_find_active():

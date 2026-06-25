@@ -11,24 +11,52 @@
 <div class="cluster-page" x-data="clusterCanvas()" x-init="init()">
 
   <div class="cluster-search" :class="{ docked: nodes.length }">
-    <div class="cluster-search-box">
-      <span class="cluster-search-icon">⌕</span>
-      <input type="text" x-model="query" @input.debounce.250ms="search()" @focus="search()"
-             placeholder="Search an artist, playlist, or song to seed a cluster…"
-             autocomplete="off" spellcheck="false">
-      <ul class="cluster-suggest" x-show="results.length" x-cloak @click.outside="results = []">
-        <template x-for="r in results" :key="r.kind + r.label">
-          <li @click="addSeed(r)">
-            <span class="cs-kind" :class="r.kind" x-text="r.kind"></span>
-            <span class="cs-label" x-text="r.label"></span>
-            <span class="cs-sub" x-text="r.sub"></span>
-          </li>
-        </template>
-      </ul>
+    <div class="cluster-search-row">
+      <div class="cluster-search-box">
+        <span class="cluster-search-icon">⌕</span>
+        <input type="text" x-ref="seedInput" x-model="query" @input.debounce.250ms="search()" @focus="search()"
+               @keydown.down.prevent="seedMove(1)" @keydown.up.prevent="seedMove(-1)"
+               @keydown.enter.prevent="seedChoose()" @keydown.escape="results = []"
+               placeholder="Search an artist, playlist, or song to seed a cluster…"
+               autocomplete="off" spellcheck="false">
+        <ul class="cluster-suggest" x-show="results.length" x-cloak @click.outside="results = []">
+          <template x-for="(r, idx) in results" :key="r.kind + r.label">
+            <li :class="{ sel: seedSel === idx }" @mouseenter="seedSel = idx" @click="addSeed(r)">
+              <span class="cs-kind" :class="r.kind" x-text="r.kind"></span>
+              <span class="cs-label" x-text="r.label"></span>
+              <span class="cs-sub" x-text="r.sub"></span>
+            </li>
+          </template>
+        </ul>
+      </div>
+      <!-- #29 genre-family whitelist as an autosuggest combo: type to filter, pick to add a chip -->
+      <div class="cluster-genres" x-show="families.length" x-cloak @click.outside="genreOpen = false">
+        <div class="cg-box" :class="{ on: allowedFamilies.length }" @click="genreOpen = true; $refs.gq.focus()">
+          <span class="cg-icon">⌕</span>
+          <template x-for="f in allowedFamilies" :key="f">
+            <span class="cg-chip" @click.stop="removeFamily(f)" x-text="f" title="Remove"></span>
+          </template>
+          <input type="text" x-ref="gq" x-model="genreQuery" @focus="genreOpen = true"
+                 @input="genreOpen = true; genreSel = -1"
+                 @keydown.down.prevent="genreOpen = true; genreMove(1)" @keydown.up.prevent="genreMove(-1)"
+                 @keydown.enter.prevent="genreChoose()" @keydown.escape="genreOpen = false"
+                 @keydown.backspace="genreQuery || popFamily()"
+                 :placeholder="allowedFamilies.length ? '' : 'All genres'"
+                 autocomplete="off" spellcheck="false">
+          <button type="button" class="cg-x" x-show="allowedFamilies.length" x-cloak
+                  @click.stop="clearFamilies()" title="Clear genres">✕</button>
+        </div>
+        <ul class="cg-suggest" x-show="genreOpen && genreSuggest().length" x-cloak>
+          <template x-for="(f, idx) in genreSuggest()" :key="f.kind + f.name">
+            <li :class="{ sel: genreSel === idx }" @mouseenter="genreSel = idx" @click="pickFamily(f.name)">
+              <span class="cg-name" x-text="f.name"></span>
+              <span class="cg-kind" :class="f.kind" x-text="f.kind === 'family' ? 'family' : 'genre'"></span>
+              <span class="cg-n" x-text="f.n"></span>
+            </li>
+          </template>
+        </ul>
+      </div>
     </div>
-    <p class="cluster-hint" x-show="!nodes.length" x-cloak>
-      <strong>Pin</strong> a track to branch toward it · <strong>prune</strong> to push away ·
-      everything you don't prune gets saved.</p>
   </div>
 
   <div class="cluster-canvas" id="cluster-canvas"
@@ -37,10 +65,20 @@
     <div class="cluster-world" :style="worldStyle()">
       <svg class="cluster-edges" :width="WORLD" :height="WORLD">
         <path class="edge-path" :d="edgePath()"></path>
+        <path class="edge-path trunk" :d="trunkPath()"></path>
       </svg>
+      <!-- One clickable dot at each edge's midpoint: "why is this connection here?" -->
+      <template x-for="e in edges()" :key="e.id">
+        <button type="button" class="edge-dot" :class="{ on: explain && explain.childId === e.id }"
+                :style="`left:${e.x}px;top:${e.y}px`" @pointerdown.stop @click="openExplain(e.id)"
+                title="Why is this connected?"></button>
+      </template>
       <template x-for="n in nodes" :key="n.id">
-        <div class="cluster-node" :class="[n.kind, n.state]" :style="`left:${n.x}px;top:${n.y}px`">
-          <div class="cn-body" @pointerdown.stop="startNodeDrag(n, $event)">
+        <div class="cluster-node"
+             :class="[n.kind, n.state, { trunk: isTrunkNode(n.id) && n.kind !== 'central', filtered: n.gpruned }]"
+             :style="`left:${n.x}px;top:${n.y}px;${nodeStyle(n)}`">
+          <div class="cn-body" @pointerdown.stop="startNodeDrag(n, $event)"
+               :title="n.kind === 'track' && n.state === 'pruned' ? n.label + ' — ' + n.sub + (n.gpruned ? ' (filtered out — click ↺ to restore)' : '') : ''">
             <template x-if="n.kind === 'central'">
               <div class="cn-central">
                 <span class="cn-eyebrow">Central cluster</span>
@@ -66,13 +104,35 @@
             <button type="button" class="cn-btn play" x-show="n.vid && n.state !== 'pruned'" @click="play(n)"
                     title="Play on YouTube Music">▶</button>
             <button type="button" class="cn-btn grow" x-show="n.state !== 'pruned'" @click="grow(n.id)"
-                    title="Grow: add a ring of nearby tracks">＋</button>
+                    :disabled="exhaustedIds.includes(n.id)"
+                    :title="exhaustedIds.includes(n.id) ? 'Genre filters are exhausted' : 'Grow: add a ring of nearby tracks'">＋</button>
             <button type="button" class="cn-btn prune" x-show="n.kind === 'track'"
                     :class="{ on: n.state === 'pruned' }" @click="prune(n.id)"
-                    title="Prune: remove and push this branch away">✕</button>
+                    x-text="n.state === 'pruned' ? '↺' : '✕'"
+                    :title="n.state === 'pruned' ? 'Restore this track' : 'Prune: remove and push this branch away'"></button>
           </div>
         </div>
       </template>
+      <!-- "Why this connection?" popover, anchored to the explained edge's live midpoint -->
+      <div class="cluster-explain" x-show="explain" x-cloak @click.outside="closeExplain()"
+           :style="`left:${explainAnchor().x}px;top:${explainAnchor().y}px`">
+        <button type="button" class="ce-close" @click="closeExplain()" title="Close">✕</button>
+        <template x-if="explain && explain.loading">
+          <p class="ce-loading">Finding the connection…</p>
+        </template>
+        <template x-if="explain && !explain.loading && explain.data">
+          <div>
+            <p class="ce-why" x-text="explain.data.headline"></p>
+            <ul class="ce-reasons" x-show="explain.data.reasons && explain.data.reasons.length > 1">
+              <template x-for="(r, i) in explain.data.reasons.slice(1)" :key="i">
+                <li x-text="r.text"></li>
+              </template>
+            </ul>
+            <p class="ce-score" x-show="explain.data.match_pct != null">
+              <span class="ce-pct" x-text="explain.data.match_pct + '%'"></span> taste-space match</p>
+          </div>
+        </template>
+      </div>
     </div>
     <div class="cluster-zoombar">
       <button type="button" @click="zoomBy(1.2)" title="Zoom in">＋</button>
@@ -83,13 +143,45 @@
 
   <form class="cluster-savebar" hx-post="/clusters/save" hx-target="#cluster-save-result"
         hx-swap="innerHTML" x-show="nodes.length" x-cloak>
-    <span class="cluster-count"><strong x-text="keepKeys().length"></strong> tracks</span>
+    <!-- save the whole cluster, or just the trunk you grew -->
+    <div class="cluster-mode">
+      <button type="button" :class="{ on: saveMode === 'all' }" @click="saveMode = 'all'">
+        <strong x-text="keepKeys().length"></strong><span>all non-hidden</span>
+      </button>
+      <button type="button" :class="{ on: saveMode === 'trunk' }" @click="saveMode = 'trunk'"
+              :disabled="!trunkKeys().length" title="Only the trunk you grew">
+        <strong x-text="trunkKeys().length"></strong><span>trunk only</span>
+      </button>
+    </div>
+    <!-- DJ Journey: how the saved mix is ordered -->
+    <div class="cluster-journey" @click.outside="journeyOpen = false">
+      <button type="button" class="cj-toggle" @click="journeyOpen = !journeyOpen" title="DJ Journey: how the mix is ordered">
+        <span class="cj-eyebrow">DJ Journey</span>
+        <span class="cj-cur" x-text="journeyName"></span>
+        <span class="cj-caret">▾</span>
+      </button>
+      <div class="cj-panel" x-show="journeyOpen" x-cloak>
+        <button type="button" class="cj-item" :class="{ on: journey === 'auto' }"
+                @click="journey = 'auto'; journeyName = 'Pick for me'; journeyOpen = false">
+          <strong>Pick for me</strong><span>Let the DJ choose the arc</span>
+        </button>
+        {% for j in journeys %}
+        <button type="button" class="cj-item" :class="{ on: journey === '{{ j.key }}' }"
+                @click="journey = '{{ j.key }}'; journeyName = '{{ j.label }}'; journeyOpen = false">
+          <strong>{{ j.label }}</strong><span>{{ j.hint }}</span>
+        </button>
+        {% endfor %}
+      </div>
+    </div>
+    <input type="hidden" name="journey" :value="journey">
     <input type="text" name="name" x-model="playlistName" placeholder="Cluster name" required>
     <label class="cluster-incl" x-show="centralSongKeys().length" x-cloak>
       <input type="checkbox" name="include_central" x-model="includeCentral">
       Include central tracks</label>
-    <input type="hidden" name="keep_keys" :value="JSON.stringify(keepKeys())">
+    <input type="hidden" name="keep_keys" :value="JSON.stringify(saveKeys())">
     <input type="hidden" name="central_keys" :value="JSON.stringify(centralSongKeys())">
+    <input type="hidden" name="seed_labels" :value="JSON.stringify(seedLabels())">
+    <input type="hidden" name="allow_families" :value="JSON.stringify(allowedFamilies)">
     <button type="submit" class="cta">▶ Save &amp; play on YouTube ↗</button>
   </form>
   <div id="cluster-save-result"></div>

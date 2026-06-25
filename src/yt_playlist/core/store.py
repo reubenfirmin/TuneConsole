@@ -8,6 +8,7 @@ from yt_playlist.repos.actions import ActionRepo
 from yt_playlist.repos.base import synchronized as _synchronized
 from yt_playlist.repos.charts import ChartsRepo
 from yt_playlist.repos.collection import CollectionRepo
+from yt_playlist.repos.enrichment import EnrichmentRepo
 from yt_playlist.repos.genres import GenreRepo
 from yt_playlist.repos.history import HistoryRepo
 from yt_playlist.repos.identities import IdentityRepo
@@ -41,6 +42,22 @@ CREATE TABLE IF NOT EXISTS tracks (
   thumbnail TEXT,
   genre TEXT,
   mb_year TEXT,
+  bpm REAL,
+  energy REAL,
+  danceability REAL,
+  mb_recording_id TEXT,
+  music_key TEXT,
+  music_scale TEXT,
+  mood_happy REAL,
+  mood_sad REAL,
+  mood_relaxed REAL,
+  mood_acoustic REAL,
+  instrumental REAL,
+  loudness REAL,
+  dynamic_complexity REAL,
+  popularity INTEGER,
+  gain REAL,
+  label TEXT,
   UNIQUE(identity_key, video_id)
 );
 CREATE TABLE IF NOT EXISTS playlists (
@@ -110,6 +127,26 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS genre_whitelist (
   name TEXT PRIMARY KEY COLLATE NOCASE   -- editable genre whitelist for tag matching
 );
+CREATE TABLE IF NOT EXISTS enrichment_log (
+  id INTEGER PRIMARY KEY,
+  track_id INTEGER NOT NULL,
+  run_id TEXT NOT NULL,                   -- groups one waterfall run across providers/tracks
+  provider TEXT NOT NULL,                 -- 'musicbrainz' | 'lastfm' | ...
+  field TEXT NOT NULL,                    -- neutral concept: 'genre' | 'year' | 'bpm' | ...
+  value TEXT,                             -- provider's finding, stringified (NULL = found nothing)
+  created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_enrichment_log_track ON enrichment_log(track_id);
+CREATE TABLE IF NOT EXISTS enrichment_conflict (
+  id INTEGER PRIMARY KEY,
+  track_id INTEGER NOT NULL,
+  field TEXT NOT NULL,                    -- conflicting field: 'genre' | 'year' | 'bpm'
+  candidates TEXT NOT NULL,               -- JSON: [{"provider": ..., "value": ...}, ...]
+  resolved INTEGER NOT NULL DEFAULT 0,
+  resolved_value TEXT,
+  updated_at REAL,
+  UNIQUE(track_id, field)
+);
 CREATE TABLE IF NOT EXISTS rec_vectors (
   identity_key TEXT PRIMARY KEY,
   vec BLOB NOT NULL                       -- float32 taste-embedding for the track (see embed.py)
@@ -127,6 +164,12 @@ CREATE TABLE IF NOT EXISTS rec_feedback (
 CREATE TABLE IF NOT EXISTS rec_weights (
   axis TEXT PRIMARY KEY,                  -- e.g. 'lane:deep_cut', 'family:techno'
   weight REAL NOT NULL DEFAULT 1.0        -- learned blend weight; 1.0 = prior
+);
+CREATE TABLE IF NOT EXISTS rec_lean (
+  axis TEXT PRIMARY KEY,                  -- 'genre:<fam>' | 'genre:<sub>' | 'era:<decade>' | 'artist:<name>'
+  value REAL NOT NULL DEFAULT 1.0,        -- standing transient multiplier; 1.0 = neutral (non-decaying)
+  updated_at REAL,                        -- when the slider was last moved (drives held-day exposure)
+  last_graduated_day TEXT                 -- UTC date (YYYY-MM-DD) of last exposure-graduation, or NULL
 );
 """
 
@@ -158,9 +201,10 @@ class Store:
         self.playlists = PlaylistRepo(self)
         self.discovery = DiscoveryRepo(self)
         self.search = SearchRepo(self)
+        self.enrichment = EnrichmentRepo(self)
         self._repos = (self.overlaps, self.discovery, self.genres, self.settings, self.actions,
                        self.identities, self.history, self.collection, self.rec, self.charts,
-                       self.tracks, self.playlists, self.search)
+                       self.tracks, self.playlists, self.search, self.enrichment)
 
     def __getattr__(self, name):
         # Delegate any attribute Store no longer defines to the DAO that owns it. Only hit on a
@@ -190,6 +234,22 @@ class Store:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN genre TEXT")
         if "mb_year" not in cols:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN mb_year TEXT")
+        if "bpm" not in cols:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN bpm REAL")
+        if "energy" not in cols:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN energy REAL")
+        if "danceability" not in cols:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN danceability REAL")
+        if "mb_recording_id" not in cols:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN mb_recording_id TEXT")
+        for _c, _t in (("music_key", "TEXT"), ("music_scale", "TEXT"),
+                       ("mood_happy", "REAL"), ("mood_sad", "REAL"),
+                       ("mood_relaxed", "REAL"), ("mood_acoustic", "REAL"),
+                       ("instrumental", "REAL"), ("loudness", "REAL"),
+                       ("dynamic_complexity", "REAL"), ("popularity", "INTEGER"),
+                       ("gain", "REAL"), ("label", "TEXT")):
+            if _c not in cols:
+                self.conn.execute(f"ALTER TABLE tracks ADD COLUMN {_c} {_t}")
         pcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(playlists)")}
         if "thumbnail" not in pcols:
             self.conn.execute("ALTER TABLE playlists ADD COLUMN thumbnail TEXT")

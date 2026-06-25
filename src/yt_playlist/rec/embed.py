@@ -211,13 +211,15 @@ def blended_neighbors(store, seed_groups, topn=12, exclude=None):
 CLUSTER_BETA = 0.6   # how hard a pruned ("negative model") track pushes a branch's ring away
 
 
-def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=CLUSTER_BETA):
+def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=CLUSTER_BETA, allow=None):
     """A Clusters-canvas ring: tracks nearest a node's PINNED-path centroid, tilted AWAY from the
     PRUNED set's centroid. Score = cos(c, pos_centroid) - beta * cos(c, neg_centroid). pos/neg seeds
     and `exclude` (already-on-canvas keys) are never returned. Empty until the model is built.
 
-    The candidate pool is today the user's own library vectors; a later pass can widen it to a
-    new-music pool without touching this scoring."""
+    `allow`, when given, is a whitelist of candidate keys the ring is restricted to (#29 genre-family
+    filter): any key outside it is skipped, so an untagged or off-genre track can't surface. The
+    candidate pool is today the user's own library vectors; a later pass can widen it to a new-music
+    pool without touching this scoring."""
     keys, V, idx = load_vectors(store)
     if V is None:
         return []
@@ -233,15 +235,45 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=CLU
         neg /= np.linalg.norm(neg) + 1e-9
         scores = scores - beta * (V @ neg)
     excl = set(exclude or ()) | set(pos_keys) | set(neg_keys)
+    allow = None if allow is None else set(allow)
     out = []
     for j in np.argsort(-scores):
         k = keys[j]
-        if k in excl:
+        if k in excl or (allow is not None and k not in allow):
             continue
         out.append((k, float(scores[j])))
         if len(out) >= topn:
             break
     return out
+
+
+def connection_geometry(store, key, path_keys, exclude=()):
+    """Explain a Clusters edge in taste space: how close the child is to its pinned path, and — when
+    there's no direct shared basket — the track that BRIDGES them.
+
+    Returns {"score": cos(child, path_centroid) in [-1, 1], "bridge": key|None}. The bridge is the
+    modelled track closest to BOTH ends, argmax over T of min(cos(child, T), cos(path_centroid, T)),
+    excluding the child, the path, and `exclude` — i.e. the 'third track both sit near' that the
+    second-order embedding is built to capture. Both fields are None until the model is built or if
+    the child / path aren't modelled."""
+    keys, V, idx = load_vectors(store)
+    if V is None or key not in idx:
+        return {"score": None, "bridge": None}
+    pi = [idx[k] for k in path_keys if k in idx and k != key]
+    if not pi:
+        return {"score": None, "bridge": None}
+    p = V[pi].mean(0)
+    p /= np.linalg.norm(p) + 1e-9
+    c = V[idx[key]]
+    score = float(c @ p)
+    both = np.minimum(V @ c, V @ p)                  # close to child AND to the path
+    excl = set(path_keys) | {key} | set(exclude)
+    bridge = None
+    for j in np.argsort(-both):
+        if keys[j] not in excl:
+            bridge = keys[j]
+            break
+    return {"score": score, "bridge": bridge}
 
 
 def centroid_neighbors(store, seed_keys, topn=12, exclude=None):

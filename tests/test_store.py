@@ -51,6 +51,16 @@ def test_upsert_track_null_video_id_dedup(store):
         ("t|x",)).fetchone()
     assert rows["cnt"] == 1
 
+def test_upsert_track_backfills_duration_on_resync(store):
+    # A track can enter the store without a duration (history/plays sync inserts duration_s=None).
+    # Re-upserting it later WITH a duration — e.g. adding it via "find alternate version" — must
+    # backfill duration_s, otherwise its time never shows in the playlist (issue #26).
+    t = store.upsert_track("v1", "Song A", "Artist X", "Alb", None, 1)
+    again = store.upsert_track("v1", "Song A", "Artist X", "Alb", 250, 1)
+    assert again == t  # same row reused, not a duplicate
+    dur = store.conn.execute("SELECT duration_s FROM tracks WHERE id=?", (t,)).fetchone()["duration_s"]
+    assert dur == 250
+
 def test_history_keys_window(store):
     iid = store.upsert_identity("main", "cred", None, True)
     store.add_history_snapshot(iid, 5000.0, ["song a|artist", "song c|artist"])
@@ -116,3 +126,13 @@ def test_suppress_overlap_roundtrip(store):
     assert len(store.get_suppressed_overlaps()) == 1
     store.unsuppress_overlap("PLA", "PLB")
     assert store.get_suppressed_overlap_pairs() == set()
+
+
+def test_theme_rows_returns_all_facets(store):
+    store.bump_theme("genre:jazz", 0.4, 1000.0)
+    store.bump_theme("era:1970", -0.3, 1000.0)
+    rows = {r["facet"]: r["score"] for r in store.theme_rows()}
+    assert abs(rows["genre:jazz"] - 0.4) < 1e-9
+    assert abs(rows["era:1970"] - (-0.3)) < 1e-9
+    # strongest magnitude first
+    assert store.theme_rows()[0]["facet"] == "genre:jazz"

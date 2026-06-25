@@ -8,7 +8,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
-from yt_playlist.providers import discogs, lastfm, musicbrainz
+from yt_playlist.providers import enrichment, lastfm, waterfall
 from yt_playlist.rec import journeys, rec_params, recommend
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 
@@ -94,6 +94,7 @@ def build(ctx) -> APIRouter:
             # autosuggest = the editable whitelist plus whatever genres already exist in the library
             "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
+            "conflict_count": store.conflict_count_for_playlist(pid),  # drives the header conflict icon
             "active_job": ctx.jobs.find_active(pid),     # an in-progress enrichment to rejoin, if any
             # arrived via a home "Enrich" CTA — tint the enrich icons CTA-green so it's clear what to click
             "enrich_hint": request.query_params.get("enrich") == "1",
@@ -151,30 +152,25 @@ def build(ctx) -> APIRouter:
             return _toast(request, "YouTube returned an unexpected response")
         return _refresh()                             # reload so the new tracks drop into the table
 
-    ENRICH_SOURCES = {"musicbrainz": musicbrainz.enrich_playlist, "lastfm": lastfm.enrich_playlist,
-                      "discogs": discogs.enrich_playlist}
-
-    @router.post("/playlist/{pid}/enrich/{source}")
-    def playlist_enrich(pid: int, source: str):
-        """Kick off a background enrichment job (source: 'musicbrainz' = genre+year, 'lastfm' = genre)."""
+    @router.post("/playlist/{pid}/enrich")
+    def playlist_enrich(pid: int):
+        """Kick off the enrichment waterfall: every enabled provider, in configured order, over this
+        playlist's not-yet-complete tracks. Logs each provider response and records disagreements."""
         if store.get_playlist(pid) is None:
             raise HTTPException(status_code=404, detail="playlist not found")
-        runner = ENRICH_SOURCES.get(source)
-        if runner is None:
-            raise HTTPException(status_code=404, detail="unknown enrichment source")
-        # Rejoin an already-running job for this playlist+source instead of starting a duplicate
-        # (double-click, or the same playlist open in two tabs) — which would double the API load
-        # and race writes. A different source is allowed to run alongside (separate rate gate).
+        # Rejoin an already-running job for this playlist rather than starting a duplicate
+        # (double-click, or the same playlist open in two tabs).
         active = ctx.jobs.find_active(pid)
-        if active is not None and active.source == source:
+        if active is not None:
             return JSONResponse({"job_id": active.id})
         job = ctx.jobs.create()
         job.playlist_id = pid           # so a refreshed page can find + rejoin this job
-        job.source = source
+        job.source = "waterfall"
 
         def run():
             try:
-                runner(store, pid, on_progress=job.events.append)
+                waterfall.run_waterfall(store, store.tracks_for_waterfall(pid),
+                                        enrichment.load_config(store), on_progress=job.events.append)
             except Exception as e:  # noqa: BLE001
                 detail = str(e) or type(e).__name__
                 job.error = detail
@@ -184,6 +180,33 @@ def build(ctx) -> APIRouter:
 
         threading.Thread(target=run, daemon=True).start()
         return JSONResponse({"job_id": job.id})
+
+    @router.get("/playlist/{pid}/conflicts")
+    def playlist_conflicts(request: Request, pid: int):
+        """The conflict-resolver modal: unresolved provider disagreements for this playlist's tracks."""
+        return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
+            "conflicts": store.unresolved_conflicts_for_playlist(pid),
+            "resolve_url": f"/playlist/{pid}/conflicts/resolve",
+            "count_left": store.conflict_count_for_playlist(pid)})
+
+    @router.post("/playlist/{pid}/conflicts/resolve")
+    async def playlist_resolve_conflicts(request: Request, pid: int):
+        """Apply the user's picks. Each `<track_id>:<field>` form key carries the chosen value;
+        it overwrites the canonical column and marks that conflict resolved."""
+        form = await request.form()
+        for key, value in form.multi_items():
+            if ":" not in key or not value:
+                continue
+            tid, _, field = key.partition(":")
+            if tid.isdigit():
+                try:
+                    store.resolve_conflict(int(tid), field, value)
+                except ValueError:
+                    pass
+        return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
+            "conflicts": store.unresolved_conflicts_for_playlist(pid),
+            "resolve_url": f"/playlist/{pid}/conflicts/resolve",
+            "count_left": store.conflict_count_for_playlist(pid)})
 
     @router.get("/playlist/enrich/events/{job_id}")
     async def playlist_enrich_events(request: Request, job_id: int):

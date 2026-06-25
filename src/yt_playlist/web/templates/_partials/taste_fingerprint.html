@@ -15,20 +15,37 @@
       {% for g in fingerprint.families[:6] %}
       <div class="fp-row">
         <span class="fp-name" title="{{ '%.0f'|format(g.share*100) }}% of your listening">{{ g.name }}</span>
-        <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ g.weight }}"
+        <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ g.effective }}"
                name="weight" hx-post="/home/steer" hx-vals='{"axis":"genre:{{ g.name }}"}'
                hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
                hx-on::before-request="sessionStorage.setItem('steered','1')"
                aria-label="favor or mute {{ g.name }}">
+        <button type="button" class="fp-expand-btn"
+                hx-post="/home/fingerprint/expand"
+                hx-vals='{"family":"{{ g.name }}"}'
+                hx-target="#fp-subs-{{ loop.index }}"
+                hx-swap="innerHTML"
+                title="Drill into {{ g.name }} subgenres"
+                aria-label="expand {{ g.name }} subgenres">&#9656;</button>
       </div>
+      <div id="fp-subs-{{ loop.index }}" class="fp-subgenres"></div>
       {% endfor %}
+      <div class="fp-search-box">
+        <input type="search" class="fp-search-input" name="q" placeholder="Search genres…"
+               hx-get="/home/fingerprint/search"
+               hx-trigger="keyup changed delay:300ms"
+               hx-target="#fp-search-results"
+               hx-swap="innerHTML"
+               aria-label="search genres to add">
+        <div id="fp-search-results" class="fp-search-results-container"></div>
+      </div>
     </div>
     <div class="fp-col">
       <span class="fp-label">Eras</span>
       {% for e in fingerprint.eras[:5] %}
       <div class="fp-row">
         <span class="fp-name" title="{{ '%.0f'|format(e.share*100) }}% of your listening">{{ e.name }}s</span>
-        <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ e.weight }}"
+        <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ e.effective }}"
                name="weight" hx-post="/home/steer" hx-vals='{"axis":"era:{{ e.name }}"}'
                hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
                hx-on::before-request="sessionStorage.setItem('steered','1')"

@@ -31,6 +31,26 @@ class ActionRepo(Repo):
         self.conn.commit()
 
     @synchronized
+    def get_draft(self, signature: str) -> Action | None:
+        row = self.conn.execute("SELECT * FROM actions WHERE kind='merge_draft' AND plan_json=?",
+                              (signature,)).fetchone()
+        if row is None:
+            return None
+        return Action(row["id"], row["kind"], row["params_json"], row["plan_json"],
+                      row["undo_json"], row["status"], row["created_at"], row["executed_at"])
+
+    @synchronized
+    def update_draft(self, action_id, params_json) -> None:
+        self.conn.execute("UPDATE actions SET params_json=? WHERE id=?",
+                          (params_json, action_id))
+        self.conn.commit()
+
+    @synchronized
+    def delete_action(self, action_id) -> None:
+        self.conn.execute("DELETE FROM actions WHERE id=?", (action_id,))
+        self.conn.commit()
+
+    @synchronized
     def get_actions(self) -> list[Action]:
         rows = self.conn.execute("SELECT * FROM actions ORDER BY id DESC").fetchall()
         return [Action(r["id"], r["kind"], r["params_json"], r["plan_json"], r["undo_json"],

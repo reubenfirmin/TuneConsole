@@ -79,6 +79,41 @@ def test_generate_endpoint_creates_and_groups(store):
     assert saved.title == "More in your wheelhouse - June 21 2026" and saved.track_count == 2
 
 
+def test_generate_result_reuses_preopened_tab(store):
+    """Regression: the post-save swap must point an ALREADY-OPEN tab at the playlist, not call a bare
+    window.open() itself. A window.open() fired from the htmx response runs after the save round-trip,
+    which — once the batch-add falls back to slow per-item retries — outlives the browser's user-
+    activation window and gets popup-blocked (the YouTube tab never opens, only the same-tab redirect
+    survives). So the success path reuses the tab opened synchronously during the click."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    fc = FakeClient()
+    c = _client(store, lambda: {iid: fc})
+    tracks = json.dumps([{"video_id": "v1", "title": "S1", "artist": "A", "album": "", "thumbnail": ""}])
+
+    r = c.post("/home/generate", data={"name": "Mix - June 21 2026", "tracks": tracks})
+
+    assert r.status_code == 200 and "Saved" in r.text
+    assert "__ytTab" in r.text                                  # reuses the tab opened on click
+
+
+def test_save_button_preopens_youtube_tab(store):
+    """The Save & play button must open the blank YouTube tab DURING the click (a user gesture), so the
+    browser doesn't block it. Without this, the open is deferred to the slow post-save swap and blocked."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    t = store.upsert_track("v1", "Song", "Artist", "Alb", None, 1)
+    pl = store.upsert_playlist(iid, "PL", "P", 1, "h", 1.0)
+    store.set_playlist_tracks(pl, [t])
+    store.add_history_snapshot(iid, 1.0, [identity_key("Song", "Artist")])
+    store.set_setting("last_sync_at", "1.0")        # synced -> the rec feed (generated cards) renders
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    r = c.get("/")
+
+    assert r.status_code == 200
+    # the Save & play button opens the tab on click and stashes the handle for the swap to reuse
+    assert "genOpenYT(" in r.text and "__ytTab" in r.text
+
+
 def test_saved_proto_tracks_not_re_offered(store):
     iid = store.upsert_identity("main", "cred", None, True)
     t = [store.upsert_track(f"v{i}", f"S{i}", "Art", None, None, 1) for i in range(2)]

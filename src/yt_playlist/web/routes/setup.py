@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from yt_playlist.core.setup import BROWSER_CREDENTIAL_FILENAME
+from yt_playlist.providers import enrichment, lastfm
 
 
 def build(ctx) -> APIRouter:
@@ -18,6 +19,8 @@ def build(ctx) -> APIRouter:
             "configured": (setup.configured if setup else True),
             "has_credentials": bool(setup and setup.credentials_present),
             "flash": request.query_params.get("flash"),
+            "enrichment": enrichment.load_config(store),
+            "lastfm_configured": lastfm.api_key(store) is not None,
         }, status_code=status_code)
 
     @router.get("/setup")
@@ -48,6 +51,25 @@ def build(ctx) -> APIRouter:
         resp.headers["HX-Trigger"] = json.dumps({"setup-checked": {"ok": True, "account": account}})
         return resp
 
+    def _enrichment_panel(request):
+        return templates.TemplateResponse(request, "_partials/enrichment_panel.html", {
+            "enrichment": enrichment.load_config(store),
+            "lastfm_configured": lastfm.api_key(store) is not None})
+
+    @router.post("/setup/enrichment")
+    async def setup_enrichment(request: Request):
+        # Persist the provider order + enabled flags. Form: `order` (names in DOM order) and
+        # `enabled` (the checked names). The JS onMove guard already prevents invalid orders; on the
+        # off chance an invalid one arrives, save_config raises and we just re-render last-good state.
+        form = await request.form()
+        order = form.getlist("order")
+        on = set(form.getlist("enabled"))
+        try:
+            enrichment.save_config(store, [{"name": n, "enabled": n in on} for n in order])
+        except ValueError:
+            pass
+        return _enrichment_panel(request)
+
     @router.post("/setup/signout")
     def setup_signout(request: Request):
         # Sign out = delete the locally-saved sign-in (cookies). Identity config is kept so
@@ -77,7 +99,6 @@ def build(ctx) -> APIRouter:
                 "brand_account_id": (brand or "").strip() or None,
                 "is_master": str(idx) == master,
                 "credential_ref": BROWSER_CREDENTIAL_FILENAME})
-        was_expired = bool(ctx.auth_expired)        # a re-signin (vs first-time setup)?
         try:
             setup.apply_setup(capture, identities)
         except ValueError as e:
@@ -86,8 +107,17 @@ def build(ctx) -> APIRouter:
             return _setup_context(request, rows=rows, master_idx=master_idx,
                                   error=str(e), status_code=400)
         ctx.auth_expired.clear()                    # success clears the stale-session banner (in place)
-        if was_expired:
-            msg = "Signed back in."
+        # Tailor the confirmation to context. "Has synced before" (the same signal that turns the
+        # syncbar's green "Sync now" CTA into a neutral "Full sync") tells a re-auth apart from a
+        # first-time setup — so we never point at a "Sync now" button that isn't on the page.
+        has_synced = bool(store.get_setting("last_sync_at"))
+        auto_sync = store.get_setting("auto_sync_plays") == "1"
+        if has_synced and auto_sync:
+            # Nothing for them to do — auto-sync will catch up. A transient toast, not a banner.
+            return RedirectResponse(f"/?toast={quote('You’re authenticated again.')}", status_code=303)
+        if has_synced:
+            # Re-authed but auto-sync is off, so they need to act — keep a persistent banner.
+            msg = "You’re authenticated again. Click “Full sync” to catch up — or turn on “Sync plays” to keep it automatic."
         else:
             n = len(identities)
             msg = f"Saved {n} identit{'y' if n == 1 else 'ies'}. Click “Sync now” to pull your playlists."

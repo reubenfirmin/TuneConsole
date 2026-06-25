@@ -35,6 +35,20 @@ def test_home_is_default_route(store):
     assert "Never synced" in r.text        # sync card shows status (no last_sync_at yet)
 
 
+def test_home_rediscovers_unplayed_saved_albums(store):
+    # A saved album with no recent plays surfaces as a "Revisit" tile at the top of the Rediscover
+    # section, linking to its in-app album page.
+    store.set_setting("last_sync_at", "1.0")          # Rediscover only renders on a synced Home
+    store.collection.add_saved_album({"browse": "MPREb_x", "title": "Kind of Blue", "artist": "Miles Davis",
+                                      "year": "1959", "type": "Album", "thumbnail": "http://img/x.jpg"})
+    c = _client(store)
+    html = c.get("/").text
+    assert "Rediscover in your library" in html
+    assert "Kind of Blue" in html and "Miles Davis" in html
+    assert "Revisit" in html                          # the relabeled badge (not "New album")
+    assert "/album?browse=MPREb_x" in html            # tile links to the in-app album page
+
+
 def test_playlists_moved_to_slash_playlists(store):
     c = _client(store)
     assert c.get("/playlists").status_code == 200
@@ -105,14 +119,16 @@ def test_home_page_has_steering_and_fingerprint(store):
     assert "/taste" in html                              # "Tune your taste model" affordance
 
 
-def test_home_steer_sets_weight_and_returns_feed(store):
+def test_home_steer_writes_lean_not_permanent_weight(store):
     iid = store.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
-    r = c.post("/home/steer", data={"axis": "genre:techno", "weight": "0.3"})
+    r = c.post("/home/steer", data={"axis": "genre:techno", "weight": "1.5"})
     assert r.status_code == 200
-    assert 'id="home-feed"' in r.text                     # returns the re-ranked feed fragment
-    assert store.get_weights()["genre:techno"] == 0.3     # weight set (genre band allows < 0.2)
+    assert 'id="home-feed"' in r.text
+    assert "genre:techno" not in store.get_weights()      # NOT a permanent write anymore
+    # permanent is neutral (1.0) so effective target 1.5 -> lean 1.5
+    assert store.get_lean("genre:techno") == 1.5
 
 
 def test_home_feed_has_steer_toast_scaffold(store):
@@ -192,3 +208,52 @@ def test_auto_sync_toggle_persists_and_renders(store):
     assert r.json() == {"enabled": False}
     assert store.get_setting("auto_sync_plays") == "0"
     assert "syncPanel(false)" in c.get("/").text
+
+
+def test_fingerprint_bar_shows_effective_multiplier(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    t = store.upsert_track("v1", "Song", "Band", None, None)
+    store.set_track_genre(t, "Techno")
+    store.add_history_snapshot(iid, 1.0, ["song|band"])
+    store.set_setting("last_sync_at", "1000")
+    fam = __import__("yt_playlist.rec.genre_map", fromlist=["family"]).family("Techno")
+    store.set_lean(f"genre:{fam}", 1.5, 1000.0)        # standing lean, permanent still 1.0
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    html = c.get("/").text
+    assert 'value="1.5"' in html                       # bar shows effective, not permanent 1.0
+
+
+def test_fingerprint_expand_lists_subgenres(store):
+    """POST /home/fingerprint/expand family=techno -> contains a subgenre bar, e.g. 'genre:minimal techno'."""
+    c = _client(store)
+    r = c.post("/home/fingerprint/expand", data={"family": "techno"})
+    assert r.status_code == 200
+    # 'minimal techno' is a known subgenre of techno
+    assert "minimal techno" in r.text
+    # should render as fp-row slider posting to /home/steer
+    assert "/home/steer" in r.text
+    assert 'type="range"' in r.text
+
+
+def test_fingerprint_add_reaches_zero_play_niche(store):
+    """POST /home/fingerprint/add axis='genre:gqom' -> 200, 'genre:gqom' appears in returned HTML,
+    and store.get_lean('genre:gqom') == 1.0."""
+    c = _client(store)
+    r = c.post("/home/fingerprint/add", data={"axis": "genre:gqom"})
+    assert r.status_code == 200
+    # The added axis must appear in the returned feed HTML (as a steerable bar)
+    assert "gqom" in r.text
+    # The lean was persisted
+    assert store.get_lean("genre:gqom") == 1.0
+
+
+def test_fingerprint_search_finds_genre(store):
+    """GET /home/fingerprint/search?q=techno -> 200, contains 'minimal techno' (or another techno member)."""
+    c = _client(store)
+    r = c.get("/home/fingerprint/search?q=techno")
+    assert r.status_code == 200
+    # Should include at least one techno-related tag
+    assert "techno" in r.text.lower()
+    # Should include 'minimal techno' specifically (a known subgenre)
+    assert "minimal techno" in r.text

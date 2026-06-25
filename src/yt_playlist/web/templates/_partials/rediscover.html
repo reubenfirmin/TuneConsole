@@ -1,11 +1,20 @@
-{# Spotlight a couple of library playlists you haven't played lately - a teaser (5 tracks each),
-   not the full list, with a Play-on-YouTube CTA and a secondary View/edit button. #}
-{% if rediscover %}
+{# Spotlight things you haven't played lately, to nudge a revisit: a row of saved albums on top,
+   then a couple of library playlists (a 5-track teaser each, with Play-on-YouTube + View/edit). #}
+{% if rediscover_albums or rediscover %}
 <section id="rediscover">
   <h2 class="section">Rediscover in your library</h2>
-  <p class="section-note">Playlists you haven't reached for lately - dip back in.</p>
-  <p class="section-note redis-note">Play times are per track - we rank by the median of when each
-    song was last played, so one recently-heard track won't hide an otherwise-cold playlist.</p>
+  {% if rediscover_albums %}
+  {% from "_macros.html" import tile %}
+  <p class="section-note">Albums you saved and then let gather dust - give one another spin.</p>
+  <div class="album-grid rediscover-albums">
+    {% for a in rediscover_albums %}
+    {{ tile('revisit', a.thumbnail, a.title, a.artist ~ (' · ' ~ a.year if a.year else ''),
+            "/album?browse=" ~ a.browse_id) }}
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if rediscover %}
+  <p class="section-note">Playlists that have gone quiet - worth dipping back into.</p>
   <div class="for-you-grid rediscover-grid">
     {% for p in rediscover %}
     <div class="card redis-card">
@@ -37,5 +46,8 @@
     </div>
     {% endfor %}
   </div>
+  <p class="redis-fineprint">Play times are per track - we rank by the median of when each song was
+    last played, so one recently-heard track won't hide an otherwise-cold playlist.</p>
+  {% endif %}
 </section>
 {% endif %}

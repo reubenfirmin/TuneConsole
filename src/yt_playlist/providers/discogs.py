@@ -17,9 +17,12 @@ import urllib.parse
 import urllib.request
 
 from yt_playlist.providers import genres
+from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.util import net
 from yt_playlist.core import paths
 from yt_playlist.providers.enrich_queue import PriorityGate
+
+name = "discogs"
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -53,6 +56,30 @@ def token(store=None, config_path=None):
         return None
     tok = data.get("discogs_token")
     return tok.strip() if isinstance(tok, str) and tok.strip() else None
+
+
+def available(store=None) -> bool:
+    return True
+
+
+def tripped() -> bool:
+    return _breaker.tripped()
+
+
+def reset() -> None:
+    _breaker.reset()
+
+
+def probe(track, store=None, tok=None) -> EnrichmentResult:
+    """Read-only lookup: genre & year from Discogs releases."""
+    tok = tok or token(store)
+    genre, year = enrich(track["title"], track["artist"], tok)
+    fields = {}
+    if genre:
+        fields["genre"] = genre
+    if year:
+        fields["year"] = year
+    return EnrichmentResult("discogs", fields)
 
 
 def _pace(tok):

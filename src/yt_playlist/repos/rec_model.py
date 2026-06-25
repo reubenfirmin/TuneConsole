@@ -88,6 +88,77 @@ class RecModelRepo(Repo):
             "SELECT item_key FROM rec_feedback WHERE kind='dislike'")}
 
     @synchronized
+    def list_dislikes(self) -> list:
+        """Active dislike bans (item_key, until, created_at), newest first — for the Taste Model page."""
+        return self.conn.execute(
+            "SELECT item_key, until, created_at FROM rec_feedback WHERE kind='dislike' "
+            "ORDER BY created_at DESC").fetchall()
+
+    # --- Likes (captured during sync; positive transient signal + graduation, idempotent) ---
+    @synchronized
+    def record_like(self, identity_key, now) -> bool:
+        """Persist a first-seen like (surface='like'). Returns True iff newly created, so the caller
+        feeds transient/graduation exactly once. Idempotent on re-sync. Mirrors record_dislike."""
+        if self.conn.execute(
+                "SELECT 1 FROM rec_feedback WHERE surface='like' AND item_key=? AND scope='' "
+                "AND kind='like'", (identity_key,)).fetchone():
+            return False
+        self.conn.execute(
+            "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) "
+            "VALUES ('like',?,'like',NULL,'',NULL,?)", (identity_key, now))
+        self.conn.commit()
+        return True
+
+    @synchronized
+    def recent_liked_keys(self, limit=None) -> list:
+        """Liked identity_keys, most-recent (created_at) first. Powers the transient like channel."""
+        rows = self.conn.execute(
+            "SELECT item_key FROM rec_feedback WHERE kind='like' ORDER BY created_at DESC").fetchall()
+        keys = [r["item_key"] for r in rows]
+        return keys[:limit] if limit else keys
+
+    @synchronized
+    def clear_like(self, identity_key) -> None:
+        """Reconcile an un-liked track: drop its like row."""
+        self.conn.execute("DELETE FROM rec_feedback WHERE item_key=? AND kind='like'", (identity_key,))
+        self.conn.commit()
+
+    # --- Standing slider leans (rec_lean): non-decaying transient multipliers, centered at 1.0 ---
+    @synchronized
+    def set_lean(self, axis, value, now) -> None:
+        """Upsert a standing lean (home-slider position). value is a multiplier; 1.0 = neutral."""
+        self.conn.execute(
+            "INSERT INTO rec_lean(axis, value, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(axis) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (axis, float(value), now))
+        self.conn.commit()
+
+    @synchronized
+    def get_leans(self) -> dict:
+        """All standing leans {axis: value}. Absence of an axis means neutral 1.0."""
+        return {r["axis"]: r["value"] for r in self.conn.execute("SELECT axis, value FROM rec_lean")}
+
+    @synchronized
+    def get_lean(self, axis) -> float:
+        row = self.conn.execute("SELECT value FROM rec_lean WHERE axis=?", (axis,)).fetchone()
+        return row["value"] if row else 1.0
+
+    @synchronized
+    def lean_rows(self) -> list:
+        return self.conn.execute(
+            "SELECT axis, value, updated_at, last_graduated_day FROM rec_lean").fetchall()
+
+    @synchronized
+    def set_lean_graduated_day(self, axis, day) -> None:
+        self.conn.execute("UPDATE rec_lean SET last_graduated_day=? WHERE axis=?", (day, axis))
+        self.conn.commit()
+
+    @synchronized
+    def clear_lean(self, axis) -> None:
+        self.conn.execute("DELETE FROM rec_lean WHERE axis=?", (axis,))
+        self.conn.commit()
+
+    @synchronized
     def muted_artists(self) -> set:
         """Artist names the user has muted (stored as item_key 'artist:<name>')."""
         rows = self.conn.execute("SELECT item_key FROM rec_feedback WHERE kind='mute'").fetchall()

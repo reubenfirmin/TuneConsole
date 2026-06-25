@@ -88,8 +88,11 @@ def test_save_resolves_keys_to_tracks(store):
     r = c.post("/clusters/save", data={"name": "My Cluster", "keep_keys": json.dumps(keep),
                                        "central_keys": "[]"})
     assert r.status_code == 200 and "Saved" in r.text
-    assert fc.created[0][1] == "My Cluster"
+    # a cluster now saves with its own 'cluster' recipe (#15), so the title is versioned like any
+    # generated mix ("My Cluster #1") and its recipe is persisted.
+    assert fc.created[0][1].startswith("My Cluster")
     assert sorted(fc.added[0][1]) == ["va", "vb"]
+    assert store.get_recipe(fc.created[0][0])["model"] == "cluster"
 
 
 def test_save_include_central_toggles_central_tracks(store):

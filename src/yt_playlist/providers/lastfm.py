@@ -18,9 +18,12 @@ import urllib.parse
 import urllib.request
 
 from yt_playlist.providers import genres
+from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.util import net
 from yt_playlist.core import paths
 from yt_playlist.providers.enrich_queue import PriorityGate
+
+name = "lastfm"
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -60,6 +63,32 @@ def api_key(store=None, config_path=None):
         return None
     key = data.get("lastfm_api_key")
     return key.strip() if isinstance(key, str) and key.strip() else None
+
+
+def available(store=None) -> bool:
+    return api_key(store) is not None
+
+
+def tripped() -> bool:
+    return _breaker.tripped()
+
+
+def reset() -> None:
+    _breaker.reset()
+
+
+def probe(track, store=None, key=None) -> EnrichmentResult:
+    """Read-only lookup: genre (and a year-ish tag/page year). Empty if no API key."""
+    key = key or api_key(store)
+    if not key:
+        return EnrichmentResult("lastfm", {})
+    genre, year = enrich(track["title"], track["artist"], key)
+    fields = {}
+    if genre:
+        fields["genre"] = genre
+    if year:
+        fields["year"] = year
+    return EnrichmentResult("lastfm", fields)
 
 
 def _pace():

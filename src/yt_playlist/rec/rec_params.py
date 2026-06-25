@@ -61,6 +61,9 @@ PARAMS = [
               "How many candidates each lane fetches per slot shown. Deeper = more variety for "
               "erosion to rotate through, at a little more compute.",
               2, 10, 1, 4, integer=True, advanced=True),
+    ParamSpec("dislike_suppress_days", "Dislike ban length (days)", "discovery",
+              "How long a thumbs-down hides a track before it can resurface.",
+              1, 3650, 1, 365, integer=True),
 ]
 
 PARAMS_BY_NAME = {p.name: p for p in PARAMS}
@@ -121,6 +124,7 @@ MOOD_EVENT_CAP = 200           # bound the rec_mood table (count, not age)
 STALE_DECAY_HALFLIFE_D = 3     # once sync stale, transient relaxes with this half-life (days)
 # Source weights into the transient leans
 PLAY_TRANSIENT_W = 0.30        # one recent play's positive push
+LIKE_TRANSIENT_W = 0.45        # one recent like's positive push to facet leans (stronger than a play)
 DISLIKE_TRANSIENT_W = 1.50     # one recent dislike's negative push (strong, explicit)
 RECENT_PLAY_LIMIT = 50         # how many recent plays feed the transient leans
 # Facet overlay shape (read by _axis_weights_for and roll_recipe). The transient overlay DE-RANKS but
@@ -136,3 +140,13 @@ DISLIKE_SUPPRESS_DAYS = 365
 THEME_THRESHOLD = 1.2
 GRADUATE_UP = 1.05
 GRADUATE_DOWN = 0.95
+# --- Graduation source weights (Approach 1: source-aware funnel) ---
+# Each transient signal contributes a source-weighted amount to rec_theme. The transient effect is
+# immediate; graduation is gated by accumulation past THEME_THRESHOLD. Calibrated so today's vibe
+# lever is preserved (a mood event still contributes ±1 with SOURCE_W_VIBE=1.0).
+SOURCE_W_VIBE = 1.0       # vibe / facet lever (unchanged from today)
+SOURCE_W_LIKE = 1.0       # explicit thumbs-up — strong
+SOURCE_W_DISLIKE = 1.0    # thumbs-down (sign supplied by caller) — strong
+SOURCE_W_SLIDER = 0.5     # per held-day of a full lean (~2-3 held days -> one graduation step)
+SOURCE_W_PLAY = 0.08      # one play — weak; passive listening must not silently rewrite taste
+PLAY_GRAD_SESSION_CAP = 0.4   # max play-graduation contribution per session (a binge can't graduate)

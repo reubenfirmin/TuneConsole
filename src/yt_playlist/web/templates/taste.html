@@ -2,6 +2,22 @@
 <div class="page-head">
   <span class="eyebrow">Tools</span>
   <h1>Taste Model</h1>
+</div>
+
+<div x-data="{ tab: 'viz' }">
+  <div class="tabs" role="tablist">
+    <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'viz' }"
+            @click="tab = 'viz'" :aria-selected="tab === 'viz'">Visualizations</button>
+    <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'controls' }"
+            @click="tab = 'controls'" :aria-selected="tab === 'controls'">Controls</button>
+  </div>
+
+  <div class="tab-panel" role="tabpanel" x-show="tab === 'viz'" x-cloak>
+    {% include "_partials/taste_viz.html" %}
+  </div>
+
+  <div class="tab-panel" role="tabpanel" x-show="tab === 'controls'" x-cloak>
+<div class="page-head">
   <p>Your recommender's control room. Every number here is built from your own library. Nothing comes
      from outside. The <strong>track vectors</strong> below underlie <em>every</em> recommendation surface
      (For You, Explore, Discover, "more like this"). The <strong>knobs</strong>, however, are narrower;
@@ -106,6 +122,24 @@
           hx-confirm="Clear all dismissals, mutes, and impression history?">Clear feedback &amp; impressions</button>
 </div>
 
+<!-- Banned tracks are a deliberate hard suppression outside the graduation funnel, stored as sync-surface dislikes. -->
+<h2 class="section">Banned tracks</h2>
+<div class="card">
+  {% if bans %}
+  <ul class="ban-list">
+    {% for b in bans %}
+    <li class="ban-item">
+      <span class="ban-key">{{ b.key }}</span>
+      <button class="btn-ghost btn-sm" hx-post="/taste/unban" hx-vals='{"key":"{{ b.key }}"}' hx-swap="none"
+              hx-confirm="Remove ban for {{ b.key }}?">Unban</button>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="section-note">No banned tracks.</p>
+  {% endif %}
+</div>
+
 <script>
 function updateOut(s){
   var o = document.getElementById('out-' + s.id);
@@ -125,4 +159,6 @@ document.body.addEventListener('htmx:afterSwap', function(e){
   }
 });
 </script>
+  </div>{# /controls panel #}
+</div>{# /x-data tabs #}
 {% endblock %}

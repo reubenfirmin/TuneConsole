@@ -1,0 +1,144 @@
+{# Taste model — full transparency. Left = permanent (durable) taste; right = right now (transient
+   mood). Every petal/bar's <title> carries the exact layer stack. Read-only; tune on Controls. #}
+
+{% macro layer_title(r) -%}
+{{ r.name }} — {{ '%.1f'|format(r.share*100) }}% of plays · permanent ×{{ '%.2f'|format(r.permanent_weight) }} · standing ×{{ '%.2f'|format(r.standing_lean) }} · right-now {{ '%+.2f'|format(r.transient_lean) }} (×{{ '%.2f'|format(r.transient_mult) }}) · effective ×{{ '%.2f'|format(r.effective) }}{% if r.graduation.score %} · graduating {{ '%+.0f'|format(r.graduation.frac*100) }}%{% endif %}
+{%- endmacro %}
+
+{% macro rose(rows, signed) -%}
+<svg viewBox="-112 -112 224 224" class="rose-svg" role="img">
+  {% if signed and rows and rows[0].petal_t %}<circle r="{{ '%.1f'|format(rows[0].petal_t.neutral_r) }}" class="rose-neutral"/>{% endif %}
+  {% for r in rows %}{% set p = r.petal_t if signed else r.petal %}
+  <path d="{{ p.path }}" class="petal{% if signed %}{{ ' pos' if p.sign > 0 else (' neg' if p.sign < 0 else ' zero') }}{% endif %}"><title>{{ layer_title(r) }}</title></path>
+  {% endfor %}
+</svg>
+{%- endmacro %}
+
+<p class="section-note" style="margin-bottom:1.2rem">
+  Everything the recommender knows about you, built only from your own library. <strong>Left</strong> is
+  your <strong>permanent</strong> taste; <strong>right</strong> is <strong>right now</strong> — your
+  current mood, which decays back toward neutral as your sync ages. Hover any shape for the exact numbers.
+  This view is read-only; adjust anything on the <em>Controls</em> tab.
+</p>
+
+{# ── Genre families: permanent shape vs current-mood lean ─────────────────── #}
+<section class="card viz-dim">
+  <h2 class="section" style="margin-top:0">Genre families</h2>
+  {% if viz.genres %}
+  <div class="viz-pair">
+    <figure class="rose"><div class="rose-cap">Permanent <span class="muted">— share of your plays</span></div>{{ rose(viz.genres, false) }}</figure>
+    <figure class="rose">
+      <div class="rose-cap">Right now <span class="muted">— mood lean</span></div>
+      {{ rose(viz.genres, true) }}
+      {% if not viz.has_transient %}<p class="rose-quiet">Quiet right now — no recent mood signal.</p>{% endif %}
+    </figure>
+  </div>
+  {% else %}<p class="section-note">No genre tags yet. Enrich your library to populate this.</p>{% endif %}
+</section>
+
+{# ── Eras / decades ──────────────────────────────────────────────────────── #}
+<section class="card viz-dim">
+  <h2 class="section" style="margin-top:0">Eras</h2>
+  {% if viz.eras %}
+  <div class="viz-pair">
+    <figure class="rose"><div class="rose-cap">Permanent <span class="muted">— share of your plays</span></div>{{ rose(viz.eras, false) }}</figure>
+    <figure class="rose">
+      <div class="rose-cap">Right now <span class="muted">— mood lean</span></div>
+      {{ rose(viz.eras, true) }}
+      {% if not viz.has_transient %}<p class="rose-quiet">Quiet right now.</p>{% endif %}
+    </figure>
+  </div>
+  {% else %}<p class="section-note">No decade data yet.</p>{% endif %}
+</section>
+
+{# ── Artists (variable count → honest bars, not a rose) ───────────────────── #}
+<section class="card viz-dim">
+  <h2 class="section" style="margin-top:0">Artists</h2>
+  {% if viz.artists %}
+  <div class="viz-bars">
+    {% for r in viz.artists %}
+    <div class="viz-bar-row" title="{{ layer_title(r) }}">
+      <span class="vb-name">{{ r.name }}</span>
+      <span class="vb-perm"><i style="width:{{ '%.0f'|format(r.share*100) }}%"></i></span>
+      <span class="vb-div"><i class="{{ 'pos' if r.transient_lean > 0 else ('neg' if r.transient_lean < 0 else '') }}"
+            style="width:{{ '%.0f'|format((r.transient_lean|abs / 2.0 if r.transient_lean|abs < 2.0 else 1.0)*50) }}%"></i></span>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="vb-legend"><span class="muted">left bar = share of plays · right bar = current-mood lean (teal = toward, red = away)</span></p>
+  {% else %}<p class="section-note">No artist play data yet.</p>{% endif %}
+</section>
+
+{# ── Lanes (permanent only) + Breadth/Freshness gauges ───────────────────── #}
+<div class="viz-pair-cards">
+  <section class="card viz-dim">
+    <h2 class="section" style="margin-top:0">Candidate lanes <span class="scope-tag">permanent</span></h2>
+    <div class="viz-bars">
+      {% for l in viz.lanes %}
+      <div class="viz-bar-row" title="{{ l.label }} weight ×{{ '%.2f'|format(l.weight) }}">
+        <span class="vb-name">{{ l.label }}</span>
+        <span class="vb-perm"><i style="width:{{ '%.0f'|format(l.weight / 3.0 * 100) }}%"></i></span>
+        <span class="vb-val mono">×{{ '%.2f'|format(l.weight) }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  <section class="card viz-dim">
+    <h2 class="section" style="margin-top:0">Breadth &amp; freshness</h2>
+    <div class="gauge">
+      <span class="gauge-lbl">Taste breadth <span class="muted">(focused → eclectic)</span></span>
+      <span class="gauge-bar"><i style="width:{{ '%.0f'|format(viz.breadth*100) }}%"></i></span>
+      <span class="gauge-val mono">{{ '%.2f'|format(viz.breadth) }}</span>
+    </div>
+    <div class="gauge">
+      <span class="gauge-lbl">Mood freshness <span class="muted">(how live the right-now read is)</span></span>
+      <span class="gauge-bar {{ 'warn' if not viz.freshness.live }}"><i style="width:{{ '%.0f'|format(viz.freshness.factor*100) }}%"></i></span>
+      <span class="gauge-val mono">{{ '%.0f'|format(viz.freshness.factor*100) }}%</span>
+    </div>
+    <p class="section-note" style="margin:.4rem 0 0">
+      {% if viz.freshness.live %}Sync is fresh — the current-mood model is at full strength.
+      {% else %}Sync is stale — the mood model is relaxing toward neutral ({{ viz.freshness.halflife_days }}-day half-life).{% endif %}
+    </p>
+  </section>
+</div>
+
+{# ── Graduation funnel: how right-now becomes permanent ───────────────────── #}
+<section class="card viz-dim">
+  <h2 class="section" style="margin-top:0">Graduation funnel <span class="scope-tag">transient → permanent</span></h2>
+  <p class="section-note">Repeated leans accumulate here; when a facet crosses the threshold it nudges
+    its <em>permanent</em> weight up or down. This is how a passing mood becomes lasting taste.
+    Sources graduate at different speeds — like/dislike fast, a single play barely at all.</p>
+  {% if viz.funnel %}
+  <div class="viz-bars">
+    {% for f in viz.funnel %}
+    <div class="viz-bar-row" title="{{ f.facet }} — ledger {{ '%+.2f'|format(f.score) }} of ±{{ '%.2f'|format(f.threshold) }}">
+      <span class="vb-name">{{ f.facet }}</span>
+      <span class="vb-div"><i class="{{ 'pos' if f.frac > 0 else 'neg' }}" style="width:{{ '%.0f'|format(f.frac|abs*50) }}%"></i></span>
+      <span class="vb-val mono">{{ '%+.0f'|format(f.frac*100) }}%</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}<p class="section-note">Nothing accumulating yet — interact with recommendations and it fills in.</p>{% endif %}
+</section>
+
+{# ── Transient sources: what's feeding "right now" ───────────────────────── #}
+<section class="card viz-dim">
+  <h2 class="section" style="margin-top:0">What's feeding "right now" <span class="scope-tag">transient inputs</span></h2>
+  <p>
+    <span class="tag">👍 mood +{{ viz.sources.mood_pos }}</span>
+    <span class="tag">👎 mood −{{ viz.sources.mood_neg }}</span>
+    <span class="tag">▶ recent plays {{ viz.sources.plays }}</span>
+    <span class="tag">♥ likes {{ viz.sources.likes }}</span>
+    <span class="tag">⃠ dislikes {{ viz.sources.dislikes }}</span>
+    <span class="tag" title="EMA over interaction rank — the newest signal carries this share of the blend">recency α {{ '%.2f'|format(viz.sources.alpha) }}</span>
+  </p>
+  <p class="section-note" style="margin:0">Newer interactions dominate (rank-weighted); the whole read is then scaled by sync freshness above.</p>
+</section>
+
+{# ── Embedding engine + centroid tilt (expensive → lazy) ──────────────────── #}
+<section class="card viz-dim">
+  <h2 class="section" style="margin-top:0">Embedding engine <span class="scope-tag">all surfaces</span></h2>
+  <div hx-get="/taste/viz/engine" hx-trigger="load" hx-swap="innerHTML">
+    <p class="section-note">Loading the embedding model…</p>
+  </div>
+</section>

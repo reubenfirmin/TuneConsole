@@ -10,12 +10,13 @@ def store():
 
 class FakeClient:
     def __init__(self, playlists=None, tracks=None, history=None, search_results=None, catalog=None,
-                 albums=None):
+                 albums=None, song_durations=None):
         self._playlists = playlists or []          # [{"playlistId","title","count"}]
         self._tracks = tracks or {}                # {playlistId: [track dict, ...]}
         self._history = history or []              # [track dict, ...]
         self._search_results = search_results or []  # list returned by search()
         self._catalog = dict(catalog or {})        # {video_id: track_dict}
+        self._song_durations = dict(song_durations or {})  # {video_id: seconds} for get_song
         self._albums = albums or {}                # {browseId: album dict (get_album shape)}
         for tlist in self._tracks.values():        # auto-seed: a client knows its own tracks
             for t in tlist:
@@ -48,6 +49,14 @@ class FakeClient:
     def delete_playlist(self, playlistId): self.deleted.append(playlistId)
     def rate_song(self, videoId, rating): self.rated.append((videoId, rating))
     def search(self, query, filter="songs"): return list(self._search_results)
+    def get_song(self, videoId):
+        secs = self._song_durations.get(videoId)
+        if secs is None:
+            secs = (self._catalog.get(videoId) or {}).get("duration_seconds")
+        details = {"videoId": videoId}
+        if secs is not None:
+            details["lengthSeconds"] = str(secs)   # real ytmusicapi returns it as a string
+        return {"videoDetails": details}
     def edit_playlist(self, playlistId, **kw):
         self.edited.append((playlistId, kw)); return "STATUS_SUCCEEDED"
 

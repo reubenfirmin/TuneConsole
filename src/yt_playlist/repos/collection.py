@@ -40,6 +40,20 @@ class CollectionRepo(Repo):
             "ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE").fetchall()
         return [dict(r) for r in rows]
 
+    @synchronized
+    def saved_albums_recency(self) -> dict:
+        """{browse_id: newest play ts across the album's tracks | None}. Plays come from history (a
+        track's identity_key in a snapshot). LEFT JOINs throughout, so an album whose tracks aren't in
+        the library — or were never played — comes back None, i.e. as cold as possible."""
+        rows = self.conn.execute(
+            "SELECT sa.browse_id AS browse, MAX(hs.taken_at) AS last "
+            "FROM saved_albums sa "
+            "LEFT JOIN tracks t ON t.album_browse_id = sa.browse_id "
+            "LEFT JOIN history_items hi ON hi.identity_key = t.identity_key "
+            "LEFT JOIN history_snapshots hs ON hs.id = hi.snapshot_id "
+            "GROUP BY sa.browse_id").fetchall()
+        return {r["browse"]: r["last"] for r in rows}
+
     # --- aggregate library views (computed across every playlist) ---
     def _play_counts(self):
         return {r["identity_key"]: r["c"]

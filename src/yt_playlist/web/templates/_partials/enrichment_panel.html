@@ -1,0 +1,46 @@
+{# Enrichment provider cards: drag to reorder, toggle to enable. Order + enabled flags persist to
+   /setup/enrichment (config only — a future worker runs them in this order). The Last.fm card holds
+   its API-key field inline. Re-rendered standalone by the /setup/enrichment route after a save. #}
+<div id="enrich-panel"
+     x-data='enrichmentTab({{ enrichment|tojson }})'
+     x-init="$nextTick(() => initSortable())">
+  <p class="section-note">Drag to set the order metadata providers run in, and switch off any you
+    don't want. AcousticBrainz reads MusicBrainz IDs, so it always follows MusicBrainz.</p>
+
+  <div class="provider-list" x-ref="list">
+    {% for p in enrichment %}
+    <div class="provider-card{% if not p.enabled %} off{% endif %}" data-name="{{ p.name }}">
+      <span class="drag-handle" title="Drag to reorder" aria-hidden="true">⠿</span>
+      <label class="provider-toggle" title="Enable / disable">
+        <input type="checkbox" name="enabled" value="{{ p.name }}" {% if p.enabled %}checked{% endif %}
+               @change="$el.closest('.provider-card').classList.toggle('off', !$el.checked); persist()">
+      </label>
+      <div class="provider-meta">
+        <strong>{{ p.label }}</strong>
+        <span class="section-note">{{ p.blurb }}</span>
+
+        {% if p.key == 'lastfm_api_key' %}
+        <div class="provider-key" x-data="lastfmKey({{ 'true' if lastfm_configured else 'false' }})">
+          <p class="provider-key-saved" x-show="saved && !editing" x-cloak>
+            ✓ API key saved
+            <button type="button" class="btn-ghost btn-sm" @click="editing = true">Replace</button>
+          </p>
+          <div class="provider-key-edit" x-show="editing" x-cloak>
+            <p class="section-note">Free key from
+              <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>
+              — paste the <strong>API key</strong>. Stored locally.</p>
+            <div class="btn-row">
+              <input type="text" x-model="val" placeholder="API key" autocomplete="off" spellcheck="false"
+                     @keydown.enter.prevent="save()">
+              <button type="button" class="btn-sm" :disabled="busy" @click="save()"
+                      x-text="busy ? 'Saving…' : 'Save'"></button>
+            </div>
+            <p class="notice err" x-show="err" x-text="err" x-cloak></p>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>

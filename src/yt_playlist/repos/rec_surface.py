@@ -192,3 +192,10 @@ class RecSurfaceRepo(Repo):
     def get_theme(self, facet):
         row = self.conn.execute("SELECT score FROM rec_theme WHERE facet=?", (facet,)).fetchone()
         return row["score"] if row else None
+
+    @synchronized
+    def theme_rows(self) -> list:
+        """All graduation-ledger rows {facet, score, updated_at}, strongest-magnitude first — the
+        transient->permanent funnel, for the Taste-model transparency view."""
+        return self.conn.execute(
+            "SELECT facet, score, updated_at FROM rec_theme ORDER BY ABS(score) DESC").fetchall()

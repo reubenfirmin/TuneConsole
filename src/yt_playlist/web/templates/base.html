@@ -35,6 +35,8 @@
       </svg>
       <span class="b-word"><span class="b-tune">Tune</span><span class="b-console">Console</span></span>
     </a>
+    {# Clusters has its own seed search; the library omni-search would only compete with it there #}
+    {% if not path.startswith('/clusters') %}
     <form class="omni" role="search" autocomplete="off" x-data="omniSearch()"
           x-init="$el.addEventListener('htmx:afterSwap', () => onResults())"
           @click.outside="close()" @keydown.escape.window="close()">
@@ -49,6 +51,7 @@
         <div id="omni-results" class="omni-results" x-show="open" x-cloak></div>
       </div>
     </form>
+    {% endif %}
     {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') or path.startswith('/network') %}
     <nav>
       <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>
@@ -79,6 +82,6 @@
     <button type="button" class="authbar-x" @click="dismissed = true" title="Dismiss" aria-label="Dismiss">×</button>
   </div>
   <main>{% block body %}{% endblock %}</main>
-  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="toasts" class="toasts" aria-live="polite">{% block toasts %}{% endblock %}</div>
 </body>
 </html>

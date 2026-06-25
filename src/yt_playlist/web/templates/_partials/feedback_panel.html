@@ -5,6 +5,9 @@
    the active mood across a refresh. Per-track feedback lives in the track listing, not here.
    Expects `pid`, `facets` ({genres, eras}), and `mood_state` (+1/-1/0). #}
 <section class="fb-panel card" id="fb-{{ pid }}">
+  {% if recipe and recipe.model == 'cluster' %}
+  <p class="fb-type"><span class="fb-type-chip">Cluster</span> grown on the canvas</p>
+  {% endif %}
   {% if recipe and recipe.facets %}
   <p class="fb-recipe">Made from
     {% if recipe.facets.genres %}<span class="fb-chip">{{ recipe.facets.genres|join(' · ') }}</span>{% endif %}

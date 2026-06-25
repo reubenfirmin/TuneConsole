@@ -153,3 +153,11 @@ def test_promote_moves_playlist_out_of_generated(store):
     r = c.post(f"/playlist/{pid}/promote")
     assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
     assert store.get_playlist_groups().get("PLG", "") != "Generated"   # graduated out of quarantine
+
+
+def test_enrich_sources_include_audio_providers():
+    from yt_playlist.providers import acousticbrainz, deezer
+    from yt_playlist.web.routes import playlists as plroute
+    sources = plroute.build_enrich_sources()
+    assert sources["deezer"] is deezer.enrich_playlist
+    assert sources["acousticbrainz"] is acousticbrainz.enrich_playlist

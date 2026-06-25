@@ -112,6 +112,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         history = with_retry(lambda: client.get_history())
         hist_keys = [identity_key(t.get("title", ""), _artist(t)) for t in history]
         store.add_history_snapshot(identity_id, now, hist_keys)
+        recommend.graduate_plays(store, hist_keys, now)
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")

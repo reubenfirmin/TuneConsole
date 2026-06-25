@@ -4,6 +4,9 @@
   <header class="gen-head"><span class="eyebrow eyebrow-warn">Couldn't save</span>
     <h2 class="gen-name">{{ name }}</h2></header>
   <p class="section-note">{{ error }}</p>
+  {# Nothing to play — discard the blank tab we opened on click so no stray about:blank is left behind. #}
+  <script>(function () { var t = window.__ytTab; window.__ytTab = null;
+    if (t && !t.closed) try { t.close(); } catch (e) {} })();</script>
   {% else %}
   <header class="gen-head"><span class="eyebrow eyebrow-ok">Saved ✓. Opening YouTube…</span>
     <h2 class="gen-name">{{ name }}</h2></header>
@@ -15,11 +18,16 @@
        target="_blank" rel="noopener">▶ Open on YouTube Music ↗</a>
   </div>
   {% if pid %}{% include "_partials/mood_panel.html" %}{% endif %}
-  {# Open YouTube in a new tab (the link above is the popup-blocked fallback), then send THIS tab to
-     the playlist's page in our UI — which carries its own "Open on YouTube Music" link too. #}
-  <script>
-    window.open("https://music.youtube.com/playlist?list={{ ytm }}", "_blank", "noopener");
+  {# Point the tab we opened on click (genOpenYT) at the new playlist, then send THIS tab to the
+     playlist's page in our UI — which carries its own "Open on YouTube Music" link too. If that tab
+     is missing (no handle / it was closed), fall back to a bare window.open; should the browser block
+     THAT, the "Open on YouTube Music" link above is the manual fallback. #}
+  <script>(function () {
+    var url = "https://music.youtube.com/playlist?list={{ ytm }}";
+    var tab = window.__ytTab; window.__ytTab = null;
+    if (tab && !tab.closed) { try { tab.opener = null; } catch (e) {} tab.location.replace(url); }
+    else { window.open(url, "_blank", "noopener"); }
     {% if pid %}window.location.assign("/playlist/{{ pid }}");{% endif %}
-  </script>
+  })();</script>
   {% endif %}
 </section>

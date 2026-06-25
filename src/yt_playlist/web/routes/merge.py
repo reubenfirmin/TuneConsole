@@ -1,4 +1,4 @@
-"""Destructive cleanup ops: the N-way merge editor, dupe deletes, keep-one, delete-empty."""
+import json
 from urllib.parse import quote
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -20,10 +20,6 @@ def build(ctx) -> APIRouter:
         # htmx does a full page reload; dependent sections (overlaps that referenced a
         # deleted copy) recompute, exactly as the old location.reload() did.
         return HTMLResponse("", headers={"HX-Refresh": "true"})
-
-    # In-memory merge drafts keyed by the sorted member-id signature. Survives a browser refresh
-    # (same server process); cleared on Apply. The editing state lives here, not in the client.
-    drafts = {}
 
     def _ids(raw):
         return [int(x) for x in raw.split(",") if x.strip().lstrip("-").isdigit()]
@@ -69,13 +65,13 @@ def build(ctx) -> APIRouter:
         vals = [v for v in npos if v is not None]
         return sum(vals) / len(vals) if vals else 1.0
 
-    def _ordered(tracks, draft):
+    def _ordered(tracks, draft_params):
         by_title = lambda t: (t["title"] or "").lower()
-        if draft["sort"] == "playlist":
-            out = sorted(tracks, key=lambda t: (_eff_pos(t, draft["pick"]), by_title(t)))
+        if draft_params["sort"] == "playlist":
+            out = sorted(tracks, key=lambda t: (_eff_pos(t, draft_params["pick"]), by_title(t)))
         else:
             out = sorted(tracks, key=by_title)
-        if draft["mode"] == "ducks":   # shared (present in >=2) first, odd ducks last (stable within)
+        if draft_params["mode"] == "ducks":   # shared (present in >=2) first, odd ducks last (stable within)
             out = sorted(out, key=lambda t: 0 if sum(t["present"]) >= 2 else 1)
         return out
 
@@ -85,25 +81,31 @@ def build(ctx) -> APIRouter:
         return next((m["id"] for m in members if m["ytm"] == "LM"), None)
 
     def _draft(ids, members, *, return_to=None):
-        sig = tuple(ids)   # keep the entry order so member letters/colors stay stable across refresh
-        d = drafts.get(sig)
-        if d is None:
-            liked = _liked_id(members)                    # merge with Liked always lands in Liked
-            d = {"excluded": set(), "pick": {}, "sort": "playlist", "mode": "interleaved",
-                 "keep": str(liked if liked is not None else members[0]["id"]),
-                 "return_to": return_to or "/cleanup"}
-            drafts[sig] = d
+        sig = ",".join(str(i) for i in ids)
+        draft = store.get_draft(sig)
+        if draft is None:
+            liked = _liked_id(members)
+            params = {"excluded": [], "pick": {}, "sort": "playlist", "mode": "interleaved",
+                      "keep": str(liked if liked is not None else members[0]["id"]),
+                      "return_to": return_to or "/cleanup"}
+            draft_id = store.record_action(
+                "merge_draft", json.dumps(params), sig, "draft", None, now_fn())
+            draft = store.get_action(draft_id)
         elif return_to:
-            d["return_to"] = return_to
-        return d
+            params = json.loads(draft.params_json)
+            params["return_to"] = return_to
+            store.update_draft(draft.id, json.dumps(params))
+        return draft
 
     def _view(request, ids, members, tracks, draft):
-        rows = [{**t, "included": t["tid"] not in draft["excluded"],
-                 "picked": draft["pick"].get(t["tid"]), "present_count": sum(t["present"])}
-                for t in _ordered(tracks, draft)]
+        draft_params = json.loads(draft.params_json)
+        draft_params["excluded"] = set(draft_params["excluded"])
+        rows = [{**t, "included": t["tid"] not in draft_params["excluded"],
+                 "picked": draft_params["pick"].get(t["tid"]), "present_count": sum(t["present"])}
+                for t in _ordered(tracks, draft_params)]
         return {"request": request, "members": members, "rows": rows, "liked_id": _liked_id(members),
-                "count": sum(1 for t in tracks if t["tid"] not in draft["excluded"]),
-                "total": len(tracks), "draft": draft, "ids_csv": ",".join(str(i) for i in ids)}
+                "count": sum(1 for t in tracks if t["tid"] not in draft_params["excluded"]),
+                "total": len(tracks), "draft": draft_params, "ids_csv": ",".join(str(i) for i in ids)}
 
     @router.get("/merge")
     def merge_editor(request: Request):
@@ -128,29 +130,34 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="merge no longer available")
         members, tracks = mt
         draft = _draft(ids, members)
+        params = json.loads(draft.params_json)
         form = await request.form()
         field, value = form.get("field", ""), form.get("value", "")
         valid = {t["tid"] for t in tracks}
         if field == "toggle" and value in valid:
-            draft["excluded"] ^= {value}
+            excluded = set(params["excluded"])
+            excluded ^= {value}
+            params["excluded"] = list(excluded)
         elif field == "setall":
-            draft["excluded"] = set() if value == "1" else set(valid)
+            params["excluded"] = [] if value == "1" else list(valid)
         elif field == "sort" and value in ("alpha", "playlist"):
-            draft["sort"] = value
+            params["sort"] = value
         elif field == "mode" and value in ("interleaved", "ducks"):
-            draft["mode"] = value
+            params["mode"] = value
         elif field == "keep":
             liked = _liked_id(members)   # with Liked in the merge, only "keep Liked" or "all" are valid
             if liked is None or value in (str(liked), "all"):
-                draft["keep"] = value
+                params["keep"] = value
         elif field == "pick" and ":" in value:
             tid, _, idx = value.rpartition(":")
             if tid in valid and idx.isdigit():
                 i = int(idx)
-                if draft["pick"].get(tid) == i:
-                    draft["pick"].pop(tid, None)        # toggle off
+                if params["pick"].get(tid) == i:
+                    params["pick"].pop(tid, None)        # toggle off
                 else:
-                    draft["pick"][tid] = i
+                    params["pick"][tid] = i
+        store.update_draft(draft.id, json.dumps(params))
+        draft = store.get_action(draft.id)   # re-read so the re-render reflects the just-saved params
         return templates.TemplateResponse(request, "_partials/merge_body.html",
                                           _view(request, ids, members, tracks, draft))
 
@@ -163,17 +170,19 @@ def build(ctx) -> APIRouter:
             return _toast(request, "Merge no longer available.")
         members, tracks = mt
         draft = _draft(ids, members)
-        vids = [t["video_id"] for t in _ordered(tracks, draft)
-                if t["tid"] not in draft["excluded"] and t["video_id"]]
+        draft_params = json.loads(draft.params_json)
+        draft_params["excluded"] = set(draft_params["excluded"])
+        vids = [t["video_id"] for t in _ordered(tracks, draft_params)
+                if t["tid"] not in draft_params["excluded"] and t["video_id"]]
         member_ids = [m["id"] for m in members]   # the existing playlists only (not stale ?ids entries)
         try:
-            s = ctx.ops().apply_merge(member_ids, vids, draft["keep"])
+            s = ctx.ops().apply_merge(member_ids, vids, draft_params["keep"])
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             logger.exception("merge/apply failed")
             return _toast(request, "YouTube returned an unexpected response.")
-        drafts.pop(tuple(ids), None)                    # consume the draft
+        store.delete_action(draft.id)
         parts = []
         if s["added"]:
             parts.append(f"{s['added']} added")
@@ -185,8 +194,8 @@ def build(ctx) -> APIRouter:
             parts.append("deleted " + ", ".join(f"“{t}”" for t in s["deleted"]))
         detail = (" — " + ", ".join(parts)) if parts else ""
         msg = f"Merged into “{s['kept_title']}”{detail}."
-        sep = "&" if "?" in draft["return_to"] else "?"
-        url = f"{draft['return_to']}{sep}flash={quote(msg)}&flash_pl={quote(s['kept_ytm'])}"
+        sep = "&" if "?" in draft_params["return_to"] else "?"
+        url = f"{draft_params['return_to']}{sep}flash={quote(msg)}&flash_pl={quote(s['kept_ytm'])}"
         return Response(status_code=200, headers={"HX-Redirect": url})
 
     @router.post("/dupe/delete")
