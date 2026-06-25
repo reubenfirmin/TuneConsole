@@ -4,9 +4,10 @@ import json
 from datetime import datetime
 
 from fastapi import APIRouter, Request, Response
+from fastapi.responses import JSONResponse
 
 from yt_playlist.library import executor
-from yt_playlist.rec import genre_map, journeys, rec_params, recommend
+from yt_playlist.rec import arc_energy, genre_map, journeys, rec_params, recommend
 from yt_playlist.rec.rec_dao import RecDao
 
 # How many tracks each generated proto-playlist offers.
@@ -20,9 +21,9 @@ ALBUMS_PER_CARD = 15               # discover album tiles fetched per epoch (gri
 ROTATING_CARDS = ("wheelhouse", "explore", "comfort", "fresh", "new_artists", "discover", "rediscover")
 _NOTES = {
     "wheelhouse": "Deeper into what you already love.",
-    "explore": "Unplayed tracks from your own playlists - corners you've drifted from.",
-    "fresh": "Tracks that aren't in your collection yet.",
-    "comfort": "Your most-played favorites you haven't reached for lately.",
+    "explore": "Unplayed corners of your own library.",
+    "fresh": "Songs you don't own yet.",
+    "comfort": "Old favorites you haven't played lately.",
 }
 
 
@@ -42,17 +43,19 @@ def _carded(store, lane, label, items, now):
     recipe = recommend.roll_recipe(store, lane, seed=_epoch(store, lane), now=now)
     items = recommend.theme_filter(store, items, recipe.get("facets", {}))
     items = recommend.attach_genres(store, items)
-    # Fresh-card items are unowned proposal dicts with no library key/plays/recency -> journeys have
-    # no signal there; keep Fresh a straight shuffle (scope decision). Owned lanes order by journey.
-    journey = "shuffle" if lane == "fresh" else recipe.get("journey", "shuffle")
+    # roll_recipe forces Fresh to journey="shuffle" (unowned proposals have no plays/recency signal),
+    # so the stored recipe and this preview ordering agree. Owned lanes order by their rolled journey.
+    journey = recipe.get("journey", "shuffle")
     _f = recommend._field
     keys = [_f(it, "key") or "" for it in items]
     dao = RecDao(store)
     decades, lastp, plays = dao.track_decades(keys), dao.track_last_played(keys), store.play_counts()
+    genres = {(_f(it, "key") or ""): (_f(it, "genre") or "") for it in items}
+    arc = arc_energy.arc_energies(keys, genres, dao.track_audio_features())   # real-audio energy (#37)
 
     def feat(it):
         k, g = _f(it, "key") or "", _f(it, "genre") or ""
-        return {"artist": _f(it, "artist") or "", "genre": g, "energy": genre_map.energy(g),
+        return {"artist": _f(it, "artist") or "", "genre": g, "energy": arc.get(k, genre_map.energy(g)),
                 "decade": decades.get(k), "plays": plays.get(k, 0), "recency": lastp.get(k, 0.0)}
 
     seed = recipe.get("dj", {}).get("seed", 0)
@@ -118,21 +121,21 @@ def build(ctx) -> APIRouter:
                    if i.key not in fy_keys]                                     # deduped vs Wheelhouse
         wheel_items = recommend.rotate_sample(fy_pool, PROTO_SIZE, _epoch(store, "wheelhouse"))
         catalog_items = recommend.rotate_sample(ex_pool, PROTO_SIZE, _epoch(store, "explore"))
-        # Comfort Listening: a fixed 4th card, kept out of the stance reordering. Dedup against what
-        # the taste lanes are *currently showing* so a track never appears twice on the page.
+        # Comfort Listening: a fixed 4th card. Dedup against what the taste lanes are *currently
+        # showing* so a track never appears twice on the page.
         shown = {i.key for i in wheel_items} | {i.key for i in catalog_items}
         cf_pool = [i for i in recommend.comfort_listening(store, now, limit=ROTATION_POOL)
                    if i.key not in shown]
         comfort_items = recommend.rotate_sample(cf_pool, PROTO_SIZE, _epoch(store, "comfort"))
 
-        stance = store.get_setting("home_stance") or "exploit"
+        # Fixed order: wheelhouse first, then catalog (the old explore/exploit toggle that reordered
+        # these was removed in #7 — breadth steering is the real focused<->eclectic control now).
         wheel = _carded(store, "wheelhouse", "More in your wheelhouse", wheel_items, now)
         catalog = _carded(store, "explore", "From your catalog", catalog_items, now) if catalog_items else None
-        generated = [catalog, wheel] if stance == "explore" and catalog else \
-                    [wheel] + ([catalog] if catalog else [])
+        generated = [wheel] + ([catalog] if catalog else [])
         comfort = _carded(store, "comfort", "Comfort listening", comfort_items, now) if comfort_items else None
         return {"fingerprint": recommend.taste_fingerprint(store),
-                "generated": generated, "comfort": comfort, "stance": stance}
+                "generated": generated, "comfort": comfort}
 
     @router.get("/")
     def home_page(request: Request):
@@ -168,6 +171,12 @@ def build(ctx) -> APIRouter:
     def privacy(request: Request):
         return templates.TemplateResponse(request, "privacy.html", {})
 
+    @router.get("/home/generating")
+    def home_generating(request: Request):
+        """Spinner interstitial shown in the popup we open on the 'Save & play' click, until the save
+        round-trip returns and the home tab redirects this window to the new YouTube playlist."""
+        return templates.TemplateResponse(request, "generating.html", {})
+
     @router.get("/home/feed")
     def home_feed(request: Request):
         return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(now_fn()))
@@ -185,10 +194,14 @@ def build(ctx) -> APIRouter:
             return Response(status_code=204)
         return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": p})
 
-    @router.post("/home/stance")
-    async def home_stance(request: Request):
-        stance = (await request.form()).get("stance", "exploit")
-        store.set_setting("home_stance", "explore" if stance == "explore" else "exploit")
+    @router.post("/home/breadth")
+    async def home_breadth(request: Request):
+        # Drag the Breadth bar -> persist the focused<->eclectic bias and return the re-ranked feed in
+        # one request (a preview like /home/steer). The bias is a scalar param (not a per-axis weight),
+        # so it gets its own route; set_param clamps it to the spec range [-1, 1]. Center (0) is neutral.
+        bias = (await request.form()).get("breadth_bias")
+        if bias is not None:
+            rec_params.set_param(store, "breadth_bias", bias)
         return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(now_fn()))
 
     @router.post("/home/steer")
@@ -229,8 +242,11 @@ def build(ctx) -> APIRouter:
 
     @router.post("/home/fingerprint/add")
     async def fingerprint_add(request: Request):
-        """Pin an axis (e.g. 'genre:gqom' or 'era:1990') so it appears as a steerable bar even with
-        zero plays. Writes a neutral lean (1.0) so it persists; returns the updated fingerprint feed."""
+        """Pin an axis (e.g. 'genre:gqom') so it appears as a steerable bar even with zero plays. Writes
+        a neutral lean (1.0) so it persists, then returns ONLY the re-rendered genre bars (server-
+        authoritative, so dedup/ordering are correct). The client swaps #fp-genre-bars with this and
+        leaves the live genre picker untouched — a neutral add doesn't change rankings, so there's no
+        need to re-render the whole feed (and re-rendering it would churn the picker)."""
         form = await request.form()
         axis = (form.get("axis") or "").strip()
         if axis and axis.split(":", 1)[0] in ("genre", "era", "artist"):
@@ -238,23 +254,20 @@ def build(ctx) -> APIRouter:
             if store.get_lean(axis) == 1.0 and axis not in store.get_leans():
                 store.set_lean(axis, 1.0, now_fn())
         return templates.TemplateResponse(
-            request, "_partials/home_feed.html", _feed_context(now_fn()))
+            request, "_partials/fingerprint_genre_bars.html",
+            {"fingerprint": recommend.taste_fingerprint(store)})
 
-    @router.get("/home/fingerprint/search")
-    def fingerprint_search(request: Request):
-        """Typeahead: return genre tags (families + subgenres) matching the query `q` (case-insensitive
-        substring). Each result has an 'add' button that posts to /home/fingerprint/add."""
-        q = (request.query_params.get("q") or "").strip().lower()
-        matches: list[str] = []
-        if q:
-            for tag in genre_map.all_genres():
-                if q in tag:
-                    matches.append(tag)
-                    if len(matches) >= 20:   # cap results for a clean dropdown
-                        break
-        return templates.TemplateResponse(
-            request, "_partials/fingerprint_search_results.html",
-            {"matches": matches, "q": q})
+    @router.get("/home/genres")
+    def home_genres():
+        """Full genre taxonomy (families + sub-genres) for the Home taste-bar genre picker. Unlike the
+        library-scoped clusters list, this is the whole map, so you can pin a bar for a genre you have
+        zero plays of yet. Each option: {name, kind: 'family'|'genre'}; the Alpine picker filters it
+        client-side (so reset/close are instant) and posts a pick to /home/fingerprint/add."""
+        fams = genre_map.all_families()
+        seen = set(fams)
+        options = [{"name": f, "kind": "family"} for f in fams]
+        options += [{"name": g, "kind": "genre"} for g in genre_map.all_genres() if g not in seen]
+        return JSONResponse({"options": options})
 
     @router.post("/home/generate")
     async def home_generate(request: Request):

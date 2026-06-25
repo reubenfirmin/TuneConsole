@@ -79,3 +79,9 @@ def all_genres() -> list:
     """Sorted list of all lowercased genre tags known to the map."""
     g2f, _, _, _ = _load()
     return sorted(g2f.keys())
+
+
+def all_families() -> list:
+    """Sorted list of all lowercased family names known to the map."""
+    _, _, _, families = _load()
+    return sorted(f.lower() for f in families.keys())

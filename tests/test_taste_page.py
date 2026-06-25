@@ -17,7 +17,61 @@ def test_taste_page_renders_status_and_controls(store):
     assert "Taste Model" in html
     assert "taste breadth" in html
     assert 'name="weight"' in html            # editable blend weights
-    assert "/taste/rebuild" in html
+    assert "/taste/autotune" in html          # auto-tune control present
+
+
+def test_autotune_route_starts_and_reports(store):
+    c = _client(store)
+    # POST kicks off a background run and returns a polling fragment (not an HX-Refresh).
+    r = c.post("/taste/autotune")
+    assert r.status_code == 200
+    assert "HX-Refresh" not in r.headers
+    assert "autotune-status" in r.text  # self-poll wired up
+    # Status endpoint is reachable and renders the fragment.
+    s = c.get("/taste/autotune-status")
+    assert s.status_code == 200
+
+
+def test_taste_page_shows_transient_and_graduation_controls(store):
+    html = _client(store).get("/taste").text
+    assert "Right-now responsiveness" in html
+    assert "Learning" in html
+    assert 'id="param-graduation_enabled"' in html   # the toggle rendered
+    assert 'id="param-play_transient_w"' in html
+
+
+def test_autotune_done_status_refreshes_model_status(store):
+    c = _client(store)
+    # The completed (idle) status poll fires the event the Model status card listens for.
+    s = c.get("/taste/autotune-status")
+    assert s.headers.get("HX-Trigger") == "autotune-done"
+    # The Model status fragment renders and re-arms its own auto-refresh listener.
+    m = c.get("/taste/model-status")
+    assert m.status_code == 200
+    assert 'id="model-status"' in m.text
+    assert "track vectors" in m.text
+    # The page wires the card to listen for autotune-done.
+    page = c.get("/taste").text
+    assert "autotune-done from:body" in page
+
+
+def test_taste_page_empty_autotune_state(store):
+    html = _client(store).get("/taste").text
+    assert "Auto-tune hasn't run yet" in html      # empty-state note before any run
+
+
+def test_taste_page_renders_autotune_result_panel(store):
+    from yt_playlist.rec import autotune_run
+    iid = store.upsert_identity("main", "cred", None, True)
+    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(40)]
+    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(40)]
+    for j in range(6):
+        store.set_playlist_tracks(store.upsert_playlist(iid, f"PA{j}", "PA", 8, f"ha{j}", 0.0), A[j*5:j*5+8])
+        store.set_playlist_tracks(store.upsert_playlist(iid, f"PB{j}", "PB", 8, f"hb{j}", 0.0), B[j*5:j*5+8])
+    autotune_run.run_and_record(store, now=1000.0)
+    html = _client(store).get("/taste").text
+    assert "chosen config" in html                 # the populated result panel rendered
+    assert "recall@20 (winner)" in html
 
 
 def test_taste_page_uses_sliders_not_number_fields(store):

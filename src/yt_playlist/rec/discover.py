@@ -13,7 +13,7 @@ from yt_playlist.rec import embed, genre_map, recommend
 from yt_playlist.providers import lastfm
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.web.routes.charts import _fetch_artist_info   # module-level so it's patchable in tests
-from yt_playlist.util.matching import normalize
+from yt_playlist.util.matching import identity_key, normalize
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -159,6 +159,7 @@ def new_artists(ctx, limit=15, max_anchors=30):
     out = out[:limit]
     for c in out:                                       # enrich the shown few with an artist image
         c["thumbnail"] = _artist_thumb(ctx, c["artist"])
+        c["genre"] = lastfm.artist_genre(c["artist"], key)   # #18: tag for the facet overlay
     return out
 
 
@@ -170,6 +171,7 @@ def run_discovery(ctx, now, budget=25) -> dict:
     store = ctx.store
     dao = RecDao(store)
     owned_albums, saved = dao.owned_albums(), dao.saved_album_ids()
+    artist_genre = dao.artist_genres()                    # #18: tag a new album by its (owned) artist's genre
     due = store.artists_due_for_scan(now, budget=budget)
     for artist in due:
         try:
@@ -180,19 +182,79 @@ def run_discovery(ctx, now, budget=25) -> dict:
             bid, title = alb.get("browse_id"), (alb.get("title") or "").strip()
             if not bid or not title or title.lower() in owned_albums or bid in saved:
                 continue
-            store.upsert_discovered_album(bid, artist, title, alb.get("year"), alb.get("thumbnail"), now)
+            store.upsert_discovered_album(bid, artist, title, alb.get("year"), alb.get("thumbnail"),
+                                          now, genre=artist_genre.get(artist))
         store.mark_scanned(artist, now)
     for a in new_artists(ctx):                            # taste-bridged new artists, accumulated
         store.upsert_discovered_artist(a["artist"], a["score"], a.get("because"), a.get("fits"),
-                                       a.get("thumbnail"), now)
+                                       a.get("thumbnail"), now, genre=a.get("genre"))
     store.prune_discovered(owned_albums, saved, dao.library_artists())
+    store.prune_discovered_tracks(dao.library_keys())
+    populate_discovered_tracks(ctx, now)                   # #13 P2: out-of-corpus candidate tracks
     return {"scanned": len(due)}
+
+
+def populate_discovered_tracks(ctx, now, budget=4) -> int:
+    """#13 Phase 2: fetch the tracks of a few not-yet-populated discovered albums and store them as
+    out-of-corpus candidates, tagged with the album's genre, then re-encode the pool's content
+    vectors. Bounded by `budget` so each pass is cheap and the pool fills over many runs. Owned
+    tracks are skipped. Returns how many candidate tracks were added/updated."""
+    store = ctx.store
+    client = next(iter((ctx.client_provider() or {}).values()), None)
+    if client is None:
+        return 0
+    owned = RecDao(store).library_keys()
+    have = {t.get("source_browse_id") for t in store.get_discovered_tracks()}
+    todo = [a for a in store.get_discovered_albums() if a["browse_id"] not in have][:budget]
+    n = 0
+    for alb in todo:
+        try:
+            data = client.get_album(alb["browse_id"])
+        except Exception:  # noqa: BLE001 - one bad album must not abort the pass
+            continue
+        artist = alb.get("artist") or ", ".join(
+            x.get("name", "") for x in ((data or {}).get("artists") or []) if x.get("name"))
+        for t in (data or {}).get("tracks") or []:
+            vid, title = t.get("videoId"), (t.get("title") or "").strip()
+            if not vid or not title:
+                continue
+            key = identity_key(title, artist)
+            if key in owned:
+                continue
+            store.upsert_discovered_track(key, vid, title, artist, alb.get("title"),
+                                          alb.get("thumbnail"), alb.get("genre"), alb.get("year"),
+                                          alb["browse_id"], now)
+            n += 1
+    if n:
+        embed.build_discovered_content_vectors(store)
+    return n
+
+
+def _discovery_facet_w(store, genre, now):
+    """#18 facet overlay for a discovered candidate: its genre-family multiplier, or None to exclude
+    (muted family). Untagged → neutral 1.0."""
+    fam = genre_map.family(genre) if genre else None
+    return recommend.discovery_facet_weight(store, fam, now)
 
 
 def pick_discovered_albums(store, n, now, recent_frac=0.7):
     """Surface n albums from the discovered pool: recency-biased (so new releases reliably pop), with
-    some older ones mixed in, de-prioritizing what was shown most recently. Stamps last_shown."""
+    some older ones mixed in, de-prioritizing what was shown most recently. Stamps last_shown.
+
+    #18: the FACET overlay applies — albums in a muted genre-family are excluded, and the family
+    weight is a secondary bias within the recency buckets (recency stays primary)."""
     albums = store.get_discovered_albums()
+    if not albums:
+        return []
+    wmap = {}
+    kept = []
+    for a in albums:
+        w = _discovery_facet_w(store, a.get("genre"), now)
+        if w is None:                                    # muted family — excluded from discovery
+            continue
+        wmap[a["browse_id"]] = w
+        kept.append(a)
+    albums = kept
     if not albums:
         return []
     yrs = [int(a["year"]) for a in albums if (a.get("year") or "").isdigit()]
@@ -205,7 +267,9 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
         return a.get("last_shown") or 0.0
 
     cut = ymax - 2                                                            # "recent" = last ~3 years
-    recent = sorted([a for a in albums if yr(a) >= cut], key=lambda a: (yr(a), -fresh(a)), reverse=True)
+    # recency primary, then the facet weight (favored families float up among same-year), then freshness
+    recent = sorted([a for a in albums if yr(a) >= cut],
+                    key=lambda a: (yr(a), wmap[a["browse_id"]], -fresh(a)), reverse=True)
     older = sorted([a for a in albums if yr(a) < cut], key=fresh)             # least-recently-shown first
 
     seen_art, picked = set(), set()
@@ -239,11 +303,20 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
 
 
 def pick_discovered_artists(store, n, now):
-    """Surface n new artists from the pool: best taste-score first, de-prioritizing recently-shown."""
+    """Surface n new artists from the pool: best taste-score first, de-prioritizing recently-shown.
+
+    #18: the FACET overlay applies — artists in a muted genre-family are excluded, and the family
+    weight multiplies the taste score (favored families rise, 'less X lately' gently lowers X)."""
     arts = store.get_discovered_artists()
     if not arts:
         return []
-    arts.sort(key=lambda a: (-(a.get("score") or 0.0), a.get("last_shown") or 0.0))
-    chosen = arts[:n]
+    scored = []
+    for a in arts:
+        w = _discovery_facet_w(store, a.get("genre"), now)
+        if w is None:                                    # muted family — excluded from discovery
+            continue
+        scored.append((a, (a.get("score") or 0.0) * w))
+    scored.sort(key=lambda t: (-t[1], t[0].get("last_shown") or 0.0))
+    chosen = [a for a, _ in scored[:n]]
     store.mark_shown("artist", [a["artist"] for a in chosen], now)
     return chosen

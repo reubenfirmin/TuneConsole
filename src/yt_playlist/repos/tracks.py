@@ -26,11 +26,11 @@ class TrackRepo(Repo):
             return row["id"]
         cur = self.conn.execute(
             "INSERT INTO tracks(video_id,title,artist,album,duration_s,identity_key,available,"
-            "video_type,artist_browse_id,album_browse_id,thumbnail,created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, strftime('%s','now')))",
+            "video_type,artist_browse_id,album_browse_id,thumbnail,orig_title,orig_artist,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, strftime('%s','now')))",
             (video_id, title, artist, album, duration_s, key,
              None if available is None else int(available), video_type,
-             artist_browse_id, album_browse_id, thumbnail, created_at))
+             artist_browse_id, album_browse_id, thumbnail, title, artist, created_at))
         self.conn.commit()
         return cur.lastrowid
 
@@ -99,6 +99,37 @@ class TrackRepo(Repo):
     def set_track_year(self, track_id, year) -> None:
         # manual override: set exactly what the user typed (may be blank to clear)
         self.conn.execute("UPDATE tracks SET mb_year=? WHERE id=?", (year or "", track_id))
+        self.conn.commit()
+
+    @synchronized
+    def set_track_title(self, track_id, title) -> None:
+        # manual fix: overwrite the live title in place so downstream consumers use it. Never blank.
+        title = (title or "").strip()
+        if not title:
+            return
+        self.conn.execute("UPDATE tracks SET title=? WHERE id=?", (title, track_id))
+        self.conn.commit()
+
+    @synchronized
+    def set_track_artist(self, track_id, artist) -> None:
+        # manual fix: overwrite the live artist in place. Never blank.
+        artist = (artist or "").strip()
+        if not artist:
+            return
+        self.conn.execute("UPDATE tracks SET artist=? WHERE id=?", (artist, track_id))
+        self.conn.commit()
+
+    @synchronized
+    def reset_track_title(self, track_id) -> None:
+        # restore the original YouTube title (undo a manual fix).
+        self.conn.execute("UPDATE tracks SET title=orig_title WHERE id=? AND orig_title IS NOT NULL",
+                          (track_id,))
+        self.conn.commit()
+
+    @synchronized
+    def reset_track_artist(self, track_id) -> None:
+        self.conn.execute("UPDATE tracks SET artist=orig_artist WHERE id=? AND orig_artist IS NOT NULL",
+                          (track_id,))
         self.conn.commit()
 
     @synchronized

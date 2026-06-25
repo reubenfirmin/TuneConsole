@@ -524,3 +524,21 @@ def test_rediscover_albums_rotates_through_cold_pool_by_epoch(store):
     assert titles(0) == ["A", "B", "C"]      # coldest page leads
     assert titles(1) == ["D", "E", "F"]      # next epoch advances to the next-coldest page
     assert titles(2) == ["A", "B", "C"]      # wraps back around the ranked pool
+
+
+def test_graduation_disabled_is_noop(store):
+    from yt_playlist.rec import rec_params
+    store.upsert_identity("main", "cred", None, True)
+    rec_params.set_param(store, "graduation_enabled", False)
+    before = dict(store.get_weights())
+    # a strong, repeated like-graduation that WOULD normally cross the threshold
+    for _ in range(10):
+        recommend.graduate_facet(store, "genre:rock", 1.0, now=1000.0, source=1.0)
+    assert dict(store.get_weights()) == before   # nothing graduated
+
+
+def test_graduation_enabled_still_graduates(store):
+    store.upsert_identity("main", "cred", None, True)
+    for _ in range(10):
+        recommend.graduate_facet(store, "genre:rock", 1.0, now=1000.0, source=1.0)
+    assert store.get_weights().get("genre:rock", 1.0) > 1.0

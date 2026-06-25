@@ -1,0 +1,23 @@
+{# The Home "Genres" steering bars: top-6 played families PLUS any pinned niches (zero-play genres
+   added via the picker, appended past the top 6 by taste_fingerprint) so an added bar always shows
+   even in a deep library. Rendered standalone by /home/fingerprint/add so a new bar can be inserted
+   WITHOUT swapping #home-feed — that keeps the live genrePicker alive (no destroy/re-init churn). #}
+{% set pinned = fingerprint.families[6:] | selectattr('pinned') | list %}
+{% for g in fingerprint.families[:6] + pinned %}
+<div class="fp-row">
+  <span class="fp-name" title="{{ '%.0f'|format(g.share*100) }}% of your listening">{{ g.name }}</span>
+  <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ g.effective }}"
+         name="weight" hx-post="/home/steer" hx-vals='{"axis":"genre:{{ g.name }}"}'
+         hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
+         hx-on::before-request="sessionStorage.setItem('steered','1')"
+         aria-label="favor or mute {{ g.name }}">
+  <button type="button" class="fp-expand-btn"
+          hx-post="/home/fingerprint/expand"
+          hx-vals='{"family":"{{ g.name }}"}'
+          hx-target="#fp-subs-{{ loop.index }}"
+          hx-swap="innerHTML"
+          title="Drill into {{ g.name }} subgenres"
+          aria-label="expand {{ g.name }} subgenres">&#9656;</button>
+</div>
+<div id="fp-subs-{{ loop.index }}" class="fp-subgenres"></div>
+{% endfor %}

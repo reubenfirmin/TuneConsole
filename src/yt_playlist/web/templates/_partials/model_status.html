@@ -1,0 +1,10 @@
+{# Model status stat-grid. Re-fetches itself when Auto-tune finishes (autotune-done event on body),
+   so the vector count / dim and the lazy recall@20 cell reflect the freshly tuned model. #}
+<div class="card stat-grid" id="model-status"
+     hx-get="/taste/model-status" hx-trigger="autotune-done from:body" hx-swap="outerHTML">
+  <div><strong>{{ vectors }}</strong><span>track vectors</span></div>
+  <div><strong>{{ baskets }}</strong><span>co-occurrence baskets</span></div>
+  <div><strong>{{ '%.0f'|format(coverage * 100) }}%</strong><span>genre coverage ({{ tagged }}/{{ tracks_total }})</span></div>
+  <div><strong>{{ '%.2f'|format(breadth) }}</strong><span>taste breadth (0=narrow, 1=eclectic)</span></div>
+  <div hx-get="/taste/recall" hx-trigger="load" hx-swap="innerHTML"><strong>…</strong><span>recall@20 (computing)</span></div>
+</div>

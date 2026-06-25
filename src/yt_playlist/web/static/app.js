@@ -175,6 +175,45 @@ function rowSort(pid, editBase) {
           { values: { video_id: vid, year }, target: tr, swap: 'outerHTML' });
       } catch (e) { /* leave the row as-is; a reload would resync */ }
     },
+
+    // --- click-to-edit title / artist (free text, edit in place) ---
+    editTitleVid: null, editArtistVid: null,
+    _startEdit(vid, which, selector, dispSel) {
+      this[which] = vid;
+      this.$nextTick(() => {
+        const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
+        const inp = tr && tr.querySelector(selector);
+        const disp = tr && tr.querySelector(dispSel);
+        if (inp) {
+          // seed from the link text, stripping the trailing " ↗" the title link carries
+          inp.value = (disp ? disp.textContent : '').replace(/↗/g, '').trim();
+          inp.focus(); inp.select();
+        }
+      });
+    },
+    startEditTitle(vid) { this._startEdit(vid, 'editTitleVid', '.tinput', '.ptitle'); },
+    startEditArtist(vid) { this._startEdit(vid, 'editArtistVid', '.ainput', '.alink'); },
+    async _saveField(vid, value, which, path, field) {
+      if (this[which] !== vid) return;        // ignore trailing blur after enter/escape
+      this[which] = null;
+      const v = (value || '').trim();
+      const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
+      if (!tr) return;
+      try {
+        await htmx.ajax('POST', `${this.editBase}/${path}`,
+          { values: { video_id: vid, [field]: v }, target: tr, swap: 'outerHTML' });
+      } catch (e) { /* leave the row as-is; a reload would resync */ }
+    },
+    saveTitle(vid, value) { return this._saveField(vid, value, 'editTitleVid', 'track-title', 'title'); },
+    saveArtist(vid, value) { return this._saveField(vid, value, 'editArtistVid', 'track-artist', 'artist'); },
+    async resetField(vid, field) {
+      const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
+      if (!tr) return;
+      try {
+        await htmx.ajax('POST', `${this.editBase}/track-reset`,
+          { values: { video_id: vid, field }, target: tr, swap: 'outerHTML' });
+      } catch (e) { /* leave the row as-is */ }
+    },
   };
 }
 function overlapSort() {
@@ -528,6 +567,53 @@ function omniSearch() {
   };
 }
 
+// Home taste-bar genre picker: an autosuggest combo (same widget family as the Clusters genre
+// filter) for pinning a steerable genre bar. The full taxonomy is fetched once and cached on
+// `window`, then filtered CLIENT-SIDE so typing, reset, and close are instant (the old server-htmx
+// search left stale "Add" rows behind on clear).
+//
+// A pick POSTs to /home/fingerprint/add and swaps ONLY #fp-genre-bars with the server's re-rendered
+// bars (the new one included), then re-processes that subtree for htmx. Deliberately a plain fetch +
+// innerHTML (not htmx.ajax targeting #home-feed): swapping the whole feed would destroy and recreate
+// THIS component on every add, and that destroy/re-init churn is what made adds land only sometimes.
+// Keeping the picker outside the swapped region makes every add reliable.
+function genrePicker() {
+  return {
+    opts: [], query: '', open: false, sel: -1,
+    load() {
+      if (window.__genreOpts) { this.opts = window.__genreOpts; return; }
+      fetch('/home/genres').then(r => r.json())
+        .then(d => { window.__genreOpts = d.options || []; this.opts = window.__genreOpts; })
+        .catch(() => {});
+    },
+    suggest() {
+      const q = this.query.trim().toLowerCase();
+      if (!q) return [];                                    // empty field -> no dropdown (reset state)
+      // Tokenized, order-independent match: every word you type must appear somewhere in the name, so
+      // "rock post", "rock-post" and "post rock" all find "post-rock" (a plain substring wouldn't).
+      const toks = q.split(/[^a-z0-9]+/).filter(Boolean);
+      return this.opts.filter(o => { const n = o.name.toLowerCase(); return toks.every(t => n.includes(t)); })
+        .slice(0, 10);
+    },
+    move(d) { const n = this.suggest().length; if (n) this.sel = (this.sel + d + n) % n; },
+    choose() { const o = this.suggest()[this.sel >= 0 ? this.sel : 0]; if (o) this.pick(o.name); },
+    pick(name) {
+      this.reset();
+      fetch('/home/fingerprint/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'axis=genre:' + encodeURIComponent(name),
+      }).then(r => r.text()).then(html => {
+        const bars = document.getElementById('fp-genre-bars');
+        if (!bars) return;
+        bars.innerHTML = html;                       // server-rendered bars (dedup + order correct)
+        if (window.htmx) htmx.process(bars);         // wire the bars' hx-* sliders / expanders
+      }).catch(() => {});
+    },
+    reset() { this.query = ''; this.open = false; this.sel = -1; },
+  };
+}
+
 // Clusters tab: a pannable/zoomable canvas where you seed a central group and grow a tree outward.
 // Each node's next ring = library tracks nearest its pinned-path centroid, pushed away from pruned
 // tracks (server: POST /clusters/expand). Tree state lives here; the server stays stateless. Node
@@ -547,6 +633,7 @@ function clusterCanvas() {
     _pan: null, _drag: null, sim: null,
     explain: null,            // {childId, loading, data} — the "why this edge?" popover
     families: [], genres: [], allowedFamilies: [], genreOpen: false, genreQuery: '',   // #29 genre whitelist (families + sub-genres)
+    includeNew: false,        // #13 P2: opt in to reaching out-of-corpus (not-in-library) tracks
     trunk: [],                // #30 ids of grown nodes; the edge leading into each lights as trunk
     subHues: {}, _subHueN: 0,  // #14 parentId -> hue: every grown ring (sub-cluster) gets its own colour
     exhaustedIds: [],          // nodes whose + found nothing left under the active genre filter
@@ -828,7 +915,8 @@ function clusterCanvas() {
           // count_keys = grown, non-pruned tracks only (NOT the central seeds) — the per-album cap
           // counts the playlist being built, so a seed artist's album doesn't pre-spend the budget.
           body: JSON.stringify({ pos_keys, neg_keys: this.prunedKeys(), exclude: this.allKeys(),
-                                 count_keys: this.keepKeys(), k, allow_genres: this.allowedFamilies }),
+                                 count_keys: this.keepKeys(), k, allow_genres: this.allowedFamilies,
+                                 include_new: this.includeNew }),
         });
         return (await r.json()).ring || [];
       } catch (e) { return []; }
@@ -952,6 +1040,7 @@ function clusterCanvas() {
           id: this.nextId++, parentId: parent.id, kind: 'track', key: t.key,
           label: t.title, sub: t.artist, thumbnail: t.thumbnail, vid: t.video_id,
           genre: t.genre || '', family: t.family || '',     // for the genre filter (#29)
+          newMusic: !!t.out_of_corpus,                       // #13 P2: not in your library
           state: 'neutral', depth: parent.depth + 1,
           x: parent.x + Math.cos(i) * 30, y: parent.y + Math.sin(i) * 30 + 40,
         });
@@ -1317,3 +1406,36 @@ function initVizTooltip() {
   document.body.addEventListener('htmx:beforeSwap', hide);
 }
 window.addEventListener('DOMContentLoaded', initVizTooltip);
+
+// hx-confirm -> styled modal (replaces the native window.confirm dialog). htmx fires `htmx:confirm`
+// for any element carrying hx-confirm; we intercept it, show our own modal, and only issue the
+// request if the user confirms. Reuses the .modal-backdrop/.modal/.modal-actions styles.
+document.addEventListener('htmx:confirm', (e) => {
+  const question = e.detail.question;
+  if (!question) return;                       // no hx-confirm on this element: proceed normally
+  e.preventDefault();                          // suppress htmx's native confirm
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML =
+    '<div class="modal" role="dialog" aria-modal="true">' +
+    '<h3>Confirm</h3><p></p>' +
+    '<div class="modal-actions">' +
+    '<button type="button" class="btn-ghost" data-act="cancel">Cancel</button>' +
+    '<button type="button" data-act="ok">Confirm</button>' +
+    '</div></div>';
+  backdrop.querySelector('p').textContent = question;   // textContent: never inject markup
+
+  const close = () => backdrop.remove();
+  const onKey = (ev) => { if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
+  backdrop.addEventListener('click', (ev) => { if (ev.target === backdrop) close(); });
+  backdrop.querySelector('[data-act="cancel"]').addEventListener('click', close);
+  backdrop.querySelector('[data-act="ok"]').addEventListener('click', () => {
+    close();
+    document.removeEventListener('keydown', onKey);
+    e.detail.issueRequest(true);               // true = skip the confirm check, avoid recursion
+  });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('[data-act="ok"]').focus();
+});

@@ -67,20 +67,25 @@ def projection_recall(store, k=20) -> dict:
     return {"recall": hits / trials if trials else None, "k": k, "trials": trials}
 
 
-def autotune(store, dims=(32, 48, 64), methods=("svd", "item2vec"), k=20) -> dict:
-    """A/B the embedding *method* (svd vs item2vec) and dimensionality by recall@k, persist the
-    winner, and rebuild on it. recall@k actually *tuning* the model (spec §10) — never forcing
-    item2vec, only keeping it if it wins on your data. Returns the winner + per-config scores."""
-    scores = {}
-    for method in methods:
+def autotune(store, svd_dims=(48, 64, 96, 128), item2vec_probe_dim=64, k=20) -> dict:
+    """A/B the embedding dimensionality (svd) by recall@k with a single item2vec sanity probe,
+    persist the winner, and rebuild on it. Returns the winner, the previous config, and the full
+    grid for the UI. Never forces item2vec; it's only kept if it wins on the user's data."""
+    prev_method = store.get_setting("rec_embed_method") or "svd"
+    prev_dim = int(store.get_setting("rec_dim") or embed.DIM)
+    previous = {"method": prev_method, "dim": prev_dim,
+                "recall": recall_at_k(store, k=k).get("recall_at_k") or 0.0}
+
+    grid = []
+    configs = [("svd", d) for d in svd_dims] + [("item2vec", item2vec_probe_dim)]
+    for method, d in configs:
         store.set_setting("rec_embed_method", method)
-        for d in dims:
-            embed.build_and_store(store, dim=d)
-            scores[(method, d)] = recall_at_k(store, k=k).get("recall_at_k") or 0.0
-    best = max(scores, key=scores.get)
-    bm, bd = best
-    store.set_setting("rec_embed_method", bm)
-    store.set_setting("rec_dim", str(bd))
-    embed.build_and_store(store, dim=bd)     # leave the live model on the winning config
-    return {"best_method": bm, "best_dim": bd,
-            "scores": {f"{m}:{d}": v for (m, d), v in scores.items()}}
+        embed.build_and_store(store, dim=d)
+        grid.append({"method": method, "dim": d,
+                     "recall": recall_at_k(store, k=k).get("recall_at_k") or 0.0})
+
+    winner = max(grid, key=lambda g: g["recall"])
+    store.set_setting("rec_embed_method", winner["method"])
+    store.set_setting("rec_dim", str(winner["dim"]))
+    embed.build_and_store(store, dim=winner["dim"])   # leave the live model on the winner
+    return {"winner": winner, "previous": previous, "grid": grid}

@@ -10,8 +10,16 @@ import zlib
 import numpy as np
 
 from yt_playlist.library import analysis
-from yt_playlist.rec import embed, genre_map, journeys, rec_params, transient
+from yt_playlist.rec import arc_energy, embed, genre_map, journeys, rec_params, transient
 from yt_playlist.rec.rec_dao import RecDao
+
+# Added to an L2 norm before dividing so a zero/degenerate vector normalises to ~0 rather than raising
+# or producing NaNs. Tiny relative to any real unit vector, so it never perturbs a result.
+_NORM_EPS = 1e-9
+# A small positive shift applied when re-weighting taste scores (which can be negative cosines): after
+# shifting every score to a non-negative base we add this so a muted family lands just above 0 instead
+# of exactly 0, keeping the ordering well-defined. Negligible next to real score gaps.
+_SCORE_SHIFT_EPS = 1e-6
 
 
 class PlaylistTaste:
@@ -35,7 +43,7 @@ class PlaylistTaste:
         """(total, [(playlist_title, contribution), ...]) for a candidate taste vector."""
         if not self.titles:
             return 0.0, []
-        v = vec / (np.linalg.norm(vec) + 1e-9)
+        v = vec / (np.linalg.norm(vec) + _NORM_EPS)
         contrib = self.weights * (self.centroids @ v)        # play-weighted cosine per context
         order = np.argsort(-contrib)[:top]
         because = [(self.titles[i], float(contrib[i])) for i in order if contrib[i] > 0]
@@ -45,7 +53,7 @@ class PlaylistTaste:
         """Per-context taste score for every row of V (N, dim) -> (N,). Vectorized."""
         if not self.titles or len(V) == 0:
             return np.zeros(len(V))
-        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
+        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
         return self.weights @ (self.centroids @ Vn.T)        # (P,)·(P,N) -> (N,)
 
 
@@ -93,7 +101,7 @@ def genre_adjusted_scores(scores, genre_of, gweights):
     if not scores or not gweights or all(w == 1.0 for w in gweights.values()):
         return scores
     smin = min(scores.values())
-    eps = 1e-6
+    eps = _SCORE_SHIFT_EPS
     return {k: (s - smin + eps) * gweights.get(genre_of.get(k), 1.0) for k, s in scores.items()}
 
 
@@ -106,8 +114,51 @@ def axis_adjusted_scores(scores, mult):
     if not scores or not mult or all(m == 1.0 for m in mult.values()):
         return scores
     smin = min(scores.values())
-    eps = 1e-6
+    eps = _SCORE_SHIFT_EPS
     return {k: (s - smin + eps) * mult.get(k, 1.0) for k, s in scores.items()}
+
+
+# Breadth steering (#7): how far one full drag of the bias can push a single family's weight. The
+# raw factor is share**(-bias*gain); these clamp it so a vanishingly rare family can't explode (nor a
+# dominant one collapse) before it folds in with the manual genre weights.
+BREADTH_FACTOR_MIN = 0.25
+BREADTH_FACTOR_MAX = 4.0
+
+
+def _breadth_factors(shares, bias, gain):
+    """Per-genre-family multiplier that tilts how broad vs focused the feed's genre mix is (#7).
+
+    This is the math kernel behind the interactive Breadth bar. It redistributes weight *across the
+    families you already listen to* (it never invents genres you don't have):
+
+      factor(fam) = clamp( r(fam) ** (-bias * gain) ),  where r(fam) = share(fam) * n_families
+
+    `r` is a family's prominence relative to an even split (r=1 means exactly average). The exponent
+    is what makes the dial work:
+      - bias = 0  -> exponent 0 -> every factor is 1.0 (returned as {} so callers no-op): no change.
+      - bias > 0  (eclectic) -> negative exponent -> rare families (r<1) lift above 1, dominant
+        families (r>1) drop below 1. The genre distribution flattens toward uniform (higher entropy =
+        more breadth), so your under-played families surface more.
+      - bias < 0  (focused) -> the mirror image: dominant families are boosted, rare ones damped, so
+        the feed concentrates on your core.
+
+    Args:
+        shares: {family: play_share} from `taste_breadth` (shares sum to ~1 over present families).
+        bias:   the steer in [-1, +1] (0 neutral, + eclectic, - focused).
+        gain:   sensitivity; one full drag roughly doubles a half/double-average family at gain=1.
+
+    Returns {family: multiplier}, or {} when there's nothing to redistribute (neutral bias, or one
+    family or fewer -> no spread to tilt). Callers treat a missing family as a neutral 1.0.
+    """
+    n = len(shares)
+    if bias == 0.0 or n <= 1:
+        return {}
+    factors = {}
+    for fam, share in shares.items():
+        r = share * n                                  # prominence vs an even split (1.0 = average)
+        raw = r ** (-bias * gain) if r > 0 else BREADTH_FACTOR_MAX   # r==0 -> maximally rare -> ceiling
+        factors[fam] = max(BREADTH_FACTOR_MIN, min(BREADTH_FACTOR_MAX, raw))
+    return factors
 
 
 def _axis_weights_for(store, keys, now=None):
@@ -119,31 +170,47 @@ def _axis_weights_for(store, keys, now=None):
     aw = {a[len("artist:"):]: v for a, v in w.items() if a.startswith("artist:")}
     leans = transient.facet_leans(store, now) if now is not None else {}
     standing = store.get_leans()
+    # Breadth steer (#7): a per-family tilt derived from your current genre spread. Only computed when
+    # the bias is off-center (the taste_breadth query isn't worth running at the neutral default), and
+    # it must keep the overlay alive below even when every genre/era/artist weight is neutral.
+    bias = rec_params.get_param(store, "breadth_bias")
+    bfac = _breadth_factors(taste_breadth(store)["families"], bias,
+                            rec_params.get_param(store, "breadth_gain")) if bias else {}
     perm_neutral = all(v == 1.0 for v in list(gw.values()) + list(ew.values()) + list(aw.values()))
-    if perm_neutral and not leans and not standing:
+    if perm_neutral and not leans and not standing and not bfac:
         return None
     keys = list(keys)
     dao = RecDao(store)
     genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
     lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
+    fgain = rec_params.get_param(store, "facet_gain")
+    fmin = rec_params.get_param(store, "facet_mult_min")
+    fmax = rec_params.get_param(store, "facet_mult_max")
 
-    def tm(token):
-        return transient.facet_multiplier(leans.get(token, 0.0))
+    def tm(token):                                      # live transient facet multiplier for a token
+        return transient.facet_multiplier(leans.get(token, 0.0), fgain, fmin, fmax)
 
-    def sl(token):
+    def sl(token):                                       # standing (held-slider) lean for a token
         return standing.get(token, 1.0)
+
+    def axis_mult(weights, kind, token):
+        """One axis's multiplier: permanent weight x standing lean x transient facet multiplier, or a
+        neutral 1.0 when the track has no value on that axis (token is None). Unifies the identical
+        chain used for genre family, sub-genre, era and artist."""
+        if token is None:
+            return 1.0
+        full = f"{kind}:{token}"
+        return weights.get(token, 1.0) * sl(full) * tm(full)
 
     mult = {}
     for k in keys:
         fam = genre_map.family(genres[k]) if k in genres else None
         sub = genre_map.subgenre(genres[k]) if k in genres else None
-        dec = decades.get(k)
-        art = artists.get(k)
-        gm = gw.get(fam, 1.0) * sl(f"genre:{fam}") * (tm(f"genre:{fam}") if fam else 1.0)
+        gm = axis_mult(gw, "genre", fam) * bfac.get(fam, 1.0)   # breadth steer folds in atop genre weight
         if sub and sub != fam:
-            gm *= gw.get(sub, 1.0) * sl(f"genre:{sub}") * tm(f"genre:{sub}")
-        em = ew.get(dec, 1.0) * sl(f"era:{dec}") * (tm(f"era:{dec}") if dec else 1.0)
-        am = aw.get(art, 1.0) * sl(f"artist:{art}") * (tm(f"artist:{art}") if art else 1.0)
+            gm *= axis_mult(gw, "genre", sub)
+        em = axis_mult(ew, "era", decades.get(k))
+        am = axis_mult(aw, "artist", artists.get(k))
         mult[k] = max(lo, min(hi, gm)) * max(lo, min(hi, em)) * max(lo, min(hi, am))
     return mult
 
@@ -152,6 +219,28 @@ def _apply_axis_weights(store, sims, now=None):
     """Re-weight a {key: taste-score} map by permanent preferences × the live transient facet leans."""
     mult = _axis_weights_for(store, list(sims), now=now)
     return sims if mult is None else axis_adjusted_scores(sims, mult)
+
+
+def discovery_facet_weight(store, family, now):
+    """#18: the facet overlay for OUTWARD discovery (new artists/albums), at genre-family granularity.
+
+    Returns a positive multiplier to scale a candidate's surfacing score by, or None to HARD-EXCLUDE
+    it (when the family's permanent `genre:` weight is exactly 0 — muting techno on the Taste tab
+    yields zero techno discovery, stronger than the in-library de-rank). The multiplier is
+    permanent_weight × standing_lean × a DAMPED transient multiplier, so 'mute' bends hard while
+    'less house lately' only nudges. An untagged candidate (family falsy) is neutral (1.0) and never
+    excluded — we don't banish what we can't classify."""
+    if not family:
+        return 1.0
+    perm = store.get_weights().get(f"genre:{family}", 1.0)
+    if perm == 0:
+        return None
+    standing = store.get_lean(f"genre:{family}")
+    lean = transient.facet_leans(store, now).get(f"genre:{family}", 0.0)
+    tmult = transient.facet_multiplier(lean * rec_params.DISCOVERY_TRANSIENT_DAMP,
+                                       rec_params.FACET_GAIN, rec_params.FACET_MULT_MIN,
+                                       rec_params.FACET_MULT_MAX)
+    return max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, perm * standing * tmult))
 
 
 def era_distribution(store) -> list:
@@ -170,42 +259,51 @@ def taste_fingerprint(store) -> dict:
     Also includes 'effective' = permanent x standing lean, clamped to [GENRE_MIN, GENRE_MAX], which
     is what the slider value binds to (the bar shows what the user actually experiences).
 
-    Pinned niches: any genre:<x> or era:<x> axis present in stored leans (set via /home/fingerprint/add)
-    that is NOT already in the play-distribution-based lists is appended with share=0.0 so a searched,
-    zero-play subgenre always renders as a steerable bar.
+    Pinned axes: 'pinned' is True for any family/era that has an explicit stored lean (set via
+    /home/fingerprint/add or by steering its bar). The Home column always renders the top-by-share
+    bars PLUS every pinned one — so an added bar shows even when it's a low-share PLAYED family (e.g.
+    'rock-post', the family post-rock lives under) that ranks past the top few, not just a zero-play
+    niche. A pinned axis not in the play distribution at all is appended with share=0.0.
     """
     bd = taste_breadth(store)
     w = store.get_weights()
+    leans = store.get_leans()
     families = [{"name": f, "share": share, "weight": w.get(f"genre:{f}", 1.0),
                  "effective": max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX,
-                                  w.get(f"genre:{f}", 1.0) * store.get_lean(f"genre:{f}")))}
+                                  w.get(f"genre:{f}", 1.0) * store.get_lean(f"genre:{f}"))),
+                 "pinned": f"genre:{f}" in leans}
                 for f, share in sorted(bd["families"].items(), key=lambda x: -x[1])]
     eras = [{"name": d, "share": share, "weight": w.get(f"era:{d}", 1.0),
              "effective": max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX,
-                              w.get(f"era:{d}", 1.0) * store.get_lean(f"era:{d}")))}
+                              w.get(f"era:{d}", 1.0) * store.get_lean(f"era:{d}"))),
+             "pinned": f"era:{d}" in leans}
             for d, share in era_distribution(store)]
 
-    # Append pinned niches: axes stored in leans but not yet in the play-distribution lists.
+    # Append pinned axes stored in leans but not present in the play-distribution lists at all.
     known_genre_names = {entry["name"] for entry in families}
     known_era_names = {entry["name"] for entry in eras}
-    leans = store.get_leans()
     for axis, lean_val in leans.items():
         if axis.startswith("genre:"):
             name = axis[len("genre:"):]
             if name not in known_genre_names:
                 weight = w.get(axis, 1.0)
                 effective = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, weight * lean_val))
-                families.append({"name": name, "share": 0.0, "weight": weight, "effective": effective})
+                families.append({"name": name, "share": 0.0, "weight": weight,
+                                 "effective": effective, "pinned": True})
                 known_genre_names.add(name)
         elif axis.startswith("era:"):
             name = axis[len("era:"):]
             if name not in known_era_names:
                 weight = w.get(axis, 1.0)
                 effective = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, weight * lean_val))
-                eras.append({"name": name, "share": 0.0, "weight": weight, "effective": effective})
+                eras.append({"name": name, "share": 0.0, "weight": weight,
+                             "effective": effective, "pinned": True})
                 known_era_names.add(name)
 
-    return {"families": families, "eras": eras, "breadth": bd["breadth"]}
+    # breadth = the *measured* spread (a backdrop the bar shows); breadth_bias = the user's current
+    # focused<->eclectic steer that the draggable handle binds to (#7).
+    return {"families": families, "eras": eras, "breadth": bd["breadth"],
+            "breadth_bias": rec_params.get_param(store, "breadth_bias")}
 
 
 def playlist_facets(store, playlist_id) -> dict:
@@ -549,10 +647,13 @@ def roll_recipe(store, model, seed=None, now=None) -> dict:
     rng = random.Random(seed)
     weights = store.get_weights()
     leans = transient.facet_leans(store, now) if now is not None else {}
+    fgain = rec_params.get_param(store, "facet_gain")
+    fmin = rec_params.get_param(store, "facet_mult_min")
+    fmax = rec_params.get_param(store, "facet_mult_max")
 
     def pick(dist, prefix):
         items = [(k, share * weights.get(f"{prefix}:{k}", 1.0)
-                     * transient.facet_multiplier(leans.get(f"{prefix}:{k}", 0.0)))
+                     * transient.facet_multiplier(leans.get(f"{prefix}:{k}", 0.0), fgain, fmin, fmax))
                  for k, share in dist.items()]
         items = [(k, w) for k, w in items if w > 0]
         if not items:
@@ -567,7 +668,9 @@ def roll_recipe(store, model, seed=None, now=None) -> dict:
 
     genre = pick(taste_breadth(store)["families"], "genre")
     era = pick(dict(era_distribution(store)), "era")
-    journey = pick(dict.fromkeys(journeys.JOURNEYS, 1.0), "journey") or "shuffle"
+    # Fresh playlists are unowned proposals with no plays/recency, so data-dependent journeys
+    # (rediscovery, deep dive, eras…) have no signal to order by — keep them a straight shuffle.
+    journey = "shuffle" if model == "fresh" else (pick(dict.fromkeys(journeys.JOURNEYS, 1.0), "journey") or "shuffle")
     facets = {}
     if genre:
         facets["genres"] = [genre]
@@ -594,6 +697,7 @@ def cluster_recipe(store, keep_keys, seed_labels=(), allow_families=(), journey=
     genres, decades = dao.track_genres(keys), dao.track_decades(keys)
     lastp, plays = dao.track_last_played(keys), store.play_counts()
     meta = store.tracks_by_keys(keys)
+    arc = arc_energy.arc_energies(keys, genres, dao.track_audio_features())   # real-audio energy (#37)
     fam_count, era_count = {}, {}
     for k in keys:
         if k in genres:
@@ -616,7 +720,7 @@ def cluster_recipe(store, keep_keys, seed_labels=(), allow_families=(), journey=
     def feat(k):
         g = genres.get(k, "")
         return {"artist": (meta.get(k) or {}).get("artist", ""), "genre": g,
-                "energy": genre_map.energy(g), "decade": decades.get(k),
+                "energy": arc.get(k, genre_map.energy(g)), "decade": decades.get(k),
                 "plays": plays.get(k, 0), "recency": lastp.get(k, 0.0)}
 
     order = journeys.journey_order(keys, journey, seed, feat)
@@ -799,7 +903,7 @@ def _apply_mood(scores, store, now, V, idx):
     factor = transient.staleness_factor(store, now)
     if factor <= 0:
         return scores
-    Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
+    Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
     return scores + MOOD_ALPHA * factor * (Vn @ tilt)
 
 
@@ -815,12 +919,14 @@ def apply_dislikes(store, status_map, now) -> None:
     for key, status in status_map.items():
         if status == "DISLIKE":
             if key not in existing_dis and store.record_dislike(key, until, now):
-                graduate_moods(store, [key], -1.0, now, source=rec_params.SOURCE_W_DISLIKE)
+                graduate_moods(store, [key], -1.0, now,
+                               source=rec_params.get_param(store, "source_w_dislike"))
             if key in existing_like:
                 store.clear_like(key)                       # a dislike supersedes a prior like
         elif status == "LIKE":
             if key not in existing_like and store.record_like(key, now):
-                graduate_moods(store, [key], 1.0, now, source=rec_params.SOURCE_W_LIKE)
+                graduate_moods(store, [key], 1.0, now,
+                               source=rec_params.get_param(store, "source_w_like"))
             if key in existing_dis:
                 store.clear_dislike(key)                    # a like clears a prior dislike (preserved)
         elif status == "INDIFFERENT":
@@ -834,11 +940,15 @@ def graduate_facet(store, axis, signed, now, source=1.0) -> None:
     """Accumulate one facet's signed event into the graduation ledger; when its running total
     crosses THEME_THRESHOLD, graduate it (a gentle permanent weight nudge, then a smooth reset).
     `source` is the signal's SOURCE_W_* weight (graduation speed). Model-only — NEVER suppresses."""
+    if not rec_params.get_param(store, "graduation_enabled"):
+        return
+    threshold = rec_params.get_param(store, "theme_threshold")
     score = store.bump_theme(axis, signed * source, now)
-    if abs(score) >= rec_params.THEME_THRESHOLD:
-        factor = rec_params.GRADUATE_UP if score > 0 else rec_params.GRADUATE_DOWN
+    if abs(score) >= threshold:
+        factor = (rec_params.get_param(store, "graduate_up") if score > 0
+                  else rec_params.get_param(store, "graduate_down"))
         store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
-        store.discount_theme(axis, math.copysign(rec_params.THEME_THRESHOLD, score))
+        store.discount_theme(axis, math.copysign(threshold, score))
 
 
 def graduate_moods(store, keys, signed, now, source=1.0) -> None:
@@ -867,12 +977,14 @@ def graduate_plays(store, keys, now) -> None:
     from collections import Counter
     play_counts = Counter(keys)
     n = len(keys) or 1                                              # total plays this session
-    raw = rec_params.SOURCE_W_PLAY * n                              # total play intensity this session
-    scale = min(1.0, rec_params.PLAY_GRAD_SESSION_CAP / raw) if raw > 0 else 0.0
+    w_play = rec_params.get_param(store, "source_w_play")
+    session_cap = rec_params.get_param(store, "play_grad_session_cap")
+    raw = w_play * n                                                # total play intensity this session
+    scale = min(1.0, session_cap / raw) if raw > 0 else 0.0
     for axis, axis_keys in facets.items():
         # Sum play counts across all unique keys mapped to this axis
         axis_play_count = sum(play_counts[k] for k in axis_keys)
-        contribution = rec_params.SOURCE_W_PLAY * axis_play_count * scale
+        contribution = w_play * axis_play_count * scale
         # source already folded into `contribution`; pass source=1.0, signed=+contribution
         graduate_facet(store, axis, contribution, now, source=1.0)
 
@@ -888,6 +1000,10 @@ def graduate_slider_exposure(store, now) -> None:
     by dividing the lean by the actual permanent ratio so the displayed effective multiplier
     (permanent x lean) is conserved (sticky). Returning a slider to neutral (magnitude 0) stops all
     accrual."""
+    if not rec_params.get_param(store, "graduation_enabled"):
+        return
+    threshold = rec_params.get_param(store, "theme_threshold")
+    w_slider = rec_params.get_param(store, "source_w_slider")
     today = _utc_day(now)
     for row in store.lean_rows():
         axis, value, last_day = row["axis"], row["value"], row["last_graduated_day"]
@@ -897,15 +1013,16 @@ def graduate_slider_exposure(store, now) -> None:
         store.set_lean_graduated_day(axis, today)             # stamp the held-day either way
         if magnitude == 0.0:
             continue
-        signed = math.copysign(magnitude * rec_params.SOURCE_W_SLIDER, value - 1.0)
+        signed = math.copysign(magnitude * w_slider, value - 1.0)
         score = store.bump_theme(axis, signed, now)
-        if abs(score) >= rec_params.THEME_THRESHOLD:
-            factor = rec_params.GRADUATE_UP if score > 0 else rec_params.GRADUATE_DOWN
+        if abs(score) >= threshold:
+            factor = (rec_params.get_param(store, "graduate_up") if score > 0
+                      else rec_params.get_param(store, "graduate_down"))
             old_perm = store.get_weights().get(axis, 1.0)
             new_perm = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
             ratio = (new_perm / old_perm) if old_perm > 0 else 1.0
             store.set_lean(axis, value / ratio, now)          # conserve: new_perm*(value/ratio) == old_perm*value
-            store.discount_theme(axis, math.copysign(rec_params.THEME_THRESHOLD, score))
+            store.discount_theme(axis, math.copysign(threshold, score))
 
 
 # HOME CARD: "Catalog" ("From your catalog") — own-but-under-played tracks, the edge of your palette.
@@ -933,7 +1050,7 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     plays = store.play_counts()                                  # {key: count}; absent = never played
     # Catalog score = novelty(lack of plays, PRIMARY) × taste-fit weight (shifted positive so it only
     # ever scales, never zeroes — "weighted, not filtered").
-    scored = {k: (1.0 / (1.0 + plays.get(k, 0))) * (sims.get(k, smin) - smin + 1e-6) for k in keys}
+    scored = {k: (1.0 / (1.0 + plays.get(k, 0))) * (sims.get(k, smin) - smin + _SCORE_SHIFT_EPS) for k in keys}
     order = sorted(scored, key=lambda k: -scored[k])
     dao = RecDao(store)
     suppressed = store.suppressed_keys("for_you", now) | dao.generated_track_keys()

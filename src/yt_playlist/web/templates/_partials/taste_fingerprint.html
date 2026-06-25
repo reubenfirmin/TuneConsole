@@ -1,43 +1,53 @@
 <section class="fingerprint card" id="fingerprint">
+  {# Header pairs the two GLOBAL controls: Breadth (the focused<->eclectic master dial, #7) on the
+     left, the "tune deeper" escape hatch on the right. Per-facet genre/era bars live in the body
+     below. Breadth is a single dial, not a list, so it belongs here rather than as a third column. #}
   <div class="fp-head">
-    <div class="fp-stance" hx-target="#home-feed" hx-swap="outerHTML">
-      <button type="button" class="seg-btn{{ ' on' if stance != 'explore' }}"
-              hx-post="/home/stance" hx-vals='{"stance":"exploit"}'>More in your wheelhouse</button>
-      <button type="button" class="seg-btn{{ ' on' if stance == 'explore' }}"
-              hx-post="/home/stance" hx-vals='{"stance":"explore"}'>Try something new</button>
+    <div class="fp-breadth">
+      <span class="fp-label">Breadth</span>
+      <span class="fp-breadth-end">Focused</span>
+      <input type="range" class="fp-breadth-slider" min="-1" max="1" step="0.05"
+             value="{{ fingerprint.breadth_bias }}" name="breadth_bias"
+             hx-post="/home/breadth" hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
+             hx-on::before-request="sessionStorage.setItem('steered','1')"
+             aria-label="steer the feed from focused to eclectic">
+      <span class="fp-breadth-end">Eclectic</span>
+      {# Measured spread, as plain context for the relative dial (no second bar to compete with it). #}
+      <span class="fp-breadth-note">naturally {{ 'eclectic' if fingerprint.breadth > 0.66 else ('focused' if fingerprint.breadth < 0.33 else 'balanced') }}</span>
     </div>
     <a class="fp-tune" href="/taste">Tune your taste model →</a>
   </div>
-  <p class="fp-hint section-note">Drag a bar to favor or mute it - your picks re-rank instantly.</p>
+  <p class="fp-hint section-note">Drag a genre or era bar to favor or mute it - your picks re-rank instantly.</p>
   <div class="fp-body">
     <div class="fp-col">
       <span class="fp-label">Genres</span>
-      {% for g in fingerprint.families[:6] %}
-      <div class="fp-row">
-        <span class="fp-name" title="{{ '%.0f'|format(g.share*100) }}% of your listening">{{ g.name }}</span>
-        <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ g.effective }}"
-               name="weight" hx-post="/home/steer" hx-vals='{"axis":"genre:{{ g.name }}"}'
-               hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
-               hx-on::before-request="sessionStorage.setItem('steered','1')"
-               aria-label="favor or mute {{ g.name }}">
-        <button type="button" class="fp-expand-btn"
-                hx-post="/home/fingerprint/expand"
-                hx-vals='{"family":"{{ g.name }}"}'
-                hx-target="#fp-subs-{{ loop.index }}"
-                hx-swap="innerHTML"
-                title="Drill into {{ g.name }} subgenres"
-                aria-label="expand {{ g.name }} subgenres">&#9656;</button>
-      </div>
-      <div id="fp-subs-{{ loop.index }}" class="fp-subgenres"></div>
-      {% endfor %}
-      <div class="fp-search-box">
-        <input type="search" class="fp-search-input" name="q" placeholder="Search genres…"
-               hx-get="/home/fingerprint/search"
-               hx-trigger="keyup changed delay:300ms"
-               hx-target="#fp-search-results"
-               hx-swap="innerHTML"
-               aria-label="search genres to add">
-        <div id="fp-search-results" class="fp-search-results-container"></div>
+      {# Bars live in their own container so a pick can swap JUST these (server-authoritative re-render)
+         and leave the picker below untouched — the picker never gets destroyed/re-initialised. #}
+      <div id="fp-genre-bars">{% include "_partials/fingerprint_genre_bars.html" %}</div>
+      {# Genre picker: an autosuggest combo (same widget family as the Clusters genre filter). Filters
+         the full taxonomy client-side so reset/close are instant; a pick POSTs to /home/fingerprint/add
+         and swaps #fp-genre-bars with the re-rendered bars (the new one included). #}
+      <div class="fp-genre-pick" x-data="genrePicker()" x-init="load()" @click.outside="open = false">
+        <div class="cg-box" :class="{ on: query }" @click="open = true; $refs.gq.focus()">
+          <span class="cg-icon">⌕</span>
+          <input type="text" x-ref="gq" x-model="query" placeholder="Add a genre bar…"
+                 @focus="open = true" @input="open = true; sel = -1"
+                 @keydown.down.prevent="open = true; move(1)" @keydown.up.prevent="move(-1)"
+                 @keydown.enter.prevent="choose()" @keydown.escape="reset()"
+                 autocomplete="off" spellcheck="false" aria-label="search genres to add a taste bar">
+          <button type="button" class="cg-x" x-show="query" x-cloak @click.stop="reset()"
+                  title="Clear">✕</button>
+        </div>
+        <ul class="cg-suggest" x-show="open && suggest().length" x-cloak>
+          <template x-for="(o, idx) in suggest()" :key="o.kind + o.name">
+            <li :class="{ sel: sel === idx }" @mouseenter="sel = idx" @click="pick(o.name)">
+              <span class="cg-name" x-text="o.name"></span>
+              <span class="cg-kind" :class="o.kind" x-text="o.kind"></span>
+            </li>
+          </template>
+        </ul>
+        <p class="fp-genre-empty section-note" x-show="open && query && !suggest().length" x-cloak
+           x-text="`No genres match “${query}”.`"></p>
       </div>
     </div>
     <div class="fp-col">
@@ -52,11 +62,6 @@
                aria-label="favor or mute the {{ e.name }}s">
       </div>
       {% endfor %}
-    </div>
-    <div class="fp-col fp-breadth">
-      <span class="fp-label">Breadth</span>
-      <span class="fp-breadth-val">{{ 'eclectic' if fingerprint.breadth > 0.66 else ('focused' if fingerprint.breadth < 0.33 else 'balanced') }}</span>
-      <span class="fp-bar wide"><i style="width:{{ '%.0f'|format(fingerprint.breadth*100) }}%"></i></span>
     </div>
   </div>
 </section>

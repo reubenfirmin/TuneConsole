@@ -50,6 +50,41 @@ def test_unknown_param_raises(store):
         rec_params.get_param(store, "no_such_knob")
 
 
+def test_transient_param_defaults_match_constants(store):
+    pairs = [
+        ("play_transient_w", rec_params.PLAY_TRANSIENT_W),
+        ("like_transient_w", rec_params.LIKE_TRANSIENT_W),
+        ("dislike_transient_w", rec_params.DISLIKE_TRANSIENT_W),
+        ("facet_gain", rec_params.FACET_GAIN),
+        ("mood_recency_alpha", rec_params.MOOD_RECENCY_ALPHA),
+        ("recent_play_limit", rec_params.RECENT_PLAY_LIMIT),
+        ("stale_decay_halflife_d", rec_params.STALE_DECAY_HALFLIFE_D),
+        ("facet_mult_min", rec_params.FACET_MULT_MIN),
+        ("facet_mult_max", rec_params.FACET_MULT_MAX),
+    ]
+    for name, const in pairs:
+        assert name in rec_params.PARAMS_BY_NAME, name
+        assert rec_params.get_param(store, name) == const, name
+    assert rec_params.PARAMS_BY_NAME["mood_alpha"].default == 0.35
+
+
+def test_graduation_params_registered(store):
+    assert rec_params.PARAMS_BY_NAME["graduation_enabled"].boolean is True
+    assert rec_params.get_param(store, "graduation_enabled") is True
+    assert rec_params.get_param(store, "theme_threshold") == rec_params.THEME_THRESHOLD
+    assert rec_params.get_param(store, "source_w_play") == rec_params.SOURCE_W_PLAY
+    assert rec_params.PARAMS_BY_NAME["theme_threshold"].group == "graduation"
+
+
+def test_boolean_param_roundtrip(store, monkeypatch):
+    spec = rec_params.ParamSpec("test_flag", "Flag", "graduation", "help", 0, 1, 1, True, boolean=True)
+    monkeypatch.setitem(rec_params.PARAMS_BY_NAME, "test_flag", spec)
+    assert rec_params.get_param(store, "test_flag") is True          # default
+    rec_params.set_param(store, "test_flag", False)
+    assert rec_params.get_param(store, "test_flag") is False
+    assert store.get_setting("rec_param:test_flag") == "0"
+
+
 def test_registry_has_expected_groups_and_advanced_flag():
     names = {p.name for p in rec_params.PARAMS}
     assert {"comfort_recency_full_days", "comfort_min_plays", "palette_absence_penalty",

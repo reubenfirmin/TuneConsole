@@ -1,0 +1,15 @@
+{# Auto-tune control: while running, self-poll every 2s; when idle, show the button + last result. #}
+<div id="autotune-status"{% if running %} hx-get="/taste/autotune-status" hx-trigger="load delay:2s" hx-swap="outerHTML"{% endif %}>
+  {% if running %}
+  <div class="autotune-ctl">
+    <button disabled><span class="spinner"></span> Auto-tuning… (rebuilding several models)</button>
+  </div>
+  {% else %}
+  <div class="autotune-ctl">
+    <button hx-post="/taste/autotune" hx-target="#autotune-status" hx-swap="outerHTML"
+            hx-confirm="Rebuild several embedding configs and keep the best by recall@k? Takes ~10s.">Auto-tune (recall@k)</button>
+    <span class="autotune-note">Saved permanently: the chosen size is reused by every future rebuild (including the automatic one on each sync) until you re-run this.</span>
+  </div>
+  {% include "_partials/autotune_result.html" %}
+  {% endif %}
+</div>

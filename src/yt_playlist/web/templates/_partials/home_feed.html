@@ -1,4 +1,4 @@
-<div id="home-feed" class="home-feed" data-stance="{{ stance }}">
+<div id="home-feed" class="home-feed">
   {# The steering panel only makes sense once the library has genres to steer; empty state until then. #}
   {% if fingerprint.families %}{% include "_partials/taste_fingerprint.html" %}{% endif %}
   <div id="steer-toast" class="steer-toast" x-data="{show:false}" x-show="show" x-cloak x-transition

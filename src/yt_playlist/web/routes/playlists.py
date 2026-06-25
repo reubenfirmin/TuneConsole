@@ -305,6 +305,50 @@ def build(ctx) -> APIRouter:
         store.set_track_year(tid, year)
         return _track_row(request, pid, vid)
 
+    @router.post("/playlist/{pid}/track-title")
+    async def playlist_set_track_title(pid: int, request: Request):
+        form = await request.form()
+        vid = (form.get("video_id") or "").strip()
+        title = (form.get("title") or "").strip()
+        if not vid:
+            return _toast(request, "no track given")
+        tid = store.track_ids_for_videos([vid]).get(vid)
+        if tid is None:
+            return _toast(request, "track not found")
+        store.set_track_title(tid, title)
+        return _track_row(request, pid, vid)
+
+    @router.post("/playlist/{pid}/track-artist")
+    async def playlist_set_track_artist(pid: int, request: Request):
+        form = await request.form()
+        vid = (form.get("video_id") or "").strip()
+        artist = (form.get("artist") or "").strip()
+        if not vid:
+            return _toast(request, "no track given")
+        tid = store.track_ids_for_videos([vid]).get(vid)
+        if tid is None:
+            return _toast(request, "track not found")
+        store.set_track_artist(tid, artist)
+        return _track_row(request, pid, vid)
+
+    @router.post("/playlist/{pid}/track-reset")
+    async def playlist_reset_track_field(pid: int, request: Request):
+        form = await request.form()
+        vid = (form.get("video_id") or "").strip()
+        field = (form.get("field") or "").strip()
+        if not vid:
+            return _toast(request, "no track given")
+        if field not in ("title", "artist"):
+            return _toast(request, "bad field")
+        tid = store.track_ids_for_videos([vid]).get(vid)
+        if tid is None:
+            return _toast(request, "track not found")
+        if field == "title":
+            store.reset_track_title(tid)
+        else:
+            store.reset_track_artist(tid)
+        return _track_row(request, pid, vid)
+
     @router.post("/playlist/{pid}/remove-track")
     async def playlist_remove_track(pid: int, request: Request):
         vid = ((await request.form()).get("video_id") or "").strip()

@@ -15,11 +15,31 @@
   </td>
   {% with video_id = t.video_id, liked = t.liked %}{% include "_partials/liked_cell.html" %}{% endwith %}
   <td class="t-wrap" title="{{ t.title }}">
-    <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-       target="_blank" rel="noopener">{{ t.title }}&nbsp;↗</a>
-    {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
+    <span class="tdisplay" x-show="editTitleVid !== '{{ t.video_id }}'">
+      <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
+         target="_blank" rel="noopener">{{ t.title }}&nbsp;↗</a>
+      {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
+      <span class="editpen" @click="startEditTitle('{{ t.video_id }}')" title="Edit title">✎</span>
+      {% if t.title_edited %}<span class="resetpen" @click="resetField('{{ t.video_id }}', 'title')" title="Reset to original">↺</span>{% endif %}
+    </span>
+    <input class="tinput" type="text" autocomplete="off" x-cloak
+           x-show="editTitleVid === '{{ t.video_id }}'"
+           @keydown.enter.prevent="saveTitle('{{ t.video_id }}', $event.target.value)"
+           @keydown.escape="editTitleVid = null"
+           @blur="saveTitle('{{ t.video_id }}', $event.target.value)">
   </td>
-  <td class="t-wrap" title="{{ t.artist }}"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
+  <td class="t-wrap" title="{{ t.artist }}">
+    <span class="adisplay" x-show="editArtistVid !== '{{ t.video_id }}'">
+      <a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a>
+      <span class="editpen" @click="startEditArtist('{{ t.video_id }}')" title="Edit artist">✎</span>
+      {% if t.artist_edited %}<span class="resetpen" @click="resetField('{{ t.video_id }}', 'artist')" title="Reset to original">↺</span>{% endif %}
+    </span>
+    <input class="ainput" type="text" autocomplete="off" x-cloak
+           x-show="editArtistVid === '{{ t.video_id }}'"
+           @keydown.enter.prevent="saveArtist('{{ t.video_id }}', $event.target.value)"
+           @keydown.escape="editArtistVid = null"
+           @blur="saveArtist('{{ t.video_id }}', $event.target.value)">
+  </td>
   <td class="t-wrap" title="{{ t.album }}">{% if t.album_browse %}<a class="alink" href="/album?browse={{ t.album_browse }}">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</td>
   <td class="num mono mb-year">
     <span class="ydisplay" x-show="editYearVid !== '{{ t.video_id }}'"

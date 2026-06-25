@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   id INTEGER PRIMARY KEY,
   video_id TEXT,
   title TEXT, artist TEXT, album TEXT, duration_s INTEGER,
+  orig_title TEXT, orig_artist TEXT,
   identity_key TEXT NOT NULL,
   available INTEGER,
   video_type TEXT,
@@ -151,6 +152,14 @@ CREATE TABLE IF NOT EXISTS rec_vectors (
   identity_key TEXT PRIMARY KEY,
   vec BLOB NOT NULL                       -- float32 taste-embedding for the track (see embed.py)
 );
+CREATE TABLE IF NOT EXISTS rec_content_vectors (
+  identity_key TEXT PRIMARY KEY,
+  vec BLOB NOT NULL                       -- float32 content (genre/era) vector; see embed.build_content_vectors
+);
+CREATE TABLE IF NOT EXISTS rec_discovered_content_vectors (
+  identity_key TEXT PRIMARY KEY,
+  vec BLOB NOT NULL                       -- #13 P2: out-of-corpus track content vectors (same model space)
+);
 CREATE TABLE IF NOT EXISTS rec_feedback (
   surface TEXT NOT NULL,                  -- where it happened: 'for_you', 'suggest', 'discover'
   item_key TEXT NOT NULL,                 -- track identity_key (or 'artist:<name>' for a mute)
@@ -242,6 +251,12 @@ class Store:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN danceability REAL")
         if "mb_recording_id" not in cols:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN mb_recording_id TEXT")
+        if "orig_title" not in cols:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN orig_title TEXT")
+            self.conn.execute("UPDATE tracks SET orig_title=title WHERE orig_title IS NULL")
+        if "orig_artist" not in cols:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN orig_artist TEXT")
+            self.conn.execute("UPDATE tracks SET orig_artist=artist WHERE orig_artist IS NULL")
         for _c, _t in (("music_key", "TEXT"), ("music_scale", "TEXT"),
                        ("mood_happy", "REAL"), ("mood_sad", "REAL"),
                        ("mood_relaxed", "REAL"), ("mood_acoustic", "REAL"),

@@ -30,6 +30,7 @@ class ParamSpec:
     default: float
     integer: bool = False
     advanced: bool = False
+    boolean: bool = False
 
 
 # Each default equals the constant it replaced, so behaviour is unchanged until a user moves it.
@@ -64,6 +65,80 @@ PARAMS = [
     ParamSpec("dislike_suppress_days", "Dislike ban length (days)", "discovery",
               "How long a thumbs-down hides a track before it can resurface.",
               1, 3650, 1, 365, integer=True),
+    ParamSpec("cluster_content_weight", "Cluster content blend", "discovery",
+              "How much the Clusters canvas leans on what tracks SOUND like (genre/era) vs how you've "
+              "filed them in playlists. 0 = pure playlist co-occurrence (old behaviour); higher = more "
+              "musical similarity, so a seed reaches its own genre even when you never playlist it there.",
+              0.0, 1.0, 0.05, 0.30),
+    # --- Breadth steering (#7). The interactive Breadth bar on the Home fingerprint binds to
+    # breadth_bias; breadth_gain is its (advanced) sensitivity. Default 0 == today's behaviour. ---
+    ParamSpec("breadth_bias", "Breadth", "discovery",
+              "Tilts the feed toward your focused core (left) or your eclectic edges (right). The "
+              "center follows your natural breadth and changes nothing; drag right to surface your "
+              "under-played genres more, left to concentrate on your dominant ones. Redistributes "
+              "across genres you already have - it doesn't pull in brand-new ones.",
+              -1.0, 1.0, 0.05, 0.0),
+    ParamSpec("breadth_gain", "Breadth sensitivity", "discovery",
+              "How hard a full Breadth drag bites. At 1.0, a full drag roughly doubles a family that "
+              "sits at half (or twice) your average share.",
+              0.2, 3.0, 0.05, 1.0, advanced=True),
+    # --- Right-now responsiveness (transient model). Defaults == the constants below. ---
+    ParamSpec("play_transient_w", "Recent-play push", "transient",
+              "How hard a recent play tilts the feed toward similar music. 0 = recent plays don't "
+              "steer; higher = your last plays dominate.", 0.0, 2.0, 0.05, 0.30),
+    ParamSpec("like_transient_w", "Recent-like push", "transient",
+              "How hard a recent thumbs-up tilts the feed (stronger than a passive play by default).",
+              0.0, 2.0, 0.05, 0.45),
+    ParamSpec("dislike_transient_w", "Recent-dislike push", "transient",
+              "How hard a recent thumbs-down pushes the feed away from similar music.",
+              0.0, 3.0, 0.05, 1.50),
+    ParamSpec("facet_gain", "Facet responsiveness", "transient",
+              "How strongly a genre/era/artist lean re-ranks the feed. Higher = right-now leans bite "
+              "harder.", 0.0, 1.0, 0.05, 0.35),
+    ParamSpec("mood_alpha", "Mood tilt", "transient",
+              "How hard a mood gesture tilts the lanes, relative to the underlying taste score.",
+              0.0, 1.0, 0.05, 0.35),
+    ParamSpec("mood_recency_alpha", "Recency emphasis", "transient",
+              "How much your newest interactions dominate over older ones. Higher = only the very "
+              "latest plays/likes matter.", 0.05, 0.9, 0.05, 0.35),
+    ParamSpec("recent_play_limit", "Recent window (tracks)", "transient",
+              "How many recent plays/likes feed the right-now model.", 5, 200, 5, 50, integer=True),
+    ParamSpec("stale_decay_halflife_d", "Right-now relax half-life (days)", "transient",
+              "Once a sync goes stale, how fast the right-now model relaxes back to your durable taste.",
+              1, 30, 1, 3, integer=True),
+    ParamSpec("facet_mult_min", "Facet floor", "transient",
+              "Even the strongest negative lean keeps a facet at least this present (never fully muted).",
+              0.0, 1.0, 0.05, 0.35, advanced=True),
+    ParamSpec("facet_mult_max", "Facet ceiling", "transient",
+              "Cap on how much a positive lean can boost a facet.", 1.0, 4.0, 0.1, 2.5, advanced=True),
+    # --- Learning (graduation: right-now -> permanent). Defaults == the constants below. ---
+    ParamSpec("graduation_enabled", "Learning enabled", "graduation",
+              "When on, sustained right-now behavior gradually rewrites your durable taste weights. "
+              "Turn off to freeze your permanent taste and let right-now effects stay temporary.",
+              0, 1, 1, True, boolean=True),
+    ParamSpec("theme_threshold", "Graduation threshold", "graduation",
+              "How much sustained signal a genre/era/artist must accumulate before it nudges your "
+              "permanent taste. Higher = learning is slower and more deliberate.", 0.2, 5.0, 0.1, 1.2),
+    ParamSpec("graduate_up", "Graduate-up step", "graduation",
+              "Permanent weight multiplier applied when a facet graduates upward.",
+              1.0, 1.5, 0.01, 1.05, advanced=True),
+    ParamSpec("graduate_down", "Graduate-down step", "graduation",
+              "Permanent weight multiplier applied when a facet graduates downward.",
+              0.5, 1.0, 0.01, 0.95, advanced=True),
+    ParamSpec("source_w_like", "Speed: likes", "graduation",
+              "How fast an explicit like graduates toward permanent taste.", 0.0, 2.0, 0.05, 1.0, advanced=True),
+    ParamSpec("source_w_dislike", "Speed: dislikes", "graduation",
+              "How fast an explicit dislike graduates toward permanent taste.", 0.0, 2.0, 0.05, 1.0, advanced=True),
+    ParamSpec("source_w_vibe", "Speed: mood gestures", "graduation",
+              "How fast a mood/vibe gesture graduates toward permanent taste.", 0.0, 2.0, 0.05, 1.0, advanced=True),
+    ParamSpec("source_w_slider", "Speed: held sliders", "graduation",
+              "How fast a held genre/lane slider graduates per day held.", 0.0, 2.0, 0.05, 0.5, advanced=True),
+    ParamSpec("source_w_play", "Speed: plays", "graduation",
+              "How fast passive plays graduate (kept small so binges don't silently rewrite taste).",
+              0.0, 1.0, 0.01, 0.08, advanced=True),
+    ParamSpec("play_grad_session_cap", "Play graduation cap / session", "graduation",
+              "Maximum total play-graduation contribution from one listening session.",
+              0.0, 2.0, 0.05, 0.4, advanced=True),
 ]
 
 PARAMS_BY_NAME = {p.name: p for p in PARAMS}
@@ -81,8 +156,15 @@ LANE_MIN, LANE_MAX, LANE_DEFAULT = 0.2, 3.0, 1.0
 # Genre-family weights (rec_weights table, axis `genre:<family>`): 0 mutes, 1 neutral, 2 favors.
 GENRE_MIN, GENRE_MAX, GENRE_DEFAULT, GENRE_STEP = 0.0, 2.0, 1.0, 0.1
 
+# #18: how much of the transient facet lean reaches OUTWARD discovery (new artists/albums). Damped
+# (<1) vs the in-library surfaces, so the deliberately-stable discovery pool isn't yanked around by a
+# single mood gesture; permanent genre weights still apply at full strength (and 0 hard-excludes).
+DISCOVERY_TRANSIENT_DAMP = 0.5
 
-def _clamp(spec, value) -> float:
+
+def _clamp(spec, value):
+    if spec.boolean:
+        return value.lower() in ("1", "true", "yes", "on") if isinstance(value, str) else bool(value)
     v = max(spec.min, min(spec.max, float(value)))
     return int(round(v)) if spec.integer else v
 
@@ -93,6 +175,8 @@ def get_param(store, name):
     raw = store.get_setting(SETTING_PREFIX + name)
     if raw is None or raw == "":
         return spec.default
+    if spec.boolean:
+        return raw == "1"
     try:
         return _clamp(spec, raw)
     except (TypeError, ValueError):
@@ -102,7 +186,10 @@ def get_param(store, name):
 def set_param(store, name, value) -> None:
     """Persist a scalar knob override (clamped to its spec range)."""
     spec = PARAMS_BY_NAME[name]
-    store.set_setting(SETTING_PREFIX + name, str(_clamp(spec, value)))
+    if spec.boolean:
+        store.set_setting(SETTING_PREFIX + name, "1" if _clamp(spec, value) else "0")
+    else:
+        store.set_setting(SETTING_PREFIX + name, str(_clamp(spec, value)))
 
 
 def reset_param(store, name) -> None:
@@ -131,9 +218,9 @@ RECENT_PLAY_LIMIT = 50         # how many recent plays feed the transient leans
 # never banishes: one gentle "less X" roughly halves X in the feed, "a lot"/sustained strongly reduces
 # but always leaves some present. Banishing a facet is the job of dislike (a ban) or graduation
 # (sustained transient → a lasting permanent-weight nudge), not a single transient gesture.
-FACET_GAIN = 0.35
+FACET_GAIN = 0.35              # slope: how hard a unit lean bends the facet multiplier off 1.0
 FACET_MULT_MIN = 0.35          # floor: even the strongest transient lean keeps a facet present, not muted
-FACET_MULT_MAX = 2.5
+FACET_MULT_MAX = 2.5           # ceiling: cap on how much a positive lean can boost a facet
 # Dislike (permanent suppression side)
 DISLIKE_SUPPRESS_DAYS = 365
 # Graduation

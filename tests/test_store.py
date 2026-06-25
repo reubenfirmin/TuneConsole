@@ -136,3 +136,12 @@ def test_theme_rows_returns_all_facets(store):
     assert abs(rows["era:1970"] - (-0.3)) < 1e-9
     # strongest magnitude first
     assert store.theme_rows()[0]["facet"] == "genre:jazz"
+
+
+def test_orig_title_artist_columns_exist_and_backfill(store):
+    # a fresh insert carries the originals; reset relies on these columns.
+    t = store.upsert_track("v1", "Bad Title", "Bad Artist", "Al", 100)
+    row = store.conn.execute(
+        "SELECT title, artist, orig_title, orig_artist FROM tracks WHERE id=?", (t,)).fetchone()
+    assert row["orig_title"] == "Bad Title"
+    assert row["orig_artist"] == "Bad Artist"

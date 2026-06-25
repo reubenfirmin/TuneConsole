@@ -50,13 +50,19 @@ def staleness_factor(store, now) -> float:
     age = now - max(stamps)
     if age <= rec_params.SYNC_STALE_S:
         return 1.0
-    return 0.5 ** ((age - rec_params.SYNC_STALE_S) / (rec_params.STALE_DECAY_HALFLIFE_D * 86400.0))
+    halflife_d = rec_params.get_param(store, "stale_decay_halflife_d")
+    return 0.5 ** ((age - rec_params.SYNC_STALE_S) / (halflife_d * 86400.0))
 
 
 def facet_leans(store, now) -> dict:
     """{facet: signed strength} — the token view of the transient model, from mood feedback (rank-
     weighted), recent plays (positive), and recent dislikes (negative), scaled by staleness."""
-    a = rec_params.MOOD_RECENCY_ALPHA
+    gp = rec_params.get_param
+    a = gp(store, "mood_recency_alpha")
+    play_w = gp(store, "play_transient_w")
+    like_w = gp(store, "like_transient_w")
+    dislike_w = gp(store, "dislike_transient_w")
+    limit = gp(store, "recent_play_limit")
     leans: dict = {}
 
     def add(keys, signed):
@@ -69,31 +75,34 @@ def facet_leans(store, now) -> dict:
 
     for rank, (_ts, direction, keys) in enumerate(store.recent_mood_events()):     # newest-first
         add(keys, direction * ((1.0 - a) ** rank))
-    for rank, k in enumerate(store.recent_keys_ordered(0, limit=rec_params.RECENT_PLAY_LIMIT)):
-        add([k], rec_params.PLAY_TRANSIENT_W * ((1.0 - a) ** rank))
-    for rank, k in enumerate(store.recent_liked_keys(limit=rec_params.RECENT_PLAY_LIMIT)):
-        add([k], rec_params.LIKE_TRANSIENT_W * ((1.0 - a) ** rank))
+    for rank, k in enumerate(store.recent_keys_ordered(0, limit=limit)):
+        add([k], play_w * ((1.0 - a) ** rank))
+    for rank, k in enumerate(store.recent_liked_keys(limit=limit)):
+        add([k], like_w * ((1.0 - a) ** rank))
     for k in store.disliked_identity_keys():
-        add([k], -rec_params.DISLIKE_TRANSIENT_W)
+        add([k], -dislike_w)
     s = staleness_factor(store, now)
     return {f: v * s for f, v in leans.items()}
 
 
-def facet_multiplier(lean) -> float:
-    """Map a signed facet lean to a positive ranking multiplier; 1.0 = neutral, clamped."""
-    return max(rec_params.FACET_MULT_MIN,
-               min(rec_params.FACET_MULT_MAX, 1.0 + rec_params.FACET_GAIN * lean))
+def facet_multiplier(lean, gain, lo, hi) -> float:
+    """Map a signed facet lean to a positive ranking multiplier; 1.0 = neutral, clamped to [lo, hi]."""
+    return max(lo, min(hi, 1.0 + gain * lean))
 
 
 def centroid_tilt(store, now, V, idx):
     """Unit embedding direction from the unified transient stream — mood events, recent plays, and
     recent likes, all interaction-rank weighted. None if quiet. Staleness is applied by the caller."""
+    gp = rec_params.get_param
+    limit = gp(store, "recent_play_limit")
     events = store.recent_mood_events()
-    plays = store.recent_keys_ordered(0, limit=rec_params.RECENT_PLAY_LIMIT)
-    likes = store.recent_liked_keys(limit=rec_params.RECENT_PLAY_LIMIT)
+    plays = store.recent_keys_ordered(0, limit=limit)
+    likes = store.recent_liked_keys(limit=limit)
     if not events and not plays and not likes:
         return None
-    a = rec_params.MOOD_RECENCY_ALPHA
+    a = gp(store, "mood_recency_alpha")
+    play_w = gp(store, "play_transient_w")
+    like_w = gp(store, "like_transient_w")
     tilt = np.zeros(V.shape[1], dtype=np.float64)
     for rank, (_ts, direction, keys) in enumerate(events):
         rows = [idx[k] for k in keys if k in idx]
@@ -116,7 +125,7 @@ def centroid_tilt(store, now, V, idx):
             nonlocal tilt
             tilt = tilt + w_base * ((1.0 - a) ** rank) * (v / nrm)
 
-    _add_dir(plays, rec_params.PLAY_TRANSIENT_W)
-    _add_dir(likes, rec_params.LIKE_TRANSIENT_W)
+    _add_dir(plays, play_w)
+    _add_dir(likes, like_w)
     n = np.linalg.norm(tilt)
     return tilt / n if n > 0 else None

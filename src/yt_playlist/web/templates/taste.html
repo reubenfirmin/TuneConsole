@@ -17,33 +17,22 @@
   </div>
 
   <div class="tab-panel" role="tabpanel" x-show="tab === 'controls'" x-cloak>
-<div class="page-head">
-  <p>Your recommender's control room. Every number here is built from your own library. Nothing comes
-     from outside. The <strong>track vectors</strong> below underlie <em>every</em> recommendation surface
-     (For You, Explore, Discover, "more like this"). The <strong>knobs</strong>, however, are narrower;
-     each section says exactly what it touches. Changes apply immediately; the live sample recomputes when
-     you click <em>Refresh</em>. Start over any time with one button:</p>
-  <div class="pl-actions">
-    <button class="btn-ghost" hx-post="/taste/reset-all" hx-swap="none"
-            hx-confirm="Reset every weight and knob on this page back to its default? Your vectors and feedback are left alone.">↺ Reset everything to defaults</button>
-  </div>
+<p class="section-note">Your recommender's control room. Every number here is built from your own library. Nothing comes
+   from outside. The <strong>track vectors</strong> below underlie <em>every</em> recommendation surface
+   (For You, Explore, Discover, "more like this"). The <strong>knobs</strong>, however, are narrower;
+   each section says exactly what it touches. Changes apply immediately; the live sample recomputes when
+   you click <em>Refresh</em>. Start over any time with one button:</p>
+<div class="pl-actions" style="margin-bottom:1.8rem">
+  <button class="btn-ghost" hx-post="/taste/reset-all" hx-swap="none"
+          hx-confirm="Reset every weight and knob on this page back to its default? Your vectors and feedback are left alone.">↺ Reset everything to defaults</button>
 </div>
 
 <h2 class="section">Model status <span class="scope-tag">All surfaces</span></h2>
-<div class="card stat-grid">
-  <div><strong>{{ vectors }}</strong><span>track vectors</span></div>
-  <div><strong>{{ baskets }}</strong><span>co-occurrence baskets</span></div>
-  <div><strong>{{ '%.0f'|format(coverage * 100) }}%</strong><span>genre coverage ({{ tagged }}/{{ tracks_total }})</span></div>
-  <div><strong>{{ '%.2f'|format(breadth) }}</strong><span>taste breadth (0=narrow, 1=eclectic)</span></div>
-  <div hx-get="/taste/recall" hx-trigger="load" hx-swap="innerHTML"><strong>…</strong><span>recall@20 (computing)</span></div>
-</div>
-<div class="pl-actions" style="margin-top:1rem">
-  <span id="rebuild-ctl"><button hx-post="/taste/rebuild" hx-target="#rebuild-ctl" hx-swap="outerHTML">Rebuild model</button></span>
-  <button class="btn-ghost" hx-post="/taste/autotune" hx-swap="none"
-          hx-confirm="Grid-search the embedding dimension by recall@k and rebuild on the best? Takes a few seconds.">Auto-tune (recall@k)</button>
-  <button class="btn-ghost" hx-post="/taste/purge-vectors" hx-swap="none"
-          hx-confirm="Delete all taste vectors? They rebuild on next sync.">Purge vectors</button>
-</div>
+{% include "_partials/model_status.html" %}
+<p class="section-note" style="margin-top:1rem"><strong>Auto-tune</strong> tries a few embedding sizes, scores
+   each by how well it predicts tracks you actually played together (<em>recall@k</em>), then rebuilds on the
+   winner. The result panel below shows what it found. Your vectors also rebuild automatically on every sync.</p>
+{% include "_partials/autotune_status.html" %}
 
 <h2 class="section">Live sample · For You</h2>
 <div class="card">
@@ -82,7 +71,7 @@
 </div>
 
 <h2 class="section">Genre families <span class="scope-tag">For You only</span></h2>
-<p class="section-note">Each knob multiplies the taste-match score of every track in that family when ranking the <strong>For You</strong> feed (and nothing else): 1.0 = neutral, 0 mutes the family (sinks to the bottom), 2 doubles its scores (floats to the top). The % is that family's share of your listening, shown for context only; it does not set the knob.</p>
+<p class="section-note">Each knob multiplies the taste-match score of every track in that family when ranking the <strong>For You</strong> feed (and nothing else): 1.0 = neutral, 0 mutes the family (sinks to the bottom), 2 doubles its scores (floats to the top). The % is that family's share of your listening, shown for context only; it does not set the knob. You set these by hand, but the <strong>Learning</strong> section below can also nudge them on its own over time.</p>
 <div class="card knob-list">
   {% for g in genres[:20] %}
   <div class="knob">
@@ -101,6 +90,29 @@
   {% else %}
   <p class="section-note">No genre tags yet. Enrich your library to unlock per-genre controls.</p>
   {% endfor %}
+</div>
+
+<h2 class="section">Right-now responsiveness <span class="scope-tag">All surfaces</span></h2>
+<p class="section-note">How hard your <strong>recent</strong> behavior (plays, likes, dislikes, mood)
+   overrides your durable taste, and how quickly "right now" relaxes. These shape the live transient
+   model shown on the Visualizations tab.</p>
+<div class="card knob-list">
+  {% for p in groups.transient.main %}{% include "_partials/taste_knob.html" %}{% endfor %}
+  <details class="advanced"><summary>Advanced</summary>
+    {% for p in groups.transient.advanced %}{% include "_partials/taste_knob.html" %}{% endfor %}
+  </details>
+</div>
+
+<h2 class="section">Learning <span class="scope-tag">Permanent</span></h2>
+<p class="section-note">The graduation funnel: when sustained, your right-now behavior gradually rewrites
+   your <strong>durable</strong> taste weights, including the Genre family and Blend weight knobs above.
+   Every other control here only changes when <em>you</em> move it; this is the only one that edits your
+   saved taste on its own, so turn it off to freeze your permanent weights.</p>
+<div class="card knob-list">
+  {% for p in groups.graduation.main %}{% include "_partials/taste_knob.html" %}{% endfor %}
+  <details class="advanced"><summary>Advanced (graduation speed)</summary>
+    {% for p in groups.graduation.advanced %}{% include "_partials/taste_knob.html" %}{% endfor %}
+  </details>
 </div>
 
 <h2 class="section">Discovery &amp; timing <span class="scope-tag">For You + Explore</span></h2>

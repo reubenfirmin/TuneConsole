@@ -52,6 +52,7 @@ def build(ctx) -> APIRouter:
         neg = body.get("neg_keys") or []
         exclude = body.get("exclude") or []
         k = int(body.get("k") or RING_SIZE)
+        include_new = bool(body.get("include_new"))      # Phase 2: reach out-of-corpus discovered tracks
         # tokens may be families or specific genres (#29 / C2b); empty = no restriction
         tokens = body.get("allow_genres") or body.get("allow_families") or []
         allow = store.keys_in_genre_selection(tokens) if tokens else None
@@ -60,7 +61,7 @@ def build(ctx) -> APIRouter:
         # the canvas (everything in `exclude` that isn't pruned), so once an album hits ALBUM_CAP
         # anywhere in the playlist, no further grow can add more of it.
         nbrs = embed.cluster_expand(store, pos_keys=pos, neg_keys=neg, exclude=exclude,
-                                    topn=max(k * 4, k + 12), allow=allow)
+                                    topn=max(k * 4, k + 12), allow=allow, include_new=include_new)
         # cap basis = the grown tracks already kept (count_keys), NOT the central seeds — a seed
         # artist's album shouldn't pre-spend the per-album budget. Falls back to non-pruned canvas keys.
         basis = body.get("count_keys")
@@ -73,10 +74,12 @@ def build(ctx) -> APIRouter:
                 album_count[alb] = album_count.get(alb, 0) + 1
         cand = [key for key, _ in nbrs]
         meta = store.tracks_by_keys(cand)
+        dmeta = store.discovered_tracks_by_keys(cand) if include_new else {}   # out-of-corpus tracks
         genres = store.track_genres(cand)               # for the client-side genre filter (#29)
         ring = []
         for key, score in nbrs:
-            m = meta.get(key)
+            new = key not in meta and key in dmeta       # out-of-corpus candidate
+            m = meta.get(key) or dmeta.get(key)
             if not m or not m.get("video_id"):
                 continue
             album = (m.get("album") or "").strip().lower()
@@ -84,10 +87,11 @@ def build(ctx) -> APIRouter:
                 if album_count.get(album, 0) >= ALBUM_CAP:
                     continue
                 album_count[album] = album_count.get(album, 0) + 1
-            g = genres.get(key, "")
+            g = (m.get("genre") if new else genres.get(key, "")) or ""
             ring.append({"key": key, "video_id": m["video_id"], "title": m["title"],
                          "artist": m["artist"], "album": m["album"], "thumbnail": m["thumbnail"],
-                         "genre": g, "family": genre_map.family(g), "score": round(score, 4)})
+                         "genre": g, "family": genre_map.family(g), "score": round(score, 4),
+                         "out_of_corpus": new})
             if len(ring) >= k:
                 break
         return JSONResponse({"ring": ring})
@@ -143,6 +147,7 @@ def build(ctx) -> APIRouter:
         journey = (form.get("journey") or "auto").strip()
         recipe, order = recommend.cluster_recipe(store, keep, seed_labels, allow_families, journey=journey)
         meta = store.tracks_by_keys(keep)
+        meta = {**store.discovered_tracks_by_keys(keep), **meta}   # resolve out-of-corpus keys too (library wins)
         tracks = [{"video_id": meta[k]["video_id"], "title": meta[k]["title"],
                    "artist": meta[k]["artist"], "album": meta[k]["album"],
                    "thumbnail": meta[k]["thumbnail"]}

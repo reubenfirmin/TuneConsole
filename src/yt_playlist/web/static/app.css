@@ -638,6 +638,16 @@ td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
 .gtag { display: inline-block; font-size: 0.72rem; padding: 0.08rem 0.4rem; border-radius: 999px;
   background: var(--surface-2); border: 1px solid var(--border-2); color: var(--dim); white-space: nowrap; }
 
+/* inline edit affordances for title/artist: pencil hidden until row hover; reset (override marker)
+   stays faintly visible so a manual fix is discoverable. */
+.editpen, .resetpen { cursor: pointer; opacity: 0; margin-left: 0.35em; font-size: 0.85em; transition: opacity 0.12s ease; }
+tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
+.editpen:hover, .resetpen:hover { opacity: 1; }
+.resetpen { opacity: 0.5; }
+.tinput, .ainput { box-sizing: border-box; width: 100%; min-width: 0; padding: 0.12rem 0.3rem;
+  font-size: 0.82rem; line-height: 1.2; background: var(--bg-2); border: 1px solid var(--accent);
+  border-radius: 4px; color: var(--text); }
+
 /* dismissible banners (flash notices + the session-expired bar) */
 .notice.banner { display: flex; align-items: center; gap: 0.8rem; margin-bottom: 1.4rem; }
 .banner-body { flex: 1; }
@@ -1010,18 +1020,24 @@ button.htmx-request .check-busy { display: inline; }
 .tile-fb .fy-x:hover { color: #fff; background: var(--accent); }
 
 /* --- generated proto-playlists: the two dated, saveable lanes at the top of Home --- */
-.gen-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem; align-items: start;
-  margin-bottom: 1.4rem; }
+.gen-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem; align-items: stretch;
+  margin-bottom: 1.4rem; }   /* stretch: both cards in a row take the row's max height */
 @media (max-width: 60rem) { .gen-lanes { grid-template-columns: 1fr; } }
 .gen-card { display: flex; flex-direction: column; }
 .gen-head { margin-bottom: 0.7rem; }
-.gen-head .section-note { margin: 0.35rem 0 0; }
+/* Reserve a uniform tagline height (1 line) so the track list starts at the same y in every card
+   in a row; tightened taglines are short enough to fit one line. */
+.gen-head .section-note { margin: 0.35rem 0 0; line-height: 1.4; min-height: 1.4em;
+  display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 .gen-refresh { float: right; background: none; border: 0; cursor: pointer; font-size: 1.15rem;
   line-height: 1; color: var(--dim); padding: 0.1rem 0.35rem; border-radius: 5px; }
 .gen-refresh:hover { color: #15e98c; background: var(--surface-2); }   /* CTA green on hover */
 .gen-refresh[disabled] { opacity: 0.45; cursor: wait; }
 .gen-name { font-family: var(--font-display); font-size: 1.12rem; line-height: 1.25;
-  letter-spacing: -0.01em; margin: 0.2rem 0 0; color: var(--text); }
+  letter-spacing: -0.01em; margin: 0.2rem 0 0; color: var(--text);
+  /* Reserve 2 lines so a 1-line title still aligns its tagline/track-list with a 2-line neighbour. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  min-height: 2.5em; }
 .gen-list { list-style: none; margin: 0 0 0.2rem; padding: 0; counter-reset: gen; }
 .gen-row { position: relative; display: grid; grid-template-columns: 1.4rem 2.3rem 1fr 1.6rem;
   align-items: center; gap: 0.55rem; padding: 0.4rem 0.2rem; border-bottom: 1px solid var(--border); }
@@ -1157,9 +1173,6 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 /* --- Home: taste fingerprint + steering --- */
 .fingerprint { display: grid; gap: 0.8rem; margin-bottom: 1.4rem; }
 .fp-head { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-.fp-stance { display: inline-flex; border: 1px solid var(--border-2); border-radius: 8px; overflow: hidden; }
-.fp-stance .seg-btn { background: none; border: none; color: var(--dim); padding: 0.35rem 0.8rem; cursor: pointer; }
-.fp-stance .seg-btn.on { background: var(--grad); color: #fff; }
 .fp-tune { margin-left: auto; color: var(--accent-2); font-weight: 600; }
 .fp-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1.2rem; }
 .fp-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--faint); }
@@ -1168,10 +1181,20 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .fp-name { min-width: 5.5rem; font-size: 0.85rem; }
 .fp-slider { flex: 1; cursor: grab; }
 .fp-slider:active { cursor: grabbing; }
-.fp-bar { display: inline-block; flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
-.fp-bar.wide { width: 100%; }
-.fp-bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 3px; }
-.fp-breadth-val { font-weight: 600; color: var(--accent-2); }
+/* Breadth master dial (#7): a compact inline control in the header — [Breadth] Focused (—•—) Eclectic
+   "naturally balanced". Its own line on narrow screens (the header wraps); the Tune link is pushed to
+   the far right by .fp-tune's margin-left:auto, so the two global controls bracket the header. */
+.fp-breadth { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
+/* flex-basis (not width) fixes the size: the global input[type=range]{width:100%} outranks a plain
+   .class width, but a flex item sizes from its basis — same trick the genre .fp-slider uses. */
+.fp-breadth-slider { flex: 0 0 8.5rem; cursor: grab; accent-color: var(--accent-2); }
+.fp-breadth-slider:active { cursor: grabbing; }
+.fp-breadth-end { font-size: 0.72rem; color: var(--faint); }
+.fp-breadth-note { font-size: 0.72rem; color: var(--dim); font-style: italic; }
+/* Home genre picker (autosuggest combo, reuses the Clusters .cg-box widget). The wrapper is the
+   positioning context for the absolute .cg-suggest dropdown; small gap below the genre sliders. */
+.fp-genre-pick { position: relative; margin-top: 0.6rem; }
+.fp-genre-empty { margin: 0.4rem 0 0; }
 .steer-toast { background: var(--accent-soft); border: 1px solid var(--border-2); border-radius: 8px;
   padding: 0.5rem 0.8rem; color: var(--accent-2); margin-bottom: 0.8rem; }
 .tile-act { position: relative; }
@@ -1347,7 +1370,16 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .cluster-node.pruned.filtered { border-color: var(--border-2); border-style: dashed; }
 .cn-body { cursor: grab; }
 .cn-body:active { cursor: grabbing; }
-.cn-track { display: flex; gap: 0.5rem; align-items: center; }
+.cn-track { display: flex; gap: 0.5rem; align-items: center; position: relative; }
+/* #13 P2: out-of-corpus (new, not-yet-owned) tracks — a light ✨ corner badge (no card-wide glow) */
+.cn-new { position: absolute; top: -7px; right: -7px; font-size: 12px; line-height: 1;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6)); pointer-events: none; z-index: 2; }
+.cn-track.new-music .cn-label { color: var(--accent-2); }
+/* "Reach for new music" opt-in toggle in the cluster controls */
+.cluster-newmusic { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer;
+  font-size: 0.8rem; color: var(--dim); padding: 0.25rem 0.5rem; border: 1px solid var(--border-2);
+  border-radius: 999px; white-space: nowrap; }
+.cluster-newmusic.on { color: var(--accent-2); border-color: var(--accent); background: var(--accent-soft); }
 .cn-central { display: flex; flex-direction: column; gap: 0.35rem; }
 .cn-eyebrow { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.14em; color: var(--accent-2); }
 .cn-seeds { display: flex; flex-wrap: wrap; gap: 0.3rem; }
@@ -1759,3 +1791,31 @@ figure.rose { margin: 0; text-align: center; }
 .cov-trend { margin-top: 1.3rem; }
 .cov-trend .spark { width: 100%; height: 90px; display: block; margin-top: 0.4rem; }
 .spark-area { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+
+/* ── Auto-tune control + result panel ─────────────────────────────────────── */
+.autotune-ctl { display: flex; align-items: center; gap: 0.85rem; flex-wrap: wrap;
+  margin: 0.2rem 0 1rem; }
+.autotune-note { color: var(--dim); font-size: 0.82rem; line-height: 1.4; max-width: 40rem; }
+
+.autotune-result { margin: 0 0 1.8rem; }
+.autotune-result-head { display: flex; align-items: center; justify-content: space-between;
+  gap: 0.75rem; margin-bottom: 0.5rem; }
+.autotune-result-head h3 { margin: 0; font-family: var(--font-display); font-size: 1.05rem; }
+.autotune-result .section-note { margin-bottom: 1.1rem; }
+.autotune-stats { margin-bottom: 1.2rem; }
+
+.autotune-grid { width: 100%; border-collapse: collapse; margin: 0 0 1.1rem;
+  font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.autotune-grid td { padding: 0.32rem 0; vertical-align: middle; }
+.autotune-grid td.cfg { white-space: nowrap; color: var(--dim); width: 7rem; padding-right: 0.9rem; }
+.autotune-grid td.track { width: auto; }
+.autotune-grid td.val { white-space: nowrap; text-align: right; width: 4.5rem; padding-left: 0.9rem; }
+.autotune-grid .bar { display: block; height: 0.55rem; min-width: 2px; border-radius: 999px;
+  background: var(--grad); opacity: 0.55; }
+.autotune-grid tr.win td.cfg, .autotune-grid tr.win td.val { color: var(--text); font-weight: 700; }
+.autotune-grid tr.win .bar { opacity: 1; background: linear-gradient(135deg, #6bffab, #15e98c); }
+
+.autotune-rotated { margin: 0 0 0.55rem; font-size: 0.85rem; color: var(--text); }
+.autotune-diff { display: flex; flex-direction: column; gap: 0.4rem; }
+.autotune-diff .diff-row { display: flex; gap: 0.55rem; align-items: baseline; }
+.autotune-diff .diff-list { color: var(--dim); font-size: 0.82rem; line-height: 1.45; }

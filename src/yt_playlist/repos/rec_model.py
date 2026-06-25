@@ -5,6 +5,14 @@ Split out of the former monolithic RecRepo so each rec concern is its own focuse
 """
 from yt_playlist.repos.base import Repo, synchronized
 
+# Learned blend weights live in [_WEIGHT_MIN, _WEIGHT_MAX] around the 1.0 prior: the floor stops a run
+# of negative feedback from disabling an axis outright (a 0 weight would never win the for_you fair
+# queue), the ceiling stops one axis from swamping the blend. After every nudge the weight is pulled
+# _WEIGHT_SHRINK of the way back toward 1.0, a gentle mean-reversion so stale learning decays instead
+# of compounding forever.
+_WEIGHT_MIN, _WEIGHT_MAX = 0.2, 3.0
+_WEIGHT_SHRINK = 0.05
+
 
 class RecModelRepo(Repo):
     # --- learned blend weights ---
@@ -14,18 +22,18 @@ class RecModelRepo(Repo):
         return {r["axis"]: r["weight"] for r in self.conn.execute("SELECT axis, weight FROM rec_weights")}
 
     @synchronized
-    def nudge_weight(self, axis, factor, lo=0.2, hi=3.0) -> float:
+    def nudge_weight(self, axis, factor, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX) -> float:
         """Multiply an axis weight by factor (clamped), then shrink slightly toward the 1.0 prior."""
         row = self.conn.execute("SELECT weight FROM rec_weights WHERE axis=?", (axis,)).fetchone()
         w = max(lo, min(hi, (row["weight"] if row else 1.0) * factor))
-        w = w + (1.0 - w) * 0.05
+        w = w + (1.0 - w) * _WEIGHT_SHRINK
         self.conn.execute("INSERT INTO rec_weights(axis, weight) VALUES (?, ?) "
                           "ON CONFLICT(axis) DO UPDATE SET weight=excluded.weight", (axis, w))
         self.conn.commit()
         return w
 
     @synchronized
-    def set_weight(self, axis, weight, lo=0.2, hi=3.0) -> None:
+    def set_weight(self, axis, weight, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX) -> None:
         """Manual override (Taste Model page). Clamped to the same [lo, hi] band as nudge_weight so a
         stray 0/negative can't silently disable a for_you lane (its fair-queue ratio would never win)."""
         w = max(lo, min(hi, float(weight)))
@@ -192,3 +200,33 @@ class RecModelRepo(Repo):
     @synchronized
     def rec_vectors_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) c FROM rec_vectors").fetchone()["c"]
+
+    # --- content (genre/era) vectors: parallel space for the cluster blend ---
+    @synchronized
+    def replace_rec_content_vectors(self, rows) -> None:
+        """Atomically replace all content vectors. rows = iterable of (identity_key, bytes)."""
+        self.conn.execute("DELETE FROM rec_content_vectors")
+        self.conn.executemany("INSERT INTO rec_content_vectors(identity_key, vec) VALUES (?,?)", rows)
+        self.conn.commit()
+
+    @synchronized
+    def get_rec_content_vectors(self) -> list[tuple]:
+        return [(r["identity_key"], r["vec"])
+                for r in self.conn.execute("SELECT identity_key, vec FROM rec_content_vectors")]
+
+    @synchronized
+    def rec_content_vectors_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) c FROM rec_content_vectors").fetchone()["c"]
+
+    @synchronized
+    def replace_rec_discovered_content_vectors(self, rows) -> None:
+        """Atomically replace out-of-corpus (discovered) content vectors. rows = (identity_key, bytes)."""
+        self.conn.execute("DELETE FROM rec_discovered_content_vectors")
+        self.conn.executemany(
+            "INSERT INTO rec_discovered_content_vectors(identity_key, vec) VALUES (?,?)", rows)
+        self.conn.commit()
+
+    @synchronized
+    def get_rec_discovered_content_vectors(self) -> list[tuple]:
+        return [(r["identity_key"], r["vec"])
+                for r in self.conn.execute("SELECT identity_key, vec FROM rec_discovered_content_vectors")]

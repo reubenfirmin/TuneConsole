@@ -56,6 +56,12 @@
           </template>
         </ul>
       </div>
+      <!-- #13 P2: opt in to reaching out-of-corpus (not-yet-owned) tracks when growing -->
+      <label class="cluster-newmusic" :class="{ on: includeNew }"
+             title="Also reach for music that's not yet in your library (marked ✨)">
+        <input type="checkbox" x-model="includeNew">
+        <span>✨ Reach for new music</span>
+      </label>
       <!-- explicit reset: wipe the canvas back to a blank slate -->
       <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
               @click="reset()" title="Reset — clear the whole canvas">⟲ Reset</button>
@@ -96,7 +102,9 @@
               </div>
             </template>
             <template x-if="n.kind === 'track'">
-              <div class="cn-track">
+              <div class="cn-track" :class="{ 'new-music': n.newMusic }">
+                <span class="cn-new" x-show="n.newMusic" x-cloak
+                      title="New — not in your library yet">✨</span>
                 <img class="cn-thumb" :src="n.thumbnail" x-show="n.thumbnail" alt="" loading="lazy"
                      @error="n.thumbnail = ''">
                 <div class="cn-text">

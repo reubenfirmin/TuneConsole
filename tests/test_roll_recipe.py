@@ -68,6 +68,21 @@ def test_roll_recipe_transient_suppresses_disfavored_genre(store):
     assert house < jazz                                          # transient "less house" steers generation
 
 
+def test_roll_recipe_fresh_is_always_shuffle(store):
+    # Fresh playlists are unowned proposals with no plays/recency, so data-dependent journeys
+    # (rediscovery, deep dive…) must never be rolled — every seed yields a straight shuffle (#32).
+    _seed_two_genres(store)
+    journeys = {recommend.roll_recipe(store, "fresh", seed=s)["journey"] for s in range(60)}
+    assert journeys == {"shuffle"}
+
+
+def test_roll_recipe_owned_lanes_can_roll_other_journeys(store):
+    # Non-fresh lanes still roll varied journeys (so the fresh gate is the only thing pinned).
+    _seed_two_genres(store)
+    journeys = {recommend.roll_recipe(store, "wheelhouse", seed=s)["journey"] for s in range(60)}
+    assert journeys - {"shuffle"}                                  # at least one non-shuffle journey
+
+
 def test_theme_filter_puts_matching_genre_first(store):
     from yt_playlist.rec import genre_map, recommend
     iid = store.upsert_identity("main", "cred", None, True)

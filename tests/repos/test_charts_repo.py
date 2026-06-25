@@ -50,3 +50,15 @@ def test_facade_delegates(store):
     _seed(store)
     assert store.top_tracks()[0]["title"] == "Alpha"       # legacy store.x() call site
     assert store.artist_songs("Artist B")[0]["title"] == "Beta"
+
+
+def test_playlist_detail_flags_edited_title_artist(store):
+    iid = store.upsert_identity("me", "c", None, True)
+    p = store.upsert_playlist(iid, "P", "P", 0, "h", 0.0)
+    t = store.upsert_track("v1", "Orig Title", "Orig Artist", "Al", 100)
+    store.set_playlist_tracks(p, [t])
+    d = store.playlist_tracks_detail(p)[0]
+    assert d["title_edited"] is False and d["artist_edited"] is False
+    store.set_track_title(t, "New Title")
+    d = store.playlist_tracks_detail(p)[0]
+    assert d["title_edited"] is True and d["artist_edited"] is False

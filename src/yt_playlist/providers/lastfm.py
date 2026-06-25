@@ -11,14 +11,13 @@ import json
 import logging
 import re
 import sys
-import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from yt_playlist.providers import genres
-from yt_playlist.providers.base import EnrichmentResult
+from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
 from yt_playlist.util import net
 from yt_playlist.core import paths
 from yt_playlist.providers.enrich_queue import PriorityGate
@@ -35,8 +34,8 @@ logger = logging.getLogger(__name__)
 _API = "https://ws.audioscrobbler.com/2.0/"
 _USER_AGENT = "yt-playlist/0.1 ( https://4rc.io ; rf@4rc.io )"
 _MIN_INTERVAL = 0.25                      # Last.fm allows ~5 req/s; stay comfortably under
-_pace_lock = threading.Lock()
-_last_call = [0.0]
+_HTTP_TIMEOUT_S = 20                      # cap each request so a stalled socket can't wedge a run
+_pacer = RateLimiter(_MIN_INTERVAL)
 _gate = PriorityGate()                    # newest enrichment job preempts older ones
 _breaker = net.CircuitBreaker()           # stop a run once the host looks unreachable
 
@@ -91,20 +90,12 @@ def probe(track, store=None, key=None) -> EnrichmentResult:
     return EnrichmentResult("lastfm", fields)
 
 
-def _pace():
-    with _pace_lock:
-        wait = _MIN_INTERVAL - (time.monotonic() - _last_call[0])
-        if wait > 0:
-            time.sleep(wait)
-        _last_call[0] = time.monotonic()
-
-
 def _get(params):
-    _pace()
+    _pacer.wait()
     url = _API + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
             data = json.load(resp)
     except Exception as e:                # report the outcome to the breaker, then let callers handle it
         _breaker.record(e)
@@ -115,10 +106,10 @@ def _get(params):
 
 def _fetch_text(url):
     for attempt in (1, 2):                         # Last.fm pages 502 transiently — retry once
-        _pace()
+        _pacer.wait()
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
                 text = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
             _breaker.record(e)                     # server answered (an error) — host is reachable
@@ -157,6 +148,20 @@ def _year_from_tags(names):
         if len(n) == 4 and n.isdigit() and 1900 <= int(n) <= 2099:
             return n
     return None
+
+
+def artist_genre(artist, key):
+    """Best whitelisted genre from an artist's Last.fm top tags, or None. For #18: tagging a new
+    (unowned) discovered artist so the facet overlay can steer it. Best-effort — None on any failure."""
+    if not key or not artist:
+        return None
+    common = {"api_key": key, "format": "json", "autocorrect": "1"}
+    try:
+        return genres.pick_genre(_tag_names(
+            _get({"method": "artist.gettoptags", "artist": artist, **common})))
+    except Exception as e:  # noqa: BLE001 - network/parse all degrade to no genre
+        logger.warning("Last.fm artist top tags failed for %r: %s", artist, e)
+        return None
 
 
 def enrich(title, artist, key):
@@ -201,33 +206,26 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, key=None, s
                                             "lastfm_api_key in config.toml."})
         return
     pending = store.tracks_to_enrich(playlist_id) if pending is None else pending   # missing genre OR year
-    total = len(pending)
-    if not total:
-        on_progress({"type": "done", "text": "Every track already has genre & year.", "total": 0})
-        return
-    on_progress({"type": "info", "text": f"Tagging {total} track(s) via Last.fm…", "total": total})
-    _breaker.reset()                       # fresh chance each run — a past outage shouldn't pre-trip it
-    seq = _gate.enter()
-    try:
-        for i, t in enumerate(pending, 1):
-            if should_stop and should_stop():
-                on_progress({"type": "info", "text": "Stopped."})
-                return
-            _gate.wait_turn(seq, on_wait=lambda: on_progress(
-                {"type": "info", "text": "Waiting — a newer playlist is tagging first…"}))
-            genre, year = enrich_fn(t["title"], t["artist"], key)
-            if _breaker.tripped():         # host unreachable — the rest would all fail too, so stop
-                on_progress({"type": "err", "text": "Last.fm looks unreachable — stopped. "
-                             "The remaining tracks will retry next time."})
-                return
-            store.set_track_enrichment(t["id"], genre, year)
-            eff_genre, eff_year = store.get_track_enrichment(t["id"])    # report what actually stuck
-            bits = " · ".join(x for x in (genre, year) if x) or "no tags"
-            on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                         "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']} — {bits}"})
-        on_progress({"type": "done", "text": f"Tagged {total} track(s).", "total": total})
-    finally:
-        _gate.leave(seq)
+
+    def _per_item(i, total, t):
+        genre, year = enrich_fn(t["title"], t["artist"], key)
+        if _breaker.tripped():             # host unreachable — the rest would all fail too, so stop
+            on_progress({"type": "err", "text": "Last.fm looks unreachable — stopped. "
+                         "The remaining tracks will retry next time."})
+            return False
+        store.set_track_enrichment(t["id"], genre, year)
+        eff_genre, eff_year = store.get_track_enrichment(t["id"])    # report what actually stuck
+        bits = " · ".join(x for x in (genre, year) if x) or "no tags"
+        on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
+                     "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']} — {bits}"})
+
+    run_enrich_loop(
+        store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
+        empty_text="Every track already has genre & year.",
+        start_text=lambda n: f"Tagging {n} track(s) via Last.fm…",
+        done_text=lambda n: f"Tagged {n} track(s).",
+        wait_text="Waiting — a newer playlist is tagging first…",
+        per_item=_per_item)
 
 
 def similar_artists(name, key, limit=50):

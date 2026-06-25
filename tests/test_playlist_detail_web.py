@@ -87,6 +87,38 @@ def test_track_year_returns_row_fragment(store):
     assert store.playlist_tracks_detail(a)[0]["year"] == "1991"
 
 
+def test_track_title_updates_and_returns_row(store):
+    iid, a = _seed_one_track(store)
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.post(f"/playlist/{a}/track-title", data={"video_id": "v0", "title": "Fixed Title"})
+    assert r.status_code == 200 and 'data-vid="v0"' in r.text and "Fixed Title" in r.text
+    assert store.playlist_tracks_detail(a)[0]["title"] == "Fixed Title"
+
+
+def test_track_artist_updates_then_resets(store):
+    iid, a = _seed_one_track(store)
+    c = _client(store, lambda: {iid: FakeClient()})
+    c.post(f"/playlist/{a}/track-artist", data={"video_id": "v0", "artist": "Fixed Artist"})
+    assert store.playlist_tracks_detail(a)[0]["artist"] == "Fixed Artist"
+    r = c.post(f"/playlist/{a}/track-reset", data={"video_id": "v0", "field": "artist"})
+    assert r.status_code == 200 and 'data-vid="v0"' in r.text
+    assert store.playlist_tracks_detail(a)[0]["artist"] == "X"   # original from _seed_one_track
+
+
+def test_track_title_no_vid_returns_toast(store):
+    iid, a = _seed_one_track(store)
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.post(f"/playlist/{a}/track-title", data={"title": "x"})
+    assert r.status_code == 422 and 'hx-swap-oob="afterbegin:#toasts"' in r.text
+
+
+def test_track_row_renders_edit_affordances(store):
+    iid, a = _seed_one_track(store)
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.get(f"/playlist/{a}")
+    assert "startEditTitle(" in r.text and "startEditArtist(" in r.text
+
+
 def test_enrich_track_events_carry_rendered_row(store, monkeypatch):
     import json as _json
     import yt_playlist.providers.musicbrainz as mb

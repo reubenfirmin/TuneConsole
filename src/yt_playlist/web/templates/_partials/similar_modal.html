@@ -33,7 +33,7 @@
     {% else %}
     <p class="section-note">Couldn't place &ldquo;{{ seed.title or 'this track' }}&rdquo; in your taste space yet.
       It's likely brand new or set aside (a saved-album or generated track not folded in yet).
-      Re-sync, then <a href="/taste">Rebuild the model</a> to include it.</p>
+      Re-sync to include it (your <a href="/taste">taste model</a> rebuilds automatically on every sync).</p>
     {% endif %}
     <div class="modal-actions">
       {% if pid and items %}

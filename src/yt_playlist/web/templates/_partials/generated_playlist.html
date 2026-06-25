@@ -32,10 +32,10 @@
   </ol>
   <footer class="gen-foot">
     <button type="button" class="cta" hx-post="/home/generate" hx-target="#gen-{{ p.lane }}"
-            hx-swap="outerHTML" hx-disabled-elt="this" onclick="genOpenYT()"
+            hx-swap="outerHTML" hx-disabled-elt="this" onclick="genOpenYT('gen-{{ p.lane }}')"
             hx-vals='js:{name: genName("gen-{{ p.lane }}"), tracks: genTracks("gen-{{ p.lane }}"), recipe: genRecipe("gen-{{ p.lane }}")}'>Save &amp; play on YouTube ↗</button>
-    <span class="gen-foot-note">Lands in your <strong>Generated</strong> group. It won't sway your
-      recommendations until you move it into your collection.</span>
+    <span class="gen-foot-note">Lands in your <strong>Generated</strong> group, kept out of your
+      recommendations until you promote it to your library.</span>
   </footer>
   {% else %}
   <p class="section-note">Nothing to bundle yet - sync your library to get started.</p>

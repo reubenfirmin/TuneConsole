@@ -145,14 +145,17 @@ def sync_plays_identity(store, identity_id, client, now, on_progress=None, label
     album work that make `sync_identity` slow — meant to be run often between full syncs."""
     label = label or f"identity {identity_id}"
     auth_bad = False
+    from yt_playlist.rec import recommend            # local import avoids any import cycle
 
     # Likes: the Liked Music (LM) system playlist's membership *is* your likes, so refreshing that one
     # playlist captures likes/unlikes made outside the app. Reuse the existing single-playlist refresh.
     existing = next((p for p in store.get_playlists()
                      if p.identity_id == identity_id and p.ytm_playlist_id == "LM"), None)
     _emit(on_progress, "info", f"{label}: refreshing Liked Music…")
+    lm_refreshed = False
     try:
         refresh_playlist(store, identity_id, client, "LM", existing.title if existing else "Liked Music", now)
+        lm_refreshed = True
     except Exception as e:  # noqa: BLE001 - a likes failure shouldn't abort the (best-effort) plays sync
         if _is_auth_error(e):
             auth_bad = True
@@ -164,12 +167,23 @@ def sync_plays_identity(store, identity_id, client, now, on_progress=None, label
             logger.warning("liked-music refresh failed for %s: %s", identity_id, e)
             _emit(on_progress, "info", f"{label}: Liked Music unavailable (skipped)")
 
-    # Plays: snapshot the listening history (the "new plays").
+    # Feed the captured likes into the model exactly as sync_identity does (#19's like channel): the LM
+    # membership *is* the likes, so every current member maps to LIKE. apply_dislikes records first-seen
+    # likes (record_like), graduates them, and feeds the transient like channel — idempotent on re-sync.
+    if lm_refreshed:
+        lm = next((p for p in store.get_playlists()
+                   if p.identity_id == identity_id and p.ytm_playlist_id == "LM"), None)
+        if lm is not None:
+            rated = {k: "LIKE" for k in store.get_playlist_track_keys(lm.id)}
+            recommend.apply_dislikes(store, rated, now)
+
+    # Plays: snapshot the listening history (the "new plays") and graduate them (mirrors sync_identity).
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:
         history = with_retry(lambda: client.get_history())
         hist_keys = [identity_key(t.get("title", ""), _artist(t)) for t in history]
         store.add_history_snapshot(identity_id, now, hist_keys)
+        recommend.graduate_plays(store, hist_keys, now)
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")

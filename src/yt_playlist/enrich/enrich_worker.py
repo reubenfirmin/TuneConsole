@@ -118,4 +118,9 @@ class EnrichWorker:
         if self._stop():                     # paused/shutting down mid-batch — re-queue it next time
             return 0
         store.mark_enriched([t["id"] for t in batch], self.ctx.now_fn())
+        try:                                  # keep the content (genre/era) cluster space current as
+            from yt_playlist.rec import embed  # coverage grows; never let a rebuild crash the drain
+            embed.maybe_rebuild_content_vectors(store)
+        except Exception:  # noqa: BLE001
+            self.ctx.logger.warning("content-vector rebuild after enrich batch failed", exc_info=True)
         return len(batch)

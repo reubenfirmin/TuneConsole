@@ -85,9 +85,18 @@ function genName(id) { return document.getElementById(id).dataset.name; }
 function genRecipe(id) { return document.getElementById(id).dataset.recipe || ''; }
 // Open the YouTube tab NOW, synchronously inside the click (a user gesture) so the browser doesn't
 // block it. The save round-trip can outlive the browser's activation window (a failed batch-add
-// retries 12 items one-by-one), so opening from the post-save swap gets popup-blocked. We stash the
-// blank tab's handle; the swapped-in result points it at the new playlist once the save returns.
-function genOpenYT() { try { window.__ytTab = window.open('', '_blank'); } catch (e) {} }
+// retries 12 items one-by-one), so opening from the post-save swap gets popup-blocked. We open our
+// own /home/generating page (not about:blank — that stark white screen reads as broken while the save
+// runs) and stash the handle; the swapped-in result points it at the new playlist on save. The card's
+// surviving thumbnails are stashed (same-origin localStorage) so that page can animate them.
+function genOpenYT(id) {
+  try {
+    var thumbs = [].slice.call(document.getElementById(id).querySelectorAll('.gen-row'))
+      .map(function (r) { return r.dataset.thumb; }).filter(Boolean).slice(0, 16);
+    localStorage.setItem('tc_gen_thumbs', JSON.stringify(thumbs));
+  } catch (e) {}
+  try { window.__ytTab = window.open('/home/generating', '_blank'); } catch (e) {}
+}
 function genTracks(id) {
   return JSON.stringify([...document.getElementById(id).querySelectorAll('.gen-row')].map(r => ({
     video_id: r.dataset.vid, title: r.dataset.title, artist: r.dataset.artist,

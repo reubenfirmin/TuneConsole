@@ -18,6 +18,32 @@ def test_sync_plays_records_history_and_likes(store):
     assert store.get_setting("last_sync_at") is None      # full-sync nudge left untouched
 
 
+def test_sync_plays_feeds_graduation_and_like_model(store):
+    """Regression for #39: the fast plays/likes sync must feed #19's signals — graduate plays and
+    record+graduate newly-captured likes (the like channel) — not only the rarer full sync."""
+    from yt_playlist.rec import recommend
+    iid = store.upsert_identity("main", "cred", None, True)
+
+    # Pre-seed the catalog so the played/liked keys resolve to facets (distinct genre families so
+    # the play contribution and the like contribution land on different theme ledgers).
+    played = store.upsert_track("v1", "Played Song", "Artist", None, None)
+    store.set_track_genre(played, "Jazz")
+    liked = store.upsert_track("v2", "Liked Song", "Other", None, None)
+    store.set_track_genre(liked, "Techno")
+    fam_play = recommend.genre_map.family("Jazz")
+    fam_like = recommend.genre_map.family("Techno")
+
+    client = FakeClient(tracks={"LM": [_track("v2", "Liked Song", "Other")]},
+                        history=[_track("v1", "Played Song", "Artist")])
+    sync_plays_all(store, {iid: client}, now=1500.0)
+
+    # Likes: the new LM member was recorded (like channel) and graduated.
+    assert store.recent_liked_keys() == ["liked song|other"]
+    assert store.get_theme(f"genre:{fam_like}") > 0.0
+    # Plays: the played key graduated (the play ledger was fed for its facet).
+    assert store.get_theme(f"genre:{fam_play}") > 0.0
+
+
 def test_sync_plays_skips_full_library_enumeration(store):
     """The fast path must never enumerate the whole library — that's the slow work it exists to skip."""
     iid = store.upsert_identity("main", "cred", None, True)

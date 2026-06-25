@@ -10,6 +10,13 @@ def _seed_jazz(store):
     return iid
 
 
+def test_viz_reflects_param_overrides(store):
+    store.upsert_identity("main", "cred", None, True)
+    rec_params.set_param(store, "stale_decay_halflife_d", 10)
+    payload = taste_viz.model_transparency(store, now=1000.0)
+    assert payload["freshness"]["halflife_days"] == 10
+
+
 def test_layer_stack_multiplies(store):
     _seed_jazz(store)
     store.set_weight("genre:jazz", 1.5)
