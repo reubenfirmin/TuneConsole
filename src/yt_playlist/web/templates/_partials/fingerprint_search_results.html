@@ -1,0 +1,16 @@
+{% if matches %}
+<ul class="fp-search-results">
+  {% for tag in matches %}
+  <li class="fp-search-item">
+    <span class="fp-search-tag">{{ tag }}</span>
+    <button type="button" class="fp-add-btn"
+            hx-post="/home/fingerprint/add"
+            hx-vals='{"axis":"genre:{{ tag }}"}'
+            hx-target="#home-feed" hx-swap="outerHTML"
+            aria-label="add {{ tag }} to your taste bars">Add</button>
+  </li>
+  {% endfor %}
+</ul>
+{% elif q %}
+<p class="fp-hint section-note">No genres match "{{ q }}".</p>
+{% endif %}

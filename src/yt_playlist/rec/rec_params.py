@@ -5,7 +5,7 @@ explanation, range, step, and default live here, and every consumer reads its va
 `get_param(store, name)` (falling back to the default). This replaces magic numbers that were
 scattered across recommend.py, so the page can render the knobs generically and reset them.
 
-Lane and genre *weights* are NOT here — those are multiplicative weights stored in the
+Lane and genre *weights* are NOT here - those are multiplicative weights stored in the
 `rec_weights` table (axes `lane:*` / `genre:*`); see LANES below for their labels/help. This
 module owns the scalar params (windows, ratios, counts, penalties), stored in the `settings`
 table as `rec_param:<name>` keys.
@@ -36,7 +36,7 @@ class ParamSpec:
 PARAMS = [
     ParamSpec("comfort_min_plays", "Comfort min plays", "discovery",
               "Comfort Listening surfaces your high-rotation favorites that have gone quiet. This is "
-              "the fewest past plays a track needs to qualify — higher = only your most-worn tracks.",
+              "the fewest past plays a track needs to qualify - higher = only your most-worn tracks.",
               1, 50, 1, 4, integer=True),
     ParamSpec("comfort_recency_full_days", "Comfort recency window (days)", "discovery",
               "Comfort Listening favors tracks you haven't played in a while. A track reaches its "
@@ -61,6 +61,9 @@ PARAMS = [
               "How many candidates each lane fetches per slot shown. Deeper = more variety for "
               "erosion to rotate through, at a little more compute.",
               2, 10, 1, 4, integer=True, advanced=True),
+    ParamSpec("dislike_suppress_days", "Dislike ban length (days)", "discovery",
+              "How long a thumbs-down hides a track before it can resurface.",
+              1, 3650, 1, 365, integer=True),
 ]
 
 PARAMS_BY_NAME = {p.name: p for p in PARAMS}
@@ -69,7 +72,7 @@ PARAMS_BY_NAME = {p.name: p for p in PARAMS}
 # Lane weights (rec_weights table, axis `lane:<name>`): labels + help for the page. Clamp [0.2, 3.0].
 LANES = [
     ("neighbourhood", "Neighbourhood", "Tracks close to what you've been playing recently."),
-    ("rotation", "Rotation", "More of what you play most — your steady rotation."),
+    ("rotation", "Rotation", "More of what you play most - your steady rotation."),
     ("deep_cut", "Deep cuts", "Overlooked tracks by artists you already have."),
     ("explore", "Explore", "New-to-you music that still sits near your taste."),
 ]
@@ -85,7 +88,7 @@ def _clamp(spec, value) -> float:
 
 
 def get_param(store, name):
-    """Current value of a scalar knob — the stored override, clamped, or the registry default."""
+    """Current value of a scalar knob - the stored override, clamped, or the registry default."""
     spec = PARAMS_BY_NAME[name]
     raw = store.get_setting(SETTING_PREFIX + name)
     if raw is None or raw == "":
@@ -121,6 +124,7 @@ MOOD_EVENT_CAP = 200           # bound the rec_mood table (count, not age)
 STALE_DECAY_HALFLIFE_D = 3     # once sync stale, transient relaxes with this half-life (days)
 # Source weights into the transient leans
 PLAY_TRANSIENT_W = 0.30        # one recent play's positive push
+LIKE_TRANSIENT_W = 0.45        # one recent like's positive push to facet leans (stronger than a play)
 DISLIKE_TRANSIENT_W = 1.50     # one recent dislike's negative push (strong, explicit)
 RECENT_PLAY_LIMIT = 50         # how many recent plays feed the transient leans
 # Facet overlay shape (read by _axis_weights_for and roll_recipe). The transient overlay DE-RANKS but
@@ -136,3 +140,13 @@ DISLIKE_SUPPRESS_DAYS = 365
 THEME_THRESHOLD = 1.2
 GRADUATE_UP = 1.05
 GRADUATE_DOWN = 0.95
+# --- Graduation source weights (Approach 1: source-aware funnel) ---
+# Each transient signal contributes a source-weighted amount to rec_theme. The transient effect is
+# immediate; graduation is gated by accumulation past THEME_THRESHOLD. Calibrated so today's vibe
+# lever is preserved (a mood event still contributes ±1 with SOURCE_W_VIBE=1.0).
+SOURCE_W_VIBE = 1.0       # vibe / facet lever (unchanged from today)
+SOURCE_W_LIKE = 1.0       # explicit thumbs-up - strong
+SOURCE_W_DISLIKE = 1.0    # thumbs-down (sign supplied by caller) - strong
+SOURCE_W_SLIDER = 0.5     # per held-day of a full lean (~2-3 held days -> one graduation step)
+SOURCE_W_PLAY = 0.08      # one play - weak; passive listening must not silently rewrite taste
+PLAY_GRAD_SESSION_CAP = 0.4   # max play-graduation contribution per session (a binge can't graduate)

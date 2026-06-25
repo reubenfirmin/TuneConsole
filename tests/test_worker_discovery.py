@@ -58,3 +58,26 @@ def test_home_discover_serves_cached(store):
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     assert "Cached LP" in c.get("/home/discover").text     # served from materialized proposals, no fetch
+
+
+def test_auto_sync_due_is_restart_safe(store):
+    # Due-based on the stored stamp (not a fixed sleep), so an app restart can't postpone auto-sync.
+    iid = store.upsert_identity("main", "cred", None, True)
+    now = 1_000_000.0
+    ctx = Ctx(store=store, client_provider=lambda: {iid: FakeClient()}, now_fn=lambda: now,
+              templates=None, jobs=None)
+    w = RecWorker(ctx)
+    assert w._auto_sync_due(now) is False                       # off by default
+    store.set_setting("auto_sync_plays", "1")
+    assert w._auto_sync_due(now) is True                        # on + connected + never synced -> due
+    store.set_setting("last_plays_sync_at", str(now - 60))      # synced a minute ago
+    assert w._auto_sync_due(now) is False                       # not due yet
+    store.set_setting("last_plays_sync_at", str(now - w.auto_sync_tick_s - 10))   # overdue
+    assert w._auto_sync_due(now) is True                        # catches up regardless of restarts
+
+
+def test_auto_sync_not_due_without_account(store):
+    now = 1_000_000.0
+    ctx = Ctx(store=store, client_provider=lambda: {}, now_fn=lambda: now, templates=None, jobs=None)
+    store.set_setting("auto_sync_plays", "1")
+    assert RecWorker(ctx)._auto_sync_due(now) is False          # no client connected -> nothing to pull

@@ -90,10 +90,13 @@ def test_track_year_returns_row_fragment(store):
 def test_enrich_track_events_carry_rendered_row(store, monkeypatch):
     import json as _json
     import yt_playlist.providers.musicbrainz as mb
+    from tests.conftest import only_provider
     monkeypatch.setattr(mb, "enrich", lambda title, artist: ("Rock", "1998") if title == "S0" else (None, None))
+    monkeypatch.setattr(mb, "recording_mbid", lambda title, artist: None)
     iid, a = _seed_one_track(store)
+    only_provider(store, "musicbrainz")
     c = _client(store, lambda: {iid: FakeClient()})
-    jid = c.post(f"/playlist/{a}/enrich/musicbrainz").json()["job_id"]
+    jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
     track_evs = [_json.loads(l[6:]) for l in body.splitlines()
@@ -193,6 +196,36 @@ def test_add_tracks_appends_and_refreshes(store):
     assert _refreshes(r)
     assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v1", "v2"]
     assert store.get_playlist(a).track_count == 3 and fc.added == [("PL1", ["v1", "v2"])]
+
+
+def test_add_tracks_backfills_duration_for_known_trackless_time(store):
+    # Regression for #26: an alternate that's already in the store with no duration (e.g. previously
+    # seen via plays/history sync, which inserts duration_s=None) must get its time filled in when
+    # added via "find alternate version" — otherwise the playlist row shows a blank time.
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
+    store.upsert_track("v1", "Song A (Live)", "Artist X", "Alb", None, 1)   # known, but no duration yet
+    c = _client(store, lambda: {iid: FakeClient()})
+    track = json.dumps({"videoId": "v1", "title": "Song A (Live)", "artist": "Artist X", "duration": 250})
+    assert _refreshes(c.post(f"/playlist/{a}/add-tracks", data={"track": track}))
+    row = next(t for t in store.playlist_tracks_detail(a) if t["video_id"] == "v1")
+    assert row["duration"] == 250
+
+
+def test_add_tracks_fetches_missing_duration_for_fresh_track(store):
+    # #26: a *new* alternate whose search result carried no time (YouTube's unfiltered search often
+    # omits it) gets its real duration fetched at add-time, so the playlist row isn't left blank.
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
+    fc = FakeClient(song_durations={"v1": 273})           # get_song knows v1's time
+    c = _client(store, lambda: {iid: fc})
+    # the posted track has duration omitted entirely (mirrors a duration-less search hit)
+    track = json.dumps({"videoId": "v1", "title": "Song A (Live)", "artist": "Artist X"})
+    assert _refreshes(c.post(f"/playlist/{a}/add-tracks", data={"track": track}))
+    row = next(t for t in store.playlist_tracks_detail(a) if t["video_id"] == "v1")
+    assert row["duration"] == 273
 
 
 def test_add_tracks_preserves_album_browse(store):

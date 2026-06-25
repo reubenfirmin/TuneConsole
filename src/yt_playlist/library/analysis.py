@@ -29,6 +29,12 @@ SYSTEM_PLAYLIST_IDS = {"LM", "SE"}
 def _manageable(p) -> bool:
     return p.ytm_playlist_id not in SYSTEM_PLAYLIST_IDS
 
+def _cleanup_excluded(store) -> set:
+    """Playlist DB ids hidden from every Cleanup category: app-generated (quarantined) playlists.
+    They're built from your library, so they trivially overlap/duplicate their source playlists, and
+    they're app-managed — not yours to tidy (#21)."""
+    return store.excluded_playlist_ids()
+
 @dataclass
 class IdenticalGroup:
     playlists: list   # all playlists sharing the exact same track set (2+)
@@ -54,9 +60,10 @@ def find_identical_groups(store, ignored_sigs=None):
     `ignored_sigs`: merge signatures the user dismissed — those groups are hidden.
     """
     ignored_sigs = ignored_sigs or set()
+    excluded = _cleanup_excluded(store)
     by_keys = {}
     for p in store.get_playlists():
-        if not _manageable(p):
+        if not _manageable(p) or p.id in excluded:
             continue
         keys = frozenset(store.get_playlist_track_keys(p.id))
         if not keys:            # empty -> not a real duplicate; handled separately
@@ -115,8 +122,9 @@ def find_empty_playlists(store, ignored=None):
     """User playlists with no tracks (excludes undeletable system playlists like Liked Music).
     `ignored`: ytm ids dismissed from the Empty category."""
     ignored = ignored or set()
+    excluded = _cleanup_excluded(store)
     return sorted((p for p in store.get_playlists()
-                   if _manageable(p) and p.ytm_playlist_id not in ignored
+                   if _manageable(p) and p.id not in excluded and p.ytm_playlist_id not in ignored
                    and not store.get_playlist_track_keys(p.id)),
                   key=lambda p: p.title.lower())
 
@@ -124,9 +132,10 @@ def find_tiny_playlists(store, max_tracks=3, ignored=None):
     """Manageable playlists with 1..max_tracks tracks — candidates to merge away or prune.
     `ignored`: ytm ids dismissed from the Tiny category."""
     ignored = ignored or set()
+    excluded = _cleanup_excluded(store)
     out = []
     for p in store.get_playlists():
-        if not _manageable(p) or p.ytm_playlist_id in ignored:
+        if not _manageable(p) or p.id in excluded or p.ytm_playlist_id in ignored:
             continue
         n = len(store.get_playlist_track_keys(p.id))
         if 1 <= n <= max_tracks:
@@ -139,8 +148,10 @@ def jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 def _pairs_with_keys(store):
-    # system playlists (Liked Music, Episodes for Later) are never dupe/overlap candidates
-    pls = [p for p in store.get_playlists() if _manageable(p)]
+    # system playlists (Liked Music, Episodes for Later) and app-generated playlists (#21) are never
+    # dupe/overlap candidates
+    excluded = _cleanup_excluded(store)
+    pls = [p for p in store.get_playlists() if _manageable(p) and p.id not in excluded]
     keyed = [(p, store.get_playlist_track_keys(p.id)) for p in pls]
     for (pa, ka), (pb, kb) in combinations(keyed, 2):
         yield pa, ka, pb, kb

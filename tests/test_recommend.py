@@ -478,3 +478,49 @@ def test_rediscover_rotation_stays_within_coldest_pool(store):
     for e in range(6):
         seen.update(p["title"] for p in recommend.rediscover_playlists(store, now, count=2, epoch=e, pool=4))
     assert seen == {"A", "B", "C", "D"}   # coldest 4 cycle through; warmest E, F never appear
+
+
+def _seed_album(store, iid, browse, title, now, played_at=None, n=2, year="2020", thumb="t.jpg"):
+    """A saved album of `n` tracks (linked by album_browse_id), optionally with one play snapshot."""
+    from yt_playlist.util.matching import identity_key
+    store.collection.add_saved_album({"browse": browse, "title": title, "artist": f"{browse} artist",
+                                      "year": year, "type": "Album", "thumbnail": thumb})
+    keys = []
+    for i in range(n):
+        t, a = f"{browse} song {i}", f"{browse} artist"
+        store.upsert_track(f"v_{browse}_{i}", t, a, None, None, album_browse_id=browse)
+        keys.append(identity_key(t, a))
+    if played_at is not None:
+        store.add_history_snapshot(iid, played_at, keys)
+
+
+def test_rediscover_albums_empty_when_no_saved(store):
+    assert recommend.rediscover_albums(store, 100.0) == []
+
+
+def test_rediscover_albums_coldest_first_and_carries_thumbnail(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0
+    now = 200 * day
+    _seed_album(store, iid, "AOLD", "Ancient", now, played_at=now - 150 * day)
+    _seed_album(store, iid, "AMID", "Dusty", now, played_at=now - 80 * day)
+    _seed_album(store, iid, "AHOT", "Fresh", now, played_at=now - 2 * day)
+    _seed_album(store, iid, "ANEW", "Untouched", now)                 # never played -> coldest
+
+    out = recommend.rediscover_albums(store, now, count=3, epoch=0)
+    assert [a["title"] for a in out] == ["Untouched", "Ancient", "Dusty"]   # coldest (never, then oldest)
+    assert out[0]["browse_id"] == "ANEW" and out[0]["thumbnail"] == "t.jpg"
+    assert out[0]["artist"] == "ANEW artist" and out[0]["year"] == "2020"
+
+
+def test_rediscover_albums_rotates_through_cold_pool_by_epoch(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    day = 86400.0
+    now = 400 * day
+    for browse, title, age in [("A1", "A", 200), ("A2", "B", 150), ("A3", "C", 100),
+                               ("A4", "D", 50), ("A5", "E", 25), ("A6", "F", 10)]:
+        _seed_album(store, iid, browse, title, now, played_at=now - age * day)
+    titles = lambda e: [a["title"] for a in recommend.rediscover_albums(store, now, count=3, epoch=e)]
+    assert titles(0) == ["A", "B", "C"]      # coldest page leads
+    assert titles(1) == ["D", "E", "F"]      # next epoch advances to the next-coldest page
+    assert titles(2) == ["A", "B", "C"]      # wraps back around the ranked pool

@@ -3,6 +3,7 @@ import logging
 import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.matching import fuzzy_ratio, normalize, track_artist, identity_key
 from yt_playlist.util.retry import with_retry
 from yt_playlist.core import paths
@@ -452,10 +453,18 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
         for t in uniq:
             if t["video_id"] in skipped_set:
                 continue
+            ti, ar = t.get("title") or "", t.get("artist") or ""
+            # Recommendation tracks arrive without a time (the rec pipeline doesn't carry one). Reuse a
+            # duration we already know for this song (free), else fetch it once — so the generated
+            # playlist's rows show their length instead of a blank (#26).
+            dur = t.get("duration")
+            if dur is None:
+                dur = store.known_duration(ti, ar)
+            if dur is None:
+                dur = _fetch_song_duration(client, t["video_id"])
             track_ids.append(store.upsert_track(
-                t["video_id"], t.get("title") or "", t.get("artist") or "", t.get("album") or "",
-                None, thumbnail=t.get("thumbnail")))
-            keys.append(identity_key(t.get("title") or "", t.get("artist") or ""))
+                t["video_id"], ti, ar, t.get("album") or "", dur, thumbnail=t.get("thumbnail")))
+            keys.append(identity_key(ti, ar))
         db_pid = store.upsert_playlist(identity_id, new_pid, title, len(track_ids),
                                        content_hash(list(dict.fromkeys(keys))), now)
         store.set_playlist_tracks(db_pid, track_ids)
@@ -546,18 +555,18 @@ def copy_into_playlist(store, source_ids, target_id, client, now) -> dict:
     return {"target_ytm": target.ytm_playlist_id, "title": target.title, "added": added,
             "skipped": len(skipped), "from": len(sources), "count": len(combined)}
 
-def _parse_duration(text):
-    """'3:45' / '1:02:03' -> seconds, else None."""
-    if not text:
+def _fetch_song_duration(client, video_id):
+    """Best-effort single-track duration (seconds) via get_song, for a track whose search result
+    carried no time (YouTube's unfiltered search often omits it). Returns None on any failure — a
+    missing time must never block an add."""
+    if not video_id:
         return None
     try:
-        parts = [int(p) for p in str(text).split(":")]
-    except ValueError:
+        details = (with_retry(lambda: client.get_song(video_id)) or {}).get("videoDetails") or {}
+        secs = details.get("lengthSeconds")
+        return int(secs) if secs not in (None, "") else None
+    except Exception:  # noqa: BLE001 - duration is a nicety; never let it fail the add
         return None
-    secs = 0
-    for p in parts:
-        secs = secs * 60 + p
-    return secs
 
 
 _PARENS_RE = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
@@ -577,11 +586,12 @@ def search_versions(client, title, artist, exclude=None, limit=14) -> list:
     the original and all remixes — rather than only that exact (often-removed) one."""
     base_title = _strip_parens(title) or title
     query = " ".join(x for x in (base_title, artist) if x).strip()
-    out, seen = [], set()
-    if exclude:
-        seen.add(exclude)
+    out, by_vid = [], {}
     # UNFILTERED first — it mirrors a plain web search (the most relevant top hits, incl. tracks the
-    # filtered searches miss) — then songs/videos add structured extras. De-duped by videoId.
+    # filtered searches miss) — then songs/videos add structured extras. De-duped by videoId. The
+    # unfiltered/top-results pass frequently OMITS duration while the 'songs' pass carries
+    # duration_seconds, so a videoId first seen unfiltered is later back-filled with its time from a
+    # filtered pass (without this, the added alternate lands in the playlist with a blank time — #26).
     for filt in (None, "songs", "videos"):
         try:
             results = with_retry(lambda f=filt: client.search(query, filter=f)) or []
@@ -590,24 +600,35 @@ def search_versions(client, title, artist, exclude=None, limit=14) -> list:
             results = []
         for r in results:
             vid = r.get("videoId")
-            if not vid or vid in seen:
+            if not vid or vid == exclude:
                 continue
-            seen.add(vid)
+            dur = r.get("duration_seconds") or parse_duration(r.get("duration"))
+            cand = by_vid.get(vid)
+            if cand is not None:                  # seen in an earlier pass — top up a missing duration
+                if cand["duration"] is None and dur is not None:
+                    cand["duration"] = dur
+                continue
+            if len(out) >= limit:                 # at capacity for new candidates; keep back-filling above
+                continue
             album = r.get("album")
             is_video = filt == "videos" or r.get("resultType") == "video" \
                 or r.get("videoType") == "MUSIC_VIDEO_TYPE_UGC"
-            out.append({
+            cand = {
                 "videoId": vid,
                 "title": r.get("title", ""),
                 "artist": ", ".join(a.get("name", "") for a in (r.get("artists") or []) if a.get("name")),
                 "album": album.get("name") if isinstance(album, dict) else None,
                 "album_browse": album.get("id") if isinstance(album, dict) else None,
-                "duration": r.get("duration_seconds") or _parse_duration(r.get("duration")),
+                "duration": dur,
                 "thumbnail": best_thumb(r.get("thumbnails")),
                 "kind": "video" if is_video else "song",
-            })
-            if len(out) >= limit:
-                return out
+            }
+            by_vid[vid] = cand
+            out.append(cand)
+        # Stop early only once we're full AND every candidate already has its time — otherwise keep
+        # scanning the remaining passes so they can back-fill the durations the first pass lacked.
+        if len(out) >= limit and all(c["duration"] is not None for c in out):
+            break
     return out
 
 
@@ -639,8 +660,13 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_
     for t in items:
         if t["videoId"] in skipped_set:
             continue
+        # The track time may be missing (search often omits it) — fetch it now, but only for the
+        # handful of tracks actually being added, so the playlist row shows a real duration (#26).
+        dur = t.get("duration")
+        if dur is None:
+            dur = _fetch_song_duration(client, t["videoId"])
         new_ids.append(store.upsert_track(t["videoId"], t.get("title", ""), t.get("artist"),
-                                          t.get("album"), t.get("duration"), 1,
+                                          t.get("album"), dur, 1,
                                           None, None, t.get("album_browse"), t.get("thumbnail")))
         titles.append(t.get("title", ""))
     combined = list(dict.fromkeys(existing + new_ids))

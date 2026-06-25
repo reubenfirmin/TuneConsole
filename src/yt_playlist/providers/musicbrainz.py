@@ -14,9 +14,38 @@ import urllib.parse
 import urllib.request
 
 from yt_playlist.util import net
+from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.providers.enrich_queue import PriorityGate
 
 logger = logging.getLogger(__name__)
+
+name = "musicbrainz"
+
+
+def available(store=None) -> bool:
+    return True
+
+
+def tripped() -> bool:
+    return _breaker.tripped()
+
+
+def reset() -> None:
+    _breaker.reset()
+
+
+def probe(track, store=None) -> EnrichmentResult:
+    """Read-only lookup: genre, year, and the recording MBID (which keys AcousticBrainz)."""
+    genre, year = enrich(track["title"], track["artist"])
+    mbid = recording_mbid(track["title"], track["artist"])
+    fields = {}
+    if genre:
+        fields["genre"] = genre
+    if year:
+        fields["year"] = year
+    if mbid:
+        fields["mb_recording_id"] = mbid
+    return EnrichmentResult("musicbrainz", fields)
 
 _API = "https://musicbrainz.org/ws/2"
 # MusicBrainz blocks requests without a meaningful UA; identify the app + a contact.
@@ -107,6 +136,30 @@ def _strip_parens(title):
     return _PARENS.sub("", title or "").strip()
 
 
+def recording_mbid(title, artist):
+    """Best-match MusicBrainz recording MBID for a track, or None. Used to key AcousticBrainz.
+    Retries once with parenthetical qualifiers stripped, same as enrich()."""
+    mbid = _search_mbid(title, artist)
+    if mbid is None:
+        stripped = _strip_parens(title)
+        if stripped and stripped != title:
+            mbid = _search_mbid(stripped, artist)
+    return mbid
+
+
+def _search_mbid(title, artist):
+    query = f'recording:"{_lucene_escape(title)}"'
+    if artist:
+        query += f' AND artist:"{_lucene_escape(artist)}"'
+    try:
+        res = _get("recording", {"query": query, "fmt": "json", "limit": "25"})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("MB mbid search failed for %r / %r: %s", title, artist, e)
+        return None
+    recordings = res.get("recordings") or []
+    return recordings[0].get("id") if recordings else None
+
+
 def enrich(title, artist):
     """Return (genre, year) for a track, or (None, None) on no match / error.
 
@@ -180,6 +233,9 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
                 on_progress({"type": "err", "text": "MusicBrainz looks unreachable; enrichment stopped. "
                              "The remaining tracks will retry next time."})
                 return
+            mbid = recording_mbid(t["title"], t["artist"])
+            if mbid:
+                store.set_track_mbid(t["id"], mbid)
             store.set_track_enrichment(t["id"], genre, year)
             eff_genre, eff_year = store.get_track_enrichment(t["id"])    # report what actually stuck
             bits = " · ".join(x for x in (genre, year) if x) or "no match"

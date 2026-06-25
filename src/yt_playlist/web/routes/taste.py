@@ -2,13 +2,33 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
-from yt_playlist.rec import embed, eval_recs, rec_params, recommend
+from yt_playlist.rec import embed, eval_recs, rec_params, recommend, rose, taste_viz
 from yt_playlist.rec.rec_dao import RecDao
 
 
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates = ctx.store, ctx.templates
+
+    def _rose_rows(rows, n=10):
+        """Augment the top-n axis rows in place with `petal` (all-time share) and `petal_t` (the
+        right-now deviation = recent share - all-time share) SVG geometry, so the template stays
+        logic-light. The deviation rose uses an absolute scale (floored) so a near-flat recent mix
+        stays small rather than being normalized up to full amplitude."""
+        rows = rows[:n]
+        devs = [r["transient_dev"] for r in rows]
+        scale = max(0.12, max((abs(d) for d in devs), default=0.0))   # 12 pts fills the rose, or more
+        unsigned = rose.rose_geometry([r["share"] for r in rows])
+        signed = rose.rose_geometry_deviation(devs, scale=scale)
+        for r, p, pt in zip(rows, unsigned, signed):
+            r["petal"], r["petal_t"] = p, pt
+        return rows
+
+    def _viz_context():
+        viz = taste_viz.model_transparency(store, ctx.now())
+        viz["genres"] = _rose_rows(viz["genres"])
+        viz["eras"] = _rose_rows(viz["eras"])
+        return {"viz": viz}
 
     def _refresh():
         return Response(status_code=200, headers={"HX-Refresh": "true"})
@@ -47,11 +67,20 @@ def build(ctx) -> APIRouter:
             "params": [_param_view(s) for s in rec_params.PARAMS if not s.advanced],
             "advanced_params": [_param_view(s) for s in rec_params.PARAMS if s.advanced],
             "feedback": dao.feedback_summary(),
+            "bans": [{"key": r["item_key"], "until": r["until"]} for r in store.list_dislikes()],
         }
 
     @router.get("/taste")
     def taste_page(request: Request):
-        return templates.TemplateResponse(request, "taste.html", _model_context())
+        return templates.TemplateResponse(request, "taste.html", {**_model_context(), **_viz_context()})
+
+    @router.get("/taste/viz/engine")
+    def taste_viz_engine(request: Request):
+        # The expensive transparency panels (embedding recall + per-playlist taste contexts load
+        # vectors; the centroid tilt re-derives the mood direction) stream in lazily, like /taste/recall.
+        return templates.TemplateResponse(request, "_partials/taste_viz_engine.html",
+                                          {"engine": taste_viz.engine_panel(store),
+                                           "tilt": taste_viz.centroid_tilt_panel(store, ctx.now())})
 
     @router.get("/taste/recall")
     def taste_recall(request: Request):
@@ -116,6 +145,13 @@ def build(ctx) -> APIRouter:
     @router.post("/taste/clear-feedback")
     def taste_clear_feedback():
         RecDao(store).clear_feedback()
+        return _refresh()
+
+    @router.post("/taste/unban")
+    async def taste_unban(request: Request):
+        key = (await request.form()).get("key")
+        if key:
+            store.clear_dislike(key)
         return _refresh()
 
     def _busy():

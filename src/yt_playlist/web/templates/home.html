@@ -1,5 +1,14 @@
 {% extends "base.html" %}{% from "_macros.html" import banner %}
 {% block title %}Home - TuneConsole{% endblock %}
+{# Transient success toast (e.g. re-authed with auto-sync on — nothing for them to do). Mirrors the
+   OOB error toast: Alpine auto-dismisses after 5s. Renders into base.html's #toasts container. #}
+{% block toasts %}{% if toast %}
+<div class="toast toast-ok" x-data="{ show: true }" x-show="show" x-cloak
+     x-init="setTimeout(() => show = false, 5000)">
+  <span class="toast-body">{{ toast }}</span>
+  <button type="button" class="toast-x" @click="show = false" aria-label="Dismiss">×</button>
+</div>
+{% endif %}{% endblock %}
 {% block body %}
 {% if flash %}
 {# Setup flash: dismissible, and auto-retires the moment a sync is kicked off (see syncPanel.start). #}
@@ -74,6 +83,11 @@
 <script>
 function genName(id) { return document.getElementById(id).dataset.name; }
 function genRecipe(id) { return document.getElementById(id).dataset.recipe || ''; }
+// Open the YouTube tab NOW, synchronously inside the click (a user gesture) so the browser doesn't
+// block it. The save round-trip can outlive the browser's activation window (a failed batch-add
+// retries 12 items one-by-one), so opening from the post-save swap gets popup-blocked. We stash the
+// blank tab's handle; the swapped-in result points it at the new playlist once the save returns.
+function genOpenYT() { try { window.__ytTab = window.open('', '_blank'); } catch (e) {} }
 function genTracks(id) {
   return JSON.stringify([...document.getElementById(id).querySelectorAll('.gen-row')].map(r => ({
     video_id: r.dataset.vid, title: r.dataset.title, artist: r.dataset.artist,

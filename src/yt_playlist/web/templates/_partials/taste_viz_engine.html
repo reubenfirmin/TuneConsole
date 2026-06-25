@@ -1,0 +1,60 @@
+{# Expensive permanent panels: embedding stats + recall, the per-playlist taste contexts, and the
+   transient centroid tilt. Streamed into the Visualizations tab via hx-get. #}
+{% import "_partials/_viz_tip.html" as vt %}
+<div class="stat-grid">
+  <div><strong>{{ engine.vectors }}</strong><span>track vectors</span></div>
+  <div><strong>{{ engine.baskets }}</strong><span>co-occurrence baskets</span></div>
+  <div><strong>{{ engine.dim }}</strong><span>embedding dimensions</span></div>
+  <div><strong>{{ engine.method }}</strong><span>method</span></div>
+  {% if engine.recall.recall_at_k is not none %}
+  <div><strong>{{ '%.0f'|format(engine.recall.recall_at_k*100) }}%</strong>
+       <span>recall@{{ engine.recall.k }}{% if engine.recall.lift %} · {{ '%.1f'|format(engine.recall.lift) }}× baseline{% endif %}</span></div>
+  {% else %}
+  <div><strong> - </strong><span>recall (build the model first)</span></div>
+  {% endif %}
+</div>
+
+<h3 class="section">Centroid tilt <span class="scope-tag">right now</span></h3>
+<p class="section-note">Your current mood as a <em>direction</em> in the embedding (learned from co-listening,
+  not surface genre tags). These are signed alignments from -1 to +1, so each bar grows from the center:
+  which sounds your mood leans <strong>toward</strong> (teal, right) or <strong>away from</strong> (red, left).</p>
+{% if tilt.projection %}
+<div class="viz-bars">
+  {% for p in tilt.projection %}
+  <div class="viz-bar-row" {{ vt.tip(p.name, [
+        {"l": "Alignment", "v": "%+.2f"|format(p.value), "t": ("pos" if p.value > 0 else "neg")},
+        {"l": "Means", "v": ("mood leaning toward this sound" if p.value > 0 else "mood leaning away from this sound"), "n": "cosine of the mood direction with this genre's centroid (-1 to +1)"}]) }}>
+    <span class="vb-name">{{ p.name }}</span>
+    <span class="vb-div"><i class="{{ 'pos' if p.value > 0 else 'neg' }}" style="width:{{ '%.0f'|format(p.value|abs*50) }}%"></i></span>
+    <span class="vb-val mono">{{ '%+.2f'|format(p.value) }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="section-note">Quiet - no current-mood tilt on the embedding.</p>
+{% endif %}
+
+<h3 class="section">Playlist influence <span class="scope-tag">permanent</span></h3>
+<p class="section-note">The recommender doesn't blur all your music into one average. It treats each
+   playlist as a distinct <em>sound</em> and blends them, weighting each by how much you actually listen
+   to it. So your heavy-rotation playlists steer your picks, while a rarely-played one (the road-trip-with-Dad
+   playlist) barely counts and can't drag recommendations off-taste. Each bar is a playlist's share of that
+   blend; hover for its dominant genre.</p>
+{% if engine.contexts %}
+{% set cmax = engine.contexts[0].weight or 1 %}
+<div class="viz-bars">
+  {% for c in engine.contexts %}
+  <div class="viz-bar-row" {{ vt.tip(c.title, [
+        {"l": "Steers your recs", "v": "%.0f"|format(c.weight*100) ~ "%", "t": "strong"},
+        {"l": "Its sound", "v": (c.genre or "mixed")},
+        {"l": "Why this much", "v": "how much you play it", "n": "more listening = more say in your recommendations"}]) }}>
+    <span class="vb-name">{{ c.title }}</span>
+    <span class="vb-perm"><i style="width:{{ '%.0f'|format(c.weight/cmax*100) }}%"></i></span>
+    <span class="vb-val mono">{{ '%.0f'|format(c.weight*100) }}%</span>
+  </div>
+  {% endfor %}
+</div>
+<p class="section-note" style="margin:.45rem 0 0">
+  {% if engine.contexts_total > engine.contexts|length %}Top {{ engine.contexts|length }} of {{ engine.contexts_total }} playlists. {% endif %}
+  The percentages are each playlist's slice of the blend, so they add up across all of them.</p>
+{% else %}<p class="section-note">No taste contexts yet - build the model and play some playlists.</p>{% endif %}

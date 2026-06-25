@@ -16,6 +16,29 @@ def test_saved_album_crud(store):
     assert store.collection.saved_album_ids() == {"B2"}
 
 
+def test_saved_albums_recency_newest_play_per_album(store):
+    from yt_playlist.util.matching import identity_key
+    iid = store.upsert_identity("me", "c", None, True)
+    store.collection.add_saved_album(_album("HOT", title="Hot"))
+    store.collection.add_saved_album(_album("COLD", title="Cold"))
+    store.collection.add_saved_album(_album("NEVER", title="Never"))
+    # HOT: two tracks, played at 100 and 300 -> album's newest play is 300
+    store.upsert_track("vh1", "H1", "AH", None, None, album_browse_id="HOT")
+    store.upsert_track("vh2", "H2", "AH", None, None, album_browse_id="HOT")
+    store.add_history_snapshot(iid, 100.0, [identity_key("H1", "AH")])
+    store.add_history_snapshot(iid, 300.0, [identity_key("H2", "AH")])
+    # COLD: one track, played once long ago
+    store.upsert_track("vc1", "C1", "AC", None, None, album_browse_id="COLD")
+    store.add_history_snapshot(iid, 50.0, [identity_key("C1", "AC")])
+    # NEVER: a track exists in the library but was never played
+    store.upsert_track("vn1", "N1", "AN", None, None, album_browse_id="NEVER")
+
+    rec = store.saved_albums_recency()
+    assert rec["HOT"] == 300.0       # newest play across the album's tracks
+    assert rec["COLD"] == 50.0
+    assert rec["NEVER"] is None      # never played -> coldest
+
+
 def test_replace_saved_albums_is_wholesale(store):
     store.collection.add_saved_album(_album("OLD"))
     store.collection.replace_saved_albums([_album("N1"), _album("N2"), {"title": "no-browse"}])

@@ -21,7 +21,7 @@ def _load():
     for fam, genres in families.items():
         for g in genres:
             genre_to_family[g.lower()] = fam
-    return genre_to_family, adjacency, energy
+    return genre_to_family, adjacency, energy, families
 
 
 def family(genre) -> str:
@@ -29,7 +29,7 @@ def family(genre) -> str:
     if not genre:
         return ""
     g = genre.strip().lower()
-    g2f, _, _ = _load()
+    g2f, _, _, _ = _load()
     return g2f.get(g, f"other:{g}")
 
 
@@ -37,7 +37,7 @@ def family_distance(fam_a, fam_b) -> float:
     """Distance in [0, 1] between two families: 0 same, listed adjacency value, else 1."""
     if fam_a == fam_b:
         return 0.0
-    _, adj, _ = _load()
+    _, adj, _, _ = _load()
     near = adj.get(fam_a, {}).get(fam_b)
     if near is None:
         near = adj.get(fam_b, {}).get(fam_a)
@@ -52,5 +52,30 @@ def distance(genre_a, genre_b) -> float:
 def energy(genre) -> float:
     """Genre-family energy/intensity in [0,1] (0 = mellow, 1 = intense). Unknown/untagged -> 0.5,
     so an untagged track floats to the middle of every energy journey rather than sinking."""
-    _, _, en = _load()
+    _, _, en, _ = _load()
     return en.get(family(genre), 0.5)
+
+
+def subgenre(genre) -> str | None:
+    """The normalized (lowercased) subgenre tag for a known genre, or None if unknown.
+    Distinct from family(): family() collapses subgenres to a bucket; subgenre() keeps the fine axis."""
+    if not genre:
+        return None
+    g = genre.strip().lower()
+    g2f, _, _, _ = _load()
+    return g if g in g2f else None
+
+
+def subgenres_of(fam) -> list:
+    """All member genre tags (lowercased) for the given family. Empty list if the family is unknown."""
+    _, _, _, families = _load()
+    members = families.get(fam)
+    if members is None:
+        return []
+    return [g.lower() for g in members]
+
+
+def all_genres() -> list:
+    """Sorted list of all lowercased genre tags known to the map."""
+    g2f, _, _, _ = _load()
+    return sorted(g2f.keys())

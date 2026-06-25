@@ -19,6 +19,20 @@ JOURNEY_LABELS = {
     "shuffle": "Straight shuffle",
 }
 
+# Short 5–6 word hints for the Clusters DJ-Journey picker (the full ones above are for the panel).
+JOURNEY_HINTS = {
+    "energy_arc": "Eases up, peaks, winds down",
+    "warm_up": "Starts mellow, steadily builds energy",
+    "wind_down": "Starts high, gradually calms down",
+    "smooth_segue": "Glides between neighbouring genres",
+    "odyssey": "Hops between contrasting genres",
+    "time_machine": "Oldest first, moving forward",
+    "throwback": "Newest first, working backward",
+    "deep_dive": "Favourites first, then deeper cuts",
+    "rediscovery": "Leads with long-unplayed tracks",
+    "shuffle": "Shuffle, keeping artists apart",
+}
+
 JOURNEY_DESCRIPTIONS = {
     "energy_arc": "Eases in, builds to a peak, then winds back down.",
     "warm_up": "Starts mellow and steadily builds energy.",

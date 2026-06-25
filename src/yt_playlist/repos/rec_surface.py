@@ -65,6 +65,14 @@ class RecSurfaceRepo(Repo):
                                 (playlist_ytm,)).fetchone()
         return json.loads(row["recipe"]) if row else None
 
+    @synchronized
+    def get_recipe_created_ats(self) -> dict:
+        """{playlist_ytm: created_at} for every generated playlist — lets the playlists page order
+        the Generated list newest-first. created_at may be None for older recipes."""
+        return {r["playlist_ytm"]: r["created_at"]
+                for r in self.conn.execute(
+                    "SELECT playlist_ytm, created_at FROM rec_recipes").fetchall()}
+
     # --- persistent mood: count-capped (replaces time-windowed active_mood) ---
     @synchronized
     def record_mood(self, keys, direction, now) -> None:
@@ -192,3 +200,10 @@ class RecSurfaceRepo(Repo):
     def get_theme(self, facet):
         row = self.conn.execute("SELECT score FROM rec_theme WHERE facet=?", (facet,)).fetchone()
         return row["score"] if row else None
+
+    @synchronized
+    def theme_rows(self) -> list:
+        """All graduation-ledger rows {facet, score, updated_at}, strongest-magnitude first - the
+        transient->permanent funnel, for the Taste-model transparency view."""
+        return self.conn.execute(
+            "SELECT facet, score, updated_at FROM rec_theme ORDER BY ABS(score) DESC").fetchall()

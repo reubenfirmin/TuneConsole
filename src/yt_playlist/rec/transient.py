@@ -26,6 +26,9 @@ def facets_for(store, keys) -> dict:
             fam = genre_map.family(genres[k])
             if fam:
                 out.setdefault(f"genre:{fam}", []).append(k)
+            sub = genre_map.subgenre(genres[k])
+            if sub and sub != fam:
+                out.setdefault(f"genre:{sub}", []).append(k)
         if k in decades:
             out.setdefault(f"era:{decades[k]}", []).append(k)
         if k in artists:
@@ -34,11 +37,17 @@ def facets_for(store, keys) -> dict:
 
 
 def staleness_factor(store, now) -> float:
-    """1.0 while sync is fresh; decays past SYNC_STALE_S with a STALE_DECAY_HALFLIFE_D half-life."""
-    last = store.get_setting("last_sync_at")
-    if last is None:
+    """1.0 while sync is fresh; decays past SYNC_STALE_S with a STALE_DECAY_HALFLIFE_D half-life.
+
+    Uses the most recent sync of EITHER kind - a full sync (`last_sync_at`) or a quick plays/auto
+    sync (`last_plays_sync_at`) - mirroring recommend.sync_status. A recent auto-sync brings fresh
+    play data, so it must keep the transient model live (otherwise the model decays even though plays
+    are current)."""
+    stamps = [float(s) for s in (store.get_setting("last_sync_at"),
+                                 store.get_setting("last_plays_sync_at")) if s is not None]
+    if not stamps:
         return 1.0
-    age = now - float(last)
+    age = now - max(stamps)
     if age <= rec_params.SYNC_STALE_S:
         return 1.0
     return 0.5 ** ((age - rec_params.SYNC_STALE_S) / (rec_params.STALE_DECAY_HALFLIFE_D * 86400.0))
@@ -62,6 +71,8 @@ def facet_leans(store, now) -> dict:
         add(keys, direction * ((1.0 - a) ** rank))
     for rank, k in enumerate(store.recent_keys_ordered(0, limit=rec_params.RECENT_PLAY_LIMIT)):
         add([k], rec_params.PLAY_TRANSIENT_W * ((1.0 - a) ** rank))
+    for rank, k in enumerate(store.recent_liked_keys(limit=rec_params.RECENT_PLAY_LIMIT)):
+        add([k], rec_params.LIKE_TRANSIENT_W * ((1.0 - a) ** rank))
     for k in store.disliked_identity_keys():
         add([k], -rec_params.DISLIKE_TRANSIENT_W)
     s = staleness_factor(store, now)
@@ -75,10 +86,12 @@ def facet_multiplier(lean) -> float:
 
 
 def centroid_tilt(store, now, V, idx):
-    """Unit embedding direction from mood events, interaction-rank weighted (persistent successor to
-    the old mood_tilt). None if quiet. Staleness is applied by the caller (it scales the blend)."""
+    """Unit embedding direction from the unified transient stream — mood events, recent plays, and
+    recent likes, all interaction-rank weighted. None if quiet. Staleness is applied by the caller."""
     events = store.recent_mood_events()
-    if not events:
+    plays = store.recent_keys_ordered(0, limit=rec_params.RECENT_PLAY_LIMIT)
+    likes = store.recent_liked_keys(limit=rec_params.RECENT_PLAY_LIMIT)
+    if not events and not plays and not likes:
         return None
     a = rec_params.MOOD_RECENCY_ALPHA
     tilt = np.zeros(V.shape[1], dtype=np.float64)
@@ -87,9 +100,23 @@ def centroid_tilt(store, now, V, idx):
         if not rows:
             continue
         c = V[rows].mean(0)
-        n = np.linalg.norm(c)
-        if n == 0:
+        nrm = np.linalg.norm(c)
+        if nrm == 0:
             continue
-        tilt += direction * ((1.0 - a) ** rank) * (c / n)
+        tilt += direction * ((1.0 - a) ** rank) * (c / nrm)
+
+    def _add_dir(keys, w_base):
+        for rank, k in enumerate(keys):
+            if k not in idx:
+                continue
+            v = V[idx[k]]
+            nrm = np.linalg.norm(v)
+            if nrm == 0:
+                continue
+            nonlocal tilt
+            tilt = tilt + w_base * ((1.0 - a) ** rank) * (v / nrm)
+
+    _add_dir(plays, rec_params.PLAY_TRANSIENT_W)
+    _add_dir(likes, rec_params.LIKE_TRANSIENT_W)
     n = np.linalg.norm(tilt)
     return tilt / n if n > 0 else None

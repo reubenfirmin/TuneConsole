@@ -102,3 +102,32 @@ def test_taste_reset_all_clears_weights_and_params(store):
 def test_taste_preview_renders_without_recs(store):
     c = _client(store)
     assert c.get("/taste/preview").status_code == 200     # no model yet -> still 200
+
+
+def test_taste_page_lists_and_clears_bans(store):
+    store.record_dislike("song|band", until=99999.0, now=1.0)
+    c = _client(store)
+    html = c.get("/taste").text
+    assert "song|band" in html or "Banned" in html
+    assert c.post("/taste/unban", data={"key": "song|band"}).status_code == 200
+    assert store.disliked_identity_keys() == set()
+
+
+def test_taste_page_has_viz_and_controls_tabs(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
+                   base_url="http://127.0.0.1")
+    html = c.get("/taste").text
+    assert "Visualizations" in html and "Controls" in html
+    assert "tab = 'viz'" in html                  # default viz tab via the setup Alpine pattern
+    assert "What's feeding" in html               # transient sources panel present
+    assert "Graduation funnel" in html            # transient -> permanent funnel present
+
+
+def test_taste_viz_engine_fragment(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
+                   base_url="http://127.0.0.1")
+    r = c.get("/taste/viz/engine")
+    assert r.status_code == 200
+    assert "track vectors" in r.text

@@ -8,16 +8,15 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from yt_playlist.providers import discogs, lastfm, musicbrainz
+from yt_playlist.providers import enrichment, lastfm, waterfall
 from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.thumbnails import best_thumb
 
 
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates = ctx.store, ctx.templates
-    ENRICH_SOURCES = {"musicbrainz": musicbrainz.enrich_playlist, "lastfm": lastfm.enrich_playlist,
-                      "discogs": discogs.enrich_playlist}
 
     def _toast(request, message):
         return templates.TemplateResponse(
@@ -55,8 +54,8 @@ def build(ctx) -> APIRouter:
             for t in album["tracks"]:
                 if t.get("video_id") and t.get("title"):
                     store.upsert_track(t["video_id"], t["title"], t.get("artist") or album.get("artist") or "",
-                                       album.get("title") or "", None, album_browse_id=browse_id,
-                                       thumbnail=album.get("thumbnail"))
+                                       album.get("title") or "", parse_duration(t.get("duration")),
+                                       album_browse_id=browse_id, thumbnail=album.get("thumbnail"))
             tracks = store.album_tracks_detail(browse_id)
         if tracks and not (album and album.get("title")):   # live fetch missing/empty but it's in our library
             meta = next((a for a in store.get_saved_albums() if a["browse"] == browse_id), {})
@@ -65,9 +64,9 @@ def build(ctx) -> APIRouter:
                      "thumbnail": meta.get("thumbnail") or tracks[0]["thumbnail"], "tracks": tracks}
         return templates.TemplateResponse(request, "album.html", {
             "album": album, "browse_id": browse_id, "tracks": tracks, "saved": saved,
-            "gaps": sum(1 for t in tracks if not t["genre"]),
             "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
+            "conflict_count": store.conflict_count_for_album(browse_id),
             # arrived via a home "Enrich" CTA — tint the enrich icons CTA-green so it's clear what to click
             "enrich_hint": request.query_params.get("enrich") == "1"})
 
@@ -147,21 +146,19 @@ def build(ctx) -> APIRouter:
             return _toast(request, "Couldn't create the playlist — see the log.")
         return Response(status_code=200, headers={"HX-Redirect": f"/playlist/{res['db_pid']}"})
 
-    @router.post("/album/{browse}/enrich/{source}")
-    def album_enrich(browse: str, source: str):
-        """Kick off a background enrichment job over a saved album's folded-in tracks — the same
-        runners and SSE stream as playlist enrichment, scoped by album_browse instead of a playlist."""
-        runner = ENRICH_SOURCES.get(source)
-        if runner is None:
-            raise HTTPException(status_code=404, detail="unknown enrichment source")
+    @router.post("/album/{browse}/enrich")
+    def album_enrich(browse: str):
+        """Run the enrichment waterfall over a saved album's folded-in tracks — same harness and SSE
+        stream as playlist enrichment, scoped by album_browse instead of a playlist."""
         job = ctx.jobs.create()
         job.album_browse = browse
-        job.source = source
-        pending = store.album_tracks_to_enrich(browse)
+        job.source = "waterfall"
+        pending = store.album_tracks_for_waterfall(browse)
 
         def run():
             try:
-                runner(store, None, on_progress=job.events.append, pending=pending)
+                waterfall.run_waterfall(store, pending, enrichment.load_config(store),
+                                        on_progress=job.events.append)
             except Exception as e:  # noqa: BLE001
                 detail = str(e) or type(e).__name__
                 job.error = detail
@@ -171,5 +168,29 @@ def build(ctx) -> APIRouter:
 
         threading.Thread(target=run, daemon=True).start()
         return JSONResponse({"job_id": job.id})
+
+    @router.get("/album/{browse}/conflicts")
+    def album_conflicts(request: Request, browse: str):
+        return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
+            "conflicts": store.unresolved_conflicts_for_album(browse),
+            "resolve_url": f"/album/{browse}/conflicts/resolve",
+            "count_left": store.conflict_count_for_album(browse)})
+
+    @router.post("/album/{browse}/conflicts/resolve")
+    async def album_resolve_conflicts(request: Request, browse: str):
+        form = await request.form()
+        for key, value in form.multi_items():
+            if ":" not in key or not value:
+                continue
+            tid, _, field = key.partition(":")
+            if tid.isdigit():
+                try:
+                    store.resolve_conflict(int(tid), field, value)
+                except ValueError:
+                    pass
+        return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
+            "conflicts": store.unresolved_conflicts_for_album(browse),
+            "resolve_url": f"/album/{browse}/conflicts/resolve",
+            "count_left": store.conflict_count_for_album(browse)})
 
     return router

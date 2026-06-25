@@ -15,6 +15,23 @@ from yt_playlist.repos.base import Repo, synchronized
 GENERATED_GROUP = "Generated"
 
 
+def _join_names(names, total) -> str:
+    """'Ritmo', 'Ritmo & Shpongle', 'Ritmo, Shpongle & 3 more' — for a connection reason sentence."""
+    if not names:
+        return ""
+    extra = total - len(names)
+    if extra > 0:
+        return ", ".join(names) + f" & {extra} more"
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " & " + names[-1]
+
+
+def _fam_label(fam) -> str:
+    """Display a genre family; the map's singleton 'other:<genre>' fallback shows as just the genre."""
+    return fam.split("other:", 1)[-1] if fam.startswith("other:") else fam
+
+
 class RecQueryRepo(Repo):
     # --- library primitives ---
     @synchronized
@@ -147,6 +164,160 @@ class RecQueryRepo(Repo):
             f"WHERE identity_key IN ({qs}) GROUP BY identity_key", keys).fetchall()
         return {r["k"]: {"title": r["title"], "artist": r["artist"], "album": r["album"] or "",
                          "video_id": r["vid"], "thumbnail": r["thumb"]} for r in rows}
+
+    @synchronized
+    def connection_facts(self, key, path_keys, max_playlist=120, max_artists=3) -> list[dict]:
+        """Why are two Clusters tracks linked? — the grounded co-occurrence facts behind an edge.
+
+        Reads the same baskets that fed the taste embedding (`rec_baskets`) and turns the concrete
+        ones into human-readable reasons: same artist, shared playlists (naming the co-occurring
+        path artists), shared album, same listening session, genre family, decade. `key` = the
+        child track; `path_keys` = its PINNED path (central seeds + ancestors). Returned
+        strongest-first as [{kind, text}, ...]. Empty when the link is purely second-order — no
+        direct shared basket — and the caller falls back to an embedding 'bridge'
+        (see embed.connection_geometry). Catch-all playlists (> max_playlist tracks) and quarantined
+        generated playlists are excluded, mirroring the embedding's own basket filtering."""
+        from yt_playlist.rec import genre_map
+        path = [k for k in dict.fromkeys(path_keys) if k and k != key]
+        if not key or not path:
+            return []
+        qs = ",".join("?" * len(path))
+        crow = self.conn.execute(
+            "SELECT MIN(artist) artist, MIN(NULLIF(album,'')) album, MIN(NULLIF(genre,'')) genre, "
+            "MIN(NULLIF(mb_year,'')) yr FROM tracks WHERE identity_key=?", (key,)).fetchone()
+        if crow is None:
+            return []
+        c_artist = (crow["artist"] or "").strip()
+        facts = []
+
+        # 1) same artist as something else on the branch — the most certain explanation
+        row = self.conn.execute(
+            f"SELECT t2.artist a FROM tracks t1 JOIN tracks t2 "
+            f"ON LOWER(TRIM(t2.artist))=LOWER(TRIM(t1.artist)) "
+            f"WHERE t1.identity_key=? AND TRIM(t1.artist)<>'' AND t2.identity_key IN ({qs}) LIMIT 1",
+            [key, *path]).fetchone()
+        if row:
+            facts.append({"kind": "same_artist",
+                          "text": f"Same artist ({row['a']}) as elsewhere on this branch."})
+
+        # 2) shared playlists — count distinct, naming the co-occurring path artists ("bands like…")
+        excl = self.excluded_playlist_ids()
+        rows = self.conn.execute(
+            f"SELECT cp.pid pid, t.artist artist FROM "
+            f"(SELECT DISTINCT pt.playlist_id pid FROM playlist_tracks pt "
+            f" JOIN tracks t ON t.id=pt.track_id WHERE t.identity_key=?) cp "
+            f"JOIN playlist_tracks pt ON pt.playlist_id=cp.pid "
+            f"JOIN tracks t ON t.id=pt.track_id "
+            f"WHERE t.identity_key IN ({qs}) "
+            f"AND cp.pid NOT IN (SELECT playlist_id FROM playlist_tracks "
+            f"                   GROUP BY playlist_id HAVING COUNT(*) > ?)",
+            [key, *path, max_playlist]).fetchall()
+        pids, artists = set(), []
+        for r in rows:
+            if r["pid"] in excl:
+                continue
+            pids.add(r["pid"])
+            a = (r["artist"] or "").strip()
+            if a and a.lower() != c_artist.lower() and a not in artists:
+                artists.append(a)
+        if pids:
+            n = len(pids)
+            lead = f"In {n} of your playlist" + ("s" if n != 1 else "")
+            names = _join_names(artists[:max_artists], len(artists))
+            facts.append({"kind": "playlist",
+                          "text": (f"{lead}, alongside {names}." if names else f"{lead} on this branch.")})
+
+        # 3) shared album
+        row = self.conn.execute(
+            f"SELECT t2.album al, t2.artist ar FROM tracks t1 JOIN tracks t2 "
+            f"ON LOWER(t2.album)=LOWER(t1.album) "
+            f"WHERE t1.identity_key=? AND TRIM(t1.album)<>'' AND t2.identity_key IN ({qs}) "
+            f"AND t2.identity_key<>? LIMIT 1", [key, *path, key]).fetchone()
+        if row:
+            facts.append({"kind": "album", "text": f"From the album “{row['al']}”, with {row['ar']}."})
+
+        # 4) same listening session (shared history snapshot)
+        if self.conn.execute(
+                f"SELECT 1 FROM history_items h1 JOIN history_items h2 ON h2.snapshot_id=h1.snapshot_id "
+                f"WHERE h1.identity_key=? AND h2.identity_key IN ({qs}) LIMIT 1",
+                [key, *path]).fetchone():
+            facts.append({"kind": "session", "text": "You played them in the same listening session."})
+
+        # 5) genre family (meta-genre map) — both sit in the same family
+        if crow["genre"]:
+            cf = genre_map.family(crow["genre"])
+            prows = self.conn.execute(
+                f"SELECT DISTINCT genre FROM tracks WHERE identity_key IN ({qs}) AND genre<>''",
+                path).fetchall()
+            if cf and any(genre_map.family(r["genre"]) == cf for r in prows):
+                facts.append({"kind": "genre", "text": f"Both in your {_fam_label(cf)} family."})
+
+        # 6) same decade
+        if crow["yr"] and crow["yr"][:4].isdigit():
+            cd = int(crow["yr"][:4]) // 10 * 10
+            yrows = self.conn.execute(
+                f"SELECT DISTINCT mb_year FROM tracks WHERE identity_key IN ({qs}) AND mb_year<>''",
+                path).fetchall()
+            if any(r["mb_year"][:4].isdigit() and int(r["mb_year"][:4]) // 10 * 10 == cd for r in yrows):
+                facts.append({"kind": "decade", "text": f"Both from the {cd}s."})
+
+        return facts
+
+    @synchronized
+    def library_genre_families(self) -> list[dict]:
+        """Genre families present in the library, each with its track count — the option list for the
+        Clusters genre-family filter (#29). Untagged tracks contribute nothing. Sorted most-common
+        first, then alphabetically."""
+        from yt_playlist.rec import genre_map
+        fams = {}
+        for r in self.conn.execute(
+                "SELECT genre, COUNT(DISTINCT identity_key) n FROM tracks "
+                "WHERE genre IS NOT NULL AND genre<>'' GROUP BY genre"):
+            fam = genre_map.family(r["genre"])
+            fams[fam] = fams.get(fam, 0) + r["n"]
+        return [{"family": f, "n": n} for f, n in
+                sorted(fams.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    @synchronized
+    def keys_in_families(self, families) -> set:
+        """Identity_keys whose genre maps into one of `families` (#29 whitelist). Untagged tracks are
+        never included — a track with no genre can't be vouched into a restricted cluster."""
+        from yt_playlist.rec import genre_map
+        fams = set(families)
+        if not fams:
+            return set()
+        return {r["k"] for r in self.conn.execute(
+            "SELECT DISTINCT identity_key k, genre FROM tracks WHERE genre IS NOT NULL AND genre<>''")
+            if genre_map.family(r["genre"]) in fams}
+
+    @synchronized
+    def library_genres(self) -> list[dict]:
+        """Individual genres (sub-genres) present in the library, each with its family and track count —
+        the fine-grained options for the Clusters genre filter (#29), alongside the coarse families.
+        Sorted most-common first, then alphabetically."""
+        from yt_playlist.rec import genre_map
+        rows = self.conn.execute(
+            "SELECT genre, COUNT(DISTINCT identity_key) n FROM tracks "
+            "WHERE genre IS NOT NULL AND genre<>'' GROUP BY genre").fetchall()
+        return [{"genre": r["genre"], "family": genre_map.family(r["genre"]), "n": r["n"]}
+                for r in sorted(rows, key=lambda r: (-r["n"], r["genre"].lower()))]
+
+    @synchronized
+    def keys_in_genre_selection(self, tokens) -> set:
+        """Identity_keys allowed by a Clusters genre whitelist (#29) where each token may be EITHER a
+        genre family OR a specific genre (sub-genre). A track qualifies if its genre matches a token
+        exactly, or its family matches a token. Untagged tracks are never included."""
+        from yt_playlist.rec import genre_map
+        toks = {t.strip().lower() for t in tokens if t and t.strip()}
+        if not toks:
+            return set()
+        out = set()
+        for r in self.conn.execute(
+                "SELECT DISTINCT identity_key k, genre FROM tracks WHERE genre IS NOT NULL AND genre<>''"):
+            g = r["genre"].strip().lower()
+            if g in toks or genre_map.family(r["genre"]).lower() in toks:
+                out.add(r["k"])
+        return out
 
     @synchronized
     def cluster_search(self, q, limit=8) -> list[dict]:

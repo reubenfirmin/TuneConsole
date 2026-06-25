@@ -1,0 +1,45 @@
+{# Live enrichment stats: worker state + pause, coverage bars, queue/conflict tiles, trend sparkline.
+   Re-rendered standalone by /enrich/stats (the page polls it) and by /enrich/toggle. #}
+{% from "_partials/_viz_tip.html" import tip %}
+<div class="enrich-head">
+  <span class="enrich-state state-{{ state }}">
+    {% if state == 'running' %}● Enriching{% elif state == 'paused' %}❙❙ Paused{% else %}✓ Caught up{% endif %}
+  </span>
+  <button type="button" class="btn-sm" hx-post="/enrich/toggle" hx-target="#enrich-stats" hx-swap="innerHTML">
+    {{ 'Pause worker' if enabled else 'Resume worker' }}
+  </button>
+</div>
+
+<div class="enrich-tiles">
+  <div class="metric"><div class="v">{{ remaining }}</div><div class="l">In queue</div></div>
+  <div class="metric"><div class="v">{{ cov.processed }}/{{ cov.total }}</div><div class="l">Processed</div></div>
+  <div class="metric"><div class="v">{{ conflicts }}</div><div class="l">Open conflicts</div></div>
+</div>
+
+<div class="cov-grid">
+  {% for key, label in [('processed','Processed'), ('genre','Genre'), ('year','Year'),
+                         ('bpm','BPM'), ('energy','Energy'), ('danceability','Danceability')] %}
+  <div class="cov-row">
+    <span class="cov-label">{{ label }}</span>
+    <div class="cov-bar"><i style="width:{{ pct[key] }}%"></i></div>
+    <span class="cov-pct">{{ pct[key] }}%</span>
+    <span class="cov-raw">{{ cov[key] }}/{{ cov.total }}</span>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="cov-trend">
+  <span class="section-note">Tracks processed over time</span>
+  {% if spark.path %}
+  <svg viewBox="0 0 520 90" preserveAspectRatio="none" class="spark">
+    <path d="{{ spark.path }}" class="spark-area"/>
+    {# Invisible full-height bands, one per point, carry the shared [data-tip] tooltip (date + count). #}
+    {% for b in spark.bands %}
+    <rect x="{{ b.x }}" y="0" width="{{ b.w }}" height="90" fill="transparent" pointer-events="all"
+          {{ tip(b.label, [{"l": "Processed", "v": b.n, "n": "cumulative by this point"}]) }}/>
+    {% endfor %}
+  </svg>
+  {% else %}
+  <p class="section-note">Not enough processed yet to chart.</p>
+  {% endif %}
+</div>

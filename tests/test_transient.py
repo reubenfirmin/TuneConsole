@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from yt_playlist.core.store import Store
 from yt_playlist.rec import rec_params, transient
 from yt_playlist.util.matching import identity_key
 
@@ -57,3 +58,27 @@ def test_staleness_factor(store):
     assert transient.staleness_factor(store, 1000.0 + rec_params.SYNC_STALE_S) == 1.0
     half = transient.staleness_factor(store, 1000.0 + rec_params.SYNC_STALE_S + 3 * 86400)
     assert abs(half - 0.5) < 1e-6
+
+
+def test_centroid_tilt_includes_recent_plays():
+    s = Store(":memory:")
+    s.init_schema()
+    iid = s.upsert_identity("m", "c", None, True)
+    s.upsert_track("v1", "s", "band", None, None)
+    s.add_history_snapshot(iid, 1.0, ["s|band"])
+    V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
+    idx = {"s|band": 0, "other|x": 1}
+    tilt = transient.centroid_tilt(s, 1000.0, V, idx)
+    assert tilt is not None
+    assert tilt[0] > tilt[1]     # leans toward the played track's direction
+
+
+def test_staleness_uses_most_recent_of_either_sync(store):
+    # Regression: freshness/decay read only last_sync_at (full sync), so a recent quick auto-sync
+    # (last_plays_sync_at) still read as stale. It must use the most recent of EITHER, like sync_status.
+    from yt_playlist.rec import transient
+    now = 1_000_000.0
+    store.set_setting("last_sync_at", str(now - 10 * 86400))     # full sync 10 days ago
+    assert transient.staleness_factor(store, now) < 1.0          # stale on its own
+    store.set_setting("last_plays_sync_at", str(now - 600))      # auto-synced 10 min ago
+    assert transient.staleness_factor(store, now) == 1.0         # fresh again

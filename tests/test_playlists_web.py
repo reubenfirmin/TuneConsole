@@ -153,3 +153,31 @@ def test_promote_moves_playlist_out_of_generated(store):
     r = c.post(f"/playlist/{pid}/promote")
     assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
     assert store.get_playlist_groups().get("PLG", "") != "Generated"   # graduated out of quarantine
+
+
+def test_playlists_page_carries_generated_created_at(store):
+    # The Generated card is ordered newest-first client-side (genRows in app.js sorts by `created`),
+    # which relies on each generated playlist's recipe created_at flowing into the page rows.
+    import json
+    import re
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_playlist(iid, "PLold", "Older Gen", 1, "h", 0.0)
+    store.upsert_playlist(iid, "PLnew", "Newer Gen", 1, "h", 0.0)
+    for ytm in ("PLold", "PLnew"):
+        store.set_playlist_group(ytm, "Generated")
+    store.set_recipe("PLold", {"theme": "a"}, 100.0)
+    store.set_recipe("PLnew", {"theme": "b"}, 200.0)
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.get("/playlists")
+    assert r.status_code == 200
+    rows = json.loads(re.search(r"playlistsTab\((\[.*?\])\)", r.text).group(1))
+    created = {row["ytm"]: row["created"] for row in rows}
+    assert created["PLold"] == 100.0 and created["PLnew"] == 200.0
+
+
+def test_waterfall_registry_includes_all_providers():
+    from yt_playlist.providers import waterfall
+    # the waterfall harness can dispatch to every provider, each exposing the probe interface
+    assert set(waterfall.REGISTRY) == {"musicbrainz", "lastfm", "discogs", "deezer", "acousticbrainz"}
+    for mod in waterfall.REGISTRY.values():
+        assert hasattr(mod, "probe") and hasattr(mod, "available")
