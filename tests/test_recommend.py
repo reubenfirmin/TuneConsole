@@ -1,4 +1,5 @@
-from yt_playlist.rec import embed, genre_map, recommend
+from yt_playlist.util import genre_map
+from yt_playlist.rec import embed, recommend
 from yt_playlist.core.store import Store
 
 

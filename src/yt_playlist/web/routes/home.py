@@ -7,7 +7,8 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
 from yt_playlist.library import executor
-from yt_playlist.rec import arc_energy, genre_map, journeys, rec_params, recommend
+from yt_playlist.util import genre_map
+from yt_playlist.rec import arc_energy, journeys, rec_params, recommend
 from yt_playlist.rec.rec_dao import RecDao
 
 # How many tracks each generated proto-playlist offers.
@@ -221,25 +222,6 @@ def build(ctx) -> APIRouter:
             store.set_lean(axis, lean, now_fn())
         return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(now_fn()))
 
-    @router.post("/home/fingerprint/expand")
-    async def fingerprint_expand(request: Request):
-        """Drill into a genre family: return fp-row sliders for each of its subgenres.
-        POSTed form field: `family` (e.g. 'techno'). Responds with the subgenre partial."""
-        form = await request.form()
-        fam = (form.get("family") or "").strip().lower()
-        subs = genre_map.subgenres_of(fam)
-        w = store.get_weights()
-        rows = []
-        for sub in subs:
-            axis = f"genre:{sub}"
-            weight = w.get(axis, 1.0)
-            lean = store.get_lean(axis)
-            effective = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, weight * lean))
-            rows.append({"name": sub, "axis": axis, "effective": effective})
-        return templates.TemplateResponse(
-            request, "_partials/fingerprint_subgenres.html",
-            {"family": fam, "rows": rows})
-
     @router.post("/home/fingerprint/add")
     async def fingerprint_add(request: Request):
         """Pin an axis (e.g. 'genre:gqom') so it appears as a steerable bar even with zero plays. Writes
@@ -250,12 +232,37 @@ def build(ctx) -> APIRouter:
         form = await request.form()
         axis = (form.get("axis") or "").strip()
         if axis and axis.split(":", 1)[0] in ("genre", "era", "artist"):
+            store.unhide_facet(axis)                  # re-adding an axis un-hides it (it was removed before)
             # Only write if not already present — don't overwrite a user-set lean.
             if store.get_lean(axis) == 1.0 and axis not in store.get_leans():
                 store.set_lean(axis, 1.0, now_fn())
         return templates.TemplateResponse(
             request, "_partials/fingerprint_genre_bars.html",
             {"fingerprint": recommend.taste_fingerprint(store)})
+
+    @router.post("/home/fingerprint/remove")
+    async def fingerprint_remove(request: Request):
+        """Remove one bar from the Home panel: hide the axis (display-only) AND clear any standing lean
+        so it stops steering. Works for ANY bar — a top played family, a steered family, or an added
+        niche — all simply disappear. Returns the re-rendered bars (#fp-genre-bars swap, picker left
+        alive). Permanent taste (the Taste page) is untouched; the genre picker re-adds it any time."""
+        axis = ((await request.form()).get("axis") or "").strip()
+        if axis:
+            store.hide_facet(axis)
+            store.clear_lean(axis)
+        return templates.TemplateResponse(
+            request, "_partials/fingerprint_genre_bars.html",
+            {"fingerprint": recommend.taste_fingerprint(store)})
+
+    @router.post("/home/fingerprint/reset")
+    async def fingerprint_reset(request: Request):
+        """Reset Home steering to default: wipe every standing lean, un-hide every removed bar, and
+        re-center the breadth bias. Re-ranks the feed (so swaps the whole #home-feed). Permanent
+        weights (long-term taste, on the Taste page) are deliberately left alone."""
+        store.clear_all_leans()
+        store.clear_hidden_facets()
+        rec_params.set_param(store, "breadth_bias", rec_params.PARAMS_BY_NAME["breadth_bias"].default)
+        return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(now_fn()))
 
     @router.get("/home/genres")
     def home_genres():

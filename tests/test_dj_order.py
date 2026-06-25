@@ -1,5 +1,6 @@
 """The DJ ordering model: seeded shuffle -> anti-artist-repeat -> stickiness-scaled genre smoothing."""
-from yt_playlist.rec import genre_map, recommend
+from yt_playlist.util import genre_map
+from yt_playlist.rec import recommend
 from yt_playlist.rec.recommend import ForYouItem
 from yt_playlist.util.matching import identity_key
 

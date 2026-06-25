@@ -289,6 +289,27 @@ def test_add_tracks_inserts_below_anchor(store):
     assert fc.edited[-1] == ("PL1", {"moveItem": ("sv9", "sv1")})
 
 
+def test_add_tracks_inserts_below_anchor_despite_indexing_lag(store):
+    # Regression for #40. YouTube has indexing lag: a just-added track often isn't visible yet on a
+    # read-back, so the best-effort YouTube reorder can't find its handle and silently gives up. The
+    # store order (what the UI renders on refresh) must STILL place the new track directly below the
+    # anchor, rather than leaving it appended at the end.
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "X", "Alb", 200, 1),
+                                  store.upsert_track("v1", "Song B", "Y", "Alb", 200, 1)])
+    # the fake client knows only the pre-existing tracks; the freshly-added v9 has no catalog entry,
+    # so add_playlist_items can't materialize it on the read-back — i.e. it stays invisible (lag).
+    fc = FakeClient(tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},
+                                    {"videoId": "v1", "setVideoId": "sv1"}]})
+    c = _client(store, lambda: {iid: fc})
+    track = json.dumps({"videoId": "v9", "title": "Song A (Live)", "artist": "X", "duration": 250})
+    r = c.post(f"/playlist/{a}/add-tracks", data={"track": track, "after_video_id": "v0"})
+    assert _refreshes(r)
+    # the YouTube reorder couldn't run, yet the store still slots v9 below the anchor v0
+    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v9", "v1"]
+
+
 def test_add_tracks_empty_returns_toast(store):
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "Mix", 0, "h", 1.0)

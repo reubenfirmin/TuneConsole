@@ -7,7 +7,7 @@ within-band artist spacer — lazy to avoid a circular import, since recommend i
 """
 import random
 
-from yt_playlist.rec import genre_map
+from yt_playlist.util import genre_map
 
 JOURNEYS = ["energy_arc", "warm_up", "wind_down", "smooth_segue", "odyssey",
             "time_machine", "throwback", "deep_dive", "rediscovery", "shuffle"]

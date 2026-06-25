@@ -1,7 +1,8 @@
 """Tests for the audio-driven 'arc energy' composite + candidate-pool fallback (issue #37)."""
 import pytest
 
-from yt_playlist.rec import arc_energy, genre_map, journeys
+from yt_playlist.util import genre_map
+from yt_playlist.rec import arc_energy, journeys
 
 
 def _ae(keys, genres, audio):

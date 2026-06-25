@@ -1,4 +1,5 @@
-from yt_playlist.rec import discover, genre_map, rec_params
+from yt_playlist.util import genre_map
+from yt_playlist.rec import discover, rec_params
 
 
 def _mute(store, genre):

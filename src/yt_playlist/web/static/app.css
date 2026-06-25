@@ -719,10 +719,10 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
 .rowmenu-pop { position: absolute; right: 0.4rem; top: 100%; z-index: 30; min-width: 12.5rem;
   background: var(--surface); border: 1px solid var(--border-2); border-radius: 10px;
   box-shadow: 0 16px 40px -12px rgba(0,0,0,.7); padding: 0.3rem; }
-.rowmenu-pop button { display: block; width: 100%; text-align: left; background: transparent;
+.rowmenu-pop button, .rowmenu-pop a { display: block; width: 100%; text-align: left; background: transparent;
   border: none; box-shadow: none; color: var(--text); font-weight: 500; font-size: 0.85rem;
-  padding: 0.45rem 0.6rem; border-radius: 6px; cursor: pointer; }
-.rowmenu-pop button:hover { background: var(--accent-soft); box-shadow: none; }
+  padding: 0.45rem 0.6rem; border-radius: 6px; cursor: pointer; text-decoration: none; }
+.rowmenu-pop button:hover, .rowmenu-pop a:hover { background: var(--accent-soft); box-shadow: none; text-decoration: none; }
 .rowmenu-pop button.danger { color: var(--danger); }
 .rowmenu-pop button.danger:hover { background: var(--danger-soft); }
 
@@ -999,25 +999,37 @@ button.htmx-request .check-busy { display: inline; }
 .tile-cover.no-art .tile-title { white-space: normal; font-family: var(--font-display); font-size: 1.05rem; }
 .tile-cover.no-art .tile-sub, .tile-cover.no-art .tile-note { white-space: normal; }
 
-/* per-tile extra controls (feedback ⋯, Add) sit top-right */
-.tile-fb { position: absolute; top: 0.4rem; right: 0.45rem; z-index: 5; }
 @media (prefers-reduced-motion: reduce) {
   .tile-cover img, .tile-scrim, .tile-play { transition: none; }
 }
 
-/* per-tile actions (Add / dismiss / feedback) — reveal on hover */
-.tile-actions { position: absolute; top: 0.4rem; right: 0.45rem; z-index: 5; display: flex; gap: 0.3rem;
-  opacity: 0; transition: opacity 0.15s ease; }
-.tile:hover .tile-actions, .tile:focus-within .tile-actions { opacity: 1; }
-.tile-act { font-family: var(--font-sans); font-size: 0.72rem; font-weight: 600; color: #fff;
-  background: rgba(7,5,24,0.72); border: 1px solid var(--border-2); border-radius: 999px;
-  padding: 0.2rem 0.55rem; cursor: pointer; backdrop-filter: blur(6px); box-shadow: none; line-height: 1.2; }
-.tile-act:hover { background: var(--accent); box-shadow: none; }
-.tile-fb { opacity: 0; transition: opacity 0.15s ease; }
-.tile:hover .tile-fb, .tile:focus-within .tile-fb { opacity: 1; }
-.tile-fb .fy-x { background: rgba(7,5,24,0.72); border: 1px solid var(--border-2); border-radius: 999px;
-  width: 1.5rem; height: 1.5rem; display: grid; place-items: center; padding: 0; color: var(--dim); }
-.tile-fb .fy-x:hover { color: #fff; background: var(--accent); }
+/* ---- "Complete this playlist" suggestion tiles ----------------------------------------------
+   A functional pick list, not a graphics-first browse grid: the caption and the Add / ⋯ actions
+   are ALWAYS visible (never hover-gated), and the dismiss menu is click-toggled with click-away
+   to close — the same stable pattern as the playlist's own track-row ⋯ menu. */
+.tile-suggest { display: flex; flex-direction: column; }
+.tile-suggest .tile-art { position: relative; }
+/* keep the hover ▶ centered on the cover art, not the (now taller) whole tile */
+.tile-suggest .tile-play { top: 50%; }
+
+.tile-cap { display: flex; flex-direction: column; gap: 0.04rem; padding: 0.5rem 0.1rem 0; min-width: 0; }
+.tile-cap-title { font-weight: 650; font-size: 0.82rem; line-height: 1.25; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-cap-sub { font-size: 0.72rem; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-cap-note { font-size: 0.67rem; color: var(--accent-2); margin-top: 0.08rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.tile-foot { position: relative; display: flex; align-items: center; gap: 0.35rem;
+  margin-top: 0.45rem; padding: 0 0.1rem; }
+.tile-foot form { flex: 1; min-width: 0; }
+.tile-add { width: 100%; font-family: var(--font-sans); font-size: 0.75rem; font-weight: 600;
+  color: var(--text); background: var(--surface-2); border: 1px solid var(--border-2);
+  border-radius: 7px; padding: 0.34rem 0.5rem; cursor: pointer; box-shadow: none; line-height: 1.2; }
+.tile-add:hover { background: var(--accent); color: #fff; border-color: transparent; box-shadow: none; }
+.tile-foot .dots { font-size: 1.1rem; flex: none; }
+/* anchor the shared rowmenu popup under the ⋯ at the tile's right edge */
+.tile-menu { right: 0; }
 
 /* --- generated proto-playlists: the two dated, saveable lanes at the top of Home --- */
 .gen-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem; align-items: stretch;
@@ -1172,8 +1184,31 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 
 /* --- Home: taste fingerprint + steering --- */
 .fingerprint { display: grid; gap: 0.8rem; margin-bottom: 1.4rem; }
+/* Collapse bar: the always-visible toggle row; the rest of the panel (.fp-collapsible) folds away. */
+.fp-bar { display: flex; align-items: center; gap: 0.8rem; }
+.fp-collapse { background: none; border: none; cursor: pointer; padding: 0; color: var(--text);
+  font-weight: 700; font-size: 0.95rem; letter-spacing: 0.01em; display: inline-flex; align-items: center; gap: 0.45rem; }
+.fp-collapse:hover { color: var(--accent-2); }
+.fp-caret { color: var(--faint); font-size: 0.8rem; width: 0.8rem; text-align: center; }
+.fp-reset { margin-left: auto; background: none; border: 1px solid var(--border-2); color: var(--dim);
+  font-size: 0.78rem; padding: 0.2rem 0.6rem; border-radius: 999px; cursor: pointer; white-space: nowrap; }
+.fp-reset:hover { border-color: var(--danger); color: var(--danger); }
+.fp-collapsible { display: grid; gap: 0.8rem; margin-top: 0.8rem; }
 .fp-head { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
 .fp-tune { margin-left: auto; color: var(--accent-2); font-weight: 600; }
+/* Row tools live OVER THE LABEL, not the slider: pinned to the label's right edge and revealed only
+   when you hover the label (never the slider, which stays fully usable). Self-contained chips so they
+   read over the label text. They consume no column width (absolute), so columns don't gain a gap. */
+.fp-name-wrap { position: relative; flex: none; display: inline-flex; align-items: center; }
+.fp-row-tools { position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; gap: 0.15rem; opacity: 0; pointer-events: none;
+  transition: opacity 0.12s ease; }
+.fp-name-wrap:hover .fp-row-tools, .fp-row-tools:hover { opacity: 1; pointer-events: auto; }
+.fp-icon-btn { background: var(--surface-2); border: 1px solid var(--border); cursor: pointer;
+  color: var(--dim); line-height: 1; font-size: 0.78rem; padding: 0.12rem 0.32rem; border-radius: 5px; }
+.fp-expand-btn:hover { color: #fff; border-color: var(--accent); background: var(--accent); }
+.fp-remove-btn { font-size: 0.86rem; }
+.fp-remove-btn:hover { color: #fff; border-color: var(--danger); background: var(--danger); }
 .fp-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1.2rem; }
 .fp-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--faint); }
 .fp-hint { margin: 0; }
@@ -1193,15 +1228,15 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .fp-breadth-note { font-size: 0.72rem; color: var(--dim); font-style: italic; }
 /* Home genre picker (autosuggest combo, reuses the Clusters .cg-box widget). The wrapper is the
    positioning context for the absolute .cg-suggest dropdown; small gap below the genre sliders. */
-.fp-genre-pick { position: relative; margin-top: 0.6rem; }
+.fp-genre-pick { position: relative; margin-top: 0.5rem; }
+/* Shrink the borrowed Clusters .cg-box pill to row scale here — its default (2.65rem tall, 1.3rem
+   radius) reads as jumbo next to the slim slider rows. */
+.fp-genre-pick .cg-box { min-height: 0; padding: 0.28rem 0.5rem; border-radius: 8px; border-width: 1px; }
+.fp-genre-pick .cg-box input { font-size: 0.82rem; padding: 0; min-width: 6rem; }
+.fp-genre-pick .cg-icon { font-size: 0.8rem; }
 .fp-genre-empty { margin: 0.4rem 0 0; }
 .steer-toast { background: var(--accent-soft); border: 1px solid var(--border-2); border-radius: 8px;
   padding: 0.5rem 0.8rem; color: var(--accent-2); margin-bottom: 0.8rem; }
-.tile-act { position: relative; }
-.dismiss-pop { position: absolute; z-index: 20; right: 0; display: flex; flex-direction: column; gap: 0.2rem;
-  background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 8px; padding: 0.3rem; margin-top: 0.3rem; }
-.dismiss-pop button { background: none; border: none; color: var(--text); text-align: left; padding: 0.25rem 0.5rem; cursor: pointer; border-radius: 5px; white-space: nowrap; }
-.dismiss-pop button:hover { background: var(--accent-soft); }
 [x-cloak] { display: none !important; }
 
 /* "Generated" pinned as its own collapsible card above the playlists table */

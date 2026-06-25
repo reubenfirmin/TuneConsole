@@ -10,7 +10,8 @@ import zlib
 import numpy as np
 
 from yt_playlist.library import analysis
-from yt_playlist.rec import arc_energy, embed, genre_map, journeys, rec_params, transient
+from yt_playlist.util import genre_map
+from yt_playlist.rec import arc_energy, embed, journeys, rec_params, transient
 from yt_playlist.rec.rec_dao import RecDao
 
 # Added to an L2 norm before dividing so a zero/degenerate vector normalises to ~0 rather than raising
@@ -268,28 +269,50 @@ def taste_fingerprint(store) -> dict:
     bd = taste_breadth(store)
     w = store.get_weights()
     leans = store.get_leans()
+    hidden = store.hidden_facets()                                   # bars the user removed (display-only)
+
+    def _subs(fam):
+        """A family's drill-down members: its subgenres MINUS the family token itself (no self-dupe),
+        minus any the user hid, minus any that already carry a lean — a leaned/added subgenre is
+        promoted to its own top-level bar, so it never shows in both places."""
+        out = []
+        for sub in genre_map.subgenres_of(fam):
+            ax = f"genre:{sub}"
+            if sub == fam or ax in hidden or ax in leans:
+                continue
+            eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.get_lean(ax)))
+            out.append({"name": sub, "axis": ax, "effective": eff})
+        return out
+
     families = [{"name": f, "share": share, "weight": w.get(f"genre:{f}", 1.0),
                  "effective": max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX,
                                   w.get(f"genre:{f}", 1.0) * store.get_lean(f"genre:{f}"))),
-                 "pinned": f"genre:{f}" in leans}
-                for f, share in sorted(bd["families"].items(), key=lambda x: -x[1])]
+                 "pinned": f"genre:{f}" in leans,
+                 "subgenres": (subs := _subs(f)), "expandable": bool(subs)}
+                for f, share in sorted(bd["families"].items(), key=lambda x: -x[1])
+                if f"genre:{f}" not in hidden]
     eras = [{"name": d, "share": share, "weight": w.get(f"era:{d}", 1.0),
              "effective": max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX,
                               w.get(f"era:{d}", 1.0) * store.get_lean(f"era:{d}"))),
              "pinned": f"era:{d}" in leans}
-            for d, share in era_distribution(store)]
+            for d, share in era_distribution(store)
+            if f"era:{d}" not in hidden]
 
     # Append pinned axes stored in leans but not present in the play-distribution lists at all.
     known_genre_names = {entry["name"] for entry in families}
     known_era_names = {entry["name"] for entry in eras}
     for axis, lean_val in leans.items():
+        if axis in hidden:
+            continue                                                 # removed from the panel; don't re-surface
         if axis.startswith("genre:"):
             name = axis[len("genre:"):]
             if name not in known_genre_names:
                 weight = w.get(axis, 1.0)
                 effective = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, weight * lean_val))
+                subs = _subs(name)
                 families.append({"name": name, "share": 0.0, "weight": weight,
-                                 "effective": effective, "pinned": True})
+                                 "effective": effective, "pinned": True,
+                                 "subgenres": subs, "expandable": bool(subs)})
                 known_genre_names.add(name)
         elif axis.startswith("era:"):
             name = axis[len("era:"):]
@@ -301,9 +324,13 @@ def taste_fingerprint(store) -> dict:
                 known_era_names.add(name)
 
     # breadth = the *measured* spread (a backdrop the bar shows); breadth_bias = the user's current
-    # focused<->eclectic steer that the draggable handle binds to (#7).
+    # focused<->eclectic steer that the draggable handle binds to (#7). has_steering gates the "Reset to
+    # default" affordance: true whenever the user has steered (a lean), removed a bar (hidden), or moved
+    # breadth off-center — i.e. there's something to reset.
+    bias = rec_params.get_param(store, "breadth_bias")
     return {"families": families, "eras": eras, "breadth": bd["breadth"],
-            "breadth_bias": rec_params.get_param(store, "breadth_bias")}
+            "breadth_bias": bias,
+            "has_steering": bool(leans) or bool(hidden) or bias != 0.0}
 
 
 def playlist_facets(store, playlist_id) -> dict:
@@ -823,30 +850,6 @@ def dj_order(tracks, stickiness=0.0, seed=0):
 
 def _rotation_reason(n) -> str:
     return f"Sits with your favorites in {n} of your playlist{'s' if n != 1 else ''}"
-
-
-def new_albums_from_favorites(ctx, limit_artists=10, limit=18) -> list[dict]:
-    """Outward discovery (Phase 2): albums by your most-played artists that you don't already own
-    or have saved. Uses the YTM client (network) — meant to run in the background worker, not per
-    request. Degrades to [] with no client/network. Spec §1/§8 discovery."""
-    from yt_playlist.web.routes.charts import _fetch_artist_info   # reuse the existing fetch
-    store = ctx.store
-    dao = RecDao(store)
-    owned, saved = dao.owned_albums(), dao.saved_album_ids()
-    out: list[dict] = []
-    for a in store.top_artists(limit_artists):
-        info = _fetch_artist_info(ctx, a["artist"])
-        if not info:
-            continue
-        for alb in info.get("albums") or []:
-            title = (alb.get("title") or "").strip()
-            if not title or title.lower() in owned or alb.get("browse_id") in saved:
-                continue
-            out.append({"artist": a["artist"], "title": title, "year": alb.get("year"),
-                        "browse_id": alb.get("browse_id"), "thumbnail": alb.get("thumbnail")})
-            if len(out) >= limit:
-                return out
-    return out
 
 
 # HOME CARD: "Fresh" ("Fresh songs") — tracks NOT in your collection yet (outward discovery).

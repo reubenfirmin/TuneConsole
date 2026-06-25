@@ -1,7 +1,8 @@
 # tests/test_slider_mechanic.py
 import time
 from yt_playlist.core.store import Store
-from yt_playlist.rec import recommend, rec_params, genre_map
+from yt_playlist.util import genre_map
+from yt_playlist.rec import recommend, rec_params
 
 DAY = 86400.0
 

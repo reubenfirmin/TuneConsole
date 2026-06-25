@@ -316,7 +316,8 @@ def test_carded_orders_by_recipe_journey(store, monkeypatch):
     """_carded must order the proto by the recipe's journey. Force 'warm_up' and assert the preview
     rises in energy thirds (and still spaces artists / carries genre)."""
     from yt_playlist.web.routes import home
-    from yt_playlist.rec import recommend, journeys, genre_map
+    from yt_playlist.util import genre_map
+    from yt_playlist.rec import recommend, journeys
     from yt_playlist.rec.recommend import ForYouItem
     store.upsert_identity("main", "cred", None, True)
     # mellow vs intense families, interleaved so source order is NOT already sorted.

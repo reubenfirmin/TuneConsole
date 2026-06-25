@@ -14,7 +14,7 @@ a playlist), and the pass is deterministic so a seeded re-save reproduces the sa
 
 Pure: takes plain dicts, depends only on genre_map, so it is trivially testable.
 """
-from yt_playlist.rec import genre_map
+from yt_playlist.util import genre_map
 
 # BPM-led blend (issue #37). Weights are re-normalized over whichever features a track actually has.
 _WEIGHTS = {"bpm": 0.5, "energy": 0.3, "danceability": 0.2}

@@ -1,4 +1,19 @@
-<section class="fingerprint card" id="fingerprint">
+<section class="fingerprint card" id="fingerprint" x-data="fpPanel()">
+  {# Collapsible: the whole panel folds to a single bar. The open/closed state is remembered in
+     localStorage (see fpPanel) so it survives reloads and every #home-feed re-render. #}
+  <div class="fp-bar">
+    <button type="button" class="fp-collapse" @click="toggle()"
+            :aria-expanded="(!collapsed).toString()" :title="collapsed ? 'Expand taste panel' : 'Collapse taste panel'">
+      <span class="fp-caret" x-text="collapsed ? '▸' : '▾'"></span> Your taste
+    </button>
+    {# Always available (a header-level global control, not per-row): clears leans, un-hides removed
+       bars, re-centers breadth. A no-op when nothing is steered. #}
+    <button type="button" class="fp-reset" x-show="!collapsed" x-cloak
+            hx-post="/home/fingerprint/reset" hx-target="#home-feed" hx-swap="outerHTML"
+            hx-on::before-request="sessionStorage.setItem('steered','1')"
+            title="Clear all your steering — every bar back to neutral">Reset to default</button>
+  </div>
+  <div class="fp-collapsible" x-show="!collapsed" x-cloak>
   {# Header pairs the two GLOBAL controls: Breadth (the focused<->eclectic master dial, #7) on the
      left, the "tune deeper" escape hatch on the right. Per-facet genre/era bars live in the body
      below. Breadth is a single dial, not a list, so it belongs here rather than as a third column. #}
@@ -63,5 +78,6 @@
       </div>
       {% endfor %}
     </div>
+  </div>
   </div>
 </section>

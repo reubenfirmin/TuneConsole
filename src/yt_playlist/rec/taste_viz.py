@@ -6,7 +6,8 @@ this is the first place the transient model is ever surfaced (it otherwise only 
 """
 import numpy as np
 
-from yt_playlist.rec import embed, eval_recs, genre_map, rec_params, recommend, transient
+from yt_playlist.util import genre_map
+from yt_playlist.rec import embed, eval_recs, rec_params, recommend, transient
 from yt_playlist.rec.rec_dao import RecDao
 
 

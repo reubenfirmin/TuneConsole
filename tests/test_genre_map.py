@@ -1,4 +1,4 @@
-from yt_playlist.rec import genre_map as gm
+from yt_playlist.util import genre_map as gm
 
 
 def test_related_genres_share_a_family():
@@ -21,7 +21,7 @@ def test_unknown_genre_is_singleton():
 
 
 def test_energy_orders_families_and_defaults():
-    from yt_playlist.rec import genre_map
+    from yt_playlist.util import genre_map
     assert genre_map.energy("ambient") < genre_map.energy("metal")   # mellow < intense
     assert 0.0 <= genre_map.energy("techno") <= 1.0
     assert genre_map.energy("") == 0.5                                # untagged -> neutral mid

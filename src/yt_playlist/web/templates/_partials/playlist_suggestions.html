@@ -1,28 +1,46 @@
 {% if suggestions %}
-{% from "_macros.html" import tile %}
 <h2 class="section">Complete this playlist</h2>
 <p class="section-note">Tracks you own that fit here but aren't in it yet.</p>
-<div class="tile-grid">
+{# Suggestion tiles. Unlike the graphics-first Home tiles, these are a functional pick list, so the
+   caption and actions are ALWAYS visible (never hover-gated) and the dismiss menu is click-toggled
+   with click-away to close — the same stable ⋯ pattern as the playlist's own track rows. #}
+<div class="tile-grid suggest-grid">
   {% for f in suggestions %}
-  {% call tile('fit', f.thumbnail, f.title, f.artist, "/artist?name=" ~ f.artist|urlencode,
-               "https://music.youtube.com/watch?v=" ~ f.video_id, f.reason) %}
-    <div class="tile-actions">
+  <div class="tile tile-suggest" x-data="{ menu: false }">
+    <div class="tile-art">
+      <a class="tile-cover{{ ' no-art' if not f.thumbnail }}" href="/artist?name={{ f.artist|urlencode }}">
+        {% if f.thumbnail %}<img src="{{ f.thumbnail }}" alt="" loading="lazy" referrerpolicy="no-referrer"
+             onerror="this.closest('.tile-cover').classList.add('no-art'); this.remove()">{% endif %}
+        <span class="tile-badge b-teal">Fits here</span>
+      </a>
+      <a class="tile-play" href="https://music.youtube.com/watch?v={{ f.video_id }}"
+         target="_blank" rel="noopener" title="Play on YouTube Music" aria-label="Play on YouTube Music">▶</a>
+    </div>
+    <div class="tile-cap">
+      <span class="tile-cap-title" title="{{ f.title }}">{{ f.title }}</span>
+      <span class="tile-cap-sub">{{ f.artist }}{% if f.album %} · {{ f.album }}{% endif %}</span>
+      {% if f.reason %}<span class="tile-cap-note">{{ f.reason }}</span>{% endif %}
+    </div>
+    <div class="tile-foot">
       <form hx-post="/playlist/{{ pid }}/add-tracks" hx-swap="none">
         <input type="hidden" name="track" value="{{ {'videoId': f.video_id, 'title': f.title, 'artist': f.artist, 'album': f.album, 'thumbnail': f.thumbnail}|tojson }}">
-        <button type="submit" class="tile-act" title="Add to this playlist" aria-label="Add">+ Add</button>
+        <button type="submit" class="tile-add" title="Add to this playlist">+ Add</button>
       </form>
-      <button type="button" class="tile-act" title="Not for this playlist" aria-label="Dismiss"
-              x-data="{open:false}" @click="open=!open">×
-        <span class="dismiss-pop" x-show="open" x-cloak @click.outside="open=false"
-              hx-target="closest .tile" hx-swap="outerHTML swap:200ms">
-          <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"vibe"}'>wrong vibe</button>
-          <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"era"}'>wrong era</button>
-          <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"mainstream"}'>too mainstream</button>
-          <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"own_it"}'>already know it</button>
-          <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"artist", "axis":"artist:{{ f.artist }}"}'>not this artist</button>
-        </span></button>
+      <button type="button" class="dots" title="More actions" aria-label="More actions"
+              @click="menu = !menu">⋯</button>
+      <div class="rowmenu-pop tile-menu" x-show="menu" x-cloak x-transition.opacity @click.outside="menu = false"
+           hx-target="closest .tile" hx-swap="outerHTML swap:200ms">
+        <a href="https://music.youtube.com/watch?v={{ f.video_id }}" target="_blank" rel="noopener"
+           @click="menu = false">▶ Play on YouTube Music</a>
+        <div class="rowmenu-sep">Not for this playlist</div>
+        <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"vibe"}'>wrong vibe</button>
+        <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"era"}'>wrong era</button>
+        <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"mainstream"}'>too mainstream</button>
+        <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"own_it"}'>already know it</button>
+        <button hx-post="/recs/feedback" hx-vals='{"item": {{ f.key|tojson }}, "surface":"suggest", "scope":"{{ pid }}", "kind":"dismiss", "reason":"artist", "axis":"artist:{{ f.artist }}"}'>not this artist</button>
+      </div>
     </div>
-  {% endcall %}
+  </div>
   {% endfor %}
 </div>
 {% endif %}

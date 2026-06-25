@@ -7,7 +7,8 @@ expiry), reactive by interaction rank, relaxes only as sync goes stale. See the 
 """
 import numpy as np
 
-from yt_playlist.rec import genre_map, rec_params
+from yt_playlist.util import genre_map
+from yt_playlist.rec import rec_params
 from yt_playlist.rec.rec_dao import RecDao
 
 

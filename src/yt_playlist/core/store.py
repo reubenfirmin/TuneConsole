@@ -180,6 +180,12 @@ CREATE TABLE IF NOT EXISTS rec_lean (
   updated_at REAL,                        -- when the slider was last moved (drives held-day exposure)
   last_graduated_day TEXT                 -- UTC date (YYYY-MM-DD) of last exposure-graduation, or NULL
 );
+-- Home steering bars the user has hidden ("remove this bar"). Pure DISPLAY curation: which steering
+-- bars show on Home. Does NOT change recommendations (that's leans/weights) — a hidden axis just
+-- isn't offered as a bar. Re-adding it via the genre picker un-hides it; "Reset to default" clears all.
+CREATE TABLE IF NOT EXISTS home_hidden_facet (
+  axis TEXT PRIMARY KEY                   -- 'genre:<name>' | 'era:<decade>' hidden from the Home panel
+);
 """
 
 # Row dataclasses live in repos.models (avoids a Store<->repo cycle); re-exported here so existing

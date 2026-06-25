@@ -350,6 +350,13 @@ function playlistsTab(rows) {
         .sort((a, b) => a.title.localeCompare(b.title));
     },
     openGroup() { if (this.count()) { this.groupName = ''; this.groupModal = true; } },
+    // Modal "save" actions go through htmx.ajax so the server's HX-Refresh reload (success) and
+    // 422 OOB error toast (copy-into) behave exactly as the inline hx-post did — but the values
+    // come straight from this component's state, not a global Alpine.$data() reach-in.
+    copy() { htmx.ajax('POST', '/playlists/copy', { values: { ids: this.copyIds.join(','), name: this.copyName } }); },
+    copyInto() { htmx.ajax('POST', '/playlists/copy-into', { values: { ids: this.copyIds.join(','), target: this.copyIntoTarget } }); },
+    group() { htmx.ajax('POST', '/playlists/group', { values: { ids: this.selected().map(r => r.id).join(','), name: this.groupName } }); },
+    remove() { htmx.ajax('POST', '/playlists/delete', { values: { ids: this.selected().map(r => r.id).join(',') } }); },
   };
 }
 function moveTab(fromId, toId) {
@@ -563,6 +570,19 @@ function omniSearch() {
       const rows = this.rows();
       const row = rows[this.active] || rows[0];
       if (row) { row.click(); this.close(); }
+    },
+  };
+}
+
+// The Home "Your taste" panel's collapse toggle. State persists in localStorage so it survives full
+// reloads AND every #home-feed htmx swap (each swap re-creates this component, which re-reads the
+// flag on init). Plain localStorage (no Alpine persist plugin needed).
+function fpPanel() {
+  return {
+    collapsed: localStorage.getItem('fp_collapsed') === '1',
+    toggle() {
+      this.collapsed = !this.collapsed;
+      localStorage.setItem('fp_collapsed', this.collapsed ? '1' : '0');
     },
   };
 }

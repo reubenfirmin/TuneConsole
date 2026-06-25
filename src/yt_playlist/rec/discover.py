@@ -9,7 +9,8 @@ it, and which of your playlists it fits. Runs in the background worker; Last.fm 
 """
 import numpy as np
 
-from yt_playlist.rec import embed, genre_map, recommend
+from yt_playlist.util import genre_map
+from yt_playlist.rec import embed, recommend
 from yt_playlist.providers import lastfm
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.web.routes.charts import _fetch_artist_info   # module-level so it's patchable in tests

@@ -669,7 +669,17 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_
                                           t.get("album"), dur, 1,
                                           None, None, t.get("album_browse"), t.get("thumbnail")))
         titles.append(t.get("title", ""))
-    combined = list(dict.fromkeys(existing + new_ids))
+    # Splice the new tracks into the store order right after the anchor, so the UI (which renders
+    # from the store on refresh) shows them below the clicked track immediately. This is independent
+    # of the best-effort YouTube reorder below, which silently gives up when YouTube's indexing lag
+    # hides a just-added track from the read-back — leaving them stranded at the end otherwise (#40).
+    new_unique = [i for i in new_ids if i not in existing]
+    insert_at = len(existing)
+    if after_video_id:
+        anchor_tid = store.track_ids_for_videos([after_video_id]).get(after_video_id)
+        if anchor_tid in existing:
+            insert_at = existing.index(anchor_tid) + 1
+    combined = existing[:insert_at] + new_unique + existing[insert_at:]
     store.set_playlist_tracks(playlist_id, combined)
     store.set_playlist_track_count(playlist_id, len(combined), now)
     store.record_action(ADD_TRACKS,

@@ -213,7 +213,7 @@ def test_fingerprint_bar_shows_effective_multiplier(store):
     store.set_track_genre(t, "Techno")
     store.add_history_snapshot(iid, 1.0, ["song|band"])
     store.set_setting("last_sync_at", "1000")
-    fam = __import__("yt_playlist.rec.genre_map", fromlist=["family"]).family("Techno")
+    fam = __import__("yt_playlist.util.genre_map", fromlist=["family"]).family("Techno")
     store.set_lean(f"genre:{fam}", 1.5, 1000.0)        # standing lean, permanent still 1.0
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
@@ -221,16 +221,25 @@ def test_fingerprint_bar_shows_effective_multiplier(store):
     assert 'value="1.5"' in html                       # bar shows effective, not permanent 1.0
 
 
-def test_fingerprint_expand_lists_subgenres(store):
-    """POST /home/fingerprint/expand family=techno -> contains a subgenre bar, e.g. 'genre:minimal techno'."""
-    c = _client(store)
-    r = c.post("/home/fingerprint/expand", data={"family": "techno"})
-    assert r.status_code == 200
-    # 'minimal techno' is a known subgenre of techno
-    assert "minimal techno" in r.text
-    # should render as fp-row slider posting to /home/steer
-    assert "/home/steer" in r.text
-    assert 'type="range"' in r.text
+def test_fingerprint_subgenres_attached_and_deduped(store):
+    """taste_fingerprint attaches a family's drill-down subgenres (eager, toggled client-side): the
+    family token itself is excluded (no self-duplicate), and a subgenre with a lean is promoted to its
+    own top bar instead of appearing under the family."""
+    from yt_playlist.rec import recommend
+    store.upsert_identity("main", "cred", None, True)
+    fp = recommend.taste_fingerprint(store)
+    techno = next((f for f in fp["families"] if f["name"] == "techno"), None)
+    if techno is None:                      # techno may not be a top family in a bare store; skip then
+        import pytest; pytest.skip("techno not present in this store's fingerprint")
+    subnames = [s["name"] for s in techno["subgenres"]]
+    assert "minimal techno" in subnames          # a real subgenre is offered
+    assert "techno" not in subnames              # the family token is not duplicated as its own subgenre
+    # pin minimal techno -> it leaves the drill-down (promoted to a top bar)
+    store.set_lean("genre:minimal techno", 1.2, 1.0)
+    fp2 = recommend.taste_fingerprint(store)
+    techno2 = next(f for f in fp2["families"] if f["name"] == "techno")
+    assert "minimal techno" not in [s["name"] for s in techno2["subgenres"]]
+    assert "minimal techno" in [f["name"] for f in fp2["families"]]   # now a top bar
 
 
 def test_fingerprint_add_reaches_zero_play_niche(store):

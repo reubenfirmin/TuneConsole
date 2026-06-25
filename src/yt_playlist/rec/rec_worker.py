@@ -144,10 +144,11 @@ class RecWorker:
     def _do_rebuild(self):
         """Rebuild vectors and materialize the heavy proposal surfaces.
 
-        Each surface is materialized INDEPENDENTLY: the album/fresh surfaces hit YouTube and can
-        fail (network, rate-limit, parse), and a single failure must not block the surfaces after it
-        from refreshing — otherwise e.g. a flaky album fetch would leave new-artist thumbnails stuck
-        on stale cache forever. A failed surface keeps its last-good proposals."""
+        Surfaces go through a small table so adding more later stays uniform. Each is built in its own
+        try/except: the build hits YouTube and can fail (network, rate-limit, parse), and a failure
+        must leave that surface's last-good proposals in place rather than wiping its card to empty.
+        Today the only such surface is Fresh songs; outward album discovery now accumulates separately
+        in the discovery pool (see discover.pick_discovered_albums), refreshed by the discovery tick."""
         from yt_playlist.rec import discover
         log = self.ctx.logger
         store = self.ctx.store
@@ -157,7 +158,7 @@ class RecWorker:
         log.info("rec rebuild: starting")
         n = embed.build_and_store(store)
         log.info("rec rebuild: embedded %d vectors in %.1fs", n, time.monotonic() - t0)
-        # Materialize deeper pools than a single card shows, so each surface has several epochs of
+        # Materialize a deeper pool than a single card shows, so the surface has several epochs of
         # material to rotate through before it has to wrap.
         surfaces = (
             ("fresh_songs", lambda: recommend.fresh_songs(self.ctx, limit=36)),

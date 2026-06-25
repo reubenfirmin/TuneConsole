@@ -1,6 +1,5 @@
 from fastapi.testclient import TestClient
 
-from yt_playlist.rec import recommend
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
@@ -25,19 +24,6 @@ def _ctx(store, client):
     iid = store.upsert_identity("main", "cred", None, True)
     return iid, Ctx(store=store, client_provider=lambda: {iid: client}, now_fn=lambda: 1.0,
                     templates=None, jobs=None)
-
-
-def test_new_albums_filters_owned_and_saved(store):
-    iid, ctx = _ctx(store, _ArtistClient())
-    # "Fav" must rank as a top artist -> needs plays
-    t = store.upsert_track("v1", "Song", "Fav", "Owned Record", None)   # owns "Owned Record"
-    store.set_playlist_tracks(store.upsert_playlist(iid, "P", "P", 1, "h", 0.0), [t])
-    store.add_history_snapshot(iid, 1.0, ["song|fav"])
-
-    albums = recommend.new_albums_from_favorites(ctx)
-    titles = {a["title"] for a in albums}
-    assert "Brand New LP" in titles        # new -> surfaced
-    assert "Owned Record" not in titles    # already owned -> filtered
 
 
 def test_worker_materializes_proposals(store):

@@ -9,7 +9,7 @@ import json
 
 import numpy as np
 
-from yt_playlist.rec import genre_map
+from yt_playlist.util import genre_map
 from yt_playlist.rec.rec_dao import RecDao
 
 # Default embedding dimensionality. 48 is the recall@k-tuned default for manual builds; Auto-tune

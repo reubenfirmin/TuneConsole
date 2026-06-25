@@ -167,6 +167,34 @@ class RecModelRepo(Repo):
         self.conn.commit()
 
     @synchronized
+    def clear_all_leans(self) -> None:
+        """Wipe every standing lean (Home 'Reset to default' — bars back to neutral). Does NOT touch
+        permanent weights (those are the long-term taste model, edited on the Taste page)."""
+        self.conn.execute("DELETE FROM rec_lean")
+        self.conn.commit()
+
+    # --- Home bar curation (home_hidden_facet): which steering bars to SHOW; not a taste signal ---
+    @synchronized
+    def hidden_facets(self) -> set:
+        """Axes the user removed from the Home panel (display-only)."""
+        return {r["axis"] for r in self.conn.execute("SELECT axis FROM home_hidden_facet")}
+
+    @synchronized
+    def hide_facet(self, axis) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO home_hidden_facet(axis) VALUES (?)", (axis,))
+        self.conn.commit()
+
+    @synchronized
+    def unhide_facet(self, axis) -> None:
+        self.conn.execute("DELETE FROM home_hidden_facet WHERE axis=?", (axis,))
+        self.conn.commit()
+
+    @synchronized
+    def clear_hidden_facets(self) -> None:
+        self.conn.execute("DELETE FROM home_hidden_facet")
+        self.conn.commit()
+
+    @synchronized
     def muted_artists(self) -> set:
         """Artist names the user has muted (stored as item_key 'artist:<name>')."""
         rows = self.conn.execute("SELECT item_key FROM rec_feedback WHERE kind='mute'").fetchall()

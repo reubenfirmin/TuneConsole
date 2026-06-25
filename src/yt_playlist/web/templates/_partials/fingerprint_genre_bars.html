@@ -1,23 +1,50 @@
-{# The Home "Genres" steering bars: top-6 played families PLUS any pinned niches (zero-play genres
-   added via the picker, appended past the top 6 by taste_fingerprint) so an added bar always shows
-   even in a deep library. Rendered standalone by /home/fingerprint/add so a new bar can be inserted
-   WITHOUT swapping #home-feed — that keeps the live genrePicker alive (no destroy/re-init churn). #}
+{# The Home "Genres" steering bars: top-6 played families PLUS any pinned niches (added/steered genres,
+   appended past the top 6 by taste_fingerprint) so an added bar always shows even in a deep library.
+   Rendered standalone by /home/fingerprint/{add,remove} so a swap can replace just #fp-genre-bars and
+   leave the live genre picker alive. Each family can drill into its subgenres (eager-rendered, hidden,
+   toggled client-side — a leaned subgenre is promoted to its own top bar instead, so no duplication). #}
 {% set pinned = fingerprint.families[6:] | selectattr('pinned') | list %}
-{% for g in fingerprint.families[:6] + pinned %}
-<div class="fp-row">
-  <span class="fp-name" title="{{ '%.0f'|format(g.share*100) }}% of your listening">{{ g.name }}</span>
-  <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ g.effective }}"
-         name="weight" hx-post="/home/steer" hx-vals='{"axis":"genre:{{ g.name }}"}'
+{% macro tools(axis, name, expandable) %}
+  {# Over-the-label tools, revealed only on label hover (CSS). Remove works on any bar/subgenre. #}
+  <span class="fp-row-tools">
+    {% if expandable %}
+    <button type="button" class="fp-icon-btn fp-expand-btn" :class="{ on: open }" @click="open = !open"
+            title="Show / hide {{ name }} subgenres" aria-label="toggle {{ name }} subgenres">&#9662;</button>
+    {% endif %}
+    <button type="button" class="fp-icon-btn fp-remove-btn"
+            hx-post="/home/fingerprint/remove" hx-vals='{"axis":"{{ axis }}"}'
+            hx-target="#fp-genre-bars" hx-swap="innerHTML"
+            title="Remove this bar" aria-label="remove {{ name }} bar">&times;</button>
+  </span>
+{% endmacro %}
+{% macro bar(axis, name, effective, tooltip) %}
+  <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ effective }}"
+         name="weight" hx-post="/home/steer" hx-vals='{"axis":"{{ axis }}"}'
          hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
          hx-on::before-request="sessionStorage.setItem('steered','1')"
-         aria-label="favor or mute {{ g.name }}">
-  <button type="button" class="fp-expand-btn"
-          hx-post="/home/fingerprint/expand"
-          hx-vals='{"family":"{{ g.name }}"}'
-          hx-target="#fp-subs-{{ loop.index }}"
-          hx-swap="innerHTML"
-          title="Drill into {{ g.name }} subgenres"
-          aria-label="expand {{ g.name }} subgenres">&#9656;</button>
+         aria-label="favor or mute {{ name }}" title="{{ tooltip }}">
+{% endmacro %}
+{% for g in fingerprint.families[:6] + pinned %}
+<div class="fp-genre"{% if g.expandable %} x-data="{ open: false }"{% endif %}>
+  <div class="fp-row">
+    <span class="fp-name-wrap">
+      <span class="fp-name" title="{{ g.name }} — {{ '%.0f'|format(g.share*100) }}% of your listening">{{ g.name }}</span>
+      {{ tools("genre:" + g.name, g.name, g.expandable) }}
+    </span>
+    {{ bar("genre:" + g.name, g.name, g.effective, "favor or mute " + g.name) }}
+  </div>
+  {% if g.expandable %}
+  <div class="fp-subgenres" x-show="open" x-cloak>
+    {% for sub in g.subgenres %}
+    <div class="fp-row fp-subrow">
+      <span class="fp-name-wrap">
+        <span class="fp-name fp-subname" title="{{ sub.name }}">{{ sub.name }}</span>
+        {{ tools(sub.axis, sub.name, false) }}
+      </span>
+      {{ bar(sub.axis, sub.name, sub.effective, sub.name) }}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 </div>
-<div id="fp-subs-{{ loop.index }}" class="fp-subgenres"></div>
 {% endfor %}

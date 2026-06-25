@@ -6,6 +6,7 @@ candidate-surface generators (comfort / rotation / deep cuts / completion / enri
 grouped here because the generators all depend on the same exclusion logic (excluded_playlist_ids).
 """
 from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.util import genre_map
 
 # Auto-assigned group for playlists this app generates from recommendations. Anything in this group
 # is quarantined from every taste signal (groupings/analysis/scores) — so the engine never feeds on
@@ -244,7 +245,6 @@ class RecQueryRepo(Repo):
         direct shared basket — and the caller falls back to an embedding 'bridge'
         (see embed.connection_geometry). Catch-all playlists (> max_playlist tracks) and quarantined
         generated playlists are excluded, mirroring the embedding's own basket filtering."""
-        from yt_playlist.rec import genre_map
         path = [k for k in dict.fromkeys(path_keys) if k and k != key]
         if not key or not path:
             return []
@@ -335,7 +335,6 @@ class RecQueryRepo(Repo):
         """Genre families present in the library, each with its track count — the option list for the
         Clusters genre-family filter (#29). Untagged tracks contribute nothing. Sorted most-common
         first, then alphabetically."""
-        from yt_playlist.rec import genre_map
         fams = {}
         for r in self.conn.execute(
                 "SELECT genre, COUNT(DISTINCT identity_key) n FROM tracks "
@@ -349,7 +348,6 @@ class RecQueryRepo(Repo):
     def keys_in_families(self, families) -> set:
         """Identity_keys whose genre maps into one of `families` (#29 whitelist). Untagged tracks are
         never included — a track with no genre can't be vouched into a restricted cluster."""
-        from yt_playlist.rec import genre_map
         fams = set(families)
         if not fams:
             return set()
@@ -362,7 +360,6 @@ class RecQueryRepo(Repo):
         """Individual genres (sub-genres) present in the library, each with its family and track count —
         the fine-grained options for the Clusters genre filter (#29), alongside the coarse families.
         Sorted most-common first, then alphabetically."""
-        from yt_playlist.rec import genre_map
         rows = self.conn.execute(
             "SELECT genre, COUNT(DISTINCT identity_key) n FROM tracks "
             "WHERE genre IS NOT NULL AND genre<>'' GROUP BY genre").fetchall()
@@ -374,7 +371,6 @@ class RecQueryRepo(Repo):
         """Identity_keys allowed by a Clusters genre whitelist (#29) where each token may be EITHER a
         genre family OR a specific genre (sub-genre). A track qualifies if its genre matches a token
         exactly, or its family matches a token. Untagged tracks are never included."""
-        from yt_playlist.rec import genre_map
         toks = {t.strip().lower() for t in tokens if t and t.strip()}
         if not toks:
             return set()
@@ -547,7 +543,6 @@ class RecQueryRepo(Repo):
         "tracks" that are really DJ mixes/compilations are dropped too, since they co-occur with
         unrelated songs and blur the model. Each basket is a list of track identity_keys.
         """
-        from yt_playlist.rec import genre_map
         good = {r["k"] for r in self.conn.execute(
             "SELECT DISTINCT identity_key k FROM tracks "
             "WHERE (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
