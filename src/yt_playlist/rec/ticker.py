@@ -15,6 +15,13 @@ def _shares(dist: dict) -> dict:
     return {k: v / total for k, v in dist.items()}
 
 
+def _pct(v, axis_max) -> float:
+    """Map an absolute share onto the 0..axis_max axis as a percentage, clamped to [0, 100]."""
+    if axis_max <= 0:
+        return 0.0
+    return max(0.0, min(100.0, v / axis_max * 100.0))
+
+
 def ticker_rows(corpus: dict, windows: dict) -> dict:
     """Build ranked ticker rows from a corpus distribution and per-period listen distributions.
 
@@ -74,17 +81,12 @@ def candle_geometry(row: dict, axis_max: float) -> dict:
     marker, the whisker ends, whether the bar is over-indexed, and the trend class. Guards
     axis_max <= 0 -> all zero; clamps to [0, 100].
     """
-    def pct(v):
-        if axis_max <= 0:
-            return 0.0
-        return max(0.0, min(100.0, v / axis_max * 100.0))
-
     return {
-        "bar_pct": pct(row["close"]),
-        "corpus_pct": pct(row["corpus_share"]),
-        "open_pct": pct(row["open"]) if row["open"] is not None else None,
-        "whisker_lo_pct": pct(row["low"]),
-        "whisker_hi_pct": pct(row["high"]),
+        "bar_pct": _pct(row["close"], axis_max),
+        "corpus_pct": _pct(row["corpus_share"], axis_max),
+        "open_pct": _pct(row["open"], axis_max) if row["open"] is not None else None,
+        "whisker_lo_pct": _pct(row["low"], axis_max),
+        "whisker_hi_pct": _pct(row["high"], axis_max),
         "over": row["close"] >= row["corpus_share"] and row["corpus_share"] > 0,
         "trend": row["trend"],
     }

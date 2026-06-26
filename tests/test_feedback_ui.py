@@ -47,7 +47,7 @@ def test_mute_artist_via_chip(store):
     assert "Fav" in store.muted_artists()
 
 
-def test_feedback_axis_nudge_lowers_and_raises_weight(store):
+def test_feedback_axis_routes_through_graduation_and_eventually_moves_weight(store):
     iid = store.upsert_identity("main", "cred", None, True)
     from fastapi.testclient import TestClient
     from yt_playlist.web.app import create_app
@@ -55,8 +55,17 @@ def test_feedback_axis_nudge_lowers_and_raises_weight(store):
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
 
+    # Why-chip steering goes through the graduation ledger now (#43 / §4b), not a direct nudge: a single
+    # event moves the ledger but leaves the permanent weight neutral (it is below THEME_THRESHOLD).
     c.post("/recs/feedback", data={"item": "a|b", "kind": "less", "axis": "era:1990"})
-    assert store.get_weights()["era:1990"] < 1.0          # 'less' nudges it down
+    assert store.get_weights().get("era:1990", 1.0) == 1.0     # one event: ledger only, weight untouched
+    assert (store.get_theme("era:1990") or 0) < 0
 
-    c.post("/recs/feedback", data={"item": "c|d", "kind": "more", "axis": "artist:Foo"})
-    assert store.get_weights()["artist:Foo"] > 1.0        # 'more' nudges it up
+    # Sustained feedback crosses the threshold and graduates the weight.
+    for _ in range(3):
+        c.post("/recs/feedback", data={"item": "a|b", "kind": "less", "axis": "era:1990"})
+    assert store.get_weights()["era:1990"] < 1.0               # 'less' graduates it down
+
+    for _ in range(4):
+        c.post("/recs/feedback", data={"item": "c|d", "kind": "more", "axis": "artist:Foo"})
+    assert store.get_weights()["artist:Foo"] > 1.0            # 'more' graduates it up

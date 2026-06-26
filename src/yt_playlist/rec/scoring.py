@@ -173,13 +173,23 @@ def _axis_mult(weights, kind, token, standing, leans, fparams):
     return weights.get(token, 1.0) * standing.get(full, 1.0) * transient_mult
 
 
+def _pop_band(popularity, threshold):
+    """The popularity-axis token for a track (#43), or None (neutral) when it has no popularity or sits
+    below the mainstream cut. One band today ('mainstream', what the 'too mainstream' dismiss steers);
+    unknown popularity stays neutral, so the axis never excludes what we cannot classify."""
+    if popularity is None:
+        return None
+    return "mainstream" if popularity >= threshold else None
+
+
 def _axis_weights_for(store, keys, now=None):
-    """{key: genre_w * era_w * artist_w}, where each axis weight is permanent x standing lean x the
-    transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
+    """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
+    the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
     w = store.get_weights()
     gw = {a[len("genre:"):]: v for a, v in w.items() if a.startswith("genre:")}
     ew = {a[len("era:"):]: v for a, v in w.items() if a.startswith("era:")}
     aw = {a[len("artist:"):]: v for a, v in w.items() if a.startswith("artist:")}
+    pw = {a[len("pop:"):]: v for a, v in w.items() if a.startswith("pop:")}
     leans = transient.facet_leans(store, now) if now is not None else {}
     standing = store.get_leans()
     # Breadth steer (#7): a per-family tilt derived from your current genre spread. Only computed when
@@ -188,12 +198,15 @@ def _axis_weights_for(store, keys, now=None):
     bias = rec_params.get_param(store, "breadth_bias")
     bfac = _breadth_factors(taste_breadth(store)["families"], bias,
                             rec_params.get_param(store, "breadth_gain")) if bias else {}
-    perm_neutral = all(v == 1.0 for v in list(gw.values()) + list(ew.values()) + list(aw.values()))
+    perm_neutral = all(v == 1.0 for v in
+                       list(gw.values()) + list(ew.values()) + list(aw.values()) + list(pw.values()))
     if perm_neutral and not leans and not standing and not bfac:
         return None
     keys = list(keys)
     dao = RecDao(store)
     genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
+    pops = dao.track_popularity(keys)
+    pop_min = rec_params.get_param(store, "pop_mainstream_min")
     lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
     fparams = (rec_params.get_param(store, "facet_gain"),
                rec_params.get_param(store, "facet_mult_min"),
@@ -208,7 +221,9 @@ def _axis_weights_for(store, keys, now=None):
             gm *= _axis_mult(gw, "genre", sub, standing, leans, fparams)
         em = _axis_mult(ew, "era", decades.get(k), standing, leans, fparams)
         am = _axis_mult(aw, "artist", artists.get(k), standing, leans, fparams)
-        mult[k] = max(lo, min(hi, gm)) * max(lo, min(hi, em)) * max(lo, min(hi, am))
+        pm = _axis_mult(pw, "pop", _pop_band(pops.get(k), pop_min), standing, leans, fparams)
+        mult[k] = (max(lo, min(hi, gm)) * max(lo, min(hi, em))
+                   * max(lo, min(hi, am)) * max(lo, min(hi, pm)))
     return mult
 
 

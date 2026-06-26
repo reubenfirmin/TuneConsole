@@ -146,6 +146,14 @@ PARAMS = [
               "How fast an explicit dislike graduates toward permanent taste.", 0.0, 2.0, 0.05, 1.0, advanced=True),
     ParamSpec("source_w_vibe", "Speed: mood gestures", "graduation",
               "How fast a mood/vibe gesture graduates toward permanent taste.", 0.0, 2.0, 0.05, 1.0, advanced=True),
+    ParamSpec("source_w_feedback", "Speed: suggestion feedback", "graduation",
+              "How fast a suggestion dismiss (wrong vibe/era, too mainstream, not this artist) and the "
+              "Home why-chips steer your permanent taste. Routed through the same graduation ledger as "
+              "every other signal.", 0.0, 2.0, 0.05, 1.0, advanced=True),
+    ParamSpec("pop_mainstream_min", "Mainstream threshold", "discovery",
+              "Deezer popularity (rank) at or above which a track counts as 'mainstream', the axis the "
+              "'too mainstream' dismiss steers. Tracks with no popularity value are never mainstream.",
+              0, 1000000, 50000, 500000, integer=True, advanced=True),
     # The intent-vs-behavior graduation balance: two visible (non-advanced) knobs. Both channels now
     # graduate by the same daily-exposure mechanic, so the weights are directly comparable (per-day vs
     # per-day). The default ratio 0.5 : 0.08 (~6:1) encodes "explicit steering moves long-term taste

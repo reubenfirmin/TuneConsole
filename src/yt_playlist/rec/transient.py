@@ -126,6 +126,10 @@ def centroid_tilt(store, now, V, idx):
     a = gp(store, "mood_recency_alpha")
     play_w = gp(store, "play_transient_w")
     like_w = gp(store, "like_transient_w")
+    # tilt accumulates a recency-weighted vector sum of UNIT directions across all transient sources;
+    # each contribution is decayed by (1-a)^rank (newer events count for more) and the whole sum is
+    # renormalized to a single unit direction at the end. Each mood event adds its signed centroid
+    # direction (direction = +1 like / -1 dislike).
     tilt = np.zeros(V.shape[1], dtype=np.float64)
     for rank, (_ts, direction, keys) in enumerate(events):
         rows = [idx[k] for k in keys if k in idx]
@@ -138,6 +142,7 @@ def centroid_tilt(store, now, V, idx):
         tilt += direction * ((1.0 - a) ** rank) * (c / nrm)
 
     def _add_dir(keys, w_base):
+        # Add each track's own unit vector, scaled by its source weight (w_base) and recency decay.
         for rank, k in enumerate(keys):
             if k not in idx:
                 continue
@@ -151,7 +156,7 @@ def centroid_tilt(store, now, V, idx):
     _add_dir(plays, play_w)
     _add_dir(likes, like_w)
     n = np.linalg.norm(tilt)
-    return tilt / n if n > 0 else None
+    return tilt / n if n > 0 else None                   # unit direction, or None when nothing accumulated
 
 
 def audio_centroid_tilt(store, now):

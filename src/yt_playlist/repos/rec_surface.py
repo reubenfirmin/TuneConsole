@@ -10,6 +10,7 @@ from yt_playlist.repos.base import Repo, synchronized
 MOOD_EVENT_CAP = 200   # bound the rec_mood table (count, not age); this repo owns that table
 
 _SCHEMA = """
+-- per-(surface, item) view counts + last_shown: anti-staleness erosion and per-card rotation
 CREATE TABLE IF NOT EXISTS rec_impressions (
   surface TEXT NOT NULL,                  -- 'for_you' | 'explore' | 'suggest'
   item_key TEXT NOT NULL,
@@ -17,40 +18,48 @@ CREATE TABLE IF NOT EXISTS rec_impressions (
   last_shown REAL,                        -- drives the recycle cooldown
   PRIMARY KEY (surface, item_key)
 );
+-- materialized last-good proposal payloads per surface (rec worker writes, routes read)
 CREATE TABLE IF NOT EXISTS rec_proposals (
   surface TEXT PRIMARY KEY,               -- 'fresh_songs' | 'discover'
   payload TEXT NOT NULL,                  -- JSON, materialized by the rec worker (last-good serving)
   built_at REAL
 );
+-- Last.fm similar-artist cache (14-day TTL); also the #28 artist model's edge source
 CREATE TABLE IF NOT EXISTS rec_artist_similar (
   artist TEXT PRIMARY KEY,                -- anchor artist (display name)
   payload TEXT NOT NULL,                  -- JSON [[name, match], ...] from Last.fm
   fetched_at REAL
 );
+-- count-capped log of mood feedback events (the transient model's mood seed)
 CREATE TABLE IF NOT EXISTS rec_mood (
   created_at REAL NOT NULL,               -- when the mood feedback was given (drives time-decay)
   direction INTEGER NOT NULL,             -- +1 = more of this vibe, -1 = not my mood
   keys TEXT NOT NULL                      -- JSON list of the playlist's track identity_keys (the seed)
 );
+-- the theme/params a generated playlist was built from (legible + re-runnable)
 CREATE TABLE IF NOT EXISTS rec_recipes (
   playlist_ytm TEXT PRIMARY KEY,          -- the generated playlist's YouTube id
   recipe TEXT NOT NULL,                   -- JSON: the rolled theme + params + dj seed + version
   created_at REAL
 );
+-- the full canvas blob behind a saved cluster playlist, so it can be reopened and regrown (#48)
 CREATE TABLE IF NOT EXISTS cluster_canvas (
   playlist_ytm TEXT PRIMARY KEY,          -- the generated playlist's YouTube id (#48: reopen its cluster)
   state TEXT NOT NULL,                     -- JSON: the full canvas blob (nodes, trunk, seeds, filter, view)
   created_at REAL
 );
+-- graduation ledger: persistent signed running totals (the transient -> permanent funnel)
 CREATE TABLE IF NOT EXISTS rec_theme (
   facet      TEXT PRIMARY KEY,             -- 'genre:<fam>' | 'era:<decade>' | 'artist:<name>'
   score      REAL NOT NULL,                -- persistent signed running total (interaction-driven, no time decay)
   updated_at REAL NOT NULL                 -- bookkeeping only
 );
+-- per-axis once-per-UTC-day stamp: the play-exposure graduation idempotency guard
 CREATE TABLE IF NOT EXISTS rec_play_grad (
   axis               TEXT PRIMARY KEY,      -- facet token, e.g. 'genre:techno'
   last_graduated_day TEXT                   -- UTC YYYY-MM-DD the play-exposure funnel last graduated this axis
 );
+-- append-only graduation instrumentation: one row per threshold-crossing nudge (model-health panel)
 CREATE TABLE IF NOT EXISTS rec_grad_log (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   axis       TEXT NOT NULL,                 -- the facet that graduated, e.g. 'genre:techno'
@@ -177,6 +186,7 @@ class RecSurfaceRepo(Repo):
         row = self.conn.execute(
             "SELECT views FROM rec_impressions WHERE surface='card' AND item_key=?", (card,)).fetchone()
         cur = row["views"] if row else 0
+        # current epoch is (cur-1)//cap; jump to the first view of the next epoch: (epoch+1)*cap + 1
         new_views = (max(0, cur - 1) // cap + 1) * cap + 1
         if row:
             self.conn.execute("UPDATE rec_impressions SET views=?, last_shown=? "

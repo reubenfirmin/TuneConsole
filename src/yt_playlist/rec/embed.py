@@ -6,6 +6,7 @@ space capture second-order similarity (tracks that never share a playlist but bo
 third), which plain co-occurrence cannot. CPU-only, no GPU, no external models.
 """
 import json
+import math
 
 import numpy as np
 
@@ -38,6 +39,7 @@ def _normalize(v):
     return v / (np.linalg.norm(v) + _NORM_EPS)
 
 
+# === Collaborative vectors: PPMI co-occurrence + truncated SVD / item2vec over the user's curation ===
 def build_vectors(store, dim=DIM):
     """Return (keys, V), L2-normalised per-track embeddings. Method ('svd' default, or 'item2vec')
     comes from the recall@k-tuned `rec_embed_method` setting."""
@@ -47,16 +49,36 @@ def build_vectors(store, dim=DIM):
         return [], np.zeros((0, dim), dtype=np.float32)
     if (store.get_setting("rec_embed_method") or "svd") == "item2vec":
         return _item2vec(baskets, keys, dim)
-    return _svd(baskets, keys, dim)
+    # #38 §4c: optionally weight co-occurrence by play frequency. OFF by default (the `rec_cooc_weighting`
+    # setting is unset); see _cooc_weights for the measured verdict on why it stays off.
+    weights = _cooc_weights(store) if store.get_setting("rec_cooc_weighting") == "1" else None
+    return _svd(baskets, keys, dim, weights)
 
 
-def _svd(baskets, keys, dim):
-    """PPMI co-occurrence + randomised truncated SVD (numpy only)."""
+def _cooc_weights(store):
+    """#38 §4c per-track co-occurrence gains from play frequency: g(k) = 1 + log1p(playcount), so a
+    heavily-played track's pairings count for more than a one-off. A never-played track keeps gain 1.0
+    (the binary baseline), so the weighting only ever amplifies existing evidence, never erases it.
+    Recency weighting is a natural extension; playcount is the signal available without a history join.
+
+    VERDICT (measured 2026-06-26 on the real library: 4303 vectors, ~5.7 days of retained history): this
+    does NOT help, so `rec_cooc_weighting` ships OFF by default. A/B'd via eval_recs.cooc_weighting_ab on
+    temporal_recall (predict-your-next-plays): binary membership beat or tied playcount-weighting at every
+    holdout window tested (0.5d..3d; deltas -0.045 .. 0.000, weighting never ahead). In-sample recall@k
+    slightly favored weighting (0.768 -> 0.777), but that is exactly the overfit-to-heavy-tracks artifact
+    temporal_recall is there to expose. Only flip the setting on if a future re-run on more retained
+    history reverses this; the toggle and harness are kept so that re-test is one call."""
+    return {k: 1.0 + math.log1p(c) for k, c in store.play_counts().items() if c}
+
+
+def _cooc_matrix(baskets, keys, weights=None):
+    """Symmetric co-occurrence matrix over `keys`. Each basket contributes Newman's 1/(size-1) per
+    member-pair (Newman 2001): a track in a 50-item playlist shares weaker evidence per neighbour than
+    one in a duet, so large baskets don't dominate. #38 §4c: when `weights` is given ({key: gain}), each
+    pair is additionally scaled by gain_i * gain_j; weights=None (the default) is binary membership."""
     n = len(keys)
     idx = {k: i for i, k in enumerate(keys)}
-    # Symmetric co-occurrence matrix C. Each basket contributes Newman's 1/(size-1) per member-pair
-    # (Newman 2001): a track in a 50-item playlist shares weaker evidence per neighbour than one in a
-    # duet, so large baskets don't dominate.
+    g = None if weights is None else np.array([float(weights.get(k, 1.0)) for k in keys])
     C = np.zeros((n, n), dtype=np.float64)
     for b in baskets:
         ii = [idx[k] for k in b]
@@ -65,8 +87,17 @@ def _svd(baskets, keys, dim):
             ia = ii[a]
             for c in range(a + 1, len(ii)):
                 ic = ii[c]
-                C[ia, ic] += w
-                C[ic, ia] += w
+                pw = w if g is None else w * g[ia] * g[ic]
+                C[ia, ic] += pw
+                C[ic, ia] += pw
+    return C
+
+
+def _svd(baskets, keys, dim, weights=None):
+    """PPMI co-occurrence + randomised truncated SVD (numpy only). #38 §4c: optional per-track
+    co-occurrence weighting via `weights` (None = binary membership, the default)."""
+    n = len(keys)
+    C = _cooc_matrix(baskets, keys, weights)
     tot = C.sum()
     if tot <= 0:
         return [], np.zeros((0, dim), dtype=np.float32)
@@ -75,9 +106,11 @@ def _svd(baskets, keys, dim):
     # (negative PMI is unreliable on sparse counts), giving the SVD a denser, better-conditioned input.
     row = C.sum(1)
     with np.errstate(divide="ignore", invalid="ignore"):
-        P = C / tot
-        exp = np.outer(row, row) / (tot * tot)
-        ppmi = np.maximum(np.log(np.where((P > 0) & (exp > 0), P / np.where(exp > 0, exp, 1.0), 1.0)), 0.0)
+        P = C / tot                                      # joint P(i,j)
+        exp = np.outer(row, row) / (tot * tot)           # independence expectation P(i)P(j)
+        # ratio = P(i,j) / [P(i)P(j)] where both are defined, else 1.0 so its log floors to 0.
+        ratio = np.where((P > 0) & (exp > 0), P / np.where(exp > 0, exp, 1.0), 1.0)
+        ppmi = np.maximum(np.log(ratio), 0.0)            # PPMI: keep only above-chance co-occurrence
     # Randomised truncated SVD (Halko 2011): project PPMI through a Gaussian sketch of dim+oversample
     # columns, orthonormalise (QR), then do an exact small SVD in that subspace. O(n^2·dim) and numpy-
     # only, vs a full dense SVD. Fixed seed → identical vectors across rebuilds when the data is unchanged.
@@ -85,7 +118,7 @@ def _svd(baskets, keys, dim):
     om = rng.standard_normal((n, dim + _SVD_OVERSAMPLE))
     Q, _ = np.linalg.qr(ppmi @ om)
     Ub, S, _ = np.linalg.svd(Q.T @ ppmi, full_matrices=False)
-    V = (Q @ Ub)[:, :dim] * np.sqrt(S[:dim])           # scale components by sqrt(singular value)
+    V = (Q @ Ub)[:, :dim] * np.sqrt(S[:dim])           # project back into track space, scale by sqrt(singular value)
     V /= np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS
     return keys, V.astype(np.float32)
 
@@ -137,10 +170,11 @@ def _item2vec(baskets, keys, dim, epochs=5, neg=5, lr=0.025, seed=0):
             ci, cj = bp[:, 0], bp[:, 1]
             m = len(bp)
             negs = rng.choice(n, size=(m, neg), p=pdist)
-            wi = W[ci]                                   # (m, dim)
-            gp = (_sigmoid((wi * Cm[cj]).sum(1)) - 1.0)[:, None]          # positive grad
-            gn = _sigmoid((wi[:, None, :] * Cm[negs]).sum(2))[:, :, None]  # (m, neg, 1)
-            gW = gp * Cm[cj] + (gn * Cm[negs]).sum(1)
+            wi = W[ci]                                   # (m, dim) center vectors for this batch
+            gp = (_sigmoid((wi * Cm[cj]).sum(1)) - 1.0)[:, None]          # positive grad: (m,1)
+            # negative grad: (m,neg,dim) elementwise -> sum over dim -> (m,neg) sigmoid -> (m,neg,1)
+            gn = _sigmoid((wi[:, None, :] * Cm[negs]).sum(2))[:, :, None]
+            gW = gp * Cm[cj] + (gn * Cm[negs]).sum(1)    # (m,dim): toward context, away from negatives
             np.add.at(W, ci, -lr * gW)
             np.add.at(Cm, cj, -lr * (gp * wi))
             np.add.at(Cm, negs.ravel(), (-lr * gn * wi[:, None, :]).reshape(-1, dim))
@@ -174,8 +208,8 @@ def load_vectors(store):
     return _load_vector_rows(store.get_rec_vectors())
 
 
-# --- content (genre/era) vectors: a "what a track IS" space, parallel to the collaborative one.
-# Blended into cluster_expand so a seed reaches its own genre even when it never co-occurs there. ---
+# === Content vectors: a "what a track IS" space (genre/era + audio), parallel to the collaborative one.
+# Blended into cluster_expand so a seed reaches its own genre even when it never co-occurs there. ===
 def content_features(content):
     """Build the content-feature index from {key: (genre, year4)}.
 
@@ -235,8 +269,8 @@ def build_content_model(content, audio):
     for f in CONTINUOUS_AUDIO:
         vals = [float(d[f]) for d in audio.values() if d.get(f) is not None]
         if len(vals) >= 2:
-            mu = sum(vals) / len(vals)
-            sd = (sum((v - mu) ** 2 for v in vals) / len(vals)) ** 0.5
+            mu = float(np.mean(vals))                    # cast off np.float64 so the model stays JSON-serializable
+            sd = float(np.std(vals))                     # population std (ddof=0), matching the old manual form
             if sd > 0:
                 cont.append([f, mu, sd])
     return {"cat": cat, "ncat": len(cat), "cont": cont}
@@ -359,6 +393,7 @@ def maybe_rebuild_content_vectors(store, step=0.05) -> bool:
     return True
 
 
+# === Ranking & neighbours: query the built vector space (taste neighbours, centroids, bridges) ===
 def _rank(keys, V, target, exclude, topn):
     sims = V @ target
     out = []
@@ -446,6 +481,7 @@ def blended_neighbors(store, seed_groups, topn=12, exclude=None):
     return _rank(keys, V, _normalize(target), excl, topn)
 
 
+# === Cluster expansion: blended collaborative + content rings for the Clusters canvas ===
 CLUSTER_BETA = 0.6   # how hard a pruned ("negative model") track pushes a branch's ring away
 SEED_FANOUT = 0.5    # for a MULTI-seed node, how much the ring is drawn to the NEAREST single seed
                      # vs the averaged centroid. >0 stops a minority seed (e.g. one psytrance pick

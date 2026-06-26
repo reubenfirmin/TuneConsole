@@ -10,9 +10,11 @@ import random
 from yt_playlist.util import genre_map
 from yt_playlist.rec.ordering import dj_order
 
+# The journey keys, in picker order; each maps to an ordering strategy in journey_order below.
 JOURNEYS = ["energy_arc", "warm_up", "wind_down", "smooth_segue", "odyssey",
             "time_machine", "throwback", "deep_dive", "rediscovery", "shuffle"]
 
+# Full display names for the generation panel (the short picker hints are in JOURNEY_HINTS below).
 JOURNEY_LABELS = {
     "energy_arc": "Energy arc", "warm_up": "Warm-up", "wind_down": "Wind-down",
     "smooth_segue": "Smooth segue", "odyssey": "Odyssey", "time_machine": "Time machine",
@@ -34,6 +36,7 @@ JOURNEY_HINTS = {
     "shuffle": "Shuffle, keeping artists apart",
 }
 
+# One-sentence descriptions shown alongside each journey in the panel.
 JOURNEY_DESCRIPTIONS = {
     "energy_arc": "Eases in, builds to a peak, then winds back down.",
     "warm_up": "Starts mellow and steadily builds energy.",
@@ -128,6 +131,8 @@ def _segue_order(items, journey, seed, feat):
         last_a = feat(out[-1])["artist"]
 
         def score(c):
+            # Sort key, ascending: same-artist last (0 before 1), then nearest genre for smooth_segue
+            # (smallest distance first) or farthest for odyssey (negate), with a seeded random tiebreak.
             fc = feat(c)
             same = 1 if (fc["artist"] and fc["artist"] == last_a) else 0
             d = genre_map.distance(last_g, fc["genre"] or "")

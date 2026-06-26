@@ -26,7 +26,7 @@ class RecModelRepo(Repo):
         """Multiply an axis weight by factor (clamped), then shrink slightly toward the 1.0 prior."""
         row = self.conn.execute("SELECT weight FROM rec_weights WHERE axis=?", (axis,)).fetchone()
         w = max(lo, min(hi, (row["weight"] if row else 1.0) * factor))
-        w = w + (1.0 - w) * _WEIGHT_SHRINK
+        w = w + (1.0 - w) * _WEIGHT_SHRINK               # mean-revert _WEIGHT_SHRINK of the way back to 1.0
         self.conn.execute("INSERT INTO rec_weights(axis, weight) VALUES (?, ?) "
                           "ON CONFLICT(axis) DO UPDATE SET weight=excluded.weight", (axis, w))
         self.conn.commit()

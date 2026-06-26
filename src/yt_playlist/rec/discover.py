@@ -118,7 +118,7 @@ class ContentProjection:
         F = proj.content_dim + proj.adim
         X = np.array([x for _, x in rows])
         Y = np.array([V[idx[k]] for k, _ in rows])
-        proj.W = np.linalg.solve(X.T @ X + lam * np.eye(F), X.T @ Y)       # ridge, closed form
+        proj.W = np.linalg.solve(X.T @ X + lam * np.eye(F), X.T @ Y)       # ridge closed form: (X'X + λI)^-1 X'Y
         return proj
 
 
@@ -200,6 +200,8 @@ def new_artists(ctx, limit=15, max_anchors=30):
         for cand, match in artist_model.artist_neighbors(store, name, topn=50):
             if not cand or cand in owned:
                 continue
+            # A candidate near several of your anchors accumulates one edge per anchor (append, not
+            # clobber); the strength/proxy below then sum over all of them, so multi-anchor fit compounds.
             bridges.setdefault(cand, []).append((vec, weight * float(match), name))
 
     out = []

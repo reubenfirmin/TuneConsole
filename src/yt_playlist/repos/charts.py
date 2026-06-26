@@ -11,6 +11,9 @@ _CAT_EXPR = {
     "genre": "MIN(NULLIF(genre,''))",
     "album": "MIN(NULLIF(album,''))",
     "artist": "MIN(NULLIF(artist,''))",
+    # year: take the first 4 chars of mb_year (substr ...,1,4); GLOB '[0-9]x4' gates it to a real
+    # 4-digit year (else CASE yields NULL -> dropped); CAST to INTEGER, //10*10 floors to the decade,
+    # CAST back to TEXT so it shares the string category column with the other dimensions.
     "year": ("CASE WHEN substr(MIN(NULLIF(mb_year,'')),1,4) GLOB '[0-9][0-9][0-9][0-9]' "
              "THEN CAST(CAST(substr(MIN(NULLIF(mb_year,'')),1,4) AS INTEGER)/10*10 AS TEXT) "
              "END"),

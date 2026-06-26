@@ -129,6 +129,18 @@ class RecQueryRepo(Repo):
             f"WHERE identity_key IN ({qs}) AND artist<>'' GROUP BY identity_key", keys)}
 
     @synchronized
+    def track_popularity(self, keys) -> dict:
+        """{identity_key: popularity} (Deezer rank) for keys carrying a popularity value; absent = unknown.
+        Powers the 'pop:' mainstream axis (#43). MAX over duplicate video rows picks the most-popular variant."""
+        keys = list(keys)
+        if not keys:
+            return {}
+        qs = ",".join("?" * len(keys))
+        return {r["identity_key"]: r["p"] for r in self.conn.execute(
+            f"SELECT identity_key, MAX(popularity) p FROM tracks "
+            f"WHERE identity_key IN ({qs}) AND popularity IS NOT NULL GROUP BY identity_key", keys)}
+
+    @synchronized
     def era_play_distribution(self) -> dict:
         """{decade: Σ(1 + play_count)} over dated tracks, deduped per song (mirrors genre version)."""
         rows = self.conn.execute(

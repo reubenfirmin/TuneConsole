@@ -177,25 +177,66 @@ def projection_recall(store, k=20) -> dict:
                           "by_coverage": _finalize(by_coverage)}}
 
 
+def _tune_score(store, k):
+    """Score the currently-built model for autotune (#38 §5). Prefer temporal_recall, the model's real
+    job (predict the next plays), so the method/DIM sweep optimizes forward prediction rather than the
+    in-sample leave-one-out recall@k. Fall back to recall@k when history is too thin for a temporal
+    split. Returns (score, metric) so the grid can show which metric drove the choice."""
+    tr = temporal_recall(store, k=k).get("recall")
+    if tr is not None:
+        return tr, "temporal_recall"
+    return recall_at_k(store, k=k).get("recall_at_k") or 0.0, "recall_at_k"
+
+
 def autotune(store, svd_dims=(48, 64, 96, 128), item2vec_probe_dim=64, k=20) -> dict:
-    """A/B the embedding dimensionality (svd) by recall@k with a single item2vec sanity probe,
-    persist the winner, and rebuild on it. Returns the winner, the previous config, and the full
+    """A/B the embedding method+dimensionality, scored by the model's real job (temporal_recall, #38 §5)
+    with a recall@k fallback when history is too thin for a temporal split, plus a single item2vec sanity
+    probe. Persists and rebuilds on the winner. Returns the winner, the previous config, and the full
     grid for the UI. Never forces item2vec; it's only kept if it wins on the user's data."""
     prev_method = store.get_setting("rec_embed_method") or "svd"
     prev_dim = int(store.get_setting("rec_dim") or embed.DIM)
-    previous = {"method": prev_method, "dim": prev_dim,
-                "recall": recall_at_k(store, k=k).get("recall_at_k") or 0.0}
+    prev_score, prev_metric = _tune_score(store, k)
+    previous = {"method": prev_method, "dim": prev_dim, "recall": prev_score, "metric": prev_metric}
 
     grid = []
     configs = [("svd", d) for d in svd_dims] + [("item2vec", item2vec_probe_dim)]
     for method, d in configs:
         store.set_setting("rec_embed_method", method)
         embed.build_and_store(store, dim=d)
-        grid.append({"method": method, "dim": d,
-                     "recall": recall_at_k(store, k=k).get("recall_at_k") or 0.0})
+        score, metric = _tune_score(store, k)
+        grid.append({"method": method, "dim": d, "recall": score, "metric": metric})
 
     winner = max(grid, key=lambda g: g["recall"])
     store.set_setting("rec_embed_method", winner["method"])
     store.set_setting("rec_dim", str(winner["dim"]))
     embed.build_and_store(store, dim=winner["dim"])   # leave the live model on the winner
     return {"winner": winner, "previous": previous, "grid": grid}
+
+
+def cooc_weighting_ab(store, k=20) -> dict:
+    """#38 §4c decision harness: does playcount-weighted co-occurrence beat binary membership? Build the
+    embedding both ways, score each on temporal_recall (recall@k fallback), and report the winner. This
+    is WHERE §4c is decided, on the real library's history, not in a unit test (which has none). Restores
+    the prior `rec_cooc_weighting` setting and rebuilds the live model on it before returning.
+
+    RESULT (2026-06-26, real library): weighting did NOT win, so the setting stays off. See the verdict
+    note on embed._cooc_weights for the numbers.
+
+    CAVEAT learned in practice: _tune_score calls temporal_recall with its 30-day default, which returns
+    None ('insufficient temporal split') and SILENTLY falls back to in-sample recall@k when the retained
+    history span is shorter than the holdout window (the real library retains only ~6 days of
+    history_snapshots). When that happens every grid entry's `metric` reads "recall_at_k", not
+    "temporal_recall" - which is the weaker, in-sample signal. ALWAYS check the `metric` field: if it is
+    "recall_at_k", the temporal split was unavailable, so re-judge by calling temporal_recall directly at
+    a holdout_days that fits the span (e.g. 0.5-3 days here) before trusting the verdict."""
+    prev = store.get_setting("rec_cooc_weighting")
+    out = {}
+    for label, val in (("binary", "0"), ("weighted", "1")):
+        store.set_setting("rec_cooc_weighting", val)
+        embed.build_and_store(store)
+        score, metric = _tune_score(store, k)
+        out[label] = {"score": score, "metric": metric}
+    store.set_setting("rec_cooc_weighting", prev if prev is not None else "0")
+    embed.build_and_store(store)                       # restore the live model on the prior setting
+    out["winner"] = "weighted" if out["weighted"]["score"] > out["binary"]["score"] else "binary"
+    return out
