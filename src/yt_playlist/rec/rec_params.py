@@ -70,6 +70,19 @@ PARAMS = [
               "filed them in playlists. 0 = pure playlist co-occurrence (old behaviour); higher = more "
               "musical similarity, so a seed reaches its own genre even when you never playlist it there.",
               0.0, 1.0, 0.05, 0.30),
+    # Cluster-ring shaping (defaults mirror embed.CLUSTER_BETA / embed.SEED_FANOUT; both apply at query
+    # time, so a change takes effect on the next grow with no rebuild).
+    ParamSpec("cluster_beta", "Cluster prune strength", "discovery",
+              "On the Clusters canvas, how hard pruning a track ('not this') steers a branch away from "
+              "similar music. 0 = a pruned track is just removed; higher = the whole ring leans away "
+              "from its neighbourhood, so one prune reshapes more of what grows next.",
+              0.0, 2.0, 0.05, 0.60),
+    ParamSpec("cluster_seed_spread", "Cluster seed spread", "discovery",
+              "When a Clusters node grows from several pinned tracks, how much the ring reaches toward "
+              "each individual seed's neighbourhood vs their blended average. 0 = pure average; higher = "
+              "a minority pick (one odd track among many) still pulls in its own kind, not just the "
+              "centre of mass.",
+              0.0, 1.0, 0.05, 0.50, advanced=True),
     # --- Artist relationship model (#28). How its blocks combine when relating artists. content_weight
     # is the §B (genre/era/audio) fraction vs the §A co-curation block (collab = 1 - content, the
     # cluster_content_weight convention); edge_weight adds the §C Last.fm-edge bonus on top. ---

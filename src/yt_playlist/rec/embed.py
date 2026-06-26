@@ -489,20 +489,20 @@ SEED_FANOUT = 0.5    # for a MULTI-seed node, how much the ring is drawn to the 
                      # adapting: when seeds are coherent (a focused path) max≈centroid, so it's a no-op.
 
 
-def _branch_scores(pos_keys, neg_keys, beta, allkeys, M, index):
+def _branch_scores(pos_keys, neg_keys, beta, allkeys, M, index, fanout=SEED_FANOUT):
     """Per-key {key: pos_affinity - beta·cos(centroid_neg)} over one vector space, or None if no seed
     is present. pos_affinity blends proximity to the seeds' CENTROID with proximity to the NEAREST
-    single seed (SEED_FANOUT), so a multi-seed node reaches each seed's neighbourhood instead of only
-    the average (a minority seed isn't averaged away). Shared by both the collaborative and content
-    spaces in cluster_expand."""
+    single seed (`fanout`, default SEED_FANOUT), so a multi-seed node reaches each seed's neighbourhood
+    instead of only the average (a minority seed isn't averaged away). Shared by both the collaborative
+    and content spaces in cluster_expand."""
     pi = [index[k] for k in pos_keys if k in index]
     if not pi:
         return None
     pos = _normalize(M[pi].mean(0))
     s = M @ pos
-    if len(pi) > 1 and SEED_FANOUT > 0.0:            # fan out to the nearest single seed (rows are unit)
+    if len(pi) > 1 and fanout > 0.0:                 # fan out to the nearest single seed (rows are unit)
         nearest = np.max(M @ M[pi].T, axis=1)         # max cos to any one seed, per candidate
-        s = (1.0 - SEED_FANOUT) * s + SEED_FANOUT * nearest
+        s = (1.0 - fanout) * s + fanout * nearest
     ni = [index[k] for k in neg_keys if k in index]
     if ni:
         neg = _normalize(M[ni].mean(0))
@@ -543,7 +543,7 @@ def _blend_spaces(collab_s, content_s, w):
     return blended
 
 
-def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=CLUSTER_BETA, allow=None,
+def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=None, allow=None,
                    include_new=False):
     """A Clusters-canvas ring: tracks nearest a node's PINNED-path centroid, tilted AWAY from the
     PRUNED set, scored as a blend of the collaborative (co-occurrence) embedding and the content
@@ -552,6 +552,8 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=CLU
     missing one space is renormalized onto the other, so untagged tracks behave exactly as before
     and w=0 reproduces the pure-collaborative ring. pos/neg seeds and `exclude` are never returned.
 
+    `beta` (prune strength) defaults to the `cluster_beta` knob; `cluster_seed_spread` sets the
+    multi-seed fan-out. Both are read here so the Taste-model page can tune them without a rebuild.
     `allow`, when given, restricts candidates to a whitelist (#29 genre filter).
     `include_new` (Phase 2) widens the candidate pool with OUT-OF-CORPUS discovered tracks: they have
     no collaborative vector, so they're scored on the content term alone (in the same model space)."""
@@ -559,11 +561,14 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=CLU
     if V is None:
         return []
     w = float(rec_params.get_param(store, "cluster_content_weight"))
+    if beta is None:
+        beta = float(rec_params.get_param(store, "cluster_beta"))
+    fanout = float(rec_params.get_param(store, "cluster_seed_spread"))
     ckeys, CV, cidx = _content_space(store, include_new)
 
-    collab_s = _branch_scores(pos_keys, neg_keys, beta, keys, V, idx) or {}
+    collab_s = _branch_scores(pos_keys, neg_keys, beta, keys, V, idx, fanout) or {}
     content_s = ({} if (CV is None or w <= 0.0)
-                 else (_branch_scores(pos_keys, neg_keys, beta, ckeys, CV, cidx) or {}))
+                 else (_branch_scores(pos_keys, neg_keys, beta, ckeys, CV, cidx, fanout) or {}))
     blended = _blend_spaces(collab_s, content_s, w)
 
     excl = set(exclude or ()) | set(pos_keys) | set(neg_keys)
