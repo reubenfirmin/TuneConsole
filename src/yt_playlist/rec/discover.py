@@ -12,7 +12,7 @@ import numpy as np
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key, normalize
 from yt_playlist.util.thumbnails import best_thumb
-from yt_playlist.rec import embed, recommend
+from yt_playlist.rec import artist_model, embed, recommend
 from yt_playlist.providers import lastfm
 from yt_playlist.rec.rec_dao import RecDao
 
@@ -51,50 +51,75 @@ def fetch_artist_info(ctx, name, browse_id=None):
 
 
 class ContentProjection:
-    """Learned cold-start grounding (ACARec-flavored): a ridge map from content features
-    (genre-family + year-decade, one-hot) to the collaborative embedding, fit on the library's own
-    (content, vector) pairs. Lets an *enriched* cold candidate get a predicted taste vector to score
-    against the per-playlist model, an alternative to the heuristic bridge proxy, kept only if it
-    beats it on recall@k (eval_recs.projection_recall). Sharpens as genre enrichment densifies.
+    """Learned cold-start grounding (ACARec-flavored): a ridge map from content features to the
+    collaborative embedding, fit on the library's own (content, vector) pairs. Lets an *enriched* cold
+    candidate get a predicted taste vector to score against the per-playlist model, an alternative to
+    the heuristic bridge proxy, kept only if it beats it on recall@k (eval_recs.projection_recall).
+
+    §2: the feature basis is the SHARED audio-aware content space from embed.build_content_model
+    (genre family + subgenre + decade + musical key/scale, plus z-scored audio: bpm / energy /
+    danceability / moods / loudness / dynamic-complexity), not genre+year alone. Audio is the dominant
+    organizing axis in electronic music, so it separates tracks a coarse genre tag cannot (a 172-BPM
+    roller from an 88-BPM dub), which is the core lift over the 0.227 genre+year baseline. Reusing the
+    same encoder as the content vectors keeps the projection and those vectors in one space. Degrades
+    gracefully: a track with only a genre still projects from whatever features it has (never worse
+    than the old genre+year grounding). Sharpens as enrichment densifies audio coverage.
+
+    §2c (deferred): for tracks missing audio, Last.fm tags and an artist-similarity signal are the
+    intended next fallback features. Artist similarity belongs in the #28 artist-relationship model
+    (artist_model.artist_neighbors); see the TODO in fit() for the seam to fold it in once #28 lands.
     """
 
-    def __init__(self, feats, W):
-        self.feats = feats          # feature name -> column index
-        self.W = W                  # (F, dim)
+    def __init__(self, model, W, aidx=None, AV=None):
+        self.model = model          # embed content model: {'cat': {tok: col}, 'ncat': int, 'cont': [...]}
+        self.W = W                  # (F, dim), F = content_dim + artist_dim
+        self.aidx = aidx or {}      # {normalized_artist: row} into the collaborative artist vectors (#28)
+        self.AV = AV                # (n_artists, adim) collaborative artist vectors, or None
+        self.content_dim = model["ncat"] + len(model["cont"])
+        self.adim = AV.shape[1] if AV is not None else 0
 
-    def _feat_vec(self, genre, year):
-        x = np.zeros(len(self.feats))
-        fi = self.feats.get(f"fam:{genre_map.family(genre)}")
-        if fi is not None:
-            x[fi] = 1.0
-        if year and str(year)[:4].isdigit():
-            di = self.feats.get(f"dec:{int(str(year)[:4]) // 10 * 10}")
-            if di is not None:
-                x[di] = 1.0
-        return x
+    def _features(self, genre, year, audio, artist):
+        """Augmented feature row: the content vector (genre/subgenre/decade + audio) concatenated with
+        the track artist's collaborative vector (#28 §2c). The artist block lets tracks missing audio
+        (or even genre) still ground on the artist-relationship signal; a missing block is zeros."""
+        xc = embed.encode_content(self.model, genre, year, audio)
+        xc = np.zeros(self.content_dim) if xc is None else xc
+        av = np.zeros(self.adim)
+        if artist and self.AV is not None:
+            r = self.aidx.get(normalize(artist))
+            if r is not None:
+                av = self.AV[r]
+        return np.concatenate([xc, av])
 
-    def predict(self, genre, year=None):
-        """Predicted (un-normalized) taste vector for an enriched candidate."""
-        return self._feat_vec(genre, year) @ self.W
+    def predict(self, genre, year=None, audio=None, artist=None):
+        """Predicted (un-normalized) taste vector for an enriched candidate. `audio` is the optional
+        per-track feature dict; `artist` (display name) folds in the #28 artist signal. Either block
+        missing degrades gracefully to the other."""
+        return self._features(genre, year, audio, artist) @ self.W
 
     @classmethod
     def fit(cls, store, lam=1.0):
         keys, V, idx = embed.load_vectors(store)
         if V is None:
             return None
-        rows = [(k, g, y) for k, (g, y) in RecDao(store).track_content().items() if k in idx]
+        dao = RecDao(store)
+        content, audio = dao.track_content(), dao.track_audio_features()
+        model = embed.build_content_model(content, audio)
+        artists, AV, aidx = artist_model.load_artist_vectors(store)   # #28 §2c relational feature block
+        proj = cls(model, None, aidx, AV)
+        rows = []
+        for k in idx:                                   # only library tracks that ARE in the embedding
+            g, y = content.get(k, (None, None))
+            x = proj._features(g, y, audio.get(k), k.rsplit("|", 1)[-1])
+            if np.any(x):                               # at least one feature present
+                rows.append((k, x))
         if len(rows) < 20:
             return None
-        feats = {}
-        for _, g, y in rows:
-            feats.setdefault(f"fam:{genre_map.family(g)}", len(feats))
-            if y:
-                feats.setdefault(f"dec:{int(y) // 10 * 10}", len(feats))
-        proj = cls(feats, np.zeros((len(feats), V.shape[1])))
-        X = np.array([proj._feat_vec(g, y) for _, g, y in rows])
-        Y = np.array([V[idx[k]] for k, _, _ in rows])
-        W = np.linalg.solve(X.T @ X + lam * np.eye(len(feats)), X.T @ Y)   # ridge, closed form
-        return cls(feats, W)
+        F = proj.content_dim + proj.adim
+        X = np.array([x for _, x in rows])
+        Y = np.array([V[idx[k]] for k, _ in rows])
+        proj.W = np.linalg.solve(X.T @ X + lam * np.eye(F), X.T @ Y)       # ridge, closed form
+        return proj
 
 
 def _anchors(store, V, idx, top_n=30):
@@ -154,21 +179,26 @@ def new_artists(ctx, limit=15, max_anchors=30):
     owned = dao.library_artists()
     now = ctx.now_fn()
 
-    def fetch(name):
-        # Key the cache on the normalized name (the rest of the feature normalizes too), so
-        # casing/autocorrect variants of one artist share the cached payload + 14-day TTL instead
-        # of each re-hitting Last.fm. The API call still uses the display name.
+    # Refresh the Last.fm similar cache for each anchor: this is the #28 artist model's §C edge source.
+    # Key on the normalized name (variants share the cached payload + 14-day TTL); the API call uses
+    # the display name. Keep a normalized -> display map so candidates print with their real casing.
+    display = {}
+    for name, _, _ in anchors:
         nkey = normalize(name)
         cached = dao.cached_similar(nkey, now)
         if cached is None:
             cached = [[n, m] for n, m in lastfm.similar_artists(name, key)]
             dao.cache_similar(nkey, cached, now)
-        return cached
+        for n, _ in cached:
+            display.setdefault(normalize(n), n)
 
+    # Bridge via the #28 artist model (artist_neighbors blends your co-curation §A + content §B + the
+    # Last.fm edges §C cached above), not Last.fm alone. Candidates are normalized vocab names; the
+    # taste-fit / because / fits ranking below is kept exactly as before.
     bridges = {}   # candidate -> [(anchor_unit_vec, edge_weight, anchor_name), ...]
     for name, weight, vec in anchors:
-        for cand, match in fetch(name):
-            if not cand or normalize(cand) in owned:
+        for cand, match in artist_model.artist_neighbors(store, name, topn=50):
+            if not cand or cand in owned:
                 continue
             bridges.setdefault(cand, []).append((vec, weight * float(match), name))
 
@@ -185,7 +215,7 @@ def new_artists(ctx, limit=15, max_anchors=30):
         if score <= 0:                                      # off-taste (negative cosine). Don't surface
             continue                                        # it as a recommendation with a "fits you" label
         because = [n for _, _, n in sorted(bl, key=lambda x: -x[1])[:3]]
-        out.append({"artist": cand, "score": round(float(score), 4),
+        out.append({"artist": display.get(cand, cand.title()), "score": round(float(score), 4),
                     "because": because, "fits": [t for t, _ in fits]})
     out.sort(key=lambda c: -c["score"])
     out = out[:limit]

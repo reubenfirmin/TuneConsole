@@ -17,6 +17,9 @@
   <script src="/static/vendor/d3-timer.min.js"></script>
   <script src="/static/vendor/d3-force.min.js"></script>
   <script src="/static/app.js?v={{ asset_v }}"></script>
+  {# Clusters canvas component (templates/clusters.html). Split out of app.js; a classic global script
+     like app.js, so load order between them doesn't matter as long as both precede Alpine. #}
+  <script src="/static/cluster.js?v={{ asset_v }}"></script>
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
 <body>

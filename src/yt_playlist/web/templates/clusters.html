@@ -56,12 +56,9 @@
           </template>
         </ul>
       </div>
-      <!-- #13 P2: opt in to reaching out-of-corpus (not-yet-owned) tracks when growing -->
-      <label class="cluster-newmusic" :class="{ on: includeNew }"
-             title="Also reach for music that's not yet in your library (marked ✨)">
-        <input type="checkbox" x-model="includeNew">
-        <span>✨ Reach for new music</span>
-      </label>
+      <!-- trim loose rings: prune everything that isn't the trunk you grew or a 🔥-emphasized pick -->
+      <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
+              @click="pruneLoose()" title="Trim: prune every track that isn't on the trunk or 🔥-emphasized">✂ Trim</button>
       <!-- explicit reset: wipe the canvas back to a blank slate -->
       <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
               @click="reset()" title="Reset: clear the whole canvas">⟲ Reset</button>
@@ -192,14 +189,13 @@
     </div>
     <input type="hidden" name="journey" :value="journey">
     <input type="text" name="name" x-model="playlistName" placeholder="Cluster name" required>
-    <label class="cluster-incl" x-show="centralSongKeys().length" x-cloak>
-      <input type="checkbox" name="include_central" x-model="includeCentral">
-      Include central tracks</label>
     <input type="hidden" name="keep_keys" :value="JSON.stringify(saveKeys())">
     <input type="hidden" name="central_keys" :value="JSON.stringify(centralSongKeys())">
     <input type="hidden" name="seed_labels" :value="JSON.stringify(seedLabels())">
     <input type="hidden" name="allow_families" :value="JSON.stringify(allowedFamilies)">
-    <button type="submit" class="cta">
+    <!-- #48: full canvas snapshot, set at submit (not reactively) so reopening restores the exact graph -->
+    <input type="hidden" name="state" x-ref="clusterStateField">
+    <button type="submit" class="cta" @click="$refs.clusterStateField.value = clusterStateJSON(); openYTTab()">
       <span class="cta-txt">▶ Save &amp; play on YouTube ↗</span>
       <span class="cta-spin" aria-hidden="true"></span>
     </button>

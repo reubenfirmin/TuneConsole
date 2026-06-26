@@ -20,13 +20,15 @@ def apply_dislikes(store, status_map, now) -> None:
         if status == "DISLIKE":
             if key not in existing_dis and store.record_dislike(key, until, now):
                 graduate_moods(store, [key], -1.0, now,
-                               source=rec_params.get_param(store, "source_w_dislike"))
+                               source=rec_params.get_param(store, "source_w_dislike"),
+                               source_label="dislike")
             if key in existing_like:
                 store.clear_like(key)                       # a dislike supersedes a prior like
         elif status == "LIKE":
             if key not in existing_like and store.record_like(key, now):
                 graduate_moods(store, [key], 1.0, now,
-                               source=rec_params.get_param(store, "source_w_like"))
+                               source=rec_params.get_param(store, "source_w_like"),
+                               source_label="like")
             if key in existing_dis:
                 store.clear_dislike(key)                    # a like clears a prior dislike (preserved)
         elif status == "INDIFFERENT":
@@ -36,10 +38,11 @@ def apply_dislikes(store, status_map, now) -> None:
                 store.clear_like(key)
 
 
-def graduate_facet(store, axis, signed, now, source=1.0) -> None:
+def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -> None:
     """Accumulate one facet's signed event into the graduation ledger; when its running total
     crosses THEME_THRESHOLD, graduate it (a gentle permanent weight nudge, then a smooth reset).
-    `source` is the signal's SOURCE_W_* weight (graduation speed). Model-only. NEVER suppresses."""
+    `source` is the signal's SOURCE_W_* weight (graduation speed). `source_label` names the driving
+    signal for the §1c graduation log. Model-only. NEVER suppresses."""
     if not rec_params.get_param(store, "graduation_enabled"):
         return
     threshold = rec_params.get_param(store, "theme_threshold")
@@ -47,20 +50,23 @@ def graduate_facet(store, axis, signed, now, source=1.0) -> None:
     if abs(score) >= threshold:
         factor = (rec_params.get_param(store, "graduate_up") if score > 0
                   else rec_params.get_param(store, "graduate_down"))
-        store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
+        new_weight = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
         store.discount_theme(axis, math.copysign(threshold, score))
+        store.log_graduation(axis, source_label, score, factor, new_weight, now)
 
 
-def graduate_moods(store, keys, signed, now, source=1.0) -> None:
+def graduate_moods(store, keys, signed, now, source=1.0, source_label="mood") -> None:
     """Accumulate a transient-feeding event into the per-facet graduation ledger (presence-weighted),
-    graduating each facet that crosses the threshold. `source` is the signal's SOURCE_W_* weight.
-    Model-only. NEVER suppresses. `signed` carries intensity (±1, ±2 on 'a lot')."""
+    graduating each facet that crosses the threshold. `source` is the signal's SOURCE_W_* weight,
+    `source_label` names it for the graduation log. Model-only. NEVER suppresses. `signed` carries
+    intensity (±1, ±2 on 'a lot')."""
     facets = transient.facets_for(store, keys)
     if not facets:
         return
     n = len(set(keys)) or 1
     for axis, axis_keys in facets.items():
-        graduate_facet(store, axis, signed * (len(axis_keys) / n), now, source=source)
+        graduate_facet(store, axis, signed * (len(axis_keys) / n), now,
+                       source=source, source_label=source_label)
 
 
 def _utc_day(now) -> str:
@@ -97,6 +103,7 @@ def graduate_slider_exposure(store, now) -> None:
             ratio = (new_perm / old_perm) if old_perm > 0 else 1.0
             store.set_lean(axis, value / ratio, now)          # conserve: new_perm*(value/ratio) == old_perm*value
             store.discount_theme(axis, math.copysign(threshold, score))
+            store.log_graduation(axis, "slider", score, factor, new_perm, now)
 
 
 def graduate_play_exposure(store, now) -> None:
@@ -130,5 +137,6 @@ def graduate_play_exposure(store, now) -> None:
         if abs(score) >= threshold:
             factor = (rec_params.get_param(store, "graduate_up") if score > 0
                       else rec_params.get_param(store, "graduate_down"))
-            store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
+            new_weight = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
             store.discount_theme(axis, math.copysign(threshold, score))
+            store.log_graduation(axis, "play", score, factor, new_weight, now)

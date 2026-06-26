@@ -69,20 +69,25 @@ class RecModelRepo(Repo):
             (surface, scope or "", now)).fetchall()
         return {r["item_key"] for r in rows}
 
+    def _record_once(self, surface, item_key, kind, until, now) -> bool:
+        """Insert a first-seen feedback row (scope=''), idempotently. Returns True iff newly created,
+        so the caller feeds transient/graduation exactly once. Shared by record_dislike/record_like."""
+        if self.conn.execute(
+                "SELECT 1 FROM rec_feedback WHERE surface=? AND item_key=? AND scope='' AND kind=?",
+                (surface, item_key, kind)).fetchone():
+            return False
+        self.conn.execute(
+            "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) "
+            "VALUES (?,?,?,NULL,'',?,?)", (surface, item_key, kind, until, now))
+        self.conn.commit()
+        return True
+
     # --- YouTube dislikes (captured during sync; global long suppression, idempotent) ---
     @synchronized
     def record_dislike(self, identity_key, until, now) -> bool:
         """Persist a thumbs-down as a long global suppression (surface='sync'). Returns True iff newly
         created, so the caller feeds transient/graduation exactly once. Idempotent on re-sync."""
-        if self.conn.execute(
-                "SELECT 1 FROM rec_feedback WHERE surface='sync' AND item_key=? AND scope='' "
-                "AND kind='dislike'", (identity_key,)).fetchone():
-            return False
-        self.conn.execute(
-            "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) "
-            "VALUES ('sync',?,'dislike',NULL,'',?,?)", (identity_key, until, now))
-        self.conn.commit()
-        return True
+        return self._record_once("sync", identity_key, "dislike", until, now)
 
     @synchronized
     def clear_dislike(self, identity_key) -> None:
@@ -107,15 +112,7 @@ class RecModelRepo(Repo):
     def record_like(self, identity_key, now) -> bool:
         """Persist a first-seen like (surface='like'). Returns True iff newly created, so the caller
         feeds transient/graduation exactly once. Idempotent on re-sync. Mirrors record_dislike."""
-        if self.conn.execute(
-                "SELECT 1 FROM rec_feedback WHERE surface='like' AND item_key=? AND scope='' "
-                "AND kind='like'", (identity_key,)).fetchone():
-            return False
-        self.conn.execute(
-            "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) "
-            "VALUES ('like',?,'like',NULL,'',NULL,?)", (identity_key, now))
-        self.conn.commit()
-        return True
+        return self._record_once("like", identity_key, "like", None, now)
 
     @synchronized
     def recent_liked_keys(self, limit=None) -> list:
@@ -258,3 +255,32 @@ class RecModelRepo(Repo):
     def get_rec_discovered_content_vectors(self) -> list[tuple]:
         return [(r["identity_key"], r["vec"])
                 for r in self.conn.execute("SELECT identity_key, vec FROM rec_discovered_content_vectors")]
+
+    # --- #28 artist-relationship model vectors (collaborative + content), keyed by normalized artist ---
+    @synchronized
+    def replace_rec_artist_vectors(self, rows) -> None:
+        """Atomically replace all collaborative artist vectors. rows = iterable of (artist, bytes)."""
+        self.conn.execute("DELETE FROM rec_artist_vectors")
+        self.conn.executemany("INSERT INTO rec_artist_vectors(artist, vec) VALUES (?,?)", rows)
+        self.conn.commit()
+
+    @synchronized
+    def get_rec_artist_vectors(self) -> list[tuple]:
+        return [(r["artist"], r["vec"])
+                for r in self.conn.execute("SELECT artist, vec FROM rec_artist_vectors")]
+
+    @synchronized
+    def rec_artist_vectors_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) c FROM rec_artist_vectors").fetchone()["c"]
+
+    @synchronized
+    def replace_rec_artist_content_vectors(self, rows) -> None:
+        """Atomically replace all artist content vectors. rows = iterable of (artist, bytes)."""
+        self.conn.execute("DELETE FROM rec_artist_content_vectors")
+        self.conn.executemany("INSERT INTO rec_artist_content_vectors(artist, vec) VALUES (?,?)", rows)
+        self.conn.commit()
+
+    @synchronized
+    def get_rec_artist_content_vectors(self) -> list[tuple]:
+        return [(r["artist"], r["vec"])
+                for r in self.conn.execute("SELECT artist, vec FROM rec_artist_content_vectors")]

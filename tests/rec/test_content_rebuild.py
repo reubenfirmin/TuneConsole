@@ -66,6 +66,21 @@ def test_crossing_boundary_rebuilds_once(monkeypatch):
     assert s.get_setting("rec_content_cov_bucket") == "3"
 
 
+def test_missing_model_forces_rebuild(monkeypatch):
+    """#48: a build under older code left the vectors + bucket persisted but no rec_content_model. The
+    bucket gate must not stay shut on that state, else the model never returns and the out-of-corpus
+    'new music' pool can never be encoded. A missing model forces a rebuild even within the bucket."""
+    s = CovStore(tagged=10, total=100)
+    _patch(monkeypatch, s)
+    embed.maybe_rebuild_content_vectors(s)                   # builds, sets bucket 2 + model
+    assert s.builds == 1 and s.get_setting("rec_content_model")
+    s._settings.pop("rec_content_model")                     # simulate the legacy vectors-without-model state
+    s._tagged = 11                                           # still bucket 2: would normally short-circuit
+    assert embed.maybe_rebuild_content_vectors(s) is True    # forced because the model is missing
+    assert s.builds == 2
+    assert s.get_setting("rec_content_model")                # re-persisted, so discovered encoding can run
+
+
 def test_multi_boundary_jump_rebuilds_once_and_snaps(monkeypatch):
     s = CovStore(tagged=5, total=100)                        # 5% → bucket 1
     _patch(monkeypatch, s)

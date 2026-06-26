@@ -86,6 +86,11 @@ CREATE TABLE IF NOT EXISTS history_items (
   snapshot_id INTEGER NOT NULL REFERENCES history_snapshots(id),
   identity_key TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS history_window (
+  identity_id INTEGER NOT NULL,            -- #49 per-identity cache of the last recently-played window,
+  identity_key TEXT NOT NULL,              -- so a sync records only NEW plays, not the lingering window.
+  PRIMARY KEY (identity_id, identity_key)
+);
 CREATE TABLE IF NOT EXISTS actions (
   id INTEGER PRIMARY KEY,
   kind TEXT NOT NULL,
@@ -160,6 +165,14 @@ CREATE TABLE IF NOT EXISTS rec_discovered_content_vectors (
   identity_key TEXT PRIMARY KEY,
   vec BLOB NOT NULL                       -- #13 P2: out-of-corpus track content vectors (same model space)
 );
+CREATE TABLE IF NOT EXISTS rec_artist_vectors (
+  artist TEXT PRIMARY KEY,                -- normalized artist name (util.matching.normalize)
+  vec BLOB NOT NULL                       -- #28 float32 collaborative artist embedding (see rec/artist_model.py)
+);
+CREATE TABLE IF NOT EXISTS rec_artist_content_vectors (
+  artist TEXT PRIMARY KEY,                -- normalized artist name
+  vec BLOB NOT NULL                       -- #28 float32 artist content (genre/era/audio) vector, same model space
+);
 CREATE TABLE IF NOT EXISTS rec_feedback (
   surface TEXT NOT NULL,                  -- where it happened: 'for_you', 'suggest', 'discover'
   item_key TEXT NOT NULL,                 -- track identity_key (or 'artist:<name>' for a mute)
@@ -200,6 +213,10 @@ class Store:
         self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        # Punctuation/space/accent-insensitive search key (see matching.search_squash): lets
+        # cluster_search match 'LSD' against a title stored as 'L.S.D.' (#48).
+        from yt_playlist.util.matching import search_squash
+        self.conn.create_function("searchnorm", 1, search_squash, deterministic=True)
         self._lock = threading.RLock()
         # --- domain DAOs (each shares this connection + lock). Use store.overlaps.x() in new code;
         #     legacy store.x() still works via __getattr__ while methods migrate out of Store. ---

@@ -6,7 +6,7 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from yt_playlist.util import genre_map
 from yt_playlist.rec import embed, recommend
@@ -33,6 +33,15 @@ def build(ctx) -> APIRouter:
     def clusters_search(q: str = ""):
         """Library autosuggest: vector-backed seeds across artists / playlists / songs."""
         return JSONResponse(store.cluster_search(q, limit=6))
+
+    @router.get("/clusters/state/{ytm}")
+    def clusters_state(ytm: str):
+        """The saved canvas behind a generated cluster playlist (#48), so it can be reopened and
+        regrown a different way. Returns the stored blob verbatim, or 404 when there is none."""
+        state = store.get_cluster_canvas(ytm)
+        if not state:
+            return JSONResponse({"error": "no canvas"}, status_code=404)
+        return Response(content=state, media_type="application/json")
 
     @router.get("/clusters/genres")
     def clusters_genres():
@@ -132,7 +141,7 @@ def build(ctx) -> APIRouter:
         """Materialize the cluster as a Generated YouTube playlist and open it (same flow as Home's
         proto-save). The canvas posts only identity_keys; we resolve them to saveable track dicts here.
         keep_keys = every non-pruned track on the canvas; central_keys = the seed group's own tracks,
-        included only when 'Include central tracks' is ticked."""
+        always folded in when present."""
         form = await request.form()
         name = (form.get("name") or "").strip()
         try:
@@ -142,8 +151,7 @@ def build(ctx) -> APIRouter:
             allow_families = list(json.loads(form.get("allow_families") or "[]"))
         except (ValueError, TypeError):
             keep, central, seed_labels, allow_families = [], [], [], []
-        if form.get("include_central"):
-            keep += [k for k in central if k not in keep]
+        keep += [k for k in central if k not in keep]   # central seed tracks are always folded in
         # #15: tag the save with its own tunable 'cluster' recipe, ordered by the chosen DJ journey.
         journey = (form.get("journey") or "auto").strip()
         recipe, order = recommend.cluster_recipe(store, keep, seed_labels, allow_families, journey=journey)
@@ -163,6 +171,15 @@ def build(ctx) -> APIRouter:
                     executor.create_generated_playlist, store, name, tracks, client, now_fn(),
                     identity_id, recipe=recipe)
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
+                # #48: stash the full canvas so this playlist can be reopened in Clusters and regrown a
+                # different way. Stored verbatim (validated as JSON); absent for older clients / failures.
+                state = form.get("state")
+                if state:
+                    try:
+                        json.loads(state)
+                        store.set_cluster_canvas(res["new_ytm"], state, now_fn())
+                    except (ValueError, TypeError):
+                        pass
             except Exception:  # noqa: BLE001 - surface a friendly card, log the detail
                 ctx.logger.exception("save cluster %r failed", name)
                 result["error"] = "YouTube returned an unexpected response."

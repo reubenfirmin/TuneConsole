@@ -1,4 +1,6 @@
 from yt_playlist.rec import embed, eval_recs
+from yt_playlist.util import genre_map
+from yt_playlist.util.matching import identity_key
 
 
 def test_recall_recovers_held_out_cluster_track(store):
@@ -19,6 +21,66 @@ def test_recall_recovers_held_out_cluster_track(store):
 def test_recall_none_without_vectors(store):
     store.upsert_identity("main", "cred", None, True)
     assert eval_recs.recall_at_k(store)["recall_at_k"] is None
+
+
+def _two_cluster_playlists(store):
+    """Two tight 8-track clusters, one per playlist, so the embedding separates A from B. Returns iid."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(8)]
+    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(8)]
+    store.set_playlist_tracks(store.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
+    store.set_playlist_tracks(store.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
+    embed.build_and_store(store, dim=4)
+    return iid
+
+
+def test_temporal_recall_recovers_recent_plays_from_history(store):
+    # The model's real job: predict what you played next. Context = cluster-A tracks played before the
+    # holdout window; held-out = the rest of cluster A played inside it. A tight cluster should rank its
+    # own held-out members near the context centroid, so recall is high.
+    iid = _two_cluster_playlists(store)
+    day, t_recent = 86400, 1_000_000.0
+    store.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
+    store.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+
+    res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
+    assert res["trials"] == 4                 # the four held-out recent plays, none seen before the cutoff
+    assert res["recall"] == 1.0               # all recovered in the top-8 by the context centroid
+
+
+def test_temporal_recall_none_without_vectors(store):
+    store.upsert_identity("main", "cred", None, True)
+    assert eval_recs.temporal_recall(store)["recall"] is None
+
+
+def test_temporal_recall_none_without_history(store):
+    _two_cluster_playlists(store)             # vectors exist, but no history snapshots were taken
+    assert eval_recs.temporal_recall(store)["recall"] is None
+
+
+def test_projection_recall_breakdown_by_family_and_coverage(store):
+    # The scalar projection_recall hides where grounding fails. The breakdown must partition trials by
+    # genre family, era, and coverage band so the failure modes are locatable.
+    iid = store.upsert_identity("main", "cred", None, True)
+    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(10)]
+    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(10)]
+    for t in A:
+        store.set_track_genre(t, "Techno")
+        store.set_track_year(t, "2015")       # cluster A has a year (coverage band: genre+year)
+    for t in B:
+        store.set_track_genre(t, "Folk")      # cluster B has no year (coverage band: genre only)
+    store.set_playlist_tracks(store.upsert_playlist(iid, "PA", "PA", 10, "h", 0.0), A)
+    store.set_playlist_tracks(store.upsert_playlist(iid, "PB", "PB", 10, "h2", 0.0), B)
+    embed.build_and_store(store, dim=8)
+
+    r = eval_recs.projection_recall(store, k=10)
+    bd = r["breakdown"]
+    assert genre_map.family("Techno") in bd["by_family"]
+    assert genre_map.family("Folk") in bd["by_family"]
+    assert sum(b["trials"] for b in bd["by_family"].values()) == r["trials"]   # a partition of trials
+    assert set(bd["by_coverage"]) == {"genre+year", "genre"}   # §2 widened the band taxonomy (+audio)
+    assert bd["by_coverage"]["genre+year"]["trials"] == 10
+    assert bd["by_coverage"]["genre"]["trials"] == 10
 
 
 def test_autotune_returns_grid_and_picks_best(store):

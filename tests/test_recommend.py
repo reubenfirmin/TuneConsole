@@ -543,3 +543,22 @@ def test_graduation_enabled_still_graduates(store):
     for _ in range(10):
         recommend.graduate_facet(store, "genre:rock", 1.0, now=1000.0, source=1.0)
     assert store.get_weights().get("genre:rock", 1.0) > 1.0
+
+
+def test_generators_exclude_dj_mixes(store):
+    """#44: a DJ mix / concert (> _MAX_TRACK_DURATION_S = 20 min) must not surface in generated-
+    playlist candidate pools, even when well-played. Short songs still come through; NULL-duration
+    tracks (the common case) are kept."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    now = 1000.0 * 86400
+    day = 86400
+    store.upsert_track("v1", "Short Song", "X", None, 200)        # 200s real song
+    store.upsert_track("v2", "Live Set", "X", None, 3600)         # 60-min concert/mix
+    store.upsert_track("v3", "Untimed", "X", None, None)          # unknown duration -> kept
+    for d in range(6):                                            # all well-played, then gone quiet
+        store.add_history_snapshot(iid, now - (40 + d) * day, ["short song|x", "live set|x", "untimed|x"])
+
+    keys = {r["key"] for r in store.comfort_candidates(now=now, min_plays=4, recency_full_days=30, limit=20)}
+    assert "short song|x" in keys
+    assert "untimed|x" in keys
+    assert "live set|x" not in keys              # the 60-min mix is excluded from generated playlists

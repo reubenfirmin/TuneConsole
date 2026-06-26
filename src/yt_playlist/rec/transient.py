@@ -8,7 +8,7 @@ expiry), reactive by interaction rank, relaxes only as sync goes stale. See the 
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import rec_params
+from yt_playlist.rec import embed, rec_params
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -150,5 +150,53 @@ def centroid_tilt(store, now, V, idx):
 
     _add_dir(plays, play_w)
     _add_dir(likes, like_w)
+    n = np.linalg.norm(tilt)
+    return tilt / n if n > 0 else None
+
+
+def audio_centroid_tilt(store, now):
+    """Unit direction in the audio-aware CONTENT vector space toward recent listening, so ranking can
+    lean to the SOUND of what you have been playing (tempo / energy / mood), not just its genre/era/
+    artist facets or its co-occurrence neighbours. The content-space sibling of `centroid_tilt`: same
+    transient stream (mood events, recent plays, recent likes), same recency weighting, but built from
+    the persisted content vectors (embed.load_content_vectors), which carry the z-scored audio block.
+
+    Returns None when the content model is unbuilt or no recent track has a content vector, so a cold
+    or quiet user is exactly as today. Audio is sparse and growing: tracks without a content vector
+    simply do not contribute, so the tilt is defined by whatever covered tracks the user has played
+    (graceful degradation). Staleness is applied by the caller, mirroring `centroid_tilt`.
+
+    This is the producer only. The scorer applies it (a content-space cosine term parallel to the
+    collaborative `_apply_mood`); see the wiring note that ships with this change.
+    """
+    _ckeys, CV, cidx = embed.load_content_vectors(store)
+    if CV is None:
+        return None
+    gp = rec_params.get_param
+    a = gp(store, "mood_recency_alpha")
+    play_w = gp(store, "play_transient_w")
+    like_w = gp(store, "like_transient_w")
+    limit = gp(store, "recent_play_limit")
+    tilt = np.zeros(CV.shape[1], dtype=np.float64)
+
+    for rank, (_ts, direction, keys) in enumerate(store.recent_mood_events()):     # newest-first
+        rows = [cidx[k] for k in keys if k in cidx]
+        if not rows:
+            continue
+        c = CV[rows].mean(0)
+        nrm = np.linalg.norm(c)
+        if nrm == 0:
+            continue
+        tilt += direction * ((1.0 - a) ** rank) * (c / nrm)
+
+    def _add_dir(keys, w_base):
+        nonlocal tilt
+        for rank, k in enumerate(keys):
+            if k not in cidx:
+                continue
+            tilt = tilt + w_base * ((1.0 - a) ** rank) * CV[cidx[k]]    # CV rows are already unit
+
+    _add_dir(store.recent_keys_ordered(0, limit=limit), play_w)
+    _add_dir(store.recent_liked_keys(limit=limit), like_w)
     n = np.linalg.norm(tilt)
     return tilt / n if n > 0 else None

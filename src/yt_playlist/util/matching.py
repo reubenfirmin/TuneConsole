@@ -27,6 +27,14 @@ def normalize(s: str) -> str:
 def identity_key(title: str, artist: str) -> str:
     return f"{normalize(title)}|{normalize(artist)}"
 
+def search_squash(s: str) -> str:
+    """Punctuation/space/accent-insensitive key for substring search: 'L.S.D.' -> 'lsd',
+    'Café del Mar' -> 'cafedelmar'. Builds on normalize() (accent fold, feat/remaster noise removed,
+    punctuation -> space) and then drops the spaces, so a query typed WITHOUT the punctuation still
+    matches (#48: typing 'LSD' should find the track titled 'L.S.D.'). Registered as the SQLite
+    `searchnorm()` function so it can be applied column-side in cluster_search."""
+    return normalize(s).replace(" ", "")
+
 def fuzzy_ratio(a: str, b: str) -> float:
     return fuzz.token_sort_ratio(a, b) / 100.0
 

@@ -8,7 +8,7 @@ rebuild, so frequent syncs never pile up.
 import threading
 import time
 
-from yt_playlist.rec import embed, recommend
+from yt_playlist.rec import artist_model, embed, recommend
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -158,6 +158,23 @@ class RecWorker:
         log.info("rec rebuild: starting")
         n = embed.build_and_store(store)
         log.info("rec rebuild: embedded %d vectors in %.1fs", n, time.monotonic() - t0)
+        # Keep the content (genre/era) space + its model in step with the collaborative rebuild, so the
+        # cluster blend and the out-of-corpus "new music" pool refresh on the regular rebuild cadence
+        # rather than ONLY when an enrichment batch happens to cross a coverage bucket (#48). Bucket-gated
+        # inside (cheap when nothing changed; forced when the model is missing); guarded so a content
+        # failure never breaks the rebuild.
+        try:
+            embed.maybe_rebuild_content_vectors(store)
+        except Exception:  # noqa: BLE001 - content space is best-effort; don't fail the rebuild
+            log.warning("rec rebuild: content-vector refresh failed", exc_info=True)
+        # #28 artist-relationship model, built alongside the track embedding. Guarded: an artist-model
+        # failure must never break the track rebuild (the model is consumed by nothing critical yet).
+        try:
+            ta = time.monotonic()
+            na = artist_model.build_artist_model_and_store(store)
+            log.info("rec rebuild: artist model %d artists in %.1fs", na, time.monotonic() - ta)
+        except Exception:  # noqa: BLE001 - artist model is best-effort; don't fail the rebuild
+            log.warning("rec rebuild: artist model failed", exc_info=True)
         # Materialize a deeper pool than a single card shows, so the surface has several epochs of
         # material to rotate through before it has to wrap.
         surfaces = (

@@ -1297,6 +1297,8 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 .fb-type-chip { display: inline-block; background: rgba(21,233,140,0.12); color: #15e98c;
   border: 1px solid rgba(21,233,140,0.4); border-radius: 999px; padding: 0.05rem 0.55rem;
   font-weight: 700; font-size: 0.72rem; margin-right: 0.4rem; }
+.fb-reopen { margin-left: 0.5rem; color: #15e98c; text-decoration: none; font-weight: 600; white-space: nowrap; }
+.fb-reopen:hover { text-decoration: underline; }
 /* "Made from" recipe line on a generated playlist's feedback panel */
 .fb-recipe { margin: 0 0 0.6rem; font-size: 0.85rem; color: var(--dim); }
 .fb-recipe .fb-chip { display: inline-block; background: var(--accent-soft); color: var(--accent-2);
@@ -1450,11 +1452,6 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 .cn-new { position: absolute; top: -7px; right: -7px; font-size: 12px; line-height: 1;
   filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6)); pointer-events: none; z-index: 2; }
 .cn-track.new-music .cn-label { color: var(--accent-2); }
-/* "Reach for new music" opt-in toggle in the cluster controls */
-.cluster-newmusic { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer;
-  font-size: 0.8rem; color: var(--dim); padding: 0.25rem 0.5rem; border: 1px solid var(--border-2);
-  border-radius: 999px; white-space: nowrap; }
-.cluster-newmusic.on { color: var(--accent-2); border-color: var(--accent); background: var(--accent-soft); }
 .cn-central { display: flex; flex-direction: column; gap: 0.35rem; }
 .cn-eyebrow { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.14em; color: var(--accent-2); }
 .cn-seeds { display: flex; flex-wrap: wrap; gap: 0.3rem; }
@@ -1523,8 +1520,12 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
   padding: 0.6rem clamp(1rem, 4vw, 2.4rem) 0;
   position: relative; z-index: 4;          /* sit above the (positioned) canvas so the input stays clickable */
   transition: transform 0.55s cubic-bezier(0.2, 0.7, 0.2, 1); }
-/* Empty state: float the search to mid-screen; it slides up to the top on the first graph render. */
-.cluster-search:not(.docked) { margin: 0.5rem 0 1rem; transform: translateY(40vh); }
+/* Empty state: float the search to mid-screen; it slides up to the top on the first graph render.
+   Absolute (out of flow) so it reserves NO height at the top: otherwise its in-flow box leaves an
+   empty "top bar" band above the canvas before the search has docked. Both states anchor at the top,
+   so only the transform animates on dock (the position swap is visually inert). */
+.cluster-search:not(.docked) { position: absolute; left: 0; right: 0; top: 0;
+  margin: 0; transform: translateY(40vh); }
 .cluster-search.docked { margin: 0 0 0.6rem; transform: translateY(0); }
 /* search box + genre combo share one row */
 .cluster-search-row { display: flex; gap: 0.6rem; align-items: center; justify-content: center;
@@ -1647,7 +1648,6 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
   flex: 1; padding: 0.55rem 0.7rem; background: var(--bg-2); border: 1px solid var(--border-2);
   border-radius: var(--radius-sm); color: var(--text);
 }
-.cluster-incl { display: flex; align-items: center; gap: 0.4rem; color: var(--dim); font-size: 0.85rem; white-space: nowrap; }
 /* Save CTA spinner: shown while the save request is in flight (htmx adds .htmx-request to the form). */
 .cluster-savebar .cta { position: relative; }
 .cluster-savebar .cta-spin { display: none; position: absolute; left: 50%; top: 50%;

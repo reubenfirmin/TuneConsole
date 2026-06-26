@@ -89,6 +89,8 @@ def build(ctx) -> APIRouter:
             "mood_state": recommend.playlist_mood_state(store, pid, now_fn()) if is_generated else 0,
             "mood_states": recommend.track_mood_states(store, now_fn()) if is_generated else {},
             "recipe": recipe,
+            # #48: a cluster-derived playlist whose canvas we saved can be reopened and regrown
+            "has_cluster_canvas": bool(store.get_cluster_canvas(pl.ytm_playlist_id)) if is_generated else False,
             "journey_label": journeys.JOURNEY_LABELS.get((recipe or {}).get("journey")) if is_generated else None,
             "journey_desc": journeys.JOURNEY_DESCRIPTIONS.get((recipe or {}).get("journey")) if is_generated else None,
             "kind": store.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),

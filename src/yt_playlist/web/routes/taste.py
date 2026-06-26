@@ -91,10 +91,14 @@ def build(ctx) -> APIRouter:
 
     @router.get("/taste/recall")
     def taste_recall(request: Request):
-        # the expensive stats, lazy-loaded so the page paints instantly
+        # the expensive stats, lazy-loaded so the page paints instantly. This is the §1 model-health
+        # panel: warm-path recall@k, forward-looking temporal_recall, cold-path projection_recall (with
+        # its failure-mode breakdown), and graduation counts by source from the §1c log.
         return templates.TemplateResponse(request, "_partials/taste_recall.html",
                                           {"recall": eval_recs.recall_at_k(store, k=20),
-                                           "proj": eval_recs.projection_recall(store, k=20)})
+                                           "proj": eval_recs.projection_recall(store, k=20),
+                                           "temporal": eval_recs.temporal_recall(store, holdout_days=30, k=20),
+                                           "grad_counts": store.graduation_log_counts()})
 
     @router.get("/taste/preview")
     def taste_preview(request: Request):

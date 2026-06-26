@@ -95,22 +95,48 @@ def test_save_resolves_keys_to_tracks(store):
     assert store.get_recipe(fc.created[0][0])["model"] == "cluster"
 
 
-def test_save_include_central_toggles_central_tracks(store):
+def test_save_always_folds_in_central_tracks(store):
     c, fc = _save_client(store)
     store.upsert_track("va", "Ta", "Art", None, None)
     store.upsert_track("vc", "Tc", "Central", None, None)
     keep = json.dumps([identity_key("Ta", "Art")])
     central = json.dumps([identity_key("Tc", "Central")])
 
-    c.post("/clusters/save", data={"name": "No Central", "keep_keys": keep, "central_keys": central})
-    assert "vc" not in fc.added[0][1]                       # central excluded by default
-
-    c.post("/clusters/save", data={"name": "With Central", "keep_keys": keep,
-                                   "central_keys": central, "include_central": "on"})
-    assert "vc" in fc.added[1][1]                           # checkbox folds central tracks in
+    # The "Include central tracks" toggle is gone: central seed tracks are always folded into the save.
+    c.post("/clusters/save", data={"name": "With Central", "keep_keys": keep, "central_keys": central})
+    assert "vc" in fc.added[0][1]
 
 
 def test_save_rejects_empty(store):
     c, _ = _save_client(store)
     r = c.post("/clusters/save", data={"name": "x", "keep_keys": "[]", "central_keys": "[]"})
     assert r.status_code == 200 and "Couldn't save" in r.text
+
+
+def test_save_persists_canvas_for_reopen(store):
+    """#48: a successful save stashes the full canvas keyed by the new playlist's ytm, and
+    /clusters/state/<ytm> returns it verbatim so the cluster can be reopened and regrown."""
+    c, fc = _save_client(store)
+    store.upsert_track("va", "Ta", "Art", None, None)
+    keep = json.dumps([identity_key("Ta", "Art")])
+    state = json.dumps({"v": 1, "rootId": 1, "nodes": [{"id": 1, "kind": "central"}], "trunk": []})
+    r = c.post("/clusters/save", data={"name": "Reopenable", "keep_keys": keep,
+                                       "central_keys": "[]", "state": state})
+    assert r.status_code == 200 and "Saved" in r.text
+    ytm = fc.created[0][0]
+    got = c.get(f"/clusters/state/{ytm}")
+    assert got.status_code == 200 and got.json() == json.loads(state)
+
+
+def test_state_404_when_no_canvas(store):
+    c, _ = _save_client(store)
+    assert c.get("/clusters/state/UNKNOWN").status_code == 404
+
+
+def test_save_without_state_stores_no_canvas(store):
+    """Older clients (or a save with no state field) don't create a canvas row, so reopen 404s."""
+    c, fc = _save_client(store)
+    store.upsert_track("va", "Ta", "Art", None, None)
+    keep = json.dumps([identity_key("Ta", "Art")])
+    c.post("/clusters/save", data={"name": "NoCanvas", "keep_keys": keep, "central_keys": "[]"})
+    assert c.get(f"/clusters/state/{fc.created[0][0]}").status_code == 404

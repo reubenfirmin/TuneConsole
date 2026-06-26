@@ -111,10 +111,11 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history())
         hist_keys = [identity_key(t.get("title", ""), _artist(t)) for t in history]
-        # Snapshot the listening history: this IS the transient play feed (transient.play_facet_leans
-        # reads it). Plays graduate into permanent taste later, by daily exposure (graduate_play_
-        # exposure on the Home feed render), not here, so a re-fetched window cannot re-count (#46).
-        store.add_history_snapshot(identity_id, now, hist_keys)
+        # Record only NEW plays: YouTube re-sends the same recently-played window each sync (~91%
+        # overlap), so record_history_plays diffs it against this identity's cached window and stores
+        # just the newly-appeared tracks. This is the transient play feed (transient.play_facet_leans
+        # reads it) and keeps play COUNT(*) honest: it counts plays, not lingering (#49).
+        store.record_history_plays(identity_id, now, hist_keys)
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")
@@ -179,14 +180,14 @@ def sync_plays_identity(store, identity_id, client, now, on_progress=None, label
             rated = {k: "LIKE" for k in store.get_playlist_track_keys(lm.id)}
             recommend.apply_dislikes(store, rated, now)
 
-    # Plays: snapshot the listening history (the transient play feed; transient.play_facet_leans reads
-    # it). Plays graduate into permanent taste later by daily exposure (graduate_play_exposure on the
-    # Home feed render), NOT here, so this fast path re-fetching the same window cannot re-count (#46).
+    # Plays: record only NEW plays from the recently-played window (record_history_plays diffs it
+    # against this identity's cached window). The fast path re-fetches the same window, so this is what
+    # stops it re-counting lingering tracks as plays (#49); it is the transient play feed too.
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:
         history = with_retry(lambda: client.get_history())
         hist_keys = [identity_key(t.get("title", ""), _artist(t)) for t in history]
-        store.add_history_snapshot(identity_id, now, hist_keys)
+        store.record_history_plays(identity_id, now, hist_keys)
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")

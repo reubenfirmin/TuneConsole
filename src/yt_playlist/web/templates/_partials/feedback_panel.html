@@ -6,7 +6,10 @@
    Expects `pid`, `facets` ({genres, eras}), and `mood_state` (+1/-1/0). #}
 <section class="fb-panel card" id="fb-{{ pid }}">
   {% if recipe and recipe.model == 'cluster' %}
-  <p class="fb-type"><span class="fb-type-chip">Cluster</span> grown on the canvas</p>
+  <p class="fb-type"><span class="fb-type-chip">Cluster</span> grown on the canvas
+    {% if has_cluster_canvas %}{# #48: jump back to the exact graph to regrow it differently #}
+    <a class="fb-reopen" href="/clusters?from={{ pl.ytm_playlist_id }}">↩ Reopen in Clusters</a>{% endif %}
+  </p>
   {% endif %}
   {% if recipe and recipe.facets %}
   <p class="fb-recipe">Made from

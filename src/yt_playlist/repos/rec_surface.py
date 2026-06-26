@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS rec_recipes (
   recipe TEXT NOT NULL,                   -- JSON: the rolled theme + params + dj seed + version
   created_at REAL
 );
+CREATE TABLE IF NOT EXISTS cluster_canvas (
+  playlist_ytm TEXT PRIMARY KEY,          -- the generated playlist's YouTube id (#48: reopen its cluster)
+  state TEXT NOT NULL,                     -- JSON: the full canvas blob (nodes, trunk, seeds, filter, view)
+  created_at REAL
+);
 CREATE TABLE IF NOT EXISTS rec_theme (
   facet      TEXT PRIMARY KEY,             -- 'genre:<fam>' | 'era:<decade>' | 'artist:<name>'
   score      REAL NOT NULL,                -- persistent signed running total (interaction-driven, no time decay)
@@ -45,6 +50,15 @@ CREATE TABLE IF NOT EXISTS rec_theme (
 CREATE TABLE IF NOT EXISTS rec_play_grad (
   axis               TEXT PRIMARY KEY,      -- facet token, e.g. 'genre:techno'
   last_graduated_day TEXT                   -- UTC YYYY-MM-DD the play-exposure funnel last graduated this axis
+);
+CREATE TABLE IF NOT EXISTS rec_grad_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  axis       TEXT NOT NULL,                 -- the facet that graduated, e.g. 'genre:techno'
+  source     TEXT NOT NULL,                 -- the signal that drove it: 'play' | 'slider' | 'vibe' | 'like' | ...
+  score      REAL NOT NULL,                 -- the ledger value at the crossing (what tripped THEME_THRESHOLD)
+  factor     REAL NOT NULL,                 -- the nudge multiplier applied (graduate_up / graduate_down)
+  new_weight REAL NOT NULL,                 -- the resulting permanent weight after the nudge
+  created_at REAL NOT NULL
 );
 """
 
@@ -69,6 +83,27 @@ class RecSurfaceRepo(Repo):
         row = self.conn.execute("SELECT recipe FROM rec_recipes WHERE playlist_ytm=?",
                                 (playlist_ytm,)).fetchone()
         return json.loads(row["recipe"]) if row else None
+
+    # --- cluster canvas: the full graph behind a saved cluster playlist, so it can be reopened and
+    #     regrown a different way (#48). `state` is the client's serialized canvas blob, stored verbatim. ---
+    @synchronized
+    def set_cluster_canvas(self, playlist_ytm, state, now=None) -> None:
+        self.conn.execute(
+            "INSERT INTO cluster_canvas(playlist_ytm, state, created_at) VALUES (?,?,?) "
+            "ON CONFLICT(playlist_ytm) DO UPDATE SET state=excluded.state, created_at=excluded.created_at",
+            (playlist_ytm, state, now))
+        self.conn.commit()
+
+    @synchronized
+    def get_cluster_canvas(self, playlist_ytm):
+        row = self.conn.execute("SELECT state FROM cluster_canvas WHERE playlist_ytm=?",
+                                (playlist_ytm,)).fetchone()
+        return row["state"] if row else None
+
+    @synchronized
+    def delete_cluster_canvas(self, playlist_ytm) -> None:
+        self.conn.execute("DELETE FROM cluster_canvas WHERE playlist_ytm=?", (playlist_ytm,))
+        self.conn.commit()
 
     @synchronized
     def get_recipe_created_ats(self) -> dict:
@@ -179,6 +214,15 @@ class RecSurfaceRepo(Repo):
         return json.loads(row["payload"])
 
     @synchronized
+    def artist_similar_edges(self, artist) -> list:
+        """Cached Last.fm similar pairs [[name, match], ...] for an artist, ignoring TTL ([] if none).
+        Used by the #28 artist model's §C edge block, where a slightly-stale relatedness hint is fine
+        (the model rebuilds periodically and new_artists keeps the cache warm)."""
+        row = self.conn.execute(
+            "SELECT payload FROM rec_artist_similar WHERE artist=?", (artist,)).fetchone()
+        return json.loads(row["payload"]) if row and row["payload"] else []
+
+    @synchronized
     def cache_similar(self, artist, pairs, now) -> None:
         self.conn.execute(
             "INSERT INTO rec_artist_similar(artist, payload, fetched_at) VALUES (?,?,?) "
@@ -212,6 +256,31 @@ class RecSurfaceRepo(Repo):
         transient->permanent funnel, for the Taste-model transparency view."""
         return self.conn.execute(
             "SELECT facet, score, updated_at FROM rec_theme ORDER BY ABS(score) DESC").fetchall()
+
+    # --- graduation instrumentation: one row per threshold-crossing nudge (§1c model-health) ---
+    @synchronized
+    def log_graduation(self, axis, source, score, factor, new_weight, now) -> None:
+        """Record one graduation event: the axis, the source signal that drove it, the ledger value at
+        the crossing, the nudge factor, and the resulting permanent weight. Append-only; read by the
+        model-health panel to show graduation counts by source and to tune SOURCE_W_* on evidence."""
+        self.conn.execute(
+            "INSERT INTO rec_grad_log(axis, source, score, factor, new_weight, created_at) "
+            "VALUES (?,?,?,?,?,?)", (axis, source, score, factor, new_weight, now))
+        self.conn.commit()
+
+    @synchronized
+    def recent_graduations(self, limit=50) -> list:
+        """The most recent graduation events, newest-first: rows of
+        {axis, source, score, factor, new_weight, created_at}."""
+        return self.conn.execute(
+            "SELECT axis, source, score, factor, new_weight, created_at FROM rec_grad_log "
+            "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+    @synchronized
+    def graduation_log_counts(self) -> dict:
+        """{source: count} over all logged graduation events, for the model-health panel."""
+        return {r["source"]: r["c"] for r in self.conn.execute(
+            "SELECT source, COUNT(*) c FROM rec_grad_log GROUP BY source").fetchall()}
 
     # --- play-exposure graduation: per-axis once-per-UTC-day stamp (the idempotency guard) ---
     @synchronized

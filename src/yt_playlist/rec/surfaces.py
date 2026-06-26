@@ -386,6 +386,39 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
     return _take_from_ranked(cooc, limit, per_artist_cap, keep)
 
 
+def related_artist_suggestions(store, playlist_id, now, limit=8):
+    """#24/#28: tracks by artists RELATED to this playlist's artists (owned + out-of-corpus), for the
+    'Complete this playlist' pool. Out-of-corpus pulls are the headline: tracks not yet in the library
+    that fit the playlist's artist neighbourhood, which the embedding/co-occurrence completer cannot
+    reach. Excludes the playlist's own tracks, suppressed, and muted. Empty until the artist model is
+    built. Returned as ForYouItems on the 'related_artist' lane (their reason labels the source)."""
+    from yt_playlist.rec import artist_model
+    members = store.get_playlist_track_keys(playlist_id)
+    seeds = {k.rsplit("|", 1)[-1] for k in members}        # this playlist's (normalized) artists
+    if not seeds:
+        return []
+    member_set = set(members)
+    suppressed = store.suppressed_keys("suggest", now or 0, scope=str(playlist_id))
+    muted = store.muted_artists()
+    out, seen = [], set()
+    # Out-of-corpus first: those are the unique value here (the in-library completer already covers
+    # owned tracks), so they're not crowded out of the limited pool by owned related-artist tracks.
+    cands = sorted(artist_model.artist_track_candidates(store, seeds, topn=limit * 4),
+                   key=lambda c: not c.get("out_of_corpus"))
+    for c in cands:
+        key, artist = c.get("key"), c.get("artist") or ""
+        if not key or key in member_set or key in seen or key in suppressed or artist in muted:
+            continue
+        seen.add(key)
+        reason = (f"New: {artist}, related to this playlist's artists" if c.get("out_of_corpus")
+                  else f"By {artist}, related to this playlist")
+        out.append(ForYouItem(c.get("title") or "", artist, c.get("album") or "", c.get("video_id"),
+                              c.get("thumbnail"), 0, reason, key, lane="related_artist"))
+        if len(out) >= limit:
+            break
+    return out
+
+
 # Canonical home-card names (code vocabulary == product wording). The legacy function names are kept
 # as the definitions to avoid churning internal callers; prefer wheelhouse/catalog in new code.
 wheelhouse = for_you          # Home card "More in your wheelhouse"

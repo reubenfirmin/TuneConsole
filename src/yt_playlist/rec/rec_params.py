@@ -70,6 +70,18 @@ PARAMS = [
               "filed them in playlists. 0 = pure playlist co-occurrence (old behaviour); higher = more "
               "musical similarity, so a seed reaches its own genre even when you never playlist it there.",
               0.0, 1.0, 0.05, 0.30),
+    # --- Artist relationship model (#28). How its blocks combine when relating artists. content_weight
+    # is the §B (genre/era/audio) fraction vs the §A co-curation block (collab = 1 - content, the
+    # cluster_content_weight convention); edge_weight adds the §C Last.fm-edge bonus on top. ---
+    ParamSpec("artist_content_weight", "Artist content blend", "discovery",
+              "When relating artists, how much to lean on what they SOUND like (genre/era/audio) vs who "
+              "you co-curate them with. 0 = pure co-curation; higher = more genre/audio similarity, which "
+              "also lets artists with thin co-curation (or none) still be placed.",
+              0.0, 1.0, 0.05, 0.30, advanced=True),
+    ParamSpec("artist_edge_weight", "Artist Last.fm-edge weight", "discovery",
+              "How much a Last.fm similar-artist edge adds when relating artists, on top of co-curation "
+              "and content. Reaches out-of-corpus artists the user hasn't curated together yet.",
+              0.0, 1.0, 0.05, 0.10, advanced=True),
     # --- Breadth steering (#7). The interactive Breadth bar on the Home fingerprint binds to
     # breadth_bias; breadth_gain is its (advanced) sensitivity. Default 0 == today's behaviour. ---
     ParamSpec("breadth_bias", "Breadth", "discovery",
@@ -92,6 +104,9 @@ PARAMS = [
     ParamSpec("dislike_transient_w", "Recent-dislike push", "transient",
               "How hard a recent thumbs-down pushes the feed away from similar music.",
               0.0, 3.0, 0.05, 1.50),
+    ParamSpec("audio_transient_w", "Recent-sound push", "transient",
+              "How hard recent listening tilts the feed toward similar SOUND (tempo, energy, mood), "
+              "not just genre/era. 0 = the sound of recent plays doesn't steer.", 0.0, 2.0, 0.05, 0.30),
     ParamSpec("facet_gain", "Facet responsiveness", "transient",
               "How strongly a genre/era/artist lean re-ranks the feed. Higher = right-now leans bite "
               "harder.", 0.0, 1.0, 0.05, 0.35),

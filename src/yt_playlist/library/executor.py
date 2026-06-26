@@ -370,6 +370,7 @@ def gc_generated_playlists(store, clients, now, grace_days=None) -> list[dict]:
                            pl.ytm_playlist_id, backup_path)
             client.delete_playlist(pl.ytm_playlist_id)
             store.remove_playlist(pl.id)
+            store.delete_cluster_canvas(pl.ytm_playlist_id)   # #48: don't leave its (large) saved canvas behind
             store.record_action(GC_GENERATED,
                                 json.dumps({"ytm": pl.ytm_playlist_id, "title": pl.title}),
                                 "{}", "executed", json.dumps({"backup": backup_path}), now)

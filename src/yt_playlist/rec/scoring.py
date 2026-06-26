@@ -162,6 +162,17 @@ def _breadth_factors(shares, bias, gain):
     return factors
 
 
+def _axis_mult(weights, kind, token, standing, leans, fparams):
+    """One axis's multiplier: permanent weight x standing lean x transient facet multiplier, or a
+    neutral 1.0 when the track has no value on that axis (token is None). Unifies the identical chain
+    used for genre family, sub-genre, era and artist. fparams = (facet_gain, facet_mult_min, facet_mult_max)."""
+    if token is None:
+        return 1.0
+    full = f"{kind}:{token}"
+    transient_mult = transient.facet_multiplier(leans.get(full, 0.0), *fparams)
+    return weights.get(token, 1.0) * standing.get(full, 1.0) * transient_mult
+
+
 def _axis_weights_for(store, keys, now=None):
     """{key: genre_w * era_w * artist_w}, where each axis weight is permanent x standing lean x the
     transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
@@ -184,34 +195,19 @@ def _axis_weights_for(store, keys, now=None):
     dao = RecDao(store)
     genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
     lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
-    fgain = rec_params.get_param(store, "facet_gain")
-    fmin = rec_params.get_param(store, "facet_mult_min")
-    fmax = rec_params.get_param(store, "facet_mult_max")
-
-    def tm(token):                                      # live transient facet multiplier for a token
-        return transient.facet_multiplier(leans.get(token, 0.0), fgain, fmin, fmax)
-
-    def sl(token):                                       # standing (held-slider) lean for a token
-        return standing.get(token, 1.0)
-
-    def axis_mult(weights, kind, token):
-        """One axis's multiplier: permanent weight x standing lean x transient facet multiplier, or a
-        neutral 1.0 when the track has no value on that axis (token is None). Unifies the identical
-        chain used for genre family, sub-genre, era and artist."""
-        if token is None:
-            return 1.0
-        full = f"{kind}:{token}"
-        return weights.get(token, 1.0) * sl(full) * tm(full)
+    fparams = (rec_params.get_param(store, "facet_gain"),
+               rec_params.get_param(store, "facet_mult_min"),
+               rec_params.get_param(store, "facet_mult_max"))
 
     mult = {}
     for k in keys:
         fam = genre_map.family(genres[k]) if k in genres else None
         sub = genre_map.subgenre(genres[k]) if k in genres else None
-        gm = axis_mult(gw, "genre", fam) * bfac.get(fam, 1.0)   # breadth steer folds in atop genre weight
+        gm = _axis_mult(gw, "genre", fam, standing, leans, fparams) * bfac.get(fam, 1.0)   # breadth folds in
         if sub and sub != fam:
-            gm *= axis_mult(gw, "genre", sub)
-        em = axis_mult(ew, "era", decades.get(k))
-        am = axis_mult(aw, "artist", artists.get(k))
+            gm *= _axis_mult(gw, "genre", sub, standing, leans, fparams)
+        em = _axis_mult(ew, "era", decades.get(k), standing, leans, fparams)
+        am = _axis_mult(aw, "artist", artists.get(k), standing, leans, fparams)
         mult[k] = max(lo, min(hi, gm)) * max(lo, min(hi, em)) * max(lo, min(hi, am))
     return mult
 
@@ -270,13 +266,43 @@ MOOD_ALPHA = 0.35   # how hard a mood event tilts the lanes, relative to the tas
 mood_tilt = transient.centroid_tilt   # back-compat: tests/callers use recommend.mood_tilt(store, now, V, idx)
 
 
+def _audio_tilt_boost(store, now, idx):
+    """Per-row cosine of each warm candidate's CONTENT vector to the recent-listening audio direction
+    (#45), aligned to V rows via `idx` (key -> row). None when there is no audio tilt or no content
+    vectors built. A candidate without a content vector contributes 0, so the term degrades gracefully
+    as audio coverage rises rather than being all-or-nothing."""
+    atilt = transient.audio_centroid_tilt(store, now)
+    if atilt is None:
+        return None
+    _keys, CV, cidx = embed.load_content_vectors(store)
+    if CV is None:
+        return None
+    boost = np.zeros(len(idx))
+    for k, r in idx.items():
+        ci = cidx.get(k)
+        if ci is not None:
+            boost[r] = float(CV[ci] @ atilt)
+    return boost
+
+
 def _apply_mood(scores, store, now, V, idx):
-    """Blend the transient centroid tilt into per-track scores, scaled down as sync goes stale."""
-    tilt = transient.centroid_tilt(store, now, V, idx)
-    if tilt is None:
-        return scores
+    """Blend the transient tilts into per-track scores, each scaled down as sync goes stale.
+
+    Two tilts from the same recent stream (plays/likes/mood): the collaborative centroid tilt (co-listen
+    space) and the audio centroid tilt (#45, the content space), so ranking can lean toward the SOUND
+    (tempo/energy/mood) of what you have been playing, not only its genre/era/artist facets. They apply
+    independently: a candidate missing one space simply skips that term, and the audio tilt can still
+    fire for recent plays that have a content vector but no collaborative one."""
     factor = transient.staleness_factor(store, now)
     if factor <= 0:
         return scores
-    Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
-    return scores + MOOD_ALPHA * factor * (Vn @ tilt)
+    tilt = transient.centroid_tilt(store, now, V, idx)
+    if tilt is not None:
+        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
+        scores = scores + MOOD_ALPHA * factor * (Vn @ tilt)
+    w = rec_params.get_param(store, "audio_transient_w")
+    if w > 0:
+        boost = _audio_tilt_boost(store, now, idx)
+        if boost is not None:
+            scores = scores + w * factor * boost
+    return scores

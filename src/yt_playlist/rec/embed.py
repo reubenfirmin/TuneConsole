@@ -32,6 +32,12 @@ _INIT_SCALE = 0.01
 _SGNS_BATCH = 2048
 
 
+def _normalize(v):
+    """L2-normalize a 1-D vector with the standard epsilon guard (a zero vector maps to ~0, never NaN).
+    For 2-D row-normalization use np.linalg.norm(..., axis=1, keepdims=True) inline."""
+    return v / (np.linalg.norm(v) + _NORM_EPS)
+
+
 def build_vectors(store, dim=DIM):
     """Return (keys, V), L2-normalised per-track embeddings. Method ('svd' default, or 'item2vec')
     comes from the recall@k-tuned `rec_embed_method` setting."""
@@ -153,14 +159,19 @@ def build_and_store(store, dim=None) -> int:
     return len(keys)
 
 
-def load_vectors(store):
-    """Return (keys, V, idx) from persisted vectors, or ([], None, {}) if none built yet."""
-    rows = store.get_rec_vectors()
+def _load_vector_rows(rows):
+    """Unpack persisted (key, float32-bytes) rows into (keys, V, idx); ([], None, {}) when empty.
+    Shared by the collaborative, content, and discovered-content vector loaders."""
     if not rows:
         return [], None, {}
     keys = [k for k, _ in rows]
     V = np.stack([np.frombuffer(v, dtype=np.float32) for _, v in rows])
     return keys, V, {k: i for i, k in enumerate(keys)}
+
+
+def load_vectors(store):
+    """Return (keys, V, idx) from persisted vectors, or ([], None, {}) if none built yet."""
+    return _load_vector_rows(store.get_rec_vectors())
 
 
 # --- content (genre/era) vectors: a "what a track IS" space, parallel to the collaborative one.
@@ -313,22 +324,12 @@ def build_discovered_content_vectors(store, model=None) -> int:
 
 def load_content_vectors(store):
     """Return (keys, V, idx) from persisted content vectors, or ([], None, {}) if none built."""
-    rows = store.get_rec_content_vectors()
-    if not rows:
-        return [], None, {}
-    keys = [k for k, _ in rows]
-    V = np.stack([np.frombuffer(v, dtype=np.float32) for _, v in rows])
-    return keys, V, {k: i for i, k in enumerate(keys)}
+    return _load_vector_rows(store.get_rec_content_vectors())
 
 
 def load_discovered_content_vectors(store):
     """Return (keys, V, idx) of out-of-corpus content vectors, or ([], None, {}) if none built."""
-    rows = store.get_rec_discovered_content_vectors()
-    if not rows:
-        return [], None, {}
-    keys = [k for k, _ in rows]
-    V = np.stack([np.frombuffer(v, dtype=np.float32) for _, v in rows])
-    return keys, V, {k: i for i, k in enumerate(keys)}
+    return _load_vector_rows(store.get_rec_discovered_content_vectors())
 
 
 def maybe_rebuild_content_vectors(store, step=0.05) -> bool:
@@ -346,7 +347,12 @@ def maybe_rebuild_content_vectors(store, step=0.05) -> bool:
         prev = int(store.get_setting("rec_content_cov_bucket", "-1"))
     except (TypeError, ValueError):
         prev = -1
-    if bucket <= prev:
+    # The bucket gate bounds full rebuilds, but it must NOT short-circuit while the model itself is
+    # missing: a build under older code persisted the vectors + bucket but not rec_content_model, which
+    # left the gate permanently shut (bucket never re-crosses once coverage plateaus) and the discovered
+    # pool unencodable forever, so "reach for new music" surfaced nothing (#48). A missing model always
+    # forces a rebuild, which re-persists it and re-encodes the out-of-corpus pool in the same space.
+    if bucket <= prev and store.get_setting("rec_content_model"):
         return False
     build_content_and_store(store)
     store.set_setting("rec_content_cov_bucket", str(bucket))
@@ -437,7 +443,7 @@ def blended_neighbors(store, seed_groups, topn=12, exclude=None):
                 target += w * (c / n)
     if not np.any(target):
         return []
-    return _rank(keys, V, target / (np.linalg.norm(target) + _NORM_EPS), excl, topn)
+    return _rank(keys, V, _normalize(target), excl, topn)
 
 
 CLUSTER_BETA = 0.6   # how hard a pruned ("negative model") track pushes a branch's ring away
@@ -456,14 +462,14 @@ def _branch_scores(pos_keys, neg_keys, beta, allkeys, M, index):
     pi = [index[k] for k in pos_keys if k in index]
     if not pi:
         return None
-    pos = M[pi].mean(0); pos /= np.linalg.norm(pos) + _NORM_EPS
+    pos = _normalize(M[pi].mean(0))
     s = M @ pos
     if len(pi) > 1 and SEED_FANOUT > 0.0:            # fan out to the nearest single seed (rows are unit)
         nearest = np.max(M @ M[pi].T, axis=1)         # max cos to any one seed, per candidate
         s = (1.0 - SEED_FANOUT) * s + SEED_FANOUT * nearest
     ni = [index[k] for k in neg_keys if k in index]
     if ni:
-        neg = M[ni].mean(0); neg /= np.linalg.norm(neg) + _NORM_EPS
+        neg = _normalize(M[ni].mean(0))
         s = s - beta * (M @ neg)
     return {allkeys[i]: float(s[i]) for i in range(len(allkeys))}
 
@@ -552,7 +558,7 @@ def connection_geometry(store, key, path_keys, exclude=()):
     if not pi:
         return {"score": None, "bridge": None}
     p = V[pi].mean(0)
-    p /= np.linalg.norm(p) + _NORM_EPS
+    p = _normalize(p)
     c = V[idx[key]]
     score = float(c @ p)
     both = np.minimum(V @ c, V @ p)                  # close to child AND to the path
@@ -574,5 +580,5 @@ def centroid_neighbors(store, seed_keys, topn=12, exclude=None):
     if not si:
         return []
     centroid = V[si].mean(0)
-    centroid /= np.linalg.norm(centroid) + _NORM_EPS
+    centroid = _normalize(centroid)
     return _rank(keys, V, centroid, set(exclude or set()) | set(seed_keys), topn)

@@ -6,5 +6,5 @@
   <div><strong>{{ baskets }}</strong><span>co-occurrence baskets</span></div>
   <div><strong>{{ '%.0f'|format(coverage * 100) }}%</strong><span>genre coverage ({{ tagged }}/{{ tracks_total }})</span></div>
   <div><strong>{{ '%.2f'|format(breadth) }}</strong><span>taste breadth (0=narrow, 1=eclectic)</span></div>
-  <div hx-get="/taste/recall" hx-trigger="load" hx-swap="innerHTML"><strong>…</strong><span>recall@20 (computing)</span></div>
+  <div hx-get="/taste/recall" hx-trigger="load" hx-swap="outerHTML"><strong>…</strong><span>recall@20 (computing)</span></div>
 </div>
