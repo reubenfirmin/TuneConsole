@@ -79,12 +79,18 @@
       {% for e in fingerprint.eras[:5] %}
       <div class="fp-row">
         <span class="fp-name" title="{{ '%.0f'|format(e.share*100) }}% of your listening">{{ e.name }}s</span>
+        <span class="fp-slider-wrap">
         <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ e.effective }}"
                style="--p:{{ '%.0f'|format(e.effective / 2 * 100) }}%"
                name="weight" hx-post="/home/steer" hx-vals='{"axis":"era:{{ e.name }}"}'
                hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
                hx-on::before-request="sessionStorage.setItem('steered','1')"
                aria-label="favor or mute the {{ e.name }}s">
+        {% if e.live_active %}
+        <span class="fp-marker" style="left:calc(8px + {{ '%.3f'|format(e.live / 2) }} * (100% - 16px))"
+              title="where your recent listening has the {{ e.name }}s right now"></span>
+        {% endif %}
+        </span>
       </div>
       {% endfor %}
       </div>

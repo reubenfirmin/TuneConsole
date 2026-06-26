@@ -111,8 +111,10 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history())
         hist_keys = [identity_key(t.get("title", ""), _artist(t)) for t in history]
+        # Snapshot the listening history: this IS the transient play feed (transient.play_facet_leans
+        # reads it). Plays graduate into permanent taste later, by daily exposure (graduate_play_
+        # exposure on the Home feed render), not here, so a re-fetched window cannot re-count (#46).
         store.add_history_snapshot(identity_id, now, hist_keys)
-        recommend.graduate_plays(store, hist_keys, now)
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")
@@ -177,13 +179,14 @@ def sync_plays_identity(store, identity_id, client, now, on_progress=None, label
             rated = {k: "LIKE" for k in store.get_playlist_track_keys(lm.id)}
             recommend.apply_dislikes(store, rated, now)
 
-    # Plays: snapshot the listening history (the "new plays") and graduate them (mirrors sync_identity).
+    # Plays: snapshot the listening history (the transient play feed; transient.play_facet_leans reads
+    # it). Plays graduate into permanent taste later by daily exposure (graduate_play_exposure on the
+    # Home feed render), NOT here, so this fast path re-fetching the same window cannot re-count (#46).
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:
         history = with_retry(lambda: client.get_history())
         hist_keys = [identity_key(t.get("title", ""), _artist(t)) for t in history]
         store.add_history_snapshot(identity_id, now, hist_keys)
-        recommend.graduate_plays(store, hist_keys, now)
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")

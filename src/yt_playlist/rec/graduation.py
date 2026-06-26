@@ -3,7 +3,6 @@ permanent-weight nudges, gated by the THEME_THRESHOLD ledger. apply_dislikes fol
 dislike statuses into the model."""
 import math
 import time
-from collections import Counter
 
 from yt_playlist.rec import rec_params, transient
 
@@ -64,31 +63,6 @@ def graduate_moods(store, keys, signed, now, source=1.0) -> None:
         graduate_facet(store, axis, signed * (len(axis_keys) / n), now, source=source)
 
 
-def graduate_plays(store, keys, now) -> None:
-    """Graduate just-played keys: weak per-play contribution (SOURCE_W_PLAY), with the whole session's
-    play contribution capped at PLAY_GRAD_SESSION_CAP so a single binge cannot rewrite taste. Spreads
-    the capped budget across the played facets proportionally to presence (counts duplicate plays)."""
-    if not keys:
-        return
-    # Build axis -> play count from the original (possibly duplicate) keys list
-    facets = transient.facets_for(store, keys)
-    if not facets:
-        return
-    # Count how many plays each key appears (duplicates count as separate plays)
-    play_counts = Counter(keys)
-    n = len(keys) or 1                                              # total plays this session
-    w_play = rec_params.get_param(store, "source_w_play")
-    session_cap = rec_params.get_param(store, "play_grad_session_cap")
-    raw = w_play * n                                                # total play intensity this session
-    scale = min(1.0, session_cap / raw) if raw > 0 else 0.0
-    for axis, axis_keys in facets.items():
-        # Sum play counts across all unique keys mapped to this axis
-        axis_play_count = sum(play_counts[k] for k in axis_keys)
-        contribution = w_play * axis_play_count * scale
-        # source already folded into `contribution`; pass source=1.0, signed=+contribution
-        graduate_facet(store, axis, contribution, now, source=1.0)
-
-
 def _utc_day(now) -> str:
     """UTC date string YYYY-MM-DD for a unix timestamp (held-day bucketing; deterministic for tests)."""
     return time.strftime("%Y-%m-%d", time.gmtime(now))
@@ -122,4 +96,39 @@ def graduate_slider_exposure(store, now) -> None:
             new_perm = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
             ratio = (new_perm / old_perm) if old_perm > 0 else 1.0
             store.set_lean(axis, value / ratio, now)          # conserve: new_perm*(value/ratio) == old_perm*value
+            store.discount_theme(axis, math.copysign(threshold, score))
+
+
+def graduate_play_exposure(store, now) -> None:
+    """Plays graduate by daily EXPOSURE, the same way held sliders do (graduate_slider_exposure).
+
+    Plays feed only the transient model (sync stores history; transient.play_facet_leans reads it).
+    Here, once per UTC day per axis, the sustained play-derived lean contributes lean_magnitude *
+    SOURCE_W_PLAY to the rec_theme ledger; crossing THEME_THRESHOLD nudges the permanent weight.
+    Unlike sliders there is NO migration step: plays are not a displayed handle to keep sticky, and
+    the play lean self-decays via staleness when listening stops, so the daily contribution falls to
+    ~0 on its own.
+
+    This replaces the old graduate_plays, which wrote permanent weights from a per-session-capped
+    event accumulator fed the whole recent-history window every sync. Because the fast plays-sync
+    re-fetches the same window each run, that path re-counted and ratcheted genre weights toward
+    GENRE_MAX (#46). The per-UTC-day stamp (rec_play_grad) makes re-runs idempotent by construction.
+    """
+    if not rec_params.get_param(store, "graduation_enabled"):
+        return
+    threshold = rec_params.get_param(store, "theme_threshold")
+    w_play = rec_params.get_param(store, "source_w_play")
+    today = _utc_day(now)
+    for axis, lean in transient.play_facet_leans(store, now).items():
+        if store.get_play_graduated_day(axis) == today:
+            continue                                          # already exposed this axis today
+        store.set_play_graduated_day(axis, today)             # stamp the day either way
+        magnitude = abs(lean)
+        if magnitude == 0.0:
+            continue
+        score = store.bump_theme(axis, magnitude * w_play, now)    # plays only ever push up
+        if abs(score) >= threshold:
+            factor = (rec_params.get_param(store, "graduate_up") if score > 0
+                      else rec_params.get_param(store, "graduate_down"))
+            store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
             store.discount_theme(axis, math.copysign(threshold, score))

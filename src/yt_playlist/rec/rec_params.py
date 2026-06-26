@@ -131,13 +131,22 @@ PARAMS = [
               "How fast an explicit dislike graduates toward permanent taste.", 0.0, 2.0, 0.05, 1.0, advanced=True),
     ParamSpec("source_w_vibe", "Speed: mood gestures", "graduation",
               "How fast a mood/vibe gesture graduates toward permanent taste.", 0.0, 2.0, 0.05, 1.0, advanced=True),
-    ParamSpec("source_w_slider", "Speed: held sliders", "graduation",
-              "How fast a held genre/lane slider graduates per day held.", 0.0, 2.0, 0.05, 0.5, advanced=True),
-    ParamSpec("source_w_play", "Speed: plays", "graduation",
-              "How fast passive plays graduate (kept small so binges don't silently rewrite taste).",
-              0.0, 1.0, 0.01, 0.08, advanced=True),
+    # The intent-vs-behavior graduation balance: two visible (non-advanced) knobs. Both channels now
+    # graduate by the same daily-exposure mechanic, so the weights are directly comparable (per-day vs
+    # per-day). The default ratio 0.5 : 0.08 (~6:1) encodes "explicit steering moves long-term taste
+    # faster than passive listening" (spec §2).
+    ParamSpec("source_w_slider", "Intent: nudge bars", "graduation",
+              "How fast your explicit steering (the Home nudge bars, while held) graduates into "
+              "permanent taste, per day held. The intent side of the intent-vs-behavior balance.",
+              0.0, 2.0, 0.05, 0.5),
+    ParamSpec("source_w_play", "Behavior: listens", "graduation",
+              "How fast your listening graduates into permanent taste, per day of sustained plays "
+              "(exposure, the same mechanic as the nudge bars). The behavior side of the balance; kept "
+              "below intent so passive listening doesn't silently rewrite taste.",
+              0.0, 1.0, 0.01, 0.08),
     ParamSpec("play_grad_session_cap", "Play graduation cap / session", "graduation",
-              "Maximum total play-graduation contribution from one listening session.",
+              "(Deprecated, unused since plays graduate by daily exposure.) Maximum total play-"
+              "graduation contribution from one listening session.",
               0.0, 2.0, 0.05, 0.4, advanced=True),
 ]
 

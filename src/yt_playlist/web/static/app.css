@@ -937,7 +937,7 @@ button.htmx-request .check-busy { display: inline; }
 
 /* ============ Recommendation tiles (graphics-first, hover-reveal) ============ */
 .tile-grid { display: grid; gap: 0.9rem; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); }
-/* "New from artists you play": a responsive album grid of normal-sized covers that flows by width
+/* "Explore your artists' catalogs": a responsive album grid of normal-sized covers that flows by width
    (stepping down to 4 / 3 / 2 as it narrows). It spans the full content width so it's exactly as wide
    as the double-playlist .gen-lanes above it; at the page max-width auto-fill still tops out at 5
    columns of 11rem. A small script in the partial then clamps the rows. */
@@ -1232,6 +1232,14 @@ details.advanced .knob { margin-bottom: 1.15rem; }
   left: calc(50% + 3.55rem); border-left: 1px dashed var(--border-2); pointer-events: none; }
 .fp-slider { flex: 1; cursor: grab; }
 .fp-slider:active { cursor: grabbing; }
+/* Transient "you right now" marker on a genre/era bar: same tick as the Breadth dial's measured-breadth
+   tick (.fp-breadth-tick) so the whole panel reads consistently. Shows the live (recent-listening)
+   position vs the thumb (your held steer). The wrap spans the slider track; the inline left uses the
+   same 8px thumb-inset as breadth so the tick lines up with the native thumb. */
+.fp-slider-wrap { position: relative; flex: 1; display: inline-flex; align-items: center; }
+.fp-slider-wrap .fp-slider { flex: 1; }
+.fp-marker { position: absolute; top: 50%; transform: translate(-50%, -50%);
+  width: 2px; height: 13px; background: var(--text); border-radius: 1px; pointer-events: none; }
 /* Breadth master dial (#7): a compact inline control in the header: [Breadth] Focused (-•-) Eclectic
    "naturally balanced". Its own line on narrow screens (the header wraps); the Tune link is pushed to
    the far right by .fp-tune's margin-left:auto, so the two global controls bracket the header. */

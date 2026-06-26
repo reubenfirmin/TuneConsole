@@ -4,7 +4,7 @@ import math
 import statistics
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import rec_params
+from yt_playlist.rec import rec_params, transient
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -17,12 +17,16 @@ def era_distribution(store) -> list:
     return sorted(((d, c / total) for d, c in dist.items()), key=lambda x: -x[1])
 
 
-def taste_fingerprint(store) -> dict:
+def taste_fingerprint(store, now) -> dict:
     """Compact, legible 'you right now' for the Home header: top genre families, breadth, era lean.
 
     Each family/era carries its current steering weight so the header can render a draggable bar.
     Also includes 'effective' = permanent x standing lean, clamped to [GENRE_MIN, GENRE_MAX], which
-    is what the slider value binds to (the bar shows what the user actually experiences).
+    is what the slider THUMB binds to (the held steer the user experiences), plus 'live' = effective x
+    the live transient facet multiplier (recent plays/likes/dislikes/mood), clamped the same way, which
+    a separate MARKER binds to. Splitting them keeps the two independent mood signals (explicit steer
+    vs. listen behavior) from overloading one bar position. 'live_active' is False when there is no
+    meaningful live signal (e.g. a stale sync), so the bar can hide the marker.
 
     Pinned axes: 'pinned' is True for any family/era that has an explicit stored lean (set via
     /home/fingerprint/add or by steering its bar). The Home column always renders the top-by-share
@@ -34,6 +38,19 @@ def taste_fingerprint(store) -> dict:
     w = store.get_weights()
     leans = store.get_leans()
     hidden = store.hidden_facets()                                   # bars the user removed (display-only)
+    tleans = transient.facet_leans(store, now)                       # live transient (plays+likes+mood+dislikes)
+    fgain = rec_params.get_param(store, "facet_gain")
+    fmin = rec_params.get_param(store, "facet_mult_min")
+    fmax = rec_params.get_param(store, "facet_mult_max")
+
+    def _live(axis, effective):
+        """Where the live transient model puts this axis right now: effective x facet multiplier,
+        clamped to the bar's [GENRE_MIN, GENRE_MAX] scale. 'active' is False when there is no
+        meaningful live lean (so the bar can hide the marker)."""
+        lean = tleans.get(axis, 0.0)
+        tmult = transient.facet_multiplier(lean, fgain, fmin, fmax)
+        live = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, effective * tmult))
+        return live, abs(lean) > 1e-6
 
     def _subs(fam):
         """A family's drill-down members: its subgenres MINUS the family token itself (no self-dupe),
@@ -45,22 +62,30 @@ def taste_fingerprint(store) -> dict:
             if sub == fam or ax in hidden or ax in leans:
                 continue
             eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.get_lean(ax)))
-            out.append({"name": sub, "axis": ax, "effective": eff})
+            live, active = _live(ax, eff)
+            out.append({"name": sub, "axis": ax, "effective": eff, "live": live, "live_active": active})
         return out
 
-    families = [{"name": f, "share": share, "weight": w.get(f"genre:{f}", 1.0),
-                 "effective": max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX,
-                                  w.get(f"genre:{f}", 1.0) * store.get_lean(f"genre:{f}"))),
-                 "pinned": f"genre:{f}" in leans,
-                 "subgenres": (subs := _subs(f)), "expandable": bool(subs)}
-                for f, share in sorted(bd["families"].items(), key=lambda x: -x[1])
-                if f"genre:{f}" not in hidden]
-    eras = [{"name": d, "share": share, "weight": w.get(f"era:{d}", 1.0),
-             "effective": max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX,
-                              w.get(f"era:{d}", 1.0) * store.get_lean(f"era:{d}"))),
-             "pinned": f"era:{d}" in leans}
-            for d, share in era_distribution(store)
-            if f"era:{d}" not in hidden]
+    families = []
+    for f, share in sorted(bd["families"].items(), key=lambda x: -x[1]):
+        if f"genre:{f}" in hidden:
+            continue
+        ax = f"genre:{f}"
+        eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.get_lean(ax)))
+        live, active = _live(ax, eff)
+        subs = _subs(f)
+        families.append({"name": f, "share": share, "weight": w.get(ax, 1.0),
+                         "effective": eff, "live": live, "live_active": active,
+                         "pinned": ax in leans, "subgenres": subs, "expandable": bool(subs)})
+    eras = []
+    for d, share in era_distribution(store):
+        if f"era:{d}" in hidden:
+            continue
+        ax = f"era:{d}"
+        eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.get_lean(ax)))
+        live, active = _live(ax, eff)
+        eras.append({"name": d, "share": share, "weight": w.get(ax, 1.0),
+                     "effective": eff, "live": live, "live_active": active, "pinned": ax in leans})
 
     # Append pinned axes stored in leans but not present in the play-distribution lists at all.
     known_genre_names = {entry["name"] for entry in families}
@@ -73,18 +98,20 @@ def taste_fingerprint(store) -> dict:
             if name not in known_genre_names:
                 weight = w.get(axis, 1.0)
                 effective = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, weight * lean_val))
+                live, active = _live(axis, effective)
                 subs = _subs(name)
                 families.append({"name": name, "share": 0.0, "weight": weight,
-                                 "effective": effective, "pinned": True,
-                                 "subgenres": subs, "expandable": bool(subs)})
+                                 "effective": effective, "live": live, "live_active": active,
+                                 "pinned": True, "subgenres": subs, "expandable": bool(subs)})
                 known_genre_names.add(name)
         elif axis.startswith("era:"):
             name = axis[len("era:"):]
             if name not in known_era_names:
                 weight = w.get(axis, 1.0)
                 effective = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, weight * lean_val))
+                live, active = _live(axis, effective)
                 eras.append({"name": name, "share": 0.0, "weight": weight,
-                             "effective": effective, "pinned": True})
+                             "effective": effective, "live": live, "live_active": active, "pinned": True})
                 known_era_names.add(name)
 
     # breadth = the *measured* spread (a backdrop the bar shows); breadth_bias = the user's current

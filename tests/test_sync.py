@@ -18,9 +18,10 @@ def test_sync_plays_records_history_and_likes(store):
     assert store.get_setting("last_sync_at") is None      # full-sync nudge left untouched
 
 
-def test_sync_plays_feeds_graduation_and_like_model(store):
-    """Regression for #39: the fast plays/likes sync must feed #19's signals, graduate plays and
-    record+graduate newly-captured likes (the like channel), not only the rarer full sync."""
+def test_sync_plays_feeds_like_model_and_transient_plays(store):
+    """The fast plays/likes sync records+graduates newly-captured likes at event time (the like
+    channel, #39), and captures plays into the transient feed only. Per #46, plays no longer graduate
+    AT sync (that re-counted); they graduate later by daily exposure (graduate_play_exposure)."""
     from yt_playlist.rec import recommend
     iid = store.upsert_identity("main", "cred", None, True)
 
@@ -37,10 +38,14 @@ def test_sync_plays_feeds_graduation_and_like_model(store):
                         history=[_track("v1", "Played Song", "Artist")])
     sync_plays_all(store, {iid: client}, now=1500.0)
 
-    # Likes: the new LM member was recorded (like channel) and graduated.
+    # Likes: the new LM member was recorded (like channel) and graduated at sync (event time).
     assert store.recent_liked_keys() == ["liked song|other"]
     assert store.get_theme(f"genre:{fam_like}") > 0.0
-    # Plays: the played key graduated (the play ledger was fed for its facet).
+    # Plays: NOT graduated at sync anymore (#46) - the play only fed the transient model.
+    assert store.get_theme(f"genre:{fam_play}") is None
+    assert "genre:" + fam_play in recommend.transient.play_facet_leans(store, 1500.0)
+    # It graduates only when the exposure funnel runs (the Home feed render does this daily).
+    recommend.graduate_play_exposure(store, 1500.0)
     assert store.get_theme(f"genre:{fam_play}") > 0.0
 
 

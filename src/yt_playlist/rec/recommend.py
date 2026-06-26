@@ -24,7 +24,7 @@ from yt_playlist.rec.surfaces import (  # noqa: F401
 from yt_playlist.rec.recipes import (  # noqa: F401
     roll_recipe, cluster_recipe, theme_filter, versioned_title)
 from yt_playlist.rec.graduation import (  # noqa: F401
-    apply_dislikes, graduate_facet, graduate_moods, graduate_plays, graduate_slider_exposure)
+    apply_dislikes, graduate_facet, graduate_moods, graduate_slider_exposure, graduate_play_exposure)
 from yt_playlist.rec.actions import (  # noqa: F401
     SyncStatus, sync_status, ActionItem, take_action, refresh_cleanup,
     SYNC_STALE_S, CLEANUP_SURFACE)

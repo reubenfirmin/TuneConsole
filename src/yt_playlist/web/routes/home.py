@@ -108,6 +108,10 @@ def build(ctx) -> APIRouter:
     def _feed_context(now):
         # Bake any held-day slider exposure into the graduation ledger (once per UTC day per axis).
         recommend.graduate_slider_exposure(store, now)
+        # Bake sustained recent listening into the same ledger, the same exposure mechanic (once per
+        # UTC day per axis). Plays feed only the transient model; this is the single funnel by which
+        # passive listening reaches permanent taste (re-runs are idempotent, so it cannot re-count).
+        recommend.graduate_play_exposure(store, now)
         # Each list card shows a stable random slice of its ranked pool, reseeded once its rotation
         # epoch advances (every erosion_view_cap real Home visits). The epoch is read here, never
         # ticked. The tick happens only in GET /, so steer/stance previews re-render the same slice
@@ -136,7 +140,7 @@ def build(ctx) -> APIRouter:
         catalog = _carded(store, "explore", "From your catalog", catalog_items, now) if catalog_items else None
         generated = [wheel] + ([catalog] if catalog else [])
         comfort = _carded(store, "comfort", "Comfort listening", comfort_items, now) if comfort_items else None
-        return {"fingerprint": recommend.taste_fingerprint(store),
+        return {"fingerprint": recommend.taste_fingerprint(store, now),
                 "generated": generated, "comfort": comfort}
 
     @router.get("/")
@@ -239,7 +243,7 @@ def build(ctx) -> APIRouter:
                 store.set_lean(axis, 1.0, now_fn())
         return templates.TemplateResponse(
             request, "_partials/fingerprint_genre_bars.html",
-            {"fingerprint": recommend.taste_fingerprint(store)})
+            {"fingerprint": recommend.taste_fingerprint(store, now_fn())})
 
     @router.post("/home/fingerprint/remove")
     async def fingerprint_remove(request: Request):
@@ -253,7 +257,7 @@ def build(ctx) -> APIRouter:
             store.clear_lean(axis)
         return templates.TemplateResponse(
             request, "_partials/fingerprint_genre_bars.html",
-            {"fingerprint": recommend.taste_fingerprint(store)})
+            {"fingerprint": recommend.taste_fingerprint(store, now_fn())})
 
     @router.post("/home/fingerprint/reset")
     async def fingerprint_reset(request: Request):

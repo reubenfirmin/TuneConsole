@@ -221,6 +221,47 @@ def test_fingerprint_bar_shows_effective_multiplier(store):
     assert 'value="1.5"' in html                       # bar shows effective, not permanent 1.0
 
 
+def test_taste_fingerprint_marks_transient(store):
+    # Recent heavy listening to one family -> a live transient marker on that bar, distinct from the
+    # held-steer thumb (which stays at `effective`). The two mood signals no longer share one position.
+    from yt_playlist.rec import recommend
+    from yt_playlist.util.matching import identity_key
+    iid = store.upsert_identity("main", "cred", None, True)
+    keys = []
+    for i in range(10):
+        t = store.upsert_track(f"v{i}", f"song{i}", "band", None, None)
+        store.set_track_genre(t, "Techno")
+        keys.append(identity_key(f"song{i}", "band"))
+    store.add_history_snapshot(iid, 1000.0, keys)
+    store.set_setting("last_sync_at", "1000")              # fresh -> staleness 1.0
+    fam = __import__("yt_playlist.util.genre_map", fromlist=["family"]).family("Techno")
+    fp = recommend.taste_fingerprint(store, 1000.0)
+    entry = next(e for e in fp["families"] if e["name"] == fam)
+    assert "live" in entry and "live_active" in entry
+    assert entry["live_active"] is True                    # recent heavy plays are a live signal
+    assert entry["live"] >= entry["effective"]             # a positive play lean pushes the marker up
+    assert 0.0 <= entry["live"] <= 2.0
+
+
+def test_taste_fingerprint_marker_inert_when_stale(store):
+    # A stale sync relaxes the transient to ~0, so no bar claims a live marker (families still present).
+    from yt_playlist.rec import recommend
+    from yt_playlist.util.matching import identity_key
+    iid = store.upsert_identity("main", "cred", None, True)
+    keys = []
+    for i in range(5):
+        t = store.upsert_track(f"v{i}", f"song{i}", "band", None, None)
+        store.set_track_genre(t, "Techno")
+        keys.append(identity_key(f"song{i}", "band"))
+    store.add_history_snapshot(iid, 1.0, keys)
+    store.set_setting("last_sync_at", "1.0")
+    now = 1.0 + 100 * 86400                                  # 100 days later -> deeply stale
+    fp = recommend.taste_fingerprint(store, now)
+    assert fp["families"], "expected played families present regardless of staleness"
+    for e in fp["families"] + fp["eras"]:
+        assert e["live_active"] is False
+
+
 def test_fingerprint_subgenres_attached_and_deduped(store):
     """taste_fingerprint attaches a family's drill-down subgenres (eager, toggled client-side): the
     family token itself is excluded (no self-duplicate), and a subgenre with a lean is promoted to its
@@ -230,14 +271,14 @@ def test_fingerprint_subgenres_attached_and_deduped(store):
     t = store.upsert_track("v1", "Song", "Band", None, None)
     store.set_track_genre(t, "techno")
     store.add_history_snapshot(iid, 1.0, ["song|band"])   # techno is now a played family
-    fp = recommend.taste_fingerprint(store)
+    fp = recommend.taste_fingerprint(store, 1000.0)
     techno = next(f for f in fp["families"] if f["name"] == "techno")
     subnames = [s["name"] for s in techno["subgenres"]]
     assert "minimal techno" in subnames          # a real subgenre is offered
     assert "techno" not in subnames              # the family token is not duplicated as its own subgenre
     # pin minimal techno -> it leaves the drill-down (promoted to a top bar)
     store.set_lean("genre:minimal techno", 1.2, 1.0)
-    fp2 = recommend.taste_fingerprint(store)
+    fp2 = recommend.taste_fingerprint(store, 1000.0)
     techno2 = next(f for f in fp2["families"] if f["name"] == "techno")
     assert "minimal techno" not in [s["name"] for s in techno2["subgenres"]]
     assert "minimal techno" in [f["name"] for f in fp2["families"]]   # now a top bar

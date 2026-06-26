@@ -17,13 +17,22 @@
             title="Remove this bar" aria-label="remove {{ name }} bar">&times;</button>
   </span>
 {% endmacro %}
-{% macro bar(axis, name, effective, tooltip) %}
-  <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ effective }}"
-         style="--p:{{ '%.0f'|format(effective / 2 * 100) }}%"
-         name="weight" hx-post="/home/steer" hx-vals='{"axis":"{{ axis }}"}'
-         hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
-         hx-on::before-request="sessionStorage.setItem('steered','1')"
-         aria-label="favor or mute {{ name }}" title="{{ tooltip }}">
+{# The thumb shows the held steer (effective = permanent x standing lean); the marker (when live_active)
+   shows where recent listening has this facet right now (live = effective x transient multiplier), so
+   the two independent mood signals never fight for one position. #}
+{% macro bar(axis, name, effective, tooltip, live, live_active) %}
+  <span class="fp-slider-wrap">
+    <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ effective }}"
+           style="--p:{{ '%.0f'|format(effective / 2 * 100) }}%"
+           name="weight" hx-post="/home/steer" hx-vals='{"axis":"{{ axis }}"}'
+           hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
+           hx-on::before-request="sessionStorage.setItem('steered','1')"
+           aria-label="favor or mute {{ name }}" title="{{ tooltip }}">
+    {% if live_active %}
+    <span class="fp-marker" style="left:calc(8px + {{ '%.3f'|format(live / 2) }} * (100% - 16px))"
+          title="where your recent listening has {{ name }} right now"></span>
+    {% endif %}
+  </span>
 {% endmacro %}
 {% for g in fingerprint.families[:6] + pinned %}
 <div class="fp-genre"{% if g.expandable %} x-data="fpGenre()" data-fam="{{ g.name }}"{% endif %}>
@@ -32,7 +41,7 @@
       <span class="fp-name" title="{{ g.name }}, {{ '%.0f'|format(g.share*100) }}% of your listening">{{ g.name }}</span>
       {{ tools("genre:" + g.name, g.name, g.expandable) }}
     </span>
-    {{ bar("genre:" + g.name, g.name, g.effective, "favor or mute " + g.name) }}
+    {{ bar("genre:" + g.name, g.name, g.effective, "favor or mute " + g.name, g.live, g.live_active) }}
   </div>
   {% if g.expandable %}
   <div class="fp-subgenres" x-show="open" x-cloak>
@@ -42,7 +51,7 @@
         <span class="fp-name fp-subname" title="{{ sub.name }}">{{ sub.name }}</span>
         {{ tools(sub.axis, sub.name, false) }}
       </span>
-      {{ bar(sub.axis, sub.name, sub.effective, sub.name) }}
+      {{ bar(sub.axis, sub.name, sub.effective, sub.name, sub.live, sub.live_active) }}
     </div>
     {% endfor %}
   </div>

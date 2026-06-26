@@ -53,6 +53,38 @@ def rotate_page(items, size, epoch):
     return [items[(start + i) % n] for i in range(min(size, n))]
 
 
+def _score_candidates(store, pt, keys, V, idx, now):
+    """Per-key taste score: per-playlist taste fit, tilted by the transient mood centroid, then scaled
+    by the permanent x transient facet weights. The shared scoring core of the Wheelhouse and Catalog
+    surfaces. Caller loads pt/keys/V/idx (Catalog needs `keys` afterward) and guards V is not None."""
+    scores = _apply_mood(pt.score_all(V), store, now, V, idx)
+    return _apply_axis_weights(store, {keys[i]: float(scores[i]) for i in range(len(keys))}, now)
+
+
+def _weighted_fair_queue(queues, limit, hard, muted):
+    """Interleave lane queues by learned weight: each turn serve the lane with the highest
+    weight/(taken+1) ratio (default weight 1.0 => round-robin), dedup across lanes, and skip rows that
+    are suppressed (`hard`) or by a muted artist. `queues` items are [rows, reason_fn, lane, weight, taken]."""
+    seen: set = set()
+    out: list[ForYouItem] = []
+    while len(out) < limit:
+        live = [q for q in queues if q[0]]
+        if not live:
+            break
+        q = max(live, key=lambda q: q[3] / (q[4] + 1))   # weight / (taken + 1)
+        rows, reason, lane, _, _ = q
+        r = rows.pop(0)
+        if r["key"] in seen or r["key"] in hard or r["artist"] in muted:
+            seen.add(r["key"])
+            continue
+        seen.add(r["key"])
+        q[4] += 1
+        out.append(ForYouItem(
+            title=r["title"], artist=r["artist"], album=r["album"], video_id=r["video_id"],
+            thumbnail=r["thumbnail"], plays=r["plays"], reason=reason(r), key=r["key"], lane=lane))
+    return out
+
+
 # HOME CARD: "Wheelhouse" ("More in your wheelhouse"). Deeper into what you already love.
 # Internal lanes here are 'neighbourhood' + 'deep_cut'. When naming new code/vars, prefer the home
 # heading "wheelhouse" over the legacy function name "for_you".
@@ -78,8 +110,7 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
         pt = playlist_taste(store)
         keys, V, idx = embed.load_vectors(store)
         if pt and V is not None:
-            allscores = _apply_mood(pt.score_all(V), store, now, V, idx)   # taste, tilted by transient mood
-            sims = _apply_axis_weights(store, {keys[i]: float(allscores[i]) for i in range(len(keys))}, now)
+            sims = _score_candidates(store, pt, keys, V, idx, now)
 
     if sims is not None:
         # Neighbourhood lane: top tracks by taste×transient, excluding your most-played (so it's the
@@ -110,24 +141,7 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
     # weighted fair queuing: each lane gets turns ∝ its learned weight (default 1.0 => round-robin)
     queues = [[list(rows), reason, lane, weights.get(f"lane:{lane}", 1.0), 0]
               for rows, reason, lane in sources]
-    seen: set = set()
-    out: list[ForYouItem] = []
-    while len(out) < limit:
-        live = [q for q in queues if q[0]]
-        if not live:
-            break
-        q = max(live, key=lambda q: q[3] / (q[4] + 1))   # weight / (taken + 1)
-        rows, reason, lane, _, _ = q
-        r = rows.pop(0)
-        if r["key"] in seen or r["key"] in hard or r["artist"] in muted:
-            seen.add(r["key"])
-            continue
-        seen.add(r["key"])
-        q[4] += 1
-        out.append(ForYouItem(
-            title=r["title"], artist=r["artist"], album=r["album"], video_id=r["video_id"],
-            thumbnail=r["thumbnail"], plays=r["plays"], reason=reason(r), key=r["key"], lane=lane))
-    return out
+    return _weighted_fair_queue(queues, limit, hard, muted)
 
 
 # HOME CARD: "Comfort" ("Comfort listening"). Most-played favourites that have gone quiet.
@@ -285,8 +299,7 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     if V is None:
         return []
     # taste WEIGHT (taste-fit + transient mood + permanent×transient facets): modulates, never filters
-    scores = _apply_mood(pt.score_all(V), store, now, V, idx)
-    sims = _apply_axis_weights(store, {keys[i]: float(scores[i]) for i in range(len(keys))}, now)
+    sims = _score_candidates(store, pt, keys, V, idx, now)
     smin = min(sims.values()) if sims else 0.0
     plays = store.play_counts()                                  # {key: count}; absent = never played
     # Catalog score = novelty(lack of plays, PRIMARY) × taste-fit weight (shifted positive so it only
@@ -306,6 +319,22 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
         reason = "Never played, sits near your taste" if p == 0 else f"Barely played ({p}×), worth another spin"
         out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"], m["thumbnail"],
                               p, reason, k, "explore"))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _take_from_ranked(candidates, limit, per_artist_cap, keep):
+    """Walk ranked (key, artist, meta, reason) candidates, applying the keep() suppression/mute filter
+    and a per-artist cap (the '529 repeats' guard), building ForYouItems until `limit`. meta is a dict
+    with title/artist/album/video_id/thumbnail. Shared by complete_playlist's two candidate sources."""
+    out, taken = [], Counter()
+    for key, artist, m, reason in candidates:
+        if not keep(key, artist) or taken[artist] >= per_artist_cap:
+            continue
+        taken[artist] += 1
+        out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"], m["thumbnail"],
+                              0, reason, key))
         if len(out) >= limit:
             break
     return out
@@ -337,39 +366,24 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
         nbrs = embed.centroid_neighbors(store, list(members), topn=limit * 8, exclude=members)
         if nbrs:
             meta = store.tracks_by_keys([k for k, _ in nbrs])
-            out, taken = [], Counter()
-            for k, _ in nbrs:
-                m = meta.get(k)
-                if not m or not keep(k, m["artist"]) or taken[m["artist"]] >= per_artist_cap:
-                    continue
-                taken[m["artist"]] += 1
-                reason = (f"More from {m['artist']}, already here" if m["artist"] in member_artists
-                          else "Matches the sound of this playlist")
-                out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"],
-                                      m["thumbnail"], 0, reason, k))
-                if len(out) >= limit:
-                    break
+            cands = ((k, m["artist"], m,
+                      (f"More from {m['artist']}, already here" if m["artist"] in member_artists
+                       else "Matches the sound of this playlist"))
+                     for k, _ in nbrs if (m := meta.get(k)))
+            out = _take_from_ranked(cands, limit, per_artist_cap, keep)
             if out:                 # if every embedding neighbor was muted/suppressed, don't return
                 return out          # an empty list, fall through to the co-occurrence heuristic
 
-
-    out, taken = [], Counter()
-    for r in store.complete_playlist(playlist_id, limit=limit * 8):
-        if not keep(r["key"], r["artist"]) or taken[r["artist"]] >= per_artist_cap:
-            continue
-        taken[r["artist"]] += 1
+    def _cooc_reason(r):
         if r["same_artist"] and r["cooc"]:
-            reason = f"By {r['artist']} (already here), and in {r['cooc']} related playlist(s)"
-        elif r["same_artist"]:
-            reason = f"More from {r['artist']}, already in this playlist"
-        else:
-            reason = f"Sits with these tracks in {r['cooc']} of your playlists"
-        out.append(ForYouItem(
-            title=r["title"], artist=r["artist"], album=r["album"], video_id=r["video_id"],
-            thumbnail=r["thumbnail"], plays=0, reason=reason, key=r["key"]))
-        if len(out) >= limit:
-            break
-    return out
+            return f"By {r['artist']} (already here), and in {r['cooc']} related playlist(s)"
+        if r["same_artist"]:
+            return f"More from {r['artist']}, already in this playlist"
+        return f"Sits with these tracks in {r['cooc']} of your playlists"
+
+    cooc = ((r["key"], r["artist"], r, _cooc_reason(r))
+            for r in store.complete_playlist(playlist_id, limit=limit * 8))
+    return _take_from_ranked(cooc, limit, per_artist_cap, keep)
 
 
 # Canonical home-card names (code vocabulary == product wording). The legacy function names are kept
