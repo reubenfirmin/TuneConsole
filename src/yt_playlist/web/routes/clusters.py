@@ -85,6 +85,8 @@ def build(ctx) -> APIRouter:
         cand = [key for key, _ in nbrs]
         meta = store.tracks_by_keys(cand)
         dmeta = store.discovered_tracks_by_keys(cand) if include_new else {}   # out-of-corpus tracks
+        if dmeta:
+            store.mark_offered("track", list(dmeta), now_fn())   # #53 offered-in-cluster count
         genres = store.track_genres(cand)               # for the client-side genre filter (#29)
         ring = []
         for key, score in nbrs:

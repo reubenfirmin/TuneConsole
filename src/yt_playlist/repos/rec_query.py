@@ -58,6 +58,11 @@ def _exclude_clause(column, ids, *, connective="AND") -> str:
 _MAX_TRACK_DURATION_S = 1200   # 20 min: above this it's a mix/live set/compilation, not a track
 _ARTIST_BASKET_CAP = 50        # an artist's whole catalogue is a weaker co-occurrence signal than a playlist
 _CONTENT_BASKET_CAP = 80       # one genre family / one decade: cap hard, these get large fast
+# Catch-all playlists (more than this many tracks) are excluded from the embedding + taste: they link
+# everything to everything and add weak, low-information co-occurrence pairs. (A #38 experiment tried a
+# genre-coherence test to keep big GENRE playlists, but temporal_recall showed no gain and the project
+# moved toward behavior-weighted taste instead, so the simple size rule stands.)
+_CATCHALL_SIZE_FLOOR = 120
 
 
 def _not_a_mix(col="duration_s") -> str:
@@ -595,26 +600,43 @@ class RecQueryRepo(Repo):
         return {r["k"] for r in rows}
 
     @synchronized
-    def rec_baskets(self, max_playlist=120, max_album=30, max_session=120) -> list[list[str]]:
+    @synchronized
+    def catchall_playlist_ids(self, size_floor=_CATCHALL_SIZE_FLOOR) -> set:
+        """Playlist ids too large to be a coherent listening context (more than `size_floor` tracks);
+        excluded from the embedding and the taste centroids as low-information grab-bags."""
+        return {r["pid"] for r in self.conn.execute(
+            "SELECT playlist_id pid, COUNT(*) n FROM playlist_tracks GROUP BY playlist_id HAVING n > ?",
+            (size_floor,))}
+
+    def rec_baskets(self, max_album=30, max_session=120) -> list[list[str]]:
         """Co-occurrence baskets for the embedding model: playlists, albums, listening sessions.
 
-        Catch-all playlists (more than max_playlist tracks) are excluded. They link everything to
-        everything and only add noise. Live sets, full-performance uploads (UGC), and over-long
-        "tracks" that are really DJ mixes/compilations are dropped too, since they co-occur with
-        unrelated songs and blur the model. Each basket is a list of track identity_keys.
+        Catch-all playlists are excluded, but #38 makes that test SMART: a large playlist is dropped
+        only when it is also genre-incoherent (a grab-bag). A focused genre playlist (one dominant
+        family) is kept at any size, so big coherent collections feed the model. Live sets, full-
+        performance uploads (UGC), and over-long "tracks" that are really DJ mixes/compilations are
+        dropped too, since they co-occur with unrelated songs and blur the model. Each basket is a
+        list of track identity_keys.
         """
         good = {r["k"] for r in self.conn.execute(
             "SELECT DISTINCT identity_key k FROM tracks "
             "WHERE (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
             "AND (duration_s IS NULL OR duration_s <= ?)", (_MAX_TRACK_DURATION_S,))}
         good -= self.generated_only_keys()               # quarantine generated songs until promoted
-        excl = self.excluded_playlist_ids()              # ...and the generated playlists themselves
+        excl = self.excluded_playlist_ids() | self.catchall_playlist_ids()   # generated + grab-bags
         pl_where = _exclude_clause("pt.playlist_id", excl, connective="WHERE")
         out = []
-        # structural baskets: tracks grouped by a shared column
+        # playlist baskets: the exclusion set already drops generated + catch-alls, so coherent
+        # playlists are kept at ANY size (no per-basket size cap here).
+        pbuckets: dict = {}
+        for r in self.conn.execute(
+                "SELECT pt.playlist_id g, t.identity_key k FROM playlist_tracks pt "
+                "JOIN tracks t ON t.id=pt.track_id" + pl_where):
+            if r["k"] in good:
+                pbuckets.setdefault(r["g"], set()).add(r["k"])
+        out += [list(s) for s in pbuckets.values() if len(s) > 1]
+        # album / artist / session baskets keep their size caps (an over-cap album/session is noise).
         for grp, cap in (
-            ("SELECT pt.playlist_id g, t.identity_key k FROM playlist_tracks pt "
-             "JOIN tracks t ON t.id=pt.track_id" + pl_where, max_playlist),
             ("SELECT album g, identity_key k FROM tracks WHERE album<>''", max_album),
             ("SELECT artist g, identity_key k FROM tracks WHERE artist<>''", _ARTIST_BASKET_CAP),
             ("SELECT snapshot_id g, identity_key k FROM history_items", max_session)):

@@ -1326,9 +1326,11 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 }
 .cluster-canvas:active { cursor: grabbing; }
 
-/* Starfield BEHIND the graph (cluster-world is z-index 1), with the ORIGINAL spacetime dot-grid as a
-   clean STATIC layer on top of the stars (::after), exactly the production grid, just over a starfield.
-   Two drifting star fields (element bg + ::before) give parallax depth + twinkle; the grid never moves. */
+/* Starfield BEHIND the graph (cluster-world is z-index 1), with the spacetime grid (<canvas>) over it.
+   Two star layers (element bg + ::before) for depth. DELIBERATELY STATIC — no animation. ANY animation
+   here (background-position drift, filter, or even an opacity twinkle) repaints the whole viewport-sized
+   field of radial-gradients EVERY frame, idle included, which pinned the entire canvas at ~20fps. Painted
+   once, it costs nothing. (Measured: animated => ~20fps idle; static => 60fps.) */
 .cluster-stars { position: absolute; inset: -60px; z-index: 0; pointer-events: none; background-repeat: repeat;
   /* drifting star field: mixed sizes/colours for depth */
   background-size: 210px 210px;          /* smaller tile ⇒ the dim dust is more densely packed */
@@ -1348,9 +1350,8 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
     radial-gradient(1px 1px at 190px 175px, rgba(220,230,255,0.36), transparent),
     radial-gradient(1px 1px at 160px 55px, rgba(255,255,255,0.3), transparent),
     radial-gradient(1px 1px at 100px 160px, rgba(255,240,230,0.34), transparent);
-  animation: starDriftA 130s linear infinite, starTwinkleA 6s ease-in-out infinite;
 }
-/* a sparser, brighter layer (with glow beacons) drifting at a different speed = parallax depth */
+/* a sparser, brighter layer for depth (static: no animation, so it never forces a repaint) */
 .cluster-stars::before {
   content: ''; position: absolute; inset: 0; background-repeat: repeat; background-size: 540px 540px; opacity: 0.95;
   background-image:
@@ -1359,15 +1360,9 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
     radial-gradient(2.3px 2.3px at 300px 430px, #fff 35%, rgba(220,195,255,0.4) 62%, transparent 76%),
     radial-gradient(1.6px 1.6px at 60px 360px, rgba(255,255,255,0.8), transparent),
     radial-gradient(1.6px 1.6px at 400px 320px, rgba(220,235,255,0.75), transparent);
-  animation: starDriftB 90s linear infinite, starTwinkleC 3.6s ease-in-out infinite;
 }
 /* (the spacetime grid is now the warped <canvas>.cluster-grid, drawn in JS, see drawGrid) */
 .cluster-grid { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
-@keyframes starDriftA { to { background-position: 240px 150px; } }
-@keyframes starDriftB { to { background-position: -300px 220px; } }
-@keyframes starTwinkleA { 0%, 100% { opacity: 0.55; } 50% { opacity: 0.72; } }
-/* gentle brightness pulse: twinkles the bright beacons */
-@keyframes starTwinkleC { 0%, 100% { filter: brightness(0.92); } 50% { filter: brightness(1.2); } }
 @media (prefers-reduced-motion: reduce) {
   .cluster-stars, .cluster-stars::before, .cluster-stars::after { animation: none; }
 }
@@ -1383,14 +1378,15 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 
 /* Bright-green midpoint dot on every edge: click it to ask "why this connection?". */
 .edge-dot {
-  position: absolute; transform: translate(-50%, -50%); z-index: 3;
+  /* positioned via inline transform translate (compositor-only, no per-frame reflow); centred on its
+     point with a negative margin so the transform is free for positioning (hover grows via box-shadow). */
+  position: absolute; left: 0; top: 0; margin: -5.5px 0 0 -5.5px; z-index: 3;
   width: 11px; height: 11px; padding: 0; border-radius: 50%; cursor: pointer;
   background: #6a6a78; border: 2px solid var(--bg-2);   /* same gray as the edges, quiet */
-  opacity: 0.6; transition: opacity 0.12s, transform 0.1s, background 0.12s;
+  opacity: 0.6; transition: opacity 0.12s, background 0.12s, box-shadow 0.12s;
 }
-.edge-dot:hover { opacity: 1; background: var(--accent-2); transform: translate(-50%, -50%) scale(1.35); }
-.edge-dot.on { opacity: 1; background: var(--accent-2); transform: translate(-50%, -50%) scale(1.35);
-  box-shadow: 0 0 0 2px var(--accent-soft); }
+.edge-dot:hover { opacity: 1; background: var(--accent-2); box-shadow: 0 0 0 3px var(--accent-soft); }
+.edge-dot.on { opacity: 1; background: var(--accent-2); box-shadow: 0 0 0 3px var(--accent-soft); }
 
 .cluster-explain {
   position: absolute; z-index: 7; transform: translate(-50%, calc(-100% - 14px));
@@ -1416,7 +1412,7 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 .ce-pct { color: #15e98c; font-weight: 700; font-size: 0.82rem; }
 
 .cluster-node {
-  position: absolute; transform: translate(-50%, -50%);
+  position: absolute; left: 0; top: 0;   /* positioned via inline transform translate (compositor-only, no per-frame reflow); -50% centring is folded into that transform */
   width: 190px; background: var(--surface); border: 1px solid var(--border-2);
   border-radius: var(--radius-sm); padding: 0.5rem 0.55rem; box-shadow: var(--shadow);
 }

@@ -33,7 +33,10 @@ def _proto(lane, label, items, now):
     """Shape a recommendation lane into a dated, saveable proto-playlist card."""
     when = datetime.fromtimestamp(now).strftime("%B %-d %Y")   # e.g. "June 21 2026"
     return {"lane": lane, "label": label, "name": f"{label} - {when}",
-            "note": _NOTES.get(lane, ""), "tracks": items[:PROTO_SIZE]}
+            "note": _NOTES.get(lane, ""), "tracks": items[:PROTO_SIZE],
+            # #50: only the Fresh (out-of-corpus discovery) card carries persistent per-row feedback.
+            # Owned-track proto cards stay curate-before-listen (client-side remove only).
+            "feedback_surface": "for_you" if lane == "fresh" else None}
 
 
 def _carded(store, lane, label, items, now):
@@ -89,6 +92,7 @@ def _one_card(store, card, now):
     elif card == "fresh":
         props = RecDao(store).get_proposals("fresh_songs")
         items = recommend.rotate_sample(props or [], PROTO_SIZE, _epoch(store, "fresh"))
+        store.mark_offered("track", [i["key"] for i in items if i.get("key")], now)   # #53 offered count
     else:
         return None
     return _carded(store, card, _CARD_LABELS[card], items, now) if items else None
@@ -329,6 +333,7 @@ def build(ctx) -> APIRouter:
         # List card: a fresh random slice each epoch, like the other proto-playlists.
         props = RecDao(store).get_proposals("fresh_songs")
         items = recommend.rotate_sample(props or [], PROTO_SIZE, _epoch(store, "fresh"))
+        store.mark_offered("track", [i["key"] for i in items if i.get("key")], now_fn())   # #53 offered count
         proto = _carded(store, "fresh", "Fresh songs", items, now_fn()) if items else None
         return templates.TemplateResponse(request, "_partials/fresh.html",
                                           {"proto": proto,

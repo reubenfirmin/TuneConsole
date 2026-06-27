@@ -9,6 +9,13 @@
 // positions are owned by a live d3-force simulation (link + charge + collide) so the graph lays
 // itself out without overlap and re-settles as you grow/prune. D3 mutates each node's x/y in place,
 // which Alpine renders reactively.
+// Keep a collection OUT of Alpine's reactivity. Alpine (Vue reactivity) re-proxies ANY object reached
+// through `this`, so without this the d3 simulation and the per-frame renderer get handed proxied nodes
+// again — a get/set trap on every node.x/vx read+write, every tick, plus reactive triggers on writes.
+// Vue's '__v_skip' flag makes reactive() return the object untouched, so `this._raw`/`this._rawById`/the
+// el-maps stay plain and the hot path touches raw objects only. (Stable across Alpine 3 / @vue/reactivity.)
+function rawColl(o) { try { Object.defineProperty(o, '__v_skip', { value: true }); } catch (e) {} return o; }
+
 function clusterCanvas() {
   const WORLD = 8000, CENTER = WORLD / 2;   // big fixed world; we pan/zoom a transform over it
   const LINK_D = 215, NODE_R = 128;         // spoke length; collision radius (#14: roomier layout)
@@ -35,7 +42,10 @@ function clusterCanvas() {
       const d3 = window.d3;
       this.sim = d3.forceSimulation([])
         .force('charge', d3.forceManyBody().strength(-420).distanceMax(1600))
-        .force('collide', d3.forceCollide(NODE_R).strength(0.95).iterations(2))
+        // One iteration mid-motion keeps the tick cheap; cards may overlap transiently while settling.
+        // A synchronous collide-only pass on 'end' (see _settleOverlaps) guarantees the FINAL layout is
+        // overlap-free, so the fast cool below never leaves cards stacked.
+        .force('collide', d3.forceCollide(NODE_R).strength(0.95).iterations(1))
         .force('link', d3.forceLink([]).id(n => n.id).strength(0.5)
           // Spoke length grows with crowding: a busy ring needs longer spokes to fit around its
           // parent, and a child that has grown its OWN sub-cluster gets pushed further out so that
@@ -44,10 +54,15 @@ function clusterCanvas() {
             + Math.min(220, Math.max(0, this.childCount(l.source.id) - 4) * 28)
             + Math.min(320, this.descCount(l.target.id) * 26)))
         .force('separate', this._clusterForce())   // keep distinct branches from overlapping
-        .alphaDecay(0.035);
+        .alphaDecay(0.1);                     // ~1s of animated settle (was ~3s); cools fully to the default alphaMin
       this.sim.stop();                       // started on demand once there are nodes (see _reheat)
-      this.sim.on('end', () => this.persist());   // save settled positions
-      this.sim.on('tick.grid', () => this._scheduleGrid());   // redraw the warped spacetime grid (throttled to rAF)
+      // On settle: resolve any residual overlap (the fast cool + 1-iteration collide can leave some),
+      // then one crisp final frame, then save the settled positions.
+      this.sim.on('end', () => { this._settleOverlaps(); this._renderFrame(true); this.persist(); });
+      // The sim mutates node x/y in place on every tick. We do NOT let Alpine react to that (see
+      // _renderFrame): positions are written to the DOM imperatively, once per animation frame, so the
+      // physics never drives ~80 reactive style effects + proxy traps per tick. rAF-throttled.
+      this.sim.on('tick.render', () => this._scheduleFrame());
       window.addEventListener('pagehide', () => this._flushState());   // land the latest state on navigation
       // #48: ?from=<ytm> reopens the canvas behind a saved cluster playlist (server-stored), overriding
       // the localStorage canvas. Strip the param so a later refresh keeps your edits instead of reloading.
@@ -67,6 +82,7 @@ function clusterCanvas() {
     _afterInit(restored) {
       this.$nextTick(() => {
         this._initGrid();
+        this._structDirty = true; this._renderFrame(false);   // position the restored/initial cards before paint
         if (restored) { this.drawGrid(); return; }   // keep the saved view; nothing to focus into
         this.resetView();
         this.$refs.seedInput && this.$refs.seedInput.focus();
@@ -138,23 +154,27 @@ function clusterCanvas() {
     // the graph barely shifts (#14: pruning shouldn't jiggle everything).
     _reheat(alpha = 0.9) {
       this._recomputeTopology();
-      const links = this.nodes
-        .filter(n => n.parentId != null && this.nodeById(n.parentId))
+      const links = this._raw
+        .filter(n => n.parentId != null && this._rawById.has(n.parentId))
         .map(n => ({ source: n.parentId, target: n.id }));
-      this.sim.nodes(this.nodes);
+      this.sim.nodes(this._raw);
       this.sim.force('link').links(links);
+      this._structDirty = true;              // a card may have been added/removed: rebuild the id→el map
       this.sim.alpha(alpha).restart();
+      this.$nextTick(() => this._renderFrame(false));   // place the new ring before paint (don't wait for tick 1)
       this.persist();
     },
     // Update the sim's node/link sets WITHOUT re-energizing it. Removed nodes leave the simulation
     // but everything else holds its exact position (#14: pruning must not jiggle the layout).
     _syncSim() {
       this._recomputeTopology();
-      const links = this.nodes
-        .filter(n => n.parentId != null && this.nodeById(n.parentId))
+      const links = this._raw
+        .filter(n => n.parentId != null && this._rawById.has(n.parentId))
         .map(n => ({ source: n.parentId, target: n.id }));
-      this.sim.nodes(this.nodes);
+      this.sim.nodes(this._raw);
       this.sim.force('link').links(links);
+      this._structDirty = true;
+      this.$nextTick(() => this._renderFrame(false));   // positions/edges changed without re-energizing: redraw once
       this.persist();
     },
 
@@ -178,11 +198,114 @@ function clusterCanvas() {
       this._gridEl.style.height = r.height + 'px';
       this._gW = r.width; this._gH = r.height; this._gDpr = dpr;
     },
-    // Coalesce redraws to one per frame. Drawing on every pointermove during a pan can saturate the
-    // main thread (big glow gradients × wells × hi-DPI) and freeze the drag. rAF throttles it.
+    // The warped grid is the heaviest paint on the canvas (O(samples × wells)) and barely changes
+    // frame-to-frame while the layout settles. Cap it to ~16fps WHILE the sim is hot so the force ticks
+    // and the imperative card writes keep the frame budget; pan/zoom (sim cold) and sim 'end' redraw
+    // immediately. A throttled-out frame re-schedules on the next tick, so the grid keeps catching up.
+    _drawGridIfDue(force) {
+      const hot = this.sim && this.sim.alpha() > this.sim.alphaMin();
+      const t = (window.performance && performance.now()) || 0;
+      if (!force && hot && t - (this._lastGrid || 0) < 140) return;   // ~7fps while settling; the wells barely move frame-to-frame and 'end' draws crisp
+      this._lastGrid = t;
+      this.drawGrid();
+    },
+    // Cache the gravity-well glow as a sprite keyed by radius, so the grid blits it with drawImage
+    // (GPU) instead of allocating a radial gradient + arc-fill for every well, every draw. Radius only
+    // changes with zoom, so during a settle the same sprite is reused for all wells across all frames.
+    _wellSprite(rad) {
+      const key = Math.max(8, Math.round(rad));
+      if (this._wellSpr && this._wellSprR === key) return this._wellSpr;
+      const c = document.createElement('canvas');
+      c.width = c.height = key * 2;
+      const g2 = c.getContext('2d');
+      const g = g2.createRadialGradient(key, key, key * 0.06, key, key, key);
+      g.addColorStop(0, 'rgba(66,70,150,0.20)'); g.addColorStop(1, 'rgba(66,70,150,0)');
+      g2.fillStyle = g; g2.beginPath(); g2.arc(key, key, key, 0, 7); g2.fill();
+      this._wellSpr = c; this._wellSprR = key;
+      return c;
+    },
+    // Grid-only frame: used by pan/zoom, where node world-positions don't change (the world transform
+    // moves them) but the screen-space grid must follow the pan. Coalesced to one redraw per frame.
     _scheduleGrid() {
       if (this._gridRAF) return;
-      this._gridRAF = requestAnimationFrame(() => { this._gridRAF = 0; this.drawGrid(); });
+      this._gridRAF = requestAnimationFrame(() => { this._gridRAF = 0; this._drawGridIfDue(false); });
+    },
+    // Full frame: write every node's position to the DOM imperatively (cards, edge dots, the two edge
+    // <path>s, the explain popover), then refresh the grid. Driven by the sim tick and by structural
+    // changes. This is the ONLY place node x/y reach the DOM, which is why the sim can run on raw
+    // objects without any Alpine reactivity in the hot path.
+    _scheduleFrame() {
+      if (this._frameRAF) return;
+      this._frameRAF = requestAnimationFrame(() => {
+        this._frameRAF = 0;
+        // Mid-drag only ONE card moved (and it's already placed synchronously in onPanMove), so don't
+        // rewrite all ~N card transforms — just refresh the edges and the dots touching the dragged node.
+        if (this._drag && this._drag.moved) this._renderDragFrame();
+        else this._renderFrame(false);
+      });
+    },
+    // Cheap per-frame update while dragging: rebuild the two edge paths (the dragged node's spokes moved)
+    // and reposition only the dots incident to the dragged node. No card transforms, no grid, no physics.
+    _renderDragFrame() {
+      const byId = this._rawById, dots = this._dotEls, dragId = this._drag.id, ts = new Set(this.trunk);
+      let edge = '', trunk = '';
+      for (const n of (this._raw || [])) {
+        if (n.parentId == null) continue;
+        const p = byId && byId.get(n.parentId); if (!p) continue;
+        const seg = `M${p.x} ${p.y}L${n.x} ${n.y}`;
+        if (ts.has(n.id)) trunk += seg; else edge += seg;
+        if (dots && (n.id === dragId || n.parentId === dragId)) {   // only spokes touching the dragged card move
+          const d = dots.get(n.id);
+          if (d) d.style.transform = `translate(${(p.x + n.x) / 2}px,${(p.y + n.y) / 2}px)`;
+        }
+      }
+      if (this.$refs.edgePath) this.$refs.edgePath.setAttribute('d', edge);
+      if (this.$refs.trunkPath) this.$refs.trunkPath.setAttribute('d', trunk);
+    },
+    _rebuildElMap() {
+      const world = this.$refs.world;
+      this._cardEls = rawColl(new Map()); this._dotEls = rawColl(new Map());
+      if (!world) return;
+      world.querySelectorAll('.cluster-node[data-nid]').forEach(el => this._cardEls.set(+el.dataset.nid, el));
+      world.querySelectorAll('.edge-dot[data-eid]').forEach(el => this._dotEls.set(+el.dataset.eid, el));
+    },
+    _renderFrame(force) {
+      if (this._structDirty || !this._cardEls) { this._rebuildElMap(); this._structDirty = false; }
+      const byId = this._rawById, cards = this._cardEls, dots = this._dotEls;
+      for (const n of (this._raw || [])) {
+        const c = cards.get(n.id);
+        if (c) c.style.transform = `translate(${n.x}px,${n.y}px) translate(-50%,-50%)`;
+        if (n.parentId == null) continue;
+        const p = byId && byId.get(n.parentId); if (!p) continue;
+        const d = dots.get(n.id);
+        if (d) d.style.transform = `translate(${(p.x + n.x) / 2}px,${(p.y + n.y) / 2}px)`;
+      }
+      if (this.$refs.edgePath) {
+        const e = this._edgePaths();
+        this.$refs.edgePath.setAttribute('d', e.edge);
+        if (this.$refs.trunkPath) this.$refs.trunkPath.setAttribute('d', e.trunk);
+      }
+      if (this.explain && this.$refs.explainEl) {
+        const a = this.explainAnchor();
+        this.$refs.explainEl.style.left = a.x + 'px';
+        this.$refs.explainEl.style.top = a.y + 'px';
+      }
+      // The warped grid is the heaviest redraw, so freeze it while a node is being dragged (the cards
+      // still flow); it recomputes on drop (onPanEnd) and on settle. `force` (settle / restore) always draws.
+      if (force || !(this._drag && this._drag.moved)) this._drawGridIfDue(force);
+    },
+    // Resolve any overlap WITHOUT re-flowing the graph. forceCollide separates cards geometrically and
+    // ignores alpha, so we zero alpha first: the other forces (charge/link/separate) scale to nothing and
+    // only collide acts. A few synchronous ticks at higher iterations then nudge overlapping neighbours
+    // apart in place — no link force pulling the layout around, so a drop never makes the graph "crawl".
+    // tick() dispatches no events (no re-entrant 'end'/'tick'); the caller renders the one resulting frame.
+    _settleOverlaps() {
+      const collide = this.sim && this.sim.force('collide');
+      if (!collide || !(this._raw && this._raw.length)) return;
+      this.sim.alpha(0);                     // freeze flow: collide-only de-overlap, in place
+      collide.iterations(3);
+      for (let i = 0; i < 4; i++) this.sim.tick();
+      collide.iterations(1);
     },
     // Draw a grid that warps toward each cluster centre (gravity-well "spacetime curvature"). Each
     // cluster's centre (the central group and every grown node) is a well whose depth grows with the
@@ -195,53 +318,57 @@ function clusterCanvas() {
       ctx.setTransform(this._gDpr, 0, 0, this._gDpr, 0, 0);
       ctx.clearRect(0, 0, W, H);
       const scale = this.scale, tx = this.tx, ty = this.ty;
-      const proj = (wx, wy) => [wx * scale + tx, wy * scale + ty];
+      const proj = (px, py) => [px * scale + tx, py * scale + ty];   // world → screen (glow wells only; the grid lines inline this)
       let wells = [];
-      for (const n of this.nodes) {
+      for (const n of (this._raw || [])) {
         if (n.kind === 'central' || this.childCount(n.id)) {
           wells.push({ x: n.x, y: n.y, m: (n.kind === 'central' ? 2.4 : 0.7) + this.descCount(n.id) * 0.3 });
         }
       }
       // cap the well count on huge clusters: the warp sums over every well per grid sample (O(pts·wells));
       // the heaviest few dominate the look anyway, so the rest add cost without visible benefit.
-      if (wells.length > 24) wells = wells.sort((a, b) => b.m - a.m).slice(0, 24);
+      if (wells.length > 16) wells = wells.sort((a, b) => b.m - a.m).slice(0, 16);
       const GRID = 88, R0 = 320, R0SQ = R0 * R0, PULL = 60;   // larger R0 ⇒ the well's pull reaches much further out
-      const warp = (px, py) => {                       // pull a world point toward the wells
-        let dx = 0, dy = 0;
-        for (const w of wells) {
-          const ex = w.x - px, ey = w.y - py, d2 = ex * ex + ey * ey, d = Math.sqrt(d2) || 1;
-          // displacement magnitude peaks AT the well (PULL·m) and decays with distance, so the dent
-          // is deepest UNDER each cluster centre, not in a ring between them. f = mag / d.
-          const f = (PULL * w.m) * R0SQ / (d2 + R0SQ) / d;
-          dx += ex * f; dy += ey * f;
-        }
-        return [px + dx, py + dy];
-      };
+      // Flatten the wells into typed arrays once, so the inner sample loop (thousands of evals per draw)
+      // reads contiguous numbers and never touches an object or allocates. f = mag / d, peaking AT the
+      // well and decaying with distance, so the dent is deepest UNDER each centre.
+      const wn = wells.length, wx = new Float64Array(wn), wy = new Float64Array(wn), wm = new Float64Array(wn);
+      for (let i = 0; i < wn; i++) { wx[i] = wells[i].x; wy[i] = wells[i].y; wm[i] = PULL * wells[i].m * R0SQ; }
       const mg = GRID * 2;                             // visible world bounds (+ margin)
       const X0 = Math.floor(((0 - tx) / scale - mg) / GRID) * GRID, X1 = Math.ceil(((W - tx) / scale + mg) / GRID) * GRID;
       const Y0 = Math.floor(((0 - ty) / scale - mg) / GRID) * GRID, Y1 = Math.ceil(((H - ty) / scale + mg) / GRID) * GRID;
-      const STEP = GRID / 7;
-      // depth: a soft blue-gray glow that sinks each well (the bottom of the dent), centred on the node
+      const STEP = GRID / 5;                           // samples per grid cell: coarser curves, ~30% fewer warp evals
+      // depth: a soft blue-gray glow that sinks each well (the bottom of the dent), centred on the node.
+      // Blit a cached sprite per well (radius is constant across wells), not a fresh gradient each time.
+      const rad = Math.max(40, R0 * scale * 0.85), spr = this._wellSprite(rad), d2r = rad * 2;
       for (const w of wells) {
-        const [sx, sy] = proj(w.x, w.y), rad = Math.max(40, R0 * scale * 0.85);
-        const g = ctx.createRadialGradient(sx, sy, rad * 0.06, sx, sy, rad);
-        g.addColorStop(0, 'rgba(66,70,150,0.20)'); g.addColorStop(1, 'rgba(66,70,150,0)');
-        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(sx, sy, rad, 0, 7); ctx.fill();
+        const [sx, sy] = proj(w.x, w.y);
+        ctx.drawImage(spr, sx - rad, sy - rad, d2r, d2r);
       }
       ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(74,78,158,0.16)';   // dark blue-indigo, distinct from the neutral-gray edges
       for (let gx = X0; gx <= X1; gx += GRID) {        // vertical lines (constant world x)
         ctx.beginPath();
-        for (let wy = Y0, first = true; wy <= Y1; wy += STEP) {
-          const wp = warp(gx, wy), s = proj(wp[0], wp[1]);
-          if (first) { ctx.moveTo(s[0], s[1]); first = false; } else ctx.lineTo(s[0], s[1]);
+        for (let py = Y0, first = true; py <= Y1; py += STEP) {
+          let dx = 0, dy = 0;                          // warp (gx, py) toward the wells, inlined (no alloc)
+          for (let i = 0; i < wn; i++) {
+            const ex = wx[i] - gx, ey = wy[i] - py, dd = ex * ex + ey * ey, d = Math.sqrt(dd) || 1;
+            const f = wm[i] / (dd + R0SQ) / d; dx += ex * f; dy += ey * f;
+          }
+          const sx = (gx + dx) * scale + tx, sy = (py + dy) * scale + ty;
+          if (first) { ctx.moveTo(sx, sy); first = false; } else ctx.lineTo(sx, sy);
         }
         ctx.stroke();
       }
       for (let gy = Y0; gy <= Y1; gy += GRID) {        // horizontal lines (constant world y)
         ctx.beginPath();
-        for (let wx = X0, first = true; wx <= X1; wx += STEP) {
-          const wp = warp(wx, gy), s = proj(wp[0], wp[1]);
-          if (first) { ctx.moveTo(s[0], s[1]); first = false; } else ctx.lineTo(s[0], s[1]);
+        for (let px = X0, first = true; px <= X1; px += STEP) {
+          let dx = 0, dy = 0;                          // warp (px, gy)
+          for (let i = 0; i < wn; i++) {
+            const ex = wx[i] - px, ey = wy[i] - gy, dd = ex * ex + ey * ey, d = Math.sqrt(dd) || 1;
+            const f = wm[i] / (dd + R0SQ) / d; dx += ex * f; dy += ey * f;
+          }
+          const sx = (px + dx) * scale + tx, sy = (gy + dy) * scale + ty;
+          if (first) { ctx.moveTo(sx, sy); first = false; } else ctx.lineTo(sx, sy);
         }
         ctx.stroke();
       }
@@ -253,26 +380,42 @@ function clusterCanvas() {
     _clusterForce() {
       const self = this;
       let nodes = [];
-      const SEP = 300;                       // target clearance between cards across branches
+      const SEP = 300, SEP2 = SEP * SEP;     // target clearance between cards across branches
       function force(alpha) {
-        const t = self._topo;                  // precomputed per reheat; avoids O(n) branchId walks per tick
-        const branch = nodes.map(n => (n.kind === 'central' || !t) ? null : t.branch.get(n.id));
+        if (!self._topo) return;               // no topology yet (before the first reheat)
         const k = alpha * 0.6;
+        // A quadtree prunes the cross-branch repulsion to nearby pairs only: ~O(n log n) instead of
+        // the old all-pairs O(n²), which is what stalled the layout past ~80 cards. Each node is pushed
+        // off every OTHER-branch neighbour within SEP; the symmetric push lands when that neighbour is
+        // itself visited as `a`, so we only mutate `a` here (no double application). Branch ids are read
+        // off the node (n._b, stamped in _recomputeTopology), so the inner loop does no Map lookups.
+        const tree = window.d3.quadtree(nodes, n => n.x, n => n.y);
         for (let i = 0; i < nodes.length; i++) {
-          if (branch[i] == null) continue;
           const a = nodes[i];
-          for (let j = i + 1; j < nodes.length; j++) {
-            if (branch[j] == null || branch[j] === branch[i]) continue;   // same branch / centre: skip
-            const b = nodes[j];
-            let dx = b.x - a.x, dy = b.y - a.y, d2 = dx * dx + dy * dy;
-            if (d2 === 0) { dx = (i - j); dy = 1; d2 = dx * dx + 1; }
-            if (d2 < SEP * SEP) {
-              const d = Math.sqrt(d2), push = (SEP - d) / d * k;
-              const fx = dx * push, fy = dy * push;
-              a.vx -= fx; a.vy -= fy;
-              b.vx += fx; b.vy += fy;
-            }
-          }
+          const ba = a._b;
+          if (ba == null) continue;            // the pinned centre neither pushes nor is pushed
+          const ax = a.x, ay = a.y;
+          tree.visit((quad, x0, y0, x1, y1) => {
+            if (x0 > ax + SEP || x1 < ax - SEP || y0 > ay + SEP || y1 < ay - SEP) return true;  // cell too far: prune
+            if (quad.length) return false;     // internal node: descend
+            let leaf = quad;
+            do {
+              const b = leaf.data;
+              if (b !== a) {
+                const bb = b._b;
+                if (bb != null && bb !== ba) {   // skip same branch / centre
+                  let dx = ax - b.x, dy = ay - b.y, d2 = dx * dx + dy * dy;
+                  if (d2 === 0) { dx = 1; dy = (i % 7) - 3 || 1; d2 = dx * dx + dy * dy; }
+                  if (d2 < SEP2) {
+                    const d = Math.sqrt(d2), push = (SEP - d) / d * k;
+                    a.vx += dx * push; a.vy += dy * push;
+                  }
+                }
+              }
+              leaf = leaf.next;
+            } while (leaf);
+            return false;
+          });
         }
       }
       force.initialize = (n) => { nodes = n; };
@@ -514,15 +657,24 @@ function clusterCanvas() {
     // tick/frame. Before this, nodeById was an O(n) scan called inside branchId (per node, per tick) and
     // drawGrid recomputed descendants() for every node every frame: O(n²)+ work that stalled at ~80 nodes.
     _recomputeTopology() {
-      const byId = new Map(), childArr = new Map();
+      const byId = rawColl(new Map()), childArr = rawColl(new Map());
       for (const n of this.nodes) byId.set(n.id, n);
       this._byId = byId;
+      // Raw (non-reactive) mirror of the node list for the hot path: the d3 sim and the per-frame
+      // renderer read/write x/y/vx/vy here so the physics never goes through Alpine proxies. Elements
+      // must be unwrapped one-by-one: `this.nodes = this.nodes.filter(...)` leaves reactive proxies as
+      // the array's ELEMENTS, which a top-level Alpine.raw() would not unwrap. Rebuilt only here, i.e.
+      // once per structural change, never per frame. The raw object and its proxy share storage, so
+      // state set through the proxy (prune/boost) is visible to the sim and vice-versa.
+      const A = window.Alpine, raw = rawColl([]), rawById = rawColl(new Map());
+      for (const n of this.nodes) { const r = A ? A.raw(n) : n; raw.push(r); rawById.set(r.id, r); }
+      this._raw = raw; this._rawById = rawById;
       for (const n of this.nodes) {
         if (n.parentId == null) continue;
         let a = childArr.get(n.parentId); if (!a) { a = []; childArr.set(n.parentId, a); }
         a.push(n);
       }
-      const desc = new Map();
+      const desc = rawColl(new Map());
       const count = (id) => {                 // memoized post-order: each node visited once ⇒ O(n) total
         if (desc.has(id)) return desc.get(id);
         desc.set(id, 0);                       // cycle guard (trees won't, but keep it safe)
@@ -530,9 +682,14 @@ function clusterCanvas() {
         if (cs) for (const c of cs) total += count(c.id);
         desc.set(id, total); return total;
       };
-      const branch = new Map();
-      for (const n of this.nodes) { count(n.id); branch.set(n.id, n.kind === 'central' ? null : this.branchId(n)); }
-      this._topo = { child: childArr, desc, branch };
+      const branch = rawColl(new Map());
+      for (const n of this.nodes) {
+        count(n.id);
+        const b = n.kind === 'central' ? null : this.branchId(n);
+        branch.set(n.id, b);
+        const r = rawById.get(n.id); if (r) r._b = b;   // stamp branch on the raw node: the separate force reads a._b, not a Map.get per pair
+      }
+      this._topo = rawColl({ child: childArr, desc, branch });
     },
     childCount(id) { const a = this._topo && this._topo.child.get(id); return a ? a.length : 0; },
     descCount(id) { return (this._topo && this._topo.desc.get(id)) || 0; },
@@ -547,40 +704,32 @@ function clusterCanvas() {
     // #14 colour-coding: a card takes the hue of the SUB-CLUSTER it belongs to, i.e. the grown ring
     // that spawned it, keyed by its parent. Each ring has its own vivid hue (assigned in addChildren),
     // so three sub-clusters down a trunk read as three clearly different colours, not shades of one.
-    nodeStyle(n) {
-      if (n.kind === 'central' || n.parentId == null) return '';
+    // Returned as an OBJECT (not a cssText string) so Alpine's :style sets only the hue custom props and
+    // leaves the imperatively-written `transform` (the node's position, see _renderFrame) untouched.
+    nodeHueVars(n) {
+      if (n.kind === 'central' || n.parentId == null) return {};
       const hue = this.subHues[n.parentId];
-      if (hue == null) return '';
-      return `--node-hue:${hue};--node-sat:70%;--node-light:60%;`;
+      if (hue == null) return {};
+      return { '--node-hue': String(hue), '--node-sat': '70%', '--node-light': '60%' };
     },
     // #30 The "trunk" is the spine you GROW out (via the + button, see grow()): each node you grow
     // through lights the bright-green line leading into it, so the path you explored glows edge by edge.
     isTrunkNode(id) { return this.trunk.includes(id); },
-    isTrunkEdge(n) { return n.parentId != null && this.trunk.includes(n.id); },
     // Two SVG <path>s: the faint branches and the bright trunk over them (Alpine can't reliably make
     // per-edge <line> elements inside <svg>, namespace issues, so each is one path on a static node).
-    edgePath() { return this._edgeD(false); },
-    trunkPath() { return this._edgeD(true); },
-    _edgeD(trunk) {
-      let d = '';
-      for (const n of this.nodes) {
+    // Both `d`s are built in ONE pass over the raw nodes (see _renderFrame), not bound reactively, so
+    // the sim doesn't re-run an all-nodes string build through Alpine on every tick. Trunk membership is
+    // a Set, so the split is O(n) rather than O(n·trunk) from a per-node Array.includes.
+    _edgePaths() {
+      let edge = '', trunk = '';
+      const byId = this._rawById, ts = new Set(this.trunk);
+      for (const n of (this._raw || [])) {
         if (n.parentId == null) continue;
-        const p = this.nodeById(n.parentId); if (!p) continue;
-        if (this.isTrunkEdge(n) !== trunk) continue;
-        d += `M${p.x} ${p.y}L${n.x} ${n.y}`;
+        const p = byId && byId.get(n.parentId); if (!p) continue;
+        const seg = `M${p.x} ${p.y}L${n.x} ${n.y}`;
+        if (ts.has(n.id)) trunk += seg; else edge += seg;
       }
-      return d;
-    },
-    // Each non-root node owns one edge (to its parent); its clickable midpoint dot reveals WHY the
-    // connection was made. Recomputed every render so the dots ride the live force simulation.
-    edges() {
-      const out = [];
-      for (const n of this.nodes) {
-        if (n.parentId == null) continue;
-        const p = this.nodeById(n.parentId); if (!p) continue;
-        out.push({ id: n.id, x: (p.x + n.x) / 2, y: (p.y + n.y) / 2 });
-      }
-      return out;
+      return { edge, trunk };
     },
     // Open the "why this edge?" popover: ask the server to explain the child against its pinned path
     // (the same positive centroid that grew it: central group + every ancestor up the branch).
@@ -589,6 +738,7 @@ function clusterCanvas() {
       const parent = this.nodeById(child.parentId); if (!parent) return;
       if (this.explain && this.explain.childId === childId) { this.explain = null; return; }  // toggle off
       this.explain = { childId, loading: true, data: null };
+      this._scheduleFrame();                 // position the popover now (it isn't a reactive :style binding)
       try {
         const r = await fetch('/clusters/explain', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -683,11 +833,14 @@ function clusterCanvas() {
       this._scheduleGrid(); this.persist();
     },
     _worldPt(e) {                            // screen → world coords (undo pan + zoom)
-      const rect = document.getElementById('cluster-canvas').getBoundingClientRect();
+      // Reuse the rect captured at drag start: getBoundingClientRect can force a synchronous layout, and
+      // pointermove fires many times per drag. The canvas doesn't move mid-drag, so one snapshot is safe.
+      const rect = this._dragRect || document.getElementById('cluster-canvas').getBoundingClientRect();
       return { x: (e.clientX - rect.left - this.tx) / this.scale,
                y: (e.clientY - rect.top - this.ty) / this.scale };
     },
     startNodeDrag(n, e) {                    // pointerdown on a card body: grab it, not the canvas
+      this._dragRect = document.getElementById('cluster-canvas').getBoundingClientRect();   // snapshot once for the whole drag
       const p = this._worldPt(e);
       this._drag = { id: n.id, moved: false, ox: p.x - n.x, oy: p.y - n.y, sx: e.clientX, sy: e.clientY };
       // capture on the canvas (which owns pointermove/up) so the drag survives the pointer leaving the card
@@ -709,7 +862,13 @@ function clusterCanvas() {
         const p = this._worldPt(e);          // past the threshold: it's a drag, pin under the pointer
         n.fx = p.x - this._drag.ox; n.fy = p.y - this._drag.oy;
         n.x = n.fx; n.y = n.fy;
-        this.sim.alpha(0.2).restart();
+        // Glue the card to the cursor NOW, on this very pointer event, instead of waiting for a sim tick
+        // + render rAF (a frame or two behind = the lag you felt). We also do NOT run the simulation
+        // during the drag: the rest of the graph stays put (cheap), and re-settles once on drop. So the
+        // drag costs one style write, not a full-graph physics pass per frame.
+        const el = this._cardEls && this._cardEls.get(this._drag.id);
+        if (el) el.style.transform = `translate(${n.x}px,${n.y}px) translate(-50%,-50%)`;
+        this._scheduleFrame();               // let the connecting edges/dots follow within a frame (no physics)
         return;
       }
       if (!this._pan) return;
@@ -720,9 +879,16 @@ function clusterCanvas() {
     onPanEnd() {
       if (this._drag) {
         const n = this.nodeById(this._drag.id);
+        const wasDrag = this._drag.moved;
         // a pure click (no move) leaves a track free to flow; a real drag pins it where dropped.
         if (n && !this._drag.moved && n.kind !== 'central') { n.fx = null; n.fy = null; }
-        this._drag = null;
+        this._drag = null; this._dragRect = null;
+        // The node STAYS exactly where you dropped it (it's pinned). Do NOT re-run the simulation: a
+        // reheat lets the link force drag the whole graph toward the new spot, which reads as the graph
+        // "crawling" after every drop. Instead resolve only any overlap the drop created — a synchronous,
+        // alpha-free collide pass (see _settleOverlaps) that nudges just the overlapping neighbours apart
+        // in a single frame. Edges to the moved node simply stretch; nothing else flows.
+        if (wasDrag) { this._settleOverlaps(); this._renderFrame(true); }
       }
       this._pan = null;
       this.persist();                          // save dragged positions / pan offset

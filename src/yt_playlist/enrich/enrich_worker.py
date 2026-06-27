@@ -13,7 +13,7 @@ import os
 import threading
 
 from yt_playlist.providers import enrichment
-from yt_playlist.providers.waterfall import run_waterfall
+from yt_playlist.providers.waterfall import run_waterfall, DiscoveredSink
 
 
 class EnrichWorker:
@@ -105,6 +105,9 @@ class EnrichWorker:
             if self._had_work:               # just drained the primary queue. Mark the catch-up point
                 store.set_setting("enrich_caught_up_at", str(self.ctx.now_fn()))
                 self._had_work = False
+            dn = self._drain_discovered(limit)   # #50: enrich the cold pool once the library is caught up
+            if dn is not None:
+                return dn
             stale_before = self.ctx.now_fn() - self._resweep_days() * 86400
             batch = store.resweep_batch(limit, stale_before)
         if not batch:
@@ -124,3 +127,31 @@ class EnrichWorker:
         except Exception:  # noqa: BLE001
             self.ctx.logger.warning("content-vector rebuild after enrich batch failed", exc_info=True)
         return len(batch)
+
+    def _drain_discovered(self, limit):
+        """#50: enrich one batch of the discovered (cold) pool, newest pulls first, via DiscoveredSink,
+        then re-encode the discovered content vectors so the cold ranker and Clusters see the new audio.
+        Returns the count processed (0 if a pause aborted it), or None when the cold queue is empty (the
+        caller then falls back to the library re-sweep). Runs only after the library queue is caught up,
+        so library enrichment keeps strict priority."""
+        store = self.ctx.store
+        dbatch = store.next_discovered_enrich_batch(limit)
+        if not dbatch:
+            return None
+        self._busy = True
+        try:
+            self.waterfall_fn(store, dbatch, enrichment.load_config(store),
+                              on_progress=lambda e: None, should_stop=self._stop,
+                              sink_for=lambda t: DiscoveredSink(store, t["identity_key"]))
+        finally:
+            self._busy = False
+        if self._stop():                      # paused/shutting down mid-batch. Re-queue it next time
+            return 0
+        store.mark_discovered_enriched([t["identity_key"] for t in dbatch], self.ctx.now_fn())
+        try:                                  # never let a rebuild crash the drain
+            from yt_playlist.rec import embed
+            embed.build_discovered_content_vectors(store)
+        except Exception:  # noqa: BLE001
+            self.ctx.logger.warning("discovered content-vector rebuild after cold enrich failed",
+                                    exc_info=True)
+        return len(dbatch)

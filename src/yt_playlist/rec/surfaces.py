@@ -5,13 +5,15 @@ import statistics
 from collections import Counter
 from dataclasses import dataclass
 
+import numpy as np
+
 from yt_playlist.library import analysis
+from yt_playlist.util import genre_map
 from yt_playlist.util.duration import ago as _ago
-from yt_playlist.util.matching import identity_key
-from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.rec.rec_dao import RecDao
-from yt_playlist.rec.scoring import _apply_axis_weights, _apply_mood, _SCORE_SHIFT_EPS, playlist_taste
+from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood, _SCORE_SHIFT_EPS,
+                                     content_taste, discovery_facet_weight, playlist_taste)
 from yt_playlist.repos.base import GENERATED_GROUP
 
 
@@ -242,42 +244,117 @@ def _rotation_reason(n) -> str:
     return f"Sits with your favorites in {n} of your playlist{'s' if n != 1 else ''}"
 
 
-# HOME CARD: "Fresh" ("Fresh songs"). Tracks NOT in your collection yet (outward discovery).
-def fresh_songs(ctx, limit=12) -> list[dict]:
-    """Outward (Phase 2): songs from YTM radios seeded by your top tracks that you don't own.
+# HOME CARD: "Fresh" ("Fresh songs"). Sourced ONLY from the taste-scored cold pool (cold_candidates,
+# materialized by rec_worker._fresh_proposal): every row is a scored, feedback-able out-of-corpus track.
+# Radio discovery still feeds that pool via discover.populate_radio_tracks; the old ephemeral radio-dict
+# producer (fresh_songs) was removed (#53: pool-only, no unscored radio rows).
 
-    Uses the client (network). Runs in the background worker, never per request. Degrades to []
-    with no client/network. limit matches the Home proto-card size (PROTO_SIZE) so the Fresh card
-    can actually fill, rather than topping out short."""
-    client = next(iter((ctx.client_provider() or {}).values()), None)
-    if client is None:
+
+def cold_candidates(store, now, limit=36) -> list[ForYouItem]:
+    """Rank out-of-corpus (cold) tracks from the discovered pool by taste + the transient tilts (#50).
+
+    Projects each pool track into the collaborative embedding via ContentProjection (so per-playlist
+    taste fit and the collaborative mood tilt apply), folds in the audio tilt over the discovered
+    content vectors (#45 cold), and scales by the #18 discovery facet overlay (a muted family is
+    hard-excluded, consistent with discovered albums/artists). Returns [] when the projection can't be
+    fit or the pool is empty. Degrades gracefully: a track missing audio still ranks on genre/era; a
+    track with no usable metadata (projection is the zero vector) is dropped, never raising.
+    """
+    from yt_playlist.rec.discover import ContentProjection   # lazy: avoid the surfaces<->discover cycle
+    rows = store.get_discovered_tracks()
+    if not rows:
         return []
-    owned = RecDao(ctx.store).library_keys()
-    out, seen = [], set()
-    for t in ctx.store.top_tracks(6):
-        vid = t.get("video_id")
-        if not vid:
+    proj = ContentProjection.fit(store)
+    if proj is None:
+        return []
+    pt = playlist_taste(store)
+    if not pt:
+        return []
+    keys, vecs, kept = [], [], []
+    for r in rows:
+        v = proj.predict(r.get("genre"), r.get("year"), r.get("audio"), artist=r.get("artist"))
+        if v is None or not np.any(v):                  # no usable features -> not surfaced
             continue
-        try:
-            radio = client.get_watch_playlist(vid) or {}
-        except Exception:  # noqa: BLE001 - network/parse/missing-method -> skip this seed
+        keys.append(r["identity_key"])
+        vecs.append(np.asarray(v, dtype=np.float32))
+        kept.append(r)
+    if not keys:
+        return []
+    V = np.vstack(vecs)
+    idx = {k: i for i, k in enumerate(keys)}
+    # Same scoring pipeline as warm tracks, but the audio tilt scores against the DISCOVERED content
+    # vectors (cold tracks' content vectors live there, not in the library content store).
+    scores = _apply_mood(pt.score_all(V), store, now, V, idx,
+                         content_vecs=embed.load_discovered_content_vectors(store))
+    suppressed = store.suppressed_keys("for_you", now)
+    muted = store.muted_artists()
+    scored = []
+    for r in kept:
+        k = r["identity_key"]
+        if k in suppressed or r.get("artist") in muted:
             continue
-        for r in radio.get("tracks") or []:
-            v, title = r.get("videoId"), (r.get("title") or "").strip()
-            artist = ((r.get("artists") or [{}])[0] or {}).get("name", "")
-            if not v or not title:
-                continue
-            key = identity_key(title, artist)
-            if key in owned or key in seen:
-                continue
-            seen.add(key)
-            # watch-playlist tracks carry their art under `thumbnail` (singular); search/playlist
-            # tracks use `thumbnails`. Try both so the fresh cards actually get cover art.
-            out.append({"video_id": v, "title": title, "artist": artist,
-                        "thumbnail": best_thumb(r.get("thumbnail") or r.get("thumbnails"))})
-            if len(out) >= limit:
-                return out
+        fam = genre_map.family(r.get("genre")) if r.get("genre") else None
+        fw = discovery_facet_weight(store, fam, now)
+        if fw is None:                                  # muted family: hard-exclude (mirrors #18 discovery)
+            continue
+        scored.append((float(scores[idx[k]]) * fw, r))
+    scored.sort(key=lambda t: -t[0])
+    out: list[ForYouItem] = []
+    for _, r in scored[:limit]:
+        reason = "New, sounds like your recent listening" if r.get("audio") else "New, fits your taste"
+        out.append(ForYouItem(r.get("title") or "", r.get("artist") or "", r.get("album") or "",
+                              r.get("video_id"), r.get("thumbnail"), 0, reason,
+                              r["identity_key"], lane="cold"))
     return out
+
+
+def _item_to_fresh_dict(item) -> dict:
+    """ForYouItem -> the Fresh-proposal dict. Superset of today's radio dict (adds key/reason/lane for
+    feedback parity); the Fresh card template reads video_id/title/artist/thumbnail and ignores extras."""
+    return {"video_id": item.video_id, "title": item.title, "artist": item.artist,
+            "thumbnail": item.thumbnail, "key": item.key, "reason": item.reason, "lane": item.lane}
+
+
+CATALOG_CONTENT_FRAC = 0.25   # share of Catalog reserved for content-only (genre/era) rediscovery tracks
+
+
+def _interleave(primary, secondary, secondary_frac) -> list:
+    """Merge two already-ranked lists, drawing ~secondary_frac of slots from `secondary` (in its order)
+    and the rest from `primary` (in its order), so the minority list reliably surfaces near the top
+    instead of being buried. When one list is exhausted, the rest comes from the other."""
+    out, pi, si = [], 0, 0
+    for pos in range(len(primary) + len(secondary)):
+        want_secondary = (secondary_frac > 0 and si < len(secondary)
+                          and (pi >= len(primary) or (pos + 1) * secondary_frac > si))
+        if want_secondary:
+            out.append(secondary[si]); si += 1
+        elif pi < len(primary):
+            out.append(primary[pi]); pi += 1
+        else:
+            out.append(secondary[si]); si += 1
+    return out
+
+
+def _content_only_scores(store, plays, now) -> dict:
+    """{key: Catalog score} for OWNED tracks that have a content (genre/era) vector but NO co-occurrence
+    vector (#38). Scored by content-space taste fit (then the permanent x transient genre/era facet
+    overlay, so mutes/steering still apply) x novelty, the same shape as the collaborative Catalog score
+    so they interleave. Empty when content vectors or the content-taste model are absent."""
+    ct = content_taste(store)
+    if not ct:
+        return {}
+    ckeys, CV, _cidx = embed.load_content_vectors(store)
+    if CV is None:
+        return {}
+    _keys, _V, idx = embed.load_vectors(store)
+    owned = set(RecDao(store).library_keys())
+    cands = [(i, k) for i, k in enumerate(ckeys) if k in owned and k not in idx]   # owned, content-only
+    if not cands:
+        return {}
+    csims = ct.score_all(CV)
+    fit = _apply_axis_weights(store, {k: float(csims[i]) for i, k in cands}, now)
+    cmin = min(fit.values())
+    return {k: (1.0 / (1.0 + plays.get(k, 0))) * (fit[k] - cmin + _SCORE_SHIFT_EPS) for k in fit}
 
 
 # HOME CARD: "Catalog" ("From your catalog"). Own-but-under-played tracks, the edge of your palette.
@@ -292,20 +369,29 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     no matter how well it fits. That's the Wheelhouse's job, not Catalog's. Empty until the
     embedding model is built. Distinct from Wheelhouse by signal (plays vs taste), not by a filter.
     """
-    pt = playlist_taste(store)
-    if not pt:
-        return []
-    keys, V, idx = embed.load_vectors(store)
-    if V is None:
-        return []
-    # taste WEIGHT (taste-fit + transient mood + permanent×transient facets): modulates, never filters
-    sims = _score_candidates(store, pt, keys, V, idx, now)
-    smin = min(sims.values()) if sims else 0.0
     plays = store.play_counts()                                  # {key: count}; absent = never played
+    pt = playlist_taste(store)
+    keys, V, idx = embed.load_vectors(store)
     # Catalog score = novelty(lack of plays, PRIMARY) × taste-fit weight (shifted positive so it only
     # ever scales, never zeroes: "weighted, not filtered").
-    scored = {k: (1.0 / (1.0 + plays.get(k, 0))) * (sims.get(k, smin) - smin + _SCORE_SHIFT_EPS) for k in keys}
-    order = sorted(scored, key=lambda k: -scored[k])
+    collab = {}
+    if pt and V is not None:
+        # taste WEIGHT (taste-fit + transient mood + permanent×transient facets): modulates, never filters
+        sims = _score_candidates(store, pt, keys, V, idx, now)
+        smin = min(sims.values()) if sims else 0.0
+        collab = {k: (1.0 / (1.0 + plays.get(k, 0))) * (sims.get(k, smin) - smin + _SCORE_SHIFT_EPS)
+                  for k in keys}
+    # #38: also rank owned tracks that have a CONTENT (genre/era) vector but no co-occurrence vector,
+    # by content-space taste fit. They are invisible to the collaborative path above, yet they are the
+    # MOST-forgotten owned tracks (never even reached the co-occurrence model), so Catalog reserves a
+    # guaranteed CATALOG_CONTENT_FRAC slice for them rather than letting the ~4.5k co-occurrence tracks
+    # fill every slot. The two lists are each ranked internally; interleaving leaves the collaborative
+    # order (and the warm path) untouched.
+    content = _content_only_scores(store, plays, now)
+    if not collab and not content:
+        return []
+    order = _interleave(sorted(collab, key=lambda k: -collab[k]),
+                        sorted(content, key=lambda k: -content[k]), CATALOG_CONTENT_FRAC)
     dao = RecDao(store)
     suppressed = store.suppressed_keys("for_you", now) | dao.generated_track_keys()
     muted = store.muted_artists()

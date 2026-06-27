@@ -54,6 +54,20 @@ PARAMS = [
               "its tracks show up in your play history by then, it's collected. Deletions are backed "
               "up and undoable from the Actions page.",
               1, 365, 1, 7, integer=True),
+    ParamSpec("discovery_artist_limit", "Discovery: artists scanned", "discovery",
+              "How many of your most-engaged artists are scanned for new albums. A smaller set keeps the "
+              "discovery pool focused and rotates as your listening shifts.",
+              10, 1000, 10, 100, integer=True, advanced=True),
+    ParamSpec("discovery_albums_per_artist", "Discovery: albums per artist", "discovery",
+              "How many albums from one artist sit in the discovery pool at once. The pool rotates "
+              "through the artist's whole catalogue over time (old albums included), so this just caps "
+              "how many show up together.",
+              1, 10, 1, 3, integer=True, advanced=True),
+    ParamSpec("discovery_gc_days", "Discovery pool cleanup (days)", "discovery",
+              "How long a discovered album, artist, or track stays in the pool after it is first shown "
+              "to you. If you have not added it by then, it is removed. A track held in a generated "
+              "playlist stays until that playlist is cleaned up.",
+              1, 365, 1, 30, integer=True),
     ParamSpec("palette_absence_penalty", "Out-of-palette penalty", "discovery",
               "How hard to penalize genres absent from your library (scaled by how eclectic you "
               "are). Higher = stick closer to genres you already have.",

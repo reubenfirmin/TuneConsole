@@ -2,6 +2,7 @@
    "Save & play" posts the surviving rows to /home/generate, which creates the real YouTube
    playlist (auto-grouped "Generated") and swaps this card for the saved-state confirmation. #}
 <section class="gen-card card" id="gen-{{ p.lane }}" data-name="{{ p.name }}"
+         {% if p.feedback_surface %}x-data="{ openMenu: null }"{% endif %}
          {% if p.recipe %}data-recipe='{{ p.recipe|tojson }}'{% endif %}>
   <header class="gen-head">
     <h2 class="gen-name">{{ p.name }}</h2>
@@ -25,6 +26,18 @@
            target="_blank" rel="noopener" title="Preview this one on YouTube Music">{{ f.title }}</a>
         <span class="gen-artist">{{ f.artist }}{% if f.reason %} · <span class="gen-why">{{ f.reason }}</span>{% endif %}</span>
       </span>
+      {% if p.feedback_surface and f.key %}
+      <span class="rowmenu">
+        <button type="button" class="dots" title="More actions"
+                @click="openMenu = (openMenu === '{{ f.video_id }}' ? null : '{{ f.video_id }}')">⋯</button>
+        <div class="rowmenu-pop" x-show="openMenu === '{{ f.video_id }}'" x-cloak x-transition.opacity
+             @click.away="openMenu = null">
+          <button type="button" class="danger" hx-post="/recs/feedback"
+                  hx-target="closest .gen-row" hx-swap="outerHTML swap:200ms" @click="openMenu = null"
+                  hx-vals='{"item": {{ f.key|tojson }}, "surface": "{{ p.feedback_surface }}", "kind": "dismiss", "reason": "vibe", "lane": "cold"}'>Not interested</button>
+        </div>
+      </span>
+      {% endif %}
       <button type="button" class="gen-rm" title="Remove from this playlist" aria-label="Remove from this playlist"
               onclick="this.closest('.gen-row').remove()">✕</button>
     </li>

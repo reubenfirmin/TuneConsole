@@ -8,7 +8,7 @@ rebuild, so frequent syncs never pile up.
 import threading
 import time
 
-from yt_playlist.rec import artist_model, embed, recommend
+from yt_playlist.rec import artist_model, embed, recommend, surfaces
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -51,6 +51,7 @@ class RecWorker:
         """Daily sweep that deletes generated playlists you never played. An initial pass runs soon
         after start so a daily-restarted app still collects them, then once per gc_tick_s."""
         from yt_playlist.library import executor
+        from yt_playlist.rec import discover
         time.sleep(self.gc_initial_s)
         while True:
             try:
@@ -62,6 +63,12 @@ class RecWorker:
                                              len(collected), ", ".join(c["title"] for c in collected))
             except Exception:  # noqa: BLE001 - a GC failure must never crash the daemon
                 self.ctx.logger.warning("generated-playlist GC tick failed", exc_info=True)
+            try:                   # #52: time-based discovery-pool GC (independent of remote clients)
+                gc = discover.gc_discovery(self.ctx, self.ctx.now_fn())
+                if any(gc.values()):
+                    self.ctx.logger.info("GC: discovery pool removed %s", gc)
+            except Exception:  # noqa: BLE001 - discovery GC must never crash the daemon
+                self.ctx.logger.warning("discovery-pool GC tick failed", exc_info=True)
             time.sleep(self.gc_tick_s)
 
     def _auto_sync_due(self, now) -> bool:
@@ -141,6 +148,13 @@ class RecWorker:
         if again:
             self.trigger()             # a request arrived mid-rebuild -> background catch-up pass
 
+    def _fresh_proposal(self, now):
+        """#50/#53: Fresh-card material is the taste-scored cold pool ONLY. Every item carries a key, so
+        it is scored and gets the feedback menu; an empty pool yields an empty card (no unscored radio
+        rows). Radios still feed the pool via discover.populate_radio_tracks, just not the card directly."""
+        pool = surfaces.cold_candidates(self.ctx.store, now, limit=36)
+        return [surfaces._item_to_fresh_dict(i) for i in pool]
+
     def _do_rebuild(self):
         """Rebuild vectors and materialize the heavy proposal surfaces.
 
@@ -177,10 +191,10 @@ class RecWorker:
             log.warning("rec rebuild: artist model failed", exc_info=True)
         # Materialize a deeper pool than a single card shows, so the surface has several epochs of
         # material to rotate through before it has to wrap.
-        surfaces = (
-            ("fresh_songs", lambda: recommend.fresh_songs(self.ctx, limit=36)),
+        surface_builders = (
+            ("fresh_songs", lambda: self._fresh_proposal(now)),
         )
-        for surface, build in surfaces:
+        for surface, build in surface_builders:
             ts = time.monotonic()
             try:
                 items = build()

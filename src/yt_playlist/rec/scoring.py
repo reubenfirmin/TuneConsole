@@ -56,24 +56,21 @@ class PlaylistTaste:
         return self.weights @ (self.centroids @ Vn.T)        # (P,)·(P,N) -> (N,)
 
 
-def playlist_taste(store, max_tracks=120) -> PlaylistTaste:
-    """Build the per-playlist taste model from the embedding + listen history."""
-    keys, V, idx = embed.load_vectors(store)
-    if V is None:
-        return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
+def _playlist_centroids(store, M, idx) -> PlaylistTaste:
+    """Per-playlist taste model over a vector space: each non-excluded playlist's normalized centroid in
+    `M` (rows indexed by `idx` = {key: row}), play-weighted. Shared by playlist_taste (co-occurrence
+    space) and content_taste (#38, content space). Generated + grab-bag catch-all playlists are skipped."""
     stats = store.get_playlist_listen_stats()                # {pid: (last_ts, listen_count)}
     excluded = RecDao(store).excluded_playlist_ids()         # generated playlists don't shape taste
+    catchall = store.catchall_playlist_ids()                 # #38: large + genre-incoherent grab-bags only
     titles, cents, ws, pids = [], [], [], []
     for p in store.get_playlists():
-        if p.id in excluded:
+        if p.id in excluded or p.id in catchall:             # skip generated + grab-bags (coherent large OK)
             continue
-        members = store.get_playlist_track_keys(p.id)
-        if len(members) > max_tracks:                        # skip catch-alls: not a coherent context
-            continue
-        rows = [idx[k] for k in members if k in idx]
+        rows = [idx[k] for k in store.get_playlist_track_keys(p.id) if k in idx]
         if not rows:
             continue
-        c = V[rows].mean(0)
+        c = M[rows].mean(0)
         n = np.linalg.norm(c)
         if n == 0:
             continue
@@ -86,6 +83,56 @@ def playlist_taste(store, max_tracks=120) -> PlaylistTaste:
     w = np.asarray(ws, dtype=np.float64)
     w = w / w.sum() if w.sum() > 0 else np.full(len(titles), 1.0 / len(titles))   # uniform if no plays
     return PlaylistTaste(titles, np.asarray(cents), w, pids)
+
+
+# How much of the permanent taste signal is "what you actually play" vs how you've filed tracks into
+# playlists. 0.5 = co-equal. A #38 temporal_recall A/B found a played-tracks centroid ties-or-beats the
+# playlist-curation taste (and that play-count/like/save weighting added nothing over flat membership),
+# so behavior is folded in as a co-equal context. Re-tune once more history accrues (see the A/B ticket).
+BEHAVIOR_TASTE_W = 0.5
+
+
+def _behavior_centroid(store, M, idx):
+    """Unit centroid of the tracks you've actually played, in vector space M (the behavior taste signal,
+    #38). Flat membership: the A/B found play-count/like/save weighting added nothing over plain played-
+    membership, so this stays simple. None when nothing you've played is modeled."""
+    rows = [idx[k] for k in store.play_counts() if k in idx]
+    if not rows:
+        return None
+    c = M[rows].mean(0)
+    n = np.linalg.norm(c)
+    return c / n if n > 0 else None
+
+
+def playlist_taste(store) -> PlaylistTaste:
+    """Per-playlist taste from the co-occurrence embedding, blended with a behavior centroid (#38): the
+    tracks you actually play form one extra taste context weighted BEHAVIOR_TASTE_W, so taste leans on
+    listening, not only playlist curation. Falls back to behavior-only when you have no shaping playlists,
+    and to playlists-only when you've played nothing modeled."""
+    keys, V, idx = embed.load_vectors(store)
+    if V is None:
+        return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
+    pt = _playlist_centroids(store, V, idx)
+    bc = _behavior_centroid(store, V, idx)
+    if bc is None:
+        return pt
+    if not pt:                                           # played tracks but no shaping playlists
+        return PlaylistTaste(["Your listening"], bc[None, :], np.array([1.0]), [None])
+    titles = list(pt.titles) + ["Your listening"]        # behavior as one more, co-equal context
+    cents = np.vstack([pt.centroids, bc[None, :]])
+    w = np.concatenate([pt.weights * (1.0 - BEHAVIOR_TASTE_W), [BEHAVIOR_TASTE_W]])
+    return PlaylistTaste(titles, cents, w, list(pt.pids) + [None])
+
+
+def content_taste(store) -> PlaylistTaste:
+    """The content-space (genre/era + audio) sibling of playlist_taste (#38). Builds per-playlist taste
+    centroids over the CONTENT vectors, so genre/era-described tracks that have no co-occurrence vector
+    can still be ranked by how well they fit the contexts you actually play, no projection needed.
+    Empty until content vectors are built."""
+    ckeys, CV, cidx = embed.load_content_vectors(store)
+    if CV is None:
+        return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
+    return _playlist_centroids(store, CV, cidx)
 
 
 def genre_adjusted_scores(scores, genre_of, gweights):
@@ -281,15 +328,19 @@ MOOD_ALPHA = 0.35   # how hard a mood event tilts the lanes, relative to the tas
 mood_tilt = transient.centroid_tilt   # back-compat: tests/callers use recommend.mood_tilt(store, now, V, idx)
 
 
-def _audio_tilt_boost(store, now, idx):
-    """Per-row cosine of each warm candidate's CONTENT vector to the recent-listening audio direction
+def _audio_tilt_boost(store, now, idx, content_vecs=None):
+    """Per-row cosine of each candidate's CONTENT vector to the recent-listening audio direction
     (#45), aligned to V rows via `idx` (key -> row). None when there is no audio tilt or no content
     vectors built. A candidate without a content vector contributes 0, so the term degrades gracefully
-    as audio coverage rises rather than being all-or-nothing."""
+    as audio coverage rises rather than being all-or-nothing.
+
+    `content_vecs` (a (keys, CV, cidx) triple) overrides the source: warm callers leave it None and get
+    the library content vectors; the cold path passes the discovered-content vectors, whose keys are
+    out-of-corpus and so absent from the library store."""
     atilt = transient.audio_centroid_tilt(store, now)
     if atilt is None:
         return None
-    _keys, CV, cidx = embed.load_content_vectors(store)
+    _keys, CV, cidx = embed.load_content_vectors(store) if content_vecs is None else content_vecs
     if CV is None:
         return None
     boost = np.zeros(len(idx))
@@ -300,14 +351,17 @@ def _audio_tilt_boost(store, now, idx):
     return boost
 
 
-def _apply_mood(scores, store, now, V, idx):
+def _apply_mood(scores, store, now, V, idx, content_vecs=None):
     """Blend the transient tilts into per-track scores, each scaled down as sync goes stale.
 
     Two tilts from the same recent stream (plays/likes/mood): the collaborative centroid tilt (co-listen
     space) and the audio centroid tilt (#45, the content space), so ranking can lean toward the SOUND
     (tempo/energy/mood) of what you have been playing, not only its genre/era/artist facets. They apply
     independently: a candidate missing one space simply skips that term, and the audio tilt can still
-    fire for recent plays that have a content vector but no collaborative one."""
+    fire for recent plays that have a content vector but no collaborative one.
+
+    `content_vecs` selects the audio tilt's content-vector source: warm callers leave it None (library
+    vectors); the cold path passes the discovered-content vectors so out-of-corpus tracks get the tilt."""
     factor = transient.staleness_factor(store, now)
     if factor <= 0:
         return scores
@@ -317,7 +371,7 @@ def _apply_mood(scores, store, now, V, idx):
         scores = scores + MOOD_ALPHA * factor * (Vn @ tilt)
     w = rec_params.get_param(store, "audio_transient_w")
     if w > 0:
-        boost = _audio_tilt_boost(store, now, idx)
+        boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs)
         if boost is not None:
             scores = scores + w * factor * boost
     return scores

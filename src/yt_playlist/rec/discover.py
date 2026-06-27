@@ -7,12 +7,14 @@ per-playlist taste, so it only surfaces if it fits contexts the user actually pl
 playlist can't drag in off-taste artists. Each result explains itself: which of your artists bridged
 it, and which of your playlists it fits. Runs in the background worker; Last.fm results cached 14d.
 """
+import random
+
 import numpy as np
 
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key, normalize
 from yt_playlist.util.thumbnails import best_thumb
-from yt_playlist.rec import artist_model, embed, recommend
+from yt_playlist.rec import artist_model, embed, recommend, rec_params, discovery_pool
 from yt_playlist.providers import lastfm
 from yt_playlist.rec.rec_dao import RecDao
 
@@ -236,26 +238,133 @@ def run_discovery(ctx, now, budget=25) -> dict:
     dao = RecDao(store)
     owned_albums, saved = dao.owned_albums(), dao.saved_album_ids()
     artist_genre = dao.artist_genres()                    # #18: tag a new album by its (owned) artist's genre
-    due = store.artists_due_for_scan(now, budget=budget)
+    # #52: scan only the top-N most-engaged artists, holding a small ROTATING per-artist album sample
+    # (old albums surface over time) instead of every album of every artist you have ever touched.
+    artist_limit = rec_params.get_param(store, "discovery_artist_limit")
+    per_artist = rec_params.get_param(store, "discovery_albums_per_artist")
+    rng = random.Random(int(now))                         # varies per pass so the rotation moves over time
+    due = store.artists_due_for_scan(now, budget=budget, artist_limit=artist_limit)
     for artist in due:
         try:
             info = fetch_artist_info(ctx, artist)
         except Exception:  # noqa: BLE001 - one bad artist must not abort the pass
             info = None
-        for alb in (info or {}).get("albums") or []:
-            bid, title = alb.get("browse_id"), (alb.get("title") or "").strip()
-            if not bid or not title or title.lower() in owned_albums or bid in saved:
-                continue
-            store.upsert_discovered_album(bid, artist, title, alb.get("year"), alb.get("thumbnail"),
-                                          now, genre=artist_genre.get(artist))
+        _scan_artist_albums(store, artist, info, owned_albums, saved,
+                            artist_genre.get(artist), now, per_artist, rng)
         store.mark_scanned(artist, now)
     for a in new_artists(ctx):                            # taste-bridged new artists, accumulated
         store.upsert_discovered_artist(a["artist"], a["score"], a.get("because"), a.get("fits"),
                                        a.get("thumbnail"), now, genre=a.get("genre"))
     store.prune_discovered(owned_albums, saved, dao.library_artists())
-    store.prune_discovered_tracks(dao.library_keys())
+    store.prune_discovered_tracks(dao.library_keys(), held_keys=store.generated_track_keys())
+    cleanup_discovery_pool(store, rng)                     # #52: bound the pool + prune orphaned tracks
     populate_discovered_tracks(ctx, now)                   # #13 P2: out-of-corpus candidate tracks
+    try:
+        populate_radio_tracks(ctx, now)                   # #50: radio pulls feed the same cold pool
+    except Exception:  # noqa: BLE001 - radio pull is best-effort; never abort the discovery pass
+        ctx.logger.info("radio pool population failed (non-fatal)")
     return {"scanned": len(due)}
+
+
+def _scan_artist_albums(store, artist, info, owned_albums, saved, genre, now, per, rng) -> None:
+    """#52: rotate one artist's pooled albums against a fresh discography scan. Builds the unowned
+    catalog, asks discovery_pool which to retain vs add (unshown retained, shown rotated out, slots
+    filled by a uniform-random draw across the WHOLE catalog so old albums surface), then applies the
+    delete/insert. Caps the artist at `per` albums in the pool."""
+    catalog = []
+    for alb in (info or {}).get("albums") or []:
+        bid, title = alb.get("browse_id"), (alb.get("title") or "").strip()
+        if not bid or not title or title.lower() in owned_albums or bid in saved:
+            continue
+        catalog.append({"browse_id": bid, "title": title, "year": alb.get("year"),
+                        "thumbnail": alb.get("thumbnail")})
+    pooled = store.discovered_albums_for_artist(artist)
+    keep, add = discovery_pool.rotate_album_sample(catalog, pooled, per, rng)
+    store.delete_discovered_albums([b for b in pooled if b not in keep])
+    for alb in add:
+        store.upsert_discovered_album(alb["browse_id"], artist, alb["title"], alb["year"],
+                                      alb["thumbnail"], now, genre=genre)
+
+
+def enforce_album_bounds(store, keep_artists, per_artist, rng) -> int:
+    """#52 (no network): bound the existing album pool. Drop albums from artists not in `keep_artists`
+    (the top-N interest set), and trim each kept artist to `per_artist` (retaining unshown first, a
+    random-varied subset among ties so the kept sample spans the catalogue). Returns albums removed."""
+    keep = set(keep_artists)
+    by_artist: dict = {}
+    for a in store.get_discovered_albums():
+        by_artist.setdefault(a["artist"], {})[a["browse_id"]] = a.get("offered_count") or 0
+    to_delete = []
+    for artist, pooled in by_artist.items():
+        if artist not in keep:
+            to_delete.extend(pooled)                              # whole artist out of the top-N
+        elif len(pooled) > per_artist:
+            keepset = discovery_pool.choose_album_keep(pooled, per_artist, rng)
+            to_delete.extend(b for b in pooled if b not in keepset)
+    return store.delete_discovered_albums(to_delete)
+
+
+def cleanup_discovery_pool(store, rng=None) -> dict:
+    """#52 one-time (and per-pass) cleanup with no network: bound the album pool to the top
+    discovery_artist_limit artists x discovery_albums_per_artist albums, then prune tracks orphaned by
+    the removed albums. Returns {albums_removed, tracks_removed}."""
+    rng = rng or random.Random(0)
+    limit = rec_params.get_param(store, "discovery_artist_limit")
+    per = rec_params.get_param(store, "discovery_albums_per_artist")
+    keep_artists = {a["artist"] for a in store.interested_artists(limit=limit)}
+    albums_removed = enforce_album_bounds(store, keep_artists, per, rng)
+    tracks_removed = store.prune_orphan_discovered_tracks()
+    return {"albums_removed": albums_removed, "tracks_removed": tracks_removed}
+
+
+def gc_discovery(ctx, now) -> dict:
+    """#52 daily sweep: remove pool items first shown longer than discovery_gc_days ago and never
+    added. A track in a live generated playlist (generated_track_keys) is held until that playlist is
+    cleaned up or promoted. Best-effort; returns the per-pool delete counts {albums, artists, tracks}."""
+    store = ctx.store
+    gc_days = rec_params.get_param(store, "discovery_gc_days")
+    held = store.generated_track_keys()
+    return store.gc_discovery_pool(now, gc_days, held)
+
+
+def populate_radio_tracks(ctx, now, seeds=6, per_seed_limit=12) -> int:
+    """#50: persist unowned YTM-radio tracks (seeded by your top tracks) into the discovered pool, so
+    the cold ranker and Clusters share one growing cold source. Dedups vs owned and the existing pool;
+    genre/year/audio are left null for the cold-enrichment worker to fill. Returns how many were added.
+    Best-effort: no client/network -> 0. (fresh_songs still produces the radio-order fallback list.)"""
+    store = ctx.store
+    client = next(iter((ctx.client_provider() or {}).values()), None)
+    if client is None:
+        return 0
+    owned = RecDao(store).library_keys()
+    have = {r["identity_key"] for r in store.get_discovered_tracks()}
+    added = 0
+    for t in store.top_tracks(seeds):
+        vid = t.get("video_id")
+        if not vid:
+            continue
+        try:
+            radio = client.get_watch_playlist(vid) or {}
+        except Exception:  # noqa: BLE001 - network/parse/missing-method -> skip this seed
+            continue
+        taken = 0
+        for r in radio.get("tracks") or []:
+            v, title = r.get("videoId"), (r.get("title") or "").strip()
+            artist = ((r.get("artists") or [{}])[0] or {}).get("name", "")
+            if not v or not title:
+                continue
+            key = identity_key(title, artist)
+            if key in owned or key in have:
+                continue
+            store.upsert_discovered_track(key, v, title, artist, None,
+                                          best_thumb(r.get("thumbnail") or r.get("thumbnails")),
+                                          None, None, f"radio:{vid}", now)
+            have.add(key)
+            added += 1
+            taken += 1
+            if taken >= per_seed_limit:
+                break
+    return added
 
 
 def populate_discovered_tracks(ctx, now, budget=4) -> int:

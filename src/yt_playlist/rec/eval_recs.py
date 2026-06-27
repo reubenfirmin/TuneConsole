@@ -177,6 +177,32 @@ def projection_recall(store, k=20) -> dict:
                           "by_coverage": _finalize(by_coverage)}}
 
 
+def cold_rankable(store, now) -> dict:
+    """#50 measured criterion: how many out-of-corpus (cold) tracks the cold ranker can actually score,
+    vs the discovered-pool size. rankable > 0 means cold tracks are recommendable by taste + the
+    transient tilts (not just recency/radio order). Imported lazily to dodge a surfaces<->eval cycle."""
+    from yt_playlist.rec import surfaces
+    pool = len(store.get_discovered_tracks())
+    rankable = len(surfaces.cold_candidates(store, now, limit=10_000))
+    return {"rankable": rankable, "pool": pool}
+
+
+def content_rankable(store) -> dict:
+    """#38 §3 measured: how many OWNED tracks that lack a co-occurrence vector become rankable through
+    the content-space taste fit (a content vector present + content_taste built). Mirrors cold_rankable.
+    Lazy imports avoid a scoring<->eval cycle."""
+    from yt_playlist.rec.scoring import content_taste
+    from yt_playlist.rec.rec_dao import RecDao
+    _keys, _V, idx = embed.load_vectors(store)
+    _ckeys, CV, cidx = embed.load_content_vectors(store)
+    owned = set(RecDao(store).library_keys())
+    vectorless_owned = owned - set(idx)
+    if CV is None or not content_taste(store):
+        return {"rankable": 0, "vectorless_owned": len(vectorless_owned)}
+    rankable = sum(1 for k in vectorless_owned if k in cidx)
+    return {"rankable": rankable, "vectorless_owned": len(vectorless_owned)}
+
+
 def _tune_score(store, k):
     """Score the currently-built model for autotune (#38 §5). Prefer temporal_recall, the model's real
     job (predict the next plays), so the method/DIM sweep optimizes forward prediction rather than the

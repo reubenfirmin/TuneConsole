@@ -19,7 +19,7 @@ from yt_playlist.rec.taste_analysis import (  # noqa: F401
     track_mood_states, taste_breadth, palette, playlist_genre_diversity)
 from yt_playlist.rec.surfaces import (  # noqa: F401
     ForYouItem, rotate_sample, rotate_page, for_you, comfort_listening,
-    rediscover_playlists, rediscover_albums, taste_sample, fresh_songs,
+    rediscover_playlists, rediscover_albums, taste_sample,
     explore_for_you, complete_playlist, related_artist_suggestions, _rotation_reason,
     wheelhouse, catalog)
 from yt_playlist.rec.recipes import (  # noqa: F401
