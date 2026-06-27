@@ -1,4 +1,4 @@
-from yt_playlist.rec import genre_map
+from yt_playlist.util import genre_map
 
 
 def test_subgenre_distinct_from_family():

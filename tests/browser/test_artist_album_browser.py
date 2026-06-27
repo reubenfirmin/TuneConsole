@@ -3,7 +3,7 @@
 This is the albums-tab refactor target: the only fetch() in the albums/artist area is
 the saveAlbum toggle, which lives on artist.html (the /albums page itself is pure client
 sort). Saving must keep the collection table, the saved column, and the discography table
-in sync, so the action does a full reload — converted to htmx HX-Refresh (parity).
+in sync, so the action does a full reload, converted to htmx HX-Refresh (parity).
 
 Own fixture (shared live_app seeds discover data and is off-limits). Characterization
 first: lock the CURRENT Alpine toggle, then keep it green after the htmx conversion.

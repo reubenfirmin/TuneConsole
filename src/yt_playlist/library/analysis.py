@@ -9,7 +9,7 @@ class DupeFinding:
 
     @property
     def identical(self) -> bool:
-        """Same set of tracks in both playlists — the clean fix is to delete one."""
+        """Same set of tracks in both playlists. The clean fix is to delete one."""
         return not self.only_a and not self.only_b
 
 @dataclass
@@ -32,7 +32,7 @@ def _manageable(p) -> bool:
 def _cleanup_excluded(store) -> set:
     """Playlist DB ids hidden from every Cleanup category: app-generated (quarantined) playlists.
     They're built from your library, so they trivially overlap/duplicate their source playlists, and
-    they're app-managed — not yours to tidy (#21)."""
+    they're app-managed, not yours to tidy (#21)."""
     return store.excluded_playlist_ids()
 
 @dataclass
@@ -56,8 +56,8 @@ def _group_sig(playlists) -> str:
 def find_identical_groups(store, ignored_sigs=None):
     """Cluster playlists by identical track set so N copies show as one group, not N-choose-2 pairs.
 
-    Empty playlists are excluded (they aren't really "the same playlist" — see find_empty_playlists).
-    `ignored_sigs`: merge signatures the user dismissed — those groups are hidden.
+    Empty playlists are excluded (they aren't really "the same playlist", see find_empty_playlists).
+    `ignored_sigs`: merge signatures the user dismissed. Those groups are hidden.
     """
     ignored_sigs = ignored_sigs or set()
     excluded = _cleanup_excluded(store)
@@ -85,7 +85,7 @@ def find_near_duplicate_groups(store, threshold=0.70, exclude_playlist_ids=None,
     playlists show as one group instead of N-choose-2 pairwise rows. Identical playlists are handled
     by find_identical_groups and excluded here.
 
-    `ignored_sigs`: merge signatures the user dismissed — those groups are hidden."""
+    `ignored_sigs`: merge signatures the user dismissed. Those groups are hidden."""
     exclude = exclude_playlist_ids or set()
     ignored_sigs = ignored_sigs or set()
     edges = [d for d in find_dupes(store, threshold)
@@ -129,7 +129,7 @@ def find_empty_playlists(store, ignored=None):
                   key=lambda p: p.title.lower())
 
 def find_tiny_playlists(store, max_tracks=3, ignored=None):
-    """Manageable playlists with 1..max_tracks tracks — candidates to merge away or prune.
+    """Manageable playlists with 1..max_tracks tracks, candidates to merge away or prune.
     `ignored`: ytm ids dismissed from the Tiny category."""
     ignored = ignored or set()
     excluded = _cleanup_excluded(store)
@@ -166,7 +166,7 @@ def find_dupes(store, threshold=0.70):
 
 def find_overlaps(store, dupe_threshold=0.70, exclude_playlist_ids=None, suppressed=None,
                   ignored_ytm=None, kept=None):
-    # exclude_playlist_ids: playlists already shown as duplicates — hide them here so the same
+    # exclude_playlist_ids: playlists already shown as duplicates. Hide them here so the same
     # playlist doesn't appear in both sections (resolve dupes first; the rest resurface on re-sync).
     # suppressed: set of frozenset({ytm_a, ytm_b}) pairs the user has manually hidden.
     # ignored_ytm: playlists the user excludes from overlap detection entirely (e.g. a huge mixtape).
@@ -202,7 +202,7 @@ class CleanupSummary:
         return [p.thumbnail for p in self.playlists if p.thumbnail][:n]
 
     def as_payload(self) -> dict:
-        """The tiny, JSON-serializable shape the home card needs — cached as a rec proposal so the
+        """The tiny, JSON-serializable shape the home card needs, cached as a rec proposal so the
         home page never re-runs the (O(n²)) scan below on every load. See recommend.refresh_cleanup."""
         return {"count": self.count, "thumbnails": self.thumbnails(2)}
 

@@ -2,21 +2,19 @@
 recording MBID.
 
 AcousticBrainz is a frozen (2022) but still-served CC0 dataset of Essentia acoustic descriptors. It
-has no name-based lookup — every query is by MusicBrainz *recording* MBID — so for a track without a
+has no name-based lookup (every query is by MusicBrainz *recording* MBID) so for a track without a
 stored MBID we resolve one live via the MusicBrainz provider, persist it, then query two endpoints:
 low-level (rhythm.bpm) and high-level (mood/danceability classifiers). AcousticBrainz has no native
 "energy" scalar, so we derive one from its mood models (see derive_energy). A 404 means "no data for
-this MBID" (common, given frozen coverage) — a clean miss, not an outage. Failures degrade to Nones.
+this MBID" (common, given frozen coverage): a clean miss, not an outage. Failures degrade to Nones.
 """
 import json
 import logging
-import threading
-import time
 import urllib.request
 
 from yt_playlist.util import net
 from yt_playlist.providers import musicbrainz
-from yt_playlist.providers.base import EnrichmentResult
+from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
 from yt_playlist.providers.enrich_queue import PriorityGate
 
 logger = logging.getLogger(__name__)
@@ -52,22 +50,18 @@ def probe(track, store=None, enrich_fn=None, mbid_fn=None) -> EnrichmentResult:
 _API = "https://acousticbrainz.org/api/v1"
 _USER_AGENT = "yt-playlist/0.1 ( https://github.com/yt-playlist ; rf@4rc.io )"
 _MIN_INTERVAL = 0.5                         # be a good citizen of a free community dataset
-_pace_lock = threading.Lock()
-_last_call = [0.0]
+_HTTP_TIMEOUT_S = 20                        # cap each request so a stalled socket can't wedge a run
+_pacer = RateLimiter(_MIN_INTERVAL)
 _gate = PriorityGate()
 _breaker = net.CircuitBreaker()
 
 
 def _get_json(url):
-    with _pace_lock:
-        wait = _MIN_INTERVAL - (time.monotonic() - _last_call[0])
-        if wait > 0:
-            time.sleep(wait)
-        _last_call[0] = time.monotonic()
+    _pacer.wait()
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
                                                "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
             data = json.load(resp)
     except Exception as e:                  # report to the breaker (404 = reachable), then re-raise
         _breaker.record(e)
@@ -83,15 +77,23 @@ def _prob(highlevel, model, label):
         return None
 
 
+# Empirical blend (no external source) mapping AcousticBrainz mood models to a perceived-energy
+# scalar: party drives the bulk of it, aggression adds intensity, danceability a smaller lift.
+_ENERGY_W_PARTY = 0.5
+_ENERGY_W_AGGRESSIVE = 0.3
+_ENERGY_W_DANCEABLE = 0.2
+
+
 def derive_energy(highlevel):
     """Heuristic energy in [0,1] from AcousticBrainz mood classifiers (no native energy field):
-    0.5*party + 0.3*aggressive + 0.2*danceable. Returns None if the inputs are absent."""
+    a weighted blend of party/aggressive/danceable (see _ENERGY_W_*). Returns None if absent."""
     party = _prob(highlevel, "mood_party", "party")
     aggressive = _prob(highlevel, "mood_aggressive", "aggressive")
     danceable = _prob(highlevel, "danceability", "danceable")
     if party is None and aggressive is None and danceable is None:
         return None
-    return round(0.5 * (party or 0.0) + 0.3 * (aggressive or 0.0) + 0.2 * (danceable or 0.0), 3)
+    return round(_ENERGY_W_PARTY * (party or 0.0) + _ENERGY_W_AGGRESSIVE * (aggressive or 0.0)
+                 + _ENERGY_W_DANCEABLE * (danceable or 0.0), 3)
 
 
 _FIELDS = ("bpm", "energy", "danceability", "music_key", "music_scale", "mood_happy",
@@ -150,42 +152,34 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, mbid_fn=Non
     enrich_fn = enrich_fn or enrich
     mbid_fn = mbid_fn or musicbrainz.recording_mbid
     pending = store.tracks_missing_audio(playlist_id) if pending is None else pending
-    total = len(pending)
-    if not total:
-        on_progress({"type": "done", "text": "Every track already has audio features.", "total": 0})
-        return
-    on_progress({"type": "info", "text": f"Fetching audio features for {total} track(s) "
-                 "from AcousticBrainz…", "total": total})
-    _breaker.reset()
-    seq = _gate.enter()
-    try:
-        for i, t in enumerate(pending, 1):
-            if should_stop and should_stop():
-                on_progress({"type": "info", "text": "Stopped."})
-                return
-            _gate.wait_turn(seq, on_wait=lambda: on_progress(
-                {"type": "info", "text": "Waiting — a newer playlist is looking up first…"}))
-            mbid = t.get("mb_recording_id")
-            if not mbid:
-                mbid = mbid_fn(t["title"], t["artist"])
-                if mbid:
-                    store.set_track_mbid(t["id"], mbid)
-            feat = enrich_fn(mbid) if mbid else _empty()
-            if _breaker.tripped():
-                on_progress({"type": "err", "text": "AcousticBrainz looks unreachable — stopped. "
-                             "The remaining tracks will retry next time."})
-                return
-            store.set_track_audio(t["id"], **feat)
-            bits = []
-            if feat["bpm"]:
-                bits.append(f"{feat['bpm']:.0f} BPM")
-            if feat["energy"] is not None:
-                bits.append(f"energy {feat['energy']:.2f}")
-            if feat["music_key"]:
-                bits.append(f"{feat['music_key']} {feat['music_scale'] or ''}".strip())
-            shown = " · ".join(bits) or "no data"
-            on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                         "text": f"{i}/{total} {t['title']} — {shown}"})
-        on_progress({"type": "done", "text": f"Fetched {total} track(s).", "total": total})
-    finally:
-        _gate.leave(seq)
+
+    def _per_item(i, total, t):
+        mbid = t.get("mb_recording_id")
+        if not mbid:
+            mbid = mbid_fn(t["title"], t["artist"])
+            if mbid:
+                store.set_track_mbid(t["id"], mbid)
+        feat = enrich_fn(mbid) if mbid else _empty()
+        if _breaker.tripped():
+            on_progress({"type": "err", "text": "AcousticBrainz looks unreachable. Stopped. "
+                         "The remaining tracks will retry next time."})
+            return False
+        store.set_track_audio(t["id"], **feat)
+        bits = []
+        if feat["bpm"]:
+            bits.append(f"{feat['bpm']:.0f} BPM")
+        if feat["energy"] is not None:
+            bits.append(f"energy {feat['energy']:.2f}")
+        if feat["music_key"]:
+            bits.append(f"{feat['music_key']} {feat['music_scale'] or ''}".strip())
+        shown = " · ".join(bits) or "no data"
+        on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
+                     "text": f"{i}/{total} {t['title']}: {shown}"})
+
+    run_enrich_loop(
+        store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
+        empty_text="Every track already has audio features.",
+        start_text=lambda n: f"Fetching audio features for {n} track(s) from AcousticBrainz…",
+        done_text=lambda n: f"Fetched {n} track(s).",
+        wait_text="Waiting: a newer playlist is looking up first…",
+        per_item=_per_item)

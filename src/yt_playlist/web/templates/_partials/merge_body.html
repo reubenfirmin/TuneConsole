@@ -61,7 +61,7 @@
               title="{{ 'Place this track by ' ~ members[i].letter ~ '’s position (#' ~ t.pos[i] ~ ')' if t.present_count > 1 else '' }}">{{ t.pos[i] }}</button>{% endif %}{% endfor %}</td>
         <td>
           {% if t.video_id %}<a class="tk-t" href="https://music.youtube.com/watch?v={{ t.video_id }}" target="_blank" rel="noopener">{{ t.title }}</a>{% else %}<span class="tk-t">{{ t.title }}</span>{% endif %}
-          <span class="muted">— {{ t.artist }}</span>
+          <span class="muted">- {{ t.artist }}</span>
           {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
         </td>
         <td class="num mono">{% if t.duration %}{{ t.duration // 60 }}:{{ '%02d'|format(t.duration % 60) }}{% endif %}</td>

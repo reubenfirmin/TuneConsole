@@ -1,4 +1,5 @@
-from yt_playlist.rec import embed, genre_map, recommend
+from yt_playlist.util import genre_map
+from yt_playlist.rec import embed, recommend
 from yt_playlist.core.store import Store
 
 
@@ -6,7 +7,7 @@ def test_wheelhouse_excludes_play_recency_lane(store):
     """Wheelhouse is the taste/genre model, not play-recency: a high-play dormant track that isn't
     a deep cut or taste neighbour must NOT surface in for_you (it belongs to Comfort Listening)."""
     iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_track("v1", "Gem", "X", None, None)         # key "gem|x" — played a lot, then dormant
+    store.upsert_track("v1", "Gem", "X", None, None)         # key "gem|x": played a lot, then dormant
     store.upsert_track("v2", "Bench", "X", None, None)       # X's never-played track -> X's deep cut
     day = 86400.0
     now = 200 * day
@@ -339,7 +340,7 @@ def test_axis_adjusted_scores_neutral_is_noop(store):
 
 
 def test_complete_playlist_caps_flooding_artist_on_eclectic_playlist(store):
-    """An eclectic playlist (many artists) shouldn't get flooded by one artist's big catalog — the
+    """An eclectic playlist (many artists) shouldn't get flooded by one artist's big catalog: the
     '529 repeats' bug, where a 12-track/10-artist playlist returned 9 tracks by one band."""
     from collections import Counter
     iid = store.upsert_identity("main", "cred", None, True)
@@ -383,9 +384,9 @@ def test_playlist_facets_groups_genres_eras_tracks(store):
 def _seed_pl(store, iid, ytm, title, n, now, played_at=None, group=None, play_each_at=None):
     """Make a library playlist of `n` tracks, optionally with play history.
 
-    play_each_at: list aligned to the n tracks — play_each_at[i] is when track i was last played
+    play_each_at: list aligned to the n tracks, play_each_at[i] is when track i was last played
                   (None entry = that track was never played). One snapshot per played track.
-    played_at:    legacy shorthand — play just the *first* track at this time (the rest never played).
+    played_at:    legacy shorthand, play just the *first* track at this time (the rest never played).
     """
     from yt_playlist.util.matching import identity_key
     keys, tids = [], []
@@ -454,7 +455,7 @@ def test_rediscover_treats_never_played_as_coldest(store):
 
 def test_rediscover_rotates_through_cold_pool_by_epoch(store):
     # Same erosion/rotation as other Home cards: page through the ranked-by-coldness pool, one page
-    # per epoch, wrapping — so you cycle through cold playlists instead of always seeing the same two.
+    # per epoch, wrapping, so you cycle through cold playlists instead of always seeing the same two.
     iid = store.upsert_identity("main", "cred", None, True)
     day = 86400.0
     now = 400 * day
@@ -524,3 +525,40 @@ def test_rediscover_albums_rotates_through_cold_pool_by_epoch(store):
     assert titles(0) == ["A", "B", "C"]      # coldest page leads
     assert titles(1) == ["D", "E", "F"]      # next epoch advances to the next-coldest page
     assert titles(2) == ["A", "B", "C"]      # wraps back around the ranked pool
+
+
+def test_graduation_disabled_is_noop(store):
+    from yt_playlist.rec import rec_params
+    store.upsert_identity("main", "cred", None, True)
+    rec_params.set_param(store, "graduation_enabled", False)
+    before = dict(store.get_weights())
+    # a strong, repeated like-graduation that WOULD normally cross the threshold
+    for _ in range(10):
+        recommend.graduate_facet(store, "genre:rock", 1.0, now=1000.0, source=1.0)
+    assert dict(store.get_weights()) == before   # nothing graduated
+
+
+def test_graduation_enabled_still_graduates(store):
+    store.upsert_identity("main", "cred", None, True)
+    for _ in range(10):
+        recommend.graduate_facet(store, "genre:rock", 1.0, now=1000.0, source=1.0)
+    assert store.get_weights().get("genre:rock", 1.0) > 1.0
+
+
+def test_generators_exclude_dj_mixes(store):
+    """#44: a DJ mix / concert (> _MAX_TRACK_DURATION_S = 20 min) must not surface in generated-
+    playlist candidate pools, even when well-played. Short songs still come through; NULL-duration
+    tracks (the common case) are kept."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    now = 1000.0 * 86400
+    day = 86400
+    store.upsert_track("v1", "Short Song", "X", None, 200)        # 200s real song
+    store.upsert_track("v2", "Live Set", "X", None, 3600)         # 60-min concert/mix
+    store.upsert_track("v3", "Untimed", "X", None, None)          # unknown duration -> kept
+    for d in range(6):                                            # all well-played, then gone quiet
+        store.add_history_snapshot(iid, now - (40 + d) * day, ["short song|x", "live set|x", "untimed|x"])
+
+    keys = {r["key"] for r in store.comfort_candidates(now=now, min_plays=4, recency_full_days=30, limit=20)}
+    assert "short song|x" in keys
+    assert "untimed|x" in keys
+    assert "live set|x" not in keys              # the 60-min mix is excluded from generated playlists

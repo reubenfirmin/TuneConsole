@@ -1,4 +1,4 @@
-"""PlaylistOps — a service facade over the executor.
+"""PlaylistOps: a service facade over the executor.
 
 Route handlers shouldn't thread the store, the per-identity client provider, and the clock
 through every executor call. PlaylistOps binds those three once and exposes the high-level
@@ -122,7 +122,7 @@ class PlaylistOps:
         if client is None:
             raise ValueError("no client for that identity")
         # Liked Music is YouTube-managed and won't accept directly-added tracks, so "Add" (from an
-        # alternate version or a 'complete this playlist' suggestion) becomes a *like* — the only thing
+        # alternate version or a 'complete this playlist' suggestion) becomes a *like*, the only thing
         # that actually lands a song in Liked Music. Every other playlist adds normally. (Ordering is
         # meaningless for likes, so after_video_id is ignored on that path.)
         if LikedMusic.is_lm(pl):
@@ -137,7 +137,7 @@ class PlaylistOps:
         client = self._client_for(pl)
         if client is None:
             raise ValueError("no client for that identity")
-        # Liked Music has no removable playlist item — "remove" unlikes the song instead.
+        # Liked Music has no removable playlist item: "remove" unlikes the song instead.
         if LikedMusic.is_lm(pl):
             return LikedMusic(self.store).remove(playlist_id, video_id, client, self.now_fn())
         return remove_track(self.store, playlist_id, video_id, client, self.now_fn())

@@ -49,11 +49,11 @@ data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows"
 {% macro ticker_tip(r, dim, close_days=7, span_days=365, compare=true) -%}
 {%- set name = (r.cat ~ 's') if dim == 'year' else r.cat -%}
 {# `compare` (genre/year/artist) adds the library baseline + over/under ratio. Albums/playlists
-   skip it — "share of library" isn't intuitive for a single album or playlist. The ◦ "earlier"
+   skip it: "share of library" isn't intuitive for a single album or playlist. The ◦ "earlier"
    and range rows are always available (when there's older data); labels are dynamic. #}
 {%- set rows = [] -%}
 {%- if compare -%}
-{%- set rows = rows + [{"l": "In your library", "v": "%.1f"|format(r.corpus_share * 100) ~ "%", "n": "your corpus baseline — the dashed tick"}] -%}
+{%- set rows = rows + [{"l": "In your library", "v": "%.1f"|format(r.corpus_share * 100) ~ "%", "n": "your corpus baseline, the dashed tick"}] -%}
 {%- endif -%}
 {%- set rows = rows + [{"l": "Now · last " ~ close_days ~ "d", "v": "%.1f"|format(r.close * 100) ~ "%", "n": "share of your recent listening"}] -%}
 {%- if r.open is not none -%}
@@ -68,7 +68,7 @@ data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows"
 {%- elif compare -%}
 {%- set accent = "pos" if r.ratio >= 1.05 else ("neg" if r.ratio <= 0.95 else "") -%}
 {%- set olabel = "over-indexed" if r.ratio >= 1.05 else ("under-indexed" if r.ratio <= 0.95 else "about even") -%}
-{%- set rows = rows + [{"l": "vs library", "v": "×" ~ "%.1f"|format(r.ratio), "n": olabel ~ " — recent share ÷ library share", "t": accent, "div": true}] -%}
+{%- set rows = rows + [{"l": "vs library", "v": "×" ~ "%.1f"|format(r.ratio), "n": olabel ~ ": recent share ÷ library share", "t": accent, "div": true}] -%}
 {%- endif -%}
 {%- if r.open is not none and r.trend != 'flat' -%}
 {%- set ttone = "pos" if r.trend == "up" else "neg" -%}

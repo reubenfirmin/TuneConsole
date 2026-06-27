@@ -56,9 +56,12 @@
           </template>
         </ul>
       </div>
+      <!-- trim loose rings: prune everything that isn't the trunk you grew or a 🔥-emphasized pick -->
+      <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
+              @click="pruneLoose()" title="Trim: prune every track that isn't on the trunk or 🔥-emphasized">✂ Trim</button>
       <!-- explicit reset: wipe the canvas back to a blank slate -->
       <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
-              @click="reset()" title="Reset — clear the whole canvas">⟲ Reset</button>
+              @click="reset()" title="Reset: clear the whole canvas">⟲ Reset</button>
     </div>
   </div>
 
@@ -67,24 +70,30 @@
        @pointermove="onPanMove($event)" @pointerup="onPanEnd()" @pointerleave="onPanEnd()">
     <div class="cluster-stars" aria-hidden="true"></div>
     <canvas class="cluster-grid" x-ref="grid" aria-hidden="true"></canvas>
-    <div class="cluster-world" :style="worldStyle()">
+    <!-- x-ref="world": the imperative per-frame renderer (_renderFrame) writes every node's transform,
+         the edge <path> `d`s, and the popover position into here, so the d3 sim never touches Alpine. -->
+    <div class="cluster-world" x-ref="world" :style="worldStyle()">
       <svg class="cluster-edges" :width="WORLD" :height="WORLD">
-        <path class="edge-path" :d="edgePath()"></path>
-        <path class="edge-path trunk" :d="trunkPath()"></path>
+        <path class="edge-path" x-ref="edgePath"></path>
+        <path class="edge-path trunk" x-ref="trunkPath"></path>
       </svg>
-      <!-- One clickable dot at each edge's midpoint: "why is this connection here?" -->
-      <template x-for="e in edges()" :key="e.id">
-        <button type="button" class="edge-dot" :class="{ on: explain && explain.childId === e.id }"
-                :style="`left:${e.x}px;top:${e.y}px`" @pointerdown.stop @click="openExplain(e.id)"
+      <!-- One clickable dot at each edge's midpoint: "why is this connection here?". Position (transform)
+           is written imperatively per frame by _renderFrame, keyed by data-eid; not a reactive binding. -->
+      <template x-for="n in nodes" :key="'e' + n.id">
+        <button type="button" class="edge-dot" x-show="n.parentId != null && nodeById(n.parentId)"
+                :data-eid="n.id" :class="{ on: explain && explain.childId === n.id }"
+                @pointerdown.stop @click="openExplain(n.id)"
                 title="Why is this connected?"></button>
       </template>
       <template x-for="n in nodes" :key="n.id">
-        <div class="cluster-node"
+        <!-- data-nid lets _renderFrame find this card to write its transform; :style carries only the
+             hue custom-props (an object, so Alpine won't clobber the imperatively-set transform). -->
+        <div class="cluster-node" :data-nid="n.id"
              :class="{ central: n.kind === 'central', track: n.kind === 'track', pruned: n.state === 'pruned',
                        trunk: isTrunkNode(n.id) && n.kind !== 'central', filtered: n.gpruned, boosted: isBoosted(n) }"
-             :style="`left:${n.x}px;top:${n.y}px;${nodeStyle(n)}`">
+             :style="nodeHueVars(n)">
           <div class="cn-body" @pointerdown.stop="startNodeDrag(n, $event)"
-               :title="n.kind === 'track' && n.state === 'pruned' ? n.label + ' — ' + n.sub + (n.gpruned ? ' (filtered out — click ↺ to restore)' : '') : ''">
+               :title="n.kind === 'track' && n.state === 'pruned' ? n.label + ', ' + n.sub + (n.gpruned ? ' (filtered out: click ↺ to restore)' : '') : ''">
             <template x-if="n.kind === 'central'">
               <div class="cn-central">
                 <span class="cn-eyebrow">Central cluster</span>
@@ -96,7 +105,9 @@
               </div>
             </template>
             <template x-if="n.kind === 'track'">
-              <div class="cn-track">
+              <div class="cn-track" :class="{ 'new-music': n.newMusic }">
+                <span class="cn-new" x-show="n.newMusic" x-cloak
+                      title="New: not in your library yet">✨</span>
                 <img class="cn-thumb" :src="n.thumbnail" x-show="n.thumbnail" alt="" loading="lazy"
                      @error="n.thumbnail = ''">
                 <div class="cn-text">
@@ -111,7 +122,7 @@
                     title="Play on YouTube Music">▶</button>
             <button type="button" class="cn-btn boost" x-show="n.kind === 'track' && n.state !== 'pruned'"
                     :class="{ on: isBoosted(n) }" @click="toggleBoost(n)"
-                    :title="isBoosted(n) ? 'Emphasized — steering new picks toward this' : 'Emphasize: steer new picks toward this track'">🔥</button>
+                    :title="isBoosted(n) ? 'Emphasized: steering new picks toward this' : 'Emphasize: steer new picks toward this track'">🔥</button>
             <button type="button" class="cn-btn grow" x-show="n.state !== 'pruned'" @click="grow(n.id)"
                     :disabled="exhaustedIds.includes(n.id)"
                     :title="exhaustedIds.includes(n.id) ? 'Genre filters are exhausted' : 'Grow: add a ring of nearby tracks'">＋</button>
@@ -122,9 +133,9 @@
           </div>
         </div>
       </template>
-      <!-- "Why this connection?" popover, anchored to the explained edge's live midpoint -->
-      <div class="cluster-explain" x-show="explain" x-cloak @click.outside="closeExplain()"
-           :style="`left:${explainAnchor().x}px;top:${explainAnchor().y}px`">
+      <!-- "Why this connection?" popover: anchored to the explained edge's live midpoint, positioned
+           imperatively each frame by _renderFrame (left/top) so it tracks the node without reactivity. -->
+      <div class="cluster-explain" x-ref="explainEl" x-show="explain" x-cloak @click.outside="closeExplain()">
         <button type="button" class="ce-close" @click="closeExplain()" title="Close">✕</button>
         <template x-if="explain && explain.loading">
           <p class="ce-loading">Finding the connection…</p>
@@ -184,14 +195,13 @@
     </div>
     <input type="hidden" name="journey" :value="journey">
     <input type="text" name="name" x-model="playlistName" placeholder="Cluster name" required>
-    <label class="cluster-incl" x-show="centralSongKeys().length" x-cloak>
-      <input type="checkbox" name="include_central" x-model="includeCentral">
-      Include central tracks</label>
     <input type="hidden" name="keep_keys" :value="JSON.stringify(saveKeys())">
     <input type="hidden" name="central_keys" :value="JSON.stringify(centralSongKeys())">
     <input type="hidden" name="seed_labels" :value="JSON.stringify(seedLabels())">
     <input type="hidden" name="allow_families" :value="JSON.stringify(allowedFamilies)">
-    <button type="submit" class="cta">
+    <!-- #48: full canvas snapshot, set at submit (not reactively) so reopening restores the exact graph -->
+    <input type="hidden" name="state" x-ref="clusterStateField">
+    <button type="submit" class="cta" @click="$refs.clusterStateField.value = clusterStateJSON(); openYTTab()">
       <span class="cta-txt">▶ Save &amp; play on YouTube ↗</span>
       <span class="cta-spin" aria-hidden="true"></span>
     </button>

@@ -37,10 +37,23 @@ def test_dislike_moves_lean_negative(store):
 
 
 def test_facet_multiplier_clamps_and_neutral_at_zero(store):
-    assert transient.facet_multiplier(0.0) == 1.0
-    assert transient.facet_multiplier(-100.0) == rec_params.FACET_MULT_MIN
-    assert transient.facet_multiplier(100.0) == rec_params.FACET_MULT_MAX
-    assert transient.facet_multiplier(-1.0) < 1.0
+    g = rec_params.get_param(store, "facet_gain")
+    lo = rec_params.get_param(store, "facet_mult_min")
+    hi = rec_params.get_param(store, "facet_mult_max")
+    assert transient.facet_multiplier(0.0, g, lo, hi) == 1.0
+    assert transient.facet_multiplier(-100.0, g, lo, hi) == lo
+    assert transient.facet_multiplier(100.0, g, lo, hi) == hi
+    assert transient.facet_multiplier(-1.0, g, lo, hi) < 1.0
+
+
+def test_facet_multiplier_uses_params(store):
+    g = rec_params.get_param(store, "facet_gain")
+    lo = rec_params.get_param(store, "facet_mult_min")
+    hi = rec_params.get_param(store, "facet_mult_max")
+    # default behavior preserved: 1 + gain*lean, clamped
+    assert transient.facet_multiplier(0.0, g, lo, hi) == 1.0
+    assert transient.facet_multiplier(1.0, g, lo, hi) == max(lo, min(hi, 1.0 + g))
+    assert transient.facet_multiplier(-1.0, g, lo, hi) >= lo
 
 
 def test_centroid_tilt_newest_dominates_and_persists(store):

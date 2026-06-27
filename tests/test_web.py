@@ -556,7 +556,7 @@ def test_merge_update_toggle_and_setall_persist(store):
     upd = f"/merge/update?ids={a},{b}"
     r = c.post(upd, data={"field": "toggle", "value": "v:v1"})
     assert r.status_code == 200 and "1 / 2" in r.text     # one excluded now
-    # the draft survives a "refresh" (re-GET) — v1 still excluded
+    # the draft survives a "refresh" (re-GET), v1 still excluded
     assert "1 / 2" in c.get(f"/merge?ids={a},{b}").text
     assert "0 / 2" in c.post(upd, data={"field": "setall", "value": "0"}).text   # none
     assert "2 / 2" in c.post(upd, data={"field": "setall", "value": "1"}).text   # all back
@@ -630,10 +630,10 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     import json as _json
     import yt_playlist.providers.musicbrainz as mb
     from tests.conftest import only_provider
-    # stub MusicBrainz so the test never hits the network (enrich + the MBID search)
-    monkeypatch.setattr(mb, "enrich",
-                        lambda title, artist: {"S0": ("rock", "1998"), "S1": ("jazz", "2003")}.get(title, (None, None)))
-    monkeypatch.setattr(mb, "recording_mbid", lambda title, artist: None)
+    # stub MusicBrainz so the test never hits the network (one enrich_full yields genre, year, MBID)
+    monkeypatch.setattr(mb, "enrich_full",
+                        lambda title, artist: {"S0": ("rock", "1998", None),
+                                               "S1": ("jazz", "2003", None)}.get(title, (None, None, None)))
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
     store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", "Al", 200, 1),
@@ -655,8 +655,9 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     # fully-resolved tracks are done; the no-match one stays eligible for a re-run
     assert [t["video_id"] for t in store.tracks_to_enrich(a)] == ["v2"]
 
-    # re-run after MusicBrainz gains a genre for v2 — it fills the gap and v2 is now complete
-    monkeypatch.setattr(mb, "enrich", lambda title, artist: ("ambient", "2010") if title == "Sx" else (None, None))
+    # re-run after MusicBrainz gains a genre for v2. It fills the gap and v2 is now complete
+    monkeypatch.setattr(mb, "enrich_full",
+                        lambda title, artist: ("ambient", "2010", None) if title == "Sx" else (None, None, None))
     jid2 = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid2}") as st:
         "".join(st.iter_text())
@@ -686,7 +687,7 @@ def test_liked_songs_get_a_heart(store):
 
 
 def test_remove_playlist_preserves_group(store):
-    # Groups are user curation (not on YouTube) — a removed/pruned playlist must keep its group so it
+    # Groups are user curation (not on YouTube). A removed/pruned playlist must keep its group so it
     # reattaches if the playlist comes back. Regression for the prune that wiped groups too.
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PLG", "Grouped", 1, "h", 1.0)
@@ -821,7 +822,7 @@ def test_lastfm_fills_missing_genre_and_year(store, monkeypatch):
         body = "".join(st.iter_text())
     evs = [_json.loads(l[6:]) for l in body.splitlines() if l.startswith("data: ")]
     track_evs = [e for e in evs if e["type"] == "track"]
-    # events report the effective stored values (so the UI matches the DB) — both fields present
+    # events report the effective stored values (so the UI matches the DB), both fields present
     assert track_evs and all("genre" in e and "year" in e for e in track_evs)
 
     detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.playlist_tracks_detail(a)}

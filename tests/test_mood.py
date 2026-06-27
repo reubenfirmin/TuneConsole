@@ -2,7 +2,7 @@ from yt_playlist.rec import embed, recommend
 
 
 def test_mood_demotes_but_does_not_banish_cluster_in_for_you(store):
-    """A strong negative mood DE-RANKS the disfavored cluster in for_you — it drops out of the lane's
+    """A strong negative mood DE-RANKS the disfavored cluster in for_you. It drops out of the lane's
     top but stays present, because the transient tilt de-ranks rather than banishes (banishing is the
     job of dislike / sustained graduation, not one mood gesture)."""
     iid = store.upsert_identity("main", "cred", None, True)
@@ -30,6 +30,6 @@ def test_mood_demotes_but_does_not_banish_cluster_in_for_you(store):
     mood_a_top = sum(1 for a in mood[:8] if a == "AB")
     assert mood_a_top < neutral_a_top, "negative mood on A should demote it out of the lane's top"
     # NOT BANISHED: A is still present in the lane (de-rank, not removal)
-    assert "AB" in mood, "A is de-ranked, not banished — it should still be present in the lane"
+    assert "AB" in mood, "A is de-ranked, not banished. It should still be present in the lane"
     # B fills the freed-up top
     assert "BB" in mood, "B should fill the top once A is demoted"

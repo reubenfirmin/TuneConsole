@@ -62,7 +62,7 @@ def test_merge_with_liked_only_offers_keep_liked_or_all(store):
 
 def test_add_tracks_to_liked_music_likes_each_song(store):
     """Adding an alternate version (or 'complete this playlist' pick) while viewing Liked Music must
-    *like* the song — YouTube rejects directly-added tracks on the system-managed LM playlist, so the
+    *like* the song. YouTube rejects directly-added tracks on the system-managed LM playlist, so the
     add is shimmed into a like, which is the only thing that actually lands a song in Liked Music."""
     iid = store.upsert_identity("main", "cred", None, True)
     lm = store.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 1.0)

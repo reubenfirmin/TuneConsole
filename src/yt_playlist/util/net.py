@@ -1,11 +1,11 @@
 """Connectivity circuit breaker shared by the enrichment providers.
 
 Each provider (MusicBrainz, Discogs, Last.fm) talks to a single host. When that host goes
-unreachable — DNS failure, refused/reset connection, timeout — every track in a playlist fails the
+unreachable (DNS failure, refused/reset connection, timeout) every track in a playlist fails the
 same way, so plowing through the whole list just burns one pace-interval per track for nothing. Each
 provider keeps a CircuitBreaker: its low-level fetch reports the outcome of every HTTP attempt, and
 the enrich loop stops once enough *consecutive* unreachable failures pile up. Crucially, any server
-response (even a 4xx/5xx) or a successful read clears the streak — the host is reachable, so a miss
+response (even a 4xx/5xx) or a successful read clears the streak: the host is reachable, so a miss
 is a per-track miss, not an outage.
 """
 import urllib.error
@@ -18,7 +18,7 @@ def is_unreachable(exc):
 
     An HTTPError means the server sent a response, so connectivity is fine. A plain URLError wraps a
     socket-level failure (DNS gaierror, connection refused/reset); a bare OSError/TimeoutError is the
-    same class of fault. Anything else (e.g. a JSON parse error) implies we got bytes back — reachable.
+    same class of fault. Anything else (e.g. a JSON parse error) implies we got bytes back: reachable.
     """
     if isinstance(exc, urllib.error.HTTPError):
         return False
@@ -35,7 +35,7 @@ class CircuitBreaker:
         self.consecutive = 0
 
     def reset(self):
-        """Clear the streak — called at the start of each run so a past outage doesn't pre-trip it."""
+        """Clear the streak, called at the start of each run so a past outage doesn't pre-trip it."""
         self.consecutive = 0
 
     def record(self, exc=None):
@@ -43,7 +43,7 @@ class CircuitBreaker:
         if exc is not None and is_unreachable(exc):
             self.consecutive += 1
         else:
-            self.consecutive = 0          # reachable (success or server error) — streak broken
+            self.consecutive = 0          # reachable (success or server error), streak broken
 
     def tripped(self):
         return self.consecutive >= self.threshold

@@ -1,4 +1,4 @@
-/* TuneConsole — "late-night studio console"
+/* TuneConsole, "late-night studio console"
    warm near-black, amber accent, editorial serif + grotesque + mono. */
 
 @font-face {
@@ -104,7 +104,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--border);
 }
-/* TuneConsole logo — an equalizer logomark (bars belong on a console) beside a
+/* TuneConsole logo: an equalizer logomark (bars belong on a console) beside a
    two-tone wordmark: "Tune" in ink, "Console" in violet. The bars bounce like
    a live EQ. */
 .brand {
@@ -302,7 +302,7 @@ td.num { font-family: var(--font-mono); }
   color: var(--faint); letter-spacing: 0.02em; margin-top: 0.1rem; user-select: all;
 }
 .ptitle { font-weight: 600; }
-/* audio/video/mixed marker — fixed-size box so all three line up identically */
+/* audio/video/mixed marker: fixed-size box so all three line up identically */
 .kind { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
   width: 1.6rem; height: 1.15rem; font-size: 0.74rem; line-height: 1; margin-right: 0.4rem;
   border-radius: 5px; border: 1px solid var(--border-2); color: var(--dim);
@@ -359,7 +359,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-sm { padding: 0.3rem 0.7rem; font-size: 0.8rem; }
 .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
 
-/* Green primary button — used for the pre-sync "Sync now" onboarding CTA (resting green, not just
+/* Green primary button: used for the pre-sync "Sync now" onboarding CTA (resting green, not just
    on hover like other buttons). */
 .sync-cta {
   background-image: linear-gradient(135deg, #6bffab, #15e98c); color: #042b16;
@@ -494,7 +494,7 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 /* earlier (1y) marker: faint dot showing where it sat a year ago (trend = bar end vs this) */
 .tk-open { top: 50%; transform: translate(-50%, -50%); width: 5px; height: 5px; border-radius: 50%;
   background: var(--surface); box-shadow: 0 0 0 1.5px var(--dim); opacity: 0.85; }
-/* range whisker: thin, faint line low..high with small caps — subordinate to the bar */
+/* range whisker: thin, faint line low..high with small caps, subordinate to the bar */
 .tk-whisker { top: 50%; transform: translateY(-50%); height: 1px; background: var(--dim);
   opacity: 0.45; }
 .tk-whisker::before, .tk-whisker::after { content: ""; position: absolute; top: 50%; width: 1px;
@@ -594,14 +594,14 @@ tr:hover .pl-play, tr.selrow .pl-play { opacity: 1; }
   filter: drop-shadow(0 0 4px rgba(255,92,138,0.45)); }
 
 /* clickable Liked-Music toggle: an SVG heart, faint outline by default; filled-pink with a soft
-   glow when on (an outer drop-shadow halo — no box, no ring). */
+   glow when on (an outer drop-shadow halo, no box, no ring). */
 .like-btn { display: inline-flex; align-items: center; justify-content: center;
   padding: 0; background: none; border: 0; box-shadow: none; cursor: pointer; color: var(--faint);
   transition: color .12s ease, filter .12s ease, transform .08s ease; }
 .like-btn svg { width: 1.2rem; height: 1.2rem; display: block; }
 .like-btn:hover { color: #ff5c8a; transform: scale(1.12); }
 .like-btn.on { color: #ff5c8a; filter: drop-shadow(0 0 5px rgba(255,92,138,0.7)); }
-/* the Liked Music playlist is all-liked, so per-row hearts are redundant — hide the column;
+/* the Liked Music playlist is all-liked, so per-row hearts are redundant: hide the column;
    a single heart sits in the header instead (.lm-heart). */
 .track-table.is-lm .liked-col { display: none; }
 .lm-heart { width: .9rem; height: .9rem; color: #ff5c8a; vertical-align: -1px; margin-right: .15rem;
@@ -616,7 +616,7 @@ tr.srow:hover .gdisplay .ghint { opacity: 0.55; }
 .ginput-wrap { position: relative; display: inline-block; }
 .ginput { width: 100%; max-width: 8rem; padding: 0.18rem 0.4rem; font-size: 0.82rem;
   background: var(--bg-2); border: 1px solid var(--accent); border-radius: 6px; color: var(--text); }
-/* custom autosuggest dropdown — constrained height, anchored under the input */
+/* custom autosuggest dropdown: constrained height, anchored under the input */
 .genre-suggest { position: absolute; left: 0; top: calc(100% + 3px); z-index: 40;
   min-width: 9.5rem; max-width: 14rem; max-height: 12rem; overflow-y: auto; padding: 0.25rem;
   background: var(--surface); border: 1px solid var(--border-2); border-radius: 9px;
@@ -638,6 +638,16 @@ td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
 .gtag { display: inline-block; font-size: 0.72rem; padding: 0.08rem 0.4rem; border-radius: 999px;
   background: var(--surface-2); border: 1px solid var(--border-2); color: var(--dim); white-space: nowrap; }
 
+/* inline edit affordances for title/artist: pencil hidden until row hover; reset (override marker)
+   stays faintly visible so a manual fix is discoverable. */
+.editpen, .resetpen { cursor: pointer; opacity: 0; margin-left: 0.35em; font-size: 0.85em; transition: opacity 0.12s ease; }
+tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
+.editpen:hover, .resetpen:hover { opacity: 1; }
+.resetpen { opacity: 0.5; }
+.tinput, .ainput { box-sizing: border-box; width: 100%; min-width: 0; padding: 0.12rem 0.3rem;
+  font-size: 0.82rem; line-height: 1.2; background: var(--bg-2); border: 1px solid var(--accent);
+  border-radius: 4px; color: var(--text); }
+
 /* dismissible banners (flash notices + the session-expired bar) */
 .notice.banner { display: flex; align-items: center; gap: 0.8rem; margin-bottom: 1.4rem; }
 .banner-body { flex: 1; }
@@ -653,7 +663,7 @@ td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
   background: var(--bg); border-top: 1px solid var(--border); }
 .setup-save { font-size: 1rem; padding: 0.6rem 1.6rem; }
 
-/* setup: tabbed sections (Cookies / Identities) — a segmented control above the card */
+/* setup: tabbed sections (Cookies / Identities), a segmented control above the card */
 .tabs { display: inline-flex; gap: 0.3rem; flex-wrap: wrap; margin-bottom: 1rem; padding: 0.3rem;
   background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); }
 .tab-btn { font-family: inherit; cursor: pointer; color: var(--dim); font-weight: 650;
@@ -693,7 +703,7 @@ td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
 .modal p { margin: 0 0 1.1rem; color: var(--dim); font-size: 0.9rem; line-height: 1.5; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 0.6rem; }
 .modal-wide { max-width: 40rem; width: calc(100vw - 3rem); }
-/* "Songs like this" modal — narrower, and never taller than the viewport (the row list scrolls). */
+/* "Songs like this" modal: narrower, and never taller than the viewport (the row list scrolls). */
 .modal.modal-similar { width: min(34rem, calc(100vw - 2rem)); max-width: none;
   max-height: calc(100dvh - 3rem); display: flex; flex-direction: column; }
 .modal.modal-similar #similar-results { flex: 1; min-height: 0; overflow-y: auto; }
@@ -709,10 +719,10 @@ td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
 .rowmenu-pop { position: absolute; right: 0.4rem; top: 100%; z-index: 30; min-width: 12.5rem;
   background: var(--surface); border: 1px solid var(--border-2); border-radius: 10px;
   box-shadow: 0 16px 40px -12px rgba(0,0,0,.7); padding: 0.3rem; }
-.rowmenu-pop button { display: block; width: 100%; text-align: left; background: transparent;
+.rowmenu-pop button, .rowmenu-pop a { display: block; width: 100%; text-align: left; background: transparent;
   border: none; box-shadow: none; color: var(--text); font-weight: 500; font-size: 0.85rem;
-  padding: 0.45rem 0.6rem; border-radius: 6px; cursor: pointer; }
-.rowmenu-pop button:hover { background: var(--accent-soft); box-shadow: none; }
+  padding: 0.45rem 0.6rem; border-radius: 6px; cursor: pointer; text-decoration: none; }
+.rowmenu-pop button:hover, .rowmenu-pop a:hover { background: var(--accent-soft); box-shadow: none; text-decoration: none; }
 .rowmenu-pop button.danger { color: var(--danger); }
 .rowmenu-pop button.danger:hover { background: var(--danger-soft); }
 
@@ -799,7 +809,7 @@ tr.htmx-request td { text-decoration: line-through; }
 tbody.stale-row.htmx-swapping, tbody.move-row.htmx-swapping,
 tbody.empty-row.htmx-swapping { opacity: 0; transition: opacity .3s ease; }
 
-/* "inbox zero" empty state (overlaps table) — reads as an achievement, not an absence */
+/* "inbox zero" empty state (overlaps table): reads as an achievement, not an absence */
 td.inbox-zero { text-align: center; padding: 2.4rem 1rem; font-size: 1.05rem;
   color: var(--text); opacity: .85; }
 
@@ -927,7 +937,7 @@ button.htmx-request .check-busy { display: inline; }
 
 /* ============ Recommendation tiles (graphics-first, hover-reveal) ============ */
 .tile-grid { display: grid; gap: 0.9rem; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); }
-/* "New from artists you play": a responsive album grid of normal-sized covers that flows by width
+/* "Explore your artists' catalogs": a responsive album grid of normal-sized covers that flows by width
    (stepping down to 4 / 3 / 2 as it narrows). It spans the full content width so it's exactly as wide
    as the double-playlist .gen-lanes above it; at the page max-width auto-fill still tops out at 5
    columns of 11rem. A small script in the partial then clamps the rows. */
@@ -945,7 +955,7 @@ button.htmx-request .check-busy { display: inline; }
 .tile:hover .tile-cover img { transform: scale(1.06); filter: brightness(0.62) saturate(1.05); }
 .tile-cover:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
 
-/* source badge — one hue per signal */
+/* source badge: one hue per signal */
 .tile-badge { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 3;
   font-family: var(--font-mono); font-size: 0.6rem; font-weight: 600; letter-spacing: 0.07em;
   text-transform: uppercase; padding: 0.18rem 0.45rem; border-radius: 999px;
@@ -957,7 +967,7 @@ button.htmx-request .check-busy { display: inline; }
 .b-cyan   { color: #c2f6df; background: rgba(87,227,160,0.20);  border-color: rgba(87,227,160,0.5); }
 .b-pink   { color: #ffd2dc; background: rgba(255,107,139,0.22); border-color: rgba(255,107,139,0.5); }
 
-/* title/subtitle scrim — hidden until hover */
+/* title/subtitle scrim: hidden until hover */
 .tile-scrim { position: absolute; inset: auto 0 0 0; z-index: 2; display: flex; flex-direction: column;
   gap: 0.05rem; padding: 1.6rem 0.6rem 0.55rem;
   background: linear-gradient(180deg, transparent, rgba(7,5,24,0.55) 35%, rgba(7,5,24,0.94));
@@ -978,7 +988,7 @@ button.htmx-request .check-busy { display: inline; }
 .tile:hover .tile-play, .tile:focus-within .tile-play { opacity: 1; transform: translate(-50%,-50%) scale(1); }
 .tile-play:hover { background: var(--accent); filter: brightness(1.12); text-decoration: none; }
 
-/* art-less tiles (artists) — gradient placeholder; name shown by default since there's no cover.
+/* art-less tiles (artists): gradient placeholder; name shown by default since there's no cover.
    These carry the name + "because…/fits…" context as text, which can run several lines, so they grow
    to fit it (square minimum) instead of inheriting the cover's fixed 1:1 ratio + clip that cut it off. */
 .tile-cover.no-art { background: var(--grad-soft); display: grid; place-items: center;
@@ -989,39 +999,57 @@ button.htmx-request .check-busy { display: inline; }
 .tile-cover.no-art .tile-title { white-space: normal; font-family: var(--font-display); font-size: 1.05rem; }
 .tile-cover.no-art .tile-sub, .tile-cover.no-art .tile-note { white-space: normal; }
 
-/* per-tile extra controls (feedback ⋯, Add) sit top-right */
-.tile-fb { position: absolute; top: 0.4rem; right: 0.45rem; z-index: 5; }
 @media (prefers-reduced-motion: reduce) {
   .tile-cover img, .tile-scrim, .tile-play { transition: none; }
 }
 
-/* per-tile actions (Add / dismiss / feedback) — reveal on hover */
-.tile-actions { position: absolute; top: 0.4rem; right: 0.45rem; z-index: 5; display: flex; gap: 0.3rem;
-  opacity: 0; transition: opacity 0.15s ease; }
-.tile:hover .tile-actions, .tile:focus-within .tile-actions { opacity: 1; }
-.tile-act { font-family: var(--font-sans); font-size: 0.72rem; font-weight: 600; color: #fff;
-  background: rgba(7,5,24,0.72); border: 1px solid var(--border-2); border-radius: 999px;
-  padding: 0.2rem 0.55rem; cursor: pointer; backdrop-filter: blur(6px); box-shadow: none; line-height: 1.2; }
-.tile-act:hover { background: var(--accent); box-shadow: none; }
-.tile-fb { opacity: 0; transition: opacity 0.15s ease; }
-.tile:hover .tile-fb, .tile:focus-within .tile-fb { opacity: 1; }
-.tile-fb .fy-x { background: rgba(7,5,24,0.72); border: 1px solid var(--border-2); border-radius: 999px;
-  width: 1.5rem; height: 1.5rem; display: grid; place-items: center; padding: 0; color: var(--dim); }
-.tile-fb .fy-x:hover { color: #fff; background: var(--accent); }
+/* ---- "Complete this playlist" suggestion tiles ----------------------------------------------
+   A functional pick list, not a graphics-first browse grid: the caption and the Add / ⋯ actions
+   are ALWAYS visible (never hover-gated), and the dismiss menu is click-toggled with click-away
+   to close, the same stable pattern as the playlist's own track-row ⋯ menu. */
+.tile-suggest { display: flex; flex-direction: column; }
+.tile-suggest .tile-art { position: relative; }
+/* keep the hover ▶ centered on the cover art, not the (now taller) whole tile */
+.tile-suggest .tile-play { top: 50%; }
+
+.tile-cap { display: flex; flex-direction: column; gap: 0.04rem; padding: 0.5rem 0.1rem 0; min-width: 0; }
+.tile-cap-title { font-weight: 650; font-size: 0.82rem; line-height: 1.25; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-cap-sub { font-size: 0.72rem; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-cap-note { font-size: 0.67rem; color: var(--accent-2); margin-top: 0.08rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.tile-foot { position: relative; display: flex; align-items: center; gap: 0.35rem;
+  margin-top: 0.45rem; padding: 0 0.1rem; }
+.tile-foot form { flex: 1; min-width: 0; }
+.tile-add { width: 100%; font-family: var(--font-sans); font-size: 0.75rem; font-weight: 600;
+  color: var(--text); background: var(--surface-2); border: 1px solid var(--border-2);
+  border-radius: 7px; padding: 0.34rem 0.5rem; cursor: pointer; box-shadow: none; line-height: 1.2; }
+.tile-add:hover { background: var(--accent); color: #fff; border-color: transparent; box-shadow: none; }
+.tile-foot .dots { font-size: 1.1rem; flex: none; }
+/* anchor the shared rowmenu popup under the ⋯ at the tile's right edge */
+.tile-menu { right: 0; }
 
 /* --- generated proto-playlists: the two dated, saveable lanes at the top of Home --- */
-.gen-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem; align-items: start;
-  margin-bottom: 1.4rem; }
+.gen-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem; align-items: stretch;
+  margin-bottom: 1.4rem; }   /* stretch: both cards in a row take the row's max height */
 @media (max-width: 60rem) { .gen-lanes { grid-template-columns: 1fr; } }
 .gen-card { display: flex; flex-direction: column; }
 .gen-head { margin-bottom: 0.7rem; }
-.gen-head .section-note { margin: 0.35rem 0 0; }
+/* Reserve a uniform tagline height (1 line) so the track list starts at the same y in every card
+   in a row; tightened taglines are short enough to fit one line. */
+.gen-head .section-note { margin: 0.35rem 0 0; line-height: 1.4; min-height: 1.4em;
+  display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 .gen-refresh { float: right; background: none; border: 0; cursor: pointer; font-size: 1.15rem;
   line-height: 1; color: var(--dim); padding: 0.1rem 0.35rem; border-radius: 5px; }
 .gen-refresh:hover { color: #15e98c; background: var(--surface-2); }   /* CTA green on hover */
 .gen-refresh[disabled] { opacity: 0.45; cursor: wait; }
 .gen-name { font-family: var(--font-display); font-size: 1.12rem; line-height: 1.25;
-  letter-spacing: -0.01em; margin: 0.2rem 0 0; color: var(--text); }
+  letter-spacing: -0.01em; margin: 0.2rem 0 0; color: var(--text);
+  /* Reserve 2 lines so a 1-line title still aligns its tagline/track-list with a 2-line neighbour. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  min-height: 2.5em; }
 .gen-list { list-style: none; margin: 0 0 0.2rem; padding: 0; counter-reset: gen; }
 .gen-row { position: relative; display: grid; grid-template-columns: 1.4rem 2.3rem 1fr 1.6rem;
   align-items: center; gap: 0.55rem; padding: 0.4rem 0.2rem; border-bottom: 1px solid var(--border); }
@@ -1156,29 +1184,99 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 
 /* --- Home: taste fingerprint + steering --- */
 .fingerprint { display: grid; gap: 0.8rem; margin-bottom: 1.4rem; }
+/* Collapse bar: the always-visible toggle row; the rest of the panel (.fp-collapsible) folds away. */
+.fp-bar { display: flex; align-items: center; gap: 0.8rem; }
+.fp-collapse { background: none; border: none; cursor: pointer; padding: 0; color: var(--text);
+  font-weight: 700; font-size: 0.95rem; letter-spacing: 0.01em; display: inline-flex; align-items: center; gap: 0.45rem; }
+/* These two are plain header buttons, not CTAs, so opt them out of the global green button:hover
+   (which paints a neon gradient + dark text). Just a subtle colour shift instead. */
+.fp-collapse:hover { color: var(--accent-2); background-image: none; box-shadow: none; }
+.fp-caret { color: var(--faint); font-size: 0.8rem; width: 0.8rem; text-align: center; }
+.fp-reset { margin-left: auto; background: none; border: 1px solid var(--border-2); color: var(--dim);
+  font-size: 0.78rem; padding: 0.2rem 0.6rem; border-radius: 999px; cursor: pointer; white-space: nowrap; }
+.fp-reset:hover { border-color: var(--danger); color: var(--danger); background-image: none; box-shadow: none; }
+.fp-collapsible { display: grid; gap: 0.8rem; margin-top: 0.8rem; }
 .fp-head { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-.fp-stance { display: inline-flex; border: 1px solid var(--border-2); border-radius: 8px; overflow: hidden; }
-.fp-stance .seg-btn { background: none; border: none; color: var(--dim); padding: 0.35rem 0.8rem; cursor: pointer; }
-.fp-stance .seg-btn.on { background: var(--grad); color: #fff; }
 .fp-tune { margin-left: auto; color: var(--accent-2); font-weight: 600; }
+/* Row tools live OVER THE LABEL, not the slider: pinned to the label's right edge and revealed only
+   when you hover the label (never the slider, which stays fully usable). Self-contained chips so they
+   read over the label text. They consume no column width (absolute), so columns don't gain a gap. */
+.fp-name-wrap { position: relative; flex: none; display: inline-flex; align-items: center; }
+.fp-row-tools { position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; gap: 0.15rem; opacity: 0; pointer-events: none;
+  transition: opacity 0.12s ease; }
+.fp-name-wrap:hover .fp-row-tools, .fp-row-tools:hover { opacity: 1; pointer-events: auto; }
+.fp-icon-btn { background: var(--surface-2); border: 1px solid var(--border); cursor: pointer;
+  color: var(--dim); line-height: 1; font-size: 0.78rem; padding: 0.12rem 0.32rem; border-radius: 5px; }
+.fp-expand-btn:hover { color: #fff; border-color: var(--accent); background: var(--accent); }
+.fp-remove-btn { font-size: 0.86rem; }
+.fp-remove-btn:hover { color: #fff; border-color: var(--danger); background: var(--danger); }
 .fp-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1.2rem; }
 .fp-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--faint); }
 .fp-hint { margin: 0; }
 .fp-row { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.35rem; }
-.fp-name { min-width: 5.5rem; font-size: 0.85rem; }
+/* Fixed width + ellipsis so a long name (e.g. "progressive trance") can't push the slider right; the
+   full name is in the title tooltip. Fixed width also keeps the over-label tools at a consistent x. */
+.fp-name { width: 6.5rem; flex: none; font-size: 0.85rem; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+/* Drill-down subgenres: a quiet group; the NAME is indented (within its fixed width) so the slider
+   stays aligned with the family sliders, important so the neutral guide line below lines up too. */
+.fp-expand-btn.on { color: var(--accent-2); transform: rotate(180deg); }
+.fp-subgenres { margin: 0.1rem 0 0.35rem; }
+.fp-subname { padding-left: 1rem; font-size: 0.8rem; color: var(--dim); }
+/* Neutral (1.0) guide: a faint dashed line down the midpoint of a bar set, so you can see where a
+   slider sits at neutral (centre) vs nudged. The track runs from the label span (6.5rem name + 0.6rem
+   gap = 7.1rem) to the column's right edge, so its centre is 50% + half that span (3.55rem). */
+.fp-barset { position: relative; }
+.fp-barset::before { content: ""; position: absolute; top: 0.15rem; bottom: 0.15rem;
+  left: calc(50% + 3.55rem); border-left: 1px dashed var(--border-2); pointer-events: none; }
 .fp-slider { flex: 1; cursor: grab; }
 .fp-slider:active { cursor: grabbing; }
-.fp-bar { display: inline-block; flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
-.fp-bar.wide { width: 100%; }
-.fp-bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 3px; }
-.fp-breadth-val { font-weight: 600; color: var(--accent-2); }
+/* Transient "you right now" marker on a genre/era bar: same tick as the Breadth dial's measured-breadth
+   tick (.fp-breadth-tick) so the whole panel reads consistently. Shows the live (recent-listening)
+   position vs the thumb (your held steer). The wrap spans the slider track; the inline left uses the
+   same 8px thumb-inset as breadth so the tick lines up with the native thumb. */
+.fp-slider-wrap { position: relative; flex: 1; display: inline-flex; align-items: center; }
+.fp-slider-wrap .fp-slider { flex: 1; }
+.fp-marker { position: absolute; top: 50%; transform: translate(-50%, -50%);
+  width: 2px; height: 13px; background: var(--text); border-radius: 1px; pointer-events: none; }
+/* Breadth master dial (#7): a compact inline control in the header: [Breadth] Focused (-•-) Eclectic
+   "naturally balanced". Its own line on narrow screens (the header wraps); the Tune link is pushed to
+   the far right by .fp-tune's margin-left:auto, so the two global controls bracket the header. */
+.fp-breadth { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
+/* flex-basis (not width) fixes the size: the global input[type=range]{width:100%} outranks a plain
+   .class width, but a flex item sizes from its basis: same trick the genre .fp-slider uses. */
+.fp-breadth-slider { cursor: grab; }
+.fp-breadth-slider:active { cursor: grabbing; }
+/* Center-anchored fill (#2): paint the track from neutral (centre, 50%) out to the thumb (--p) so you
+   can see how far a bar is nudged and in which direction. --p is the thumb position as a %, set inline
+   per-render and updated live on drag (delegated handler in app.js). The selector includes the element
+   so it outranks the base input[type=range]{background:...}. */
+input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
+  background: linear-gradient(90deg,
+    var(--border) min(var(--p, 50%), 50%),
+    var(--accent-2) min(var(--p, 50%), 50%), var(--accent-2) max(var(--p, 50%), 50%),
+    var(--border) max(var(--p, 50%), 50%));
+}
+/* Breadth tick (#1): a marker at the transient model's CURRENT measured breadth (0=focused..1=eclectic),
+   so you see where you naturally sit vs where the thumb (your bias steer) is. */
+.fp-breadth-track { position: relative; display: inline-flex; align-items: center; flex: 0 0 8.5rem; }
+.fp-breadth-track .fp-breadth-slider { flex: 1; }
+.fp-breadth-tick { position: absolute; top: 50%; transform: translate(-50%, -50%);
+  width: 2px; height: 13px; background: var(--text); border-radius: 1px; pointer-events: none; }
+.fp-breadth-end { font-size: 0.72rem; color: var(--faint); }
+.fp-breadth-note { font-size: 0.72rem; color: var(--dim); font-style: italic; }
+/* Home genre picker (autosuggest combo, reuses the Clusters .cg-box widget). The wrapper is the
+   positioning context for the absolute .cg-suggest dropdown; small gap below the genre sliders. */
+.fp-genre-pick { position: relative; margin-top: 0.5rem; }
+/* Shrink the borrowed Clusters .cg-box pill to row scale here: its default (2.65rem tall, 1.3rem
+   radius) reads as jumbo next to the slim slider rows. */
+.fp-genre-pick .cg-box { min-height: 0; padding: 0.28rem 0.5rem; border-radius: 8px; border-width: 1px; }
+.fp-genre-pick .cg-box input { font-size: 0.82rem; padding: 0; min-width: 6rem; }
+.fp-genre-pick .cg-icon { font-size: 0.8rem; }
+.fp-genre-empty { margin: 0.4rem 0 0; }
 .steer-toast { background: var(--accent-soft); border: 1px solid var(--border-2); border-radius: 8px;
   padding: 0.5rem 0.8rem; color: var(--accent-2); margin-bottom: 0.8rem; }
-.tile-act { position: relative; }
-.dismiss-pop { position: absolute; z-index: 20; right: 0; display: flex; flex-direction: column; gap: 0.2rem;
-  background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 8px; padding: 0.3rem; margin-top: 0.3rem; }
-.dismiss-pop button { background: none; border: none; color: var(--text); text-align: left; padding: 0.25rem 0.5rem; cursor: pointer; border-radius: 5px; white-space: nowrap; }
-.dismiss-pop button:hover { background: var(--accent-soft); }
 [x-cloak] { display: none !important; }
 
 /* "Generated" pinned as its own collapsible card above the playlists table */
@@ -1199,6 +1297,8 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .fb-type-chip { display: inline-block; background: rgba(21,233,140,0.12); color: #15e98c;
   border: 1px solid rgba(21,233,140,0.4); border-radius: 999px; padding: 0.05rem 0.55rem;
   font-weight: 700; font-size: 0.72rem; margin-right: 0.4rem; }
+.fb-reopen { margin-left: 0.5rem; color: #15e98c; text-decoration: none; font-weight: 600; white-space: nowrap; }
+.fb-reopen:hover { text-decoration: underline; }
 /* "Made from" recipe line on a generated playlist's feedback panel */
 .fb-recipe { margin: 0 0 0.6rem; font-size: 0.85rem; color: var(--dim); }
 .fb-recipe .fb-chip { display: inline-block; background: var(--accent-soft); color: var(--accent-2);
@@ -1226,11 +1326,13 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 }
 .cluster-canvas:active { cursor: grabbing; }
 
-/* Starfield BEHIND the graph (cluster-world is z-index 1), with the ORIGINAL spacetime dot-grid as a
-   clean STATIC layer on top of the stars (::after) — exactly the production grid, just over a starfield.
-   Two drifting star fields (element bg + ::before) give parallax depth + twinkle; the grid never moves. */
+/* Starfield BEHIND the graph (cluster-world is z-index 1), with the spacetime grid (<canvas>) over it.
+   Two star layers (element bg + ::before) for depth. DELIBERATELY STATIC — no animation. ANY animation
+   here (background-position drift, filter, or even an opacity twinkle) repaints the whole viewport-sized
+   field of radial-gradients EVERY frame, idle included, which pinned the entire canvas at ~20fps. Painted
+   once, it costs nothing. (Measured: animated => ~20fps idle; static => 60fps.) */
 .cluster-stars { position: absolute; inset: -60px; z-index: 0; pointer-events: none; background-repeat: repeat;
-  /* drifting star field — mixed sizes/colours for depth */
+  /* drifting star field: mixed sizes/colours for depth */
   background-size: 210px 210px;          /* smaller tile ⇒ the dim dust is more densely packed */
   background-image:
     radial-gradient(1.5px 1.5px at 40px 60px, rgba(255,255,255,0.85), transparent),
@@ -1248,9 +1350,8 @@ details.advanced .knob { margin-bottom: 1.15rem; }
     radial-gradient(1px 1px at 190px 175px, rgba(220,230,255,0.36), transparent),
     radial-gradient(1px 1px at 160px 55px, rgba(255,255,255,0.3), transparent),
     radial-gradient(1px 1px at 100px 160px, rgba(255,240,230,0.34), transparent);
-  animation: starDriftA 130s linear infinite, starTwinkleA 6s ease-in-out infinite;
 }
-/* a sparser, brighter layer (with glow beacons) drifting at a different speed = parallax depth */
+/* a sparser, brighter layer for depth (static: no animation, so it never forces a repaint) */
 .cluster-stars::before {
   content: ''; position: absolute; inset: 0; background-repeat: repeat; background-size: 540px 540px; opacity: 0.95;
   background-image:
@@ -1259,15 +1360,9 @@ details.advanced .knob { margin-bottom: 1.15rem; }
     radial-gradient(2.3px 2.3px at 300px 430px, #fff 35%, rgba(220,195,255,0.4) 62%, transparent 76%),
     radial-gradient(1.6px 1.6px at 60px 360px, rgba(255,255,255,0.8), transparent),
     radial-gradient(1.6px 1.6px at 400px 320px, rgba(220,235,255,0.75), transparent);
-  animation: starDriftB 90s linear infinite, starTwinkleC 3.6s ease-in-out infinite;
 }
-/* (the spacetime grid is now the warped <canvas>.cluster-grid, drawn in JS — see drawGrid) */
+/* (the spacetime grid is now the warped <canvas>.cluster-grid, drawn in JS, see drawGrid) */
 .cluster-grid { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
-@keyframes starDriftA { to { background-position: 240px 150px; } }
-@keyframes starDriftB { to { background-position: -300px 220px; } }
-@keyframes starTwinkleA { 0%, 100% { opacity: 0.55; } 50% { opacity: 0.72; } }
-/* gentle brightness pulse — twinkles the bright beacons */
-@keyframes starTwinkleC { 0%, 100% { filter: brightness(0.92); } 50% { filter: brightness(1.2); } }
 @media (prefers-reduced-motion: reduce) {
   .cluster-stars, .cluster-stars::before, .cluster-stars::after { animation: none; }
 }
@@ -1281,16 +1376,17 @@ details.advanced .knob { margin-bottom: 1.15rem; }
   animation: trunkGlow 1.8s ease-in-out infinite; }
 @keyframes trunkGlow { 0%, 100% { opacity: 1; } 50% { opacity: 0.78; } }
 
-/* Bright-green midpoint dot on every edge — click it to ask "why this connection?". */
+/* Bright-green midpoint dot on every edge: click it to ask "why this connection?". */
 .edge-dot {
-  position: absolute; transform: translate(-50%, -50%); z-index: 3;
+  /* positioned via inline transform translate (compositor-only, no per-frame reflow); centred on its
+     point with a negative margin so the transform is free for positioning (hover grows via box-shadow). */
+  position: absolute; left: 0; top: 0; margin: -5.5px 0 0 -5.5px; z-index: 3;
   width: 11px; height: 11px; padding: 0; border-radius: 50%; cursor: pointer;
-  background: #6a6a78; border: 2px solid var(--bg-2);   /* same gray as the edges — quiet */
-  opacity: 0.6; transition: opacity 0.12s, transform 0.1s, background 0.12s;
+  background: #6a6a78; border: 2px solid var(--bg-2);   /* same gray as the edges, quiet */
+  opacity: 0.6; transition: opacity 0.12s, background 0.12s, box-shadow 0.12s;
 }
-.edge-dot:hover { opacity: 1; background: var(--accent-2); transform: translate(-50%, -50%) scale(1.35); }
-.edge-dot.on { opacity: 1; background: var(--accent-2); transform: translate(-50%, -50%) scale(1.35);
-  box-shadow: 0 0 0 2px var(--accent-soft); }
+.edge-dot:hover { opacity: 1; background: var(--accent-2); box-shadow: 0 0 0 3px var(--accent-soft); }
+.edge-dot.on { opacity: 1; background: var(--accent-2); box-shadow: 0 0 0 3px var(--accent-soft); }
 
 .cluster-explain {
   position: absolute; z-index: 7; transform: translate(-50%, calc(-100% - 14px));
@@ -1316,7 +1412,7 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .ce-pct { color: #15e98c; font-weight: 700; font-size: 0.82rem; }
 
 .cluster-node {
-  position: absolute; transform: translate(-50%, -50%);
+  position: absolute; left: 0; top: 0;   /* positioned via inline transform translate (compositor-only, no per-frame reflow); -50% centring is folded into that transform */
   width: 190px; background: var(--surface); border: 1px solid var(--border-2);
   border-radius: var(--radius-sm); padding: 0.5rem 0.55rem; box-shadow: var(--shadow);
 }
@@ -1325,7 +1421,7 @@ details.advanced .knob { margin-bottom: 1.15rem; }
   box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow);
 }
 /* #14 colour-coding: a track card is tinted by its branch hue; depth desaturates/lightens it (the
-   hue vars are set inline per node — see app.js nodeStyle). Declared before .trunk/.pruned so those
+   hue vars are set inline per node, see app.js nodeStyle). Declared before .trunk/.pruned so those
    states still override the border colour. */
 .cluster-node.track {
   border-color: hsl(var(--node-hue, 210) var(--node-sat, 60%) var(--node-light, 60%));
@@ -1343,11 +1439,15 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .cluster-node.pruned .cn-label { text-decoration: line-through; font-size: 0.74rem; }
 .cluster-node.pruned .cn-actions { margin-top: 0.25rem; }
 .cluster-node.pruned:hover { opacity: 0.9; }                  /* hover to read it (its title shows what it was) */
-/* Filtered-out (by the genre chip) reads as a neutral, reversible "set aside" — NOT a red rejection. */
+/* Filtered-out (by the genre chip) reads as a neutral, reversible "set aside", NOT a red rejection. */
 .cluster-node.pruned.filtered { border-color: var(--border-2); border-style: dashed; }
 .cn-body { cursor: grab; }
 .cn-body:active { cursor: grabbing; }
-.cn-track { display: flex; gap: 0.5rem; align-items: center; }
+.cn-track { display: flex; gap: 0.5rem; align-items: center; position: relative; }
+/* #13 P2: out-of-corpus (new, not-yet-owned) tracks: a light ✨ corner badge (no card-wide glow) */
+.cn-new { position: absolute; top: -7px; right: -7px; font-size: 12px; line-height: 1;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6)); pointer-events: none; z-index: 2; }
+.cn-track.new-music .cn-label { color: var(--accent-2); }
 .cn-central { display: flex; flex-direction: column; gap: 0.35rem; }
 .cn-eyebrow { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.14em; color: var(--accent-2); }
 .cn-seeds { display: flex; flex-wrap: wrap; gap: 0.3rem; }
@@ -1369,7 +1469,7 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .cn-btn:disabled:hover { border-color: var(--border-2); }   /* no hover affordance when dead */
 .cn-btn.play { color: var(--accent-2); }
 .cn-btn.play:hover { background: var(--accent-soft); border-color: var(--accent); }
-/* When a card is pruned, its ✕ becomes a ↺ RESTORE control — colour it like an action to bring back,
+/* When a card is pruned, its ✕ becomes a ↺ RESTORE control: colour it like an action to bring back,
    not a destructive delete. */
 .cn-btn.prune.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-2); }
 .cn-btn.prune.on:hover { background: var(--accent); color: #fff; }
@@ -1382,7 +1482,7 @@ details.advanced .knob { margin-bottom: 1.15rem; }
    transform stacking context:
    1) an animated box-shadow that pulses a warm/violet glow (always paints with the card);
    2) ::before is a gradient BORDER RING (masked to the border, so it sits over the edge without
-      covering content) whose colours rotate via @property --boostAngle — flames licking the border. */
+      covering content) whose colours rotate via @property --boostAngle, flames licking the border. */
 @property --boostAngle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
 .cluster-node.boosted { border-color: #ff8a00; animation: boostGlow 1.5s ease-in-out infinite; }
 .cluster-node.boosted::before, .cluster-node.boosted::after {
@@ -1411,13 +1511,17 @@ details.advanced .knob { margin-bottom: 1.15rem; }
   .cluster-node.boosted, .cluster-node.boosted::before, .cluster-node.boosted::after { animation: none; }
 }
 
-/* search — centered hero when empty, docked strip once seeded */
+/* search: centered hero when empty, docked strip once seeded */
 .cluster-search { display: flex; flex-direction: column; align-items: center; gap: 0.6rem;
   padding: 0.6rem clamp(1rem, 4vw, 2.4rem) 0;
   position: relative; z-index: 4;          /* sit above the (positioned) canvas so the input stays clickable */
   transition: transform 0.55s cubic-bezier(0.2, 0.7, 0.2, 1); }
-/* Empty state: float the search to mid-screen; it slides up to the top on the first graph render. */
-.cluster-search:not(.docked) { margin: 0.5rem 0 1rem; transform: translateY(40vh); }
+/* Empty state: float the search to mid-screen; it slides up to the top on the first graph render.
+   Absolute (out of flow) so it reserves NO height at the top: otherwise its in-flow box leaves an
+   empty "top bar" band above the canvas before the search has docked. Both states anchor at the top,
+   so only the transform animates on dock (the position swap is visually inert). */
+.cluster-search:not(.docked) { position: absolute; left: 0; right: 0; top: 0;
+  margin: 0; transform: translateY(40vh); }
 .cluster-search.docked { margin: 0 0 0.6rem; transform: translateY(0); }
 /* search box + genre combo share one row */
 .cluster-search-row { display: flex; gap: 0.6rem; align-items: center; justify-content: center;
@@ -1428,7 +1532,7 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .cluster-search-box input {
   width: 100%; padding: 0.7rem 0.9rem 0.7rem 2.1rem; font-size: 1rem;
   background: var(--surface); color: var(--text); border-radius: 999px;
-  border: 1.5px solid #15e98c;                                  /* CTA green — distinct from the topbar search */
+  border: 1.5px solid #15e98c;                                  /* CTA green, distinct from the topbar search */
   box-shadow: 0 0 0 1px rgba(21,233,140,0.25), 0 6px 18px -10px rgba(21,233,140,0.65);
 }
 .cluster-search-box input:focus { outline: none; border-color: #6bffab;
@@ -1447,7 +1551,7 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .cs-sub { font-size: 0.75rem; color: var(--faint); margin-left: auto; }
 .cluster-hint { color: var(--dim); font-size: 0.85rem; }
 
-/* #29 genre-family whitelist — an autosuggest combo beside the seed search: type to filter, pick to
+/* #29 genre-family whitelist: an autosuggest combo beside the seed search: type to filter, pick to
    add a chip. Neutral border (the bright green is the seed search's signature); green once active. */
 .cluster-genres { position: relative; flex: 0 1 15rem; min-width: 11rem; }
 .cluster-reset { flex: none; cursor: pointer; padding: 0.45rem 0.8rem; border-radius: 999px;
@@ -1516,7 +1620,7 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .cluster-mode button.on strong, .cluster-mode button.on span { color: var(--accent-2); }
 .cluster-mode button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* DJ Journey picker — two-line items (name + short hint), opens upward from the save bar */
+/* DJ Journey picker: two-line items (name + short hint), opens upward from the save bar */
 .cluster-journey { position: relative; flex: none; }
 .cj-toggle { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 0.04rem;
   cursor: pointer; padding: 0.3rem 1.6rem 0.3rem 0.7rem; border-radius: var(--radius-sm);
@@ -1540,7 +1644,6 @@ details.advanced .knob { margin-bottom: 1.15rem; }
   flex: 1; padding: 0.55rem 0.7rem; background: var(--bg-2); border: 1px solid var(--border-2);
   border-radius: var(--radius-sm); color: var(--text);
 }
-.cluster-incl { display: flex; align-items: center; gap: 0.4rem; color: var(--dim); font-size: 0.85rem; white-space: nowrap; }
 /* Save CTA spinner: shown while the save request is in flight (htmx adds .htmx-request to the form). */
 .cluster-savebar .cta { position: relative; }
 .cluster-savebar .cta-spin { display: none; position: absolute; left: 50%; top: 50%;
@@ -1565,7 +1668,7 @@ details.advanced .knob { margin-bottom: 1.15rem; }
   color: var(--text); margin: 0 0 0.45rem; }
 .presync-sub { color: var(--dim); font-size: 1rem; max-width: 42ch; margin: 0 auto; line-height: 1.5; }
 
-/* Enrich onboarding nudge — icon, text, and dismiss as three columns so the copy never wraps under
+/* Enrich onboarding nudge: icon, text, and dismiss as three columns so the copy never wraps under
    the bulb. Violet-tinted to match the recommendation theme. */
 .enrich-nudge {
   display: flex; align-items: flex-start; gap: 0.85rem;
@@ -1759,3 +1862,31 @@ figure.rose { margin: 0; text-align: center; }
 .cov-trend { margin-top: 1.3rem; }
 .cov-trend .spark { width: 100%; height: 90px; display: block; margin-top: 0.4rem; }
 .spark-area { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+
+/* ── Auto-tune control + result panel ─────────────────────────────────────── */
+.autotune-ctl { display: flex; align-items: center; gap: 0.85rem; flex-wrap: wrap;
+  margin: 0.2rem 0 1rem; }
+.autotune-note { color: var(--dim); font-size: 0.82rem; line-height: 1.4; max-width: 40rem; }
+
+.autotune-result { margin: 0 0 1.8rem; }
+.autotune-result-head { display: flex; align-items: center; justify-content: space-between;
+  gap: 0.75rem; margin-bottom: 0.5rem; }
+.autotune-result-head h3 { margin: 0; font-family: var(--font-display); font-size: 1.05rem; }
+.autotune-result .section-note { margin-bottom: 1.1rem; }
+.autotune-stats { margin-bottom: 1.2rem; }
+
+.autotune-grid { width: 100%; border-collapse: collapse; margin: 0 0 1.1rem;
+  font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.autotune-grid td { padding: 0.32rem 0; vertical-align: middle; }
+.autotune-grid td.cfg { white-space: nowrap; color: var(--dim); width: 7rem; padding-right: 0.9rem; }
+.autotune-grid td.track { width: auto; }
+.autotune-grid td.val { white-space: nowrap; text-align: right; width: 4.5rem; padding-left: 0.9rem; }
+.autotune-grid .bar { display: block; height: 0.55rem; min-width: 2px; border-radius: 999px;
+  background: var(--grad); opacity: 0.55; }
+.autotune-grid tr.win td.cfg, .autotune-grid tr.win td.val { color: var(--text); font-weight: 700; }
+.autotune-grid tr.win .bar { opacity: 1; background: linear-gradient(135deg, #6bffab, #15e98c); }
+
+.autotune-rotated { margin: 0 0 0.55rem; font-size: 0.85rem; color: var(--text); }
+.autotune-diff { display: flex; flex-direction: column; gap: 0.4rem; }
+.autotune-diff .diff-row { display: flex; gap: 0.55rem; align-items: baseline; }
+.autotune-diff .diff-list { color: var(--dim); font-size: 0.82rem; line-height: 1.45; }

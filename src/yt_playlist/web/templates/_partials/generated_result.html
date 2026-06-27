@@ -1,36 +1,34 @@
-{# Swapped in for a proto-playlist card after "Save & play" — success or a friendly failure. #}
+{# Swapped in for a proto-playlist card after "Save & play": success or a friendly failure. #}
 <section class="gen-card card gen-done">
   {% if error %}
   <header class="gen-head"><span class="eyebrow eyebrow-warn">Couldn't save</span>
     <h2 class="gen-name">{{ name }}</h2></header>
   <p class="section-note">{{ error }}</p>
-  {# Nothing to play — discard the blank tab we opened on click so no stray about:blank is left behind. #}
+  {# Nothing to play. Discard the blank tab we opened on click so no stray about:blank is left behind. #}
   <script>(function () { var t = window.__ytTab; window.__ytTab = null;
     if (t && !t.closed) try { t.close(); } catch (e) {} })();</script>
   {% else %}
   <header class="gen-head"><span class="eyebrow eyebrow-ok">Saved ✓. Opening YouTube…</span>
     <h2 class="gen-name">{{ name }}</h2></header>
   <p class="section-note">{{ added }} track{{ '' if added == 1 else 's' }} added to a new playlist in
-    your <strong>Generated</strong> group. It stays out of your recommendations until you move it into
-    your collection.</p>
+    your <strong>Generated</strong> group, kept out of your recommendations until you promote it to
+    your library.</p>
   <div class="gen-foot">
     <a class="cta" href="https://music.youtube.com/playlist?list={{ ytm }}"
        target="_blank" rel="noopener">▶ Open on YouTube Music ↗</a>
   </div>
   {% if pid %}{% include "_partials/mood_panel.html" %}{% endif %}
   {# Point the tab we opened on click (genOpenYT) at the new playlist, then send THIS tab to the
-     playlist's page in our UI — which carries its own "Open on YouTube Music" link too. If that tab
+     playlist's page in our UI, which carries its own "Open on YouTube Music" link too. If that tab
      is missing (no handle / it was closed), fall back to a bare window.open; should the browser block
-     THAT, the "Open on YouTube Music" link above is the manual fallback.
-     The same-tab navigation is DEFERRED: navigating this tab synchronously tears down the opener
-     context and cancels the popup's just-issued cross-origin navigation before it commits, stranding
-     it at about:blank. A short delay lets the popup nav start before we unload. #}
+     THAT, the "Open on YouTube Music" link above is the manual fallback. Until this fires the popup
+     shows our /generating placeholder (a spinner card), not a stark white about:blank. #}
   <script>(function () {
     var url = "https://music.youtube.com/playlist?list={{ ytm }}";
     var tab = window.__ytTab; window.__ytTab = null;
     if (tab && !tab.closed) { try { tab.opener = null; } catch (e) {} tab.location.replace(url); }
     else { window.open(url, "_blank", "noopener"); }
-    {% if pid %}setTimeout(function () { window.location.assign("/playlist/{{ pid }}"); }, 150);{% endif %}
+    {% if pid %}window.location.assign("/playlist/{{ pid }}");{% endif %}
   })();</script>
   {% endif %}
 </section>

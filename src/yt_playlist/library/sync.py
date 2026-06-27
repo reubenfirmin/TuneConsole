@@ -43,7 +43,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
             if on_auth_expired:
                 on_auth_expired(identity_id, label)
             _emit(on_progress, "auth_expired",
-                  f"{label}: YouTube session expired — re-authenticate", label=label)
+                  f"{label}: YouTube session expired. Re-authenticate", label=label)
             return
         raise
     _emit(on_progress, "info", f"{label}: {len(playlists)} playlists", count=len(playlists))
@@ -80,7 +80,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         _emit(on_progress, "step", f"{label} › {pl.get('title', '')} ({len(track_ids)} tracks)",
               i=i, total=total)
 
-    # Prune playlists no longer in this identity's remote library (deleted elsewhere / stale rows) —
+    # Prune playlists no longer in this identity's remote library (deleted elsewhere / stale rows),
     # but ONLY when the fetch actually returned a library. An empty result is almost always a
     # transient or session glitch (it doesn't always surface as a 401/403), and pruning on it would
     # destructively wipe every playlist for the identity. Sync must only *update* on success, never
@@ -94,16 +94,16 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         if stale:
             _emit(on_progress, "info", f"{label}: removed {len(stale)} playlist(s) no longer present")
     else:
-        # An empty library on a configured identity is, in practice, a broken/expired session — some
+        # An empty library on a configured identity is, in practice, a broken/expired session. Some
         # endpoints return [] instead of raising a 401 (exactly what happened to the master account
         # while the brand account got a clean 401). Treat it the SAME: flag for re-auth, never prune.
         auth_bad = True
-        logger.warning("identity %s returned no playlists — flagging for re-auth, keeping existing",
+        logger.warning("identity %s returned no playlists, flagging for re-auth, keeping existing",
                        identity_id)
         if on_auth_expired:
             on_auth_expired(identity_id, label)
         _emit(on_progress, "auth_expired",
-              f"{label}: returned no playlists — session may have expired, re-authenticate", label=label)
+              f"{label}: returned no playlists. Session may have expired, re-authenticate", label=label)
 
     from yt_playlist.rec import recommend            # local import avoids any import cycle
     recommend.apply_dislikes(store, rated, now)
@@ -111,8 +111,11 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history())
         hist_keys = [identity_key(t.get("title", ""), _artist(t)) for t in history]
-        store.add_history_snapshot(identity_id, now, hist_keys)
-        recommend.graduate_plays(store, hist_keys, now)
+        # Record only NEW plays: YouTube re-sends the same recently-played window each sync (~91%
+        # overlap), so record_history_plays diffs it against this identity's cached window and stores
+        # just the newly-appeared tracks. This is the transient play feed (transient.play_facet_leans
+        # reads it) and keeps play COUNT(*) honest: it counts plays, not lingering (#49).
+        store.record_history_plays(identity_id, now, hist_keys)
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")
@@ -123,7 +126,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         _emit(on_progress, "done", f"{label}: done ({len(playlists)} playlists)")
 
 def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now) -> None:
-    """Re-fetch a single playlist's tracks into the store — fast post-merge refresh (no full sync)."""
+    """Re-fetch a single playlist's tracks into the store, fast post-merge refresh (no full sync)."""
     detail = with_retry(lambda: client.get_playlist(ytm_playlist_id, limit=None))
     track_ids, keys = [], []
     for t in detail.get("tracks", []):
@@ -142,34 +145,49 @@ def sync_plays_identity(store, identity_id, client, now, on_progress=None, label
                         on_auth_expired=None, on_auth_ok=None) -> None:
     """Fast, lightweight sync: pull only this identity's likes (the Liked Music playlist) and new
     plays (listening history). Deliberately skips the full-library enumeration, pruning and saved-
-    album work that make `sync_identity` slow — meant to be run often between full syncs."""
+    album work that make `sync_identity` slow, meant to be run often between full syncs."""
     label = label or f"identity {identity_id}"
     auth_bad = False
+    from yt_playlist.rec import recommend            # local import avoids any import cycle
 
     # Likes: the Liked Music (LM) system playlist's membership *is* your likes, so refreshing that one
     # playlist captures likes/unlikes made outside the app. Reuse the existing single-playlist refresh.
     existing = next((p for p in store.get_playlists()
                      if p.identity_id == identity_id and p.ytm_playlist_id == "LM"), None)
     _emit(on_progress, "info", f"{label}: refreshing Liked Music…")
+    lm_refreshed = False
     try:
         refresh_playlist(store, identity_id, client, "LM", existing.title if existing else "Liked Music", now)
+        lm_refreshed = True
     except Exception as e:  # noqa: BLE001 - a likes failure shouldn't abort the (best-effort) plays sync
         if _is_auth_error(e):
             auth_bad = True
             if on_auth_expired:
                 on_auth_expired(identity_id, label)
             _emit(on_progress, "auth_expired",
-                  f"{label}: YouTube session expired — re-authenticate", label=label)
+                  f"{label}: YouTube session expired. Re-authenticate", label=label)
         else:
             logger.warning("liked-music refresh failed for %s: %s", identity_id, e)
             _emit(on_progress, "info", f"{label}: Liked Music unavailable (skipped)")
 
-    # Plays: snapshot the listening history (the "new plays").
+    # Feed the captured likes into the model exactly as sync_identity does (#19's like channel): the LM
+    # membership *is* the likes, so every current member maps to LIKE. apply_dislikes records first-seen
+    # likes (record_like), graduates them, and feeds the transient like channel, idempotent on re-sync.
+    if lm_refreshed:
+        lm = next((p for p in store.get_playlists()
+                   if p.identity_id == identity_id and p.ytm_playlist_id == "LM"), None)
+        if lm is not None:
+            rated = {k: "LIKE" for k in store.get_playlist_track_keys(lm.id)}
+            recommend.apply_dislikes(store, rated, now)
+
+    # Plays: record only NEW plays from the recently-played window (record_history_plays diffs it
+    # against this identity's cached window). The fast path re-fetches the same window, so this is what
+    # stops it re-counting lingering tracks as plays (#49); it is the transient play feed too.
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:
         history = with_retry(lambda: client.get_history())
         hist_keys = [identity_key(t.get("title", ""), _artist(t)) for t in history]
-        store.add_history_snapshot(identity_id, now, hist_keys)
+        store.record_history_plays(identity_id, now, hist_keys)
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")
@@ -221,13 +239,13 @@ def _materialize_album_tracks(store, clients, saved, on_progress) -> None:
     if not todo:
         return
     # Each album is a separate get_album network call, so stream one step per album (named, with a
-    # running counter) instead of going silent for the whole batch — 258 of these is a long wait.
+    # running counter) instead of going silent for the whole batch. 258 of these is a long wait.
     _emit(on_progress, "info", f"folding in {len(todo)} saved album(s)…", count=len(todo))
     added = 0
     for i, bid in enumerate(todo, 1):
         meta = saved[bid]
         _emit(on_progress, "step",
-              f"albums › {i}/{len(todo)} {meta.get('title') or '(album)'} — {meta.get('artist') or '?'}",
+              f"albums › {i}/{len(todo)} {meta.get('title') or '(album)'}, {meta.get('artist') or '?'}",
               count=len(todo), index=i)
         try:
             album = with_retry(lambda: client.get_album(bid))

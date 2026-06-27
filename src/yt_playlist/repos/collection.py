@@ -1,4 +1,4 @@
-"""CollectionRepo — the user's album collection: saved-album CRUD plus the aggregate
+"""CollectionRepo: the user's album collection: saved-album CRUD plus the aggregate
 library views (every album / artist across all playlists) that power the collection pages.
 """
 from yt_playlist.repos.base import Repo, synchronized
@@ -44,7 +44,7 @@ class CollectionRepo(Repo):
     def saved_albums_recency(self) -> dict:
         """{browse_id: newest play ts across the album's tracks | None}. Plays come from history (a
         track's identity_key in a snapshot). LEFT JOINs throughout, so an album whose tracks aren't in
-        the library — or were never played — comes back None, i.e. as cold as possible."""
+        the library (or were never played) comes back None, i.e. as cold as possible."""
         rows = self.conn.execute(
             "SELECT sa.browse_id AS browse, MAX(hs.taken_at) AS last "
             "FROM saved_albums sa "

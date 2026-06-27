@@ -1,4 +1,14 @@
-{# one scalar knob (slider + value + help + reset). Expects `p` = {name,label,help,min,max,step,value,default}. #}
+{# one knob. Expects `p` = {name,label,help,min,max,step,value,default,boolean}. #}
+{% if p.boolean %}
+<div class="knob knob-toggle">
+  <label>
+    <input type="checkbox" id="param-{{ p.name }}" name="value" {% if p.value %}checked{% endif %}
+           hx-post="/taste/param" hx-vals='{"name":"{{ p.name }}"}' hx-trigger="change" hx-swap="none">
+    {{ p.label }}
+  </label>
+  <p class="knob-help">{{ p.help }}</p>
+</div>
+{% else %}
 <div class="knob">
   <div class="knob-head">
     <label>{{ p.label }}</label>
@@ -14,3 +24,4 @@
          oninput="updateOut(this)">
   <p class="knob-help">{{ p.help }}</p>
 </div>
+{% endif %}

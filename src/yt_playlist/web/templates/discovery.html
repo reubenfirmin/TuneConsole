@@ -1,0 +1,68 @@
+{% extends "base.html" %}{% block title %}Discovery Pools · TuneConsole{% endblock %}{% block body %}
+<div class="page-head">
+  <span class="eyebrow">Tools</span>
+  <h1>Discovery Pools</h1>
+  <p>Out-of-corpus candidates we have surfaced to you: new tracks, albums, and artists you do not own
+    yet. Each is removed automatically {{ gc_days }} days after it is first shown if you never add it
+    (a track held in a generated playlist stays until that playlist is cleaned up).</p>
+</div>
+
+{% macro gc_cell(row) -%}
+  {% if row.gc_at is none %}<span class="muted">not shown yet</span>
+  {% else %}{% set d = ((row.gc_at - now) / 86400) | round(0, 'ceil') | int %}
+    {% if d <= 0 %}<span class="muted">due</span>{% else %}in {{ d }} day{{ 's' if d != 1 }}{% endif %}
+  {% endif %}
+{%- endmacro %}
+
+{% macro ingested(row) -%}
+  {% set d = ((now - row.found_at) / 86400) | round(0, 'floor') | int %}
+  {{ 'today' if d <= 0 else (d ~ 'd ago') }}
+{%- endmacro %}
+
+<div class="card" x-data="{ tab: 'tracks' }">
+  <div class="tabs">
+    <button type="button" :class="{ active: tab === 'tracks' }" @click="tab = 'tracks'">Tracks ({{ tracks|length }})</button>
+    <button type="button" :class="{ active: tab === 'albums' }" @click="tab = 'albums'">Albums ({{ albums|length }})</button>
+    <button type="button" :class="{ active: tab === 'artists' }" @click="tab = 'artists'">Artists ({{ artists|length }})</button>
+  </div>
+
+  <table class="pool-table" x-show="tab === 'tracks'">
+    <thead><tr><th>Track</th><th>Ingested</th><th>Plays</th><th>Offered</th><th>Playlists</th><th>Cleanup</th><th></th></tr></thead>
+    <tbody>
+      {% for r in tracks %}
+      <tr id="dt-{{ loop.index }}">
+        <td>{{ r.title }} <span class="muted">· {{ r.artist }}</span></td>
+        <td>{{ ingested(r) }}</td><td>{{ r.plays }}</td><td>{{ r.offered_count }}</td>
+        <td>{{ r.playlists }}</td><td>{{ gc_cell(r) }}</td>
+        <td><button class="btn-sm" hx-post="/discovery/add" hx-vals='{"kind":"track","id":"{{ r.identity_key }}"}'
+                    hx-target="#dt-{{ loop.index }}" hx-swap="outerHTML swap:0.2s">Add (Like)</button></td>
+      </tr>
+      {% else %}<tr><td colspan="7" class="muted">No tracks in the pool yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+
+  <table class="pool-table" x-show="tab === 'albums'" x-cloak>
+    <thead><tr><th>Album</th><th>Ingested</th><th>Offered</th><th>Cleanup</th><th></th></tr></thead>
+    <tbody>
+      {% for r in albums %}
+      <tr id="da-{{ loop.index }}">
+        <td>{{ r.title }} <span class="muted">· {{ r.artist }}{{ ' · ' ~ r.year if r.year }}</span></td>
+        <td>{{ ingested(r) }}</td><td>{{ r.offered_count }}</td><td>{{ gc_cell(r) }}</td>
+        <td><button class="btn-sm" hx-post="/collection/save-album" hx-vals='{"browse_id":"{{ r.browse_id }}"}'
+                    hx-target="#da-{{ loop.index }}" hx-swap="outerHTML swap:0.2s">Save</button></td>
+      </tr>
+      {% else %}<tr><td colspan="5" class="muted">No albums in the pool yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+
+  <table class="pool-table" x-show="tab === 'artists'" x-cloak>
+    <thead><tr><th>Artist</th><th>Genre</th><th>Ingested</th><th>Offered</th><th>Cleanup</th></tr></thead>
+    <tbody>
+      {% for r in artists %}
+      <tr><td>{{ r.artist }}</td><td>{{ r.genre or '' }}</td><td>{{ ingested(r) }}</td>
+        <td>{{ r.offered_count }}</td><td>{{ gc_cell(r) }}</td></tr>
+      {% else %}<tr><td colspan="5" class="muted">No artists in the pool yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

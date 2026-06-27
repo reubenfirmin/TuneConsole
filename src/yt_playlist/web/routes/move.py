@@ -40,10 +40,10 @@ def build(ctx) -> APIRouter:
             return HTMLResponse("")   # source deleted -> htmx fades + removes the row
         extra = f", {res['unresolved']} couldn’t be matched" if res["unresolved"] else ""
         if res.get("delete_error"):  # copy succeeded but the original couldn't be deleted
-            msg = (f"Copied “{res['title']}” ({res['added']} tracks{extra}). Couldn’t delete the original "
-                   f"— YouTube refused (it may not be a deletable playlist). Remove it manually if you want.")
+            msg = (f"Copied “{res['title']}” ({res['added']} tracks{extra}). Couldn’t delete the original: "
+                   f"YouTube refused (it may not be a deletable playlist). Remove it manually if you want.")
         elif not copy_only:  # move requested but some tracks couldn't be recreated -> kept the source
-            msg = f"Copied “{res['title']}” ({res['added']} tracks{extra}). Source kept — couldn’t recreate every track."
+            msg = f"Copied “{res['title']}” ({res['added']} tracks{extra}). Source kept. Couldn’t recreate every track."
         else:
             msg = f"Copied “{res['title']}” ({res['added']} tracks{extra})."
         return _move_row(request, playlist, message=msg)

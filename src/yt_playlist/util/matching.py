@@ -13,7 +13,7 @@ def normalize(s: str) -> str:
     if not s:
         return ""
     # Fold accented Latin to ASCII (café -> cafe). For an all-non-Latin string (Cyrillic, CJK,
-    # Greek, emoji) the ASCII fold is empty — keep the original there so distinct songs keep
+    # Greek, emoji) the ASCII fold is empty. Keep the original there so distinct songs keep
     # distinct identity_keys instead of every one collapsing to "" (and the key to "|").
     ascii_s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     s = ascii_s if ascii_s.strip() else s
@@ -26,6 +26,14 @@ def normalize(s: str) -> str:
 
 def identity_key(title: str, artist: str) -> str:
     return f"{normalize(title)}|{normalize(artist)}"
+
+def search_squash(s: str) -> str:
+    """Punctuation/space/accent-insensitive key for substring search: 'L.S.D.' -> 'lsd',
+    'Café del Mar' -> 'cafedelmar'. Builds on normalize() (accent fold, feat/remaster noise removed,
+    punctuation -> space) and then drops the spaces, so a query typed WITHOUT the punctuation still
+    matches (#48: typing 'LSD' should find the track titled 'L.S.D.'). Registered as the SQLite
+    `searchnorm()` function so it can be applied column-side in cluster_search."""
+    return normalize(s).replace(" ", "")
 
 def fuzzy_ratio(a: str, b: str) -> float:
     return fuzz.token_sort_ratio(a, b) / 100.0

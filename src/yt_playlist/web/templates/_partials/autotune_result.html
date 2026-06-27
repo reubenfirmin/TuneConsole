@@ -1,0 +1,44 @@
+{# Last Auto-tune result. `autotune_result` = autotune_run.last_result() shape, or None. #}
+{% set r = autotune_result %}
+{% if r %}
+<div class="card autotune-result">
+  <div class="autotune-result-head">
+    <h3>Auto-tune result</h3>
+    <span class="tag teal">applied &amp; saved</span>
+  </div>
+  <p class="section-note">We rebuilt your taste model several ways and kept the one that best predicts
+     your own playlists. The winner below is now live and stays in use until you re-run Auto-tune.</p>
+
+  <div class="stat-grid autotune-stats">
+    <div><strong>{{ r.winner.method }} · {{ r.winner.dim }}</strong><span>chosen config</span></div>
+    <div><strong>{{ '%.1f'|format(r.winner.recall * 100) }}%</strong><span>recall@20 (winner)</span></div>
+    <div><strong>{{ '%.1f'|format(r.previous.recall * 100) }}%</strong><span>recall@20 (before: {{ r.previous.method }}·{{ r.previous.dim }})</span></div>
+  </div>
+
+  <table class="autotune-grid">
+    {% for g in r.grid|sort(attribute='recall', reverse=true) %}
+    {% set won = g.method == r.winner.method and g.dim == r.winner.dim %}
+    <tr class="{{ 'win' if won }}">
+      <td class="cfg">{{ g.method }} · {{ g.dim }}</td>
+      <td class="track"><i class="bar" style="width:{{ '%.0f'|format(g.recall * 100) }}%"></i></td>
+      <td class="val">{{ '%.1f'|format(g.recall * 100) }}%{% if won %} ✓{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <p class="knob-help">recall@20 = of your playlists, how often the model ranks a held-out track from
+     that playlist back into the top 20. Random guessing scores near 0%, so higher means the model
+     groups tracks that genuinely belong together. The embedding size and method are tuned for you and
+     not hand-editable; this is just the report.</p>
+
+  <p class="autotune-rotated">Switching rotated {{ r.recs.dropped|length }} of your top {{ r.recs.compared }} For You picks.</p>
+  {% if r.recs.dropped or r.recs.added %}
+  <div class="autotune-diff">
+    {% if r.recs.dropped %}<div class="diff-row"><span class="tag">dropped</span><span class="diff-list">{% for d in r.recs.dropped %}{{ d.artist }}: {{ d.title }}{% if not loop.last %} · {% endif %}{% endfor %}</span></div>{% endif %}
+    {% if r.recs.added %}<div class="diff-row"><span class="tag teal">added</span><span class="diff-list">{% for d in r.recs.added %}{{ d.artist }}: {{ d.title }}{% if not loop.last %} · {% endif %}{% endfor %}</span></div>{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% else %}
+<p class="section-note">Auto-tune hasn't run yet. Click it to see how different model sizes score on your library.</p>
+{% endif %}

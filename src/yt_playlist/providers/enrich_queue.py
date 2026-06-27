@@ -1,8 +1,8 @@
 """Priority coordination for rate-limited enrichment jobs.
 
 Each playlist the user enriches runs as its own background job, but they all share one rate-limited
-API (MusicBrainz, Last.fm). To make the *most recently requested* playlist win — its tracks jump the
-queue — every job passes through a PriorityGate before each track: a job yields (at track boundaries)
+API (MusicBrainz, Last.fm). To make the *most recently requested* playlist win (its tracks jump the
+queue) every job passes through a PriorityGate before each track: a job yields (at track boundaries)
 while any newer job is still active. So clicking the icon on playlist B preempts an in-progress job
 on playlist A; B runs to completion, then A resumes where it left off.
 

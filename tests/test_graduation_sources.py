@@ -12,6 +12,7 @@ def test_source_weights_seeded():
 
 from yt_playlist.core.store import Store
 from yt_playlist.rec import recommend, rec_params
+from yt_playlist.util.matching import identity_key
 
 
 def _store_with_genre(keys_genre):
@@ -21,6 +22,23 @@ def _store_with_genre(keys_genre):
         tid = s.upsert_track(vid, title, artist, None, None)
         s.set_track_genre(tid, genre)
     return s
+
+
+def _store_with_play_history(genre="Techno", n=10, now=1000.0, w_play=0.5):
+    """A fresh store whose recent history is n distinct tracks of one genre (a dominant family), with
+    source_w_play raised so a handful of daily exposures crosses THEME_THRESHOLD (the 0.08 default
+    would need ~18 days, too slow for a unit test). Returns (store, now, axis)."""
+    s = Store(":memory:")
+    s.init_schema()
+    iid = s.identities.upsert_identity("me", "cred", None, True)
+    keys = []
+    for i in range(n):
+        tid = s.upsert_track(f"v{i}", f"song{i}", "band", None, None)
+        s.set_track_genre(tid, genre)
+        keys.append(identity_key(f"song{i}", "band"))
+    s.add_history_snapshot(iid, now, keys)
+    rec_params.set_param(s, "source_w_play", w_play)
+    return s, now, f"genre:{recommend.genre_map.family(genre)}"
 
 
 def test_vibe_graduation_unchanged_regression():
@@ -42,26 +60,44 @@ def test_play_source_is_weak():
     assert abs(s.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_PLAY   # but ledger accumulated
 
 
-def test_play_graduation_session_capped():
-    s = _store_with_genre({f"s{i}|band": (f"v{i}", f"s{i}", "band", "Techno") for i in range(50)})
-    keys = [f"s{i}|band" for i in range(50)]
-    recommend.graduate_plays(s, keys, 1000.0)
-    fam = recommend.genre_map.family("Techno")
-    # 50 plays * 0.08 = 4.0 raw, but capped to PLAY_GRAD_SESSION_CAP (0.4) for the session
-    assert abs(s.get_theme(f"genre:{fam}")) <= rec_params.PLAY_GRAD_SESSION_CAP + 1e-9
-    assert abs(s.get_theme(f"genre:{fam}")) == rec_params.PLAY_GRAD_SESSION_CAP
+def test_play_exposure_graduates_over_several_days():
+    # Sustained recent listening graduates the permanent weight up via daily exposure (mirrors the
+    # held-slider mechanic). Plays feed only the transient; this is the single funnel into permanent.
+    s, now, axis = _store_with_play_history("Techno", n=10)
+    before = s.get_weights().get(axis, 1.0)
+    day = 86400
+    for d in range(8):
+        recommend.graduate_play_exposure(s, now + d * day)
+    after = s.get_weights().get(axis, 1.0)
+    assert after > before, "sustained daily listening should graduate the permanent weight up"
 
 
-def test_plays_graduate_only_over_several_sessions():
+def test_play_exposure_idempotent_within_a_day():
+    # Re-running the same fast sync the same UTC day must NOT re-count (the #46 regression guard).
+    s, now, axis = _store_with_play_history("Techno", n=10)
+    recommend.graduate_play_exposure(s, now)
+    score_after_first = s.get_theme(axis)
+    recommend.graduate_play_exposure(s, now)
+    recommend.graduate_play_exposure(s, now)
+    assert s.get_theme(axis) == score_after_first, "same-day re-runs must not re-count"
+
+
+def test_play_exposure_stops_without_recent_plays():
+    # No recent plays -> play_facet_leans empty -> exposure is a no-op (the funnel's off-switch).
     s = _store_with_genre({"s|band": ("v", "s", "band", "Techno")})
-    fam = recommend.genre_map.family("Techno")
-    # capped at 0.4/session; needs >= ceil(1.2/0.4)=3 sessions to cross THEME_THRESHOLD
-    for session in range(3):
-        recommend.graduate_plays(s, ["s|band"] * 50, 1000.0 + session)
-    # nudge_weight applies shrinkage-toward-1.0: a single graduation makes weight 1.0475, not exactly
-    # 1.05 (GRADUATE_UP). Assert "graduated exactly once": weight is between 1.0 and GRADUATE_UP.
-    w = s.get_weights().get(f"genre:{fam}")
-    assert w is not None and 1.0 < w < rec_params.GRADUATE_UP
+    axis = f"genre:{recommend.genre_map.family('Techno')}"
+    before = s.get_weights().get(axis, 1.0)
+    recommend.graduate_play_exposure(s, 1000.0 + 86400)
+    assert s.get_weights().get(axis, 1.0) == before, "no recent plays -> no graduation"
+
+
+def test_play_graduated_day_roundtrip():
+    s = _store_with_genre({"song|band": ("v1", "song", "band", "Techno")})
+    assert s.get_play_graduated_day("genre:techno") is None
+    s.set_play_graduated_day("genre:techno", "2026-06-25")
+    assert s.get_play_graduated_day("genre:techno") == "2026-06-25"
+    s.set_play_graduated_day("genre:techno", "2026-06-26")     # upsert, not duplicate
+    assert s.get_play_graduated_day("genre:techno") == "2026-06-26"
 
 
 def test_axis_weights_fold_standing_lean():

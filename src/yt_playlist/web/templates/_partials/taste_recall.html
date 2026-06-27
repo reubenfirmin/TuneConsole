@@ -1,7 +1,22 @@
+{# §1 model-health panel, swapped in via outerHTML so each metric becomes its own stat-grid cell:
+   warm-path recall@k, forward-looking temporal recall, cold-path content grounding (with its
+   coverage-band breakdown), and graduation counts by source from the §1c log. #}
 {% if recall.recall_at_k is not none %}
-<strong>{{ '%.0f'|format(recall.recall_at_k * 100) }}%</strong>
-<span>recall@{{ recall.k }} ({{ '%.0f'|format(recall.lift) }}× random, {{ recall.trials }} playlists)
-{% if proj.recall is not none %}· content-grounding {{ '%.0f'|format(proj.recall * 100) }}%{% endif %}</span>
+<div><strong>{{ '%.0f'|format(recall.recall_at_k * 100) }}%</strong><span>recall@{{ recall.k }} ({{ '%.0f'|format(recall.lift) }}× random, {{ recall.trials }} playlists)</span></div>
 {% else %}
-<strong>-</strong><span>recall@20 (build vectors first)</span>
+<div><strong>-</strong><span>recall@20 (build vectors first)</span></div>
 {% endif %}
+
+{% if temporal.recall is not none %}
+<div><strong>{{ '%.0f'|format(temporal.recall * 100) }}%</strong><span>temporal recall@{{ temporal.k }} (next {{ temporal.holdout_days }}d of plays, {{ temporal.trials }} held out)</span></div>
+{% else %}
+<div><strong>-</strong><span>temporal recall (needs more history)</span></div>
+{% endif %}
+
+{% if proj.recall is not none %}
+<div><strong>{{ '%.0f'|format(proj.recall * 100) }}%</strong><span>content grounding ({{ proj.trials }} tracks){% for band, b in proj.breakdown.by_coverage.items() %}{% if b.recall is not none %} · {{ band }} {{ '%.0f'|format(b.recall * 100) }}%{% endif %}{% endfor %}</span></div>
+{% else %}
+<div><strong>-</strong><span>content grounding (needs more tags)</span></div>
+{% endif %}
+
+<div><strong>{{ grad_counts.values()|sum }}</strong><span>graduations{% if grad_counts %}: {% for src, c in grad_counts.items() %}{{ src }} {{ c }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</span></div>

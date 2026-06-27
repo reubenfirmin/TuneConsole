@@ -1,6 +1,6 @@
 """The egress guard is a security primitive, so its behavior is pinned by tests:
 allow the allowlist, block everything else, strip secrets from the log, and gate
-*both* HTTP stacks (requests and urllib) — the request must never reach the
+*both* HTTP stacks (requests and urllib). The request must never reach the
 underlying transport when the host is off-allowlist."""
 import urllib.request
 

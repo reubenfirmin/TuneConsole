@@ -11,8 +11,8 @@ def _client(store):
 
 
 def test_home_visit_ticks_card_rotation_but_previews_dont(store):
-    """A genuine Home visit advances each card's rotation counter once; steer/stance previews and the
-    feed fragment re-render the same epoch without ticking — so tuning your taste never churns cards."""
+    """A genuine Home visit advances each card's rotation counter once; steer/breadth previews and the
+    feed fragment re-render the same epoch without ticking, so tuning your taste never churns cards."""
     from yt_playlist.rec.rec_dao import RecDao
     c = _client(store)
     dao = RecDao(store)
@@ -20,10 +20,10 @@ def test_home_visit_ticks_card_rotation_but_previews_dont(store):
     c.get("/")
     c.get("/")
     assert dao.card_views("wheelhouse") == 2 and dao.card_views("new_artists") == 2   # all cards tick
-    c.post("/home/stance", data={"stance": "explore"})    # previews must not advance rotation
+    c.post("/home/breadth", data={"breadth_bias": "0.5"})  # previews must not advance rotation
     c.post("/home/steer", data={"axis": "genre:Rock", "weight": "1.5"})
     c.get("/home/feed")
-    c.get("/home/fresh")                                   # lazy re-fetch (e.g. from a steer) — read-only
+    c.get("/home/fresh")                                   # lazy re-fetch (e.g. from a steer), read-only
     assert dao.card_views("wheelhouse") == 2 and dao.card_views("fresh") == 2
 
 
@@ -75,7 +75,7 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     assert 'class="sync-bar"' not in c.get("/charts").text
 
 
-def test_home_feed_fragment_renders_fingerprint_and_respects_stance(store):
+def test_home_feed_fragment_renders_fingerprint(store):
     iid = store.upsert_identity("main", "cred", None, True)
     t = store.upsert_track("v1", "Song", "Band", None, None)
     store.set_track_genre(t, "Techno")
@@ -85,9 +85,6 @@ def test_home_feed_fragment_renders_fingerprint_and_respects_stance(store):
     assert r.status_code == 200
     assert "fingerprint" in r.text                       # the header partial rendered
     assert 'id="home-feed"' in r.text                    # the re-rank swap-target container
-
-    c.post("/home/stance", data={"stance": "explore"})
-    assert store.get_setting("home_stance") == "explore"
 
 
 def test_steering_panel_hidden_until_genres_exist(store):
@@ -115,7 +112,7 @@ def test_home_page_has_steering_and_fingerprint(store):
     assert 'id="fingerprint"' in html                    # fingerprint header present
     assert 'type="range"' in html                        # draggable bars, not +/- buttons
     assert "/home/steer" in html                         # dragging a bar steers + re-ranks
-    assert "/home/stance" in html                        # explore/exploit toggle wired
+    assert "/home/breadth" in html                       # the breadth bar steers focused<->eclectic
     assert "/taste" in html                              # "Tune your taste model" affordance
 
 
@@ -216,7 +213,7 @@ def test_fingerprint_bar_shows_effective_multiplier(store):
     store.set_track_genre(t, "Techno")
     store.add_history_snapshot(iid, 1.0, ["song|band"])
     store.set_setting("last_sync_at", "1000")
-    fam = __import__("yt_playlist.rec.genre_map", fromlist=["family"]).family("Techno")
+    fam = __import__("yt_playlist.util.genre_map", fromlist=["family"]).family("Techno")
     store.set_lean(f"genre:{fam}", 1.5, 1000.0)        # standing lean, permanent still 1.0
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
@@ -224,36 +221,153 @@ def test_fingerprint_bar_shows_effective_multiplier(store):
     assert 'value="1.5"' in html                       # bar shows effective, not permanent 1.0
 
 
-def test_fingerprint_expand_lists_subgenres(store):
-    """POST /home/fingerprint/expand family=techno -> contains a subgenre bar, e.g. 'genre:minimal techno'."""
-    c = _client(store)
-    r = c.post("/home/fingerprint/expand", data={"family": "techno"})
-    assert r.status_code == 200
-    # 'minimal techno' is a known subgenre of techno
-    assert "minimal techno" in r.text
-    # should render as fp-row slider posting to /home/steer
-    assert "/home/steer" in r.text
-    assert 'type="range"' in r.text
+def test_taste_fingerprint_marks_transient(store):
+    # Recent heavy listening to one family -> a live transient marker on that bar, distinct from the
+    # held-steer thumb (which stays at `effective`). The two mood signals no longer share one position.
+    from yt_playlist.rec import recommend
+    from yt_playlist.util.matching import identity_key
+    iid = store.upsert_identity("main", "cred", None, True)
+    keys = []
+    for i in range(10):
+        t = store.upsert_track(f"v{i}", f"song{i}", "band", None, None)
+        store.set_track_genre(t, "Techno")
+        keys.append(identity_key(f"song{i}", "band"))
+    store.add_history_snapshot(iid, 1000.0, keys)
+    store.set_setting("last_sync_at", "1000")              # fresh -> staleness 1.0
+    fam = __import__("yt_playlist.util.genre_map", fromlist=["family"]).family("Techno")
+    fp = recommend.taste_fingerprint(store, 1000.0)
+    entry = next(e for e in fp["families"] if e["name"] == fam)
+    assert "live" in entry and "live_active" in entry
+    assert entry["live_active"] is True                    # recent heavy plays are a live signal
+    assert entry["live"] >= entry["effective"]             # a positive play lean pushes the marker up
+    assert 0.0 <= entry["live"] <= 2.0
+
+
+def test_taste_fingerprint_marker_inert_when_stale(store):
+    # A stale sync relaxes the transient to ~0, so no bar claims a live marker (families still present).
+    from yt_playlist.rec import recommend
+    from yt_playlist.util.matching import identity_key
+    iid = store.upsert_identity("main", "cred", None, True)
+    keys = []
+    for i in range(5):
+        t = store.upsert_track(f"v{i}", f"song{i}", "band", None, None)
+        store.set_track_genre(t, "Techno")
+        keys.append(identity_key(f"song{i}", "band"))
+    store.add_history_snapshot(iid, 1.0, keys)
+    store.set_setting("last_sync_at", "1.0")
+    now = 1.0 + 100 * 86400                                  # 100 days later -> deeply stale
+    fp = recommend.taste_fingerprint(store, now)
+    assert fp["families"], "expected played families present regardless of staleness"
+    for e in fp["families"] + fp["eras"]:
+        assert e["live_active"] is False
+
+
+def test_fingerprint_subgenres_attached_and_deduped(store):
+    """taste_fingerprint attaches a family's drill-down subgenres (eager, toggled client-side): the
+    family token itself is excluded (no self-duplicate), and a subgenre with a lean is promoted to its
+    own top bar instead of appearing under the family."""
+    from yt_playlist.rec import recommend
+    iid = store.upsert_identity("main", "cred", None, True)
+    t = store.upsert_track("v1", "Song", "Band", None, None)
+    store.set_track_genre(t, "techno")
+    store.add_history_snapshot(iid, 1.0, ["song|band"])   # techno is now a played family
+    fp = recommend.taste_fingerprint(store, 1000.0)
+    techno = next(f for f in fp["families"] if f["name"] == "techno")
+    subnames = [s["name"] for s in techno["subgenres"]]
+    assert "minimal techno" in subnames          # a real subgenre is offered
+    assert "techno" not in subnames              # the family token is not duplicated as its own subgenre
+    # pin minimal techno -> it leaves the drill-down (promoted to a top bar)
+    store.set_lean("genre:minimal techno", 1.2, 1.0)
+    fp2 = recommend.taste_fingerprint(store, 1000.0)
+    techno2 = next(f for f in fp2["families"] if f["name"] == "techno")
+    assert "minimal techno" not in [s["name"] for s in techno2["subgenres"]]
+    assert "minimal techno" in [f["name"] for f in fp2["families"]]   # now a top bar
 
 
 def test_fingerprint_add_reaches_zero_play_niche(store):
-    """POST /home/fingerprint/add axis='genre:gqom' -> 200, 'genre:gqom' appears in returned HTML,
-    and store.get_lean('genre:gqom') == 1.0."""
+    """POST /home/fingerprint/add axis='genre:gqom' -> 200; returns just the re-rendered genre bars
+    (for swapping #fp-genre-bars, leaving the picker alive) with a gqom bar, and persists the lean."""
     c = _client(store)
     r = c.post("/home/fingerprint/add", data={"axis": "genre:gqom"})
     assert r.status_code == 200
-    # The added axis must appear in the returned feed HTML (as a steerable bar)
-    assert "gqom" in r.text
+    # The added axis renders as a steerable bar in the returned bars partial...
+    assert 'genre:gqom' in r.text and 'type="range"' in r.text
+    # ...and the response is JUST the bars partial, not the whole feed (so the picker isn't swapped).
+    assert 'gen-lanes' not in r.text and 'fp-genre-pick' not in r.text
     # The lean was persisted
     assert store.get_lean("genre:gqom") == 1.0
 
 
-def test_fingerprint_search_finds_genre(store):
-    """GET /home/fingerprint/search?q=techno -> 200, contains 'minimal techno' (or another techno member)."""
+def test_fingerprint_renders_pinned_genre_beyond_top6():
+    """Regression: a pinned axis (explicit lean) past the top-6 must still render as a bar. Two ways it
+    lands past index 6: (a) a zero-play niche appended at the end; (b) a low-share PLAYED family the
+    user added (e.g. 'rock-post', the family post-rock lives under) -- this one has share>0, so the old
+    `share == 0.0` filter dropped it ('select rock-post, nothing happens'). Both must show now."""
+    from jinja2 import Environment, FileSystemLoader
+    env = Environment(loader=FileSystemLoader("src/yt_playlist/web/templates"))
+    families = [{"name": f"fam{i}", "share": 1.0 - i * 0.1, "weight": 1.0, "effective": 1.0,
+                 "pinned": False} for i in range(7)]                 # 7 played, un-pinned families
+    # (b) a low-share PLAYED family the user pinned, ranked past the top 6:
+    families.append({"name": "rock-post", "share": 0.02, "weight": 1.0, "effective": 1.0, "pinned": True})
+    # (a) a zero-play niche appended at the end:
+    families.append({"name": "psytrance", "share": 0.0, "weight": 1.0, "effective": 1.0, "pinned": True})
+    fp = {"families": families, "eras": [], "breadth": 0.5, "breadth_bias": 0.0}
+    html = env.get_template("_partials/taste_fingerprint.html").render(fingerprint=fp)
+    assert "genre:rock-post" in html      # low-share pinned PLAYED family renders (the reported bug)
+    assert "genre:psytrance" in html      # pinned zero-play niche still renders
+    assert "genre:fam6" not in html       # an UN-pinned family past the top-6 stays hidden (compact)
+
+
+def test_home_breadth_bar_is_interactive(store):
+    """#7: the Breadth bar steers the feed. It posts to /home/breadth bound to the breadth_bias param,
+    and a post persists the bias and re-renders the feed (a preview, exactly like /home/steer)."""
+    from yt_playlist.rec import rec_params
+    iid = store.upsert_identity("main", "cred", None, True)
+    t = store.upsert_track("v1", "Song", "Band", None, None)
+    store.set_track_genre(t, "Techno")
+    store.add_history_snapshot(iid, 1.0, ["song|band"])
     c = _client(store)
-    r = c.get("/home/fingerprint/search?q=techno")
+    html = c.get("/home/feed").text
+    assert "/home/breadth" in html                       # the breadth bar is now a steering control
+    assert 'name="breadth_bias"' in html                 # ...bound to the breadth_bias param
+    r = c.post("/home/breadth", data={"breadth_bias": "0.5"})
+    assert r.status_code == 200 and 'id="home-feed"' in r.text
+    assert rec_params.get_param(store, "breadth_bias") == 0.5
+
+
+def test_home_breadth_clamps_out_of_range(store):
+    """A stray value can't run away: the param spec clamps the bias to [-1, 1]."""
+    from yt_playlist.rec import rec_params
+    iid = store.upsert_identity("main", "cred", None, True)
+    c = _client(store)
+    c.post("/home/breadth", data={"breadth_bias": "9"})
+    assert rec_params.get_param(store, "breadth_bias") == 1.0
+
+
+def test_home_has_no_stance_toggle(store):
+    """#7: the noisy wheelhouse/explore toggle is gone (route, container, and its unique label)."""
+    iid = store.upsert_identity("main", "cred", None, True)
+    t = store.upsert_track("v1", "Song", "Band", None, None)
+    store.set_track_genre(t, "Techno")
+    store.add_history_snapshot(iid, 1.0, ["song|band"])
+    store.set_setting("last_sync_at", "1000")
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
+    c = TestClient(app, base_url="http://127.0.0.1")
+    html = c.get("/").text
+    assert "/home/stance" not in html
+    assert "fp-stance" not in html
+    assert "Try something new" not in html               # the toggle's unique label
+    assert c.post("/home/stance", data={"stance": "explore"}).status_code == 404
+
+
+def test_home_genres_taxonomy(store):
+    """GET /home/genres -> 200, the full taxonomy (families + sub-genres) the Home genre picker filters
+    client-side. Must include a known subgenre ('minimal techno') so a zero-play genre is pinnable."""
+    c = _client(store)
+    r = c.get("/home/genres")
     assert r.status_code == 200
-    # Should include at least one techno-related tag
-    assert "techno" in r.text.lower()
-    # Should include 'minimal techno' specifically (a known subgenre)
-    assert "minimal techno" in r.text
+    opts = r.json()["options"]
+    names = {o["name"] for o in opts}
+    kinds = {o["kind"] for o in opts}
+    assert "minimal techno" in names           # a known subgenre is searchable
+    assert kinds == {"family", "genre"}         # both kinds are tagged for the dropdown

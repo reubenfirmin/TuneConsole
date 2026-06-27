@@ -17,6 +17,24 @@ def test_manual_genre_year_overrides(store):
     assert store.tracks.get_track_enrichment(t) == ("", "1999")
 
 
+def test_set_title_artist_and_reset(store):
+    t = store.tracks.upsert_track("v1", "Bad - Title (junk)", "Bad Artist", "Al", 100)
+    store.tracks.set_track_title(t, "Good Title")
+    store.tracks.set_track_artist(t, "Good Artist")
+    row = store.conn.execute("SELECT title, artist FROM tracks WHERE id=?", (t,)).fetchone()
+    assert (row["title"], row["artist"]) == ("Good Title", "Good Artist")
+    store.tracks.reset_track_title(t)
+    store.tracks.reset_track_artist(t)
+    row = store.conn.execute("SELECT title, artist FROM tracks WHERE id=?", (t,)).fetchone()
+    assert (row["title"], row["artist"]) == ("Bad - Title (junk)", "Bad Artist")
+
+
+def test_set_title_rejects_blank(store):
+    t = store.tracks.upsert_track("v1", "Keep Me", "A", "Al", 100)
+    store.tracks.set_track_title(t, "   ")
+    assert store.conn.execute("SELECT title FROM tracks WHERE id=?", (t,)).fetchone()["title"] == "Keep Me"
+
+
 def test_enrichment_is_fill_only(store):
     t = store.tracks.upsert_track("v1", "S", "A", "Al", 100)
     store.tracks.set_track_enrichment(t, "House", "2001")

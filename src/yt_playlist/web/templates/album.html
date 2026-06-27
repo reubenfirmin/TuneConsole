@@ -35,7 +35,7 @@
     </div>
   </div>
   {# Enrichment runs over the album's tracks once they're folded into the library, which happens when
-     you save it — so the icons are always shown (parity with playlists) but disabled until saved. #}
+     you save it, so the icons are always shown (parity with playlists) but disabled until saved. #}
   <div class="head-tools{% if enrich_hint %} enrich-hint{% endif %}" x-data="{ cpOpen: false }">
     <button type="button" class="head-icon" @click="cpOpen = true"
             title="Create a playlist from this album" aria-label="Create a playlist from this album">
@@ -76,7 +76,7 @@
     </a>
     <button type="button" class="head-icon" :class="{ on: running }"
             @click="start()" :disabled="running{% if not saved %} || true{% endif %}"
-            title="{{ 'Save to library first to enrich' if not saved else 'Enrich genre, year &amp; audio features — runs every enabled provider in order' }}"
+            title="{{ 'Save to library first to enrich' if not saved else 'Enrich genre, year &amp; audio features: runs every enabled provider in order' }}"
             aria-label="Enrich">
       <span class="spinner" x-show="running" x-cloak></span>
       <svg x-show="!running" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
@@ -86,7 +86,7 @@
     </button>
     <button type="button" class="head-icon conflict-icon" x-show="conflictCount > 0" x-cloak
             @click="openConflicts()"
-            :title="conflictCount + ' provider disagreement(s) — click to resolve'"
+            :title="conflictCount + ' provider disagreement(s): click to resolve'"
             aria-label="Resolve enrichment disagreements">
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
            stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -127,7 +127,7 @@
   </table>
   <datalist id="genrelist">{% for g in genres %}<option value="{{ g }}"></option>{% endfor %}</datalist>
   {% else %}
-  {# Not in your library yet — read-only preview from YouTube. Save it to enrich. #}
+  {# Not in your library yet. Read-only preview from YouTube. Save it to enrich. #}
   <table class="track-table">
     <thead><tr>
       <th class="num" style="width:2.6rem">#</th><th style="width:2.6rem"></th>

@@ -2,11 +2,12 @@
    "Save & play" posts the surviving rows to /home/generate, which creates the real YouTube
    playlist (auto-grouped "Generated") and swaps this card for the saved-state confirmation. #}
 <section class="gen-card card" id="gen-{{ p.lane }}" data-name="{{ p.name }}"
+         {% if p.feedback_surface %}x-data="{ openMenu: null }"{% endif %}
          {% if p.recipe %}data-recipe='{{ p.recipe|tojson }}'{% endif %}>
   <header class="gen-head">
     <h2 class="gen-name">{{ p.name }}</h2>
     {% if p.refreshable %}
-    <button type="button" class="gen-refresh" title="Refresh — a fresh batch from this model"
+    <button type="button" class="gen-refresh" title="Refresh: a fresh batch from this model"
             aria-label="Refresh this card" hx-post="/home/refresh-card/{{ p.lane }}"
             hx-target="#gen-{{ p.lane }}" hx-swap="outerHTML" hx-disabled-elt="this">↻</button>
     {% endif %}
@@ -25,6 +26,18 @@
            target="_blank" rel="noopener" title="Preview this one on YouTube Music">{{ f.title }}</a>
         <span class="gen-artist">{{ f.artist }}{% if f.reason %} · <span class="gen-why">{{ f.reason }}</span>{% endif %}</span>
       </span>
+      {% if p.feedback_surface and f.key %}
+      <span class="rowmenu">
+        <button type="button" class="dots" title="More actions"
+                @click="openMenu = (openMenu === '{{ f.video_id }}' ? null : '{{ f.video_id }}')">⋯</button>
+        <div class="rowmenu-pop" x-show="openMenu === '{{ f.video_id }}'" x-cloak x-transition.opacity
+             @click.away="openMenu = null">
+          <button type="button" class="danger" hx-post="/recs/feedback"
+                  hx-target="closest .gen-row" hx-swap="outerHTML swap:200ms" @click="openMenu = null"
+                  hx-vals='{"item": {{ f.key|tojson }}, "surface": "{{ p.feedback_surface }}", "kind": "dismiss", "reason": "vibe", "lane": "cold"}'>Not interested</button>
+        </div>
+      </span>
+      {% endif %}
       <button type="button" class="gen-rm" title="Remove from this playlist" aria-label="Remove from this playlist"
               onclick="this.closest('.gen-row').remove()">✕</button>
     </li>
@@ -32,10 +45,10 @@
   </ol>
   <footer class="gen-foot">
     <button type="button" class="cta" hx-post="/home/generate" hx-target="#gen-{{ p.lane }}"
-            hx-swap="outerHTML" hx-disabled-elt="this" onclick="genOpenYT()"
+            hx-swap="outerHTML" hx-disabled-elt="this" onclick="genOpenYT('gen-{{ p.lane }}')"
             hx-vals='js:{name: genName("gen-{{ p.lane }}"), tracks: genTracks("gen-{{ p.lane }}"), recipe: genRecipe("gen-{{ p.lane }}")}'>Save &amp; play on YouTube ↗</button>
-    <span class="gen-foot-note">Lands in your <strong>Generated</strong> group. It won't sway your
-      recommendations until you move it into your collection.</span>
+    <span class="gen-foot-note">Lands in your <strong>Generated</strong> group, kept out of your
+      recommendations until you promote it to your library.</span>
   </footer>
   {% else %}
   <p class="section-note">Nothing to bundle yet - sync your library to get started.</p>

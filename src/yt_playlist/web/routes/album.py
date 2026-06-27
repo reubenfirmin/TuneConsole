@@ -1,4 +1,4 @@
-"""Album landing page — cover, track table, save/open, "create a playlist from this album", and
+"""Album landing page: cover, track table, save/open, "create a playlist from this album", and
 (for saved albums folded into the library) genre/year enrichment with the same live flow as playlists."""
 import asyncio
 import re
@@ -45,11 +45,11 @@ def build(ctx) -> APIRouter:
         saved = browse_id in RecDao(store).saved_album_ids()
         # The editable "folded-in library" table is only for SAVED albums (whose full track list has
         # been materialized for enrichment). For an unsaved album, regular sync may still have stamped
-        # one incidental track with this album_browse_id (because it's in one of your playlists) — that
+        # one incidental track with this album_browse_id (because it's in one of your playlists). That
         # partial subset must NOT shadow the full live-fetched album, so only read it when saved.
         tracks = store.album_tracks_detail(browse_id) if (browse_id and saved) else []
         # Fold a saved album's tracks into the library ON DEMAND (using the tracks we just fetched
-        # live), so enrichment is available the moment you open it — no waiting for a full sync.
+        # live), so enrichment is available the moment you open it, no waiting for a full sync.
         if saved and not tracks and album and album.get("tracks"):
             for t in album["tracks"]:
                 if t.get("video_id") and t.get("title"):
@@ -67,17 +67,17 @@ def build(ctx) -> APIRouter:
             "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
             "conflict_count": store.conflict_count_for_album(browse_id),
-            # arrived via a home "Enrich" CTA — tint the enrich icons CTA-green so it's clear what to click
+            # arrived via a home "Enrich" CTA. Tint the enrich icons CTA-green so it's clear what to click
             "enrich_hint": request.query_params.get("enrich") == "1"})
 
     @router.get("/album/{browse}/share.txt")
     def album_share(browse: str):
-        """Download the album as a plain .txt — one song URL per line — for easy sharing. Uses the
+        """Download the album as a plain .txt (one song URL per line) for easy sharing. Uses the
         folded-in library tracks when saved, else the live album fetch (so unsaved albums share too)."""
         title, vids = None, []
         # Only trust the library track list for SAVED albums (whose full track list is materialized).
         # For an unsaved album, album_tracks_detail may hold a single incidental track stamped with
-        # this browse_id by playlist sync — sharing that would drop the rest of the album, so fetch live.
+        # this browse_id by playlist sync. Sharing that would drop the rest of the album, so fetch live.
         if browse in RecDao(store).saved_album_ids():
             tracks = store.album_tracks_detail(browse)
             vids = [t["video_id"] for t in tracks if t.get("video_id")]
@@ -143,12 +143,12 @@ def build(ctx) -> APIRouter:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             ctx.logger.exception("create playlist from album %r failed", browse_id)
-            return _toast(request, "Couldn't create the playlist — see the log.")
+            return _toast(request, "Couldn't create the playlist. See the log.")
         return Response(status_code=200, headers={"HX-Redirect": f"/playlist/{res['db_pid']}"})
 
     @router.post("/album/{browse}/enrich")
     def album_enrich(browse: str):
-        """Run the enrichment waterfall over a saved album's folded-in tracks — same harness and SSE
+        """Run the enrichment waterfall over a saved album's folded-in tracks, same harness and SSE
         stream as playlist enrichment, scoped by album_browse instead of a playlist."""
         job = ctx.jobs.create()
         job.album_browse = browse

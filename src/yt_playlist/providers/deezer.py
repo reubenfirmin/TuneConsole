@@ -1,6 +1,6 @@
 """Deezer enrichment: tempo (BPM) for a track, free and without authentication.
 
-Deezer's public API needs no API key for catalog reads. We resolve a track in two calls — an
+Deezer's public API needs no API key for catalog reads. We resolve a track in two calls: an
 advanced track search (artist + title) to get its id, then a track lookup whose object carries the
 `bpm` field (search/listing responses omit it). Deezer reports bpm=0 for tracks it hasn't analysed,
 which we treat as unknown. Deezer also signals quota/errors via an {"error": ...} body on an HTTP
@@ -8,13 +8,11 @@ which we treat as unknown. Deezer also signals quota/errors via an {"error": ...
 """
 import json
 import logging
-import threading
-import time
 import urllib.parse
 import urllib.request
 
 from yt_playlist.util import net
-from yt_playlist.providers.base import EnrichmentResult
+from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
 from yt_playlist.providers.enrich_queue import PriorityGate
 
 logger = logging.getLogger(__name__)
@@ -43,22 +41,18 @@ def probe(track, store=None) -> EnrichmentResult:
 _API = "https://api.deezer.com"
 _USER_AGENT = "yt-playlist/0.1 +https://4rc.io"
 _MIN_INTERVAL = 0.15                       # ~50 req / 5s soft limit -> stay well under
-_pace_lock = threading.Lock()
-_last_call = [0.0]
+_HTTP_TIMEOUT_S = 20                        # cap each request so a stalled socket can't wedge a run
+_pacer = RateLimiter(_MIN_INTERVAL)
 _gate = PriorityGate()
 _breaker = net.CircuitBreaker()
 
 
 def _get_json(url):
-    with _pace_lock:                       # serialize + pace all Deezer traffic across threads
-        wait = _MIN_INTERVAL - (time.monotonic() - _last_call[0])
-        if wait > 0:
-            time.sleep(wait)
-        _last_call[0] = time.monotonic()
+    _pacer.wait()                          # serialize + pace all Deezer traffic across threads
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT,
                                                "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
             data = json.load(resp)
     except Exception as e:                 # report to the breaker, then let the caller decide
         _breaker.record(e)
@@ -130,32 +124,24 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
     `pending` list. on_progress(event_dict) feeds the SSE stream."""
     enrich_fn = enrich_fn or enrich
     pending = store.tracks_missing_audio(playlist_id) if pending is None else pending
-    total = len(pending)
-    if not total:
-        on_progress({"type": "done", "text": "Every track already has audio features.", "total": 0})
-        return
-    on_progress({"type": "info", "text": f"Looking up BPM for {total} track(s) on Deezer…",
-                 "total": total})
-    _breaker.reset()
-    seq = _gate.enter()
-    try:
-        for i, t in enumerate(pending, 1):
-            if should_stop and should_stop():
-                on_progress({"type": "info", "text": "Stopped."})
-                return
-            _gate.wait_turn(seq, on_wait=lambda: on_progress(
-                {"type": "info", "text": "Waiting — a newer playlist is looking up first…"}))
-            feat = enrich_fn(t["title"], t["artist"])
-            if _breaker.tripped():
-                on_progress({"type": "err", "text": "Deezer looks unreachable — stopped. "
-                             "The remaining tracks will retry next time."})
-                return
-            store.set_track_audio(t["id"], **feat)
-            shown = f"{feat['bpm']:.0f} BPM" if feat["bpm"] else "no BPM"
-            if feat["popularity"]:
-                shown += f" · pop {feat['popularity']}"
-            on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                         "text": f"{i}/{total} {t['title']} — {shown}"})
-        on_progress({"type": "done", "text": f"Looked up {total} track(s).", "total": total})
-    finally:
-        _gate.leave(seq)
+
+    def _per_item(i, total, t):
+        feat = enrich_fn(t["title"], t["artist"])
+        if _breaker.tripped():
+            on_progress({"type": "err", "text": "Deezer looks unreachable. Stopped. "
+                         "The remaining tracks will retry next time."})
+            return False
+        store.set_track_audio(t["id"], **feat)
+        shown = f"{feat['bpm']:.0f} BPM" if feat["bpm"] else "no BPM"
+        if feat["popularity"]:
+            shown += f" · pop {feat['popularity']}"
+        on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
+                     "text": f"{i}/{total} {t['title']}: {shown}"})
+
+    run_enrich_loop(
+        store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
+        empty_text="Every track already has audio features.",
+        start_text=lambda n: f"Looking up BPM for {n} track(s) on Deezer…",
+        done_text=lambda n: f"Looked up {n} track(s).",
+        wait_text="Waiting: a newer playlist is looking up first…",
+        per_item=_per_item)

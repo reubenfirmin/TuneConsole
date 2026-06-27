@@ -31,7 +31,7 @@ def test_roll_recipe_shapes_and_facets(store):
 
 def test_roll_recipe_is_preference_weighted(store):
     _seed_two_genres(store)
-    from yt_playlist.rec import genre_map
+    from yt_playlist.util import genre_map
     techno_fam = genre_map.family("Techno")
     picks = Counter(recommend.roll_recipe(store, "fresh", seed=s)["facets"]["genres"][0] for s in range(60))
     # techno is played far more, so it should be rolled far more often than folk
@@ -40,7 +40,7 @@ def test_roll_recipe_is_preference_weighted(store):
 
 def test_roll_recipe_respects_muted_genre(store):
     _seed_two_genres(store)
-    from yt_playlist.rec import genre_map
+    from yt_playlist.util import genre_map
     folk_fam = genre_map.family("Folk")
     store.set_weight(f"genre:{folk_fam}", 0.0, lo=0.0, hi=2.0)    # mute folk
     picks = Counter(recommend.roll_recipe(store, "fresh", seed=s)["facets"]["genres"][0] for s in range(40))
@@ -68,8 +68,24 @@ def test_roll_recipe_transient_suppresses_disfavored_genre(store):
     assert house < jazz                                          # transient "less house" steers generation
 
 
+def test_roll_recipe_fresh_is_always_shuffle(store):
+    # Fresh playlists are unowned proposals with no plays/recency, so data-dependent journeys
+    # (rediscovery, deep dive…) must never be rolled. Every seed yields a straight shuffle (#32).
+    _seed_two_genres(store)
+    journeys = {recommend.roll_recipe(store, "fresh", seed=s)["journey"] for s in range(60)}
+    assert journeys == {"shuffle"}
+
+
+def test_roll_recipe_owned_lanes_can_roll_other_journeys(store):
+    # Non-fresh lanes still roll varied journeys (so the fresh gate is the only thing pinned).
+    _seed_two_genres(store)
+    journeys = {recommend.roll_recipe(store, "wheelhouse", seed=s)["journey"] for s in range(60)}
+    assert journeys - {"shuffle"}                                  # at least one non-shuffle journey
+
+
 def test_theme_filter_puts_matching_genre_first(store):
-    from yt_playlist.rec import genre_map, recommend
+    from yt_playlist.util import genre_map
+    from yt_playlist.rec import recommend
     iid = store.upsert_identity("main", "cred", None, True)
     h = store.upsert_track("v1", "H", "HArt", None, None); store.set_track_genre(h, "House")
     f = store.upsert_track("v2", "F", "FArt", None, None); store.set_track_genre(f, "Folk")

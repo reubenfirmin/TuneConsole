@@ -96,7 +96,7 @@ def build(ctx) -> APIRouter:
             return RedirectResponse(f"/actions?flasherr={quote(str(e))}", status_code=303)
         except Exception:  # noqa: BLE001
             logger.exception("undo %s failed", action_id)
-            return RedirectResponse(f"/actions?flasherr={quote('Could not undo — YouTube returned an '
+            return RedirectResponse(f"/actions?flasherr={quote('Could not undo. YouTube returned an '
                 'unexpected response.')}", status_code=303)
         return RedirectResponse(f"/actions?flash={quote('Undid #' + str(action_id) + ': ' + desc)}",
                                 status_code=303)

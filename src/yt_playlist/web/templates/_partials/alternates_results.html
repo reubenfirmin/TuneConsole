@@ -18,7 +18,7 @@
       <span class="alt-sub">{{ r.artist }}{% if r.album %} · {{ r.album }}{% endif %}
         {% if r.kind %}<span class="alt-kind">{{ r.kind }}</span>{% endif %}</span>
     </span>
-    <span class="mono alt-dur">{% if r.duration %}{{ '%d:%02d'|format(r.duration // 60, r.duration % 60) }}{% else %}<span class="muted" title="time filled in when added">—</span>{% endif %}</span>
+    <span class="mono alt-dur">{% if r.duration %}{{ '%d:%02d'|format(r.duration // 60, r.duration % 60) }}{% else %}<span class="muted" title="time filled in when added">-</span>{% endif %}</span>
     <a class="alink" href="https://music.youtube.com/watch?v={{ r.videoId }}"
        target="_blank" rel="noopener" @click.stop title="Try it on YouTube Music">Play ↗</a>
   </label>

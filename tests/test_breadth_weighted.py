@@ -1,4 +1,5 @@
-from yt_playlist.rec import genre_map, recommend
+from yt_playlist.util import genre_map
+from yt_playlist.rec import recommend
 
 
 def test_breadth_palette_are_play_weighted(store):

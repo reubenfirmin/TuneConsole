@@ -100,12 +100,12 @@ def _genre_items():
 
 
 def _adj_total(out):
-    from yt_playlist.rec import genre_map
+    from yt_playlist.util import genre_map
     return sum(genre_map.distance(out[i]["genre"], out[i + 1]["genre"]) for i in range(len(out) - 1))
 
 
 def test_energy_arc_rises_then_falls_even_for_small_mixes():
-    # Arc must form a mountain (peak interior, both ends below the peak) — not a ramp — even for
+    # Arc must form a mountain (peak interior, both ends below the peak), not a ramp, even for
     # short mixes that previously yielded <=2 bands.
     # seed=8 exposes the bug for both n=6 and n=8 (which previously produced a ramp).
     for n in (6, 8, 12):

@@ -2,16 +2,19 @@
 chosen by weighted-random at generation and learnable via feedback.
 
 Pure: `journey_order` takes a `feat(item) -> dict` accessor, so this module needs no Store and is
-trivially testable. Only dependency is genre_map (+ a LAZY import of recommend.dj_order for the
-within-band artist spacer — lazy to avoid a circular import, since recommend imports this module).
+trivially testable. Dependencies are genre_map and ordering.dj_order (the within-band artist spacer);
+both are leaf modules, so there is no longer a circular import to dodge.
 """
 import random
 
-from yt_playlist.rec import genre_map
+from yt_playlist.util import genre_map
+from yt_playlist.rec.ordering import dj_order
 
+# The journey keys, in picker order; each maps to an ordering strategy in journey_order below.
 JOURNEYS = ["energy_arc", "warm_up", "wind_down", "smooth_segue", "odyssey",
             "time_machine", "throwback", "deep_dive", "rediscovery", "shuffle"]
 
+# Full display names for the generation panel (the short picker hints are in JOURNEY_HINTS below).
 JOURNEY_LABELS = {
     "energy_arc": "Energy arc", "warm_up": "Warm-up", "wind_down": "Wind-down",
     "smooth_segue": "Smooth segue", "odyssey": "Odyssey", "time_machine": "Time machine",
@@ -33,6 +36,7 @@ JOURNEY_HINTS = {
     "shuffle": "Shuffle, keeping artists apart",
 }
 
+# One-sentence descriptions shown alongside each journey in the panel.
 JOURNEY_DESCRIPTIONS = {
     "energy_arc": "Eases in, builds to a peak, then winds back down.",
     "warm_up": "Starts mellow and steadily builds energy.",
@@ -65,13 +69,12 @@ def _space(items, seed):
     engine. <=2 items: nothing to space."""
     if len(items) <= 2:
         return list(items)
-    from yt_playlist.rec.recommend import dj_order   # lazy: avoid circular import
     return dj_order(items, stickiness=0.4, seed=seed)
 
 
 def _split_bands(items, value_of, min_bands=1):
     """Sort items with a non-None value ascending and cut into ~_BAND_SIZE contiguous bands.
-    Returns (value_bands_low_to_high, none_band). `min_bands` floors the band count — the arc needs
+    Returns (value_bands_low_to_high, none_band). `min_bands` floors the band count: the arc needs
     >=4 bands to rise AND fall."""
     have = [it for it in items if value_of(it) is not None]
     none = [it for it in items if value_of(it) is None]
@@ -128,6 +131,8 @@ def _segue_order(items, journey, seed, feat):
         last_a = feat(out[-1])["artist"]
 
         def score(c):
+            # Sort key, ascending: same-artist last (0 before 1), then nearest genre for smooth_segue
+            # (smallest distance first) or farthest for odyssey (negate), with a seeded random tiebreak.
             fc = feat(c)
             same = 1 if (fc["artist"] and fc["artist"] == last_a) else 0
             d = genre_map.distance(last_g, fc["genre"] or "")

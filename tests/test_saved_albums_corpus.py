@@ -1,5 +1,5 @@
 """Saved albums fold their TRACKS into the library on sync, so they count in the taste corpus
-(metadata alone doesn't) — fetched incrementally, once per album."""
+(metadata alone doesn't), fetched incrementally, once per album."""
 from yt_playlist.library import sync
 from yt_playlist.util.matching import identity_key
 from tests.conftest import FakeClient

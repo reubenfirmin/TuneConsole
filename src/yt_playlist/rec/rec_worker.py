@@ -2,13 +2,13 @@
 
 Rec computation runs OFF the sync/request path here: a single background thread rebuilds the
 taste vectors and materializes the heavy/slow surfaces (fresh songs, outward discovery) into
-rec_proposals for last-good serving. Triggers coalesce — many syncs in a row collapse into one
-rebuild — so frequent syncs never pile up.
+rec_proposals for last-good serving. Triggers coalesce: many syncs in a row collapse into one
+rebuild, so frequent syncs never pile up.
 """
 import threading
 import time
 
-from yt_playlist.rec import embed, recommend
+from yt_playlist.rec import artist_model, embed, recommend, surfaces
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -51,6 +51,7 @@ class RecWorker:
         """Daily sweep that deletes generated playlists you never played. An initial pass runs soon
         after start so a daily-restarted app still collects them, then once per gc_tick_s."""
         from yt_playlist.library import executor
+        from yt_playlist.rec import discover
         time.sleep(self.gc_initial_s)
         while True:
             try:
@@ -62,6 +63,12 @@ class RecWorker:
                                              len(collected), ", ".join(c["title"] for c in collected))
             except Exception:  # noqa: BLE001 - a GC failure must never crash the daemon
                 self.ctx.logger.warning("generated-playlist GC tick failed", exc_info=True)
+            try:                   # #52: time-based discovery-pool GC (independent of remote clients)
+                gc = discover.gc_discovery(self.ctx, self.ctx.now_fn())
+                if any(gc.values()):
+                    self.ctx.logger.info("GC: discovery pool removed %s", gc)
+            except Exception:  # noqa: BLE001 - discovery GC must never crash the daemon
+                self.ctx.logger.warning("discovery-pool GC tick failed", exc_info=True)
             time.sleep(self.gc_tick_s)
 
     def _auto_sync_due(self, now) -> bool:
@@ -97,7 +104,7 @@ class RecWorker:
 
     @property
     def busy(self):
-        """True while a rebuild is scheduled or running — drives the 'refreshing…' UI state."""
+        """True while a rebuild is scheduled or running, driving the 'refreshing…' UI state."""
         return self._running
 
     def trigger(self):
@@ -141,13 +148,21 @@ class RecWorker:
         if again:
             self.trigger()             # a request arrived mid-rebuild -> background catch-up pass
 
+    def _fresh_proposal(self, now):
+        """#50/#53: Fresh-card material is the taste-scored cold pool ONLY. Every item carries a key, so
+        it is scored and gets the feedback menu; an empty pool yields an empty card (no unscored radio
+        rows). Radios still feed the pool via discover.populate_radio_tracks, just not the card directly."""
+        pool = surfaces.cold_candidates(self.ctx.store, now, limit=36)
+        return [surfaces._item_to_fresh_dict(i) for i in pool]
+
     def _do_rebuild(self):
         """Rebuild vectors and materialize the heavy proposal surfaces.
 
-        Each surface is materialized INDEPENDENTLY: the album/fresh surfaces hit YouTube and can
-        fail (network, rate-limit, parse), and a single failure must not block the surfaces after it
-        from refreshing — otherwise e.g. a flaky album fetch would leave new-artist thumbnails stuck
-        on stale cache forever. A failed surface keeps its last-good proposals."""
+        Surfaces go through a small table so adding more later stays uniform. Each is built in its own
+        try/except: the build hits YouTube and can fail (network, rate-limit, parse), and a failure
+        must leave that surface's last-good proposals in place rather than wiping its card to empty.
+        Today the only such surface is Fresh songs; outward album discovery now accumulates separately
+        in the discovery pool (see discover.pick_discovered_albums), refreshed by the discovery tick."""
         from yt_playlist.rec import discover
         log = self.ctx.logger
         store = self.ctx.store
@@ -157,12 +172,29 @@ class RecWorker:
         log.info("rec rebuild: starting")
         n = embed.build_and_store(store)
         log.info("rec rebuild: embedded %d vectors in %.1fs", n, time.monotonic() - t0)
-        # Materialize deeper pools than a single card shows, so each surface has several epochs of
+        # Keep the content (genre/era) space + its model in step with the collaborative rebuild, so the
+        # cluster blend and the out-of-corpus "new music" pool refresh on the regular rebuild cadence
+        # rather than ONLY when an enrichment batch happens to cross a coverage bucket (#48). Bucket-gated
+        # inside (cheap when nothing changed; forced when the model is missing); guarded so a content
+        # failure never breaks the rebuild.
+        try:
+            embed.maybe_rebuild_content_vectors(store)
+        except Exception:  # noqa: BLE001 - content space is best-effort; don't fail the rebuild
+            log.warning("rec rebuild: content-vector refresh failed", exc_info=True)
+        # #28 artist-relationship model, built alongside the track embedding. Guarded: an artist-model
+        # failure must never break the track rebuild (the model is consumed by nothing critical yet).
+        try:
+            ta = time.monotonic()
+            na = artist_model.build_artist_model_and_store(store)
+            log.info("rec rebuild: artist model %d artists in %.1fs", na, time.monotonic() - ta)
+        except Exception:  # noqa: BLE001 - artist model is best-effort; don't fail the rebuild
+            log.warning("rec rebuild: artist model failed", exc_info=True)
+        # Materialize a deeper pool than a single card shows, so the surface has several epochs of
         # material to rotate through before it has to wrap.
-        surfaces = (
-            ("fresh_songs", lambda: recommend.fresh_songs(self.ctx, limit=36)),
+        surface_builders = (
+            ("fresh_songs", lambda: self._fresh_proposal(now)),
         )
-        for surface, build in surfaces:
+        for surface, build in surface_builders:
             ts = time.monotonic()
             try:
                 items = build()
@@ -179,7 +211,7 @@ class RecWorker:
         except Exception:  # noqa: BLE001 - never let the cleanup scan crash a rebuild
             log.warning("rec rebuild: cleanup summary failed", exc_info=True)
         # Outward discovery (new albums + new artists) is now an accumulating, scan-ledger-backed pass
-        # over ALL interested artists, a budgeted batch at a time — not a top-10 overwrite each sync.
+        # over ALL interested artists, a budgeted batch at a time, not a top-10 overwrite each sync.
         try:
             res = discover.run_discovery(self.ctx, now)
             log.info("rec rebuild: discovery scanned %d artists", res.get("scanned", 0))

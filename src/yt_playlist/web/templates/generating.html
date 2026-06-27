@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+{# Standalone interstitial shown in the popup we open on the "Save & play on YouTube" click. The save
+   round-trip (create the playlist, add tracks, one by one on a batch-add failure) can take many
+   seconds; until the home tab redirects this window to YouTube, a raw about:blank reads as a broken
+   white screen. This gives that wait a branded face in the app's console / deep-space idiom: the
+   playlist's own thumbnails orbit a glowing hub, edges carrying green "data" pulses inward, while the
+   real playlist is wired up on YouTube. No nav/htmx/alpine: it's a momentary page the opener leaves. #}
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wiring up your playlist…</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <style>
+    html, body { height: 100%; }
+    body { overflow: hidden; }
+    /* Full-viewport stage: deep-space wash (mirrors the Clusters canvas) under the orbiting graph. */
+    .gen-stage {
+      position: fixed; inset: 0; overflow: hidden; isolation: isolate;
+      background:
+        radial-gradient(58% 48% at 78% 16%, rgba(124,108,255,0.16), transparent 70%),
+        radial-gradient(52% 46% at 16% 84%, rgba(43,200,221,0.10), transparent 70%),
+        radial-gradient(46% 40% at 60% 70%, rgba(45,255,163,0.06), transparent 72%),
+        radial-gradient(130% 110% at 50% -6%, #16132f 0%, #0b0a23 55%, #06051a 100%);
+    }
+    /* Drifting parallax starfield: reuses the Clusters starfield (.cluster-stars) wholesale. */
+    .gen-stage .cluster-stars { z-index: 0; }
+    /* Canvas: warped dot-grid + edges with inward green pulses. Behind the thumbnail nodes. */
+    .gen-fx { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+    .gen-orbit { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+
+    /* Central hub: the playlist being assembled, the brand EQ mark in a pulsing green ring. */
+    .gen-hub {
+      position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 3;
+      width: 84px; height: 84px; border-radius: 50%; display: grid; place-items: center;
+      background: radial-gradient(circle at 50% 38%, rgba(45,255,163,0.22), rgba(23,19,64,0.92) 70%);
+      box-shadow: 0 0 0 1px rgba(45,255,163,0.5), 0 0 26px -2px rgba(45,255,163,0.55),
+                  inset 0 0 18px rgba(45,255,163,0.18);
+    }
+    .gen-hub .brand-eq { width: 38px; height: 33px; filter: drop-shadow(0 0 6px rgba(45,255,163,0.6)); }
+    .gen-hub .brand-eq .eqbar { animation: eq-bounce 1.05s ease-in-out infinite; }
+    .gen-hub-ring {
+      position: absolute; inset: -7px; border-radius: 50%; border: 1px solid rgba(45,255,163,0.45);
+      animation: gen-ring 2.6s ease-out infinite;
+    }
+    @keyframes gen-ring {
+      0%   { transform: scale(0.82); opacity: 0.9; }
+      100% { transform: scale(1.7); opacity: 0; }
+    }
+
+    /* Orbiting thumbnail nodes (positioned each frame via JS transforms). */
+    .gen-node {
+      position: absolute; left: 0; top: 0; width: 58px; height: 58px; border-radius: 12px;
+      overflow: hidden; will-change: transform, opacity; background: var(--surface-2);
+      box-shadow: 0 8px 20px -8px rgba(0,0,0,0.85), 0 0 0 1px var(--border-2);
+    }
+    .gen-node img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .gen-node.no-art { background: var(--grad-soft); }
+    .gen-node.no-art::after {
+      content: '\266A'; position: absolute; inset: 0; display: grid; place-items: center;
+      color: var(--accent-2); opacity: 0.55; font-size: 1.4rem;
+    }
+
+    /* Scrim: darkens the bottom-left so the console copy stays legible over the graph. */
+    .gen-scrim {
+      position: absolute; inset: 0; z-index: 4; pointer-events: none;
+      background: radial-gradient(125% 95% at 0% 100%, rgba(6,5,26,0.86), transparent 56%);
+    }
+
+    /* Brand, top-left. */
+    .gen-brand { position: absolute; z-index: 5; top: clamp(1.2rem, 4vh, 2.2rem); left: clamp(1.4rem, 5vw, 4rem); }
+
+    /* Console status block, bottom-left: left-aligned, mono eyebrow with a live dot + blinking cursor. */
+    .gen-copy { position: absolute; z-index: 5; left: clamp(1.4rem, 5vw, 4rem); bottom: clamp(1.4rem, 6vh, 4rem);
+      max-width: 32rem; }
+    .gen-eyebrow {
+      font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.14em; text-transform: lowercase;
+      color: #2dffa3; display: inline-flex; align-items: center; gap: 0.55rem;
+    }
+    .gen-dot { width: 8px; height: 8px; border-radius: 50%; background: #2dffa3;
+      box-shadow: 0 0 9px #2dffa3; animation: gen-blink 1.5s ease-in-out infinite; }
+    .gen-cursor { width: 8px; height: 1.05em; background: #2dffa3; display: inline-block;
+      margin-left: -0.1rem; animation: gen-caret 1.05s steps(1) infinite; }
+    @keyframes gen-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+    @keyframes gen-caret { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+    .gen-title {
+      font-family: var(--font-display); font-weight: 600; font-size: clamp(1.8rem, 4.6vw, 2.7rem);
+      line-height: 1.04; letter-spacing: -0.012em; margin: 0.7rem 0 0.55rem; color: var(--text);
+    }
+    .gen-sub { font-family: var(--font-sans); color: var(--dim); font-size: 1rem; line-height: 1.55;
+      margin: 0; max-width: 36ch; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .gen-hub-ring, .gen-dot, .gen-cursor, .gen-hub .brand-eq .eqbar { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="gen-stage" id="gen-stage">
+    <div class="cluster-stars" aria-hidden="true"></div>
+    <canvas class="gen-fx" id="gen-fx" aria-hidden="true"></canvas>
+    <div class="gen-orbit" id="gen-orbit" aria-hidden="true">
+      <div class="gen-hub">
+        <span class="gen-hub-ring"></span>
+        <svg class="brand-eq" viewBox="0 0 28 24" aria-hidden="true">
+          <rect class="eqbar" style="animation-delay:-.9s"  x="0"  y="9"  width="4" height="15" rx="2" fill="#2dffa3"/>
+          <rect class="eqbar" style="animation-delay:-.3s"  x="6"  y="3"  width="4" height="21" rx="2" fill="#2dffa3"/>
+          <rect class="eqbar" style="animation-delay:-.6s"  x="12" y="12" width="4" height="12" rx="2" fill="#2dffa3"/>
+          <rect class="eqbar" style="animation-delay:0s"    x="18" y="6"  width="4" height="18" rx="2" fill="#2dffa3"/>
+          <rect class="eqbar" style="animation-delay:-.45s" x="24" y="14" width="4" height="10" rx="2" fill="#2dffa3"/>
+        </svg>
+      </div>
+    </div>
+    <div class="gen-scrim" aria-hidden="true"></div>
+
+    <span class="gen-brand brand" aria-label="TuneConsole">
+      <svg class="brand-eq" viewBox="0 0 28 24" width="28" height="24" aria-hidden="true">
+        <defs><linearGradient id="eqg" x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#a596ff"/>
+        </linearGradient></defs>
+        <rect class="eqbar" style="animation-delay:-.9s" x="0"  y="9"  width="4" height="15" rx="2" fill="url(#eqg)"/>
+        <rect class="eqbar" style="animation-delay:-.3s" x="6"  y="3"  width="4" height="21" rx="2" fill="url(#eqg)"/>
+        <rect class="eqbar" style="animation-delay:-.6s" x="12" y="12" width="4" height="12" rx="2" fill="url(#eqg)"/>
+        <rect class="eqbar" style="animation-delay:0s"   x="18" y="6"  width="4" height="18" rx="2" fill="url(#eqg)"/>
+        <rect class="eqbar" style="animation-delay:-.45s" x="24" y="14" width="4" height="10" rx="2" fill="url(#eqg)"/>
+      </svg>
+      <span class="b-word"><span class="b-tune">Tune</span><span class="b-console">Console</span></span>
+    </span>
+
+    <div class="gen-copy">
+      <span class="gen-eyebrow"><span class="gen-dot"></span>building on youtube<span class="gen-cursor"></span></span>
+      <h1 class="gen-title">Wiring up your playlist</h1>
+      <p class="gen-sub">Pulling your picks together on YouTube Music. This tab opens the playlist the
+        moment it's ready. Keep it open.</p>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    var stage = document.getElementById('gen-stage');
+    var orbit = document.getElementById('gen-orbit');
+    var canvas = document.getElementById('gen-fx');
+    var ctx = canvas.getContext('2d');
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // The clicked card's surviving thumbnails, stashed by genOpenYT() before this window opened.
+    var thumbs = [];
+    try { thumbs = JSON.parse(localStorage.getItem('tc_gen_thumbs') || '[]'); } catch (e) {}
+    if (!Array.isArray(thumbs)) thumbs = [];
+
+    // Build the orbiting nodes: real thumbnails when we have them, else gradient "♪" tiles so the
+    // graph still feels populated. Two interleaved rings give the swirl some depth.
+    var COUNT = thumbs.length ? Math.min(thumbs.length, 14) : 9;
+    var nodes = [];
+    for (var i = 0; i < COUNT; i++) {
+      var ring = i % 2;
+      var el = document.createElement('div');
+      el.className = 'gen-node';
+      var url = thumbs.length ? thumbs[i % thumbs.length] : '';
+      if (url) {
+        var img = document.createElement('img');
+        img.alt = ''; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
+        img.onerror = function () { var p = this.parentNode; if (p) p.classList.add('no-art'); this.remove(); };
+        img.src = url;
+        el.appendChild(img);
+      } else { el.classList.add('no-art'); }
+      orbit.appendChild(el);
+      nodes.push({ el: el, ring: ring,
+        a0: (i / COUNT) * Math.PI * 2 + (ring ? 0.45 : 0),
+        spin: (ring ? 0.055 : 0.085) * (i % 4 < 2 ? 1 : -1),   // alternate direction for a livelier swirl
+        bob: Math.random() * Math.PI * 2,
+        pulse: Math.random() });
+    }
+
+    var W = 0, H = 0, cx = 0, cy = 0, rIn = 0, rOut = 0, DPR = 1;
+    var SQ = 0.6;   // vertical squash → orbit reads as a tilted ring, not a flat circle
+
+    function resize() {
+      DPR = Math.min(window.devicePixelRatio || 1, 2);
+      W = stage.clientWidth; H = stage.clientHeight;
+      canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+      canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      cx = W / 2; cy = H / 2;
+      var base = Math.min(W, H);
+      rIn = base * 0.22; rOut = base * 0.35;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    function drawGrid() {
+      // Faint dot-grid that fades out from the hub, a quiet nod to the Clusters spacetime grid.
+      var step = 36, maxD = Math.max(W, H) * 0.62;
+      for (var gx = cx % step; gx < W; gx += step) {
+        for (var gy = cy % step; gy < H; gy += step) {
+          var dx = gx - cx, dy = gy - cy, d = Math.sqrt(dx * dx + dy * dy);
+          var a = 0.16 * (1 - d / maxD);
+          if (a <= 0.012) continue;
+          ctx.globalAlpha = a;
+          ctx.fillStyle = '#7c6cff';
+          ctx.fillRect(gx, gy, 1.4, 1.4);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function frame(ts) {
+      var t = ts / 1000;
+      ctx.clearRect(0, 0, W, H);
+      drawGrid();
+
+      // Position each node on its (breathing) ring, then draw its edge + an inward green pulse.
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        var r = (n.ring ? rOut : rIn) * (1 + 0.05 * Math.sin(t * 0.7 + n.bob));
+        var a = n.a0 + (reduce ? 0 : t * n.spin);
+        var x = cx + r * Math.cos(a);
+        var y = cy + r * Math.sin(a) * SQ;
+        var depth = (Math.sin(a) + 1) / 2;          // 0 = far side, 1 = near side
+
+        // edge: hub → node, green at the hub fading to indigo at the rim
+        var g = ctx.createLinearGradient(cx, cy, x, y);
+        g.addColorStop(0, 'rgba(45,255,163,0.34)');
+        g.addColorStop(1, 'rgba(124,108,255,0.05)');
+        ctx.strokeStyle = g; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(x, y); ctx.stroke();
+
+        if (!reduce) {                              // a pulse travelling from the node toward the hub
+          var f = (t * 0.32 + n.pulse) % 1;         // 0 at node → 1 at hub
+          var px = x + (cx - x) * f, py = y + (cy - y) * f;
+          ctx.beginPath(); ctx.arc(px, py, 2.3, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(45,255,163,' + (0.2 + 0.7 * f).toFixed(2) + ')';
+          ctx.shadowColor = 'rgba(45,255,163,0.9)'; ctx.shadowBlur = 9;
+          ctx.fill(); ctx.shadowBlur = 0;
+        }
+
+        var s = 0.72 + 0.42 * depth;
+        n.el.style.transform = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) +
+          'px) translate(-50%,-50%) scale(' + s.toFixed(3) + ')';
+        n.el.style.opacity = (0.5 + 0.5 * depth).toFixed(3);
+        n.el.style.zIndex = String(10 + Math.round(depth * 20));
+      }
+      raf = window.requestAnimationFrame(frame);
+    }
+
+    var raf = window.requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>

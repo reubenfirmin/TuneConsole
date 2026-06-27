@@ -1,7 +1,7 @@
-"""#29 — a cluster can be restricted to a whitelist of genre families (e.g. a calm car playlist).
+"""#29: a cluster can be restricted to a whitelist of genre families (e.g. a calm car playlist).
 
 Expansion only offers tracks whose genre FAMILY is in the chosen set; untagged tracks are dropped
-while a filter is active (strict — a track with no genre can't be vouched safe).
+while a filter is active (strict: a track with no genre can't be vouched safe).
 """
 import math
 

@@ -3,7 +3,7 @@
 This is the reusable orchestrator the background worker will call. For each track it walks the
 enabled providers in the user's configured order; each provider's read-only ``probe`` returns what it
 found, which the harness (a) writes to the parseable ``enrichment_log``, (b) applies to the canonical
-track fill-only — so a later provider sees an MBID an earlier one resolved — and (c) compares across
+track fill-only (so a later provider sees an MBID an earlier one resolved) and (c) compares across
 providers to record disagreements as ``enrichment_conflict`` rows.
 
 Web-agnostic: it takes a track list, an ``on_progress`` callback (same event shapes the SSE renderer
@@ -25,24 +25,85 @@ _AUDIO = ("bpm", "energy", "danceability", "music_key", "music_scale", "mood_hap
           "popularity", "gain", "label")
 
 
-def _apply(store, track, res) -> None:
-    """Fill-only-apply a provider's findings to the canonical track, and mirror an mb_recording_id
-    onto the in-memory track dict so later providers in this run can key off it."""
+class TrackSink:
+    """Default persistence sink: write a provider's findings onto the canonical LIBRARY track (by id),
+    log every field, and record cross-provider conflicts. This is the pre-#50 behavior, unchanged."""
+    def __init__(self, store, track):
+        self.store, self.track = store, track
+
+    def set_enrichment(self, genre, year):
+        self.store.set_track_enrichment(self.track["id"], genre, year)
+
+    def set_mbid(self, mbid):
+        self.store.set_track_mbid(self.track["id"], mbid)
+        self.track["mb_recording_id"] = self.track.get("mb_recording_id") or mbid
+
+    def set_audio(self, **audio):
+        self.store.set_track_audio(self.track["id"], **audio)
+
+    def log(self, run_id, provider, field, value):
+        self.store.log_enrichment(self.track["id"], run_id, provider, field, value)
+
+    def upsert_conflict(self, field, candidates):
+        self.store.upsert_conflict(self.track["id"], field, candidates)
+
+    def effective_enrichment(self):
+        return self.store.get_track_enrichment(self.track["id"])
+
+
+class DiscoveredSink:
+    """#50 cold sink: write genre/year/audio onto a discovered_tracks row (by identity_key). Discovered
+    tracks are candidates, not canonical library rows, so MBID, the enrichment log, and conflict review
+    are no-ops. Remembers the last genre/year it set so effective_enrichment can echo it for progress."""
+    def __init__(self, store, identity_key):
+        self.store, self.key = store, identity_key
+        self._genre = self._year = None
+
+    def set_enrichment(self, genre, year):
+        if genre is not None:
+            self._genre = genre
+        if year is not None:
+            self._year = year
+        self.store.set_discovered_enrichment(self.key, genre, year)
+
+    def set_mbid(self, mbid):
+        pass
+
+    def set_audio(self, **audio):
+        self.store.set_discovered_audio(self.key, **audio)
+
+    def log(self, run_id, provider, field, value):
+        pass
+
+    def upsert_conflict(self, field, candidates):
+        pass
+
+    def effective_enrichment(self):
+        return (self._genre, self._year)
+
+
+def _apply(sink, track, res) -> None:
+    """Fill-only-apply a provider's findings through `sink`, and mirror an mb_recording_id onto the
+    in-memory track dict so later providers in this run can key off it (the sink handles persistence)."""
     f = res.fields
     if "genre" in f or "year" in f:
-        store.set_track_enrichment(track["id"], f.get("genre"), f.get("year"))
+        sink.set_enrichment(f.get("genre"), f.get("year"))
     if f.get("mb_recording_id"):
-        store.set_track_mbid(track["id"], f["mb_recording_id"])
+        sink.set_mbid(f["mb_recording_id"])
         track["mb_recording_id"] = track.get("mb_recording_id") or f["mb_recording_id"]
     audio = {k: v for k, v in f.items() if k in _AUDIO}
     if audio:
-        store.set_track_audio(track["id"], **audio)
+        sink.set_audio(**audio)
 
 
-def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=None, registry=None):
+def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=None, registry=None,
+                  sink_for=None):
     """Enrich `tracks` through the enabled providers in `config` order. `config` is the list from
-    enrichment.load_config(store). `registry` (name -> provider module) is injectable for tests."""
+    enrichment.load_config(store). `registry` (name -> provider module) is injectable for tests.
+    `sink_for(track) -> sink` selects per-track persistence: the default builds a TrackSink (library
+    tracks); the cold path (#50) passes one that builds a DiscoveredSink (discovered_tracks)."""
     registry = registry or REGISTRY
+    sink_for = sink_for or (lambda t: TrackSink(store, t))
     run_id = run_id or uuid.uuid4().hex
     chosen = []
     for p in config:
@@ -53,7 +114,7 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
             continue
         if not mod.available(store):
             on_progress({"type": "info",
-                         "text": f"{p.get('label', p['name'])} is enabled but has no API key — skipping."})
+                         "text": f"{p.get('label', p['name'])} is enabled but has no API key, skipping."})
             continue
         chosen.append(mod)
 
@@ -78,24 +139,25 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 on_progress({"type": "info", "text": "Stopped."})
                 return
             _gate.wait_turn(seq, on_wait=lambda: on_progress(
-                {"type": "info", "text": "Waiting — a newer run is enriching first…"}))
+                {"type": "info", "text": "Waiting: a newer run is enriching first…"}))
+            sink = sink_for(t)
             results = []
             for m in chosen:
                 if m.name in dead:
                     continue
                 res = m.probe(t, store)
                 for fld, val in res.fields.items():
-                    store.log_enrichment(t["id"], run_id, m.name, fld, val)
-                _apply(store, t, res)
+                    sink.log(run_id, m.name, fld, val)
+                _apply(sink, t, res)
                 results.append(res)
-                if m.tripped():                   # host unreachable — drop it for the rest of the run
+                if m.tripped():                   # host unreachable. Drop it for the rest of the run
                     dead.add(m.name)
-                    on_progress({"type": "info", "text": f"{m.name} looks unreachable — "
-                                 "skipping it for the rest of this run."})
+                    on_progress({"type": "info", "text": f"{m.name} looks unreachable. "
+                                 "Skipping it for the rest of this run."})
             for fld, candidates in base.detect_conflicts(results).items():
-                store.upsert_conflict(t["id"], fld, candidates)
+                sink.upsert_conflict(fld, candidates)
                 conflicts_found += 1
-            eff_genre, eff_year = store.get_track_enrichment(t["id"])
+            eff_genre, eff_year = sink.effective_enrichment()
             on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
                          "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']}"})
         note = f" · {conflicts_found} disagreement(s) to review" if conflicts_found else ""

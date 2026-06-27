@@ -6,7 +6,8 @@ this is the first place the transient model is ever surfaced (it otherwise only 
 """
 import numpy as np
 
-from yt_playlist.rec import embed, eval_recs, genre_map, rec_params, recommend, transient
+from yt_playlist.util import genre_map
+from yt_playlist.rec import embed, eval_recs, rec_params, recommend, transient
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -23,22 +24,21 @@ def _clamp(v):
     return max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, v))
 
 
-def _axis_rows(prefix, shares, weights, standing, leans):
+def _axis_rows(prefix, shares, weights, standing, leans, fparams):
     rows = []
     for name, share in shares:
         token = f"{prefix}:{name}"
         pw = weights.get(token, 1.0)
         sl = standing.get(token, 1.0)
         tlean = leans.get(token, 0.0)
-        tmult = transient.facet_multiplier(tlean)
+        tmult = transient.facet_multiplier(tlean, *fparams)
         rows.append({"name": name, "share": share, "permanent_weight": pw, "standing_lean": sl,
                      "transient_lean": tlean, "transient_mult": tmult,
                      "effective": _clamp(pw) * _clamp(sl) * _clamp(tmult)})
     return rows
 
 
-def _attach_graduation(rows, prefix, theme):
-    thr = rec_params.THEME_THRESHOLD
+def _attach_graduation(rows, prefix, theme, thr):
     for r in rows:
         score = theme.get(f"{prefix}:{r['name']}", 0.0)
         r["graduation"] = {"score": score, "threshold": thr,
@@ -102,12 +102,13 @@ def _sources(store):
             mood_pos += 1
         elif direction < 0:
             mood_neg += 1
+    limit = rec_params.get_param(store, "recent_play_limit")
     return {
         "mood_pos": mood_pos, "mood_neg": mood_neg,
-        "plays": len(store.recent_keys_ordered(0, limit=rec_params.RECENT_PLAY_LIMIT)),
-        "likes": len(store.recent_liked_keys(limit=rec_params.RECENT_PLAY_LIMIT)),
+        "plays": len(store.recent_keys_ordered(0, limit=limit)),
+        "likes": len(store.recent_liked_keys(limit=limit)),
         "dislikes": len(store.disliked_identity_keys()),
-        "alpha": rec_params.MOOD_RECENCY_ALPHA,
+        "alpha": rec_params.get_param(store, "mood_recency_alpha"),
     }
 
 
@@ -119,14 +120,21 @@ def model_transparency(store, now, recent_window=RECENT_PLAYS_WINDOW) -> dict:
     standing = store.get_leans()
     leans = transient.facet_leans(store, now)
     theme = {r["facet"]: r["score"] for r in store.theme_rows()}
+    fparams = (rec_params.get_param(store, "facet_gain"),
+               rec_params.get_param(store, "facet_mult_min"),
+               rec_params.get_param(store, "facet_mult_max"))
+    graduation_threshold = rec_params.get_param(store, "theme_threshold")
 
     bd = recommend.taste_breadth(store)
     fam_shares = sorted(bd["families"].items(), key=lambda x: -x[1])
-    genres = _attach_graduation(_axis_rows("genre", fam_shares, weights, standing, leans), "genre", theme)
+    genres = _attach_graduation(_axis_rows("genre", fam_shares, weights, standing, leans, fparams),
+                                "genre", theme, graduation_threshold)
     eras = _attach_graduation(
-        _axis_rows("era", recommend.era_distribution(store), weights, standing, leans), "era", theme)
+        _axis_rows("era", recommend.era_distribution(store), weights, standing, leans, fparams),
+        "era", theme, graduation_threshold)
     artists = _attach_graduation(
-        _axis_rows("artist", _artist_shares(store), weights, standing, leans), "artist", theme)
+        _axis_rows("artist", _artist_shares(store), weights, standing, leans, fparams),
+        "artist", theme, graduation_threshold)
 
     # The right rose / right bar plot 'right now vs your usual' as a zero-sum deviation: each facet's
     # share of your RECENT plays minus its share of all your plays - both play-frequency weighted, so
@@ -151,11 +159,12 @@ def model_transparency(store, now, recent_window=RECENT_PLAYS_WINDOW) -> dict:
         "lanes": [{"name": n, "label": lbl, "help": h, "weight": weights.get(f"lane:{n}", 1.0)}
                   for n, lbl, h in rec_params.LANES],
         "breadth": bd["breadth"], "n_families": bd["n_families"],
-        "freshness": {"factor": factor, "halflife_days": rec_params.STALE_DECAY_HALFLIFE_D,
+        "freshness": {"factor": factor,
+                      "halflife_days": rec_params.get_param(store, "stale_decay_halflife_d"),
                       "live": factor >= 0.999},
         "sources": sources,
-        "funnel": [{"facet": f, "score": s, "threshold": rec_params.THEME_THRESHOLD,
-                    "frac": max(-1.0, min(1.0, s / rec_params.THEME_THRESHOLD))}
+        "funnel": [{"facet": f, "score": s, "threshold": graduation_threshold,
+                    "frac": max(-1.0, min(1.0, s / graduation_threshold))}
                    for f, s in sorted(theme.items(), key=lambda x: -abs(x[1]))],
         "has_transient": has_transient,
         "recent_exists": recent_exists,

@@ -1,4 +1,4 @@
-"""GenreRepo — the editable genre whitelist plus the distinct genres collected from tracks."""
+"""GenreRepo: the editable genre whitelist plus the distinct genres collected from tracks."""
 from yt_playlist.repos.base import Repo, synchronized
 
 

@@ -1,11 +1,11 @@
-"""RecRepo — backwards-compatible facade over the focused recommendation DAOs.
+"""RecRepo: backwards-compatible facade over the focused recommendation DAOs.
 
 The recommendation persistence was one 40-method class; it's now split by responsibility into three
 cohesive DAOs, each on the shared Repo base (+ @synchronized):
 
-  - RecModelRepo   (repos/rec_model.py)   — learned model: weights, feedback, embedding vectors
-  - RecSurfaceRepo (repos/rec_surface.py) — serving surfaces: impressions, proposals, similar cache
-  - RecQueryRepo   (repos/rec_query.py)   — read-only library queries + candidate generators
+  - RecModelRepo   (repos/rec_model.py)   : learned model: weights, feedback, embedding vectors
+  - RecSurfaceRepo (repos/rec_surface.py) : serving surfaces: impressions, proposals, similar cache
+  - RecQueryRepo   (repos/rec_query.py)   : read-only library queries + candidate generators
 
 RecRepo composes the three and delegates by attribute, so existing `RecDao(store).X()` and
 `store.rec.X()` call sites keep working unchanged; reach the parts directly via `store.rec.model`,

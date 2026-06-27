@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Res
 
 from yt_playlist.providers import enrichment, lastfm, waterfall
 from yt_playlist.rec import journeys, rec_params, recommend
+from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 
 
@@ -21,7 +22,7 @@ def build(ctx) -> APIRouter:
         return [int(x) for x in (form.get("ids", "") or "").split(",") if x.strip().isdigit()]
 
     def _refresh():
-        # htmx sees this header and does a full page reload — exact parity with the old
+        # htmx sees this header and does a full page reload, exact parity with the old
         # location.reload(); the list re-renders from the server as it did before.
         return Response(status_code=200, headers={"HX-Refresh": "true"})
 
@@ -31,7 +32,6 @@ def build(ctx) -> APIRouter:
             status_code=422, headers={"HX-Reswap": "none"})
 
     def _is_generated(pid):
-        from yt_playlist.repos.rec_query import GENERATED_GROUP
         pl = store.get_playlist(pid)
         return pl is not None and store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP
 
@@ -43,7 +43,7 @@ def build(ctx) -> APIRouter:
                 return templates.TemplateResponse(request, "_partials/track_row.html",
                     {"t": t, "idx": i, "is_generated": gen,
                      "mood_states": recommend.track_mood_states(store, now_fn()) if gen else {}})
-        return Response(status_code=204)         # row no longer present — nothing to swap
+        return Response(status_code=204)         # row no longer present, nothing to swap
 
     @router.get("/playlists")
     def playlists_page(request: Request):
@@ -80,7 +80,6 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="playlist not found")
         labels = {i.id: i.label for i in store.get_identities()}
         tracks = store.playlist_tracks_detail(pid)
-        from yt_playlist.repos.rec_query import GENERATED_GROUP
         is_generated = store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP
         recipe = store.get_recipe(pl.ytm_playlist_id) if is_generated else None
         return templates.TemplateResponse(request, "playlist.html", {
@@ -90,6 +89,8 @@ def build(ctx) -> APIRouter:
             "mood_state": recommend.playlist_mood_state(store, pid, now_fn()) if is_generated else 0,
             "mood_states": recommend.track_mood_states(store, now_fn()) if is_generated else {},
             "recipe": recipe,
+            # #48: a cluster-derived playlist whose canvas we saved can be reopened and regrown
+            "has_cluster_canvas": bool(store.get_cluster_canvas(pl.ytm_playlist_id)) if is_generated else False,
             "journey_label": journeys.JOURNEY_LABELS.get((recipe or {}).get("journey")) if is_generated else None,
             "journey_desc": journeys.JOURNEY_DESCRIPTIONS.get((recipe or {}).get("journey")) if is_generated else None,
             "kind": store.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),
@@ -98,13 +99,13 @@ def build(ctx) -> APIRouter:
             "lastfm_configured": lastfm.api_key(store) is not None,
             "conflict_count": store.conflict_count_for_playlist(pid),  # drives the header conflict icon
             "active_job": ctx.jobs.find_active(pid),     # an in-progress enrichment to rejoin, if any
-            # arrived via a home "Enrich" CTA — tint the enrich icons CTA-green so it's clear what to click
+            # arrived via a home "Enrich" CTA. Tint the enrich icons CTA-green so it's clear what to click
             "enrich_hint": request.query_params.get("enrich") == "1",
         })
 
     @router.get("/playlist/{pid}/share.txt")
     def playlist_share(pid: int):
-        """Download the playlist as a plain .txt — one song URL per line — for easy sharing."""
+        """Download the playlist as a plain .txt (one song URL per line) for easy sharing."""
         pl = store.get_playlist(pid)
         if pl is None:
             raise HTTPException(status_code=404, detail="playlist not found")
@@ -217,7 +218,7 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="no such enrichment job")
 
         # Render each track's <tr> server-side so the live enrich update and a manual edit produce
-        # identical cells (the page's applyRow just drops in row_html — no client HTML building).
+        # identical cells (the page's applyRow just drops in row_html, no client HTML building).
         # Album jobs render the album row partial from the album's folded-in tracks instead.
         if job.album_browse is not None:
             row_tmpl = templates.env.get_template("_partials/album_track_row.html")
@@ -305,6 +306,50 @@ def build(ctx) -> APIRouter:
         store.set_track_year(tid, year)
         return _track_row(request, pid, vid)
 
+    @router.post("/playlist/{pid}/track-title")
+    async def playlist_set_track_title(pid: int, request: Request):
+        form = await request.form()
+        vid = (form.get("video_id") or "").strip()
+        title = (form.get("title") or "").strip()
+        if not vid:
+            return _toast(request, "no track given")
+        tid = store.track_ids_for_videos([vid]).get(vid)
+        if tid is None:
+            return _toast(request, "track not found")
+        store.set_track_title(tid, title)
+        return _track_row(request, pid, vid)
+
+    @router.post("/playlist/{pid}/track-artist")
+    async def playlist_set_track_artist(pid: int, request: Request):
+        form = await request.form()
+        vid = (form.get("video_id") or "").strip()
+        artist = (form.get("artist") or "").strip()
+        if not vid:
+            return _toast(request, "no track given")
+        tid = store.track_ids_for_videos([vid]).get(vid)
+        if tid is None:
+            return _toast(request, "track not found")
+        store.set_track_artist(tid, artist)
+        return _track_row(request, pid, vid)
+
+    @router.post("/playlist/{pid}/track-reset")
+    async def playlist_reset_track_field(pid: int, request: Request):
+        form = await request.form()
+        vid = (form.get("video_id") or "").strip()
+        field = (form.get("field") or "").strip()
+        if not vid:
+            return _toast(request, "no track given")
+        if field not in ("title", "artist"):
+            return _toast(request, "bad field")
+        tid = store.track_ids_for_videos([vid]).get(vid)
+        if tid is None:
+            return _toast(request, "track not found")
+        if field == "title":
+            store.reset_track_title(tid)
+        else:
+            store.reset_track_artist(tid)
+        return _track_row(request, pid, vid)
+
     @router.post("/playlist/{pid}/remove-track")
     async def playlist_remove_track(pid: int, request: Request):
         vid = ((await request.form()).get("video_id") or "").strip()
@@ -379,7 +424,7 @@ def build(ctx) -> APIRouter:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001  (errors surface on the reloaded page, as before)
             logger.exception("copy-into %s -> %s failed", ids, target)
-            return _toast(request, "Copy failed — see the log.")
+            return _toast(request, "Copy failed. See the log.")
         return _refresh()
 
     @router.post("/playlists/delete")

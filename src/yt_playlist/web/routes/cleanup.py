@@ -37,7 +37,7 @@ def build(ctx) -> APIRouter:
         playlists = store.get_playlists()
         pl_by_ytm = {p.ytm_playlist_id: p for p in playlists}
         kinds = {p.ytm_playlist_id: store.playlist_kind(p.id) for p in playlists}   # audio/video/mixed
-        # Only surface prefs whose playlists still exist — a deleted side leaves a stale pair.
+        # Only surface prefs whose playlists still exist: a deleted side leaves a stale pair.
         hidden = [{"a": a, "b": b, "a_title": pl_by_ytm[a].title, "b_title": pl_by_ytm[b].title}
                   for a, b, _ in store.get_suppressed_overlaps()
                   if a in pl_by_ytm and b in pl_by_ytm]
@@ -54,7 +54,7 @@ def build(ctx) -> APIRouter:
                           for m in store.get_ignored_merges()]
         ignored_merges = [m for m in ignored_merges if len(m["titles"]) > 1]   # need 2+ live members
         # Every cleanup edit HX-Refreshes back through here, so this is where the home card's cached
-        # summary goes stale — refresh it now so the home "Playlist cleanups" count stays honest.
+        # summary goes stale. Refresh it now so the home "Playlist cleanups" count stays honest.
         recommend.refresh_cleanup(store, now_fn())
         return templates.TemplateResponse(request, "cleanup.html", {
             "groups": groups, "near_groups": near_groups, "overlaps": overlaps,

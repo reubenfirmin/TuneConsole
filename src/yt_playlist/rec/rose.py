@@ -14,7 +14,7 @@ def _arc_path(inner, outer, a0, a1) -> str:
     x1o, y1o = outer * math.cos(a1), outer * math.sin(a1)
     x0i, y0i = inner * math.cos(a0), inner * math.sin(a0)
     x1i, y1i = inner * math.cos(a1), inner * math.sin(a1)
-    large = 1 if (a1 - a0) > math.pi else 0
+    large = 1 if (a1 - a0) > math.pi else 0   # SVG large-arc-flag: 1 when the sweep exceeds 180 degrees
     return (f"M{x0o:.2f},{y0o:.2f} A{outer:.2f},{outer:.2f} 0 {large} 1 {x1o:.2f},{y1o:.2f} "
             f"L{x1i:.2f},{y1i:.2f} A{inner:.2f},{inner:.2f} 0 {large} 0 {x0i:.2f},{y0i:.2f} Z")
 
@@ -67,9 +67,9 @@ def rose_geometry_deviation(values, *, scale, radius=100.0, inner=18.0, neutral=
         if abs(f) < eps:
             p["path"] = ""                      # no meaningful change -> no petal, rests on the ring
             continue
-        if f > 0:
+        if f > 0:                               # positive lean grows OUTWARD from the neutral ring
             r0, r1 = neutral_r, neutral_r + f * (radius - neutral_r)
-        else:
+        else:                                   # negative lean (f < 0) pulls INWARD toward the inner radius
             r0, r1 = neutral_r + f * (neutral_r - inner), neutral_r
         p["path"] = _arc_path(min(r0, r1), max(r0, r1), p["a0"], p["a1"])
     return petals

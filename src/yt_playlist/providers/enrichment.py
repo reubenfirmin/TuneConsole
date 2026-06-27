@@ -1,6 +1,6 @@
 """Enrichment provider config: the ordered, enable/disable list the Setup → Enrichment tab edits.
 
-This is *config only* — it records the order the user wants metadata providers run in, and which are
+This is *config only*: it records the order the user wants metadata providers run in, and which are
 enabled. A future background worker consumes this; nothing here runs a provider. `load_config` is the
 canonical reader: it always returns a valid, fully-populated, dependency-respecting list, so callers
 (the worker, the template) never have to cope with missing/corrupt/partial saved state.
@@ -12,7 +12,7 @@ import json
 
 _SETTING_KEY = "enrichment_order"
 
-# Canonical registry — single source of truth. `key` names the settings entry holding that provider's
+# Canonical registry: single source of truth. `key` names the settings entry holding that provider's
 # API key (only Last.fm needs one today); `requires` names a provider that must come before it.
 PROVIDERS = [
     {"name": "musicbrainz",    "label": "MusicBrainz",    "key": None,             "requires": None,
@@ -41,7 +41,7 @@ def _repair_order(names):
             req = _BY_NAME[name]["requires"]
             if req is None or req not in names:
                 continue
-            if names.index(req) > i:                 # prerequisite is later — move this one after it
+            if names.index(req) > i:                 # prerequisite is later. Move this one after it
                 names.pop(i)
                 names.insert(names.index(req) + 1, name)
                 changed = True

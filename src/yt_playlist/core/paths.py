@@ -2,10 +2,10 @@ import os
 from pathlib import Path
 
 # Resolution order for both config and data:
-#   1. $YT_PLAYLIST_HOME                 — explicit override (tests, custom installs)
-#   2. $XDG_CONFIG_HOME / $XDG_DATA_HOME — honoured so sandboxes (Flatpak) that redirect these to a
+#   1. $YT_PLAYLIST_HOME                 : explicit override (tests, custom installs)
+#   2. $XDG_CONFIG_HOME / $XDG_DATA_HOME : honoured so sandboxes (Flatpak) that redirect these to a
 #      per-app directory work with no host filesystem access granted
-#   3. ~/.config and ~/.local/share      — the usual fallbacks
+#   3. ~/.config and ~/.local/share      : the usual fallbacks
 
 
 def _xdg_base(xdg_var, default_subpath) -> Path:

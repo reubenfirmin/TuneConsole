@@ -1,7 +1,7 @@
-{# One album track row — mirrors the playlist track_row (liked toggle, click-to-edit genre/year,
+{# One album track row: mirrors the playlist track_row (liked toggle, click-to-edit genre/year,
    sortable data-* attrs, ⋯ menu) so the two views render alike. class 'srow' + data-vid lets the
    enrich SSE applyRow replace it, identical to the playlist flow. Needs: t, idx.
-   (No reorder/remove/alternates/mood — those are playlist-only.) #}
+   (No reorder/remove/alternates/mood: those are playlist-only.) #}
 <tr class="srow" data-vid="{{ t.video_id }}" data-title="{{ t.title|lower }}" data-artist="{{ t.artist|lower }}"
     data-plays="{{ t.plays }}" data-len="{{ t.duration or 0 }}" data-year="{{ t.year or 0 }}"
     data-genre="{{ t.genre|lower }}">

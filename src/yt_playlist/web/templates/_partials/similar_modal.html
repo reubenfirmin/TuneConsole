@@ -1,4 +1,4 @@
-{# "Songs like this" — embedding neighbours of one track, swapped into #similar-modal. When `pid` is
+{# "Songs like this": embedding neighbours of one track, swapped into #similar-modal. When `pid` is
    set (opened from a playlist) each row carries the track as JSON and the Add button posts the checked
    ones to /add-tracks with the seed (`seed_vid`) as the insert anchor, so they land below that track. #}
 <div class="modal-backdrop" x-data="{ open: true }" x-show="open" x-cloak x-transition.opacity
@@ -33,7 +33,7 @@
     {% else %}
     <p class="section-note">Couldn't place &ldquo;{{ seed.title or 'this track' }}&rdquo; in your taste space yet.
       It's likely brand new or set aside (a saved-album or generated track not folded in yet).
-      Re-sync, then <a href="/taste">Rebuild the model</a> to include it.</p>
+      Re-sync to include it (your <a href="/taste">taste model</a> rebuilds automatically on every sync).</p>
     {% endif %}
     <div class="modal-actions">
       {% if pid and items %}

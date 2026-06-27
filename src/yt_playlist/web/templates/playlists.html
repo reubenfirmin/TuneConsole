@@ -8,7 +8,7 @@
      and split the view by group.</p>
 </div>
 
-<div id="pltab" x-data='playlistsTab({{ rows|tojson }})'>
+<div x-data='playlistsTab({{ rows|tojson }})'>
   <div class="card" style="margin-bottom:1.1rem">
     <div class="pl-toolbar">
       <span class="muted" style="font-size:.85rem">Click a column heading to sort.</span>
@@ -61,7 +61,7 @@
   </tr>
   {% endmacro %}
 
-  {# "Generated" lives in its own card above the table — always a separate block, collapsible #}
+  {# "Generated" lives in its own card above the table, always a separate block, collapsible #}
   <div class="card gen-grp" x-show="genRows().length" x-cloak>
     <div class="gen-grp-head" @click="toggleGen()" title="Click to collapse / expand">
       <span class="eyebrow">Generated</span>
@@ -113,12 +113,10 @@
            playlists. The originals are left untouched.</p>
         <input class="modal-input" type="text" x-model="copyName" placeholder="New playlist name"
                x-ref="cname" x-init="$watch('copyModal', v => v && $nextTick(() => $refs.cname.select()))"
-               hx-post="/playlists/copy" hx-trigger="keyup[key=='Enter']"
-               hx-vals='js:{ids: plData().copyIds.join(","), name: plData().copyName}'>
+               @keydown.enter="copy()">
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="copyModal = false">Cancel</button>
-          <button type="button" hx-post="/playlists/copy"
-                  hx-vals='js:{ids: plData().copyIds.join(","), name: plData().copyName}'>Save</button>
+          <button type="button" @click="copy()">Save</button>
         </div>
       </div>
     </div>
@@ -141,9 +139,7 @@
         </select>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="copyIntoModal = false">Cancel</button>
-          <button type="button" hx-post="/playlists/copy-into"
-                  @htmx:after-request="if ($event.detail.successful) copyIntoModal = false"
-                  hx-vals='js:{ids: plData().copyIds.join(","), target: plData().copyIntoTarget}'
+          <button type="button" @click="copyInto()"
                   :disabled="!copyIntoTarget">Copy in</button>
         </div>
       </div>
@@ -160,13 +156,11 @@
         <input class="modal-input" type="text" x-model="groupName" placeholder="e.g. Workout"
                list="grouplist" autocomplete="off"
                x-ref="gname" x-init="$watch('groupModal', v => v && $nextTick(() => $refs.gname.focus()))"
-               hx-post="/playlists/group" hx-trigger="keyup[key=='Enter']"
-               hx-vals='js:{ids: plData().selected().map(r => r.id).join(","), name: plData().groupName}'>
+               @keydown.enter="group()">
         <datalist id="grouplist">{% for g in group_names %}<option value="{{ g }}"></option>{% endfor %}</datalist>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="groupModal = false">Cancel</button>
-          <button type="button" hx-post="/playlists/group"
-                  hx-vals='js:{ids: plData().selected().map(r => r.id).join(","), name: plData().groupName}'>Save</button>
+          <button type="button" @click="group()">Save</button>
         </div>
       </div>
     </div>
@@ -183,14 +177,10 @@
            <strong>hidden</strong> from this tab instead.</p>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="delModal = false">Cancel</button>
-          <button type="button" class="btn-danger" hx-post="/playlists/delete"
-                  hx-vals='js:{ids: plData().selected().map(r => r.id).join(",")}'>Delete them</button>
+          <button type="button" class="btn-danger" @click="remove()">Delete them</button>
         </div>
       </div>
     </div>
   </template>
 </div>
-{# htmx evaluates hx-vals js: in the global scope (no $el/this/event bound), so reach the
-   playlistsTab Alpine state by id. The teleported modals share this same component data. #}
-<script>function plData() { return Alpine.$data(document.getElementById('pltab')); }</script>
 {% endblock %}

@@ -1,5 +1,6 @@
 """The DJ ordering model: seeded shuffle -> anti-artist-repeat -> stickiness-scaled genre smoothing."""
-from yt_playlist.rec import genre_map, recommend
+from yt_playlist.util import genre_map
+from yt_playlist.rec import recommend
 from yt_playlist.rec.recommend import ForYouItem
 from yt_playlist.util.matching import identity_key
 
@@ -40,7 +41,7 @@ def test_dj_order_stickiness_smooths_genre_transitions():
 
 
 def test_dj_order_works_on_foryou_items():
-    # ForYouItems are dataclasses, not dicts — dj_order must still read .artist/.genre off them, or
+    # ForYouItems are dataclasses, not dicts: dj_order must still read .artist/.genre off them, or
     # generated playlists (built from ForYouItems) come out artist-clustered. The 'comfort' bug.
     items = ([_fy("Hermanos", i) for i in range(4)] + [_fy("Younger", i) for i in range(3)]
              + [_fy("Ritmo", i) for i in range(2)] + [_fy("Solo", 0)])

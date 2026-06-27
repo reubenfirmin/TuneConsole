@@ -1,4 +1,4 @@
-"""ActionRepo — the undoable action log (merges, moves, dupe-deletes, undos)."""
+"""ActionRepo: the undoable action log (merges, moves, dupe-deletes, undos)."""
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.models import Action
 

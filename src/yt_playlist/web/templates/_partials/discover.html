@@ -1,12 +1,12 @@
 {% if building %}
 <div hx-get="/home/discover" hx-trigger="load delay:4s" hx-swap="outerHTML">
-  <h2 class="section">New from artists you play <span class="refreshing">finding…</span></h2>
+  <h2 class="section">Explore your artists' catalogs <span class="refreshing">finding…</span></h2>
   <div class="album-grid">{% for _ in range(6) %}<div class="tile"><div class="tile-cover skeleton"></div></div>{% endfor %}</div>
 </div>
 {% elif albums %}
 {% from "_macros.html" import tile %}
 <div{% if stale %} hx-get="/home/discover" hx-trigger="load delay:3s" hx-swap="outerHTML"{% endif %}>
-<h2 class="section">New from artists you play{% if stale %} <span class="refreshing">refreshing…</span>{% endif %}</h2>
+<h2 class="section">Explore your artists' catalogs{% if stale %} <span class="refreshing">refreshing…</span>{% endif %}</h2>
 <p class="section-note">Albums by your most-played artists that you don't own or have saved.</p>
 <div class="album-grid" id="album-grid">
   {% for a in albums %}

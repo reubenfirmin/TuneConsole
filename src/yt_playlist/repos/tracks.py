@@ -1,4 +1,4 @@
-"""TrackRepo — track rows and their genre/year enrichment."""
+"""TrackRepo: track rows and their genre/year enrichment."""
 from yt_playlist.util.matching import identity_key
 from yt_playlist.repos.base import Repo, synchronized
 
@@ -26,11 +26,11 @@ class TrackRepo(Repo):
             return row["id"]
         cur = self.conn.execute(
             "INSERT INTO tracks(video_id,title,artist,album,duration_s,identity_key,available,"
-            "video_type,artist_browse_id,album_browse_id,thumbnail,created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, strftime('%s','now')))",
+            "video_type,artist_browse_id,album_browse_id,thumbnail,orig_title,orig_artist,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, strftime('%s','now')))",
             (video_id, title, artist, album, duration_s, key,
              None if available is None else int(available), video_type,
-             artist_browse_id, album_browse_id, thumbnail, created_at))
+             artist_browse_id, album_browse_id, thumbnail, title, artist, created_at))
         self.conn.commit()
         return cur.lastrowid
 
@@ -57,7 +57,7 @@ class TrackRepo(Repo):
 
     @synchronized
     def album_tracks_to_enrich(self, album_browse_id) -> list:
-        """A saved album's folded-in tracks still missing genre or year — the album-scoped twin of
+        """A saved album's folded-in tracks still missing genre or year, the album-scoped twin of
         tracks_to_enrich, so the same enrich runners work over an album."""
         rows = self.conn.execute(
             "SELECT t.id, t.video_id, t.title, t.artist FROM tracks t WHERE t.album_browse_id=? "
@@ -71,8 +71,8 @@ class TrackRepo(Repo):
 
     @synchronized
     def tracks_for_waterfall(self, playlist_id) -> list:
-        """Playlist tracks the waterfall still has work for — missing genre, year, or any of the
-        core audio features — in playlist order. Carries mb_recording_id so AcousticBrainz can key
+        """Playlist tracks the waterfall still has work for (missing genre, year, or any of the
+        core audio features) in playlist order. Carries mb_recording_id so AcousticBrainz can key
         off an already-resolved MBID."""
         rows = self.conn.execute(
             "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id FROM playlist_tracks pt "
@@ -82,7 +82,7 @@ class TrackRepo(Repo):
 
     @synchronized
     def album_tracks_for_waterfall(self, album_browse_id) -> list:
-        """A saved album's folded-in tracks the waterfall still has work for — album-scoped twin of
+        """A saved album's folded-in tracks the waterfall still has work for, album-scoped twin of
         tracks_for_waterfall."""
         rows = self.conn.execute(
             "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id FROM tracks t "
@@ -102,6 +102,37 @@ class TrackRepo(Repo):
         self.conn.commit()
 
     @synchronized
+    def set_track_title(self, track_id, title) -> None:
+        # manual fix: overwrite the live title in place so downstream consumers use it. Never blank.
+        title = (title or "").strip()
+        if not title:
+            return
+        self.conn.execute("UPDATE tracks SET title=? WHERE id=?", (title, track_id))
+        self.conn.commit()
+
+    @synchronized
+    def set_track_artist(self, track_id, artist) -> None:
+        # manual fix: overwrite the live artist in place. Never blank.
+        artist = (artist or "").strip()
+        if not artist:
+            return
+        self.conn.execute("UPDATE tracks SET artist=? WHERE id=?", (artist, track_id))
+        self.conn.commit()
+
+    @synchronized
+    def reset_track_title(self, track_id) -> None:
+        # restore the original YouTube title (undo a manual fix).
+        self.conn.execute("UPDATE tracks SET title=orig_title WHERE id=? AND orig_title IS NOT NULL",
+                          (track_id,))
+        self.conn.commit()
+
+    @synchronized
+    def reset_track_artist(self, track_id) -> None:
+        self.conn.execute("UPDATE tracks SET artist=orig_artist WHERE id=? AND orig_artist IS NOT NULL",
+                          (track_id,))
+        self.conn.commit()
+
+    @synchronized
     def tracks_missing_genre(self, playlist_id) -> list:
         """Playlist tracks with no genre yet (for Last.fm genre enrichment), in playlist order."""
         rows = self.conn.execute(
@@ -114,7 +145,7 @@ class TrackRepo(Repo):
     @synchronized
     def set_track_enrichment(self, track_id, genre, year) -> None:
         # fill-only: set a field just when it's currently blank. So enrichment fills gaps and never
-        # overwrites what you already have — MusicBrainz and Last.fm each top up the other's misses.
+        # overwrites what you already have. MusicBrainz and Last.fm each top up the other's misses.
         self.conn.execute(
             "UPDATE tracks SET "
             "  genre = CASE WHEN (genre IS NULL OR genre='') AND ? <> '' THEN ? ELSE genre END, "
@@ -125,7 +156,7 @@ class TrackRepo(Repo):
 
     @synchronized
     def get_track_enrichment(self, track_id):
-        """Current (genre, year) for a track — used to report the effective value after a fill."""
+        """Current (genre, year) for a track, used to report the effective value after a fill."""
         row = self.conn.execute("SELECT genre, mb_year FROM tracks WHERE id=?", (track_id,)).fetchone()
         if row is None:
             return ("", "")
@@ -156,7 +187,7 @@ class TrackRepo(Repo):
 
     @synchronized
     def get_track_audio(self, track_id):
-        """Current (bpm, energy, danceability) for a track — each float or None."""
+        """Current (bpm, energy, danceability) for a track, each float or None."""
         row = self.conn.execute(
             "SELECT bpm, energy, danceability FROM tracks WHERE id=?", (track_id,)).fetchone()
         if row is None:
@@ -199,7 +230,7 @@ class TrackRepo(Repo):
 
     @synchronized
     def materialized_album_ids(self) -> set:
-        """browse_ids of saved albums whose tracks we've already folded into the library — so sync
+        """browse_ids of saved albums whose tracks we've already folded into the library, so sync
         only fetches an album's track list once, not on every pass."""
         return {r["album_browse_id"] for r in self.conn.execute(
             "SELECT DISTINCT album_browse_id FROM tracks WHERE album_browse_id IS NOT NULL")}

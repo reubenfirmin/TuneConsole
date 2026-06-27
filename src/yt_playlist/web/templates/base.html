@@ -17,6 +17,9 @@
   <script src="/static/vendor/d3-timer.min.js"></script>
   <script src="/static/vendor/d3-force.min.js"></script>
   <script src="/static/app.js?v={{ asset_v }}"></script>
+  {# Clusters canvas component (templates/clusters.html). Split out of app.js; a classic global script
+     like app.js, so load order between them doesn't matter as long as both precede Alpine. #}
+  <script src="/static/cluster.js?v={{ asset_v }}"></script>
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
 <body>
@@ -52,7 +55,7 @@
       </div>
     </form>
     {% endif %}
-    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') %}
+    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') or path.startswith('/discovery') %}
     <nav>
       <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>
       <a href="/playlists" class="{{ 'active' if path.startswith('/playlist') else '' }}">Playlists</a>
@@ -70,6 +73,7 @@
           <a href="/genres" class="{{ 'active' if path.startswith('/genres') else '' }}">Genres</a>
           <a href="/enrich" class="{{ 'active' if path.startswith('/enrich') else '' }}">Enrichment</a>
           <a href="/taste" class="{{ 'active' if path.startswith('/taste') else '' }}">Taste Model</a>
+          <a href="/discovery" class="{{ 'active' if path.startswith('/discovery') else '' }}">Discovery Pools</a>
           <a href="/network" class="{{ 'active' if path.startswith('/network') else '' }}">Network</a>
           <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
         </div>

@@ -28,7 +28,7 @@
     </a>
     <button type="button" class="head-icon" :class="{ on: running }"
             @click="start()" :disabled="running"
-            title="Enrich genre, year &amp; audio features — runs every enabled provider in order"
+            title="Enrich genre, year &amp; audio features: runs every enabled provider in order"
             aria-label="Enrich">
       <span class="spinner" x-show="running" x-cloak></span>
       <svg x-show="!running" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
@@ -38,7 +38,7 @@
     </button>
     <button type="button" class="head-icon conflict-icon" x-show="conflictCount > 0" x-cloak
             @click="openConflicts()"
-            :title="conflictCount + ' provider disagreement(s) — click to resolve'"
+            :title="conflictCount + ' provider disagreement(s): click to resolve'"
             aria-label="Resolve enrichment disagreements">
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
            stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

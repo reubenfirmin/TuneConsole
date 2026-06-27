@@ -1,4 +1,4 @@
-"""SettingsRepo — small key/value app settings (e.g. the Last.fm API key)."""
+"""SettingsRepo: small key/value app settings (e.g. the Last.fm API key)."""
 from yt_playlist.repos.base import Repo, synchronized
 
 

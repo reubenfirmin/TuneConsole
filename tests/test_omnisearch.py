@@ -1,4 +1,4 @@
-"""store.omni_search — navbar omnisearch over the user's library.
+"""store.omni_search: navbar omnisearch over the user's library.
 
 LinkedIn-style: an artist match pivots into that artist's tracks/albums/playlists;
 direct title matches on songs and playlists get their own sections.

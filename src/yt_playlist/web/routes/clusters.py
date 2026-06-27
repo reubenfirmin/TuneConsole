@@ -6,12 +6,13 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
-from yt_playlist.rec import embed, recommend, genre_map
+from yt_playlist.util import genre_map
+from yt_playlist.rec import embed, recommend
 from yt_playlist.library import executor
 
-RING_SIZE = 6        # tracks added per "grow" — a small ring keeps the canvas legible
+RING_SIZE = 6        # tracks added per "grow", a small ring keeps the canvas legible
 ALBUM_CAP = 2        # #14: at most this many tracks from one album per ring (untagged albums uncapped)
 
 
@@ -33,6 +34,15 @@ def build(ctx) -> APIRouter:
         """Library autosuggest: vector-backed seeds across artists / playlists / songs."""
         return JSONResponse(store.cluster_search(q, limit=6))
 
+    @router.get("/clusters/state/{ytm}")
+    def clusters_state(ytm: str):
+        """The saved canvas behind a generated cluster playlist (#48), so it can be reopened and
+        regrown a different way. Returns the stored blob verbatim, or 404 when there is none."""
+        state = store.get_cluster_canvas(ytm)
+        if not state:
+            return JSONResponse({"error": "no canvas"}, status_code=404)
+        return Response(content=state, media_type="application/json")
+
     @router.get("/clusters/genres")
     def clusters_genres():
         """Genre options for the Clusters filter (#29): coarse families AND individual genres
@@ -44,7 +54,7 @@ def build(ctx) -> APIRouter:
     async def clusters_expand(request: Request):
         """A node's next ring. Body: {pos_keys, neg_keys, exclude, k, allow_families}. pos_keys = the
         pinned path's keys (its centroid); neg_keys = every pruned key (push-away); exclude = keys
-        already on the canvas; allow_families = optional genre-family whitelist (#29) — when set, the
+        already on the canvas; allow_families = optional genre-family whitelist (#29), when set, the
         ring is restricted to tracks in those families (untagged tracks dropped). Returns
         {ring: [{key, video_id, title, artist, album, thumbnail, score}]}."""
         body = await request.json()
@@ -52,6 +62,7 @@ def build(ctx) -> APIRouter:
         neg = body.get("neg_keys") or []
         exclude = body.get("exclude") or []
         k = int(body.get("k") or RING_SIZE)
+        include_new = bool(body.get("include_new"))      # Phase 2: reach out-of-corpus discovered tracks
         # tokens may be families or specific genres (#29 / C2b); empty = no restriction
         tokens = body.get("allow_genres") or body.get("allow_families") or []
         allow = store.keys_in_genre_selection(tokens) if tokens else None
@@ -60,8 +71,8 @@ def build(ctx) -> APIRouter:
         # the canvas (everything in `exclude` that isn't pruned), so once an album hits ALBUM_CAP
         # anywhere in the playlist, no further grow can add more of it.
         nbrs = embed.cluster_expand(store, pos_keys=pos, neg_keys=neg, exclude=exclude,
-                                    topn=max(k * 4, k + 12), allow=allow)
-        # cap basis = the grown tracks already kept (count_keys), NOT the central seeds — a seed
+                                    topn=max(k * 4, k + 12), allow=allow, include_new=include_new)
+        # cap basis = the grown tracks already kept (count_keys), NOT the central seeds. A seed
         # artist's album shouldn't pre-spend the per-album budget. Falls back to non-pruned canvas keys.
         basis = body.get("count_keys")
         if basis is None:
@@ -73,10 +84,14 @@ def build(ctx) -> APIRouter:
                 album_count[alb] = album_count.get(alb, 0) + 1
         cand = [key for key, _ in nbrs]
         meta = store.tracks_by_keys(cand)
+        dmeta = store.discovered_tracks_by_keys(cand) if include_new else {}   # out-of-corpus tracks
+        if dmeta:
+            store.mark_offered("track", list(dmeta), now_fn())   # #53 offered-in-cluster count
         genres = store.track_genres(cand)               # for the client-side genre filter (#29)
         ring = []
         for key, score in nbrs:
-            m = meta.get(key)
+            new = key not in meta and key in dmeta       # out-of-corpus candidate
+            m = meta.get(key) or dmeta.get(key)
             if not m or not m.get("video_id"):
                 continue
             album = (m.get("album") or "").strip().lower()
@@ -84,10 +99,11 @@ def build(ctx) -> APIRouter:
                 if album_count.get(album, 0) >= ALBUM_CAP:
                     continue
                 album_count[album] = album_count.get(album, 0) + 1
-            g = genres.get(key, "")
+            g = (m.get("genre") if new else genres.get(key, "")) or ""
             ring.append({"key": key, "video_id": m["video_id"], "title": m["title"],
                          "artist": m["artist"], "album": m["album"], "thumbnail": m["thumbnail"],
-                         "genre": g, "family": genre_map.family(g), "score": round(score, 4)})
+                         "genre": g, "family": genre_map.family(g), "score": round(score, 4),
+                         "out_of_corpus": new})
             if len(ring) >= k:
                 break
         return JSONResponse({"ring": ring})
@@ -111,7 +127,7 @@ def build(ctx) -> APIRouter:
             bm = store.tracks_by_keys([geo["bridge"]]).get(geo["bridge"])
             if bm:
                 reasons.append({"kind": "bridge",
-                                "text": f"Linked through “{bm['title']}” by {bm['artist']} — "
+                                "text": f"Linked through “{bm['title']}” by {bm['artist']}, "
                                         f"a track that sits near both."})
         headline = reasons[0]["text"] if reasons else "A close match in your taste space."
         meta = store.tracks_by_keys([key]).get(key, {})
@@ -127,7 +143,7 @@ def build(ctx) -> APIRouter:
         """Materialize the cluster as a Generated YouTube playlist and open it (same flow as Home's
         proto-save). The canvas posts only identity_keys; we resolve them to saveable track dicts here.
         keep_keys = every non-pruned track on the canvas; central_keys = the seed group's own tracks,
-        included only when 'Include central tracks' is ticked."""
+        always folded in when present."""
         form = await request.form()
         name = (form.get("name") or "").strip()
         try:
@@ -137,12 +153,12 @@ def build(ctx) -> APIRouter:
             allow_families = list(json.loads(form.get("allow_families") or "[]"))
         except (ValueError, TypeError):
             keep, central, seed_labels, allow_families = [], [], [], []
-        if form.get("include_central"):
-            keep += [k for k in central if k not in keep]
+        keep += [k for k in central if k not in keep]   # central seed tracks are always folded in
         # #15: tag the save with its own tunable 'cluster' recipe, ordered by the chosen DJ journey.
         journey = (form.get("journey") or "auto").strip()
         recipe, order = recommend.cluster_recipe(store, keep, seed_labels, allow_families, journey=journey)
         meta = store.tracks_by_keys(keep)
+        meta = {**store.discovered_tracks_by_keys(keep), **meta}   # resolve out-of-corpus keys too (library wins)
         tracks = [{"video_id": meta[k]["video_id"], "title": meta[k]["title"],
                    "artist": meta[k]["artist"], "album": meta[k]["album"],
                    "thumbnail": meta[k]["thumbnail"]}
@@ -150,13 +166,22 @@ def build(ctx) -> APIRouter:
         identity_id, client = next(iter((ctx.client_provider() or {}).items()), (None, None))
         result = {"name": name}
         if client is None or not tracks:
-            result["error"] = "Couldn't create it — connect an account and keep at least one track."
+            result["error"] = "Couldn't create it. Connect an account and keep at least one track."
         else:
             try:
                 res = await asyncio.to_thread(
                     executor.create_generated_playlist, store, name, tracks, client, now_fn(),
                     identity_id, recipe=recipe)
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
+                # #48: stash the full canvas so this playlist can be reopened in Clusters and regrown a
+                # different way. Stored verbatim (validated as JSON); absent for older clients / failures.
+                state = form.get("state")
+                if state:
+                    try:
+                        json.loads(state)
+                        store.set_cluster_canvas(res["new_ytm"], state, now_fn())
+                    except (ValueError, TypeError):
+                        pass
             except Exception:  # noqa: BLE001 - surface a friendly card, log the detail
                 ctx.logger.exception("save cluster %r failed", name)
                 result["error"] = "YouTube returned an unexpected response."

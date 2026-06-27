@@ -87,12 +87,44 @@ def test_track_year_returns_row_fragment(store):
     assert store.playlist_tracks_detail(a)[0]["year"] == "1991"
 
 
+def test_track_title_updates_and_returns_row(store):
+    iid, a = _seed_one_track(store)
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.post(f"/playlist/{a}/track-title", data={"video_id": "v0", "title": "Fixed Title"})
+    assert r.status_code == 200 and 'data-vid="v0"' in r.text and "Fixed Title" in r.text
+    assert store.playlist_tracks_detail(a)[0]["title"] == "Fixed Title"
+
+
+def test_track_artist_updates_then_resets(store):
+    iid, a = _seed_one_track(store)
+    c = _client(store, lambda: {iid: FakeClient()})
+    c.post(f"/playlist/{a}/track-artist", data={"video_id": "v0", "artist": "Fixed Artist"})
+    assert store.playlist_tracks_detail(a)[0]["artist"] == "Fixed Artist"
+    r = c.post(f"/playlist/{a}/track-reset", data={"video_id": "v0", "field": "artist"})
+    assert r.status_code == 200 and 'data-vid="v0"' in r.text
+    assert store.playlist_tracks_detail(a)[0]["artist"] == "X"   # original from _seed_one_track
+
+
+def test_track_title_no_vid_returns_toast(store):
+    iid, a = _seed_one_track(store)
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.post(f"/playlist/{a}/track-title", data={"title": "x"})
+    assert r.status_code == 422 and 'hx-swap-oob="afterbegin:#toasts"' in r.text
+
+
+def test_track_row_renders_edit_affordances(store):
+    iid, a = _seed_one_track(store)
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.get(f"/playlist/{a}")
+    assert "startEditTitle(" in r.text and "startEditArtist(" in r.text
+
+
 def test_enrich_track_events_carry_rendered_row(store, monkeypatch):
     import json as _json
     import yt_playlist.providers.musicbrainz as mb
     from tests.conftest import only_provider
-    monkeypatch.setattr(mb, "enrich", lambda title, artist: ("Rock", "1998") if title == "S0" else (None, None))
-    monkeypatch.setattr(mb, "recording_mbid", lambda title, artist: None)
+    monkeypatch.setattr(mb, "enrich_full",
+                        lambda title, artist: ("Rock", "1998", None) if title == "S0" else (None, None, None))
     iid, a = _seed_one_track(store)
     only_provider(store, "musicbrainz")
     c = _client(store, lambda: {iid: FakeClient()})
@@ -127,7 +159,7 @@ def test_remove_track_returns_empty_and_drops_row(store):
 
 
 def test_remove_track_from_liked_music_unlikes(store):
-    # On the Liked Music (LM) list "remove" has no playlist item to delete — it unlikes the song.
+    # On the Liked Music (LM) list "remove" has no playlist item to delete. It unlikes the song.
     iid = store.upsert_identity("main", "cred", None, True)
     lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
     store.set_playlist_tracks(lm, [store.upsert_track("v0", "S0", "X", "Alb", 200, 1)])
@@ -201,7 +233,7 @@ def test_add_tracks_appends_and_refreshes(store):
 def test_add_tracks_backfills_duration_for_known_trackless_time(store):
     # Regression for #26: an alternate that's already in the store with no duration (e.g. previously
     # seen via plays/history sync, which inserts duration_s=None) must get its time filled in when
-    # added via "find alternate version" — otherwise the playlist row shows a blank time.
+    # added via "find alternate version". Otherwise the playlist row shows a blank time.
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
     store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
@@ -244,7 +276,7 @@ def test_add_tracks_inserts_below_anchor(store):
     store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "X", "Alb", 200, 1),
                                   store.upsert_track("v1", "Song B", "Y", "Alb", 200, 1)])
     # the fake client must materialize the added track (with a setVideoId) so the post-add reorder can
-    # find its handle and move it into place — mirroring how YouTube reports the new item.
+    # find its handle and move it into place, mirroring how YouTube reports the new item.
     fc = FakeClient(tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},
                                     {"videoId": "v1", "setVideoId": "sv1"}]},
                     catalog={"v9": {"videoId": "v9", "setVideoId": "sv9"}})
@@ -255,6 +287,27 @@ def test_add_tracks_inserts_below_anchor(store):
     # v9 lands directly below the anchor v0, not at the end
     assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v9", "v1"]
     assert fc.edited[-1] == ("PL1", {"moveItem": ("sv9", "sv1")})
+
+
+def test_add_tracks_inserts_below_anchor_despite_indexing_lag(store):
+    # Regression for #40. YouTube has indexing lag: a just-added track often isn't visible yet on a
+    # read-back, so the best-effort YouTube reorder can't find its handle and silently gives up. The
+    # store order (what the UI renders on refresh) must STILL place the new track directly below the
+    # anchor, rather than leaving it appended at the end.
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "X", "Alb", 200, 1),
+                                  store.upsert_track("v1", "Song B", "Y", "Alb", 200, 1)])
+    # the fake client knows only the pre-existing tracks; the freshly-added v9 has no catalog entry,
+    # so add_playlist_items can't materialize it on the read-back, i.e. it stays invisible (lag).
+    fc = FakeClient(tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},
+                                    {"videoId": "v1", "setVideoId": "sv1"}]})
+    c = _client(store, lambda: {iid: fc})
+    track = json.dumps({"videoId": "v9", "title": "Song A (Live)", "artist": "X", "duration": 250})
+    r = c.post(f"/playlist/{a}/add-tracks", data={"track": track, "after_video_id": "v0"})
+    assert _refreshes(r)
+    # the YouTube reorder couldn't run, yet the store still slots v9 below the anchor v0
+    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v9", "v1"]
 
 
 def test_add_tracks_empty_returns_toast(store):

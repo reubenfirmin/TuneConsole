@@ -75,7 +75,7 @@ class Runtime:
     def sign_out(self) -> None:
         """Delete the saved sign-in (the local credential file) and reload.
 
-        Only drops the captured cookies — the identity config stays put so re-signing in just
+        Only drops the captured cookies. The identity config stays put so re-signing in just
         means pasting a fresh capture. With no credential, load() leaves the runtime unconfigured.
         """
         (self.creds_dir / BROWSER_CREDENTIAL_FILENAME).unlink(missing_ok=True)
@@ -93,7 +93,7 @@ class Runtime:
         if (capture or "").strip():
             store_credentials(capture, self.creds_dir / BROWSER_CREDENTIAL_FILENAME)
         elif not self.credentials_present:
-            raise ValueError("provide your sign-in capture — there's no saved credential to reuse")
+            raise ValueError("provide your sign-in capture: there's no saved credential to reuse")
         write_config(identities, self.config_path)
         self.load()
         if not self._configured:

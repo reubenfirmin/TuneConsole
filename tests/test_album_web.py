@@ -45,7 +45,7 @@ def test_create_playlist_from_album_redirects_to_new_playlist(store, monkeypatch
 def test_unsaved_album_shows_full_live_tracks_not_incidental_library_subset(store):
     """An album that merely shares a track with one of your playlists must still render the FULL
     live-fetched album, not the partial library subset. Regular sync stamps each track's
-    album_browse_id, so an unsaved album can have a single incidental library row — that must not
+    album_browse_id, so an unsaved album can have a single incidental library row. That must not
     shadow the real 8-track album."""
     # one incidental library track tagged with this album's browse_id (as playlist sync would)
     store.upsert_track("v1", "One", "Artist X", "The Album", None, album_browse_id="MPREb_x")
@@ -93,7 +93,7 @@ def test_create_playlist_from_album_requires_browse(store):
 def test_saved_album_folds_in_durations_and_renders_liked_and_plays(store):
     """Saving an album folds its live tracks into the library WITH durations parsed from the YTM
     'M:SS' strings (issue: Length not populated), and the saved table renders the liked heart and
-    the Plays column — parity with the playlist view."""
+    the Plays column, parity with the playlist view."""
     store.add_saved_album({"browse": "MPREb_x", "title": "The Album", "artist": "Artist X"})
     c, _fc, _iid = _client(store)
     r = c.get("/album?browse=MPREb_x")

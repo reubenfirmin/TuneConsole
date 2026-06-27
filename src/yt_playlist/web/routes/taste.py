@@ -2,8 +2,9 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
-from yt_playlist.rec import embed, eval_recs, rec_params, recommend, rose, taste_viz
+from yt_playlist.rec import autotune_run, eval_recs, rec_params, recommend, rose, taste_viz
 from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.web.context import form_float
 
 
 def build(ctx) -> APIRouter:
@@ -41,7 +42,11 @@ def build(ctx) -> APIRouter:
     def _param_view(spec):
         return {"name": spec.name, "label": spec.label, "help": spec.explanation,
                 "min": spec.min, "max": spec.max, "step": spec.step, "default": spec.default,
-                "value": rec_params.get_param(store, spec.name)}
+                "boolean": spec.boolean, "value": rec_params.get_param(store, spec.name)}
+
+    def _group(g):
+        return {"main": [_param_view(s) for s in rec_params.PARAMS if s.group == g and not s.advanced],
+                "advanced": [_param_view(s) for s in rec_params.PARAMS if s.group == g and s.advanced]}
 
     def _model_context():
         bd = recommend.taste_breadth(store)
@@ -64,10 +69,12 @@ def build(ctx) -> APIRouter:
                        for f, share in families],
             "genre_min": rec_params.GENRE_MIN, "genre_max": rec_params.GENRE_MAX,
             "genre_default": rec_params.GENRE_DEFAULT, "genre_step": rec_params.GENRE_STEP,
-            "params": [_param_view(s) for s in rec_params.PARAMS if not s.advanced],
-            "advanced_params": [_param_view(s) for s in rec_params.PARAMS if s.advanced],
+            "params": [_param_view(s) for s in rec_params.PARAMS if not s.advanced and s.group == "discovery"],
+            "advanced_params": [_param_view(s) for s in rec_params.PARAMS if s.advanced and s.group == "discovery"],
+            "groups": {"transient": _group("transient"), "graduation": _group("graduation")},
             "feedback": dao.feedback_summary(),
             "bans": [{"key": r["item_key"], "until": r["until"]} for r in store.list_dislikes()],
+            "autotune_result": autotune_run.last_result(store),
         }
 
     @router.get("/taste")
@@ -84,15 +91,19 @@ def build(ctx) -> APIRouter:
 
     @router.get("/taste/recall")
     def taste_recall(request: Request):
-        # the expensive stats — lazy-loaded so the page paints instantly
+        # the expensive stats, lazy-loaded so the page paints instantly. This is the §1 model-health
+        # panel: warm-path recall@k, forward-looking temporal_recall, cold-path projection_recall (with
+        # its failure-mode breakdown), and graduation counts by source from the §1c log.
         return templates.TemplateResponse(request, "_partials/taste_recall.html",
                                           {"recall": eval_recs.recall_at_k(store, k=20),
-                                           "proj": eval_recs.projection_recall(store, k=20)})
+                                           "proj": eval_recs.projection_recall(store, k=20),
+                                           "temporal": eval_recs.temporal_recall(store, holdout_days=30, k=20),
+                                           "grad_counts": store.graduation_log_counts()})
 
     @router.get("/taste/preview")
     def taste_preview(request: Request):
         # Manual-refresh live sample of For You under the current knobs (recomputed only on demand).
-        # A random slice of the matching pool — not the top-N — so every refresh shows a new set,
+        # A random slice of the matching pool (not the top-N) so every refresh shows a new set,
         # even when the knobs haven't changed.
         items = recommend.taste_sample(store, ctx.now(), limit=8)
         return templates.TemplateResponse(request, "_partials/taste_preview.html", {"items": items})
@@ -100,20 +111,24 @@ def build(ctx) -> APIRouter:
     @router.post("/taste/weight")
     async def taste_weight(request: Request):
         form = await request.form()
-        axis, val = form.get("axis"), form.get("weight")
-        if axis and val:
+        axis, weight = form.get("axis"), form_float(form.get("weight"))
+        if axis and weight is not None:
             if axis.startswith("genre:"):     # genre weights use the [0,2] band so a family can be muted
-                store.set_weight(axis, float(val), lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
+                store.set_weight(axis, weight, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
             else:
-                store.set_weight(axis, float(val))
+                store.set_weight(axis, weight)
         return _stale()
 
     @router.post("/taste/param")
     async def taste_param(request: Request):
         form = await request.form()
         name, val = form.get("name"), form.get("value")
-        if name in rec_params.PARAMS_BY_NAME and val not in (None, ""):
-            rec_params.set_param(store, name, val)
+        if name in rec_params.PARAMS_BY_NAME:
+            spec = rec_params.PARAMS_BY_NAME[name]
+            if spec.boolean:
+                rec_params.set_param(store, name, val is not None)   # unchecked box sends no value
+            elif val not in (None, ""):
+                rec_params.set_param(store, name, val)
         return _stale()
 
     @router.post("/taste/reset-param")
@@ -131,11 +146,47 @@ def build(ctx) -> APIRouter:
         rec_params.reset_all_params(store)
         return _refresh()
 
+    import threading
+    _autotune_lock = threading.Lock()
+    _autotune_state = {"running": False}
+
+    def _autotune_status(request):
+        running = _autotune_state["running"]
+        resp = templates.TemplateResponse(request, "_partials/autotune_status.html",
+                                          {"running": running,
+                                           "autotune_result": autotune_run.last_result(store)})
+        if not running:
+            # The poll's final (done) response tells the Model status card to refresh its vector
+            # count / dim and recompute recall@20 against the freshly tuned model.
+            resp.headers["HX-Trigger"] = "autotune-done"
+        return resp
+
     @router.post("/taste/autotune")
-    def taste_autotune():
-        """Grid-search the embedding dim by recall@k and rebuild on the winner."""
-        eval_recs.autotune(store)
-        return _refresh()
+    def taste_autotune(request: Request):
+        """Grid-search the embedding dim by recall@k and rebuild on the winner (background)."""
+        with _autotune_lock:
+            if not _autotune_state["running"]:
+                _autotune_state["running"] = True
+
+                def run():
+                    try:
+                        autotune_run.run_and_record(store, ctx.now())
+                    except Exception:  # noqa: BLE001 - never crash the app on a tune failure
+                        ctx.logger.warning("autotune run failed", exc_info=True)
+                    finally:
+                        _autotune_state["running"] = False
+
+                threading.Thread(target=run, daemon=True).start()
+        return _autotune_status(request)
+
+    @router.get("/taste/autotune-status")
+    def taste_autotune_status(request: Request):
+        return _autotune_status(request)
+
+    @router.get("/taste/model-status")
+    def taste_model_status(request: Request):
+        # Re-rendered when Auto-tune finishes (autotune-done) so the stat-grid reflects the new model.
+        return templates.TemplateResponse(request, "_partials/model_status.html", _model_context())
 
     @router.post("/taste/reset-weights")
     def taste_reset_weights():
@@ -152,31 +203,6 @@ def build(ctx) -> APIRouter:
         key = (await request.form()).get("key")
         if key:
             store.clear_dislike(key)
-        return _refresh()
-
-    def _busy():
-        return bool(ctx.rec_worker and ctx.rec_worker.busy)
-
-    def _rebuild_status(request):
-        return templates.TemplateResponse(request, "_partials/rebuild_status.html", {"busy": _busy()})
-
-    @router.post("/taste/rebuild")
-    def taste_rebuild(request: Request):
-        # Background-dispatch (coalesced) so a hung YTM/Last.fm call during materialization can't tie
-        # up a request worker. Returns a live status fragment that polls until the worker is idle.
-        if ctx.rec_worker:
-            ctx.rec_worker.trigger()
-        else:
-            embed.build_and_store(store)
-        return _rebuild_status(request)
-
-    @router.get("/taste/rebuild-status")
-    def taste_rebuild_status(request: Request):
-        return _rebuild_status(request)
-
-    @router.post("/taste/purge-vectors")
-    def taste_purge():
-        store.replace_rec_vectors([])
         return _refresh()
 
     return router

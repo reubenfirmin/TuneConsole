@@ -2,7 +2,7 @@
 
 When merging N playlists, "playlist order" should read naturally: each track sits
 roughly where it lives in the playlists that contain it, and tracks shared between
-playlists land at their *average* spot — so unique tracks weave around the shared
+playlists land at their *average* spot, so unique tracks weave around the shared
 anchors instead of being shunted into a block.
 
 We use each track's average **normalized position** (0 = first, 1 = last) across the

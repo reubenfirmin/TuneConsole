@@ -26,7 +26,7 @@ def test_set_song_liked_toggles_lm_membership(store):
     store.upsert_track("v1", "Song", "Artist", "Al", 100)
     store.playlists.set_song_liked(iid, "v1", True)
     assert len(store.playlists.get_playlist_track_ids(lm)) == 1
-    store.playlists.set_song_liked(iid, "v1", True)                               # idempotent — no dup
+    store.playlists.set_song_liked(iid, "v1", True)                               # idempotent, no dup
     assert len(store.playlists.get_playlist_track_ids(lm)) == 1
     store.playlists.set_song_liked(iid, "v1", False)
     assert store.playlists.get_playlist_track_ids(lm) == []
