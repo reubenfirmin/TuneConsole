@@ -75,12 +75,13 @@ if (!window.__tcBridgeLoaded) {
     if (!np || !np.title) return;
     np.likeStatus = readLikeStatus();
     // Include likeStatus in the key so a like/dislike change re-reports even when the track is the same.
-    const key = np.title + " | " + np.artist + " | " + np.likeStatus;
+    const key = np.title + " | " + np.artist + " | " + np.likeStatus + " | " + (np.videoId || "");
     if (key === lastNowPlaying) return;
     lastNowPlaying = key;
     console.log("[TuneConsole] now playing:", np.title, "-", np.artist, np.likeStatus);
     chrome.runtime.sendMessage({
-      type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail, likeStatus: np.likeStatus,
+      type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
+      likeStatus: np.likeStatus, videoId: np.videoId,
     });
   };
   let lastMainAt = 0;

@@ -101,6 +101,18 @@ def build(ctx) -> APIRouter:
             "active_job": ctx.jobs.find_active(pid),     # an in-progress enrichment to rejoin, if any
         })
 
+    @router.get("/playlist/{pid}/cells")
+    def playlist_cells(pid: int):
+        # Lightweight genre/year snapshot so the open playlist page can fill in cells as the background
+        # enrichment worker resolves them (polled on the same loop that highlights the now-playing row).
+        if store.get_playlist(pid) is None:
+            raise HTTPException(status_code=404, detail="playlist not found")
+        tracks = store.playlist_tracks_detail(pid)
+        cells = [{"video_id": t["video_id"], "genre": t.get("genre") or "", "year": t.get("year") or ""}
+                 for t in tracks]
+        pending = sum(1 for t in tracks if not (t.get("genre") and t.get("year")))
+        return JSONResponse({"cells": cells, "pending": pending})
+
     @router.get("/playlist/{pid}/share.txt")
     def playlist_share(pid: int):
         """Download the playlist as a plain .txt (one song URL per line) for easy sharing."""

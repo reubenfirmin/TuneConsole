@@ -186,7 +186,7 @@ function connect() {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "play" && ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "play", title: msg.title, artist: msg.artist,
-      thumbnail: msg.thumbnail, likeStatus: msg.likeStatus }));
+      thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId }));
   }
 });
 
