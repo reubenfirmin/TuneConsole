@@ -75,10 +75,11 @@ def take_action(store, now, auth_expired) -> list[ActionItem]:
     items: list[ActionItem] = []
     for label in auth_expired.values():
         items.append(ActionItem(
-            "auth", "high", f"Re-authenticate {label}",
-            "YouTube session expired - sync and recommendations are stale until you reconnect.",
-            "Re-authenticate", "/setup", key=f"auth:{label}",
-            note="Session expired - sync is stalled", badge="!"))
+            "auth", "high", f"Sign in to YouTube Music ({label})",
+            "You are signed out of YouTube Music. Open music.youtube.com and sign in; the extension "
+            "picks the session back up and sync resumes.",
+            "Open YouTube Music", "https://music.youtube.com", key=f"auth:{label}",
+            note="Signed out - sync is paused", badge="!"))
 
     # Read the cached summary the rec worker / cleanup page materialize. Never scan on home load.
     cleanup = store.get_proposals(CLEANUP_SURFACE) or {}
@@ -91,24 +92,7 @@ def take_action(store, now, auth_expired) -> list[ActionItem]:
             "Review", "/cleanup", thumbnails=cleanup.get("thumbnails", []), key="cleanup:all",
             note="Duplicates, overlaps & clutter to review", badge=str(n)))
 
-    # Enrichment cards: playlists and saved albums, capped at 3 TOTAL (most-played playlists first,
-    # then gappiest albums) so the section stays a tight, single row rather than a flood.
-    enrich: list[ActionItem] = []
-    for e in store.enrichment_candidates(limit=3):
-        enrich.append(ActionItem(
-            "enrich", "low", e["title"],
-            f"{e['gaps']} of {e['total']} tracks are missing genre tags - and it's one of your "
-            f"most-played playlists ({e['plays']} plays). Enriching it sharpens recommendations, "
-            "since recs lean on genre and year.",
-            "Enrich", f"/playlist/{e['id']}?enrich=1", thumbnail=e["thumbnail"], key=f"enrich:{e['id']}",
-            badge=f"{e['gaps']}/{e['total']}"))
-    for e in store.album_enrichment_candidates(limit=3):
-        enrich.append(ActionItem(
-            "enrich", "low", e["title"],
-            f"{e['gaps']} of {e['total']} tracks on this saved album are missing genre tags. "
-            "Enriching it sharpens recommendations, since the model now leans on these tracks too.",
-            "Enrich", f"/album?browse={e['browse_id']}&enrich=1", thumbnail=e["thumbnail"],
-            key=f"enrich-album:{e['browse_id']}", badge=f"{e['gaps']}/{e['total']}"))
-    items += [i for i in enrich if i.key not in snoozed][:3]
+    # Manual-enrichment nag cards were removed: the auto-enrich worker drains the library in the
+    # background, so there is nothing to nag the user to enrich by hand here anymore.
 
     return [i for i in items if i.key not in snoozed]

@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from yt_playlist.core.bridge import BridgeError
 from yt_playlist.util.matching import identity_key, track_artist, track_album
 from yt_playlist.util.retry import with_retry
 from yt_playlist.util.thumbnails import best_thumb
@@ -27,8 +28,14 @@ def _emit(on_progress, type, text, **extra):
         on_progress({"type": type, "text": text, **extra})
 
 def _is_auth_error(e) -> bool:
+    # A dead session shows up two ways: a clean HTTP 401/403, or (more often) YouTube quietly serving
+    # the SIGNED-OUT layout - singleColumnBrowseResultsRenderer with a "Sign in" button / signInEndpoint -
+    # which ytmusicapi can't parse (it expects the signed-in twoColumnBrowseResultsRenderer) and raises a
+    # nav error whose text carries those markers. Treat both as expired so the user gets the re-auth banner
+    # instead of a silent "unavailable (skipped)".
     s = str(e).lower()
-    return "401" in s or "403" in s or "unauthorized" in s
+    return ("401" in s or "403" in s or "unauthorized" in s
+            or "signinendpoint" in s or "singlecolumnbrowseresultsrenderer" in s)
 
 def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
                   on_auth_expired=None, on_auth_ok=None) -> None:
@@ -37,6 +44,13 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     _emit(on_progress, "info", f"{label}: fetching playlists…")
     try:
         playlists = with_retry(lambda: client.get_library_playlists(limit=None))
+    except BridgeError as e:
+        # The extension is disconnected / no signed-in tab / a bridge timeout: a CONNECTION problem,
+        # not a dead session. Skip this identity quietly, do NOT flag re-auth, do NOT raise. The
+        # background sync daemon retries once the extension reconnects.
+        logger.info("identity %s: extension not connected, skipping (%s)", identity_id, e)
+        _emit(on_progress, "info", f"{label}: extension not connected, skipping")
+        return
     except Exception as e:  # noqa: BLE001 - an expired session shouldn't abort the whole sync
         if _is_auth_error(e):
             logger.warning("auth expired for identity %s: %s", identity_id, e)
@@ -110,12 +124,12 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history())
-        hist_keys = [identity_key(t.get("title", ""), _artist(t)) for t in history]
-        # Record only NEW plays: YouTube re-sends the same recently-played window each sync (~91%
-        # overlap), so record_history_plays diffs it against this identity's cached window and stores
-        # just the newly-appeared tracks. This is the transient play feed (transient.play_facet_leans
-        # reads it) and keeps play COUNT(*) honest: it counts plays, not lingering (#49).
-        store.record_history_plays(identity_id, now, hist_keys)
+        hist = [(identity_key(t.get("title", ""), _artist(t)), t.get("played")) for t in history]
+        # Record plays keyed by (track, played-date): YouTube re-sends the same recently-played window
+        # each sync (~91% overlap) and the 30-min syncs re-add it, so record_history_plays dedups on the
+        # absolute play-date (the relative `played` bucket resolved via `now`). Keeps play COUNT(*)
+        # honest: it counts plays, not lingering (#49/#58). Also the transient play feed.
+        store.record_history_plays(identity_id, now, hist)
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")
@@ -140,73 +154,6 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now) ->
     db_pid = store.upsert_playlist(identity_id, ytm_playlist_id, title,
                                    len(track_ids), content_hash(keys), now)
     store.set_playlist_tracks(db_pid, track_ids)
-
-def sync_plays_identity(store, identity_id, client, now, on_progress=None, label=None,
-                        on_auth_expired=None, on_auth_ok=None) -> None:
-    """Fast, lightweight sync: pull only this identity's likes (the Liked Music playlist) and new
-    plays (listening history). Deliberately skips the full-library enumeration, pruning and saved-
-    album work that make `sync_identity` slow, meant to be run often between full syncs."""
-    label = label or f"identity {identity_id}"
-    auth_bad = False
-    from yt_playlist.rec import recommend            # local import avoids any import cycle
-
-    # Likes: the Liked Music (LM) system playlist's membership *is* your likes, so refreshing that one
-    # playlist captures likes/unlikes made outside the app. Reuse the existing single-playlist refresh.
-    existing = next((p for p in store.get_playlists()
-                     if p.identity_id == identity_id and p.ytm_playlist_id == "LM"), None)
-    _emit(on_progress, "info", f"{label}: refreshing Liked Music…")
-    lm_refreshed = False
-    try:
-        refresh_playlist(store, identity_id, client, "LM", existing.title if existing else "Liked Music", now)
-        lm_refreshed = True
-    except Exception as e:  # noqa: BLE001 - a likes failure shouldn't abort the (best-effort) plays sync
-        if _is_auth_error(e):
-            auth_bad = True
-            if on_auth_expired:
-                on_auth_expired(identity_id, label)
-            _emit(on_progress, "auth_expired",
-                  f"{label}: YouTube session expired. Re-authenticate", label=label)
-        else:
-            logger.warning("liked-music refresh failed for %s: %s", identity_id, e)
-            _emit(on_progress, "info", f"{label}: Liked Music unavailable (skipped)")
-
-    # Feed the captured likes into the model exactly as sync_identity does (#19's like channel): the LM
-    # membership *is* the likes, so every current member maps to LIKE. apply_dislikes records first-seen
-    # likes (record_like), graduates them, and feeds the transient like channel, idempotent on re-sync.
-    if lm_refreshed:
-        lm = next((p for p in store.get_playlists()
-                   if p.identity_id == identity_id and p.ytm_playlist_id == "LM"), None)
-        if lm is not None:
-            rated = {k: "LIKE" for k in store.get_playlist_track_keys(lm.id)}
-            recommend.apply_dislikes(store, rated, now)
-
-    # Plays: record only NEW plays from the recently-played window (record_history_plays diffs it
-    # against this identity's cached window). The fast path re-fetches the same window, so this is what
-    # stops it re-counting lingering tracks as plays (#49); it is the transient play feed too.
-    _emit(on_progress, "info", f"{label}: fetching history…")
-    try:
-        history = with_retry(lambda: client.get_history())
-        hist_keys = [identity_key(t.get("title", ""), _artist(t)) for t in history]
-        store.record_history_plays(identity_id, now, hist_keys)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("history fetch failed for %s: %s", identity_id, e)
-        _emit(on_progress, "info", f"{label}: history unavailable (skipped)")
-
-    if not auth_bad:
-        if on_auth_ok:
-            on_auth_ok(identity_id)   # genuine success -> clear any "expired" flag
-        _emit(on_progress, "done", f"{label}: plays synced")
-
-def sync_plays_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None) -> None:
-    """Fast plays/likes sync across all identities. Records its own `last_plays_sync_at` marker and
-    leaves `last_sync_at` (which drives the full-sync nudge) alone."""
-    labels = {idn.id: idn.label for idn in store.get_identities()}
-    for identity_id, client in clients.items():
-        sync_plays_identity(store, identity_id, client, now,
-                            on_progress=on_progress, label=labels.get(identity_id),
-                            on_auth_expired=on_auth_expired, on_auth_ok=on_auth_ok)
-    store.set_setting("last_plays_sync_at", str(now))
-    _emit(on_progress, "done", "plays synced", final=True)
 
 def _sync_saved_albums(store, clients, on_progress) -> None:
     """Pull the albums saved in each account's library and store them (best-effort)."""

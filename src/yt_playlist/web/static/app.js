@@ -478,67 +478,72 @@ function authBanner(initial) {
     add(label) { if (label && !this.labels.includes(label)) this.labels.push(label); },
   };
 }
-function syncPanel(autoOn = false) {
+function homeStatus() {
+  // Home status card: polls GET /bridge/status every ~3s for the live extension connection and the
+  // now-playing track. Library syncing is automatic in the background, so the only action here is an
+  // unobtrusive "Refresh library" link that kicks a manual POST /sync for power users.
   return {
-    running: false,
-    failed: false,
-    auto: autoOn,
-    lines: [],
-    async toggleAuto() {
-      const next = !this.auto;
-      this.auto = next;   // optimistic: flip immediately so the note appears/disappears
-      try {
-        await fetch('/sync/auto', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'enabled=' + (next ? '1' : '0'),
-        });
-      } catch (e) { this.auto = !next; return; }   // revert if the server didn't take it
-      if (next) this.start('/sync/plays');   // turning it on also runs an immediate live sync, as before
+    connected: false,
+    nowPlaying: null,
+    refreshing: false,
+    init() {
+      const poll = () => fetch('/bridge/status').then(r => r.json())
+        .then(d => { this.connected = !!d.connected; this.nowPlaying = d.now_playing || null; })
+        .catch(() => {});
+      poll();
+      setInterval(poll, 3000);
     },
-    push(ev) {
-      const bad = ev.type === 'err' || ev.type === 'auth_expired';
-      const pip = bad ? '✗' : ev.type === 'done' || ev.type === 'end' ? '✓'
-                : ev.type === 'step' ? '›' : '•';
-      const cls = bad ? 'err' : (ev.type === 'done' || ev.type === 'end') ? 'done' : '';
-      this.lines.push({ text: ev.text || '', pip, cls });
-      this.$nextTick(() => { const l = this.$refs.log; if (l) l.scrollTop = l.scrollHeight; });
-    },
-    async start(endpoint = '/sync') {
-      if (this.running) return;
-      this.running = true; this.failed = false; this.lines = [];
-      // Onboarding: kicking off a sync retires the setup flash and strips ?flash from the URL, so the
-      // post-sync reload doesn't bring it back.
+    async refresh() {
+      if (this.refreshing) return;
+      this.refreshing = true;
+      // Kicking off a sync retires the setup flash (same event the old sync bar dispatched).
       window.dispatchEvent(new CustomEvent('sync-started'));
       if (location.search.includes('flash=')) history.replaceState({}, '', location.pathname);
-      this.push({ type: 'info', text: 'starting sync…' });
-      let job;
-      try {
-        const r = await fetch(endpoint, { method: 'POST' });
-        job = (await r.json()).job_id;
-      } catch (e) { this.push({ type: 'err', text: String(e) }); this.running = false; this.failed = true; return; }
-      const es = new EventSource(`/sync/events/${job}`);
-      es.onmessage = (m) => {
-        const ev = JSON.parse(m.data);
-        if (ev.type === 'err' || ev.type === 'auth_expired') this.failed = true;   // keep the log open
-        if (ev.type === 'auth_expired' && ev.label)        // pop the "session expired" banner live
-          window.dispatchEvent(new CustomEvent('auth-expired', { detail: { label: ev.label } }));
-        if (ev.type === 'end') {
-          es.close(); this.running = false;
-          if (!ev.error && !this.failed) {
-            this.push({ type: 'done', text: 'reloading…' });
-            setTimeout(() => location.reload(), 700);
-          } else {
-            this.push({ type: 'err', text: 'finished with errors. Log kept open. Reload when ready.' });
-          }
-          return;
-        }
-        this.push(ev);
-      };
-      es.onerror = () => { es.close(); this.running = false; this.failed = true; this.push({ type: 'err', text: 'stream interrupted' }); };
+      try { await fetch('/sync', { method: 'POST' }); } catch (e) {}
+      // The library sync runs in the background (rec/enrich workers pick it up); just hold the link
+      // in its "Refreshing…" state briefly so the click reads as acknowledged.
+      setTimeout(() => { this.refreshing = false; }, 4000);
+    },
+    rate(action) {
+      if (!this.nowPlaying) return;
+      const want = action === 'like' ? 'LIKE' : 'DISLIKE';
+      // Optimistic toggle (clicking the active one clears it, matching YouTube Music); the next poll
+      // reconciles with the real state the extension read back from the player.
+      this.nowPlaying.likeStatus = this.nowPlaying.likeStatus === want ? 'INDIFFERENT' : want;
+      fetch('/now-playing/rate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      }).catch(() => {});
     },
   };
 }
+
+// Route every YouTube Music play/open link through the extension so it plays in the EXISTING YouTube
+// Music tab (in the background, you stay on TuneConsole) instead of opening a new tab. Falls back to
+// opening the link when the extension is not connected. Ctrl/meta/middle-click still open a new tab.
+function tcPlay(url) {
+  return fetch('/play', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+  }).then(r => r.json()).then(d => {
+    if (!d || !d.ok) window.open(url, '_blank', 'noopener');   // extension off: open it the old way
+  }).catch(() => { window.open(url, '_blank', 'noopener'); });
+}
+window.tcPlay = tcPlay;
+// Capture phase (the `true` below) so we run BEFORE the target's own handlers: some play links live
+// inside modals and carry @click.stop, which would hide the click from a normal bubble listener.
+document.addEventListener('click', function (e) {
+  if (e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+  var a = e.target.closest && e.target.closest('a[href*="music.youtube.com/"]');
+  if (!a) return;
+  var u;
+  try { u = new URL(a.href || a.getAttribute('href'), location.href); } catch (err) { return; }
+  if (u.hostname !== 'music.youtube.com') return;
+  // Any content path (watch / playlist / browse / channel / ...) routes to the existing tab. Only the
+  // bare origin (the "sign in" link) is left to open normally so you can actually see the sign-in page.
+  if (u.pathname === '/' || u.pathname === '') return;
+  e.preventDefault();
+  tcPlay(u.href);
+}, true);
 
 // Navbar omnisearch dropdown: open/close + keyboard nav over the HTMX-rendered result rows.
 // Visibility is driven by results arriving (htmx:afterSwap, wired in x-init on the form) and by

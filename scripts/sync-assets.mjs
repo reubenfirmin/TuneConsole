@@ -20,6 +20,10 @@ const ASSETS = [
   ["d3-quadtree/dist/d3-quadtree.min.js", "d3-quadtree.min.js"],
   ["d3-timer/dist/d3-timer.min.js", "d3-timer.min.js"],
   ["d3-force/dist/d3-force.min.js", "d3-force.min.js"],
+  // Clusters canvas RENDERER: force-graph (canvas/2D) draws nodes+edges+grid on one GPU-friendly
+  // surface and renders on demand (idle = no repaint). Bundles its own d3-force; we still load the
+  // standalone d3-* above for `window.d3.quadtree`, used by the custom cross-branch separation force.
+  ["force-graph/dist/force-graph.min.js", "force-graph.min.js"],
 ];
 
 // self-hosted variable fonts (latin, weight axis) -> static/vendor/fonts/<dest>

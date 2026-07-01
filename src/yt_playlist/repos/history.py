@@ -1,10 +1,40 @@
 """HistoryRepo: listening-history snapshots and their item keys."""
+import datetime
+
 from yt_playlist.repos.base import Repo, synchronized
 
-# A truncated get_history() reply (the app sees occasional 1-3 item windows) must NOT replace a full
-# cached window, or the dropped tracks would re-count as "plays" when the full window returns. So a
-# window smaller than this fraction of the cached one is treated as a hiccup and ignored (#49).
-_WINDOW_MIN_FRACTION = 0.5
+_NOON = 43200            # store each play-date snapshot at noon UTC, so taken_at queries are day-stable
+_EPOCH = datetime.date(1970, 1, 1)
+
+
+def _parse_played_date(played, taken_at) -> float:
+    """Resolve YouTube's relative `played` bucket ('Today' / 'Yesterday' / 'Jun 25' / 'Jun 25, 2025') to
+    an ABSOLUTE UTC day (a noon timestamp), anchored on the sync time `taken_at` (#58). Because the bucket
+    is relative, the SAME play reads 'Today' on one sync and 'Yesterday' the next -- both resolve to the
+    same date, which is what makes play recording idempotent. Unknown/localized labels fall back to the
+    sync day (so a play is at worst attributed to the day we observed it, never duplicated)."""
+    sync_day = datetime.datetime.fromtimestamp(taken_at, tz=datetime.timezone.utc).date()
+    p = (played or "").strip().lower()
+    if p in ("", "today"):
+        day = sync_day
+    elif p == "yesterday":
+        day = sync_day - datetime.timedelta(days=1)
+    else:
+        day = sync_day
+        s = (played or "").strip()
+        for fmt, has_year in (("%b %d, %Y", True), ("%B %d, %Y", True), ("%b %d", False), ("%B %d", False)):
+            try:
+                if has_year:
+                    d = datetime.datetime.strptime(s, fmt).date()
+                else:                                    # pin the sync year explicitly (no 1900 default)
+                    d = datetime.datetime.strptime(f"{s} {sync_day.year}", f"{fmt} %Y").date()
+                    if d > sync_day:                     # e.g. "Dec 30" seen in early Jan -> previous year
+                        d = d.replace(year=sync_day.year - 1)
+            except (ValueError, TypeError, AttributeError):
+                continue
+            day = d
+            break
+    return (day - _EPOCH).days * 86400 + _NOON
 
 
 class HistoryRepo(Repo):
@@ -23,35 +53,60 @@ class HistoryRepo(Repo):
         return sid
 
     @synchronized
-    def record_history_plays(self, identity_id, taken_at, item_keys) -> int:
-        """#49 Capture-time play detection. YouTube's recently-played window is re-fetched every sync
-        and ~91% overlaps the previous one, so storing it whole made COUNT(*) count lingering, not
-        plays. Instead, diff the new window against this identity's cached previous window and record
-        ONLY the newly-appeared keys as a snapshot (so all the COUNT(*) read queries stay correct and
-        cheap). Returns the number of NEW plays recorded.
+    def record_history_plays(self, identity_id, taken_at, items) -> int:
+        """#49/#58 Idempotent capture-time play recording. `items` is the recently-played window as
+        [(identity_key, played_bucket), ...] (a bare key is also accepted -> played=None -> the sync
+        day). Each play is keyed by (identity_key, played-DATE): the relative `played` bucket resolved
+        to an absolute day via taken_at. Re-fetching the same window -- even when 'Today' becomes
+        'Yesterday' the next day -- maps to the same date and records nothing new, so COUNT(*) counts
+        plays, not lingering; a reordered/unstable window cannot create phantom plays. Same-date repeats
+        merge. Returns the number of new (key, date) plays recorded.
 
-        Robust to truncated replies: a window much smaller than the cached one is treated as a hiccup
-        (no plays recorded, cache preserved) so an API blip can't drop the window and re-count later."""
-        incoming = {k for k in item_keys if k}
-        if not incoming:
-            return 0
-        prev = self._history_window_keys(identity_id)
-        if prev and len(incoming) < len(prev) * _WINDOW_MIN_FRACTION:
-            return 0                                       # truncated/hiccup: ignore, keep the cache
-        new = incoming - prev
-        if new:
-            self.add_history_snapshot(identity_id, taken_at, sorted(new))
-        self._replace_history_window(identity_id, incoming)
-        return len(new)
+        play_count(key) = COUNT(*) over history_items = number of distinct days the track was played.
+        """
+        by_date: dict = {}
+        for item in items:
+            key, played = (item, None) if isinstance(item, str) else item
+            if key:
+                by_date.setdefault(_parse_played_date(played, taken_at), set()).add(key)
+        recorded = 0
+        for play_ts, keys in by_date.items():
+            sid = self._snapshot_for_date(identity_id, play_ts)
+            existing = {r["identity_key"] for r in self.conn.execute(
+                "SELECT identity_key FROM history_items WHERE snapshot_id=?", (sid,))}
+            new = sorted(keys - existing)
+            if new:
+                self.conn.executemany("INSERT INTO history_items(snapshot_id, identity_key) VALUES (?,?)",
+                                      [(sid, k) for k in new])
+                recorded += len(new)
+        self.conn.commit()
+        return recorded
 
-    def _history_window_keys(self, identity_id) -> set:
-        return {r["identity_key"] for r in self.conn.execute(
-            "SELECT identity_key FROM history_window WHERE identity_id=?", (identity_id,))}
+    def _snapshot_for_date(self, identity_id, play_ts):
+        """Get-or-create the single snapshot for (identity, play-date), so all of a day's plays share
+        one snapshot and (snapshot, key) is the de-dup unit."""
+        row = self.conn.execute(
+            "SELECT id FROM history_snapshots WHERE identity_id=? AND taken_at=?",
+            (identity_id, play_ts)).fetchone()
+        if row:
+            return row["id"]
+        return self.conn.execute(
+            "INSERT INTO history_snapshots(identity_id, taken_at) VALUES (?,?)",
+            (identity_id, play_ts)).lastrowid
 
-    def _replace_history_window(self, identity_id, keys) -> None:
-        self.conn.execute("DELETE FROM history_window WHERE identity_id=?", (identity_id,))
-        self.conn.executemany("INSERT INTO history_window(identity_id, identity_key) VALUES (?,?)",
-                              [(identity_id, k) for k in keys])
+    @synchronized
+    def reset_play_history(self, identity_id=None) -> None:
+        """#58 Clear stored play history so it rebuilds clean from the next sync (the reset a full sync
+        can call). Scoped to one identity, or all when None. Also clears the legacy window cache."""
+        if identity_id is None:
+            self.conn.execute("DELETE FROM history_items")
+            self.conn.execute("DELETE FROM history_snapshots")
+            self.conn.execute("DELETE FROM history_window")
+        else:
+            self.conn.execute("DELETE FROM history_items WHERE snapshot_id IN "
+                              "(SELECT id FROM history_snapshots WHERE identity_id=?)", (identity_id,))
+            self.conn.execute("DELETE FROM history_snapshots WHERE identity_id=?", (identity_id,))
+            self.conn.execute("DELETE FROM history_window WHERE identity_id=?", (identity_id,))
         self.conn.commit()
 
     @synchronized

@@ -1,12 +1,19 @@
-"""#49 capture-time play counting: record_history_plays records only NEW recently-played entries,
-so the re-fetched (heavily-overlapping) window no longer inflates play counts."""
+"""#49/#58 capture-time play counting: plays are keyed by (identity_key, played-DATE), so a re-fetched
+window (even relabeled Today->Yesterday) never inflates, and same-date repeats merge."""
+import datetime
+
 from yt_playlist.core.store import Store
+from yt_playlist.repos.history import _parse_played_date
+
+DAY = 86400
+
+
+def _ts(day):
+    return day * DAY + 50000          # some moment within `day`
 
 
 def _store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
+    s = Store(":memory:"); s.init_schema(); return s
 
 
 def _counts(s):
@@ -14,30 +21,52 @@ def _counts(s):
         "SELECT identity_key, COUNT(*) FROM history_items GROUP BY identity_key")}
 
 
-def test_record_history_plays_dedups_lingering_window():
-    s = _store()
-    iid = s.upsert_identity("m", "c", None, True)
-    win = ["a|x", "b|x", "c|x"]
-    assert s.record_history_plays(iid, 1.0, win) == 3          # first window: all genuinely new
-    assert s.record_history_plays(iid, 2.0, win) == 0          # same window re-synced: nothing new
-    assert s.record_history_plays(iid, 3.0, ["d|x"] + win) == 1  # one new track on top of the window
-    assert _counts(s) == {"a|x": 1, "b|x": 1, "c|x": 1, "d|x": 1}   # no lingering inflation
+# --- _parse_played_date ---
+
+def test_parse_today_yesterday_and_missing():
+    assert _parse_played_date("Today", _ts(100)) == 100 * DAY + 43200
+    assert _parse_played_date("Yesterday", _ts(100)) == 99 * DAY + 43200
+    assert _parse_played_date(None, _ts(100)) == 100 * DAY + 43200          # missing -> sync day
 
 
-def test_record_history_plays_ignores_truncated_window():
-    s = _store()
-    iid = s.upsert_identity("m", "c", None, True)
-    full = [f"t{i}|x" for i in range(10)]
-    assert s.record_history_plays(iid, 1.0, full) == 10
-    assert s.record_history_plays(iid, 2.0, ["t0|x"]) == 0     # truncated reply: ignored, not re-counted
-    assert s.record_history_plays(iid, 3.0, full) == 0         # cache survived the hiccup -> no re-count
-    assert all(c == 1 for c in _counts(s).values())
+def test_parse_relabel_resolves_to_same_date():
+    # the SAME play: "Today" on day 100, "Yesterday" on day 101 -> identical absolute date
+    assert _parse_played_date("Today", _ts(100)) == _parse_played_date("Yesterday", _ts(101))
 
 
-def test_record_history_plays_is_per_identity():
-    s = _store()
-    a = s.upsert_identity("a", "c", None, True)
-    b = s.upsert_identity("b", "c", None, False)
-    assert s.record_history_plays(a, 1.0, ["k|x"]) == 1
-    assert s.record_history_plays(b, 1.0, ["k|x"]) == 1        # a different identity's window is separate
-    assert _counts(s) == {"k|x": 2}
+def test_parse_explicit_date_string():
+    sync = int(datetime.datetime(2026, 6, 27, tzinfo=datetime.timezone.utc).timestamp())
+    want = (datetime.date(2026, 6, 25) - datetime.date(1970, 1, 1)).days
+    assert _parse_played_date("Jun 25", sync) == want * DAY + 43200
+
+
+def test_parse_unparseable_falls_back_to_sync_day():
+    assert _parse_played_date("hoy (localized)", _ts(100)) == 100 * DAY + 43200
+
+
+# --- record_history_plays ---
+
+def test_dedups_by_played_date_across_relabel():
+    s = _store(); iid = s.upsert_identity("m", "c", None, True)
+    assert s.record_history_plays(iid, _ts(100), [("a|x", "Today")]) == 1
+    assert s.record_history_plays(iid, _ts(101), [("a|x", "Yesterday")]) == 0   # same date -> no inflation
+    assert s.record_history_plays(iid, _ts(101), [("b|y", "Today")]) == 1       # genuinely new
+    assert _counts(s) == {"a|x": 1, "b|y": 1}
+
+
+def test_merges_same_date_repeats():
+    s = _store(); iid = s.upsert_identity("m", "c", None, True)
+    assert s.record_history_plays(iid, _ts(100), [("a|x", "Today"), ("a|x", "Today")]) == 1
+
+
+def test_accepts_bare_keys_backward_compat():
+    s = _store(); iid = s.upsert_identity("m", "c", None, True)
+    assert s.record_history_plays(iid, _ts(100), ["a|x", "b|x"]) == 2     # bare key -> sync day
+    assert s.record_history_plays(iid, _ts(100), ["a|x"]) == 0            # same day, idempotent
+
+
+def test_reset_play_history():
+    s = _store(); iid = s.upsert_identity("m", "c", None, True)
+    s.record_history_plays(iid, _ts(100), [("a|x", "Today")])
+    s.reset_play_history(iid)
+    assert _counts(s) == {}

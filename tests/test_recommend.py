@@ -210,7 +210,7 @@ def test_take_action_auth_and_cleanup_no_sync(store):
     kinds = [i.kind for i in items]
     assert "sync" not in kinds                       # sync nudge now lives in the Sync card
     assert kinds[0] == "auth"
-    assert "Re-authenticate main" in items[0].title
+    assert "Sign in to YouTube Music (main)" in items[0].title
     assert any(i.kind == "cleanup" and i.cta_href == "/cleanup" for i in items)
 
 
@@ -219,35 +219,14 @@ def test_take_action_empty_when_clean(store):
     assert recommend.take_action(store, now=1000.0, auth_expired={}) == []
 
 
-def test_take_action_enrichment_ranked_by_playcount(store):
+def test_take_action_has_no_manual_enrich_nag(store):
+    """The Take-Action triage no longer emits manual-enrichment nag cards (removed in favor of the
+    background auto-enrich worker)."""
     iid = store.upsert_identity("main", "cred", None, True)
-    hot = [store.upsert_track(f"h{i}", f"H{i}", "HA", None, None) for i in range(6)]   # all gappy
-    cold = [store.upsert_track(f"c{i}", f"C{i}", "CA", None, None) for i in range(6)]  # all gappy
+    ts = [store.upsert_track(f"h{i}", f"H{i}", "HA", None, None) for i in range(6)]   # all gappy
     php = store.upsert_playlist(iid, "PH", "Hot List", 6, "h", 0.0, "http://t/hot.jpg")
-    plp = store.upsert_playlist(iid, "PL", "Cold List", 6, "h2", 0.0)
-    store.set_playlist_tracks(php, hot)
-    store.set_playlist_tracks(plp, cold)
-    store.add_history_snapshot(iid, 1.0, ["h0|ha"])           # only Hot List has plays
-
-    items = recommend.take_action(store, now=1000.0, auth_expired={})
-    enrich = [i for i in items if i.kind == "enrich"]
-
-    assert len(enrich) == 2                           # one card per gappy playlist
-    assert all(i.severity == "low" for i in enrich)
-    assert "Hot List" in enrich[0].title              # ranked by playcount: Hot List first
-    assert "Cold List" in enrich[1].title
-    assert enrich[0].cta_href == f"/playlist/{php}?enrich=1"
-    assert enrich[0].thumbnail == "http://t/hot.jpg"  # card carries the playlist thumbnail
-
-
-def test_enrichment_skips_mostly_enriched_playlist(store):
-    """A playlist enriched down to a few untaggable residuals must stop nagging (the 13/639 bug)."""
-    iid = store.upsert_identity("main", "cred", None, True)
-    ts = [store.upsert_track(f"t{i}", f"T{i}", "A", None, None) for i in range(20)]
-    pid = store.upsert_playlist(iid, "P", "Almost Done", 20, "h", 0.0)
-    store.set_playlist_tracks(pid, ts)
-    for t in ts[2:]:                                  # tag all but 2 -> 10% gap, below threshold
-        store.set_track_genre(t, "Techno")
+    store.set_playlist_tracks(php, ts)
+    store.add_history_snapshot(iid, 1.0, ["h0|ha"])
     items = recommend.take_action(store, now=1000.0, auth_expired={})
     assert not [i for i in items if i.kind == "enrich"]
 

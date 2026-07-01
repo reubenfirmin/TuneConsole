@@ -555,10 +555,6 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 .head-icon:hover { color: var(--accent); background: var(--surface-2); transform: translateY(-1px); }
 .head-icon.on, .head-icon:disabled { color: var(--accent-2); transform: none; }
 .head-icon:disabled { cursor: default; }
-/* Arrived from a home "Enrich" CTA: the enrich buttons (the share icon is an <a>) glow CTA-green so
-   it's obvious what to click. Drops once a source starts running (.on) or is unavailable (:disabled). */
-.head-tools.enrich-hint button.head-icon:not(.on):not(:disabled) { color: #15e98c; }
-.head-tools.enrich-hint button.head-icon:not(.on):not(:disabled):hover { color: #6bffab; }
 
 /* enrichment progress strip below the header */
 .enrich-strip { display: flex; align-items: center; gap: 0.8rem; margin: -0.6rem 0 1.6rem; }
@@ -828,6 +824,46 @@ button.htmx-request .check-busy { display: inline; }
 .sync-status { display: flex; align-items: center; gap: 0.6rem; }
 .sync-nudge { color: var(--accent-2); font-size: 0.86rem; font-weight: 600; }
 .home-control.sync-stale { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
+
+/* Home status card: live extension connection, now-playing, and library freshness. */
+.home-status { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  padding: 0.85rem 1.15rem; margin-bottom: 1.6rem; position: relative; overflow: hidden; }
+.home-status::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px;
+  background: var(--grad); opacity: 0.9; }
+.home-status.is-down::before { background: #d29922; }
+.hs-main { display: flex; align-items: center; gap: 0.7rem; min-width: 0; }
+.hs-dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; flex: none; }
+.home-status.is-live .hs-dot { background: #3fb950; box-shadow: 0 0 0 3px rgba(63,185,80,0.18); }
+.home-status.is-down .hs-dot { background: #d29922; box-shadow: 0 0 0 3px rgba(210,153,34,0.18); }
+.hs-state { font-weight: 600; color: var(--text); }
+.hs-now { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
+.hs-art { width: 3.4rem; height: 3.4rem; border-radius: 7px; object-fit: cover; flex: none;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
+.hs-rate-group { display: inline-flex; align-items: center; gap: 0.15rem; margin-left: 0.35rem; flex: none; }
+.hs-rate { background: none; border: none; cursor: pointer; padding: 0.3rem; line-height: 0;
+  color: var(--dim); border-radius: 6px; transition: color 0.12s, background 0.12s; }
+.hs-rate svg { width: 1.35rem; height: 1.35rem; display: block; fill: none; stroke: currentColor;
+  stroke-width: 1.7; stroke-linejoin: round; }
+.hs-rate:hover { background: var(--accent-soft); color: var(--text); }
+.hs-heart.on { color: #ff5c8a; }
+.hs-skull.on { color: #e6edf3; }
+.hs-rate.on svg { fill: currentColor; stroke: none; }
+.hs-now-text { min-width: 0; display: flex; align-items: baseline; gap: 0.5rem; }
+.hs-now-title { font-weight: 700; font-size: 1.1rem; color: var(--text); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 34ch; }
+.hs-now-artist { color: var(--dim); font-weight: 500; font-size: 0.95rem; white-space: nowrap; }
+.hs-now-artist::before { content: "·"; margin-right: 0.5rem; }
+.hs-eq { display: inline-flex; align-items: flex-end; gap: 2px; height: 0.95rem; flex: none; }
+.hs-eq i { width: 3px; height: 100%; border-radius: 2px; background: var(--accent-2);
+  transform-origin: bottom; animation: hs-eq 0.9s ease-in-out infinite; }
+.hs-eq i:nth-child(1) { animation-delay: -0.15s; }
+.hs-eq i:nth-child(2) { animation-delay: -0.5s; }
+.hs-eq i:nth-child(3) { animation-delay: -0.35s; }
+@keyframes hs-eq { 0%, 100% { transform: scaleY(0.35); } 50% { transform: scaleY(1); } }
+.hs-meta { display: flex; align-items: center; gap: 0.9rem; flex: none; }
+.hs-sync { color: var(--dim); font-size: 0.82rem; white-space: nowrap; }
+.hs-refresh { color: var(--accent-2); font-size: 0.82rem; font-weight: 600; }
+.hs-refresh.is-busy { opacity: 0.6; pointer-events: none; }
 .home-footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border);
   text-align: center; font-size: 0.85rem; }
 .home-footer a { color: var(--dim); }
@@ -1085,7 +1121,6 @@ button.htmx-request .check-busy { display: inline; }
    that would leave only-3 tiles bunched at min-width on the left. */
 .rediscover-albums { grid-template-columns: repeat(3, 1fr); }
 /* The how-we-rank explanation sits at the foot of the section as quiet secondary text. */
-.redis-fineprint { color: var(--faint); font-size: 0.78rem; margin: 1.2rem 0 0; }
 .redis-card { display: flex; flex-direction: column; }
 .redis-head { display: flex; gap: 0.7rem; align-items: center; margin-bottom: 0.7rem; }
 .redis-head .gen-th { width: 3rem; height: 3rem; }
@@ -1325,6 +1360,16 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
     radial-gradient(130% 105% at 50% -8%, #16132f 0%, #0b0a23 55%, #06051a 100%);
 }
 .cluster-canvas:active { cursor: grabbing; }
+/* force-graph renders its <canvas> inside here, filling the panel; it handles pan/zoom/drag itself. */
+.cluster-graph { position: absolute; inset: 0; z-index: 1; }
+.cluster-graph canvas { display: block; }
+/* override force-graph's inline canvas cursor while hovering a mid-edge info dot (see pointermove in init) */
+.cluster-graph.dot-hover canvas { cursor: pointer !important; }
+/* hover/click action menu, floated over the canvas at a node's screen position (set in _positionOverlays) */
+.cluster-actions { position: absolute; top: 0; left: 0; z-index: 6; }
+/* full card width (width set per-node in _positionOverlays); flex:1 buttons stretch to fill = big targets */
+.cluster-actions .ca-row { display: flex; gap: 4px; padding: 4px; border-radius: 9px; width: 100%; box-sizing: border-box;
+  background: rgba(13,11,38,0.94); border: 1px solid var(--border-2); box-shadow: var(--shadow); }
 
 /* Starfield BEHIND the graph (cluster-world is z-index 1), with the spacetime grid (<canvas>) over it.
    Two star layers (element bg + ::before) for depth. DELIBERATELY STATIC — no animation. ANY animation
@@ -1559,15 +1604,18 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
   white-space: nowrap; align-self: center; }
 .cluster-reset:hover { border-color: var(--danger); color: var(--danger); }
 .cg-box { display: flex; align-items: center; flex-wrap: wrap; gap: 0.3rem; cursor: text;
-  padding: 0.4rem 0.6rem; min-height: 2.65rem; box-sizing: border-box;
+  padding: 0.4rem 0.6rem; min-height: 2.65rem; box-sizing: border-box; width: 100%;
+  /* #d: the box grows taller ONLY when chips truly run out of horizontal room. It used to wrap early
+     because the input demanded a wide min-width and got bumped to its own line; the input now shrinks
+     (see .cg-box input) so it tucks in after the chips and a second row appears only when needed. */
   background: var(--surface); border: 1.5px solid var(--border-2); border-radius: 1.3rem; }
 .cg-box.on { border-color: #15e98c; }
 .cg-box:focus-within { border-color: #6bffab; box-shadow: 0 0 0 3px rgba(107,255,171,0.18); }
 .cg-icon { color: var(--faint); font-size: 0.9rem; flex: none; }
-.cg-box input { flex: 1; min-width: 4rem; border: none; background: none; outline: none;
+.cg-box input { flex: 1 1 2rem; min-width: 2rem; border: none; background: none; outline: none;
   color: var(--text); font-size: 0.9rem; padding: 0.1rem 0; }
-.cg-chip { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer;
-  background: rgba(21,233,140,0.12); color: #15e98c; border: 1px solid rgba(21,233,140,0.4);
+.cg-chip { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; flex: none;
+  white-space: nowrap; background: rgba(21,233,140,0.12); color: #15e98c; border: 1px solid rgba(21,233,140,0.4);
   border-radius: 999px; padding: 0.08rem 0.5rem; font-size: 0.76rem; font-weight: 600;
   text-transform: capitalize; }
 .cg-chip::after { content: '✕'; font-size: 0.6rem; opacity: 0.7; }
@@ -1668,19 +1716,19 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
   color: var(--text); margin: 0 0 0.45rem; }
 .presync-sub { color: var(--dim); font-size: 1rem; max-width: 42ch; margin: 0 auto; line-height: 1.5; }
 
-/* Enrich onboarding nudge: icon, text, and dismiss as three columns so the copy never wraps under
-   the bulb. Violet-tinted to match the recommendation theme. */
-.enrich-nudge {
+/* Home nudge banner: icon, text, and dismiss as three columns so the copy never wraps under the
+   icon. Violet-tinted to match the recommendation theme. */
+.home-nudge {
   display: flex; align-items: flex-start; gap: 0.85rem;
   padding: 0.95rem 1.05rem; margin-bottom: 1.4rem; border-radius: var(--radius-sm);
   background: linear-gradient(135deg, var(--accent-soft), rgba(124, 108, 255, 0.05));
   border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
 }
-.enrich-nudge-icon { flex: none; font-size: 1.35rem; line-height: 1.35; }
-.enrich-nudge-body { flex: 1; display: flex; flex-direction: column; gap: 0.18rem; min-width: 0; }
-.enrich-nudge-body strong { color: var(--text); font-weight: 650; }
-.enrich-nudge-body span { color: var(--dim); font-size: 0.92rem; line-height: 1.5; }
-.enrich-nudge-x { flex: none; align-self: flex-start; margin: -0.2rem -0.3rem 0 0; }
+.home-nudge-icon { flex: none; font-size: 1.35rem; line-height: 1.35; }
+.home-nudge-body { flex: 1; display: flex; flex-direction: column; gap: 0.18rem; min-width: 0; }
+.home-nudge-body strong { color: var(--text); font-weight: 650; }
+.home-nudge-body span { color: var(--dim); font-size: 0.92rem; line-height: 1.5; }
+.home-nudge-x { flex: none; align-self: flex-start; margin: -0.2rem -0.3rem 0 0; }
 
 /* Sync controls go CTA-green on hover (matching the ↻ refresh icon) instead of the neutral grey dim.
    Scoped to the sync bar so other ghost buttons keep their normal hover. */
@@ -1890,3 +1938,37 @@ figure.rose { margin: 0; text-align: center; }
 .autotune-diff { display: flex; flex-direction: column; gap: 0.4rem; }
 .autotune-diff .diff-row { display: flex; gap: 0.55rem; align-items: baseline; }
 .autotune-diff .diff-list { color: var(--dim); font-size: 0.82rem; line-height: 1.45; }
+
+/* "You're into [X] recently" Wikipedia card: big squared thumbnail in the left column, body right. */
+.wiki-card { display: grid; grid-template-columns: auto 1fr; gap: 1.2rem; align-items: stretch; }
+.wiki-th { width: 11rem; align-self: stretch; aspect-ratio: 1 / 1; border-radius: var(--radius-sm);
+  background-size: cover; background-position: center; border: 1px solid var(--border); }
+.wiki-body { display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; }
+.wiki-title { font-size: 1.05rem; margin: 0; font-weight: 500; }
+/* The featured subject: display serif, tinted + glowing in its genre colour (--subj, set inline). */
+.wiki-subject { font-family: var(--font-display); font-weight: 600; font-size: 1.5rem;
+  color: var(--subj, var(--accent-2)); letter-spacing: 0.01em;
+  text-shadow: 0 0 18px color-mix(in srgb, var(--subj, var(--accent-2)) 55%, transparent); }
+.wiki-extract { margin: 0; color: var(--dim); line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.wiki-foot { display: flex; align-items: baseline; gap: 0.8rem; flex-wrap: wrap; }
+.wiki-cta { font-size: 0.9rem; font-weight: 600; color: var(--subj, var(--accent-2));
+  padding: 0.32rem 0.7rem; border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--subj, var(--accent-2)) 45%, transparent);
+  background: color-mix(in srgb, var(--subj, var(--accent-2)) 12%, transparent); }
+.wiki-cta:hover { background: color-mix(in srgb, var(--subj, var(--accent-2)) 22%, transparent); }
+.wiki-link { font-size: 0.9rem; }
+.wiki-attr { font-size: 0.78rem; color: var(--faint); margin-left: auto; }
+
+/* Clusters: switcher between multiple saved canvases. Sits at the bottom, just left of the zoombar
+   (which lives at right:0.8rem), as a horizontal row that wraps UPWARD when there are many. */
+.canvas-switcher { position: absolute; right: 3.6rem; bottom: 0.8rem; z-index: 4;
+  display: flex; flex-direction: row; flex-wrap: wrap-reverse; justify-content: flex-end;
+  align-items: flex-end; gap: 0.4rem; max-width: calc(100% - 6rem); }
+.canvas-chip { max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0.35rem 0.75rem; border-radius: 999px; font-size: 0.82rem; color: var(--dim);
+  background: linear-gradient(135deg, var(--surface), var(--surface-2));
+  border: 1px solid var(--border); box-shadow: var(--shadow); }
+.canvas-chip:hover { color: var(--text); border-color: var(--border-2); }
+.canvas-chip.active { color: var(--text); font-weight: 600;
+  border-color: var(--accent); background: var(--accent-soft); }

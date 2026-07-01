@@ -1,13 +1,14 @@
 <div id="home-feed" class="home-feed">
-  {# The steering panel only makes sense once the library has genres to steer; empty state until then. #}
+  {# The mode-focused cards lead the dash so it does not open on a wall of taste sliders. They load
+     lazily from the worker's prepared bundles (spinner while assembling). #}
+  <div hx-get="/home/cards" hx-trigger="load" hx-swap="innerHTML" class="card-row-loading">
+    <div class="spinner" aria-label="Building your mixes"></div>
+  </div>
+  {# The steering panel sits BELOW the cards (only meaningful once the library has genres to steer), so
+     the page starts with playlists, not controls. #}
   {% if fingerprint.families %}{% include "_partials/taste_fingerprint.html" %}{% endif %}
   <div id="steer-toast" class="steer-toast" x-data="{show:false}" x-show="show" x-cloak x-transition
        x-init="$nextTick(() => { if (sessionStorage.getItem('steered')) { sessionStorage.removeItem('steered'); show=true; setTimeout(()=>show=false, 3500); } })">
     Re-ranked. <a href="/taste">Fine-tune your taste model →</a>
-  </div>
-  <div class="gen-lanes">
-    {% for p in generated %}{% include "_partials/generated_playlist.html" %}{% endfor %}
-    <div hx-get="/home/fresh" hx-trigger="load" hx-swap="outerHTML"></div>
-    {% if comfort %}{% with p = comfort %}{% include "_partials/generated_playlist.html" %}{% endwith %}{% endif %}
   </div>
 </div>

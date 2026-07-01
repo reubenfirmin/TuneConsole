@@ -31,6 +31,25 @@ def build(ctx) -> APIRouter:
         viz["eras"] = _rose_rows(viz["eras"])
         return {"viz": viz}
 
+    MODE_NEW_S = 2 * 86400.0   # a mode first seen within this window renders as "new"
+
+    def _modes_context():
+        now = ctx.now()
+        rows = store.modes.list_modes(active_only=True)
+        rep_keys = [k for m in rows for k in m["rep_keys"]]
+        meta = store.modes.meta_for(rep_keys)
+        from yt_playlist.rec import mode_eval
+        board = {b["mode_id"]: b for b in mode_eval.mode_scoreboard(store)}
+        modes = []
+        for m in rows:
+            b = board.get(m["mode_id"], {})
+            tracks = [meta[k] for k in m["rep_keys"] if k in meta]
+            modes.append({"label": m["label"], "size": m["size"],
+                          "fresh": (now - m["first_seen"]) < MODE_NEW_S, "tracks": tracks,
+                          "offered": b.get("offered", 0), "picked": b.get("picked", 0),
+                          "plays": b.get("plays", 0)})
+        return {"modes": modes}
+
     def _refresh():
         return Response(status_code=200, headers={"HX-Refresh": "true"})
 
@@ -79,7 +98,8 @@ def build(ctx) -> APIRouter:
 
     @router.get("/taste")
     def taste_page(request: Request):
-        return templates.TemplateResponse(request, "taste.html", {**_model_context(), **_viz_context()})
+        return templates.TemplateResponse(
+            request, "taste.html", {**_model_context(), **_viz_context(), **_modes_context()})
 
     @router.get("/taste/viz/engine")
     def taste_viz_engine(request: Request):

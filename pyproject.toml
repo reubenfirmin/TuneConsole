@@ -9,7 +9,9 @@ dependencies = [
     # but we cap the major for reproducibility and to review breaking changes deliberately.
     "ytmusicapi>=1.12,<2",
     "fastapi>=0.110",
-    "uvicorn>=0.29",
+    # [standard] pulls in a WebSocket implementation (websockets), which the extension bridge
+    # endpoint (/bridge/ws) requires; plain uvicorn returns 404 on the WS upgrade without it.
+    "uvicorn[standard]>=0.29",
     "jinja2>=3.1",
     "python-multipart>=0.0.9",
     "rapidfuzz>=3.6",

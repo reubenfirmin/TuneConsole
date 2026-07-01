@@ -1,0 +1,20 @@
+<section class="card wiki-card">
+  <div class="wiki-th" style="background-image:url('{{ card.thumbnail }}')" aria-hidden="true"></div>
+  <div class="wiki-body">
+    <h2 class="wiki-title">You're into
+      <strong class="wiki-subject" style="--subj: {{ card.color }}">{{ card.display }}</strong>
+      recently</h2>
+    <p class="wiki-extract">{{ card.extract | linkify }}</p>
+    <div class="wiki-foot">
+      {% if card.seed %}
+      <a class="wiki-cta" style="--subj: {{ card.color }}"
+         href="/clusters?seed={{ card.seed | urlencode }}&depth={{ card.depth }}&label={{ card.display | urlencode }}{% if card.genre %}&genre={{ card.genre | urlencode }}{% endif %}">
+        Explore {{ card.display }} in your catalog →</a>
+      {% endif %}
+      {% if card.url %}
+      <a class="wiki-link" href="{{ card.url }}" target="_blank" rel="noopener nofollow">Read on Wikipedia ↗</a>
+      {% endif %}
+      <span class="wiki-attr">from Wikipedia</span>
+    </div>
+  </div>
+</section>

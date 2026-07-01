@@ -12,6 +12,7 @@ from yt_playlist.repos.enrichment import EnrichmentRepo
 from yt_playlist.repos.genres import GenreRepo
 from yt_playlist.repos.history import HistoryRepo
 from yt_playlist.repos.identities import IdentityRepo
+from yt_playlist.repos.modes import ModesRepo
 from yt_playlist.repos.overlaps import OverlapRepo
 from yt_playlist.repos.playlists import PlaylistRepo
 from yt_playlist.repos.rec import RecRepo
@@ -19,6 +20,7 @@ from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.search import SearchRepo
 from yt_playlist.repos.settings import SettingsRepo
 from yt_playlist.repos.tracks import TrackRepo
+from yt_playlist.repos.wiki import WikiRepo
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS identities (
@@ -199,6 +201,40 @@ CREATE TABLE IF NOT EXISTS rec_lean (
 CREATE TABLE IF NOT EXISTS home_hidden_facet (
   axis TEXT PRIMARY KEY                   -- 'genre:<name>' | 'era:<decade>' hidden from the Home panel
 );
+CREATE TABLE IF NOT EXISTS wiki_cards (
+  subject    TEXT PRIMARY KEY,
+  kind       TEXT NOT NULL,
+  display    TEXT NOT NULL,
+  title      TEXT,
+  extract    TEXT,
+  thumbnail  TEXT,
+  url        TEXT,
+  found      INTEGER NOT NULL,
+  fetched_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS taste_modes (
+  mode_id     INTEGER PRIMARY KEY,
+  label       TEXT NOT NULL,
+  families    TEXT NOT NULL,
+  centroid    BLOB NOT NULL,
+  size        INTEGER NOT NULL,
+  rep_keys    TEXT NOT NULL,
+  active      INTEGER NOT NULL,
+  first_seen  REAL NOT NULL,
+  last_seen   REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rec_mode_impressions (
+  epoch      INTEGER NOT NULL,
+  lane       TEXT NOT NULL,
+  mode_id    INTEGER NOT NULL,
+  created_at REAL NOT NULL,
+  PRIMARY KEY (epoch, lane)
+);
+CREATE TABLE IF NOT EXISTS rec_mode_picks (
+  playlist_id INTEGER PRIMARY KEY,
+  mode_id     INTEGER NOT NULL,
+  created_at  REAL NOT NULL
+);
 """
 
 # Row dataclasses live in repos.models (avoids a Store<->repo cycle); re-exported here so existing
@@ -234,9 +270,11 @@ class Store:
         self.discovery = DiscoveryRepo(self)
         self.search = SearchRepo(self)
         self.enrichment = EnrichmentRepo(self)
+        self.wiki = WikiRepo(self)
+        self.modes = ModesRepo(self)
         self._repos = (self.overlaps, self.discovery, self.genres, self.settings, self.actions,
                        self.identities, self.history, self.collection, self.rec, self.charts,
-                       self.tracks, self.playlists, self.search, self.enrichment)
+                       self.tracks, self.playlists, self.search, self.enrichment, self.wiki, self.modes)
 
     def __getattr__(self, name):
         # Delegate any attribute Store no longer defines to the DAO that owns it. Only hit on a

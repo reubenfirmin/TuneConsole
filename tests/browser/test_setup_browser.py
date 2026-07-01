@@ -1,5 +1,6 @@
-"""Live-behavior test for the Setup check flow: htmx posts /setup/check, swaps the result,
-and fires an `setup-checked` HX-Trigger that Alpine reacts to (auto-fill the master label)."""
+"""Live-behavior test for the Setup pairing tab: the token renders verbatim and the connection
+indicator starts in the "waiting" state, polling GET /bridge/status via Alpine (see setup.html's
+setupForm().init())."""
 import socket
 import threading
 import time
@@ -28,7 +29,6 @@ def live_setup_app():
     s = Store(":memory:")
     s.init_schema()
     rt = _FakeRuntime(s, configured=False)
-    rt.account_name = "Reuben"
     app = create_app(s, rt.clients, now_fn=lambda: 1.0, setup=rt)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
@@ -41,12 +41,16 @@ def live_setup_app():
     thread.join(timeout=5)
 
 
-def test_setup_check_shows_account_and_autofills_master(live_setup_app, page):
+def test_setup_pairing_tab_shows_autoconnect_and_waiting_status(live_setup_app, page):
     page.goto(f"{live_setup_app}/setup")
-    page.locator('textarea[name="headers"]').fill("cookie: x")
-    page.get_by_role("button", name="Check sign-in").click()
-    # htmx swapped the result fragment in
-    expect(page.locator("#check-result")).to_contain_text("Signed in as")
-    expect(page.locator("#check-result")).to_contain_text("Reuben")
-    # HX-Trigger -> Alpine onChecked auto-filled the (blank) master label input
+    # Pairing is seamless now: no token to paste, just an auto-connecting extension.
+    expect(page.get_by_text("it connects automatically")).to_be_visible()
+    # No extension connected yet: GET /bridge/status polls back {"connected": false}
+    expect(page.get_by_text("Waiting for the extension to connect")).to_be_visible()
+
+
+def test_setup_identities_tab_accepts_manual_label(live_setup_app, page):
+    page.goto(f"{live_setup_app}/setup")
+    page.get_by_role("tab", name="Identities").click()
+    page.locator('input[name="label"]').first.fill("Reuben")
     expect(page.locator('input[name="label"]').first).to_have_value("Reuben")

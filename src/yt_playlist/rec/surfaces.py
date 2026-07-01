@@ -250,7 +250,7 @@ def _rotation_reason(n) -> str:
 # producer (fresh_songs) was removed (#53: pool-only, no unscored radio rows).
 
 
-def cold_candidates(store, now, limit=36) -> list[ForYouItem]:
+def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
     """Rank out-of-corpus (cold) tracks from the discovered pool by taste + the transient tilts (#50).
 
     Projects each pool track into the collaborative embedding via ContentProjection (so per-playlist
@@ -300,8 +300,11 @@ def cold_candidates(store, now, limit=36) -> list[ForYouItem]:
         scored.append((float(scores[idx[k]]) * fw, r))
     scored.sort(key=lambda t: -t[0])
     out: list[ForYouItem] = []
-    for _, r in scored[:limit]:
-        reason = "New, sounds like your recent listening" if r.get("audio") else "New, fits your taste"
+    for _, r in (scored[:limit] if limit else scored):
+        # The Fresh card label already says these are new, taste-fit tracks, so a generic "fits your
+        # taste" per row is pure redundancy: leave it blank. Only the audio-matched tracks get a row
+        # note, because "sounds like your recent listening" is genuinely distinguishing info.
+        reason = "Sounds like your recent listening" if r.get("audio") else ""
         out.append(ForYouItem(r.get("title") or "", r.get("artist") or "", r.get("album") or "",
                               r.get("video_id"), r.get("thumbnail"), 0, reason,
                               r["identity_key"], lane="cold"))

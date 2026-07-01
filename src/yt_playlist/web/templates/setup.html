@@ -2,19 +2,18 @@
 <div class="page-head">
   <span class="eyebrow">Connect</span>
   <h1>Set up TuneConsole</h1>
-  <p>Paste a signed-in request from YouTube Music, name your identities, and you're in.</p>
+  <p>Pair the browser extension, name your identities, and you're in.</p>
 </div>
 
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 {% if error %}{% call banner('err') %}<strong>{{ error }}</strong>{% endcall %}{% endif %}
 {% if configured %}{% call banner('') %}Already configured. Saving will update your settings.{% endcall %}{% endif %}
 
-<div x-data='setupForm({{ rows|tojson }}, {{ master_idx|tojson }}, {{ configured|tojson }})'
-     @setup-checked.window="onChecked($event.detail)">
+<div x-data='setupForm({{ rows|tojson }}, {{ master_idx|tojson }}, {{ configured|tojson }})'>
 
   <div class="tabs" role="tablist">
     <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'browser' }"
-            @click="tab = 'browser'" :aria-selected="tab === 'browser'">YouTube · Cookies</button>
+            @click="tab = 'browser'" :aria-selected="tab === 'browser'">Pairing</button>
     <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'identities' }"
             @click="tab = 'identities'" :aria-selected="tab === 'identities'">Identities</button>
     <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'enrichment' }"
@@ -23,62 +22,59 @@
 
 <form method="post" action="/setup" x-ref="form">
 
-  {# ── Tab 1: Cookies (the sign-in capture) ─────────────────────────────────────────── #}
+  {# ── Tab 1: Pairing (the browser-extension bridge) ────────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'browser'" x-cloak>
+    <div class="card" x-cloak
+         :style="connected
+           ? 'border:1px solid #1a7f37;background:rgba(26,127,55,.12);display:flex;gap:.8rem;align-items:center;margin-bottom:1rem'
+           : 'border:1px solid #b4841e;background:rgba(180,132,30,.12);display:flex;gap:.8rem;align-items:center;margin-bottom:1rem'">
+      <span :style="connected ? 'color:#3fb950' : 'color:#d29922'" style="font-size:1.5rem;line-height:1">&#9679;</span>
+      <div>
+        <strong x-text="connected ? 'Extension connected' : 'Extension not connected'"></strong>
+        <div class="section-note" style="margin:.15rem 0 0"
+             x-text="connected
+               ? 'Requests are authenticated live by your signed-in browser session. The app stores no cookies and holds no credential of its own.'
+               : 'Open a signed-in music.youtube.com tab. Until the extension connects, the app cannot reach YouTube Music at all.'"></div>
+      </div>
+    </div>
     <div class="card">
-      <h2 class="section" style="margin-top:0">Capture your sign-in</h2>
+      <h2 class="section" style="margin-top:0">Pair the browser extension</h2>
       <details class="advanced" style="margin-bottom:1rem">
-        <summary>Why sign in this way?</summary>
+        <summary>Why an extension?</summary>
         <p class="section-note">YouTube Music has no public, official API for managing your library and
           playlists. Google does offer an OAuth path (the YouTube Data API), and it can create and edit
           playlists, but it <strong>can't read your listening history</strong>, the "listens" data our
-          recommendation models depend on, so it can't fully drive this app. So instead the app reuses the
-          signed-in request your own browser already makes (the <code class="mono">Copy as cURL</code>
-          below), which carries the cookies and headers those endpoints expect. This is the same approach
-          established tools like <code class="mono">ytmusicapi</code> take, out of necessity.</p>
-        <p class="section-note">Your credentials are stored locally and only ever sent to YouTube, never
-          to us or any third party.</p>
+          recommendation models depend on, so it can't fully drive this app. So instead the app routes
+          requests through a small browser extension (TuneConsole) running in your own signed-in browser
+          session: the extension applies your cookies to each request and sends the response back over a
+          local connection. This is the same underlying approach established tools like
+          <code class="mono">ytmusicapi</code> take, out of necessity, just brokered live through the
+          extension instead of a one-time pasted capture.</p>
+        <p class="section-note">Your session cookies never leave your browser or cross this connection:
+          the app sends only the request (method, URL, body), and the extension adds auth and sends the
+          response back. Nothing credential-related is stored on disk here.</p>
       </details>
       <details class="advanced" style="margin-bottom:1rem">
         <summary>What does this give access to?</summary>
-        <p class="section-note">The capture is your Google sign-in itself: the session cookies
-          (<code class="mono">SID</code>, <code class="mono">SAPISID</code>, …) your browser sends to
-          YouTube Music, plus the matching authorization header. These are <strong>Google
-          account-level credentials</strong>, not a YouTube-only token: the same cookies sign you in
-          across Google. There is no narrower, YouTube-scoped credential that can do everything the app
-          needs (see above), which is why there's no OAuth option here. Treat the saved file like a
-          password. This is why the app runs locally: we cannot host a service that captures these.</p>
-        <p class="section-note">In practice the app only uses it to read and manage your YouTube Music
-          library and playlists, and it's built so it can't quietly do more. A built-in network guard
-          restricts the app to YouTube and a handful of music-metadata services, blocking anything else
-          before it leaves your machine; you can watch every request it makes on the
-          <a href="/network">Network</a> page (full details in the <a href="/privacy">privacy policy</a>).
-          To revoke the sign-in entirely, sign out of YouTube Music or remove the session from your
-          <a href="https://myaccount.google.com/device-activity" target="_blank" rel="noopener">Google
-          account security page</a>; that invalidates the saved capture.</p>
+        <p class="section-note">Only your YouTube Music library, playlists, and listening history. The
+          extension uses the sign-in your browser already has for YouTube Music, but
+          <strong>your session cookie never leaves the browser</strong>: it is applied to each request
+          inside the page, and only the response comes back to this app. The app never receives or
+          stores your cookie or any Google credential; it sends only the request (method, URL, body).</p>
+        <p class="section-note">The connection is <strong>scoped to YouTube Music</strong>: the
+          extension only signs requests to YouTube Music's own API and refuses anything else, so it
+          cannot be used to reach Gmail, Drive, or other Google services. You can watch every request
+          the app makes on the <a href="/network">Network</a> page (full details in the
+          <a href="/privacy">privacy policy</a>). To revoke access, remove the extension or sign out of
+          YouTube Music in the browser.</p>
       </details>
-      <ol class="steps">
-        <li>Open <a href="https://music.youtube.com" target="_blank" rel="noopener">music.youtube.com</a>
-            signed in, then open DevTools (F12) → <strong>Network</strong>.</li>
-        <li>Click <strong>any playlist</strong> (e.g. in the left sidebar). That fires a
-            <code class="mono">browse</code> request. Type <code class="mono">browse</code> in the
-            filter and click that <code class="mono">browse</code> request <em>row</em>.</li>
-        <li>Right-click it → <em>Copy</em> → <strong>Copy as cURL</strong>
-            (Windows: <em>Copy as cURL (bash)</em>), then paste below.</li>
-      </ol>
-      <p class="section-note">It includes everything needed. A raw request-headers block works too.
-        {% if has_credentials %}<br><em>A credential is already saved. Leave the box blank to keep it.</em>{% endif %}</p>
-
-      <textarea name="headers" rows="7"
-                hx-post="/setup/check" hx-include="closest form" hx-trigger="change[this.value.trim().length > 0]"
-                hx-target="#check-result" hx-swap="innerHTML"
-                placeholder="Paste your 'Copy as cURL' here…"></textarea>
+      <p class="section-note">Install the TuneConsole extension and it connects automatically, there is
+        nothing to paste. Keep a <code class="mono">music.youtube.com</code> tab open while signed in.
+        The extension is recognized by its identity, so no other program can use this connection.</p>
 
       <div class="btn-row" style="margin-top:.8rem">
-        <button type="button" class="btn-ghost btn-sm"
-                hx-post="/setup/check" hx-include="closest form" hx-target="#check-result" hx-swap="innerHTML">
-          <span class="check-idle">Check sign-in</span><span class="check-busy">Checking…</span></button>
-        <span id="check-result"></span>
+        <span x-show="connected" x-cloak class="muted">✓ Extension connected</span>
+        <span x-show="!connected" x-cloak class="muted">○ Waiting for the extension to connect…</span>
       </div>
     </div>
   </div>
@@ -88,8 +84,8 @@
     <div class="card">
       <h2 class="section" style="margin-top:0">Your identities</h2>
       <p class="section-note">One row per YouTube identity. Exactly one is the <strong>master</strong>:
-        your main account, where cross-identity merges land (we fill its label in once your sign-in
-        checks out). A brand identity also needs its <code class="mono">brand_account_id</code>: open
+        your main account, where cross-identity merges land. A brand identity also needs its
+        <code class="mono">brand_account_id</code>: open
         <a href="https://myaccount.google.com/brandaccounts" target="_blank" rel="noopener">myaccount.google.com/brandaccounts</a>,
         pick the account, and copy the id from the URL <code class="mono">…/b/&lt;id&gt;/</code>. Leave it blank for your main account.</p>
 
@@ -115,15 +111,7 @@
   </div>
 
   <div class="setup-actions" x-show="tab !== 'enrichment'" x-cloak>
-    {% if has_credentials %}
-    {# Sign out lives in the action bar (not a separate form below) so the sticky bar can't hide it.
-       formaction reuses this form to POST /setup/signout; that route ignores the body. #}
-    <button type="submit" class="btn-ghost btn-sm" style="margin-right:auto"
-            formaction="/setup/signout" formmethod="post" formnovalidate
-            title="Deletes the locally-saved sign-in (cookies). Identities are kept."
-            onclick="return confirm('Delete the saved sign-in from this machine? You\'ll need to paste a fresh capture to sign back in.')">Sign out</button>
-    {% endif %}
-    <span class="muted" x-show="signedIn" x-cloak>✓ Signed in as <strong x-text="account"></strong> </span>
+    <span class="muted" x-show="connected" x-cloak style="margin-right:auto">✓ Extension connected</span>
     <button type="submit" class="setup-save">{{ 'Save' if configured else 'Save and start →' }}</button>
   </div>
 </form>
@@ -139,24 +127,22 @@
 
 <script>
 function setupForm(rows, masterIdx, configured) {
-  // Tabs (Cookies / Identities) are pure client state. The sign-in check is an htmx POST to
-  // /setup/check (it swaps the result into #check-result and fires a `setup-checked` HX-Trigger);
-  // we only react to that event below.
+  // Tabs (Pairing / Identities) are pure client state. The pairing indicator polls
+  // GET /bridge/status every couple seconds so it flips to connected the moment the extension
+  // pairs, no reload needed. Alpine calls init() automatically since it's a method on the
+  // x-data object.
   return {
     rows: rows,
     masterIdx: masterIdx,
     configured: configured,
     tab: 'browser',
-    account: '',
-    signedIn: false,
-    onChecked(detail) {
-      if (!detail || !detail.ok) { this.signedIn = false; return; }
-      this.signedIn = true; this.account = detail.account;
-      // auto-detect the logged-in (master) identity: fill its label if still blank
-      const m = this.rows[this.masterIdx];
-      if (m && !m.label.trim()) m.label = detail.account;
-      // Re-auth: identities already configured, so a valid check is all we need. Commit now.
-      if (this.configured) this.$nextTick(() => this.$refs.form.requestSubmit());
+    connected: false,
+    init() {
+      const poll = () => fetch('/bridge/status').then(r => r.json())
+        .then(d => { this.connected = !!d.connected; })
+        .catch(() => {});
+      poll();
+      setInterval(poll, 2000);
     },
   };
 }

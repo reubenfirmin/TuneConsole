@@ -78,6 +78,7 @@ ALLOWED_DOMAINS = frozenset({
     "last.fm",            # enrichment: Last.fm album HTML page, for the Release Date (www.last.fm)
     "deezer.com",         # enrichment: BPM (api.deezer.com), no auth
     "acousticbrainz.org",  # enrichment: BPM/energy/danceability by MusicBrainz recording MBID
+    "wikipedia.org",      # into-recently card: keyless page summaries (en.wikipedia.org)
 })
 
 

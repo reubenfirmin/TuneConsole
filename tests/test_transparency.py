@@ -11,10 +11,14 @@ def _client(store):
                            base_url="http://127.0.0.1")
 
 
-def test_all_clear_when_nothing_to_do(store):
+def test_no_alerts_when_nothing_to_do(store):
+    # When nothing needs attention, the alerts section renders nothing at all (an empty "all clear"
+    # note is just noise, see _partials/alerts.html).
     _, c = _client(store)
     store.set_setting("last_sync_at", "1000.0")     # not stale
-    assert "All clear" in c.get("/").text
+    html = c.get("/").text
+    assert "alert-card" not in html
+    assert "All clear" not in html
 
 
 def test_alert_dismiss_persists(store):
@@ -32,5 +36,6 @@ def test_alert_dismiss_persists(store):
 def test_transparency_note_when_muted(store):
     _, c = _client(store)
     store.set_setting("last_sync_at", "1.0")        # synced -> the gated muted-artist note renders
+    store.set_setting("onboard_dismissed", "1")     # graduated user: testing the normal feed, not onboarding
     store.record_feedback("for_you", "artist:Coldplay", "mute", now=1.0)
     assert "muted artist" in c.get("/").text and "Taste Model" in c.get("/").text

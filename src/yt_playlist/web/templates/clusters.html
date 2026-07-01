@@ -10,6 +10,16 @@
 {% else %}
 <div class="cluster-page" x-data="clusterCanvas()" x-init="init()" @cluster-saved.window="reset()">
 
+  {# Bottom-right canvas switcher: appears once there is more than one saved canvas (e.g. after an
+     "Explore in your catalog" deep-link opens a new one). Click a chip to switch; reset clears the
+     current canvas and jumps to another. #}
+  <div class="canvas-switcher" x-show="canvases.length > 1" x-cloak>
+    <template x-for="cv in canvases" :key="cv.id">
+      <button type="button" class="canvas-chip" :class="{ active: cv.id === activeId }"
+              @click="switchCanvas(cv.id)" x-text="cv.label || 'Untitled'"></button>
+    </template>
+  </div>
+
   <div class="cluster-search" :class="{ docked: nodes.length }">
     <div class="cluster-search-row">
       <div class="cluster-search-box">
@@ -65,95 +75,55 @@
     </div>
   </div>
 
-  <div class="cluster-canvas" id="cluster-canvas"
-       @wheel.prevent="onWheel($event)" @pointerdown="onPanStart($event)"
-       @pointermove="onPanMove($event)" @pointerup="onPanEnd()" @pointerleave="onPanEnd()">
+  <div class="cluster-canvas" id="cluster-canvas">
+    <!-- static starfield backdrop (z-index 0), behind the transparent force-graph canvas (z-index 1). -->
     <div class="cluster-stars" aria-hidden="true"></div>
-    <canvas class="cluster-grid" x-ref="grid" aria-hidden="true"></canvas>
-    <!-- x-ref="world": the imperative per-frame renderer (_renderFrame) writes every node's transform,
-         the edge <path> `d`s, and the popover position into here, so the d3 sim never touches Alpine. -->
-    <div class="cluster-world" x-ref="world" :style="worldStyle()">
-      <svg class="cluster-edges" :width="WORLD" :height="WORLD">
-        <path class="edge-path" x-ref="edgePath"></path>
-        <path class="edge-path trunk" x-ref="trunkPath"></path>
-      </svg>
-      <!-- One clickable dot at each edge's midpoint: "why is this connection here?". Position (transform)
-           is written imperatively per frame by _renderFrame, keyed by data-eid; not a reactive binding. -->
-      <template x-for="n in nodes" :key="'e' + n.id">
-        <button type="button" class="edge-dot" x-show="n.parentId != null && nodeById(n.parentId)"
-                :data-eid="n.id" :class="{ on: explain && explain.childId === n.id }"
-                @pointerdown.stop @click="openExplain(n.id)"
-                title="Why is this connected?"></button>
-      </template>
-      <template x-for="n in nodes" :key="n.id">
-        <!-- data-nid lets _renderFrame find this card to write its transform; :style carries only the
-             hue custom-props (an object, so Alpine won't clobber the imperatively-set transform). -->
-        <div class="cluster-node" :data-nid="n.id"
-             :class="{ central: n.kind === 'central', track: n.kind === 'track', pruned: n.state === 'pruned',
-                       trunk: isTrunkNode(n.id) && n.kind !== 'central', filtered: n.gpruned, boosted: isBoosted(n) }"
-             :style="nodeHueVars(n)">
-          <div class="cn-body" @pointerdown.stop="startNodeDrag(n, $event)"
-               :title="n.kind === 'track' && n.state === 'pruned' ? n.label + ', ' + n.sub + (n.gpruned ? ' (filtered out: click ↺ to restore)' : '') : ''">
-            <template x-if="n.kind === 'central'">
-              <div class="cn-central">
-                <span class="cn-eyebrow">Central cluster</span>
-                <div class="cn-seeds">
-                  <template x-for="(s, i) in n.seeds" :key="i">
-                    <span class="cn-seed" :class="s.kind" x-text="s.label"></span>
-                  </template>
-                </div>
-              </div>
-            </template>
-            <template x-if="n.kind === 'track'">
-              <div class="cn-track" :class="{ 'new-music': n.newMusic }">
-                <span class="cn-new" x-show="n.newMusic" x-cloak
-                      title="New: not in your library yet">✨</span>
-                <img class="cn-thumb" :src="n.thumbnail" x-show="n.thumbnail" alt="" loading="lazy"
-                     @error="n.thumbnail = ''">
-                <div class="cn-text">
-                  <strong class="cn-label" x-text="n.label"></strong>
-                  <span class="cn-sub" x-text="n.sub"></span>
-                </div>
-              </div>
-            </template>
-          </div>
-          <div class="cn-actions">
-            <button type="button" class="cn-btn play" x-show="n.vid && n.state !== 'pruned'" @click="play(n)"
-                    title="Play on YouTube Music">▶</button>
-            <button type="button" class="cn-btn boost" x-show="n.kind === 'track' && n.state !== 'pruned'"
-                    :class="{ on: isBoosted(n) }" @click="toggleBoost(n)"
-                    :title="isBoosted(n) ? 'Emphasized: steering new picks toward this' : 'Emphasize: steer new picks toward this track'">🔥</button>
-            <button type="button" class="cn-btn grow" x-show="n.state !== 'pruned'" @click="grow(n.id)"
-                    :disabled="exhaustedIds.includes(n.id)"
-                    :title="exhaustedIds.includes(n.id) ? 'Genre filters are exhausted' : 'Grow: add a ring of nearby tracks'">＋</button>
-            <button type="button" class="cn-btn prune" x-show="n.kind === 'track'"
-                    :class="{ on: n.state === 'pruned' }" @click="prune(n.id)"
-                    x-text="n.state === 'pruned' ? '↺' : '✕'"
-                    :title="n.state === 'pruned' ? 'Restore this track' : 'Prune: remove and push this branch away'"></button>
-          </div>
+    <!-- force-graph (canvas) renders nodes + edges + the warped grid and owns pan/zoom/drag. The HTML
+         overlays below float over that canvas, positioned in graph coords each frame (_positionOverlays). -->
+    <div class="cluster-graph" x-ref="graph"></div>
+
+    <!-- Hover/click action menu for one node: play / 🔥 emphasize / ＋ grow / ✕ prune. -->
+    <div class="cluster-actions" x-ref="actions" x-show="hovered != null" x-cloak
+         @mouseenter="_overOverlay = true; clearTimeout(_hoverT)"
+         @mouseleave="_overOverlay = false; hovered = null">
+      <template x-if="hoveredNode()">
+        <div class="ca-row">
+          <button type="button" class="cn-btn play" x-show="hoveredNode().vid && hoveredNode().state !== 'pruned'"
+                  @click="play(hoveredNode())" title="Play on YouTube Music">▶</button>
+          <button type="button" class="cn-btn boost" x-show="hoveredNode().kind === 'track' && hoveredNode().state !== 'pruned'"
+                  :class="{ on: isBoosted(hoveredNode()) }" @click="toggleBoost(hoveredNode())"
+                  title="Emphasize: steer new picks toward this track">🔥</button>
+          <button type="button" class="cn-btn grow" x-show="hoveredNode().state !== 'pruned'"
+                  @click="grow(hovered)" :disabled="exhaustedIds.includes(hovered)"
+                  :title="exhaustedIds.includes(hovered) ? 'Genre filters are exhausted' : 'Grow: add a ring of nearby tracks'">＋</button>
+          <button type="button" class="cn-btn prune" x-show="hoveredNode().kind === 'track'"
+                  :class="{ on: hoveredNode().state === 'pruned' }" @click="prune(hovered)"
+                  x-text="hoveredNode().state === 'pruned' ? '↺' : '✕'"
+                  :title="hoveredNode().state === 'pruned' ? 'Restore this track' : 'Prune: remove and push this branch away'"></button>
         </div>
       </template>
-      <!-- "Why this connection?" popover: anchored to the explained edge's live midpoint, positioned
-           imperatively each frame by _renderFrame (left/top) so it tracks the node without reactivity. -->
-      <div class="cluster-explain" x-ref="explainEl" x-show="explain" x-cloak @click.outside="closeExplain()">
-        <button type="button" class="ce-close" @click="closeExplain()" title="Close">✕</button>
-        <template x-if="explain && explain.loading">
-          <p class="ce-loading">Finding the connection…</p>
-        </template>
-        <template x-if="explain && !explain.loading && explain.data">
-          <div>
-            <p class="ce-why" x-text="explain.data.headline"></p>
-            <ul class="ce-reasons" x-show="explain.data.reasons && explain.data.reasons.length > 1">
-              <template x-for="(r, i) in explain.data.reasons.slice(1)" :key="i">
-                <li x-text="r.text"></li>
-              </template>
-            </ul>
-            <p class="ce-score" x-show="explain.data.match_pct != null">
-              <span class="ce-pct" x-text="explain.data.match_pct + '%'"></span> taste-space match</p>
-          </div>
-        </template>
-      </div>
     </div>
+
+    <!-- "Why this connection?" popover: positioned at the clicked edge's midpoint each frame. -->
+    <div class="cluster-explain" x-ref="explainEl" x-show="explain" x-cloak @click.outside="closeExplain()">
+      <button type="button" class="ce-close" @click="closeExplain()" title="Close">✕</button>
+      <template x-if="explain && explain.loading">
+        <p class="ce-loading">Finding the connection…</p>
+      </template>
+      <template x-if="explain && !explain.loading && explain.data">
+        <div>
+          <p class="ce-why" x-text="explain.data.headline"></p>
+          <ul class="ce-reasons" x-show="explain.data.reasons && explain.data.reasons.length > 1">
+            <template x-for="(r, i) in explain.data.reasons.slice(1)" :key="i">
+              <li x-text="r.text"></li>
+            </template>
+          </ul>
+          <p class="ce-score" x-show="explain.data.match_pct != null">
+            <span class="ce-pct" x-text="explain.data.match_pct + '%'"></span> taste-space match</p>
+        </div>
+      </template>
+    </div>
+
     <div class="cluster-zoombar">
       <button type="button" @click="zoomBy(1.2)" title="Zoom in">＋</button>
       <button type="button" @click="zoomBy(0.8)" title="Zoom out">－</button>

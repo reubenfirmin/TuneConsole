@@ -66,9 +66,7 @@ def build(ctx) -> APIRouter:
             "album": album, "browse_id": browse_id, "tracks": tracks, "saved": saved,
             "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
-            "conflict_count": store.conflict_count_for_album(browse_id),
-            # arrived via a home "Enrich" CTA. Tint the enrich icons CTA-green so it's clear what to click
-            "enrich_hint": request.query_params.get("enrich") == "1"})
+            "conflict_count": store.conflict_count_for_album(browse_id)})
 
     @router.get("/album/{browse}/share.txt")
     def album_share(browse: str):
