@@ -545,6 +545,69 @@ document.addEventListener('click', function (e) {
   tcPlay(u.href);
 }, true);
 
+// On a track-list page (playlist, album): highlight the currently-playing row (matched by video id,
+// falling back to a normalized title), and while THIS list is the one playing, fill in genre/year
+// cells as the background enrichment worker resolves them, on the same 2.5s loop.
+(function () {
+  function norm(s) {
+    return (s || '').toLowerCase().replace(/\(.*?\)|\[.*?\]/g, '').replace(/\bfeat\.?.*$/, '')
+      .replace(/[^a-z0-9]+/g, ' ').trim();
+  }
+  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+  function rowByVid(vid) {
+    var sel = window.CSS && CSS.escape ? CSS.escape(vid) : vid;
+    return document.querySelector('tr[data-vid="' + sel + '"]');
+  }
+  var plId = (location.pathname.match(/^\/playlist\/(\d+)/) || [])[1];
+  var metaDone = false;
+
+  // Returns true if the now-playing track is one of the rows on this page.
+  function highlight(np) {
+    var rows = document.querySelectorAll('tr[data-vid]');
+    rows.forEach(function (r) { r.classList.remove('now-playing'); });
+    if (!np || !np.title) return false;
+    var match = np.video_id ? rowByVid(np.video_id) : null;
+    if (!match) {
+      var nt = norm(np.title);
+      rows.forEach(function (r) { if (!match && norm(r.getAttribute('data-title')) === nt) match = r; });
+    }
+    if (match) { match.classList.add('now-playing'); return true; }
+    return false;
+  }
+
+  function refreshCells() {
+    if (!plId || metaDone) return;
+    fetch('/playlist/' + plId + '/cells').then(function (r) { return r.json(); }).then(function (d) {
+      (d.cells || []).forEach(function (c) {
+        var row = rowByVid(c.video_id); if (!row) return;
+        if (c.genre) {
+          var g = row.querySelector('.gdisplay');
+          if (g && !g.querySelector('.gtag')) {
+            g.innerHTML = '<span class="gtag">' + esc(c.genre) + '</span>';
+            row.setAttribute('data-genre', String(c.genre).toLowerCase());
+          }
+        }
+        if (c.year) {
+          var y = row.querySelector('.ydisplay');
+          if (y && y.querySelector('.ghint')) { y.textContent = c.year; row.setAttribute('data-year', String(c.year)); }
+        }
+      });
+      if (d.pending === 0) metaDone = true;   // everything resolved: stop refreshing cells
+    }).catch(function () {});
+  }
+
+  function poll() {
+    if (!document.querySelector('tr[data-vid]')) return;   // only on pages that list tracks
+    fetch('/bridge/status').then(function (r) { return r.json(); }).then(function (d) {
+      var np = d && d.connected ? d.now_playing : null;
+      // Only refresh metadata while THIS list is the one playing (stop otherwise).
+      if (highlight(np)) refreshCells();
+    }).catch(function () {});
+  }
+  poll();
+  setInterval(poll, 2500);
+})();
+
 // Navbar omnisearch dropdown: open/close + keyboard nav over the HTMX-rendered result rows.
 // Visibility is driven by results arriving (htmx:afterSwap, wired in x-init on the form) and by
 // focus; we never build markup here. The server owns the dropdown body.

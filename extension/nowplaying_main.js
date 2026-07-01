@@ -9,7 +9,9 @@
       var md = navigator.mediaSession && navigator.mediaSession.metadata;
       if (!md || !md.title) return;
       var art = md.artwork && md.artwork.length ? md.artwork[md.artwork.length - 1].src : "";
-      window.postMessage({ __tcNow: { title: md.title, artist: md.artist || "", thumbnail: art || "" } }, "*");
+      var vid = "";
+      try { vid = new URL(location.href).searchParams.get("v") || ""; } catch (e) {}
+      window.postMessage({ __tcNow: { title: md.title, artist: md.artist || "", thumbnail: art || "", videoId: vid } }, "*");
     } catch (e) {}
   }, 2000);
 })();

@@ -286,6 +286,9 @@ thead th {
 tbody td { padding: 0.6rem 0.7rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
 tbody tr { transition: background 0.12s ease; }
 tbody tr:hover { background: var(--accent-soft); }
+/* Currently-playing track row (set by the now-playing poller in app.js). */
+tr.now-playing > td { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+tr.now-playing > td:first-child { box-shadow: inset 3px 0 0 0 var(--accent-2); }
 td.mono, .mono { font-family: var(--font-mono); font-size: 0.82rem; }
 /* right-align numeric columns for BOTH header and cells (th + td) so they line up everywhere */
 .num { text-align: right; }

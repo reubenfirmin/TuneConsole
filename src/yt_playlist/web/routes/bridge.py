@@ -110,7 +110,8 @@ def build(ctx) -> APIRouter:
                     # Surface it for the Home now-playing line (polled via GET /bridge/status).
                     bridge.now_playing = {"title": msg.get("title"), "artist": msg.get("artist"),
                                           "thumbnail": msg.get("thumbnail"),
-                                          "likeStatus": msg.get("likeStatus")}
+                                          "likeStatus": msg.get("likeStatus"),
+                                          "video_id": msg.get("videoId")}
                     continue
                 try:
                     req_id = int(msg["id"])

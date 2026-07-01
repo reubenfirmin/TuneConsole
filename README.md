@@ -3,6 +3,9 @@
 A local web console for power-managing your YouTube Music library across multiple YouTube brand
 identities. Dedupe, merge, prune, organize, and grow it, all from one place.
 
+**Website: [tuneconsole.com](https://tuneconsole.com)** — overview, install guide, and
+[privacy policy](https://tuneconsole.com/privacy).
+
 ## Features
 
 - **Cross-identity consolidation**: sign in to several YouTube brand accounts and merge or move
