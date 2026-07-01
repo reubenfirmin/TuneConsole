@@ -198,6 +198,54 @@ PARAMS = [
               "(Deprecated, unused since plays graduate by daily exposure.) Maximum total play-"
               "graduation contribution from one listening session.",
               0.0, 2.0, 0.05, 0.4, advanced=True),
+    ParamSpec("modes_k", "Taste modes: cluster count", "discovery",
+              "How many clusters the taste-mode finder starts from before keeping only the dense "
+              "ones. Higher splits your taste into finer regions; lower keeps them broad.",
+              4, 40, 1, 14, integer=True, advanced=True),
+    ParamSpec("modes_min_members", "Taste modes: minimum size", "discovery",
+              "Smallest number of tracks a cluster needs to count as a taste mode. Clusters below "
+              "this are treated as noise and dropped.",
+              10, 200, 5, 40, integer=True, advanced=True),
+    ParamSpec("modes_match_threshold", "Taste modes: identity match", "discovery",
+              "How similar a mode must be between two recomputes to keep its identity. Higher makes "
+              "a mode split into a new one more readily as your library shifts.",
+              0.0, 1.0, 0.05, 0.60, advanced=True),
+    ParamSpec("modes_pool_limit", "Taste modes: pool breadth", "discovery",
+              "How deep into each surface's ranked pool the worker reaches when bucketing tracks by "
+              "taste mode. Bigger gives each mode more candidates to draw from.",
+              50, 2000, 50, 400, integer=True, advanced=True),
+    ParamSpec("modes_cand_per_mode", "Taste modes: candidates per mode", "discovery",
+              "How many tracks are cached per mode per card. This is the rotation depth a mode card "
+              "draws from before it repeats.",
+              12, 200, 4, 40, integer=True, advanced=True),
+    ParamSpec("modes_menu_size", "Taste modes: cards", "discovery",
+              "How many distinct taste modes the Home card row surfaces at once.",
+              2, 6, 1, 4, integer=True, advanced=True),
+    ParamSpec("modes_artist_cap", "Taste modes: max per artist", "discovery",
+              "The most tracks from a single artist allowed in one mode-focused card, so a card can't "
+              "collapse into one artist.",
+              1, 12, 1, 2, integer=True, advanced=True),
+    ParamSpec("modes_album_cap", "Taste modes: max per album", "discovery",
+              "The most tracks from a single album allowed in one mode-focused card, so a card can't "
+              "collapse into one compilation. Singles (no album) are not capped.",
+              1, 12, 1, 2, integer=True, advanced=True),
+    ParamSpec("comfort_min_pool", "Comfort credibility floor", "discovery",
+              "Comfort Listening needs play history with worn-then-quiet favorites to be meaningful. It "
+              "only appears once its pool has at least this many tracks; below that, the temporal card "
+              "(Throwback / Time Flies / Recent Picks) takes the 4th slot until enough history accrues.",
+              0, 500, 4, 36, integer=True, advanced=True),
+    ParamSpec("onboard_coverage_min", "Onboarding: ready coverage", "discovery",
+              "Genre-enrichment coverage at/above which (with at least one taste mode) the model is "
+              "considered ready and the guided onboarding view hands over to your full Home.",
+              0.0, 1.0, 0.05, 0.60, advanced=True),
+    ParamSpec("onboard_feedback_min", "Onboarding: ready feedback", "discovery",
+              "Number of likes + dislikes that graduate you out of onboarding even before enrichment "
+              "finishes (so a thin catalog is never stuck).",
+              1, 200, 1, 10, integer=True, advanced=True),
+    ParamSpec("onboard_library_min", "Onboarding: library playlist floor", "discovery",
+              "Fewest owned tracks before the onboarding 'from your library' playlist appears; below "
+              "this, onboarding shows the radio playlist only.",
+              0, 500, 5, 30, integer=True, advanced=True),
 ]
 
 PARAMS_BY_NAME = {p.name: p for p in PARAMS}

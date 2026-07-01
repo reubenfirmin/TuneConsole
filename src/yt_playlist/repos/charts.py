@@ -160,6 +160,32 @@ class ChartsRepo(Repo):
         return [{"artist": r["artist"], "plays": r["total"], "thumbnail": r["thumb"]} for r in rows]
 
     @synchronized
+    def artist_thumbnail(self, artist) -> str | None:
+        """A representative thumbnail for an artist, from any of their library tracks (or None)."""
+        if not artist:
+            return None
+        row = self.conn.execute(
+            "SELECT thumbnail FROM tracks WHERE lower(artist)=lower(?) "
+            "AND thumbnail IS NOT NULL AND thumbnail<>'' LIMIT 1", (artist,)).fetchone()
+        return row["thumbnail"] if row else None
+
+    @synchronized
+    def genre_representative(self, genres) -> dict | None:
+        """The most-played artist (with a thumbnail) among library tracks tagged with any of `genres`,
+        as {artist, thumbnail}. Used to seed/illustrate a genre's 'into recently' card. None if empty."""
+        genres = [g for g in (genres or []) if g]
+        if not genres:
+            return None
+        qs = ",".join("?" * len(genres))
+        row = self.conn.execute(
+            "WITH plays AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key) "
+            "SELECT t.artist artist, MIN(t.thumbnail) thumb, COALESCE(SUM(p.c),0) pl "
+            "FROM tracks t LEFT JOIN plays p ON p.identity_key=t.identity_key "
+            f"WHERE t.genre IN ({qs}) AND t.artist<>'' AND t.thumbnail IS NOT NULL AND t.thumbnail<>'' "
+            "GROUP BY t.artist ORDER BY pl DESC, t.artist LIMIT 1", genres).fetchone()
+        return {"artist": row["artist"], "thumbnail": row["thumb"]} if row else None
+
+    @synchronized
     def playlist_tracks_detail(self, playlist_id) -> list[dict]:
         """Full per-track detail for our own playlist view (in playlist order)."""
         rows = self.conn.execute(

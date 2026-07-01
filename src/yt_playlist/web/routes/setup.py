@@ -1,5 +1,5 @@
-"""Setup wizard: render the config form, live-check the capture, and save identities."""
-import json
+"""Setup wizard: render the config form and save identities. Credential is the live extension
+pairing (see the Pairing tab), so there is no capture to paste or verify here anymore."""
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
@@ -17,7 +17,6 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "setup.html", {
             "rows": rows, "master_idx": master_idx, "error": error,
             "configured": (setup.configured if setup else True),
-            "has_credentials": bool(setup and setup.credentials_present),
             "flash": request.query_params.get("flash"),
             "enrichment": enrichment.load_config(store),
             "lastfm_configured": lastfm.api_key(store) is not None,
@@ -32,24 +31,6 @@ def build(ctx) -> APIRouter:
         else:
             rows, master_idx = [{"label": "", "brand": ""}], 0
         return _setup_context(request, rows=rows, master_idx=master_idx)
-
-    @router.post("/setup/check")
-    async def setup_check(request: Request):
-        # Live-verify the capture (network) and report who's signed in, for the green checkmark.
-        # Returns the result fragment AND fires an `setup-checked` HX-Trigger so the page's Alpine
-        # can auto-fill the master label and (on re-auth) submit immediately.
-        if setup is None:
-            raise HTTPException(status_code=404, detail="setup not available")
-        form = await request.form()
-        try:
-            account = setup.check_auth(form.get("headers", "") or "")
-        except ValueError as e:
-            resp = templates.TemplateResponse(request, "_partials/setup_check.html", {"error": str(e)})
-            resp.headers["HX-Trigger"] = json.dumps({"setup-checked": {"ok": False}})
-            return resp
-        resp = templates.TemplateResponse(request, "_partials/setup_check.html", {"account": account})
-        resp.headers["HX-Trigger"] = json.dumps({"setup-checked": {"ok": True, "account": account}})
-        return resp
 
     def _enrichment_panel(request):
         return templates.TemplateResponse(request, "_partials/enrichment_panel.html", {
@@ -70,23 +51,11 @@ def build(ctx) -> APIRouter:
             pass
         return _enrichment_panel(request)
 
-    @router.post("/setup/signout")
-    def setup_signout(request: Request):
-        # Sign out = delete the locally-saved sign-in (cookies). Identity config is kept so
-        # re-signing in just means pasting a fresh capture.
-        if setup is None:
-            raise HTTPException(status_code=404, detail="setup not available")
-        setup.sign_out()
-        ctx.auth_expired.clear()
-        return RedirectResponse(f"/setup?flash={quote('Signed out. Your saved sign-in was deleted.')}",
-                                status_code=303)
-
     @router.post("/setup")
     async def setup_submit(request: Request):
         if setup is None:
             raise HTTPException(status_code=404, detail="setup not available")
         form = await request.form()
-        capture = form.get("headers", "") or ""
         labels, brands = form.getlist("label"), form.getlist("brand_account_id")
         master = form.get("master")
         identities = []
@@ -100,27 +69,26 @@ def build(ctx) -> APIRouter:
                 "is_master": str(idx) == master,
                 "credential_ref": BROWSER_CREDENTIAL_FILENAME})
         try:
-            setup.apply_setup(capture, identities)
+            # The credential is the live extension pairing now, so no capture is passed here.
+            setup.apply_setup(identities)
         except ValueError as e:
             rows = [{"label": l, "brand": b} for l, b in zip(labels, brands)] or [{"label": "", "brand": ""}]
             master_idx = int(master) if (master or "").isdigit() else 0
             return _setup_context(request, rows=rows, master_idx=master_idx,
                                   error=str(e), status_code=400)
-        ctx.auth_expired.clear()                    # success clears the stale-session banner (in place)
-        # Tailor the confirmation to context. "Has synced before" (the same signal that turns the
-        # syncbar's green "Sync now" CTA into a neutral "Full sync") tells a re-auth apart from a
-        # first-time setup, so we never point at a "Sync now" button that isn't on the page.
+        ctx.clear_all_auth_expired()                # success clears the stale-session banner (persisted)
+        # Syncing is automatic in the background now (fires as soon as the extension is connected and
+        # then periodically), so there is no button to point at. "Has synced before" tells a re-auth
+        # apart from a first-time setup only to word the confirmation.
         has_synced = bool(store.get_setting("last_sync_at"))
-        auto_sync = store.get_setting("auto_sync_plays") == "1"
-        if has_synced and auto_sync:
-            # Nothing for them to do. Auto-sync will catch up. A transient toast, not a banner.
-            return RedirectResponse(f"/?toast={quote('You’re authenticated again.')}", status_code=303)
         if has_synced:
-            # Re-authed but auto-sync is off, so they need to act. Keep a persistent banner.
-            msg = "You’re authenticated again. Click “Full sync” to catch up, or turn on “Sync plays” to keep it automatic."
-        else:
-            n = len(identities)
-            msg = f"Saved {n} identit{'y' if n == 1 else 'ies'}. Click “Sync now” to pull your playlists."
+            # Nothing for them to do: the background sync catches up. A transient toast, not a banner.
+            return RedirectResponse(
+                f"/?toast={quote('You’re authenticated again. Your library will refresh automatically.')}",
+                status_code=303)
+        n = len(identities)
+        msg = (f"Saved {n} identit{'y' if n == 1 else 'ies'}. Keep a signed-in music.youtube.com tab "
+               "open and your library will sync automatically.")
         return RedirectResponse(f"/?flash={quote(msg)}", status_code=303)
 
     return router

@@ -566,12 +566,17 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=Non
     fanout = float(rec_params.get_param(store, "cluster_seed_spread"))
     ckeys, CV, cidx = _content_space(store, include_new)
 
-    collab_s = _branch_scores(pos_keys, neg_keys, beta, keys, V, idx, fanout) or {}
+    # Genre-only seed: a genre picked with no artist/song seed (empty pos_keys) seeds a cluster FROM the
+    # genre itself — the centroid is the genre's own tracks, and we KEEP those tracks as candidates (don't
+    # exclude the seed set) so the opening ring fills with the most representative tracks of the genre.
+    seed_only = (not pos_keys) and bool(allow)
+    src = list(allow) if seed_only else pos_keys
+    collab_s = _branch_scores(src, neg_keys, beta, keys, V, idx, fanout) or {}
     content_s = ({} if (CV is None or w <= 0.0)
-                 else (_branch_scores(pos_keys, neg_keys, beta, ckeys, CV, cidx, fanout) or {}))
+                 else (_branch_scores(src, neg_keys, beta, ckeys, CV, cidx, fanout) or {}))
     blended = _blend_spaces(collab_s, content_s, w)
 
-    excl = set(exclude or ()) | set(pos_keys) | set(neg_keys)
+    excl = set(exclude or ()) | set(neg_keys) | (set() if seed_only else set(pos_keys))
     allow = None if allow is None else set(allow)
     out = []
     for k in sorted(blended, key=lambda k: -blended[k]):

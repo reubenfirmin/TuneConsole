@@ -20,6 +20,4 @@
   </div>
   {% endfor %}
 </section>
-{% else %}
-<p class="section-note alerts-clear">✓ All clear - nothing needs your attention.</p>
-{% endif %}
+{% endif %}{# no actions → render nothing; an empty "all clear" note is just noise #}

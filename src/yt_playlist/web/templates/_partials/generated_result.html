@@ -4,30 +4,28 @@
   <header class="gen-head"><span class="eyebrow eyebrow-warn">Couldn't save</span>
     <h2 class="gen-name">{{ name }}</h2></header>
   <p class="section-note">{{ error }}</p>
-  {# Nothing to play. Discard the blank tab we opened on click so no stray about:blank is left behind. #}
+  {# Close the loading window we opened on click, otherwise it spins forever on a failure (e.g. no
+     YouTube Music tab open to run the request). #}
   <script>(function () { var t = window.__ytTab; window.__ytTab = null;
-    if (t && !t.closed) try { t.close(); } catch (e) {} })();</script>
+    if (t && !t.closed) { try { t.close(); } catch (e) {} } })();</script>
   {% else %}
-  <header class="gen-head"><span class="eyebrow eyebrow-ok">Saved ✓. Opening YouTube…</span>
+  <header class="gen-head"><span class="eyebrow eyebrow-ok">Saved ✓. Opening in your YouTube Music tab…</span>
     <h2 class="gen-name">{{ name }}</h2></header>
   <p class="section-note">{{ added }} track{{ '' if added == 1 else 's' }} added to a new playlist in
     your <strong>Generated</strong> group, kept out of your recommendations until you promote it to
     your library.</p>
   <div class="gen-foot">
-    <a class="cta" href="https://music.youtube.com/playlist?list={{ ytm }}"
+    <a class="cta" href="https://music.youtube.com/watch?list={{ ytm }}"
        target="_blank" rel="noopener">▶ Open on YouTube Music ↗</a>
   </div>
   {% if pid %}{% include "_partials/mood_panel.html" %}{% endif %}
-  {# Point the tab we opened on click (genOpenYT) at the new playlist, then send THIS tab to the
-     playlist's page in our UI, which carries its own "Open on YouTube Music" link too. If that tab
-     is missing (no handle / it was closed), fall back to a bare window.open; should the browser block
-     THAT, the "Open on YouTube Music" link above is the manual fallback. Until this fires the popup
-     shows our /generating placeholder (a spinner card), not a stark white about:blank. #}
+  {# The extension plays the playlist in your EXISTING YouTube Music tab (see home_generate's navigate
+     control), so we NEVER open a YouTube tab here: the loading window just closes. If the extension is
+     off, the "Open on YouTube Music" link above is the manual way. Send THIS tab to the playlist page
+     in our own UI. #}
   <script>(function () {
-    var url = "https://music.youtube.com/playlist?list={{ ytm }}";
     var tab = window.__ytTab; window.__ytTab = null;
-    if (tab && !tab.closed) { try { tab.opener = null; } catch (e) {} tab.location.replace(url); }
-    else { window.open(url, "_blank", "noopener"); }
+    if (tab && !tab.closed) { try { tab.close(); } catch (e) {} }
     {% if pid %}window.location.assign("/playlist/{{ pid }}");{% endif %}
   })();</script>
   {% endif %}

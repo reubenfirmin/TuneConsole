@@ -92,6 +92,37 @@
   {% endfor %}
 </div>
 
+<h2 class="section">Taste modes <span class="scope-tag">Auto-discovered</span></h2>
+<div class="card taste-modes">
+  <p class="muted">The distinct regions of your taste, found automatically from your library
+    (content: genre, era, audio). Read-only for now.</p>
+  {% if modes %}
+  <ul class="modes-list">
+    {% for m in modes %}
+    <li class="mode-row">
+      <div class="mode-head">
+        <span class="mode-label">{{ m.label }}</span>
+        <span class="mode-size">{{ m.size }} tracks</span>
+        {% if m.fresh %}<span class="mode-new">new</span>{% endif %}
+      </div>
+      <div class="mode-stats">
+        <span title="Times this mode was offered">offered {{ m.offered }}</span>
+        <span title="Times you saved &amp; played it">picked {{ m.picked }}</span>
+        <span title="Plays of your picked playlists for this mode">plays {{ m.plays }}</span>
+      </div>
+      <ul class="mode-tracks">
+        {% for t in m.tracks %}
+        <li><span class="t-title">{{ t.title }}</span> <span class="t-artist">{{ t.artist }}</span></li>
+        {% endfor %}
+      </ul>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No taste modes yet; they appear once your library has enough enriched tracks.</p>
+  {% endif %}
+</div>
+
 <h2 class="section">Right-now responsiveness <span class="scope-tag">All surfaces</span></h2>
 <p class="section-note">How hard your <strong>recent</strong> behavior (plays, likes, dislikes, mood)
    overrides your durable taste, and how quickly "right now" relaxes. These shape the live transient

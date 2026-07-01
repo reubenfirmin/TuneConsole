@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "TuneConsole session bridge",
+  "version": "0.1.0",
+  "description": "Bridge a signed-in YouTube Music session to the local TuneConsole backend over a persistent, allowlisted WebSocket connection, transparently.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwoxmIzJTT1Fs6XYs6QyBSiDCPSa0TnJ2U4iv2yBl9W5CV43Qm9VEqayvGUFmZFzvKbu5VmrhPSLeh5sIg/1/YUf6jOaPkHoBrk+v7/r+hpaucG4icx1R6R5eoHJTLMTMRISJr0ItDywX0hCxObrwNsUOB+cdrJ+memaOlKRM5Ap+B90Xz9XYvt8IEJtbmYU7jmYC5ZDeFbCoAHaVClhruptCPQpzGiIvdME7Ot3mAN3p9+Ax0FPQ0HsEm8Zu0kgfp6DWNf+wfNyMCDRweLFSeQpv5SHP/mN43daq3AMc6TJJEzIUVcdpQ0iAhx6yfXsW7rl+9Mj5OqTbw5KIh8VFgQIDAQAB",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    },
+    "default_title": "TuneConsole session bridge"
+  },
+  "permissions": ["cookies", "tabs", "alarms", "scripting"],
+  "host_permissions": [
+    "https://music.youtube.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://music.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://music.youtube.com/*"],
+      "js": ["nowplaying_main.js"],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    }
+  ]
+}

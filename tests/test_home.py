@@ -32,13 +32,15 @@ def test_home_is_default_route(store):
     r = c.get("/")
     assert r.status_code == 200
     assert 'id="home"' in r.text          # Home shell marker
-    assert "Never synced" in r.text        # sync card shows status (no last_sync_at yet)
+    assert "home-status" in r.text         # live status card is present
+    assert "Library synced not yet" in r.text   # never-synced freshness line
 
 
 def test_home_rediscovers_unplayed_saved_albums(store):
     # A saved album with no recent plays surfaces as a "Revisit" tile at the top of the Rediscover
     # section, linking to its in-app album page.
     store.set_setting("last_sync_at", "1.0")          # Rediscover only renders on a synced Home
+    store.set_setting("onboard_dismissed", "1")       # graduated user: testing the normal feed, not onboarding
     store.collection.add_saved_album({"browse": "MPREb_x", "title": "Kind of Blue", "artist": "Miles Davis",
                                       "year": "1959", "type": "Album", "thumbnail": "http://img/x.jpg"})
     c = _client(store)
@@ -55,6 +57,9 @@ def test_playlists_moved_to_slash_playlists(store):
 
 
 def test_home_renders_for_you_and_no_sync_elsewhere(store):
+    # Cards are lazy-loaded via /home/cards; card assertions move there. Sync-bar assertions stay on /.
+    import numpy as np
+    from yt_playlist.rec import mode_surfaces as ms
     iid = store.upsert_identity("main", "cred", None, True)
     store.upsert_track("v1", "Gem", "X", None, None)
     day = 86400.0
@@ -62,17 +67,33 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     store.add_history_snapshot(iid, now - 120 * day, ["gem|x"])
     store.add_history_snapshot(iid, now - 110 * day, ["gem|x"])
     store.set_setting("last_sync_at", str(now - day))   # synced user -> rec feed renders (not the placeholder)
+    # Seed mode_bundles: "Gem" placed in the wheelhouse surface so the card renders it
+    store.modes.replace_modes([
+        {"mode_id": 1, "label": "a", "families": [["house", 1]],
+         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 80, "rep_keys": []},
+    ], retired_ids=[], now=now)
+    payload = {"1": {}}
+    for surf in ms.CARD_SURFACES:
+        title = "Gem" if surf == "wheelhouse" else f"Song {surf}"
+        key = "gem|x" if surf == "wheelhouse" else f"{surf}k"
+        payload["1"][surf] = [{"key": key, "video_id": "v1", "title": title,
+                               "artist": "X" if surf == "wheelhouse" else "Art",
+                               "album": "", "thumbnail": None,
+                               "plays": 0, "reason": "", "lane": "", "genre": ""}]
+    store.put_proposals("mode_bundles", payload, now)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now)
     c = TestClient(app, base_url="http://127.0.0.1")
 
-    home = c.get("/").text
-    assert "More in your wheelhouse" in home    # the exploit lane heading
-    assert "Gem" in home                       # the forgotten gem is rendered
-    assert 'class="sync-bar"' in home          # Sync control present on Home
+    cards = c.get("/home/cards").text
+    assert "More in your wheelhouse" in cards    # the wheelhouse card heading
+    assert "Gem" in cards                        # the track appears in the card row
 
-    # Sync control removed from the other tabs (Rediscover is deleted in Task 8)
-    assert 'class="sync-bar"' not in c.get("/playlists").text
-    assert 'class="sync-bar"' not in c.get("/charts").text
+    home = c.get("/").text
+    assert 'class="home-status card"' in home    # live status card present on Home
+
+    # The status card is Home-only (never on the other tabs)
+    assert "home-status" not in c.get("/playlists").text
+    assert "home-status" not in c.get("/charts").text
 
 
 def test_home_feed_fragment_renders_fingerprint(store):
@@ -106,6 +127,7 @@ def test_home_page_has_steering_and_fingerprint(store):
     store.set_track_year(t, "1999")
     store.add_history_snapshot(iid, 1.0, ["song|band"])
     store.set_setting("last_sync_at", "1000")            # synced user -> feed (with fingerprint/steer) renders
+    store.set_setting("onboard_dismissed", "1")          # graduated user: testing the normal feed, not onboarding
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     html = c.get("/").text
@@ -135,22 +157,20 @@ def test_home_feed_has_steer_toast_scaffold(store):
     assert "Tune your taste model" in html or "fine-tune" in html.lower()
 
 
-def test_new_user_only_gets_full_sync(store):
-    """A never-synced user gets a single green 'Sync now' CTA (no plays to sync yet). After the first
-    sync it becomes the neutral 'Full sync' button and the 'Sync plays' auto-sync toggle appears."""
+def test_home_status_card_replaces_sync_buttons(store):
+    """Syncing is automatic in the background now: Home shows a live status card (connection +
+    now-playing + freshness) with no Full-sync button and no Sync-plays toggle."""
     c = _client(store)
     html = c.get("/").text
-    assert "Never synced" in html
-    assert "Sync now" in html                # initial CTA label (matches the setup flash)
-    assert "sync-cta" in html                # ...and it's the green CTA
-    assert "Full sync" not in html           # the neutral label is for after the first sync
-    assert "Sync plays" not in html          # no plays to sync yet
-    assert "sync-toggle" not in html
+    assert "homeStatus()" in html            # the status card's Alpine component
+    assert "Library synced not yet" in html  # never-synced freshness line
+    assert "Sync now" not in html and "Full sync" not in html   # no manual sync buttons
+    assert "Sync plays" not in html and "sync-toggle" not in html
+    assert "hs-refresh" in html              # the small unobtrusive power-user refresh link
 
-    store.set_setting("last_sync_at", "1000")   # now there's a first sync (now_fn -> 1000.0)
+    store.set_setting("last_sync_at", "1000")   # after a first sync (now_fn -> 1000.0)
     html = c.get("/").text
-    assert "Full sync" in html and "sync-cta" not in html   # reverts to the neutral ghost button
-    assert "Sync plays" in html and "sync-toggle" in html
+    assert "Library synced" in html and "not yet" not in html
 
 
 def test_presync_shows_recs_placeholder_not_feed(store):
@@ -170,41 +190,13 @@ def test_presync_shows_recs_placeholder_not_feed(store):
     assert "presync card" not in c.get("/").text                           # placeholder gone post-sync
 
 
-def test_enrich_nudge_after_first_sync_and_persisted_dismiss(store):
-    """After the first sync, Home shows a one-time 'enrich improves recs' nudge. Dismissing it
-    persists (settings flag) so it never returns. A never-synced user doesn't see it."""
+def test_enrich_nudge_is_gone(store):
+    """The manual-enrichment nag was removed (auto-enrich worker handles it now): no #enrich-nudge,
+    and the old dismiss endpoint no longer exists."""
     c = _client(store)
-    assert "enrich-nudge" not in c.get("/").text          # never synced -> no nudge yet
-
-    store.set_setting("last_sync_at", "1000")             # first sync happened
-    html = c.get("/").text
-    assert "enrich-nudge" in html
-    assert "better your recommendations" in html          # the message landed
-
-    r = c.post("/onboard/enrich/dismiss")                 # dismiss it
-    assert r.status_code == 200
-    assert store.get_setting("enrich_nudge_dismissed") == "1"
-
-    assert "enrich-nudge" not in c.get("/").text          # gone for good
-
-
-def test_auto_sync_toggle_persists_and_renders(store):
-    store.set_setting("last_sync_at", "1000")   # synced user -> toggle is offered
-    iid = store.upsert_identity("main", "cred", None, True)
-    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
-    c = TestClient(app, base_url="http://127.0.0.1")
-
-    assert "Will re-sync plays automatically every 30 mins" in c.get("/").text   # note copy present
-
-    r = c.post("/sync/auto", data={"enabled": "1"})
-    assert r.status_code == 200 and r.json() == {"enabled": True}
-    assert store.get_setting("auto_sync_plays") == "1"
-    assert "syncPanel(true)" in c.get("/").text                                   # reflected on load
-
-    r = c.post("/sync/auto", data={"enabled": "0"})
-    assert r.json() == {"enabled": False}
-    assert store.get_setting("auto_sync_plays") == "0"
-    assert "syncPanel(false)" in c.get("/").text
+    store.set_setting("last_sync_at", "1000")             # synced user, the old nudge's trigger
+    assert "enrich-nudge" not in c.get("/").text
+    assert c.post("/onboard/enrich/dismiss").status_code == 404   # route removed entirely
 
 
 def test_fingerprint_bar_shows_effective_multiplier(store):
@@ -213,6 +205,7 @@ def test_fingerprint_bar_shows_effective_multiplier(store):
     store.set_track_genre(t, "Techno")
     store.add_history_snapshot(iid, 1.0, ["song|band"])
     store.set_setting("last_sync_at", "1000")
+    store.set_setting("onboard_dismissed", "1")       # graduated user: testing the normal feed, not onboarding
     fam = __import__("yt_playlist.util.genre_map", fromlist=["family"]).family("Techno")
     store.set_lean(f"genre:{fam}", 1.5, 1000.0)        # standing lean, permanent still 1.0
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)

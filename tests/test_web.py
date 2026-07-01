@@ -116,26 +116,16 @@ class _FakeRuntime:
         self.credentials_present = credentials_present
         self.applied = None
         self.raise_value_error = None
-        self.account_name = "Tester"
-        self.check_error = None
     @property
     def configured(self):
         return self._configured
     def clients(self):
         return {}
-    def check_auth(self, capture):
-        if self.check_error:
-            raise ValueError(self.check_error)
-        return self.account_name
-    def apply_setup(self, headers_raw, identities):
+    def apply_setup(self, identities):
         if self.raise_value_error:
             raise ValueError(self.raise_value_error)
-        self.applied = (headers_raw, identities)
+        self.applied = identities
         self._configured = True
-    def sign_out(self):
-        self.signed_out = True
-        self.credentials_present = False
-        self._configured = False
 
 def test_unconfigured_redirects_to_setup(store):
     rt = _FakeRuntime(store, configured=False)
@@ -150,14 +140,12 @@ def test_setup_post_applies_and_redirects(store):
     app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/setup", data={
-        "headers": "Cookie: SID=abc",
         "label": ["main", "brand"],
         "brand_account_id": ["", "UC9"],
         "master": "0",
     }, follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"].startswith("/")  # dashboard, with a flash
-    headers_raw, identities = rt.applied
-    assert headers_raw == "Cookie: SID=abc"
+    identities = rt.applied
     assert [i["label"] for i in identities] == ["main", "brand"]
     assert identities[0]["is_master"] and not identities[1]["is_master"]
     assert identities[1]["brand_account_id"] == "UC9"
@@ -167,29 +155,23 @@ def _setup_redirect(store, rt):
     from urllib.parse import urlsplit, parse_qsl
     app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
     c = TestClient(app, base_url="http://127.0.0.1")
-    r = c.post("/setup", data={"headers": "h", "label": "main", "brand_account_id": "", "master": "0"},
+    r = c.post("/setup", data={"label": "main", "brand_account_id": "", "master": "0"},
                follow_redirects=False)
     assert r.status_code == 303
     (key, value), = parse_qsl(urlsplit(r.headers["location"]).query)
     return key, value
 
-def test_setup_first_time_banners_sync_now(store):
-    # Never synced -> the green "Sync now" CTA is on the page, so point at it via a persistent banner.
+def test_setup_first_time_flashes_saved(store):
+    # Never synced -> the background sync will pull the library once paired, so just confirm the save
+    # with a persistent flash (no manual sync button to point at anymore).
     key, value = _setup_redirect(store, _FakeRuntime(store, configured=False))
-    assert key == "flash" and "Sync now" in value
+    assert key == "flash" and "Saved" in value and "automatically" in value
 
-def test_setup_reauth_with_autosync_shows_toast(store):
-    # Synced before + auto-sync on -> nothing to do, so a transient toast (not a banner).
+def test_setup_reauth_shows_toast(store):
+    # Synced before -> nothing to do, the background sync catches up, so a transient toast (not a banner).
     store.set_setting("last_sync_at", "1.0")
-    store.set_setting("auto_sync_plays", "1")
     key, value = _setup_redirect(store, _FakeRuntime(store, configured=True))
     assert key == "toast" and "authenticated again" in value
-
-def test_setup_reauth_without_autosync_banners_action(store):
-    # Synced before but auto-sync off -> they must act, so a persistent banner pointing at Full sync.
-    store.set_setting("last_sync_at", "1.0")
-    key, value = _setup_redirect(store, _FakeRuntime(store, configured=True))
-    assert key == "flash" and "authenticated again" in value and "Full sync" in value
 
 def test_setup_post_skips_blank_label_rows(store):
     rt = _FakeRuntime(store, configured=False)
@@ -201,7 +183,7 @@ def test_setup_post_skips_blank_label_rows(store):
         "brand_account_id": ["", ""],
         "master": "0",
     }, follow_redirects=False)
-    _, identities = rt.applied
+    identities = rt.applied
     assert [i["label"] for i in identities] == ["main"]
 
 def test_setup_post_validation_error_rerenders_400(store):
@@ -218,28 +200,6 @@ def test_setup_post_without_collaborator_404(store):
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     assert c.post("/setup", data={"label": "x"}).status_code == 404
-
-def test_signout_button_shows_only_with_credentials(store):
-    app = create_app(store, _FakeRuntime(store, credentials_present=True).clients,
-                      now_fn=lambda: 1.0, setup=_FakeRuntime(store, credentials_present=True))
-    c = TestClient(app, base_url="http://127.0.0.1")
-    assert "/setup/signout" in c.get("/setup").text
-    rt = _FakeRuntime(store, credentials_present=False)
-    app2 = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
-    assert "/setup/signout" not in TestClient(app2, base_url="http://127.0.0.1").get("/setup").text
-
-def test_signout_deletes_credential_and_redirects(store):
-    rt = _FakeRuntime(store, configured=True, credentials_present=True)
-    app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
-    c = TestClient(app, base_url="http://127.0.0.1")
-    r = c.post("/setup/signout", follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"].startswith("/setup?flash=")
-    assert rt.signed_out is True
-
-def test_signout_without_collaborator_404(store):
-    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
-    c = TestClient(app, base_url="http://127.0.0.1")
-    assert c.post("/setup/signout").status_code == 404
 
 # --- network transparency page ---
 
@@ -280,25 +240,6 @@ def test_no_external_cdn_in_pages(store):
     assert "/static/vendor/htmx.min.js" in body
 
 
-def test_setup_check_reports_account(store):
-    rt = _FakeRuntime(store); rt.account_name = "Reuben"
-    app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
-    c = TestClient(app, base_url="http://127.0.0.1")
-    r = c.post("/setup/check", data={"headers": "cookie: x"})
-    assert r.status_code == 200
-    assert "Signed in as" in r.text and "Reuben" in r.text       # result fragment
-    assert "Reuben" in r.headers.get("hx-trigger", "")           # HX-Trigger carries the account
-
-def test_setup_check_reports_error(store):
-    rt = _FakeRuntime(store); rt.check_error = "sign-in didn't work (401)"
-    app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
-    c = TestClient(app, base_url="http://127.0.0.1")
-    r = c.post("/setup/check", data={"headers": "bad"})
-    assert r.status_code == 200
-    assert "sign-in" in r.text                                    # error rendered in the fragment
-    assert '"ok": false' in r.headers.get("hx-trigger", "").lower()
-
-
 def test_setup_page_alpine_attr_well_formed(store):
     # Regression: tojson emits double quotes, so x-data MUST be single-quoted or the JSON
     # terminates the HTML attribute early and Alpine (the whole check UI) never initializes.
@@ -326,20 +267,6 @@ def test_sync_streams_progress_events(store):
     assert "sync complete" in body       # final done event
     assert '"type": "end"' in body       # stream terminator
     assert len(store.get_playlists()) == 1
-
-def test_sync_plays_streams_and_records(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    client = FakeClient(tracks={"LM": [_track("v2", "Liked Song", "Artist")]},
-                        history=[_track("v1", "Played Song", "Artist")])
-    app = create_app(store, lambda: {iid: client}, now_fn=lambda: 7.0)
-    c = TestClient(app, base_url="http://127.0.0.1")
-    jid = c.post("/sync/plays").json()["job_id"]
-    with c.stream("GET", f"/sync/events/{jid}") as s:
-        body = "".join(s.iter_text())
-    assert "plays synced" in body          # final done event
-    assert '"type": "end"' in body         # stream terminator
-    assert store.get_recent_history_keys(0.0) == {"played song|artist"}
-    assert store.get_setting("last_plays_sync_at") == "7.0"
 
 def test_sync_events_unknown_job_404(store):
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
@@ -738,11 +665,11 @@ def test_resignin_clears_banner_and_flashes(store):
     app.state.ctx.auth_expired["main"] = "Main"          # simulate an expired session (banner shown)
     c = TestClient(app, base_url="http://127.0.0.1")
 
-    r = c.post("/setup", data={"headers": "Cookie: SID=abc", "label": ["main"],
+    r = c.post("/setup", data={"label": ["main"],
                                "brand_account_id": [""], "master": "0"}, follow_redirects=False)
     assert r.status_code == 303
-    # Auto-sync off, so they must act -> persistent banner pointing at Full sync, back to the dashboard.
-    assert r.headers["location"].startswith("/?flash=") and "authenticated%20again" in r.headers["location"]
+    # Synced before -> nothing to do (background sync catches up), so a transient toast back to Home.
+    assert r.headers["location"].startswith("/?toast=") and "authenticated%20again" in r.headers["location"]
     assert app.state.ctx.auth_expired == {}                          # stale-session banner cleared
 
 

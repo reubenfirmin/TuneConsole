@@ -13,15 +13,12 @@ from yt_playlist.rec.rec_dao import RecDao
 
 
 class RecWorker:
-    def __init__(self, ctx, debounce_s=2.0, discovery_tick_s=1800, gc_tick_s=86400, gc_initial_s=60,
-                 auto_sync_tick_s=1800, auto_sync_poll_s=60):
+    def __init__(self, ctx, debounce_s=2.0, discovery_tick_s=1800, gc_tick_s=86400, gc_initial_s=60):
         self.ctx = ctx
         self.debounce_s = debounce_s
         self.discovery_tick_s = discovery_tick_s   # background discovery scan cadence (~30 min)
         self.gc_tick_s = gc_tick_s                 # generated-playlist GC cadence (daily)
         self.gc_initial_s = gc_initial_s           # first GC pass shortly after start (catches restarts)
-        self.auto_sync_tick_s = auto_sync_tick_s   # auto-sync-plays cadence when the user opts in (~30 min)
-        self.auto_sync_poll_s = auto_sync_poll_s   # how often the loop checks whether a sync is DUE
         self._lock = threading.Lock()
         self._pending = False
         self._running = False
@@ -36,7 +33,6 @@ class RecWorker:
             self._ticker_started = True
         threading.Thread(target=self._tick_loop, daemon=True).start()
         threading.Thread(target=self._gc_loop, daemon=True).start()
-        threading.Thread(target=self._auto_sync_loop, daemon=True).start()
 
     def _tick_loop(self):
         from yt_playlist.rec import discover
@@ -70,37 +66,6 @@ class RecWorker:
             except Exception:  # noqa: BLE001 - discovery GC must never crash the daemon
                 self.ctx.logger.warning("discovery-pool GC tick failed", exc_info=True)
             time.sleep(self.gc_tick_s)
-
-    def _auto_sync_due(self, now) -> bool:
-        """Whether an auto-sync of plays should run NOW: the user has opted in (settings key
-        `auto_sync_plays`), an account is connected, and it's been at least one tick since the last
-        plays sync (or there's never been one). Due-based on the stored stamp - NOT a fixed sleep - so
-        an app restart can't postpone it: on restart, if it's overdue, the next poll runs it."""
-        if self.ctx.store.get_setting("auto_sync_plays") != "1":
-            return False
-        if not (self.ctx.client_provider() or {}):     # no account connected yet -> nothing to pull
-            return False
-        last = self.ctx.store.get_setting("last_plays_sync_at")
-        return last is None or (now - float(last)) >= self.auto_sync_tick_s
-
-    def _auto_sync_loop(self):
-        """Keeps plays/likes current without a manual sync when auto-sync is on. Polls every
-        auto_sync_poll_s and runs a sync whenever one is DUE (see _auto_sync_due). Polling on a short
-        interval (rather than sleeping a full tick first) means restarting the app no longer pushes the
-        next sync 30 minutes out - it catches up within a poll of being overdue, then holds the cadence."""
-        from yt_playlist.library import sync as sync_mod
-        while True:
-            time.sleep(self.auto_sync_poll_s)
-            try:
-                if not self._auto_sync_due(self.ctx.now_fn()):
-                    continue
-                sync_mod.sync_plays_all(
-                    self.ctx.store, self.ctx.client_provider() or {}, self.ctx.now_fn(),
-                    on_auth_expired=lambda iid, label: self.ctx.auth_expired.__setitem__(iid, label or str(iid)),
-                    on_auth_ok=lambda iid: self.ctx.auth_expired.pop(iid, None))
-                self.trigger()         # fold the new plays/likes into the taste model (debounced)
-            except Exception:  # noqa: BLE001 - an auto-sync failure must never crash the daemon
-                self.ctx.logger.warning("auto-sync-plays tick failed", exc_info=True)
 
     @property
     def busy(self):
@@ -148,13 +113,6 @@ class RecWorker:
         if again:
             self.trigger()             # a request arrived mid-rebuild -> background catch-up pass
 
-    def _fresh_proposal(self, now):
-        """#50/#53: Fresh-card material is the taste-scored cold pool ONLY. Every item carries a key, so
-        it is scored and gets the feedback menu; an empty pool yields an empty card (no unscored radio
-        rows). Radios still feed the pool via discover.populate_radio_tracks, just not the card directly."""
-        pool = surfaces.cold_candidates(self.ctx.store, now, limit=36)
-        return [surfaces._item_to_fresh_dict(i) for i in pool]
-
     def _do_rebuild(self):
         """Rebuild vectors and materialize the heavy proposal surfaces.
 
@@ -181,6 +139,31 @@ class RecWorker:
             embed.maybe_rebuild_content_vectors(store)
         except Exception:  # noqa: BLE001 - content space is best-effort; don't fail the rebuild
             log.warning("rec rebuild: content-vector refresh failed", exc_info=True)
+        # Taste modes (#60): cluster the freshly-rebuilt content space into the user's distinct taste
+        # regions, with stable ids across recomputes. Read-only for now (nothing ranks on them yet);
+        # guarded so a mode failure never breaks the rebuild.
+        try:
+            from yt_playlist.rec import taste_modes
+            nm = taste_modes.recompute(store, now)
+            log.info("rec rebuild: taste modes -> %d active", nm)
+        except Exception:  # noqa: BLE001 - modes are best-effort; don't fail the rebuild
+            log.warning("rec rebuild: taste-modes recompute failed", exc_info=True)
+        # Part B (#60): bucket every Home surface's pool by mode so the request can assemble distinct,
+        # mode-focused cards without ranking anything live. Guarded; a failure leaves last-good bundles.
+        try:
+            from yt_playlist.rec import mode_surfaces
+            mode_surfaces.prepare_bundles(store, now)
+            log.info("rec rebuild: mode bundles prepared")
+        except Exception:  # noqa: BLE001 - mode bundles are best-effort; don't fail the rebuild
+            log.warning("rec rebuild: mode-bundle prep failed", exc_info=True)
+        # #57 SHADOW: per-mode PPR (random walk) computed in parallel and appended to a persistent log
+        # alongside the cosine ranking, for a non-circular comparison in ~2 weeks. Serves nothing.
+        try:
+            from yt_playlist.rec import ppr
+            nm = ppr.shadow_log(store, now)
+            log.info("rec rebuild: PPR shadow logged %d modes", nm)
+        except Exception:  # noqa: BLE001 - shadow experiment must never break the rebuild
+            log.warning("rec rebuild: PPR shadow log failed", exc_info=True)
         # #28 artist-relationship model, built alongside the track embedding. Guarded: an artist-model
         # failure must never break the track rebuild (the model is consumed by nothing critical yet).
         try:
@@ -189,19 +172,16 @@ class RecWorker:
             log.info("rec rebuild: artist model %d artists in %.1fs", na, time.monotonic() - ta)
         except Exception:  # noqa: BLE001 - artist model is best-effort; don't fail the rebuild
             log.warning("rec rebuild: artist model failed", exc_info=True)
-        # Materialize a deeper pool than a single card shows, so the surface has several epochs of
-        # material to rotate through before it has to wrap.
-        surface_builders = (
-            ("fresh_songs", lambda: self._fresh_proposal(now)),
-        )
-        for surface, build in surface_builders:
-            ts = time.monotonic()
-            try:
-                items = build()
-                dao.put_proposals(surface, items, now)
-                log.info("rec rebuild: %s → %d items in %.1fs", surface, len(items), time.monotonic() - ts)
-            except Exception:  # noqa: BLE001 - one surface's failure must not starve the others
-                log.warning("rec rebuild: %s failed after %.1fs", surface, time.monotonic() - ts, exc_info=True)
+        # Wikipedia 'into recently' cards: pre-fetch the whole fresh-subject pool so the Home card
+        # serves from a warm cache instead of blocking on a live fetch when the rotation lands on a
+        # new subject. Guarded + best-effort: a fetch failure leaves the prior cache in place. The
+        # subject pool tracks the transient model, which we just rebuilt, so this is the right moment.
+        try:
+            from yt_playlist.rec import into_recently
+            warmed = into_recently.prewarm_pool(store, now)
+            log.info("rec rebuild: warmed %d wiki card(s)", warmed)
+        except Exception:  # noqa: BLE001 - wiki prewarm is best-effort; never fail the rebuild
+            log.warning("rec rebuild: wiki prewarm failed", exc_info=True)
         # Playlist-cleanup summary: a local-only O(n²) scan we keep OFF the home request path by
         # materializing it here (sync changes the playlists this depends on, so a rebuild is the right
         # moment). Last-good: a failure leaves the previous summary in place.

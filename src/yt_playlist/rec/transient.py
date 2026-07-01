@@ -66,12 +66,14 @@ def facet_leans(store, now) -> dict:
     limit = gp(store, "recent_play_limit")
     leans: dict = {}
 
-    def add(keys, signed):
+    def add(keys, signed, drop_artist=False):
         if not keys or signed == 0:
             return
         fac = facets_for(store, keys)
         n = len(set(keys)) or 1
         for f, fk in fac.items():
+            if drop_artist and f.startswith("artist:"):
+                continue
             leans[f] = leans.get(f, 0.0) + signed * (len(fk) / n)
 
     for rank, (_ts, direction, keys) in enumerate(store.recent_mood_events()):     # newest-first
@@ -80,8 +82,12 @@ def facet_leans(store, now) -> dict:
         add([k], play_w * ((1.0 - a) ** rank))
     for rank, k in enumerate(store.recent_liked_keys(limit=limit)):
         add([k], like_w * ((1.0 - a) ** rank))
+    # #54: a dislike is a verdict on THAT track, not the artist. Its track is already hard-suppressed
+    # via suppressed_keys; do NOT also emit a negative artist lean (which would mute every other song by
+    # that artist - "Billy Idol has stinkers but I still want the good ones"). Genre/era leans stay:
+    # they are broad, so a single dislike barely nudges them, and can't kill one artist.
     for k in store.disliked_identity_keys():
-        add([k], -dislike_w)
+        add([k], -dislike_w, drop_artist=True)
     s = staleness_factor(store, now)
     return {f: v * s for f, v in leans.items()}
 

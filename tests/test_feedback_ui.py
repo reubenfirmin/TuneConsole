@@ -19,8 +19,21 @@ def _seed(store):
 def test_home_proto_curation_not_pre_listen_taste_chips(store):
     # The Home proto-playlists are drafts you curate before listening, so each row offers a plain
     # "remove from this playlist", NOT taste feedback that only makes sense after hearing a track.
+    # Cards are now lazy-loaded; assert against /home/cards instead of /.
+    import numpy as np
+    from yt_playlist.rec import mode_surfaces as ms
     _, c = _seed(store)
-    html = c.get("/").text
+    store.modes.replace_modes([
+        {"mode_id": 1, "label": "a", "families": [["house", 1]],
+         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 80, "rep_keys": []},
+    ], retired_ids=[], now=1000.0)
+    payload = {"1": {}}
+    for surf in ms.CARD_SURFACES:
+        payload["1"][surf] = [{"key": f"{surf}k", "video_id": "v", "title": f"Song {surf}",
+                               "artist": "Art", "album": "", "thumbnail": None,
+                               "plays": 0, "reason": "", "lane": "", "genre": ""}]
+    store.put_proposals("mode_bundles", payload, 1000.0)
+    html = c.get("/home/cards").text
     assert "gen-rm" in html and "Remove from this playlist" in html
     for chip in ("More like this", "Not the vibe", "Wrong era", "Too mainstream", "Already know it"):
         assert chip not in html

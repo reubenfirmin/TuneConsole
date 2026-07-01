@@ -33,7 +33,10 @@ def test_dislike_moves_lean_negative(store):
     k = _jazz_track(store, "v1", "S")
     store.record_dislike(k, until=9e9, now=5.0)
     leans = transient.facet_leans(store, now=10.0)
-    assert leans.get("artist:A", 0.0) < 0
+    # #54: a dislike must NOT push the artist negative (one stinker can't mute the whole artist),
+    assert leans.get("artist:A", 0.0) >= 0
+    # but it still registers as a broad (genre/era) negative signal, so it isn't inert.
+    assert any(v < 0 for f, v in leans.items() if not f.startswith("artist:"))
 
 
 def test_facet_multiplier_clamps_and_neutral_at_zero(store):

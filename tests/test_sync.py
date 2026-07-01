@@ -1,71 +1,49 @@
-from yt_playlist.library.sync import sync_identity, sync_all, sync_plays_all, content_hash
+from yt_playlist.library.sync import sync_identity, sync_all, content_hash
+from yt_playlist.library import sync as sync_mod
 from tests.conftest import FakeClient, _track
 
 
-def test_sync_plays_records_history_and_likes(store):
-    """The fast plays sync pulls listening history and the Liked Music playlist, and records its
-    own timestamp without disturbing the full-sync 'time to sync' nudge (last_sync_at)."""
-    iid = store.upsert_identity("main", "cred", None, True)
-    client = FakeClient(tracks={"LM": [_track("v2", "Liked Song", "Artist")]},
-                        history=[_track("v1", "Played Song", "Artist")])
-    sync_plays_all(store, {iid: client}, now=1500.0)
-
-    assert store.get_recent_history_keys(0.0) == {"played song|artist"}
-    lm = [p for p in store.get_playlists() if p.ytm_playlist_id == "LM"]
-    assert len(lm) == 1
-    assert store.get_playlist_track_keys(lm[0].id) == {"liked song|artist"}
-    assert store.get_setting("last_plays_sync_at") == "1500.0"
-    assert store.get_setting("last_sync_at") is None      # full-sync nudge left untouched
+# The message ytmusicapi raises when YouTube serves the SIGNED-OUT layout (singleColumnBrowseResultsRenderer
+# with a "Sign in" button / signInEndpoint) instead of the signed-in twoColumnBrowseResultsRenderer. The
+# full response dict is interpolated into the exception text, so the sign-in markers are present in str(e).
+_SIGNED_OUT_MSG = (
+    "Unable to find 'twoColumnBrowseResultsRenderer' using path "
+    "['contents', 'twoColumnBrowseResultsRenderer', 'tabs', 0] on "
+    "{'singleColumnBrowseResultsRenderer': {'tabs': [{'tabRenderer': {'content': "
+    "{'sectionListRenderer': {'contents': [{'messageRenderer': {'text': {'runs': "
+    "[{'text': 'Looking for what you’ve liked?'}]}, 'button': {'buttonRenderer': "
+    "{'text': {'runs': [{'text': 'Sign in'}]}, 'navigationEndpoint': "
+    "{'signInEndpoint': {'hack': True}}}}}}]}}}}]}}, exception: 'twoColumnBrowseResultsRenderer'"
+)
 
 
-def test_sync_plays_feeds_like_model_and_transient_plays(store):
-    """The fast plays/likes sync records+graduates newly-captured likes at event time (the like
-    channel, #39), and captures plays into the transient feed only. Per #46, plays no longer graduate
-    AT sync (that re-counted); they graduate later by daily exposure (graduate_play_exposure)."""
-    from yt_playlist.rec import recommend
-    iid = store.upsert_identity("main", "cred", None, True)
-
-    # Pre-seed the catalog so the played/liked keys resolve to facets (distinct genre families so
-    # the play contribution and the like contribution land on different theme ledgers).
-    played = store.upsert_track("v1", "Played Song", "Artist", None, None)
-    store.set_track_genre(played, "Jazz")
-    liked = store.upsert_track("v2", "Liked Song", "Other", None, None)
-    store.set_track_genre(liked, "Techno")
-    fam_play = recommend.genre_map.family("Jazz")
-    fam_like = recommend.genre_map.family("Techno")
-
-    client = FakeClient(tracks={"LM": [_track("v2", "Liked Song", "Other")]},
-                        history=[_track("v1", "Played Song", "Artist")])
-    sync_plays_all(store, {iid: client}, now=1500.0)
-
-    # Likes: the new LM member was recorded (like channel) and graduated at sync (event time).
-    assert store.recent_liked_keys() == ["liked song|other"]
-    assert store.get_theme(f"genre:{fam_like}") > 0.0
-    # Plays: NOT graduated at sync anymore (#46) - the play only fed the transient model.
-    assert store.get_theme(f"genre:{fam_play}") is None
-    assert "genre:" + fam_play in recommend.transient.play_facet_leans(store, 1500.0)
-    # It graduates only when the exposure funnel runs (the Home feed render does this daily).
-    recommend.graduate_play_exposure(store, 1500.0)
-    assert store.get_theme(f"genre:{fam_play}") > 0.0
+def test_is_auth_error_detects_signed_out_response():
+    """A signed-out session surfaces as a parse failure whose text carries the sign-in markers; it must
+    be classified as an auth error so the user gets the re-auth banner (not a silent 'unavailable')."""
+    assert sync_mod._is_auth_error(Exception(_SIGNED_OUT_MSG)) is True
 
 
-def test_sync_plays_skips_full_library_enumeration(store):
-    """The fast path must never enumerate the whole library. That's the slow work it exists to skip."""
+def test_is_auth_error_still_matches_http_codes_and_ignores_transient():
+    assert sync_mod._is_auth_error(Exception("HTTP 401 Unauthorized")) is True
+    assert sync_mod._is_auth_error(Exception("403 Forbidden")) is True
+    assert sync_mod._is_auth_error(Exception("temporary network blip")) is False
+
+
+def test_sync_identity_soft_skips_on_bridge_disconnect(store):
+    """A BridgeError (extension disconnected / no signed-in tab) is a CONNECTION problem, not a dead
+    session: sync_identity must skip quietly, NOT flag re-auth, and NOT raise."""
+    from yt_playlist.core.bridge import BridgeError
     iid = store.upsert_identity("main", "cred", None, True)
 
-    class SpyClient(FakeClient):
-        def __init__(self, **kw):
-            super().__init__(**kw)
-            self.library_calls = 0
-
+    class _DisconnectedClient(FakeClient):
         def get_library_playlists(self, limit=25):
-            self.library_calls += 1
-            return super().get_library_playlists(limit)
+            raise BridgeError("no extension connected")
 
-    client = SpyClient(tracks={"LM": [_track("v2", "Liked", "Artist")]},
-                       history=[_track("v1", "Played", "Artist")])
-    sync_plays_all(store, {iid: client}, now=1.0)
-    assert client.library_calls == 0
+    expired = {}
+    sync_identity(store, iid, _DisconnectedClient(), now=1500.0,
+                  on_auth_expired=lambda i, label: expired.__setitem__(i, label or str(i)))
+    assert expired == {}                       # NOT flagged for re-auth
+    assert store.get_playlists() == []         # nothing pruned/changed
 
 
 def test_sync_all_records_last_sync_at(store):

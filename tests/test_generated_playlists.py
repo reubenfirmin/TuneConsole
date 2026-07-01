@@ -79,12 +79,10 @@ def test_generate_endpoint_creates_and_groups(store):
     assert saved.title == "More in your wheelhouse - June 21 2026" and saved.track_count == 2
 
 
-def test_generate_result_reuses_preopened_tab(store):
-    """Regression: the post-save swap must point an ALREADY-OPEN tab at the playlist, not call a bare
-    window.open() itself. A window.open() fired from the htmx response runs after the save round-trip,
-    which, once the batch-add falls back to slow per-item retries, outlives the browser's user-
-    activation window and gets popup-blocked (the YouTube tab never opens, only the same-tab redirect
-    survives). So the success path reuses the tab opened synchronously during the click."""
+def test_generate_result_play_and_redirect(store):
+    """After Save & play: a playable YouTube Music watch link, and this tab redirects to the playlist
+    page. With the extension connected the playlist plays in your existing tab; without it (this test
+    has no live bridge), the loading window falls back to becoming the playlist."""
     iid = store.upsert_identity("main", "cred", None, True)
     fc = FakeClient()
     c = _client(store, lambda: {iid: fc})
@@ -93,12 +91,14 @@ def test_generate_result_reuses_preopened_tab(store):
     r = c.post("/home/generate", data={"name": "Mix - June 21 2026", "tracks": tracks})
 
     assert r.status_code == 200 and "Saved" in r.text
-    assert "__ytTab" in r.text                                  # reuses the tab opened on click
+    assert "music.youtube.com/watch?list=" in r.text           # playable watch link
+    assert 'window.location.assign("/playlist/' in r.text      # this tab goes to the playlist page
+    assert "__ytTab" in r.text                                 # loading window handled (fallback path)
 
 
-def test_save_button_preopens_youtube_tab(store):
-    """The Save & play button must open the blank YouTube tab DURING the click (a user gesture), so the
-    browser doesn't block it. Without this, the open is deferred to the slow post-save swap and blocked."""
+def test_save_button_opens_generating_screen(store):
+    """The Save & play button opens the cool generating screen during the click (a user gesture), so
+    the browser does not block it."""
     iid = store.upsert_identity("main", "cred", None, True)
     t = store.upsert_track("v1", "Song", "Artist", "Alb", None, 1)
     pl = store.upsert_playlist(iid, "PL", "P", 1, "h", 1.0)
@@ -110,8 +110,8 @@ def test_save_button_preopens_youtube_tab(store):
     r = c.get("/")
 
     assert r.status_code == 200
-    # the Save & play button opens the tab on click and stashes the handle for the swap to reuse
-    assert "genOpenYT(" in r.text and "__ytTab" in r.text
+    assert "genOpenYT(" in r.text                              # save-button hook present
+    assert "window.open('/home/generating'" in r.text          # opens the generating screen on click
 
 
 def test_saved_proto_tracks_not_re_offered(store):
@@ -133,15 +133,28 @@ def test_generate_endpoint_rejects_empty(store):
 
 
 def test_home_renders_generated_cards(store):
+    # Cards are lazy-loaded via /home/cards; assert against that endpoint instead of /.
+    import numpy as np
+    from yt_playlist.rec import mode_surfaces as ms
     iid = store.upsert_identity("main", "cred", None, True)
     t = store.upsert_track("v1", "Song", "Artist", "Alb", None, 1)
     pl = store.upsert_playlist(iid, "PL", "P", 1, "h", 1.0)
     store.set_playlist_tracks(pl, [t])
     store.add_history_snapshot(iid, 1.0, [identity_key("Song", "Artist")])
     store.set_setting("last_sync_at", "1.0")        # synced -> the rec feed (generated cards) renders
+    store.modes.replace_modes([
+        {"mode_id": 1, "label": "a", "families": [["house", 1]],
+         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 80, "rep_keys": []},
+    ], retired_ids=[], now=1.0)
+    payload = {"1": {}}
+    for surf in ms.CARD_SURFACES:
+        payload["1"][surf] = [{"key": f"{surf}k", "video_id": "v", "title": f"Song {surf}",
+                               "artist": "Art", "album": "", "thumbnail": None,
+                               "plays": 0, "reason": "", "lane": "", "genre": ""}]
+    store.put_proposals("mode_bundles", payload, 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
 
-    r = c.get("/")
+    r = c.get("/home/cards")
     assert r.status_code == 200
     assert "More in your wheelhouse" in r.text and "Save &amp; play on YouTube" in r.text
 

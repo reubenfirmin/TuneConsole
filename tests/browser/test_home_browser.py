@@ -1,12 +1,12 @@
-def test_home_is_landing_with_sync_and_sections(live_app, page):
+def test_home_is_landing_with_status_and_sections(live_app, page):
     page.goto(f"{live_app}/")
-    # Home is the default tab and owns the Sync control. This live_app has never synced, so a brand-new
-    # user is offered Full sync only. The "Sync plays" auto-sync toggle appears after a first sync.
-    assert page.get_by_role("button", name="Full sync").is_visible()
+    # Home is the default tab. Syncing is automatic in the background now, so there is no manual
+    # sync button: just a live status card (connection + now-playing + freshness).
+    assert page.get_by_role("button", name="Full sync").count() == 0
     assert page.get_by_role("button", name="Sync plays").count() == 0
     assert page.get_by_role("heading", name="More in your wheelhouse").is_visible()
-    # the merged Sync card carries the status badge (no separate "Time to sync" row)
-    assert page.get_by_text("Never synced").is_visible()
+    # the status card carries the library-freshness line (never synced yet on this live_app)
+    assert page.get_by_text("Library synced not yet").is_visible()
 
 
 def test_sync_button_absent_from_playlists_tab(live_app, page):

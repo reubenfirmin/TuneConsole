@@ -8,8 +8,9 @@ from fastapi.responses import JSONResponse
 
 from yt_playlist.library import executor
 from yt_playlist.util import genre_map
-from yt_playlist.rec import arc_energy, journeys, rec_params, recommend
+from yt_playlist.rec import arc_energy, journeys, onboarding, rec_params, recommend, into_recently
 from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.providers import wikipedia, lastfm
 from yt_playlist.web.context import form_float
 
 # How many tracks each generated proto-playlist offers.
@@ -20,7 +21,26 @@ ALBUMS_PER_CARD = 15               # discover album tiles fetched per epoch (gri
 # Home cards that rotate. Each holds its content for erosion_view_cap real Home visits, then advances
 # to a fresh epoch. They tick together (once per visit, in GET /) but each rotates its OWN pool at its
 # own size, so the small new-artist pool cycles through faster than the deep playlist pool.
-ROTATING_CARDS = ("wheelhouse", "explore", "comfort", "fresh", "new_artists", "discover", "rediscover")
+ROTATING_CARDS = ("wheelhouse", "explore", "comfort", "fresh", "new_artists", "discover",
+                  "rediscover", "into_recently", "cards")
+
+# Genre coverage below this fraction of processed tracks, with no Last.fm key, prompts the user to
+# add one. Last.fm is the densest genre source, so a thin genre coverage is the signal that a key
+# would most help.
+LASTFM_NUDGE_COVERAGE = 0.90
+
+
+def lastfm_nudge_due(store) -> bool:
+    """True when metadata is genre-sparse, no Last.fm key is set, and the nudge is not dismissed."""
+    if lastfm.available(store):
+        return False
+    if store.get_setting("lastfm_nudge_dismissed") == "1":
+        return False
+    cov = store.coverage_stats()
+    processed = cov.get("processed", 0)
+    if not processed:
+        return False
+    return cov.get("genre", 0) / processed < LASTFM_NUDGE_COVERAGE
 _NOTES = {
     "wheelhouse": "Deeper into what you already love.",
     "explore": "Unplayed corners of your own library.",
@@ -39,18 +59,12 @@ def _proto(lane, label, items, now):
             "feedback_surface": "for_you" if lane == "fresh" else None}
 
 
-def _carded(store, lane, label, items, now):
-    """A proto-card built from a rolled recipe: roll the theme + journey (seeded by the card's
-    rotation epoch so it's stable across steer/stance previews), focus the items on the theme, then
-    order them by the rolled JOURNEY (energy arc, eras, deep dive…) with genres attached. Ordering
-    happens here, not at save, so the preview IS the playlist (WYSIWYG): a Save keeps the rows you
-    didn't prune, in the order you see. Recipes predating journeys fall back to 'shuffle'."""
-    recipe = recommend.roll_recipe(store, lane, seed=_epoch(store, lane), now=now)
-    items = recommend.theme_filter(store, items, recipe.get("facets", {}))
+def _order_by_journey(store, items, journey, seed):
+    """Order proto-card items (ForYouItem objects in preview, plain dicts on the mode path) by the
+    rolled DJ JOURNEY, attaching the per-track features journey_order needs (genre, real-audio energy,
+    decade, plays, recency). Ordering happens here, not at save, so the preview IS the playlist
+    (WYSIWYG): a Save keeps the rows you didn't prune, in the order you see."""
     items = recommend.attach_genres(store, items)
-    # roll_recipe forces Fresh to journey="shuffle" (unowned proposals have no plays/recency signal),
-    # so the stored recipe and this preview ordering agree. Owned lanes order by their rolled journey.
-    journey = recipe.get("journey", "shuffle")
     _f = recommend._field
     keys = [_f(it, "key") or "" for it in items]
     dao = RecDao(store)
@@ -63,11 +77,22 @@ def _carded(store, lane, label, items, now):
         return {"artist": _f(it, "artist") or "", "genre": g, "energy": arc.get(k, genre_map.energy(g)),
                 "decade": decades.get(k), "plays": plays.get(k, 0), "recency": lastp.get(k, 0.0)}
 
-    seed = recipe.get("dj", {}).get("seed", 0)
-    items = journeys.journey_order(items, journey, seed, feat)
+    return journeys.journey_order(items, journey, seed, feat)
+
+
+def _carded(store, lane, label, items, now):
+    """A proto-card built from a rolled recipe: roll the theme + journey (seeded by the card's
+    rotation epoch so it's stable across steer/stance previews), focus the items on the theme, then
+    order them by the rolled JOURNEY (energy arc, eras, deep dive…). Recipes predating journeys fall
+    back to 'shuffle'."""
+    recipe = recommend.roll_recipe(store, lane, seed=_epoch(store, lane), now=now)
+    items = recommend.theme_filter(store, items, recipe.get("facets", {}))
+    # roll_recipe forces Fresh to journey="shuffle" (unowned proposals have no plays/recency signal),
+    # so the stored recipe and this preview ordering agree. Owned lanes order by their rolled journey.
+    items = _order_by_journey(store, items, recipe.get("journey", "shuffle"),
+                              recipe.get("dj", {}).get("seed", 0))
     p = _proto(lane, label, items, now)
     p["recipe"] = recipe
-    p["refreshable"] = True
     return p
 
 
@@ -90,9 +115,11 @@ def _one_card(store, card, now):
         items = recommend.rotate_sample(recommend.comfort_listening(store, now, limit=ROTATION_POOL),
                                         PROTO_SIZE, _epoch(store, "comfort"))
     elif card == "fresh":
-        props = RecDao(store).get_proposals("fresh_songs")
-        items = recommend.rotate_sample(props or [], PROTO_SIZE, _epoch(store, "fresh"))
-        store.mark_offered("track", [i["key"] for i in items if i.get("key")], now)   # #53 offered count
+        from yt_playlist.rec import surfaces
+        pool = surfaces.cold_candidates(store, now, limit=PROTO_SIZE)
+        items = [surfaces._item_to_fresh_dict(i) for i in pool]
+        # NB: #53 offered-count is stamped by the CALLER (the /home/cards loop or the per-card refresh
+        # route), not here, so the cold-start fallback path doesn't double-count fresh tracks.
     else:
         return None
     return _carded(store, card, _CARD_LABELS[card], items, now) if items else None
@@ -110,42 +137,11 @@ def build(ctx) -> APIRouter:
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
 
     def _feed_context(now):
-        # Bake any held-day slider exposure into the graduation ledger (once per UTC day per axis).
+        # Bake held slider exposure + sustained listening into the graduation ledger (idempotent per
+        # UTC day). The cards themselves now load lazily via /home/cards from the worker's bundles.
         recommend.graduate_slider_exposure(store, now)
-        # Bake sustained recent listening into the same ledger, the same exposure mechanic (once per
-        # UTC day per axis). Plays feed only the transient model; this is the single funnel by which
-        # passive listening reaches permanent taste (re-runs are idempotent, so it cannot re-count).
         recommend.graduate_play_exposure(store, now)
-        # Each list card shows a stable random slice of its ranked pool, reseeded once its rotation
-        # epoch advances (every erosion_view_cap real Home visits). The epoch is read here, never
-        # ticked. The tick happens only in GET /, so steer/stance previews re-render the same slice
-        # and tuning your taste model never churns the cards.
-        # HOME CARD MAP (heading <- function): Wheelhouse <- for_you, Catalog <- explore_for_you,
-        # Comfort <- comfort_listening, Fresh <- fresh_songs. Catalog ('ex_pool') is DEDUPED against
-        # the Wheelhouse pool below, so the two cards never show the same track, but note both rank
-        # off the same taste×transient score, so Catalog is currently "Wheelhouse's leftovers by
-        # under-played artists" rather than a distinct novelty signal (a known differentiation gap).
-        fy_pool = recommend.for_you(store, now, limit=ROTATION_POOL)            # Wheelhouse pool
-        fy_keys = {i.key for i in fy_pool}
-        ex_pool = [i for i in recommend.explore_for_you(store, now, limit=ROTATION_POOL)  # Catalog pool
-                   if i.key not in fy_keys]                                     # deduped vs Wheelhouse
-        wheel_items = recommend.rotate_sample(fy_pool, PROTO_SIZE, _epoch(store, "wheelhouse"))
-        catalog_items = recommend.rotate_sample(ex_pool, PROTO_SIZE, _epoch(store, "explore"))
-        # Comfort Listening: a fixed 4th card. Dedup against what the taste lanes are *currently
-        # showing* so a track never appears twice on the page.
-        shown = {i.key for i in wheel_items} | {i.key for i in catalog_items}
-        cf_pool = [i for i in recommend.comfort_listening(store, now, limit=ROTATION_POOL)
-                   if i.key not in shown]
-        comfort_items = recommend.rotate_sample(cf_pool, PROTO_SIZE, _epoch(store, "comfort"))
-
-        # Fixed order: wheelhouse first, then catalog (the old explore/exploit toggle that reordered
-        # these was removed in #7. Breadth steering is the real focused<->eclectic control now).
-        wheel = _carded(store, "wheelhouse", "More in your wheelhouse", wheel_items, now)
-        catalog = _carded(store, "explore", "From your catalog", catalog_items, now) if catalog_items else None
-        generated = [wheel] + ([catalog] if catalog else [])
-        comfort = _carded(store, "comfort", "Comfort listening", comfort_items, now) if comfort_items else None
-        return {"fingerprint": recommend.taste_fingerprint(store, now),
-                "generated": generated, "comfort": comfort}
+        return {"fingerprint": recommend.taste_fingerprint(store, now)}
 
     @router.get("/")
     def home_page(request: Request):
@@ -156,7 +152,6 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "home.html", {
             "actions": recommend.take_action(store, now, ctx.auth_expired),
             "sync": recommend.sync_status(store, now),
-            "auto_sync": store.get_setting("auto_sync_plays") == "1",
             "muted_count": len(store.muted_artists()),   # transparency: what's being hidden
             "rediscover": recommend.rediscover_playlists(store, now, epoch=_epoch(store, "rediscover")),
             # Saved albums you haven't played lately, rendered above the playlists in the same
@@ -164,18 +159,42 @@ def build(ctx) -> APIRouter:
             "rediscover_albums": recommend.rediscover_albums(store, now, epoch=_epoch(store, "rediscover")),
             "flash": request.query_params.get("flash"),
             "toast": request.query_params.get("toast"),   # transient success (e.g. re-auth w/ auto-sync)
-            # One-time onboarding nudge: once they've synced, point new users at enrichment until
-            # they dismiss it (the flag persists across reloads).
-            "show_enrich_nudge": bool(store.get_setting("last_sync_at"))
-                                 and store.get_setting("enrich_nudge_dismissed") != "1",
+            # Sparsity nudge: when metadata is genre-thin and no Last.fm key is set, point the user
+            # at adding one (persists once dismissed). The auto-enrich worker handles the rest, so
+            # there is no manual-enrichment nag anymore.
+            "show_lastfm_nudge": lastfm_nudge_due(store),
+            "onboarding": onboarding.onboarding_active(store, now),
+            "onboard_library": onboarding.library_size(store) >= rec_params.get_param(store, "onboard_library_min"),
+            "cleanup_count": onboarding.cleanup_count(store),   # CACHED read, never the O(n^2) scan
+            "onboard_progress": onboarding.warmup_progress(store),
             **_feed_context(now),
         })
 
-    @router.post("/onboard/enrich/dismiss")
-    def dismiss_enrich_nudge():
-        """Permanently dismiss the Home enrichment nudge. Empty 200 so HTMX swaps it out."""
-        store.set_setting("enrich_nudge_dismissed", "1")
+    @router.post("/onboard/lastfm/dismiss")
+    def dismiss_lastfm_nudge():
+        """Permanently dismiss the Home Last.fm-key nudge. Empty 200 so HTMX swaps it out."""
+        store.set_setting("lastfm_nudge_dismissed", "1")
         return Response(status_code=200)
+
+    @router.get("/home/onboard/radio")
+    def home_onboard_radio(request: Request):
+        now = now_fn()
+        client = next(iter((ctx.client_provider() or {}).values()), None)
+        tracks = onboarding.radio_sample(store, client, now, n=PROTO_SIZE)
+        proto = _proto("onboard_radio", "YouTube radio for you", tracks, now) if tracks else None
+        return templates.TemplateResponse(request, "_partials/onboard_playlist.html", {"proto": proto})
+
+    @router.get("/home/onboard/library")
+    def home_onboard_library(request: Request):
+        now = now_fn()
+        tracks = onboarding.library_sample(store, n=PROTO_SIZE)
+        proto = _proto("onboard_library", "From your library", tracks, now) if tracks else None
+        return templates.TemplateResponse(request, "_partials/onboard_playlist.html", {"proto": proto})
+
+    @router.post("/onboard/done")
+    def onboard_done():
+        store.set_setting("onboard_dismissed", "1")
+        return Response(status_code=200, headers={"HX-Refresh": "true"})
 
     @router.get("/privacy")
     def privacy(request: Request):
@@ -191,6 +210,33 @@ def build(ctx) -> APIRouter:
     def home_feed(request: Request):
         return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(now_fn()))
 
+    @router.get("/home/into-recently")
+    def home_into_recently(request: Request):
+        """The 'You're into [X] recently' card: a Wikipedia summary for the freshest, least-obvious
+        artist/genre in the transient model. Lazy HTMX fragment; empty body when there is nothing
+        fresh or no usable page (the card is then simply absent)."""
+        now = now_fn()
+        # Walk the epoch-ordered pool and render the FIRST subject that resolves to a usable card. The
+        # warm (cached) subjects are rotated by epoch so the card erodes through them one per epoch; a
+        # pick with no Wikipedia page or no thumbnail falls through to the next instead of blanking the
+        # card. Misses are negative-cached, so later refreshes don't refetch the dead subjects.
+        for subj in into_recently.subjects_for_epoch(store, now, epoch=_epoch(store, "into_recently")):
+            row = store.wiki.get(subj["subject"])
+            if row is None or not store.wiki.is_fresh(row, now):
+                payload = wikipedia.fetch_summary(subj["kind"], subj["display"])
+                store.wiki.put(subj["subject"], subj["kind"], subj["display"], payload, now)
+                row = store.wiki.get(subj["subject"])
+            if not row or not row["found"] or not row["extract"]:
+                continue
+            extras = into_recently.decorate(store, subj)
+            thumbnail = row["thumbnail"] or extras["thumbnail"]
+            if not thumbnail:                          # the card always wants a thumbnail
+                continue
+            card = {**row, "thumbnail": thumbnail, "color": extras["color"],
+                    "seed": extras["seed"], "genre": extras["genre"], "depth": into_recently.CLUSTER_DEPTH}
+            return templates.TemplateResponse(request, "_partials/into_recently.html", {"card": card})
+        return Response(status_code=200)
+
     @router.post("/home/refresh-card/{card}")
     def home_refresh_card(request: Request, card: str):
         """Refresh one Home card: advance its rotation to a fresh, unseen slice, rerun that card's
@@ -202,7 +248,66 @@ def build(ctx) -> APIRouter:
         p = _one_card(store, card, now)
         if p is None:
             return Response(status_code=204)
+        keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None)) for t in p["tracks"]]
+        store.mark_offered("track", [k for k in keys if k], now)   # #53: this route is the sole counter here
         return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": p})
+
+    def _cards_fragment(request, now):
+        from yt_playlist.rec import mode_surfaces
+        epoch = _epoch(store, "cards")
+        cards = mode_surfaces.assemble_cards(store, now, epoch)
+        if cards:
+            protos = []
+            for c in cards:
+                # Roll a DJ journey for this card so the saved playlist carries a Flow (parity with the
+                # per-lane _carded cards). Seed per (epoch, mode) so each of the 4 cards rolls its OWN
+                # journey, stable across re-renders of the same epoch. We keep only the rolled journey
+                # + dj seed: the mode already defines the theme, so its facets/weights are not re-rolled.
+                rolled = recommend.roll_recipe(store, c["lane"], seed=f"{epoch}:{c['mode_id']}", now=now)
+                journey, dj = rolled.get("journey", "shuffle"), rolled.get("dj", {})
+                tracks = _order_by_journey(store, c["tracks"], journey, dj.get("seed", 0))
+                protos.append(_proto(c["lane"], c["label"], tracks, now)
+                              | {"mode_id": c["mode_id"],
+                                 "recipe": {"model": "mode", "mode_id": c["mode_id"],
+                                            "journey": journey, "dj": dj}})
+            try:
+                store.modes.log_impressions(epoch, [(c["lane"], c["mode_id"]) for c in cards], now)
+            except Exception:  # noqa: BLE001 - logging must never break the card render
+                ctx.logger.warning("mode-impression log failed", exc_info=True)
+        else:
+            # Fallback before the first rebuild: the pre-B per-card builders, so the row is never empty.
+            protos = [p for p in (_one_card(store, name, now) for name in
+                                  ("wheelhouse", "explore", "comfort", "fresh")) if p]
+        for p in protos:                                   # #53 offered-count parity
+            # tracks are dicts on the mode path but ForYouItem objects on the _one_card fallback,
+            # so read the key from either shape (a bare t.get here 500s the whole card row).
+            keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None))
+                    for t in p["tracks"]]
+            store.mark_offered("track", [k for k in keys if k], now)
+        return templates.TemplateResponse(request, "_partials/mode_cards.html", {"protos": protos})
+
+    def _cards_safe(request, now):
+        # The row loads via hx-trigger=load with the spinner as placeholder content: a 500 here leaves
+        # the spinner up forever (HTMX does not swap on error). So never raise out of this surface,
+        # render an empty row on any unexpected failure (logged) so the spinner always clears.
+        try:
+            return _cards_fragment(request, now)
+        except Exception:  # noqa: BLE001 - a render failure must not strand the home page on a spinner
+            ctx.logger.exception("home cards render failed")
+            return templates.TemplateResponse(request, "_partials/mode_cards.html", {"protos": []})
+
+    @router.get("/home/cards")
+    def home_cards(request: Request):
+        """The mode-driven card row: 4 distinct taste-mode variations from the worker's prepared
+        bundles. Lazy fragment (spinner) so live mood tilt runs off the main render."""
+        return _cards_safe(request, now_fn())
+
+    @router.post("/home/refresh-cards")
+    def home_refresh_cards(request: Request):
+        """Re-roll the whole mode-card row (advance its shared rotation epoch)."""
+        now = now_fn()
+        RecDao(store).refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+        return _cards_safe(request, now)
 
     @router.post("/home/breadth")
     async def home_breadth(request: Request):
@@ -308,7 +413,22 @@ def build(ctx) -> APIRouter:
                 res = await asyncio.to_thread(
                     executor.create_generated_playlist, store, name, tracks, client, now_fn(),
                     identity_id, recipe=recipe)
+                # Land playback in the already-open YouTube Music tab, not a new one. The watch URL
+                # (list=...) autoplays the playlist. The extension swaps the existing tab; the result
+                # template never opens a YouTube tab itself.
+                watch_url = f"https://music.youtube.com/watch?list={res['new_ytm']}"
+                bridge = getattr(ctx, "bridge", None)
+                if bridge is not None and getattr(bridge, "connected", False):
+                    try:
+                        bridge.send_control({"type": "navigate", "url": watch_url})
+                    except Exception:  # noqa: BLE001 - navigation is best-effort
+                        pass
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
+                if isinstance(recipe, dict) and recipe.get("mode_id") is not None and res.get("pid"):
+                    try:
+                        store.modes.log_pick(res["pid"], int(recipe["mode_id"]), now_fn())
+                    except Exception:  # noqa: BLE001 - logging must never break playlist creation
+                        pass
             except Exception:  # noqa: BLE001 - surface a friendly card, log the detail
                 ctx.logger.exception("generate playlist %r failed", name)
                 result["error"] = "YouTube returned an unexpected response."
@@ -327,18 +447,6 @@ def build(ctx) -> APIRouter:
                                           {"albums": albums,
                                            "building": not albums and _busy(),
                                            "stale": bool(albums) and _busy()})
-
-    @router.get("/home/fresh")
-    def home_fresh(request: Request):
-        # List card: a fresh random slice each epoch, like the other proto-playlists.
-        props = RecDao(store).get_proposals("fresh_songs")
-        items = recommend.rotate_sample(props or [], PROTO_SIZE, _epoch(store, "fresh"))
-        store.mark_offered("track", [i["key"] for i in items if i.get("key")], now_fn())   # #53 offered count
-        proto = _carded(store, "fresh", "Fresh songs", items, now_fn()) if items else None
-        return templates.TemplateResponse(request, "_partials/fresh.html",
-                                          {"proto": proto,
-                                           "building": props is None and _busy(),
-                                           "stale": props is not None and _busy()})
 
     @router.get("/home/new-artists")
     def home_new_artists(request: Request):

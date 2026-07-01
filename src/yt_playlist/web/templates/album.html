@@ -36,7 +36,7 @@
   </div>
   {# Enrichment runs over the album's tracks once they're folded into the library, which happens when
      you save it, so the icons are always shown (parity with playlists) but disabled until saved. #}
-  <div class="head-tools{% if enrich_hint %} enrich-hint{% endif %}" x-data="{ cpOpen: false }">
+  <div class="head-tools" x-data="{ cpOpen: false }">
     <button type="button" class="head-icon" @click="cpOpen = true"
             title="Create a playlist from this album" aria-label="Create a playlist from this album">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"

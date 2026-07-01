@@ -99,8 +99,6 @@ def build(ctx) -> APIRouter:
             "lastfm_configured": lastfm.api_key(store) is not None,
             "conflict_count": store.conflict_count_for_playlist(pid),  # drives the header conflict icon
             "active_job": ctx.jobs.find_active(pid),     # an in-progress enrichment to rejoin, if any
-            # arrived via a home "Enrich" CTA. Tint the enrich icons CTA-green so it's clear what to click
-            "enrich_hint": request.query_params.get("enrich") == "1",
         })
 
     @router.get("/playlist/{pid}/share.txt")

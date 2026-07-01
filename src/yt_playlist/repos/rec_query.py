@@ -776,45 +776,6 @@ class RecQueryRepo(Repo):
                  "video_id": r["vid"], "thumbnail": r["thumb"],
                  "same_artist": bool(r["sa"]), "cooc": r["cooc"]} for r in rows]
 
-    @synchronized
-    def enrichment_candidates(self, limit=3, min_gaps=5, min_ratio=0.25) -> list[dict]:
-        """Playlists worth enriching, ranked by how much you listen to them.
-
-        Only playlists with a meaningful share of missing genre tags qualify (>= min_ratio of
-        tracks, and at least min_gaps). This stops nagging about playlists you've already enriched
-        down to a handful of untaggable residuals. What's left there isn't worth another pass,
-        regardless of which providers ran. Enriching the most-played gappy playlists first gives
-        the biggest recommendation lift, since recs lean on genre/year.
-        """
-        excl = self.excluded_playlist_ids()
-        gen_where = _exclude_clause("p.id", excl)
-        rows = self.conn.execute(
-            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key) "
-            "SELECT p.id id, p.title title, p.thumbnail thumb, "
-            "       SUM(CASE WHEN t.genre IS NULL OR t.genre='' THEN 1 ELSE 0 END) gaps, "
-            "       COUNT(pt.track_id) total, COALESCE(SUM(tp.c),0) plays "
-            "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
-            "JOIN tracks t ON t.id=pt.track_id "
-            "LEFT JOIN tp ON tp.identity_key=t.identity_key "
-            f"WHERE 1=1{gen_where} "
-            "GROUP BY p.id HAVING gaps >= :min_gaps AND (gaps * 1.0 / total) >= :min_ratio "
-            "ORDER BY plays DESC, gaps DESC LIMIT :limit",
-            {"limit": limit, "min_gaps": min_gaps, "min_ratio": min_ratio}).fetchall()
-        return [{"id": r["id"], "title": r["title"], "thumbnail": r["thumb"], "gaps": r["gaps"],
-                 "total": r["total"], "plays": r["plays"]} for r in rows]
-
-    @synchronized
-    def album_enrichment_candidates(self, limit=3, min_gaps=3, min_ratio=0.25) -> list[dict]:
-        """Saved albums (folded into the library) with a meaningful share of missing genre tags,
-        the album twin of enrichment_candidates. Enriching them sharpens recs, since the model now
-        leans on these tracks too."""
-        rows = self.conn.execute(
-            "SELECT t.album_browse_id bid, MIN(sa.title) title, MIN(sa.thumbnail) thumb, "
-            "       SUM(CASE WHEN t.genre IS NULL OR t.genre='' THEN 1 ELSE 0 END) gaps, COUNT(*) total "
-            "FROM tracks t JOIN saved_albums sa ON sa.browse_id=t.album_browse_id "
-            "WHERE t.album_browse_id IS NOT NULL "
-            "GROUP BY t.album_browse_id HAVING gaps >= :min_gaps AND (gaps * 1.0 / total) >= :min_ratio "
-            "ORDER BY gaps DESC LIMIT :limit",
-            {"limit": limit, "min_gaps": min_gaps, "min_ratio": min_ratio}).fetchall()
-        return [{"browse_id": r["bid"], "title": r["title"], "thumbnail": r["thumb"],
-                 "gaps": r["gaps"], "total": r["total"]} for r in rows]
+    # enrichment_candidates / album_enrichment_candidates were removed along with the Take-Action
+    # manual-enrichment nag cards they fed. The auto-enrich worker now handles coverage in the
+    # background, so there is no surface that needs to rank "gappy" playlists/albums to nag about.

@@ -173,6 +173,14 @@ def build(ctx) -> APIRouter:
                     executor.create_generated_playlist, store, name, tracks, client, now_fn(),
                     identity_id, recipe=recipe)
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
+                # Play in the already-open YouTube Music tab (background), same as /home/generate.
+                bridge = getattr(ctx, "bridge", None)
+                if bridge is not None and getattr(bridge, "connected", False):
+                    try:
+                        bridge.send_control({"type": "navigate",
+                            "url": f"https://music.youtube.com/watch?list={res['new_ytm']}"})
+                    except Exception:  # noqa: BLE001 - navigation is best-effort
+                        pass
                 # #48: stash the full canvas so this playlist can be reopened in Clusters and regrown a
                 # different way. Stored verbatim (validated as JSON); absent for older clients / failures.
                 state = form.get("state")

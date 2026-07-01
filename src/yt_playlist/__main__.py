@@ -7,6 +7,7 @@ import uvicorn
 import webbrowser
 from pathlib import Path
 from yt_playlist.core import paths
+from yt_playlist.core.bridge import Bridge
 from yt_playlist.core.store import Store
 from yt_playlist.core.config import credential_path
 from yt_playlist.core.runtime import Runtime
@@ -53,6 +54,12 @@ def parse_args(argv=None):
 def build_app():
     """Construct the ASGI app from on-disk config. Importable so uvicorn --reload can re-import it."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    # The home card polls GET /bridge/status every few seconds; drop those access-log lines so they
+    # do not drown the log. The endpoint still works, it just is not logged.
+    class _QuietPolls(logging.Filter):
+        def filter(self, record):
+            return "/bridge/status" not in record.getMessage()
+    logging.getLogger("uvicorn.access").addFilter(_QuietPolls())
     # Install the egress guard before anything can make a network call: from here on every
     # server-side HTTP request is allowlisted and logged (see yt_playlist.egress, read at /network).
     from yt_playlist import egress
@@ -64,7 +71,18 @@ def build_app():
     runtime.load()
     if not runtime.configured:
         logging.getLogger(__name__).warning("no usable config yet. Open /setup to finish setup")
-    return create_app(store, runtime.clients, now_fn=time.time, setup=runtime)
+    # One Bridge instance shared by the extension WebSocket route and the runtime's client
+    # provider, so both sides talk to the same in-process connection.
+    bridge = Bridge()
+    runtime.bridge = bridge
+    return create_app(store, runtime.clients, now_fn=time.time, setup=runtime, bridge=bridge)
+
+def _print_bridge_banner(host, port):
+    """Print the bridge address at startup. The extension authenticates by its origin and connects
+    automatically, so there is nothing to paste; this is just here so the port is visible."""
+    display_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
+    print(f"\nTuneConsole bridge: ws://{display_host}:{port}/bridge/ws "
+          f"(install the extension; it connects automatically)\n")
 
 def _open_browser_when_ready(host, port):
     """Wait (briefly) for the server to accept connections, then open it in the default browser.
@@ -85,14 +103,18 @@ def main(argv=None):
     if args.reload:
         # The reloader runs the app in a child process that re-imports this module on change,
         # so it needs an import string + factory, not an already-built app object. Watch only
-        # src/ to avoid churning on node_modules/.venv.
+        # src/ to avoid churning on node_modules/.venv. build_app() runs again in that child
+        # process, so nothing account-specific needs to be computed here.
         src_dir = str(Path(__file__).resolve().parent.parent)
+        _print_bridge_banner(args.host, args.port)
         uvicorn.run("yt_playlist.__main__:build_app", factory=True, reload=True,
                     reload_dirs=[src_dir], host=args.host, port=args.port,
                     timeout_graceful_shutdown=2)
     else:
+        app = build_app()
+        _print_bridge_banner(args.host, args.port)
         # bound graceful shutdown so a Ctrl-C lands promptly even with an open sync SSE stream
-        uvicorn.run(build_app(), host=args.host, port=args.port, timeout_graceful_shutdown=2)
+        uvicorn.run(app, host=args.host, port=args.port, timeout_graceful_shutdown=2)
 
 if __name__ == "__main__":
     main()

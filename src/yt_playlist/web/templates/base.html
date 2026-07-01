@@ -16,6 +16,8 @@
   <script src="/static/vendor/d3-quadtree.min.js"></script>
   <script src="/static/vendor/d3-timer.min.js"></script>
   <script src="/static/vendor/d3-force.min.js"></script>
+  {# Clusters canvas renderer (global `ForceGraph`); bundles its own d3-force, draws on demand. #}
+  <script src="/static/vendor/force-graph.min.js"></script>
   <script src="/static/app.js?v={{ asset_v }}"></script>
   {# Clusters canvas component (templates/clusters.html). Split out of app.js; a classic global script
      like app.js, so load order between them doesn't matter as long as both precede Alpine. #}
@@ -82,8 +84,9 @@
   </header>
   <div class="authbar" x-data='authBanner({{ (auth_expired.values()|list)|tojson }})'
        x-show="labels.length && !dismissed" x-cloak @auth-expired.window="add($event.detail.label)">
-    <span class="authbar-body">⚠ YouTube session expired for <strong x-text="labels.join(', ')"></strong> -
-      its data is stale until you reconnect. <a href="/setup">Re-authenticate →</a></span>
+    <span class="authbar-body">⚠ Not signed in to YouTube Music for <strong x-text="labels.join(', ')"></strong>.
+      Open <a href="https://music.youtube.com" target="_blank" rel="noopener">music.youtube.com</a> and sign in;
+      the extension will pick the session back up.</span>
     <button type="button" class="authbar-x" @click="dismissed = true" title="Dismiss" aria-label="Dismiss">×</button>
   </div>
   <main>{% block body %}{% endblock %}</main>

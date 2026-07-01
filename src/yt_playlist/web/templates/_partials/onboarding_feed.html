@@ -1,0 +1,32 @@
+<div id="onboarding-feed" class="home-feed">
+  <section class="card onboard-explainer">
+    <h2>We're learning your taste</h2>
+    <p>We're still learning what you like - enrichment runs in the background and can take a day. Play
+      one of these in YouTube Music, and as you listen use YouTube's like / dislike: like what grabs
+      you, dislike what you never want to hear again. We pick that up automatically and learn fast.</p>
+    <div class="onboard-progress" role="progressbar" aria-valuenow="{{ onboard_progress }}"
+         aria-valuemin="0" aria-valuemax="100" title="How far enrichment has warmed up your taste model">
+      <div class="onboard-progress-bar" style="width: {{ onboard_progress }}%"></div>
+      <span class="onboard-progress-label">Warming up: {{ onboard_progress }}%</span>
+    </div>
+  </section>
+  {% if cleanup_count %}
+  <section class="card onboard-cleanup">
+    <p>You have {{ cleanup_count }} cleanup item{{ 's' if cleanup_count != 1 }} (duplicates / overlaps).
+      <a href="/cleanup">Tidy them up →</a></p>
+  </section>
+  {% endif %}
+  <div class="gen-lanes">
+    <div hx-get="/home/onboard/radio" hx-trigger="load" hx-swap="outerHTML">
+      <div class="spinner" aria-label="Loading radio"></div>
+    </div>
+    {% if onboard_library %}
+    <div hx-get="/home/onboard/library" hx-trigger="load" hx-swap="outerHTML">
+      <div class="spinner" aria-label="Loading your library"></div>
+    </div>
+    {% endif %}
+  </div>
+  <form hx-post="/onboard/done" hx-swap="none" class="onboard-done">
+    <button type="submit" class="cta-secondary">I'm set up - show my full Home</button>
+  </form>
+</div>

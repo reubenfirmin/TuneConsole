@@ -17,15 +17,25 @@ identities. Dedupe, merge, prune, organize, and grow it, all from one place.
   "for you" feed driven by the taste model.
 - **Generative playlists**: auto-build playlists from your taste; unplayed ones are
   garbage-collected after a grace window.
-- **Play-history sync**: pulls play counts to keep recommendations and cleanup current.
-- **Guided browser setup**: capture auth and add identities through a wizard; no config files
-  needed up front.
+- **Live now-playing & rating**: see the current track on the home card and like or dislike it in
+  one click; every "play" link swaps your open YouTube Music tab in the background.
+- **Browser-extension bridge**: a small extension carries your live, signed-in YouTube Music
+  session. No pasted cookies, no OAuth, no Google Cloud project. It stays fresh, so it does not
+  disconnect, and your session credential never leaves your browser.
 
 ## Quickstart
-```bash
-uv sync
-uv run yt-playlist        # serves http://127.0.0.1:8765
-```
+
+1. **Start the app:**
+   ```bash
+   uv sync
+   uv run yt-playlist        # serves http://127.0.0.1:8765
+   ```
+2. **Install the browser extension** (Chrome/Chromium/Edge): go to `chrome://extensions`, turn on
+   **Developer mode**, click **Load unpacked**, and select the `extension/` directory. It connects
+   to the app automatically, there is nothing to paste (see `extension/README.md`).
+3. **Open `https://music.youtube.com` signed in** and keep that tab open. The app pairs with the
+   extension and starts syncing your library in the background.
+
 Design specs live in `docs/superpowers/specs/`.
 
 ## Architecture
@@ -45,8 +55,10 @@ TuneConsole is a single local process with no build step and no SPA.
   the Clusters graph.
 - **SQLite**: the whole library, play history, and model state live in one local SQLite file.
   `store.py` composes per-domain DAOs (the `repos/` package) behind a single connection.
-- **ytmusicapi**: the only outbound dependency, used to talk to YouTube Music. Frontend libraries
-  are vendored locally, so nothing is fetched from a CDN at runtime.
+- **ytmusicapi**: builds the YouTube Music (InnerTube) requests and parses the responses. It does
+  not make the network calls itself: a custom session routes each request through the browser
+  extension, which applies your live session and returns the response. Frontend libraries are
+  vendored locally, so nothing is fetched from a CDN at runtime.
 
 ### The model
 
@@ -79,12 +91,21 @@ than replacing them, so your baseline taste always shows through.
 
 ## Setup
 
-Run it and open the dashboard. Until it is configured, every page redirects to **`/setup`**, a
-guided wizard that captures your signed-in YouTube Music auth and lets you add one or more
-identities (exactly one is the master that cross-identity merges consolidate into). On save it
-writes your config and credentials for you and drops you on the dashboard. Revisit **Setup** in the
-nav anytime to add identities or refresh auth.
+Until it is configured, every page redirects to **`/setup`**. Two things happen there, both simple:
 
-Config and data live in `~/.config/yt-playlist/` (`config.toml` plus `browser.json`).
-`YT_PLAYLIST_HOME` overrides that location, and `yt-playlist --help` lists options (`--host`,
+- **Pair the extension.** Install the extension (Quickstart above) and it connects automatically,
+  the Pairing tab flips to "Extension connected". Authentication is by the extension's identity, so
+  there is nothing to paste and no other program can use the connection. Your session cookie never
+  leaves the browser: the app only ever sends a request (method, URL, body) and the extension
+  applies auth and returns the response.
+- **Add identities.** One or more YouTube identities (exactly one is the master that cross-identity
+  merges consolidate into). Saved on their own; the extension is the live credential.
+
+On save you land on the dashboard. Syncing is automatic: a full library sync runs once the extension
+is connected, then refreshes daily, and plays are captured live. Revisit **Setup** in the nav anytime
+to add identities.
+
+Config and data live in `~/.config/yt-playlist/` (`config.toml`) and `~/.local/share/yt-playlist/`
+(`state.db`); no credential file is stored, the live extension session is the credential.
+`YT_PLAYLIST_HOME` overrides the config location, and `yt-playlist --help` lists options (`--host`,
 `--port`).
