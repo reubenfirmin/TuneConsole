@@ -17,57 +17,85 @@
   <button type="button" class="banner-x" @click="show = false" title="Dismiss" aria-label="Dismiss">×</button>
 </div>
 {% endif %}
-<div id="home">
-  {# Live status card: extension connection (polled every ~3s), what's playing now, and library
-     freshness. Syncing is automatic in the background now, so there's no sync button here, just an
-     unobtrusive "Refresh library" link for power users. #}
-  <section class="home-status card" :class="connected ? 'is-live' : 'is-down'" x-data="homeStatus()">
-    <div class="hs-main">
-      <span class="hs-dot" aria-hidden="true"></span>
-      <template x-if="connected && nowPlaying && (nowPlaying.title || nowPlaying.artist)">
-        <div class="hs-now">
-          <img class="hs-art" x-show="nowPlaying.thumbnail" :src="nowPlaying.thumbnail" alt=""
-               referrerpolicy="no-referrer">
-          <span class="hs-eq" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span class="hs-now-text">
-            <span class="hs-now-title" x-text="nowPlaying.title || ''"></span>
-            <span class="hs-now-artist" x-show="nowPlaying.artist" x-text="nowPlaying.artist || ''"></span>
-          </span>
-          <span class="hs-rate-group">
-            <button type="button" class="hs-rate hs-heart" :class="{ on: nowPlaying.likeStatus === 'LIKE' }"
-                    @click="rate('like')" title="Like" aria-label="Like">
-              <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-            </button>
-            <button type="button" class="hs-rate hs-skull" :class="{ on: nowPlaying.likeStatus === 'DISLIKE' }"
-                    @click="rate('dislike')" title="Dislike" aria-label="Dislike">
-              <svg viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C7.58 2 4 5.58 4 10c0 2.4 1.06 4.55 2.73 6.02.17.15.27.36.27.59V19c0 .55.45 1 1 1h.5v.5a1 1 0 1 0 2 0V20h1v.5a1 1 0 1 0 2 0V20h.5c.55 0 1-.45 1-1v-2.39c0-.23.1-.44.27-.59A7.99 7.99 0 0 0 20 10c0-4.42-3.58-8-8-8ZM9 8.5A1.5 1.5 0 1 0 9 11.5 1.5 1.5 0 0 0 9 8.5Zm6 0A1.5 1.5 0 1 0 15 11.5 1.5 1.5 0 0 0 15 8.5Z"/></svg>
-            </button>
-          </span>
-        </div>
-      </template>
-      <template x-if="!(connected && nowPlaying && (nowPlaying.title || nowPlaying.artist))">
-        <span class="hs-state" x-text="connected ? 'Extension connected' : 'Extension not connected'"></span>
-      </template>
-    </div>
-    <div class="hs-meta">
-      <span class="hs-sync">Library synced {{ sync.last_synced_ago if sync.last_synced_ago else 'not yet' }}</span>
-      <a href="#" class="hs-refresh" @click.prevent="refresh()" :class="{ 'is-busy': refreshing }"
-         x-text="refreshing ? 'Refreshing…' : 'Refresh'"></a>
-    </div>
-  </section>
+<div id="home" x-data="homeStatus()">
+  {# Extension state, one homeStatus() poller (~3s): a first-run hero until the extension connects,
+     then a compact live strip with what's playing and library freshness. #}
+  <div>
+    {# Not connected: left-aligned card with the live equalizer, sits above the user's feed (if any). #}
+    <section class="onboard-card" x-show="!connected" x-cloak>
+      <svg class="presync-art onb-art" viewBox="0 0 132 72" aria-hidden="true">
+        <defs><linearGradient id="onb-g" x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#a596ff"/>
+        </linearGradient></defs>
+        {% for x, h in [(6,22),(24,40),(42,30),(60,56),(78,34),(96,48),(114,26)] %}
+        <rect class="pbar" style="animation-delay:-{{ loop.index0 * 0.22 }}s"
+              x="{{ x }}" y="{{ 72 - h }}" width="12" height="{{ h }}" rx="4" fill="url(#onb-g)"/>
+        {% endfor %}
+      </svg>
+      <div class="onb-body">
+        <span class="onb-eyebrow"><span class="onb-dot" aria-hidden="true"></span> Waiting for the extension</span>
+        <h2 class="onb-title">Connect the extension</h2>
+        <p class="onb-sub">Install the TuneConsole extension to connect. It pairs automatically.</p>
+        <a class="btn" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
+           target="_blank" rel="noopener">Get the extension →</a>
+      </div>
+    </section>
 
-  {% if show_lastfm_nudge %}
-  <div id="lastfm-nudge" class="home-nudge">
-    <span class="home-nudge-icon" aria-hidden="true">🎵</span>
-    <div class="home-nudge-body">
-      <strong>Your library's metadata is looking thin.</strong>
-      <span>Add a free Last.fm API key to fill in genres and similar-artist links.
-        <a href="/setup">Add it in Setup, Enrichment tab.</a></span>
-    </div>
-    <button type="button" class="banner-x home-nudge-x" title="Dismiss" aria-label="Dismiss"
-            hx-post="/onboard/lastfm/dismiss" hx-target="#lastfm-nudge" hx-swap="outerHTML swap:200ms">×</button>
+    {# Connected: compact live strip (what's playing + library freshness). #}
+    <section class="home-status card is-live" x-show="connected" x-cloak>
+      <div class="hs-main">
+        <span class="hs-dot" aria-hidden="true"></span>
+        <template x-if="nowPlaying && (nowPlaying.title || nowPlaying.artist)">
+          <div class="hs-now">
+            <img class="hs-art" x-show="nowPlaying.thumbnail" :src="nowPlaying.thumbnail" alt=""
+                 referrerpolicy="no-referrer">
+            <span class="hs-eq" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="hs-now-text">
+              <span class="hs-now-title" x-text="nowPlaying.title || ''"></span>
+              <span class="hs-now-artist" x-show="nowPlaying.artist" x-text="nowPlaying.artist || ''"></span>
+            </span>
+            <span class="hs-rate-group">
+              <button type="button" class="hs-rate hs-heart" :class="{ on: nowPlaying.likeStatus === 'LIKE' }"
+                      @click="rate('like')" title="Like" aria-label="Like">
+                <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+              </button>
+              <button type="button" class="hs-rate hs-skull" :class="{ on: nowPlaying.likeStatus === 'DISLIKE' }"
+                      @click="rate('dislike')" title="Dislike" aria-label="Dislike">
+                <svg viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C7.58 2 4 5.58 4 10c0 2.4 1.06 4.55 2.73 6.02.17.15.27.36.27.59V19c0 .55.45 1 1 1h.5v.5a1 1 0 1 0 2 0V20h1v.5a1 1 0 1 0 2 0V20h.5c.55 0 1-.45 1-1v-2.39c0-.23.1-.44.27-.59A7.99 7.99 0 0 0 20 10c0-4.42-3.58-8-8-8ZM9 8.5A1.5 1.5 0 1 0 9 11.5 1.5 1.5 0 0 0 9 8.5Zm6 0A1.5 1.5 0 1 0 15 11.5 1.5 1.5 0 0 0 15 8.5Z"/></svg>
+              </button>
+            </span>
+          </div>
+        </template>
+        <template x-if="!(nowPlaying && (nowPlaying.title || nowPlaying.artist))">
+          <span class="hs-state">Extension connected</span>
+        </template>
+      </div>
+      {# Only once the library has actually synced (no awkward "not yet"), and not while a sync runs
+         (the console below owns that status). #}
+      {% if sync.last_synced_ago %}
+      <div class="hs-meta" x-show="!running" x-cloak>
+        <span class="hs-sync">Library synced {{ sync.last_synced_ago }}</span>
+        <a href="#" class="hs-refresh" @click.prevent="refresh()" :class="{ 'is-busy': refreshing }"
+           x-text="refreshing ? 'Starting…' : 'Refresh'"></a>
+      </div>
+      {% endif %}
+    </section>
+
+    {# Live sync console: streams the library sync's results (background or manual) as they happen. #}
+    <section class="sync-console" x-show="running || lines.length" x-cloak>
+      <div class="sc-head">
+        <span class="sc-eye">Library sync</span>
+        <span class="sc-state" :class="{ 'is-run': running, 'is-err': failed }"
+              x-text="running ? 'syncing…' : (failed ? 'finished with errors' : 'done')"></span>
+      </div>
+      <div class="sc-bar" x-show="running" aria-hidden="true"><i></i></div>
+      <div class="sync-log" x-ref="log">
+        <template x-for="(ln, i) in lines" :key="i">
+          <div class="sc-line" :class="ln.cls"><span class="sc-pip" x-text="ln.pip"></span><span x-text="ln.text"></span></div>
+        </template>
+      </div>
+    </section>
   </div>
-  {% endif %}
 
   {% if sync.last_synced_ago %}
   {% include "_partials/alerts.html" %}
@@ -89,8 +117,9 @@
   <div hx-get="/home/new-artists" hx-trigger="load" hx-swap="innerHTML"></div>
   {% endif %}
   {% else %}
-  {# Pre-sync onboarding placeholder: no taste data yet, so stand in for the whole rec feed. #}
-  <section class="presync card">
+  {# Pre-sync placeholder: only once the extension is connected (not while the live sync console is
+     streaming). Before connecting, the onboard hero above is the whole first-run screen. #}
+  <section class="presync card" x-show="connected && !running" x-cloak>
     <svg class="presync-art" viewBox="0 0 132 72" aria-hidden="true">
       <defs><linearGradient id="presync-g" x1="0" y1="1" x2="0" y2="0">
         <stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#a596ff"/>
@@ -100,8 +129,8 @@
             x="{{ x }}" y="{{ 72 - h }}" width="12" height="{{ h }}" rx="4" fill="url(#presync-g)"/>
       {% endfor %}
     </svg>
-    <h2 class="presync-title">Recommendations are warming up</h2>
-    <p class="presync-sub">Once you sync your account, we'll start getting you recommendations here.</p>
+    <h2 class="presync-title">Connecting in 30 seconds or less</h2>
+    <p class="presync-sub">We're pulling in your library. Your recommendations will start appearing here as soon as it syncs.</p>
   </section>
   {% endif %}
 

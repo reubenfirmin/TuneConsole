@@ -95,5 +95,17 @@
      and push it off-screen. At body level the backdrop is viewport-relative. #}
   <div id="conflicts-modal"></div>
   <div id="toasts" class="toasts" aria-live="polite">{% block toasts %}{% endblock %}</div>
+  {% if exit_on_idle %}
+  <script>
+    // Packaged launch (Flatpak/.app): heartbeat the local server so it shuts itself down when this
+    // tab closes — there's no terminal to Ctrl-C and no window to quit.
+    (function () {
+      function beat() { fetch('/heartbeat', { method: 'POST', keepalive: true }).catch(function () {}); }
+      beat();
+      setInterval(beat, 3000);
+      addEventListener('pagehide', function () { try { navigator.sendBeacon('/goodbye'); } catch (e) {} });
+    })();
+  </script>
+  {% endif %}
 </body>
 </html>

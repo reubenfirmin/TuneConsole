@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import socket
 import threading
 import time
@@ -49,6 +50,9 @@ def parse_args(argv=None):
     parser.add_argument("--open", action="store_true", dest="open_browser",
                         help="open the app in your default web browser once the server is up "
                              "(used by the packaged Linux/macOS launchers)")
+    parser.add_argument("--exit-on-idle", action="store_true", dest="exit_on_idle",
+                        help="shut down when the UI tab closes (used by the packaged launchers, "
+                             "which have no terminal to Ctrl-C or window to quit)")
     return parser.parse_args(argv)
 
 def build_app():
@@ -96,8 +100,44 @@ def _open_browser_when_ready(host, port):
             time.sleep(0.1)
     webbrowser.open(f"http://{target}:{port}/")
 
+def _already_running(host, port):
+    """True if our app is already serving on host:port. Checks the bridge-status endpoint's shape so
+    we don't mistake some other server for ours."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/bridge/status", timeout=0.6) as r:
+            return r.status == 200 and b'"now_playing"' in r.read(256)
+    except Exception:
+        return False
+
+
+def _cancel_pending_shutdown(host, port):
+    """Poke the running instance's heartbeat so that, if its tab was just closed and it is inside the
+    idle-shutdown grace, it cancels the pending shutdown and stays up for the tab we are about to
+    open. Without this, a quick relaunch can open a tab just as the old process exits -> the browser
+    shows "127.0.0.1 refused to connect". Harmless (404, ignored) when the instance isn't running
+    with --exit-on-idle, since /heartbeat only exists then."""
+    import urllib.request
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(f"http://{host}:{port}/heartbeat", method="POST"), timeout=0.6
+        ).read()
+    except Exception:
+        pass
+
+
 def main(argv=None):
     args = parse_args(argv)
+    if args.exit_on_idle:
+        os.environ["YT_PLAYLIST_EXIT_ON_IDLE"] = "1"
+    target = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
+    # Relaunched from the app menu while already running? Don't crash with EADDRINUSE — just open the
+    # existing instance's tab and exit.
+    if args.open_browser and _already_running(target, args.port):
+        _cancel_pending_shutdown(target, args.port)   # it may be mid-idle-shutdown; keep it up for the tab
+        print(f"TuneConsole is already running on {target}:{args.port} — opening it in your browser.")
+        webbrowser.open(f"http://{target}:{args.port}/")
+        return
     if args.open_browser:
         threading.Thread(target=_open_browser_when_ready, args=(args.host, args.port), daemon=True).start()
     if args.reload:

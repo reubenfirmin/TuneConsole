@@ -1,4 +1,7 @@
+import logging
+import os
 import re
+import signal
 import threading
 import time
 from pathlib import Path
@@ -6,7 +9,7 @@ from urllib.parse import urlsplit
 
 from markupsafe import Markup, escape
 from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -15,6 +18,49 @@ from yt_playlist.web.context import Ctx
 from yt_playlist.web.jobs import SyncJobs
 from yt_playlist.web.routes import build_all
 from yt_playlist.web.routes.bridge import build as build_bridge_route
+
+
+def _install_idle_shutdown(app, templates):
+    """The packaged launchers (Flatpak / .app) set YT_PLAYLIST_EXIT_ON_IDLE=1. They run headless with
+    no terminal to Ctrl-C and no window to quit, so the UI heartbeats the server and it shuts itself
+    down once the tab is gone — otherwise it lingers on the port and blocks the next launch. Off by
+    default (a `uv run` dev server keeps running until you Ctrl-C it)."""
+    if os.environ.get("YT_PLAYLIST_EXIT_ON_IDLE") != "1":
+        templates.env.globals["exit_on_idle"] = False
+        return
+    templates.env.globals["exit_on_idle"] = True
+    st = {"last": time.monotonic(), "seen": False, "bye_at": None}
+
+    @app.post("/heartbeat")
+    def _heartbeat():
+        st["last"] = time.monotonic()
+        st["seen"] = True
+        st["bye_at"] = None                    # a live beat cancels a pending goodbye (page reload)
+        return Response(status_code=204)
+
+    @app.post("/goodbye")
+    def _goodbye():
+        st["bye_at"] = time.monotonic()        # tab closing (sendBeacon); a reload will re-beat
+        return Response(status_code=204)
+
+    def _monitor():
+        start = time.monotonic()
+        while True:
+            time.sleep(1.0)
+            now = time.monotonic()
+            if not st["seen"]:
+                if now - start > 45:           # browser never connected; do not linger forever
+                    break
+                continue
+            bye = st["bye_at"]
+            if bye is not None and st["last"] < bye and now - bye > 2.5:
+                break                          # tab closed and no reload heartbeat within the grace
+            if now - st["last"] > 12:
+                break                          # heartbeats stopped (closed w/o beacon, or a crash)
+        logging.getLogger("yt_playlist").info("UI idle — shutting down server")
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=_monitor, daemon=True).start()
 
 # Methods that don't change state: exempt from the cross-origin guard below.
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -62,15 +108,20 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
                 continue                       # synced recently enough
             if not ctx.sync_lock.acquire(blocking=False):
                 continue                       # a manual sync is already running; try next tick
+            # Run through a job so the automatic sync streams to the dashboard's live console too
+            # (not just manual POST /sync). The console discovers it via GET /sync/active.
+            job = ctx.jobs.create(kind="library")
             try:
                 clients = ctx.client_provider() or {}
                 if not clients:
                     continue
                 from yt_playlist.library import sync as sync_mod
                 sync_mod.sync_all(ctx.store, clients, ctx.now_fn(),
+                                  on_progress=job.events.append,
                                   on_auth_expired=ctx.flag_auth_expired,
                                   on_auth_ok=ctx.clear_auth_expired)
             finally:
+                job.done = True
                 ctx.sync_lock.release()
             if ctx.rec_worker:                 # fold the freshly-synced library into the taste model
                 ctx.rec_worker.trigger()
@@ -113,16 +164,6 @@ def create_app(store, client_provider, *, now_fn=time.time,
     templates.env.filters["linkify"] = _linkify
 
     @app.middleware("http")
-    async def require_configured(request: Request, call_next):
-        # Until an identity config exists, funnel every page to the setup wizard. /setup and
-        # /static stay reachable so the wizard can load its own assets (Alpine).
-        path = request.url.path
-        if setup is not None and not setup.configured \
-                and not (path.startswith("/setup") or path.startswith("/static")):
-            return RedirectResponse("/setup", status_code=303)
-        return await call_next(request)
-
-    @app.middleware("http")
     async def guard_state_changes(request: Request, call_next):
         # This UI runs on loopback but is reachable by any web page the user visits
         # (and by DNS-rebinding attacks). Its POSTs delete/merge real playlists, so
@@ -162,4 +203,5 @@ def create_app(store, client_provider, *, now_fn=time.time,
     for router in build_all(ctx):
         app.include_router(router)
 
+    _install_idle_shutdown(app, templates)
     return app

@@ -72,9 +72,9 @@
         nothing to paste. Keep a <code class="mono">music.youtube.com</code> tab open while signed in.
         The extension is recognized by its identity, so no other program can use this connection.</p>
 
-      <div class="btn-row" style="margin-top:.8rem">
-        <span x-show="connected" x-cloak class="muted">✓ Extension connected</span>
-        <span x-show="!connected" x-cloak class="muted">○ Waiting for the extension to connect…</span>
+      <div class="btn-row" x-show="!connected" x-cloak style="margin-top:.8rem">
+        <a class="btn" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
+           target="_blank" rel="noopener">Get the extension →</a>
       </div>
     </div>
   </div>
@@ -112,7 +112,7 @@
 
   <div class="setup-actions" x-show="tab !== 'enrichment'" x-cloak>
     <span class="muted" x-show="connected" x-cloak style="margin-right:auto">✓ Extension connected</span>
-    <button type="submit" class="setup-save">{{ 'Save' if configured else 'Save and start →' }}</button>
+    <button type="submit" class="setup-save">Save</button>
   </div>
 </form>
 

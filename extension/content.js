@@ -41,6 +41,15 @@ if (!window.__tcBridgeLoaded) {
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "rate") { clickRate(msg.action); return; }
+    if (msg.type === "resync-now") {
+      // The bridge (re)connected. The backend cleared now_playing on the previous disconnect, so
+      // force a re-emit of the current track even though it hasn't changed (dedup would otherwise
+      // swallow it until the next track). The MAIN-world poller re-emits within ~2s too.
+      lastNowPlaying = "";
+      const np = domNowPlaying();
+      if (np) report(np);
+      return;
+    }
     if (msg.type !== "fetch") return;
     (async () => {
       if (!isAllowed(msg.url)) {

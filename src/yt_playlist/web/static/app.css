@@ -831,6 +831,50 @@ button.htmx-request .check-busy { display: inline; }
 /* Home status card: live extension connection, now-playing, and library freshness. */
 .home-status { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
   padding: 0.85rem 1.15rem; margin-bottom: 1.6rem; position: relative; overflow: hidden; }
+
+/* Live sync console: streams the library sync's results as they happen (background or manual). */
+.sync-console { margin-bottom: 1.6rem; padding: 0.85rem 1rem 0.75rem; border: 1px solid var(--border-2);
+  border-radius: 12px; background: #0a0818; overflow: hidden; }
+.sc-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.55rem; }
+.sc-eye { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--accent-2); }
+.sc-state { font-family: var(--font-mono); font-size: 0.72rem; color: var(--faint); }
+.sc-state.is-run { color: #3fb950; }
+.sc-state.is-err { color: #ff6b8b; }
+.sc-bar { height: 2px; border-radius: 2px; background: rgba(124,92,255,0.16); overflow: hidden; margin-bottom: 0.6rem; }
+.sc-bar i { display: block; height: 100%; width: 38%; border-radius: 2px; background: var(--grad);
+  animation: sc-bar 1.1s ease-in-out infinite; }
+@keyframes sc-bar { 0% { transform: translateX(-110%); } 100% { transform: translateX(330%); } }
+.sync-log { font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; max-height: 15rem;
+  overflow-y: auto; color: var(--dim); }
+.sc-line { display: flex; gap: 0.55rem; white-space: pre-wrap; word-break: break-word; }
+.sc-line.done { color: #7fd88f; }
+.sc-line.err { color: #ff8fa6; }
+.sc-pip { flex: none; width: 1ch; color: var(--faint); }
+.sc-line.done .sc-pip { color: #3fb950; }
+.sc-line.err .sc-pip { color: #ff6b8b; }
+@media (prefers-reduced-motion: reduce) { .sc-bar i { animation: none; width: 100%; } }
+
+/* Not-connected card: left-aligned, sits above whatever feed the user already has, but with the
+   animated equalizer + display headline so it greets a first-run user with some life (not a bare strip). */
+.onboard-card { position: relative; overflow: hidden; display: flex; align-items: center; gap: 1.7rem;
+  flex-wrap: wrap; padding: 1.7rem 1.9rem; margin-bottom: 1.6rem; border-radius: 16px;
+  border: 1px solid var(--border);
+  /* Flourish: the equalizer reads as a live signal source — a soft glow pools behind it (left-centre)
+     and the bars cast light, so the "waiting for a signal" idea carries the visual (no accent stripe). */
+  background: radial-gradient(240px 220px at 10% 50%, rgba(124,108,255,0.20), transparent 70%), var(--surface); }
+.onboard-card .onb-art { flex: none; width: 132px; height: 72px;
+  filter: drop-shadow(0 3px 24px rgba(133,118,255,0.55)); }
+.onb-body { flex: 1 1 20rem; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }
+.onb-eyebrow { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.7rem; font-weight: 700;
+  letter-spacing: 0.11em; text-transform: uppercase; color: #e0b355; margin-bottom: 0.55rem; }
+.onb-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: #d29922;
+  animation: ob-pulse 1.6s ease-in-out infinite; }
+.onb-title { font-family: var(--font-display); font-size: 1.6rem; font-weight: 600; color: var(--text);
+  margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+.onb-sub { color: var(--dim); font-size: 0.98rem; line-height: 1.5; margin: 0 0 1.15rem; }
+@keyframes ob-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .onb-dot { animation: none; } }
 .home-status::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px;
   background: var(--grad); opacity: 0.9; }
 .home-status.is-down::before { background: #d29922; }
@@ -873,8 +917,10 @@ button.htmx-request .check-busy { display: inline; }
 
 /* Poster action cards: a big cover across the top, minimal orienting text, then the CTA. auto-fit
    so the cards stretch to FILL the row (no trailing empty columns). */
-.alerts { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
-  gap: 0.8rem; margin-bottom: 1.8rem; }
+/* Four fixed slots on desktop so a lone nag + skeleton fillers make one clean row; collapse on smaller. */
+.alerts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.8rem; margin-bottom: 1.8rem; }
+@media (max-width: 64rem) { .alerts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 34rem) { .alerts { grid-template-columns: 1fr; } }
 .alert-card { position: relative; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 .alert-cover { display: block; width: 100%; height: 7.5rem; overflow: hidden; background: var(--grad-soft); }
 .alert-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -897,6 +943,19 @@ button.htmx-request .check-busy { display: inline; }
   background: rgba(7,5,24,0.6); border: 1px solid var(--border-2); border-radius: 999px;
   color: #fff; font-size: 1rem; line-height: 1; box-shadow: none; cursor: pointer; }
 .alert-x:hover { background: var(--accent); box-shadow: none; }
+/* Muted filler cards so a lone nag fills its row instead of sitting orphaned. Decorative only. */
+.alert-skeleton { opacity: 0.5; pointer-events: none; }
+.skel-block { background: var(--surface-2); border-radius: 6px; }
+.alert-skeleton .alert-cover { height: 7.5rem; }
+.alert-skeleton .alert-body { gap: 0.6rem; padding: 0.9rem; }
+.alert-skeleton .skel-line { display: block; height: 0.72rem; }
+.alert-skeleton .skel-short { width: 55%; }
+@media (max-width: 64rem) { .alert-skeleton { display: none; } }   /* fillers only in the 4-slot desktop row */
+/* Setup/onboarding nudges rendered as nag cards: an emoji "cover" instead of a thumbnail, and their
+   full message in the body (not clamped like an action title). */
+.alert-cover-icon { display: grid; place-items: center; font-size: 2.4rem; background: var(--accent-soft); }
+.alert-nudge .alert-title { -webkit-line-clamp: unset; min-height: 0; font-weight: 600; font-size: 0.86rem;
+  line-height: 1.42; }
 
 .for-you-grid { display: grid; gap: 1rem;
   grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }
@@ -1074,6 +1133,13 @@ button.htmx-request .check-busy { display: inline; }
 .gen-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem; align-items: stretch;
   margin-bottom: 1.4rem; }   /* stretch: both cards in a row take the row's max height */
 @media (max-width: 60rem) { .gen-lanes { grid-template-columns: 1fr; } }
+/* Dynamic: a lone card in a row (1 card, or the odd last of 3) spans full width instead of sitting at
+   half. On wide screens its tracklist splits into two columns so it fills the width, not one sparse run. */
+.gen-lanes > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+@media (min-width: 60.01rem) {
+  .gen-lanes > :last-child:nth-child(odd) .gen-list { columns: 2; column-gap: 1.8rem; }
+  .gen-lanes > :last-child:nth-child(odd) .gen-row { break-inside: avoid; }
+}
 .gen-card { display: flex; flex-direction: column; }
 .gen-head { margin-bottom: 0.7rem; }
 /* Reserve a uniform tagline height (1 line) so the track list starts at the same y in every card
@@ -1116,6 +1182,10 @@ button.htmx-request .check-busy { display: inline; }
   align-items: flex-start; gap: 0.5rem; }
 .gen-foot-note { color: var(--dim); font-size: 0.78rem; line-height: 1.4; }
 .gen-done { justify-content: center; }
+/* "More mixes coming" note, shown below the taste panel while the model still produces < 4 cards. */
+.gen-more { display: flex; align-items: center; gap: 0.85rem; margin-bottom: 1.4rem; }
+.gen-more-icon { flex: none; color: var(--accent-2); font-size: 1.15rem; }
+.gen-more p { margin: 0; color: var(--dim); font-size: 0.92rem; line-height: 1.5; }
 
 /* --- Rediscover: a couple of stale library playlists spotlighted on Home --- */
 .rediscover-grid { grid-template-columns: 1fr 1fr; gap: 1.4rem; margin-bottom: 1.4rem; }
@@ -1732,6 +1802,9 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 .home-nudge-body strong { color: var(--text); font-weight: 650; }
 .home-nudge-body span { color: var(--dim); font-size: 0.92rem; line-height: 1.5; }
 .home-nudge-x { flex: none; align-self: flex-start; margin: -0.2rem -0.3rem 0 0; }
+/* The post-first-sync welcome leads the nudge stack; a touch more accent so it reads as a greeting. */
+.home-nudge-intro { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 20%, transparent), rgba(124,108,255,0.06));
+  border-color: color-mix(in srgb, var(--accent) 46%, transparent); }
 
 /* Sync controls go CTA-green on hover (matching the ↻ refresh icon) instead of the neutral grey dim.
    Scoped to the sync bar so other ghost buttons keep their normal hover. */

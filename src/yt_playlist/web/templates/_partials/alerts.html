@@ -1,5 +1,20 @@
-{% if actions %}
+{% set nudge_count = (1 if show_intro else 0) + (1 if show_lastfm_nudge else 0) + (1 if show_identities_nudge else 0) %}
+{% if actions or nudge_count %}
 <section class="alerts" aria-label="Needs attention">
+  {# The welcome always leads the row. #}
+  {% if show_intro %}
+  <div class="alert-card card alert-nudge" id="intro-nudge">
+    <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
+            hx-post="/onboard/intro/dismiss" hx-target="#intro-nudge" hx-swap="outerHTML swap:200ms">×</button>
+    <span class="alert-cover"><img src="/static/nag/intro.png" alt="" loading="lazy"
+         onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
+    <div class="alert-body">
+      <span class="alert-title">You're all set. TuneConsole keeps learning your taste as you listen, save,
+        and rate: it locks in after a day or two and keeps improving over the week. Keep it running.</span>
+    </div>
+  </div>
+  {% endif %}
+
   {% for a in actions %}
   <div class="alert-card card alert-{{ a.severity }}">
     <button type="button" class="alert-x" aria-label="Snooze" title="Snooze this"
@@ -19,5 +34,73 @@
     </div>
   </div>
   {% endfor %}
+
+  {% if show_lastfm_nudge %}
+  <div class="alert-card card alert-nudge" id="lastfm-nudge">
+    <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
+            hx-post="/onboard/lastfm/dismiss" hx-target="#lastfm-nudge" hx-swap="outerHTML swap:200ms">×</button>
+    <span class="alert-cover"><img src="/static/nag/lastfm.png" alt="" loading="lazy"
+         onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
+    <div class="alert-body">
+      <span class="alert-title">Add a free Last.fm key to improve genres and song metadata, which helps the models learn.</span>
+      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup">Add key →</a></div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if show_identities_nudge %}
+  <div class="alert-card card alert-nudge" id="identities-nudge">
+    <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
+            hx-post="/onboard/identities/dismiss" hx-target="#identities-nudge" hx-swap="outerHTML swap:200ms">×</button>
+    <span class="alert-cover"><img src="/static/nag/identities.png" alt="" loading="lazy"
+         onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
+    <div class="alert-body">
+      <span class="alert-title">Multiple YouTube identities with music? Merge their catalogs into one.</span>
+      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup">Set up →</a></div>
+    </div>
+  </div>
+  {% endif %}
+
+  {# Pad a sparse row with muted skeletons so a lone nag fills the 4-slot row instead of orphaning. #}
+  {% set pad = 4 - (actions|length + nudge_count) %}
+  {% if pad > 0 %}{% for _ in range(pad) %}
+  <div class="alert-card card alert-skeleton" aria-hidden="true">
+    <span class="alert-cover skel-block"></span>
+    <div class="alert-body">
+      <span class="skel-block skel-line"></span>
+      <span class="skel-block skel-line skel-short"></span>
+    </div>
+  </div>
+  {% endfor %}{% endif %}
 </section>
-{% endif %}{# no actions → render nothing; an empty "all clear" note is just noise #}
+<script>
+  (function () {
+    const sec = document.currentScript.previousElementSibling;
+    if (!sec || !sec.classList.contains('alerts') || sec.__nagBound) return;
+    sec.__nagBound = true;
+    function makeSkeleton() {
+      const d = document.createElement('div');
+      d.className = 'alert-card card alert-skeleton';
+      d.setAttribute('aria-hidden', 'true');
+      d.innerHTML = '<span class="alert-cover skel-block"></span><div class="alert-body">' +
+        '<span class="skel-block skel-line"></span><span class="skel-block skel-line skel-short"></span></div>';
+      return d;
+    }
+    // A MutationObserver (not an htmx event) so it fires even though a dismissed card detaches before
+    // its event could bubble. Keep the row at 4 by filling a freed slot with a skeleton; when no real
+    // nags remain, drop the whole row.
+    const obs = new MutationObserver(function () {
+      const real = sec.querySelectorAll('.alert-card:not(.alert-skeleton)').length;
+      if (real === 0) { obs.disconnect(); sec.remove(); return; }
+      const want = Math.max(0, 4 - real);
+      const skels = sec.querySelectorAll('.alert-skeleton');
+      if (skels.length === want) return;                 // no change needed → don't re-trigger ourselves
+      obs.disconnect();
+      for (let i = skels.length - 1; i >= want; i--) skels[i].remove();
+      for (let i = sec.querySelectorAll('.alert-skeleton').length; i < want; i++) sec.appendChild(makeSkeleton());
+      obs.observe(sec, { childList: true });
+    });
+    obs.observe(sec, { childList: true });
+  })();
+</script>
+{% endif %}{# nothing to show → render nothing #}

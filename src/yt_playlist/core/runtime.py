@@ -4,7 +4,7 @@ from pathlib import Path
 
 from yt_playlist.core.config import load_identities
 from yt_playlist.core.identities import build_client
-from yt_playlist.core.setup import write_config, validate_identities
+from yt_playlist.core.setup import write_config, validate_identities, BROWSER_CREDENTIAL_FILENAME
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +27,11 @@ class Runtime:
         return self.store.get_setting("bridge_paired") == "1"
 
     def clients(self) -> dict:
-        """Client provider passed to the web app; raises if called while unconfigured."""
+        """Client provider passed to the web app. Returns {} while unconfigured (no identity yet) so
+        callers degrade gracefully now that the dashboard is reachable before setup, instead of the
+        old forced /setup redirect."""
         if self._provider is None:
-            raise RuntimeError("runtime is not configured")
+            return {}
         return self._provider()
 
     def load(self) -> None:
@@ -40,6 +42,8 @@ class Runtime:
         """
         self._provider = None
         self._configured = False
+        if not self.config_path.exists():
+            self._provision_default()          # first run: seed a usable "main" identity, setup optional
         if not self.config_path.exists():
             return
         try:
@@ -59,6 +63,19 @@ class Runtime:
 
         self._provider = provider
         self._configured = True
+
+    def _provision_default(self) -> None:
+        """First run has no config yet. Credentials are live via the extension bridge now, so a single
+        default identity is all a one-account user needs: write it so the app is usable immediately
+        (no "Save an identity" gate) and the /setup wizard is only for people who actually have
+        multiple (brand) identities. Best-effort: never let provisioning crash startup."""
+        try:
+            self.creds_dir.mkdir(parents=True, exist_ok=True)
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            write_config([{"label": "main", "is_master": True,
+                           "credential_ref": BROWSER_CREDENTIAL_FILENAME}], self.config_path)
+        except Exception:                       # noqa: BLE001 - app still works via /setup
+            logger.warning("could not provision default identity", exc_info=True)
 
     def apply_setup(self, identities) -> None:
         """Validate input, write config, then reload.

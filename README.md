@@ -94,19 +94,22 @@ than replacing them, so your baseline taste always shows through.
 
 ## Setup
 
-Until it is configured, every page redirects to **`/setup`**. Two things happen there, both simple:
+There is no setup gate: you land straight on the dashboard, which shows the extension connection
+state and, until it connects, an inline prompt to install the extension. The only thing you actually
+have to do is **pair the extension**:
 
-- **Pair the extension.** Install the extension (Quickstart above) and it connects automatically,
-  the Pairing tab flips to "Extension connected". Authentication is by the extension's identity, so
+- **Pair the extension.** Install the extension (Quickstart above) and it connects automatically;
+  the dashboard flips to "Extension connected". Authentication is by the extension's identity, so
   there is nothing to paste and no other program can use the connection. Your session cookie never
   leaves the browser: the app only ever sends a request (method, URL, body) and the extension
   applies auth and returns the response.
-- **Add identities.** One or more YouTube identities (exactly one is the master that cross-identity
-  merges consolidate into). Saved on their own; the extension is the live credential.
 
-On save you land on the dashboard. Syncing is automatic: a full library sync runs once the extension
-is connected, then refreshes daily, and plays are captured live. Revisit **Setup** in the nav anytime
-to add identities.
+A single default identity (`main`) is provisioned on first run, so a one-account user needs nothing
+else. **`/setup`** is optional and only worth visiting if you have **multiple YouTube identities**
+(brand accounts): add them there and pick the master that cross-identity merges consolidate into.
+
+Syncing is automatic: a full library sync runs once the extension is connected, then refreshes daily,
+and plays are captured live.
 
 Config and data live in `~/.config/yt-playlist/` (`config.toml`) and `~/.local/share/yt-playlist/`
 (`state.db`); no credential file is stored, the live extension session is the credential.

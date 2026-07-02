@@ -2,4 +2,4 @@
 # Flatpak entry point: start the local server and open it in the host browser (via the OpenURI
 # portal). Extra args pass through, e.g. `flatpak run io._4rc.YtPlaylist --port 9000`.
 export BROWSER=xdg-open
-exec yt-playlist --open "$@"
+exec yt-playlist --open --exit-on-idle "$@"

@@ -7,6 +7,27 @@
   {# The steering panel sits BELOW the cards (only meaningful once the library has genres to steer), so
      the page starts with playlists, not controls. #}
   {% if fingerprint.families %}{% include "_partials/taste_fingerprint.html" %}{% endif %}
+  {# More mixes are coming while the model is still learning. Revealed by JS when the loaded card row
+     has 1-3 generated playlists (hidden at 0 — that's the warming-up state — and at the full 4). #}
+  <section class="card gen-more" id="gen-more" hidden>
+    <span class="gen-more-icon" aria-hidden="true">✦</span>
+    <p>More playlist recommendations will appear here as the model keeps learning your taste.</p>
+  </section>
+  <script>
+    (function () {
+      function syncGenMore() {
+        var row = document.getElementById('home-mode-cards');
+        var more = document.getElementById('gen-more');
+        if (!row || !more) return;
+        var n = row.querySelectorAll('.gen-card').length;
+        more.hidden = !(n >= 1 && n < 4);
+      }
+      document.body.addEventListener('htmx:afterSwap', function (e) {
+        if (e.target && (e.target.id === 'home-mode-cards' || e.target.querySelector('#home-mode-cards'))) syncGenMore();
+      });
+      syncGenMore();
+    })();
+  </script>
   <div id="steer-toast" class="steer-toast" x-data="{show:false}" x-show="show" x-cloak x-transition
        x-init="$nextTick(() => { if (sessionStorage.getItem('steered')) { sessionStorage.removeItem('steered'); show=true; setTimeout(()=>show=false, 3500); } })">
     Re-ranked. <a href="/taste">Fine-tune your taste model →</a>

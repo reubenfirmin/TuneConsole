@@ -13,11 +13,18 @@ def build(ctx) -> APIRouter:
     router = APIRouter()
     store, now_fn, jobs = ctx.store, ctx.now_fn, ctx.jobs
 
+    @router.get("/sync/active")
+    def sync_active():
+        # The dashboard console polls this to attach to whatever library sync is running (the
+        # automatic background one included), then streams it via /sync/events/{job_id}.
+        job = jobs.find_active_library()
+        return {"job_id": job.id if job else None}
+
     @router.post("/sync")
     def do_sync():
         # Run the (slow, network-bound) sync in a background thread and stream progress over SSE.
         clients = ctx.client_provider()
-        job = jobs.create()
+        job = jobs.create(kind="library")
 
         def run():
             try:
