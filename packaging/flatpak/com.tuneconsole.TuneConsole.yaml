@@ -34,7 +34,7 @@ modules:
       - install -Dm755 yt-playlist-launch ${FLATPAK_DEST}/bin/yt-playlist-launch
       - install -Dm644 com.tuneconsole.TuneConsole.desktop ${FLATPAK_DEST}/share/applications/com.tuneconsole.TuneConsole.desktop
       - install -Dm644 com.tuneconsole.TuneConsole.metainfo.xml ${FLATPAK_DEST}/share/metainfo/com.tuneconsole.TuneConsole.metainfo.xml
-      - install -Dm644 com.tuneconsole.TuneConsole.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/com.tuneconsole.TuneConsole.svg
+      - install -Dm644 com.tuneconsole.TuneConsole.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/com.tuneconsole.TuneConsole.png
     sources:
       - type: file
         path: ../../dist/yt_playlist-0.1.1-py3-none-any.whl
@@ -45,4 +45,4 @@ modules:
       - type: file
         path: com.tuneconsole.TuneConsole.metainfo.xml
       - type: file
-        path: com.tuneconsole.TuneConsole.svg
+        path: com.tuneconsole.TuneConsole.png

@@ -32,8 +32,8 @@ modules:
         ${FLATPAK_DEST}/share/applications/com.tuneconsole.TuneConsole.desktop
       - install -Dm644 packaging/flatpak/com.tuneconsole.TuneConsole.metainfo.xml
         ${FLATPAK_DEST}/share/metainfo/com.tuneconsole.TuneConsole.metainfo.xml
-      - install -Dm644 packaging/flatpak/com.tuneconsole.TuneConsole.svg
-        ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/com.tuneconsole.TuneConsole.svg
+      - install -Dm644 packaging/flatpak/com.tuneconsole.TuneConsole.png
+        ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/com.tuneconsole.TuneConsole.png
     sources:
       - type: file
         url: https://github.com/reubenfirmin/TuneConsole/releases/download/v0.1.1/yt_playlist-0.1.1-py3-none-any.whl

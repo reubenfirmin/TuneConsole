@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import re
@@ -54,9 +55,13 @@ def _install_idle_shutdown(app, templates):
                 continue
             bye = st["bye_at"]
             if bye is not None and st["last"] < bye and now - bye > 2.5:
-                break                          # tab closed and no reload heartbeat within the grace
-            if now - st["last"] > 12:
-                break                          # heartbeats stopped (closed w/o beacon, or a crash)
+                break                          # tab closed (pagehide beacon) and no reload within grace
+            # Backstop for a close that never sent the beacon (crash/force-quit). MUST be well above the
+            # browser's background-tab timer throttling: a hidden tab's heartbeat interval gets throttled
+            # to ~once/minute, so a short timeout would kill the server under an open-but-backgrounded
+            # tab. 150s tolerates that; a real close is handled promptly by the beacon above.
+            if now - st["last"] > 150:
+                break
         logging.getLogger("yt_playlist").info("UI idle — shutting down server")
         os.kill(os.getpid(), signal.SIGTERM)
 
@@ -148,16 +153,27 @@ def create_app(store, client_provider, *, now_fn=time.time,
     app = FastAPI()
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     allowed = set(allowed_hosts)
-    # Cache-bust the front-end by the newest mtime across ALL top-level static JS/CSS so browsers always
-    # fetch the current build after an edit (otherwise a stale cached file silently diverges). MUST cover
-    # every served script — cluster.js was previously omitted, so edits to it never busted the cache and
-    # browsers ran an old copy. Evaluated LAZILY per render (str()), so editing a static file busts the
-    # cache without a server restart; `{{ asset_v }}` in templates calls __str__ each time.
+    # Cache-bust the front-end by a CONTENT hash across ALL top-level static JS/CSS so browsers always
+    # fetch the current build after an edit (otherwise a stale cached file silently diverges). Content
+    # (not mtime): Flatpak zeroes every packaged file's mtime for reproducible builds, so an mtime-based
+    # version was constant ("0") across rebuilds and browsers kept running a stale app.js. Evaluated
+    # LAZILY per render, memoized by (mtime, size) so a dev edit still busts without a restart while the
+    # hash is only recomputed when a file actually changes.
     class _AssetVersion:
+        _key = None
+        _val = "0"
+
         def __str__(self):
             try:
-                files = [*static_dir.glob("*.js"), *static_dir.glob("*.css"), static_dir / "favicon.svg"]
-                return str(int(max(f.stat().st_mtime for f in files if f.exists())))
+                files = sorted((p for p in [*static_dir.glob("*.js"), *static_dir.glob("*.css"),
+                                            static_dir / "favicon.svg"] if p.exists()), key=lambda p: p.name)
+                key = tuple((p.name, int(p.stat().st_mtime), p.stat().st_size) for p in files)
+                if key != self._key:
+                    h = hashlib.md5()
+                    for p in files:
+                        h.update(p.read_bytes())
+                    self._val, self._key = h.hexdigest()[:12], key
+                return self._val
             except (OSError, ValueError):
                 return "0"
     templates.env.globals["asset_v"] = _AssetVersion()
