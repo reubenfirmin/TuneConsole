@@ -2,7 +2,7 @@
 #
 # Tight sandbox: the ONLY host permission is network access. The app needs nothing from the host
 # filesystem — Flatpak redirects XDG_CONFIG_HOME / XDG_DATA_HOME to this app's private directory
-# (~/.var/app/io._4rc.YtPlaylist/{config,data}), and paths.py honours those, so config + state.db +
+# (~/.var/app/com.tuneconsole.TuneConsole/{config,data}), and paths.py honours those, so config + state.db +
 # backups all land in the per-app sandbox with no `--filesystem` grant. Opening the browser goes
 # through the OpenURI portal (always available, no permission needed). Downloaded share .txt files
 # are written by your browser, which runs outside this sandbox.
@@ -11,9 +11,9 @@
 #   1. uv build --wheel                              # -> dist/*.whl  (run from repo root)
 #   2. ./generate-pip-sources.sh                     # -> python3-requirements.json  (needs network, once)
 #   3. flatpak install flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
-#   4. flatpak-builder --user --install --force-clean build-dir io._4rc.YtPlaylist.yaml
-#   5. flatpak run io._4rc.YtPlaylist
-app-id: io._4rc.YtPlaylist
+#   4. flatpak-builder --user --install --force-clean build-dir com.tuneconsole.TuneConsole.yaml
+#   5. flatpak run com.tuneconsole.TuneConsole
+app-id: com.tuneconsole.TuneConsole
 runtime: org.freedesktop.Platform
 runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
@@ -30,19 +30,19 @@ modules:
   - name: yt-playlist
     buildsystem: simple
     build-commands:
-      - pip3 install --no-index --no-deps --prefix=${FLATPAK_DEST} yt_playlist-0.1.0-py3-none-any.whl
+      - pip3 install --no-index --no-deps --prefix=${FLATPAK_DEST} yt_playlist-0.1.1-py3-none-any.whl
       - install -Dm755 yt-playlist-launch ${FLATPAK_DEST}/bin/yt-playlist-launch
-      - install -Dm644 io._4rc.YtPlaylist.desktop ${FLATPAK_DEST}/share/applications/io._4rc.YtPlaylist.desktop
-      - install -Dm644 io._4rc.YtPlaylist.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io._4rc.YtPlaylist.metainfo.xml
-      - install -Dm644 io._4rc.YtPlaylist.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io._4rc.YtPlaylist.svg
+      - install -Dm644 com.tuneconsole.TuneConsole.desktop ${FLATPAK_DEST}/share/applications/com.tuneconsole.TuneConsole.desktop
+      - install -Dm644 com.tuneconsole.TuneConsole.metainfo.xml ${FLATPAK_DEST}/share/metainfo/com.tuneconsole.TuneConsole.metainfo.xml
+      - install -Dm644 com.tuneconsole.TuneConsole.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/com.tuneconsole.TuneConsole.svg
     sources:
       - type: file
-        path: ../../dist/yt_playlist-0.1.0-py3-none-any.whl
+        path: ../../dist/yt_playlist-0.1.1-py3-none-any.whl
       - type: file
         path: yt-playlist-launch
       - type: file
-        path: io._4rc.YtPlaylist.desktop
+        path: com.tuneconsole.TuneConsole.desktop
       - type: file
-        path: io._4rc.YtPlaylist.metainfo.xml
+        path: com.tuneconsole.TuneConsole.metainfo.xml
       - type: file
-        path: io._4rc.YtPlaylist.svg
+        path: com.tuneconsole.TuneConsole.svg

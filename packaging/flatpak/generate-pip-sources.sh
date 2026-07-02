@@ -17,15 +17,24 @@ fi
 GEN=$(command -v flatpak-pip-generator || true)
 if [ -z "$GEN" ]; then
   echo "Fetching flatpak-pip-generator…"
-  curl -fsSL -o /tmp/flatpak-pip-generator \
-    https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/pip/flatpak-pip-generator
-  GEN="python3 /tmp/flatpak-pip-generator"
+  # The tool now ships as a PEP 723 script named flatpak-pip-generator.py (the old bare name is a
+  # stub). uv run resolves its inline deps (requirements-parser) and executes it.
+  curl -fsSL -o /tmp/flatpak-pip-generator.py \
+    https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/pip/flatpak-pip-generator.py
+  GEN="uv run /tmp/flatpak-pip-generator.py"
 fi
 
 # Keep this list in sync with [project.dependencies] in ../../pyproject.toml (minus tomli, which is
-# only needed on Python < 3.11 — the runtime ships a newer Python).
+# only needed on Python < 3.11 — the runtime ships a newer Python). uvicorn needs the [standard]
+# extra so websockets is vendored (the /bridge/ws extension endpoint 404s without it), and numpy is
+# a hard runtime dep of the recommender — both must be present or the offline build ships broken.
+# These deps ship compiled extensions (C/Rust). Use prebuilt manylinux wheels instead of building
+# them from sdists in the sandbox — the SDK has no Rust/maturin (pydantic-core, watchfiles) or the
+# heavy build stacks (numpy). --wheel-arches defaults to x86_64,aarch64, matching Flathub targets.
 $GEN --runtime="org.freedesktop.Sdk//$RUNTIME_VERSION" \
   --output python3-requirements \
-  ytmusicapi fastapi uvicorn jinja2 python-multipart rapidfuzz
+  --prefer-wheels=numpy,pydantic-core,rapidfuzz,watchfiles,uvloop,httptools,markupsafe,pyyaml \
+  "ytmusicapi>=1.12,<2" "fastapi>=0.110" "uvicorn[standard]>=0.29" "jinja2>=3.1" \
+  "python-multipart>=0.0.9" "rapidfuzz>=3.6" "numpy>=1.26"
 
 echo "Wrote $(pwd)/python3-requirements.json"

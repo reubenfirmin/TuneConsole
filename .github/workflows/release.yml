@@ -1,0 +1,24 @@
+# On a `v*` tag, build the Python wheel and attach it to the GitHub Release. Flathub's submission
+# manifest (packaging/flathub/) fetches this wheel by URL, and it's the same artifact the CLI/uv
+# install uses. The macOS .dmg is produced separately by macos.yml.
+name: Release artifacts
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build wheel
+        run: uv build --wheel
+      - name: Attach wheel to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl

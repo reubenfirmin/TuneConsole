@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=TuneConsole
+GenericName=YouTube Music console
+Comment=Power-manage and tune your YouTube Music library, with recommendations you can see into
+Exec=yt-playlist-launch
+Icon=com.tuneconsole.TuneConsole
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=youtube;music;playlist;dedupe;merge;
+StartupNotify=true
