@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # The extension id is pinned by the `key` field in extension/manifest.json, so it is stable across
 # machines and installs. Only this origin may open the bridge socket.
-EXTENSION_ID = "edhplcadobipneepllhkkajckoammpnk"
+EXTENSION_ID = "opmmbolbdgdkphfocffpjpgmelkkjkcn"
 EXTENSION_ORIGIN = f"chrome-extension://{EXTENSION_ID}"
 
 
