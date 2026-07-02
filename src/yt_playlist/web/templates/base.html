@@ -103,6 +103,9 @@
       function beat() { fetch('/heartbeat', { method: 'POST', keepalive: true }).catch(function () {}); }
       beat();
       setInterval(beat, 3000);
+      // Refocusing a backgrounded tab (whose interval was throttled) beats immediately so the server's
+      // idle backstop resets right away instead of waiting for the next throttled tick.
+      addEventListener('visibilitychange', function () { if (!document.hidden) beat(); });
       addEventListener('pagehide', function () { try { navigator.sendBeacon('/goodbye'); } catch (e) {} });
     })();
   </script>

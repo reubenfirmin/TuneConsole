@@ -5,7 +5,7 @@
 #
 # Produces:
 #   dist/TuneConsole.app
-#   dist/TuneConsole-0.1.1.dmg
+#   dist/TuneConsole-0.1.2.dmg
 #
 # The bundle is unsigned, so first launch needs right-click -> Open (or System Settings ->
 # Privacy & Security -> Open Anyway). Add an Apple Developer cert + notarization later for
@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$(cd ../.. && pwd)
-VERSION=0.1.1
+VERSION=0.1.2
 
 # 1. Isolated build environment with the app + PyInstaller installed (so data/metadata collect).
 python3 -m venv .build-venv

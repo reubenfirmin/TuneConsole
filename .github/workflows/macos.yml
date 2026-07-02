@@ -1,6 +1,6 @@
 # Builds the macOS .app + .dmg on a real Mac runner (Apple hardware, required for macOS builds).
 #
-#   - Push a tag like `v0.1.1`  -> builds and attaches TuneConsole-macos.dmg to a GitHub Release.
+#   - Push a tag like `v0.1.2`  -> builds and attaches TuneConsole-macos.dmg to a GitHub Release.
 #   - Manual "Run workflow"     -> builds and uploads the .dmg as a downloadable Actions artifact.
 #
 # The site's "Download for macOS" button points at:
