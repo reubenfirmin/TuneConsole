@@ -6,7 +6,7 @@
 # the pinned git checkout, and all Python deps come from python3-requirements.json (regenerate with
 # ../flatpak/generate-pip-sources.sh).
 #
-# The git commit and wheel sha256 below are pinned to the v0.1.1 release. For a future release, bump
+# The git commit and wheel sha256 below are pinned to the v0.1.2 release. For a future release, bump
 # the version/tag/URL and refresh them:
 #   commit:  git rev-parse vX.Y.Z
 #   sha256:  curl -sL <release-wheel-url> | sha256sum   (hash the released asset, not a local build)
@@ -26,7 +26,7 @@ modules:
   - name: tuneconsole
     buildsystem: simple
     build-commands:
-      - pip3 install --no-index --no-deps --prefix=${FLATPAK_DEST} yt_playlist-0.1.1-py3-none-any.whl
+      - pip3 install --no-index --no-deps --prefix=${FLATPAK_DEST} yt_playlist-0.1.2-py3-none-any.whl
       - install -Dm755 packaging/flatpak/yt-playlist-launch ${FLATPAK_DEST}/bin/yt-playlist-launch
       - install -Dm644 packaging/flatpak/com.tuneconsole.TuneConsole.desktop
         ${FLATPAK_DEST}/share/applications/com.tuneconsole.TuneConsole.desktop
@@ -36,9 +36,9 @@ modules:
         ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/com.tuneconsole.TuneConsole.png
     sources:
       - type: file
-        url: https://github.com/reubenfirmin/TuneConsole/releases/download/v0.1.1/yt_playlist-0.1.1-py3-none-any.whl
-        sha256: 6e19c3d8b1f9236ea00234ef935c817801c9c5ded2b1f1efc8a00cfe324b1c85
+        url: https://github.com/reubenfirmin/TuneConsole/releases/download/v0.1.2/yt_playlist-0.1.2-py3-none-any.whl
+        sha256: REPLACE_WITH_RELEASE_WHEEL_SHA256   # curl -sL <url above> | sha256sum  (after the release builds)
       - type: git
         url: https://github.com/reubenfirmin/TuneConsole.git
-        tag: v0.1.1
-        commit: fb3699788cb443776cc2aba33e2b0720d42267e4
+        tag: v0.1.2
+        commit: REPLACE_WITH_TAG_COMMIT            # git rev-parse v0.1.2  (after the tag is pushed)

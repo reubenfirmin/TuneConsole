@@ -49,6 +49,12 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.2" date="2026-07-02">
+      <description>
+        <p>Dashboard-first onboarding with a live library-sync console, redesigned setup nag cards, and
+          reliability fixes for asset caching and idle shutdown.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-07-02">
       <description>
         <p>Version synced with the browser extension; packaging and metadata polish.</p>
