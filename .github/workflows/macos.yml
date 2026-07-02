@@ -1,0 +1,79 @@
+# Builds the macOS .app + .dmg on a real Mac runner (Apple hardware, required for macOS builds).
+#
+#   - Push a tag like `v0.1.1`  -> builds and attaches TuneConsole-macos.dmg to a GitHub Release.
+#   - Manual "Run workflow"     -> builds and uploads the .dmg as a downloadable Actions artifact.
+#
+# The site's "Download for macOS" button points at:
+#   https://github.com/reubenfirmin/TuneConsole/releases/latest/download/TuneConsole-macos.dmg
+# so tagging a release is all that's needed to publish a new download — no artifact has to be
+# folded into the Cloudflare Pages deploy (Pages caps files at 25 MiB; the .dmg lives on Releases).
+name: macOS build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to create/attach releases
+
+jobs:
+  build:
+    # macos-14 = Apple Silicon (arm64). For Intel too, add a matrix job on macos-13 and publish a
+    # second asset (e.g. TuneConsole-macos-x86_64.dmg).
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install icon tooling (librsvg for the .icns)
+        run: brew install librsvg
+
+      - name: Build .app and .dmg
+        run: |
+          cd packaging/macos
+          ./build.sh
+
+      # Stable asset name so the site's /releases/latest/download URL is constant across versions.
+      - name: Stage DMG with a stable name
+        run: cp "packaging/macos/dist/TuneConsole-0.1.1.dmg" TuneConsole-macos.dmg
+
+      # --- Code signing + notarization (optional; fill in the secrets to enable) ------------------
+      # Needs an Apple Developer account: a Developer ID Application cert (exported .p12) and an
+      # app-specific password. Add repo secrets MACOS_CERT_P12 (base64), MACOS_CERT_PASSWORD,
+      # APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD, then uncomment:
+      #
+      # - name: Sign & notarize
+      #   env:
+      #     CERT: ${{ secrets.MACOS_CERT_P12 }}
+      #     CERT_PW: ${{ secrets.MACOS_CERT_PASSWORD }}
+      #     APPLE_ID: ${{ secrets.APPLE_ID }}
+      #     TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      #     APP_PW: ${{ secrets.APPLE_APP_PASSWORD }}
+      #   run: |
+      #     echo "$CERT" | base64 -d > cert.p12
+      #     security create-keychain -p "" build.keychain
+      #     security import cert.p12 -k build.keychain -P "$CERT_PW" -T /usr/bin/codesign
+      #     security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+      #     security list-keychains -s build.keychain
+      #     codesign --deep --force --options runtime \
+      #       --sign "Developer ID Application" "packaging/macos/dist/TuneConsole.app"
+      #     xcrun notarytool submit TuneConsole-macos.dmg --apple-id "$APPLE_ID" \
+      #       --team-id "$TEAM_ID" --password "$APP_PW" --wait
+      #     xcrun stapler staple "packaging/macos/dist/TuneConsole.app"
+      # --------------------------------------------------------------------------------------------
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TuneConsole-macos-dmg
+          path: TuneConsole-macos.dmg
+
+      - name: Attach to the release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TuneConsole-macos.dmg

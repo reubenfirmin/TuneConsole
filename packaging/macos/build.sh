@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build "YT Playlist.app" and a .dmg with PyInstaller. Run on macOS.
+# Build "TuneConsole.app" and a .dmg with PyInstaller. Run on macOS.
 #
 #   ./build.sh
 #
 # Produces:
-#   dist/YT Playlist.app
-#   dist/YT-Playlist-0.1.0.dmg
+#   dist/TuneConsole.app
+#   dist/TuneConsole-0.1.1.dmg
 #
 # The bundle is unsigned, so first launch needs right-click -> Open (or System Settings ->
 # Privacy & Security -> Open Anyway). Add an Apple Developer cert + notarization later for
@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$(cd ../.. && pwd)
-VERSION=0.1.0
+VERSION=0.1.1
 
 # 1. Isolated build environment with the app + PyInstaller installed (so data/metadata collect).
 python3 -m venv .build-venv
@@ -30,9 +30,9 @@ rm -rf build dist
 pyinstaller --noconfirm --clean yt-playlist.spec
 
 # 4. Wrap it in a compressed .dmg.
-APP="dist/YT Playlist.app"
-DMG="dist/YT-Playlist-$VERSION.dmg"
-hdiutil create -volname "YT Playlist" -srcfolder "$APP" -ov -format UDZO "$DMG"
+APP="dist/TuneConsole.app"
+DMG="dist/TuneConsole-$VERSION.dmg"
+hdiutil create -volname "TuneConsole" -srcfolder "$APP" -ov -format UDZO "$DMG"
 
 echo
 echo "Built:"

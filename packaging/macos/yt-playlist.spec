@@ -20,8 +20,13 @@ hiddenimports += [
     "uvicorn.protocols.websockets.auto",
     "uvicorn.lifespan.on",
 ]
+# Belt-and-suspenders for two deps loaded via lazy/indirect imports: python-multipart (starlette
+# imports it only when parsing a form POST — e.g. the setup wizard) and websockets (the /bridge/ws
+# extension endpoint). collect_submodules is a no-op if a package is absent, so this is safe.
+hiddenimports += collect_submodules("multipart")
+hiddenimports += collect_submodules("websockets")
 
-icon = "YtPlaylist.icns" if os.path.exists("YtPlaylist.icns") else None
+icon = "TuneConsole.icns" if os.path.exists("TuneConsole.icns") else None
 
 a = Analysis(
     ["entry.py"],
@@ -47,13 +52,13 @@ coll = COLLECT(exe, a.binaries, a.datas, name="yt-playlist")
 
 app = BUNDLE(
     coll,
-    name="YT Playlist.app",
+    name="TuneConsole.app",
     icon=icon,
-    bundle_identifier="io._4rc.YtPlaylist",
-    version="0.1.0",
+    bundle_identifier="com.tuneconsole.TuneConsole",
+    version="0.1.1",
     info_plist={
-        "CFBundleShortVersionString": "0.1.0",
-        "CFBundleVersion": "0.1.0",
+        "CFBundleShortVersionString": "0.1.1",
+        "CFBundleVersion": "0.1.1",
         "NSHighResolutionCapable": True,
         # the server has no window; keep it a normal app so it appears in the Dock and can be quit
         "LSBackgroundOnly": False,

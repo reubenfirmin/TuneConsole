@@ -1,0 +1,45 @@
+# Flathub submission manifest for TuneConsole.
+#
+# This differs from ../flatpak/com.tuneconsole.TuneConsole.yaml in one way: Flathub builds offline
+# from pinned, checksummed sources, so the app wheel is fetched from a tagged GitHub Release instead
+# of a local dist/ path. The branded files (launch script, desktop entry, metainfo, icon) come from
+# the pinned git checkout, and all Python deps come from python3-requirements.json (regenerate with
+# ../flatpak/generate-pip-sources.sh).
+#
+# Before opening the Flathub PR, fill the two placeholders below:
+#   __COMMIT_SHA__    ->  git rev-parse v0.1.1
+#   __WHEEL_SHA256__  ->  sha256 of the wheel *attached to the v0.1.1 release* (wheels aren't
+#                         byte-reproducible by default, so hash the released asset, not a local build):
+#                         curl -sL <release-wheel-url> | sha256sum
+app-id: com.tuneconsole.TuneConsole
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+command: yt-playlist-launch
+
+finish-args:
+  - --share=network # outbound HTTPS + serves 127.0.0.1; browser opens via the OpenURI portal
+
+modules:
+  # All Python runtime deps as offline, checksummed wheels/sdists.
+  - python3-requirements.json
+
+  - name: tuneconsole
+    buildsystem: simple
+    build-commands:
+      - pip3 install --no-index --no-deps --prefix=${FLATPAK_DEST} yt_playlist-0.1.1-py3-none-any.whl
+      - install -Dm755 packaging/flatpak/yt-playlist-launch ${FLATPAK_DEST}/bin/yt-playlist-launch
+      - install -Dm644 packaging/flatpak/com.tuneconsole.TuneConsole.desktop
+        ${FLATPAK_DEST}/share/applications/com.tuneconsole.TuneConsole.desktop
+      - install -Dm644 packaging/flatpak/com.tuneconsole.TuneConsole.metainfo.xml
+        ${FLATPAK_DEST}/share/metainfo/com.tuneconsole.TuneConsole.metainfo.xml
+      - install -Dm644 packaging/flatpak/com.tuneconsole.TuneConsole.svg
+        ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/com.tuneconsole.TuneConsole.svg
+    sources:
+      - type: file
+        url: https://github.com/reubenfirmin/TuneConsole/releases/download/v0.1.1/yt_playlist-0.1.1-py3-none-any.whl
+        sha256: __WHEEL_SHA256__
+      - type: git
+        url: https://github.com/reubenfirmin/TuneConsole.git
+        tag: v0.1.1
+        commit: __COMMIT_SHA__

@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.tuneconsole.TuneConsole</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>TuneConsole</name>
+  <summary>Power-manage and tune your YouTube Music library</summary>
+  <developer id="io.4rc">
+    <name>Reuben Firmin</name>
+  </developer>
+  <url type="homepage">https://tuneconsole.com</url>
+  <url type="bugtracker">https://github.com/reubenfirmin/TuneConsole/issues</url>
+
+  <description>
+    <p>
+      TuneConsole is a local console for power-managing your YouTube Music library, with a
+      recommendation model you can actually see into and tune. Discover new artists and
+      rediscoveries drawn from your own listening, generate playlists from your taste, and merge,
+      reorganize and clean up playlists across multiple accounts.
+    </p>
+    <p>
+      Everything runs on your own machine. The app serves a web UI on 127.0.0.1; your library, play
+      history and taste model live in one file on your computer, never on a server.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">com.tuneconsole.TuneConsole.desktop</launchable>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+  </categories>
+
+  <!-- URLs resolve once tuneconsole.com is live (the site ships these under /shots). -->
+  <screenshots>
+    <screenshot type="default">
+      <image>https://tuneconsole.com/shots/shot-1.png</image>
+      <caption>Discovery drawn from your own listening</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://tuneconsole.com/shots/shot-3.png</image>
+      <caption>A recommendation model you can see into and tune</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://tuneconsole.com/shots/shot-7.png</image>
+      <caption>Explore your library as an interactive map</caption>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.1" date="2026-07-02">
+      <description>
+        <p>Version synced with the browser extension; packaging and metadata polish.</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-06-21">
+      <description>
+        <p>First packaged release.</p>
+      </description>
+    </release>
+  </releases>
+</component>
