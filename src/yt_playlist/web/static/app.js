@@ -486,23 +486,64 @@ function homeStatus() {
     connected: false,
     nowPlaying: null,
     refreshing: false,
+    running: false,        // a library sync is streaming into the console
+    failed: false,
+    lines: [],
+    _job: null,            // job id the console is attached to (guards against double-attach)
     init() {
       const poll = () => fetch('/bridge/status').then(r => r.json())
         .then(d => { this.connected = !!d.connected; this.nowPlaying = d.now_playing || null; })
         .catch(() => {});
       poll();
       setInterval(poll, 3000);
+      // Attach the live console to whatever library sync is running — the automatic background sync
+      // included — so the initial sync's results stream in with no manual action.
+      const scan = () => { if (this.running) return; fetch('/sync/active').then(r => r.json())
+        .then(d => { if (d && d.job_id) this.attach(d.job_id); }).catch(() => {}); };
+      scan();
+      setInterval(scan, 3000);
+    },
+    push(ev) {
+      const bad = ev.type === 'err' || ev.type === 'auth_expired';
+      const pip = bad ? '✗' : (ev.type === 'done' || ev.type === 'end') ? '✓' : ev.type === 'step' ? '›' : '•';
+      const cls = bad ? 'err' : (ev.type === 'done' || ev.type === 'end') ? 'done' : '';
+      this.lines.push({ text: ev.text || '', pip, cls });
+      this.$nextTick(() => { const l = this.$refs.log; if (l) l.scrollTop = l.scrollHeight; });
+    },
+    attach(jobId) {
+      if (this.running || this._job === jobId) return;
+      this._job = jobId; this.running = true; this.failed = false; this.lines = [];
+      const es = new EventSource(`/sync/events/${jobId}`);
+      es.onmessage = (m) => {
+        const ev = JSON.parse(m.data);
+        if (ev.type === 'err' || ev.type === 'auth_expired') this.failed = true;
+        if (ev.type === 'end') {
+          es.close(); this.running = false;
+          if (!ev.error && !this.failed) {
+            this.push({ type: 'done', text: 'library updated — refreshing…' });
+            setTimeout(() => location.reload(), 900);
+          } else {
+            this.push({ type: 'err', text: 'finished with errors. Reload when ready.' });
+          }
+          return;
+        }
+        this.push(ev);
+      };
+      es.onerror = () => { es.close(); this.running = false; this.failed = true;
+        this.push({ type: 'err', text: 'stream interrupted' }); };
     },
     async refresh() {
-      if (this.refreshing) return;
+      if (this.running || this.refreshing) return;
       this.refreshing = true;
       // Kicking off a sync retires the setup flash (same event the old sync bar dispatched).
       window.dispatchEvent(new CustomEvent('sync-started'));
       if (location.search.includes('flash=')) history.replaceState({}, '', location.pathname);
-      try { await fetch('/sync', { method: 'POST' }); } catch (e) {}
-      // The library sync runs in the background (rec/enrich workers pick it up); just hold the link
-      // in its "Refreshing…" state briefly so the click reads as acknowledged.
-      setTimeout(() => { this.refreshing = false; }, 4000);
+      try {
+        const r = await fetch('/sync', { method: 'POST' });
+        const job = (await r.json()).job_id;
+        if (job) this.attach(job);          // stream this one into the console
+      } catch (e) {}
+      this.refreshing = false;
     },
     rate(action) {
       if (!this.nowPlaying) return;

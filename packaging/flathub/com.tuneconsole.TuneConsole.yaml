@@ -6,11 +6,10 @@
 # the pinned git checkout, and all Python deps come from python3-requirements.json (regenerate with
 # ../flatpak/generate-pip-sources.sh).
 #
-# Before opening the Flathub PR, fill the two placeholders below:
-#   __COMMIT_SHA__    ->  git rev-parse v0.1.1
-#   __WHEEL_SHA256__  ->  sha256 of the wheel *attached to the v0.1.1 release* (wheels aren't
-#                         byte-reproducible by default, so hash the released asset, not a local build):
-#                         curl -sL <release-wheel-url> | sha256sum
+# The git commit and wheel sha256 below are pinned to the v0.1.1 release. For a future release, bump
+# the version/tag/URL and refresh them:
+#   commit:  git rev-parse vX.Y.Z
+#   sha256:  curl -sL <release-wheel-url> | sha256sum   (hash the released asset, not a local build)
 app-id: com.tuneconsole.TuneConsole
 runtime: org.freedesktop.Platform
 runtime-version: "24.08"
@@ -38,8 +37,8 @@ modules:
     sources:
       - type: file
         url: https://github.com/reubenfirmin/TuneConsole/releases/download/v0.1.1/yt_playlist-0.1.1-py3-none-any.whl
-        sha256: __WHEEL_SHA256__
+        sha256: 6e19c3d8b1f9236ea00234ef935c817801c9c5ded2b1f1efc8a00cfe324b1c85
       - type: git
         url: https://github.com/reubenfirmin/TuneConsole.git
         tag: v0.1.1
-        commit: __COMMIT_SHA__
+        commit: fb3699788cb443776cc2aba33e2b0720d42267e4

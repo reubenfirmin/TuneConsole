@@ -12,4 +12,6 @@ if __name__ == "__main__":
     argv = sys.argv[1:]
     if "--open" not in argv:
         argv = ["--open", *argv]
+    if "--exit-on-idle" not in argv:
+        argv = ["--exit-on-idle", *argv]
     main(argv)

@@ -29,7 +29,9 @@ def build(ctx) -> APIRouter:
             rows = [{"label": i.label, "brand": i.brand_account_id or ""} for i in idents]
             master_idx = next((n for n, i in enumerate(idents) if i.is_master), 0)
         else:
-            rows, master_idx = [{"label": "", "brand": ""}], 0
+            # Pre-fill a sensible default so a single-account user who just paired the extension can
+            # click Save without being nagged to invent an identity. They can rename it or add more.
+            rows, master_idx = [{"label": "main", "brand": ""}], 0
         return _setup_context(request, rows=rows, master_idx=master_idx)
 
     def _enrichment_panel(request):

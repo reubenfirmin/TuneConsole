@@ -48,6 +48,13 @@ async function injectAllYtmTabs() {
   for (const t of tabs) await inject(t.id);
 }
 
+// Ask each YouTube Music tab to re-emit what's playing right now (used on (re)connect, since the
+// backend forgets now_playing when the socket drops and the content script otherwise dedups it away).
+async function resyncNowPlaying() {
+  const tabs = await chrome.tabs.query({ url: "https://music.youtube.com/*" });
+  for (const t of tabs) { try { await chrome.tabs.sendMessage(t.id, { type: "resync-now" }); } catch (e) {} }
+}
+
 // On extension install/reload, reload any open YouTube Music tabs so they pick up the fresh content
 // script. That way reloading the extension is the only reload you need, no manual tab refresh.
 async function reloadYtmTabs() {
@@ -166,9 +173,10 @@ function connect() {
   if (ws && ws.readyState !== WebSocket.CLOSED) return;
   const sock = new WebSocket(BRIDGE_URL);
   ws = sock;
-  sock.onopen = () => {
+  sock.onopen = async () => {
     console.log("[TuneConsole bridge] connected");
-    injectAllYtmTabs();   // make sure existing tabs have the content script (and now-playing watcher)
+    await injectAllYtmTabs();   // make sure existing tabs have the content script (and now-playing watcher)
+    resyncNowPlaying();         // backend cleared now_playing on the last disconnect; re-emit the current track
   };
   sock.onmessage = async (ev) => {
     const frame = JSON.parse(ev.data);
@@ -198,3 +206,33 @@ chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 chrome.runtime.onInstalled.addListener(reloadYtmTabs);   // reload open YTM tabs so one reload suffices
 connect();
+
+// Quality of life: keep a single TuneConsole tab. When a second one appears (the app relaunches and
+// opens another, or you open one by hand), close the extras and focus the one that was already there
+// so you never end up with a pile of 127.0.0.1:8765 tabs.
+const APP_TAB_GLOB = "http://127.0.0.1:8765/*";
+let dedupeBusy = false;
+async function dedupeAppTabs() {
+  if (dedupeBusy) return;
+  dedupeBusy = true;
+  try {
+    const tabs = await chrome.tabs.query({ url: APP_TAB_GLOB });
+    if (tabs.length <= 1) return;
+    tabs.sort((a, b) => a.id - b.id);       // keep the oldest tab (preserves its state)
+    const keep = tabs[0];
+    for (const t of tabs.slice(1)) { try { await chrome.tabs.remove(t.id); } catch (e) {} }
+    try {
+      await chrome.tabs.update(keep.id, { active: true });
+      if (keep.windowId != null) await chrome.windows.update(keep.windowId, { focused: true });
+    } catch (e) {}
+  } catch (e) {
+    // no tabs permission / query failed — nothing to do
+  } finally {
+    dedupeBusy = false;
+  }
+}
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.status === "complete" && tab.url && tab.url.startsWith("http://127.0.0.1:8765/")) {
+    dedupeAppTabs();
+  }
+});

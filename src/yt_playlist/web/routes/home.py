@@ -1,6 +1,7 @@
 """Home tab: the default landing page: Sync control, Take-Action triage, and For-You recs."""
 import asyncio
 import json
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Request, Response
@@ -30,17 +31,22 @@ ROTATING_CARDS = ("wheelhouse", "explore", "comfort", "fresh", "new_artists", "d
 LASTFM_NUDGE_COVERAGE = 0.90
 
 
-def lastfm_nudge_due(store) -> bool:
-    """True when metadata is genre-sparse, no Last.fm key is set, and the nudge is not dismissed."""
+LASTFM_NUDGE_SNOOZE_S = 30 * 86400   # dismissing snoozes the nudge 30 days, not forever
+
+
+def lastfm_nudge_due(store, now=None) -> bool:
+    """True when no Last.fm key is set and the nudge isn't snoozed. Dismissing snoozes it for 30 days
+    (records a timestamp) so a long-lived install is reminded again instead of never seeing it."""
     if lastfm.available(store):
         return False
-    if store.get_setting("lastfm_nudge_dismissed") == "1":
-        return False
-    cov = store.coverage_stats()
-    processed = cov.get("processed", 0)
-    if not processed:
-        return False
-    return cov.get("genre", 0) / processed < LASTFM_NUDGE_COVERAGE
+    dismissed_at = store.get_setting("lastfm_nudge_dismissed_at")
+    if dismissed_at is not None:
+        try:
+            if (now if now is not None else time.time()) - float(dismissed_at) < LASTFM_NUDGE_SNOOZE_S:
+                return False
+        except (TypeError, ValueError):
+            pass
+    return True
 _NOTES = {
     "wheelhouse": "Deeper into what you already love.",
     "explore": "Unplayed corners of your own library.",
@@ -162,7 +168,16 @@ def build(ctx) -> APIRouter:
             # Sparsity nudge: when metadata is genre-thin and no Last.fm key is set, point the user
             # at adding one (persists once dismissed). The auto-enrich worker handles the rest, so
             # there is no manual-enrichment nag anymore.
-            "show_lastfm_nudge": lastfm_nudge_due(store),
+            # Welcome nag shown once the first sync lands (dismissable, persists): sets expectations
+            # that the model keeps learning over the next week.
+            "show_intro": (store.get_setting("last_sync_at") is not None
+                           and store.get_setting("intro_dismissed") != "1"),
+            "show_lastfm_nudge": lastfm_nudge_due(store, now),
+            # Once the library has synced and the user still has only the default identity, offer the
+            # multi-identity merge (dismissable, persists). Skipped as soon as they add a second one.
+            "show_identities_nudge": (store.get_setting("last_sync_at") is not None
+                                      and len(store.get_identities()) <= 1
+                                      and store.get_setting("identities_nudge_dismissed") != "1"),
             "onboarding": onboarding.onboarding_active(store, now),
             "onboard_library": onboarding.library_size(store) >= rec_params.get_param(store, "onboard_library_min"),
             "cleanup_count": onboarding.cleanup_count(store),   # CACHED read, never the O(n^2) scan
@@ -172,8 +187,21 @@ def build(ctx) -> APIRouter:
 
     @router.post("/onboard/lastfm/dismiss")
     def dismiss_lastfm_nudge():
-        """Permanently dismiss the Home Last.fm-key nudge. Empty 200 so HTMX swaps it out."""
-        store.set_setting("lastfm_nudge_dismissed", "1")
+        """Snooze the Home Last.fm-key nudge for 30 days (records the dismissal time). Empty 200 so
+        HTMX swaps it out."""
+        store.set_setting("lastfm_nudge_dismissed_at", str(now_fn()))
+        return Response(status_code=200)
+
+    @router.post("/onboard/identities/dismiss")
+    def dismiss_identities_nudge():
+        """Permanently dismiss the multi-identity merge nudge. Empty 200 so HTMX swaps it out."""
+        store.set_setting("identities_nudge_dismissed", "1")
+        return Response(status_code=200)
+
+    @router.post("/onboard/intro/dismiss")
+    def dismiss_intro_nudge():
+        """Permanently dismiss the post-first-sync welcome nag. Empty 200 so HTMX swaps it out."""
+        store.set_setting("intro_dismissed", "1")
         return Response(status_code=200)
 
     @router.get("/home/onboard/radio")
