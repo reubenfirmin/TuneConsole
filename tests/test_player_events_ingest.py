@@ -70,6 +70,16 @@ def test_curation_body_is_truncated_and_bad_json_tolerated():
     assert len(payload["body"]) <= 4096
 
 
+def test_rate_url_with_querystring_still_parses_action():
+    s = _store()
+    s.upsert_track("vidQ", "Song", "Artist", "", None)
+    body = json.dumps({"target": {"videoId": "vidQ"}})
+    msg = {"kind": "rate", "url": "https://music.youtube.com/youtubei/v1/like/dislike?key=abc&prettyPrint=false",
+           "body": body, "brandId": ""}
+    assert player_events.handle_player_event(_ctx(s), msg, 1000.0) is True
+    assert identity_key("Song", "Artist") in s.disliked_identity_keys()
+
+
 def test_unconfigured_store_skips():
     empty = Store(":memory:"); empty.init_schema()
     assert player_events.handle_player_event(_ctx(empty), {"kind": "tick", "videoId": "v"}, 1.0) is False

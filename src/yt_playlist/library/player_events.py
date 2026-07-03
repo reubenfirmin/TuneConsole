@@ -5,6 +5,7 @@ action on a known track feeding the like/dislike model (off-player likes, the #3
 interpretation (skip vs completion, sessions, curation signals) happens later, at read time, so
 thresholds stay server-tunable without extension releases."""
 import json
+from urllib.parse import urlsplit
 
 from yt_playlist.library.live_plays import resolve_identity
 from yt_playlist.rec import graduation
@@ -15,6 +16,15 @@ CURATION_KINDS = {"rate", "playlist_edit", "feedback", "subscription", "share_in
 _BODY_CAP = 4096
 _RATE_STATUS = {"like": "LIKE", "dislike": "DISLIKE", "removelike": "INDIFFERENT"}
 _PAYLOAD_EXTRAS = ("state", "volume", "shuffle", "repeat")
+
+
+def _extract_action_from_url(url):
+    """Extract action from URL path, ignoring querystring (e.g., 'like', 'dislike' from .../{action}?...)."""
+    try:
+        path = urlsplit(url).path
+        return path.rstrip("/").rsplit("/", 1)[-1]
+    except Exception:
+        return url.rstrip("/").rsplit("/", 1)[-1]
 
 
 def _curation_fields(kind, msg):
@@ -29,7 +39,7 @@ def _curation_fields(kind, msg):
         data = {}
     if kind == "rate":
         target = data.get("target") or {}
-        action = url.rstrip("/").rsplit("/", 1)[-1]
+        action = _extract_action_from_url(url)
         return target.get("videoId"), target.get("playlistId"), action
     if kind == "playlist_edit":
         vids = [a.get("addedVideoId") or a.get("removedVideoId")
@@ -37,7 +47,7 @@ def _curation_fields(kind, msg):
         vids = [v for v in vids if v]
         return (vids[0] if vids else None), data.get("playlistId"), None
     if kind == "subscription":
-        return None, None, url.rstrip("/").rsplit("/", 1)[-1]
+        return None, None, _extract_action_from_url(url)
     return None, None, None
 
 

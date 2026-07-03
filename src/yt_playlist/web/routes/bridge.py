@@ -10,7 +10,7 @@ import logging
 import time
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
-from yt_playlist.library import live_plays
+from yt_playlist.library import live_plays, player_events
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +127,15 @@ def build(ctx) -> APIRouter:
                             await asyncio.to_thread(live_plays.handle_play_event, ctx, msg, now)
                         except Exception:  # noqa: BLE001
                             logger.warning("failed to persist play event", exc_info=True)
+                    continue
+                if isinstance(msg, dict) and msg.get("type") == "pevent":
+                    # #91 raw player/curation event; persist off the loop, never kill the socket.
+                    if store is not None:
+                        now = ctx.now_fn() if getattr(ctx, "now_fn", None) else time.time()
+                        try:
+                            await asyncio.to_thread(player_events.handle_player_event, ctx, msg, now)
+                        except Exception:  # noqa: BLE001
+                            logger.warning("failed to persist player event", exc_info=True)
                     continue
                 try:
                     req_id = int(msg["id"])

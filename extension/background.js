@@ -41,6 +41,7 @@ async function inject(tabId) {
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
     // The MAIN-world now-playing companion (reads the page's MediaSession).
     await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", files: ["nowplaying_main.js"] });
+    await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", files: ["observer_main.js"] });
   } catch (e) {}
 }
 async function injectAllYtmTabs() {
@@ -190,12 +191,16 @@ function connect() {
   sock.onerror = () => { try { sock.close(); } catch (e) {} };
 }
 
-// Push a now-playing event (sent by the content script) up to the backend so it can log the play.
+// Push a now-playing event, and #91 raw pevent frames (both sent by the content script), up to the
+// backend: "play" for the now-playing pipeline, "pevent" for the playback observer stream.
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg && msg.type === "play" && ws && ws.readyState === WebSocket.OPEN) {
+  if (!msg || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (msg.type === "play") {
     ws.send(JSON.stringify({ type: "play", title: msg.title, artist: msg.artist,
       thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
       playlist: msg.playlist || "", brandId: msg.brandId || "" }));
+  } else if (msg.type === "pevent") {
+    ws.send(JSON.stringify(msg));   // #91 already a flat, self-describing frame
   }
 });
 

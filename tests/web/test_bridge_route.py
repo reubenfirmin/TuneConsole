@@ -97,3 +97,25 @@ def test_play_frame_persists_event():
     evs = s.play_events_since(0)
     assert len(evs) == 1
     assert evs[0]["video_id"] == "v1" and evs[0]["playlist_ytm_id"] == "PLabc"
+
+
+def test_pevent_frame_persists_raw_event():
+    # #91 a pevent frame lands in player_events; a stub store still cannot kill the socket
+    import time
+    from yt_playlist.core.store import Store
+    s = Store(":memory:"); s.init_schema()
+    s.upsert_identity("main", "bridge", None, True)
+    bridge = Bridge()
+    app = FastAPI()
+    ctx = type("C", (), {"bridge": bridge, "store": s,
+                         "now_fn": staticmethod(lambda: 1234.0)})()
+    app.include_router(build_bridge_route(ctx))
+    client = TestClient(app)
+    with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        ws.send_json({"type": "pevent", "kind": "track_exit", "videoId": "v1",
+                      "position": 20.0, "duration": 400.0, "playlist": "PL1", "brandId": ""})
+        deadline = time.time() + 5
+        while time.time() < deadline and not s.player_events_since(0):
+            time.sleep(0.05)
+    evs = s.player_events_since(0)
+    assert len(evs) == 1 and evs[0]["kind"] == "track_exit" and evs[0]["at"] == 1234.0

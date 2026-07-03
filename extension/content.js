@@ -102,10 +102,28 @@ if (!window.__tcBridgeLoaded) {
     });
   };
   let lastMainAt = 0;
+  let lastPlayer = null;   // #91 latest playback point, for the pagehide goodbye
   window.addEventListener("message", (ev) => {
-    if (ev.source !== window || !ev.data || !ev.data.__tcNow) return;
+    if (ev.source !== window || !ev.data) return;
+    if (ev.data.__tcPlayer) {
+      const p = ev.data.__tcPlayer;
+      lastPlayer = { videoId: p.videoId, position: p.position, duration: p.duration, brandId: p.brandId };
+      try { chrome.runtime.sendMessage(Object.assign({ type: "pevent" }, p)); } catch (e) {}
+      return;
+    }
+    if (ev.data.__tcCuration) {
+      try { chrome.runtime.sendMessage(Object.assign({ type: "pevent" }, ev.data.__tcCuration)); } catch (e) {}
+      return;
+    }
+    if (!ev.data.__tcNow) return;
     lastMainAt = Date.now();
     report(ev.data.__tcNow);
+  });
+  window.addEventListener("pagehide", () => {
+    // #91 goodbye: close the session and the last track's record when the tab goes away.
+    try {
+      if (lastPlayer) chrome.runtime.sendMessage(Object.assign({ type: "pevent", kind: "bye" }, lastPlayer));
+    } catch (e) {}
   });
   const domNowPlaying = () => {
     const t = document.querySelector(".title.ytmusic-player-bar") ||
