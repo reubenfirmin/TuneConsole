@@ -1,6 +1,6 @@
 # Builds the macOS .app + .dmg on a real Mac runner (Apple hardware, required for macOS builds).
 #
-#   - Push a tag like `v0.1.3`  -> builds and attaches TuneConsole-macos.dmg to a GitHub Release.
+#   - Push a tag like `v0.1.4`  -> builds and attaches TuneConsole-macos.dmg to a GitHub Release.
 #   - Manual "Run workflow"     -> builds and uploads the .dmg as a downloadable Actions artifact.
 #
 # The site's "Download for macOS" button points at:
@@ -39,7 +39,7 @@ jobs:
 
       # Stable asset name so the site's /releases/latest/download URL is constant across versions.
       - name: Stage DMG with a stable name
-        run: cp "packaging/macos/dist/TuneConsole-0.1.1.dmg" TuneConsole-macos.dmg
+        run: cp packaging/macos/dist/TuneConsole-*.dmg TuneConsole-macos.dmg   # version-agnostic: no bump needed
 
       # --- Code signing + notarization (optional; fill in the secrets to enable) ------------------
       # Needs an Apple Developer account: a Developer ID Application cert (exported .p12) and an
