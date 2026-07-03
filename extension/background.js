@@ -232,7 +232,7 @@ async function dedupeAppTabs() {
       if (keep.windowId != null) await chrome.windows.update(keep.windowId, { focused: true });
     } catch (e) {}
   } catch (e) {
-    // no tabs permission / query failed — nothing to do
+    // no tabs permission / query failed: nothing to do
   } finally {
     dedupeBusy = false;
   }

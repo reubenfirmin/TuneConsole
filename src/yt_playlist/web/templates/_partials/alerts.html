@@ -1,4 +1,4 @@
-{% set nudge_count = (1 if show_intro else 0) + (1 if show_lastfm_nudge else 0) + (1 if show_identities_nudge else 0) %}
+{% set nudge_count = (1 if show_intro else 0) + (1 if show_lastfm_nudge else 0) + (1 if show_identities_nudge else 0) + (1 if show_backend_update else 0) %}
 {% if actions or nudge_count %}
 <section class="alerts" aria-label="Needs attention">
   {# The welcome always leads the row. #}
@@ -11,6 +11,24 @@
     <div class="alert-body">
       <span class="alert-title">You're all set. TuneConsole keeps learning your taste as you listen, save,
         and rate: it locks in after a day or two and keeps improving over the week. Keep it running.</span>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if show_backend_update %}
+  <div class="alert-card card alert-nudge" id="update-nudge">
+    <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
+            hx-post="/onboard/update/dismiss?v={{ backend_update.latest }}" hx-target="#update-nudge" hx-swap="outerHTML swap:200ms">×</button>
+    <span class="alert-cover no-art"></span>
+    <div class="alert-body">
+      <span class="alert-title">Backend update available. You're on {{ backend_update.current }}, {{ backend_update.latest }} is out.</span>
+      <div class="alert-foot">
+        {% if backend_update.link %}
+        <a class="btn btn-sm alert-go" href="{{ backend_update.link }}" target="_blank" rel="noopener">{{ backend_update.command }} →</a>
+        {% else %}
+        <code class="alert-cmd">{{ backend_update.command }}</code>
+        {% endif %}
+      </div>
     </div>
   </div>
   {% endif %}

@@ -7,6 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
+from yt_playlist.core import updatecheck
 from yt_playlist.library import executor
 from yt_playlist.util import genre_map
 from yt_playlist.rec import arc_energy, journeys, onboarding, rec_params, recommend, into_recently
@@ -155,6 +156,7 @@ def build(ctx) -> APIRouter:
         dao = RecDao(store)
         for card in ROTATING_CARDS:   # one tick per genuine Home visit -> per-card rotation advances
             dao.bump_card_view(card, now)
+        backend_update = updatecheck.update_nudge(store)
         return templates.TemplateResponse(request, "home.html", {
             "actions": recommend.take_action(store, now, ctx.auth_expired),
             "sync": recommend.sync_status(store, now),
@@ -173,6 +175,8 @@ def build(ctx) -> APIRouter:
             "show_intro": (store.get_setting("last_sync_at") is not None
                            and store.get_setting("intro_dismissed") != "1"),
             "show_lastfm_nudge": lastfm_nudge_due(store, now),
+            "backend_update": backend_update,
+            "show_backend_update": backend_update is not None,
             # Once the library has synced and the user still has only the default identity, offer the
             # multi-identity merge (dismissable, persists). Skipped as soon as they add a second one.
             "show_identities_nudge": (store.get_setting("last_sync_at") is not None
@@ -202,6 +206,15 @@ def build(ctx) -> APIRouter:
     def dismiss_intro_nudge():
         """Permanently dismiss the post-first-sync welcome nag. Empty 200 so HTMX swaps it out."""
         store.set_setting("intro_dismissed", "1")
+        return Response(status_code=200)
+
+    @router.post("/onboard/update/dismiss")
+    def dismiss_update_nudge(v: str = ""):
+        """Dismiss the backend-update nag for the version the user saw (passed as ?v=). Falls back to
+        the currently-cached latest. A newer release re-shows it. Empty 200 so HTMX swaps it out."""
+        dismissed = v or store.get_setting("latest_version_seen")
+        if dismissed:
+            store.set_setting("backend_update_dismissed_version", dismissed)
         return Response(status_code=200)
 
     @router.get("/home/onboard/radio")

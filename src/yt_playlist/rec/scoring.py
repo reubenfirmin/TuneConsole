@@ -15,12 +15,6 @@ from yt_playlist.rec.taste_analysis import taste_breadth
 _NORM_EPS = 1e-9
 
 
-# A small positive shift applied when re-weighting taste scores (which can be negative cosines): after
-# shifting every score to a non-negative base we add this so a muted family lands just above 0 instead
-# of exactly 0, keeping the ordering well-defined. Negligible next to real score gaps.
-_SCORE_SHIFT_EPS = 1e-6
-
-
 class PlaylistTaste:
     """Play-weighted per-playlist taste model: each playlist is one taste *context* (its embedding
     centroid), weighted by how much you actually listen to it. Scoring a candidate against this
@@ -138,30 +132,26 @@ def content_taste(store) -> PlaylistTaste:
 def genre_adjusted_scores(scores, genre_of, gweights):
     """Re-weight per-track taste scores by the user's per-genre-family preferences.
 
-    `gweights` maps genre family -> weight (1.0 = neutral, 0 = mute, >1 = favor). Because raw taste
-    scores can be negative (cosine), every score is first shifted to a common non-negative base, then
-    scaled by its family's weight, so ordering stays well-defined regardless of sign: a muted family
-    sinks to 0, a boosted one rises. Returns a new {key: score}; a pure no-op when all weights are
-    neutral, so the default path is untouched.
-    """
+    `gweights` maps genre family -> weight (1.0 = neutral, 0 = mute, >1 = favor). #86: weights
+    apply to a rank/percentile base (see embed.percentile_scores), not a shift-by-min base, which
+    BOUNDS how much the pool's worst score can distort the effect of a weight (it no longer warps
+    it without limit; see the base's docstring for the residual). A muted family sinks to 0, a
+    boosted one rises. Returns a new {key: score}; a pure no-op when all weights are neutral."""
     if not scores or not gweights or all(w == 1.0 for w in gweights.values()):
         return scores
-    smin = min(scores.values())
-    eps = _SCORE_SHIFT_EPS
-    return {k: (s - smin + eps) * gweights.get(genre_of.get(k), 1.0) for k, s in scores.items()}
+    base = embed.percentile_scores(scores)
+    return {k: base[k] * gweights.get(genre_of.get(k), 1.0) for k in scores}
 
 
 def axis_adjusted_scores(scores, mult):
     """Re-weight taste scores by a precomputed per-key multiplier (generalizes genre weighting).
 
-    Shift to a common non-negative base then scale, so ordering is well-defined for negative cosines.
-    No-op when `mult` is falsy. Returns a new {key: score}.
-    """
+    #86: rank/percentile base (bounds pool influence; see embed.percentile_scores), not
+    shift-by-min. No-op when `mult` is falsy or all-neutral. Returns a new {key: score}."""
     if not scores or not mult or all(m == 1.0 for m in mult.values()):
         return scores
-    smin = min(scores.values())
-    eps = _SCORE_SHIFT_EPS
-    return {k: (s - smin + eps) * mult.get(k, 1.0) for k, s in scores.items()}
+    base = embed.percentile_scores(scores)
+    return {k: base[k] * mult.get(k, 1.0) for k in scores}
 
 
 # Breadth steering (#7): how far one full drag of the bias can push a single family's weight. The

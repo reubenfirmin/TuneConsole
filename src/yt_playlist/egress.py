@@ -79,6 +79,7 @@ ALLOWED_DOMAINS = frozenset({
     "deezer.com",         # enrichment: BPM (api.deezer.com), no auth
     "acousticbrainz.org",  # enrichment: BPM/energy/danceability by MusicBrainz recording MBID
     "wikipedia.org",      # into-recently card: keyless page summaries (en.wikipedia.org)
+    "github.com",         # update check: latest release tag (api.github.com)
 })
 
 

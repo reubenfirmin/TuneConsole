@@ -26,11 +26,23 @@
       var url = typeof input === "string" ? input : ((input && input.url) || "");
       for (var i = 0; i < PATTERNS.length; i++) {
         if (PATTERNS[i].re.test(url)) {
-          var body = (init && typeof init.body === "string") ? init.body : "";
-          window.postMessage({ __tcCuration: {
-            kind: PATTERNS[i].kind, url: url.split("?")[0], body: body.slice(0, BODY_CAP),
-            href: location.href, brandId: brand()
-          } }, "*");
+          var kind = PATTERNS[i].kind;
+          var report = function (body) {
+            try {
+              window.postMessage({ __tcCuration: {
+                kind: kind, url: url.split("?")[0], body: (body || "").slice(0, BODY_CAP),
+                href: location.href, brandId: brand()
+              } }, "*");
+            } catch (e) {}
+          };
+          // YTM usually passes the JSON body inside a Request object, not as a string init.body;
+          // clone() lets us read it without consuming the stream. Async is fine: the server stamps
+          // event time at receipt, and a failed read still reports the observation (empty body).
+          if (init && typeof init.body === "string") report(init.body);
+          else if (input && typeof input.clone === "function") {
+            try { input.clone().text().then(report, function () { report(""); }); }
+            catch (e) { report(""); }
+          } else report("");
           break;
         }
       }

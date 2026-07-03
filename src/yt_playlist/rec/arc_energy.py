@@ -14,22 +14,41 @@ a playlist), and the pass is deterministic so a seeded re-save reproduces the sa
 
 Pure: takes plain dicts, depends only on genre_map, so it is trivially testable.
 """
+import statistics
+
 from yt_playlist.util import genre_map
 
 # BPM-led blend (issue #37). Weights are re-normalized over whichever features a track actually has.
 _WEIGHTS = {"bpm": 0.5, "energy": 0.3, "danceability": 0.2}
 _BPM_LO, _BPM_HI = 60.0, 180.0   # normalization window; covers the vast majority of music
 
+_FOLD_RATIO = 1.6          # #86 fold a BPM down by octaves while it exceeds ratio x family median
+_FOLD_MIN_SAMPLES = 3      # need this many enriched tracks in a family to trust its median
+
 
 def _norm_bpm(bpm) -> float:
-    """Map BPM onto [0,1] over _BPM_LO.._BPM_HI, clamped. Half/double-time is not corrected."""
+    """Map BPM onto [0,1] over _BPM_LO.._BPM_HI, clamped. Half/double-time is not corrected here;
+    see _fold_bpm for the genre-relative octave correction applied before normalization."""
     return min(1.0, max(0.0, (float(bpm) - _BPM_LO) / (_BPM_HI - _BPM_LO)))
 
 
-def _raw(features) -> float | None:
+def _fold_bpm(bpm, fam_median) -> float:
+    """#86 Octave-fold a suspect double-time BPM down toward its genre family's median. Only folds
+    DOWN (tagger double-time misreads are the common error) and only when the family median is
+    known; a genuinely fast family keeps its fast tracks."""
+    b = float(bpm)
+    if not fam_median:
+        return b
+    while b >= _FOLD_RATIO * fam_median:
+        b /= 2.0
+    return b
+
+
+def _raw(features, fam_median=None) -> float | None:
     """Composite arc energy from the audio features present, or None if a track carries none of the
     three arc features. Weights are re-normalized over what's present, so a track with only BPM
-    scores its normalized BPM, only energy scores its energy, etc."""
+    scores its normalized BPM, only energy scores its energy, etc. bpm is octave-folded toward
+    fam_median (issue #86) before normalization."""
     if not features:
         return None
     num = den = 0.0
@@ -37,7 +56,7 @@ def _raw(features) -> float | None:
         val = features.get(name)
         if val is None:
             continue
-        val = _norm_bpm(val) if name == "bpm" else float(val)
+        val = _norm_bpm(_fold_bpm(val, fam_median)) if name == "bpm" else float(val)
         num += weight * val
         den += weight
     return num / den if den else None
@@ -54,11 +73,28 @@ def arc_energies(keys, genres, audio) -> dict:
     genres: {key: genre string} (missing/empty -> untagged).
     audio:  {key: {feature: value}} for the keys that carry audio metadata (others absent).
 
-    Returns {key: arc_energy}. Tracks with features score their composite directly; the rest fall
-    back through subgenre -> family pool averages -> the curated family constant -> 0.5.
+    Returns {key: arc_energy}. Tracks with features score their composite directly, with their bpm
+    first octave-folded toward its genre family's raw-BPM median (issue #86, computed from the
+    pool's own enriched tracks) to correct tagger double-time misreads; the rest fall back through
+    subgenre -> family pool averages -> the curated family constant -> 0.5.
     """
     keys = list(keys)
-    raw = {k: _raw(audio.get(k)) for k in keys}
+
+    fam_bpms = {}
+    for k in keys:
+        feats = audio.get(k)
+        bpm = feats.get("bpm") if feats else None
+        if bpm is None:
+            continue
+        fam_bpms.setdefault(genre_map.family(genres.get(k, "")), []).append(float(bpm))
+    fam_bpm_median = {
+        f: statistics.median(vs) for f, vs in fam_bpms.items() if len(vs) >= _FOLD_MIN_SAMPLES
+    }
+
+    raw = {
+        k: _raw(audio.get(k), fam_median=fam_bpm_median.get(genre_map.family(genres.get(k, ""))))
+        for k in keys
+    }
 
     by_subgenre, by_family = {}, {}
     for k in keys:

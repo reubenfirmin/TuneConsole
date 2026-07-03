@@ -24,14 +24,24 @@
     try { return (window.ytcfg && window.ytcfg.get) ? (window.ytcfg.get("DELEGATED_SESSION_ID") || "") : ""; } catch (e) { return ""; }
   }
   function shuffleRepeat() {
-    // Best-effort context; unknown stays "". Repeat mode is an attribute on the player bar;
-    // shuffle only exposes the button's pressed state.
+    // Best-effort context; unknown stays "". Repeat mode is an attribute on the player bar. The
+    // shuffle button carries NO state attribute (verified against the live DOM), so shuffle comes
+    // from the app store instead: probe the queue state for a boolean shuffle-ish key rather than
+    // pinning an exact internal name YTM could rename.
     var rep = "", shuf = "";
     try {
       var bar = document.querySelector("ytmusic-player-bar");
       rep = (bar && (bar.getAttribute("repeat-mode_") || bar.getAttribute("repeat-mode"))) || "";
-      var sb = bar && (bar.querySelector(".shuffle") || bar.querySelector("[aria-label='Shuffle']"));
-      if (sb) shuf = sb.getAttribute("aria-pressed") || "";
+    } catch (e) {}
+    try {
+      var app = document.querySelector("ytmusic-app");
+      var st = app && app.store && app.store.getState && app.store.getState();
+      var q = st && st.queue;
+      if (q) {
+        for (var k in q) {
+          if (typeof q[k] === "boolean" && /shuffle/i.test(k)) { shuf = q[k] ? "true" : "false"; break; }
+        }
+      }
     } catch (e) {}
     return { repeat: rep, shuffle: shuf };
   }

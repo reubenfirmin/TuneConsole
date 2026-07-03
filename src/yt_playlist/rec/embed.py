@@ -527,19 +527,46 @@ def _content_space(store, include_new):
     return ckeys, CV, cidx
 
 
+def percentile_scores(scores) -> dict:
+    """#86 Map raw scores onto (0, 1] by ascending average rank (ties share their mean rank).
+
+    The base for multiplicative taste weights: the old shift-by-min base let a single terrible
+    candidate warp every reranked gap without bound. Ranks BOUND that influence (junk can never
+    reorder the base itself), but they do not eliminate it entirely: percentile values still shift
+    with pool size, so a multiplier sitting inside a pair's narrow crossover band can resolve
+    differently in different pools. Accepted trade-off (owner-approved over softmax, which is
+    pairwise pool-independent but needs a temperature constant we cannot tune without eval)."""
+    if not scores:
+        return {}
+    n = len(scores)
+    by_val = {}
+    for k, s in scores.items():
+        by_val.setdefault(s, []).append(k)
+    out, taken = {}, 0
+    for s in sorted(by_val):
+        ks = by_val[s]
+        avg_rank = (2 * taken + len(ks) + 1) / 2.0     # mean of ranks taken+1 .. taken+len(ks)
+        for k in ks:
+            out[k] = avg_rank / n
+        taken += len(ks)
+    return out
+
+
 def _blend_spaces(collab_s, content_s, w):
-    """Combine the collaborative and content per-key scores: (1-w)·collab + w·content where a key has
-    both, else whichever space holds it. So an untagged candidate (or w==0) scores on collaborative
-    alone, and an out-of-corpus track with no collaborative vector scores on content alone."""
+    """Combine the collaborative and content per-key scores: (1-w)*collab + w*content where a key
+    has both, else whichever space holds it. #86: each space is rank-normalized onto (0, 1] first
+    (percentile_scores), so collab-only and content-only candidates compete on one comparable scale
+    instead of raw cosines from distributions with different shapes."""
+    cn, tn = percentile_scores(collab_s), percentile_scores(content_s)
     blended = {}
-    for k in collab_s.keys() | content_s.keys():
-        has_c, has_t = k in collab_s, k in content_s
+    for k in cn.keys() | tn.keys():
+        has_c, has_t = k in cn, k in tn
         if has_c and has_t:
-            blended[k] = (1.0 - w) * collab_s[k] + w * content_s[k]
+            blended[k] = (1.0 - w) * cn[k] + w * tn[k]
         elif has_c:
-            blended[k] = collab_s[k]
+            blended[k] = cn[k]
         else:
-            blended[k] = content_s[k]
+            blended[k] = tn[k]
     return blended
 
 
@@ -547,8 +574,8 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=Non
                    include_new=False):
     """A Clusters-canvas ring: tracks nearest a node's PINNED-path centroid, tilted AWAY from the
     PRUNED set, scored as a blend of the collaborative (co-occurrence) embedding and the content
-    (genre/era) vector: score = (1-w)·cos(collab) + w·cos(content), w = the cluster_content_weight
-    knob. Each term is computed against the seeds' centroid in its own space; a candidate (or seed)
+    (genre/era) vector. #86: each space's cosines are rank-normalized first, so the score is
+    (1-w)·rank(cos(collab)) + w·rank(cos(content)), w = the cluster_content_weight knob. Each term is computed against the seeds' centroid in its own space; a candidate (or seed)
     missing one space is renormalized onto the other, so untagged tracks behave exactly as before
     and w=0 reproduces the pure-collaborative ring. pos/neg seeds and `exclude` are never returned.
 
@@ -567,7 +594,7 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=Non
     ckeys, CV, cidx = _content_space(store, include_new)
 
     # Genre-only seed: a genre picked with no artist/song seed (empty pos_keys) seeds a cluster FROM the
-    # genre itself — the centroid is the genre's own tracks, and we KEEP those tracks as candidates (don't
+    # genre itself: the centroid is the genre's own tracks, and we KEEP those tracks as candidates (don't
     # exclude the seed set) so the opening ring fills with the most representative tracks of the genre.
     seed_only = (not pos_keys) and bool(allow)
     src = list(allow) if seed_only else pos_keys

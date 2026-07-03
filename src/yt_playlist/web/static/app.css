@@ -963,6 +963,16 @@ button.htmx-request .check-busy { display: inline; }
 .alert-cover-icon { display: grid; place-items: center; font-size: 2.4rem; background: var(--accent-soft); }
 .alert-nudge .alert-title { -webkit-line-clamp: unset; min-height: 0; font-weight: 600; font-size: 0.86rem;
   line-height: 1.42; }
+.alert-cmd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  user-select: all;
+  white-space: nowrap;
+  overflow: auto;
+}
 
 .for-you-grid { display: grid; gap: 1rem;
   grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }

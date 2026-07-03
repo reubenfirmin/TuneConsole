@@ -88,3 +88,9 @@ class _Resp:
     """Stub HTTP response with the bits record() reads."""
     status_code = status = 200
     headers = {"Content-Length": "0"}
+
+
+def test_github_api_is_allowed_for_update_check():
+    from yt_playlist.egress import host_allowed
+    assert host_allowed("api.github.com") is True
+    assert host_allowed("github.com") is True
