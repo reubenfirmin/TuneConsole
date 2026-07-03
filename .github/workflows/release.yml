@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }          # full history + tags so hatch-vcs derives the version
       - uses: astral-sh/setup-uv@v5
       - name: Build wheel
         run: uv build --wheel
@@ -28,22 +29,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }          # hatch-vcs needs the tag
       - uses: astral-sh/setup-uv@v5
-      - name: Build the wheel the manifest installs
+      - name: Build the wheel the manifest globs from dist/
         run: uv build --wheel
       - name: Install flatpak + flatpak-builder
         run: |
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-      - name: Build the app and export a single-file bundle
+      - name: Import the repo signing key
+        env:
+          FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
+        run: |
+          echo "$FLATPAK_GPG_KEY" | gpg --batch --import
+          echo "FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')" >> "$GITHUB_ENV"
+      - name: Build + GPG-sign the auto-update repo (pruned to latest) and a one-shot bundle
         working-directory: packaging/flatpak
         run: |
           flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse \
-            --repo=repo --force-clean build-dir com.tuneconsole.TuneConsole.yaml
+            --repo=repo --gpg-sign="$FPR" --force-clean build-dir com.tuneconsole.TuneConsole.yaml
+          flatpak build-update-repo repo --gpg-sign="$FPR" --prune --prune-depth=0
           flatpak build-bundle repo ../../TuneConsole.flatpak com.tuneconsole.TuneConsole \
             --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
-      - name: Attach the flatpak bundle to the release
+          cp tuneconsole.flatpakrepo repo/tuneconsole.flatpakrepo
+      - name: Publish the repo to Cloudflare Pages (this is the flatpak update channel)
+        working-directory: packaging/flatpak
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx -y wrangler pages deploy repo --project-name tuneconsole-flatpak --branch production
+      - name: Attach the one-shot bundle to the release
         uses: softprops/action-gh-release@v2
         with:
           files: TuneConsole.flatpak

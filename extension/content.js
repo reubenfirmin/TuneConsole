@@ -87,10 +87,18 @@ if (!window.__tcBridgeLoaded) {
     const key = np.title + " | " + np.artist + " | " + np.likeStatus + " | " + (np.videoId || "");
     if (key === lastNowPlaying) return;
     lastNowPlaying = key;
+    let vid = np.videoId || "", lst = np.playlist || "";
+    if (!vid || !lst) {  // DOM-fallback reports carry neither; the watch URL has both
+      try {
+        const u = new URL(location.href);
+        vid = vid || u.searchParams.get("v") || "";
+        lst = lst || u.searchParams.get("list") || "";
+      } catch (e) {}
+    }
     console.log("[TuneConsole] now playing:", np.title, "-", np.artist, np.likeStatus);
     chrome.runtime.sendMessage({
       type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
-      likeStatus: np.likeStatus, videoId: np.videoId,
+      likeStatus: np.likeStatus, videoId: vid, playlist: lst, brandId: np.brandId || "",
     });
   };
   let lastMainAt = 0;

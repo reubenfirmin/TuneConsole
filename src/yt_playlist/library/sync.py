@@ -126,9 +126,10 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         history = with_retry(lambda: client.get_history())
         hist = [(identity_key(t.get("title", ""), _artist(t)), t.get("played")) for t in history]
         # Record plays keyed by (track, played-date): YouTube re-sends the same recently-played window
-        # each sync (~91% overlap) and the 30-min syncs re-add it, so record_history_plays dedups on the
-        # absolute play-date (the relative `played` bucket resolved via `now`). Keeps play COUNT(*)
-        # honest: it counts plays, not lingering (#49/#58). Also the transient play feed.
+        # each fetch (~91% overlap), so record_history_plays dedups on the absolute play-date (the
+        # relative `played` bucket resolved via `now`). #75: this daily fetch is now BACKFILL for plays
+        # that happened while the app was not running; live plays arrive via the extension's play
+        # events (library/live_plays.py) and dedup against the same (track, date) model.
         store.record_history_plays(identity_id, now, hist)
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)

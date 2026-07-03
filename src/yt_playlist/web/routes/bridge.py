@@ -7,14 +7,20 @@ So we accept the socket only when it comes from our pinned extension id, which m
 that tries to drive the bridge. No credential ever crosses this socket in either direction."""
 import asyncio
 import logging
+import time
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+
+from yt_playlist.library import live_plays
 
 logger = logging.getLogger(__name__)
 
-# The extension id is pinned by the `key` field in extension/manifest.json, so it is stable across
-# machines and installs. Only this origin may open the bridge socket.
-EXTENSION_ID = "opmmbolbdgdkphfocffpjpgmelkkjkcn"
+# The published (Chrome Web Store) build and a local unpacked load of extension/ have DIFFERENT ids:
+# the store signs with its own key, while an unpacked load derives its id from the manifest `key`
+# field. Both are first-party builds of the same extension, so both origins may open the bridge.
+EXTENSION_ID = "opmmbolbdgdkphfocffpjpgmelkkjkcn"        # Chrome Web Store build
+DEV_EXTENSION_ID = "edhplcadobipneepllhkkajckoammpnk"    # unpacked extension/ (from manifest `key`)
 EXTENSION_ORIGIN = f"chrome-extension://{EXTENSION_ID}"
+EXTENSION_ORIGINS = {EXTENSION_ORIGIN, f"chrome-extension://{DEV_EXTENSION_ID}"}
 
 
 def build(ctx) -> APIRouter:
@@ -59,7 +65,7 @@ def build(ctx) -> APIRouter:
     @router.websocket("/bridge/ws")
     async def bridge_ws(ws: WebSocket):
         # Origin is set by the browser and unspoofable by page scripts, so it is a sound gate.
-        if ws.headers.get("origin") != EXTENSION_ORIGIN:
+        if ws.headers.get("origin") not in EXTENSION_ORIGINS:
             logger.warning("bridge handshake rejected (origin %r)", ws.headers.get("origin"))
             await ws.close(code=1008)
             return
@@ -112,6 +118,15 @@ def build(ctx) -> APIRouter:
                                           "thumbnail": msg.get("thumbnail"),
                                           "likeStatus": msg.get("likeStatus"),
                                           "video_id": msg.get("videoId")}
+                    # #75 persist it: play_events + the (track, day) model + freshness stamp.
+                    # Store calls block, so run off the event loop; a bad frame or a stub store
+                    # (tests) must never kill the bridge socket.
+                    if store is not None:
+                        now = ctx.now_fn() if getattr(ctx, "now_fn", None) else time.time()
+                        try:
+                            await asyncio.to_thread(live_plays.handle_play_event, ctx, msg, now)
+                        except Exception:  # noqa: BLE001
+                            logger.warning("failed to persist play event", exc_info=True)
                     continue
                 try:
                     req_id = int(msg["id"])

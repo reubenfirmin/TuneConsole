@@ -194,10 +194,6 @@ PARAMS = [
               "(exposure, the same mechanic as the nudge bars). The behavior side of the balance; kept "
               "below intent so passive listening doesn't silently rewrite taste.",
               0.0, 1.0, 0.01, 0.08),
-    ParamSpec("play_grad_session_cap", "Play graduation cap / session", "graduation",
-              "(Deprecated, unused since plays graduate by daily exposure.) Maximum total play-"
-              "graduation contribution from one listening session.",
-              0.0, 2.0, 0.05, 0.4, advanced=True),
     ParamSpec("modes_k", "Taste modes: cluster count", "discovery",
               "How many clusters the taste-mode finder starts from before keeping only the dense "
               "ones. Higher splits your taste into finer regions; lower keeps them broad.",

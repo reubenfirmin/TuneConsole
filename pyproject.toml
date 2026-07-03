@@ -1,6 +1,7 @@
 [project]
 name = "yt-playlist"
-version = "0.1.4"
+dynamic = ["version"]   # derived from the git tag by hatch-vcs (see [tool.hatch.version]); releasing is
+                        # just `git tag vX.Y.Z && git push` — no version lives in a file.
 description = "Local web tool to dedupe, merge, and prune YouTube Music playlists across identities"
 requires-python = ">=3.10"
 dependencies = [
@@ -26,8 +27,14 @@ yt-playlist = "yt_playlist.__main__:main"
 dev = ["pytest>=8", "httpx>=0.27", "watchfiles>=0.21", "pytest-playwright>=0.5"]  # watchfiles powers `yt-playlist --reload`
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+# Version comes from the latest git tag (vX.Y.Z -> X.Y.Z). On an untagged commit it's a dev version
+# (X.Y.Z.devN+g<hash>), which is fine for local builds. CI must checkout with fetch-depth: 0 so the
+# tag is visible.
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/yt_playlist"]
