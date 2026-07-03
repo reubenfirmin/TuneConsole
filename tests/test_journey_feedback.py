@@ -20,7 +20,9 @@ def test_recs_journey_nudges_journey_weight(store):
     for _ in range(int(rec_params.THEME_THRESHOLD) + 1):
         r = c.post("/recs/journey", data={"pid": pid, "dir": 1})
         assert r.status_code == 200
-    assert store.get_weights().get("journey:energy_arc", 1.0) > 1.0     # 👍 raised its weight
+    # #85 the route's now_fn is fixed at 1.0; read at the same `now` so reversion (vs real wall-clock
+    # time) doesn't erase the nudge before the assertion runs.
+    assert store.get_weights(now=1.0).get("journey:energy_arc", 1.0) > 1.0     # raised its weight
 
 
 def test_recs_journey_bad_input_is_422(store):

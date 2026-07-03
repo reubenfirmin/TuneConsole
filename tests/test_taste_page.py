@@ -102,7 +102,7 @@ def test_taste_page_renders_genre_slider_for_tagged_library(store):
 def test_taste_controls_round_trip(store):
     c = _client(store)
     assert c.post("/taste/weight", data={"axis": "lane:deep_cut", "weight": "0.5"}).status_code == 200
-    assert store.get_weights()["lane:deep_cut"] == 0.5
+    assert store.get_weights(now=1.0)["lane:deep_cut"] == 0.5
     assert c.post("/taste/reset-weights").status_code == 200
     assert store.get_weights() == {}
     store.record_feedback("for_you", "a|b", "dismiss", now=1.0)
@@ -134,7 +134,7 @@ def test_taste_genre_weight_uses_genre_band(store):
     c = _client(store)
     # a genre axis may be muted to 0 (band [0,2]); the lane band [0.2,3.0] must not floor it
     assert c.post("/taste/weight", data={"axis": "genre:rock", "weight": "0"}).status_code == 200
-    assert store.get_weights()["genre:rock"] == 0.0
+    assert store.get_weights(now=1.0)["genre:rock"] == 0.0
 
 
 def test_taste_reset_param_restores_default(store):

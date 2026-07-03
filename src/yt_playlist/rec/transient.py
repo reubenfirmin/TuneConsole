@@ -2,14 +2,27 @@
 
 Inputs are signed track-key events at a point in recency: mood feedback (rec_mood), recent plays
 (history), recent dislikes (rec_feedback kind='dislike'). Two derived views: facet leans
-(genre/era/artist tokens) and an embedding centroid tilt. Lifecycle: persistent (no wall-clock
-expiry), reactive by interaction rank, relaxes only as sync goes stale. See the design spec.
+(genre/era/artist tokens) and an embedding centroid tilt.
+
+Lifecycle (#85): every event decays on the wall clock with a per-source half-life (see the
+*_halflife_d params); nothing is rank-decayed and there is no separate staleness relax. An event
+fades the same way whether or not anything newer arrived.
 """
 import numpy as np
 
 from yt_playlist.util import genre_map
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.rec.rec_dao import RecDao
+
+
+def decay_weight(age_s, half_life_d) -> float:
+    """#85 Wall-clock event decay: 0.5 ** (age_days / half_life_days). A fresh (or clock-skewed
+    future) event weighs 1.0. This kernel is the whole lifecycle now: no rank decay, no separate
+    staleness relax; an event fades on the clock whether or not anything newer arrived. #88's
+    layered model instantiates this same kernel at several half-lives."""
+    if age_s <= 0:
+        return 1.0
+    return 0.5 ** (age_s / (half_life_d * 86400.0))
 
 
 def facets_for(store, keys) -> dict:
@@ -37,32 +50,15 @@ def facets_for(store, keys) -> dict:
     return out
 
 
-def staleness_factor(store, now) -> float:
-    """1.0 while sync is fresh; decays past SYNC_STALE_S with a STALE_DECAY_HALFLIFE_D half-life.
-
-    Uses the most recent sync of EITHER kind - a full sync (`last_sync_at`) or a quick plays/auto
-    sync (`last_plays_sync_at`) - mirroring recommend.sync_status. A recent auto-sync brings fresh
-    play data, so it must keep the transient model live (otherwise the model decays even though plays
-    are current)."""
-    stamps = [float(s) for s in (store.get_setting("last_sync_at"),
-                                 store.get_setting("last_plays_sync_at")) if s is not None]
-    if not stamps:
-        return 1.0
-    age = now - max(stamps)
-    if age <= rec_params.SYNC_STALE_S:
-        return 1.0
-    halflife_d = rec_params.get_param(store, "stale_decay_halflife_d")
-    return 0.5 ** ((age - rec_params.SYNC_STALE_S) / (halflife_d * 86400.0))
-
-
 def facet_leans(store, now) -> dict:
-    """{facet: signed strength}: the token view of the transient model, from mood feedback (rank-
-    weighted), recent plays (positive), and recent dislikes (negative), scaled by staleness."""
+    """{facet: signed strength}: the token view of the transient model. #85: every source decays on
+    the wall clock (per-source half-life params); a month-old vibe tap is nearly gone even if the
+    user never interacted again."""
     gp = rec_params.get_param
-    a = gp(store, "mood_recency_alpha")
-    play_w = gp(store, "play_transient_w")
-    like_w = gp(store, "like_transient_w")
-    dislike_w = gp(store, "dislike_transient_w")
+    play_w, like_w, dislike_w = (gp(store, "play_transient_w"), gp(store, "like_transient_w"),
+                                 gp(store, "dislike_transient_w"))
+    play_hl, mood_hl = gp(store, "play_halflife_d"), gp(store, "mood_halflife_d")
+    like_hl, dislike_hl = gp(store, "like_halflife_d"), gp(store, "dislike_halflife_d")
     limit = gp(store, "recent_play_limit")
     leans: dict = {}
 
@@ -76,42 +72,39 @@ def facet_leans(store, now) -> dict:
                 continue
             leans[f] = leans.get(f, 0.0) + signed * (len(fk) / n)
 
-    for rank, (_ts, direction, keys) in enumerate(store.recent_mood_events()):     # newest-first
-        add(keys, direction * ((1.0 - a) ** rank))
-    for rank, k in enumerate(store.recent_keys_ordered(0, limit=limit)):
-        add([k], play_w * ((1.0 - a) ** rank))
-    for rank, k in enumerate(store.recent_liked_keys(limit=limit)):
-        add([k], like_w * ((1.0 - a) ** rank))
-    # #54: a dislike is a verdict on THAT track, not the artist. Its track is already hard-suppressed
-    # via suppressed_keys; do NOT also emit a negative artist lean (which would mute every other song by
-    # that artist - "Billy Idol has stinkers but I still want the good ones"). Genre/era leans stay:
-    # they are broad, so a single dislike barely nudges them, and can't kill one artist.
-    for k in store.disliked_identity_keys():
-        add([k], -dislike_w, drop_artist=True)
-    s = staleness_factor(store, now)
-    return {f: v * s for f, v in leans.items()}
+    for ts, direction, keys in store.recent_mood_events():
+        add(keys, direction * decay_weight(now - ts, mood_hl))
+    for k, ts in store.recent_plays_with_ts(limit=limit):
+        add([k], play_w * decay_weight(now - ts, play_hl))
+    for k, ts in store.recent_liked_with_ts(limit=limit):
+        add([k], like_w * decay_weight(now - ts, like_hl))
+    # #54: a dislike is a verdict on THAT track, not the artist (the track itself is hard-suppressed
+    # via suppressed_keys). Genre/era leans stay, but #85 they now FADE by age instead of pressing at
+    # full strength forever.
+    for k, ts in store.disliked_with_ts():
+        add([k], -dislike_w * decay_weight(now - ts, dislike_hl), drop_artist=True)
+    return leans
 
 
 def play_facet_leans(store, now) -> dict:
-    """The recent-plays slice of `facet_leans`, in isolation, staleness-scaled.
+    """The recent-plays slice of `facet_leans`, in isolation.
 
     `facet_leans` blends every transient source (mood, plays, likes, dislikes). The play-exposure
     graduation funnel (graduation.graduate_play_exposure) must graduate plays SPECIFICALLY, because
     likes / dislikes / vibe taps already graduate at event time and would otherwise double-count. So
-    this returns only the positive, recency-weighted, staleness-scaled push from recent plays. When
-    listening stops the recent window drains (and staleness damps it), so this falls to {} on its own,
-    which is the funnel's natural off-switch.
+    this returns only the positive, wall-clock-decayed push from recent plays (#85: per-event age, no
+    rank, no separate staleness relax). When listening stops the recent window drains and each play
+    ages out on its own, so this falls to {} over time, which is the funnel's natural off-switch.
     """
     gp = rec_params.get_param
-    a = gp(store, "mood_recency_alpha")
     play_w = gp(store, "play_transient_w")
+    play_hl = gp(store, "play_halflife_d")
     limit = gp(store, "recent_play_limit")
     leans: dict = {}
-    for rank, k in enumerate(store.recent_keys_ordered(0, limit=limit)):
+    for k, ts in store.recent_plays_with_ts(limit=limit):
         for f in facets_for(store, [k]):                # one key -> its facets, each gets the play push
-            leans[f] = leans.get(f, 0.0) + play_w * ((1.0 - a) ** rank)
-    s = staleness_factor(store, now)
-    return {f: v * s for f, v in leans.items()}
+            leans[f] = leans.get(f, 0.0) + play_w * decay_weight(now - ts, play_hl)
+    return leans
 
 
 def facet_multiplier(lean, gain, lo, hi) -> float:
@@ -121,23 +114,24 @@ def facet_multiplier(lean, gain, lo, hi) -> float:
 
 def centroid_tilt(store, now, V, idx):
     """Unit embedding direction from the unified transient stream: mood events, recent plays, and
-    recent likes, all interaction-rank weighted. None if quiet. Staleness is applied by the caller."""
+    recent likes, each wall-clock decayed by its own half-life (#85). None if quiet. Decay is
+    per-event and internal; callers apply no external freshness factor."""
     gp = rec_params.get_param
     limit = gp(store, "recent_play_limit")
     events = store.recent_mood_events()
-    plays = store.recent_keys_ordered(0, limit=limit)
-    likes = store.recent_liked_keys(limit=limit)
+    plays = store.recent_plays_with_ts(limit=limit)
+    likes = store.recent_liked_with_ts(limit=limit)
     if not events and not plays and not likes:
         return None
-    a = gp(store, "mood_recency_alpha")
-    play_w = gp(store, "play_transient_w")
-    like_w = gp(store, "like_transient_w")
-    # tilt accumulates a recency-weighted vector sum of UNIT directions across all transient sources;
-    # each contribution is decayed by (1-a)^rank (newer events count for more) and the whole sum is
-    # renormalized to a single unit direction at the end. Each mood event adds its signed centroid
-    # direction (direction = +1 like / -1 dislike).
+    mood_hl = gp(store, "mood_halflife_d")
+    play_hl, play_w = gp(store, "play_halflife_d"), gp(store, "play_transient_w")
+    like_hl, like_w = gp(store, "like_halflife_d"), gp(store, "like_transient_w")
+    # tilt accumulates a wall-clock-decayed vector sum of UNIT directions across all transient
+    # sources; each contribution is decayed by decay_weight(age, half_life) (fresher events count for
+    # more) and the whole sum is renormalized to a single unit direction at the end. Each mood event
+    # adds its signed centroid direction (direction = +1 like / -1 dislike).
     tilt = np.zeros(V.shape[1], dtype=np.float64)
-    for rank, (_ts, direction, keys) in enumerate(events):
+    for ts, direction, keys in events:
         rows = [idx[k] for k in keys if k in idx]
         if not rows:
             continue
@@ -145,11 +139,11 @@ def centroid_tilt(store, now, V, idx):
         nrm = np.linalg.norm(c)
         if nrm == 0:
             continue
-        tilt += direction * ((1.0 - a) ** rank) * (c / nrm)
+        tilt += direction * decay_weight(now - ts, mood_hl) * (c / nrm)
 
-    def _add_dir(keys, w_base):
-        # Add each track's own unit vector, scaled by its source weight (w_base) and recency decay.
-        for rank, k in enumerate(keys):
+    def _add_dir(pairs, w_base, half_life_d):
+        # Add each track's own unit vector, scaled by its source weight (w_base) and wall-clock decay.
+        for k, ts in pairs:
             if k not in idx:
                 continue
             v = V[idx[k]]
@@ -157,10 +151,10 @@ def centroid_tilt(store, now, V, idx):
             if nrm == 0:
                 continue
             nonlocal tilt
-            tilt = tilt + w_base * ((1.0 - a) ** rank) * (v / nrm)
+            tilt = tilt + w_base * decay_weight(now - ts, half_life_d) * (v / nrm)
 
-    _add_dir(plays, play_w)
-    _add_dir(likes, like_w)
+    _add_dir(plays, play_w, play_hl)
+    _add_dir(likes, like_w, like_hl)
     n = np.linalg.norm(tilt)
     return tilt / n if n > 0 else None                   # unit direction, or None when nothing accumulated
 
@@ -175,7 +169,8 @@ def audio_centroid_tilt(store, now):
     Returns None when the content model is unbuilt or no recent track has a content vector, so a cold
     or quiet user is exactly as today. Audio is sparse and growing: tracks without a content vector
     simply do not contribute, so the tilt is defined by whatever covered tracks the user has played
-    (graceful degradation). Staleness is applied by the caller, mirroring `centroid_tilt`.
+    (graceful degradation). Decay is per-event and internal (#85); callers apply no external freshness
+    factor, mirroring `centroid_tilt`.
 
     This is the producer only. The scorer applies it (a content-space cosine term parallel to the
     collaborative `_apply_mood`); see the wiring note that ships with this change.
@@ -184,13 +179,13 @@ def audio_centroid_tilt(store, now):
     if CV is None:
         return None
     gp = rec_params.get_param
-    a = gp(store, "mood_recency_alpha")
-    play_w = gp(store, "play_transient_w")
-    like_w = gp(store, "like_transient_w")
+    mood_hl = gp(store, "mood_halflife_d")
+    play_hl, play_w = gp(store, "play_halflife_d"), gp(store, "play_transient_w")
+    like_hl, like_w = gp(store, "like_halflife_d"), gp(store, "like_transient_w")
     limit = gp(store, "recent_play_limit")
     tilt = np.zeros(CV.shape[1], dtype=np.float64)
 
-    for rank, (_ts, direction, keys) in enumerate(store.recent_mood_events()):     # newest-first
+    for ts, direction, keys in store.recent_mood_events():     # newest-first
         rows = [cidx[k] for k in keys if k in cidx]
         if not rows:
             continue
@@ -198,16 +193,16 @@ def audio_centroid_tilt(store, now):
         nrm = np.linalg.norm(c)
         if nrm == 0:
             continue
-        tilt += direction * ((1.0 - a) ** rank) * (c / nrm)
+        tilt += direction * decay_weight(now - ts, mood_hl) * (c / nrm)
 
-    def _add_dir(keys, w_base):
+    def _add_dir(pairs, w_base, half_life_d):
         nonlocal tilt
-        for rank, k in enumerate(keys):
+        for k, ts in pairs:
             if k not in cidx:
                 continue
-            tilt = tilt + w_base * ((1.0 - a) ** rank) * CV[cidx[k]]    # CV rows are already unit
+            tilt = tilt + w_base * decay_weight(now - ts, half_life_d) * CV[cidx[k]]  # rows already unit
 
-    _add_dir(store.recent_keys_ordered(0, limit=limit), play_w)
-    _add_dir(store.recent_liked_keys(limit=limit), like_w)
+    _add_dir(store.recent_plays_with_ts(limit=limit), play_w, play_hl)
+    _add_dir(store.recent_liked_with_ts(limit=limit), like_w, like_hl)
     n = np.linalg.norm(tilt)
     return tilt / n if n > 0 else None

@@ -64,16 +64,10 @@ def test_centroid_tilt_newest_dominates_and_persists(store):
     store.record_mood(["a|x"], 1, now=1000.0)
     store.record_mood(["a|x"], -1, now=1001.0)                 # newest: away
     assert transient.centroid_tilt(store, 1001.0, V, idx)[0] < 0
-    # persists with no wall-clock decay
+    # #85: this used to assert no wall-clock decay; now a single event fades on the clock (mood_halflife_d)
+    # but its unit direction never hits exactly zero magnitude, so the tilt stays defined 30d out.
     store2_tilt = transient.centroid_tilt(store, 1001.0 + 30 * 86400, V, idx)
     assert store2_tilt is not None
-
-
-def test_staleness_factor(store):
-    store.set_setting("last_sync_at", str(1000.0))
-    assert transient.staleness_factor(store, 1000.0 + rec_params.SYNC_STALE_S) == 1.0
-    half = transient.staleness_factor(store, 1000.0 + rec_params.SYNC_STALE_S + 3 * 86400)
-    assert abs(half - 0.5) < 1e-6
 
 
 def test_centroid_tilt_includes_recent_plays():
@@ -89,12 +83,7 @@ def test_centroid_tilt_includes_recent_plays():
     assert tilt[0] > tilt[1]     # leans toward the played track's direction
 
 
-def test_staleness_uses_most_recent_of_either_sync(store):
-    # Regression: freshness/decay read only last_sync_at (full sync), so a recent quick auto-sync
-    # (last_plays_sync_at) still read as stale. It must use the most recent of EITHER, like sync_status.
-    from yt_playlist.rec import transient
-    now = 1_000_000.0
-    store.set_setting("last_sync_at", str(now - 10 * 86400))     # full sync 10 days ago
-    assert transient.staleness_factor(store, now) < 1.0          # stale on its own
-    store.set_setting("last_plays_sync_at", str(now - 600))      # auto-synced 10 min ago
-    assert transient.staleness_factor(store, now) == 1.0         # fresh again
+# #85: test_staleness_factor and test_staleness_uses_most_recent_of_either_sync removed here -
+# staleness_factor is deleted from transient.py entirely (no sync-freshness relax; every event decays
+# on its own wall clock instead). The sync-freshness behavior they covered is Task 4's territory
+# (scoring.py / taste_viz.py), not reintroduced in transient.py.

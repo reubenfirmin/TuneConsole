@@ -124,11 +124,14 @@ class RecSurfaceRepo(Repo):
 
     # --- persistent mood: count-capped (replaces time-windowed active_mood) ---
     @synchronized
-    def record_mood(self, keys, direction, now) -> None:
-        """Log a mood signal (seed keys + ±direction). Persistent, NOT pruned by time; only the
-        newest MOOD_EVENT_CAP rows are kept so the table stays bounded. Read by recent_mood_events."""
+    def record_mood(self, keys, direction, now, prune_before=None) -> None:
+        """Log a mood signal (seed keys + ±direction). Bounded by age (via prune_before, if set)
+        and by count (only the newest MOOD_EVENT_CAP rows are kept). When prune_before is set,
+        rows with created_at < prune_before are deleted in the same transaction. Read by recent_mood_events."""
         self.conn.execute("INSERT INTO rec_mood(created_at, direction, keys) VALUES (?,?,?)",
                           (now, int(direction), json.dumps(list(keys))))
+        if prune_before is not None:
+            self.conn.execute("DELETE FROM rec_mood WHERE created_at < ?", (prune_before,))
         self.conn.execute(
             "DELETE FROM rec_mood WHERE rowid NOT IN "
             "(SELECT rowid FROM rec_mood ORDER BY created_at DESC, rowid DESC LIMIT ?)",

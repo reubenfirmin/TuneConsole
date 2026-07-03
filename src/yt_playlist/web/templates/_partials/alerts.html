@@ -19,7 +19,8 @@
   <div class="alert-card card alert-nudge" id="update-nudge">
     <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
             hx-post="/onboard/update/dismiss?v={{ backend_update.latest }}" hx-target="#update-nudge" hx-swap="outerHTML swap:200ms">×</button>
-    <span class="alert-cover no-art"></span>
+    <span class="alert-cover"><img src="/static/nag/update.png" alt="" loading="lazy"
+         onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
     <div class="alert-body">
       <span class="alert-title">Backend update available. You're on {{ backend_update.current }}, {{ backend_update.latest }} is out.</span>
       <div class="alert-foot">

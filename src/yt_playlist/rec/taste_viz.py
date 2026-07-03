@@ -96,6 +96,9 @@ def _artist_shares(store, top=12):
 
 
 def _sources(store):
+    """#85: there is no longer a single rank-based recency alpha blending these sources - each one
+    fades independently on its own wall-clock half-life (transient.decay_weight). Report those
+    half-lives instead so the page states the real per-source decay, not a retired blend knob."""
     mood_pos = mood_neg = 0
     for _ts, direction, _keys in store.recent_mood_events():
         if direction > 0:
@@ -103,12 +106,16 @@ def _sources(store):
         elif direction < 0:
             mood_neg += 1
     limit = rec_params.get_param(store, "recent_play_limit")
+    gp = rec_params.get_param
     return {
         "mood_pos": mood_pos, "mood_neg": mood_neg,
         "plays": len(store.recent_keys_ordered(0, limit=limit)),
         "likes": len(store.recent_liked_keys(limit=limit)),
         "dislikes": len(store.disliked_identity_keys()),
-        "alpha": rec_params.get_param(store, "mood_recency_alpha"),
+        "halflife_days": {
+            "mood": gp(store, "mood_halflife_d"), "play": gp(store, "play_halflife_d"),
+            "like": gp(store, "like_halflife_d"), "dislike": gp(store, "dislike_halflife_d"),
+        },
     }
 
 
@@ -116,7 +123,7 @@ def model_transparency(store, now, recent_window=RECENT_PLAYS_WINDOW) -> dict:
     """The cheap transparency payload: per-axis layer stacks, lanes, breadth, freshness, sources, and
     the graduation funnel. Expensive panels (embedding/recall, playlist contexts, centroid tilt) are
     separate (engine_panel / centroid_tilt_panel), htmx-lazy on the page."""
-    weights = store.get_weights()
+    weights = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     standing = store.get_leans()
     leans = transient.facet_leans(store, now)
     theme = {r["facet"]: r["score"] for r in store.theme_rows()}
@@ -146,7 +153,6 @@ def model_transparency(store, now, recent_window=RECENT_PLAYS_WINDOW) -> dict:
     _attach_deviation(artists, _axis_dist(store, recent_counts, "artist"), _axis_dist(store, alltime_counts, "artist"))
     recent_exists = bool(recent_counts)
 
-    factor = transient.staleness_factor(store, now)
     sources = _sources(store)
     # Gates the roses' "Quiet right now" overlay: true iff you've played something recently AND your
     # recent mix actually differs from your usual one (otherwise every deviation is ~0 and the rose is
@@ -159,9 +165,8 @@ def model_transparency(store, now, recent_window=RECENT_PLAYS_WINDOW) -> dict:
         "lanes": [{"name": n, "label": lbl, "help": h, "weight": weights.get(f"lane:{n}", 1.0)}
                   for n, lbl, h in rec_params.LANES],
         "breadth": bd["breadth"], "n_families": bd["n_families"],
-        "freshness": {"factor": factor,
-                      "halflife_days": rec_params.get_param(store, "stale_decay_halflife_d"),
-                      "live": factor >= 0.999},
+        # #85: no "freshness" key any more - the old sync-staleness relax of the whole transient read
+        # is gone; each source in `sources` now fades independently on its own wall-clock half-life.
         "sources": sources,
         "funnel": [{"facet": f, "score": s, "threshold": graduation_threshold,
                     "frac": max(-1.0, min(1.0, s / graduation_threshold))}
@@ -199,15 +204,19 @@ def engine_panel(store, top=12) -> dict:
 
 
 def centroid_tilt_panel(store, now) -> dict:
-    """The transient embedding pull: magnitude of the current-mood centroid tilt (staleness-scaled),
-    and its projection onto your top genre-family centroids - 'which way the mood leans'. Quiet -> 0."""
+    """The transient embedding pull: magnitude of the current-mood centroid tilt, and its projection
+    onto your top genre-family centroids - 'which way the mood leans'. Quiet -> 0.
+
+    #85: `centroid_tilt` returns a unit direction (its wall-clock decay is baked in per-event before
+    normalization), so magnitude is 1.0 whenever a tilt exists and 0.0 when quiet - there is no
+    separate sync-staleness scale applied on top any more."""
     keys, V, idx = embed.load_vectors(store)
     if V is None:
         return {"magnitude": 0.0, "projection": []}
     tilt = transient.centroid_tilt(store, now, V, idx)
     if tilt is None:
         return {"magnitude": 0.0, "projection": []}
-    mag = float(np.linalg.norm(tilt)) * transient.staleness_factor(store, now)
+    mag = float(np.linalg.norm(tilt))
     tn = tilt / (np.linalg.norm(tilt) + 1e-9)
     fam_keys: dict = {}
     tg = RecDao(store).track_genres(list(keys))

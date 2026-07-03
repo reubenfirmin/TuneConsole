@@ -35,7 +35,7 @@ def taste_fingerprint(store, now) -> dict:
     niche. A pinned axis not in the play distribution at all is appended with share=0.0.
     """
     bd = taste_breadth(store)
-    w = store.get_weights()
+    w = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     leans = store.get_leans()
     hidden = store.hidden_facets()                                   # bars the user removed (display-only)
     tleans = transient.facet_leans(store, now)                       # live transient (plays+likes+mood+dislikes)

@@ -28,7 +28,8 @@ def test_recent_keys_ordered_returns_latest_first(store):
 
 # --- Z set_weight is clamped like nudge_weight ---
 def test_set_weight_clamps(store):
-    store.rec.set_weight("lane:deep_cut", 0.0)
-    assert store.get_weights()["lane:deep_cut"] == 0.2          # floored, not 0 (would disable the lane)
-    store.rec.set_weight("lane:explore", 99.0)
-    assert store.get_weights()["lane:explore"] == 3.0           # capped
+    import pytest
+    store.rec.set_weight("lane:deep_cut", 0.0, now=1000.0)
+    assert store.get_weights(now=1000.0)["lane:deep_cut"] == pytest.approx(0.2)          # floored, not 0 (would disable the lane)
+    store.rec.set_weight("lane:explore", 99.0, now=1000.0)
+    assert store.get_weights(now=1000.0)["lane:explore"] == pytest.approx(3.0)           # capped

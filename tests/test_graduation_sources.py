@@ -47,8 +47,9 @@ def test_vibe_graduation_unchanged_regression():
     s = _store_with_genre({"song|band": ("v1", "song", "band", "Techno")})
     recommend.graduate_moods(s, ["song|band"], 2.0, 1000.0, source=rec_params.SOURCE_W_VIBE)
     fam = recommend.genre_map.family("Techno")
-    # nudge_weight applies shrinkage-toward-1.0 on top of GRADUATE_UP; result is > 1.0 (nudged up)
-    assert s.get_weights()[f"genre:{fam}"] > 1.0   # nudged once, from prior 1.0
+    # #85 GRADUATE_UP itself is > 1.0 (no more flat post-nudge shrink); read at the same `now` as the
+    # nudge so time-proportional reversion doesn't erode it before the assertion runs.
+    assert s.get_weights(now=1000.0)[f"genre:{fam}"] > 1.0   # nudged once, from prior 1.0
 
 
 def test_play_source_is_weak():
@@ -64,11 +65,12 @@ def test_play_exposure_graduates_over_several_days():
     # Sustained recent listening graduates the permanent weight up via daily exposure (mirrors the
     # held-slider mechanic). Plays feed only the transient; this is the single funnel into permanent.
     s, now, axis = _store_with_play_history("Techno", n=10)
-    before = s.get_weights().get(axis, 1.0)
     day = 86400
+    before = s.get_weights(now=now).get(axis, 1.0)
     for d in range(8):
         recommend.graduate_play_exposure(s, now + d * day)
-    after = s.get_weights().get(axis, 1.0)
+    # #85 read at the last nudge's `now`, else real-wall-clock reversion would erase the graduation
+    after = s.get_weights(now=now + 7 * day).get(axis, 1.0)
     assert after > before, "sustained daily listening should graduate the permanent weight up"
 
 

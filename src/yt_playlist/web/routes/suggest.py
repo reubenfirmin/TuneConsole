@@ -114,17 +114,18 @@ def build(ctx) -> APIRouter:
         # taste facet the graduation ledger owns.
         lane = form.get("lane")
         if lane and reason != "own_it":
+            halflife = rec_params.get_param(store, "weight_revert_halflife_d")
             if kind in ("dismiss", "less", "not_now"):
-                store.nudge_weight(f"lane:{lane}", 0.85)
+                store.nudge_weight(f"lane:{lane}", 0.85, now=now, revert_halflife_d=halflife)
             elif kind == "more":
-                store.nudge_weight(f"lane:{lane}", 1.15)
+                store.nudge_weight(f"lane:{lane}", 1.15, now=now, revert_halflife_d=halflife)
         return HTMLResponse("")
 
     @router.post("/recs/mood")
     async def recs_mood(request: Request):
-        """Transient mood feedback: tilts the Home lanes toward (+) or away (-) from a vibe. It sticks
-        until you change it (and only relaxes once your sync goes stale), reactive, but NOT a
-        permanent taste signal. Two shapes:
+        """Transient mood feedback: tilts the Home lanes toward (+) or away (-) from a vibe. #85: it
+        fades on the wall clock (mood_halflife_d), reactive, but NOT a permanent taste signal. Two
+        shapes:
           - whole-mix (simple panel): `pid` -> seeds with the whole playlist; swaps in a confirmation.
           - facet/track levers: explicit `keys` (JSON list) of just that subset; returns a light ack.
         `intensity=lot` doubles the magnitude (a stronger tilt)."""
@@ -141,8 +142,11 @@ def build(ctx) -> APIRouter:
             except (ValueError, TypeError):
                 keys = []
             if keys:
-                store.record_mood(keys, signed, now_fn())
-                recommend.graduate_moods(store, keys, signed, now_fn(), source=rec_params.get_param(store, "source_w_vibe"))
+                now = now_fn()
+                halflife_d = rec_params.get_param(store, "mood_halflife_d")
+                prune_before = now - 4 * halflife_d * 86400
+                store.record_mood(keys, signed, now, prune_before=prune_before)
+                recommend.graduate_moods(store, keys, signed, now, source=rec_params.get_param(store, "source_w_vibe"))
             return HTMLResponse("")
         try:                                          # whole-mix simple buttons
             pid = int(form.get("pid"))
@@ -150,8 +154,11 @@ def build(ctx) -> APIRouter:
             return HTMLResponse("", status_code=422)
         keys = store.get_playlist_track_keys(pid)
         if keys:
-            store.record_mood(keys, signed, now_fn())
-            recommend.graduate_moods(store, list(keys), signed, now_fn(), source=rec_params.get_param(store, "source_w_vibe"))
+            now = now_fn()
+            halflife_d = rec_params.get_param(store, "mood_halflife_d")
+            prune_before = now - 4 * halflife_d * 86400
+            store.record_mood(keys, signed, now, prune_before=prune_before)
+            recommend.graduate_moods(store, list(keys), signed, now, source=rec_params.get_param(store, "source_w_vibe"))
         return HTMLResponse("")                        # no swap: the panel stays put (Advanced reachable)
 
     @router.post("/recs/journey")

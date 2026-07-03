@@ -71,7 +71,7 @@ def build(ctx) -> APIRouter:
         bd = recommend.taste_breadth(store)
         dao = RecDao(store)
         tracks_total = len(store.get_playlists()) and dao.tracks_total()
-        weights = store.get_weights()
+        weights = store.get_weights(now=ctx.now(), revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
         families = sorted(bd["families"].items(), key=lambda x: -x[1])
         return {
             "vectors": store.rec_vectors_count(),
@@ -134,9 +134,9 @@ def build(ctx) -> APIRouter:
         axis, weight = form.get("axis"), form_float(form.get("weight"))
         if axis and weight is not None:
             if axis.startswith("genre:"):     # genre weights use the [0,2] band so a family can be muted
-                store.set_weight(axis, weight, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
+                store.set_weight(axis, weight, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX, now=ctx.now())
             else:
-                store.set_weight(axis, weight)
+                store.set_weight(axis, weight, now=ctx.now())
         return _stale()
 
     @router.post("/taste/param")

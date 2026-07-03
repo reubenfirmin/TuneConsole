@@ -206,7 +206,8 @@ CREATE TABLE IF NOT EXISTS rec_feedback (
 );
 CREATE TABLE IF NOT EXISTS rec_weights (
   axis TEXT PRIMARY KEY,                  -- e.g. 'lane:deep_cut', 'family:techno'
-  weight REAL NOT NULL DEFAULT 1.0        -- learned blend weight; 1.0 = prior
+  weight REAL NOT NULL DEFAULT 1.0,       -- learned blend weight; 1.0 = prior
+  updated_at REAL                         -- #85 last nudge time; drives time-proportional reversion at read
 );
 CREATE TABLE IF NOT EXISTS rec_lean (
   axis TEXT PRIMARY KEY,                  -- 'genre:<fam>' | 'genre:<sub>' | 'era:<decade>' | 'artist:<name>'
@@ -362,6 +363,10 @@ class Store:
         pcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(playlists)")}
         if "thumbnail" not in pcols:
             self.conn.execute("ALTER TABLE playlists ADD COLUMN thumbnail TEXT")
+        # #85 time-proportional weight reversion needs to know when a weight was last touched
+        wcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(rec_weights)")}
+        if "updated_at" not in wcols:
+            self.conn.execute("ALTER TABLE rec_weights ADD COLUMN updated_at REAL")
         # #75 the legacy recently-played window cache is gone (live play events + the (track, date)
         # dedup made it obsolete); drop it from existing databases
         self.conn.execute("DROP TABLE IF EXISTS history_window")

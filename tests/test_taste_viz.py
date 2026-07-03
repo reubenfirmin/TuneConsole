@@ -11,10 +11,12 @@ def _seed_jazz(store):
 
 
 def test_viz_reflects_param_overrides(store):
+    # #85: stale_decay_halflife_d and the "freshness" payload key are gone (no sync-staleness relax
+    # any more); the equivalent per-source override now shows up in sources.halflife_days.
     store.upsert_identity("main", "cred", None, True)
-    rec_params.set_param(store, "stale_decay_halflife_d", 10)
+    rec_params.set_param(store, "mood_halflife_d", 10)
     payload = taste_viz.model_transparency(store, now=1000.0)
-    assert payload["freshness"]["halflife_days"] == 10
+    assert payload["sources"]["halflife_days"]["mood"] == 10
 
 
 def test_layer_stack_multiplies(store):
@@ -36,7 +38,8 @@ def test_cold_start_has_no_transient(store):
     assert payload["recent_exists"] is False
     assert payload["sources"]["plays"] == 0
     assert payload["genres"] == []
-    assert payload["freshness"]["live"] is True   # never-synced reads as fresh, not decayed
+    # #85: no "freshness" key any more (no sync-staleness relax); nothing to assert here beyond the
+    # above - a cold store's sources are simply empty.
 
 
 def test_transient_deviation_is_zero_sum_and_signed(store):

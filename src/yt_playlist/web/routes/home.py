@@ -370,7 +370,8 @@ def build(ctx) -> APIRouter:
         axis, weight = form.get("axis"), form.get("weight")
         target = form_float(weight)
         if axis and target is not None and axis.split(":", 1)[0] in ("genre", "era", "artist"):
-            perm = store.get_weights().get(axis, 1.0)
+            now = now_fn()
+            perm = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(axis, 1.0)
             lean = target / perm if perm > 0 else target
             lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
             lean = max(lo, min(hi, lean))

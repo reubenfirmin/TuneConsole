@@ -3,42 +3,64 @@
 Owns the rec_weights / rec_feedback / rec_vectors tables (created in store.py's central SCHEMA).
 Split out of the former monolithic RecRepo so each rec concern is its own focused DAO.
 """
+import time
+
 from yt_playlist.repos.base import Repo, synchronized
 
 # Learned blend weights live in [_WEIGHT_MIN, _WEIGHT_MAX] around the 1.0 prior: the floor stops a run
 # of negative feedback from disabling an axis outright (a 0 weight would never win the for_you fair
-# queue), the ceiling stops one axis from swamping the blend. After every nudge the weight is pulled
-# _WEIGHT_SHRINK of the way back toward 1.0, a gentle mean-reversion so stale learning decays instead
-# of compounding forever.
+# queue), the ceiling stops one axis from swamping the blend. Weights mean-revert toward 1.0 over time
+# (see _reverted below) rather than shrinking a flat amount on every nudge, so stale learning decays
+# but reinforced preferences hold.
 _WEIGHT_MIN, _WEIGHT_MAX = 0.2, 3.0
-_WEIGHT_SHRINK = 0.05
+
+
+def _reverted(weight, updated_at, now, halflife_d):
+    """#85 time-proportional mean reversion toward the 1.0 prior: the gap halves every halflife_d
+    days of NO reinforcement. A NULL updated_at (legacy row) reverts nothing until its next nudge
+    stamps it. Replaces the old flat 5%-per-nudge shrink, which eroded stable preferences at the
+    same rate as noise."""
+    if updated_at is None or now is None:
+        return weight
+    age_d = max(0.0, (now - updated_at) / 86400.0)
+    keep = 0.5 ** (age_d / float(halflife_d))
+    return 1.0 + (weight - 1.0) * keep
 
 
 class RecModelRepo(Repo):
     # --- learned blend weights ---
     @synchronized
-    def get_weights(self) -> dict:
-        """Learned blend weights by axis (missing axis = prior 1.0)."""
-        return {r["axis"]: r["weight"] for r in self.conn.execute("SELECT axis, weight FROM rec_weights")}
+    def get_weights(self, now=None, revert_halflife_d=60.0) -> dict:
+        """Learned blend weights by axis (missing axis = prior 1.0), with time-proportional reversion
+        toward 1.0 applied at read time (non-persisting: the stored value is untouched)."""
+        now = time.time() if now is None else now
+        return {r["axis"]: _reverted(r["weight"], r["updated_at"], now, revert_halflife_d)
+                for r in self.conn.execute("SELECT axis, weight, updated_at FROM rec_weights")}
 
     @synchronized
-    def nudge_weight(self, axis, factor, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX) -> float:
-        """Multiply an axis weight by factor (clamped), then shrink slightly toward the 1.0 prior."""
-        row = self.conn.execute("SELECT weight FROM rec_weights WHERE axis=?", (axis,)).fetchone()
-        w = max(lo, min(hi, (row["weight"] if row else 1.0) * factor))
-        w = w + (1.0 - w) * _WEIGHT_SHRINK               # mean-revert _WEIGHT_SHRINK of the way back to 1.0
-        self.conn.execute("INSERT INTO rec_weights(axis, weight) VALUES (?, ?) "
-                          "ON CONFLICT(axis) DO UPDATE SET weight=excluded.weight", (axis, w))
+    def nudge_weight(self, axis, factor, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX, now=None, revert_halflife_d=60.0) -> float:
+        """Revert the stored weight for elapsed time since its last nudge, then multiply by factor
+        (clamped), then persist the result with updated_at=now."""
+        now = time.time() if now is None else now
+        row = self.conn.execute("SELECT weight, updated_at FROM rec_weights WHERE axis=?", (axis,)).fetchone()
+        base = _reverted(row["weight"], row["updated_at"], now, revert_halflife_d) if row else 1.0
+        w = max(lo, min(hi, base * factor))
+        self.conn.execute("INSERT INTO rec_weights(axis, weight, updated_at) VALUES (?, ?, ?) "
+                          "ON CONFLICT(axis) DO UPDATE SET weight=excluded.weight, updated_at=excluded.updated_at",
+                          (axis, w, now))
         self.conn.commit()
         return w
 
     @synchronized
-    def set_weight(self, axis, weight, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX) -> None:
+    def set_weight(self, axis, weight, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX, now=None) -> None:
         """Manual override (Taste Model page). Clamped to the same [lo, hi] band as nudge_weight so a
-        stray 0/negative can't silently disable a for_you lane (its fair-queue ratio would never win)."""
+        stray 0/negative can't silently disable a for_you lane (its fair-queue ratio would never win).
+        A manual override is fresh evidence; it re-stamps the reversion clock."""
+        now = time.time() if now is None else now
         w = max(lo, min(hi, float(weight)))
-        self.conn.execute("INSERT INTO rec_weights(axis, weight) VALUES (?, ?) "
-                          "ON CONFLICT(axis) DO UPDATE SET weight=excluded.weight", (axis, w))
+        self.conn.execute("INSERT INTO rec_weights(axis, weight, updated_at) VALUES (?, ?, ?) "
+                          "ON CONFLICT(axis) DO UPDATE SET weight=excluded.weight, updated_at=excluded.updated_at",
+                          (axis, w, now))
         self.conn.commit()
 
     @synchronized
@@ -121,6 +143,25 @@ class RecModelRepo(Repo):
             "SELECT item_key FROM rec_feedback WHERE kind='like' ORDER BY created_at DESC").fetchall()
         keys = [r["item_key"] for r in rows]
         return keys[:limit] if limit else keys
+
+    @synchronized
+    def recent_liked_with_ts(self, limit=None) -> list:
+        """#85 [(identity_key, created_at)] for likes, newest-first (the timestamped sibling of
+        recent_liked_keys; wall-clock decay needs the event time, not just the order)."""
+        rows = self.conn.execute(
+            "SELECT item_key, created_at FROM rec_feedback WHERE kind='like' "
+            "ORDER BY created_at DESC").fetchall()
+        out = [(r["item_key"], float(r["created_at"])) for r in rows]
+        return out[:limit] if limit else out
+
+    @synchronized
+    def disliked_with_ts(self) -> list:
+        """#85 [(identity_key, created_at)] for dislikes, newest-first, so the transient negative
+        lean can decay by age instead of pressing at full strength forever."""
+        rows = self.conn.execute(
+            "SELECT item_key, created_at FROM rec_feedback WHERE kind='dislike' "
+            "ORDER BY created_at DESC").fetchall()
+        return [(r["item_key"], float(r["created_at"])) for r in rows]
 
     @synchronized
     def clear_like(self, identity_key) -> None:

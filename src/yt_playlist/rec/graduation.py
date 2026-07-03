@@ -50,7 +50,8 @@ def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -
     if abs(score) >= threshold:
         factor = (rec_params.get_param(store, "graduate_up") if score > 0
                   else rec_params.get_param(store, "graduate_down"))
-        new_weight = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
+        new_weight = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
+                                        now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
         store.discount_theme(axis, math.copysign(threshold, score))
         store.log_graduation(axis, source_label, score, factor, new_weight, now)
 
@@ -98,8 +99,10 @@ def graduate_slider_exposure(store, now) -> None:
         if abs(score) >= threshold:
             factor = (rec_params.get_param(store, "graduate_up") if score > 0
                       else rec_params.get_param(store, "graduate_down"))
-            old_perm = store.get_weights().get(axis, 1.0)
-            new_perm = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
+            halflife = rec_params.get_param(store, "weight_revert_halflife_d")
+            old_perm = store.get_weights(now=now, revert_halflife_d=halflife).get(axis, 1.0)
+            new_perm = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
+                                          now=now, revert_halflife_d=halflife)
             ratio = (new_perm / old_perm) if old_perm > 0 else 1.0
             store.set_lean(axis, value / ratio, now)          # conserve: new_perm*(value/ratio) == old_perm*value
             store.discount_theme(axis, math.copysign(threshold, score))
@@ -113,8 +116,8 @@ def graduate_play_exposure(store, now) -> None:
     Here, once per UTC day per axis, the sustained play-derived lean contributes lean_magnitude *
     SOURCE_W_PLAY to the rec_theme ledger; crossing THEME_THRESHOLD nudges the permanent weight.
     Unlike sliders there is NO migration step: plays are not a displayed handle to keep sticky, and
-    the play lean self-decays via staleness when listening stops, so the daily contribution falls to
-    ~0 on its own.
+    the play lean self-decays on the wall clock (#85) when listening stops, so the daily
+    contribution falls to ~0 on its own.
 
     This replaces the old graduate_plays, which wrote permanent weights from a per-session-capped
     event accumulator fed the whole recent-history window every sync. Because the fast plays-sync
@@ -137,6 +140,7 @@ def graduate_play_exposure(store, now) -> None:
         if abs(score) >= threshold:
             factor = (rec_params.get_param(store, "graduate_up") if score > 0
                       else rec_params.get_param(store, "graduate_down"))
-            new_weight = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX)
+            new_weight = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
+                                            now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
             store.discount_theme(axis, math.copysign(threshold, score))
             store.log_graduation(axis, "play", score, factor, new_weight, now)

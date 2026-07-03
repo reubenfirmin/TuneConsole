@@ -137,17 +137,28 @@ PARAMS = [
     ParamSpec("facet_gain", "Facet responsiveness", "transient",
               "How strongly a genre/era/artist lean re-ranks the feed. Higher = right-now leans bite "
               "harder.", 0.0, 1.0, 0.05, 0.35),
+    ParamSpec("play_halflife_d", "Play memory half-life (days)", "transient",
+              "How long a play's influence lasts in the transient model. Shorter = recent plays "
+              "dominate for a brief window; longer = they influence the feed for days.",
+              0.5, 30, 0.5, 3),
+    ParamSpec("mood_halflife_d", "Mood memory half-life (days)", "transient",
+              "How long a mood event's influence lasts. Shorter = mood gestures fade quickly; longer = "
+              "they steer the feed for days.", 1, 60, 1, 7, integer=True),
+    ParamSpec("like_halflife_d", "Like memory half-life (days)", "transient",
+              "How long a thumbs-up's influence lasts. Shorter = likes fade quickly; longer = they "
+              "steer for days.", 1, 90, 1, 21, integer=True),
+    ParamSpec("dislike_halflife_d", "Dislike fade half-life (days)", "transient",
+              "How long a thumbs-down's negative influence lasts in the transient model. Shorter = "
+              "dislikes fade quickly; longer = they suppress similar music for days.",
+              5, 180, 5, 45, integer=True),
     ParamSpec("mood_alpha", "Mood tilt", "transient",
               "How hard a mood gesture tilts the lanes, relative to the underlying taste score.",
               0.0, 1.0, 0.05, 0.35),
-    ParamSpec("mood_recency_alpha", "Recency emphasis", "transient",
-              "How much your newest interactions dominate over older ones. Higher = only the very "
-              "latest plays/likes matter.", 0.05, 0.9, 0.05, 0.35),
+    ParamSpec("weight_revert_halflife_d", "Learned-weight revert half-life (days)", "transient",
+              "How long learned weight changes persist before reverting toward your durable taste. "
+              "Longer = learned tweaks stick around longer.", 7, 365, 7, 60, integer=True, advanced=True),
     ParamSpec("recent_play_limit", "Recent window (tracks)", "transient",
               "How many recent plays/likes feed the right-now model.", 5, 200, 5, 50, integer=True),
-    ParamSpec("stale_decay_halflife_d", "Right-now relax half-life (days)", "transient",
-              "Once a sync goes stale, how fast the right-now model relaxes back to your durable taste.",
-              1, 30, 1, 3, integer=True),
     ParamSpec("facet_mult_min", "Facet floor", "transient",
               "Even the strongest negative lean keeps a facet at least this present (never fully muted).",
               0.0, 1.0, 0.05, 0.35, advanced=True),
@@ -309,8 +320,6 @@ def reset_all_params(store) -> None:
 
 # --- Transient model (lifecycle / recency) ---
 SYNC_STALE_S = 24 * 3600       # sync older than this is "stale" (also used by recommend.sync_status)
-MOOD_RECENCY_ALPHA = 0.35      # EMA over interaction RANK; newest pick ~35% of the blend
-STALE_DECAY_HALFLIFE_D = 3     # once sync stale, transient relaxes with this half-life (days)
 # Source weights into the transient leans
 PLAY_TRANSIENT_W = 0.30        # one recent play's positive push
 LIKE_TRANSIENT_W = 0.45        # one recent like's positive push to facet leans (stronger than a play)

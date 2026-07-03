@@ -51,7 +51,9 @@ def test_less_nudges_lane_down(store):
     _, c = _seed(store)
     c.post("/recs/feedback", data={"item": "bench|fav", "surface": "for_you",
                                    "kind": "less", "reason": "vibe", "lane": "deep_cut"})
-    assert store.get_weights().get("lane:deep_cut", 1.0) < 1.0
+    # #85 _seed's now_fn is fixed at 1000.0; read at the same `now` so reversion (vs real wall-clock
+    # time) doesn't erase the nudge before the assertion runs.
+    assert store.get_weights(now=1000.0).get("lane:deep_cut", 1.0) < 1.0
 
 
 def test_mute_artist_via_chip(store):
@@ -71,14 +73,16 @@ def test_feedback_axis_routes_through_graduation_and_eventually_moves_weight(sto
     # Why-chip steering goes through the graduation ledger now (#43 / §4b), not a direct nudge: a single
     # event moves the ledger but leaves the permanent weight neutral (it is below THEME_THRESHOLD).
     c.post("/recs/feedback", data={"item": "a|b", "kind": "less", "axis": "era:1990"})
-    assert store.get_weights().get("era:1990", 1.0) == 1.0     # one event: ledger only, weight untouched
+    assert store.get_weights(now=1.0).get("era:1990", 1.0) == 1.0     # one event: ledger only, weight untouched
     assert (store.get_theme("era:1990") or 0) < 0
 
     # Sustained feedback crosses the threshold and graduates the weight.
     for _ in range(3):
         c.post("/recs/feedback", data={"item": "a|b", "kind": "less", "axis": "era:1990"})
-    assert store.get_weights()["era:1990"] < 1.0               # 'less' graduates it down
+    # #85 the route's now_fn is fixed at 1.0; read at the same `now` so reversion (vs real wall-clock
+    # time) doesn't erase the graduation before the assertion runs.
+    assert store.get_weights(now=1.0)["era:1990"] < 1.0               # 'less' graduates it down
 
     for _ in range(4):
         c.post("/recs/feedback", data={"item": "c|d", "kind": "more", "axis": "artist:Foo"})
-    assert store.get_weights()["artist:Foo"] > 1.0            # 'more' graduates it up
+    assert store.get_weights(now=1.0)["artist:Foo"] > 1.0            # 'more' graduates it up

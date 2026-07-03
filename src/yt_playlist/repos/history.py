@@ -153,6 +153,22 @@ class HistoryRepo(Repo):
         return keys[:limit] if limit else keys
 
     @synchronized
+    def recent_plays_with_ts(self, limit=None) -> list:
+        """#85 [(identity_key, ts)] newest-first, deduped per key. Unions the live play stream
+        (play_events, real timestamps) with the (track, day) history model (noon-bucket timestamps,
+        the only signal for pre-live history), keeping each key's LATEST timestamp. The transient
+        model's wall-clock decay reads time from here instead of inferring recency from rank."""
+        q = ("SELECT k, MAX(ts) ts FROM ("
+             "  SELECT identity_key k, played_at ts FROM play_events"
+             "  UNION ALL"
+             "  SELECT hi.identity_key k, hs.taken_at ts FROM history_items hi"
+             "  JOIN history_snapshots hs ON hs.id = hi.snapshot_id"
+             ") GROUP BY k ORDER BY ts DESC")
+        rows = self.conn.execute(q + (" LIMIT ?" if limit else ""),
+                                 ((limit,) if limit else ())).fetchall()
+        return [(r["k"], float(r["ts"])) for r in rows]
+
+    @synchronized
     def record_play_event(self, identity_id, identity_key, video_id, played_at,
                           playlist_ytm_id=None, like_status=None) -> bool:
         """#75 Persist one live now-playing report from the extension. The content script re-reports

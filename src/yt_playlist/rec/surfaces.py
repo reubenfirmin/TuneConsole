@@ -134,7 +134,7 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
         for rows, _, _ in sources:
             rows.sort(key=lambda r: -sims.get(r["key"], -1.0))
 
-    weights = store.get_weights()
+    weights = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     # Never show these: dismissed/snoozed/muted, and anything already bundled into a generated
     # playlist (don't re-offer what you just saved). Anti-staleness is per-card rotation, not here.
     dao = RecDao(store)

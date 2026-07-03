@@ -222,7 +222,7 @@ def _pop_band(popularity, threshold):
 def _axis_weights_for(store, keys, now=None):
     """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
     the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
-    w = store.get_weights()
+    w = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     gw = {a[len("genre:"):]: v for a, v in w.items() if a.startswith("genre:")}
     ew = {a[len("era:"):]: v for a, v in w.items() if a.startswith("era:")}
     aw = {a[len("artist:"):]: v for a, v in w.items() if a.startswith("artist:")}
@@ -281,7 +281,7 @@ def discovery_facet_weight(store, family, now):
     excluded. We don't banish what we can't classify."""
     if not family:
         return 1.0
-    perm = store.get_weights().get(f"genre:{family}", 1.0)
+    perm = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(f"genre:{family}", 1.0)
     if perm == 0:
         return None
     standing = store.get_lean(f"genre:{family}")
@@ -342,7 +342,9 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None):
 
 
 def _apply_mood(scores, store, now, V, idx, content_vecs=None):
-    """Blend the transient tilts into per-track scores, each scaled down as sync goes stale.
+    """Blend the transient tilts into per-track scores. #85: each tilt decays internally, per event, on
+    its own wall clock (see transient.decay_weight); there is no separate external staleness relax here
+    any more, so this just adds the (already-decayed) tilts straight in.
 
     Two tilts from the same recent stream (plays/likes/mood): the collaborative centroid tilt (co-listen
     space) and the audio centroid tilt (#45, the content space), so ranking can lean toward the SOUND
@@ -352,16 +354,13 @@ def _apply_mood(scores, store, now, V, idx, content_vecs=None):
 
     `content_vecs` selects the audio tilt's content-vector source: warm callers leave it None (library
     vectors); the cold path passes the discovered-content vectors so out-of-corpus tracks get the tilt."""
-    factor = transient.staleness_factor(store, now)
-    if factor <= 0:
-        return scores
     tilt = transient.centroid_tilt(store, now, V, idx)
     if tilt is not None:
         Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
-        scores = scores + MOOD_ALPHA * factor * (Vn @ tilt)
+        scores = scores + MOOD_ALPHA * (Vn @ tilt)
     w = rec_params.get_param(store, "audio_transient_w")
     if w > 0:
         boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs)
         if boost is not None:
-            scores = scores + w * factor * boost
+            scores = scores + w * boost
     return scores

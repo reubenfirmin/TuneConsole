@@ -19,8 +19,8 @@ def _store_with_play_history(genre="Techno", n=10, now=1000.0):
 
 
 def test_transient_constants_present():
-    assert rec_params.MOOD_RECENCY_ALPHA == 0.35
-    assert rec_params.STALE_DECAY_HALFLIFE_D == 3
+    # #85: MOOD_RECENCY_ALPHA and STALE_DECAY_HALFLIFE_D are gone with rank decay and the staleness
+    # relax (Task 2); the still-live scalar constants are asserted below.
     assert rec_params.PLAY_TRANSIENT_W == 0.30
     assert rec_params.DISLIKE_TRANSIENT_W == 1.50
     assert rec_params.RECENT_PLAY_LIMIT == 50

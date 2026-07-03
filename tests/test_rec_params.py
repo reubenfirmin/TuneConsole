@@ -51,14 +51,14 @@ def test_unknown_param_raises(store):
 
 
 def test_transient_param_defaults_match_constants(store):
+    # #85: mood_recency_alpha (rank EMA) and stale_decay_halflife_d (sync-staleness relax) were dropped
+    # with rank decay / the staleness relax; the per-source wall-clock half-lives replace them.
     pairs = [
         ("play_transient_w", rec_params.PLAY_TRANSIENT_W),
         ("like_transient_w", rec_params.LIKE_TRANSIENT_W),
         ("dislike_transient_w", rec_params.DISLIKE_TRANSIENT_W),
         ("facet_gain", rec_params.FACET_GAIN),
-        ("mood_recency_alpha", rec_params.MOOD_RECENCY_ALPHA),
         ("recent_play_limit", rec_params.RECENT_PLAY_LIMIT),
-        ("stale_decay_halflife_d", rec_params.STALE_DECAY_HALFLIFE_D),
         ("facet_mult_min", rec_params.FACET_MULT_MIN),
         ("facet_mult_max", rec_params.FACET_MULT_MAX),
     ]

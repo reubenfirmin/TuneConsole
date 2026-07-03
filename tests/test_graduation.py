@@ -13,9 +13,11 @@ def test_graduation_crosses_threshold_and_resets(store):
     store.set_track_year(tid, "1960")
     k = identity_key("S", "Coltrane")
     recommend.graduate_moods(store, [k], 1, now=1.0)            # +1.0 each facet, below 1.2
-    assert store.get_weights().get("artist:Coltrane", 1.0) == 1.0
+    assert store.get_weights(now=1.0).get("artist:Coltrane", 1.0) == 1.0
     recommend.graduate_moods(store, [k], 1, now=2.0)           # total 2.0 -> graduate
-    w = store.get_weights()
+    # #85 read at the same `now` used for the nudge, else read-time reversion (vs real wall-clock
+    # time) would erase it before the assertion runs.
+    w = store.get_weights(now=2.0)
     assert w.get("artist:Coltrane", 1.0) > 1.0
     assert w.get("era:1960", 1.0) > 1.0
     assert any(ax.startswith("genre:") and v > 1.0 for ax, v in w.items())
@@ -31,7 +33,7 @@ def test_presence_weighting_tames_diffuse_artist(store):
         keys.append(identity_key(f"S{i}", f"Art{i}"))
     for t in range(3):
         recommend.graduate_moods(store, keys, 1, now=float(t))
-    w = store.get_weights()
+    w = store.get_weights(now=2.0)   # #85 same `now` as the last nudge; avoids real-wall-clock reversion
     assert any(ax.startswith("genre:") and v > 1.0 for ax, v in w.items())
     assert all(not ax.startswith("artist:") or v == 1.0 for ax, v in w.items())
 
@@ -55,7 +57,9 @@ def test_recs_mood_route_feeds_graduation(store):
     c = TestClient_factory(store, iid)
     k = identity_key("S", "Coltrane")
     c.post("/recs/mood", data={"keys": json.dumps([k]), "dir": "1", "intensity": "lot"})  # signed 2 -> crosses
-    assert store.get_weights().get("artist:Coltrane", 1.0) > 1.0
+    # #85 the route nudged at now_fn()==1.0; read at the same `now` so reversion (vs real wall-clock
+    # time) doesn't erase the nudge before the assertion runs.
+    assert store.get_weights(now=1.0).get("artist:Coltrane", 1.0) > 1.0
 
 
 def TestClient_factory(store, iid):

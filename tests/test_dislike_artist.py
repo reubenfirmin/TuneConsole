@@ -17,7 +17,8 @@ def test_dislike_does_not_emit_artist_lean(store, monkeypatch):
         ("billy|rebel", "Rebel Yell", "Billy Idol", "rock-classic", "1983"))
     store.conn.commit()
     store.record_dislike("billy|rebel", None, 100.0)
-    monkeypatch.setattr(transient, "staleness_factor", lambda *a: 1.0)   # isolate from sync-staleness decay
+    # #85: staleness_factor is gone; facet_leans decays each event on its own wall clock and never
+    # depended on a global sync-staleness relax, so there is nothing left to isolate from here.
 
     leans = transient.facet_leans(store, now=100.0)
 

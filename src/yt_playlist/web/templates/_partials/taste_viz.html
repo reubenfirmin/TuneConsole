@@ -149,24 +149,20 @@
 <section class="card viz-dim">
   <h2 class="section" style="margin-top:0">What's feeding "right now" <span class="scope-tag">transient inputs</span></h2>
   <p>
-    <span class="tag">👍 mood +{{ viz.sources.mood_pos }}</span>
-    <span class="tag">👎 mood −{{ viz.sources.mood_neg }}</span>
-    <span class="tag">▶ recent plays {{ viz.sources.plays }}</span>
-    <span class="tag">♥ likes {{ viz.sources.likes }}</span>
-    <span class="tag">⃠ dislikes {{ viz.sources.dislikes }}</span>
-    <span class="tag" {{ vt.tip("Recency weighting", [
-          {"l": "α", "v": "%.2f"|format(viz.sources.alpha), "t": "strong"},
-          {"l": "Means", "v": "newest signal ≈ " ~ "%.0f"|format(viz.sources.alpha*100) ~ "%", "n": "of the blend - older interactions count for less"}]) }}>recency α {{ '%.2f'|format(viz.sources.alpha) }}</span>
+    <span class="tag" {{ vt.tip("Mood taps", [
+          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.mood) ~ "d", "t": "strong"}]) }}>👍 mood +{{ viz.sources.mood_pos }}</span>
+    <span class="tag" {{ vt.tip("Mood taps", [
+          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.mood) ~ "d", "t": "strong"}]) }}>👎 mood −{{ viz.sources.mood_neg }}</span>
+    <span class="tag" {{ vt.tip("Recent plays", [
+          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.play) ~ "d", "t": "strong"}]) }}>▶ recent plays {{ viz.sources.plays }}</span>
+    <span class="tag" {{ vt.tip("Likes", [
+          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.like) ~ "d", "t": "strong"}]) }}>♥ likes {{ viz.sources.likes }}</span>
+    <span class="tag" {{ vt.tip("Dislikes", [
+          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.dislike) ~ "d", "t": "strong"}]) }}>⃠ dislikes {{ viz.sources.dislikes }}</span>
   </p>
-  <p class="section-note" style="margin:.2rem 0 .8rem">Newer interactions dominate (rank-weighted); the whole read is then scaled by its <strong>freshness</strong> - how recently you synced:</p>
-  <div class="freshness {{ 'fading' if not viz.freshness.live }}" {{ vt.tip("Mood freshness", [
-        {"l": "Strength", "v": "%.0f"|format(viz.freshness.factor*100) ~ "%", "t": "strong"},
-        {"l": "Status", "v": ("live" if viz.freshness.live else "fading"), "n": ("at full strength - sync is current" if viz.freshness.live else "relaxing toward neutral on a " ~ viz.freshness.halflife_days ~ "-day half-life since your last sync")}], desc="Scales everything above. A stale sync fades the whole 'right now' read back toward neutral.") }}>
-    <span class="fr-dot"></span>
-    <span class="fr-status">{{ 'Live' if viz.freshness.live else 'Fading' }}</span>
-    <span class="fr-meter"><i style="width:{{ '%.0f'|format(viz.freshness.factor*100) }}%"></i></span>
-    <span class="fr-val mono">{{ '%.0f'|format(viz.freshness.factor*100) }}%</span>
-  </div>
+  <p class="section-note" style="margin:.2rem 0 .8rem">Each source fades on its own wall-clock half-life
+    (hover a tag) - a month-old vibe tap is nearly gone even if you never interact again. There's no
+    separate sync-freshness scaling any more: every event decays on its own clock, sync or no sync.</p>
 </section>
 
 {# ── Embedding engine + centroid tilt (expensive → lazy) ──────────────────── #}
