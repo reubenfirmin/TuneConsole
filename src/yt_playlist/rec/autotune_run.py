@@ -24,12 +24,16 @@ def run_and_record(store, now) -> dict:
         "winner": tuned["winner"],
         "previous": tuned["previous"],
         "grid": tuned["grid"],
+        "metric": tuned["metric"],           # #83: the one metric the whole sweep was judged on
+        "in_sample": tuned["in_sample"],
         "recs": {
             "dropped": [{"title": t, "artist": a} for (t, a) in bset - aset],
             "added": [{"title": t, "artist": a} for (t, a) in aset - bset],
             "compared": len(before),
         },
     }
+    if tuned.get("sweep_failed"):
+        result["sweep_failed"] = True
     store.set_setting(RESULT_SETTING, json.dumps(result))
     return result
 

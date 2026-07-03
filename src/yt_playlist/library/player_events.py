@@ -13,6 +13,12 @@ from yt_playlist.rec import graduation
 PLAYBACK_KINDS = {"track_exit", "ended", "state", "tick", "volume", "bye"}
 CURATION_KINDS = {"rate", "playlist_edit", "feedback", "subscription", "share_intent"}
 
+# Server-written kinds: recorded directly via store.record_player_event by server-side routes, never
+# pushed as a bridge frame, so they are intentionally absent from the two sets above and never seen
+# by handle_player_event. "alt_version" (web/routes/playlists.py, the alternates-add route): the user
+# swapped in an alternate version of a track, i.e. "these two are the same song to me" (future
+# dedupe/preference evidence). Payload: {"old": <old video_id>, "new": <new video_id>}.
+
 _BODY_CAP = 4096
 _RATE_STATUS = {"like": "LIKE", "dislike": "DISLIKE", "removelike": "INDIFFERENT"}
 _PAYLOAD_EXTRAS = ("state", "volume", "shuffle", "repeat")

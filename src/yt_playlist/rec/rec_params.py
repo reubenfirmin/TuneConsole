@@ -164,6 +164,36 @@ PARAMS = [
               0.0, 1.0, 0.05, 0.35, advanced=True),
     ParamSpec("facet_mult_max", "Facet ceiling", "transient",
               "Cap on how much a positive lean can boost a facet.", 1.0, 4.0, 0.1, 2.5, advanced=True),
+    # --- NOW/session layers (#88 layered taste model): a confidence-gated posterior over taste modes
+    # read from the last few hours of real plays (NOW), plus a slower same-sitting carry-over
+    # (session). Defaults tuned so a normal listening session clears the NOW gate within a couple of
+    # tracks; a quiet stretch (or one lone play) returns no read rather than guessing. ---
+    ParamSpec("now_window_h", "NOW layer window (hours)", "transient",
+              "How far back the moment-to-moment taste read looks for recent plays. Shorter reacts "
+              "only to what's playing right now; longer smooths over a whole sitting.",
+              1, 24, 1, 6, integer=True),
+    ParamSpec("now_min_events", "NOW layer: minimum plays", "transient",
+              "Fewest distinct recent plays (with a known sound) needed before the moment-to-moment "
+              "read speaks up. Below this, thin evidence stays silent instead of guessing.",
+              2, 10, 1, 3, integer=True, advanced=True),
+    ParamSpec("now_gain", "NOW layer responsiveness", "transient",
+              "How hard the moment-to-moment taste read steers the feed once it has enough evidence.",
+              0.0, 2.0, 0.05, 0.6),
+    ParamSpec("session_halflife_h", "Session memory half-life (hours)", "transient",
+              "How long this listening session's influence lasts. Shorter forgets a session quickly "
+              "once you stop; longer lets it carry across a break.", 0.5, 24, 0.5, 4),
+    ParamSpec("session_alpha", "Session tilt", "transient",
+              "How strongly this session's read blends into the feed relative to your durable taste.",
+              0.0, 1.0, 0.05, 0.25),
+    # --- Skips (#84 read-time classification of track_exit/bye rows). Defaults mirror the
+    # play/like/dislike transient channels: a moderate push with a two-week memory. ---
+    ParamSpec("skip_transient_w", "Recent-skip push", "transient",
+              "How hard a recent skip pushes the feed away from similar music. 0 = skips don't "
+              "steer; higher = your last skips dominate.", 0.0, 2.0, 0.05, 0.6),
+    ParamSpec("skip_halflife_d", "Skip memory half-life (days)", "transient",
+              "How long a skip's influence lasts in the transient model. Shorter = recent skips "
+              "dominate for a brief window; longer = they influence the feed for days.",
+              1, 60, 1, 14, integer=True),
     # --- Learning (graduation: right-now -> permanent). Defaults == the constants below. ---
     ParamSpec("graduation_enabled", "Learning enabled", "graduation",
               "When on, sustained right-now behavior gradually rewrites your durable taste weights. "

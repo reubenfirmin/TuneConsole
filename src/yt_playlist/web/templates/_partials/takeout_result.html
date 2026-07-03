@@ -1,0 +1,38 @@
+{# #61 Takeout import result. The route sets HX-Retarget to #takeout-import-block, so on success
+   this REPLACES the instructions + upload form with a completed state, instead of stacking a
+   run-on one-liner under the button. Each number gets its own label and the counts that look
+   alarming out of context (unmatched, especially) get an honest plain-language explanation. #}
+<p class="section-note" style="color:#3fb950;margin-bottom:1rem"><strong>&#10003; Import complete</strong></p>
+
+{% if report.matched %}
+<div class="stat-grid" style="margin-bottom:1.1rem">
+  <div><strong>{{ report.matched }}</strong><span>plays matched your library</span></div>
+  <div><strong>{{ report.events_added }}</strong><span>new plays recorded</span></div>
+  <div><strong>{{ report.span_days }}</strong><span>days of history</span></div>
+  <div><strong>{{ report.unmatched }}</strong><span>not in your library</span></div>
+</div>
+{% if report.unmatched %}
+<p class="section-note">The {{ report.unmatched }} unmatched plays are songs you streamed but never
+  saved to your library, which is normal for a full history: there is no library track to attach
+  them to, so they don't affect your charts or recommendations.</p>
+{% endif %}
+{% else %}
+<p class="section-note">Nothing in this export matched your library. That usually means the library
+  hasn't synced yet: keep a signed-in <code class="mono">music.youtube.com</code> tab open, let the
+  first sync finish, then import the same file again.</p>
+{% endif %}
+
+{% if seeded %}
+<p class="section-note">Seeded <strong>{{ seeded }}</strong> of your most-played unmatched artists
+  into discovery, so those plays still inform what gets suggested.</p>
+{% endif %}
+{% if report.unparsed_dates %}
+<p class="section-note">Skipped {{ report.unparsed_dates }} {{ 'entry with an unreadable date' if report.unparsed_dates == 1 else 'entries with unreadable dates' }}
+  (never silently: what you see above is everything that was imported).</p>
+{% endif %}
+
+<p class="section-note">Re-importing the same or a newer export is always safe: plays already
+  recorded are skipped, never duplicated.</p>
+<div class="btn-row">
+  <a class="btn-ghost btn-sm" href="/setup?tab=import">Import another file</a>
+</div>

@@ -136,6 +136,20 @@ async function rateInYtmTab(action) {
   }
 }
 
+// Ask the content script to refresh the YTM tab's view so edits made in TuneConsole (rename, art,
+// tracklist, etc.) show up promptly without ever interrupting playback. The content script owns the
+// "is it safe to reload" decision (it checks the URL and playback state); this just delivers the ask.
+async function refreshViewInYtmTab(playlist) {
+  const tab = await pickYtmTab();
+  if (!tab) return;
+  try {
+    await chrome.tabs.sendMessage(tab.id, { type: "refresh-view", playlist });
+  } catch (e) {
+    await inject(tab.id);
+    try { await chrome.tabs.sendMessage(tab.id, { type: "refresh-view", playlist }); } catch (e2) {}
+  }
+}
+
 async function handleFrame(frame) {
   // Allowlist is the load-bearing control: refuse anything not a youtubei call.
   if (!isAllowed(frame.url)) {
@@ -184,6 +198,7 @@ function connect() {
     if (frame && frame.ping) return; // keepalive from the backend; receiving it keeps this SW awake
     if (frame && frame.type === "navigate") { navigateYtmTab(frame.url); return; }
     if (frame && frame.type === "rate") { rateInYtmTab(frame.action); return; }
+    if (frame && frame.type === "refresh-view") { refreshViewInYtmTab(frame.playlist); return; }
     const reply = await handleFrame(frame);
     try { sock.send(JSON.stringify(reply)); } catch (e) {}
   };

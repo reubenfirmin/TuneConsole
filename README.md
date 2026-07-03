@@ -111,6 +111,9 @@ else. **`/setup`** is optional and only worth visiting if you have **multiple Yo
 Syncing is automatic: a full library sync runs once the extension is connected, then refreshes daily,
 and plays are captured live.
 
+You can backfill your full listening history by importing a Google Takeout JSON export from the
+**Import** panel in Setup. The import processes entirely locally and accepts JSON exports only.
+
 Config and data live in `~/.config/yt-playlist/` (`config.toml`) and `~/.local/share/yt-playlist/`
 (`state.db`); no credential file is stored, the live extension session is the credential.
 `YT_PLAYLIST_HOME` overrides the config location, and `yt-playlist --help` lists options (`--host`,

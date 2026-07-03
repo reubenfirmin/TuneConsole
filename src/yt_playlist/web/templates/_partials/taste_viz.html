@@ -23,6 +23,66 @@
   This view is read-only; adjust anything on the <em>Controls</em> tab.
 </p>
 
+{% macro layer_ribbon(segments) -%}
+<div class="breadth-ribbon layer-ribbon">
+  {% for seg in segments %}{% set pc = ROSE_PALETTE[seg.color_idx % ROSE_PALETTE|length] %}<i class="seg"
+    style="width:{{ '%.1f'|format(seg.share*100) }}%; --petal-c:{{ pc }}" {{ vt.tip(seg.label, [
+      {"l": "Share", "v": "%.1f"|format(seg.share*100) ~ "%", "t": "strong"}], dot=pc) }}></i>{% endfor %}
+</div>
+{%- endmacro %}
+
+{# ── Layer stack (#88): four readings of "what you want", fastest to slowest, replacing the old
+   one-line "Right now" reading (which this subsumes). NOW/SESSION ribbons index their color off
+   viz.layer_stack.layer_modes so the SAME taste mode is the SAME color in both. ── #}
+<section class="card viz-dim layer-stack">
+  <h2 class="section" style="margin-top:0">Layer stack</h2>
+  <p class="section-note">Four readings of what you want, each at its own timescale - fastest at the top.</p>
+
+  <div class="layer-row" {{ vt.tip("NOW", [
+        {"l": "Window", "v": "last " ~ viz.layer_stack.now.window_h ~ "h", "t": "strong"},
+        {"l": "Plays", "v": viz.layer_stack.now.n, "n": "distinct plays with a known sound feeding this read"}],
+        desc="A confidence-gated snapshot of what's playing right now, classified against your discovered taste modes.") }}>
+    <div class="layer-meta"><span class="layer-name">NOW</span><span class="layer-scale muted">last {{ viz.layer_stack.now.window_h }}h</span></div>
+    <div class="layer-reading">
+      {% if viz.layer_stack.now.segments %}{{ layer_ribbon(viz.layer_stack.now.segments) }}
+      {% else %}<p class="rose-quiet">Quiet: fewer than {{ viz.layer_stack.min_events }} plays with a known sound in the window.</p>{% endif %}
+    </div>
+  </div>
+
+  <div class="layer-row" {{ vt.tip("SESSION", [
+        {"l": "Window", "v": "last 24h", "t": "strong"},
+        {"l": "Half-life", "v": viz.layer_stack.session.halflife_h ~ "h", "n": "how fast this session's plays fade"},
+        {"l": "Plays", "v": viz.layer_stack.session.n}],
+        desc="This sitting's mode balance - like NOW, but decay-weighted over a full day instead of a hard window.") }}>
+    <div class="layer-meta"><span class="layer-name">SESSION</span><span class="layer-scale muted">last 24h · {{ viz.layer_stack.session.halflife_h }}h half-life</span></div>
+    <div class="layer-reading">
+      {% if viz.layer_stack.session.segments %}{{ layer_ribbon(viz.layer_stack.session.segments) }}
+      {% else %}<p class="rose-quiet">Quiet: fewer than {{ viz.layer_stack.min_events }} plays with a known sound in the last 24h.</p>{% endif %}
+    </div>
+  </div>
+
+  <div class="layer-row">
+    <div class="layer-meta"><span class="layer-name">TRANSIENT</span><span class="layer-scale muted">days to weeks</span></div>
+    <div class="layer-reading">
+      {% if viz.has_transient and viz.layer_stack.transient.up %}
+      <p class="section-note" style="margin:0">Leaning into <strong>{{ viz.layer_stack.transient.up.name }}</strong>{% if viz.layer_stack.transient.down %}, away from <strong>{{ viz.layer_stack.transient.down.name }}</strong>{% endif %}
+        <span class="muted">- see the genre roses below</span></p>
+      {% elif not viz.recent_exists %}<p class="rose-quiet">Quiet - nothing played recently.</p>
+      {% else %}<p class="rose-quiet">Your recent mix matches your usual.</p>{% endif %}
+    </div>
+  </div>
+
+  <div class="layer-row">
+    <div class="layer-meta"><span class="layer-name">PERMANENT</span><span class="layer-scale muted">everything, always</span></div>
+    <div class="layer-reading">
+      {% if viz.layer_stack.permanent.top %}
+      <p class="section-note" style="margin:0"><strong>{{ viz.layer_stack.permanent.top.name }}</strong> {{ '%.0f'|format(viz.layer_stack.permanent.top.share*100) }}%
+        <span class="muted">- your taste reads {{ viz.layer_stack.permanent.breadth_word }}</span></p>
+      {% else %}<p class="section-note" style="margin:0">No genre tags yet.</p>{% endif %}
+    </div>
+  </div>
+</section>
+
 {# ── Genre families: permanent shape vs current-mood lean ─────────────────── #}
 <section class="card viz-dim">
   <h2 class="section" style="margin-top:0">Genre families</h2>

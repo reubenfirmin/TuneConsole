@@ -48,6 +48,26 @@ def lastfm_nudge_due(store, now=None) -> bool:
         except (TypeError, ValueError):
             pass
     return True
+
+
+TAKEOUT_NAG_SNOOZE_S = 90 * 86400   # dismissing snoozes the nag 90 days, not forever
+
+
+def takeout_nag_due(store, now=None) -> bool:
+    """True when a Google Takeout watch-history import has never landed and the nag isn't snoozed.
+    Terminal (never due again) once takeout_imported_at is set. No last_sync gate: importing early
+    is exactly the point, so this can be due on a fresh install. Dismissing snoozes it for 90 days
+    (records a timestamp) so a long-lived install that never imports is reminded again."""
+    if store.get_setting("takeout_imported_at") is not None:
+        return False
+    dismissed_at = store.get_setting("takeout_nag_dismissed_at")
+    if dismissed_at is not None:
+        try:
+            if (now if now is not None else time.time()) - float(dismissed_at) < TAKEOUT_NAG_SNOOZE_S:
+                return False
+        except (TypeError, ValueError):
+            pass
+    return True
 _NOTES = {
     "wheelhouse": "Deeper into what you already love.",
     "explore": "Unplayed corners of your own library.",
@@ -194,6 +214,9 @@ def build(ctx) -> APIRouter:
             "show_intro": (store.get_setting("last_sync_at") is not None
                            and store.get_setting("intro_dismissed") != "1"),
             "show_lastfm_nudge": lastfm_nudge_due(store, now),
+            # Takeout import nag: no last_sync gate (importing early is exactly the point), terminal
+            # once takeout_imported_at is set by a successful import.
+            "show_takeout_nag": takeout_nag_due(store, now),
             "backend_update": backend_update,
             "show_backend_update": backend_update is not None,
             # Once the library has synced and the user still has only the default identity, offer the
@@ -213,6 +236,13 @@ def build(ctx) -> APIRouter:
         """Snooze the Home Last.fm-key nudge for 30 days (records the dismissal time). Empty 200 so
         HTMX swaps it out."""
         store.set_setting("lastfm_nudge_dismissed_at", str(now_fn()))
+        return Response(status_code=200)
+
+    @router.post("/onboard/takeout/dismiss")
+    def dismiss_takeout_nag():
+        """Snooze the Home Takeout-import nag for 90 days (records the dismissal time). Empty 200 so
+        HTMX swaps it out."""
+        store.set_setting("takeout_nag_dismissed_at", str(now_fn()))
         return Response(status_code=200)
 
     @router.post("/onboard/identities/dismiss")

@@ -200,3 +200,51 @@ class HistoryRepo(Repo):
             "SELECT identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status "
             "FROM play_events WHERE played_at>=? ORDER BY played_at, id", (since_ts,)).fetchall()
         return [dict(r) for r in rows]
+
+    @synchronized
+    def import_plays(self, identity_id, plays) -> int:
+        """#61 Bulk (track, day) backfill from a Takeout import: [(identity_key, ts)] -> the same
+        per-date snapshot + (snapshot, key) dedup the live/sync paths use, so imports, syncs, and
+        live capture can all see the same play without double counting. Returns NEW rows."""
+        by_date: dict = {}
+        for key, ts in plays:
+            if not key:
+                continue
+            day = int(ts // 86400)
+            by_date.setdefault(day * 86400 + _NOON, set()).add(key)
+        added = 0
+        for play_ts, keys in by_date.items():
+            sid = self._snapshot_for_date(identity_id, play_ts)
+            existing = {r["identity_key"] for r in self.conn.execute(
+                "SELECT identity_key FROM history_items WHERE snapshot_id=?", (sid,))}
+            new = sorted(keys - existing)
+            if new:
+                self.conn.executemany(
+                    "INSERT INTO history_items(snapshot_id, identity_key) VALUES (?,?)",
+                    [(sid, k) for k in new])
+                added += len(new)
+        self.conn.commit()
+        return added
+
+    @synchronized
+    def import_play_events(self, identity_id, rows) -> int:
+        """#61 Bulk play_events backfill: [(identity_key, video_id, ts)]. Idempotency key is
+        (identity, key, played_at within 2s), NOT exact timestamp equality: Takeout's HTML export
+        floors timestamps to whole seconds while the JSON export carries milliseconds, so the same
+        play arrives sub-second apart when a user imports one format and later the other (observed
+        live: an HTML import then a JSON redo doubled every matched event). No real play of the
+        same track can recur within 2 seconds, so the window never swallows a genuine play. Live
+        rows near the same instant also dedupe."""
+        added = 0
+        for key, vid, ts in rows:
+            if not key:
+                continue
+            cur = self.conn.execute(
+                "INSERT INTO play_events(identity_id, identity_key, video_id, played_at) "
+                "SELECT ?, ?, ?, ? WHERE NOT EXISTS ("
+                "  SELECT 1 FROM play_events WHERE identity_id=? AND identity_key=? "
+                "  AND played_at BETWEEN ? - 2.0 AND ? + 2.0)",
+                (identity_id, key, vid, ts, identity_id, key, ts, ts))
+            added += cur.rowcount
+        self.conn.commit()
+        return added

@@ -20,6 +20,7 @@ def test_no_alerts_when_nothing_to_do(store):
     store.set_setting("intro_dismissed", "1")
     store.set_setting("identities_nudge_dismissed", "1")
     store.set_setting("lastfm_nudge_dismissed_at", "1000.0")   # snoozed for 30 days
+    store.set_setting("takeout_imported_at", "1000.0")         # #61 nag is terminal once imported
     html = c.get("/").text
     assert "alert-card" not in html
     assert "All clear" not in html

@@ -5,7 +5,7 @@ Split out of the former monolithic recommend.py; recommend re-exports these for 
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, rec_params, transient
+from yt_playlist.rec import embed, layers, rec_params, transient
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.rec.taste_analysis import taste_breadth
 
@@ -346,11 +346,14 @@ def _apply_mood(scores, store, now, V, idx, content_vecs=None):
     its own wall clock (see transient.decay_weight); there is no separate external staleness relax here
     any more, so this just adds the (already-decayed) tilts straight in.
 
-    Two tilts from the same recent stream (plays/likes/mood): the collaborative centroid tilt (co-listen
-    space) and the audio centroid tilt (#45, the content space), so ranking can lean toward the SOUND
-    (tempo/energy/mood) of what you have been playing, not only its genre/era/artist facets. They apply
-    independently: a candidate missing one space simply skips that term, and the audio tilt can still
-    fire for recent plays that have a content vector but no collaborative one.
+    #88: three tilts from the same recent stream (plays/likes/mood), each at its own timescale, blended
+    alongside one another: the transient collaborative centroid tilt (co-listen space, days half-lives),
+    the SESSION tilt (layers.session_tilt, same collaborative space, hours half-life: the current
+    listening session's carry-over), and the audio centroid tilt (#45, the content space), so ranking
+    can lean toward the SOUND (tempo/energy/mood) of what you have been playing, not only its
+    genre/era/artist facets. They apply independently: a candidate missing one space simply skips that
+    term, and the audio tilt can still fire for recent plays that have a content vector but no
+    collaborative one.
 
     `content_vecs` selects the audio tilt's content-vector source: warm callers leave it None (library
     vectors); the cold path passes the discovered-content vectors so out-of-corpus tracks get the tilt."""
@@ -358,6 +361,11 @@ def _apply_mood(scores, store, now, V, idx, content_vecs=None):
     if tilt is not None:
         Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
         scores = scores + MOOD_ALPHA * (Vn @ tilt)
+    st = layers.session_tilt(store, now, V, idx)
+    if st is not None:
+        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
+        session_alpha = rec_params.get_param(store, "session_alpha")
+        scores = scores + session_alpha * (Vn @ st)
     w = rec_params.get_param(store, "audio_transient_w")
     if w > 0:
         boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs)

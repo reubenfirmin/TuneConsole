@@ -7,7 +7,7 @@ this is the first place the transient model is ever surfaced (it otherwise only 
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, eval_recs, rec_params, recommend, transient
+from yt_playlist.rec import embed, eval_recs, layers, rec_params, recommend, transient
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -81,6 +81,35 @@ def _attach_deviation(rows, recent, alltime):
         r["alltime_share"] = at
         r["transient_dev"] = (rs - at) if recent else 0.0
     return rows
+
+
+def _breadth_word(breadth):
+    """Same thresholds the 'Taste breadth' card already uses: >0.66 eclectic, <0.33 focused,
+    otherwise balanced."""
+    return "eclectic" if breadth > 0.66 else ("focused" if breadth < 0.33 else "balanced")
+
+
+def _ordered_layer_modes(modes, *shares_dicts):
+    """Ordered union of mode ids appearing in any of the given {mode_id: share} dicts (or None),
+    kept in the active-modes list's own order. Both `now_mode_mix` and `session_mode_mix` read the
+    same active-modes list, so this order is stable regardless of which layer currently reports a
+    given mode - the NOW and SESSION ribbons index their ROSE_PALETTE color off THIS list, so a mode
+    that appears in both gets the same color in both."""
+    seen = set()
+    for d in shares_dicts:
+        if d:
+            seen.update(d.keys())
+    return [m for m in modes if m["mode_id"] in seen]
+
+
+def _ribbon_segments(shares, ordered_modes):
+    """{mode_id: share} + the ordered mode union -> ribbon segment dicts for the template, each
+    carrying a `color_idx` into `ordered_modes` (NOT its own position) so NOW/SESSION color the same
+    mode identically even when one ribbon is missing a mode the other has."""
+    if not shares:
+        return []
+    return [{"mode_id": m["mode_id"], "label": m["label"], "share": shares[m["mode_id"]], "color_idx": i}
+            for i, m in enumerate(ordered_modes) if m["mode_id"] in shares]
 
 
 def _artist_shares(store, top=12):
@@ -160,6 +189,29 @@ def model_transparency(store, now, recent_window=RECENT_PLAYS_WINDOW) -> dict:
     max_dev = max((abs(r["transient_dev"]) for r in genres + eras + artists), default=0.0)
     has_transient = recent_exists and max_dev > QUIET_DEV_EPS
 
+    # #88: the "Layer stack" card - four readings of "what the listener wants" at their own
+    # timescales, fastest to slowest. NOW and SESSION are confidence-gated categorical posteriors
+    # over discovered taste modes (rec/layers.py); TRANSIENT and PERMANENT are summaries of data this
+    # function already computed above (the genre roses / breadth), not new computations.
+    now_shares, now_n, now_modes = layers.now_mode_mix(store, now)
+    session_shares, session_n, session_modes = layers.session_mode_mix(store, now)
+    layer_modes = _ordered_layer_modes(now_modes or session_modes, now_shares, session_shares)
+    transient_up = max((r for r in genres if r["transient_dev"] > 0),
+                       key=lambda r: r["transient_dev"], default=None)
+    transient_down = min((r for r in genres if r["transient_dev"] < 0),
+                         key=lambda r: r["transient_dev"], default=None)
+    layer_stack = {
+        "now": {"segments": _ribbon_segments(now_shares, layer_modes), "n": now_n,
+                "window_h": rec_params.get_param(store, "now_window_h")},
+        "session": {"segments": _ribbon_segments(session_shares, layer_modes), "n": session_n,
+                    "halflife_h": rec_params.get_param(store, "session_halflife_h")},
+        "min_events": int(rec_params.get_param(store, "now_min_events")),
+        "transient": {"up": transient_up, "down": transient_down},
+        "permanent": {"top": genres[0] if genres else None,
+                      "breadth_word": _breadth_word(bd["breadth"]) if genres else None},
+        "layer_modes": layer_modes,
+    }
+
     return {
         "genres": genres, "eras": eras, "artists": artists,
         "lanes": [{"name": n, "label": lbl, "help": h, "weight": weights.get(f"lane:{n}", 1.0)}
@@ -173,6 +225,15 @@ def model_transparency(store, now, recent_window=RECENT_PLAYS_WINDOW) -> dict:
                    for f, s in sorted(theme.items(), key=lambda x: -abs(x[1]))],
         "has_transient": has_transient,
         "recent_exists": recent_exists,
+        # #88 Task 5: the NOW layer (rec/layers.now_layer_reading) as one terse reading - the top
+        # taste mode from the last `now_window_h` hours of real plays, or None when quiet/gated.
+        # `now_window_h` rides alongside for the copy ("...last {now_window_h}h").
+        "now_layer": layers.now_layer_reading(store, now),
+        "now_window_h": rec_params.get_param(store, "now_window_h"),
+        # #88: the new "Layer stack" card at the top of the viz tab subsumes the one-line now_layer
+        # reading above (kept for backward compatibility - nothing else currently reads it besides
+        # the payload-level tests).
+        "layer_stack": layer_stack,
     }
 
 

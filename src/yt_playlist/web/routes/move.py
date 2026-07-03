@@ -26,9 +26,22 @@ def build(ctx) -> APIRouter:
             "flash": request.query_params.get("flash"),
         })
 
+    def _refresh_deleted_source(ytm_id):
+        # #95: a move deletes the source playlist on YouTube; a YTM tab sitting on it should show
+        # it's gone, not a stale tracklist. Best-effort only (no extension connected raises), and
+        # never affects the route's own response. The copy destination is a brand-new playlist no
+        # tab can already be viewing, so only the deleted source warrants a refresh.
+        try:
+            if ytm_id:
+                ctx.bridge.send_control({"type": "refresh-view", "playlist": ytm_id})
+        except Exception:  # noqa: BLE001
+            logger.debug("refresh-view control not sent for %s", ytm_id, exc_info=True)
+
     @router.post("/move/run")
     def move_run(request: Request, playlist: int = Form(...), target_identity: int = Form(...),
                  copy_only: str = Form("")):
+        src = store.get_playlist(playlist)
+        src_ytm = src.ytm_playlist_id if src else ""   # captured now: a move removes the local row
         try:
             res = ctx.ops().move(playlist, target_identity, copy_only=bool(copy_only))
         except ValueError as e:
@@ -37,6 +50,7 @@ def build(ctx) -> APIRouter:
             logger.exception("move/copy failed")
             return _move_row(request, playlist, error="YouTube returned an unexpected response.")
         if res["deleted"]:
+            _refresh_deleted_source(src_ytm)
             return HTMLResponse("")   # source deleted -> htmx fades + removes the row
         extra = f", {res['unresolved']} couldn’t be matched" if res["unresolved"] else ""
         if res.get("delete_error"):  # copy succeeded but the original couldn't be deleted

@@ -319,6 +319,54 @@ def test_add_tracks_empty_returns_toast(store):
     assert store.get_playlist(a).track_count == 0
 
 
+def test_add_tracks_with_anchor_records_alt_version_event(store):
+    # #95: picking an alternate version off the alternates modal is the user saying "these two are
+    # the same song to me" - future dedupe/preference evidence. after_video_id is only ever set by
+    # that modal's form (alternates_results.html), so it doubles as "this really is a swap".
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    track = json.dumps({"videoId": "v1", "title": "Song A (Live)", "artist": "Artist X", "duration": 250})
+    r = c.post(f"/playlist/{a}/add-tracks", data={"track": track, "after_video_id": "v0"})
+
+    assert _refreshes(r)
+    events = store.player_events_since(0, kind="alt_version")
+    assert len(events) == 1
+    e = events[0]
+    assert e["video_id"] == "v1" and e["playlist_ytm_id"] == "PL1"
+    assert json.loads(e["payload"]) == {"old": "v0", "new": "v1"}
+
+
+def test_add_tracks_with_anchor_records_one_event_per_chosen_version(store):
+    # multiple versions checked in the modal at once still each get their own old/new row.
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    chosen = [json.dumps({"videoId": "v1", "title": "Song A (Live)", "artist": "Artist X", "duration": 250}),
+              json.dumps({"videoId": "v2", "title": "Song A (Remix)", "artist": "DJ Z", "duration": 190})]
+    r = c.post(f"/playlist/{a}/add-tracks", data={"track": chosen, "after_video_id": "v0"})
+
+    assert _refreshes(r)
+    events = store.player_events_since(0, kind="alt_version")
+    assert {(e["video_id"], json.loads(e["payload"])["new"]) for e in events} == {("v1", "v1"), ("v2", "v2")}
+    assert all(json.loads(e["payload"])["old"] == "v0" for e in events)
+
+
+def test_add_tracks_without_anchor_does_not_record_alt_version_event(store):
+    # a plain "add from suggestions" (no after_video_id) is not an alternate-version swap.
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PL1", "Mix", 0, "h", 1.0)
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    track = json.dumps({"videoId": "v9", "title": "T", "artist": "A", "duration": 200})
+    assert _refreshes(c.post(f"/playlist/{a}/add-tracks", data={"track": track}))
+    assert store.player_events_since(0, kind="alt_version") == []
+
+
 # --- Last.fm API key ---
 
 def test_lastfm_key_saved_via_form(store, monkeypatch, tmp_path):

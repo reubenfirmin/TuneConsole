@@ -114,10 +114,12 @@ def build(ctx) -> APIRouter:
         # the expensive stats, lazy-loaded so the page paints instantly. This is the §1 model-health
         # panel: warm-path recall@k, forward-looking temporal_recall, cold-path projection_recall (with
         # its failure-mode breakdown), and graduation counts by source from the §1c log.
+        holdout_days = eval_recs.best_holdout(store)
         return templates.TemplateResponse(request, "_partials/taste_recall.html",
                                           {"recall": eval_recs.recall_at_k(store, k=20),
                                            "proj": eval_recs.projection_recall(store, k=20),
-                                           "temporal": eval_recs.temporal_recall(store, holdout_days=30, k=20),
+                                           "temporal": eval_recs.temporal_recall(store, holdout_days=holdout_days, k=20),
+                                           "holdout_days": holdout_days,
                                            "grad_counts": store.graduation_log_counts()})
 
     @router.get("/taste/preview")

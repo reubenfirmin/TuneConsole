@@ -1964,6 +1964,22 @@ figure.rose { margin: 0; text-align: center; }
 .breadth-ribbon .seg:hover { filter: brightness(1.2); }
 .breadth-ribbon .seg.other { background: var(--border); }
 
+/* Layer stack (#88): four readings of "what the listener wants", fastest (NOW) to slowest
+   (PERMANENT). Reuses .breadth-ribbon/.seg for the NOW/SESSION mode ribbons; this block is just the
+   row layout - name + timescale on the left, the reading on the right. */
+.layer-stack .layer-row { display: grid; grid-template-columns: 9rem 1fr; gap: 0.2rem 1.1rem;
+  align-items: center; padding: 0.65rem 0; border-bottom: 1px solid var(--border); }
+.layer-stack .layer-row:last-child { border-bottom: none; padding-bottom: 0; }
+.layer-stack .layer-row:first-child { padding-top: 0.2rem; }
+.layer-stack .layer-meta { display: flex; flex-direction: column; gap: 0.15rem; }
+.layer-stack .layer-name { font-family: var(--font-display); font-size: 0.9rem; letter-spacing: 0.03em; }
+.layer-stack .layer-scale { font-size: 0.7rem; }
+.layer-stack .layer-reading { min-width: 0; }
+.layer-stack .layer-ribbon { height: 16px; }
+@media (max-width: 640px) {
+  .layer-stack .layer-row { grid-template-columns: 1fr; gap: 0.35rem; }
+}
+
 /* Mood freshness - a liveness/signal indicator (deliberately unlike the breadth spectrum). */
 .freshness { display: flex; align-items: center; gap: 0.55rem; }
 .fr-dot { flex: none; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--teal);

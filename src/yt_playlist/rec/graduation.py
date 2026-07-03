@@ -60,12 +60,20 @@ def graduate_moods(store, keys, signed, now, source=1.0, source_label="mood") ->
     """Accumulate a transient-feeding event into the per-facet graduation ledger (presence-weighted),
     graduating each facet that crosses the threshold. `source` is the signal's SOURCE_W_* weight,
     `source_label` names it for the graduation log. Model-only. NEVER suppresses. `signed` carries
-    intensity (±1, ±2 on 'a lot')."""
+    intensity (±1, ±2 on 'a lot').
+
+    #54/#84: a negative signal (signed < 0: a dislike, a negative vibe tap, ...) is a verdict on the
+    tracks themselves, not on an artist's whole catalogue, so `artist:` axes are skipped whenever
+    signed < 0 -- otherwise two dislikes of one artist (2 x source_w_dislike 1.0 > THEME_THRESHOLD
+    1.2) would permanently down-weight that artist, the exact leak #54 already fixed on the transient
+    side (transient.facet_leans' dislike/skip drop_artist). Positive signals still graduate artists."""
     facets = transient.facets_for(store, keys)
     if not facets:
         return
     n = len(set(keys)) or 1
     for axis, axis_keys in facets.items():
+        if signed < 0 and axis.startswith("artist:"):
+            continue
         graduate_facet(store, axis, signed * (len(axis_keys) / n), now,
                        source=source, source_label=source_label)
 

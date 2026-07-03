@@ -1,8 +1,9 @@
 """The transient model: a reactive, persistent read on recent interaction.
 
 Inputs are signed track-key events at a point in recency: mood feedback (rec_mood), recent plays
-(history), recent dislikes (rec_feedback kind='dislike'). Two derived views: facet leans
-(genre/era/artist tokens) and an embedding centroid tilt.
+(history), recent dislikes (rec_feedback kind='dislike'), recent skips (#84, player_events
+track_exit/bye rows classified at read time). Two derived views: facet leans (genre/era/artist
+tokens) and an embedding centroid tilt.
 
 Lifecycle (#85): every event decays on the wall clock with a per-source half-life (see the
 *_halflife_d params); nothing is rank-decayed and there is no separate staleness relax. An event
@@ -59,6 +60,7 @@ def facet_leans(store, now) -> dict:
                                  gp(store, "dislike_transient_w"))
     play_hl, mood_hl = gp(store, "play_halflife_d"), gp(store, "mood_halflife_d")
     like_hl, dislike_hl = gp(store, "like_halflife_d"), gp(store, "dislike_halflife_d")
+    skip_w, skip_hl = gp(store, "skip_transient_w"), gp(store, "skip_halflife_d")
     limit = gp(store, "recent_play_limit")
     leans: dict = {}
 
@@ -83,6 +85,13 @@ def facet_leans(store, now) -> dict:
     # full strength forever.
     for k, ts in store.disliked_with_ts():
         add([k], -dislike_w * decay_weight(now - ts, dislike_hl), drop_artist=True)
+    # #84: extends #54's rationale one step further. A skip is a verdict on THAT track in THAT
+    # moment (could be mood, could be context, could just be an accident of the queue), even weaker
+    # evidence against the artist than a dislike is, so the artist axis never sees it either
+    # (drop_artist=True). Lookback is a generous 4 half-lives (mirrors the mood-prune rationale) so
+    # the read only asks the store for skips that could still matter, not the whole history.
+    for k, ts in store.recent_skips_with_ts(now - 4 * skip_hl * 86400):
+        add([k], -skip_w * decay_weight(now - ts, skip_hl), drop_artist=True)
     return leans
 
 
@@ -113,15 +122,18 @@ def facet_multiplier(lean, gain, lo, hi) -> float:
 
 
 def centroid_tilt(store, now, V, idx):
-    """Unit embedding direction from the unified transient stream: mood events, recent plays, and
-    recent likes, each wall-clock decayed by its own half-life (#85). None if quiet. Decay is
-    per-event and internal; callers apply no external freshness factor."""
+    """Unit embedding direction from the unified transient stream: mood events, recent plays,
+    recent likes, and recent skips (#84, negative), each wall-clock decayed by its own half-life
+    (#85). None if quiet. Decay is per-event and internal; callers apply no external freshness
+    factor."""
     gp = rec_params.get_param
     limit = gp(store, "recent_play_limit")
+    skip_hl, skip_w = gp(store, "skip_halflife_d"), gp(store, "skip_transient_w")
     events = store.recent_mood_events()
     plays = store.recent_plays_with_ts(limit=limit)
     likes = store.recent_liked_with_ts(limit=limit)
-    if not events and not plays and not likes:
+    skips = store.recent_skips_with_ts(now - 4 * skip_hl * 86400)     # #84: same lookback as facet_leans
+    if not events and not plays and not likes and not skips:
         return None
     mood_hl = gp(store, "mood_halflife_d")
     play_hl, play_w = gp(store, "play_halflife_d"), gp(store, "play_transient_w")
@@ -155,6 +167,9 @@ def centroid_tilt(store, now, V, idx):
 
     _add_dir(plays, play_w, play_hl)
     _add_dir(likes, like_w, like_hl)
+    # #84: a skip subtracts the skipped track's own unit direction, pulling the tilt AWAY from it
+    # (negative w_base reuses the same accumulation the positive sources use).
+    _add_dir(skips, -skip_w, skip_hl)
     n = np.linalg.norm(tilt)
     return tilt / n if n > 0 else None                   # unit direction, or None when nothing accumulated
 
@@ -170,7 +185,8 @@ def audio_centroid_tilt(store, now):
     or quiet user is exactly as today. Audio is sparse and growing: tracks without a content vector
     simply do not contribute, so the tilt is defined by whatever covered tracks the user has played
     (graceful degradation). Decay is per-event and internal (#85); callers apply no external freshness
-    factor, mirroring `centroid_tilt`.
+    factor, mirroring `centroid_tilt`. #84: recent skips contribute too, subtracting the skipped
+    track's own unit direction, same weight/decay as `centroid_tilt`.
 
     This is the producer only. The scorer applies it (a content-space cosine term parallel to the
     collaborative `_apply_mood`); see the wiring note that ships with this change.
@@ -182,6 +198,7 @@ def audio_centroid_tilt(store, now):
     mood_hl = gp(store, "mood_halflife_d")
     play_hl, play_w = gp(store, "play_halflife_d"), gp(store, "play_transient_w")
     like_hl, like_w = gp(store, "like_halflife_d"), gp(store, "like_transient_w")
+    skip_hl, skip_w = gp(store, "skip_halflife_d"), gp(store, "skip_transient_w")
     limit = gp(store, "recent_play_limit")
     tilt = np.zeros(CV.shape[1], dtype=np.float64)
 
@@ -204,5 +221,8 @@ def audio_centroid_tilt(store, now):
 
     _add_dir(store.recent_plays_with_ts(limit=limit), play_w, play_hl)
     _add_dir(store.recent_liked_with_ts(limit=limit), like_w, like_hl)
+    # #84: same lookback rationale as facet_leans/centroid_tilt (4 half-lives); negative weight pulls
+    # the tilt away from the skipped track's own direction.
+    _add_dir(store.recent_skips_with_ts(now - 4 * skip_hl * 86400), -skip_w, skip_hl)
     n = np.linalg.norm(tilt)
     return tilt / n if n > 0 else None

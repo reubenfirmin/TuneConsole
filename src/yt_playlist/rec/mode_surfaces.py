@@ -9,7 +9,7 @@ from collections import Counter
 
 import numpy as np
 
-from yt_playlist.rec import embed, mode_eval, rec_params, recommend, surfaces, transient
+from yt_playlist.rec import embed, layers, mode_eval, rec_params, recommend, surfaces, transient
 
 CARD_SURFACES = ("wheelhouse", "explore", "comfort", "fresh")
 _MIN_CARD = 4          # below this many tracks (even after backfill) a card is dropped, not shown thin
@@ -146,14 +146,29 @@ def thompson_mode_scores(stats, mode_ids, rng) -> dict:
     return out
 
 
-def select_modes(store, modes, leans, epoch, n=4, stats=None) -> list[int]:
+def select_modes(store, modes, leans, epoch, n=4, stats=None, now_posterior=None) -> list[int]:
     """Pick n distinct mode_ids: a DOMINANT chosen by Thompson-sampled pick-through x library share x
-    live mood, then (n-1) pushed apart by centroid distance. Deterministic for fixed (modes, leans,
-    epoch, stats)."""
+    live mood x NOW-layer boost (#88), then (n-1) pushed apart by centroid distance. Deterministic for
+    fixed (modes, leans, epoch, stats, now_posterior).
+
+    `now_posterior` ({mode_id: share} from `layers.now_mode_posterior`, or None) multiplies the
+    dominant draw's context: a mode carrying share `s` of the last `now_window_h` hours' real plays
+    gets `now_boost = 1.0 + now_gain * s`, nudging the rotation toward whatever the listener is doing
+    right now without ever excluding a mode outright. `now_gain` (a live param) is read ONLY when a
+    posterior is present, so a None posterior (the common case: quiet hours, thin evidence, or a caller
+    that doesn't pass one, including `store=None` in tests) touches no param and reproduces the exact
+    pre-#88 behavior, byte-for-byte: no boost, no store access."""
     if not modes:
         return []
     rng = random.Random(epoch)
     cents = {m["mode_id"]: np.asarray(m["centroid"], dtype=np.float64) for m in modes}
+    now_gain = rec_params.get_param(store, "now_gain") if now_posterior else None
+
+    def _now_boost(mid):
+        if not now_posterior:
+            return 1.0
+        return 1.0 + now_gain * now_posterior.get(mid, 0.0)
+
     # #87 Thompson-sampled dominant: sample each mode's pick-through posterior, scale by the same
     # library-share and mood context as before, take the max. The sample's randomness IS the
     # rotation (a big or mood-lifted mode rolls dominant often but not always), and unlike the old
@@ -161,8 +176,8 @@ def select_modes(store, modes, leans, epoch, n=4, stats=None) -> list[int]:
     # modes stay wide and keep getting explored. Zero pick data reproduces the old behavior in
     # expectation (uniform samples scale every mode equally).
     samples = thompson_mode_scores(stats or {}, [m["mode_id"] for m in modes], rng)
-    dominant = max(modes, key=lambda m: samples[m["mode_id"]]
-                   * max(1, m["size"]) * _mode_mood_weight(m, leans))["mode_id"]
+    dominant = max(modes, key=lambda m: samples[m["mode_id"]] * max(1, m["size"])
+                   * _mode_mood_weight(m, leans) * _now_boost(m["mode_id"]))["mode_id"]
     chosen = [dominant]
     remaining = [m["mode_id"] for m in modes if m["mode_id"] != dominant]
     while len(chosen) < min(n, len(modes)):
@@ -233,7 +248,7 @@ def assemble_cards(store, now, epoch) -> list[dict]:
     (wheelhouse, explore, fresh) plus a resolved 4th slot: COMFORT if its pool is credible
     (>= comfort_min_pool), else the TEMPORAL card whose band rotates per epoch (Throwback / Time Flies /
     Recent Picks) over the user's own release-year terciles. Modes are selected by Thompson-sampled
-    pick-through x library share x live mood (#87) and
+    pick-through x library share x live mood (#87), NOW-boosted (#88, see `select_modes`), and
     DEPTH-AWARE assigned (each surface claims the chosen mode it has the most material for, temporal
     depth measured within the epoch's band). Each card is diversity-capped (artist + album) and, EXCEPT
     Comfort, backfilled from its general pool when thin; Comfort shows only real comfort tracks. If a
@@ -247,8 +262,9 @@ def assemble_cards(store, now, epoch) -> list[dict]:
         return []
     leans = transient.facet_leans(store, now)
     n = int(rec_params.get_param(store, "modes_menu_size"))
+    now_posterior = layers.now_mode_posterior(store, now)
     chosen = select_modes(store, modes, leans, epoch, n=max(n, 4),
-                          stats=mode_eval.mode_bandit_stats(store))
+                          stats=mode_eval.mode_bandit_stats(store), now_posterior=now_posterior)
     if not chosen:
         return []
     cap_a = int(rec_params.get_param(store, "modes_artist_cap"))

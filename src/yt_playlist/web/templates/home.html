@@ -97,6 +97,10 @@
     </section>
   </div>
 
+  {# The Takeout nag deliberately escapes the first-sync gate (importing early is the point, #61);
+     everything else keeps waiting for first sync. #}
+  {% include "_partials/takeout_nag.html" %}
+
   {% if sync.last_synced_ago %}
   {% include "_partials/alerts.html" %}
 

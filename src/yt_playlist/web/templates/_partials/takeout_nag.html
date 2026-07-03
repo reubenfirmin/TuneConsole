@@ -1,0 +1,17 @@
+{# #61: the Google Takeout import nag. Deliberately included ungated (no last_sync check) from
+   home.html, because importing early is exactly the point; this file gates only on show_takeout_nag
+   itself, same as any other nag in _partials/alerts.html. #}
+{% if show_takeout_nag %}
+<section class="alerts" aria-label="Needs attention">
+  <div class="alert-card card alert-nudge" id="takeout-nag">
+    <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
+            hx-post="/onboard/takeout/dismiss" hx-target="#takeout-nag" hx-swap="outerHTML swap:200ms">×</button>
+    <span class="alert-cover"><img src="/static/nag/takeout.png" alt="" loading="lazy"
+         onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
+    <div class="alert-body">
+      <span class="alert-title">Import your Google Takeout watch history to jumpstart your taste model. It stays local, nothing leaves your machine.</span>
+      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=import">Import →</a></div>
+    </div>
+  </div>
+</section>
+{% endif %}

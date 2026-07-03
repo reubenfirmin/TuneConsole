@@ -600,6 +600,34 @@ class RecQueryRepo(Repo):
         return {r["k"] for r in rows}
 
     @synchronized
+    def generated_only_play_days(self, group=GENERATED_GROUP) -> set[tuple[int, str]]:
+        """#83 (utc_day, identity_key) pairs where EVERY play_events row for that key on that UTC
+        day carries generated-playlist provenance, so rec_baskets can drop that day's session
+        basket for that key instead of learning co-occurrence from a suggestion the app made to
+        itself. "Generated provenance" = playlist_ytm_id equal to a quarantined generated
+        playlist's ytm id, or that playlist's radio ("RDAMPL" + ytm id). A NULL-playlist play or a
+        play from an ordinary playlist is real listening evidence, so a key/day mixing that with
+        generated plays is conservatively kept OUT of the set (mixed evidence stays, since it's
+        not purely self-generated). UTC day = int(played_at // 86400), matching the store's other
+        day bucketing. Independent of graduation: promoting the playlist stops new generated plays
+        from accruing, but does not retroactively change quarantined history."""
+        excl = self.excluded_playlist_ids(group)
+        if not excl:
+            return set()
+        qs = ",".join("?" * len(excl))
+        ytm_ids = {r["ytm_playlist_id"] for r in self.conn.execute(
+            f"SELECT ytm_playlist_id FROM playlists WHERE id IN ({qs})", list(excl))}
+        if not ytm_ids:
+            return set()
+        generated_ids = ytm_ids | {"RDAMPL" + y for y in ytm_ids}
+        gqs = ",".join("?" * len(generated_ids))
+        rows = self.conn.execute(
+            "SELECT identity_key k, CAST(played_at / 86400 AS INTEGER) day, "
+            f"SUM(CASE WHEN playlist_ytm_id IN ({gqs}) THEN 0 ELSE 1 END) non_generated "
+            "FROM play_events GROUP BY identity_key, day",
+            list(generated_ids)).fetchall()
+        return {(r["day"], r["k"]) for r in rows if r["non_generated"] == 0}
+
     @synchronized
     def catchall_playlist_ids(self, size_floor=_CATCHALL_SIZE_FLOOR) -> set:
         """Playlist ids too large to be a coherent listening context (more than `size_floor` tracks);
@@ -635,16 +663,30 @@ class RecQueryRepo(Repo):
             if r["k"] in good:
                 pbuckets.setdefault(r["g"], set()).add(r["k"])
         out += [list(s) for s in pbuckets.values() if len(s) > 1]
-        # album / artist / session baskets keep their size caps (an over-cap album/session is noise).
+        # album / artist baskets keep their size caps (an over-cap album is noise).
         for grp, cap in (
             ("SELECT album g, identity_key k FROM tracks WHERE album<>''", max_album),
-            ("SELECT artist g, identity_key k FROM tracks WHERE artist<>''", _ARTIST_BASKET_CAP),
-            ("SELECT snapshot_id g, identity_key k FROM history_items", max_session)):
+            ("SELECT artist g, identity_key k FROM tracks WHERE artist<>''", _ARTIST_BASKET_CAP)):
             buckets = {}
             for r in self.conn.execute(grp):
                 if r["k"] in good:
                     buckets.setdefault(r["g"], set()).add(r["k"])
             out += [list(s) for s in buckets.values() if 1 < len(s) <= cap]
+        # session baskets (#83): same size cap, but a key is dropped from a day-snapshot's basket
+        # when that (day, key) is generated-only -- the app never gets to learn co-occurrence from
+        # a suggestion it made to itself. Fetched once, up front, rather than per basket. The day
+        # comes off the snapshot's own taken_at (joined in), not a second table scan for a map.
+        gen_only_days = self.generated_only_play_days()
+        sbuckets: dict = {}
+        for r in self.conn.execute(
+                "SELECT hi.snapshot_id g, hi.identity_key k, hs.taken_at t FROM history_items hi "
+                "JOIN history_snapshots hs ON hs.id=hi.snapshot_id"):
+            if r["k"] not in good:
+                continue
+            if (int(r["t"] // 86400), r["k"]) in gen_only_days:
+                continue
+            sbuckets.setdefault(r["g"], set()).add(r["k"])
+        out += [list(s) for s in sbuckets.values() if 1 < len(s) <= max_session]
         # content baskets: genre FAMILY (meta-genre map §2.1) and year decade
         fam, yr = {}, {}
         for r in self.conn.execute("SELECT genre, mb_year, identity_key k FROM tracks "

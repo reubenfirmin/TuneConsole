@@ -16,6 +16,20 @@ if (!window.__tcBridgeLoaded) {
     }
   };
 
+  // Does this tab's current URL point at the given playlist? Either the watch page's querystring
+  // (?list=<id>, browsing a track within the playlist) or the playlist's own browse page
+  // (/browse/VL<id>) count as "looking at this playlist".
+  const playlistMatches = (playlist) => {
+    if (!playlist) return false;
+    try {
+      const u = new URL(location.href);
+      if (u.searchParams.get("list") === playlist) return true;
+      return u.pathname.includes("browse/VL" + playlist);
+    } catch (e) {
+      return false;
+    }
+  };
+
   // Read/drive YouTube Music's own like/dislike control in the player bar, so rating the current
   // track goes through YTM exactly as a manual click would (no videoId juggling).
   const likeRenderer = () => document.querySelector("ytmusic-player-bar ytmusic-like-button-renderer");
@@ -48,6 +62,20 @@ if (!window.__tcBridgeLoaded) {
       lastNowPlaying = "";
       const np = domNowPlaying();
       if (np) report(np);
+      return;
+    }
+    if (msg.type === "refresh-view") {
+      // Backend edits (rename, art, tracklist) should show up promptly, but the user's verification
+      // glance must never cost them their playback. Only reload if this tab is actually looking at
+      // the edited playlist, and only when nothing is audibly playing.
+      try {
+        if (!playlistMatches(msg.playlist)) return;
+        const video = document.querySelector("video");
+        // Absolute guard: never reload a tab with an in-progress playback. A stale view is fine; a
+        // dropped song is not.
+        if (video && !video.paused) return;
+        location.reload();
+      } catch (e) {}
       return;
     }
     if (msg.type !== "fetch") return;

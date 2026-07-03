@@ -12,6 +12,7 @@ from yt_playlist.providers import enrichment, lastfm, waterfall
 from yt_playlist.rec import journeys, rec_params, recommend
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
+from yt_playlist.library.live_plays import resolve_identity
 
 
 def build(ctx) -> APIRouter:
@@ -34,6 +35,52 @@ def build(ctx) -> APIRouter:
     def _is_generated(pid):
         pl = store.get_playlist(pid)
         return pl is not None and store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP
+
+    def _record_alt_version_events(pid, old_video_id, tracks):
+        # #95: choosing an alternate version off the alternates modal is the user saying "these two
+        # are the same song to me" - future dedupe/preference evidence (see library/player_events.py
+        # KINDS note). Server-written, one row per chosen version, only when after_video_id (the
+        # anchor set exclusively by that modal's form) is present, so a plain suggestion-add never
+        # fires it. Best-effort only: no identity configured yet means nothing to attribute the
+        # event to, so skip silently rather than let it break the route's own response.
+        try:
+            ident = resolve_identity(store, "")
+            if ident is None:
+                return
+            pl = store.get_playlist(pid)
+            if pl is None:
+                return
+            now = now_fn()
+            for t in tracks:
+                new_video_id = t.get("videoId")
+                if not new_video_id:
+                    continue
+                payload = json.dumps({"old": old_video_id, "new": new_video_id})
+                store.record_player_event(ident, "alt_version", new_video_id, None, None,
+                                          pl.ytm_playlist_id, payload, now)
+        except Exception:  # noqa: BLE001  (analytics must never 500 a route whose add succeeded)
+            logger.debug("alt_version event not recorded for playlist %s", pid, exc_info=True)
+
+    def _refresh_ytm_view_id(ctx, ytm_id):
+        # #95 variant taking the YTM id directly, for callers whose local row is already gone by
+        # the time they fire (delete: the id must be captured before the row is removed).
+        try:
+            if ytm_id:
+                ctx.bridge.send_control({"type": "refresh-view", "playlist": ytm_id})
+        except Exception:  # noqa: BLE001
+            logger.debug("refresh-view control not sent for %s", ytm_id, exc_info=True)
+
+    def _refresh_ytm_view(ctx, store, pid):
+        # #95: tell a connected extension to reload the YTM tab if it's sitting on this playlist, so
+        # a server-side edit (rename, track add/remove/reorder) doesn't leave a stale view on screen.
+        # Best-effort only: no extension connected raises, and that must never affect the route's
+        # own response.
+        try:
+            pl = store.get_playlist(pid)
+        except Exception:  # noqa: BLE001
+            return
+        if pl is not None:
+            _refresh_ytm_view_id(ctx, pl.ytm_playlist_id)
 
     def _track_row(request, pid, video_id):
         # Re-render one track's <tr> (the shared swap unit for manual edits and enrich).
@@ -163,6 +210,9 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001
             logger.exception("add-tracks failed for playlist %s", pid)
             return _toast(request, "YouTube returned an unexpected response")
+        _refresh_ytm_view(ctx, store, pid)
+        if after_video_id:
+            _record_alt_version_events(pid, after_video_id, tracks)
         return _refresh()                             # reload so the new tracks drop into the table
 
     @router.post("/playlist/{pid}/enrich")
@@ -282,6 +332,7 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001
             logger.exception("rename of playlist %s failed", pid)
             return _toast(request, "YouTube returned an unexpected response")
+        _refresh_ytm_view(ctx, store, pid)
         return templates.TemplateResponse(request, "_partials/playlist_head.html",
                                           {"pl": store.get_playlist(pid)})
 
@@ -372,6 +423,7 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001
             logger.exception("remove-track failed for playlist %s", pid)
             return _toast(request, "YouTube returned an unexpected response")
+        _refresh_ytm_view(ctx, store, pid)
         return HTMLResponse("")                       # htmx swaps empty -> the row is removed
 
     @router.post("/playlist/{pid}/reorder")
@@ -386,6 +438,7 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001  (the DOM already moved; reload to resync the true order)
             logger.exception("reorder failed for playlist %s", pid)
             return _refresh()
+        _refresh_ytm_view(ctx, store, pid)
         return Response(status_code=204)              # success: order persisted, nothing to swap
 
     @router.post("/playlist/{pid}/promote")
@@ -435,6 +488,7 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001  (errors surface on the reloaded page, as before)
             logger.exception("copy-into %s -> %s failed", ids, target)
             return _toast(request, "Copy failed. See the log.")
+        _refresh_ytm_view(ctx, store, target)   # #95: the TARGET playlist changed on YouTube
         return _refresh()
 
     @router.post("/playlists/delete")
@@ -453,6 +507,10 @@ def build(ctx) -> APIRouter:
                 await asyncio.to_thread(ops.delete, pid)
             except Exception:  # noqa: BLE001  (errors surface on the reloaded page, as before)
                 logger.exception("playlists delete of %s failed", pl.ytm_playlist_id)
+            else:
+                # #95: a YTM tab sitting on the deleted playlist should show it's gone, not a stale
+                # tracklist. The local row is removed by the delete, hence the id-taking variant.
+                _refresh_ytm_view_id(ctx, pl.ytm_playlist_id)
         # The home card's pending-cleanup count/icons come from a cached summary; recompute it now
         # so deleted playlists stop showing as pending cleanups until the next worker rebuild (#73).
         await asyncio.to_thread(recommend.refresh_cleanup, store, now_fn())
