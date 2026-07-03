@@ -5,6 +5,8 @@ from yt_playlist.repos.base import Repo, synchronized
 
 _NOON = 43200            # store each play-date snapshot at noon UTC, so taken_at queries are day-stable
 _EPOCH = datetime.date(1970, 1, 1)
+_LIVE_DEDUP_S = 1800     # #75 same-track re-reports within this window merge (likeStatus updates);
+                         # past it, the same track is a genuine replay and logs a new event
 
 
 def _parse_played_date(played, taken_at) -> float:
@@ -97,16 +99,14 @@ class HistoryRepo(Repo):
     @synchronized
     def reset_play_history(self, identity_id=None) -> None:
         """#58 Clear stored play history so it rebuilds clean from the next sync (the reset a full sync
-        can call). Scoped to one identity, or all when None. Also clears the legacy window cache."""
+        can call). Scoped to one identity, or all when None."""
         if identity_id is None:
             self.conn.execute("DELETE FROM history_items")
             self.conn.execute("DELETE FROM history_snapshots")
-            self.conn.execute("DELETE FROM history_window")
         else:
             self.conn.execute("DELETE FROM history_items WHERE snapshot_id IN "
                               "(SELECT id FROM history_snapshots WHERE identity_id=?)", (identity_id,))
             self.conn.execute("DELETE FROM history_snapshots WHERE identity_id=?", (identity_id,))
-            self.conn.execute("DELETE FROM history_window WHERE identity_id=?", (identity_id,))
         self.conn.commit()
 
     @synchronized
@@ -151,3 +151,36 @@ class HistoryRepo(Repo):
             "GROUP BY hi.identity_key ORDER BY last DESC", (since_ts,)).fetchall()
         keys = [r["k"] for r in rows]
         return keys[:limit] if limit else keys
+
+    @synchronized
+    def record_play_event(self, identity_id, identity_key, video_id, played_at,
+                          playlist_ytm_id=None, like_status=None) -> bool:
+        """#75 Persist one live now-playing report from the extension. The content script re-reports
+        the SAME track when its likeStatus changes, so a report matching the identity's latest event
+        (same key, within _LIVE_DEDUP_S) updates that row (like_status; playlist id only if missing)
+        instead of logging a second play. Returns True when a NEW play event was recorded."""
+        row = self.conn.execute(
+            "SELECT id, identity_key, played_at FROM play_events WHERE identity_id=? "
+            "ORDER BY played_at DESC, id DESC LIMIT 1", (identity_id,)).fetchone()
+        if (row and row["identity_key"] == identity_key
+                and played_at - row["played_at"] < _LIVE_DEDUP_S):
+            self.conn.execute(
+                "UPDATE play_events SET like_status=COALESCE(?, like_status), "
+                "playlist_ytm_id=COALESCE(playlist_ytm_id, ?) WHERE id=?",
+                (like_status, playlist_ytm_id, row["id"]))
+            self.conn.commit()
+            return False
+        self.conn.execute(
+            "INSERT INTO play_events(identity_id, identity_key, video_id, played_at, "
+            "playlist_ytm_id, like_status) VALUES (?,?,?,?,?,?)",
+            (identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status))
+        self.conn.commit()
+        return True
+
+    @synchronized
+    def play_events_since(self, since_ts) -> list[dict]:
+        """#75 Play events at/after since_ts, oldest first."""
+        rows = self.conn.execute(
+            "SELECT identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status "
+            "FROM play_events WHERE played_at>=? ORDER BY played_at, id", (since_ts,)).fetchall()
+        return [dict(r) for r in rows]

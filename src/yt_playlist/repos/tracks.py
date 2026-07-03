@@ -35,6 +35,13 @@ class TrackRepo(Repo):
         return cur.lastrowid
 
     @synchronized
+    def identity_key_for_video(self, video_id) -> str | None:
+        """#91 Map an observed videoId to the library's identity_key (None when not in the library)."""
+        row = self.conn.execute(
+            "SELECT identity_key FROM tracks WHERE video_id=? LIMIT 1", (video_id,)).fetchone()
+        return row["identity_key"] if row else None
+
+    @synchronized
     def known_duration(self, title, artist):
         """A duration (seconds) we already hold for this song under ANY stored row, else None. Lets a
         generated playlist reuse a time we know from one videoId for the same song under another."""

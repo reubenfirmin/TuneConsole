@@ -1,4 +1,5 @@
 """DAO suite for TrackRepo (track rows + genre/year enrichment)."""
+from yt_playlist.util.matching import identity_key
 
 
 def test_upsert_dedupes_by_identity_and_backfills(store):
@@ -62,3 +63,9 @@ def test_facade_delegates(store):
     t = store.upsert_track("v1", "S", "A", "Al", 100)       # legacy store.x() call site
     store.set_track_year(t, "2020")
     assert store.get_track_enrichment(t) == ("", "2020")
+
+
+def test_identity_key_for_video(store):
+    store.tracks.upsert_track("vidX", "Song", "Artist", "", None, True, None, None, None, None)
+    assert store.tracks.identity_key_for_video("vidX") == identity_key("Song", "Artist")
+    assert store.tracks.identity_key_for_video("nope") is None

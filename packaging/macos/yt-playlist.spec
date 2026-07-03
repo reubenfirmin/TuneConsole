@@ -1,6 +1,11 @@
 # PyInstaller spec — builds "YT Playlist.app", a self-contained bundle with Python + all deps.
 # Build with packaging/macos/build.sh (which installs the project + pyinstaller into a venv first).
+import importlib.metadata
 import os
+
+# Version comes from the git tag via hatch-vcs, baked into the installed package metadata — nothing to
+# bump here. Sanitize a dev version (0.1.3.dev3+g...) to plain X.Y.Z for the CFBundle keys.
+_VERSION = importlib.metadata.version("yt-playlist").split(".dev")[0].split("+")[0]
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
@@ -55,10 +60,10 @@ app = BUNDLE(
     name="TuneConsole.app",
     icon=icon,
     bundle_identifier="com.tuneconsole.TuneConsole",
-    version="0.1.4",
+    version=_VERSION,
     info_plist={
-        "CFBundleShortVersionString": "0.1.4",
-        "CFBundleVersion": "0.1.4",
+        "CFBundleShortVersionString": _VERSION,
+        "CFBundleVersion": _VERSION,
         "NSHighResolutionCapable": True,
         # the server has no window; keep it a normal app so it appears in the Dock and can be quit
         "LSBackgroundOnly": False,

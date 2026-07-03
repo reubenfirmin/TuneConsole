@@ -30,14 +30,17 @@ modules:
   - name: yt-playlist
     buildsystem: simple
     build-commands:
-      - pip3 install --no-index --no-deps --prefix=${FLATPAK_DEST} yt_playlist-0.1.4-py3-none-any.whl
+      # Glob the wheel so the version (from the git tag) never has to appear here. The dist/ dir is
+      # copied in below, and must contain exactly one yt_playlist-*.whl (CI/local build it fresh).
+      - pip3 install --no-index --no-deps --prefix=${FLATPAK_DEST} wheel/yt_playlist-*.whl
       - install -Dm755 yt-playlist-launch ${FLATPAK_DEST}/bin/yt-playlist-launch
       - install -Dm644 com.tuneconsole.TuneConsole.desktop ${FLATPAK_DEST}/share/applications/com.tuneconsole.TuneConsole.desktop
       - install -Dm644 com.tuneconsole.TuneConsole.metainfo.xml ${FLATPAK_DEST}/share/metainfo/com.tuneconsole.TuneConsole.metainfo.xml
       - install -Dm644 com.tuneconsole.TuneConsole.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/com.tuneconsole.TuneConsole.png
     sources:
-      - type: file
-        path: ../../dist/yt_playlist-0.1.4-py3-none-any.whl
+      - type: dir
+        path: ../../dist
+        dest: wheel
       - type: file
         path: yt-playlist-launch
       - type: file

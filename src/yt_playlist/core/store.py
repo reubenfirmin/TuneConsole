@@ -15,6 +15,7 @@ from yt_playlist.repos.identities import IdentityRepo
 from yt_playlist.repos.modes import ModesRepo
 from yt_playlist.repos.overlaps import OverlapRepo
 from yt_playlist.repos.playlists import PlaylistRepo
+from yt_playlist.repos.player_events import PlayerEventsRepo
 from yt_playlist.repos.rec import RecRepo
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.search import SearchRepo
@@ -88,11 +89,29 @@ CREATE TABLE IF NOT EXISTS history_items (
   snapshot_id INTEGER NOT NULL REFERENCES history_snapshots(id),
   identity_key TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS history_window (
-  identity_id INTEGER NOT NULL,            -- #49 per-identity cache of the last recently-played window,
-  identity_key TEXT NOT NULL,              -- so a sync records only NEW plays, not the lingering window.
-  PRIMARY KEY (identity_id, identity_key)
+CREATE TABLE IF NOT EXISTS play_events (
+  id INTEGER PRIMARY KEY,
+  identity_id INTEGER NOT NULL REFERENCES identities(id),
+  identity_key TEXT NOT NULL,              -- #75 live now-playing stream: one row per real play,
+  video_id TEXT,                           -- real timestamps (the (track,day) history model stays
+  played_at REAL NOT NULL,                 -- the coarse view every existing consumer reads)
+  playlist_ytm_id TEXT,                    -- provenance: the list= id when played from a playlist
+  like_status TEXT                         -- LIKE | DISLIKE | INDIFFERENT at report time
 );
+CREATE INDEX IF NOT EXISTS ix_play_events_time ON play_events(played_at);
+CREATE TABLE IF NOT EXISTS player_events (
+  id INTEGER PRIMARY KEY,
+  identity_id INTEGER NOT NULL REFERENCES identities(id),
+  kind TEXT NOT NULL,                      -- #91 raw sensor stream: track_exit | ended | state |
+  video_id TEXT,                           -- tick | volume | bye | rate | playlist_edit |
+  position REAL,                           -- feedback | subscription | share_intent
+  duration REAL,
+  playlist_ytm_id TEXT,
+  payload TEXT,                            -- JSON extras per kind (state/volume/shuffle/repeat or url/body/href/action)
+  at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_player_events_at ON player_events(at);
+CREATE INDEX IF NOT EXISTS ix_player_events_kind_at ON player_events(kind, at);
 CREATE TABLE IF NOT EXISTS actions (
   id INTEGER PRIMARY KEY,
   kind TEXT NOT NULL,
@@ -267,6 +286,7 @@ class Store:
         self.charts = ChartsRepo(self)
         self.tracks = TrackRepo(self)
         self.playlists = PlaylistRepo(self)
+        self.player_events = PlayerEventsRepo(self)
         self.discovery = DiscoveryRepo(self)
         self.search = SearchRepo(self)
         self.enrichment = EnrichmentRepo(self)
@@ -274,7 +294,7 @@ class Store:
         self.modes = ModesRepo(self)
         self._repos = (self.overlaps, self.discovery, self.genres, self.settings, self.actions,
                        self.identities, self.history, self.collection, self.rec, self.charts,
-                       self.tracks, self.playlists, self.search, self.enrichment, self.wiki, self.modes)
+                       self.tracks, self.playlists, self.player_events, self.search, self.enrichment, self.wiki, self.modes)
 
     def __getattr__(self, name):
         # Delegate any attribute Store no longer defines to the DAO that owns it. Only hit on a
@@ -342,4 +362,7 @@ class Store:
         pcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(playlists)")}
         if "thumbnail" not in pcols:
             self.conn.execute("ALTER TABLE playlists ADD COLUMN thumbnail TEXT")
+        # #75 the legacy recently-played window cache is gone (live play events + the (track, date)
+        # dedup made it obsolete); drop it from existing databases
+        self.conn.execute("DROP TABLE IF EXISTS history_window")
         self.conn.commit()
