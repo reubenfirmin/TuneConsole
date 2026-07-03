@@ -55,10 +55,10 @@ app = BUNDLE(
     name="TuneConsole.app",
     icon=icon,
     bundle_identifier="com.tuneconsole.TuneConsole",
-    version="0.1.3",
+    version="0.1.4",
     info_plist={
-        "CFBundleShortVersionString": "0.1.3",
-        "CFBundleVersion": "0.1.3",
+        "CFBundleShortVersionString": "0.1.4",
+        "CFBundleVersion": "0.1.4",
         "NSHighResolutionCapable": True,
         # the server has no window; keep it a normal app so it appears in the Dock and can be quit
         "LSBackgroundOnly": False,
