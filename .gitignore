@@ -18,3 +18,10 @@ docs/
 backups/
 logs/
 ppr_shadow_log.jsonl
+
+# Flatpak build output (OSTree repo, bundle repo, builder scratch) — CI regenerates these; never track.
+packaging/flatpak/repo/
+packaging/flatpak/bundle-repo/
+packaging/flatpak/rbuild/
+packaging/flatpak/build-dir/
+packaging/flatpak/.flatpak-builder/
