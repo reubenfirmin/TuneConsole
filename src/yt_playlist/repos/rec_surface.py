@@ -153,6 +153,36 @@ class RecSurfaceRepo(Repo):
         persistent API. Time-window args are ignored; all stored events are returned newest-first."""
         return self.recent_mood_events()
 
+    # --- #87 lane impressions: pure instrumentation for a future lane bandit (rec_lane_impressions,
+    #     defined in core.store SCHEMA since it's a plain append-only log, not surface-owned state) ---
+    @synchronized
+    def record_lane_impressions(self, items, now, prune_before=None) -> None:
+        """Log which lane served each rendered item: items is [(lane, identity_key), ...]. One
+        executemany insert; when prune_before is set, rows with at < prune_before are deleted in the
+        same transaction. No-op on an empty items list. Read by lane_impression_counts."""
+        items = list(items)
+        if not items:
+            return
+        self.conn.executemany(
+            "INSERT INTO rec_lane_impressions(lane, identity_key, at) VALUES (?,?,?)",
+            [(lane, key, now) for lane, key in items])
+        if prune_before is not None:
+            self.conn.execute("DELETE FROM rec_lane_impressions WHERE at < ?", (prune_before,))
+        self.conn.commit()
+
+    @synchronized
+    def lane_impression_counts(self, since=None) -> dict:
+        """{lane: count} of logged impressions, optionally restricted to at >= since. The future
+        lane-bandit's read side; also proof the data lands."""
+        if since is None:
+            rows = self.conn.execute(
+                "SELECT lane, COUNT(*) c FROM rec_lane_impressions GROUP BY lane").fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT lane, COUNT(*) c FROM rec_lane_impressions WHERE at >= ? GROUP BY lane",
+                (since,)).fetchall()
+        return {r["lane"]: r["c"] for r in rows}
+
     # --- per-card rotation (the rec_impressions table, surface='card') ---
     @synchronized
     def bump_card_view(self, card, now) -> int:

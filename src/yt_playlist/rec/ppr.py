@@ -3,8 +3,8 @@
 Run in SHADOW: computed each rebuild and logged alongside the centroid-cosine ranking for a later
 NON-CIRCULAR comparison (does PPR surface better per-mode tracks than content-cosine?). It serves no
 live surface and changes nothing the user sees - it only appends a snapshot to a persistent JSONL log
-so we can revisit in a couple of weeks. The eventual verdict rides on the #60C selection signal once
-enough picks accrue; this shadow log is the qualitative read in the meantime.
+so we can revisit in a couple of weeks. Mode selection now rides on the #60C pick/impression signal
+(#87); this shadow log will inform the eventual PPR verdict for live interleaving.
 """
 import json
 

@@ -1,14 +1,15 @@
 """Taste modes across the Home surfaces (issue #60, Part B).
 
 The worker buckets every surface's candidate pool by nearest taste mode (prepare_bundles); the Home
-request cheaply selects 4 distinct modes by live mood, assigns one per card, and tilts/orders/caps
-within the prepared bucket (assemble_cards). No pool ranking happens on the request."""
+request cheaply selects 4 distinct modes by acceptance-weighted Thompson sampling and live mood
+(#87), assigns one per card, and tilts/orders/caps within the prepared bucket (assemble_cards). No
+pool ranking happens on the request."""
 import random
 from collections import Counter
 
 import numpy as np
 
-from yt_playlist.rec import embed, rec_params, recommend, surfaces, transient
+from yt_playlist.rec import embed, mode_eval, rec_params, recommend, surfaces, transient
 
 CARD_SURFACES = ("wheelhouse", "explore", "comfort", "fresh")
 _MIN_CARD = 4          # below this many tracks (even after backfill) a card is dropped, not shown thin
@@ -133,26 +134,35 @@ def _mode_mood_weight(mode, leans):
     return min(4.0, max(0.05, 1.0 + s / total))
 
 
-def select_modes(store, modes, leans, epoch, n=4) -> list[int]:
-    """Pick n distinct mode_ids: a DOMINANT chosen by (library share x live mood), then (n-1) pushed
-    apart by centroid distance. Deterministic for fixed (modes, leans, epoch)."""
+def thompson_mode_scores(stats, mode_ids, rng) -> dict:
+    """#87 One Beta posterior sample per mode: Beta(1 + picks, 1 + impressions - picks). A mode
+    that gets offered but never picked concentrates low and is served less; an unproven mode's
+    wide Beta(1,1) keeps it explored. The sample replaces the old draw's uniform randomness, so
+    exploration is uncertainty-shaped instead of blind."""
+    out = {}
+    for mid in mode_ids:
+        picks, imps = stats.get(mid, (0, 0))
+        out[mid] = rng.betavariate(1 + picks, 1 + max(0, imps - picks))
+    return out
+
+
+def select_modes(store, modes, leans, epoch, n=4, stats=None) -> list[int]:
+    """Pick n distinct mode_ids: a DOMINANT chosen by Thompson-sampled pick-through x library share x
+    live mood, then (n-1) pushed apart by centroid distance. Deterministic for fixed (modes, leans,
+    epoch, stats)."""
     if not modes:
         return []
     rng = random.Random(epoch)
     cents = {m["mode_id"]: np.asarray(m["centroid"], dtype=np.float64) for m in modes}
-    weights = [(m["mode_id"], max(1, m["size"]) * _mode_mood_weight(m, leans)) for m in modes]
-    # Dominant by a weighted random draw seeded on the epoch: a big / mood-lifted mode rolls dominant
-    # OFTEN but not always, so the dominant rotates across epochs and the menu stays fresh. (A plain
-    # max-weight pick would freeze the whole menu until mood or the rebuild changed.)
-    total = sum(w for _i, w in weights)
-    r = rng.random() * total
-    dominant = weights[-1][0]
-    acc = 0.0
-    for mid, w in weights:
-        acc += w
-        if r < acc:            # standard prefix-sum draw: r in [acc_{i-1}, acc_i) selects item i
-            dominant = mid
-            break
+    # #87 Thompson-sampled dominant: sample each mode's pick-through posterior, scale by the same
+    # library-share and mood context as before, take the max. The sample's randomness IS the
+    # rotation (a big or mood-lifted mode rolls dominant often but not always), and unlike the old
+    # blind draw it is uncertainty-shaped: offered-but-never-picked modes concentrate low, unproven
+    # modes stay wide and keep getting explored. Zero pick data reproduces the old behavior in
+    # expectation (uniform samples scale every mode equally).
+    samples = thompson_mode_scores(stats or {}, [m["mode_id"] for m in modes], rng)
+    dominant = max(modes, key=lambda m: samples[m["mode_id"]]
+                   * max(1, m["size"]) * _mode_mood_weight(m, leans))["mode_id"]
     chosen = [dominant]
     remaining = [m["mode_id"] for m in modes if m["mode_id"] != dominant]
     while len(chosen) < min(n, len(modes)):
@@ -222,7 +232,8 @@ def assemble_cards(store, now, epoch) -> list[dict]:
     """Build the mode-focused Home cards from the prepared bundles. Three always-on surfaces
     (wheelhouse, explore, fresh) plus a resolved 4th slot: COMFORT if its pool is credible
     (>= comfort_min_pool), else the TEMPORAL card whose band rotates per epoch (Throwback / Time Flies /
-    Recent Picks) over the user's own release-year terciles. Modes are selected by live mood and
+    Recent Picks) over the user's own release-year terciles. Modes are selected by Thompson-sampled
+    pick-through x library share x live mood (#87) and
     DEPTH-AWARE assigned (each surface claims the chosen mode it has the most material for, temporal
     depth measured within the epoch's band). Each card is diversity-capped (artist + album) and, EXCEPT
     Comfort, backfilled from its general pool when thin; Comfort shows only real comfort tracks. If a
@@ -236,7 +247,8 @@ def assemble_cards(store, now, epoch) -> list[dict]:
         return []
     leans = transient.facet_leans(store, now)
     n = int(rec_params.get_param(store, "modes_menu_size"))
-    chosen = select_modes(store, modes, leans, epoch, n=max(n, 4))
+    chosen = select_modes(store, modes, leans, epoch, n=max(n, 4),
+                          stats=mode_eval.mode_bandit_stats(store))
     if not chosen:
         return []
     cap_a = int(rec_params.get_param(store, "modes_artist_cap"))

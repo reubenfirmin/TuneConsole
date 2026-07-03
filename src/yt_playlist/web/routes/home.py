@@ -107,6 +107,21 @@ def _carded(store, lane, label, items, now):
 _CARD_LABELS = {"wheelhouse": "More in your wheelhouse", "explore": "From your catalog",
                 "comfort": "Comfort listening", "fresh": "Fresh songs"}
 
+# #87 retention only needs to outlive the future lane-bandit's evidence window, not forever.
+_LANE_IMPRESSION_RETAIN_D = 30
+
+
+def _record_lane_impressions(store, items, now):
+    """#87 pure instrumentation: log which lane served each item actually rendered on a Home card, for
+    a future lane bandit. Never affects lane selection/weighting. Items are ForYouItem (wheelhouse/
+    explore/comfort) or the Fresh dict shape, both of which carry lane + key."""
+    if not items:
+        return
+    pairs = [((it.get("lane") if isinstance(it, dict) else it.lane),
+              (it.get("key") if isinstance(it, dict) else it.key)) for it in items]
+    store.record_lane_impressions(pairs, now,
+                                  prune_before=now - _LANE_IMPRESSION_RETAIN_D * 86400)
+
 
 def _one_card(store, card, now):
     """Build a single Home card's proto (its pool, rotated at the card's CURRENT epoch). Used by the
@@ -129,7 +144,11 @@ def _one_card(store, card, now):
         # route), not here, so the cold-start fallback path doesn't double-count fresh tracks.
     else:
         return None
-    return _carded(store, card, _CARD_LABELS[card], items, now) if items else None
+    if not items:
+        return None
+    p = _carded(store, card, _CARD_LABELS[card], items, now)
+    _record_lane_impressions(store, p["tracks"], now)   # #87: log what was actually rendered
+    return p
 
 
 def _epoch(store, card):
@@ -315,6 +334,11 @@ def build(ctx) -> APIRouter:
                 store.modes.log_impressions(epoch, [(c["lane"], c["mode_id"]) for c in cards], now)
             except Exception:  # noqa: BLE001 - logging must never break the card render
                 ctx.logger.warning("mode-impression log failed", exc_info=True)
+            # #87 lane impressions for the PRIMARY serving path too (the _one_card hook only covers
+            # per-card refresh and the pre-rebuild fallback); without this, the future lane bandit's
+            # evidence would be skewed toward refresh clicks.
+            for p in protos:
+                _record_lane_impressions(store, p["tracks"], now)
         else:
             # Fallback before the first rebuild: the pre-B per-card builders, so the row is never empty.
             protos = [p for p in (_one_card(store, name, now) for name in

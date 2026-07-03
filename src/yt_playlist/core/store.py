@@ -255,6 +255,14 @@ CREATE TABLE IF NOT EXISTS rec_mode_picks (
   mode_id     INTEGER NOT NULL,
   created_at  REAL NOT NULL
 );
+-- #87 raw log of which lane served each rendered Home item: the future lane-bandit's training data
+CREATE TABLE IF NOT EXISTS rec_lane_impressions (
+  id INTEGER PRIMARY KEY,
+  lane TEXT NOT NULL,                      -- #87 which home lane served the item
+  identity_key TEXT NOT NULL,              -- what was shown (future lane-bandit success join)
+  at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_lane_impressions_at ON rec_lane_impressions(at);
 """
 
 # Row dataclasses live in repos.models (avoids a Store<->repo cycle); re-exported here so existing
