@@ -37,8 +37,8 @@ modules:
     sources:
       - type: file
         url: https://github.com/reubenfirmin/TuneConsole/releases/download/v0.1.2/yt_playlist-0.1.2-py3-none-any.whl
-        sha256: REPLACE_WITH_RELEASE_WHEEL_SHA256   # curl -sL <url above> | sha256sum  (after the release builds)
+        sha256: 1b24a7433308d832f68d1f3b709b9816eb733749ea6530586e97c9e7bcc8c973
       - type: git
         url: https://github.com/reubenfirmin/TuneConsole.git
         tag: v0.1.2
-        commit: REPLACE_WITH_TAG_COMMIT            # git rev-parse v0.1.2  (after the tag is pushed)
+        commit: df3dca180b1f5235229599e42f5880497f4e894e

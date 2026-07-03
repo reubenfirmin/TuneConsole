@@ -1,4 +1,6 @@
 from fastapi.testclient import TestClient
+from yt_playlist.rec import recommend
+from yt_playlist.rec.actions import CLEANUP_SURFACE
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 
@@ -127,12 +129,14 @@ class _FakeRuntime:
         self.applied = identities
         self._configured = True
 
-def test_unconfigured_redirects_to_setup(store):
+def test_unconfigured_home_still_renders(store):
+    # The forced /setup redirect is gone by design: a default identity is auto-provisioned and the
+    # extension pairs live, so the dashboard is reachable before setup. /setup stays available.
     rt = _FakeRuntime(store, configured=False)
     app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.get("/", follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"] == "/setup"
+    assert r.status_code == 200                          # home renders, no redirect
     assert c.get("/setup").status_code == 200            # setup page itself is reachable
 
 def test_setup_post_applies_and_redirects(store):
@@ -387,6 +391,37 @@ def test_delete_empty_playlist(store, monkeypatch, tmp_path):
     r = c.post("/playlist/delete-empty", data={"playlist": empty})
     assert r.status_code == 200 and r.text.strip() == ""          # empty -> htmx removes the row
     assert client.deleted == ["PLempty"] and store.get_playlist(empty) is None
+
+def test_inline_dupe_delete_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_path):
+    # /dupe/delete returns JSON without a page reload, so it must refresh the cached cleanup
+    # summary itself or the home card keeps showing the deleted playlist as pending (issue #73).
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(4)]
+    tr = [_track(f"v{i}", f"S{i}", "X") for i in range(4)]
+    keep = store.upsert_playlist(iid, "KEEP", "Storm", 4, "h", 1.0); store.set_playlist_tracks(keep, t)
+    dele = store.upsert_playlist(iid, "DEL", "Storm", 4, "h", 1.0); store.set_playlist_tracks(dele, t)
+    recommend.refresh_cleanup(store, 1.0)
+    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 2
+    client = FakeClient(tracks={"KEEP": tr, "DEL": tr})
+    c = _client(store, lambda: {iid: client})
+    r = c.post("/dupe/delete", data={"source": dele, "target": keep})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 0      # survivor is no longer a dupe
+
+
+def test_delete_empty_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_path):
+    # /playlist/delete-empty just removes the row (no reload), so it must refresh the cache too.
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    empty = store.upsert_playlist(iid, "PLempty", "jazz 2", 0, "h", 1.0)
+    recommend.refresh_cleanup(store, 1.0)
+    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 1      # the empty playlist
+    c = _client(store, lambda: {iid: FakeClient()})
+    r = c.post("/playlist/delete-empty", data={"playlist": empty})
+    assert r.status_code == 200
+    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 0
+
 
 def test_delete_empty_refuses_if_not_empty(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))

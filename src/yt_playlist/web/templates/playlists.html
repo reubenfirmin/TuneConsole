@@ -27,13 +27,14 @@
     <div class="pl-actionbar" x-show="count() > 0" x-cloak x-transition.scale.origin.bottom>
       <strong x-text="count() + ' selected'"></strong>
       <button type="button" class="btn-sm" :disabled="count() < 2"
-              @click="merge()" title="Open the merge editor with the selected playlists">Merge →</button>
+              @click="merge()" title="Open the merge editor with the selected playlists">Merge</button>
       <button type="button" class="btn-sm" @click="openCopy()"
               :title="count() > 1 ? 'Combine the selected playlists into a new one' : 'Duplicate the selected playlist'"
-              x-text="count() > 1 ? 'Combine to new…' : 'Copy…'"></button>
+              x-text="count() > 1 ? 'Combine' : 'Copy'"></button>
       <button type="button" class="btn-sm" @click="openCopyInto()"
-              title="Copy the selected playlists' songs into an existing playlist">Copy into…</button>
-      <button type="button" class="btn-sm" @click="openGroup()">Group…</button>
+              title="Copy the selected playlists' songs into an existing playlist">Copy into</button>
+      <button type="button" class="btn-sm" @click="openGroup()"
+              title="Assign the selected playlists to a named group">Group</button>
       <button type="button" class="btn-danger btn-sm" @click="delModal = true">Delete</button>
       <button type="button" class="btn-ghost btn-sm" @click="selectAll(false)">Clear</button>
     </div>
@@ -41,7 +42,8 @@
 
   {% macro pl_row(promote=False) %}
   <tr :class="{ selrow: sel[r.id] }">
-    <td><input type="checkbox" :checked="sel[r.id]" @change="toggle(r.id)" style="width:auto"></td>
+    <td class="selcell" @click="rowCheck(r, $event)">
+      <input type="checkbox" :checked="sel[r.id]" @click.stop="rowCheck(r, $event)"></td>
     <td>
       <span class="pl-cover">
         <img class="pl-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
@@ -84,7 +86,7 @@
   <div class="card">
     <table>
       <thead><tr>
-        <th style="width:2rem"></th>
+        <th style="width:2.4rem"></th>
         <th class="sorth" @click="sortBy('title')">Playlist<span x-text="ind('title')"></span></th>
         <th class="sorth" style="width:8rem" @click="sortBy('group')">Group<span x-text="ind('group')"></span></th>
         <th class="sorth num" style="width:4.5rem" @click="sortBy('count')">Songs<span x-text="ind('count')"></span></th>
@@ -169,15 +171,18 @@
   <!-- delete modal -->
   <template x-teleport="body">
     <div class="modal-backdrop" x-show="delModal" x-cloak x-transition.opacity
-         @click="delModal = false" @keydown.escape.window="delModal = false">
+         @click="busy || (delModal = false)" @keydown.escape.window="busy || (delModal = false)">
       <div class="modal" @click.stop x-transition.scale.origin.center>
         <h3>Delete <span x-text="count()"></span> playlist<span x-show="count() !== 1">s</span>?</h3>
         <p>Each is backed up first and can be undone from <strong>Actions</strong>. System playlists
            (e.g. Liked Music, Episodes for Later) can't be deleted from YouTube, so they're just
            <strong>hidden</strong> from this tab instead.</p>
         <div class="modal-actions">
-          <button type="button" class="btn-ghost" @click="delModal = false">Cancel</button>
-          <button type="button" class="btn-danger" @click="remove()">Delete them</button>
+          <button type="button" class="btn-ghost" :disabled="busy" @click="delModal = false">Cancel</button>
+          <button type="button" class="btn-danger" :disabled="busy" @click="remove()">
+            <span class="spinner" x-show="busy" x-cloak></span>
+            <span x-text="busy ? 'Deleting…' : 'Delete them'"></span>
+          </button>
         </div>
       </div>
     </div>

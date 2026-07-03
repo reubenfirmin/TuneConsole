@@ -7,12 +7,27 @@ def _stub_ytmusic(monkeypatch):
     monkeypatch.setattr(identities, "YTMusic", lambda *a, **k: object())        # build_client provider
 
 
-def test_load_unconfigured_when_no_config(store, tmp_path):
+def test_load_provisions_default_identity_on_first_run(store, monkeypatch, tmp_path):
+    # First run (no config yet): load() seeds a usable "main" identity so the app works
+    # immediately; the /setup wizard is only for multi-identity users now.
+    _stub_ytmusic(monkeypatch)
     rt = Runtime(store, tmp_path / "config.toml", tmp_path)
     rt.load()
+    assert rt.configured is True
+    assert (tmp_path / "config.toml").exists()                 # default config written
+    assert [i.label for i in store.get_identities()] == ["main"]
+    assert len(rt.clients()) == 1
+
+
+def test_load_unconfigured_when_config_unusable(store, tmp_path):
+    # A broken config leaves the runtime unconfigured (setup shown) rather than crashing,
+    # and the client provider degrades to {} instead of raising.
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("this is not [[ valid toml")
+    rt = Runtime(store, cfg, tmp_path)
+    rt.load()
     assert rt.configured is False
-    with pytest.raises(RuntimeError):
-        rt.clients()
+    assert rt.clients() == {}
 
 
 def test_apply_setup_configures_and_builds_provider(store, monkeypatch, tmp_path):
@@ -49,11 +64,14 @@ def test_apply_setup_configures_identity_independent_of_credential(store, monkey
     assert rt.configured is True
 
 
-def test_load_reloads_after_external_config(store, monkeypatch, tmp_path):
+def test_apply_setup_reloads_over_provisioned_default(store, monkeypatch, tmp_path):
     _stub_ytmusic(monkeypatch)
     rt = Runtime(store, tmp_path / "config.toml", tmp_path)
     rt.load()
-    assert rt.configured is False
+    assert rt.configured is True and len(rt.clients()) == 1    # auto-provisioned "main"
     rt.apply_setup([
-        {"label": "main", "credential_ref": "browser.json", "brand_account_id": None, "is_master": True}])
-    assert rt.configured is True   # load() ran inside apply_setup and swapped the provider in
+        {"label": "main", "credential_ref": "browser.json", "brand_account_id": None, "is_master": True},
+        {"label": "brand", "credential_ref": "browser.json", "brand_account_id": "UC9", "is_master": False},
+    ])
+    assert rt.configured is True
+    assert len(rt.clients()) == 2   # load() ran inside apply_setup and swapped the provider in

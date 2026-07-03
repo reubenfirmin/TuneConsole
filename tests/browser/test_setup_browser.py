@@ -46,7 +46,17 @@ def test_setup_pairing_tab_shows_autoconnect_and_waiting_status(live_setup_app, 
     # Pairing is seamless now: no token to paste, just an auto-connecting extension.
     expect(page.get_by_text("it connects automatically")).to_be_visible()
     # No extension connected yet: GET /bridge/status polls back {"connected": false}
-    expect(page.get_by_text("Waiting for the extension to connect")).to_be_visible()
+    expect(page.get_by_text("Extension not connected")).to_be_visible()
+
+
+def test_setup_tab_deep_link_opens_enrichment(live_setup_app, page):
+    # #69: the home Last.fm card lands on the Enrichment tab directly, not on Pairing.
+    page.goto(f"{live_setup_app}/setup?tab=enrichment")
+    expect(page.get_by_role("heading", name="Metadata providers")).to_be_visible()
+    expect(page.get_by_text("Pair the browser extension", exact=True)).to_be_hidden()
+    # Last.fm signup guidance: the callback URL is optional and the shared secret is irrelevant.
+    expect(page.get_by_text("Callback URL")).to_be_visible()
+    expect(page.get_by_text("Shared secret")).to_be_visible()
 
 
 def test_setup_identities_tab_accepts_manual_label(live_setup_app, page):

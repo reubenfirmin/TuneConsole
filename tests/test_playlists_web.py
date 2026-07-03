@@ -10,6 +10,8 @@ Store-mutation coverage moved here from the JSON-based test_web.py tests
 """
 from fastapi.testclient import TestClient
 
+from yt_playlist.rec import recommend
+from yt_playlist.rec.actions import CLEANUP_SURFACE
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 
@@ -46,6 +48,28 @@ def test_delete_removes_and_refreshes(store, monkeypatch, tmp_path):
     r = c.post("/playlists/delete", data={"ids": str(a)})
     assert _refreshes(r)
     assert store.get_playlist(a) is None and fc.deleted == ["PLA"]
+
+
+def test_delete_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_path):
+    # Two identical playlists are a pending cleanup (exact duplicates); the home card reads a
+    # CACHED count/thumbnails. Deleting one must refresh that cache so the card's pending-cleanup
+    # icons involving the deleted playlist disappear (issue #73).
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    iid = store.upsert_identity("main", "cred", None, True)
+    a = store.upsert_playlist(iid, "PLA", "Rock", 4, "h", 1.0)
+    b = store.upsert_playlist(iid, "PLB", "Rock copy", 4, "h", 1.0)
+    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(4)]
+    store.set_playlist_tracks(a, t)
+    store.set_playlist_tracks(b, t)
+    recommend.refresh_cleanup(store, 1.0)
+    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 2      # both dupes pending
+    fc = FakeClient(tracks={"PLA": [_track(f"v{i}", f"S{i}", "X") for i in range(4)]})
+    c = _client(store, lambda: {iid: fc})
+
+    r = c.post("/playlists/delete", data={"ids": str(a)})
+    assert _refreshes(r)
+    assert store.get_playlist(a) is None
+    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 0      # survivor is no longer a dupe
 
 
 def test_delete_hides_system_playlist_and_refreshes(store, monkeypatch, tmp_path):

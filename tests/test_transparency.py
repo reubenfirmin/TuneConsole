@@ -12,10 +12,14 @@ def _client(store):
 
 
 def test_no_alerts_when_nothing_to_do(store):
-    # When nothing needs attention, the alerts section renders nothing at all (an empty "all clear"
-    # note is just noise, see _partials/alerts.html).
+    # When everything is triaged, the alerts section renders nothing at all (an empty "all clear"
+    # note is just noise, see _partials/alerts.html). The onboarding nudges (welcome, Last.fm key,
+    # identities merge) count as "to do" until dismissed, so dismiss them here.
     _, c = _client(store)
     store.set_setting("last_sync_at", "1000.0")     # not stale
+    store.set_setting("intro_dismissed", "1")
+    store.set_setting("identities_nudge_dismissed", "1")
+    store.set_setting("lastfm_nudge_dismissed_at", "1000.0")   # snoozed for 30 days
     html = c.get("/").text
     assert "alert-card" not in html
     assert "All clear" not in html

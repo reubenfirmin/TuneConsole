@@ -5,6 +5,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from yt_playlist.library.merge_order import track_positions
+from yt_playlist.rec import recommend
 
 
 def build(ctx) -> APIRouter:
@@ -210,6 +211,8 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001
             logger.exception("inline dupe delete failed")
             return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response."})
+        # no page reload on this path, so keep the home card's cached pending-cleanup icons honest
+        recommend.refresh_cleanup(store, now_fn())
         return JSONResponse({"ok": True, "deleted": title})
 
     @router.post("/dupe/keep-one")
@@ -233,6 +236,8 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001
             logger.exception("delete-empty failed")
             return _toast(request, "YouTube returned an unexpected response.")
+        # no page reload on this path, so keep the home card's cached pending-cleanup icons honest
+        recommend.refresh_cleanup(store, now_fn())
         return HTMLResponse("")   # htmx fades + removes the row
 
     @router.get("/dupe/{a}/{b}")

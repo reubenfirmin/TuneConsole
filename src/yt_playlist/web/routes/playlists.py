@@ -453,6 +453,9 @@ def build(ctx) -> APIRouter:
                 await asyncio.to_thread(ops.delete, pid)
             except Exception:  # noqa: BLE001  (errors surface on the reloaded page, as before)
                 logger.exception("playlists delete of %s failed", pl.ytm_playlist_id)
+        # The home card's pending-cleanup count/icons come from a cached summary; recompute it now
+        # so deleted playlists stop showing as pending cleanups until the next worker rebuild (#73).
+        await asyncio.to_thread(recommend.refresh_cleanup, store, now_fn())
         return _refresh()
 
     return router

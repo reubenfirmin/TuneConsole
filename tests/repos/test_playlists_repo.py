@@ -41,6 +41,18 @@ def test_remove_playlist_prunes_links_keeps_group(store):
     assert store.playlists.get_playlist_groups() == {"PX": "Faves"}               # group survives
 
 
+def test_remove_playlist_prunes_cleanup_dismissals(store):
+    iid = store.upsert_identity("me", "c", None, True)
+    p = store.playlists.upsert_playlist(iid, "PX", "Gone", 0, "h", 0.0)
+    store.ignore_cleanup("PX", "empty", 1.0)
+    store.ignore_cleanup("PY", "tiny", 1.0)                    # other playlist, must survive
+    store.ignore_merge("sig-px", ["PX", "PY"], 1.0)
+    store.ignore_merge("sig-other", ["PY", "PZ"], 1.0)         # doesn't involve PX, must survive
+    store.playlists.remove_playlist(p)
+    assert store.get_cleanup_ignored() == {"tiny": {"PY"}}
+    assert store.get_ignored_merge_sigs() == {"sig-other"}
+
+
 def test_hide_and_groups(store):
     store.playlists.hide_playlist("P1")
     assert store.playlists.get_hidden_playlists() == {"P1"}
