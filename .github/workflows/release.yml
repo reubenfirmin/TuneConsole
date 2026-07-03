@@ -1,6 +1,7 @@
-# On a `v*` tag, build the Python wheel and attach it to the GitHub Release. Flathub's submission
-# manifest (packaging/flathub/) fetches this wheel by URL, and it's the same artifact the CLI/uv
-# install uses. The macOS .dmg is produced separately by macos.yml.
+# On a `v*` tag, build the release artifacts and attach them to the GitHub Release:
+#   - the Python wheel (also what the CLI/uv install and the Flathub manifest use)
+#   - a single-file Flatpak bundle (TuneConsole.flatpak) for the self-hosted Linux install
+# The macOS .dmg is produced separately by macos.yml.
 name: Release artifacts
 
 on:
@@ -22,3 +23,27 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.whl
+
+  flatpak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build the wheel the manifest installs
+        run: uv build --wheel
+      - name: Install flatpak + flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+      - name: Build the app and export a single-file bundle
+        working-directory: packaging/flatpak
+        run: |
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse \
+            --repo=repo --force-clean build-dir com.tuneconsole.TuneConsole.yaml
+          flatpak build-bundle repo ../../TuneConsole.flatpak com.tuneconsole.TuneConsole \
+            --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
+      - name: Attach the flatpak bundle to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TuneConsole.flatpak

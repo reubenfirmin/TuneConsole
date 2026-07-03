@@ -28,7 +28,9 @@
           <div class="provider-key-edit" x-show="editing" x-cloak>
             <p class="section-note">Free key from
               <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>:
-              paste the <strong>API key</strong>. Stored locally.</p>
+              paste the <strong>API key</strong> here (stored locally). On their form, leave
+              <strong>Callback URL</strong> blank (it isn't needed), and ignore the
+              <strong>Shared secret</strong> it shows you: only the API key matters.</p>
             <div class="btn-row">
               <input type="text" x-model="val" placeholder="API key" autocomplete="off" spellcheck="false"
                      @keydown.enter.prevent="save()">

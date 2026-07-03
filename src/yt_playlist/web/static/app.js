@@ -275,6 +275,27 @@ function playlistsTab(rows) {
     selected() { return this.rows.filter(r => this.sel[r.id]); },
     count() { return this.selected().length; },
     toggle(id) { this.sel[id] = !this.sel[id]; },
+    lastPicked: null,
+    // every visible row id in visual order: the Generated card first (unless collapsed), then the table
+    visibleIds() {
+      const gen = this.collapsed.Generated ? [] : this.genRows();
+      return [...gen, ...this.sections().flatMap(s => s.rows)].map(r => r.id);
+    },
+    // checkbox (or its cell) clicked: shift extends the anchor row's state across the visible range
+    rowCheck(r, ev) {
+      if (ev && ev.shiftKey && this.lastPicked != null && this.lastPicked !== r.id) {
+        const ids = this.visibleIds();
+        const i = ids.indexOf(this.lastPicked), j = ids.indexOf(r.id);
+        if (i !== -1 && j !== -1) {
+          const on = !!this.sel[this.lastPicked];
+          ids.slice(Math.min(i, j), Math.max(i, j) + 1).forEach(id => { this.sel[id] = on; });
+          this.lastPicked = r.id;
+          return;
+        }
+      }
+      this.toggle(r.id);
+      this.lastPicked = r.id;
+    },
     sortBy(key) {
       if (this.sortKey === key) { this.sortDir = -this.sortDir; }
       else { this.sortKey = key; this.sortDir = ['count', 'listens', 'last'].includes(key) ? -1 : 1; }
@@ -356,7 +377,14 @@ function playlistsTab(rows) {
     copy() { htmx.ajax('POST', '/playlists/copy', { values: { ids: this.copyIds.join(','), name: this.copyName } }); },
     copyInto() { htmx.ajax('POST', '/playlists/copy-into', { values: { ids: this.copyIds.join(','), target: this.copyIntoTarget } }); },
     group() { htmx.ajax('POST', '/playlists/group', { values: { ids: this.selected().map(r => r.id).join(','), name: this.groupName } }); },
-    remove() { htmx.ajax('POST', '/playlists/delete', { values: { ids: this.selected().map(r => r.id).join(',') } }); },
+    // Delete keeps the modal up with a spinner: one remote YouTube call per playlist, so a batch
+    // can take a while. `busy` blocks a second submit; success ends in a full page reload.
+    remove() {
+      if (this.busy) return;
+      this.busy = true;
+      htmx.ajax('POST', '/playlists/delete', { values: { ids: this.selected().map(r => r.id).join(',') } })
+        .catch(() => { this.busy = false; });
+    },
   };
 }
 function moveTab(fromId, toId) {

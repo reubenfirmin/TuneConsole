@@ -117,7 +117,7 @@ def test_find_and_add_alternate_version(live_playlist_app, page):
     page.goto(f"{base}/playlist/{pid}")
     row = page.get_by_role("row").filter(has_text="Song A")
     row.get_by_title("More actions").click()
-    row.get_by_role("button", name="Find alternate versions…").click()
+    row.get_by_role("button", name="Find alternate versions").click()
     expect(page.get_by_text("Song A (Live)")).to_be_visible()        # htmx-rendered search results
     page.locator('#alt-results input[name="track"]').first.check()
     page.get_by_role("button", name="Add to playlist").click()
@@ -126,12 +126,17 @@ def test_find_and_add_alternate_version(live_playlist_app, page):
 
 
 def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):
+    # Enrichment is one waterfall button now (the header's "Enrich" icon runs every enabled
+    # provider in order); isolate MusicBrainz and stub its lookup.
     import yt_playlist.providers.musicbrainz as mb
-    monkeypatch.setattr(mb, "enrich",
-                        lambda title, artist: ("Electronic", "1998") if title == "Song B" else (None, None))
+    from tests.conftest import only_provider
+    monkeypatch.setattr(mb, "enrich_full",
+                        lambda title, artist: ("Electronic", "1998", None) if title == "Song B"
+                        else (None, None, None))
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    only_provider(live_playlist_app["store"], "musicbrainz")
     page.goto(f"{base}/playlist/{pid}")
-    page.get_by_role("button", name="Enrich via MusicBrainz").click()
+    page.get_by_role("button", name="Enrich", exact=True).click()
     row = page.get_by_role("row").filter(has_text="Song B")
     expect(row.get_by_text("Electronic")).to_be_visible(timeout=5000)   # live SSE cell update
     expect(row.get_by_text("1998")).to_be_visible()

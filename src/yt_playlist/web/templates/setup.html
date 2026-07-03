@@ -127,15 +127,17 @@
 
 <script>
 function setupForm(rows, masterIdx, configured) {
-  // Tabs (Pairing / Identities) are pure client state. The pairing indicator polls
+  // Tabs (Pairing / Identities) are pure client state. ?tab=identities|enrichment deep-links a tab
+  // (the home nudge cards use it); anything else lands on Pairing. The pairing indicator polls
   // GET /bridge/status every couple seconds so it flips to connected the moment the extension
   // pairs, no reload needed. Alpine calls init() automatically since it's a method on the
   // x-data object.
+  const wanted = new URLSearchParams(location.search).get('tab');
   return {
     rows: rows,
     masterIdx: masterIdx,
     configured: configured,
-    tab: 'browser',
+    tab: ['identities', 'enrichment'].includes(wanted) ? wanted : 'browser',
     connected: false,
     init() {
       const poll = () => fetch('/bridge/status').then(r => r.json())

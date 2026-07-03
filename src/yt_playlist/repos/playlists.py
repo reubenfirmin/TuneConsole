@@ -1,4 +1,6 @@
 """PlaylistRepo: playlists, their track membership/ordering, groups, and hidden flags."""
+import json
+
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.models import Playlist
 
@@ -104,10 +106,13 @@ class PlaylistRepo(Repo):
 
     @synchronized
     def remove_playlist(self, playlist_id) -> None:
-        """Drop a playlist, its track links, and any overlap prefs that referenced it.
+        """Drop a playlist, its track links, and any cleanup/overlap prefs that referenced it.
 
         Pruning the suppress/ignore/keep rows keeps stale pairs (one side deleted) from
-        lingering in the Hidden/Ignored sections.
+        lingering in the Hidden/Ignored sections. The same goes for the cleanup dismissals:
+        a per-playlist empty/tiny ignore is meaningless once the playlist is gone, and an
+        ignored merge that lost a member can never match its signature again (the cleanup
+        page would hide it forever with no way to restore it).
 
         We deliberately KEEP the playlist's group assignment (playlist_group, keyed by the YouTube
         id): groups are user curation that can't be reconstructed from YouTube, and a playlist that
@@ -124,6 +129,13 @@ class PlaylistRepo(Repo):
                 self.conn.execute("DELETE FROM suppressed_overlaps WHERE a=? OR b=?", (ytm, ytm))
                 self.conn.execute("DELETE FROM overlap_ignored WHERE ytm=?", (ytm,))
                 self.conn.execute("DELETE FROM overlap_kept WHERE a=? OR b=?", (ytm, ytm))
+                self.conn.execute("DELETE FROM cleanup_ignored WHERE ytm=?", (ytm,))
+                # members is a JSON list of ytm ids, so match in Python rather than by signature
+                stale = [r["signature"]
+                         for r in self.conn.execute("SELECT signature, members FROM ignored_merges")
+                         if ytm in json.loads(r["members"])]
+                for sig in stale:
+                    self.conn.execute("DELETE FROM ignored_merges WHERE signature=?", (sig,))
 
     @synchronized
     def get_playlists(self) -> list[Playlist]:

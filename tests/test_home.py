@@ -33,7 +33,8 @@ def test_home_is_default_route(store):
     assert r.status_code == 200
     assert 'id="home"' in r.text          # Home shell marker
     assert "home-status" in r.text         # live status card is present
-    assert "Library synced not yet" in r.text   # never-synced freshness line
+    assert "Library synced" not in r.text  # freshness line only appears after a first sync
+    assert 'class="presync card"' in r.text     # never-synced: the pre-sync placeholder instead
 
 
 def test_home_rediscovers_unplayed_saved_albums(store):
@@ -89,7 +90,7 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     assert "Gem" in cards                        # the track appears in the card row
 
     home = c.get("/").text
-    assert 'class="home-status card"' in home    # live status card present on Home
+    assert 'class="home-status card is-live"' in home    # live status card present on Home
 
     # The status card is Home-only (never on the other tabs)
     assert "home-status" not in c.get("/playlists").text
@@ -163,14 +164,14 @@ def test_home_status_card_replaces_sync_buttons(store):
     c = _client(store)
     html = c.get("/").text
     assert "homeStatus()" in html            # the status card's Alpine component
-    assert "Library synced not yet" in html  # never-synced freshness line
+    assert "Library synced" not in html      # no awkward "not yet" line before the first sync
     assert "Sync now" not in html and "Full sync" not in html   # no manual sync buttons
     assert "Sync plays" not in html and "sync-toggle" not in html
-    assert "hs-refresh" in html              # the small unobtrusive power-user refresh link
 
     store.set_setting("last_sync_at", "1000")   # after a first sync (now_fn -> 1000.0)
     html = c.get("/").text
     assert "Library synced" in html and "not yet" not in html
+    assert "hs-refresh" in html              # the small unobtrusive power-user refresh link
 
 
 def test_presync_shows_recs_placeholder_not_feed(store):
@@ -183,7 +184,7 @@ def test_presync_shows_recs_placeholder_not_feed(store):
 
     html = c.get("/").text
     assert 'class="presync card"' in html                                  # placeholder shown
-    assert "we'll start getting you recommendations here" in html          # the copy
+    assert "recommendations will start appearing here" in html             # the copy
     assert "More in your wheelhouse" not in html                           # feed hidden pre-sync
 
     store.set_setting("last_sync_at", "1000")
