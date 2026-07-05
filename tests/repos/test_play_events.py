@@ -65,3 +65,44 @@ def test_identities_are_independent_for_dedup(store):
     assert store.record_play_event(iid1, "a|x", "v1", 1000.0) is True
     assert store.record_play_event(iid2, "a|x", "v1", 1010.0) is True
     assert len(store.play_events_since(0)) == 2
+
+
+# --- #93v2 exclude_list_ids: the machine-queued-radio-plays-are-not-mood-evidence exclusion. ---
+
+def _seed_exclusion_fixture(store):
+    """One play with radio provenance, one with a different (deliberately-pressed) playlist's
+    provenance, one with no provenance at all (a direct search/album play)."""
+    iid = store.upsert_identity("me", "c", None, True)
+    store.record_play_event(iid, "radio|x", "v1", 1000.0, playlist_ytm_id="PLRADIO")
+    store.record_play_event(iid, "other|y", "v2", 1010.0, playlist_ytm_id="PLOTHER")
+    store.record_play_event(iid, "none|z", "v3", 1020.0, playlist_ytm_id=None)
+    return iid
+
+
+def test_exclude_list_ids_drops_only_radio_provenance_rows(store):
+    _seed_exclusion_fixture(store)
+    evs = store.play_events_since(0, exclude_list_ids={"PLRADIO"})
+    keys = {e["identity_key"] for e in evs}
+    assert keys == {"other|y", "none|z"}          # radio-provenance row dropped
+
+
+def test_exclude_list_ids_keeps_null_provenance_rows(store):
+    _seed_exclusion_fixture(store)
+    # Excluding EVERY playlist id in play (including the "other" one) still keeps the NULL row:
+    # no provenance means the play cannot be attributed to any machine-queued playlist.
+    evs = store.play_events_since(0, exclude_list_ids={"PLRADIO", "PLOTHER"})
+    assert {e["identity_key"] for e in evs} == {"none|z"}
+
+
+def test_exclude_list_ids_keeps_other_generated_playlist_rows(store):
+    _seed_exclusion_fixture(store)
+    evs = store.play_events_since(0, exclude_list_ids={"PLRADIO"})
+    assert any(e["identity_key"] == "other|y" for e in evs)
+
+
+def test_empty_exclusion_is_byte_identical_to_no_exclusion_arg(store):
+    _seed_exclusion_fixture(store)
+    baseline = store.play_events_since(0)
+    assert store.play_events_since(0, exclude_list_ids=None) == baseline
+    assert store.play_events_since(0, exclude_list_ids=[]) == baseline
+    assert store.play_events_since(0, exclude_list_ids=set()) == baseline

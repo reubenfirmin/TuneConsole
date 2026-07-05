@@ -13,11 +13,12 @@ from yt_playlist.repos.rec_surface import RecSurfaceRepo
 def test_recrepo_is_a_facade_over_three_focused_daos(store):
     # The former 40-method god class is split by responsibility; RecRepo composes the parts and
     # delegates, so model/surface/query methods all resolve through the one facade object.
+    import pytest
     assert isinstance(store.rec.model, RecModelRepo)        # learned model
     assert isinstance(store.rec.surface, RecSurfaceRepo)    # serving surfaces
     assert isinstance(store.rec.query, RecQueryRepo)        # library reads + candidate generators
     store.rec.set_weight("lane:explore", 1.1)               # -> model, via facade __getattr__
-    assert store.rec.get_weights()["lane:explore"] == 1.1
+    assert store.rec.get_weights()["lane:explore"] == pytest.approx(1.1)
     assert store.rec.tracks_total() == 0                    # -> query, via facade __getattr__
     assert store.rec.get_proposals("discover") is None      # -> surface, via facade __getattr__
 
@@ -59,14 +60,17 @@ def test_tracks_total_replaces_raw_sql(store):
 # --- the learned-model methods folded in from the former god class ---
 
 def test_weights_nudge_set_reset(store):
+    # #85 nudge_weight/get_weights need a shared `now` so read-time reversion doesn't drift the
+    # assertion between the write and the read (they'd otherwise both default to real wall-clock time).
+    import pytest
     dao = RecRepo(store)
-    assert dao.get_weights() == {}                       # missing axis = prior 1.0 (empty map)
-    up = dao.nudge_weight("lane:deep_cut", 2.0)
-    assert 1.0 < up <= 3.0 and dao.get_weights()["lane:deep_cut"] == up
-    dao.set_weight("lane:explore", 0.5)
-    assert dao.get_weights()["lane:explore"] == 0.5
+    assert dao.get_weights(now=1000.0) == {}              # missing axis = prior 1.0 (empty map)
+    up = dao.nudge_weight("lane:deep_cut", 2.0, now=1000.0)
+    assert 1.0 < up <= 3.0 and dao.get_weights(now=1000.0)["lane:deep_cut"] == pytest.approx(up)
+    dao.set_weight("lane:explore", 0.5, now=1000.0)
+    assert dao.get_weights(now=1000.0)["lane:explore"] == pytest.approx(0.5)
     dao.reset_weights()
-    assert dao.get_weights() == {}
+    assert dao.get_weights(now=1000.0) == {}
 
 
 def test_feedback_suppression_and_mutes(store):
@@ -90,8 +94,10 @@ def test_vectors_roundtrip(store):
 
 
 def test_folded_methods_delegate_via_facade(store):
+    import pytest
     store.set_weight("lane:rotation", 1.2)               # legacy store.x() call site
-    assert store.get_weights()["lane:rotation"] == 1.2
+    # Use pytest.approx to handle floating point precision from reversion calculations
+    assert store.get_weights()["lane:rotation"] == pytest.approx(1.2)
     assert store.rec_vectors_count() == 0
 
 

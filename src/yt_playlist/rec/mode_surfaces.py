@@ -1,17 +1,36 @@
 """Taste modes across the Home surfaces (issue #60, Part B).
 
 The worker buckets every surface's candidate pool by nearest taste mode (prepare_bundles); the Home
-request cheaply selects 4 distinct modes by live mood, assigns one per card, and tilts/orders/caps
-within the prepared bucket (assemble_cards). No pool ranking happens on the request."""
+request cheaply selects 4 distinct modes by acceptance-weighted Thompson sampling and live mood
+(#87), assigns one per card, and tilts/orders/caps within the prepared bucket (assemble_cards). No
+pool ranking happens on the request."""
 import random
 from collections import Counter
 
 import numpy as np
 
-from yt_playlist.rec import embed, rec_params, recommend, surfaces, transient
+from yt_playlist.rec import embed, layers, mode_eval, rec_params, recommend, surfaces, transient
 
 CARD_SURFACES = ("wheelhouse", "explore", "comfort", "fresh")
 _MIN_CARD = 4          # below this many tracks (even after backfill) a card is dropped, not shown thin
+
+_PPR_TAIL = 1 << 30    # sort sentinel: a candidate absent from the PPR ranking sorts after all ranked ones
+
+
+def _ranker_for(epoch, mode_id, share) -> str:
+    """Deterministic A/B coin per (epoch, mode): 'ppr' with probability `share`, else 'cosine'. Seeded
+    with an integer (str seeds are per-process-randomized), so the same card resolves to the same ranker
+    across processes and re-renders of the epoch."""
+    seed = (int(epoch) * 1_000_003 + int(mode_id)) & 0x7FFFFFFF
+    return "ppr" if random.Random(seed).random() < share else "cosine"
+
+
+def _order_key(ranker, ppr_pos, leans):
+    """Sort key for a card's candidates: ascending PPR position for the 'ppr' arm (unknown keys last),
+    else the existing descending mood-tilt for the 'cosine' arm. Both return ascending-sortable values."""
+    if ranker == "ppr":
+        return lambda d: ppr_pos.get(d.get("key"), _PPR_TAIL)
+    return lambda d: -_tilt_key(d, leans)
 
 
 def _item_dict(it) -> dict:
@@ -82,6 +101,14 @@ def prepare_bundles(store, now) -> dict:
     cuts = ([int(np.percentile(yvals, 33)), int(np.percentile(yvals, 66))]
             if len(yvals) >= 30 else None)
     payload["_meta"] = {"comfort_pool": len(pools["comfort"]), "year_cuts": cuts}
+    # #57 per-mode PPR ordering, precomputed for the A/B in-mode ranker. Best-effort: a failure leaves
+    # cards on the existing ranker (assemble_cards falls back when a mode has no _ppr entry).
+    try:
+        from yt_playlist.rec import ppr
+        rankings = ppr.mode_rankings(store)
+        payload["_ppr"] = {str(mid): rankings.get(mid, []) for mid in mode_ids}
+    except Exception:  # noqa: BLE001 - PPR precompute must never break bundle prep
+        payload["_ppr"] = {}
     store.put_proposals("mode_bundles", payload, now)
     return payload
 
@@ -133,26 +160,50 @@ def _mode_mood_weight(mode, leans):
     return min(4.0, max(0.05, 1.0 + s / total))
 
 
-def select_modes(store, modes, leans, epoch, n=4) -> list[int]:
-    """Pick n distinct mode_ids: a DOMINANT chosen by (library share x live mood), then (n-1) pushed
-    apart by centroid distance. Deterministic for fixed (modes, leans, epoch)."""
+def thompson_mode_scores(stats, mode_ids, rng) -> dict:
+    """#87 One Beta posterior sample per mode: Beta(1 + picks, 1 + impressions - picks). A mode
+    that gets offered but never picked concentrates low and is served less; an unproven mode's
+    wide Beta(1,1) keeps it explored. The sample replaces the old draw's uniform randomness, so
+    exploration is uncertainty-shaped instead of blind."""
+    out = {}
+    for mid in mode_ids:
+        picks, imps = stats.get(mid, (0, 0))
+        out[mid] = rng.betavariate(1 + picks, 1 + max(0, imps - picks))
+    return out
+
+
+def select_modes(store, modes, leans, epoch, n=4, stats=None, now_posterior=None) -> list[int]:
+    """Pick n distinct mode_ids: a DOMINANT chosen by Thompson-sampled pick-through x library share x
+    live mood x NOW-layer boost (#88), then (n-1) pushed apart by centroid distance. Deterministic for
+    fixed (modes, leans, epoch, stats, now_posterior).
+
+    `now_posterior` ({mode_id: share} from `layers.now_mode_posterior`, or None) multiplies the
+    dominant draw's context: a mode carrying share `s` of the last `now_window_h` hours' real plays
+    gets `now_boost = 1.0 + now_gain * s`, nudging the rotation toward whatever the listener is doing
+    right now without ever excluding a mode outright. `now_gain` (a live param) is read ONLY when a
+    posterior is present, so a None posterior (the common case: quiet hours, thin evidence, or a caller
+    that doesn't pass one, including `store=None` in tests) touches no param and reproduces the exact
+    pre-#88 behavior, byte-for-byte: no boost, no store access."""
     if not modes:
         return []
     rng = random.Random(epoch)
     cents = {m["mode_id"]: np.asarray(m["centroid"], dtype=np.float64) for m in modes}
-    weights = [(m["mode_id"], max(1, m["size"]) * _mode_mood_weight(m, leans)) for m in modes]
-    # Dominant by a weighted random draw seeded on the epoch: a big / mood-lifted mode rolls dominant
-    # OFTEN but not always, so the dominant rotates across epochs and the menu stays fresh. (A plain
-    # max-weight pick would freeze the whole menu until mood or the rebuild changed.)
-    total = sum(w for _i, w in weights)
-    r = rng.random() * total
-    dominant = weights[-1][0]
-    acc = 0.0
-    for mid, w in weights:
-        acc += w
-        if r < acc:            # standard prefix-sum draw: r in [acc_{i-1}, acc_i) selects item i
-            dominant = mid
-            break
+    now_gain = rec_params.get_param(store, "now_gain") if now_posterior else None
+
+    def _now_boost(mid):
+        if not now_posterior:
+            return 1.0
+        return 1.0 + now_gain * now_posterior.get(mid, 0.0)
+
+    # #87 Thompson-sampled dominant: sample each mode's pick-through posterior, scale by the same
+    # library-share and mood context as before, take the max. The sample's randomness IS the
+    # rotation (a big or mood-lifted mode rolls dominant often but not always), and unlike the old
+    # blind draw it is uncertainty-shaped: offered-but-never-picked modes concentrate low, unproven
+    # modes stay wide and keep getting explored. Zero pick data reproduces the old behavior in
+    # expectation (uniform samples scale every mode equally).
+    samples = thompson_mode_scores(stats or {}, [m["mode_id"] for m in modes], rng)
+    dominant = max(modes, key=lambda m: samples[m["mode_id"]] * max(1, m["size"])
+                   * _mode_mood_weight(m, leans) * _now_boost(m["mode_id"]))["mode_id"]
     chosen = [dominant]
     remaining = [m["mode_id"] for m in modes if m["mode_id"] != dominant]
     while len(chosen) < min(n, len(modes)):
@@ -222,7 +273,8 @@ def assemble_cards(store, now, epoch) -> list[dict]:
     """Build the mode-focused Home cards from the prepared bundles. Three always-on surfaces
     (wheelhouse, explore, fresh) plus a resolved 4th slot: COMFORT if its pool is credible
     (>= comfort_min_pool), else the TEMPORAL card whose band rotates per epoch (Throwback / Time Flies /
-    Recent Picks) over the user's own release-year terciles. Modes are selected by live mood and
+    Recent Picks) over the user's own release-year terciles. Modes are selected by Thompson-sampled
+    pick-through x library share x live mood (#87), NOW-boosted (#88, see `select_modes`), and
     DEPTH-AWARE assigned (each surface claims the chosen mode it has the most material for, temporal
     depth measured within the epoch's band). Each card is diversity-capped (artist + album) and, EXCEPT
     Comfort, backfilled from its general pool when thin; Comfort shows only real comfort tracks. If a
@@ -236,13 +288,17 @@ def assemble_cards(store, now, epoch) -> list[dict]:
         return []
     leans = transient.facet_leans(store, now)
     n = int(rec_params.get_param(store, "modes_menu_size"))
-    chosen = select_modes(store, modes, leans, epoch, n=max(n, 4))
+    now_posterior = layers.now_mode_posterior(store, now)
+    chosen = select_modes(store, modes, leans, epoch, n=max(n, 4),
+                          stats=mode_eval.mode_bandit_stats(store), now_posterior=now_posterior)
     if not chosen:
         return []
     cap_a = int(rec_params.get_param(store, "modes_artist_cap"))
     cap_al = int(rec_params.get_param(store, "modes_album_cap"))
     allb = bundles.get("all", {})
     meta = bundles.get("_meta", {})
+    ppr_map = bundles.get("_ppr", {})
+    ab_share = float(rec_params.get_param(store, "ppr_ab_share"))
 
     # Resolve the 4th slot. Comfort needs a credible pool; otherwise the temporal card takes the slot
     # (when the library has enough year data), its band chosen by the epoch.
@@ -272,12 +328,12 @@ def assemble_cards(store, now, epoch) -> list[dict]:
 
     cards, seen = [], set()
 
-    def _card_for(surf, mid):
+    def _card_for(surf, mid, ranker, ppr_pos):
         """Build one card for (surface, mode), or return (None, bucket) when it is too thin. Reads the
         running `seen` set from the enclosing scope."""
         bucket = _bucket(mid, surf)
         items = [d for d in bucket if d.get("key") and d["key"] not in seen]
-        items.sort(key=lambda d: -_tilt_key(d, leans))
+        items.sort(key=_order_key(ranker, ppr_pos, leans))
         items = _diversify(items, cap_a, cap_al)
         if surf != "comfort" and len(items) < PROTO_SIZE:   # Comfort is NEVER backfilled (#63 credibility)
             taken = {d["key"] for d in items}
@@ -285,13 +341,14 @@ def assemble_cards(store, now, epoch) -> list[dict]:
             if surf == "temporal" and year_cuts is not None:
                 pool = [d for d in pool if _in_band(d.get("year"), band, year_cuts[0], year_cuts[1])]
             extra = [d for d in pool if d.get("key") and d["key"] not in seen and d["key"] not in taken]
-            extra.sort(key=lambda d: -_tilt_key(d, leans))
+            extra.sort(key=_order_key(ranker, ppr_pos, leans))
             items = _diversify(items + extra, cap_a, cap_al)
         items = items[:PROTO_SIZE]
         if len(items) < _MIN_CARD:                          # credibility gate: too thin to show
             return None, bucket
         label = _BAND_LABELS[band] if surf == "temporal" else _CARD_LABELS[surf]
-        return {"lane": surf, "label": label, "mode_id": mid, "tracks": items}, bucket
+        return {"lane": surf, "label": label, "mode_id": mid, "ranker": ranker,
+                "tracks": items}, bucket
 
     def _commit(card, bucket):
         # Block the ENTIRE considered bucket (rendered + diversity-dropped), not just the rendered rows,
@@ -304,7 +361,11 @@ def assemble_cards(store, now, epoch) -> list[dict]:
         mid = assign.get(surf)
         if mid is None:
             continue
-        card, bucket = _card_for(surf, mid)
+        ranker = _ranker_for(epoch, mid, ab_share)
+        ppr_pos = {k: i for i, k in enumerate(ppr_map.get(str(mid), []))}
+        if ranker == "ppr" and not ppr_pos:   # no PPR data for this mode: order and label honestly
+            ranker = "cosine"
+        card, bucket = _card_for(surf, mid, ranker, ppr_pos)
         if card is not None:
             _commit(card, bucket)
             continue
@@ -317,7 +378,11 @@ def assemble_cards(store, now, epoch) -> list[dict]:
             avail = sorted((m for m in chosen if m not in used),
                            key=lambda m: -len(_bucket(m, "temporal")))   # deepest band bucket first
             for tmid in avail:
-                tcard, tbucket = _card_for("temporal", tmid)
+                tranker = _ranker_for(epoch, tmid, ab_share)
+                tpos = {k: i for i, k in enumerate(ppr_map.get(str(tmid), []))}
+                if tranker == "ppr" and not tpos:   # no PPR data for this mode: order and label honestly
+                    tranker = "cosine"
+                tcard, tbucket = _card_for("temporal", tmid, tranker, tpos)
                 if tcard is not None:
                     _commit(tcard, tbucket)
                     break

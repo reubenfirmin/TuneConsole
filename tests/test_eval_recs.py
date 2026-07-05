@@ -48,6 +48,54 @@ def test_temporal_recall_recovers_recent_plays_from_history(store):
     assert res["recall"] == 1.0               # all recovered in the top-8 by the context centroid
 
 
+def test_temporal_recall_excludes_generated_only_held_plays(store):
+    # #83 closing the last circular path: a held-out play the app CAUSED (played only from a
+    # quarantined generated playlist, per play_events provenance) must not count as a successful
+    # prediction. Keys with organic evidence in the window (mixed, or no play_events rows at all,
+    # since day-model rows carry no provenance) stay: same conservatism as the baskets filter.
+    from yt_playlist.repos.rec_query import GENERATED_GROUP
+    iid = _two_cluster_playlists(store)
+    day, t_recent = 86400, 1_000_000.0
+    store.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
+    store.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+    store.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
+    store.set_playlist_group("PLGEN", GENERATED_GROUP)
+    # cutoff = 1_000_000 - 5*86400 = 568_000; all provenance rows below are inside the window.
+    store.record_play_event(iid, identity_key("A6", "AB"), "a6", 999_000.0, playlist_ytm_id="PLGEN")
+    store.record_play_event(iid, identity_key("A7", "AB"), "a7", 998_000.0, playlist_ytm_id="PLGEN")
+    # A5 is MIXED evidence: one generated play plus one organic (no-playlist) play, spaced beyond
+    # the 30-minute live-dedup merge window so they land as two distinct rows. It must stay held.
+    store.record_play_event(iid, identity_key("A5", "AB"), "a5", 997_000.0, playlist_ytm_id="PLGEN")
+    store.record_play_event(iid, identity_key("A5", "AB"), "a5", 990_000.0, playlist_ytm_id=None)
+
+    res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
+
+    assert res["generated_excluded"] == 2     # A6, A7 dropped
+    assert res["trials"] == 2                 # A4 (no provenance rows) and A5 (mixed) remain
+    assert res["recall"] == 1.0
+
+
+def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store):
+    # When EVERY held-out play is app-caused, the honest answer is "no usable split", never a
+    # recall score computed over zero real plays.
+    from yt_playlist.repos.rec_query import GENERATED_GROUP
+    iid = _two_cluster_playlists(store)
+    day, t_recent = 86400, 1_000_000.0
+    store.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
+    store.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+    store.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
+    store.set_playlist_group("PLGEN", GENERATED_GROUP)
+    for i in range(4, 8):
+        store.record_play_event(iid, identity_key(f"A{i}", "AB"), f"a{i}", 990_000.0 + i * 3600,
+                                playlist_ytm_id="PLGEN")
+
+    res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
+
+    assert res["recall"] is None
+    assert res["generated_excluded"] == 4
+    assert res["reason"] == "insufficient temporal split"
+
+
 def test_temporal_recall_none_without_vectors(store):
     store.upsert_identity("main", "cred", None, True)
     assert eval_recs.temporal_recall(store)["recall"] is None

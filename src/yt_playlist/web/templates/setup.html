@@ -18,6 +18,8 @@
             @click="tab = 'identities'" :aria-selected="tab === 'identities'">Identities</button>
     <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'enrichment' }"
             @click="tab = 'enrichment'" :aria-selected="tab === 'enrichment'">Enrichment</button>
+    <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'import' }"
+            @click="tab = 'import'" :aria-selected="tab === 'import'">Import</button>
   </div>
 
 <form method="post" action="/setup" x-ref="form">
@@ -110,7 +112,7 @@
     </div>
   </div>
 
-  <div class="setup-actions" x-show="tab !== 'enrichment'" x-cloak>
+  <div class="setup-actions" x-show="tab === 'browser' || tab === 'identities'" x-cloak>
     <span class="muted" x-show="connected" x-cloak style="margin-right:auto">✓ Extension connected</span>
     <button type="submit" class="setup-save">Save</button>
   </div>
@@ -121,6 +123,56 @@
     <div class="card">
       <h2 class="section" style="margin-top:0">Metadata providers</h2>
       {% include "_partials/enrichment_panel.html" %}
+    </div>
+  </div>
+
+  {# ── Tab 4: Import YouTube history (Google Takeout) ────────────────────────────────── #}
+  <div class="tab-panel" role="tabpanel" x-show="tab === 'import'" x-cloak>
+    <div class="card">
+      <h2 class="section" style="margin-top:0">Import YouTube history (Google Takeout)</h2>
+      {# On a successful import the route retargets the htmx swap at this whole block, replacing
+         the instructions + form with the result card. Errors keep the narrower default target
+         (#takeout-import-result) so the form survives for a retry. #}
+      <div id="takeout-import-block">
+      <p class="section-note">The live sync only sees new plays going forward. Upload your Google
+        Takeout <code class="mono">watch-history.json</code> to backfill your full listening
+        history. Everything is processed locally on this machine: the file never leaves it.</p>
+      <details class="advanced" style="margin-bottom:1rem">
+        <summary>How to export</summary>
+        <ul class="section-note" style="margin:0;padding-left:1.2rem">
+          <li>Go to <a href="https://takeout.google.com" target="_blank"
+            rel="noopener">takeout.google.com</a></li>
+          <li>Click <strong>Deselect all</strong></li>
+          <li>Select only <strong>YouTube and YouTube Music</strong></li>
+          <li>Click <strong>All YouTube data included</strong></li>
+          <li><strong>Deselect all</strong>, then select <strong>history</strong> only</li>
+          <li>Click <strong>Multiple formats</strong>, scroll down to <strong>History</strong>, click
+            the menu at the right where it says <strong>HTML</strong>, and choose
+            <strong>JSON</strong></li>
+          <li>Export, then upload the downloaded <code class="mono">takeout-*.zip</code> here as is
+            (or the <code class="mono">watch-history.json</code> from inside it)</li>
+        </ul>
+      </details>
+      <form hx-post="/import/takeout" hx-target="#takeout-import-result" hx-swap="innerHTML"
+            hx-encoding="multipart/form-data" hx-disabled-elt="find button">
+        <div x-data="{ fname: '' }" style="display:flex;align-items:center;gap:.6rem;position:relative">
+          <label class="btn-ghost btn-sm" style="cursor:pointer;margin:0">
+            Choose file
+            <!-- visually hidden rather than display:none, so the browser can still anchor the
+                 required-field validation bubble to the input -->
+            <input type="file" name="file" accept=".json,.zip,application/json,application/zip" required
+                   style="position:absolute;opacity:0;width:1px;height:1px;pointer-events:none"
+                   @change="fname = $event.target.files.length ? $event.target.files[0].name : ''">
+          </label>
+          <span class="section-note mono" style="margin:0"
+                x-text="fname || 'no file selected'"></span>
+        </div>
+        <div class="btn-row" style="margin-top:.8rem">
+          <button type="submit" class="btn-sm">Import history</button>
+        </div>
+      </form>
+      <div id="takeout-import-result"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -137,7 +189,7 @@ function setupForm(rows, masterIdx, configured) {
     rows: rows,
     masterIdx: masterIdx,
     configured: configured,
-    tab: ['identities', 'enrichment'].includes(wanted) ? wanted : 'browser',
+    tab: ['identities', 'enrichment', 'import'].includes(wanted) ? wanted : 'browser',
     connected: false,
     init() {
       const poll = () => fetch('/bridge/status').then(r => r.json())

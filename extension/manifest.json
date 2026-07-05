@@ -37,6 +37,12 @@
     },
     {
       "matches": ["https://music.youtube.com/*"],
+      "js": ["observer_main.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://music.youtube.com/*"],
       "js": ["nowplaying_main.js"],
       "world": "MAIN",
       "run_at": "document_idle"

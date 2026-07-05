@@ -8,9 +8,9 @@
 {% endif %}
 
 {% if temporal.recall is not none %}
-<div><strong>{{ '%.0f'|format(temporal.recall * 100) }}%</strong><span>temporal recall@{{ temporal.k }} (next {{ temporal.holdout_days }}d of plays, {{ temporal.trials }} held out)</span></div>
+<div><strong>{{ '%.0f'|format(temporal.recall * 100) }}%</strong><span>temporal recall@{{ temporal.k }} (holdout: {{ holdout_days }}d, {{ temporal.trials }} held out{% if temporal.generated_excluded %}, {{ temporal.generated_excluded }} self-generated excluded{% endif %})</span></div>
 {% else %}
-<div><strong>-</strong><span>temporal recall (needs more history)</span></div>
+<div><strong>-</strong><span>temporal recall (needs more history, holdout: {{ holdout_days }}d)</span></div>
 {% endif %}
 
 {% if proj.recall is not none %}

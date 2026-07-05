@@ -3,42 +3,64 @@
 Owns the rec_weights / rec_feedback / rec_vectors tables (created in store.py's central SCHEMA).
 Split out of the former monolithic RecRepo so each rec concern is its own focused DAO.
 """
+import time
+
 from yt_playlist.repos.base import Repo, synchronized
 
 # Learned blend weights live in [_WEIGHT_MIN, _WEIGHT_MAX] around the 1.0 prior: the floor stops a run
 # of negative feedback from disabling an axis outright (a 0 weight would never win the for_you fair
-# queue), the ceiling stops one axis from swamping the blend. After every nudge the weight is pulled
-# _WEIGHT_SHRINK of the way back toward 1.0, a gentle mean-reversion so stale learning decays instead
-# of compounding forever.
+# queue), the ceiling stops one axis from swamping the blend. Weights mean-revert toward 1.0 over time
+# (see _reverted below) rather than shrinking a flat amount on every nudge, so stale learning decays
+# but reinforced preferences hold.
 _WEIGHT_MIN, _WEIGHT_MAX = 0.2, 3.0
-_WEIGHT_SHRINK = 0.05
+
+
+def _reverted(weight, updated_at, now, halflife_d):
+    """#85 time-proportional mean reversion toward the 1.0 prior: the gap halves every halflife_d
+    days of NO reinforcement. A NULL updated_at (legacy row) reverts nothing until its next nudge
+    stamps it. Replaces the old flat 5%-per-nudge shrink, which eroded stable preferences at the
+    same rate as noise."""
+    if updated_at is None or now is None:
+        return weight
+    age_d = max(0.0, (now - updated_at) / 86400.0)
+    keep = 0.5 ** (age_d / float(halflife_d))
+    return 1.0 + (weight - 1.0) * keep
 
 
 class RecModelRepo(Repo):
     # --- learned blend weights ---
     @synchronized
-    def get_weights(self) -> dict:
-        """Learned blend weights by axis (missing axis = prior 1.0)."""
-        return {r["axis"]: r["weight"] for r in self.conn.execute("SELECT axis, weight FROM rec_weights")}
+    def get_weights(self, now=None, revert_halflife_d=60.0) -> dict:
+        """Learned blend weights by axis (missing axis = prior 1.0), with time-proportional reversion
+        toward 1.0 applied at read time (non-persisting: the stored value is untouched)."""
+        now = time.time() if now is None else now
+        return {r["axis"]: _reverted(r["weight"], r["updated_at"], now, revert_halflife_d)
+                for r in self.conn.execute("SELECT axis, weight, updated_at FROM rec_weights")}
 
     @synchronized
-    def nudge_weight(self, axis, factor, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX) -> float:
-        """Multiply an axis weight by factor (clamped), then shrink slightly toward the 1.0 prior."""
-        row = self.conn.execute("SELECT weight FROM rec_weights WHERE axis=?", (axis,)).fetchone()
-        w = max(lo, min(hi, (row["weight"] if row else 1.0) * factor))
-        w = w + (1.0 - w) * _WEIGHT_SHRINK               # mean-revert _WEIGHT_SHRINK of the way back to 1.0
-        self.conn.execute("INSERT INTO rec_weights(axis, weight) VALUES (?, ?) "
-                          "ON CONFLICT(axis) DO UPDATE SET weight=excluded.weight", (axis, w))
+    def nudge_weight(self, axis, factor, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX, now=None, revert_halflife_d=60.0) -> float:
+        """Revert the stored weight for elapsed time since its last nudge, then multiply by factor
+        (clamped), then persist the result with updated_at=now."""
+        now = time.time() if now is None else now
+        row = self.conn.execute("SELECT weight, updated_at FROM rec_weights WHERE axis=?", (axis,)).fetchone()
+        base = _reverted(row["weight"], row["updated_at"], now, revert_halflife_d) if row else 1.0
+        w = max(lo, min(hi, base * factor))
+        self.conn.execute("INSERT INTO rec_weights(axis, weight, updated_at) VALUES (?, ?, ?) "
+                          "ON CONFLICT(axis) DO UPDATE SET weight=excluded.weight, updated_at=excluded.updated_at",
+                          (axis, w, now))
         self.conn.commit()
         return w
 
     @synchronized
-    def set_weight(self, axis, weight, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX) -> None:
+    def set_weight(self, axis, weight, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX, now=None) -> None:
         """Manual override (Taste Model page). Clamped to the same [lo, hi] band as nudge_weight so a
-        stray 0/negative can't silently disable a for_you lane (its fair-queue ratio would never win)."""
+        stray 0/negative can't silently disable a for_you lane (its fair-queue ratio would never win).
+        A manual override is fresh evidence; it re-stamps the reversion clock."""
+        now = time.time() if now is None else now
         w = max(lo, min(hi, float(weight)))
-        self.conn.execute("INSERT INTO rec_weights(axis, weight) VALUES (?, ?) "
-                          "ON CONFLICT(axis) DO UPDATE SET weight=excluded.weight", (axis, w))
+        self.conn.execute("INSERT INTO rec_weights(axis, weight, updated_at) VALUES (?, ?, ?) "
+                          "ON CONFLICT(axis) DO UPDATE SET weight=excluded.weight, updated_at=excluded.updated_at",
+                          (axis, w, now))
         self.conn.commit()
 
     @synchronized
@@ -107,20 +129,96 @@ class RecModelRepo(Repo):
             "SELECT item_key, until, created_at FROM rec_feedback WHERE kind='dislike' "
             "ORDER BY created_at DESC").fetchall()
 
-    # --- Likes (captured during sync; positive transient signal + graduation, idempotent) ---
+    # --- Likes (positive graduation signal; transient participation depends on provenance) ---
+    # Provenance (stored in the like row's `reason` column):
+    #   'action': observed live through the extension (player likeStatus or an observed rate call).
+    #             The event time is real, so these keep full transient participation.
+    #   'sync':   discovered by the library sync's bulk rated map. YTM reports no like-time, so
+    #             created_at is only first-sight time; these must NOT feed the transient model and
+    #             graduate into the permanent model only, at the low sync-like weight.
     @synchronized
-    def record_like(self, identity_key, now) -> bool:
-        """Persist a first-seen like (surface='like'). Returns True iff newly created, so the caller
-        feeds transient/graduation exactly once. Idempotent on re-sync. Mirrors record_dislike."""
-        return self._record_once("like", identity_key, "like", None, now)
+    def record_like(self, identity_key, now, provenance="sync") -> bool:
+        """Persist a like (surface='like', reason=provenance). Returns True iff newly created, so the
+        caller feeds graduation exactly once. Idempotent on re-sync. If the like already exists with
+        'sync' provenance and is re-observed as an 'action', the row is UPGRADED to action provenance
+        (never downgraded) and False is still returned: an upgrade is not a new like."""
+        row = self.conn.execute(
+            "SELECT reason FROM rec_feedback WHERE surface='like' AND item_key=? AND scope='' "
+            "AND kind='like'", (identity_key,)).fetchone()
+        if row:
+            if provenance == "action" and row["reason"] != "action":
+                self.conn.execute(
+                    "UPDATE rec_feedback SET reason='action' WHERE surface='like' AND item_key=? "
+                    "AND scope='' AND kind='like'", (identity_key,))
+                self.conn.commit()
+            return False
+        self.conn.execute(
+            "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) "
+            "VALUES ('like',?,'like',?,'',NULL,?)", (identity_key, provenance, now))
+        self.conn.commit()
+        return True
 
     @synchronized
     def recent_liked_keys(self, limit=None) -> list:
-        """Liked identity_keys, most-recent (created_at) first. Powers the transient like channel."""
+        """ALL liked identity_keys regardless of provenance, most-recent (created_at) first. For
+        existence checks and counters (reconciliation, onboarding, taste page), NOT the transient
+        model; the transient reader is recent_liked_with_ts, which is action-provenance only."""
         rows = self.conn.execute(
             "SELECT item_key FROM rec_feedback WHERE kind='like' ORDER BY created_at DESC").fetchall()
         keys = [r["item_key"] for r in rows]
         return keys[:limit] if limit else keys
+
+    @synchronized
+    def recent_liked_with_ts(self, limit=None) -> list:
+        """#85 [(identity_key, created_at)] for ACTION-provenance likes, newest-first: the transient
+        model's like feed. Sync-discovered likes are excluded here by design: they carry no true
+        action timestamp (YTM's API and Takeout both lack like-time), so treating their first-sight
+        created_at as an event time would let a re-recorded like masquerade as a fresh user action."""
+        rows = self.conn.execute(
+            "SELECT item_key, created_at FROM rec_feedback WHERE kind='like' AND reason='action' "
+            "ORDER BY created_at DESC").fetchall()
+        out = [(r["item_key"], float(r["created_at"])) for r in rows]
+        return out[:limit] if limit else out
+
+    @synchronized
+    def like_provenance(self, identity_key):
+        """'action' | 'sync' | None (no like row). Legacy rows stamped by the one-shot repair."""
+        row = self.conn.execute(
+            "SELECT reason FROM rec_feedback WHERE kind='like' AND item_key=? AND scope=''",
+            (identity_key,)).fetchone()
+        return row["reason"] if row else None
+
+    @synchronized
+    def stamp_sync_like_provenance(self) -> int:
+        """One-shot migration helper (rec/repair.py): mark every provenance-less like row as
+        sync-discovered. Pre-provenance rows all came from the sync's bulk rated map (the live
+        pipeline recorded through the same code path, indistinguishably), so 'sync' - the class with
+        no transient participation - is the only honest classification. Returns rows stamped."""
+        cur = self.conn.execute(
+            "UPDATE rec_feedback SET reason='sync' WHERE kind='like' AND (reason IS NULL OR reason='')")
+        self.conn.commit()
+        return cur.rowcount
+
+    @synchronized
+    def mark_graduated_once(self, identity_key, kind, now) -> bool:
+        """Once-EVER graduation stamp (kind='like_grad' | 'dislike_grad'; surface=kind, so the two
+        signals stamp independently under rec_feedback's UNIQUE(surface, item_key, scope)).
+        Invariant: a like/dislike may graduate its facets at most once per identity_key, ever. The
+        stamp lives in rec_feedback but is intentionally independent of the like/dislike row
+        lifecycle: clear_like/clear_dislike delete only their own kind, so a likeStatus flap (or a
+        genuine unlike-then-relike) can never re-arm graduation. A provenance upgrade does not
+        re-graduate either (record_like returns False on upgrade). Returns True iff this key has
+        never graduated for this signal."""
+        return self._record_once(kind, identity_key, kind, None, now)
+
+    @synchronized
+    def disliked_with_ts(self) -> list:
+        """#85 [(identity_key, created_at)] for dislikes, newest-first, so the transient negative
+        lean can decay by age instead of pressing at full strength forever."""
+        rows = self.conn.execute(
+            "SELECT item_key, created_at FROM rec_feedback WHERE kind='dislike' "
+            "ORDER BY created_at DESC").fetchall()
+        return [(r["item_key"], float(r["created_at"])) for r in rows]
 
     @synchronized
     def clear_like(self, identity_key) -> None:

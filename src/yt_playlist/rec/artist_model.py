@@ -183,7 +183,13 @@ def _blended_set_scores(store, seeds):
     embed._blend_spaces (w = artist_content_weight; a candidate present in only one space falls back to
     it), then the §C Last.fm edges of the seeds are folded in as an additive bonus. The §C term reaches
     out-of-corpus artists with no §A/§B vector (they appear at their edge strength alone). {} when no
-    seed is in any space and there are no edges. One seed = the single-artist neighbour case."""
+    seed is in any space and there are no edges. One seed = the single-artist neighbour case.
+
+    #86: _blend_spaces now returns rank/percentile values in (0, 1], not raw cosines, so the additive
+    w_edge bonus reads as a PERCENTILE bump: artist_edge_weight 0.10 lifts a candidate past ~10% of
+    the blended pool. That is a more interpretable unit than the old raw-cosine gap (which varied
+    unpredictably between neighbours), and out-of-corpus edge-only candidates now enter on the same
+    (0, 1] scale instead of a raw edge strength competing against cosines."""
     seeds = set(seeds)
     w = float(rec_params.get_param(store, "artist_content_weight"))
     artists, V, idx = load_artist_vectors(store)

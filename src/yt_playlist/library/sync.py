@@ -22,6 +22,15 @@ def _album_id(t):
     alb = t.get("album")
     return alb.get("id") if isinstance(alb, dict) else None
 
+# Within one sync run, a track's rated-map status is the HIGHEST-priority status seen across every
+# playlist it appears in. YTM's likeStatus is per-context: a liked track that also sits in ordinary
+# playlists reads INDIFFERENT there (the rating simply is not populated in that context), so
+# last-writer-wins would flap the same track LIKE/INDIFFERENT run to run depending on fetch order,
+# deleting and re-recording the like each day. LIKE must beat INDIFFERENT; only DISLIKE beats LIKE.
+# A track that reads INDIFFERENT across the WHOLE run is a genuine un-like and still clears.
+_STATUS_PRIORITY = {"INDIFFERENT": 0, "LIKE": 1, "DISLIKE": 2}
+
+
 def _emit(on_progress, type, text, **extra):
     """Report a progress event to an optional callback (used to stream sync to the browser)."""
     if on_progress is not None:
@@ -63,7 +72,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     _emit(on_progress, "info", f"{label}: {len(playlists)} playlists", count=len(playlists))
     total = len(playlists)
     seen_ytm = set()
-    rated: dict[str, str] = {}                  # identity_key -> likeStatus; DISLIKE wins on conflict
+    rated: dict[str, str] = {}                  # identity_key -> likeStatus; see _STATUS_PRIORITY
     for i, pl in enumerate(playlists, 1):
         pid = pl["playlistId"]
         seen_ytm.add(pid)  # mark seen before fetch so a transient read failure doesn't prune it
@@ -81,9 +90,9 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
             track_ids.append(tid)
             keys.append(identity_key(t.get("title", ""), _artist(t)))
             status = t.get("likeStatus")
-            if status:
+            if status in _STATUS_PRIORITY:
                 rk = identity_key(t.get("title", ""), _artist(t))
-                if rated.get(rk) != "DISLIKE":
+                if rk not in rated or _STATUS_PRIORITY[status] > _STATUS_PRIORITY[rated[rk]]:
                     rated[rk] = status
         track_ids = list(dict.fromkeys(track_ids))   # de-dupe (YouTube can repeat a video; see set_playlist_tracks)
         keys = list(dict.fromkeys(keys))
@@ -120,7 +129,9 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
               f"{label}: returned no playlists. Session may have expired, re-authenticate", label=label)
 
     from yt_playlist.rec import recommend            # local import avoids any import cycle
-    recommend.apply_dislikes(store, rated, now)
+    # provenance='sync': bulk-discovered statuses carry no real action time, so their likes stay out
+    # of the transient model and graduate at the low sync-like weight (see graduation.apply_dislikes).
+    recommend.apply_dislikes(store, rated, now, provenance="sync")
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history())

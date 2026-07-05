@@ -15,6 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from yt_playlist.core.bridge import Bridge
+from yt_playlist.core import updatecheck
+from yt_playlist.rec.radio import RadioSession
 from yt_playlist.web.context import Ctx
 from yt_playlist.web.jobs import SyncJobs
 from yt_playlist.web.routes import build_all
@@ -96,6 +98,15 @@ _SYNC_MAX_AGE_S = 86400.0    # 24 hours: full sync is expensive, so after the in
                             # only re-pull the library once a day. Plays stay current via the live feed.
 
 
+def _maybe_check_update(ctx):
+    """Refresh the cached latest-release version (daily-gated inside check_latest). Never raises,
+    so a failed check can't disturb the sync daemon."""
+    try:
+        updatecheck.check_latest(ctx.store, ctx.now_fn())
+    except Exception:  # noqa: BLE001 - update check must never crash the daemon
+        ctx.logger.warning("update check tick failed", exc_info=True)
+
+
 def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=_SYNC_MAX_AGE_S):
     """Keep the library fresh with no manual card: once configured and the extension is connected,
     run a full sync when we've never synced or the last full sync is older than max_age_s. Covers
@@ -103,6 +114,7 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
     Guarded by ctx.sync_lock so it never overlaps a manual POST /sync (or itself)."""
     while True:
         time.sleep(poll_s)
+        _maybe_check_update(ctx)
         try:
             if setup is not None and not setup.configured:
                 continue
@@ -202,7 +214,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
     genre_lib.configure(store)                                 # load (and seed) the genre whitelist
 
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
-              templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge)
+              templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge,
+              radio=RadioSession())
     app.include_router(build_bridge_route(ctx))
     from yt_playlist.rec.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx)                            # decoupled rec computation

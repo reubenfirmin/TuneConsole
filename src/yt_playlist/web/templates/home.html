@@ -46,10 +46,16 @@
       <div class="hs-main">
         <span class="hs-dot" aria-hidden="true"></span>
         <template x-if="nowPlaying && (nowPlaying.title || nowPlaying.artist)">
-          <div class="hs-now">
+          <div class="hs-now" :class="{ paused: nowPlaying.paused }">
             <img class="hs-art" x-show="nowPlaying.thumbnail" :src="nowPlaying.thumbnail" alt=""
                  referrerpolicy="no-referrer">
             <span class="hs-eq" aria-hidden="true"><i></i><i></i><i></i></span>
+            <button type="button" class="hs-rate hs-playpause" @click="toggle()"
+                    :title="nowPlaying.paused ? 'Play' : 'Pause'"
+                    :aria-label="nowPlaying.paused ? 'Play' : 'Pause'">
+              <span x-show="!nowPlaying.paused" x-cloak>&#10074;&#10074;</span>
+              <span x-show="nowPlaying.paused" x-cloak>&#9654;</span>
+            </button>
             <span class="hs-now-text">
               <span class="hs-now-title" x-text="nowPlaying.title || ''"></span>
               <span class="hs-now-artist" x-show="nowPlaying.artist" x-text="nowPlaying.artist || ''"></span>
@@ -64,6 +70,10 @@
                 <svg viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C7.58 2 4 5.58 4 10c0 2.4 1.06 4.55 2.73 6.02.17.15.27.36.27.59V19c0 .55.45 1 1 1h.5v.5a1 1 0 1 0 2 0V20h1v.5a1 1 0 1 0 2 0V20h.5c.55 0 1-.45 1-1v-2.39c0-.23.1-.44.27-.59A7.99 7.99 0 0 0 20 10c0-4.42-3.58-8-8-8ZM9 8.5A1.5 1.5 0 1 0 9 11.5 1.5 1.5 0 0 0 9 8.5Zm6 0A1.5 1.5 0 1 0 15 11.5 1.5 1.5 0 0 0 15 8.5Z"/></svg>
               </button>
             </span>
+            {# #93 Task 9: nothing radio-related sits here unless radio is actually ACTIVE. The launch
+               card (below) owns Start/Stop and Customize; while playing, its customize panel migrates
+               UP into this slot (Alpine x-teleport) so steering happens right where you're listening. #}
+            <div id="radio-steer-slot"></div>
           </div>
         </template>
         <template x-if="!(nowPlaying && (nowPlaying.title || nowPlaying.artist))">
@@ -81,6 +91,15 @@
       {% endif %}
     </section>
 
+    {# #93 Task 9: the radio launch card, its own card (not a status-strip button). Off: Start radio +
+       collapsed Customize. On: Stop + Customize, and the customize panel migrates up into the
+       now-playing card's #radio-steer-slot above (Alpine x-teleport).
+       Owner-parked (2026-07-05): hidden unless the page is loaded with ?radio=true (or ?radio=1)
+       while the feature bakes; every /radio/* endpoint stays live underneath. #}
+    {% if show_radio %}
+    {% include "_partials/radio_launch.html" %}
+    {% endif %}
+
     {# Live sync console: streams the library sync's results (background or manual) as they happen. #}
     <section class="sync-console" x-show="running || lines.length" x-cloak>
       <div class="sc-head">
@@ -96,6 +115,10 @@
       </div>
     </section>
   </div>
+
+  {# The Takeout nag deliberately escapes the first-sync gate (importing early is the point, #61);
+     everything else keeps waiting for first sync. #}
+  {% include "_partials/takeout_nag.html" %}
 
   {% if sync.last_synced_ago %}
   {% include "_partials/alerts.html" %}

@@ -1,0 +1,74 @@
+{# #79 Month in review: a "wrapped" recap of the last fully-elapsed calendar month -- a calendar heat
+   grid, a top-3 artist podium, the song of the month, and (when the month had one) a binge-day
+   callout, plus the new-favorite/riser/faller lines. #}
+<div class="card">
+  <h2>Month in review</h2>
+  {% if review %}
+  <p class="review-headline">Your {{ month_name }}</p>
+  <p class="section-note">You heard {{ review.plays }} tracks across {{ review.listen_days }} days last month, with a {{ review.longest_streak }}-day streak at best.</p>
+  <div class="stat-row">
+    <span><strong>{{ review.plays }}</strong> tracks heard</span>
+    <span><strong>{{ review.listen_days }}</strong> listen days</span>
+    <span><strong>{{ review.longest_streak }}</strong> day best streak</span>
+  </div>
+  {% if review.play_days %}
+  {% set counts = review.play_days | map(attribute='n') | list %}
+  {% set max_n = (counts | max) if counts else 0 %}
+  <div class="review-calendar" role="img" aria-label="Daily listening activity through {{ month_name }}">
+    <div class="cal-weekdays"><span>S</span><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span></div>
+    <div class="cal-grid">
+      {% for _ in range(review.first_weekday) %}<i class="cal-pad"></i>{% endfor %}
+      {% for d in review.play_days %}
+      <i class="cal-day" style="--heat: {{ '%.2f'|format((d.n / max_n) if max_n else 0) }}"
+         title="Day {{ d.day }}: {{ d.n }} track{{ 's' if d.n != 1 }} heard">{{ d.day }}</i>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  {% if review.top_artists %}
+  <div class="artist-podium">
+    {% for a in review.top_artists %}
+    <div class="podium-tile">
+      <span class="podium-rank">#{{ loop.index }}</span>
+      <span class="podium-art{{ '' if a.art else ' no-art' }}">
+        {% if a.art %}<img src="{{ a.art }}" alt="" loading="lazy"
+             onerror="this.closest('.podium-art').classList.add('no-art'); this.remove()">{% endif %}
+      </span>
+      <span class="podium-name">{{ a.artist }}</span>
+      <span class="podium-plays mono">{{ a.plays }} play{{ 's' if a.plays != 1 }}</span>
+      <span class="play-bar"><i style="width: {{ '%.1f'|format((a.plays / review.top_artists[0].plays * 100) if review.top_artists[0].plays else 0) }}%"></i></span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if review.top_track %}
+  <div class="song-of-month">
+    <span class="som-art{{ '' if review.top_track.art else ' no-art' }}">
+      {% if review.top_track.art %}<img src="{{ review.top_track.art }}" alt="" loading="lazy"
+           onerror="this.closest('.som-art').classList.add('no-art'); this.remove()">{% endif %}
+    </span>
+    <div class="som-meta">
+      <span class="som-label">Song of the month</span>
+      <strong class="som-title">{{ review.top_track.title or "Unknown track" }}</strong>
+      <span class="som-artist">{{ review.top_track.artist }} &middot; {{ review.top_track.plays }} play{{ 's' if review.top_track.plays != 1 }}</span>
+    </div>
+  </div>
+  {% endif %}
+  {% if review.binge %}
+  <p class="binge-callout">Your biggest day: <strong>{{ binge_day_label }}</strong> - {{ review.binge.plays }} plays, {{ (review.binge.pct * 100) | round | int }}% {{ review.binge.artist }}.</p>
+  {% endif %}
+  <ul class="review-list">
+    {% if review.top_new_artist %}
+    <li class="rl-new"><span class="rl-glyph">&#9733;</span>New favorite: <strong>{{ review.top_new_artist.artist }}</strong> ({{ review.top_new_artist.plays }} tracks heard)</li>
+    {% endif %}
+    {% if review.riser %}
+    <li class="rl-up"><span class="rl-glyph">&#8593;</span>Rising: <strong>{{ review.riser.artist }}</strong> (+{{ review.riser.delta }} vs last month)</li>
+    {% endif %}
+    {% if review.faller %}
+    <li class="rl-down"><span class="rl-glyph">&#8595;</span>Cooling off: <strong>{{ review.faller.artist }}</strong> ({{ review.faller.delta }} vs last month)</li>
+    {% endif %}
+  </ul>
+  {% else %}
+  <p class="empty">Your month in review appears after a full calendar month.</p>
+  {% endif %}
+</div>

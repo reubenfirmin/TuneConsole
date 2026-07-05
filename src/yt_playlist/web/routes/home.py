@@ -7,9 +7,10 @@ from datetime import datetime
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
+from yt_playlist.core import updatecheck
 from yt_playlist.library import executor
 from yt_playlist.util import genre_map
-from yt_playlist.rec import arc_energy, journeys, onboarding, rec_params, recommend, into_recently
+from yt_playlist.rec import arc_energy, journeys, onboarding, rec_params, recommend, into_recently, trend_rollups
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.providers import wikipedia, lastfm
 from yt_playlist.web.context import form_float
@@ -47,6 +48,78 @@ def lastfm_nudge_due(store, now=None) -> bool:
         except (TypeError, ValueError):
             pass
     return True
+
+
+TAKEOUT_NAG_SNOOZE_S = 90 * 86400   # dismissing snoozes the nag 90 days, not forever
+
+
+def takeout_nag_due(store, now=None) -> bool:
+    """True when a Google Takeout watch-history import has never landed and the nag isn't snoozed.
+    Terminal (never due again) once takeout_imported_at is set. No last_sync gate: importing early
+    is exactly the point, so this can be due on a fresh install. Dismissing snoozes it for 90 days
+    (records a timestamp) so a long-lived install that never imports is reminded again."""
+    if store.get_setting("takeout_imported_at") is not None:
+        return False
+    dismissed_at = store.get_setting("takeout_nag_dismissed_at")
+    if dismissed_at is not None:
+        try:
+            if (now if now is not None else time.time()) - float(dismissed_at) < TAKEOUT_NAG_SNOOZE_S:
+                return False
+        except (TypeError, ValueError):
+            pass
+    return True
+
+
+SPOTLIGHT_MIN_INTERVAL_S = trend_rollups.SPOTLIGHT_MIN_INTERVAL_S
+SPOTLIGHT_SNOOZE_S = trend_rollups.SPOTLIGHT_SNOOZE_S
+
+
+def _spotlight_kind(sig):
+    """The detector kind prefix of a spotlight signature (e.g. "song_of_week:14:k1" -> "song_of_week").
+    Signatures embed per-occurrence identifiers (a week, a track key, a month...) after the kind, so two
+    consecutive weeks' song-of-week candidates never share an exact signature."""
+    return sig.split(":", 1)[0]
+
+
+def _snoozed(store, sig, now):
+    """True while `sig`'s KIND (not its exact signature) is within the post-dismissal snooze window.
+    Kind-level, not signature-level: several kinds (song_of_week every week, put_to_bed/emergence/
+    revival/binge each time they refire on a new artist/day/week) mint a fresh signature on every
+    occurrence, so snoozing only the exact dismissed signature let a dismissed kind re-nudge the very
+    next time it fired under a new signature -- dismissing "I don't want to see this kind of nudge for a
+    while" should quiet the whole kind, not just that one instant of it."""
+    dismissed = store.get_setting("trend_spotlight_dismissed_signature")
+    if dismissed is None or _spotlight_kind(dismissed) != _spotlight_kind(sig):
+        return False
+    at = store.get_setting("trend_spotlight_dismissed_at")
+    try:
+        return at is not None and now - float(at) < SPOTLIGHT_SNOOZE_S
+    except (TypeError, ValueError):
+        return False
+
+
+def spotlight_due(store, now):
+    """The Home trend-spotlight candidate to show, or None. Shows only when a candidate exists, its
+    signature differs from the last shown, it is not snoozed, and at least the minimum interval has
+    passed since the last spotlight. Silence is the default."""
+    roll = store.get_proposals("trend_rollups") or {}
+    cand = roll.get("spotlight")
+    if not cand:
+        return None
+    sig = cand["signature"]
+    if store.get_setting("trend_spotlight_last_signature") == sig:
+        return None                                       # already shown this exact signature
+    if _snoozed(store, sig, now):
+        return None
+    last_at = store.get_setting("trend_spotlight_last_shown_at")
+    try:
+        if last_at is not None and now - float(last_at) < SPOTLIGHT_MIN_INTERVAL_S:
+            return None                                   # too soon after the last spotlight
+    except (TypeError, ValueError):
+        pass
+    return cand
+
+
 _NOTES = {
     "wheelhouse": "Deeper into what you already love.",
     "explore": "Unplayed corners of your own library.",
@@ -106,6 +179,21 @@ def _carded(store, lane, label, items, now):
 _CARD_LABELS = {"wheelhouse": "More in your wheelhouse", "explore": "From your catalog",
                 "comfort": "Comfort listening", "fresh": "Fresh songs"}
 
+# #87 retention only needs to outlive the future lane-bandit's evidence window, not forever.
+_LANE_IMPRESSION_RETAIN_D = 30
+
+
+def _record_lane_impressions(store, items, now):
+    """#87 pure instrumentation: log which lane served each item actually rendered on a Home card, for
+    a future lane bandit. Never affects lane selection/weighting. Items are ForYouItem (wheelhouse/
+    explore/comfort) or the Fresh dict shape, both of which carry lane + key."""
+    if not items:
+        return
+    pairs = [((it.get("lane") if isinstance(it, dict) else it.lane),
+              (it.get("key") if isinstance(it, dict) else it.key)) for it in items]
+    store.record_lane_impressions(pairs, now,
+                                  prune_before=now - _LANE_IMPRESSION_RETAIN_D * 86400)
+
 
 def _one_card(store, card, now):
     """Build a single Home card's proto (its pool, rotated at the card's CURRENT epoch). Used by the
@@ -128,7 +216,11 @@ def _one_card(store, card, now):
         # route), not here, so the cold-start fallback path doesn't double-count fresh tracks.
     else:
         return None
-    return _carded(store, card, _CARD_LABELS[card], items, now) if items else None
+    if not items:
+        return None
+    p = _carded(store, card, _CARD_LABELS[card], items, now)
+    _record_lane_impressions(store, p["tracks"], now)   # #87: log what was actually rendered
+    return p
 
 
 def _epoch(store, card):
@@ -155,6 +247,14 @@ def build(ctx) -> APIRouter:
         dao = RecDao(store)
         for card in ROTATING_CARDS:   # one tick per genuine Home visit -> per-card rotation advances
             dao.bump_card_view(card, now)
+        backend_update = updatecheck.update_nudge(store)
+        # The spotlight renders inside the alerts row, which home.html gates on a completed first
+        # sync: only stamp shown-state when the card can actually appear, or a signature would burn
+        # invisibly pre-sync.
+        _spot = spotlight_due(store, now) if store.get_setting("last_sync_at") is not None else None
+        if _spot is not None:
+            store.set_setting("trend_spotlight_last_signature", _spot["signature"])
+            store.set_setting("trend_spotlight_last_shown_at", str(now))
         return templates.TemplateResponse(request, "home.html", {
             "actions": recommend.take_action(store, now, ctx.auth_expired),
             "sync": recommend.sync_status(store, now),
@@ -173,6 +273,11 @@ def build(ctx) -> APIRouter:
             "show_intro": (store.get_setting("last_sync_at") is not None
                            and store.get_setting("intro_dismissed") != "1"),
             "show_lastfm_nudge": lastfm_nudge_due(store, now),
+            # Takeout import nag: no last_sync gate (importing early is exactly the point), terminal
+            # once takeout_imported_at is set by a successful import.
+            "show_takeout_nag": takeout_nag_due(store, now),
+            "backend_update": backend_update,
+            "show_backend_update": backend_update is not None,
             # Once the library has synced and the user still has only the default identity, offer the
             # multi-identity merge (dismissable, persists). Skipped as soon as they add a second one.
             "show_identities_nudge": (store.get_setting("last_sync_at") is not None
@@ -182,6 +287,13 @@ def build(ctx) -> APIRouter:
             "onboard_library": onboarding.library_size(store) >= rec_params.get_param(store, "onboard_library_min"),
             "cleanup_count": onboarding.cleanup_count(store),   # CACHED read, never the O(n^2) scan
             "onboard_progress": onboarding.warmup_progress(store),
+            "trend_spotlight": _spot,
+            # #93 Task 9: the radio launch card's customize panel is seeded server-side with the
+            # current SESSION tilts (never rec_weights) so a reload shows what's actually steering.
+            "tilts": (getattr(getattr(ctx, "radio", None), "tilts", None) or {}),
+            # Owner-parked (2026-07-05): the radio card only renders when the page is loaded with
+            # ?radio=true (or ?radio=1). The feature and its endpoints stay intact underneath.
+            "show_radio": request.query_params.get("radio") in ("true", "1"),
             **_feed_context(now),
         })
 
@@ -190,6 +302,13 @@ def build(ctx) -> APIRouter:
         """Snooze the Home Last.fm-key nudge for 30 days (records the dismissal time). Empty 200 so
         HTMX swaps it out."""
         store.set_setting("lastfm_nudge_dismissed_at", str(now_fn()))
+        return Response(status_code=200)
+
+    @router.post("/onboard/takeout/dismiss")
+    def dismiss_takeout_nag():
+        """Snooze the Home Takeout-import nag for 90 days (records the dismissal time). Empty 200 so
+        HTMX swaps it out."""
+        store.set_setting("takeout_nag_dismissed_at", str(now_fn()))
         return Response(status_code=200)
 
     @router.post("/onboard/identities/dismiss")
@@ -202,6 +321,24 @@ def build(ctx) -> APIRouter:
     def dismiss_intro_nudge():
         """Permanently dismiss the post-first-sync welcome nag. Empty 200 so HTMX swaps it out."""
         store.set_setting("intro_dismissed", "1")
+        return Response(status_code=200)
+
+    @router.post("/trends/spotlight/dismiss")
+    def dismiss_trend_spotlight(sig: str = ""):
+        """Snooze the Home trend-spotlight card for its signature (30 days). Empty 200 so HTMX swaps
+        it out."""
+        if sig:
+            store.set_setting("trend_spotlight_dismissed_signature", sig)
+            store.set_setting("trend_spotlight_dismissed_at", str(now_fn()))
+        return Response(status_code=200)
+
+    @router.post("/onboard/update/dismiss")
+    def dismiss_update_nudge(v: str = ""):
+        """Dismiss the backend-update nag for the version the user saw (passed as ?v=). Falls back to
+        the currently-cached latest. A newer release re-shows it. Empty 200 so HTMX swaps it out."""
+        dismissed = v or store.get_setting("latest_version_seen")
+        if dismissed:
+            store.set_setting("backend_update_dismissed_version", dismissed)
         return Response(status_code=200)
 
     @router.get("/home/onboard/radio")
@@ -295,13 +432,20 @@ def build(ctx) -> APIRouter:
                 journey, dj = rolled.get("journey", "shuffle"), rolled.get("dj", {})
                 tracks = _order_by_journey(store, c["tracks"], journey, dj.get("seed", 0))
                 protos.append(_proto(c["lane"], c["label"], tracks, now)
-                              | {"mode_id": c["mode_id"],
+                              | {"mode_id": c["mode_id"], "ranker": c["ranker"],
                                  "recipe": {"model": "mode", "mode_id": c["mode_id"],
+                                            "ranker": c["ranker"],
                                             "journey": journey, "dj": dj}})
             try:
-                store.modes.log_impressions(epoch, [(c["lane"], c["mode_id"]) for c in cards], now)
+                store.modes.log_impressions(
+                    epoch, [(c["lane"], c["mode_id"], c["ranker"]) for c in cards], now)
             except Exception:  # noqa: BLE001 - logging must never break the card render
                 ctx.logger.warning("mode-impression log failed", exc_info=True)
+            # #87 lane impressions for the PRIMARY serving path too (the _one_card hook only covers
+            # per-card refresh and the pre-rebuild fallback); without this, the future lane bandit's
+            # evidence would be skewed toward refresh clicks.
+            for p in protos:
+                _record_lane_impressions(store, p["tracks"], now)
         else:
             # Fallback before the first rebuild: the pre-B per-card builders, so the row is never empty.
             protos = [p for p in (_one_card(store, name, now) for name in
@@ -357,7 +501,8 @@ def build(ctx) -> APIRouter:
         axis, weight = form.get("axis"), form.get("weight")
         target = form_float(weight)
         if axis and target is not None and axis.split(":", 1)[0] in ("genre", "era", "artist"):
-            perm = store.get_weights().get(axis, 1.0)
+            now = now_fn()
+            perm = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(axis, 1.0)
             lean = target / perm if perm > 0 else target
             lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
             lean = max(lo, min(hi, lean))
@@ -454,7 +599,8 @@ def build(ctx) -> APIRouter:
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
                 if isinstance(recipe, dict) and recipe.get("mode_id") is not None and res.get("pid"):
                     try:
-                        store.modes.log_pick(res["pid"], int(recipe["mode_id"]), now_fn())
+                        store.modes.log_pick(res["pid"], int(recipe["mode_id"]), now_fn(),
+                                             ranker=recipe.get("ranker"))
                     except Exception:  # noqa: BLE001 - logging must never break playlist creation
                         pass
             except Exception:  # noqa: BLE001 - surface a friendly card, log the detail

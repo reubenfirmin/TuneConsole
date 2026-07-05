@@ -8,6 +8,10 @@ from yt_playlist.rec import rec_params
 
 
 SYNC_STALE_S = rec_params.SYNC_STALE_S   # highlight the Sync card after this (defined in rec_params)
+# #85: this is display-only copy escalation (badge text), not model math -- the transient model no
+# longer has a sync-staleness relax; every event decays on its own wall clock instead (transient.py).
+# A fixed 3-day wait past "stale" before switching to the more alarming "drifting" message.
+_URGENT_AFTER_S = 3 * 86400
 
 
 @dataclass
@@ -15,7 +19,7 @@ class SyncStatus:
     last_synced_ago: str | None   # None if never synced
     stale: bool                   # never synced, or older than SYNC_STALE_S
     message: str | None           # highlight copy when stale, else None
-    urgent: bool = False          # stale enough that the transient model is actively decaying
+    urgent: bool = False          # stale long enough to escalate the badge copy (display only, #85)
 
 
 def sync_status(store, now) -> SyncStatus:
@@ -28,7 +32,7 @@ def sync_status(store, now) -> SyncStatus:
         return SyncStatus(None, True, "Sync to pull in your library and recommendations.")
     age = now - max(stamps)
     if age > SYNC_STALE_S:
-        if age > SYNC_STALE_S + rec_params.STALE_DECAY_HALFLIFE_D * 86400:
+        if age > SYNC_STALE_S + _URGENT_AFTER_S:
             return SyncStatus(_ago(age), True,
                               f"We haven't seen your plays in {_ago(age)}. Your recommendations are "
                               "drifting. Sync now.", urgent=True)

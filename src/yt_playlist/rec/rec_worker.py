@@ -156,6 +156,15 @@ class RecWorker:
             log.info("rec rebuild: mode bundles prepared")
         except Exception:  # noqa: BLE001 - mode bundles are best-effort; don't fail the rebuild
             log.warning("rec rebuild: mode-bundle prep failed", exc_info=True)
+        # #76-#80 Trends rollups: first-play index + weekly/monthly rollup + spotlight candidate,
+        # materialized for the /trends page and the intermittent Home spotlight. Guarded; a failure
+        # leaves the last-good rollup in place and never breaks the rebuild.
+        try:
+            from yt_playlist.rec import trend_rollups
+            trend_rollups.build(store, now)
+            log.info("rec rebuild: trend rollups built")
+        except Exception:  # noqa: BLE001 - trend rollups are best-effort; don't fail the rebuild
+            log.warning("rec rebuild: trend-rollup build failed", exc_info=True)
         # #57 SHADOW: per-mode PPR (random walk) computed in parallel and appended to a persistent log
         # alongside the cosine ranking, for a non-circular comparison in ~2 weeks. Serves nothing.
         try:

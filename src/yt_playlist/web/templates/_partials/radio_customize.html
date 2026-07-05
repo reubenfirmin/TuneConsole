@@ -1,0 +1,53 @@
+{# #93 Task 9: session-only taste tilts for the radio. Modeled on the era-bar block of
+   taste_fingerprint.html, reusing the same .fp-* bar styles, but these sliders write to
+   /radio/steer (SESSION tilts on ctx.radio, never rec_weights/leans) instead of /home/steer. No
+   add-picker here: a session tilt is a subset of the taste fingerprint's own genre/era inventory,
+   so there is nothing to pin that isn't already listed. #}
+<div id="radio-customize-bars" class="radio-customize">
+  <div class="fp-bar">
+    <span class="fp-label">Steer this session</span>
+    <button type="button" class="fp-reset" hx-post="/radio/steer/reset"
+            hx-target="#radio-customize-bars" hx-swap="outerHTML"
+            title="Clear this session's tilts: every bar back to neutral">Reset to default</button>
+  </div>
+  <p class="fp-hint section-note">Nudge a genre or era for this radio session only. Your taste model on the
+    Taste page is untouched.</p>
+  <div class="fp-body">
+    <div class="fp-col">
+      <span class="fp-label">Genres</span>
+      <div class="fp-barset">
+        {% for g in fingerprint.families[:6] %}
+        <div class="fp-row">
+          <span class="fp-name" title="{{ g.name }}">{{ g.name }}</span>
+          <span class="fp-slider-wrap">
+            <input type="range" class="fp-slider" min="0" max="2" step="0.1"
+                   value="{{ tilts.get('genre:' + g.name, 1.0) }}"
+                   style="--p:{{ '%.0f'|format(tilts.get('genre:' + g.name, 1.0) / 2 * 100) }}%"
+                   name="weight" hx-post="/radio/steer" hx-vals='{"axis":"genre:{{ g.name }}"}'
+                   hx-target="#radio-customize-bars" hx-swap="outerHTML" hx-trigger="change"
+                   aria-label="favor or mute {{ g.name }} for this session">
+          </span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="fp-col">
+      <span class="fp-label">Eras</span>
+      <div class="fp-barset">
+        {% for e in fingerprint.eras[:5] %}
+        <div class="fp-row">
+          <span class="fp-name">{{ e.name }}s</span>
+          <span class="fp-slider-wrap">
+            <input type="range" class="fp-slider" min="0" max="2" step="0.1"
+                   value="{{ tilts.get('era:' + e.name, 1.0) }}"
+                   style="--p:{{ '%.0f'|format(tilts.get('era:' + e.name, 1.0) / 2 * 100) }}%"
+                   name="weight" hx-post="/radio/steer" hx-vals='{"axis":"era:{{ e.name }}"}'
+                   hx-target="#radio-customize-bars" hx-swap="outerHTML" hx-trigger="change"
+                   aria-label="favor or mute the {{ e.name }}s for this session">
+          </span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>

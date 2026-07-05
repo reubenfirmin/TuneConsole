@@ -35,6 +35,44 @@ WebSocket only from that `chrome-extension://` origin, which a web page cannot f
 - Requests outside the allowlist (anything that is not a `youtubei/v1/` call) are refused with a
   "blocked by allowlist" error instead of being sent.
 
+## What the extension observes and sends
+
+The extension acts as a sensor for your listening and curation behavior on YouTube Music, capturing
+both playback events (play/pause, track changes, completion) and curation actions (likes, playlist
+edits, follows). All events land in the local database; nothing leaves your machine.
+
+### Playback events
+
+The extension observes the video element and player UI to capture listening behavior. Each event
+includes the video ID, playback position (in seconds), track duration, and current shuffle/repeat
+mode (unknown values are empty strings):
+
+- `track_exit`: you changed tracks (skip/replay); carries the exit position of the previous track
+- `ended`: the track completed naturally
+- `state`: you pressed play or pause
+- `tick`: heartbeat every approximately 30 seconds while playing (session recovery if the tab dies)
+- `volume`: you adjusted the volume (0 to 1 scale; muted = 0)
+- `bye`: you closed or unloaded the tab
+
+### Curation events
+
+The extension observes requests to five curation endpoints and reports them at request time. The
+server extracts kind-specific details from the request body (best-effort, since we observe requests
+before we can confirm they succeed):
+
+- `rate`: track ratings via `/youtubei/v1/like/{like,removelike,dislike}`
+- `playlist_edit`: add/remove tracks via `/youtubei/v1/browse/edit_playlist`
+- `feedback`: library/album saves via `/youtubei/v1/feedback`
+- `subscription`: artist follow/unfollow via `/youtubei/v1/subscription/{subscribe,unsubscribe}`
+- `share_intent`: share dialog opened via `/youtubei/v1/share/get_share_panel`
+
+### Privacy
+
+All events are stored locally in the app's database.
+- Timestamps are assigned by the local server at the moment each event arrives.
+- The fetch observer never alters or blocks requests; it only observes them. The app's own API
+  calls run in the extension's isolated world, so they are structurally excluded from observation.
+
 ## If it fails
 
 Check the service worker console for the reason:

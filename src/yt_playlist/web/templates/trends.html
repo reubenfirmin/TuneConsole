@@ -1,0 +1,46 @@
+{% extends "base.html" %}{% from "_partials/_viz_tip.html" import tip %}{% from "_partials/_chart_screen.html" import screen %}
+{% block title %}Trends · TuneConsole{% endblock %}{% block body %}
+<h1>Trends</h1>
+{% if not roll.get('weeks') %}
+  <p class="empty">Trends appear once your library has synced and the model has run.</p>
+{% else %}
+<div class="trends-page">
+{% include "_partials/trend_insights.html" %}
+<section id="listening" class="card">
+  <h2>Listening over time</h2>
+  <p class="section-note">Your weekly listening activity, with your top genre families layered underneath.</p>
+  <svg viewBox="0 0 520 90" class="spark instrument" preserveAspectRatio="none">
+    {{ screen('listening') }}
+    {% for band in ribbon %}<path d="{{ band.path }}" class="fam fam-{{ loop.index0 }}"/>{% endfor %}
+    {% if top_line %}<path d="{{ top_line }}" class="trace-teal"/>{% endif %}
+    <path d="{{ area.path }}" class="spark-area"/>
+    {% for b in area.bands %}
+    <rect x="{{ b.x }}" y="0" width="{{ b.w }}" height="90" fill="transparent" pointer-events="all"
+          {{ tip(b.label, [{"l": "Tracks heard", "v": b.n}]) }}/>
+    {% endfor %}
+  </svg>
+  {% if x_axis %}<div class="chart-axis"><span>{{ x_axis.first }}</span><span>{{ x_axis.last }}</span></div>{% endif %}
+  {% if families %}
+  <div class="chart-legend">
+    {% for f in families %}
+    <span class="legend-chip"><i class="chip-dot fam-{{ loop.index0 }}"></i>{{ f }}</span>
+    {% endfor %}
+    <span class="legend-chip"><i class="chip-dot chip-total"></i>Total</span>
+  </div>
+  {% endif %}
+  {% if weeks|length == 1 %}
+  <div class="stat-grid">
+    <div><strong>{{ weeks[0].plays }}</strong><span>tracks heard this week</span></div>
+  </div>
+  {% elif not area.path %}
+  <p class="empty">Not enough weeks of listening yet to chart.</p>
+  {% endif %}
+</section>
+<section id="discovery" hx-get="/trends/discovery" hx-trigger="load" hx-swap="innerHTML"></section>
+<section id="diversity" hx-get="/trends/diversity" hx-trigger="load" hx-swap="innerHTML"></section>
+<section id="review" hx-get="/trends/review" hx-trigger="load" hx-swap="innerHTML"></section>
+<section id="health" hx-get="/trends/health" hx-trigger="load" hx-swap="innerHTML"></section>
+<p class="trends-footnote">Measured from your synced listening history: counts reflect how often tracks appear there, not exact play counts.</p>
+</div>
+{% endif %}
+{% endblock %}

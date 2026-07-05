@@ -94,6 +94,37 @@ def test_returns_value_for_every_key():
     assert all(0.0 <= v <= 1.0 for v in out.values())
 
 
+# --- genre-relative BPM octave folding (issue #86) ---
+
+def test_double_time_misread_folds_to_family_band():
+    # Family median is 110 (all four bpms count, including the outlier), so 176 sits EXACTLY on the
+    # 1.6x fold boundary; it folds because _fold_bpm's gate is >= (see its docstring). Nudging any
+    # bpm here shifts the median and can silently stop the fold, keep the fixture as is. Folded to
+    # 88, the outlier lands BELOW the 120 track instead of above it.
+    keys = ["k1", "k2", "k3", "k4"]
+    genres = {k: "indie rock" for k in keys}
+    audio = {"k1": {"bpm": 95}, "k2": {"bpm": 100}, "k3": {"bpm": 120}, "k4": {"bpm": 176}}
+    out = _ae(keys, genres, audio)
+    assert out["k4"] < out["k3"]
+
+
+def test_fast_family_does_not_fold():
+    # A genuinely fast family (median ~170): a 172 BPM track is honest and must NOT fold down.
+    keys = ["d1", "d2", "d3"]
+    genres = {k: "drum and bass" for k in keys}
+    audio = {"d1": {"bpm": 168}, "d2": {"bpm": 170}, "d3": {"bpm": 172}}
+    out = _ae(keys, genres, audio)
+    assert out["d3"] >= out["d2"] >= out["d1"]
+
+
+def test_small_family_sample_never_folds():
+    keys = ["a", "b"]
+    genres = {k: "ambient" for k in keys}
+    audio = {"a": {"bpm": 70}, "b": {"bpm": 160}}       # only 2 samples: below _FOLD_MIN_SAMPLES
+    out = _ae(keys, genres, audio)
+    assert out["b"] > out["a"]                           # unfolded ordering preserved
+
+
 # --- integration: real per-track BPM drives a middle-peaked energy arc ---
 
 def test_energy_arc_peaks_in_middle_with_real_bpm():

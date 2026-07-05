@@ -47,8 +47,9 @@ def test_vibe_graduation_unchanged_regression():
     s = _store_with_genre({"song|band": ("v1", "song", "band", "Techno")})
     recommend.graduate_moods(s, ["song|band"], 2.0, 1000.0, source=rec_params.SOURCE_W_VIBE)
     fam = recommend.genre_map.family("Techno")
-    # nudge_weight applies shrinkage-toward-1.0 on top of GRADUATE_UP; result is > 1.0 (nudged up)
-    assert s.get_weights()[f"genre:{fam}"] > 1.0   # nudged once, from prior 1.0
+    # #85 GRADUATE_UP itself is > 1.0 (no more flat post-nudge shrink); read at the same `now` as the
+    # nudge so time-proportional reversion doesn't erode it before the assertion runs.
+    assert s.get_weights(now=1000.0)[f"genre:{fam}"] > 1.0   # nudged once, from prior 1.0
 
 
 def test_play_source_is_weak():
@@ -64,11 +65,12 @@ def test_play_exposure_graduates_over_several_days():
     # Sustained recent listening graduates the permanent weight up via daily exposure (mirrors the
     # held-slider mechanic). Plays feed only the transient; this is the single funnel into permanent.
     s, now, axis = _store_with_play_history("Techno", n=10)
-    before = s.get_weights().get(axis, 1.0)
     day = 86400
+    before = s.get_weights(now=now).get(axis, 1.0)
     for d in range(8):
         recommend.graduate_play_exposure(s, now + d * day)
-    after = s.get_weights().get(axis, 1.0)
+    # #85 read at the last nudge's `now`, else real-wall-clock reversion would erase the graduation
+    after = s.get_weights(now=now + 7 * day).get(axis, 1.0)
     assert after > before, "sustained daily listening should graduate the permanent weight up"
 
 
@@ -89,6 +91,36 @@ def test_play_exposure_stops_without_recent_plays():
     before = s.get_weights().get(axis, 1.0)
     recommend.graduate_play_exposure(s, 1000.0 + 86400)
     assert s.get_weights().get(axis, 1.0) == before, "no recent plays -> no graduation"
+
+
+def test_radio_only_listening_day_graduates_nothing():
+    # #93v2: a day of purely radio-queued listening (every play carrying the radio playlist's
+    # provenance, plus the provenance-free history_items shadows the next YTM sync writes for those
+    # same plays) must accrue NO ledger score and NO permanent weight for the played genre. Without
+    # the exclusion, radio's own picks would graduate transient leans into standing taste day after
+    # day - the slow-burn arm of the feedback loop.
+    s = Store(":memory:")
+    s.init_schema()
+    iid = s.identities.upsert_identity("me", "cred", None, True)
+    s.set_setting("radio_playlist_ytm", "PLRADIO")
+    now = 100 * 86400 + 1000.0
+    keys = []
+    for i in range(10):
+        tid = s.upsert_track(f"v{i}", f"song{i}", "band", None, None)
+        s.set_track_genre(tid, "Techno")
+        k = identity_key(f"song{i}", "band")
+        keys.append(k)
+        s.record_play_event(iid, k, f"v{i}", now + i * 4000, playlist_ytm_id="PLRADIO")
+    s.record_history_plays(iid, now + 50000, keys)             # the same plays, post-sync shadows
+    rec_params.set_param(s, "source_w_play", 0.5)              # same fast lane as the positive test
+    axis = f"genre:{recommend.genre_map.family('Techno')}"
+    day = 86400
+    before = s.get_weights(now=now).get(axis, 1.0)
+    for d in range(8):
+        recommend.graduate_play_exposure(s, now + d * day)
+    assert not s.get_theme(axis), "radio-only plays must not accrue ledger score"   # None = never bumped
+    assert s.get_weights(now=now + 7 * day).get(axis, 1.0) == before, \
+        "radio-only listening must not graduate a permanent weight"
 
 
 def test_play_graduated_day_roundtrip():

@@ -1,0 +1,14 @@
+{# Instrument-screen panel for the Trends charts: an inset "chart recorder" panel (darker warm well +
+   a faint graticule grid) that traces glow over, styled in app.css under .instrument. `id` must be
+   unique per <svg> on the page (it's only ever a handful of chart sections) since SVG pattern/gradient
+   ids are document-global. Sized to viz.py's SPARK_W/SPARK_H/SPARK_PAD defaults (520x90, pad 4);
+   pass w/h/pad to match a differently-sized chart. #}
+{% macro screen(id, w=520, h=90, pad=4) -%}
+<defs>
+  <pattern id="grid-{{ id }}" width="26" height="18" patternUnits="userSpaceOnUse">
+    <path d="M26 0 L0 0 0 18" class="grid-line"/>
+  </pattern>
+</defs>
+<rect x="{{ pad }}" y="{{ pad }}" width="{{ w - 2*pad }}" height="{{ h - 2*pad }}" rx="3" class="screen-bg"/>
+<rect x="{{ pad }}" y="{{ pad }}" width="{{ w - 2*pad }}" height="{{ h - 2*pad }}" rx="3" fill="url(#grid-{{ id }})"/>
+{%- endmacro %}

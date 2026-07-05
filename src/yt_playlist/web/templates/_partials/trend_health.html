@@ -1,0 +1,81 @@
+{# #80 Library health: never-played share, staleness histogram, dead-weight playlists. #}
+{% from "_partials/_viz_tip.html" import tip %}
+<div class="card">
+  <h2>Library health</h2>
+  {% if health and health.total_tracks %}
+  <p class="section-note">{{ health.never_played }} of {{ health.total_tracks }} tracks ({{ "%.0f"|format(health.never_played_share * 100) }}%) have never come up in your listening.</p>
+  <div class="health-top">
+    <div class="stat-grid tiles">
+      <div><strong>{{ health.total_tracks }}</strong><span>Total tracks</span></div>
+      <div><strong>{{ "%.0f"|format(health.never_played_share * 100) }}%</strong><span>Never played</span></div>
+    </div>
+    <svg viewBox="0 0 80 80" class="health-donut" aria-hidden="true">
+      <circle cx="40" cy="40" r="32" class="donut-track"/>
+      <circle cx="40" cy="40" r="32" class="donut-value"
+              style="--dash: {{ '%.1f'|format(201.06 * (1 - health.never_played_share)) }}"/>
+      <text x="40" y="37" text-anchor="middle" class="donut-num">{{ "%.0f"|format((1 - health.never_played_share) * 100) }}%</text>
+      <text x="40" y="52" text-anchor="middle" class="donut-cap">played</text>
+    </svg>
+  </div>
+  <div class="breadth-ribbon health-ribbon">
+    {% for b in health.staleness %}
+    <i class="seg" style="width:{{ '%.2f'|format(b.pct) }}%; --petal-c:{{ b.color }}"
+       {{ tip(b.bucket, [{"l": "Tracks", "v": b.n, "t": "strong"}, {"l": "Share", "v": "%.1f"|format(b.pct) ~ "%"}]) }}></i>
+    {% endfor %}
+  </div>
+  <ul class="stale-legend">
+    {% for b in health.staleness %}
+    <li><i class="dot" style="--petal-c:{{ b.color }}"></i><span class="bucket-label">{{ b.bucket }}</span><span class="bucket-pct mono">{{ "%.0f"|format(b.pct) }}%</span><span class="bucket-n mono">({{ b.n }})</span></li>
+    {% endfor %}
+  </ul>
+  {% if health.dead_playlists %}
+  <p class="section-note">Dead-weight playlists (no listens):</p>
+  <div class="dead-chips">
+    {% for pl in health.dead_playlists %}
+    <a class="tag" href="/playlist/{{ pl.playlist_id }}">{{ pl.title }}</a>
+    {% endfor %}
+    {% if health.dead_overflow %}
+    <a class="tag" href="/cleanup">and {{ health.dead_overflow }} more →</a>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% if health.rediscover %}
+  <p class="section-note">Rediscover candidates: tracks you used to play a lot, gone quiet.</p>
+  <div class="rediscover-list">
+    {% for r in health.rediscover[:3] %}
+    <div class="rc-row">
+      <span class="rc-art{{ '' if r.thumbnail else ' no-art' }}">
+        {% if r.thumbnail %}<img src="{{ r.thumbnail }}" alt="" loading="lazy"
+             onerror="this.closest('.rc-art').classList.add('no-art'); this.remove()">{% endif %}
+      </span>
+      <span class="rc-meta">
+        <strong class="rc-title">{{ r.title or "Unknown track" }}</strong>
+        <span class="rc-sub">{{ r.artist }} &middot; last played {{ r.months_ago }} month{{ 's' if r.months_ago != 1 }} ago</span>
+      </span>
+      <a class="btn btn-sm rc-go" href="/artist?name={{ r.artist|urlencode }}">Give it another spin</a>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if health.unopened_albums and health.unopened_albums.count %}
+  <p class="section-note">{{ health.unopened_albums.count }} saved album{{ 's' if health.unopened_albums.count != 1 }} you have never opened:</p>
+  <div class="unopened-albums">
+    {% for a in health.unopened_albums['items'][:3] %}
+    <a class="unopened-tile" href="/album?browse={{ a.browse_id }}">
+      <span class="unopened-art{{ '' if a.art else ' no-art' }}">
+        {% if a.art %}<img src="{{ a.art }}" alt="" loading="lazy"
+             onerror="this.closest('.unopened-art').classList.add('no-art'); this.remove()">{% endif %}
+      </span>
+      <span class="unopened-meta">
+        <strong>{{ a.title or "Unknown album" }}</strong>
+        <span>{{ a.artist }}</span>
+      </span>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <a class="health-cta" href="/#rediscover">Give forgotten tracks a spin: Rediscover →</a>
+  {% else %}
+  <p class="empty">Library health appears once your library has synced.</p>
+  {% endif %}
+</div>

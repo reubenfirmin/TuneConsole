@@ -164,6 +164,30 @@ def _artist_thumb(ctx, name):
         return None
 
 
+def _rank_candidates(bridges, pt, dim) -> list[dict]:
+    """#86 Rank bridge candidates by STRENGTH alone (sum of anchor_weight x match; multi-anchor fit
+    compounds). The proxy vector is the anchors' own weighted average, so scoring taste FROM it and
+    multiplying by strength double-counted the anchors (a candidate near many high-play anchors won
+    twice). Taste now only GATES (off-taste proxies are dropped, keeping the 'fits you' label
+    honest) and supplies the fits/because explanations."""
+    out = []
+    for cand, bl in bridges.items():
+        strength = sum(w for _, w, _ in bl)
+        proxy = np.zeros(dim, dtype=np.float64)
+        for v, w, _ in bl:
+            proxy += w * v
+        if strength <= 0 or not np.any(proxy):
+            continue
+        taste, fits = pt.score(proxy)
+        if taste <= 0:
+            continue
+        because = [n for _, _, n in sorted(bl, key=lambda x: -x[1])[:3]]
+        out.append({"cand": cand, "score": round(float(strength), 4),
+                    "because": because, "fits": [t for t, _ in fits]})
+    out.sort(key=lambda c: -c["score"])
+    return out
+
+
 def new_artists(ctx, limit=15, max_anchors=30):
     """Taste-pinned new artists: [{artist, score, because[anchors], fits[playlists]}], or []."""
     store = ctx.store
@@ -206,23 +230,9 @@ def new_artists(ctx, limit=15, max_anchors=30):
             # clobber); the strength/proxy below then sum over all of them, so multi-anchor fit compounds.
             bridges.setdefault(cand, []).append((vec, weight * float(match), name))
 
-    out = []
-    for cand, bl in bridges.items():
-        strength = sum(w for _, w, _ in bl)                 # collaborative: Σ anchor_weight × match
-        proxy = np.zeros(V.shape[1], dtype=np.float64)
-        for v, w, _ in bl:
-            proxy += w * v                                  # edge-weighted bridge centroid
-        if strength <= 0 or not np.any(proxy):
-            continue
-        taste, fits = pt.score(proxy)                       # play-weighted per-playlist fit (direction)
-        score = taste * strength                            # judged-by-taste × bridge-strength
-        if score <= 0:                                      # off-taste (negative cosine). Don't surface
-            continue                                        # it as a recommendation with a "fits you" label
-        because = [n for _, _, n in sorted(bl, key=lambda x: -x[1])[:3]]
-        out.append({"artist": display.get(cand, cand.title()), "score": round(float(score), 4),
-                    "because": because, "fits": [t for t, _ in fits]})
-    out.sort(key=lambda c: -c["score"])
-    out = out[:limit]
+    ranked = _rank_candidates(bridges, pt, V.shape[1])
+    out = [{"artist": display.get(c["cand"], c["cand"].title()), "score": c["score"],
+            "because": c["because"], "fits": c["fits"]} for c in ranked[:limit]]
     for c in out:                                       # enrich the shown few with an artist image
         c["thumbnail"] = _artist_thumb(ctx, c["artist"])
         c["genre"] = lastfm.artist_genre(c["artist"], key)   # #18: tag for the facet overlay

@@ -1,3 +1,4 @@
+import numpy as np
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import embed, rec_params
@@ -72,6 +73,41 @@ def test_taste_page_renders_autotune_result_panel(store):
     html = _client(store).get("/taste").text
     assert "chosen config" in html                 # the populated result panel rendered
     assert "recall@20 (winner)" in html
+    # No history was recorded, so the sweep judged itself in-sample: the panel must say so.
+    assert "Tuned on in-sample recall" in html
+
+
+def _set_autotune_result(store, **overrides):
+    import json
+    from yt_playlist.rec import autotune_run
+    payload = {
+        "ran_at": 1000.0,
+        "winner": {"method": "svd", "dim": 64, "recall": 0.5, "metric": "temporal_recall"},
+        "previous": {"method": "svd", "dim": 48, "recall": 0.3, "metric": "temporal_recall"},
+        "grid": [{"method": "svd", "dim": 64, "recall": 0.5, "metric": "temporal_recall"},
+                 {"method": "svd", "dim": 48, "recall": 0.3, "metric": "temporal_recall"}],
+        "metric": "temporal_recall",
+        "in_sample": False,
+        "recs": {"dropped": [], "added": [], "compared": 0},
+    }
+    payload.update(overrides)
+    store.set_setting(autotune_run.RESULT_SETTING, json.dumps(payload))
+
+
+def test_taste_page_autotune_temporal_result_has_no_in_sample_warning(store):
+    _set_autotune_result(store)
+    html = _client(store).get("/taste").text
+    assert "temporal recall@20" in html             # metric is named, not a bare "recall@20"
+    assert "Tuned on in-sample recall" not in html
+    assert "Sweep failed" not in html
+
+
+def test_taste_page_autotune_sweep_failed_renders_line(store):
+    _set_autotune_result(store, metric="recall_at_k", in_sample=True, sweep_failed=True,
+                          winner={"method": "svd", "dim": 48, "recall": 0.2, "metric": "recall_at_k"},
+                          previous={"method": "svd", "dim": 48, "recall": 0.2, "metric": "recall_at_k"})
+    html = _client(store).get("/taste").text
+    assert "Sweep failed: kept the previous configuration" in html
 
 
 def test_taste_page_uses_sliders_not_number_fields(store):
@@ -102,7 +138,7 @@ def test_taste_page_renders_genre_slider_for_tagged_library(store):
 def test_taste_controls_round_trip(store):
     c = _client(store)
     assert c.post("/taste/weight", data={"axis": "lane:deep_cut", "weight": "0.5"}).status_code == 200
-    assert store.get_weights()["lane:deep_cut"] == 0.5
+    assert store.get_weights(now=1.0)["lane:deep_cut"] == 0.5
     assert c.post("/taste/reset-weights").status_code == 200
     assert store.get_weights() == {}
     store.record_feedback("for_you", "a|b", "dismiss", now=1.0)
@@ -112,7 +148,9 @@ def test_taste_controls_round_trip(store):
 
 def test_taste_recall_fragment(store):
     c = _client(store)
-    assert c.get("/taste/recall").status_code == 200   # no vectors -> "build first", still 200
+    r = c.get("/taste/recall")
+    assert r.status_code == 200   # no vectors -> "build first", still 200
+    assert "holdout: 1d" in r.text   # temporal panel names the actual holdout window used
 
 
 def test_taste_param_saves_and_marks_sample_stale(store):
@@ -134,7 +172,7 @@ def test_taste_genre_weight_uses_genre_band(store):
     c = _client(store)
     # a genre axis may be muted to 0 (band [0,2]); the lane band [0.2,3.0] must not floor it
     assert c.post("/taste/weight", data={"axis": "genre:rock", "weight": "0"}).status_code == 200
-    assert store.get_weights()["genre:rock"] == 0.0
+    assert store.get_weights(now=1.0)["genre:rock"] == 0.0
 
 
 def test_taste_reset_param_restores_default(store):
@@ -185,3 +223,40 @@ def test_taste_viz_engine_fragment(store):
     r = c.get("/taste/viz/engine")
     assert r.status_code == 200
     assert "track vectors" in r.text
+
+
+def test_taste_page_shows_now_reading_with_live_posterior(store, monkeypatch):
+    # #88: a live NOW posterior (seeded the same way test_now_layer.py does) renders in the new
+    # "Layer stack" card's NOW row - ribbon + tooltip naming the mode, instead of the old one-line
+    # "Right now: ..." paragraph (which this card subsumes).
+    store.modes.replace_modes([
+        {"mode_id": 1, "label": "Warehouse techno", "families": [["techno", 1]],
+         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 50, "rep_keys": []},
+    ], retired_ids=[], now=1.0)
+    keys = ["a1", "a2", "a3"]
+    V = np.array([[1.0, 0.02], [1.0, 0.03], [1.0, 0.01]], dtype=np.float32)
+    V = V / np.linalg.norm(V, axis=1, keepdims=True)
+    idx = {k: i for i, k in enumerate(keys)}
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (keys, V, idx))
+    iid = store.upsert_identity("main", "cred", None, True)
+    now = 100_000.0
+    rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
+    store.import_play_events(iid, rows)
+
+    c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
+                   base_url="http://127.0.0.1")
+    html = c.get("/taste").text
+    assert "Layer stack" in html
+    assert "Warehouse techno" in html   # NOW/SESSION ribbon tooltip title
+    assert "last 6h" in html            # NOW row's timescale (now_window_h default)
+    assert "24h" in html and "4h half-life" in html   # SESSION row's timescale
+    assert "100.0%" in html             # single-mode ribbon segment share, in the tooltip
+
+
+def test_taste_page_hides_now_and_session_reading_when_quiet(store):
+    # No modes, no recent plays -> below the confidence gate -> the honest quiet copy for both rows.
+    html = _client(store).get("/taste").text
+    assert "Layer stack" in html
+    assert "Quiet: fewer than" in html
+    assert "plays with a known sound in the window." in html
+    assert "plays with a known sound in the last 24h." in html

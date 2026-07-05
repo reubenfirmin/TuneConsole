@@ -1,0 +1,25 @@
+{# #78 Diversity index over time: how spread out your monthly listening is across genre families. #}
+{% from "_partials/_viz_tip.html" import tip %}{% from "_partials/_chart_screen.html" import screen %}
+<div class="card">
+  <h2>Genre diversity</h2>
+  {% if months|length >= 2 and area.path %}
+  <p class="section-note">How spread your listening is across genre families each month (0 = one family, higher = more varied).</p>
+  <div class="stat-grid mini">
+    <div><strong>{{ "%.2f"|format(stats.min) }}</strong><span>Min</span></div>
+    <div><strong>{{ "%.2f"|format(stats.current) }}</strong><span>Current</span></div>
+    <div><strong>{{ "%.2f"|format(stats.max) }}</strong><span>Max</span></div>
+  </div>
+  <svg viewBox="0 0 520 90" class="spark instrument" preserveAspectRatio="none">
+    {{ screen('diversity') }}
+    <path d="{{ area.path }}" class="spark-area"/>
+    <path d="{{ area.stroke }}" class="spark-line"/>
+    {% for b in area.bands %}
+    <rect x="{{ b.x }}" y="0" width="{{ b.w }}" height="90" fill="transparent" pointer-events="all"
+          {{ tip(b.label, [{"l": "Diversity", "v": "%.2f"|format(b.n)}]) }}/>
+    {% endfor %}
+  </svg>
+  {% if x_axis %}<div class="chart-axis"><span>{{ x_axis.first }}</span><span>{{ x_axis.last }}</span></div>{% endif %}
+  {% else %}
+  <p class="empty">Diversity trends appear after a couple of months of history.</p>
+  {% endif %}
+</div>

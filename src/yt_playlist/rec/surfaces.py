@@ -12,7 +12,7 @@ from yt_playlist.util import genre_map
 from yt_playlist.util.duration import ago as _ago
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.rec.rec_dao import RecDao
-from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood, _SCORE_SHIFT_EPS,
+from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood,
                                      content_taste, discovery_facet_weight, playlist_taste)
 from yt_playlist.repos.base import GENERATED_GROUP
 
@@ -134,7 +134,7 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
         for rows, _, _ in sources:
             rows.sort(key=lambda r: -sims.get(r["key"], -1.0))
 
-    weights = store.get_weights()
+    weights = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     # Never show these: dismissed/snoozed/muted, and anything already bundled into a generated
     # playlist (don't re-offer what you just saved). Anti-staleness is per-card rotation, not here.
     dao = RecDao(store)
@@ -338,6 +338,16 @@ def _interleave(primary, secondary, secondary_frac) -> list:
     return out
 
 
+def _catalog_scores(fit, plays, all_keys=None) -> dict:
+    """#86 Catalog kernel: novelty(1/(1+plays)) x a rank base over the taste-fit scores. Keys in
+    `all_keys` but absent from `fit` (no scoreable vector) get a below-worst floor so they still
+    rank by novelty among themselves instead of zeroing out."""
+    base = embed.percentile_scores(fit)
+    floor = 0.5 / max(len(fit), 1)
+    keys = all_keys if all_keys is not None else fit.keys()
+    return {k: (1.0 / (1.0 + plays.get(k, 0))) * base.get(k, floor) for k in keys}
+
+
 def _content_only_scores(store, plays, now) -> dict:
     """{key: Catalog score} for OWNED tracks that have a content (genre/era) vector but NO co-occurrence
     vector (#38). Scored by content-space taste fit (then the permanent x transient genre/era facet
@@ -356,8 +366,7 @@ def _content_only_scores(store, plays, now) -> dict:
         return {}
     csims = ct.score_all(CV)
     fit = _apply_axis_weights(store, {k: float(csims[i]) for i, k in cands}, now)
-    cmin = min(fit.values())
-    return {k: (1.0 / (1.0 + plays.get(k, 0))) * (fit[k] - cmin + _SCORE_SHIFT_EPS) for k in fit}
+    return _catalog_scores(fit, plays)
 
 
 # HOME CARD: "Catalog" ("From your catalog"). Own-but-under-played tracks, the edge of your palette.
@@ -375,15 +384,13 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     plays = store.play_counts()                                  # {key: count}; absent = never played
     pt = playlist_taste(store)
     keys, V, idx = embed.load_vectors(store)
-    # Catalog score = novelty(lack of plays, PRIMARY) × taste-fit weight (shifted positive so it only
-    # ever scales, never zeroes: "weighted, not filtered").
+    # Catalog score = novelty(lack of plays, PRIMARY) × taste-fit rank base (a percentile in (0, 1],
+    # so it only ever scales, never zeroes: "weighted, not filtered").
     collab = {}
     if pt and V is not None:
         # taste WEIGHT (taste-fit + transient mood + permanent×transient facets): modulates, never filters
         sims = _score_candidates(store, pt, keys, V, idx, now)
-        smin = min(sims.values()) if sims else 0.0
-        collab = {k: (1.0 / (1.0 + plays.get(k, 0))) * (sims.get(k, smin) - smin + _SCORE_SHIFT_EPS)
-                  for k in keys}
+        collab = _catalog_scores(sims, plays, all_keys=keys)
     # #38: also rank owned tracks that have a CONTENT (genre/era) vector but no co-occurrence vector,
     # by content-space taste fit. They are invisible to the collaborative path above, yet they are the
     # MOST-forgotten owned tracks (never even reached the co-occurrence model), so Catalog reserves a

@@ -22,9 +22,12 @@
         var n = row.querySelectorAll('.gen-card').length;
         more.hidden = !(n >= 1 && n < 4);
       }
-      document.body.addEventListener('htmx:afterSwap', function (e) {
-        if (e.target && (e.target.id === 'home-mode-cards' || e.target.querySelector('#home-mode-cards'))) syncGenMore();
-      });
+      // Re-sync on EVERY swap/settle: the card row swaps with hx-swap="outerHTML" (initial load and
+      // the per-card regenerate button), and htmx fires those events with a target that is NOT the
+      // new #home-mode-cards node, so any id-filtered listener goes stale (seen live: the message
+      // stayed visible under a full 4-card row). The count is a cheap querySelectorAll.
+      document.body.addEventListener('htmx:afterSwap', syncGenMore);
+      document.body.addEventListener('htmx:afterSettle', syncGenMore);
       syncGenMore();
     })();
   </script>

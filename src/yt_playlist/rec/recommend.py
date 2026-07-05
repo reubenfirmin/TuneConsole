@@ -13,7 +13,7 @@ from yt_playlist.rec.scoring import (  # noqa: F401
     PlaylistTaste, playlist_taste, genre_adjusted_scores, axis_adjusted_scores,
     _breadth_factors, _axis_weights_for, _apply_axis_weights, discovery_facet_weight,
     genre_distance_fn, _apply_mood, mood_tilt, MOOD_ALPHA,
-    BREADTH_FACTOR_MIN, BREADTH_FACTOR_MAX, _NORM_EPS, _SCORE_SHIFT_EPS)
+    BREADTH_FACTOR_MIN, BREADTH_FACTOR_MAX, _NORM_EPS)
 from yt_playlist.rec.taste_analysis import (  # noqa: F401
     era_distribution, taste_fingerprint, playlist_facets, playlist_mood_state,
     track_mood_states, taste_breadth, palette, playlist_genre_diversity)

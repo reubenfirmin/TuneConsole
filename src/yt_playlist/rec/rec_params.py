@@ -137,22 +137,63 @@ PARAMS = [
     ParamSpec("facet_gain", "Facet responsiveness", "transient",
               "How strongly a genre/era/artist lean re-ranks the feed. Higher = right-now leans bite "
               "harder.", 0.0, 1.0, 0.05, 0.35),
+    ParamSpec("play_halflife_d", "Play memory half-life (days)", "transient",
+              "How long a play's influence lasts in the transient model. Shorter = recent plays "
+              "dominate for a brief window; longer = they influence the feed for days.",
+              0.5, 30, 0.5, 3),
+    ParamSpec("mood_halflife_d", "Mood memory half-life (days)", "transient",
+              "How long a mood event's influence lasts. Shorter = mood gestures fade quickly; longer = "
+              "they steer the feed for days.", 1, 60, 1, 7, integer=True),
+    ParamSpec("like_halflife_d", "Like memory half-life (days)", "transient",
+              "How long a thumbs-up's influence lasts. Shorter = likes fade quickly; longer = they "
+              "steer for days.", 1, 90, 1, 21, integer=True),
+    ParamSpec("dislike_halflife_d", "Dislike fade half-life (days)", "transient",
+              "How long a thumbs-down's negative influence lasts in the transient model. Shorter = "
+              "dislikes fade quickly; longer = they suppress similar music for days.",
+              5, 180, 5, 45, integer=True),
     ParamSpec("mood_alpha", "Mood tilt", "transient",
               "How hard a mood gesture tilts the lanes, relative to the underlying taste score.",
               0.0, 1.0, 0.05, 0.35),
-    ParamSpec("mood_recency_alpha", "Recency emphasis", "transient",
-              "How much your newest interactions dominate over older ones. Higher = only the very "
-              "latest plays/likes matter.", 0.05, 0.9, 0.05, 0.35),
+    ParamSpec("weight_revert_halflife_d", "Learned-weight revert half-life (days)", "transient",
+              "How long learned weight changes persist before reverting toward your durable taste. "
+              "Longer = learned tweaks stick around longer.", 7, 365, 7, 60, integer=True, advanced=True),
     ParamSpec("recent_play_limit", "Recent window (tracks)", "transient",
               "How many recent plays/likes feed the right-now model.", 5, 200, 5, 50, integer=True),
-    ParamSpec("stale_decay_halflife_d", "Right-now relax half-life (days)", "transient",
-              "Once a sync goes stale, how fast the right-now model relaxes back to your durable taste.",
-              1, 30, 1, 3, integer=True),
     ParamSpec("facet_mult_min", "Facet floor", "transient",
               "Even the strongest negative lean keeps a facet at least this present (never fully muted).",
               0.0, 1.0, 0.05, 0.35, advanced=True),
     ParamSpec("facet_mult_max", "Facet ceiling", "transient",
               "Cap on how much a positive lean can boost a facet.", 1.0, 4.0, 0.1, 2.5, advanced=True),
+    # --- NOW/session layers (#88 layered taste model): a confidence-gated posterior over taste modes
+    # read from the last few hours of real plays (NOW), plus a slower same-sitting carry-over
+    # (session). Defaults tuned so a normal listening session clears the NOW gate within a couple of
+    # tracks; a quiet stretch (or one lone play) returns no read rather than guessing. ---
+    ParamSpec("now_window_h", "NOW layer window (hours)", "transient",
+              "How far back the moment-to-moment taste read looks for recent plays. Shorter reacts "
+              "only to what's playing right now; longer smooths over a whole sitting.",
+              1, 24, 1, 6, integer=True),
+    ParamSpec("now_min_events", "NOW layer: minimum plays", "transient",
+              "Fewest distinct recent plays (with a known sound) needed before the moment-to-moment "
+              "read speaks up. Below this, thin evidence stays silent instead of guessing.",
+              2, 10, 1, 3, integer=True, advanced=True),
+    ParamSpec("now_gain", "NOW layer responsiveness", "transient",
+              "How hard the moment-to-moment taste read steers the feed once it has enough evidence.",
+              0.0, 2.0, 0.05, 0.6),
+    ParamSpec("session_halflife_h", "Session memory half-life (hours)", "transient",
+              "How long this listening session's influence lasts. Shorter forgets a session quickly "
+              "once you stop; longer lets it carry across a break.", 0.5, 24, 0.5, 4),
+    ParamSpec("session_alpha", "Session tilt", "transient",
+              "How strongly this session's read blends into the feed relative to your durable taste.",
+              0.0, 1.0, 0.05, 0.25),
+    # --- Skips (#84 read-time classification of track_exit/bye rows). Defaults mirror the
+    # play/like/dislike transient channels: a moderate push with a two-week memory. ---
+    ParamSpec("skip_transient_w", "Recent-skip push", "transient",
+              "How hard a recent skip pushes the feed away from similar music. 0 = skips don't "
+              "steer; higher = your last skips dominate.", 0.0, 2.0, 0.05, 0.6),
+    ParamSpec("skip_halflife_d", "Skip memory half-life (days)", "transient",
+              "How long a skip's influence lasts in the transient model. Shorter = recent skips "
+              "dominate for a brief window; longer = they influence the feed for days.",
+              1, 60, 1, 14, integer=True),
     # --- Learning (graduation: right-now -> permanent). Defaults == the constants below. ---
     ParamSpec("graduation_enabled", "Learning enabled", "graduation",
               "When on, sustained right-now behavior gradually rewrites your durable taste weights. "
@@ -167,8 +208,16 @@ PARAMS = [
     ParamSpec("graduate_down", "Graduate-down step", "graduation",
               "Permanent weight multiplier applied when a facet graduates downward.",
               0.5, 1.0, 0.01, 0.95, advanced=True),
-    ParamSpec("source_w_like", "Speed: likes", "graduation",
-              "How fast an explicit like graduates toward permanent taste.", 0.0, 2.0, 0.05, 1.0, advanced=True),
+    ParamSpec("source_w_like", "Speed: likes (in the player)", "graduation",
+              "How fast a thumbs-up you press while listening graduates toward permanent taste. "
+              "These likes are seen the moment you press them, so they also steer the day-to-day "
+              "mood at full strength.", 0.0, 2.0, 0.05, 1.0, advanced=True),
+    ParamSpec("source_w_like_synced", "Speed: likes (found by sync)", "graduation",
+              "How fast a like the library sync discovers shapes your permanent taste. YouTube "
+              "reports these in bulk with no record of when you actually pressed them, so they "
+              "never steer the day-to-day mood; they only slowly shape the permanent model. At the "
+              "default, roughly three likes in the same genre/era/artist are needed per nudge.",
+              0.0, 2.0, 0.05, 0.4, advanced=True),
     ParamSpec("source_w_dislike", "Speed: dislikes", "graduation",
               "How fast an explicit dislike graduates toward permanent taste.", 0.0, 2.0, 0.05, 1.0, advanced=True),
     ParamSpec("source_w_vibe", "Speed: mood gestures", "graduation",
@@ -242,6 +291,76 @@ PARAMS = [
               "Fewest owned tracks before the onboarding 'from your library' playlist appears; below "
               "this, onboarding shows the radio playlist only.",
               0, 500, 5, 30, integer=True, advanced=True),
+    # --- Per-mode Personalized PageRank ranker (#57). Experimental A/B: PPR walk vs the current
+    # in-mode ordering. All advanced (a tuner sweeps them; hand-setting only degrades quality). ---
+    ParamSpec("ppr_alpha", "PPR walk weight", "discovery",
+              "For the experimental random-walk in-mode ranker: how far the walk spreads from a mode's "
+              "seed tracks before restarting. Higher reaches further along your co-listen graph; the "
+              "restart probability is one minus this.",
+              0.5, 0.99, 0.01, 0.85, advanced=True),
+    ParamSpec("ppr_iters", "PPR iteration cap", "discovery",
+              "Maximum power-iteration steps for the random-walk in-mode ranker before it stops. It "
+              "usually converges well before this.",
+              10, 200, 5, 50, integer=True, advanced=True),
+    ParamSpec("ppr_tol", "PPR convergence tolerance", "discovery",
+              "The random-walk in-mode ranker stops early once the ranking stops moving by more than "
+              "this. Smaller runs more iterations for a tighter fixed point.",
+              0.0, 0.01, 0.000001, 0.000001, advanced=True),
+    ParamSpec("ppr_rank_depth", "PPR rank depth", "discovery",
+              "How many top tracks of each mode's random-walk ranking the worker caches for the card "
+              "to order from.",
+              50, 2000, 50, 200, integer=True, advanced=True),
+    ParamSpec("ppr_ab_share", "PPR card share", "discovery",
+              "Share of mode cards whose in-mode order comes from the experimental random-walk ranker "
+              "rather than the current one. 0 = never, 1 = always; the rest keep the current ranker so "
+              "the selection log can compare them.",
+              0.0, 1.0, 0.05, 0.5, advanced=True),
+    # --- Dynamic radio (#93). Session-scoped reactivity for the primed-handoff radio. All advanced
+    # (a tuner sweeps them; hand-setting only shifts feel, never correctness). ---
+    ParamSpec("radio_artist_cap", "Radio artist cap", "discovery",
+              "The most tracks by any one artist that dynamic radio will play in a single session, so a "
+              "session does not collapse onto one artist.",
+              1, 10, 1, 3, integer=True, advanced=True),
+    ParamSpec("radio_candidate_pool", "Radio candidate pool", "discovery",
+              "How many of your top-scored tracks dynamic radio ranks the next pick from. Deeper reaches "
+              "further into the tail; shallower keeps picks closer to your core taste.",
+              10, 500, 10, 60, integer=True, advanced=True),
+    ParamSpec("radio_skip_artist_penalty", "Radio skip artist penalty", "discovery",
+              "How hard skipping a track in radio depresses more tracks by that same artist for the rest "
+              "of the session. Higher backs off a skipped artist faster.",
+              0.0, 2.0, 0.05, 0.5, advanced=True),
+    ParamSpec("radio_skip_mode_penalty", "Radio skip mode penalty", "discovery",
+              "How hard skipping a track in radio depresses that track's taste region (its nearest mode) "
+              "for the rest of the session. Higher steers away from the whole neighborhood, not just the "
+              "artist.",
+              0.0, 2.0, 0.05, 0.25, advanced=True),
+    ParamSpec("radio_skip_halflife_h", "Radio skip half-life (hours)", "discovery",
+              "How quickly a radio skip penalty fades. At this many hours it is half as strong, so an "
+              "early skip does not haunt the rest of a long session.",
+              0.25, 24.0, 0.25, 2.0, advanced=True),
+    ParamSpec("radio_volume_floor", "Radio volume floor", "discovery",
+              "Turning the volume to at or below this fraction during radio counts as a soft skip: radio "
+              "eases off that track's neighborhood without changing the song.",
+              0.0, 0.5, 0.01, 0.1, advanced=True),
+    ParamSpec("radio_seed_depth", "Radio seed depth", "discovery",
+              "How many upcoming tracks dynamic radio keeps queued ahead of you, so you always have a "
+              "song or two to skip into. The playlist is topped up to this many unplayed picks. "
+              "Deeper also keeps YouTube's own autoplay suggestions further from the queue panel.",
+              1, 10, 1, 6, integer=True, advanced=True),
+    ParamSpec("radio_deck_size", "Radio deck size", "discovery",
+              "How many tracks each dynamic-radio deck (mini playlist) holds before it hands off to the "
+              "other deck. Also the maximum number of tracks your skips and steering take to reach you, "
+              "since reactivity is delivered by the next deck, not the one currently playing.",
+              2, 6, 1, 3, integer=True, advanced=True),
+    ParamSpec("radio_variety", "Radio variety", "discovery",
+              "How adventurous each radio pick is. 0 always plays your strongest match; higher values "
+              "let deeper cuts through more often, so a fresh session does not open on the same tracks "
+              "every time.",
+              0.0, 0.9, 0.05, 0.5, advanced=True),
+    ParamSpec("radio_freshness_days", "Radio freshness (days)", "discovery",
+              "How long a track that radio already played sits out of new radio sessions. 0 turns the "
+              "cooldown off, so a restart can immediately replay the same picks.",
+              0.0, 14.0, 0.5, 3.0, advanced=True),
 ]
 
 PARAMS_BY_NAME = {p.name: p for p in PARAMS}
@@ -309,8 +428,6 @@ def reset_all_params(store) -> None:
 
 # --- Transient model (lifecycle / recency) ---
 SYNC_STALE_S = 24 * 3600       # sync older than this is "stale" (also used by recommend.sync_status)
-MOOD_RECENCY_ALPHA = 0.35      # EMA over interaction RANK; newest pick ~35% of the blend
-STALE_DECAY_HALFLIFE_D = 3     # once sync stale, transient relaxes with this half-life (days)
 # Source weights into the transient leans
 PLAY_TRANSIENT_W = 0.30        # one recent play's positive push
 LIKE_TRANSIENT_W = 0.45        # one recent like's positive push to facet leans (stronger than a play)
@@ -334,7 +451,9 @@ GRADUATE_DOWN = 0.95
 # immediate; graduation is gated by accumulation past THEME_THRESHOLD. Calibrated so today's vibe
 # lever is preserved (a mood event still contributes ±1 with SOURCE_W_VIBE=1.0).
 SOURCE_W_VIBE = 1.0       # vibe / facet lever (unchanged from today)
-SOURCE_W_LIKE = 1.0       # explicit thumbs-up - strong
+SOURCE_W_LIKE = 1.0       # thumbs-up observed live in the player - strong (real action time)
+SOURCE_W_LIKE_SYNCED = 0.4  # like discovered by the library sync - low (no reliable action time;
+                            # a single one must not cross THEME_THRESHOLD on its own)
 SOURCE_W_DISLIKE = 1.0    # thumbs-down (sign supplied by caller) - strong
 SOURCE_W_SLIDER = 0.5     # per held-day of a full lean (~2-3 held days -> one graduation step)
 SOURCE_W_PLAY = 0.08      # one play - weak; passive listening must not silently rewrite taste

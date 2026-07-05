@@ -124,11 +124,14 @@ class RecSurfaceRepo(Repo):
 
     # --- persistent mood: count-capped (replaces time-windowed active_mood) ---
     @synchronized
-    def record_mood(self, keys, direction, now) -> None:
-        """Log a mood signal (seed keys + ±direction). Persistent, NOT pruned by time; only the
-        newest MOOD_EVENT_CAP rows are kept so the table stays bounded. Read by recent_mood_events."""
+    def record_mood(self, keys, direction, now, prune_before=None) -> None:
+        """Log a mood signal (seed keys + ±direction). Bounded by age (via prune_before, if set)
+        and by count (only the newest MOOD_EVENT_CAP rows are kept). When prune_before is set,
+        rows with created_at < prune_before are deleted in the same transaction. Read by recent_mood_events."""
         self.conn.execute("INSERT INTO rec_mood(created_at, direction, keys) VALUES (?,?,?)",
                           (now, int(direction), json.dumps(list(keys))))
+        if prune_before is not None:
+            self.conn.execute("DELETE FROM rec_mood WHERE created_at < ?", (prune_before,))
         self.conn.execute(
             "DELETE FROM rec_mood WHERE rowid NOT IN "
             "(SELECT rowid FROM rec_mood ORDER BY created_at DESC, rowid DESC LIMIT ?)",
@@ -149,6 +152,36 @@ class RecSurfaceRepo(Repo):
         """Deprecated alias for recent_mood_events(), retained for callers not yet updated to the
         persistent API. Time-window args are ignored; all stored events are returned newest-first."""
         return self.recent_mood_events()
+
+    # --- #87 lane impressions: pure instrumentation for a future lane bandit (rec_lane_impressions,
+    #     defined in core.store SCHEMA since it's a plain append-only log, not surface-owned state) ---
+    @synchronized
+    def record_lane_impressions(self, items, now, prune_before=None) -> None:
+        """Log which lane served each rendered item: items is [(lane, identity_key), ...]. One
+        executemany insert; when prune_before is set, rows with at < prune_before are deleted in the
+        same transaction. No-op on an empty items list. Read by lane_impression_counts."""
+        items = list(items)
+        if not items:
+            return
+        self.conn.executemany(
+            "INSERT INTO rec_lane_impressions(lane, identity_key, at) VALUES (?,?,?)",
+            [(lane, key, now) for lane, key in items])
+        if prune_before is not None:
+            self.conn.execute("DELETE FROM rec_lane_impressions WHERE at < ?", (prune_before,))
+        self.conn.commit()
+
+    @synchronized
+    def lane_impression_counts(self, since=None) -> dict:
+        """{lane: count} of logged impressions, optionally restricted to at >= since. The future
+        lane-bandit's read side; also proof the data lands."""
+        if since is None:
+            rows = self.conn.execute(
+                "SELECT lane, COUNT(*) c FROM rec_lane_impressions GROUP BY lane").fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT lane, COUNT(*) c FROM rec_lane_impressions WHERE at >= ? GROUP BY lane",
+                (since,)).fetchall()
+        return {r["lane"]: r["c"] for r in rows}
 
     # --- per-card rotation (the rec_impressions table, surface='card') ---
     @synchronized
@@ -285,6 +318,14 @@ class RecSurfaceRepo(Repo):
         return self.conn.execute(
             "SELECT axis, source, score, factor, new_weight, created_at FROM rec_grad_log "
             "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+    @synchronized
+    def graduation_audit_rows(self) -> list:
+        """Every graduation log row's (axis, source, factor), oldest-first. Powers the one-shot
+        like-ratchet repair's entitlement audit (rec/repair.py): per-axis like-source counts and
+        the non-like factor product that floors the correction."""
+        return self.conn.execute(
+            "SELECT axis, source, factor FROM rec_grad_log ORDER BY id").fetchall()
 
     @synchronized
     def graduation_log_counts(self) -> dict:

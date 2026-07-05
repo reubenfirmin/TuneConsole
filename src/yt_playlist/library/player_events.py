@@ -5,6 +5,7 @@ action on a known track feeding the like/dislike model (off-player likes, the #3
 interpretation (skip vs completion, sessions, curation signals) happens later, at read time, so
 thresholds stay server-tunable without extension releases."""
 import json
+from urllib.parse import urlsplit
 
 from yt_playlist.library.live_plays import resolve_identity
 from yt_playlist.rec import graduation
@@ -12,9 +13,28 @@ from yt_playlist.rec import graduation
 PLAYBACK_KINDS = {"track_exit", "ended", "state", "tick", "volume", "bye"}
 CURATION_KINDS = {"rate", "playlist_edit", "feedback", "subscription", "share_intent"}
 
+# Server-written kinds: recorded directly via store.record_player_event by server-side routes, never
+# pushed as a bridge frame, so they are intentionally absent from the two sets above and never seen
+# by handle_player_event. "alt_version" (web/routes/playlists.py, the alternates-add route): the user
+# swapped in an alternate version of a track, i.e. "these two are the same song to me" (future
+# dedupe/preference evidence). Payload: {"old": <old video_id>, "new": <new video_id>}.
+
 _BODY_CAP = 4096
-_RATE_STATUS = {"like": "LIKE", "dislike": "DISLIKE", "removelike": "INDIFFERENT"}
+# Observed rate actions that may act on the like/dislike model. 'removelike' is deliberately NOT
+# mapped: only LIKE/DISLIKE may act from the player pipeline; the authoritative un-like is the
+# library sync's whole-run INDIFFERENT (see live_plays._STATUSES for the flap this prevents). The
+# raw removelike event is still persisted in player_events for later interpretation.
+_RATE_STATUS = {"like": "LIKE", "dislike": "DISLIKE"}
 _PAYLOAD_EXTRAS = ("state", "volume", "shuffle", "repeat")
+
+
+def _extract_action_from_url(url):
+    """Extract action from URL path, ignoring querystring (e.g., 'like', 'dislike' from .../{action}?...)."""
+    try:
+        path = urlsplit(url).path
+        return path.rstrip("/").rsplit("/", 1)[-1]
+    except Exception:
+        return url.rstrip("/").rsplit("/", 1)[-1]
 
 
 def _curation_fields(kind, msg):
@@ -29,7 +49,7 @@ def _curation_fields(kind, msg):
         data = {}
     if kind == "rate":
         target = data.get("target") or {}
-        action = url.rstrip("/").rsplit("/", 1)[-1]
+        action = _extract_action_from_url(url)
         return target.get("videoId"), target.get("playlistId"), action
     if kind == "playlist_edit":
         vids = [a.get("addedVideoId") or a.get("removedVideoId")
@@ -37,7 +57,7 @@ def _curation_fields(kind, msg):
         vids = [v for v in vids if v]
         return (vids[0] if vids else None), data.get("playlistId"), None
     if kind == "subscription":
-        return None, None, url.rstrip("/").rsplit("/", 1)[-1]
+        return None, None, _extract_action_from_url(url)
     return None, None, None
 
 
@@ -67,5 +87,7 @@ def handle_player_event(ctx, msg, now) -> bool:
     if kind == "rate" and video_id and action in _RATE_STATUS:
         key = store.identity_key_for_video(video_id)
         if key:
-            graduation.apply_dislikes(store, {key: _RATE_STATUS[action]}, now)  # idempotent
+            # provenance='action': an observed rate call is a real-time user action, so the like
+            # keeps full transient participation (unlike sync-discovered likes).
+            graduation.apply_dislikes(store, {key: _RATE_STATUS[action]}, now, provenance="action")
     return True

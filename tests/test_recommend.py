@@ -521,7 +521,9 @@ def test_graduation_enabled_still_graduates(store):
     store.upsert_identity("main", "cred", None, True)
     for _ in range(10):
         recommend.graduate_facet(store, "genre:rock", 1.0, now=1000.0, source=1.0)
-    assert store.get_weights().get("genre:rock", 1.0) > 1.0
+    # #85 read at the same `now` as the nudges, else read-time reversion (vs real wall-clock time)
+    # would erase it before the assertion runs.
+    assert store.get_weights(now=1000.0).get("genre:rock", 1.0) > 1.0
 
 
 def test_generators_exclude_dj_mixes(store):

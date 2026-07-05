@@ -19,8 +19,11 @@ def test_sync_dislike_suppresses_and_feeds_negative_transient(store):
     assert k in store.suppressed_keys("for_you", 1000.0)        # hidden everywhere
     # NO direct permanent axis nudge at capture (graduation owns that)
     assert all(v == 1.0 for v in store.get_weights().values())
-    # dislike accumulated negatively into the graduation ledger
-    assert (store.get_theme("artist:Nickelback") or 0.0) < 0
+    # #84: a dislike is a verdict on the TRACK, so the artist axis never accrues negatively (the
+    # old assertion here encoded the leak #84 fixed). This fixture track has no genre at sync time
+    # (enrichment hasn't run), so nothing accrues at all here; genre-facet accrual on dislikes is
+    # covered by test_negative_graduation.py with enriched fixtures.
+    assert store.get_theme("artist:Nickelback") is None
 
 
 def test_sync_dislike_idempotent(store):
@@ -29,9 +32,10 @@ def test_sync_dislike_idempotent(store):
                       tracks={"PL1": [_disliked()]})
     sync.sync_identity(store, iid, fake, now=1000.0)
     sync.sync_identity(store, iid, fake, now=2000.0)
-    assert (store.get_theme("artist:Nickelback") or 0.0) > -1.5 - 1e-9   # accumulated once, not twice
-    # (one dislike -> one -1.0 contribution; a second sync must not add another)
-    assert store.get_theme("artist:Nickelback") == -1.0
+    # #84: the artist axis no longer accrues on dislikes, and it must STAY empty on a repeat sync
+    # (guards against a regression re-adding artist accrual on re-capture; genre-facet accrual and
+    # idempotency with enriched fixtures live in test_negative_graduation.py).
+    assert store.get_theme("artist:Nickelback") is None
 
 
 def test_sync_reconciles_undislike(store):

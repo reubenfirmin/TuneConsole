@@ -153,6 +153,62 @@ class HistoryRepo(Repo):
         return keys[:limit] if limit else keys
 
     @synchronized
+    def recent_plays_with_ts(self, limit=None, exclude_list_ids=None) -> list:
+        """#85 [(identity_key, ts)] newest-first, deduped per key. Unions the live play stream
+        (play_events, real timestamps) with the (track, day) history model (noon-bucket timestamps,
+        the only signal for pre-live history), keeping each key's LATEST timestamp. The transient
+        model's wall-clock decay reads time from here instead of inferring recency from rank.
+
+        `exclude_list_ids` (#93v2, same contract as play_events_since): drops play_events rows whose
+        playlist_ytm_id is in the set; NULL-provenance play_events rows are ALWAYS kept (a play not
+        attributed to any machine-queued playlist is user-driven). The subtlety this method adds is
+        the history branch of the union: the next YTM history sync re-records every radio play as a
+        day-granular history_items row with NO provenance (YTM history carries no playlist
+        attribution), and MAX(ts) GROUP BY key would resurrect the excluded play through that shadow.
+        So while an exclusion is active, a history row whose (identity_key, UTC day) has a matching
+        excluded-provenance play_event is suppressed too; history rows for keys/days with no such
+        radio event (organic listening, pre-live history) pass through untouched. history_items
+        carries no video id, so (identity_key, day) IS the play's identity in the day-granular
+        model, making it the correct shadow-match join.
+
+        The day match is widened to ADJACENT days (play day within shadow day +/- 1): play_events
+        timestamps are real UTC, but _parse_played_date anchors YTM's LOCAL-day 'Today'/'Yesterday'
+        buckets on the UTC sync day, so a non-UTC user's evening radio play can land its shadow one
+        UTC day off in either direction and would slip past an exact-day match, re-entering the
+        funnel. Collateral of the widening stays confined to same-track adjacent-day history rows,
+        and only when radio played that exact track: the conservative direction for a machine-play
+        exclusion (an organic same-track play two or more days away always survives)."""
+        if exclude_list_ids:
+            excl = list(exclude_list_ids)
+            ph = ",".join("?" * len(excl))
+            q = ("SELECT k, MAX(ts) ts FROM ("
+                 "  SELECT identity_key k, played_at ts FROM play_events"
+                 f"  WHERE (playlist_ytm_id IS NULL OR playlist_ytm_id NOT IN ({ph}))"
+                 "  UNION ALL"
+                 "  SELECT hi.identity_key k, hs.taken_at ts FROM history_items hi"
+                 "  JOIN history_snapshots hs ON hs.id = hi.snapshot_id"
+                 "  WHERE NOT EXISTS ("
+                 "    SELECT 1 FROM play_events pe"
+                 "    WHERE pe.identity_key = hi.identity_key"
+                 f"    AND pe.playlist_ytm_id IN ({ph})"
+                 "    AND CAST(pe.played_at / 86400 AS INTEGER)"
+                 "        BETWEEN CAST(hs.taken_at / 86400 AS INTEGER) - 1"
+                 "        AND CAST(hs.taken_at / 86400 AS INTEGER) + 1)"
+                 ") GROUP BY k ORDER BY ts DESC")
+            params: tuple = (*excl, *excl)
+        else:
+            q = ("SELECT k, MAX(ts) ts FROM ("
+                 "  SELECT identity_key k, played_at ts FROM play_events"
+                 "  UNION ALL"
+                 "  SELECT hi.identity_key k, hs.taken_at ts FROM history_items hi"
+                 "  JOIN history_snapshots hs ON hs.id = hi.snapshot_id"
+                 ") GROUP BY k ORDER BY ts DESC")
+            params = ()
+        rows = self.conn.execute(q + (" LIMIT ?" if limit else ""),
+                                 (*params, limit) if limit else params).fetchall()
+        return [(r["k"], float(r["ts"])) for r in rows]
+
+    @synchronized
     def record_play_event(self, identity_id, identity_key, video_id, played_at,
                           playlist_ytm_id=None, like_status=None) -> bool:
         """#75 Persist one live now-playing report from the extension. The content script re-reports
@@ -178,9 +234,74 @@ class HistoryRepo(Repo):
         return True
 
     @synchronized
-    def play_events_since(self, since_ts) -> list[dict]:
-        """#75 Play events at/after since_ts, oldest first."""
-        rows = self.conn.execute(
-            "SELECT identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status "
-            "FROM play_events WHERE played_at>=? ORDER BY played_at, id", (since_ts,)).fetchall()
+    def play_events_since(self, since_ts, exclude_list_ids=None) -> list[dict]:
+        """#75 Play events at/after since_ts, oldest first.
+
+        `exclude_list_ids`, when given, drops rows whose playlist_ytm_id is in that set (#93v2: a
+        caller reading recent plays as mood/taste EVIDENCE passes the radio playlists here, so the
+        radio's own machine-queued plays cannot feed back into the model that steers the radio - see
+        rec/transient.py's radio_list_ids for the loop this closes). Rows with a NULL playlist_ytm_id
+        are ALWAYS kept regardless of the exclusion set: no provenance means the play was not
+        attributed to any machine-queued playlist (a direct search/album play, or a pre-provenance
+        row), so it is user-driven and must still count."""
+        if exclude_list_ids:
+            excl = list(exclude_list_ids)
+            placeholders = ",".join("?" * len(excl))
+            q = ("SELECT identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status "
+                 f"FROM play_events WHERE played_at>=? "
+                 f"AND (playlist_ytm_id IS NULL OR playlist_ytm_id NOT IN ({placeholders})) "
+                 "ORDER BY played_at, id")
+            rows = self.conn.execute(q, (since_ts, *excl)).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status "
+                "FROM play_events WHERE played_at>=? ORDER BY played_at, id", (since_ts,)).fetchall()
         return [dict(r) for r in rows]
+
+    @synchronized
+    def import_plays(self, identity_id, plays) -> int:
+        """#61 Bulk (track, day) backfill from a Takeout import: [(identity_key, ts)] -> the same
+        per-date snapshot + (snapshot, key) dedup the live/sync paths use, so imports, syncs, and
+        live capture can all see the same play without double counting. Returns NEW rows."""
+        by_date: dict = {}
+        for key, ts in plays:
+            if not key:
+                continue
+            day = int(ts // 86400)
+            by_date.setdefault(day * 86400 + _NOON, set()).add(key)
+        added = 0
+        for play_ts, keys in by_date.items():
+            sid = self._snapshot_for_date(identity_id, play_ts)
+            existing = {r["identity_key"] for r in self.conn.execute(
+                "SELECT identity_key FROM history_items WHERE snapshot_id=?", (sid,))}
+            new = sorted(keys - existing)
+            if new:
+                self.conn.executemany(
+                    "INSERT INTO history_items(snapshot_id, identity_key) VALUES (?,?)",
+                    [(sid, k) for k in new])
+                added += len(new)
+        self.conn.commit()
+        return added
+
+    @synchronized
+    def import_play_events(self, identity_id, rows) -> int:
+        """#61 Bulk play_events backfill: [(identity_key, video_id, ts)]. Idempotency key is
+        (identity, key, played_at within 2s), NOT exact timestamp equality: Takeout's HTML export
+        floors timestamps to whole seconds while the JSON export carries milliseconds, so the same
+        play arrives sub-second apart when a user imports one format and later the other (observed
+        live: an HTML import then a JSON redo doubled every matched event). No real play of the
+        same track can recur within 2 seconds, so the window never swallows a genuine play. Live
+        rows near the same instant also dedupe."""
+        added = 0
+        for key, vid, ts in rows:
+            if not key:
+                continue
+            cur = self.conn.execute(
+                "INSERT INTO play_events(identity_id, identity_key, video_id, played_at) "
+                "SELECT ?, ?, ?, ? WHERE NOT EXISTS ("
+                "  SELECT 1 FROM play_events WHERE identity_id=? AND identity_key=? "
+                "  AND played_at BETWEEN ? - 2.0 AND ? + 2.0)",
+                (identity_id, key, vid, ts, identity_id, key, ts, ts))
+            added += cur.rowcount
+        self.conn.commit()
+        return added

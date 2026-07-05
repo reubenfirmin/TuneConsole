@@ -4,14 +4,19 @@ The cookie-era fast plays sync (30-minute get_history polls) was removed with th
 migration; this is its replacement. Each report becomes a timestamped play_events row (the
 fine-grained source of truth), also feeds the existing (track, day) history model so every
 downstream consumer (charts, transient model, graduation) keeps working unchanged, stamps
-last_plays_sync_at (the plays half of staleness_factor), and folds likeStatus into the
-like/dislike model. The daily full sync's get_history() stays as backfill for plays that happen
-while the app is not running; record_history_plays dedups per (track, date), so the two sources
-never double-count a day."""
+last_plays_sync_at (#85: feeds the sync-status display badge, recommend.sync_status; the
+transient model no longer damps on sync staleness, each event decays on its own wall clock),
+and folds likeStatus into the like/dislike model. The daily full sync's get_history() stays as
+backfill for plays that happen while the app is not running; record_history_plays dedups per
+(track, date), so the two sources never double-count a day."""
 from yt_playlist.rec import graduation
 from yt_playlist.util.matching import identity_key as make_key
 
-_STATUSES = {"LIKE", "DISLIKE", "INDIFFERENT"}
+# Only explicit ratings act from the player pipeline. INDIFFERENT is deliberately excluded: the
+# player's like-button readout shows INDIFFERENT before YTM hydrates the real rating, so folding it
+# in would wrongly clear a genuine like (which then re-records on the next sync, the flap that
+# ratcheted graduation). The authoritative un-like is the library sync's whole-run INDIFFERENT.
+_STATUSES = {"LIKE", "DISLIKE"}
 
 
 def resolve_identity(store, brand_id):
@@ -47,7 +52,9 @@ def handle_play_event(ctx, msg, now) -> bool:
                                   like_status=(status or None))
     if new:
         store.record_history_plays(ident, now, [key])       # keep the (track, day) model current
-        store.set_setting("last_plays_sync_at", str(now))   # plays-freshness for staleness_factor
+        store.set_setting("last_plays_sync_at", str(now))   # plays-freshness for the sync-status badge
     if status in _STATUSES:
-        graduation.apply_dislikes(store, {key: status}, now)    # idempotent by design
+        # provenance='action': observed live while the user is engaged, so the event time is real
+        # and the like keeps full transient participation.
+        graduation.apply_dislikes(store, {key: status}, now, provenance="action")  # idempotent by design
     return new

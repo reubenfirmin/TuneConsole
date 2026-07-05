@@ -1,0 +1,63 @@
+{# #93 Task 9: the radio launch card. Its OWN card on Home (not a status-strip button, see the ticket).
+   OFF: "Start radio" + collapsed "Customize". ON: "Stop" + "Customize". The single customize-panel
+   instance is guarded by x-if so exactly one #radio-customize-bars exists at a time: inline in this
+   card while radio is off, or x-teleport'ed into the now-playing card's #radio-steer-slot while it's
+   playing (steering happens right where you're listening). x-data lives on the shared #home root
+   (homeStatus() in app.js), so radioActive/startRadio/stopRadio/customizeOpen are already in scope. #}
+<section class="card radio-launch" id="radio-launch" x-show="connected" x-cloak :class="{ 'is-active': radioActive }">
+  <div class="rl-top">
+    <span class="rl-eyebrow"><span class="rl-dot" aria-hidden="true"></span> Radio</span>
+    <span class="rl-actions">
+      <button type="button" class="btn btn-sm" x-show="!radioActive" x-cloak
+              @click="startRadio()" title="Start radio" aria-label="Start radio">Start radio</button>
+      <button type="button" class="btn btn-ghost btn-sm" x-show="radioActive" x-cloak
+              @click="stopRadio()" title="Stop radio" aria-label="Stop radio">Stop</button>
+      {# Testing/maintenance: force a mid-track tail top-up so live-queue behavior is observable on
+         demand, no waiting for a track boundary. #}
+      <button type="button" class="btn btn-ghost btn-sm" x-show="radioActive" x-cloak
+              @click="populateRadio()" title="Recompute and push the upcoming tracks now"
+              aria-label="Populate tail">Populate tail</button>
+      <button type="button" class="rl-customize-toggle" @click="customizeOpen = !customizeOpen"
+              :aria-expanded="customizeOpen.toString()"
+              :title="customizeOpen ? 'Hide customize' : 'Customize this session'">
+        <span class="fp-caret" x-text="customizeOpen ? '▾' : '▸'"></span> Customize
+      </button>
+    </span>
+  </div>
+  <p class="rl-sub" x-show="!radioActive" x-cloak>A dynamic session seeded from your taste model, playable
+    from any track. Adjust it once below, or steer it live once it's playing.</p>
+  {# Waiting-state net: the radio window can come up with a blocked deck-play (autoplay/MEI), which
+     used to leave the owner staring at a silent tab with no signal at all. radioWaiting rides the
+     SAME homeStatus() /bridge/status poll radioActive already uses (see app.js), no new poller. #}
+  <p class="rl-sub rl-waiting" x-show="radioActive && radioWaiting" x-cloak>Radio is ready. Click the radio tab once to start playback.</p>
+  {# Mode transparency: always visible while active, plain language, no "dual"/"v2" jargon. The full
+     fallback reason (when set) rides the title attribute as a tooltip; the visible text only gets a
+     short parenthetical hint. #}
+  <p class="rl-sub rl-mode" x-show="radioActive" x-cloak x-text="radioModeLine()" :title="radioModeTitle()"></p>
+  {# "Up next" (visibility wave, Part 2): the feedback loop that makes Populate tail / a steer tweak
+     visibly do something -- this list changes on the next poll after a rebuild, in BOTH modes. #}
+  <div class="rl-upcoming" x-show="radioActive && radioUpcoming.length" x-cloak>
+    <span class="rl-upcoming-label">Up next</span>
+    <template x-for="(t, i) in radioUpcoming" :key="i">
+      <span class="rl-upcoming-chip">
+        <span class="rl-upcoming-title" x-text="t.title || '?'"></span><template x-if="t.artist"><span class="rl-upcoming-artist" x-text="t.artist"></span></template>
+      </span>
+    </template>
+  </div>
+  <span class="hs-sync rl-reason" x-show="radioReason" x-cloak x-text="radioReason"></span>
+  {# Off: the panel renders right here, collapsed by default. #}
+  <template x-if="!radioActive">
+    <div class="rl-customize-inline" x-show="customizeOpen" x-cloak>
+      {% include "_partials/radio_customize.html" %}
+    </div>
+  </template>
+  {# On: the SAME panel, teleported up into the now-playing card so steering sits next to what's
+     playing. Still respects the collapsed/open toggle. #}
+  <template x-if="radioActive">
+    <template x-teleport="#radio-steer-slot">
+      <div class="rl-customize-teleported" x-show="customizeOpen" x-cloak>
+        {% include "_partials/radio_customize.html" %}
+      </div>
+    </template>
+  </template>
+</section>

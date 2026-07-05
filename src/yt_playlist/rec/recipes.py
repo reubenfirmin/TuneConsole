@@ -14,7 +14,7 @@ def roll_recipe(store, model, seed=None, now=None) -> dict:
     weights × the live transient facet leans, so common facets come up often, a muted facet never
     rolls, and a fresh 'less house' makes house roll less in the very next generation."""
     rng = random.Random(seed)
-    weights = store.get_weights()
+    weights = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     leans = transient.facet_leans(store, now) if now is not None else {}
     fgain = rec_params.get_param(store, "facet_gain")
     fmin = rec_params.get_param(store, "facet_mult_min")

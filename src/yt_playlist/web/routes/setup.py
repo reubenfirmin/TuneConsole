@@ -3,9 +3,11 @@ pairing (see the Pairing tab), so there is no capture to paste or verify here an
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from yt_playlist.core.setup import BROWSER_CREDENTIAL_FILENAME
+from yt_playlist.library.takeout import (TakeoutFormatError, import_takeout,
+                                         seed_discovery_from_unmatched)
 from yt_playlist.providers import enrichment, lastfm
 
 
@@ -92,5 +94,49 @@ def build(ctx) -> APIRouter:
         msg = (f"Saved {n} identit{'y' if n == 1 else 'ies'}. Keep a signed-in music.youtube.com tab "
                "open and your library will sync automatically.")
         return RedirectResponse(f"/?flash={quote(msg)}", status_code=303)
+
+    @router.post("/import/takeout")
+    async def import_takeout_route(request: Request):
+        # Google Takeout watch-history upload (#61). Everything is processed locally: the file
+        # is parsed in this request and never leaves the machine. Unmatched artists with enough
+        # plays seed the discovery pool automatically (the min-plays gate filters one-off noise).
+        form = await request.form()
+        up = form.get("file")
+        if up is None or not hasattr(up, "read"):    # absent field, or a stray text value
+            return HTMLResponse("<p class=\"section-note\">No file selected.</p>", status_code=400)
+        raw = await up.read()
+        try:
+            report = import_takeout(store, raw)
+        except TakeoutFormatError:
+            # load_watch_history (called by import_takeout) now parses both the JSON and the
+            # default HTML export, so this only fires for genuinely unusable input (a zip with
+            # neither history file inside it, or plain garbage). JSON stays the recommended path
+            # because it carries a real timestamp on every row.
+            return HTMLResponse(
+                "<p class=\"section-note\">Could not read this as a Takeout watch history export. "
+                "JSON is recommended (it has the most complete timestamps), but the HTML export "
+                "works too.</p>")
+        if "error" in report:
+            return HTMLResponse(f"<p class=\"section-note\">{report['error']}</p>")
+        if report["plays_added"] or report["events_added"]:
+            if ctx.rec_worker:
+                ctx.rec_worker.trigger()
+        if report["matched"] > 0:
+            store.set_setting("takeout_imported_at", str(ctx.now_fn()))
+        else:
+            # A zero-match import (usually: library not synced yet) should not re-nag on the very
+            # next Home render: snooze the nag 90 days; it returns as the re-import reminder.
+            store.set_setting("takeout_nag_dismissed_at", str(ctx.now_fn()))
+        # Seeding bar scales with export span: 3 plays in a decade is noise, 3 in a season is taste.
+        min_plays = max(3, round(report["span_days"] / 365))
+        n = seed_discovery_from_unmatched(store, report["unmatched_artists"], ctx.now_fn(),
+                                          min_plays=min_plays)
+        # Success replaces the whole import block (instructions + form) with a labeled result
+        # card: HX-Retarget widens the swap target beyond the form's own error slot. Error
+        # responses above keep the default #takeout-import-result target so the form stays
+        # usable for a retry.
+        return templates.TemplateResponse(
+            request, "_partials/takeout_result.html", {"report": report, "seeded": n},
+            headers={"HX-Retarget": "#takeout-import-block", "HX-Reswap": "innerHTML"})
 
     return router

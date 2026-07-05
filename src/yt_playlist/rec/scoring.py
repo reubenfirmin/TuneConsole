@@ -5,7 +5,7 @@ Split out of the former monolithic recommend.py; recommend re-exports these for 
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, rec_params, transient
+from yt_playlist.rec import embed, layers, rec_params, transient
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.rec.taste_analysis import taste_breadth
 
@@ -13,12 +13,6 @@ from yt_playlist.rec.taste_analysis import taste_breadth
 # Added to an L2 norm before dividing so a zero/degenerate vector normalises to ~0 rather than raising
 # or producing NaNs. Tiny relative to any real unit vector, so it never perturbs a result.
 _NORM_EPS = 1e-9
-
-
-# A small positive shift applied when re-weighting taste scores (which can be negative cosines): after
-# shifting every score to a non-negative base we add this so a muted family lands just above 0 instead
-# of exactly 0, keeping the ordering well-defined. Negligible next to real score gaps.
-_SCORE_SHIFT_EPS = 1e-6
 
 
 class PlaylistTaste:
@@ -86,10 +80,14 @@ def _playlist_centroids(store, M, idx) -> PlaylistTaste:
 
 
 # How much of the permanent taste signal is "what you actually play" vs how you've filed tracks into
-# playlists. 0.5 = co-equal. A #38 temporal_recall A/B found a played-tracks centroid ties-or-beats the
-# playlist-curation taste (and that play-count/like/save weighting added nothing over flat membership),
-# so behavior is folded in as a co-equal context. Re-tune once more history accrues (see the A/B ticket).
-BEHAVIOR_TASTE_W = 0.5
+# playlists. 0.0 = playlist curation only. The #38 thin-data A/B (6.5 days, ~40-66 trials) suggested
+# 0.5 co-equal; the #56 re-run on 143 days of history (366/381 trials at 14d/30d holdouts) reversed
+# it decisively: a flat play-centroid averaged over months of genre-diverse listening collapses to a
+# direction that predicts nothing (0 hits vs 19 for playlist taste at both deep holdouts, monotone
+# harm from w=0.3 up), because it blurs distinct listening contexts into one gray vector, while each
+# playlist stays its own coherent context. Behavior-only remains the fallback when there are no
+# shaping playlists at all. Full experiment: #56 wrap-up (2026-07-03).
+BEHAVIOR_TASTE_W = 0.0
 
 
 def _behavior_centroid(store, M, idx):
@@ -118,7 +116,9 @@ def playlist_taste(store) -> PlaylistTaste:
         return pt
     if not pt:                                           # played tracks but no shaping playlists
         return PlaylistTaste(["Your listening"], bc[None, :], np.array([1.0]), [None])
-    titles = list(pt.titles) + ["Your listening"]        # behavior as one more, co-equal context
+    if BEHAVIOR_TASTE_W == 0.0:                          # #56 verdict: curation wins; no dead context
+        return pt
+    titles = list(pt.titles) + ["Your listening"]        # behavior as one more context
     cents = np.vstack([pt.centroids, bc[None, :]])
     w = np.concatenate([pt.weights * (1.0 - BEHAVIOR_TASTE_W), [BEHAVIOR_TASTE_W]])
     return PlaylistTaste(titles, cents, w, list(pt.pids) + [None])
@@ -138,30 +138,26 @@ def content_taste(store) -> PlaylistTaste:
 def genre_adjusted_scores(scores, genre_of, gweights):
     """Re-weight per-track taste scores by the user's per-genre-family preferences.
 
-    `gweights` maps genre family -> weight (1.0 = neutral, 0 = mute, >1 = favor). Because raw taste
-    scores can be negative (cosine), every score is first shifted to a common non-negative base, then
-    scaled by its family's weight, so ordering stays well-defined regardless of sign: a muted family
-    sinks to 0, a boosted one rises. Returns a new {key: score}; a pure no-op when all weights are
-    neutral, so the default path is untouched.
-    """
+    `gweights` maps genre family -> weight (1.0 = neutral, 0 = mute, >1 = favor). #86: weights
+    apply to a rank/percentile base (see embed.percentile_scores), not a shift-by-min base, which
+    BOUNDS how much the pool's worst score can distort the effect of a weight (it no longer warps
+    it without limit; see the base's docstring for the residual). A muted family sinks to 0, a
+    boosted one rises. Returns a new {key: score}; a pure no-op when all weights are neutral."""
     if not scores or not gweights or all(w == 1.0 for w in gweights.values()):
         return scores
-    smin = min(scores.values())
-    eps = _SCORE_SHIFT_EPS
-    return {k: (s - smin + eps) * gweights.get(genre_of.get(k), 1.0) for k, s in scores.items()}
+    base = embed.percentile_scores(scores)
+    return {k: base[k] * gweights.get(genre_of.get(k), 1.0) for k in scores}
 
 
 def axis_adjusted_scores(scores, mult):
     """Re-weight taste scores by a precomputed per-key multiplier (generalizes genre weighting).
 
-    Shift to a common non-negative base then scale, so ordering is well-defined for negative cosines.
-    No-op when `mult` is falsy. Returns a new {key: score}.
-    """
+    #86: rank/percentile base (bounds pool influence; see embed.percentile_scores), not
+    shift-by-min. No-op when `mult` is falsy or all-neutral. Returns a new {key: score}."""
     if not scores or not mult or all(m == 1.0 for m in mult.values()):
         return scores
-    smin = min(scores.values())
-    eps = _SCORE_SHIFT_EPS
-    return {k: (s - smin + eps) * mult.get(k, 1.0) for k, s in scores.items()}
+    base = embed.percentile_scores(scores)
+    return {k: base[k] * mult.get(k, 1.0) for k in scores}
 
 
 # Breadth steering (#7): how far one full drag of the bias can push a single family's weight. The
@@ -232,7 +228,7 @@ def _pop_band(popularity, threshold):
 def _axis_weights_for(store, keys, now=None):
     """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
     the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
-    w = store.get_weights()
+    w = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     gw = {a[len("genre:"):]: v for a, v in w.items() if a.startswith("genre:")}
     ew = {a[len("era:"):]: v for a, v in w.items() if a.startswith("era:")}
     aw = {a[len("artist:"):]: v for a, v in w.items() if a.startswith("artist:")}
@@ -291,7 +287,7 @@ def discovery_facet_weight(store, family, now):
     excluded. We don't banish what we can't classify."""
     if not family:
         return 1.0
-    perm = store.get_weights().get(f"genre:{family}", 1.0)
+    perm = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(f"genre:{family}", 1.0)
     if perm == 0:
         return None
     standing = store.get_lean(f"genre:{family}")
@@ -352,26 +348,33 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None):
 
 
 def _apply_mood(scores, store, now, V, idx, content_vecs=None):
-    """Blend the transient tilts into per-track scores, each scaled down as sync goes stale.
+    """Blend the transient tilts into per-track scores. #85: each tilt decays internally, per event, on
+    its own wall clock (see transient.decay_weight); there is no separate external staleness relax here
+    any more, so this just adds the (already-decayed) tilts straight in.
 
-    Two tilts from the same recent stream (plays/likes/mood): the collaborative centroid tilt (co-listen
-    space) and the audio centroid tilt (#45, the content space), so ranking can lean toward the SOUND
-    (tempo/energy/mood) of what you have been playing, not only its genre/era/artist facets. They apply
-    independently: a candidate missing one space simply skips that term, and the audio tilt can still
-    fire for recent plays that have a content vector but no collaborative one.
+    #88: three tilts from the same recent stream (plays/likes/mood), each at its own timescale, blended
+    alongside one another: the transient collaborative centroid tilt (co-listen space, days half-lives),
+    the SESSION tilt (layers.session_tilt, same collaborative space, hours half-life: the current
+    listening session's carry-over), and the audio centroid tilt (#45, the content space), so ranking
+    can lean toward the SOUND (tempo/energy/mood) of what you have been playing, not only its
+    genre/era/artist facets. They apply independently: a candidate missing one space simply skips that
+    term, and the audio tilt can still fire for recent plays that have a content vector but no
+    collaborative one.
 
     `content_vecs` selects the audio tilt's content-vector source: warm callers leave it None (library
     vectors); the cold path passes the discovered-content vectors so out-of-corpus tracks get the tilt."""
-    factor = transient.staleness_factor(store, now)
-    if factor <= 0:
-        return scores
     tilt = transient.centroid_tilt(store, now, V, idx)
     if tilt is not None:
         Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
-        scores = scores + MOOD_ALPHA * factor * (Vn @ tilt)
+        scores = scores + MOOD_ALPHA * (Vn @ tilt)
+    st = layers.session_tilt(store, now, V, idx)
+    if st is not None:
+        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
+        session_alpha = rec_params.get_param(store, "session_alpha")
+        scores = scores + session_alpha * (Vn @ st)
     w = rec_params.get_param(store, "audio_transient_w")
     if w > 0:
         boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs)
         if boost is not None:
-            scores = scores + w * factor * boost
+            scores = scores + w * boost
     return scores

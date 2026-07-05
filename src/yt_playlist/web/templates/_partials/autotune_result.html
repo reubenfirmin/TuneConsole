@@ -1,18 +1,26 @@
 {# Last Auto-tune result. `autotune_result` = autotune_run.last_result() shape, or None. #}
 {% set r = autotune_result %}
 {% if r %}
+{% set metric_label = "temporal recall@20" if r.metric == "temporal_recall" else "recall@20" %}
 <div class="card autotune-result">
   <div class="autotune-result-head">
     <h3>Auto-tune result</h3>
-    <span class="tag teal">applied &amp; saved</span>
+    {% if r.sweep_failed %}<span class="tag">kept previous</span>
+    {% else %}<span class="tag teal">applied &amp; saved</span>{% endif %}
   </div>
   <p class="section-note">We rebuilt your taste model several ways and kept the one that best predicts
      your own playlists. The winner below is now live and stays in use until you re-run Auto-tune.</p>
 
+  {% if r.sweep_failed %}
+  <p class="section-note">Sweep failed: kept the previous configuration.</p>
+  {% elif r.in_sample %}
+  <p class="section-note">Tuned on in-sample recall: import history or listen longer for forward-looking tuning.</p>
+  {% endif %}
+
   <div class="stat-grid autotune-stats">
     <div><strong>{{ r.winner.method }} · {{ r.winner.dim }}</strong><span>chosen config</span></div>
-    <div><strong>{{ '%.1f'|format(r.winner.recall * 100) }}%</strong><span>recall@20 (winner)</span></div>
-    <div><strong>{{ '%.1f'|format(r.previous.recall * 100) }}%</strong><span>recall@20 (before: {{ r.previous.method }}·{{ r.previous.dim }})</span></div>
+    <div><strong>{{ '%.1f'|format(r.winner.recall * 100) }}%</strong><span>{{ metric_label }} (winner)</span></div>
+    <div><strong>{{ '%.1f'|format(r.previous.recall * 100) }}%</strong><span>{{ metric_label }} (before: {{ r.previous.method }}·{{ r.previous.dim }})</span></div>
   </div>
 
   <table class="autotune-grid">
