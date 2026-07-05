@@ -136,3 +136,45 @@ def test_history_day_noon_bucket_does_not_count_toward_now_layer(store, monkeypa
     store.record_history_plays(iid, now, [keys[2]])
 
     assert layers.now_mode_posterior(store, now) is None
+
+
+def test_radio_provenance_plays_are_excluded_from_now_layer_mood_evidence(store, monkeypatch):
+    """#93v2 loop fix: the radio's own machine-queued plays must not feed the NOW layer, or a radio
+    pick tilts the very posterior that steers the next radio pick. Seed radio-provenance plays for
+    mode 1 (would-be evidence for "X") and organic plays for mode 2 ("Y"); the posterior must read
+    as pure Y, never tilted toward X by the plays radio itself queued."""
+    _install_modes(store)
+    keys = ["x1", "x2", "x3", "y1", "y2", "y3"]
+    V = np.array([
+        [1.0, 0.02], [1.0, 0.03], [1.0, 0.01],   # x1..x3 -> mode 1
+        [0.02, 1.0], [0.03, 1.0], [0.01, 1.0],   # y1..y3 -> mode 2
+    ], dtype=np.float32)
+    _install_content_vectors(store, monkeypatch, keys, V)
+    iid = _identity(store)
+    now = 100_000.0
+    store.set_setting("radio_playlist_ytm", "PLRADIO")
+    # Radio-queued plays (mode 1 / "X"): carry the radio playlist's own ytm id as provenance.
+    for i, k in enumerate(["x1", "x2", "x3"]):
+        store.record_play_event(iid, k, "v" + k, now - i * 60, playlist_ytm_id="PLRADIO")
+    # Organic plays (mode 2 / "Y"): no provenance, e.g. a direct search/album play.
+    for i, k in enumerate(["y1", "y2", "y3"]):
+        store.record_play_event(iid, k, "v" + k, now - 200 - i * 60, playlist_ytm_id=None)
+
+    posterior = layers.now_mode_posterior(store, now)
+    assert posterior is not None
+    assert posterior == {2: pytest.approx(1.0, abs=1e-6)}   # mode 1 (the radio-queued plays) absent
+
+
+def test_stale_mode_centroids_dim_mismatch_reads_as_quiet(store, monkeypatch):
+    # Live find (home render traceback): autotune can rebuild the content space at a NEW dim while
+    # the stored mode centroids are still the old dim; the next mode rebuild heals them. That
+    # window must read as quiet (None), never crash the render with a matmul shape error.
+    _install_modes(store)                                     # 2-D centroids
+    keys = ["a1", "a2", "a3"]
+    V = np.array([[1.0, 0.0, 0.0], [1.0, 0.1, 0.0], [1.0, 0.0, 0.1]], dtype=np.float32)   # 3-D
+    _install_content_vectors(store, monkeypatch, keys, V)
+    iid = _identity(store)
+    now = 100_000.0
+    store.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
+
+    assert layers.now_mode_posterior(store, now) is None

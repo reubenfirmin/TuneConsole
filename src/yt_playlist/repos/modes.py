@@ -94,19 +94,23 @@ class ModesRepo(Repo):
 
     @synchronized
     def log_impressions(self, epoch, rows, now) -> None:
-        """Record which mode filled each card lane for this menu epoch. Idempotent per (epoch, lane)."""
-        for lane, mode_id in rows:
+        """Record which mode (and, from #57, which in-mode ranker) filled each card lane for this menu
+        epoch. Idempotent per (epoch, lane). Each row is (lane, mode_id) or (lane, mode_id, ranker)."""
+        for row in rows:
+            lane, mode_id = row[0], row[1]
+            ranker = row[2] if len(row) > 2 else None
             self.conn.execute(
-                "INSERT OR IGNORE INTO rec_mode_impressions(epoch, lane, mode_id, created_at) "
-                "VALUES (?, ?, ?, ?)", (int(epoch), lane, int(mode_id), float(now)))
+                "INSERT OR IGNORE INTO rec_mode_impressions(epoch, lane, mode_id, ranker, created_at) "
+                "VALUES (?, ?, ?, ?, ?)", (int(epoch), lane, int(mode_id), ranker, float(now)))
         self.conn.commit()
 
     @synchronized
-    def log_pick(self, playlist_id, mode_id, now) -> None:
-        """Record a Save & play of a mode card. Idempotent per playlist_id."""
+    def log_pick(self, playlist_id, mode_id, now, ranker=None) -> None:
+        """Record a Save & play of a mode card, with the in-mode ranker it was served under (#57).
+        Idempotent per playlist_id."""
         self.conn.execute(
-            "INSERT OR IGNORE INTO rec_mode_picks(playlist_id, mode_id, created_at) VALUES (?, ?, ?)",
-            (int(playlist_id), int(mode_id), float(now)))
+            "INSERT OR IGNORE INTO rec_mode_picks(playlist_id, mode_id, ranker, created_at) "
+            "VALUES (?, ?, ?, ?)", (int(playlist_id), int(mode_id), ranker, float(now)))
         self.conn.commit()
 
     @synchronized
@@ -127,3 +131,24 @@ class ModesRepo(Repo):
             sql += " WHERE created_at >= ?"
             args.append(float(since))
         return [(r["playlist_id"], r["mode_id"]) for r in self.conn.execute(sql, args).fetchall()]
+
+    @synchronized
+    def ranker_impression_counts(self, since=None) -> dict:
+        """#57 {ranker: impressions}; NULL (pre-#57 rows) counts as 'cosine'."""
+        sql = "SELECT COALESCE(ranker, 'cosine') r, COUNT(*) c FROM rec_mode_impressions"
+        args = []
+        if since is not None:
+            sql += " WHERE created_at >= ?"
+            args.append(float(since))
+        sql += " GROUP BY r"
+        return {row["r"]: row["c"] for row in self.conn.execute(sql, args).fetchall()}
+
+    @synchronized
+    def ranker_pick_rows(self, since=None) -> list:
+        """#57 [(playlist_id, ranker)]; NULL counts as 'cosine'."""
+        sql = "SELECT playlist_id, COALESCE(ranker, 'cosine') r FROM rec_mode_picks"
+        args = []
+        if since is not None:
+            sql += " WHERE created_at >= ?"
+            args.append(float(since))
+        return [(row["playlist_id"], row["r"]) for row in self.conn.execute(sql, args).fetchall()]

@@ -513,6 +513,14 @@ function homeStatus() {
   return {
     connected: false,
     nowPlaying: null,
+    radioActive: false,
+    radioWaiting: false,   // waiting-state net: radio is active but a deck-play attempt was blocked
+    radioReason: '',       // unobtrusive note when a radio start attempt is rejected
+    radioDual: false,          // mode transparency: true = playing in the dedicated radio window
+    radioFallbackReason: '',   // set when dual fell back to single-tab mode; '' when healthy/inactive
+    radioUpcoming: [],         // "Up next" feedback loop: up to 8 {title, artist} picks after now-playing
+    customizeOpen: false,  // #93 Task 9: the radio customize panel is collapsed until toggled, and
+                            // stays open/closed across the launch-card <-> now-playing migration
     refreshing: false,
     running: false,        // a library sync is streaming into the console
     failed: false,
@@ -520,7 +528,11 @@ function homeStatus() {
     _job: null,            // job id the console is attached to (guards against double-attach)
     init() {
       const poll = () => fetch('/bridge/status').then(r => r.json())
-        .then(d => { this.connected = !!d.connected; this.nowPlaying = d.now_playing || null; })
+        .then(d => { this.connected = !!d.connected; this.nowPlaying = d.now_playing || null;
+                     this.radioActive = !!d.radio; this.radioWaiting = !!d.radio_waiting;
+                     this.radioDual = !!d.radio_dual;
+                     this.radioFallbackReason = d.radio_fallback_reason || '';
+                     this.radioUpcoming = d.radio_upcoming || []; })
         .catch(() => {});
       poll();
       setInterval(poll, 3000);
@@ -583,6 +595,59 @@ function homeStatus() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
       }).catch(() => {});
+    },
+    toggle() {
+      if (!this.nowPlaying) return;
+      // Optimistic flip; the next poll reconciles with the real state read back from the player.
+      this.nowPlaying.paused = !this.nowPlaying.paused;
+      fetch('/now-playing/toggle', { method: 'POST' }).catch(() => {});
+    },
+    startRadio() {
+      // Optimistic flip; the next poll reconciles with the real server state.
+      this.radioActive = true;
+      this.radioReason = '';
+      fetch('/radio/start', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          if (!d || !d.ok) {
+            this.radioActive = false;
+            this.radioReason = (d && d.reason) || 'unavailable';
+            setTimeout(() => { this.radioReason = ''; }, 4000);
+          }
+        })
+        .catch(() => { this.radioActive = false; });
+    },
+    stopRadio() {
+      this.radioActive = false;
+      this.radioWaiting = false;
+      this.radioReason = '';
+      fetch('/radio/stop', { method: 'POST' }).catch(() => {});
+    },
+    // Mode transparency (visibility wave): plain-language, no "dual deck"/"v2" jargon. A fallback
+    // reason gets a subtle parenthetical hint in the visible text, with the FULL reason only in the
+    // title/tooltip attribute (radioModeTitle) so the line itself stays short and unalarming.
+    radioModeLine() {
+      if (!this.radioActive) return '';
+      const base = this.radioDual ? 'Playing in the radio window.' : 'Playing in your YouTube Music tab.';
+      return this.radioFallbackReason ? base + ' (dedicated window unavailable)' : base;
+    },
+    radioModeTitle() { return this.radioFallbackReason || ''; },
+    populateRadio() {
+      // Testing/maintenance: force a mid-track tail top-up and report what the queue holds now.
+      this.radioReason = 'populating…';
+      fetch('/radio/populate', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          // Dual mode reports the rebuilt standby ("standby": [...]) instead of the v2 "ahead"
+          // count; without this branch the toast rendered "undefined ahead" for dual sessions.
+          this.radioReason = (d && d.ok)
+            ? (d.standby
+                ? (d.standby.length + ' queued next' + (d.changed ? ', refreshed' : ', unchanged'))
+                : (d.ahead + ' ahead' + (d.changed ? ', playlist updated' : ', unchanged')))
+            : ((d && d.reason) || 'unavailable');
+          setTimeout(() => { this.radioReason = ''; }, 5000);
+        })
+        .catch(() => { this.radioReason = ''; });
     },
   };
 }

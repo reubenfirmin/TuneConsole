@@ -64,6 +64,7 @@
       <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
       <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
       <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
+      <a href="/trends" class="{{ 'active' if path.startswith('/trends') else '' }}">Trends</a>
       <a href="/clusters" class="{{ 'active' if path.startswith('/clusters') else '' }}">Clusters</a>
       <div class="tools-menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
         <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"

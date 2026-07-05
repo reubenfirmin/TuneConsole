@@ -30,6 +30,13 @@ import numpy as np
 
 from yt_playlist.rec import embed, rec_params, transient
 
+# #93v2: every layer in this module reads recent plays as MOOD EVIDENCE and feeds that reading back
+# into the scores that steer radio, so every play_events_since read here excludes the radio
+# playlists' own machine-queued plays. The single shared helper (and the full rationale for the
+# loop it closes) lives in transient.radio_list_ids, next to the slower transient/graduation funnel
+# that needs the same exclusion.
+_radio_list_ids = transient.radio_list_ids
+
 
 def now_mode_mix(store, now):
     """Shared internals for `now_mode_posterior`, `now_layer_reading`, and the taste_viz NOW ribbon:
@@ -49,7 +56,7 @@ def now_mode_mix(store, now):
     window_h = rec_params.get_param(store, "now_window_h")
     min_events = int(rec_params.get_param(store, "now_min_events"))
     since = now - window_h * 3600.0
-    rows = store.play_events_since(since)
+    rows = store.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
 
     # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
     # overwrite lands on the latest occurrence of each key).
@@ -63,6 +70,11 @@ def now_mode_mix(store, now):
 
     mode_ids = [m["mode_id"] for m in modes]
     C = np.stack([m["centroid"].astype(np.float64) for m in modes])
+    if C.shape[1] != CV.shape[1]:
+        # Stale modes: autotune rebuilt the content space at a new dim and the mode rebuild has
+        # not re-stacked the centroids yet. That window reads as quiet, never a shape-error crash
+        # on the home render (seen live 2026-07-03).
+        return None, 0, modes
 
     counts: dict = {}
     for k in played_keys:
@@ -127,7 +139,7 @@ def session_tilt(store, now, V, idx) -> np.ndarray | None:
     min_events = int(rec_params.get_param(store, "now_min_events"))
     session_hl_h = rec_params.get_param(store, "session_halflife_h")
     since = now - 24 * 3600.0
-    rows = store.play_events_since(since)
+    rows = store.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
 
     # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
     # overwrite lands on the latest occurrence of each key).
@@ -185,7 +197,7 @@ def session_mode_mix(store, now):
     min_events = int(rec_params.get_param(store, "now_min_events"))
     session_hl_h = rec_params.get_param(store, "session_halflife_h")
     since = now - 24 * 3600.0
-    rows = store.play_events_since(since)
+    rows = store.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
 
     # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
     # overwrite lands on the latest occurrence of each key).
@@ -199,6 +211,9 @@ def session_mode_mix(store, now):
 
     mode_ids = [m["mode_id"] for m in modes]
     C = np.stack([m["centroid"].astype(np.float64) for m in modes])
+    if C.shape[1] != CV.shape[1]:
+        # Same stale-modes window as now_mode_mix: quiet until the mode rebuild re-stacks centroids.
+        return None, 0, modes
 
     weights: dict = {}
     for k in played_keys:

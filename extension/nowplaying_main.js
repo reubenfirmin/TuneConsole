@@ -88,8 +88,11 @@
       var md = navigator.mediaSession && navigator.mediaSession.metadata;
       if (md && md.title) {
         var art = md.artwork && md.artwork.length ? md.artwork[md.artwork.length - 1].src : "";
+        // #97 carry the video's real paused state so a play frame taken right after a server
+        // restart (or any resync) reflects reality instead of assuming "playing".
         window.postMessage({ __tcNow: { title: md.title, artist: md.artist || "", thumbnail: art || "",
-                                        videoId: info.videoId, playlist: info.playlist, brandId: brand() } }, "*");
+                                        videoId: info.videoId, playlist: info.playlist, brandId: brand(),
+                                        paused: !!(v && v.paused) } }, "*");
       }
     } catch (e) {}
   }, 2000);

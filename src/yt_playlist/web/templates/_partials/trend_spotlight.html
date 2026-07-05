@@ -1,0 +1,17 @@
+{# Trend spotlight: an intermittent nudge pointing at a novel Trends finding (a streak, a discovery
+   spike, a new top genre). Silence is the default; spotlight_due gates almost everything out. This
+   is a CARD, not a row: it renders inside _partials/alerts.html's existing nag row (owner call:
+   one row for every nag) and is counted in that row's nudge_count. #}
+{% if trend_spotlight %}
+<div class="alert-card card alert-nudge trend-spotlight" id="trend-spotlight">
+  <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
+          hx-post="/trends/spotlight/dismiss?sig={{ trend_spotlight.signature }}"
+          hx-target="#trend-spotlight" hx-swap="outerHTML swap:200ms">×</button>
+  <span class="alert-cover"><img src="/static/nag/trends.png" alt="" loading="lazy"
+       onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
+  <div class="alert-body">
+    <span class="alert-title"><strong>{{ trend_spotlight.headline }}:</strong> {{ trend_spotlight.detail }}</span>
+    <div class="alert-foot"><a class="btn btn-sm alert-go" href="/trends#{{ trend_spotlight.anchor }}">View →</a></div>
+  </div>
+</div>
+{% endif %}

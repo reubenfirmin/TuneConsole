@@ -93,6 +93,36 @@ def test_play_exposure_stops_without_recent_plays():
     assert s.get_weights().get(axis, 1.0) == before, "no recent plays -> no graduation"
 
 
+def test_radio_only_listening_day_graduates_nothing():
+    # #93v2: a day of purely radio-queued listening (every play carrying the radio playlist's
+    # provenance, plus the provenance-free history_items shadows the next YTM sync writes for those
+    # same plays) must accrue NO ledger score and NO permanent weight for the played genre. Without
+    # the exclusion, radio's own picks would graduate transient leans into standing taste day after
+    # day - the slow-burn arm of the feedback loop.
+    s = Store(":memory:")
+    s.init_schema()
+    iid = s.identities.upsert_identity("me", "cred", None, True)
+    s.set_setting("radio_playlist_ytm", "PLRADIO")
+    now = 100 * 86400 + 1000.0
+    keys = []
+    for i in range(10):
+        tid = s.upsert_track(f"v{i}", f"song{i}", "band", None, None)
+        s.set_track_genre(tid, "Techno")
+        k = identity_key(f"song{i}", "band")
+        keys.append(k)
+        s.record_play_event(iid, k, f"v{i}", now + i * 4000, playlist_ytm_id="PLRADIO")
+    s.record_history_plays(iid, now + 50000, keys)             # the same plays, post-sync shadows
+    rec_params.set_param(s, "source_w_play", 0.5)              # same fast lane as the positive test
+    axis = f"genre:{recommend.genre_map.family('Techno')}"
+    day = 86400
+    before = s.get_weights(now=now).get(axis, 1.0)
+    for d in range(8):
+        recommend.graduate_play_exposure(s, now + d * day)
+    assert not s.get_theme(axis), "radio-only plays must not accrue ledger score"   # None = never bumped
+    assert s.get_weights(now=now + 7 * day).get(axis, 1.0) == before, \
+        "radio-only listening must not graduate a permanent weight"
+
+
 def test_play_graduated_day_roundtrip():
     s = _store_with_genre({"song|band": ("v1", "song", "band", "Techno")})
     assert s.get_play_graduated_day("genre:techno") is None

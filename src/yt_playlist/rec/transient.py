@@ -1,9 +1,11 @@
 """The transient model: a reactive, persistent read on recent interaction.
 
 Inputs are signed track-key events at a point in recency: mood feedback (rec_mood), recent plays
-(history), recent dislikes (rec_feedback kind='dislike'), recent skips (#84, player_events
-track_exit/bye rows classified at read time). Two derived views: facet leans (genre/era/artist
-tokens) and an embedding centroid tilt.
+(history), recent ACTION-provenance likes (rec_feedback kind='like' observed live through the
+extension; sync-discovered likes carry no true action timestamp and are excluded at the repo level,
+see recent_liked_with_ts), recent dislikes (rec_feedback kind='dislike'), recent skips (#84,
+player_events track_exit/bye rows classified at read time). Two derived views: facet leans
+(genre/era/artist tokens) and an embedding centroid tilt.
 
 Lifecycle (#85): every event decays on the wall clock with a per-source half-life (see the
 *_halflife_d params); nothing is rank-decayed and there is no separate staleness relax. An event
@@ -14,6 +16,29 @@ import numpy as np
 from yt_playlist.util import genre_map
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.rec.rec_dao import RecDao
+
+# Settings keys holding the radio playlists' ytm ids (radio.py: RADIO_PLAYLIST_SETTING,
+# RADIO_DECK_SETTING). Duplicated here rather than imported to avoid a rec.transient -> rec.radio
+# dependency; these three strings are the stable contract between the two modules.
+_RADIO_SETTING_KEYS = ("radio_playlist_ytm", "radio_playlist_a_ytm", "radio_playlist_b_ytm")
+
+
+def radio_list_ids(store) -> list[str]:
+    """#93v2 The radio playlists' ytm ids, resolved from settings (unset/empty skipped). This module
+    and rec/layers.py read recent plays as TASTE EVIDENCE - what the user seems to want - and feed
+    that reading back into the scores that steer what radio plays next (layers tilt every surface's
+    ranking; play_facet_leans additionally graduates into PERMANENT weights daily via
+    graduation.graduate_play_exposure). Without this exclusion, a radio pick counts as evidence the
+    instant it plays, tilting the next pick toward whatever radio just queued: a closed loop that
+    runs away from anything the user actually chose (live find: an artist with 5 plays, all today,
+    all radio-queued, took over 3 of 7 picks). Machine-queued radio plays are therefore excluded
+    from every plays-read that feeds the taste model; the user's OWN signals on those same tracks -
+    skips, ratings, explicit steering - are unaffected, since those flow through their own channels.
+    Plays from any OTHER generated playlist still count: pressing play on a non-radio playlist is a
+    deliberate user action, not continuous machine playback. Trends/stats keep counting radio plays
+    (descriptive, a different pipeline)."""
+    ids = [store.get_setting(k) for k in _RADIO_SETTING_KEYS]
+    return [i for i in ids if i]
 
 
 def decay_weight(age_s, half_life_d) -> float:
@@ -76,8 +101,12 @@ def facet_leans(store, now) -> dict:
 
     for ts, direction, keys in store.recent_mood_events():
         add(keys, direction * decay_weight(now - ts, mood_hl))
-    for k, ts in store.recent_plays_with_ts(limit=limit):
+    for k, ts in store.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store)):
         add([k], play_w * decay_weight(now - ts, play_hl))
+    # Likes here are ACTION-provenance only (recent_liked_with_ts filters at the repo): a like
+    # observed live has a real event time and belongs at the top of the model stack. A like the
+    # library sync merely discovered has no reliable time (its created_at is first-sight), so it
+    # never reaches the transient model; it shapes the permanent model only, via graduation.
     for k, ts in store.recent_liked_with_ts(limit=limit):
         add([k], like_w * decay_weight(now - ts, like_hl))
     # #54: a dislike is a verdict on THAT track, not the artist (the track itself is hard-suppressed
@@ -110,7 +139,7 @@ def play_facet_leans(store, now) -> dict:
     play_hl = gp(store, "play_halflife_d")
     limit = gp(store, "recent_play_limit")
     leans: dict = {}
-    for k, ts in store.recent_plays_with_ts(limit=limit):
+    for k, ts in store.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store)):
         for f in facets_for(store, [k]):                # one key -> its facets, each gets the play push
             leans[f] = leans.get(f, 0.0) + play_w * decay_weight(now - ts, play_hl)
     return leans
@@ -123,14 +152,14 @@ def facet_multiplier(lean, gain, lo, hi) -> float:
 
 def centroid_tilt(store, now, V, idx):
     """Unit embedding direction from the unified transient stream: mood events, recent plays,
-    recent likes, and recent skips (#84, negative), each wall-clock decayed by its own half-life
-    (#85). None if quiet. Decay is per-event and internal; callers apply no external freshness
+    recent likes (action provenance only, see recent_liked_with_ts), and recent skips (#84,
+    negative), each wall-clock decayed by its own half-life (#85). None if quiet. Decay is per-event and internal; callers apply no external freshness
     factor."""
     gp = rec_params.get_param
     limit = gp(store, "recent_play_limit")
     skip_hl, skip_w = gp(store, "skip_halflife_d"), gp(store, "skip_transient_w")
     events = store.recent_mood_events()
-    plays = store.recent_plays_with_ts(limit=limit)
+    plays = store.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store))
     likes = store.recent_liked_with_ts(limit=limit)
     skips = store.recent_skips_with_ts(now - 4 * skip_hl * 86400)     # #84: same lookback as facet_leans
     if not events and not plays and not likes and not skips:
@@ -178,7 +207,8 @@ def audio_centroid_tilt(store, now):
     """Unit direction in the audio-aware CONTENT vector space toward recent listening, so ranking can
     lean to the SOUND of what you have been playing (tempo / energy / mood), not just its genre/era/
     artist facets or its co-occurrence neighbours. The content-space sibling of `centroid_tilt`: same
-    transient stream (mood events, recent plays, recent likes), same recency weighting, but built from
+    transient stream (mood events, recent plays, recent action-provenance likes), same recency
+    weighting, but built from
     the persisted content vectors (embed.load_content_vectors), which carry the z-scored audio block.
 
     Returns None when the content model is unbuilt or no recent track has a content vector, so a cold
@@ -219,7 +249,8 @@ def audio_centroid_tilt(store, now):
                 continue
             tilt = tilt + w_base * decay_weight(now - ts, half_life_d) * CV[cidx[k]]  # rows already unit
 
-    _add_dir(store.recent_plays_with_ts(limit=limit), play_w, play_hl)
+    _add_dir(store.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store)),
+             play_w, play_hl)
     _add_dir(store.recent_liked_with_ts(limit=limit), like_w, like_hl)
     # #84: same lookback rationale as facet_leans/centroid_tilt (4 half-lives); negative weight pulls
     # the tilt away from the skipped track's own direction.

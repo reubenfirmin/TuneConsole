@@ -11,7 +11,7 @@ import json
 import numpy as np
 
 from yt_playlist.core import paths
-from yt_playlist.rec import embed
+from yt_playlist.rec import embed, rec_params
 
 _ALPHA = 0.85          # walk weight; restart probability is (1 - alpha)
 _ITERS = 50            # power-iteration steps (converges well before this on a stochastic matrix)
@@ -41,9 +41,10 @@ def build_transition(store):
     return keys, W, {k: i for i, k in enumerate(keys)}
 
 
-def ppr_rank(W, seed_idx, alpha=_ALPHA, iters=_ITERS):
+def ppr_rank(W, seed_idx, alpha=_ALPHA, iters=_ITERS, tol=0.0):
     """Personalized PageRank scores via power iteration r = (1-alpha)*p + alpha*(W @ r), with the
-    restart/personalization vector p uniform over seed_idx. Returns the score vector (n,)."""
+    restart/personalization vector p uniform over seed_idx. Stops early once the L1 change drops
+    below tol (tol=0.0 disables early-stop and runs the full iteration cap). Returns (n,)."""
     n = W.shape[0]
     p = np.zeros(n)
     if len(seed_idx) == 0:
@@ -51,8 +52,51 @@ def ppr_rank(W, seed_idx, alpha=_ALPHA, iters=_ITERS):
     p[list(seed_idx)] = 1.0 / len(seed_idx)
     r = p.copy()
     for _ in range(iters):
-        r = (1.0 - alpha) * p + alpha * (W @ r)
+        nxt = (1.0 - alpha) * p + alpha * (W @ r)
+        if tol > 0.0 and np.abs(nxt - r).sum() < tol:
+            return nxt
+        r = nxt
     return r
+
+
+def mode_rankings(store, alpha=None, iters=None, tol=None, depth=None) -> dict:
+    """{mode_id: [key, ...]} - per active taste mode, the co-listen PPR order of the graph's tracks,
+    walk restarted uniformly over that mode's member tracks (library tracks nearest the mode centroid).
+    Truncated to `depth`. {} when the graph or content space is missing; a mode with no member present
+    in the co-listen vocab maps to []. Precompute only (called from the rec worker); None args fall back
+    to the ppr_* knobs so a tuner can sweep alpha/tolerance without code changes."""
+    modes = store.modes.list_modes(active_only=True)
+    if not modes:
+        return {}
+    keys, W, idx = build_transition(store)
+    lkeys, LV, lidx = embed.load_content_vectors(store)
+    if W is None or LV is None or not lkeys:
+        return {}
+    if alpha is None:
+        alpha = float(rec_params.get_param(store, "ppr_alpha"))
+    if iters is None:
+        iters = int(rec_params.get_param(store, "ppr_iters"))
+    if tol is None:
+        tol = float(rec_params.get_param(store, "ppr_tol"))
+    if depth is None:
+        depth = int(rec_params.get_param(store, "ppr_rank_depth"))
+    C = np.stack([m["centroid"].astype(np.float64) for m in modes])
+    if C.shape[1] != LV.shape[1]:
+        # Stale modes: content space rebuilt at a new dim before the mode rebuild re-stacked the
+        # centroids. {} (bundles then carry no _ppr and cards honestly fall back to cosine) beats
+        # a shape-error crash in the rec worker.
+        return {}
+    near = (LV.astype(np.float64) @ C.T).argmax(axis=1)          # each library track -> nearest mode
+    out = {}
+    for j, m in enumerate(modes):
+        members = [lkeys[i] for i in np.where(near == j)[0]]
+        seed = [idx[k] for k in members if k in idx]             # members present in the co-listen vocab
+        if not seed:
+            out[m["mode_id"]] = []
+            continue
+        r = ppr_rank(W, seed, alpha=alpha, iters=iters, tol=tol)
+        out[m["mode_id"]] = [keys[i] for i in np.argsort(-r)[:depth]]
+    return out
 
 
 def shadow_log(store, now) -> int:
@@ -68,6 +112,8 @@ def shadow_log(store, now) -> int:
     if W is None or LV is None or not lkeys:
         return 0
     C = np.stack([m["centroid"].astype(np.float64) for m in modes])
+    if C.shape[1] != LV.shape[1]:
+        return 0                    # stale modes (content space rebuilt at a new dim): skip quietly
     near = (LV.astype(np.float64) @ C.T).argmax(axis=1)            # each library track -> nearest mode
     meta = store.modes.meta_for(lkeys)
 

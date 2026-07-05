@@ -1,0 +1,23 @@
+{# #77 Discovery rate: share of weekly sync-history appearances that were a brand-new artist. #}
+{% from "_partials/_viz_tip.html" import tip %}{% from "_partials/_chart_screen.html" import screen %}
+<div class="card">
+  <h2>Discovery rate</h2>
+  {% if have and area.path %}
+  <p class="section-note">Share of each week's listening that went to a brand-new artist for you.</p>
+  <svg viewBox="0 0 520 90" class="spark instrument" preserveAspectRatio="none">
+    {{ screen('discovery') }}
+    <path d="{{ area.path }}" class="spark-area"/>
+    <path d="{{ area.stroke }}" class="spark-line"/>
+    {% for b in area.bands %}
+    <rect x="{{ b.x }}" y="0" width="{{ b.w }}" height="90" fill="transparent" pointer-events="all"
+          {{ tip(b.label, [{"l": "New-artist share", "v": "%.0f"|format(b.n * 100) ~ "%"}]) }}/>
+    {% endfor %}
+  </svg>
+  {% if x_axis %}<div class="chart-axis"><span>{{ x_axis.first }}</span><span>{{ x_axis.last }}</span></div>{% endif %}
+  {% if latest %}
+  <p class="section-note">Latest reading: {{ "%.0f"|format(latest.v * 100) }}% of this week's plays were brand-new artists.</p>
+  {% endif %}
+  {% else %}
+  <p class="empty">Discovery rate appears once a couple of weeks of history have synced.</p>
+  {% endif %}
+</div>

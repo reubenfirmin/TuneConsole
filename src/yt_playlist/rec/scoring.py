@@ -80,10 +80,14 @@ def _playlist_centroids(store, M, idx) -> PlaylistTaste:
 
 
 # How much of the permanent taste signal is "what you actually play" vs how you've filed tracks into
-# playlists. 0.5 = co-equal. A #38 temporal_recall A/B found a played-tracks centroid ties-or-beats the
-# playlist-curation taste (and that play-count/like/save weighting added nothing over flat membership),
-# so behavior is folded in as a co-equal context. Re-tune once more history accrues (see the A/B ticket).
-BEHAVIOR_TASTE_W = 0.5
+# playlists. 0.0 = playlist curation only. The #38 thin-data A/B (6.5 days, ~40-66 trials) suggested
+# 0.5 co-equal; the #56 re-run on 143 days of history (366/381 trials at 14d/30d holdouts) reversed
+# it decisively: a flat play-centroid averaged over months of genre-diverse listening collapses to a
+# direction that predicts nothing (0 hits vs 19 for playlist taste at both deep holdouts, monotone
+# harm from w=0.3 up), because it blurs distinct listening contexts into one gray vector, while each
+# playlist stays its own coherent context. Behavior-only remains the fallback when there are no
+# shaping playlists at all. Full experiment: #56 wrap-up (2026-07-03).
+BEHAVIOR_TASTE_W = 0.0
 
 
 def _behavior_centroid(store, M, idx):
@@ -112,7 +116,9 @@ def playlist_taste(store) -> PlaylistTaste:
         return pt
     if not pt:                                           # played tracks but no shaping playlists
         return PlaylistTaste(["Your listening"], bc[None, :], np.array([1.0]), [None])
-    titles = list(pt.titles) + ["Your listening"]        # behavior as one more, co-equal context
+    if BEHAVIOR_TASTE_W == 0.0:                          # #56 verdict: curation wins; no dead context
+        return pt
+    titles = list(pt.titles) + ["Your listening"]        # behavior as one more context
     cents = np.vstack([pt.centroids, bc[None, :]])
     w = np.concatenate([pt.weights * (1.0 - BEHAVIOR_TASTE_W), [BEHAVIOR_TASTE_W]])
     return PlaylistTaste(titles, cents, w, list(pt.pids) + [None])

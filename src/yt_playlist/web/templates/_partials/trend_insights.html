@@ -1,0 +1,30 @@
+{# T10e Insights: the top-of-page finding cards for the seven insight detectors
+   (rec/trend_rollups.py::detect_insights). The rollup already ranks + bakes every display field
+   (title/art/anchor/cta/evidence) onto each entry, so this render does zero aggregation -- it's a
+   straight loop. Silence is the default: the whole section is omitted when there are no insights yet
+   (a fresh install, or a library too small for any detector to clear its threshold). #}
+{% if insights %}
+<section id="insights">
+  <h2>Insights</h2>
+  <p class="section-note">Patterns your listening actually shows this month, not just the raw charts.</p>
+  <div class="insights-list">
+    {% for i in insights %}
+    <div class="card insight-card">
+      <span class="insight-art{{ '' if i.art else ' no-art' }} k-{{ i.kind }}">
+        {% if i.art %}
+        <img src="{{ i.art }}" alt="" loading="lazy"
+             onerror="this.closest('.insight-art').classList.add('no-art'); this.remove()">
+        {% endif %}
+        <i class="insight-glyph" aria-hidden="true"></i>
+      </span>
+      <div class="insight-body">
+        <strong>{{ i.headline }}</strong>
+        <p>{{ i.detail }}</p>
+        <p class="mono insight-evidence">{% for e in i.evidence %}{{ e.k }} {{ e.v }}{% if not loop.last %} &#9670; {% endif %}{% endfor %}</p>
+        <a class="btn btn-sm" href="{{ i.anchor }}">{{ i.cta }} &rarr;</a>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}

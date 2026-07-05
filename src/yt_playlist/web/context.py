@@ -52,6 +52,7 @@ class Ctx:
     rec_worker: object | None = None   # decoupled recommendation worker (set in create_app)
     enrich_worker: object | None = None  # background enrichment worker (set in create_app)
     bridge: object | None = None       # shared Bridge instance the WS route and runtime read from
+    radio: object | None = None        # #93 in-process RadioSession (dynamic radio), set in create_app
     # Guards library sync so the background sync daemon and a manual POST /sync never run at once.
     sync_lock: object = field(default_factory=threading.Lock)
 

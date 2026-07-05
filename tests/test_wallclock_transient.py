@@ -39,7 +39,7 @@ def test_rapid_plays_do_not_erase_a_recent_like():
     s = _store()
     _track(s, "loved|artist", genre="jazz")
     now = 1000 * DAY
-    s.record_like("loved|artist", now - 3600)
+    s.record_like("loved|artist", now - 3600, provenance="action")  # a live thumbs-up (transient)
     for i in range(50):
         _track(s, f"p{i}|other", genre="techno")
         s.record_play_event(1, f"p{i}|other", None, now - 1800 + i * 30)

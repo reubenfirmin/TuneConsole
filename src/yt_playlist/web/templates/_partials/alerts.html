@@ -1,4 +1,4 @@
-{% set nudge_count = (1 if show_intro else 0) + (1 if show_lastfm_nudge else 0) + (1 if show_identities_nudge else 0) + (1 if show_backend_update else 0) %}
+{% set nudge_count = (1 if show_intro else 0) + (1 if show_lastfm_nudge else 0) + (1 if show_identities_nudge else 0) + (1 if show_backend_update else 0) + (1 if trend_spotlight else 0) %}
 {% if actions or nudge_count %}
 <section class="alerts" aria-label="Needs attention">
   {# The welcome always leads the row. #}
@@ -14,6 +14,9 @@
     </div>
   </div>
   {% endif %}
+
+  {# A fresh trend finding is the most interesting thing in the row: right after the welcome. #}
+  {% include "_partials/trend_spotlight.html" %}
 
   {% if show_backend_update %}
   <div class="alert-card card alert-nudge" id="update-nudge">

@@ -129,16 +129,40 @@ class RecModelRepo(Repo):
             "SELECT item_key, until, created_at FROM rec_feedback WHERE kind='dislike' "
             "ORDER BY created_at DESC").fetchall()
 
-    # --- Likes (captured during sync; positive transient signal + graduation, idempotent) ---
+    # --- Likes (positive graduation signal; transient participation depends on provenance) ---
+    # Provenance (stored in the like row's `reason` column):
+    #   'action': observed live through the extension (player likeStatus or an observed rate call).
+    #             The event time is real, so these keep full transient participation.
+    #   'sync':   discovered by the library sync's bulk rated map. YTM reports no like-time, so
+    #             created_at is only first-sight time; these must NOT feed the transient model and
+    #             graduate into the permanent model only, at the low sync-like weight.
     @synchronized
-    def record_like(self, identity_key, now) -> bool:
-        """Persist a first-seen like (surface='like'). Returns True iff newly created, so the caller
-        feeds transient/graduation exactly once. Idempotent on re-sync. Mirrors record_dislike."""
-        return self._record_once("like", identity_key, "like", None, now)
+    def record_like(self, identity_key, now, provenance="sync") -> bool:
+        """Persist a like (surface='like', reason=provenance). Returns True iff newly created, so the
+        caller feeds graduation exactly once. Idempotent on re-sync. If the like already exists with
+        'sync' provenance and is re-observed as an 'action', the row is UPGRADED to action provenance
+        (never downgraded) and False is still returned: an upgrade is not a new like."""
+        row = self.conn.execute(
+            "SELECT reason FROM rec_feedback WHERE surface='like' AND item_key=? AND scope='' "
+            "AND kind='like'", (identity_key,)).fetchone()
+        if row:
+            if provenance == "action" and row["reason"] != "action":
+                self.conn.execute(
+                    "UPDATE rec_feedback SET reason='action' WHERE surface='like' AND item_key=? "
+                    "AND scope='' AND kind='like'", (identity_key,))
+                self.conn.commit()
+            return False
+        self.conn.execute(
+            "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) "
+            "VALUES ('like',?,'like',?,'',NULL,?)", (identity_key, provenance, now))
+        self.conn.commit()
+        return True
 
     @synchronized
     def recent_liked_keys(self, limit=None) -> list:
-        """Liked identity_keys, most-recent (created_at) first. Powers the transient like channel."""
+        """ALL liked identity_keys regardless of provenance, most-recent (created_at) first. For
+        existence checks and counters (reconciliation, onboarding, taste page), NOT the transient
+        model; the transient reader is recent_liked_with_ts, which is action-provenance only."""
         rows = self.conn.execute(
             "SELECT item_key FROM rec_feedback WHERE kind='like' ORDER BY created_at DESC").fetchall()
         keys = [r["item_key"] for r in rows]
@@ -146,13 +170,46 @@ class RecModelRepo(Repo):
 
     @synchronized
     def recent_liked_with_ts(self, limit=None) -> list:
-        """#85 [(identity_key, created_at)] for likes, newest-first (the timestamped sibling of
-        recent_liked_keys; wall-clock decay needs the event time, not just the order)."""
+        """#85 [(identity_key, created_at)] for ACTION-provenance likes, newest-first: the transient
+        model's like feed. Sync-discovered likes are excluded here by design: they carry no true
+        action timestamp (YTM's API and Takeout both lack like-time), so treating their first-sight
+        created_at as an event time would let a re-recorded like masquerade as a fresh user action."""
         rows = self.conn.execute(
-            "SELECT item_key, created_at FROM rec_feedback WHERE kind='like' "
+            "SELECT item_key, created_at FROM rec_feedback WHERE kind='like' AND reason='action' "
             "ORDER BY created_at DESC").fetchall()
         out = [(r["item_key"], float(r["created_at"])) for r in rows]
         return out[:limit] if limit else out
+
+    @synchronized
+    def like_provenance(self, identity_key):
+        """'action' | 'sync' | None (no like row). Legacy rows stamped by the one-shot repair."""
+        row = self.conn.execute(
+            "SELECT reason FROM rec_feedback WHERE kind='like' AND item_key=? AND scope=''",
+            (identity_key,)).fetchone()
+        return row["reason"] if row else None
+
+    @synchronized
+    def stamp_sync_like_provenance(self) -> int:
+        """One-shot migration helper (rec/repair.py): mark every provenance-less like row as
+        sync-discovered. Pre-provenance rows all came from the sync's bulk rated map (the live
+        pipeline recorded through the same code path, indistinguishably), so 'sync' - the class with
+        no transient participation - is the only honest classification. Returns rows stamped."""
+        cur = self.conn.execute(
+            "UPDATE rec_feedback SET reason='sync' WHERE kind='like' AND (reason IS NULL OR reason='')")
+        self.conn.commit()
+        return cur.rowcount
+
+    @synchronized
+    def mark_graduated_once(self, identity_key, kind, now) -> bool:
+        """Once-EVER graduation stamp (kind='like_grad' | 'dislike_grad'; surface=kind, so the two
+        signals stamp independently under rec_feedback's UNIQUE(surface, item_key, scope)).
+        Invariant: a like/dislike may graduate its facets at most once per identity_key, ever. The
+        stamp lives in rec_feedback but is intentionally independent of the like/dislike row
+        lifecycle: clear_like/clear_dislike delete only their own kind, so a likeStatus flap (or a
+        genuine unlike-then-relike) can never re-arm graduation. A provenance upgrade does not
+        re-graduate either (record_like returns False on upgrade). Returns True iff this key has
+        never graduated for this signal."""
+        return self._record_once(kind, identity_key, kind, None, now)
 
     @synchronized
     def disliked_with_ts(self) -> list:

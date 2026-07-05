@@ -7,7 +7,8 @@ grouped here because the generators all depend on the same exclusion logic (excl
 """
 from collections import Counter
 
-from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized  # noqa: F401  (GENERATED_GROUP re-exported)
+from yt_playlist.repos.base import (  # noqa: F401  (GENERATED_GROUP re-exported)
+    GENERATED_GROUP, Repo, synchronized)
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import normalize, search_squash
 
@@ -627,6 +628,49 @@ class RecQueryRepo(Repo):
             "FROM play_events GROUP BY identity_key, day",
             list(generated_ids)).fetchall()
         return {(r["day"], r["k"]) for r in rows if r["non_generated"] == 0}
+
+    @synchronized
+    def generated_only_keys_since(self, since_ts, group=GENERATED_GROUP) -> set[str]:
+        """#83 identity keys whose EVERY play_events row at/after `since_ts` carries generated-
+        playlist provenance: the windowed sibling of generated_only_play_days (same provenance
+        rule, including the RDAMPL radio form), used by eval_recs.temporal_recall to drop held-out
+        plays the app itself caused by recommending them. A model must not score points for
+        predicting its own suggestions. Keys with NO play_events rows in the window are NOT in the
+        set (day-model rows carry no provenance, so there is no evidence to condemn them:
+        conservatively kept, matching the per-day helper's mixed-evidence rule)."""
+        excl = self.excluded_playlist_ids(group)
+        if not excl:
+            return set()
+        qs = ",".join("?" * len(excl))
+        ytm_ids = {r["ytm_playlist_id"] for r in self.conn.execute(
+            f"SELECT ytm_playlist_id FROM playlists WHERE id IN ({qs})", list(excl))}
+        if not ytm_ids:
+            return set()
+        generated_ids = ytm_ids | {"RDAMPL" + y for y in ytm_ids}
+        gqs = ",".join("?" * len(generated_ids))
+        rows = self.conn.execute(
+            "SELECT identity_key k, "
+            f"SUM(CASE WHEN playlist_ytm_id IN ({gqs}) THEN 0 ELSE 1 END) non_generated "
+            "FROM play_events WHERE played_at >= ? GROUP BY identity_key",
+            list(generated_ids) + [since_ts]).fetchall()
+        return {r["k"] for r in rows if r["non_generated"] == 0}
+
+    @synchronized
+    def plays_by_list_ids_since(self, ytm_ids, since_ts) -> set[str]:
+        """#93 identity keys with a play_events row whose playlist_ytm_id is one of `ytm_ids` at/after
+        since_ts. Used by dynamic radio's cross-session freshness cooldown: a track radio already
+        played (matched by the deck/playlist ytm id the play's URL carried, not the generated-playlist
+        quarantine group) sits out of new radio sessions for a while, so a restart does not immediately
+        re-roll the identical seed set. `ytm_ids` empty (no radio playlist created yet) returns an empty
+        set with no query."""
+        ids = {y for y in ytm_ids if y}
+        if not ids:
+            return set()
+        qs = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT DISTINCT identity_key k FROM play_events WHERE playlist_ytm_id IN ({qs}) "
+            "AND played_at >= ?", list(ids) + [since_ts]).fetchall()
+        return {r["k"] for r in rows}
 
     @synchronized
     def catchall_playlist_ids(self, size_floor=_CATCHALL_SIZE_FLOOR) -> set:

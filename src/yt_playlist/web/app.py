@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core import updatecheck
+from yt_playlist.rec.radio import RadioSession
 from yt_playlist.web.context import Ctx
 from yt_playlist.web.jobs import SyncJobs
 from yt_playlist.web.routes import build_all
@@ -213,7 +214,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
     genre_lib.configure(store)                                 # load (and seed) the genre whitelist
 
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
-              templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge)
+              templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge,
+              radio=RadioSession())
     app.include_router(build_bridge_route(ctx))
     from yt_playlist.rec.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx)                            # decoupled rec computation

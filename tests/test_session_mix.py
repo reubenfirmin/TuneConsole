@@ -154,3 +154,40 @@ def test_no_content_vectors_returns_none(store, monkeypatch):
     shares, n, modes = layers.session_mode_mix(store, now)
     assert shares is None
     assert n == 0
+
+
+def test_session_mode_mix_passes_radio_exclusion_to_play_events_since(store, monkeypatch):
+    """#93v2 pin: session_mode_mix must resolve the radio playlist ids (layers._radio_list_ids) and
+    pass them as exclude_list_ids to store.play_events_since. Behavior is covered end-to-end by
+    test_now_layer.py's equivalent test for the NOW layer (same underlying mechanism); this pins the
+    parameter-passing contract for THIS call site specifically."""
+    _install_modes(store)
+    _install_content_vectors(store, monkeypatch, ["a1"], np.array([[1.0, 0.0]], dtype=np.float32))
+    store.set_setting("radio_playlist_ytm", "PLRADIO")
+    store.set_setting("radio_playlist_b_ytm", "PLRADIO_B")
+    captured = {}
+    orig = store.play_events_since
+
+    def fake(since_ts, exclude_list_ids=None):
+        captured["exclude_list_ids"] = exclude_list_ids
+        return orig(since_ts, exclude_list_ids=exclude_list_ids)
+    monkeypatch.setattr(store, "play_events_since", fake)
+
+    layers.session_mode_mix(store, 1000.0)
+
+    assert captured["exclude_list_ids"] == ["PLRADIO", "PLRADIO_B"]
+
+
+def test_stale_mode_centroids_dim_mismatch_reads_as_quiet(store, monkeypatch):
+    # Same stale-modes window as the NOW layer (content space rebuilt at a new dim before the mode
+    # rebuild catches up): quiet, never a shape-error crash.
+    _install_modes(store)                                     # 2-D centroids
+    keys = ["a1", "a2", "a3"]
+    V = np.array([[1.0, 0.0, 0.0], [1.0, 0.1, 0.0], [1.0, 0.0, 0.1]], dtype=np.float32)   # 3-D
+    _install_content_vectors(store, monkeypatch, keys, V)
+    iid = _identity(store)
+    now = 100_000.0
+    store.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
+
+    shares, _n, modes = layers.session_mode_mix(store, now)
+    assert shares is None and len(modes) == 2

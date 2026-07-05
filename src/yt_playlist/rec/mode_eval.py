@@ -37,3 +37,21 @@ def mode_scoreboard(store, since=None) -> list[dict]:
                       "plays": plays.get(mid, 0), "last_play": last_play.get(mid)})
     board.sort(key=lambda b: (-b["offered"], b["mode_id"]))
     return board
+
+
+def ranker_scoreboard(store, since=None) -> list[dict]:
+    """#57 A/B verdict for the in-mode ranker, judged by the #60 selection log (NOT temporal_recall).
+    Per ranker ('ppr' vs 'cosine'): how often it was offered, how often its card was picked (Save &
+    play), and how much its picked playlists were then listened to. NULL rankers (pre-#57 rows) count
+    as 'cosine', the ranker they were served under. Reads only."""
+    offered = store.modes.ranker_impression_counts(since)      # {ranker: impressions}
+    picks = store.modes.ranker_pick_rows(since)                # [(playlist_id, ranker)]
+    stats = store.charts.get_playlist_listen_stats()           # {playlist_id: (last_listen_ts, count)}
+    picked, plays = {}, {}
+    for playlist_id, ranker in picks:
+        picked[ranker] = picked.get(ranker, 0) + 1
+        _last, cnt = stats.get(playlist_id, (None, 0))
+        plays[ranker] = plays.get(ranker, 0) + (cnt or 0)
+    rankers = set(offered) | set(picked)
+    return [{"ranker": rk, "offered": offered.get(rk, 0), "picked": picked.get(rk, 0),
+             "plays": plays.get(rk, 0)} for rk in sorted(rankers)]

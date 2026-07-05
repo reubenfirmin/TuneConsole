@@ -20,7 +20,11 @@ CURATION_KINDS = {"rate", "playlist_edit", "feedback", "subscription", "share_in
 # dedupe/preference evidence). Payload: {"old": <old video_id>, "new": <new video_id>}.
 
 _BODY_CAP = 4096
-_RATE_STATUS = {"like": "LIKE", "dislike": "DISLIKE", "removelike": "INDIFFERENT"}
+# Observed rate actions that may act on the like/dislike model. 'removelike' is deliberately NOT
+# mapped: only LIKE/DISLIKE may act from the player pipeline; the authoritative un-like is the
+# library sync's whole-run INDIFFERENT (see live_plays._STATUSES for the flap this prevents). The
+# raw removelike event is still persisted in player_events for later interpretation.
+_RATE_STATUS = {"like": "LIKE", "dislike": "DISLIKE"}
 _PAYLOAD_EXTRAS = ("state", "volume", "shuffle", "repeat")
 
 
@@ -83,5 +87,7 @@ def handle_player_event(ctx, msg, now) -> bool:
     if kind == "rate" and video_id and action in _RATE_STATUS:
         key = store.identity_key_for_video(video_id)
         if key:
-            graduation.apply_dislikes(store, {key: _RATE_STATUS[action]}, now)  # idempotent
+            # provenance='action': an observed rate call is a real-time user action, so the like
+            # keeps full transient participation (unlike sync-discovered likes).
+            graduation.apply_dislikes(store, {key: _RATE_STATUS[action]}, now, provenance="action")
     return True

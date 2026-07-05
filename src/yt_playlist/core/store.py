@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 # Per-domain DAOs split out of this former god class. `_synchronized` lives with them now; Store
@@ -21,6 +22,7 @@ from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.search import SearchRepo
 from yt_playlist.repos.settings import SettingsRepo
 from yt_playlist.repos.tracks import TrackRepo
+from yt_playlist.repos.trends import TrendsRepo
 from yt_playlist.repos.wiki import WikiRepo
 
 SCHEMA = """
@@ -99,6 +101,10 @@ CREATE TABLE IF NOT EXISTS play_events (
   like_status TEXT                         -- LIKE | DISLIKE | INDIFFERENT at report time
 );
 CREATE INDEX IF NOT EXISTS ix_play_events_time ON play_events(played_at);
+-- #93v2 recent_plays_with_ts' radio-shadow suppression probes play_events by identity_key per
+-- history row; without this index that is a correlated full scan (measured ~25 s at 33k history
+-- rows x 20k events, vs 67 ms indexed). Also serves import_play_events' (identity, key, ts) dedup.
+CREATE INDEX IF NOT EXISTS ix_play_events_key ON play_events(identity_key);
 CREATE TABLE IF NOT EXISTS player_events (
   id INTEGER PRIMARY KEY,
   identity_id INTEGER NOT NULL REFERENCES identities(id),
@@ -247,12 +253,14 @@ CREATE TABLE IF NOT EXISTS rec_mode_impressions (
   epoch      INTEGER NOT NULL,
   lane       TEXT NOT NULL,
   mode_id    INTEGER NOT NULL,
+  ranker     TEXT,
   created_at REAL NOT NULL,
   PRIMARY KEY (epoch, lane)
 );
 CREATE TABLE IF NOT EXISTS rec_mode_picks (
   playlist_id INTEGER PRIMARY KEY,
   mode_id     INTEGER NOT NULL,
+  ranker      TEXT,
   created_at  REAL NOT NULL
 );
 -- #87 raw log of which lane served each rendered Home item: the future lane-bandit's training data
@@ -263,6 +271,16 @@ CREATE TABLE IF NOT EXISTS rec_lane_impressions (
   at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_lane_impressions_at ON rec_lane_impressions(at);
+-- #76-#79 first-play index: earliest UTC day we have evidence of a track / artist. Built by the rec
+-- worker (trend_rollups) as MIN over the day model and play_events; play_events only lowers the MIN.
+CREATE TABLE IF NOT EXISTS trend_first_play (
+  kind      TEXT NOT NULL,        -- 'track' (identity_key) | 'artist' (display name)
+  id_key    TEXT NOT NULL,
+  first_day INTEGER NOT NULL,     -- int(first_ts // 86400)
+  first_ts  REAL NOT NULL,
+  source    TEXT NOT NULL,        -- 'history' | 'play_event'
+  PRIMARY KEY (kind, id_key)
+);
 """
 
 # Row dataclasses live in repos.models (avoids a Store<->repo cycle); re-exported here so existing
@@ -301,9 +319,11 @@ class Store:
         self.enrichment = EnrichmentRepo(self)
         self.wiki = WikiRepo(self)
         self.modes = ModesRepo(self)
+        self.trends = TrendsRepo(self)
         self._repos = (self.overlaps, self.discovery, self.genres, self.settings, self.actions,
                        self.identities, self.history, self.collection, self.rec, self.charts,
-                       self.tracks, self.playlists, self.player_events, self.search, self.enrichment, self.wiki, self.modes)
+                       self.tracks, self.playlists, self.player_events, self.search, self.enrichment, self.wiki, self.modes,
+                       self.trends)
 
     def __getattr__(self, name):
         # Delegate any attribute Store no longer defines to the DAO that owns it. Only hit on a
@@ -375,7 +395,27 @@ class Store:
         wcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(rec_weights)")}
         if "updated_at" not in wcols:
             self.conn.execute("ALTER TABLE rec_weights ADD COLUMN updated_at REAL")
+        # #57 which in-mode ranker (ppr / cosine) filled each mode card, for the selection-log A/B
+        icols = {r["name"] for r in self.conn.execute("PRAGMA table_info(rec_mode_impressions)")}
+        if "ranker" not in icols:
+            self.conn.execute("ALTER TABLE rec_mode_impressions ADD COLUMN ranker TEXT")
+        pcols2 = {r["name"] for r in self.conn.execute("PRAGMA table_info(rec_mode_picks)")}
+        if "ranker" not in pcols2:
+            self.conn.execute("ALTER TABLE rec_mode_picks ADD COLUMN ranker TEXT")
+        # #76-#79 first-play index: whole-table create in SCHEMA covers fresh + existing DBs; this
+        # guard is only a belt-and-braces create so an older DB without it gets the table.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS trend_first_play ("
+            "kind TEXT NOT NULL, id_key TEXT NOT NULL, first_day INTEGER NOT NULL, "
+            "first_ts REAL NOT NULL, source TEXT NOT NULL, PRIMARY KEY (kind, id_key))")
         # #75 the legacy recently-played window cache is gone (live play events + the (track, date)
         # dedup made it obsolete); drop it from existing databases
         self.conn.execute("DROP TABLE IF EXISTS history_window")
         self.conn.commit()
+        # One-shot like-ratchet repair (rec/repair.py): a per-context likeStatus flap re-graduated
+        # the same likes daily and pinned artist weights at the cap. Stamped via the settings key
+        # inside apply_like_ratchet_repair, same pattern as the enrich_ts backfill above; the stamp
+        # stores a summary line for audit. Local import: core must not import the rec package at
+        # module load (import cycle).
+        from yt_playlist.rec import repair as _like_repair
+        _like_repair.apply_like_ratchet_repair(self, time.time())

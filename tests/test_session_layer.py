@@ -114,6 +114,27 @@ def test_keys_absent_from_idx_do_not_contribute(store):
     assert tilt is None, "tilt should be None when gate=3 but only 2 keys are in idx"
 
 
+def test_session_tilt_passes_radio_exclusion_to_play_events_since(store, monkeypatch):
+    """#93v2 pin: session_tilt must resolve the radio playlist ids (layers._radio_list_ids) and pass
+    them as exclude_list_ids to store.play_events_since, so radio's own machine-queued plays cannot
+    feed this layer. Behavior is covered end-to-end by test_now_layer.py's equivalent test for the
+    NOW layer (same underlying mechanism); this pins the parameter-passing contract for THIS call
+    site specifically."""
+    store.set_setting("radio_playlist_ytm", "PLRADIO")
+    store.set_setting("radio_playlist_a_ytm", "PLRADIO_A")
+    captured = {}
+    orig = store.play_events_since
+
+    def fake(since_ts, exclude_list_ids=None):
+        captured["exclude_list_ids"] = exclude_list_ids
+        return orig(since_ts, exclude_list_ids=exclude_list_ids)
+    monkeypatch.setattr(store, "play_events_since", fake)
+
+    layers.session_tilt(store, 1000.0, np.zeros((1, 1)), {})
+
+    assert captured["exclude_list_ids"] == ["PLRADIO", "PLRADIO_A"]
+
+
 def test_zero_norm_contribution_returns_none(store):
     """When a key's vector has zero norm, it should be skipped. If all vectors are zero-norm,
     the result should be None."""

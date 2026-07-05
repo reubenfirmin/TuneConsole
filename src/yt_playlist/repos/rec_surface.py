@@ -320,6 +320,14 @@ class RecSurfaceRepo(Repo):
             "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 
     @synchronized
+    def graduation_audit_rows(self) -> list:
+        """Every graduation log row's (axis, source, factor), oldest-first. Powers the one-shot
+        like-ratchet repair's entitlement audit (rec/repair.py): per-axis like-source counts and
+        the non-like factor product that floors the correction."""
+        return self.conn.execute(
+            "SELECT axis, source, factor FROM rec_grad_log ORDER BY id").fetchall()
+
+    @synchronized
     def graduation_log_counts(self) -> dict:
         """{source: count} over all logged graduation events, for the model-health panel."""
         return {r["source"]: r["c"] for r in self.conn.execute(

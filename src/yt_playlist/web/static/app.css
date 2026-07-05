@@ -890,7 +890,11 @@ button.htmx-request .check-busy { display: inline; }
 .home-status.is-live .hs-dot { background: #3fb950; box-shadow: 0 0 0 3px rgba(63,185,80,0.18); }
 .home-status.is-down .hs-dot { background: #d29922; box-shadow: 0 0 0 3px rgba(210,153,34,0.18); }
 .hs-state { font-weight: 600; color: var(--text); }
-.hs-now { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
+.hs-now { display: flex; align-items: center; gap: 0.75rem; min-width: 0; flex-wrap: wrap; }
+/* #93 Task 9: the migrated radio customize panel (x-teleport'ed here while radio is active) takes
+   the full card width on its own row, rather than squeezing into the now-playing flex row. Empty
+   (radio off, or panel collapsed) contributes nothing, so the row height is unaffected. */
+#radio-steer-slot:not(:empty) { flex-basis: 100%; }
 .hs-art { width: 3.4rem; height: 3.4rem; border-radius: 7px; object-fit: cover; flex: none;
   box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
 .hs-rate-group { display: inline-flex; align-items: center; gap: 0.15rem; margin-left: 0.35rem; flex: none; }
@@ -914,6 +918,9 @@ button.htmx-request .check-busy { display: inline; }
 .hs-eq i:nth-child(2) { animation-delay: -0.5s; }
 .hs-eq i:nth-child(3) { animation-delay: -0.35s; }
 @keyframes hs-eq { 0%, 100% { transform: scaleY(0.35); } 50% { transform: scaleY(1); } }
+.hs-playpause { font-size: 0.85rem; }
+.hs-now.paused .hs-art, .hs-now.paused .hs-now-text { opacity: 0.55; }
+.hs-now.paused .hs-eq i { animation-play-state: paused; }
 .hs-meta { display: flex; align-items: center; gap: 0.9rem; flex: none; }
 .hs-sync { color: var(--dim); font-size: 0.82rem; white-space: nowrap; }
 .hs-refresh { color: var(--accent-2); font-size: 0.82rem; font-weight: 600; }
@@ -921,6 +928,41 @@ button.htmx-request .check-busy { display: inline; }
 .home-footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border);
   text-align: center; font-size: 0.85rem; }
 .home-footer a { color: var(--dim); }
+
+/* #93 Task 9: the radio launch card - its own card, not a status-strip button. Off: Start radio +
+   collapsed Customize. On (.is-active): Stop + Customize, and the customize panel has migrated up
+   into the now-playing card (see #radio-steer-slot above), so this card shows just the toggle row. */
+.radio-launch { margin-bottom: 1.4rem; }
+.rl-top { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; }
+.rl-eyebrow { display: inline-flex; align-items: center; gap: 0.45rem; font-weight: 600; color: var(--text); }
+.rl-dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--faint); flex: none; }
+.radio-launch.is-active .rl-dot { background: var(--accent-2); box-shadow: 0 0 0 3px var(--accent-soft);
+  animation: rl-pulse 2.4s ease-in-out infinite; }
+@keyframes rl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.rl-actions { display: inline-flex; align-items: center; gap: 0.5rem; margin-left: auto; }
+.rl-customize-toggle { background: none; border: 1px solid var(--border-2); color: var(--dim);
+  border-radius: 999px; padding: 0.3rem 0.75rem; font-size: 0.82rem; font-weight: 600; cursor: pointer; }
+.rl-customize-toggle:hover { color: var(--text); border-color: var(--text); }
+.rl-sub { color: var(--dim); font-size: 0.9rem; margin: 0.5rem 0 0; }
+.rl-reason { display: inline-block; margin-top: 0.4rem; }
+.rl-customize-inline, .rl-customize-teleported { margin-top: 0.9rem; }
+.rl-customize-teleported .radio-customize { padding-top: 0.2rem; }
+
+/* Mode transparency (visibility wave): a small, unobtrusive line, never alarming even when a
+   fallback hint is appended -- the full reason lives in the title tooltip, not the visible text. */
+.rl-mode { font-size: 0.82rem; opacity: 0.85; }
+
+/* "Up next" feedback loop (visibility wave): one row of compact chips, wraps rather than scrolls so
+   nothing is hidden. This is the only place a Populate-tail / steer tweak is visibly confirmed in
+   dual mode (the live deck's own queue is a frozen YTM snapshot until the next toggle). */
+.rl-upcoming { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.4rem 0.5rem;
+  margin-top: 0.6rem; }
+.rl-upcoming-label { color: var(--dim); font-size: 0.78rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.03em; flex: none; }
+.rl-upcoming-chip { background: var(--accent-soft); border-radius: 999px; padding: 0.15rem 0.65rem;
+  font-size: 0.82rem; color: var(--text); white-space: nowrap; }
+.rl-upcoming-artist { color: var(--dim); }
+.rl-upcoming-artist::before { content: " \00b7 "; }
 
 /* Poster action cards: a big cover across the top, minimal orienting text, then the CTA. auto-fit
    so the cards stretch to FILL the row (no trailing empty columns). */
@@ -1201,6 +1243,9 @@ button.htmx-request .check-busy { display: inline; }
 .gen-done { justify-content: center; }
 /* "More mixes coming" note, shown below the taste panel while the model still produces < 4 cards. */
 .gen-more { display: flex; align-items: center; gap: 0.85rem; margin-bottom: 1.4rem; }
+/* display:flex above beats the UA stylesheet's [hidden] rule, so the JS reveal toggle silently
+   stopped hiding this card (seen live: it sat under a full 4-mix row). Re-assert the attribute. */
+.gen-more[hidden] { display: none; }
 .gen-more-icon { flex: none; color: var(--accent-2); font-size: 1.15rem; }
 .gen-more p { margin: 0; color: var(--dim); font-size: 0.92rem; line-height: 1.5; }
 
@@ -2017,8 +2062,151 @@ figure.rose { margin: 0; text-align: center; }
 .cov-pct { color: var(--text); }
 .cov-raw { color: var(--faint); }
 .cov-trend { margin-top: 1.3rem; }
-.cov-trend .spark { width: 100%; height: 90px; display: block; margin-top: 0.4rem; }
+.spark { width: 100%; height: 90px; display: block; margin-top: 0.4rem; }
 .spark-area { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+
+/* ── Trends: instrument-panel charts ──────────────────────────────────────────────────
+   Analog chart-recorder look (see the Trends nag art): each chart is a gridded "screen"
+   panel inset into the card, with a glowing phosphor trace drawn over it. The glow is a
+   layered CSS filter (two stacked drop-shadows) on the crisp stroke itself, so it's one
+   cheap paint per trace rather than a separate blurred copy. Amber = the primary/total
+   reading; teal = a second, comparison trace (e.g. the genre-family mix riding along
+   with total plays). Grid + screen background live INSIDE the plot area only (the
+   _chart_screen.html macro insets them by `pad`); axis labels and stat tiles stay plain
+   text outside the screen, never glowing. */
+.instrument .screen-bg {
+  fill: color-mix(in srgb, #2b1a08 55%, var(--bg));
+  stroke: color-mix(in srgb, #f6c177 22%, var(--border-2));
+  stroke-width: 1;
+}
+.instrument .grid-line { fill: none; stroke: #f6c177; stroke-width: 0.6; opacity: 0.14; }
+
+.instrument .spark-area {
+  fill: rgba(246, 193, 119, 0.12);
+  stroke: #f6c177;
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 2px rgba(246, 193, 119, 0.85)) drop-shadow(0 0 7px rgba(246, 193, 119, 0.55));
+}
+.instrument .spark-line {
+  fill: none;
+  stroke: #ffd688;
+  stroke-width: 1.6;
+  stroke-linejoin: round; stroke-linecap: round;
+  filter: drop-shadow(0 0 2px rgba(246, 193, 119, 0.9)) drop-shadow(0 0 7px rgba(246, 193, 119, 0.6));
+}
+.instrument .trace-teal {
+  fill: none;
+  stroke: var(--teal);
+  stroke-width: 1.3;
+  stroke-linejoin: round; stroke-linecap: round;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 2px rgba(79, 214, 224, 0.85)) drop-shadow(0 0 6px rgba(79, 214, 224, 0.5));
+}
+/* genre-family share wash under the traces: flat teal fills (no glow -- see stacked_top's single
+   glowing top line above for the "second trace" reading), each rank a touch more transparent so the
+   layered bands still read as depth without needing a categorical legend. */
+.instrument .fam { stroke: none; fill: var(--teal); }
+.instrument .fam-0 { opacity: 0.42; }
+.instrument .fam-1 { opacity: 0.34; }
+.instrument .fam-2 { opacity: 0.27; }
+.instrument .fam-3 { opacity: 0.21; }
+.instrument .fam-4 { opacity: 0.16; }
+
+.chart-axis {
+  display: flex; justify-content: space-between;
+  font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.03em;
+  color: var(--faint); margin: 0.35rem 0.1rem 0;
+}
+
+.stat-grid.mini { gap: 0.9rem; margin-bottom: 0.9rem; }
+.stat-grid.mini strong { font-size: 1.2rem; }
+
+/* Trends page (#76-#80) round-2 polish: page-level card rhythm, chart legend, and a shared
+   "wrapped"-style tile treatment used by both Month in review and Library health. Scoped to
+   .trends-page (this page's own container class) rather than a global .card/section rule, so
+   nothing else on the site inherits this spacing. */
+.trends-page { display: flex; flex-direction: column; gap: 1.8rem; }
+.trends-footnote { color: var(--faint); font-size: 0.78rem; margin: -0.6rem 0.2rem 0; line-height: 1.5; }
+
+/* Listening-over-time legend (#2): chip colors mirror the exact stacked-area mapping (teal fam-N
+   opacities from the .instrument .fam-N rules above; solid amber for the total trace) so the
+   legend is always honest about what's on screen, never a separate palette. */
+.chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1rem;
+  margin: 0.6rem 0.1rem 0; font-size: 0.78rem; color: var(--dim); }
+.legend-chip { display: inline-flex; align-items: center; gap: 0.35rem; }
+.chip-dot { width: 0.6rem; height: 0.6rem; border-radius: 3px; flex: none;
+  border: 1px solid var(--border-2); background: var(--teal); }
+.chip-dot.fam-0 { opacity: 0.42; }
+.chip-dot.fam-1 { opacity: 0.34; }
+.chip-dot.fam-2 { opacity: 0.27; }
+.chip-dot.fam-3 { opacity: 0.21; }
+.chip-dot.fam-4 { opacity: 0.16; }
+.chip-dot.chip-total { background: #f6c177; border-color: transparent; opacity: 1; }
+
+/* Shared "wrapped" stat-tile treatment (#4b/#5b): each tile gets its own inset panel + a glowing
+   display-font number, instead of the plain stat-grid's bare strong/span pair. */
+.stat-grid.tiles { gap: 0.9rem; }
+.stat-grid.tiles > div {
+  background: linear-gradient(160deg, var(--surface-2), var(--bg-2));
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 0.85rem 1rem; gap: 0.15rem;
+}
+.stat-grid.tiles strong {
+  font-family: var(--font-display); font-size: 1.7rem; color: var(--text);
+  text-shadow: 0 0 14px rgba(246, 193, 119, 0.35);
+}
+.stat-grid.tiles span { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--dim); }
+
+/* Month in review (#79): "wrapped" headline, listen-day heat strip, insight bullets with
+   directional glyphs. */
+.review-headline {
+  font-family: var(--font-display); font-size: 1.6rem; font-weight: 600; margin: 0.1rem 0 0.5rem;
+  background: linear-gradient(120deg, #f6c177, var(--accent-2));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.heat-strip { display: flex; flex-wrap: wrap; gap: 3px; margin: 1rem 0 0.2rem; }
+.heat-day {
+  width: 0.6rem; height: 0.6rem; border-radius: 2px; flex: none;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, #f6c177 calc(var(--heat, 0) * 100%), var(--bg-2));
+  box-shadow: 0 0 calc(var(--heat, 0) * 6px) rgba(246, 193, 119, calc(var(--heat, 0) * 0.9));
+}
+.review-list { margin: 0.9rem 0 0; padding: 0; list-style: none; display: grid; gap: 0.4rem;
+  color: var(--dim); font-size: 0.88rem; }
+.review-list li { display: flex; align-items: baseline; gap: 0.4rem; }
+.review-list strong { color: var(--text); }
+.review-list .rl-glyph { display: inline-block; width: 1rem; text-align: center; flex: none; font-size: 0.82rem; }
+.rl-up .rl-glyph { color: var(--teal); }
+.rl-down .rl-glyph { color: var(--danger); }
+.rl-new .rl-glyph { color: #f6c177; }
+
+/* Library health (#80): staleness ribbon + legend, stat/donut header row, dead-weight playlist
+   chips, rediscover CTA. */
+.health-top { display: flex; align-items: center; gap: 1.6rem; flex-wrap: wrap; margin: 0.2rem 0 1rem; }
+.health-top .stat-grid { flex: 1 1 12rem; }
+.health-donut { width: 5.5rem; height: 5.5rem; flex: none; }
+.donut-track { fill: none; stroke: var(--border); stroke-width: 8; }
+.donut-value {
+  fill: none; stroke: var(--teal); stroke-width: 8; stroke-linecap: round;
+  stroke-dasharray: var(--dash, 0) 999px; transform: rotate(-90deg); transform-origin: 40px 40px;
+  filter: drop-shadow(0 0 4px rgba(79, 214, 224, 0.6));
+}
+.donut-num { font-family: var(--font-display); font-size: 15px; fill: var(--text); font-weight: 600; }
+.donut-cap { font-size: 7px; fill: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
+.health-ribbon { height: 30px; border-radius: 8px; margin: 0.9rem 0 0.7rem; }
+.stale-legend { list-style: none; margin: 0 0 1.1rem; padding: 0;
+  display: flex; flex-wrap: wrap; gap: 0.35rem 1.1rem; }
+.stale-legend li { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--dim); }
+.stale-legend .dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; flex: none;
+  background: var(--petal-c, var(--accent)); }
+.stale-legend .bucket-pct { font-family: var(--font-mono); color: var(--text); font-weight: 600; }
+.stale-legend .bucket-n { font-family: var(--font-mono); color: var(--faint); }
+.dead-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.5rem 0 0; }
+.dead-chips a.tag:hover { background: var(--accent); color: #fff; border-color: transparent; }
+.health-cta { display: inline-block; margin-top: 1.1rem; color: var(--dim); font-size: 0.85rem;
+  border-bottom: 1px dashed var(--border-2); }
+.health-cta:hover { color: var(--accent-2); border-color: var(--accent-2); }
 
 /* ── Auto-tune control + result panel ─────────────────────────────────────── */
 .autotune-ctl { display: flex; align-items: center; gap: 0.85rem; flex-wrap: wrap;
@@ -2081,3 +2269,113 @@ figure.rose { margin: 0; text-align: center; }
 .canvas-chip:hover { color: var(--text); border-color: var(--border-2); }
 .canvas-chip.active { color: var(--text); font-weight: 600;
   border-color: var(--accent); background: var(--accent-soft); }
+
+/* ── T10e: Insights (top of Trends) ───────────────────────────────────────────────────────
+   A stack of finding cards -- left art (track/artist thumbnail, or a per-kind glyph when
+   there's none), headline + detail + a mono evidence line, a CTA. These read left-to-right
+   like a rolodex of findings, so they get their own row layout rather than the vertical
+   alert-card poster shape used by the nag row. */
+.insights-list { display: flex; flex-direction: column; gap: 0.7rem; margin-bottom: 1.8rem; }
+.insight-card { display: flex; gap: 1rem; align-items: center; padding: 0.9rem 1.1rem; }
+.insight-art { position: relative; flex: none; width: 3.6rem; height: 3.6rem;
+  border-radius: var(--radius-sm); overflow: hidden; display: grid; place-items: center;
+  background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); border: 1px solid var(--border-2); }
+.insight-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.insight-glyph { display: none; font-size: 1.35rem; color: #f6c177;
+  text-shadow: 0 0 10px rgba(246, 193, 119, 0.6); }
+.insight-art.no-art .insight-glyph { display: block; }
+.insight-art.k-emergence .insight-glyph::before { content: "\25B2"; }      /* growth */
+.insight-art.k-put_to_bed .insight-glyph::before { content: "\25A0"; }     /* gone quiet */
+.insight-art.k-repetition .insight-glyph::before { content: "\21BB"; }     /* repeat return */
+.insight-art.k-revival .insight-glyph::before { content: "\2605"; }        /* back */
+.insight-art.k-one_song .insight-glyph::before { content: "\221E"; }       /* on repeat */
+.insight-art.k-binge .insight-glyph::before { content: "\26A1"; }          /* big day */
+.insight-art.k-song_of_week .insight-glyph::before { content: "\266A"; }   /* top track */
+.insight-body { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; flex: 1 1 auto; }
+.insight-body strong { font-size: 0.98rem; }
+.insight-body p { margin: 0; color: var(--dim); font-size: 0.88rem; line-height: 1.4; }
+.insight-evidence { color: var(--teal) !important; font-size: 0.76rem !important; letter-spacing: 0.02em; }
+.insight-card .btn-sm { align-self: flex-start; margin-top: 0.15rem; }
+@media (max-width: 40rem) { .insight-card { flex-wrap: wrap; } .insight-card .btn-sm { margin-left: 4.6rem; } }
+
+/* ── T10f: Month in review redesign ───────────────────────────────────────────────────────
+   Demoted stat strip, a full calendar heat grid, a top-3 artist podium, song of the month,
+   and a binge-day callout, all sitting above the existing new-favorite/riser/faller lines. */
+.stat-row { display: flex; flex-wrap: wrap; gap: 1.4rem; margin: 0.2rem 0 1.3rem;
+  color: var(--dim); font-size: 0.85rem; }
+.stat-row strong { color: var(--text); font-family: var(--font-display); font-size: 1.05rem; }
+
+.review-calendar { margin: 0.2rem 0 1.4rem; }
+.cal-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-bottom: 4px;
+  font-family: var(--font-mono); font-size: 0.66rem; color: var(--faint); text-align: center;
+  text-transform: uppercase; letter-spacing: 0.04em; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-pad, .cal-day { aspect-ratio: 1 / 1; border-radius: 5px; }
+.cal-pad { visibility: hidden; }
+.cal-day {
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: 0.64rem;
+  color: color-mix(in srgb, var(--text) 75%, transparent);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, #f6c177 calc(var(--heat, 0) * 100%), var(--bg-2));
+  box-shadow: 0 0 calc(var(--heat, 0) * 10px) rgba(246, 193, 119, calc(var(--heat, 0) * 0.85));
+}
+
+.artist-podium { display: flex; gap: 0.9rem; margin: 0.4rem 0 1.4rem; flex-wrap: wrap; }
+.podium-tile { flex: 1 1 8rem; display: flex; flex-direction: column; align-items: center; gap: 0.35rem;
+  padding: 0.9rem 0.7rem 0.8rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); text-align: center; }
+.podium-tile:first-child { border-color: color-mix(in srgb, #f6c177 45%, var(--border-2));
+  box-shadow: 0 0 18px -6px rgba(246, 193, 119, 0.5); }
+.podium-rank { font-family: var(--font-mono); font-size: 0.72rem; color: var(--faint); }
+.podium-art { width: 3.6rem; height: 3.6rem; border-radius: 50%; overflow: hidden;
+  background: var(--grad-soft); display: block; }
+.podium-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.podium-name { font-weight: 650; font-size: 0.9rem; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 100%; }
+.podium-plays { font-size: 0.76rem; color: var(--dim); }
+.play-bar { display: block; width: 100%; height: 6px; background: var(--surface-2);
+  border-radius: 999px; overflow: hidden; }
+.play-bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--teal), #f6c177);
+  border-radius: 999px; }
+
+.song-of-month { display: flex; gap: 0.9rem; align-items: center; margin: 0.2rem 0 1.3rem;
+  padding: 0.8rem 0.9rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); }
+.som-art { width: 3.4rem; height: 3.4rem; flex: none; border-radius: var(--radius-sm);
+  overflow: hidden; background: var(--grad-soft); }
+.som-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.som-meta { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+.som-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); }
+.som-title { font-size: 0.98rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.som-artist { font-size: 0.8rem; color: var(--dim); }
+
+.binge-callout { margin: 0 0 1rem; padding: 0.6rem 0.85rem; border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border-2));
+  background: color-mix(in srgb, var(--danger) 10%, transparent); font-size: 0.86rem; color: var(--dim); }
+.binge-callout strong { color: var(--text); }
+
+/* ── T10g: Library health redesign ────────────────────────────────────────────────────────
+   Rediscover candidates (named tracks, quiet a long time) and albums saved but never opened --
+   turning the health card from a diagnosis into doorways. */
+.rediscover-list { display: flex; flex-direction: column; gap: 0.55rem; margin: 0.3rem 0 1.2rem; }
+.rc-row { display: flex; align-items: center; gap: 0.8rem; }
+.rc-art { flex: none; width: 2.6rem; height: 2.6rem; border-radius: var(--radius-sm);
+  overflow: hidden; background: var(--surface-2); border: 1px solid var(--border); }
+.rc-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.rc-meta { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; flex: 1 1 auto; }
+.rc-title { font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rc-sub { font-size: 0.78rem; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rc-go { flex: none; white-space: nowrap; }
+
+.unopened-albums { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.7rem; margin: 0.3rem 0 1.2rem; }
+.unopened-tile { display: flex; flex-direction: column; gap: 0.35rem; color: var(--text); }
+.unopened-tile:hover .unopened-meta strong { color: var(--accent-2); }
+.unopened-art { display: block; width: 100%; aspect-ratio: 1 / 1; border-radius: var(--radius-sm);
+  overflow: hidden; background: var(--grad-soft); border: 1px solid var(--border); }
+.unopened-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.unopened-meta { display: flex; flex-direction: column; gap: 0.05rem; min-width: 0; }
+.unopened-meta strong { font-size: 0.82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.unopened-meta span { font-size: 0.74rem; color: var(--dim); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }

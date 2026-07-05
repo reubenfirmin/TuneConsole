@@ -87,3 +87,39 @@ def test_centroid_tilt_includes_recent_plays():
 # staleness_factor is deleted from transient.py entirely (no sync-freshness relax; every event decays
 # on its own wall clock instead). The sync-freshness behavior they covered is Task 4's territory
 # (scoring.py / taste_viz.py), not reintroduced in transient.py.
+
+
+# --- #93v2: machine-queued radio plays are not taste evidence in the transient/graduation funnel
+# either (transient.radio_list_ids). Radio-provenance plays must produce NO play lean; organic plays
+# still do. ---
+
+def test_radio_provenance_plays_produce_no_play_lean(store):
+    k = _jazz_track(store, "v1", "RadioSong", artist="RadioBand")
+    iid = store.upsert_identity("main", "c", None, True)
+    store.set_setting("radio_playlist_ytm", "PLRADIO")
+    store.record_play_event(iid, k, "v1", 5.0, playlist_ytm_id="PLRADIO")
+    assert transient.play_facet_leans(store, now=10.0) == {}
+    # And the blended facet_leans view sees no play push either (no other sources are seeded).
+    assert transient.facet_leans(store, now=10.0) == {}
+
+
+def test_organic_plays_still_produce_play_lean(store):
+    k = _jazz_track(store, "v1", "OrganicSong", artist="OrganicBand")
+    iid = store.upsert_identity("main", "c", None, True)
+    store.set_setting("radio_playlist_ytm", "PLRADIO")
+    store.record_play_event(iid, k, "v1", 5.0, playlist_ytm_id=None)   # no provenance = user-driven
+    leans = transient.play_facet_leans(store, now=10.0)
+    assert leans.get("artist:OrganicBand", 0.0) > 0
+
+
+def test_radio_play_lean_stays_zero_after_history_sync_shadow(store):
+    # The slow-burn re-entry: radio plays a track today, the next YTM history sync re-records it as
+    # a provenance-free noon-bucket history row the SAME day. The lean must stay zero, or radio
+    # plays graduate into permanent weights one sync later.
+    k = _jazz_track(store, "v1", "RadioSong", artist="RadioBand")
+    iid = store.upsert_identity("main", "c", None, True)
+    store.set_setting("radio_playlist_ytm", "PLRADIO")
+    day = 100 * 86400
+    store.record_play_event(iid, k, "v1", day + 61000, playlist_ytm_id="PLRADIO")
+    store.record_history_plays(iid, day + 70000, [k])          # the post-sync shadow
+    assert transient.play_facet_leans(store, now=day + 80000) == {}

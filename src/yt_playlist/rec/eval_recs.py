@@ -92,8 +92,13 @@ def temporal_recall(store, holdout_days=30, k=20) -> dict:
     Using history_snapshots, hold out the most recent `holdout_days` of plays, treat everything played
     before the cutoff as context, and check whether each genuinely new held-out play (one not already
     in the context) ranks in the top-k by cosine to the context centroid in the embedding space. This
-    rewards forward prediction, unlike the in-sample leave-one-out recall_at_k. Returns recall=None
-    when there are no vectors, no history, or the split has no usable context/held-out plays."""
+    rewards forward prediction, unlike the in-sample leave-one-out recall_at_k.
+
+    Held-out plays the app itself CAUSED are dropped first (#83's last circular path): a key whose
+    every play_events row in the holdout window carries generated-playlist provenance
+    (generated_only_keys_since) would otherwise count the model's own suggestion as a successful
+    prediction. The number dropped is reported as `generated_excluded`. Returns recall=None when
+    there are no vectors, no history, or the split has no usable context/held-out plays."""
     keys, V, idx = embed.load_vectors(store)
     if V is None:
         return {"recall": None, "trials": 0, "reason": "no vectors built"}
@@ -105,8 +110,12 @@ def temporal_recall(store, holdout_days=30, k=20) -> dict:
     after = store.get_recent_history_keys(cutoff)
     context = [key for key in before if key in idx]
     held = [key for key in after if key in idx and key not in before]   # new plays to predict
+    gen_only = store.generated_only_keys_since(cutoff)
+    generated_excluded = sum(1 for key in held if key in gen_only)
+    held = [key for key in held if key not in gen_only]
     if not context or not held:
         return {"recall": None, "trials": len(held), "holdout_days": holdout_days,
+                "generated_excluded": generated_excluded,
                 "reason": "insufficient temporal split"}
     Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
     c = Vn[[idx[key] for key in context]].mean(0)
@@ -119,6 +128,7 @@ def temporal_recall(store, holdout_days=30, k=20) -> dict:
     recall = hits / len(held)
     baseline = k / len(ranked) if ranked else None
     return {"recall": recall, "k": k, "trials": len(held), "holdout_days": holdout_days,
+            "generated_excluded": generated_excluded,
             "baseline": baseline, "lift": (recall / baseline) if recall and baseline else None}
 
 
