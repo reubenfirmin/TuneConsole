@@ -5,13 +5,13 @@ from pathlib import Path
 EXT = Path(__file__).resolve().parents[1] / "extension"
 
 
-def test_manifest_bumped_and_permissions_unchanged():
+def test_manifest_permission_surface_unchanged():
     m = json.loads((EXT / "manifest.json").read_text())
-    # Bumped past the 0.1.4 store baseline; an exact pin here broke on every legitimate bump, so
-    # assert the floor instead. The permission surface is the real invariant. Floor raised to
-    # 0.1.13 with the waiting-state net (probe-order cold start + deck-waiting reporting): extension
-    # behavior changed again, so the owner must see a version he can verify after his manual reload.
-    assert tuple(int(x) for x in m["version"].split(".")) >= (0, 1, 13)
+    # The manifest is the single source of truth for the extension version, and the store submission
+    # sets its own cadence (0.1.3 followed the in-repo 0.1.14, since only some dev bumps ever
+    # shipped), so tests must not pin or floor the version: any assertion here is a second copy that
+    # drifts. The permission surface is the real invariant; the version just needs to be well-formed.
+    assert all(x.isdigit() for x in m["version"].split("."))
     assert m["permissions"] == ["cookies", "tabs", "alarms", "scripting"]   # unchanged surface
 
 
