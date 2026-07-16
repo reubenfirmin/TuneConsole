@@ -1,0 +1,194 @@
+{# Standalone full-screen takeover (deliberately NOT extending base.html: no nav chrome, and no
+   transformed ancestor to break the reel's fixed positioning). Loads only tokens + story styles. #}
+{% from "_partials/_aura.html" import aura %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your {{ story.month_name }} · TuneConsole</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/story.css?v={{ asset_v }}">
+  <script defer src="/static/vendor/alpine.min.js"></script>
+</head>
+<body class="reel-body">
+{# Alpine auto-runs the component's init() method; do NOT also call it via x-init or the keydown
+   handler binds twice and every ArrowRight skips a beat. #}
+<div class="reel" x-data="reel({{ story.beats|length }})"
+     @touchstart="ts($event)" @touchend="te($event)">
+  <div class="reel-progress">
+    {% for b in story.beats %}
+    <button type="button" class="reel-dot" :class="{on: i >= {{ loop.index0 }}, cur: i === {{ loop.index0 }}}"
+            @click="go({{ loop.index0 }})" aria-label="Beat {{ loop.index }}"></button>
+    {% endfor %}
+  </div>
+  <a class="reel-close" href="/trends" aria-label="Close">✕</a>
+  <button type="button" class="reel-auto" @click="toggleAuto()"
+          :class="{on: autoplay}" x-text="autoplay ? '❚❚ Auto' : '▶ Auto'"></button>
+
+  <div class="reel-tap prev" @click="prev()" aria-hidden="true"></div>
+  <div class="reel-tap next" @click="next()" aria-hidden="true"></div>
+
+  {% for b in story.beats %}
+  <section class="slide slide-{{ b.kind }}" x-show="i === {{ loop.index0 }}" x-ref="slide{{ loop.index0 }}"
+           x-transition:enter="s-enter" x-transition:enter-start="s-enter-start" x-transition:enter-end="s-enter-end"
+           role="group" aria-roledescription="slide" aria-label="{{ b.kind }}">
+    {% if b.kind == 'cover' %}
+      <span class="slide-eyebrow">Monthly recap</span>
+      <h1 class="slide-h1">Your {{ b.month_name }}</h1>
+      <p class="slide-thesis">{{ b.thesis }}</p>
+      <span class="slide-hint">tap to begin</span>
+    {% elif b.kind == 'numbers' %}
+      <span class="slide-eyebrow">By the numbers</span>
+      <div class="num-grid">
+        <div><strong data-count="{{ b.plays }}">{{ b.plays }}</strong><span>plays</span></div>
+        <div><strong data-count="{{ b.listen_days }}">{{ b.listen_days }}</strong><span>days listening</span></div>
+        <div><strong data-count="{{ b.streak }}">{{ b.streak }}</strong><span>day streak</span></div>
+        {% if b.distinct_artists %}<div><strong data-count="{{ b.distinct_artists }}">{{ b.distinct_artists }}</strong><span>artists</span></div>{% endif %}
+      </div>
+    {% elif b.kind == 'all_in' %}
+      <span class="slide-eyebrow">You went all in on</span>
+      <h1 class="slide-h1 slide-name">{{ b.artist }}</h1>
+      <p class="slide-big"><strong data-count="{{ (b.share * 100)|round|int }}">{{ (b.share * 100)|round|int }}</strong>%<span> of everything you played</span></p>
+      <p class="slide-sub">{{ b.plays }} plays</p>
+    {% elif b.kind == 'wide_net' %}
+      <span class="slide-eyebrow">You cast a wide net</span>
+      <h1 class="slide-h1"><strong data-count="{{ b.artists }}">{{ b.artists }}</strong> artists</h1>
+      <p class="slide-sub">across {{ b.plays }} plays — no one act ran the month. You were exploring.</p>
+    {% elif b.kind == 'night' %}
+      <span class="slide-eyebrow">Your biggest day</span>
+      <h1 class="slide-h1">{{ b.label }}</h1>
+      <p class="slide-big"><strong data-count="{{ b.plays }}">{{ b.plays }}</strong><span> plays in a day</span></p>
+      <p class="slide-sub">{{ (b.pct * 100)|round|int }}% of it was {{ b.artist }}</p>
+    {% elif b.kind == 'new' %}
+      <span class="slide-eyebrow">A new obsession</span>
+      <h1 class="slide-h1 slide-name">{{ b.artist }}</h1>
+      <p class="slide-sub">Never in your world before this month — then <strong data-count="{{ b.plays }}">{{ b.plays }}</strong> plays.</p>
+    {% elif b.kind == 'diversity' %}
+      <span class="slide-eyebrow">Your taste</span>
+      <h1 class="slide-h1">You {{ b.direction }}</h1>
+      <p class="slide-sub">Genre spread {{ b.prev }} → <strong>{{ b.cur }}</strong> vs last month
+        {{ '(wider)' if b.delta > 0 else '(tighter)' }}.</p>
+    {% elif b.kind == 'revival' %}
+      <span class="slide-eyebrow">Back from the dead</span>
+      <h1 class="slide-h1 slide-name">{{ b.artist }}</h1>
+      <p class="slide-sub">{{ b.detail }}</p>
+    {% elif b.kind == 'personality' %}
+      <span class="slide-eyebrow">Your listening personality</span>
+      <div class="pers-aura">{{ aura(b.aura, 'p') }}</div>
+      <h1 class="slide-h1 slide-name">{{ b.name }}</h1>
+      <p class="slide-sub">{{ b.blurb }}.</p>
+      <div class="axes">
+        <div class="axis"><span>Calm</span><i class="axis-bar" style="--v: {{ b.axes.energy }}"></i><span>Charged</span></div>
+        <div class="axis"><span>Loyalist</span><i class="axis-bar" style="--v: {{ b.axes.exploration }}"></i><span>Explorer</span></div>
+        <div class="axis"><span>Daylight</span><i class="axis-bar" style="--v: {{ b.axes.rhythm }}"></i><span>Night-owl</span></div>
+      </div>
+    {% elif b.kind == 'closing' %}
+      <div class="close-card" x-ref="card"
+           data-month="{{ b.month_name }}" data-personality="{{ b.personality }}"
+           data-plays="{{ b.plays }}" data-days="{{ b.listen_days }}"
+           data-artist="{{ b.top_artist or '' }}" data-hue="{{ b.aura.hue }}">
+        <div class="close-aura">{{ aura(b.aura, 'c') }}</div>
+        <span class="slide-eyebrow">Your {{ b.month_name }}</span>
+        <h1 class="slide-h1 slide-name">{{ b.personality }}</h1>
+        <div class="close-stats">
+          <div><strong>{{ b.plays }}</strong><span>plays</span></div>
+          <div><strong>{{ b.listen_days }}</strong><span>days</span></div>
+          {% if b.top_artist %}<div><strong>{{ b.top_artist }}</strong><span>most played</span></div>{% endif %}
+        </div>
+        <span class="close-brand">TuneConsole</span>
+      </div>
+      <button type="button" class="btn close-share" @click="share($refs.card)">Save image</button>
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>
+
+<script>
+function reel(n) {
+  return {
+    i: 0, n: n, autoplay: false, _t: null, _x: 0,
+    init() {
+      this.$watch('i', () => this.enter());
+      this.$nextTick(() => this.enter());
+      this._key = (e) => {
+        if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); this.next(); }
+        else if (e.key === 'ArrowLeft') this.prev();
+        else if (e.key === 'Escape') window.location.href = '/trends';
+      };
+      window.addEventListener('keydown', this._key);
+    },
+    go(k) { this.i = Math.max(0, Math.min(this.n - 1, k)); },
+    next() { if (this.i < this.n - 1) this.i++; else window.location.href = '/trends'; },
+    prev() { this.go(this.i - 1); },
+    toggleAuto() { this.autoplay = !this.autoplay; this._tick(); },
+    _tick() { clearTimeout(this._t); if (this.autoplay && this.i < this.n - 1) this._t = setTimeout(() => this.next(), 5200); },
+    ts(e) { this._x = e.changedTouches[0].clientX; },
+    te(e) { const dx = e.changedTouches[0].clientX - this._x; if (dx < -40) this.next(); else if (dx > 40) this.prev(); },
+    enter() {
+      this._tick();
+      const slide = this.$refs['slide' + this.i];
+      if (!slide) return;
+      // Always animate: prefers-reduced-motion is deliberately NOT honored here (it was firing in an
+      // environment the user never opted into, and it left every stat at its 0 placeholder). The real
+      // value is also the element's default text, so numbers are correct even if this never runs.
+      slide.querySelectorAll('[data-count]').forEach(el => {
+        const target = +el.dataset.count, dur = 850, t0 = performance.now();
+        el.textContent = '0';
+        const step = t => { const p = Math.min(1, (t - t0) / dur);
+          el.textContent = Math.round(target * (1 - Math.pow(1 - p, 3))).toLocaleString();
+          if (p < 1) requestAnimationFrame(step); };
+        requestAnimationFrame(step);
+      });
+    },
+    async share(card) {
+      // Draw the share card DIRECTLY on a canvas (not via SVG foreignObject, which rasterises the HTML
+      // with no stylesheet -> unstyled + fallback fonts). Full control, real Hanken Grotesk.
+      if (!card) return;
+      const d = card.dataset, W = 1080, H = 1350, cx = W / 2;
+      try { if (document.fonts) await document.fonts.load('800 100px "Hanken Grotesk"'); } catch (e) {}
+      const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      const ctx = cv.getContext('2d'); ctx.textAlign = 'center';
+      const F = (w, s) => `${w} ${s}px "Hanken Grotesk", system-ui, sans-serif`;
+      let bg = ctx.createLinearGradient(0, 0, 0, H);
+      bg.addColorStop(0, '#1c1656'); bg.addColorStop(1, '#070516');
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+      const hue = d.hue || '#8b7cff', ay = H * 0.31, ar = W * 0.42;
+      let ag = ctx.createRadialGradient(cx, ay, 8, cx, ay, ar);
+      ag.addColorStop(0, 'rgba(255,255,255,0.55)'); ag.addColorStop(0.30, hue);
+      ag.addColorStop(0.62, hue + 'aa'); ag.addColorStop(0.82, 'rgba(255,107,208,0.20)');
+      ag.addColorStop(1, hue + '00');
+      ctx.fillStyle = ag; ctx.beginPath(); ctx.arc(cx, ay, ar, 0, 6.29); ctx.fill();
+      ctx.fillStyle = '#b6a9ff'; ctx.letterSpacing = '7px'; ctx.font = F(700, 30);
+      ctx.fillText(('Your ' + (d.month || '')).toUpperCase(), cx, H * 0.585);
+      ctx.letterSpacing = '0px';
+      const ng = ctx.createLinearGradient(W * 0.12, 0, W * 0.88, 0);
+      ng.addColorStop(0, '#ffffff'); ng.addColorStop(0.5, '#bd91ff'); ng.addColorStop(1, '#4fd6e0');
+      ctx.fillStyle = ng;
+      const size = 118; ctx.font = F(800, size);
+      const words = (d.personality || '').split(' '), lines = []; let line = '';
+      for (const w of words) { const t = line ? line + ' ' + w : w;
+        if (ctx.measureText(t).width > W * 0.84 && line) { lines.push(line); line = w; } else line = t; }
+      if (line) lines.push(line);
+      let y = H * 0.665; for (const l of lines) { ctx.fillText(l, cx, y); y += size * 0.97; }
+      const stats = [[d.plays, 'PLAYS'], [d.days, 'DAYS']];
+      if (d.artist) stats.push([d.artist, 'MOST PLAYED']);
+      const gap = W * 0.72 / stats.length, x0 = cx - gap * (stats.length - 1) / 2, sy = H * 0.865;
+      stats.forEach(([v, lab], i) => { const x = x0 + gap * i, s = String(v);
+        ctx.fillStyle = '#ffffff'; ctx.font = F(800, s.length > 9 ? Math.max(28, 460 / s.length) : 48);
+        ctx.fillText(s, x, sy);
+        ctx.fillStyle = '#9a92c8'; ctx.letterSpacing = '2px'; ctx.font = F(600, 21);
+        ctx.fillText(lab, x, sy + 40); ctx.letterSpacing = '0px';
+      });
+      ctx.fillStyle = '#6f699f'; ctx.letterSpacing = '6px'; ctx.font = F(600, 24);
+      ctx.fillText('TUNECONSOLE', cx, H * 0.955); ctx.letterSpacing = '0px';
+      const a = document.createElement('a');
+      a.download = 'your-' + (d.month || 'recap').toLowerCase() + '.png';
+      a.href = cv.toDataURL('image/png'); a.click();
+    }
+  };
+}
+</script>
+</body>
+</html>

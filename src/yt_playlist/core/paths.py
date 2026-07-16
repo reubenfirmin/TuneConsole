@@ -36,6 +36,11 @@ def network_log_path() -> Path:
     """Rotating egress log written by the network guard (see yt_playlist.egress)."""
     return logs_dir() / "network.log"
 
+def app_log_path() -> Path:
+    """Rotating application log (see yt_playlist.core.logsetup). The packaged builds have no
+    terminal, so this file is the only place their output survives."""
+    return logs_dir() / "app.log"
+
 def config_path() -> Path:
     override = os.environ.get("YT_PLAYLIST_HOME")
     if override:

@@ -8,6 +8,7 @@
        so nothing is fetched from a third-party CDN at runtime. -->
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/story.css?v={{ asset_v }}">
   <script src="/static/vendor/htmx.min.js"></script>
   <script src="/static/vendor/sortable.min.js"></script>
   {# d3-force graph layout for the Clusters canvas. Order matters: d3-force reads its deps off the
@@ -64,7 +65,6 @@
       <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
       <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
       <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
-      <a href="/trends" class="{{ 'active' if path.startswith('/trends') else '' }}">Trends</a>
       <a href="/clusters" class="{{ 'active' if path.startswith('/clusters') else '' }}">Clusters</a>
       <div class="tools-menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
         <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"

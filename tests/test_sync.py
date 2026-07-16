@@ -75,7 +75,10 @@ def test_sync_identity_populates_store(store):
     client = FakeClient(
         playlists=[{"playlistId": "PL1", "title": "Mix", "count": 2}],
         tracks={"PL1": [_track("v1", "Song A", "Artist"), _track("v2", "Song B", "Artist")]},
-        history=[_track("v1", "Song A", "Artist")])
+        # `played` mirrors the real API: ytmusicapi sets it from the history shelf's title
+        # (musicShelfRenderer TITLE_TEXT), so it is always present. Rows under a "This week" or
+        # "Earlier" shelf are undateable and are dropped rather than stamped as played today.
+        history=[{**_track("v1", "Song A", "Artist"), "played": "Today"}])
     sync_identity(store, iid, client, now=1000.0)
 
     pls = store.get_playlists()

@@ -1,8 +1,27 @@
 """Read-only transparency view of the recommendation model for the Taste page.
 
-Pure functions over a Store (no web imports), like recommend.py. Assembles, per shared axis
-(genre family / era decade / artist), the full ranking-multiplier stack -   effective = permanent_weight x standing_lean x transient_facet_multiplier (each clamped) - plus the graduation funnel (transient -> permanent) and the live transient sources. Nothing hidden:
-this is the first place the transient model is ever surfaced (it otherwise only shapes ranking).
+Pure functions over a Store (no web imports), like recommend.py.
+
+#88: the model is a stack of four layers, each at its own wall-clock timescale:
+
+    NOW        hours       a posterior over your taste modes (layers.now_mode_mix)
+    SESSION    a day       the same posterior, decay-weighted (layers.session_mode_mix),
+                           plus a free direction in the embedding (layers.session_tilt)
+    TRANSIENT  days-weeks  per-facet leans -> ranking multipliers (transient.facet_leans),
+                           plus a free direction in the embedding (transient.centroid_tilt)
+    PERMANENT  forever     graduated weights x standing leans, and the embedding itself
+
+A layer only exists on the axes where the model actually computes it. NOW and SESSION are
+categorical over taste MODES and have no per-facet quantity at all; NOW deliberately has no
+embedding direction (averaging an hour of plays yields a direction nothing in the catalogue sounds
+like - see layers.py). So this module exposes each layer on the axis it lives on, and nowhere else:
+
+    mode_layers()          modes axis:    NOW, SESSION, PERMANENT
+    model_transparency()   facet axes:    TRANSIENT, PERMANENT (and their product)
+    centroid_tilt_panel()  embedding:     SESSION, TRANSIENT
+
+Nothing hidden: this is the only place the transient model is ever surfaced (it otherwise only
+shapes ranking).
 """
 import numpy as np
 
@@ -11,20 +30,15 @@ from yt_playlist.rec import embed, eval_recs, layers, rec_params, recommend, tra
 from yt_playlist.rec.rec_dao import RecDao
 
 
-# Below this max-absolute share deviation (in share fraction, ~1 point) the right rose is treated as
-# quiet - your recent mix matches your usual one, so there's nothing meaningful to draw.
-QUIET_DEV_EPS = 0.01
-# "Recent" = the last this-many play events (frequency-weighted). Large enough to be a representative
-# recent mix, small enough to differ from your all-time mix for an active listener.
-RECENT_PLAYS_WINDOW = 400
-_ALLTIME_LIMIT = 1_000_000_000   # effectively unbounded - the all-time play-count basis
-
-
-def _clamp(v):
-    return max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, v))
-
-
 def _axis_rows(prefix, shares, weights, standing, leans, fparams):
+    """One row per facet on an axis, carrying the EXACT multiplier chain `scoring._axis_mult` applies:
+
+        effective = permanent_weight x standing_lean x transient_mult
+
+    No clamping is re-applied here. Each factor is already bounded where it is produced (genre
+    weights at set_weight, the facet multiplier inside transient.facet_multiplier), so re-clamping
+    would show the user a number the ranker never used.
+    """
     rows = []
     for name, share in shares:
         token = f"{prefix}:{name}"
@@ -32,9 +46,10 @@ def _axis_rows(prefix, shares, weights, standing, leans, fparams):
         sl = standing.get(token, 1.0)
         tlean = leans.get(token, 0.0)
         tmult = transient.facet_multiplier(tlean, *fparams)
-        rows.append({"name": name, "share": share, "permanent_weight": pw, "standing_lean": sl,
+        rows.append({"name": name, "share": share,
+                     "permanent_weight": pw, "standing_lean": sl, "lasting": pw * sl,
                      "transient_lean": tlean, "transient_mult": tmult,
-                     "effective": _clamp(pw) * _clamp(sl) * _clamp(tmult)})
+                     "effective": pw * sl * tmult})
     return rows
 
 
@@ -46,82 +61,59 @@ def _attach_graduation(rows, prefix, theme, thr):
     return rows
 
 
-def _axis_dist(store, counts, axis) -> dict:
-    """Normalize a {identity_key: play count} map onto an axis (genre family / decade / artist),
-    summing to 1. Play-frequency weighted - a track played 10× counts 10× - so recent and all-time
-    are measured the same way and their difference is an honest 'more/less than usual'."""
-    if not counts:
-        return {}
-    dao = RecDao(store)
-    keys = list(counts)
-    if axis == "genre":
-        m, name_of = dao.track_genres(keys), genre_map.family
-    elif axis == "era":
-        m, name_of = dao.track_decades(keys), lambda d: d
-    else:
-        m, name_of = dao.track_artists(keys), lambda x: x
-    w: dict = {}
-    for k, c in counts.items():
-        if k in m:
-            name = name_of(m[k])
-            if name not in (None, ""):
-                w[name] = w.get(name, 0.0) + c
-    total = sum(w.values())
-    return {n: x / total for n, x in w.items()} if total else {}
-
-
-def _attach_deviation(rows, recent, alltime):
-    """Per axis row, attach `recent_share`, `alltime_share`, and `transient_dev` = recent - all-time
-    (both play-frequency shares). The deviation is the zero-sum 'right now vs usual' signal the right
-    rose draws. With no recent plays, deviation is 0 (not all-negative) so the rose is flat."""
-    for r in rows:
-        rs = recent.get(r["name"], 0.0)
-        at = alltime.get(r["name"], 0.0)
-        r["recent_share"] = rs
-        r["alltime_share"] = at
-        r["transient_dev"] = (rs - at) if recent else 0.0
-    return rows
-
-
 def _breadth_word(breadth):
-    """Same thresholds the 'Taste breadth' card already uses: >0.66 eclectic, <0.33 focused,
-    otherwise balanced."""
+    """Same thresholds the 'Taste breadth' card uses: >0.66 eclectic, <0.33 focused, else balanced."""
     return "eclectic" if breadth > 0.66 else ("focused" if breadth < 0.33 else "balanced")
 
 
-def _ordered_layer_modes(modes, *shares_dicts):
-    """Ordered union of mode ids appearing in any of the given {mode_id: share} dicts (or None),
-    kept in the active-modes list's own order. Both `now_mode_mix` and `session_mode_mix` read the
-    same active-modes list, so this order is stable regardless of which layer currently reports a
-    given mode - the NOW and SESSION ribbons index their ROSE_PALETTE color off THIS list, so a mode
-    that appears in both gets the same color in both."""
-    seen = set()
-    for d in shares_dicts:
-        if d:
-            seen.update(d.keys())
-    return [m for m in modes if m["mode_id"] in seen]
-
-
-def _ribbon_segments(shares, ordered_modes):
-    """{mode_id: share} + the ordered mode union -> ribbon segment dicts for the template, each
-    carrying a `color_idx` into `ordered_modes` (NOT its own position) so NOW/SESSION color the same
-    mode identically even when one ribbon is missing a mode the other has."""
-    if not shares:
-        return []
-    return [{"mode_id": m["mode_id"], "label": m["label"], "share": shares[m["mode_id"]], "color_idx": i}
-            for i, m in enumerate(ordered_modes) if m["mode_id"] in shares]
-
-
 def _artist_shares(store, top=12):
-    """Top artists by play share. Normalized over ALL artists (not just the displayed top-N), so the
-    shares are directly comparable to the recency-weighted recent distribution - otherwise the recent
-    side (full population) sits systematically below this one and every artist reads as 'less than
-    usual'. Mirrors how the genre/era shares are full-population."""
+    """Top artists by play share, normalized over ALL artists (not just the displayed top-N), so the
+    shares are comparable to the genre/era shares, which are likewise full-population."""
     alla = store.top_artists(limit=1_000_000)          # all artists, play-desc (LIMIT only truncates output)
     total = sum(a.get("plays", 0) for a in alla)
     if not total:
         return []
     return [(a["artist"], a["plays"] / total) for a in alla[:top]]
+
+
+def _ribbon_segments(shares, modes):
+    """{mode_id: share} + the active-mode list -> ribbon segment dicts, each carrying `color_idx`
+    (its position in `modes`, NOT in the ribbon) so the same taste mode is the same color in the
+    NOW, SESSION and PERMANENT ribbons even when a mode is missing from one of them."""
+    if not shares:
+        return []
+    return [{"mode_id": m["mode_id"], "label": m["label"], "share": shares[m["mode_id"]], "color_idx": i}
+            for i, m in enumerate(modes) if m["mode_id"] in shares]
+
+
+def _permanent_mode_shares(modes):
+    """Each active taste mode's share of the clustered library, by mode size. This is the PERMANENT
+    reading on the modes axis: the durable shape of your taste in mode space, the thing NOW and
+    SESSION are transient departures from."""
+    total = sum(m["size"] for m in modes)
+    return {m["mode_id"]: m["size"] / total for m in modes if m["size"]} if total else {}
+
+
+def mode_layers(store, now) -> dict:
+    """The modes axis, read at three timescales - the only axis on which NOW and SESSION exist.
+
+    All three readings are shares over the SAME active-mode list, so they stack: PERMANENT is the
+    durable shape of your taste, SESSION is this sitting's balance, NOW is the last few hours. NOW
+    and SESSION are confidence-gated (`now_min_events` distinct played keys with a known sound);
+    below the gate they report nothing rather than a weak guess, and `segments` is empty.
+    """
+    now_shares, now_n, modes = layers.now_mode_mix(store, now)
+    session_shares, session_n, _ = layers.session_mode_mix(store, now)
+    return {
+        "modes": modes,
+        "now": {"segments": _ribbon_segments(now_shares, modes), "n": now_n,
+                "window_h": rec_params.get_param(store, "now_window_h")},
+        "session": {"segments": _ribbon_segments(session_shares, modes), "n": session_n,
+                    "halflife_h": rec_params.get_param(store, "session_halflife_h")},
+        "permanent": {"segments": _ribbon_segments(_permanent_mode_shares(modes), modes),
+                      "n": sum(m["size"] for m in modes)},
+        "min_events": int(rec_params.get_param(store, "now_min_events")),
+    }
 
 
 def _sources(store):
@@ -148,10 +140,11 @@ def _sources(store):
     }
 
 
-def model_transparency(store, now, recent_window=RECENT_PLAYS_WINDOW) -> dict:
-    """The cheap transparency payload: per-axis layer stacks, lanes, breadth, freshness, sources, and
-    the graduation funnel. Expensive panels (embedding/recall, playlist contexts, centroid tilt) are
-    separate (engine_panel / centroid_tilt_panel), htmx-lazy on the page."""
+def model_transparency(store, now) -> dict:
+    """The cheap transparency payload: the per-facet multiplier chain on each axis (genre family /
+    era decade / artist), the modes axis at all three timescales it exists on, lanes, breadth,
+    sources, and the graduation funnel. Expensive panels (embedding/recall, playlist contexts,
+    centroid tilt) are separate (engine_panel / centroid_tilt_panel), htmx-lazy on the page."""
     weights = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     standing = store.get_leans()
     leans = transient.facet_leans(store, now)
@@ -172,68 +165,20 @@ def model_transparency(store, now, recent_window=RECENT_PLAYS_WINDOW) -> dict:
         _axis_rows("artist", _artist_shares(store), weights, standing, leans, fparams),
         "artist", theme, graduation_threshold)
 
-    # The right rose / right bar plot 'right now vs your usual' as a zero-sum deviation: each facet's
-    # share of your RECENT plays minus its share of all your plays - both play-frequency weighted, so
-    # the difference is honest. Two count queries (recent window + all-time), mapped onto each axis.
-    recent_counts = store.recent_play_counts(recent_window)
-    alltime_counts = store.recent_play_counts(_ALLTIME_LIMIT)
-    _attach_deviation(genres, _axis_dist(store, recent_counts, "genre"), _axis_dist(store, alltime_counts, "genre"))
-    _attach_deviation(eras, _axis_dist(store, recent_counts, "era"), _axis_dist(store, alltime_counts, "era"))
-    _attach_deviation(artists, _axis_dist(store, recent_counts, "artist"), _axis_dist(store, alltime_counts, "artist"))
-    recent_exists = bool(recent_counts)
-
-    sources = _sources(store)
-    # Gates the roses' "Quiet right now" overlay: true iff you've played something recently AND your
-    # recent mix actually differs from your usual one (otherwise every deviation is ~0 and the rose is
-    # a flat ring - "same as usual", not a dramatic shape).
-    max_dev = max((abs(r["transient_dev"]) for r in genres + eras + artists), default=0.0)
-    has_transient = recent_exists and max_dev > QUIET_DEV_EPS
-
-    # #88: the "Layer stack" card - four readings of "what the listener wants" at their own
-    # timescales, fastest to slowest. NOW and SESSION are confidence-gated categorical posteriors
-    # over discovered taste modes (rec/layers.py); TRANSIENT and PERMANENT are summaries of data this
-    # function already computed above (the genre roses / breadth), not new computations.
-    now_shares, now_n, now_modes = layers.now_mode_mix(store, now)
-    session_shares, session_n, session_modes = layers.session_mode_mix(store, now)
-    layer_modes = _ordered_layer_modes(now_modes or session_modes, now_shares, session_shares)
-    transient_up = max((r for r in genres if r["transient_dev"] > 0),
-                       key=lambda r: r["transient_dev"], default=None)
-    transient_down = min((r for r in genres if r["transient_dev"] < 0),
-                         key=lambda r: r["transient_dev"], default=None)
-    layer_stack = {
-        "now": {"segments": _ribbon_segments(now_shares, layer_modes), "n": now_n,
-                "window_h": rec_params.get_param(store, "now_window_h")},
-        "session": {"segments": _ribbon_segments(session_shares, layer_modes), "n": session_n,
-                    "halflife_h": rec_params.get_param(store, "session_halflife_h")},
-        "min_events": int(rec_params.get_param(store, "now_min_events")),
-        "transient": {"up": transient_up, "down": transient_down},
-        "permanent": {"top": genres[0] if genres else None,
-                      "breadth_word": _breadth_word(bd["breadth"]) if genres else None},
-        "layer_modes": layer_modes,
-    }
-
     return {
         "genres": genres, "eras": eras, "artists": artists,
+        "modes": mode_layers(store, now),
         "lanes": [{"name": n, "label": lbl, "help": h, "weight": weights.get(f"lane:{n}", 1.0)}
                   for n, lbl, h in rec_params.LANES],
         "breadth": bd["breadth"], "n_families": bd["n_families"],
+        "breadth_word": _breadth_word(bd["breadth"]),
         # #85: no "freshness" key any more - the old sync-staleness relax of the whole transient read
         # is gone; each source in `sources` now fades independently on its own wall-clock half-life.
-        "sources": sources,
+        "sources": _sources(store),
         "funnel": [{"facet": f, "score": s, "threshold": graduation_threshold,
                     "frac": max(-1.0, min(1.0, s / graduation_threshold))}
                    for f, s in sorted(theme.items(), key=lambda x: -abs(x[1]))],
-        "has_transient": has_transient,
-        "recent_exists": recent_exists,
-        # #88 Task 5: the NOW layer (rec/layers.now_layer_reading) as one terse reading - the top
-        # taste mode from the last `now_window_h` hours of real plays, or None when quiet/gated.
-        # `now_window_h` rides alongside for the copy ("...last {now_window_h}h").
-        "now_layer": layers.now_layer_reading(store, now),
-        "now_window_h": rec_params.get_param(store, "now_window_h"),
-        # #88: the new "Layer stack" card at the top of the viz tab subsumes the one-line now_layer
-        # reading above (kept for backward compatibility - nothing else currently reads it besides
-        # the payload-level tests).
-        "layer_stack": layer_stack,
+        "facet_mult_min": fparams[1], "facet_mult_max": fparams[2],
     }
 
 
@@ -264,33 +209,62 @@ def engine_panel(store, top=12) -> dict:
             "contexts_total": total_contexts}
 
 
-def centroid_tilt_panel(store, now) -> dict:
-    """The transient embedding pull: magnitude of the current-mood centroid tilt, and its projection
-    onto your top genre-family centroids - 'which way the mood leans'. Quiet -> 0.
-
-    #85: `centroid_tilt` returns a unit direction (its wall-clock decay is baked in per-event before
-    normalization), so magnitude is 1.0 whenever a tilt exists and 0.0 when quiet - there is no
-    separate sync-staleness scale applied on top any more."""
-    keys, V, idx = embed.load_vectors(store)
-    if V is None:
-        return {"magnitude": 0.0, "projection": []}
-    tilt = transient.centroid_tilt(store, now, V, idx)
-    if tilt is None:
-        return {"magnitude": 0.0, "projection": []}
-    mag = float(np.linalg.norm(tilt))
-    tn = tilt / (np.linalg.norm(tilt) + 1e-9)
+def _family_centroids(store, keys, V, idx) -> dict:
+    """{genre family: unit centroid} in the collaborative embedding space - the reference directions
+    both free-vector layers are projected onto."""
     fam_keys: dict = {}
     tg = RecDao(store).track_genres(list(keys))
     for k in keys:
         if k in tg:
-            fam_keys.setdefault(genre_map.family(tg[k]), []).append(k)
-    proj = []
+            fam = genre_map.family(tg[k])
+            if fam:
+                fam_keys.setdefault(fam, []).append(k)
+    out = {}
     for fam, ks in fam_keys.items():
         rows = [idx[k] for k in ks if k in idx]
         if not rows:
             continue
         c = V[rows].mean(0)
-        c = c / (np.linalg.norm(c) + 1e-9)
-        proj.append({"name": fam, "value": float(c @ tn)})
-    proj.sort(key=lambda x: -abs(x["value"]))
-    return {"magnitude": mag, "projection": proj[:6]}
+        out[fam] = c / (np.linalg.norm(c) + 1e-9)
+    return out
+
+
+def centroid_tilt_panel(store, now, top=6) -> dict:
+    """The embedding axis, read at the two timescales on which a free direction exists.
+
+    SESSION (`layers.session_tilt`, hours half-life) and TRANSIENT (`transient.centroid_tilt`, days
+    half-life) are both unit directions in the same collaborative space, so projecting each onto the
+    same genre-family centroids puts them on one comparable -1..+1 scale: which sounds this sitting
+    leans toward, against which sounds the last few weeks lean toward.
+
+    NOW has no row here by design. An hour of listening is too few events to estimate a direction in
+    embedding space without whiplash, so the NOW layer is categorical over taste modes instead (see
+    layers.py); it appears in `mode_layers`, not here.
+    """
+    # The half-lives ride along unconditionally: the template names them in its explanatory copy,
+    # which it renders whether or not either layer currently has a direction.
+    panel = {"families": [], "has_session": False, "has_transient": False,
+             "halflife_h": rec_params.get_param(store, "session_halflife_h"),
+             "play_halflife_d": rec_params.get_param(store, "play_halflife_d")}
+    keys, V, idx = embed.load_vectors(store)
+    if V is None:
+        return panel
+    # Both already return unit directions (their wall-clock decay is baked in per-event, before
+    # normalization). Re-normalizing is defensive, and keeps the projection an honest cosine.
+    tilts = {"session": layers.session_tilt(store, now, V, idx),
+             "transient": transient.centroid_tilt(store, now, V, idx)}
+    unit = {k: (t / (np.linalg.norm(t) + 1e-9)) if t is not None else None for k, t in tilts.items()}
+    if unit["session"] is None and unit["transient"] is None:
+        return panel
+
+    fams = []
+    for fam, c in _family_centroids(store, keys, V, idx).items():
+        row = {"name": fam}
+        for layer, t in unit.items():
+            row[layer] = float(c @ t) if t is not None else None
+        fams.append(row)
+    fams.sort(key=lambda r: -max(abs(r[k] or 0.0) for k in ("session", "transient")))
+    panel.update(families=fams[:top],
+                 has_session=unit["session"] is not None,
+                 has_transient=unit["transient"] is not None)
+    return panel

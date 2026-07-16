@@ -39,10 +39,14 @@ def test_dismiss_update_records_version_param_over_latest():
     assert store.get_setting("backend_update_dismissed_version") == "0.3.0"
 
 
-def test_home_renders_backend_update_card(store):
+def test_home_renders_backend_update_card(store, monkeypatch):
     from yt_playlist.web.app import create_app
+    from yt_playlist.core import updatecheck
     from tests.conftest import FakeClient
 
+    # The test suite runs from an editable checkout, which is now (correctly) treated as a dev install
+    # and never nagged. Pin it to a packaged install so the release-behind card path is exercised.
+    monkeypatch.setattr(updatecheck, "is_dev_install", lambda: False)
     store.set_setting("last_sync_at", "1700000000")
     store.set_setting("latest_version_seen", "999.0.0")   # force "behind" regardless of real version
     c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")

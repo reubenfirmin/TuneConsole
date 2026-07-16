@@ -63,11 +63,14 @@ def mode_label(families) -> str:
 
 def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED) -> list[dict]:
     """Cluster the library content vectors and return the dense clusters as taste modes. Each mode is
-    {centroid, size, families, rep_keys, label}. Empty list when there are too few content vectors."""
+    {centroid, space, size, families, rep_keys, label}. `space` fingerprints the content space the
+    centroid lives in, so reconcile can tell a stale centroid from a comparable one. Empty list when
+    there are too few content vectors."""
     if k is None:
         k = rec_params.get_param(store, "modes_k")
     if min_members is None:
         min_members = rec_params.get_param(store, "modes_min_members")
+    space = embed.content_space_id(store)
     keys, V, _idx = embed.load_content_vectors(store)
     if V is None or len(keys) < max(int(min_members), _MIN_CORPUS):
         return []
@@ -99,25 +102,96 @@ def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED) -> l
         sims = Vf[member_rows] @ centroid.astype(np.float64)
         order = np.argsort(-sims)[:n_rep]
         rep_keys = [member_keys[i] for i in order]
-        modes.append({"centroid": centroid, "size": int(len(member_rows)),
-                      "families": families, "rep_keys": rep_keys, "label": mode_label(families)})
+        # member_keys is transient: reconcile uses it to carry mode identity across a content-space
+        # rebuild (an existing mode's rep_keys must land inside this cluster). replace_modes reads only
+        # the named columns, so it never reaches the database.
+        modes.append({"centroid": centroid, "space": space, "size": int(len(member_rows)),
+                      "families": families, "rep_keys": rep_keys, "label": mode_label(families),
+                      "member_keys": member_keys})
     return modes
 
 
+def live_modes(store):
+    """Active modes whose centroids live in the CURRENT content space.
+
+    The one safe way to read persisted centroids. `enrich_worker` can rebuild the content space
+    without recomputing modes, so at any moment the stored centroids may belong to a space that no
+    longer exists; their columns then mean something else entirely. Callers that stack centroids
+    against live content vectors must go through here, not `store.modes.list_modes`, or they are one
+    enrichment batch away from either a shape error or a silently wrong cosine.
+    """
+    space = embed.content_space_id(store)
+    return [m for m in store.modes.list_modes(active_only=True) if (m.get("space") or "") == space]
+
+
+REP_MATCH_THRESHOLD = 0.5    # Fraction of an existing mode's representative tracks that must land
+                             # inside a discovered cluster for the two to be the same taste region.
+                             # A simple majority: below that, a fresh id is more honest.
+
+
+def _rep_containment(existing_reps, discovered_keys) -> float:
+    """What fraction of an existing mode's representative tracks fall inside a discovered cluster.
+
+    Containment, NOT Jaccard. rep_keys holds 6 tracks; a discovered cluster holds hundreds (90 to 691
+    on the reference library), so Jaccard is dominated by the size asymmetry and reads ~0.01 even when
+    every single representative is inside the cluster. Measured on the reference database: median
+    Jaccard 0.01 (0/13 modes above 0.34), median containment 1.00 (12/13 above 0.67).
+
+    identity_keys do not depend on the embedding basis, which is what lets this survive a content-space
+    rebuild when centroid cosine cannot.
+    """
+    reps = set(existing_reps or ())
+    keys = set(discovered_keys or ())
+    if not reps or not keys:
+        return 0.0
+    return len(reps & keys) / len(reps)
+
+
 def reconcile(existing, discovered, *, threshold):
-    """Assign stable mode_ids by greedy centroid-cosine matching. Matched discovered modes inherit the
-    existing mode_id; unmatched get mode_id=None (the caller allocates ids); unmatched existing modes
-    are returned as retired_ids. Deterministic. existing/discovered centroids are unit-norm."""
+    """Assign stable mode_ids. Matched discovered modes inherit the existing mode_id; unmatched get
+    mode_id=None (the caller allocates ids); unmatched existing modes are returned as retired_ids.
+    Deterministic. Centroids are unit-norm.
+
+    Two kinds of evidence, in strict priority order:
+
+    * TIER 0, same content space: centroid cosine >= `threshold`. The centroid is the best available
+      description of a mode, but it means nothing outside the space that built it, and that space is
+      rebuilt whenever enrichment adds a genre/key token (see embed.content_model_fingerprint).
+      Scoring a cross-space pair by cosine either crashes on a dimension mismatch or, worse, silently
+      matches modes through a reordered basis.
+    * TIER 1, across a rebuild: >= REP_MATCH_THRESHOLD of the existing mode's `rep_keys` fall inside
+      the discovered cluster's membership. identity_keys are independent of the basis. Without this
+      tier every mode_id is reallocated whenever the space changes, which silently discards the picks,
+      impressions, and Thompson posterior keyed to the old id (mode_eval.mode_bandit_stats feeds
+      mode_surfaces.thompson_mode_scores, which looks up stats by LIVE mode_id and finds nothing).
+
+    A same-space match always beats a cross-space one, so tier is the primary sort key. When several
+    existing modes contain into one discovered cluster (the space merged them), greedy assignment gives
+    the id to the best-contained one and retires the rest, which is the honest outcome: one region now
+    where there were two.
+    """
     pairs = []
     for di, d in enumerate(discovered):
         dc = np.asarray(d["centroid"], dtype=np.float64)
+        # Prefer the discovered cluster's full membership. discover_modes supplies it; a caller that
+        # only has rep_keys (tests, and any future consumer reading modes back off disk) degrades to
+        # comparing against those instead.
+        d_keys = d.get("member_keys") or d.get("rep_keys")
         for ei, e in enumerate(existing):
-            cos = float(dc @ np.asarray(e["centroid"], dtype=np.float64))
-            if cos >= threshold:
-                pairs.append((cos, di, ei))
-    pairs.sort(key=lambda p: (-p[0], p[1], p[2]))   # deterministic: cos desc, then index order
+            if e.get("space") == d.get("space"):
+                ec = np.asarray(e["centroid"], dtype=np.float64)
+                if ec.shape != dc.shape:    # same fingerprint, different shape: cannot happen, but a
+                    continue                # silent skip beats a ValueError in a best-effort worker
+                cos = float(dc @ ec)
+                if cos >= threshold:
+                    pairs.append((0, -cos, di, ei))
+            else:
+                c = _rep_containment(e.get("rep_keys"), d_keys)
+                if c >= REP_MATCH_THRESHOLD:
+                    pairs.append((1, -c, di, ei))
+    pairs.sort()            # tier asc (same-space first), score desc, then index order: deterministic
     matched_d, matched_e, assign = set(), set(), {}
-    for cos, di, ei in pairs:
+    for _tier, _neg_score, di, ei in pairs:
         if di in matched_d or ei in matched_e:
             continue
         matched_d.add(di)

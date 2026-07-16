@@ -20,21 +20,50 @@ def test_current_version_strips_dev_suffix(monkeypatch):
 
 
 def test_install_kind_flatpak(monkeypatch):
+    monkeypatch.setattr(uc, "is_dev_install", lambda: False)
     monkeypatch.setenv("FLATPAK_ID", "com.tuneconsole.TuneConsole")
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     assert uc.install_kind() == "flatpak"
 
 
 def test_install_kind_macos(monkeypatch):
+    monkeypatch.setattr(uc, "is_dev_install", lambda: False)
     monkeypatch.delenv("FLATPAK_ID", raising=False)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     assert uc.install_kind() == "macos"
 
 
 def test_install_kind_pip(monkeypatch):
+    monkeypatch.setattr(uc, "is_dev_install", lambda: False)
     monkeypatch.delenv("FLATPAK_ID", raising=False)
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     assert uc.install_kind() == "pip"
+
+
+def test_install_kind_dev_beats_everything(monkeypatch):
+    # An editable/source build wins even inside a flatpak sandbox: it is running checkout code,
+    # not the packaged release, so 'flatpak update' would be the wrong advice.
+    monkeypatch.setattr(uc, "is_dev_install", lambda: True)
+    monkeypatch.setenv("FLATPAK_ID", "com.tuneconsole.TuneConsole")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert uc.install_kind() == "dev"
+
+
+def test_is_dev_install_from_version_markers(monkeypatch):
+    monkeypatch.setattr(uc, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.5.dev3+g2f5b17deb.d20260703")
+    assert uc.is_dev_install() is True                      # .dev + local segment
+    monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.5+g2f5b17deb")
+    assert uc.is_dev_install() is True                      # bare local segment
+    monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.6")
+    assert uc.is_dev_install() is False                     # clean release tag
+
+
+def test_is_dev_install_from_editable_metadata(monkeypatch):
+    # Even a version that happens to sit exactly on a tag is a dev install if the dist is editable.
+    monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.6")
+    monkeypatch.setattr(uc, "_is_editable_install", lambda: True)
+    assert uc.is_dev_install() is True
 
 
 def test_update_instruction_per_kind():
@@ -47,17 +76,20 @@ def test_update_instruction_per_kind():
 
 
 def test_update_nudge_none_when_no_latest_seen(monkeypatch):
+    monkeypatch.setattr(uc, "is_dev_install", lambda: False)
     monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.6")
     assert uc.update_nudge(FakeStore()) is None
 
 
 def test_update_nudge_none_when_current_is_latest(monkeypatch):
+    monkeypatch.setattr(uc, "is_dev_install", lambda: False)
     monkeypatch.setattr(uc, "_raw_version", lambda: "0.2.0")
     store = FakeStore({"latest_version_seen": "0.2.0"})
     assert uc.update_nudge(store) is None
 
 
 def test_update_nudge_present_when_behind(monkeypatch):
+    monkeypatch.setattr(uc, "is_dev_install", lambda: False)
     monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.6")
     monkeypatch.delenv("FLATPAK_ID", raising=False)
     monkeypatch.setattr(sys, "frozen", False, raising=False)
@@ -68,12 +100,32 @@ def test_update_nudge_present_when_behind(monkeypatch):
 
 
 def test_update_nudge_dev_build_on_latest_does_not_nag(monkeypatch):
+    monkeypatch.setattr(uc, "_is_editable_install", lambda: False)
     monkeypatch.setattr(uc, "_raw_version", lambda: "0.2.0.dev4+gdead")
     store = FakeStore({"latest_version_seen": "0.2.0"})
     assert uc.update_nudge(store) is None
 
 
+def test_update_nudge_dev_build_behind_latest_does_not_nag(monkeypatch):
+    # Regression: a source/editable checkout reports a stale, sanitized base version (0.1.5 here,
+    # from 0.1.5.dev3+g<hash>) that looks 'behind' the newest release, but it is running HEAD code
+    # and is not pip-managed. It must not be nagged to reinstall.
+    monkeypatch.setattr(uc, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.5.dev3+g2f5b17deb.d20260703")
+    store = FakeStore({"latest_version_seen": "0.1.7"})
+    assert uc.update_nudge(store) is None
+
+
+def test_update_nudge_editable_build_on_tag_does_not_nag(monkeypatch):
+    # Editable install whose version sits exactly on a tag: no dev/local marker, caught via metadata.
+    monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.6")
+    monkeypatch.setattr(uc, "_is_editable_install", lambda: True)
+    store = FakeStore({"latest_version_seen": "0.2.0"})
+    assert uc.update_nudge(store) is None
+
+
 def test_update_nudge_suppressed_for_dismissed_version(monkeypatch):
+    monkeypatch.setattr(uc, "is_dev_install", lambda: False)
     monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.6")
     store = FakeStore({"latest_version_seen": "0.2.0",
                        "backend_update_dismissed_version": "0.2.0"})
@@ -81,6 +133,7 @@ def test_update_nudge_suppressed_for_dismissed_version(monkeypatch):
 
 
 def test_update_nudge_returns_after_newer_release_than_dismissed(monkeypatch):
+    monkeypatch.setattr(uc, "is_dev_install", lambda: False)
     monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.6")
     monkeypatch.delenv("FLATPAK_ID", raising=False)
     monkeypatch.setattr(sys, "frozen", False, raising=False)

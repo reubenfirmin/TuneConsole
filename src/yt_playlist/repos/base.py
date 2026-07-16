@@ -12,6 +12,19 @@ from functools import wraps
 # group (it then counts as one of your real playlists). Playing it does not graduate it; adoption is
 # an explicit act, so a saved suggestion you never endorse can't quietly reshape your taste model.
 # The single source of truth (re-exported by rec_query for existing importers).
+#
+# TWO TIERS OF SIGNAL. Conflating them is the trap, in both directions:
+#
+#   TRACK-LEVEL taste signal (groupings, analysis, scores, Trends, insights)
+#     QUARANTINED. A play sourced from a generated playlist is the app's own recommendation coming
+#     back, not a preference the user expressed. Exclude it. Trends violated this for its whole life
+#     because the rule was only ever a comment; tests/test_generated_quarantine.py now enforces it.
+#
+#   MODE-LEVEL selection signal (rec_mode_picks, rec_mode_impressions, ledger_mode_plays)
+#     RETAINED DELIBERATELY. Each generated playlist is built from one taste mode, so choosing to play
+#     it is weak evidence for THAT MODE at the top of the model stack (it feeds the Thompson sampler
+#     via rec.mode_eval.mode_bandit_stats). It is evidence about the mode, never about the tracks.
+#     Do not "fix" this tier by quarantining it: that deletes the only non-circular signal we have.
 GENERATED_GROUP = "Generated"
 
 # A track is "liked" if its song (identity_key) appears in any "Liked Music" (LM) playlist. Used as a

@@ -1,4 +1,4 @@
-{% set nudge_count = (1 if show_intro else 0) + (1 if show_lastfm_nudge else 0) + (1 if show_identities_nudge else 0) + (1 if show_backend_update else 0) + (1 if trend_spotlight else 0) %}
+{% set nudge_count = (1 if show_intro else 0) + (1 if show_lastfm_nudge else 0) + (1 if show_identities_nudge else 0) + (1 if show_backend_update else 0) + (1 if recap else 0) %}
 {% if actions or nudge_count %}
 <section class="alerts" aria-label="Needs attention">
   {# The welcome always leads the row. #}
@@ -15,8 +15,20 @@
   </div>
   {% endif %}
 
-  {# A fresh trend finding is the most interesting thing in the row: right after the welcome. #}
-  {% include "_partials/trend_spotlight.html" %}
+  {# The monthly recap is the marquee moment in the row: right after the welcome. Links into the
+     full-screen reel (#79); the Trends tab was removed -- this is the recap's only entry point. #}
+  {% if recap %}
+  <div class="alert-card card alert-nudge recap-nudge" id="recap-nudge">
+    <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
+            hx-post="/onboard/recap/dismiss?month={{ recap.month }}" hx-target="#recap-nudge" hx-swap="outerHTML swap:200ms">×</button>
+    <span class="alert-cover"><img src="/static/nag/trends.png" alt="" loading="lazy"
+         onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
+    <div class="alert-body">
+      <span class="alert-title"><strong>Your {{ recap.month_name }} is wrapped.</strong> A one-minute recap of how you actually listened.</span>
+      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/trends/story/{{ recap.month }}">Play your {{ recap.month_name }} →</a></div>
+    </div>
+  </div>
+  {% endif %}
 
   {% if show_backend_update %}
   <div class="alert-card card alert-nudge" id="update-nudge">

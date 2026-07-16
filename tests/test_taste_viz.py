@@ -1,16 +1,20 @@
+"""#88 The taste-model transparency payload: the per-facet multiplier chain (PERMANENT x TRANSIENT),
+the modes axis at the three timescales it exists on (NOW / SESSION / PERMANENT), and the embedding
+axis at the two it exists on (SESSION / TRANSIENT).
+"""
 import numpy as np
 import pytest
 
-from yt_playlist.rec import embed, rec_params, taste_viz
+from yt_playlist.rec import embed, layers, rec_params, scoring, taste_viz, transient
 
 
 def _install_now_modes(store):
     """Two orthogonal active taste modes in a 2-D content space (mirrors test_now_layer.py)."""
     store.modes.replace_modes([
         {"mode_id": 1, "label": "Warehouse techno", "families": [["techno", 1]],
-         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 50, "rep_keys": []},
+         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 60, "rep_keys": []},
         {"mode_id": 2, "label": "Chill acoustic", "families": [["folk", 1]],
-         "centroid": np.array([0.0, 1.0], dtype=np.float32), "size": 50, "rep_keys": []},
+         "centroid": np.array([0.0, 1.0], dtype=np.float32), "size": 20, "rep_keys": []},
     ], retired_ids=[], now=1.0)
 
 
@@ -39,59 +43,57 @@ def test_viz_reflects_param_overrides(store):
     assert payload["sources"]["halflife_days"]["mood"] == 10
 
 
-def test_layer_stack_multiplies(store):
+# ── The facet axes: PERMANENT x TRANSIENT = EFFECTIVE ───────────────────────
+
+def test_chain_multiplies_permanent_by_standing_by_transient(store):
     _seed_jazz(store)
     store.set_weight("genre:jazz", 1.5)
     store.set_lean("genre:jazz", 1.2, 1000.0)
     payload = taste_viz.model_transparency(store, now=1000.0)
     jazz = next(r for r in payload["genres"] if r["name"] == "jazz")
-    assert abs(jazz["permanent_weight"] - 1.5) < 1e-9
-    assert abs(jazz["standing_lean"] - 1.2) < 1e-9
-    expected = (min(rec_params.GENRE_MAX, 1.5) * min(rec_params.GENRE_MAX, 1.2)
-                * jazz["transient_mult"])
-    assert abs(jazz["effective"] - expected) < 1e-6
+    assert jazz["permanent_weight"] == pytest.approx(1.5)
+    assert jazz["standing_lean"] == pytest.approx(1.2)
+    assert jazz["lasting"] == pytest.approx(1.5 * 1.2)
+    assert jazz["effective"] == pytest.approx(1.5 * 1.2 * jazz["transient_mult"])
 
 
-def test_cold_start_has_no_transient(store):
+def test_effective_equals_the_multiplier_scoring_actually_applies(store):
+    """The whole point of the card: `effective` must be the number `scoring._axis_mult` composes, not
+    a re-clamped lookalike. A weight above the genre band would previously be shown clamped here and
+    applied unclamped there."""
+    _seed_jazz(store)
+    store.set_weight("genre:jazz", 1.9)
+    store.set_lean("genre:jazz", 1.4, 1000.0)
+    now = 1000.0
+
+    row = next(r for r in taste_viz.model_transparency(store, now=now)["genres"] if r["name"] == "jazz")
+
+    weights = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
+    gw = {a[len("genre:"):]: v for a, v in weights.items() if a.startswith("genre:")}
+    fparams = (rec_params.get_param(store, "facet_gain"),
+               rec_params.get_param(store, "facet_mult_min"),
+               rec_params.get_param(store, "facet_mult_max"))
+    expected = scoring._axis_mult(gw, "genre", "jazz", store.get_leans(),
+                                  transient.facet_leans(store, now), fparams)
+    assert row["effective"] == pytest.approx(expected)
+
+
+def test_transient_multiplier_reflects_a_recent_play(store):
+    """A recent play pushes its genre's transient lean positive, so the TRANSIENT rose has a shape
+    while PERMANENT stays neutral. This is the contrast the card exists to draw."""
+    _seed_jazz(store)
+    row = next(r for r in taste_viz.model_transparency(store, now=1.0)["genres"] if r["name"] == "jazz")
+    assert row["transient_lean"] > 0
+    assert row["transient_mult"] > 1.0
+    assert row["lasting"] == pytest.approx(1.0)      # nothing graduated, no slider held
+    assert row["effective"] == pytest.approx(row["transient_mult"])
+
+
+def test_cold_start_is_neutral_everywhere(store):
     payload = taste_viz.model_transparency(store, now=1000.0)
-    assert payload["has_transient"] is False
-    assert payload["recent_exists"] is False
+    assert payload["genres"] == [] and payload["eras"] == [] and payload["artists"] == []
     assert payload["sources"]["plays"] == 0
-    assert payload["genres"] == []
-    # #85: no "freshness" key any more (no sync-staleness relax); nothing to assert here beyond the
-    # above - a cold store's sources are simply empty.
-
-
-def test_transient_deviation_is_zero_sum_and_signed(store):
-    # All-time: jazz dominates (3 plays vs 1). Recent window of 2 events = the latest techno + jazz
-    # play -> recent mix is 50/50, so techno is OVER-indexed and jazz UNDER-indexed, equal & opposite.
-    iid = store.upsert_identity("main", "cred", None, True)
-    j = store.upsert_track("vj", "JTrack", "JArtist", None, None)
-    store.set_track_genre(j, "Jazz")
-    t = store.upsert_track("vt", "TTrack", "TArtist", None, None)
-    store.set_track_genre(t, "Techno")
-    for ts in (10.0, 20.0, 30.0):
-        store.add_history_snapshot(iid, ts, ["jtrack|jartist"])
-    store.add_history_snapshot(iid, 40.0, ["ttrack|tartist"])    # most recent play
-    p = taste_viz.model_transparency(store, now=100.0, recent_window=2)
-    g = {r["name"]: r for r in p["genres"]}
-    assert g["techno"]["transient_dev"] > 0          # techno: 50% recent vs 25% all-time
-    assert g["jazz"]["transient_dev"] < 0            # jazz: 50% recent vs 75% all-time
-    assert abs(g["techno"]["transient_dev"] + g["jazz"]["transient_dev"]) < 1e-9   # zero-sum
-    assert p["has_transient"] is True and p["recent_exists"] is True
-
-
-def test_recent_play_counts_are_frequency_weighted(store):
-    # A replayed track counts more than once (unlike the deduped recent_keys_ordered) -- the basis the
-    # recent-vs-usual deviation needs so heavy rotation isn't flattened to mere presence.
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_track("v1", "Hit", "Star", None, None)
-    store.upsert_track("v2", "Bsong", "Other", None, None)
-    for ts in (10.0, 20.0, 30.0):
-        store.add_history_snapshot(iid, ts, ["hit|star"])        # played 3 times
-    store.add_history_snapshot(iid, 40.0, ["bsong|other"])
-    counts = store.recent_play_counts(1000)
-    assert counts["hit|star"] == 3 and counts["bsong|other"] == 1
+    assert payload["modes"]["modes"] == []
 
 
 def test_funnel_reports_threshold(store):
@@ -100,26 +102,6 @@ def test_funnel_reports_threshold(store):
     row = next(r for r in payload["funnel"] if r["facet"] == "genre:jazz")
     assert row["threshold"] == rec_params.THEME_THRESHOLD
     assert abs(row["frac"] - 0.6 / rec_params.THEME_THRESHOLD) < 1e-6
-
-
-def test_engine_panel_reports_counts(store):
-    panel = taste_viz.engine_panel(store)
-    assert panel["vectors"] == store.rec_vectors_count()
-    assert panel["contexts"] == []          # no playlists -> no taste contexts
-    assert panel["dim"] >= 1
-
-
-def test_centroid_tilt_quiet_on_cold_store(store):
-    panel = taste_viz.centroid_tilt_panel(store, now=1000.0)
-    assert panel == {"magnitude": 0.0, "projection": []}
-
-
-def test_single_genre_has_no_shift(store):
-    # With one genre, recent and all-time mixes are both 100% it -> zero deviation -> quiet (no
-    # dramatic petal). Proves the deviation view can't manufacture a shift from a one-genre library.
-    _seed_jazz(store)
-    assert taste_viz.model_transparency(store, now=100.0)["recent_exists"] is True
-    assert taste_viz.model_transparency(store, now=100.0)["has_transient"] is False
 
 
 def test_artists_populate_from_play_history(store):
@@ -137,9 +119,8 @@ def test_artists_populate_from_play_history(store):
 
 
 def test_artist_shares_normalize_over_all_artists(store):
-    # All-time artist shares must be normalized over ALL artists (like genres), not just the displayed
-    # top-N. Otherwise recent_share (full population) is systematically below all-time_share (top-N
-    # base) and every artist reads as "less than usual" -- the bug. 13 artists, one play each:
+    # Shares must be normalized over ALL artists (like genres), not just the displayed top-N, so the
+    # Artists card's "what you play" bars are on the same footing as the genre rose's.
     iid = store.upsert_identity("main", "cred", None, True)
     for i in range(13):
         store.upsert_track(f"v{i}", f"S{i}", f"Art{i}", None, None)
@@ -150,32 +131,11 @@ def test_artist_shares_normalize_over_all_artists(store):
     assert abs(sum(shares.values()) - 12 / 13) < 1e-6
 
 
-def test_now_layer_present_with_live_posterior(store, monkeypatch):
-    # #88 Task 5: a live NOW posterior surfaces as a terse `now_layer` reading on the transparency
-    # payload - top mode label, its share, and how many distinct plays fed it.
-    _install_now_modes(store)
-    keys = ["a1", "a2", "a3"]
-    V = np.array([[1.0, 0.02], [1.0, 0.03], [1.0, 0.01]], dtype=np.float32)
-    _install_now_content_vectors(store, monkeypatch, keys, V)
-    iid = store.upsert_identity("main", "cred", None, True)
-    now = 100_000.0
-    rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.import_play_events(iid, rows)
+# ── The modes axis: NOW / SESSION / PERMANENT ───────────────────────────────
 
-    payload = taste_viz.model_transparency(store, now=now)
-    assert payload["now_layer"] == {"top_label": "Warehouse techno", "top_share": pytest.approx(1.0), "n": 3}
-    assert payload["now_window_h"] == rec_params.get_param(store, "now_window_h")
-
-
-def test_now_layer_absent_when_quiet(store):
-    # No modes, no plays -> below the confidence gate -> None, not a weak guess.
-    payload = taste_viz.model_transparency(store, now=1000.0)
-    assert payload["now_layer"] is None
-
-
-def test_layer_stack_now_and_session_share_colors_for_same_mode(store, monkeypatch):
-    # #88: NOW and SESSION both classify the SAME three plays to the SAME two modes, so their ribbon
-    # segments must carry the SAME color_idx per mode_id - that's the whole point of layer_modes.
+def test_mode_layers_three_ribbons_share_colors_for_the_same_mode(store, monkeypatch):
+    # NOW, SESSION and PERMANENT all read shares over the SAME active-mode list, so a given mode_id
+    # must carry the SAME color_idx in all three ribbons - that is what makes them stack visually.
     _install_now_modes(store)
     keys = ["a1", "a2", "b1"]
     V = np.array([[1.0, 0.02], [1.0, 0.03], [0.02, 1.0]], dtype=np.float32)
@@ -186,73 +146,130 @@ def test_layer_stack_now_and_session_share_colors_for_same_mode(store, monkeypat
     # shares land on the exact same 2/3, 1/3 split as NOW's plain-count posterior.
     store.import_play_events(iid, [(k, "v" + k, now) for k in keys])
 
-    payload = taste_viz.model_transparency(store, now=now)
-    ls = payload["layer_stack"]
+    ml = taste_viz.model_transparency(store, now=now)["modes"]
+    assert [m["mode_id"] for m in ml["modes"]] == [1, 2]
 
-    assert [m["mode_id"] for m in ls["layer_modes"]] == [1, 2]
+    by_layer = {}
+    for layer in ("now", "session", "permanent"):
+        by_layer[layer] = {s["mode_id"]: s for s in ml[layer]["segments"]}
 
-    assert ls["now"]["n"] == 3
-    now_by_mode = {s["mode_id"]: s for s in ls["now"]["segments"]}
-    assert now_by_mode[1]["share"] == pytest.approx(2 / 3, abs=1e-6)
-    assert now_by_mode[2]["share"] == pytest.approx(1 / 3, abs=1e-6)
-    assert now_by_mode[1]["label"] == "Warehouse techno"
-    assert now_by_mode[2]["label"] == "Chill acoustic"
+    assert ml["now"]["n"] == 3 and ml["session"]["n"] == 3
+    for layer in ("now", "session"):
+        assert by_layer[layer][1]["share"] == pytest.approx(2 / 3, abs=1e-6)
+        assert by_layer[layer][2]["share"] == pytest.approx(1 / 3, abs=1e-6)
+    assert by_layer["now"][1]["label"] == "Warehouse techno"
 
-    assert ls["session"]["n"] == 3
-    session_by_mode = {s["mode_id"]: s for s in ls["session"]["segments"]}
-    assert session_by_mode[1]["share"] == pytest.approx(2 / 3, abs=1e-6)
-    assert session_by_mode[2]["share"] == pytest.approx(1 / 3, abs=1e-6)
+    # PERMANENT is each mode's share of the clustered library, by size (60 and 20 -> 0.75 / 0.25).
+    assert by_layer["permanent"][1]["share"] == pytest.approx(0.75)
+    assert by_layer["permanent"][2]["share"] == pytest.approx(0.25)
+    assert ml["permanent"]["n"] == 80
 
-    # The color-consistency guarantee: same mode_id -> same color_idx in both ribbons.
-    assert now_by_mode[1]["color_idx"] == session_by_mode[1]["color_idx"] == 0
-    assert now_by_mode[2]["color_idx"] == session_by_mode[2]["color_idx"] == 1
+    # The color-consistency guarantee: same mode_id -> same color_idx in every ribbon.
+    for mode_id, idx in ((1, 0), (2, 1)):
+        assert {by_layer[l][mode_id]["color_idx"] for l in by_layer} == {idx}
 
-    assert ls["now"]["window_h"] == rec_params.get_param(store, "now_window_h")
-    assert ls["session"]["halflife_h"] == rec_params.get_param(store, "session_halflife_h")
-    assert ls["min_events"] == int(rec_params.get_param(store, "now_min_events"))
-
-
-def test_layer_stack_quiet_now_and_session_when_no_modes_or_plays(store):
-    payload = taste_viz.model_transparency(store, now=1000.0)
-    ls = payload["layer_stack"]
-    assert ls["now"]["segments"] == []
-    assert ls["session"]["segments"] == []
-    assert ls["layer_modes"] == []
+    assert ml["now"]["window_h"] == rec_params.get_param(store, "now_window_h")
+    assert ml["session"]["halflife_h"] == rec_params.get_param(store, "session_halflife_h")
+    assert ml["min_events"] == int(rec_params.get_param(store, "now_min_events"))
 
 
-def test_layer_stack_transient_and_permanent_summarize_existing_data(store):
-    # #88: TRANSIENT/PERMANENT rows are summaries of data model_transparency already computes (the
-    # genre roses / breadth), not new computations - reuse the same fixture as
-    # test_transient_deviation_is_zero_sum_and_signed (techno over-indexed, jazz under-indexed).
-    iid = store.upsert_identity("main", "cred", None, True)
-    j = store.upsert_track("vj", "JTrack", "JArtist", None, None)
-    store.set_track_genre(j, "Jazz")
-    t = store.upsert_track("vt", "TTrack", "TArtist", None, None)
-    store.set_track_genre(t, "Techno")
-    for ts in (10.0, 20.0, 30.0):
-        store.add_history_snapshot(iid, ts, ["jtrack|jartist"])
-    store.add_history_snapshot(iid, 40.0, ["ttrack|tartist"])
-    payload = taste_viz.model_transparency(store, now=100.0, recent_window=2)
-    ls = payload["layer_stack"]
-
-    assert ls["transient"]["up"]["name"] == "techno"
-    assert ls["transient"]["down"]["name"] == "jazz"
-
-    assert ls["permanent"]["top"]["name"] == "jazz"     # jazz has the larger all-time share (3 vs 1)
-    assert ls["permanent"]["breadth_word"] == taste_viz._breadth_word(payload["breadth"])
+def test_mode_layers_permanent_stands_alone_when_the_fast_layers_are_quiet(store):
+    # Modes exist, but no recent plays -> NOW and SESSION are below the confidence gate and report
+    # nothing, while PERMANENT still describes the durable shape. Quiet is not the same as absent.
+    _install_now_modes(store)
+    ml = taste_viz.model_transparency(store, now=1_000_000.0)["modes"]
+    assert ml["now"]["segments"] == [] and ml["session"]["segments"] == []
+    assert {s["mode_id"] for s in ml["permanent"]["segments"]} == {1, 2}
+    assert [m["mode_id"] for m in ml["modes"]] == [1, 2]
 
 
-def test_layer_stack_transient_none_when_quiet(store):
-    # No plays at all -> genres is empty -> no up/down facet, no permanent top.
-    payload = taste_viz.model_transparency(store, now=1000.0)
-    ls = payload["layer_stack"]
-    assert ls["transient"]["up"] is None
-    assert ls["transient"]["down"] is None
-    assert ls["permanent"]["top"] is None
-    assert ls["permanent"]["breadth_word"] is None
+def test_mode_layers_empty_without_modes(store):
+    ml = taste_viz.model_transparency(store, now=1000.0)["modes"]
+    assert ml["modes"] == []
+    assert ml["now"]["segments"] == ml["session"]["segments"] == ml["permanent"]["segments"] == []
+
+
+# ── The embedding axis: SESSION / TRANSIENT ─────────────────────────────────
+
+def test_centroid_tilt_quiet_on_cold_store(store):
+    panel = taste_viz.centroid_tilt_panel(store, now=1000.0)
+    assert panel["families"] == []
+    assert panel["has_session"] is False and panel["has_transient"] is False
+    # The half-lives ride along even when quiet: the template's copy names them regardless.
+    assert panel["halflife_h"] == rec_params.get_param(store, "session_halflife_h")
+
+
+def _install_tilt_space(store, monkeypatch, session, transient_dir):
+    """A 2-D collaborative space with two single-track genre families on the axes, so a family's
+    centroid IS the axis and a projection reads off directly."""
+    keys = ["t|techno", "j|jazz"]
+    V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
+    idx = {k: i for i, k in enumerate(keys)}
+    monkeypatch.setattr(taste_viz.embed, "load_vectors", lambda s: (keys, V, idx))
+    monkeypatch.setattr(taste_viz, "RecDao",
+                        lambda s: type("D", (), {"track_genres": staticmethod(
+                            lambda ks: {"t|techno": "Techno", "j|jazz": "Jazz"})})())
+    monkeypatch.setattr(taste_viz.layers, "session_tilt", lambda *a: session)
+    monkeypatch.setattr(taste_viz.transient, "centroid_tilt", lambda *a: transient_dir)
+
+
+def test_centroid_tilt_projects_both_layers_onto_the_same_centroids(store, monkeypatch):
+    # Session leans hard toward techno; transient leans toward jazz. Both are cosines against the same
+    # family centroids, so the two bars sit on one comparable scale and can visibly disagree.
+    _install_tilt_space(store, monkeypatch,
+                        session=np.array([1.0, 0.0]), transient_dir=np.array([0.0, 1.0]))
+    panel = taste_viz.centroid_tilt_panel(store, now=1000.0)
+    assert panel["has_session"] and panel["has_transient"]
+    fams = {f["name"]: f for f in panel["families"]}
+    assert fams["techno"]["session"] == pytest.approx(1.0, abs=1e-6)
+    assert fams["techno"]["transient"] == pytest.approx(0.0, abs=1e-6)
+    assert fams["jazz"]["session"] == pytest.approx(0.0, abs=1e-6)
+    assert fams["jazz"]["transient"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_centroid_tilt_reports_transient_alone_when_session_is_gated(store, monkeypatch):
+    # A quiet session (below now_min_events) must leave the transient row intact and mark itself
+    # absent, rather than suppressing the whole panel.
+    _install_tilt_space(store, monkeypatch, session=None, transient_dir=np.array([0.0, 1.0]))
+    panel = taste_viz.centroid_tilt_panel(store, now=1000.0)
+    assert panel["has_session"] is False and panel["has_transient"] is True
+    assert all(f["session"] is None for f in panel["families"])
+    assert {f["name"] for f in panel["families"]} == {"techno", "jazz"}
+
+
+def test_now_layer_has_no_embedding_direction(store, monkeypatch):
+    """NOW is categorical over modes by design (layers.py: an hour of plays cannot place a direction
+    without whiplash). Pin that the embedding panel never grows a `now` row."""
+    _install_tilt_space(store, monkeypatch,
+                        session=np.array([1.0, 0.0]), transient_dir=np.array([0.0, 1.0]))
+    panel = taste_viz.centroid_tilt_panel(store, now=1000.0)
+    assert "now" not in panel
+    assert all("now" not in f for f in panel["families"])
+    assert not hasattr(layers, "now_tilt")
+
+
+# ── Misc ───────────────────────────────────────────────────────────────────
+
+def test_engine_panel_reports_counts(store):
+    panel = taste_viz.engine_panel(store)
+    assert panel["vectors"] == store.rec_vectors_count()
+    assert panel["contexts"] == []          # no playlists -> no taste contexts
+    assert panel["dim"] >= 1
 
 
 def test_breadth_word_thresholds():
     assert taste_viz._breadth_word(0.9) == "eclectic"
     assert taste_viz._breadth_word(0.5) == "balanced"
     assert taste_viz._breadth_word(0.1) == "focused"
+
+
+def test_recent_play_counts_are_frequency_weighted(store):
+    # A replayed track counts more than once (unlike the deduped recent_keys_ordered).
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_track("v1", "Hit", "Star", None, None)
+    store.upsert_track("v2", "Bsong", "Other", None, None)
+    for ts in (10.0, 20.0, 30.0):
+        store.add_history_snapshot(iid, ts, ["hit|star"])        # played 3 times
+    store.add_history_snapshot(iid, 40.0, ["bsong|other"])
+    counts = store.recent_play_counts(1000)
+    assert counts["hit|star"] == 3 and counts["bsong|other"] == 1

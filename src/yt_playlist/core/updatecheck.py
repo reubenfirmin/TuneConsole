@@ -19,7 +19,9 @@ _CHECK_INTERVAL_S = 86400          # once a day; well under GitHub's 60 req/hr u
 _USER_AGENT = "yt-playlist-updatecheck"
 
 # (command-or-label, optional link) per install kind. flatpak/pip are copy-paste commands;
-# macOS is a frozen .app you cannot pip-upgrade, so it is a link to the latest release.
+# macOS is a frozen .app you cannot pip-upgrade, so it is a link to the latest release. There is
+# deliberately no "dev" entry: a source/editable checkout is never nagged (see update_nudge), so it
+# never needs an update command -- you update it with git, not a package manager.
 _INSTRUCTIONS = {
     "flatpak": ("flatpak update --user com.tuneconsole.TuneConsole", None),
     "macos": ("Get the latest release", "https://github.com/reubenfirmin/TuneConsole/releases/latest"),
@@ -35,6 +37,31 @@ def _raw_version() -> str:
 def current_version() -> str:
     """Running version sanitized to base X.Y.Z (drops a .devN and/or +g<hash> local suffix)."""
     return _raw_version().split(".dev")[0].split("+")[0]
+
+
+def _is_editable_install() -> bool:
+    """True when the running dist is an editable/local install (pip/uv `-e`, i.e. run from a checkout).
+    Reads the PEP 610 direct_url.json metadata. Fail-safe to False on any metadata hiccup."""
+    try:
+        raw = importlib.metadata.distribution(PACKAGE).read_text("direct_url.json")
+        if not raw:
+            return False
+        return bool(json.loads(raw).get("dir_info", {}).get("editable"))
+    except Exception:                       # noqa: BLE001 - missing/odd metadata must not surface
+        return False
+
+
+def is_dev_install() -> bool:
+    """True for a source/checkout build rather than a published release. Two signals:
+    a PEP 440 `.dev` or `+local` segment in the baked version (hatch-vcs stamps these on any commit
+    that is not exactly a tag), or an editable install. Such a build runs HEAD code straight from a
+    checkout, so it is never meaningfully 'behind' a release and must never be nagged to reinstall
+    (its sanitized version is a stale snapshot that can read as older than, newer than, or divergent
+    from any release)."""
+    raw = _raw_version()
+    if ".dev" in raw or "+" in raw:
+        return True
+    return _is_editable_install()
 
 
 def _fetch_latest_release():
@@ -70,7 +97,11 @@ def check_latest(store, now, *, interval_s=_CHECK_INTERVAL_S):
 
 
 def install_kind() -> str:
-    """How this backend was installed: 'flatpak' (sandbox env), 'macos' (frozen .app), else 'pip'."""
+    """How this backend was installed: 'dev' (source/editable checkout), 'flatpak' (sandbox env),
+    'macos' (frozen .app), else 'pip'. 'dev' is checked first: a checkout running inside a flatpak
+    or frozen bundle is still checkout code, and 'flatpak update' / a dmg link would be wrong advice."""
+    if is_dev_install():
+        return "dev"
     if os.environ.get("FLATPAK_ID"):
         return "flatpak"
     if getattr(sys, "frozen", False):
@@ -99,7 +130,13 @@ def _out_of_date(current: str, latest: str) -> bool:
 
 def update_nudge(store):
     """Nag payload dict when the backend is behind the latest seen release and the user has not
-    dismissed that exact version, else None. Keys: current, latest, kind, command, link."""
+    dismissed that exact version, else None. Keys: current, latest, kind, command, link.
+
+    A source/editable checkout (is_dev_install) is never nagged: it runs HEAD code, its reported
+    version is a stale hatch-vcs snapshot, and it is not managed by any package manager, so 'you are
+    behind, run pip install -U' would be both wrong and unactionable."""
+    if is_dev_install():
+        return None
     latest = store.get_setting("latest_version_seen")
     if not latest:
         return None

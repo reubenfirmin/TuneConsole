@@ -28,7 +28,7 @@ returns a renormalized unit direction or None when quiet/below gate.
 """
 import numpy as np
 
-from yt_playlist.rec import embed, rec_params, transient
+from yt_playlist.rec import embed, rec_params, taste_modes, transient
 
 # #93v2: every layer in this module reads recent plays as MOOD EVIDENCE and feeds that reading back
 # into the scores that steer radio, so every play_events_since read here excludes the radio
@@ -39,14 +39,14 @@ _radio_list_ids = transient.radio_list_ids
 
 
 def now_mode_mix(store, now):
-    """Shared internals for `now_mode_posterior`, `now_layer_reading`, and the taste_viz NOW ribbon:
-    the {mode_id: share} posterior, `n` (the count of distinct played keys that fed it), and the
-    active mode list used to build it (so a caller wanting mode labels doesn't have to re-fetch them).
+    """Shared internals for `now_mode_posterior` and the taste_viz NOW ribbon: the {mode_id: share}
+    posterior, `n` (the count of distinct played keys that fed it), and the active mode list used to
+    build it (so a caller wanting mode labels doesn't have to re-fetch them).
     Returns (None, 0, modes) below the confidence gate - `modes` may still be non-empty even when the
     gate isn't cleared. Public (not `_`-prefixed): taste_viz needs the full mix, not just the reduced
     readings the other two callers take from it.
     """
-    modes = store.modes.list_modes(active_only=True)
+    modes = taste_modes.live_modes(store)
     if not modes:
         return None, 0, modes
     _ckeys, CV, cidx = embed.load_content_vectors(store)
@@ -105,22 +105,6 @@ def now_mode_posterior(store, now) -> dict | None:
     """
     posterior, _n, _modes = now_mode_mix(store, now)
     return posterior
-
-
-def now_layer_reading(store, now) -> dict | None:
-    """#88 Task 5: the NOW layer boiled down to one legible reading for the taste page -
-    {"top_label": str, "top_share": float, "n": int} for the highest-share mode in
-    `now_mode_posterior`'s output, or None when that posterior itself is None (quiet hours, or below
-    the confidence gate). `n` is the number of distinct played keys that contributed to the posterior
-    (a content-vector hit within the NOW window); `top_label` comes from the active mode list
-    (`store.modes.list_modes`), matched by mode_id.
-    """
-    posterior, n, modes = now_mode_mix(store, now)
-    if posterior is None:
-        return None
-    top_mode_id = max(posterior, key=posterior.get)
-    label = next((m["label"] for m in modes if m["mode_id"] == top_mode_id), str(top_mode_id))
-    return {"top_label": label, "top_share": posterior[top_mode_id], "n": n}
 
 
 def session_tilt(store, now, V, idx) -> np.ndarray | None:
@@ -187,7 +171,7 @@ def session_mode_mix(store, now):
     contributed (unweighted, matching `now_mode_mix`'s `n`); `modes` is the active mode list. Below the
     gate this returns None, never a weak guess, mirroring every other layer in this module.
     """
-    modes = store.modes.list_modes(active_only=True)
+    modes = taste_modes.live_modes(store)
     if not modes:
         return None, 0, modes
     _ckeys, CV, cidx = embed.load_content_vectors(store)

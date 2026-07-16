@@ -88,3 +88,56 @@ def test_bands_fallback_unchanged_for_enrich():
     # No label key -> byte-identical to the shipped local-tz "%b %-d, %H:%M" fallback (enrich path).
     out = viz.area_spark([{"t": 0.0, "n": 1}, {"t": 10.0, "n": 2}])
     assert ", " in out["bands"][0]["label"] and ":" in out["bands"][0]["label"]
+
+
+# --- nice_ymax: a stable, zero-anchored volume axis ------------------------------------------------
+# area_spark rescales to the data's own max, so every series touches the top of the canvas and a
+# doubling in listening looks identical to a flat week. A volume chart needs a round, labelled axis.
+
+def test_nice_ymax_rounds_up_to_a_readable_step():
+    assert viz.nice_ymax([3, 7, 12]) == 20
+    assert viz.nice_ymax([120, 340]) == 500
+    assert viz.nice_ymax([291]) == 300          # the reference library's weekly peak
+    assert viz.nice_ymax([1, 2]) == 2
+
+
+def test_nice_ymax_never_returns_zero():
+    assert viz.nice_ymax([0, 0]) == 1
+    assert viz.nice_ymax([]) == 1
+    assert viz.nice_ymax([-5]) == 1
+
+
+def test_nice_ymax_is_at_or_above_the_data_max():
+    for vals in ([1], [9], [10], [11], [99], [100], [101], [250], [291], [1750]):
+        assert viz.nice_ymax(vals) >= max(vals)
+
+
+def _min_y(path):
+    """The topmost (smallest) y coordinate in an SVG path string."""
+    import re
+    return min(float(m) for m in re.findall(r",(-?[\d.]+)", path))
+
+
+def test_volume_series_is_read_against_a_round_axis_not_its_own_peak():
+    """291 plays on a 0..300 axis must leave visible headroom. area_spark instead pins the peak to the
+    very top of the canvas every render, so the reader has no scale to judge the value against."""
+    pts = [{"t": 0, "v": 14}, {"t": 1, "v": 291}]
+    rounded = viz.line_area(pts, ymax=viz.nice_ymax([14, 291]))     # ymax 300
+    assert _min_y(rounded["stroke"]) > viz.SPARK_PAD                # does not touch the top
+
+    selfscaled = viz.area_spark([{"t": 0, "n": 14}, {"t": 1, "n": 291}])
+    assert _min_y(selfscaled["path"]) == viz.SPARK_PAD              # pinned to the top
+
+
+def test_volume_series_is_zero_anchored():
+    """A zero week sits on the baseline, so bar heights are proportional to plays."""
+    a = viz.line_area([{"t": 0, "v": 0}, {"t": 1, "v": 300}], ymax=300)
+    assert _min_y(a["stroke"]) == viz.SPARK_PAD                     # 300 reaches the top of a 0..300 axis
+    ys = [float(y) for y in __import__("re").findall(r",(-?[\d.]+)", a["stroke"])]
+    assert max(ys) == viz.SPARK_H - viz.SPARK_PAD                   # 0 sits on the baseline
+
+
+def test_area_spark_self_normalizes_which_is_why_volume_stopped_using_it():
+    small = viz.area_spark([{"t": 0, "n": 1}, {"t": 1, "n": 2}])
+    large = viz.area_spark([{"t": 0, "n": 100}, {"t": 1, "n": 200}])
+    assert small["path"] == large["path"]       # identical, despite a 100x difference

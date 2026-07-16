@@ -5,6 +5,13 @@ from datetime import datetime
 
 SPARK_W, SPARK_H, SPARK_PAD = 520, 90, 4
 
+# Trends renders full-width "instrument" charts, not inline sparklines. Each chart spans the whole page
+# column (no side-by-side), so a wide 3:1 coordinate box gives the timeline horizontal room while an
+# `.instrument` aspect-ratio in app.css keeps it a generous ~350px tall. The Enrichment sparkline keeps
+# the compact SPARK_* box. Strokes use vector-effect:non-scaling-stroke in CSS, so this larger
+# coordinate space never changes how thick a line renders.
+TREND_W, TREND_H, TREND_PAD = 960, 320, 26
+
 
 def _bands(points, xs, w, pad, key="n"):
     """Full-height invisible hover bands, one per point, each tied to its value + formatted date.
@@ -22,6 +29,40 @@ def _bands(points, xs, w, pad, key="n"):
         out.append({"x": round(left, 1), "w": round(max(right - left, 0.1), 1),
                     "label": lbl, "n": p[key]})
     return out
+
+
+def nice_ymax(values, floor=1) -> int:
+    """A round, human-readable upper bound at or above max(values), for a ZERO-ANCHORED axis.
+
+    `area_spark` scales to the data's own max, which makes every series touch the top of the canvas:
+    a week with 291 plays and a week with 3 draw the same shape, so a real jump in listening is
+    invisible. A volume chart needs a stable, labelled axis instead. 12 -> 20, 291 -> 300, 340 -> 500.
+
+    The 3 step exists so the reference library's 291-play peak rounds to 300 rather than 500, which
+    would leave 40% of the canvas empty.
+    """
+    top = max(values, default=0)
+    if top <= 0:
+        return floor
+    mag = 10 ** (len(str(int(top))) - 1)
+    for step in (1, 2, 3, 5, 10):
+        if top <= step * mag:
+            return max(int(step * mag), floor)
+    return max(int(10 * mag), floor)
+
+
+def nice_frac_ymax(values, floor=0.2, step=0.1) -> float:
+    """Round a 0..1 rate up to the next `step`, never below `floor`, never above 1.0.
+
+    A discovery rate of 8-19% drawn on a 0..100% axis is a flat line hugging the baseline: the axis
+    is technically honest and practically useless. Rounding up to the next 10% keeps a stable,
+    labelled scale (it only moves when the data crosses a decile) while using the canvas.
+    """
+    top = max(values, default=0.0)
+    if top <= 0:
+        return floor
+    n = int(top / step) + (0 if abs(top % step) < 1e-9 else 1)
+    return min(1.0, max(floor, round(n * step, 10)))
 
 
 def area_spark(points, w=SPARK_W, h=SPARK_H, pad=SPARK_PAD):
@@ -110,10 +151,16 @@ def stacked_top(series, w=SPARK_W, h=SPARK_H, pad=SPARK_PAD):
     return " ".join(f"{'M' if i == 0 else 'L'}{x(ts[i])},{y(cum[i])}" for i in range(n))
 
 
-def line_area(points, ymax, w=SPARK_W, h=SPARK_H, pad=SPARK_PAD):
-    """Filled area for a rate/index series on a FIXED 0..ymax axis (unlike area_spark, which scales to
-    the data's own max) -- for charts like Discovery rate / Genre diversity, where the axis must stay
+def line_area(points, ymax, w=SPARK_W, h=SPARK_H, pad=SPARK_PAD, ymin=0.0):
+    """Filled area for a rate/index series on a FIXED ymin..ymax axis (unlike area_spark, which scales
+    to the data's own max) -- for charts like Discovery rate / Genre diversity, where the axis must stay
     stable across renders rather than rescaling to whatever the current data happens to span.
+
+    `ymin` (default 0.0) sets a non-zero baseline: Discovery/volume start at a true zero, but a metric
+    that lives in a narrow band well above zero (genre diversity sits ~0.5-0.7) would draw as a flat
+    line hugging the top of a 0-based axis. Giving it a floor just below the observed minimum lets the
+    band's own variation use the height of the canvas, while the axis labels still print the real
+    ymin/ymax so the zoom is honest.
 
     Returns {path, stroke, bands}: `path` is the area closed down to a fixed bottom baseline (h - pad),
     so the shape sits on that baseline and rises upward as values increase; `stroke` is the same points
@@ -132,11 +179,12 @@ def line_area(points, ymax, w=SPARK_W, h=SPARK_H, pad=SPARK_PAD):
     ts = [p["t"] for p in points]
     t0, t1 = ts[0], ts[-1]
     ymax = ymax or 1.0
+    denom = (ymax - ymin) or 1.0
     span = (t1 - t0) or 1
     def x(t):
         return round(pad + (w - 2 * pad) * (t - t0) / span, 1)
     def y(v):
-        return round(h - pad - (h - 2 * pad) * min(v, ymax) / ymax, 1)
+        return round(h - pad - (h - 2 * pad) * (min(max(v, ymin), ymax) - ymin) / denom, 1)
     stroke = " ".join(f"{'M' if i == 0 else 'L'}{x(p['t'])},{y(p['v'])}" for i, p in enumerate(points))
     line = " ".join(f"L{x(p['t'])},{y(p['v'])}" for p in points)
     path = f"M{x(t0)},{h - pad} {line} L{x(t1)},{h - pad} Z"

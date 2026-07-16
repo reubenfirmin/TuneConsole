@@ -5,6 +5,7 @@ and listening sessions, a latent model of *their* taste, not the crowd's. Neighb
 space capture second-order similarity (tracks that never share a playlist but both sit near a
 third), which plain co-occurrence cannot. CPU-only, no GPU, no external models.
 """
+import hashlib
 import json
 import math
 
@@ -321,6 +322,31 @@ def _build_library_content(store):
             vecs.append(v)
     V = np.stack(vecs).astype(np.float32) if keys else np.zeros((0, 0), dtype=np.float32)
     return keys, V, model
+
+
+def content_model_fingerprint(model) -> str:
+    """Identify the content SPACE, so a vector built in one is never compared against another.
+
+    `build_content_model` assigns categorical columns by insertion order, so a single new sub-genre
+    or musical key both grows the dimension and can shift what a column *means*. Anything holding a
+    persisted vector (taste-mode centroids) must be able to notice that its space is gone: a bare
+    dimension check would miss a same-size reordering and silently produce meaningless cosines.
+
+    Keyed on the token→column mapping and the continuous feature order, NOT on the z-score mu/sd,
+    which drift on every rebuild. Treating that drift as a new space would retire every taste mode
+    each pass; the geometry it induces is close enough for centroid matching to remain meaningful.
+    """
+    payload = json.dumps({
+        "cat": sorted(model.get("cat", {}).items(), key=lambda kv: (kv[1], kv[0])),
+        "cont": [c[0] for c in model.get("cont", [])],
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def content_space_id(store) -> str:
+    """Fingerprint of the currently-persisted content model, or "" when none is built yet."""
+    raw = store.get_setting("rec_content_model")
+    return content_model_fingerprint(json.loads(raw)) if raw else ""
 
 
 def build_content_vectors(store, dim=None):  # dim kept for signature symmetry; ignored

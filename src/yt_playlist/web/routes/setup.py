@@ -123,6 +123,10 @@ def build(ctx) -> APIRouter:
                 ctx.rec_worker.trigger()
         if report["matched"] > 0:
             store.set_setting("takeout_imported_at", str(ctx.now_fn()))
+            # Takeout is account-wide, so it can now prove which history rows never happened. Run the
+            # phantom purge against the window this import just established (core/repair.py).
+            from yt_playlist.core import repair
+            repair.run_once(store)
         else:
             # A zero-match import (usually: library not synced yet) should not re-nag on the very
             # next Home render: snooze the nag 90 days; it returns as the re-import reminder.

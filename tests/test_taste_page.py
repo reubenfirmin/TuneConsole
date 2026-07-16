@@ -212,8 +212,10 @@ def test_taste_page_has_viz_and_controls_tabs(store):
     html = c.get("/taste").text
     assert "Visualizations" in html and "Controls" in html
     assert "tab = 'viz'" in html                  # default viz tab via the setup Alpine pattern
-    assert "What's feeding" in html               # transient sources panel present
+    assert "What feeds the transient layer" in html   # transient sources panel present
     assert "Graduation funnel" in html            # transient -> permanent funnel present
+    assert "The four layers" in html              # the layer key replaces the old "Layer stack" card
+    assert "Layer stack" not in html
 
 
 def test_taste_viz_engine_fragment(store):
@@ -226,9 +228,8 @@ def test_taste_viz_engine_fragment(store):
 
 
 def test_taste_page_shows_now_reading_with_live_posterior(store, monkeypatch):
-    # #88: a live NOW posterior (seeded the same way test_now_layer.py does) renders in the new
-    # "Layer stack" card's NOW row - ribbon + tooltip naming the mode, instead of the old one-line
-    # "Right now: ..." paragraph (which this card subsumes).
+    # #88: a live NOW posterior (seeded the same way test_now_layer.py does) renders as the NOW
+    # ribbon on the Taste modes card - the only card on which the NOW layer exists.
     store.modes.replace_modes([
         {"mode_id": 1, "label": "Warehouse techno", "families": [["techno", 1]],
          "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 50, "rep_keys": []},
@@ -246,17 +247,30 @@ def test_taste_page_shows_now_reading_with_live_posterior(store, monkeypatch):
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                    base_url="http://127.0.0.1")
     html = c.get("/taste").text
-    assert "Layer stack" in html
+    assert "Taste modes" in html
     assert "Warehouse techno" in html   # NOW/SESSION ribbon tooltip title
     assert "last 6h" in html            # NOW row's timescale (now_window_h default)
     assert "24h" in html and "4h half-life" in html   # SESSION row's timescale
-    assert "100.0%" in html             # single-mode ribbon segment share, in the tooltip
+    assert "100%" in html               # single-mode ribbon segment share, in the tooltip
 
 
 def test_taste_page_hides_now_and_session_reading_when_quiet(store):
-    # No modes, no recent plays -> below the confidence gate -> the honest quiet copy for both rows.
+    # No modes, no recent plays -> below the confidence gate. The card stays, the fast rows go quiet.
     html = _client(store).get("/taste").text
-    assert "Layer stack" in html
-    assert "Quiet: fewer than" in html
-    assert "plays with a known sound in the window." in html
-    assert "plays with a known sound in the last 24h." in html
+    assert "Taste modes" in html
+    assert "No taste modes yet" in html
+
+
+def test_taste_page_draws_the_full_chain_on_a_facet_axis(store):
+    # #88: wherever the page contrasts permanent and transient it must draw every layer that exists
+    # on that axis - here, the whole multiplier chain, not just a share and a shrug.
+    iid = store.upsert_identity("main", "cred", None, True)
+    t = store.upsert_track("vj", "Song", "Band", None, None)
+    store.set_track_genre(t, "Jazz")
+    store.add_history_snapshot(iid, 1.0, ["song|band"])
+    html = _client(store).get("/taste").text
+    assert "Genre families" in html
+    for cap in ("What you play", "Permanent", "Transient", "Effective"):
+        assert cap in html
+    assert "Right-now multiplier" in html    # the chain tooltip spells the whole composition out
+    assert "= Effective" in html

@@ -11,24 +11,43 @@ def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates = ctx.store, ctx.templates
 
-    def _rose_rows(rows, n=10):
-        """Augment the top-n axis rows in place with `petal` (all-time share) and `petal_t` (the
-        right-now deviation = recent share - all-time share) SVG geometry, so the template stays
-        logic-light. The deviation rose uses an absolute scale (floored) so a near-flat recent mix
-        stays small rather than being normalized up to full amplitude."""
+    # The three multiplier layers of a facet's chain, in the order the ranker composes them:
+    # lasting bias (permanent weight x standing lean), the transient tilt, and their product.
+    CHAIN = (("lasting", "perm"), ("transient_mult", "tran"), ("effective", "eff"))
+    # A +/-15% multiplier fills a deviation rose. Below that the scale stays fixed, so a nearly
+    # neutral model draws small petals instead of being normalized up to full amplitude; above it the
+    # scale expands to fit. All three layers of one card share the scale, so their shapes compare.
+    CHAIN_SCALE_MIN = 0.15
+
+    def _chain_rows(rows, n=10, roses=True):
+        """Augment the top-n axis rows in place with the geometry for the multiplier chain: `frac_*`
+        in [-1, 1] for the diverging bars, and (when `roses`) `petal` for the share rose plus
+        `petal_perm` / `petal_tran` / `petal_eff` for the three layer roses. Every layer of one card
+        is measured against ONE shared scale, so a petal that is twice as long really is twice the
+        tilt - and `effective`'s petal visibly composes the other two."""
         rows = rows[:n]
-        devs = [r["transient_dev"] for r in rows]
-        scale = max(0.12, max((abs(d) for d in devs), default=0.0))   # 12 pts fills the rose, or more
-        unsigned = rose.rose_geometry([r["share"] for r in rows])
-        signed = rose.rose_geometry_deviation(devs, scale=scale)
-        for r, p, pt in zip(rows, unsigned, signed):
-            r["petal"], r["petal_t"] = p, pt
+        if not rows:
+            return rows
+        scale = max(CHAIN_SCALE_MIN,
+                    max(abs(r[key] - 1.0) for r in rows for key, _ in CHAIN))
+        for r in rows:
+            for key, short in CHAIN:
+                r[f"frac_{short}"] = max(-1.0, min(1.0, (r[key] - 1.0) / scale))
+        if roses:
+            geom = {short: rose.rose_geometry_deviation([r[key] - 1.0 for r in rows], scale=scale)
+                    for key, short in CHAIN}
+            unsigned = rose.rose_geometry([r["share"] for r in rows])
+            for i, r in enumerate(rows):
+                r["petal"] = unsigned[i]
+                for _key, short in CHAIN:
+                    r[f"petal_{short}"] = geom[short][i]
         return rows
 
     def _viz_context():
         viz = taste_viz.model_transparency(store, ctx.now())
-        viz["genres"] = _rose_rows(viz["genres"])
-        viz["eras"] = _rose_rows(viz["eras"])
+        viz["genres"] = _chain_rows(viz["genres"])
+        viz["eras"] = _chain_rows(viz["eras"])
+        viz["artists"] = _chain_rows(viz["artists"], n=12, roses=False)
         return {"viz": viz}
 
     MODE_NEW_S = 2 * 86400.0   # a mode first seen within this window renders as "new"

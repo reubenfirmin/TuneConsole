@@ -9,7 +9,8 @@ from collections import Counter
 
 import numpy as np
 
-from yt_playlist.rec import embed, layers, mode_eval, rec_params, recommend, surfaces, transient
+from yt_playlist.rec import (embed, layers, mode_eval, rec_params, recommend, surfaces,
+                             taste_modes, transient)
 
 CARD_SURFACES = ("wheelhouse", "explore", "comfort", "fresh")
 _MIN_CARD = 4          # below this many tracks (even after backfill) a card is dropped, not shown thin
@@ -57,7 +58,7 @@ def _nearest_mode(key, mode_ids, C, lidx, LV, didx, DV):
 def prepare_bundles(store, now) -> dict:
     """Bucket each surface's pool by nearest mode; cache under rec_proposals['mode_bundles']. Payload
     {str(mode_id): {surface: [item_dict, ...]}}. Empty dict when there are no modes."""
-    modes = store.modes.list_modes(active_only=True)
+    modes = taste_modes.live_modes(store)
     if not modes:
         store.put_proposals("mode_bundles", {}, now)
         return {}

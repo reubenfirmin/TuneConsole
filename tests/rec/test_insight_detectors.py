@@ -224,6 +224,48 @@ def test_rank_insights_drops_stale_zero_score():
     assert [i["signature"] for i in ranked] == ["new"]
 
 
+def test_detect_insights_excludes_generated_playlist_plays_from_repetition():
+    """Regression: detect_insights builds the repetition detector's series from a direct play_events
+    read, SEPARATE from the quarantined day_counts the other six detectors use. That read must apply
+    the GENERATED_GROUP quarantine too, or the app's own recommendations -- played back from a
+    generated playlist in machine-queued bursts with shrinking gaps -- register as the user
+    "coming back faster" and manufacture repetition insights out of nothing.
+
+    Two tracks with the identical strictly-shrinking gap pattern (14 -> 8 -> 4 -> 2 days): one played
+    entirely FROM a generated playlist, one user-driven (NULL provenance). Only the user-driven one
+    may surface."""
+    D = 86400.0
+    GEN = {"PLgen"}
+    pattern = (0, 14 * D, 22 * D, 26 * D, 28 * D)
+    gen_events = [{"identity_key": "kg", "played_at": t, "playlist_ytm_id": "PLgen"} for t in pattern]
+    real_events = [{"identity_key": "kr", "played_at": t, "playlist_ytm_id": None} for t in pattern]
+    events = gen_events + real_events
+
+    class _Trends:
+        def first_play_floor_day(self): return 0
+        def generated_ytm_ids(self): return set(GEN)
+        def track_cards(self, keys): return {}
+
+    class _History:
+        def play_events_since(self, since, exclude_list_ids=None):
+            # Mirror the real repo: NULL-provenance rows are always kept; only rows whose playlist is
+            # in the exclusion set are dropped.
+            if not exclude_list_ids:
+                return events
+            return [e for e in events if e["playlist_ytm_id"] is None
+                    or e["playlist_ytm_id"] not in exclude_list_ids]
+
+    class _Store:
+        trends = _Trends()
+        history = _History()
+
+    got = tr.detect_insights(_Store(), day_counts=[], meta={}, artist_first={}, track_first={},
+                             now=29 * D)
+    subjects = {g["subject"] for g in got if g["kind"] == "repetition"}
+    assert "kr" in subjects, "user-driven repetition must still surface"
+    assert "kg" not in subjects, "generated-playlist-only repetition must be quarantined"
+
+
 def test_takeout_backfill_immune_to_first_day_eq_floor_day():
     """The dangerous Takeout artifact: a single import snapshot gives EVERY artist the same
     first_day == floor_day exactly. Emergence's guard is first_day-based (first_day > floor_day +
