@@ -38,6 +38,19 @@
   --accent-2:  #a596ff;
   --accent-soft: rgba(124, 108, 255, 0.16);
   --teal:      #4fd6e0;   /* cyan secondary, pairs with indigo gradients */
+  --amber:     #f6c177;   /* warm accent: was a bare literal repeated in a dozen rules */
+
+  /* Categorical series palette. Identity, not magnitude: assigned in a FIXED order and never cycled,
+     so a genre family keeps its hue when another overtakes it. A 6th family folds into --series-other.
+     Validated against this app's card surface (#171340) with the dataviz skill's validate_palette.js:
+     lightness band, chroma floor, adjacent-pair CVD separation (worst 41.3 dE, protan) and 3:1
+     contrast all pass. Do not hand-edit these values; re-run the validator. */
+  --series-1: #3987e5;   /* blue   */
+  --series-2: #199e70;   /* aqua   */
+  --series-3: #c98500;   /* yellow */
+  --series-4: #9085e9;   /* violet */
+  --series-5: #e66767;   /* red    */
+  --series-other: #6b6a7d;
   --danger:    #ff6b8b;   /* warm pink-red */
   --danger-soft: rgba(255, 107, 139, 0.15);
   --up:        #9ece6a;   /* ticker "heating up" green */
@@ -228,11 +241,17 @@ h2.section {
   letter-spacing: -0.01em; margin: 2.4rem 0 0.4rem;
   display: flex; align-items: baseline; gap: 0.6rem;
 }
+h3.section {
+  font-family: var(--font-display); font-weight: 600; font-size: 1.05rem;
+  letter-spacing: -0.01em; margin: 1.8rem 0 0.4rem;
+  display: flex; align-items: baseline; gap: 0.6rem;
+}
 h2.section .count {
   font-family: var(--font-mono); font-size: 0.8rem; color: var(--faint);
   font-weight: 500;
 }
-h2.section .scope-tag {
+/* Scope chips also ride on the h3 sub-sections inside the lazy-loaded engine panel. */
+h2.section .scope-tag, h3.section .scope-tag {
   font-family: var(--font-mono); font-size: 0.62rem; font-weight: 600;
   letter-spacing: 0.04em; text-transform: uppercase;
   color: var(--accent-2); background: var(--accent-soft);
@@ -514,7 +533,7 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 /* per-dimension bar colors so each tab reads distinctly */
 .dim-genre .tk-bar { background: linear-gradient(90deg, var(--accent), #9a8cff); }
 .dim-year .tk-bar { background: linear-gradient(90deg, #2ba3b8, var(--teal)); }
-.dim-album .tk-bar { background: linear-gradient(90deg, #d99a4e, #f6c177); }
+.dim-album .tk-bar { background: linear-gradient(90deg, #d99a4e, var(--amber)); }
 .dim-playlist .tk-bar { background: linear-gradient(90deg, #8d63e6, #bb9af7); }
 .dim-artist .tk-bar { background: linear-gradient(90deg, #3d6fd0, #7aa2f7); }
 .tkratio .tk-over { color: var(--up); }
@@ -540,6 +559,11 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 .pl-art { position: relative; flex: none; aspect-ratio: 1; border-radius: 12px; overflow: hidden;
   border: 1px solid var(--border-2); box-shadow: 0 14px 34px -16px rgba(0,0,0,0.75); }
 .pl-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+/* An album with no cover of its own (a personal compilation) is shown as what it is made of: a grid
+   of its tracks' covers. Static flow, so the tiles lay out instead of stacking on inset:0. */
+.pl-art-mosaic { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr; gap: 1px; }
+.pl-art-mosaic img { position: static; inset: auto; }
+.pl-art-mosaic img:only-child, .pl-art-mosaic img:nth-child(3):last-child { grid-column: span 2; }
 .pl-headmain { min-width: 0; }
 .share-link { align-self: flex-start; }
 .pl-headmain { display: flex; flex-direction: column; min-width: 0; }
@@ -554,6 +578,9 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
   color: var(--dim); font-size: 0.92rem; margin: 0.8rem 0 0; }
 .pl-stats .stat { display: inline-flex; align-items: baseline; }
 .pl-stats .stat::before { content: "·"; color: var(--faint); margin-right: 0.85rem; }
+/* A separator only separates: when the artist pill is absent (a compilation upload has no album
+   artist) the first stat leads the line, and must not open with a dangling "·". */
+.pl-stats .stat:first-child::before { content: none; }
 .pl-stats strong { color: var(--text); font-weight: 700; }
 .pl-actions { margin-top: 1.25rem; }
 /* bare icon tools (share, MusicBrainz, Last.fm) stacked at the right, spread to fill the header height */
@@ -712,7 +739,11 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
 /* "Songs like this" modal: narrower, and never taller than the viewport (the row list scrolls). */
 .modal.modal-similar { width: min(34rem, calc(100vw - 2rem)); max-width: none;
   max-height: calc(100dvh - 3rem); display: flex; flex-direction: column; }
-.modal.modal-similar #similar-results { flex: 1; min-height: 0; overflow-y: auto; }
+/* padding-inline matches .alt-list's negative margins below: the rows bleed outward so a row hover
+   spans the full width, and this is the room they bleed INTO. Without it they overhang this box,
+   and since overflow-y:auto forces overflow-x to compute to auto, that overhang became a horizontal
+   scrollbar (#106). */
+.modal.modal-similar #similar-results { flex: 1; min-height: 0; overflow-y: auto; padding-inline: 0.4rem; }
 .modal.modal-similar .alt-list { max-height: none; overflow: visible; margin: 0.2rem -0.4rem 0; }
 
 /* per-row "⋯" actions menu */
@@ -1904,7 +1935,9 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 .viz-pair-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; }
 @media (max-width: 640px) { .viz-pair, .viz-pair-cards { grid-template-columns: 1fr; } }
 
-figure.rose { margin: 0; text-align: center; }
+/* A column flex so the footer caption sits on the baseline across all four roses of a card, even
+   when one of them carries an extra "quiet" line above it. */
+figure.rose { margin: 0; text-align: center; display: flex; flex-direction: column; }
 .rose-cap { font-size: 0.8rem; font-weight: 650; color: var(--text); margin-bottom: 0.4rem; }
 .rose-cap .muted { font-weight: 400; }
 .rose-svg { width: 100%; max-width: 360px; height: auto; }
@@ -2009,20 +2042,57 @@ figure.rose { margin: 0; text-align: center; }
 .breadth-ribbon .seg:hover { filter: brightness(1.2); }
 .breadth-ribbon .seg.other { background: var(--border); }
 
-/* Layer stack (#88): four readings of "what the listener wants", fastest (NOW) to slowest
-   (PERMANENT). Reuses .breadth-ribbon/.seg for the NOW/SESSION mode ribbons; this block is just the
-   row layout - name + timescale on the left, the reading on the right. */
-.layer-stack .layer-row { display: grid; grid-template-columns: 9rem 1fr; gap: 0.2rem 1.1rem;
+/* #88 The layered taste model. `.layer-name` / `.layer-scale` are shared by the key card and the
+   modes card so a layer always looks the same wherever it is named. */
+.layer-name { font-family: var(--font-display); font-size: 0.9rem; letter-spacing: 0.03em; }
+.layer-scale { font-size: 0.7rem; }
+
+/* The key: one row per layer, naming its timescale, what it is, and which cards draw it. */
+.layer-key-list { list-style: none; margin: 0.7rem 0 1rem; padding: 0; }
+.layer-key-list li { display: grid; grid-template-columns: 7rem 8rem 1fr; gap: 0.2rem 1rem;
+  align-items: baseline; padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
+.layer-key-list li:last-child { border-bottom: none; }
+.layer-what { font-size: 0.78rem; color: var(--dim); line-height: 1.45; }
+.layer-what em { color: var(--faint); font-style: normal; }
+@media (max-width: 720px) {
+  .layer-key-list li { grid-template-columns: 1fr; gap: 0.15rem; }
+}
+
+/* The modes card: NOW / SESSION / PERMANENT as ribbons over the same modes. Reuses
+   .breadth-ribbon/.seg; this is just the row layout - name + timescale left, the reading right. */
+.mode-layers .layer-row { display: grid; grid-template-columns: 9rem 1fr; gap: 0.2rem 1.1rem;
   align-items: center; padding: 0.65rem 0; border-bottom: 1px solid var(--border); }
-.layer-stack .layer-row:last-child { border-bottom: none; padding-bottom: 0; }
-.layer-stack .layer-row:first-child { padding-top: 0.2rem; }
-.layer-stack .layer-meta { display: flex; flex-direction: column; gap: 0.15rem; }
-.layer-stack .layer-name { font-family: var(--font-display); font-size: 0.9rem; letter-spacing: 0.03em; }
-.layer-stack .layer-scale { font-size: 0.7rem; }
-.layer-stack .layer-reading { min-width: 0; }
-.layer-stack .layer-ribbon { height: 16px; }
+.mode-layers .layer-row:last-child { border-bottom: none; }
+.mode-layers .layer-meta { display: flex; flex-direction: column; gap: 0.15rem; }
+.mode-layers .layer-reading { min-width: 0; }
+.mode-layers .layer-ribbon { height: 16px; }
 @media (max-width: 640px) {
-  .layer-stack .layer-row { grid-template-columns: 1fr; gap: 0.35rem; }
+  .mode-layers .layer-row { grid-template-columns: 1fr; gap: 0.35rem; }
+}
+
+/* A facet axis read at four readings side by side: evidence, then the three multipliers that
+   compose. Two-up before it gets cramped, one-up on a phone. */
+.viz-quad { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+@media (max-width: 1100px) { .viz-quad { grid-template-columns: 1fr 1fr; gap: 1.3rem; } }
+@media (max-width: 560px) { .viz-quad { grid-template-columns: 1fr; } }
+.rose-foot { font-size: 0.68rem; color: var(--faint); margin: 0.25rem 0 0; line-height: 1.3;
+  margin-top: auto; padding-top: 0.25rem; }
+
+/* The same four readings as bars, for axes with too many rows to draw as a rose (artists), and the
+   two-column variant for the session/transient embedding tilt. */
+.chain-bars { display: flex; flex-direction: column; gap: 0.4rem; }
+.chain-row { display: grid; grid-template-columns: 9rem 1fr 1fr 1fr 1fr; gap: 0.55rem;
+  align-items: center; }
+.chain-row.tilt-row { grid-template-columns: 9rem 1fr 1fr; }
+.chain-head { font-size: 0.66rem; color: var(--faint); text-transform: uppercase;
+  letter-spacing: 0.05em; margin-bottom: 0.15rem; }
+.chain-head .muted { text-transform: none; letter-spacing: 0; }
+.vb-absent { background: transparent; box-shadow: none; }
+.vb-absent::before { display: none; }
+@media (max-width: 720px) {
+  .chain-row { grid-template-columns: 6.5rem 1fr 1fr 1fr 1fr; gap: 0.3rem; }
+  .chain-row.tilt-row { grid-template-columns: 6.5rem 1fr 1fr; }
+  .chain-head { font-size: 0.6rem; }
 }
 
 /* Mood freshness - a liveness/signal indicator (deliberately unlike the breadth spectrum). */
@@ -2065,6 +2135,12 @@ figure.rose { margin: 0; text-align: center; }
 .spark { width: 100%; height: 90px; display: block; margin-top: 0.4rem; }
 .spark-area { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
 
+/* Trends "instrument" charts are full charts, not the compact Enrichment sparkline (bare .spark, kept
+   at 90px). They render into viz.py's taller TREND_* box (720x300); this aspect-ratio makes the SVG
+   fill its column at that 2.4:1 shape and scale down on mobile, instead of being crushed to 90px and
+   stretched by preserveAspectRatio. No fixed pixel height -> no squash. */
+.spark.instrument { height: auto; aspect-ratio: 960 / 320; margin-top: 0.7rem; }
+
 /* ── Trends: instrument-panel charts ──────────────────────────────────────────────────
    Analog chart-recorder look (see the Trends nag art): each chart is a gridded "screen"
    panel inset into the card, with a glowing phosphor trace drawn over it. The glow is a
@@ -2075,43 +2151,60 @@ figure.rose { margin: 0; text-align: center; }
    _chart_screen.html macro insets them by `pad`); axis labels and stat tiles stay plain
    text outside the screen, never glowing. */
 .instrument .screen-bg {
-  fill: color-mix(in srgb, #2b1a08 55%, var(--bg));
-  stroke: color-mix(in srgb, #f6c177 22%, var(--border-2));
+  /* was color-mix(#2b1a08 55%, var(--bg)): a warm brown well that read as dirt against the indigo
+     page, and tinted every series hue laid over it. The screen is now a neutral deepening of the
+     page itself. The amber trace still glows against it; the categorical bands are no longer
+     pulled toward orange. */
+  fill: color-mix(in srgb, var(--bg) 88%, black);
+  stroke: var(--border-2);
   stroke-width: 1;
 }
-.instrument .grid-line { fill: none; stroke: #f6c177; stroke-width: 0.6; opacity: 0.14; }
+/* All instrument marks use non-scaling-stroke: line weights are stated in real screen pixels and stay
+   put whether the chart renders full-width or in a half-column, so the taller coordinate box never
+   thins or fattens a trace. */
+.instrument .grid-line { fill: none; stroke: var(--text); stroke-width: 1; opacity: 0.07; vector-effect: non-scaling-stroke; }
 
 .instrument .spark-area {
-  fill: rgba(246, 193, 119, 0.12);
-  stroke: #f6c177;
-  stroke-width: 1.4;
+  fill: color-mix(in srgb, var(--teal) 15%, transparent);
+  stroke: var(--teal);
+  stroke-width: 2;
   stroke-linejoin: round;
-  filter: drop-shadow(0 0 2px rgba(246, 193, 119, 0.85)) drop-shadow(0 0 7px rgba(246, 193, 119, 0.55));
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--teal) 85%, transparent)) drop-shadow(0 0 9px color-mix(in srgb, var(--teal) 50%, transparent));
 }
 .instrument .spark-line {
   fill: none;
-  stroke: #ffd688;
-  stroke-width: 1.6;
+  stroke: #9bf3f8;
+  stroke-width: 2.25;
   stroke-linejoin: round; stroke-linecap: round;
-  filter: drop-shadow(0 0 2px rgba(246, 193, 119, 0.9)) drop-shadow(0 0 7px rgba(246, 193, 119, 0.6));
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--teal) 90%, transparent)) drop-shadow(0 0 9px color-mix(in srgb, var(--teal) 55%, transparent));
 }
 .instrument .trace-teal {
   fill: none;
   stroke: var(--teal);
-  stroke-width: 1.3;
+  stroke-width: 2;
   stroke-linejoin: round; stroke-linecap: round;
   opacity: 0.9;
+  vector-effect: non-scaling-stroke;
   filter: drop-shadow(0 0 2px rgba(79, 214, 224, 0.85)) drop-shadow(0 0 6px rgba(79, 214, 224, 0.5));
 }
-/* genre-family share wash under the traces: flat teal fills (no glow -- see stacked_top's single
-   glowing top line above for the "second trace" reading), each rank a touch more transparent so the
-   layered bands still read as depth without needing a categorical legend. */
-.instrument .fam { stroke: none; fill: var(--teal); }
-.instrument .fam-0 { opacity: 0.42; }
-.instrument .fam-1 { opacity: 0.34; }
-.instrument .fam-2 { opacity: 0.27; }
-.instrument .fam-3 { opacity: 0.21; }
-.instrument .fam-4 { opacity: 0.16; }
+/* Genre-family share bands. These are CATEGORICAL: five different things, not five magnitudes of one
+   thing. They used to be a single teal at five opacities, which is a sequential encoding doing a
+   categorical job, and it read as "most genres are the same colour". Each band now gets its own
+   validated hue, assigned by slot in a fixed order. The 2px surface stroke is the dataviz mark spec:
+   adjacent stacked fills must not touch, or the boundary between two bands disappears. */
+/* Genre families: a cohesive COOL categorical set (cyan -> azure -> indigo -> mint -> lavender) so the
+   ribbon reads in the same register as the cyan phosphor trace, with a soft glow to match. "Other"
+   (slot 5) is a recessive slate. Still five distinct hues, so identity is never color-alone. */
+.instrument .fam { stroke: var(--surface); stroke-width: 2; vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--teal) 22%, transparent)); }
+.instrument .fam-0 { fill: #4fd6e0; }
+.instrument .fam-1 { fill: #57a6f5; }
+.instrument .fam-2 { fill: #8b7cff; }
+.instrument .fam-3 { fill: #46e2b0; }
+.instrument .fam-4 { fill: #bd91ff; }
+.instrument .fam-5 { fill: #5c6a8f; }
 
 .chart-axis {
   display: flex; justify-content: space-between;
@@ -2126,7 +2219,21 @@ figure.rose { margin: 0; text-align: center; }
    "wrapped"-style tile treatment used by both Month in review and Library health. Scoped to
    .trends-page (this page's own container class) rather than a global .card/section rule, so
    nothing else on the site inherits this spacing. */
-.trends-page { display: flex; flex-direction: column; gap: 1.8rem; }
+/* Was a single flex column, so every card ran full width and sized itself by intrinsic height. That
+   let Month in review (stat row + 7-column calendar + podium + song panel + binge + list) tower over
+   Insights (a short list of one-line cards), with nothing allocating space by importance. Now a
+   two-column grid; the charts and Library health span both columns.
+   minmax(0, 1fr), not a bare 1fr: an fr track has min-width:auto, so the 520px chart SVGs would
+   refuse to shrink and force the page to scroll horizontally. */
+/* Single column: every section runs the full page width. Charts get the whole timeline, and Month in
+   review / Library health each get a full canvas to lay out their own internal structure. No section
+   is ever squeezed into a half-column. */
+.trends-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.8rem;
+}
+.trends-page > .full { width: 100%; }
 .trends-footnote { color: var(--faint); font-size: 0.78rem; margin: -0.6rem 0.2rem 0; line-height: 1.5; }
 
 /* Listening-over-time legend (#2): chip colors mirror the exact stacked-area mapping (teal fam-N
@@ -2136,13 +2243,76 @@ figure.rose { margin: 0; text-align: center; }
   margin: 0.6rem 0.1rem 0; font-size: 0.78rem; color: var(--dim); }
 .legend-chip { display: inline-flex; align-items: center; gap: 0.35rem; }
 .chip-dot { width: 0.6rem; height: 0.6rem; border-radius: 3px; flex: none;
-  border: 1px solid var(--border-2); background: var(--teal); }
-.chip-dot.fam-0 { opacity: 0.42; }
-.chip-dot.fam-1 { opacity: 0.34; }
-.chip-dot.fam-2 { opacity: 0.27; }
-.chip-dot.fam-3 { opacity: 0.21; }
-.chip-dot.fam-4 { opacity: 0.16; }
-.chip-dot.chip-total { background: #f6c177; border-color: transparent; opacity: 1; }
+  border: 1px solid var(--border-2); background: var(--series-other); }
+.chip-dot.fam-0 { background: #4fd6e0; }
+.chip-dot.fam-1 { background: #57a6f5; }
+.chip-dot.fam-2 { background: #8b7cff; }
+.chip-dot.fam-3 { background: #46e2b0; }
+.chip-dot.fam-4 { background: #bd91ff; }
+.chip-dot.fam-5 { background: #5c6a8f; }
+
+/* A chart's y scale, printed beside it. The volume chart is zero-anchored on a round axis, so the
+   reader can judge a value instead of only its rank against the tallest week. */
+.chart-scale {
+  display: flex; justify-content: space-between;
+  font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.03em;
+  color: var(--faint); margin: 0.5rem 0.1rem -0.2rem;
+}
+/* Two y-axis ticks that actually flank the plot: the max reads at the top edge, the min/baseline at
+   the bottom edge (so a zoomed axis like Genre diversity shows its floor value, not just its ceiling). */
+.chart-tick { font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.03em; color: var(--faint); }
+.chart-tick-top { margin: 0.5rem 0.1rem 0.2rem; }
+.chart-tick-bot { margin: 0.25rem 0.1rem 0; }
+
+/* ── #76 Listening overlays: window filter + per-artist/genre comparison lines ─────────────── */
+.listening-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.listening-head h2 { margin: 0; }
+.window-seg { flex: none; }
+.overlay-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem 0.5rem; margin: 0.5rem 0 1.2rem; }
+.ov-group-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); }
+.ov-group-label + .ov-chip { margin-left: 0.1rem; }
+.overlay-chips .ov-group-label:not(:first-child) { margin-left: 0.7rem; }
+.ov-chip { background: var(--bg-2); border: 1px solid var(--border-2); color: var(--dim);
+  border-radius: 999px; padding: 0.26rem 0.78rem; font-size: 0.8rem; font-family: var(--font-sans);
+  line-height: 1.3; cursor: pointer; box-shadow: none; transform: none; }
+.ov-chip:hover { color: var(--text); border-color: var(--faint); box-shadow: none; transform: none; }
+.ov-chip.on { color: #fff; }
+.ov-chip-0.on { background: color-mix(in srgb, #ff6b8b 24%, transparent); border-color: #ff6b8b; }
+.ov-chip-1.on { background: color-mix(in srgb, #9ece6a 24%, transparent); border-color: #9ece6a; }
+.ov-chip-2.on { background: color-mix(in srgb, #bd91ff 24%, transparent); border-color: #bd91ff; }
+.ov-chip-3.on { background: color-mix(in srgb, #ff9d5c 24%, transparent); border-color: #ff9d5c; }
+.ov-chip-4.on { background: color-mix(in srgb, #56a6f5 24%, transparent); border-color: #56a6f5; }
+.ov-chip-5.on { background: color-mix(in srgb, #e879f9 24%, transparent); border-color: #e879f9; }
+
+/* Overlay comparison lines drawn over the volume area. Categorical identity -> six distinct hues,
+   each non-scaling with a soft glow, painted after the base trace so they sit on top. */
+.ov-line { fill: none; stroke-width: 2.25; vector-effect: non-scaling-stroke;
+  stroke-linejoin: round; stroke-linecap: round; }
+.ov-line-0 { stroke: #ff6b8b; filter: drop-shadow(0 0 4px rgba(255,107,139,0.55)); }
+.ov-line-1 { stroke: #9ece6a; filter: drop-shadow(0 0 4px rgba(158,206,106,0.55)); }
+.ov-line-2 { stroke: #bd91ff; filter: drop-shadow(0 0 4px rgba(189,145,255,0.55)); }
+.ov-line-3 { stroke: #ff9d5c; filter: drop-shadow(0 0 4px rgba(255,157,92,0.55)); }
+.ov-line-4 { stroke: #56a6f5; filter: drop-shadow(0 0 4px rgba(86,166,245,0.55)); }
+.ov-line-5 { stroke: #e879f9; filter: drop-shadow(0 0 4px rgba(232,121,249,0.55)); }
+.ov-legend { margin-top: 0.7rem; }
+.chip-dot.base-dot { background: var(--teal); }
+.chip-dot.ov-dot-0 { background: #ff6b8b; }
+.chip-dot.ov-dot-1 { background: #9ece6a; }
+.chip-dot.ov-dot-2 { background: #bd91ff; }
+.chip-dot.ov-dot-3 { background: #ff9d5c; }
+.chip-dot.ov-dot-4 { background: #56a6f5; }
+.chip-dot.ov-dot-5 { background: #e879f9; }
+.ov-legend .legend-chip b { color: var(--text); font-weight: 600; margin-left: 0.15rem; }
+
+/* No serif anywhere on Trends: the display face (Fraunces) is replaced by the sans across the whole
+   page -- headings, the "Your <Month>" headline, and the big stat figures. */
+.trends-title,
+.trends-page h2, .trends-page h3,
+.review-headline,
+.rs-tile strong { font-family: var(--font-sans); }
+/* Volume and its genre mix stack full-width, one above the other -- never side by side. */
+.chart-pair { display: flex; flex-direction: column; gap: 1.9rem; }
+.chart-pair .chart { margin: 0; min-width: 0; }
 
 /* Shared "wrapped" stat-tile treatment (#4b/#5b): each tile gets its own inset panel + a glowing
    display-font number, instead of the plain stat-grid's bare strong/span pair. */
@@ -2154,7 +2324,7 @@ figure.rose { margin: 0; text-align: center; }
 }
 .stat-grid.tiles strong {
   font-family: var(--font-display); font-size: 1.7rem; color: var(--text);
-  text-shadow: 0 0 14px rgba(246, 193, 119, 0.35);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--amber) 35%, transparent);
 }
 .stat-grid.tiles span { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--dim); }
 
@@ -2162,15 +2332,15 @@ figure.rose { margin: 0; text-align: center; }
    directional glyphs. */
 .review-headline {
   font-family: var(--font-display); font-size: 1.6rem; font-weight: 600; margin: 0.1rem 0 0.5rem;
-  background: linear-gradient(120deg, #f6c177, var(--accent-2));
+  background: linear-gradient(120deg, var(--amber), var(--accent-2));
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 .heat-strip { display: flex; flex-wrap: wrap; gap: 3px; margin: 1rem 0 0.2rem; }
 .heat-day {
   width: 0.6rem; height: 0.6rem; border-radius: 2px; flex: none;
   border: 1px solid var(--border);
-  background: color-mix(in srgb, #f6c177 calc(var(--heat, 0) * 100%), var(--bg-2));
-  box-shadow: 0 0 calc(var(--heat, 0) * 6px) rgba(246, 193, 119, calc(var(--heat, 0) * 0.9));
+  background: color-mix(in srgb, var(--amber) calc(var(--heat, 0) * 100%), var(--bg-2));
+  box-shadow: 0 0 calc(var(--heat, 0) * 6px) color-mix(in srgb, var(--amber) calc(var(--heat, 0) * 90%), transparent);
 }
 .review-list { margin: 0.9rem 0 0; padding: 0; list-style: none; display: grid; gap: 0.4rem;
   color: var(--dim); font-size: 0.88rem; }
@@ -2179,30 +2349,48 @@ figure.rose { margin: 0; text-align: center; }
 .review-list .rl-glyph { display: inline-block; width: 1rem; text-align: center; flex: none; font-size: 0.82rem; }
 .rl-up .rl-glyph { color: var(--teal); }
 .rl-down .rl-glyph { color: var(--danger); }
-.rl-new .rl-glyph { color: #f6c177; }
+.rl-new .rl-glyph { color: var(--amber); }
 
-/* Library health (#80): staleness ribbon + legend, stat/donut header row, dead-weight playlist
-   chips, rediscover CTA. */
+/* ── Library health, full-width recast ────────────────────────────────────────────────────
+   Diagnosis band (never-played headline + a labeled staleness bar chart), then three doorway
+   panels. The old thin ribbon read as an empty grey bar; a bar chart with per-bucket rows makes
+   the aging legible and honest -- the huge "never" bar IS the story. */
+.health-diag { display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+  gap: 1.4rem 2.4rem; align-items: center; margin: 0.4rem 0 1.6rem; }
+@media (max-width: 640px) { .health-diag { grid-template-columns: 1fr; } }
+.hh-figure { display: flex; align-items: center; gap: 0.9rem; }
+.hh-figure strong { font-family: var(--font-display); font-size: 4rem; line-height: 0.8;
+  color: var(--text); font-weight: 600; letter-spacing: -0.015em; flex: none; }
+.hh-figure > span { display: flex; flex-direction: column; gap: 0.15rem;
+  font-size: 0.84rem; color: var(--dim); line-height: 1.45; }
+.hh-figure em { font-style: normal; text-transform: uppercase; letter-spacing: 0.07em;
+  font-size: 0.72rem; color: var(--faint); }
+
+.stale-bars { display: flex; flex-direction: column; gap: 0.45rem; }
+.sb-row { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr) 3rem; align-items: center;
+  gap: 0.7rem; cursor: default; }
+.sb-label { font-size: 0.78rem; color: var(--dim); text-align: right; white-space: nowrap; }
+.sb-track { height: 12px; border-radius: 999px; background: var(--bg-2);
+  border: 1px solid var(--border); overflow: hidden; }
+.sb-track > i { display: block; height: 100%; border-radius: 999px; min-width: 3px; }
+.sb-val { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text); text-align: right; }
+
+/* Doorway panels: three inset actions in a responsive grid, each its own panel with a subhead. */
+.health-doors { display: grid; grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr));
+  gap: 1.2rem; margin-top: 0.4rem; }
+.door { padding: 1.1rem 1.15rem; border: 1px solid var(--border); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-2) 70%, transparent); min-width: 0; }
+.door-head { margin: 0 0 0.9rem; font-family: var(--font-sans); font-weight: 650; font-size: 0.92rem;
+  color: var(--text); display: flex; flex-direction: column; gap: 0.15rem; }
+.door-head span { font-weight: 400; font-size: 0.74rem; color: var(--faint); }
+.tag-more { border-style: dashed; }
+.rc-go-icon { flex: none; color: var(--faint); font-size: 1.1rem; }
+.rc-row:hover .rc-go-icon { color: var(--accent-2); }
+.rc-row:hover .rc-title { color: var(--accent-2); }
+
 .health-top { display: flex; align-items: center; gap: 1.6rem; flex-wrap: wrap; margin: 0.2rem 0 1rem; }
 .health-top .stat-grid { flex: 1 1 12rem; }
-.health-donut { width: 5.5rem; height: 5.5rem; flex: none; }
-.donut-track { fill: none; stroke: var(--border); stroke-width: 8; }
-.donut-value {
-  fill: none; stroke: var(--teal); stroke-width: 8; stroke-linecap: round;
-  stroke-dasharray: var(--dash, 0) 999px; transform: rotate(-90deg); transform-origin: 40px 40px;
-  filter: drop-shadow(0 0 4px rgba(79, 214, 224, 0.6));
-}
-.donut-num { font-family: var(--font-display); font-size: 15px; fill: var(--text); font-weight: 600; }
-.donut-cap { font-size: 7px; fill: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
-.health-ribbon { height: 30px; border-radius: 8px; margin: 0.9rem 0 0.7rem; }
-.stale-legend { list-style: none; margin: 0 0 1.1rem; padding: 0;
-  display: flex; flex-wrap: wrap; gap: 0.35rem 1.1rem; }
-.stale-legend li { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--dim); }
-.stale-legend .dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; flex: none;
-  background: var(--petal-c, var(--accent)); }
-.stale-legend .bucket-pct { font-family: var(--font-mono); color: var(--text); font-weight: 600; }
-.stale-legend .bucket-n { font-family: var(--font-mono); color: var(--faint); }
-.dead-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.5rem 0 0; }
+.dead-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0; }
 .dead-chips a.tag:hover { background: var(--accent); color: #fff; border-color: transparent; }
 .health-cta { display: inline-block; margin-top: 1.1rem; color: var(--dim); font-size: 0.85rem;
   border-bottom: 1px dashed var(--border-2); }
@@ -2275,14 +2463,17 @@ figure.rose { margin: 0; text-align: center; }
    there's none), headline + detail + a mono evidence line, a CTA. These read left-to-right
    like a rolodex of findings, so they get their own row layout rather than the vertical
    alert-card poster shape used by the nag row. */
-.insights-list { display: flex; flex-direction: column; gap: 0.7rem; margin-bottom: 1.8rem; }
+/* Spans the page, so the one-line cards flow into columns instead of a single tall
+   ribbon down the left with dead space beside it. */
+.insights-list { display: grid; gap: 0.7rem;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr)); }
 .insight-card { display: flex; gap: 1rem; align-items: center; padding: 0.9rem 1.1rem; }
 .insight-art { position: relative; flex: none; width: 3.6rem; height: 3.6rem;
   border-radius: var(--radius-sm); overflow: hidden; display: grid; place-items: center;
   background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); border: 1px solid var(--border-2); }
 .insight-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.insight-glyph { display: none; font-size: 1.35rem; color: #f6c177;
-  text-shadow: 0 0 10px rgba(246, 193, 119, 0.6); }
+.insight-glyph { display: none; font-size: 1.35rem; color: var(--amber);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--amber) 60%, transparent); }
 .insight-art.no-art .insight-glyph { display: block; }
 .insight-art.k-emergence .insight-glyph::before { content: "\25B2"; }      /* growth */
 .insight-art.k-put_to_bed .insight-glyph::before { content: "\25A0"; }     /* gone quiet */
@@ -2305,28 +2496,33 @@ figure.rose { margin: 0; text-align: center; }
   color: var(--dim); font-size: 0.85rem; }
 .stat-row strong { color: var(--text); font-family: var(--font-display); font-size: 1.05rem; }
 
-.review-calendar { margin: 0.2rem 0 1.4rem; }
-.cal-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-bottom: 4px;
-  font-family: var(--font-mono); font-size: 0.66rem; color: var(--faint); text-align: center;
+/* The calendar sizes to a comfortable maximum and centers, rather than being capped at a cramped 22px
+   per cell. Cells fill the width up to that cap, so the numbers are actually readable. */
+.review-calendar { margin: 0.2rem 0 1.6rem; max-width: 22rem; }
+.cal-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin-bottom: 5px;
+  font-family: var(--font-mono); font-size: 0.68rem; color: var(--faint); text-align: center;
   text-transform: uppercase; letter-spacing: 0.04em; }
-.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
-.cal-pad, .cal-day { aspect-ratio: 1 / 1; border-radius: 5px; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
+.cal-pad, .cal-day { aspect-ratio: 1 / 1; border-radius: 7px; }
 .cal-pad { visibility: hidden; }
 .cal-day {
   display: flex; align-items: center; justify-content: center;
-  font-family: var(--font-mono); font-size: 0.64rem;
-  color: color-mix(in srgb, var(--text) 75%, transparent);
-  border: 1px solid var(--border);
-  background: color-mix(in srgb, #f6c177 calc(var(--heat, 0) * 100%), var(--bg-2));
-  box-shadow: 0 0 calc(var(--heat, 0) * 10px) rgba(246, 193, 119, calc(var(--heat, 0) * 0.85));
+  font-family: var(--font-mono); font-size: 0.76rem; font-weight: 500;
+  /* Ink brightens with the day's heat: quiet days sit back, heavy days read white and lit. */
+  color: color-mix(in srgb, var(--text) calc(55% + var(--heat, 0) * 45%), var(--faint));
+  border: 1px solid color-mix(in srgb, var(--series-1) calc(var(--heat, 0) * 55%), var(--border));
+  /* Plays-per-day is SEQUENTIAL (one magnitude), so it takes one hue's ramp, light to dark. Same hue
+     as the staleness ramp: both are magnitude, so both read on the same scale language. */
+  background: color-mix(in srgb, var(--series-1) calc(var(--heat, 0) * 100%), var(--bg-2));
+  box-shadow: 0 0 calc(var(--heat, 0) * 12px) color-mix(in srgb, var(--series-1) calc(var(--heat, 0) * 65%), transparent);
 }
 
 .artist-podium { display: flex; gap: 0.9rem; margin: 0.4rem 0 1.4rem; flex-wrap: wrap; }
 .podium-tile { flex: 1 1 8rem; display: flex; flex-direction: column; align-items: center; gap: 0.35rem;
   padding: 0.9rem 0.7rem 0.8rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); text-align: center; }
-.podium-tile:first-child { border-color: color-mix(in srgb, #f6c177 45%, var(--border-2));
-  box-shadow: 0 0 18px -6px rgba(246, 193, 119, 0.5); }
+.podium-tile:first-child { border-color: color-mix(in srgb, var(--amber) 45%, var(--border-2));
+  box-shadow: 0 0 18px -6px color-mix(in srgb, var(--amber) 50%, transparent); }
 .podium-rank { font-family: var(--font-mono); font-size: 0.72rem; color: var(--faint); }
 .podium-art { width: 3.6rem; height: 3.6rem; border-radius: 50%; overflow: hidden;
   background: var(--grad-soft); display: block; }
@@ -2336,8 +2532,9 @@ figure.rose { margin: 0; text-align: center; }
 .podium-plays { font-size: 0.76rem; color: var(--dim); }
 .play-bar { display: block; width: 100%; height: 6px; background: var(--surface-2);
   border-radius: 999px; overflow: hidden; }
-.play-bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--teal), #f6c177);
-  border-radius: 999px; }
+/* Flat, not a gradient. A bar's LENGTH is the encoding; a hue ramp along that length implies a
+   second variable that does not exist. */
+.play-bar > i { display: block; height: 100%; background: var(--series-1); border-radius: 999px; }
 
 .song-of-month { display: flex; gap: 0.9rem; align-items: center; margin: 0.2rem 0 1.3rem;
   padding: 0.8rem 0.9rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -2355,11 +2552,57 @@ figure.rose { margin: 0; text-align: center; }
   background: color-mix(in srgb, var(--danger) 10%, transparent); font-size: 0.86rem; color: var(--dim); }
 .binge-callout strong { color: var(--text); }
 
+/* ── Month in review, full-width recast ───────────────────────────────────────────────────
+   Trends-only recap: the listening PATTERN (calendar heat) beside WHAT CHANGED (new favorite /
+   rising / cooling). Rankings moved to Charts, so no podium or song-of-month here. */
+.review-head { display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 1.2rem 2rem; flex-wrap: wrap; }
+.review-head h2 { margin: 0; }
+.review-stats { display: flex; gap: 0.7rem; }
+.rs-tile { display: flex; flex-direction: column; align-items: center; text-align: center;
+  padding: 0.6rem 1.15rem; min-width: 5.2rem; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); }
+.rs-tile strong { font-family: var(--font-display); font-size: 1.85rem; line-height: 1; color: var(--text);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--amber) 30%, transparent); }
+.rs-tile span { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--dim); margin-top: 0.3rem; }
+.review-sub { margin: 0.55rem 0 0; }
+
+.review-body { display: grid; grid-template-columns: 22rem minmax(0, 1fr); gap: 2.2rem;
+  margin-top: 1.5rem; align-items: start; }
+@media (max-width: 760px) { .review-body { grid-template-columns: 1fr; } }
+
+.cal-legend { display: flex; align-items: center; gap: 0.5rem; margin: 0.8rem 0 0;
+  font-size: 0.72rem; color: var(--faint); }
+.cal-ramp { width: 5rem; height: 8px; border-radius: 999px; flex: none;
+  background: linear-gradient(90deg, var(--bg-2), var(--series-1)); border: 1px solid var(--border); }
+.cal-peak { margin-left: auto; color: var(--dim); font-family: var(--font-mono); font-size: 0.68rem; }
+
+.review-aside { min-width: 0; }
+.review-subhead { font-family: var(--font-sans); font-weight: 650; font-size: 0.95rem;
+  margin: 0 0 0.85rem; color: var(--text); }
+.moved-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.7rem; }
+.moved { display: flex; align-items: center; gap: 0.85rem; padding: 0.8rem 0.95rem;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); }
+.moved-glyph { width: 2.1rem; height: 2.1rem; flex: none; display: grid; place-items: center;
+  border-radius: 50%; font-size: 0.95rem; }
+.moved-new .moved-glyph { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+.moved-up .moved-glyph { color: var(--up); background: color-mix(in srgb, var(--up) 16%, transparent); }
+.moved-down .moved-glyph { color: var(--danger); background: color-mix(in srgb, var(--danger) 16%, transparent); }
+.moved-meta { display: flex; flex-direction: column; gap: 0.12rem; min-width: 0; flex: 1 1 auto; }
+.moved-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); }
+.moved-meta strong { font-size: 0.98rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.moved-fig { font-family: var(--font-mono); font-size: 0.9rem; color: var(--dim); flex: none; }
+.moved-flat .moved-meta { color: var(--dim); font-size: 0.9rem; }
+
 /* ── T10g: Library health redesign ────────────────────────────────────────────────────────
    Rediscover candidates (named tracks, quiet a long time) and albums saved but never opened --
    turning the health card from a diagnosis into doorways. */
-.rediscover-list { display: flex; flex-direction: column; gap: 0.55rem; margin: 0.3rem 0 1.2rem; }
-.rc-row { display: flex; align-items: center; gap: 0.8rem; }
+.rediscover-list { display: flex; flex-direction: column; gap: 0.35rem; margin: 0; }
+.rc-row { display: flex; align-items: center; gap: 0.7rem; text-decoration: none; color: inherit;
+  padding: 0.35rem; margin: -0.35rem; border-radius: var(--radius-sm); }
+.rc-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .rc-art { flex: none; width: 2.6rem; height: 2.6rem; border-radius: var(--radius-sm);
   overflow: hidden; background: var(--surface-2); border: 1px solid var(--border); }
 .rc-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -2368,8 +2611,8 @@ figure.rose { margin: 0; text-align: center; }
 .rc-sub { font-size: 0.78rem; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rc-go { flex: none; white-space: nowrap; }
 
-.unopened-albums { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
-  gap: 0.7rem; margin: 0.3rem 0 1.2rem; }
+.unopened-albums { display: grid; grid-template-columns: repeat(2, 1fr);
+  gap: 0.7rem; margin: 0; }
 .unopened-tile { display: flex; flex-direction: column; gap: 0.35rem; color: var(--text); }
 .unopened-tile:hover .unopened-meta strong { color: var(--accent-2); }
 .unopened-art { display: block; width: 100%; aspect-ratio: 1 / 1; border-radius: var(--radius-sm);
@@ -2379,3 +2622,19 @@ figure.rose { margin: 0; text-align: center; }
 .unopened-meta strong { font-size: 0.82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .unopened-meta span { font-size: 0.74rem; color: var(--dim); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
+
+.rt-suggestions { display: flex; flex-direction: column; border: 1px solid var(--border);
+  border-radius: 8px; margin: 0.25rem 0; max-height: 10rem; overflow-y: auto; }
+.rt-suggestion { text-align: left; background: transparent; border: none; padding: 0.4rem 0.6rem;
+  cursor: pointer; color: inherit; }
+.rt-suggestion:hover { background: var(--accent-soft); }
+.rt-recipe-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.rt-recipe-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0.5rem 0; }
+.rt-recipe-actions { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.5rem; }
+.genre-chip.red { background: var(--danger-soft); color: var(--danger); }
+
+/* Generate button: swap label <-> spinner while the (multi-second: per-track Deezer popularity
+   lookups) request is in flight. htmx adds .htmx-request to the button itself for its duration. */
+.rt-gen-btn .rt-gen-loading { display: none; align-items: center; gap: 0.35rem; }
+.rt-gen-btn.htmx-request .rt-gen-loading { display: inline-flex; }
+.rt-gen-btn.htmx-request .rt-gen-label { display: none; }

@@ -7,7 +7,7 @@ import time
 import uvicorn
 import webbrowser
 from pathlib import Path
-from yt_playlist.core import paths
+from yt_playlist.core import logsetup, paths
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core.store import Store
 from yt_playlist.core.config import credential_path
@@ -57,7 +57,12 @@ def parse_args(argv=None):
 
 def build_app():
     """Construct the ASGI app from on-disk config. Importable so uvicorn --reload can re-import it."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    # NB: both uvicorn.run() calls below pass log_config=None. Uvicorn's default logging config
+    # sets propagate=False on the `uvicorn` and `uvicorn.access` loggers, which strands their
+    # records (including the traceback for any request that 500s) on uvicorn's own stderr
+    # handler, which is /dev/null in the packaged builds. Declining that config lets them reach
+    # the root handlers logsetup installs, so they land in app.log.
+    logsetup.configure()
     # The home card polls GET /bridge/status every few seconds; drop those access-log lines so they
     # do not drown the log. The endpoint still works, it just is not logged.
     class _QuietPolls(logging.Filter):
@@ -127,6 +132,9 @@ def _cancel_pending_shutdown(host, port):
 
 
 def main(argv=None):
+    # Before anything that can fail: _already_running() and _cancel_pending_shutdown() both do
+    # I/O, and the packaged builds have no console to raise on.
+    logsetup.configure()
     args = parse_args(argv)
     if args.exit_on_idle:
         os.environ["YT_PLAYLIST_EXIT_ON_IDLE"] = "1"
@@ -149,12 +157,13 @@ def main(argv=None):
         _print_bridge_banner(args.host, args.port)
         uvicorn.run("yt_playlist.__main__:build_app", factory=True, reload=True,
                     reload_dirs=[src_dir], host=args.host, port=args.port,
-                    timeout_graceful_shutdown=2)
+                    timeout_graceful_shutdown=2, log_config=None)
     else:
         app = build_app()
         _print_bridge_banner(args.host, args.port)
         # bound graceful shutdown so a Ctrl-C lands promptly even with an open sync SSE stream
-        uvicorn.run(app, host=args.host, port=args.port, timeout_graceful_shutdown=2)
+        uvicorn.run(app, host=args.host, port=args.port, timeout_graceful_shutdown=2,
+                    log_config=None)
 
 if __name__ == "__main__":
     main()

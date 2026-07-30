@@ -33,8 +33,9 @@ def reset() -> None:
 
 
 def probe(track, store=None) -> EnrichmentResult:
-    """Read-only lookup: genre, year, and the recording MBID (which keys AcousticBrainz)."""
-    genre, year, mbid = enrich_full(track["title"], track["artist"])
+    """Read-only lookup: genre, year, the recording MBID (which keys AcousticBrainz), and the
+    candidate release MBIDs (which key Cover Art Archive). All from the one search."""
+    genre, year, mbid, release_ids = enrich_full(track["title"], track["artist"])
     fields = {}
     if genre:
         fields["genre"] = genre
@@ -42,6 +43,8 @@ def probe(track, store=None) -> EnrichmentResult:
         fields["year"] = year
     if mbid:
         fields["mb_recording_id"] = mbid
+    if release_ids:
+        fields["mb_release_ids"] = release_ids
     return EnrichmentResult("musicbrainz", fields)
 
 _API = "https://musicbrainz.org/ws/2"
@@ -171,13 +174,30 @@ def enrich(title, artist):
     return _genre_year(_recording_search(title, artist))
 
 
+def _release_ids(recordings):
+    """Candidate release MBIDs, best match first. Cover Art Archive is keyed by RELEASE (not
+    recording), and these ride along in the search response we already made, so the fallback costs
+    no extra MusicBrainz traffic. De-duplicated: the same release recurs across candidates."""
+    ids = []
+    for rec in recordings:
+        for rel in (rec.get("releases") or []):
+            rid = rel.get("id")
+            if rid and rid not in ids:
+                ids.append(rid)
+    return ids
+
+
 def enrich_full(title, artist):
-    """(genre, year, mb_recording_id) from a SINGLE recording search. Callers that also want the
-    MBID (the enrichment waterfall, the playlist runner) use this instead of enrich() plus a
-    separate recording_mbid(), so a track costs one search rather than two."""
+    """(genre, year, mb_recording_id, release_ids) from a SINGLE recording search. Callers that also
+    want the MBID (the enrichment waterfall, the playlist runner) use this instead of enrich() plus a
+    separate recording_mbid(), so a track costs one search rather than two.
+
+    release_ids keys Cover Art Archive (which is keyed by release, not recording). It rides along
+    here rather than in its own function so the cover fallback costs no extra search, and so this
+    stays the single seam where MusicBrainz touches the network."""
     recs = _recording_search(title, artist)
     genre, year = _genre_year(recs)
-    return genre, year, (recs[0].get("id") if recs else None)
+    return genre, year, (recs[0].get("id") if recs else None), _release_ids(recs)
 
 
 def _genre_year(recordings):
@@ -211,7 +231,7 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
     pending = store.tracks_to_enrich(playlist_id) if pending is None else pending
 
     def _per_item(i, total, t):
-        genre, year, mbid = enrich_fn(t["title"], t["artist"])   # one search yields genre, year and MBID
+        genre, year, mbid, _rel = enrich_fn(t["title"], t["artist"])   # one search: genre, year, MBID
         if _breaker.tripped():             # host unreachable, so the rest would all fail too: stop
             on_progress({"type": "err", "text": "MusicBrainz looks unreachable; enrichment stopped. "
                          "The remaining tracks will retry next time."})

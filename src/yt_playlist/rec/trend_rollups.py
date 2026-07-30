@@ -131,21 +131,35 @@ def discovery_spike(counts) -> bool:
     return latest >= DISCOVERY_SPIKE_RATIO * base and latest >= DISCOVERY_SPIKE_MIN_ABS
 
 
-def compute_weeks(day_counts, meta, artist_first, track_first) -> list:
-    """weeks array. A play in week W counts as a new-artist play iff its artist's first_day is in W
-    (same for new-track). Families come from each key's representative genre via genre_map.family."""
+def compute_weeks(day_counts, meta, artist_first, track_first,
+                  catalog_artists=frozenset(), catalog_keys=frozenset()) -> list:
+    """weeks array. Families come from each key's representative genre via genre_map.family.
+
+    DISCOVERY is catalog-relative, not log-relative. A play counts as a new-artist play iff the
+    artist's first observed play falls in this week AND the artist is absent from the user's catalog
+    (`catalog_artists`, from repos/trends.catalog_artists). The first-play index only knows when we
+    started watching: a user who migrated a library from another service has played most of it long
+    before our ledger begins, so first-observed-play alone reports them discovering their own
+    collection. Measured on the reference database, the catalog filter took one week's new-artist
+    share from 66% to 13%, removing 124 of 158 falsely-new artists.
+
+    `new_artists` is the distinct COUNT, exposed alongside the play-weighted share because plays per
+    track average ~1.6: the share of plays and the share of artists are nearly the same number, and
+    the count is the one a human can check.
+    """
     weeks = {}
     for day, key, cnt in day_counts:
         w = week_start(day)
         artist, genre = meta.get(key, ("", None))
         wk = weeks.setdefault(w, {"plays": 0, "artists": set(), "new_artist_plays": 0,
-                                  "new_track_plays": 0, "families": {}})
+                                  "new_artists": set(), "new_track_plays": 0, "families": {}})
         wk["plays"] += cnt
         if artist:
             wk["artists"].add(artist)
-            if week_start(artist_first.get(artist, day)) == w:
+            if artist not in catalog_artists and week_start(artist_first.get(artist, day)) == w:
                 wk["new_artist_plays"] += cnt
-        if week_start(track_first.get(key, day)) == w:
+                wk["new_artists"].add(artist)
+        if key not in catalog_keys and week_start(track_first.get(key, day)) == w:
             wk["new_track_plays"] += cnt
         if genre:
             fam = genre_map.family(genre)
@@ -156,25 +170,28 @@ def compute_weeks(day_counts, meta, artist_first, track_first) -> list:
         out.append({"week_start_day": w, "plays": wk["plays"],
                     "distinct_artists": len(wk["artists"]),
                     "new_artist_plays": wk["new_artist_plays"],
+                    "new_artists": len(wk["new_artists"]),
                     "new_track_plays": wk["new_track_plays"],
                     "families": wk["families"], "diversity": diversity_index(wk["families"])})
     return out
 
 
-def compute_months(day_counts, meta, artist_first) -> list:
-    """months array (same fields as weeks minus new_track, plus listen_days + longest_streak)."""
+def compute_months(day_counts, meta, artist_first, catalog_artists=frozenset()) -> list:
+    """months array (same fields as weeks minus new_track, plus listen_days + longest_streak).
+    Discovery is catalog-relative; see compute_weeks."""
     months = {}
     for day, key, cnt in day_counts:
         m = month_of(day)
         artist, genre = meta.get(key, ("", None))
         mo = months.setdefault(m, {"plays": 0, "artists": set(), "new_artist_plays": 0,
-                                   "families": {}, "days": set()})
+                                   "new_artists": set(), "families": {}, "days": set()})
         mo["plays"] += cnt
         mo["days"].add(day)
         if artist:
             mo["artists"].add(artist)
-            if month_of(artist_first.get(artist, day)) == m:
+            if artist not in catalog_artists and month_of(artist_first.get(artist, day)) == m:
                 mo["new_artist_plays"] += cnt
+                mo["new_artists"].add(artist)
         if genre:
             fam = genre_map.family(genre)
             mo["families"][fam] = mo["families"].get(fam, 0) + cnt
@@ -182,8 +199,8 @@ def compute_months(day_counts, meta, artist_first) -> list:
     for m in sorted(months):
         mo = months[m]
         out.append({"month": m, "plays": mo["plays"], "distinct_artists": len(mo["artists"]),
-                    "new_artist_plays": mo["new_artist_plays"], "families": mo["families"],
-                    "diversity": diversity_index(mo["families"]),
+                    "new_artist_plays": mo["new_artist_plays"], "new_artists": len(mo["new_artists"]),
+                    "families": mo["families"], "diversity": diversity_index(mo["families"]),
                     "listen_days": len(mo["days"]), "longest_streak": longest_streak(mo["days"])})
     return out
 
@@ -197,8 +214,13 @@ def _build_first_play_index(store):
         store.set_setting("trend_first_play_watermark", "0")
         store.set_setting("trend_first_play_takeout_seen", str(ti))
     wm = int(store.get_setting("trend_first_play_watermark") or 0)
-    hist = store.trends.history_track_first(wm)
     plays = store.trends.play_event_track_first()
+    # The history day model is evidence of a first play ONLY when there is no ledger. Where a ledger
+    # exists it is complete (Takeout backfills the past, the extension records the present), and the
+    # history rows are a lingering recently-played window that would drag first-seen days earlier and
+    # fabricate a discovery spike on whatever day the sync happened to run. On the reference database
+    # that put 131 tracks and 32 artists on 2026-06-20 alone.
+    hist = {} if store.trends.has_play_ledger() else store.trends.history_track_first(wm)
     rows = []
     for key in set(hist) | set(plays):
         cands = []
@@ -266,18 +288,30 @@ def month_review(months, store, now, day_counts=(), meta=None):
     start = datetime(y, mo, 1, tzinfo=timezone.utc).timestamp()
     end = datetime(y + (mo == 12), (mo % 12) + 1, 1, tzinfo=timezone.utc).timestamp()
     pstart = datetime(y - (mo == 1), ((mo - 2) % 12) + 1, 1, tzinfo=timezone.utc).timestamp()
-    this = store.charts.listen_distribution("artist", since=start, until=end)
-    prev = store.charts.listen_distribution("artist", since=pstart, until=start)
+    # Ledger where we have one: real plays, and the generated-playlist quarantine applied. The charts
+    # ticker keeps its own day-model semantics; only Trends switches.
+    ledger = store.trends.has_play_ledger()
+    if ledger:
+        this = store.trends.ledger_artist_plays(start, end)
+        prev = store.trends.ledger_artist_plays(pstart, start)
+    else:
+        this = store.charts.listen_distribution("artist", since=start, until=end)
+        prev = store.charts.listen_distribution("artist", since=pstart, until=start)
     deltas = {a: this.get(a, 0) - prev.get(a, 0) for a in set(this) | set(prev)}
     riser = max(deltas.items(), key=lambda kv: kv[1], default=None)
     faller = min(deltas.items(), key=lambda kv: kv[1], default=None)
-    # top new artist: first-seen in this month, ordered by this month's plays
+    # top new artist: first-seen in this month AND absent from the catalog, ordered by this month's
+    # plays. Without the catalog filter this crowns an artist the user has owned for years, whose only
+    # crime was being played for the first time inside our observation window.
     afp = store.trends.first_play_map("artist")
-    new_this = {a: this.get(a, 0) for a, d in afp.items() if month_of(d) == cur["month"]}
+    catalog = store.trends.catalog_artists()
+    new_this = {a: this.get(a, 0) for a, d in afp.items()
+                if month_of(d) == cur["month"] and a not in catalog}
     top_new = max(new_this.items(), key=lambda kv: kv[1], default=None)
     top_artists = [{"artist": a, "plays": n, "art": store.charts.artist_thumbnail(a)}
                    for a, n in sorted(this.items(), key=lambda kv: (-kv[1], kv[0]))[:3]]
-    mtp = store.trends.month_track_plays(start, end)
+    mtp = (store.trends.ledger_track_plays(start, end) if ledger
+           else store.trends.month_track_plays(start, end))
     tk = max(mtp.items(), key=lambda kv: (kv[1], kv[0]), default=None)
     if tk:
         c = store.trends.track_cards([tk[0]]).get(tk[0], {})
@@ -437,7 +471,14 @@ def detect_insights(store, day_counts, meta, artist_first, track_first, now):
     floor_day = store.trends.first_play_floor_day()
     f = _fold(day_counts, meta)
     series = {}
-    for ev in store.history.play_events_since(0):
+    # GENERATED_GROUP quarantine (repos/base.py): the repetition detector reads real play timestamps
+    # directly here, a SEPARATE source from the already-quarantined day_counts the other detectors use.
+    # It must exclude plays sourced from generated playlists too, or the app's own recommendations --
+    # machine-queued from a generated playlist in bursts with shrinking gaps -- masquerade as the user
+    # "coming back faster" and fabricate repetition insights. play_events_since keeps NULL-provenance
+    # (user-driven) rows regardless.
+    generated = store.trends.generated_ytm_ids()
+    for ev in store.history.play_events_since(0, exclude_list_ids=generated):
         series.setdefault(ev["identity_key"], []).append(ev["played_at"])
     for k in series:
         series[k].sort()
@@ -451,23 +492,81 @@ def detect_insights(store, day_counts, meta, artist_first, track_first, now):
     return _bake_art(store, rank_insights(raw, now_day), now)
 
 
+def day_counts_source(store) -> list:
+    """The rollup's play series: [(day, identity_key, plays)].
+
+    Prefers the play ledger (play_events), which records one row per real play with playlist
+    provenance, and which therefore honours the GENERATED_GROUP quarantine (repos/base.py): the app's
+    own recommendations, played back, are not evidence of the user's taste.
+
+    Falls back to the history day model only when no ledger exists at all, which is the fresh-install
+    case (no extension, no Takeout import). The history model cannot be trusted where a ledger exists:
+    it counts snapshot appearances, so a track lingering in YouTube's recently-played window is
+    recorded as played again on every sync. On the reference database 79% of its sync-era rows have no
+    corresponding real play, and it reports 3524 "plays" where 1235 happened.
+    """
+    if store.trends.has_play_ledger():
+        return store.trends.ledger_day_counts()
+    return store.trends.play_day_counts()
+
+
+def compute_overlay_series(day_counts, meta, weeks, top_artists=8, top_genres=6):
+    """Per-entity weekly play series aligned to `weeks`, for the Listening-over-time overlays (#76).
+
+    Returns {"artists": [...], "genres": [...]}, each entry {key, label, total, weekly}, where `weekly`
+    is a plays-per-week list the same length/order as `weeks` (so the Trends route can draw any entity's
+    trajectory on the same axis as the total without another query). Artists are the top-N by total
+    plays; genres are the genre families already tallied per week in compute_weeks."""
+    idx = {w["week_start_day"]: i for i, w in enumerate(weeks)}
+    n = len(weeks)
+    a_week, a_total = {}, {}
+    for day, key, cnt in day_counts:
+        i = idx.get(week_start(day))
+        if i is None:
+            continue
+        artist, _genre = meta.get(key, ("", None))
+        if artist:
+            a_total[artist] = a_total.get(artist, 0) + cnt
+            a_week.setdefault(artist, [0] * n)[i] += cnt
+    g_week, g_total = {}, {}
+    for i, w in enumerate(weeks):
+        for fam, c in w["families"].items():
+            g_week.setdefault(fam, [0] * n)[i] += c
+            g_total[fam] = g_total.get(fam, 0) + c
+    top_a = sorted(a_total, key=lambda a: (-a_total[a], a))[:top_artists]
+    top_g = sorted(g_total, key=lambda f: (-g_total[f], f))[:top_genres]
+    return {"artists": [{"key": "artist:" + a, "label": a, "total": a_total[a], "weekly": a_week[a]}
+                        for a in top_a],
+            "genres": [{"key": "genre:" + f, "label": f, "total": g_total[f], "weekly": g_week[f]}
+                       for f in top_g]}
+
+
 def build(store, now) -> dict:
     """Precompute the whole Trends rollup + spotlight candidate and materialize it. Rec-worker only."""
     _build_first_play_index(store)
-    day_counts = store.trends.play_day_counts()
+    day_counts = day_counts_source(store)
     meta = store.trends.track_meta()
     artist_first = store.trends.first_play_map("artist")
     track_first = store.trends.first_play_map("track")
-    weeks = compute_weeks(day_counts, meta, artist_first, track_first)
-    months = compute_months(day_counts, meta, artist_first)
+    # Catalog membership is the prior for "new to you". Without it, a migrated library reads as a
+    # continuous stream of discoveries the first time we observe each of its artists.
+    catalog_artists = store.trends.catalog_artists()
+    catalog_keys = store.trends.catalog_track_keys()
+    weeks = compute_weeks(day_counts, meta, artist_first, track_first, catalog_artists, catalog_keys)
+    months = compute_months(day_counts, meta, artist_first, catalog_artists)
     insights = detect_insights(store, day_counts, meta, artist_first, track_first, now)
     review = month_review(months, store, now, day_counts, meta)
     floor_day = store.trends.first_play_floor_day()
     days = {day for day, _key, _cnt in day_counts}
     spotlight = detect_spotlight(weeks, months, review, floor_day, store, now, days=days, insights=insights)
+    from yt_playlist.rec import recap_story
+    month_name = (datetime.strptime(review["month"] + "-01", "%Y-%m-%d").strftime("%B")
+                  if review else None)
+    story = recap_story.build_story(store, months, review, insights, month_name)
     payload = {"built_at": now, "first_play_floor_day": floor_day, "weeks": weeks, "months": months,
+               "overlays": compute_overlay_series(day_counts, meta, weeks),
                "insights": insights, "review": review, "health": health_snapshot(store, now),
-               "spotlight": spotlight}
+               "story": story, "spotlight": spotlight}
     store.put_proposals("trend_rollups", payload, now)
     # Only mark the review month "consumed" when its month-rollover candidate is the one that actually
     # won the spotlight cascade. detect_spotlight lets insights (priority 0) outrank the month-rollover

@@ -1,139 +1,172 @@
-{# Taste model - full transparency. Left = permanent (durable) taste; right = right now (transient
-   mood). Hover any petal or bar for a formatted readout of the full layer stack (see _viz_tip.html). #}
+{# Taste model - full transparency. The model is a stack of four layers at different timescales, and
+   each card below draws exactly the layers that exist on its axis. Hover any shape for the whole
+   chain of numbers behind it (see _viz_tip.html). #}
 {% import "_partials/_viz_tip.html" as vt %}
 
-{# One categorical color per petal, assigned by position. Both roses of a dimension iterate the same
-   ordered rows, so a given genre/decade gets the SAME color on the left (permanent) and right (right-now)
-   rose - making them directly comparable. On the right rose, sign is carried by the geometry (beyond the
-   neutral ring = leaning in, inside = leaning away), so color is free to encode identity. #}
+{# One categorical color per petal, assigned by position. Every rose on a card iterates the same
+   ordered rows, so a given genre/decade is the SAME color in all four - making the layers directly
+   comparable. Sign is carried by geometry (beyond the neutral ring = boosted, inside = muted), so
+   color is free to encode identity. The mode ribbons index this same palette by mode. #}
 {% set ROSE_PALETTE = ['#7c6cff', '#4fd6e0', '#ff6b8b', '#f6c177', '#9ece6a', '#bb9af7', '#7aa2f7', '#e0af68', '#ff9e64', '#2ac3de'] %}
-{% macro rose(rows, signed) -%}
+
+{# ── The stack, stated once ──────────────────────────────────────────────── #}
+<section class="card viz-dim layer-key">
+  <h2 class="section" style="margin-top:0">The four layers</h2>
+  <p class="section-note">Your taste is modelled at four timescales at once, fastest to slowest. They
+    do not all speak the same language, so each card below shows only the layers that genuinely exist
+    on its axis - the rest would be invented.</p>
+  <ol class="layer-key-list">
+    <li><span class="layer-name">NOW</span><span class="layer-scale muted">hours</span>
+      <span class="layer-what">Which of your taste modes you're playing right now. Too few plays to
+        estimate a direction, so it's a share across modes, and it stays silent below
+        {{ viz.modes.min_events }} plays rather than guess. <em>See: Taste modes.</em></span></li>
+    <li><span class="layer-name">SESSION</span><span class="layer-scale muted">a day</span>
+      <span class="layer-what">This sitting, fading on a {{ '%.0f'|format(viz.modes.session.halflife_h) }}h
+        half-life. Both a mode balance and a direction in the embedding.
+        <em>See: Taste modes, Mood direction.</em></span></li>
+    <li><span class="layer-name">TRANSIENT</span><span class="layer-scale muted">days to weeks</span>
+      <span class="layer-what">Recent plays, likes, dislikes, mood taps and skips, each fading on its
+        own clock. Becomes a multiplier on every genre, era and artist.
+        <em>See: Genre families, Eras, Artists, Mood direction.</em></span></li>
+    <li><span class="layer-name">PERMANENT</span><span class="layer-scale muted">no decay</span>
+      <span class="layer-what">Your durable taste: weights graduated slowly from your history, the
+        sliders you hold, and the embedding itself.
+        <em>See: everything below.</em></span></li>
+  </ol>
+  <p class="section-note" style="margin-bottom:0">This view is read-only; adjust anything on the
+    <em>Controls</em> tab.</p>
+</section>
+
+{# ── Modes axis: the only axis on which NOW and SESSION exist ─────────────── #}
+{% macro mode_ribbon(segments, layer, scale, note) -%}
+<div class="breadth-ribbon layer-ribbon">
+  {% for seg in segments %}{% set pc = ROSE_PALETTE[seg.color_idx % ROSE_PALETTE|length] %}<i class="seg"
+    style="width:{{ '%.1f'|format(seg.share*100) }}%; --petal-c:{{ pc }}" {{ vt.mode_tip(seg, layer, scale, note, dot=pc) }}></i>{% endfor %}
+</div>
+{%- endmacro %}
+
+<section class="card viz-dim mode-layers">
+  <h2 class="section" style="margin-top:0">Taste modes <span class="scope-tag">now · session · permanent</span></h2>
+  <p class="section-note">The distinct regions of your taste, discovered from your library. All three
+    readings are shares over the same modes, so they stack: <strong>permanent</strong> is the durable
+    shape of your taste, and the faster two are how far this sitting has departed from it. Same mode,
+    same color, in all three.</p>
+
+  <div class="layer-row">
+    <div class="layer-meta"><span class="layer-name">NOW</span><span class="layer-scale muted">last {{ viz.modes.now.window_h }}h</span></div>
+    <div class="layer-reading">
+      {% if viz.modes.now.segments %}{{ mode_ribbon(viz.modes.now.segments, "Now", "last " ~ viz.modes.now.window_h ~ "h", "a flat count of distinct plays in a hard window") }}
+      {% elif not viz.modes.modes %}<p class="rose-quiet">No taste modes yet.</p>
+      {% else %}<p class="rose-quiet">Quiet: fewer than {{ viz.modes.min_events }} plays with a known sound in the last {{ viz.modes.now.window_h }}h.</p>{% endif %}
+    </div>
+  </div>
+
+  <div class="layer-row">
+    <div class="layer-meta"><span class="layer-name">SESSION</span><span class="layer-scale muted">last 24h · {{ '%.0f'|format(viz.modes.session.halflife_h) }}h half-life</span></div>
+    <div class="layer-reading">
+      {% if viz.modes.session.segments %}{{ mode_ribbon(viz.modes.session.segments, "Session", "last 24h", "the same plays, weighted so fresher ones count for more") }}
+      {% elif not viz.modes.modes %}<p class="rose-quiet">No taste modes yet.</p>
+      {% else %}<p class="rose-quiet">Quiet: fewer than {{ viz.modes.min_events }} plays with a known sound in the last 24h.</p>{% endif %}
+    </div>
+  </div>
+
+  <div class="layer-row">
+    <div class="layer-meta"><span class="layer-name">PERMANENT</span><span class="layer-scale muted">no decay</span></div>
+    <div class="layer-reading">
+      {% if viz.modes.permanent.segments %}{{ mode_ribbon(viz.modes.permanent.segments, "Permanent", "no decay", "each mode's share of your clustered library, by size") }}
+      {% else %}<p class="rose-quiet">No taste modes yet; they appear once your library has enough enriched tracks.</p>{% endif %}
+    </div>
+  </div>
+
+  <p class="vb-legend"><span class="muted">NOW has no shape on any other card: an hour of listening is
+    too little to place a direction in the embedding without whiplash, so it is only ever a share
+    across modes you already have.</span></p>
+</section>
+
+{# ── Facet axes: the multiplier chain the ranker literally composes ───────── #}
+{% macro rose(rows, pkey, layer, signed=true) -%}
 <svg viewBox="-112 -112 224 224" class="rose-svg" role="img">
-  {% if signed and rows and rows[0].petal_t %}<circle r="{{ '%.1f'|format(rows[0].petal_t.neutral_r) }}" class="rose-neutral"/>{% endif %}
-  {% for r in rows %}{% set p = r.petal_t if signed else r.petal %}{% set pc = ROSE_PALETTE[loop.index0 % ROSE_PALETTE|length] %}
-  {% if p.path %}<path d="{{ p.path }}" class="petal{% if signed and p.sign < 0 %} away{% endif %}" style="--petal-c:{{ pc }}" {{ vt.transient_tip(r, pc) if signed else vt.perm_tip(r, pc) }}></path>{% endif %}
+  {% if signed and rows and rows[0][pkey] %}<circle r="{{ '%.1f'|format(rows[0][pkey].neutral_r) }}" class="rose-neutral"/>{% endif %}
+  {% for r in rows %}{% set p = r[pkey] %}{% set pc = ROSE_PALETTE[loop.index0 % ROSE_PALETTE|length] %}
+  {% if p.path %}<path d="{{ p.path }}" class="petal{% if signed and p.sign < 0 %} away{% endif %}" style="--petal-c:{{ pc }}" {{ vt.chain_tip(r, layer, pc) }}></path>{% endif %}
   {% endfor %}
 </svg>
 {%- endmacro %}
 
-<p class="section-note" style="margin-bottom:1.2rem">
-  Everything the recommender knows about you, built only from your own library. <strong>Left</strong> is
-  your <strong>permanent</strong> taste; <strong>right</strong> is <strong>right now</strong> - your
-  current mood, which decays back toward neutral as your sync ages. Hover any shape for the exact numbers.
-  This view is read-only; adjust anything on the <em>Controls</em> tab.
-</p>
-
-{% macro layer_ribbon(segments) -%}
-<div class="breadth-ribbon layer-ribbon">
-  {% for seg in segments %}{% set pc = ROSE_PALETTE[seg.color_idx % ROSE_PALETTE|length] %}<i class="seg"
-    style="width:{{ '%.1f'|format(seg.share*100) }}%; --petal-c:{{ pc }}" {{ vt.tip(seg.label, [
-      {"l": "Share", "v": "%.1f"|format(seg.share*100) ~ "%", "t": "strong"}], dot=pc) }}></i>{% endfor %}
+{# Four readings of one facet axis: the evidence, then the three multipliers that compose into the
+   number ranking applies. The three multiplier roses share one scale, so their petals compare. #}
+{% macro chain_roses(rows, unit) -%}
+<div class="viz-quad">
+  <figure class="rose">
+    <div class="rose-cap">What you play <span class="muted"> - share of plays</span></div>
+    {{ rose(rows, 'petal', 'Plays', false) }}
+    <figcaption class="rose-foot">evidence, not a model output</figcaption>
+  </figure>
+  <figure class="rose">
+    <div class="rose-cap">Permanent <span class="muted"> - lasting bias</span></div>
+    {{ rose(rows, 'petal_perm', 'Permanent') }}
+    {% if not (rows | selectattr('lasting', 'ne', 1.0) | list) %}
+    <p class="rose-quiet">Neutral - nothing has graduated yet, and no slider is held.</p>{% endif %}
+    <figcaption class="rose-foot">graduated weight × your slider</figcaption>
+  </figure>
+  <figure class="rose">
+    <div class="rose-cap">Transient <span class="muted"> - right now</span></div>
+    {{ rose(rows, 'petal_tran', 'Transient') }}
+    {% if not (rows | selectattr('transient_mult', 'ne', 1.0) | list) %}
+    <p class="rose-quiet">Neutral - nothing recent is tilting your {{ unit }}.</p>{% endif %}
+    <figcaption class="rose-foot">plays, likes, mood, skips - fading</figcaption>
+  </figure>
+  <figure class="rose">
+    <div class="rose-cap">Effective <span class="muted"> - what ranking applies</span></div>
+    {{ rose(rows, 'petal_eff', 'Effective') }}
+    {% if not (rows | selectattr('effective', 'ne', 1.0) | list) %}
+    <p class="rose-quiet">Neutral - every {{ unit }} scores as itself.</p>{% endif %}
+    <figcaption class="rose-foot">permanent × transient</figcaption>
+  </figure>
 </div>
+<p class="vb-legend"><span class="muted">The dashed ring is <strong>×1.00</strong>, neutral. A petal
+  reaching <strong>out</strong> means that layer boosts the {{ unit }}; <strong>in</strong> means it
+  mutes it. The last three roses share one scale, so <em>effective</em> visibly composes the two
+  before it. Hover any petal for the exact chain.</span></p>
 {%- endmacro %}
 
-{# ── Layer stack (#88): four readings of "what you want", fastest to slowest, replacing the old
-   one-line "Right now" reading (which this subsumes). NOW/SESSION ribbons index their color off
-   viz.layer_stack.layer_modes so the SAME taste mode is the SAME color in both. ── #}
-<section class="card viz-dim layer-stack">
-  <h2 class="section" style="margin-top:0">Layer stack</h2>
-  <p class="section-note">Four readings of what you want, each at its own timescale - fastest at the top.</p>
-
-  <div class="layer-row" {{ vt.tip("NOW", [
-        {"l": "Window", "v": "last " ~ viz.layer_stack.now.window_h ~ "h", "t": "strong"},
-        {"l": "Plays", "v": viz.layer_stack.now.n, "n": "distinct plays with a known sound feeding this read"}],
-        desc="A confidence-gated snapshot of what's playing right now, classified against your discovered taste modes.") }}>
-    <div class="layer-meta"><span class="layer-name">NOW</span><span class="layer-scale muted">last {{ viz.layer_stack.now.window_h }}h</span></div>
-    <div class="layer-reading">
-      {% if viz.layer_stack.now.segments %}{{ layer_ribbon(viz.layer_stack.now.segments) }}
-      {% else %}<p class="rose-quiet">Quiet: fewer than {{ viz.layer_stack.min_events }} plays with a known sound in the window.</p>{% endif %}
-    </div>
-  </div>
-
-  <div class="layer-row" {{ vt.tip("SESSION", [
-        {"l": "Window", "v": "last 24h", "t": "strong"},
-        {"l": "Half-life", "v": viz.layer_stack.session.halflife_h ~ "h", "n": "how fast this session's plays fade"},
-        {"l": "Plays", "v": viz.layer_stack.session.n}],
-        desc="This sitting's mode balance - like NOW, but decay-weighted over a full day instead of a hard window.") }}>
-    <div class="layer-meta"><span class="layer-name">SESSION</span><span class="layer-scale muted">last 24h · {{ viz.layer_stack.session.halflife_h }}h half-life</span></div>
-    <div class="layer-reading">
-      {% if viz.layer_stack.session.segments %}{{ layer_ribbon(viz.layer_stack.session.segments) }}
-      {% else %}<p class="rose-quiet">Quiet: fewer than {{ viz.layer_stack.min_events }} plays with a known sound in the last 24h.</p>{% endif %}
-    </div>
-  </div>
-
-  <div class="layer-row">
-    <div class="layer-meta"><span class="layer-name">TRANSIENT</span><span class="layer-scale muted">days to weeks</span></div>
-    <div class="layer-reading">
-      {% if viz.has_transient and viz.layer_stack.transient.up %}
-      <p class="section-note" style="margin:0">Leaning into <strong>{{ viz.layer_stack.transient.up.name }}</strong>{% if viz.layer_stack.transient.down %}, away from <strong>{{ viz.layer_stack.transient.down.name }}</strong>{% endif %}
-        <span class="muted">- see the genre roses below</span></p>
-      {% elif not viz.recent_exists %}<p class="rose-quiet">Quiet - nothing played recently.</p>
-      {% else %}<p class="rose-quiet">Your recent mix matches your usual.</p>{% endif %}
-    </div>
-  </div>
-
-  <div class="layer-row">
-    <div class="layer-meta"><span class="layer-name">PERMANENT</span><span class="layer-scale muted">everything, always</span></div>
-    <div class="layer-reading">
-      {% if viz.layer_stack.permanent.top %}
-      <p class="section-note" style="margin:0"><strong>{{ viz.layer_stack.permanent.top.name }}</strong> {{ '%.0f'|format(viz.layer_stack.permanent.top.share*100) }}%
-        <span class="muted">- your taste reads {{ viz.layer_stack.permanent.breadth_word }}</span></p>
-      {% else %}<p class="section-note" style="margin:0">No genre tags yet.</p>{% endif %}
-    </div>
-  </div>
-</section>
-
-{# ── Genre families: permanent shape vs current-mood lean ─────────────────── #}
 <section class="card viz-dim">
-  <h2 class="section" style="margin-top:0">Genre families</h2>
-  {% if viz.genres %}
-  <div class="viz-pair">
-    <figure class="rose"><div class="rose-cap">Permanent <span class="muted"> - share of your plays</span></div>{{ rose(viz.genres, false) }}</figure>
-    <figure class="rose">
-      <div class="rose-cap">Right now <span class="muted"> - shift vs your usual</span></div>
-      {{ rose(viz.genres, true) }}
-      {% if not viz.recent_exists %}<p class="rose-quiet">Quiet - nothing played recently.</p>
-      {% elif not viz.has_transient %}<p class="rose-quiet">Your recent mix matches your usual.</p>{% endif %}
-    </figure>
-  </div>
-  <p class="vb-legend"><span class="muted">right rose: petals reach <strong>out</strong> past the ring when you're into a genre more than usual lately, <strong>in</strong> when less. The shifts sum to zero.</span></p>
+  <h2 class="section" style="margin-top:0">Genre families <span class="scope-tag">permanent · transient</span></h2>
+  {% if viz.genres %}{{ chain_roses(viz.genres, "genre") }}
   {% else %}<p class="section-note">No genre tags yet. Enrich your library to populate this.</p>{% endif %}
 </section>
 
-{# ── Eras / decades ──────────────────────────────────────────────────────── #}
 <section class="card viz-dim">
-  <h2 class="section" style="margin-top:0">Eras</h2>
-  {% if viz.eras %}
-  <div class="viz-pair">
-    <figure class="rose"><div class="rose-cap">Permanent <span class="muted"> - share of your plays</span></div>{{ rose(viz.eras, false) }}</figure>
-    <figure class="rose">
-      <div class="rose-cap">Right now <span class="muted"> - shift vs your usual</span></div>
-      {{ rose(viz.eras, true) }}
-      {% if not viz.recent_exists %}<p class="rose-quiet">Quiet - nothing played recently.</p>
-      {% elif not viz.has_transient %}<p class="rose-quiet">Your recent mix matches your usual.</p>{% endif %}
-    </figure>
-  </div>
+  <h2 class="section" style="margin-top:0">Eras <span class="scope-tag">permanent · transient</span></h2>
+  {% if viz.eras %}{{ chain_roses(viz.eras, "decade") }}
   {% else %}<p class="section-note">No decade data yet.</p>{% endif %}
 </section>
 
-{# ── Artists (variable count → honest bars, not a rose) ───────────────────── #}
+{# Artists: a variable, long-tailed count -> honest bars, but the same four readings. #}
 <section class="card viz-dim">
-  <h2 class="section" style="margin-top:0">Artists</h2>
+  <h2 class="section" style="margin-top:0">Artists <span class="scope-tag">permanent · transient</span></h2>
   {% if viz.artists %}
-  {# Shares are full-population (tiny for big libraries), so scale the play bar to your top artist for
+  {# Shares are full-population (tiny for big libraries), so scale the play bar to the top artist for
      legibility; the exact % is in the tooltip. Rows are sorted by share, so the first is the max. #}
   {% set amax = viz.artists[0].share or 1 %}
-  <div class="viz-bars">
+  <div class="chain-bars">
+    <div class="chain-row chain-head">
+      <span></span><span>What you play</span><span>Permanent</span><span>Transient</span><span>Effective</span>
+    </div>
     {% for r in viz.artists %}
-    <div class="viz-bar-row" {{ vt.axis_tip(r) }}>
+    <div class="chain-row" {{ vt.chain_tip(r, "Artist") }}>
       <span class="vb-name">{{ r.name }}</span>
       <span class="vb-perm"><i style="width:{{ '%.0f'|format(r.share / amax * 100) }}%"></i></span>
-      <span class="vb-div"><i class="{{ 'pos' if r.transient_dev > 0 else ('neg' if r.transient_dev < 0 else '') }}"
-            style="width:{{ '%.0f'|format((r.transient_dev|abs / 0.12 * 50) if r.transient_dev|abs < 0.12 else 50) }}%"></i></span>
+      {% for f in [r.frac_perm, r.frac_tran, r.frac_eff] %}
+      <span class="vb-div"><i class="{{ 'pos' if f > 0 else ('neg' if f < 0 else '') }}"
+            style="width:{{ '%.0f'|format(f|abs * 50) }}%"></i></span>
+      {% endfor %}
     </div>
     {% endfor %}
   </div>
-  <p class="vb-legend"><span class="muted">left bar = share of plays · right bar = shift vs your usual (teal = more lately, red = less)</span></p>
+  <p class="vb-legend"><span class="muted">The last three bars grow from a neutral ×1.00 center: teal
+    right = boosted, red left = muted. <em>Effective</em> is the product of the two before it, and is
+    the multiplier ranking applies to every track by that artist.</span></p>
   {% else %}<p class="section-note">No artist play data yet.</p>{% endif %}
 </section>
 
@@ -159,14 +192,13 @@
   <section class="card viz-dim">
     <h2 class="section" style="margin-top:0">Taste breadth <span class="scope-tag">permanent</span></h2>
     {% if viz.genres %}
-    {% set bword = "eclectic" if viz.breadth > 0.66 else ("focused" if viz.breadth < 0.33 else "balanced") %}
     {% set shown = viz.genres | sum(attribute='share') %}
     <div class="breadth-head" {{ vt.tip("Taste breadth", [
-          {"l": "Reads as", "v": bword, "t": "strong"},
+          {"l": "Reads as", "v": viz.breadth_word, "t": "strong"},
           {"l": "Index", "v": "%.2f"|format(viz.breadth) ~ " / 1.00", "n": "0 = one genre only, 1 = evenly spread across many"},
           {"l": "Top genre", "v": viz.genres[0].name ~ " · " ~ "%.0f"|format(viz.genres[0].share*100) ~ "%"},
           {"l": "Families", "v": viz.n_families ~ " genres"}], desc="Each band below is a genre family, sized by share of plays. The shape is your breadth.") }}>
-      <span class="breadth-word">{{ bword }}</span>
+      <span class="breadth-word">{{ viz.breadth_word }}</span>
       <span class="breadth-idx mono">{{ '%.2f'|format(viz.breadth) }}<small> / 1.00</small></span>
     </div>
     <div class="breadth-ribbon">
@@ -184,12 +216,13 @@
   </section>
 </div>
 
-{# ── Graduation funnel: how right-now becomes permanent ───────────────────── #}
+{# ── Graduation funnel: how transient becomes permanent ───────────────────── #}
 <section class="card viz-dim">
   <h2 class="section" style="margin-top:0">Graduation funnel <span class="scope-tag">transient → permanent</span></h2>
-  <p class="section-note">Repeated leans accumulate here; when a facet crosses the threshold it nudges
-    its <em>permanent</em> weight up or down. This is how a passing mood becomes lasting taste.
-    Sources graduate at different speeds - like/dislike fast, a single play barely at all.</p>
+  <p class="section-note">The one path between two layers. Repeated transient leans accumulate here;
+    when a facet crosses the threshold it nudges its <em>permanent</em> weight up or down, changing
+    the Permanent rose above. This is how a passing mood becomes lasting taste. Sources graduate at
+    different speeds - like/dislike fast, a single play barely at all.</p>
   {% if viz.funnel %}
   <div class="viz-bars">
     {% for f in viz.funnel %}
@@ -205,9 +238,9 @@
   {% else %}<p class="section-note">Nothing accumulating yet - interact with recommendations and it fills in.</p>{% endif %}
 </section>
 
-{# ── Transient sources: what's feeding "right now" ───────────────────────── #}
+{# ── Transient sources: what's feeding the transient layer ───────────────── #}
 <section class="card viz-dim">
-  <h2 class="section" style="margin-top:0">What's feeding "right now" <span class="scope-tag">transient inputs</span></h2>
+  <h2 class="section" style="margin-top:0">What feeds the transient layer <span class="scope-tag">transient inputs</span></h2>
   <p>
     <span class="tag" {{ vt.tip("Mood taps", [
           {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.mood) ~ "d", "t": "strong"}]) }}>👍 mood +{{ viz.sources.mood_pos }}</span>
@@ -220,14 +253,15 @@
     <span class="tag" {{ vt.tip("Dislikes", [
           {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.dislike) ~ "d", "t": "strong"}]) }}>⃠ dislikes {{ viz.sources.dislikes }}</span>
   </p>
-  <p class="section-note" style="margin:.2rem 0 .8rem">Each source fades on its own wall-clock half-life
-    (hover a tag) - a month-old vibe tap is nearly gone even if you never interact again. There's no
-    separate sync-freshness scaling any more: every event decays on its own clock, sync or no sync.</p>
+  <p class="section-note" style="margin:.2rem 0 .8rem">These are the events behind every Transient
+    shape above. Each source fades on its own wall-clock half-life (hover a tag) - a month-old vibe
+    tap is nearly gone even if you never interact again. There's no separate sync-freshness scaling:
+    every event decays on its own clock, sync or no sync.</p>
 </section>
 
-{# ── Embedding engine + centroid tilt (expensive → lazy) ──────────────────── #}
+{# ── Embedding engine + the two free-direction layers (expensive → lazy) ──── #}
 <section class="card viz-dim">
-  <h2 class="section" style="margin-top:0">Embedding engine <span class="scope-tag">all surfaces</span></h2>
+  <h2 class="section" style="margin-top:0">Embedding engine <span class="scope-tag">session · transient · permanent</span></h2>
   <div hx-get="/taste/viz/engine" hx-trigger="load" hx-swap="innerHTML">
     <p class="section-note">Loading the embedding model…</p>
   </div>

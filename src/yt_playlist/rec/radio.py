@@ -10,7 +10,7 @@ import threading
 import numpy as np
 
 from yt_playlist.library.listen_derive import classify_exit
-from yt_playlist.rec import embed, rec_params, surfaces, transient
+from yt_playlist.rec import embed, rec_params, surfaces, taste_modes, transient
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
 
@@ -175,7 +175,7 @@ def _modeinfo(store):
     """(cidx, CV, C, mode_ids): content-vector index + stacked active-mode centroids for nearest-mode
     skip scoping, or None when there are no modes / no content vectors / a dim mismatch (the same stale
     -modes guard as layers.now_mode_mix). None makes the mode penalty term inert, never a crash."""
-    modes = store.modes.list_modes(active_only=True)
+    modes = taste_modes.live_modes(store)
     if not modes:
         return None
     _k, CV, cidx = embed.load_content_vectors(store)

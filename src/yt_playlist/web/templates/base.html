@@ -8,6 +8,7 @@
        so nothing is fetched from a third-party CDN at runtime. -->
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/story.css?v={{ asset_v }}">
   <script src="/static/vendor/htmx.min.js"></script>
   <script src="/static/vendor/sortable.min.js"></script>
   {# d3-force graph layout for the Clusters canvas. Order matters: d3-force reads its deps off the
@@ -64,8 +65,8 @@
       <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
       <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
       <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
-      <a href="/trends" class="{{ 'active' if path.startswith('/trends') else '' }}">Trends</a>
       <a href="/clusters" class="{{ 'active' if path.startswith('/clusters') else '' }}">Clusters</a>
+      <a href="/road_trip" class="{{ 'active' if path.startswith('/road_trip') else '' }}">Road Trip</a>
       <div class="tools-menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
         <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"
                 @click="open = !open" :aria-expanded="open">Tools <span class="caret" :class="{ up: open }">▾</span></button>
@@ -95,6 +96,9 @@
      transform (its fill state), which would otherwise become this fixed modal's containing block
      and push it off-screen. At body level the backdrop is viewport-relative. #}
   <div id="conflicts-modal"></div>
+  {# "Songs like this" loads here for the same reason, and on every page: it used to sit inside each
+     page's own body block, where main's transform captured it and opened it off-screen (#104). #}
+  <div id="similar-modal"></div>
   <div id="toasts" class="toasts" aria-live="polite">{% block toasts %}{% endblock %}</div>
   {% if exit_on_idle %}
   <script>

@@ -17,7 +17,7 @@
   <td class="t-wrap" title="{{ t.title }}">
     <span class="tdisplay" x-show="editTitleVid !== '{{ t.video_id }}'">
       <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-         target="_blank" rel="noopener">{{ t.title }}&nbsp;↗</a>
+         target="_blank" rel="noopener" data-yt-info>{{ t.title }}&nbsp;↗</a>
       {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
       <span class="editpen" @click="startEditTitle('{{ t.video_id }}')" title="Edit title">✎</span>
       {% if t.title_edited %}<span class="resetpen" @click="resetField('{{ t.video_id }}', 'title')" title="Reset to original">↺</span>{% endif %}

@@ -62,6 +62,19 @@ if (!window.__tcBridgeLoaded) {
     console.log("[TuneConsole] toggled play/pause");
   };
 
+  // #101 Start playback on demand (the rescue's "ensure-playing"): click the page's main play button
+  // -- the big one on a playlist/watch page that starts the queue -- and if it is not there, resume
+  // via the player-bar toggle. Callers must have already confirmed nothing is playing, so this never
+  // pauses a live tab. A synthetic click is untrusted, so this only starts audio when the (now
+  // foregrounded) tab has enough media engagement for gesture-free autoplay; it is a best effort.
+  const clickMainPlay = () => {
+    const main = document.querySelector("ytmusic-play-button-renderer");
+    const btn = main && (main.querySelector("button") || main);
+    if (btn) { btn.click(); console.log("[TuneConsole] clicked the page play button"); return; }
+    const v = document.querySelector("video");
+    if (v && v.paused) clickPlayPause();
+  };
+
   // Waiting-state net: report a blocked deck-play as a "deck-waiting" pevent (background relays it
   // and focuses the radio window) and arm a ONE-TIME user-activation retry: whichever of click/
   // keydown fires first satisfies Chrome's gesture requirement and retries play(). Shared by both
@@ -107,6 +120,18 @@ if (!window.__tcBridgeLoaded) {
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "rate") { clickRate(msg.action); return; }
     if (msg.type === "playpause") { clickPlayPause(); return; }
+    if (msg.type === "ensure-playing") {
+      // #101 The rescue foregrounded this tab because a play-open did not start. Prefer a direct
+      // play() (a foregrounded, high-engagement tab honours it); on rejection, or with no <video>
+      // yet, click the page play button. Guarded on paused so a tab already playing is left alone.
+      try {
+        const v = document.querySelector("video");
+        if (v && !v.paused) return;
+        if (v) v.play().catch(() => clickMainPlay());
+        else clickMainPlay();
+      } catch (e) {}
+      return;
+    }
     if (msg.type === "radio-prime") {
       // #93 a null/absent url means "clear the stored prime" (sent by /radio/stop), never a URL to
       // navigate to: without this, a stale prime from a stopped radio would hijack the tab on the

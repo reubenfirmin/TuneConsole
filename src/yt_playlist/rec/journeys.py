@@ -143,12 +143,52 @@ def _segue_order(items, journey, seed, feat):
     return out
 
 
+def _road_trip_order(items, seed, feat):
+    """Interleave 'mine' and 'theirs' tracks proportional to their pool sizes (already drawn to the
+    target ratio upstream, so no ratio parameter is needed here), then repair artist-adjacency in
+    small SEQUENTIAL bands — mirroring _axis_order's per-band _space use, NOT a single _space call
+    over the whole sequence. _space/dj_order starts with an unconditional shuffle of its entire
+    input, so calling it once over the full interleaved list would re-shuffle from scratch and
+    destroy the ratio interleaving just built. Banding keeps each band's position in the overall
+    sequence fixed and only reorders the handful of tracks within it (same seam-repair pattern as
+    _axis_order above)."""
+    rng = random.Random(seed)
+    mine = [it for it in items if feat(it).get("source") == "mine"]
+    theirs = [it for it in items if feat(it).get("source") != "mine"]
+    rng.shuffle(mine)
+    rng.shuffle(theirs)
+    seq = []
+    m_used = t_used = 0
+    for _ in range(len(items)):
+        m_share = (m_used / len(mine)) if mine else 1.0
+        t_share = (t_used / len(theirs)) if theirs else 1.0
+        if mine and (not theirs or m_used == 0 or m_share <= t_share):
+            seq.append(mine[m_used]); m_used += 1
+        else:
+            seq.append(theirs[t_used]); t_used += 1
+
+    bands = [seq[i:i + _BAND_SIZE] for i in range(0, len(seq), _BAND_SIZE)]
+    out = []
+    for i, band in enumerate(bands):
+        spaced = _space(band, seed + i)
+        if (out and len(spaced) > 1 and feat(out[-1])["artist"]
+                and feat(out[-1])["artist"] == feat(spaced[0])["artist"]):
+            spaced[0], spaced[1] = spaced[1], spaced[0]   # seam repair across the band boundary
+        out.extend(spaced)
+    return out
+
+
 def journey_order(tracks, journey_key, seed, feat):
     """Order `tracks` per `journey_key`. `feat(item)` -> {artist, genre, energy, decade, plays,
-    recency}. Pure given feat; returns a permutation. Unknown keys fall back to a straight shuffle."""
+    recency}. Pure given feat; returns a permutation. Unknown keys fall back to a straight shuffle.
+
+    'road_trip' is a special case: it is NOT in JOURNEYS (see module docs above), so it never
+    appears in a picker, but is dispatched here so rec/road_trip.py can call it directly."""
     items = list(tracks)
     if len(items) <= 2:
         return items
+    if journey_key == "road_trip":
+        return _road_trip_order(items, seed, feat)
     if journey_key in _AXIS:
         return _axis_order(items, journey_key, seed, feat)
     if journey_key in ("smooth_segue", "odyssey"):

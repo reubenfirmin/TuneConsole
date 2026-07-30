@@ -17,7 +17,7 @@ def only_provider(store, name):
 
 class FakeClient:
     def __init__(self, playlists=None, tracks=None, history=None, search_results=None, catalog=None,
-                 albums=None, song_durations=None):
+                 albums=None, song_durations=None, uploads=None, artists=None):
         self._playlists = playlists or []          # [{"playlistId","title","count"}]
         self._tracks = tracks or {}                # {playlistId: [track dict, ...]}
         self._history = history or []              # [track dict, ...]
@@ -25,6 +25,8 @@ class FakeClient:
         self._catalog = dict(catalog or {})        # {video_id: track_dict}
         self._song_durations = dict(song_durations or {})  # {video_id: seconds} for get_song
         self._albums = albums or {}                # {browseId: album dict (get_album shape)}
+        self._uploads = uploads or {}              # {browseId: album dict (upload shape)}
+        self._artists = artists or {}              # {browseId: artist dict (get_artist shape)}
         for tlist in self._tracks.values():        # auto-seed: a client knows its own tracks
             for t in tlist:
                 if t.get("videoId"):
@@ -39,6 +41,8 @@ class FakeClient:
         return {"tracks": tracks[:limit] if limit is not None else tracks}
     def get_history(self): return list(self._history)
     def get_album(self, browseId): return self._albums.get(browseId, {})
+    def get_library_upload_album(self, browseId): return self._uploads.get(browseId, {})
+    def get_artist(self, browseId): return self._artists.get(browseId, {})
     def create_playlist(self, title, description):  # description required, matching real YTMusic API
         pid = f"PL_NEW_{len(self.created)}"; self.created.append((pid, title, description))
         self._tracks.setdefault(pid, []); return pid

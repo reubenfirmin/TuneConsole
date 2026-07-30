@@ -58,3 +58,38 @@ def test_complete_playlist_uses_embedding_centroid(store):
     items = recommend.complete_playlist(store, target, limit=4)
     assert items
     assert all(i.artist == "AB" for i in items)                # centroid pulls A-cluster, not B
+
+
+# --- content-space fingerprint -------------------------------------------------------------------
+# Taste-mode centroids are persisted vectors in this space; the fingerprint is how they detect that
+# the space they were built in no longer exists (see rec/taste_modes.reconcile).
+
+def test_fingerprint_is_stable_for_the_same_space():
+    m = {"cat": {"rock": 0, "pop": 1}, "cont": [["bpm", 120.0, 10.0]]}
+    assert embed.content_model_fingerprint(m) == embed.content_model_fingerprint(dict(m))
+
+
+def test_fingerprint_changes_when_a_token_is_added():
+    a = {"cat": {"rock": 0, "pop": 1}, "cont": []}
+    b = {"cat": {"rock": 0, "pop": 1, "jazz": 2}, "cont": []}
+    assert embed.content_model_fingerprint(a) != embed.content_model_fingerprint(b)
+
+
+def test_fingerprint_changes_when_columns_are_reordered():
+    """Same dimension, different basis: the case a shape check cannot catch."""
+    a = {"cat": {"rock": 0, "pop": 1}, "cont": []}
+    b = {"cat": {"rock": 1, "pop": 0}, "cont": []}
+    assert embed.content_model_fingerprint(a) != embed.content_model_fingerprint(b)
+
+
+def test_fingerprint_changes_when_a_continuous_feature_drops_out():
+    a = {"cat": {}, "cont": [["bpm", 120.0, 10.0], ["energy", 0.5, 0.1]]}
+    b = {"cat": {}, "cont": [["bpm", 120.0, 10.0]]}
+    assert embed.content_model_fingerprint(a) != embed.content_model_fingerprint(b)
+
+
+def test_fingerprint_ignores_zscore_drift():
+    """mu/sd move on every rebuild; treating that as a new space would retire all modes each pass."""
+    a = {"cat": {"rock": 0}, "cont": [["bpm", 120.0, 10.0]]}
+    b = {"cat": {"rock": 0}, "cont": [["bpm", 118.4, 11.2]]}
+    assert embed.content_model_fingerprint(a) == embed.content_model_fingerprint(b)

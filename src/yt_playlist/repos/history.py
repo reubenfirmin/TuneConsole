@@ -1,7 +1,10 @@
 """HistoryRepo: listening-history snapshots and their item keys."""
 import datetime
+import logging
 
 from yt_playlist.repos.base import Repo, synchronized
+
+logger = logging.getLogger(__name__)
 
 _NOON = 43200            # store each play-date snapshot at noon UTC, so taken_at queries are day-stable
 _EPOCH = datetime.date(1970, 1, 1)
@@ -9,20 +12,35 @@ _LIVE_DEDUP_S = 1800     # #75 same-track re-reports within this window merge (l
                          # past it, the same track is a genuine replay and logs a new event
 
 
-def _parse_played_date(played, taken_at) -> float:
+def _parse_played_date(played, taken_at):
     """Resolve YouTube's relative `played` bucket ('Today' / 'Yesterday' / 'Jun 25' / 'Jun 25, 2025') to
-    an ABSOLUTE UTC day (a noon timestamp), anchored on the sync time `taken_at` (#58). Because the bucket
-    is relative, the SAME play reads 'Today' on one sync and 'Yesterday' the next -- both resolve to the
-    same date, which is what makes play recording idempotent. Unknown/localized labels fall back to the
-    sync day (so a play is at worst attributed to the day we observed it, never duplicated)."""
+    an ABSOLUTE UTC day (a noon timestamp), anchored on the sync time `taken_at` (#58). Returns None when
+    the bucket cannot be resolved.
+
+    Because the bucket is relative, the SAME play reads 'Today' on one sync and 'Yesterday' the next.
+    Both resolve to the same date, which is what makes play recording idempotent.
+
+    An UNRESOLVABLE bucket returns None rather than falling back to the sync day. The old fallback was
+    the phantom-play generator: get_history() returns YouTube's whole recently-played window (hundreds of
+    rows) on every sync, so any row we could not date was stamped "played today", again, every single
+    day. Measured on a real database: one sync wrote 230 history rows, of which 153 were tracks whose
+    actual plays all happened on other days. It also hit every non-English locale at once, because the
+    only date formats parsed here are English month names.
+
+    None means "this row is in the window but we do not know when it was played", which is exactly the
+    truth. The caller drops it. A play we cannot date is not lost: the extension records live plays with
+    real timestamps (library/live_plays.py), and a dateable row still backfills.
+    """
     sync_day = datetime.datetime.fromtimestamp(taken_at, tz=datetime.timezone.utc).date()
     p = (played or "").strip().lower()
-    if p in ("", "today"):
+    if p == "today":
         day = sync_day
     elif p == "yesterday":
         day = sync_day - datetime.timedelta(days=1)
+    elif not p:
+        return None                                      # no bucket at all: undateable
     else:
-        day = sync_day
+        day = None
         s = (played or "").strip()
         for fmt, has_year in (("%b %d, %Y", True), ("%B %d, %Y", True), ("%b %d", False), ("%B %d", False)):
             try:
@@ -36,6 +54,10 @@ def _parse_played_date(played, taken_at) -> float:
                 continue
             day = d
             break
+        if day is None:                                  # localized month name, or a format we don't know
+            logger.warning("history: unparseable played bucket %r; the row is skipped rather than "
+                           "attributed to today (see _parse_played_date)", s)
+            return None
     return (day - _EPOCH).days * 86400 + _NOON
 
 
@@ -64,13 +86,28 @@ class HistoryRepo(Repo):
         plays, not lingering; a reordered/unstable window cannot create phantom plays. Same-date repeats
         merge. Returns the number of new (key, date) plays recorded.
 
-        play_count(key) = COUNT(*) over history_items = number of distinct days the track was played.
+        play_count(key) = COUNT(*) over history_items = number of distinct days the track was played,
+        PER IDENTITY. Two accounts that both played a track on the same day contribute two rows.
+
+        A window row whose `played` bucket cannot be resolved to a date is DROPPED, not attributed to
+        the sync day. get_history() returns the whole recently-played window on every sync, so dating a
+        row by "the day we happened to look" re-records the same play daily. A bare string key (used by
+        explicit callers and by live_plays, which knows the play is happening now) still means the sync
+        day.
         """
         by_date: dict = {}
         for item in items:
-            key, played = (item, None) if isinstance(item, str) else item
-            if key:
-                by_date.setdefault(_parse_played_date(played, taken_at), set()).add(key)
+            bare = isinstance(item, str)
+            key, played = (item, None) if bare else item
+            if not key:
+                continue
+            if bare:
+                play_ts = _parse_played_date("today", taken_at)     # caller asserts: played now
+            else:
+                play_ts = _parse_played_date(played, taken_at)
+                if play_ts is None:                                 # undateable window row: not a play today
+                    continue
+            by_date.setdefault(play_ts, set()).add(key)
         recorded = 0
         for play_ts, keys in by_date.items():
             sid = self._snapshot_for_date(identity_id, play_ts)
@@ -228,7 +265,7 @@ class HistoryRepo(Repo):
             return False
         self.conn.execute(
             "INSERT INTO play_events(identity_id, identity_key, video_id, played_at, "
-            "playlist_ytm_id, like_status) VALUES (?,?,?,?,?,?)",
+            "playlist_ytm_id, like_status, source) VALUES (?,?,?,?,?,?,'live')",
             (identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status))
         self.conn.commit()
         return True
@@ -297,8 +334,8 @@ class HistoryRepo(Repo):
             if not key:
                 continue
             cur = self.conn.execute(
-                "INSERT INTO play_events(identity_id, identity_key, video_id, played_at) "
-                "SELECT ?, ?, ?, ? WHERE NOT EXISTS ("
+                "INSERT INTO play_events(identity_id, identity_key, video_id, played_at, source) "
+                "SELECT ?, ?, ?, ?, 'takeout' WHERE NOT EXISTS ("
                 "  SELECT 1 FROM play_events WHERE identity_id=? AND identity_key=? "
                 "  AND played_at BETWEEN ? - 2.0 AND ? + 2.0)",
                 (identity_id, key, vid, ts, identity_id, key, ts, ts))

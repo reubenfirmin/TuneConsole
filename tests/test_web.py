@@ -594,8 +594,8 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     from tests.conftest import only_provider
     # stub MusicBrainz so the test never hits the network (one enrich_full yields genre, year, MBID)
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist: {"S0": ("rock", "1998", None),
-                                               "S1": ("jazz", "2003", None)}.get(title, (None, None, None)))
+                        lambda title, artist: {"S0": ("rock", "1998", None, []),
+                                               "S1": ("jazz", "2003", None, [])}.get(title, (None, None, None, [])))
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
     store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", "Al", 200, 1),
@@ -619,7 +619,8 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
 
     # re-run after MusicBrainz gains a genre for v2. It fills the gap and v2 is now complete
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist: ("ambient", "2010", None) if title == "Sx" else (None, None, None))
+                        lambda title, artist: ("ambient", "2010", None, []) if title == "Sx"
+                        else (None, None, None, []))
     jid2 = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid2}") as st:
         "".join(st.iter_text())

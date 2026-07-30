@@ -21,6 +21,21 @@ def test_allowlist_membership():
     assert not host_allowed("")
 
 
+def test_cover_art_hosts_are_allowed():
+    """Cover art enrichment reaches Cover Art Archive, which redirects its JSON to archive.org's
+    CDN, so BOTH are needed: allowing only coverartarchive.org blocks the redirect and the fallback
+    silently yields no art (which is exactly how it shipped broken once)."""
+    assert host_allowed("coverartarchive.org")
+    assert host_allowed("archive.org")
+    assert host_allowed("dn721909.ca.archive.org")   # the redirect target is a wildcard CDN subdomain
+
+
+def test_cover_art_hosts_do_not_widen_the_boundary():
+    assert not host_allowed("notarchive.org")
+    assert not host_allowed("archive.org.evil.com")
+    assert not host_allowed("coverartarchive.org.evil.com")
+
+
 def test_gate_strips_query_and_returns_path(tmp_path):
     g = EgressGuard(log_path=tmp_path / "net.log")
     host, path = g.gate("https://ws.audioscrobbler.com/2.0/?api_key=SECRET&method=x",

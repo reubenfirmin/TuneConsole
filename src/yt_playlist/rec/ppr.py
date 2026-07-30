@@ -11,7 +11,7 @@ import json
 import numpy as np
 
 from yt_playlist.core import paths
-from yt_playlist.rec import embed, rec_params
+from yt_playlist.rec import embed, rec_params, taste_modes
 
 _ALPHA = 0.85          # walk weight; restart probability is (1 - alpha)
 _ITERS = 50            # power-iteration steps (converges well before this on a stochastic matrix)
@@ -65,7 +65,7 @@ def mode_rankings(store, alpha=None, iters=None, tol=None, depth=None) -> dict:
     Truncated to `depth`. {} when the graph or content space is missing; a mode with no member present
     in the co-listen vocab maps to []. Precompute only (called from the rec worker); None args fall back
     to the ppr_* knobs so a tuner can sweep alpha/tolerance without code changes."""
-    modes = store.modes.list_modes(active_only=True)
+    modes = taste_modes.live_modes(store)
     if not modes:
         return {}
     keys, W, idx = build_transition(store)
@@ -104,7 +104,7 @@ def shadow_log(store, now) -> int:
     co-listen graph) and the centroid-cosine top-N (the mode's content-nearest members), and append one
     timestamped snapshot to the persistent shadow log. Returns the number of modes logged. Best-effort:
     returns 0 when prerequisites are missing; the caller guards against exceptions."""
-    modes = store.modes.list_modes(active_only=True)
+    modes = taste_modes.live_modes(store)
     if not modes:
         return 0
     keys, W, idx = build_transition(store)

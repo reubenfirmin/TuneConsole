@@ -1,0 +1,34 @@
+{% if error %}<p class="muted rt-error">{{ error }}</p>{% endif %}
+{% for r in recipes %}
+<div class="card rt-recipe" x-data="{ editing: false }">
+  <div class="rt-recipe-head">
+    <h3>{{ r.name }}</h3>
+    <span class="tag teal">{{ r.own_pct }}% mine / {{ 100 - r.own_pct }}% theirs</span>
+    <span class="tag">{{ (r.target_minutes / 60) | round(1) }}h target</span>
+  </div>
+  <div class="rt-recipe-chips">
+    {% for a in r.artists %}<span class="genre-chip"><span>{{ a }}</span></span>{% endfor %}
+    {% for g in r.genres %}<span class="genre-chip"><span>{{ g }}</span></span>{% endfor %}
+    {% if r.blacklist_genres %}
+    <span class="muted">Excluding from mine:</span>
+    {% for g in r.blacklist_genres %}<span class="genre-chip red"><span>{{ g }}</span></span>{% endfor %}
+    {% endif %}
+  </div>
+  <div class="rt-recipe-actions">
+    <button type="button" class="btn rt-gen-btn" hx-post="/road_trip/recipes/{{ r.id }}/generate"
+            hx-target="#road-trip-recipes" hx-swap="innerHTML" hx-disabled-elt="this">
+      <span class="rt-gen-label">Generate</span>
+      <span class="rt-gen-loading htmx-indicator"><span class="spinner"></span> Generating…</span>
+    </button>
+    <button type="button" class="btn ghost" hx-delete="/road_trip/recipes/{{ r.id }}"
+            hx-target="#road-trip-recipes" hx-swap="innerHTML"
+            hx-confirm="Delete the &quot;{{ r.name }}&quot; recipe?">Delete</button>
+    {% if r.last_playlist_id %}
+    <a class="muted" href="https://music.youtube.com/playlist?list={{ r.last_playlist_id }}"
+       target="_blank" rel="noopener" data-yt-info>Last generated ↗</a>
+    {% endif %}
+  </div>
+</div>
+{% else %}
+<p class="muted">No Road Trip recipes yet. Add one below.</p>
+{% endfor %}

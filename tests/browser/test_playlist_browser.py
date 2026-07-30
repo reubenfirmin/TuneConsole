@@ -131,8 +131,8 @@ def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):
     import yt_playlist.providers.musicbrainz as mb
     from tests.conftest import only_provider
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist: ("Electronic", "1998", None) if title == "Song B"
-                        else (None, None, None))
+                        lambda title, artist: ("Electronic", "1998", None, []) if title == "Song B"
+                        else (None, None, None, []))
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     only_provider(live_playlist_app["store"], "musicbrainz")
     page.goto(f"{base}/playlist/{pid}")

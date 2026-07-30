@@ -79,6 +79,62 @@ async function pickYtmTab() {
 }
 
 // Land a backend "navigate" request in the EXISTING YouTube Music tab, not a new one. Scoped to
+// #101 Playback rescue. Swapping the tab in the background is the right default, but it often will
+// not start playing: Chrome gates unmuted playback on a user gesture or a high media-engagement
+// score, and a tab that was never foregrounded regularly loses that bet. The swap then lands
+// silently and nothing happens. So watch the navigated tab for a REAL playing frame, and if none
+// turns up, show the tab briefly (which is what actually gets YouTube Music going) and put the owner
+// straight back where they were.
+//
+// If even that does not start it, Chrome wants a click we cannot fake, so we STAY on the tab: the
+// player is right there and one click starts it. Bouncing back would hide the problem instead.
+const RESCUE_WAIT_MS = 2500;   // let a normal navigate + autoplay report in first, so the common case never flickers
+const RESCUE_DWELL_MS = 600;   // long enough for YTM to get going once it is visible
+let rescue = null;             // { tabId, returnTabId, timer } while an episode is in flight
+// Tabs currently reporting real playback, so the rescue can tell "it worked" from "still silent".
+const playingTabs = new Set();
+
+function cancelPlaybackRescue() {
+  if (!rescue) return;
+  try { clearTimeout(rescue.timer); } catch (e) {}
+  rescue = null;
+}
+
+async function armPlaybackRescue(tabId) {
+  cancelPlaybackRescue();          // a newer play supersedes any episode still in flight
+  playingTabs.delete(tabId);       // the navigate wipes the old document: assume silence until told otherwise
+  let returnTabId = null;
+  try {
+    // lastFocusedWindow, NOT currentWindow: a service worker has no window of its own, so
+    // "currentWindow" has nothing to resolve against here. The window they were last looking at is
+    // the one to put them back in.
+    const [cur] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (cur && cur.id !== tabId) returnTabId = cur.id;   // null when they are already sitting on YTM
+  } catch (e) {}
+  rescue = { tabId, returnTabId, timer: setTimeout(() => runPlaybackRescue(tabId), RESCUE_WAIT_MS) };
+}
+
+async function runPlaybackRescue(tabId) {
+  if (!rescue || rescue.tabId !== tabId) return;   // superseded or already cancelled by a playing frame
+  const returnTabId = rescue.returnTabId;
+  rescue = null;
+  try {
+    await chrome.tabs.update(tabId, { active: true });
+  } catch (e) {
+    return;                                        // tab closed under us: nothing to rescue
+  }
+  // Foregrounding often is not enough on its own (the page loaded paused). Now that the tab is
+  // visible, ask the page to actually start: a foregrounded, high-engagement music.youtube.com tab
+  // usually honours a direct play(), and content.js falls back to clicking the page play button.
+  try { chrome.tabs.sendMessage(tabId, { type: "ensure-playing" }).catch(() => {}); } catch (e) {}
+  setTimeout(async () => {
+    // Only go back if showing it actually worked. Still silent means Chrome wants a click, so leave
+    // them on the player rather than hiding it behind TuneConsole again.
+    if (returnTabId == null || !playingTabs.has(tabId)) return;
+    try { await chrome.tabs.update(returnTabId, { active: true }); } catch (e) {}
+  }, RESCUE_DWELL_MS);
+}
+
 // music.youtube.com so the backend can only ever point our own tab at YouTube Music.
 async function navigateYtmTab(url) {
   try {
@@ -93,6 +149,7 @@ async function navigateYtmTab(url) {
     try {
       await suppressBeforeUnload(tab.id);   // seamless swap, no "Reload site?" prompt
       await chrome.tabs.update(tab.id, { url });
+      armPlaybackRescue(tab.id);            // #101: a background swap often will not autoplay
       console.log("[TuneConsole] navigated existing YTM tab (background)", tab.id, "->", url);
     } catch (e) {
       console.warn("[TuneConsole] navigate update failed:", e);
@@ -101,7 +158,12 @@ async function navigateYtmTab(url) {
     // Only when there is genuinely no YouTube Music tab: open one (in the background), since there is
     // nothing to swap.
     console.log("[TuneConsole] no existing YTM tab, opening one in the background");
-    try { await chrome.tabs.create({ url, active: false }); } catch (e) {}
+    // A brand-new background tab is even less likely to autoplay than a reused one, so it gets the
+    // same rescue.
+    try {
+      const made = await chrome.tabs.create({ url, active: false });
+      if (made && made.id != null) armPlaybackRescue(made.id);
+    } catch (e) {}
   }
 }
 
@@ -544,6 +606,11 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
 // listeners cannot race each other into a double-clear or a redundant self-heal. Still awaits the
 // restore before reading ids (L7): a wake on this event must not log against null state.
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  // #101: a closed tab is neither playing nor rescuable. Bookkeeping only, and done up front,
+  // because the deck logic below deliberately returns early for non-deck tabs (which is most of
+  // them) and playingTabs would otherwise grow for the life of the service worker.
+  playingTabs.delete(tabId);
+  if (rescue && rescue.tabId === tabId) cancelPlaybackRescue();
   await ensureDeckStateRestored();   // SW-wake race guard: see restoreDeckState's comment
   if (tabId !== liveTabId && tabId !== standbyTabId) return;
   console.log("[TuneConsole] deck tab closed", tabId, "- leaving self-heal to the next deck-navigate");
@@ -745,6 +812,19 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   }
   if (msg.type === "play" && (deck === "live" || deck === "standby")) {
     deckWaitingFocused = false;
+  }
+  // #101 Playback rescue: track which tabs are actually PLAYING (content.js reports paused off the
+  // real <video>, so a paused play frame is not playback), and stand the rescue down the moment the
+  // navigated tab reports real sound. That is the "if needed" in the issue: the switch only ever
+  // happens when the background swap genuinely failed to start.
+  const srcTabId = sender && sender.tab && sender.tab.id;
+  if (msg.type === "play" && srcTabId != null) {
+    if (msg.paused) {
+      playingTabs.delete(srcTabId);
+    } else {
+      playingTabs.add(srcTabId);
+      if (rescue && rescue.tabId === srcTabId) cancelPlaybackRescue();
+    }
   }
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (msg.type === "play") {

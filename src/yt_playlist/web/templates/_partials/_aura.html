@@ -1,0 +1,28 @@
+{# Deterministic "listening aura" for the recap personality: a soft glowing blob whose hue is the
+   month's dominant genre-family colour, distorted by energy (turbulence), spread by exploration
+   (reach), and softened by rhythm (warmth). Seeded, so it is reproducible and share-safe. `id` must be
+   unique per aura on a page (SVG filter/gradient ids are document-global). #}
+{% macro aura(a, id) -%}
+<svg viewBox="0 0 240 240" class="aura" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+  <defs>
+    {# Iridescent, not monochrome: a bright core, the genre hue in the body, and a cool cyan rim, so
+       the aura reads as colour rather than one flat wash. #}
+    <radialGradient id="aura-g-{{ id }}" cx="50%" cy="44%" r="64%">
+      <stop offset="0%" stop-color="color-mix(in srgb, {{ a.hue }} 35%, #ffffff)" stop-opacity="1"/>
+      <stop offset="34%" stop-color="{{ a.hue }}" stop-opacity="0.95"/>
+      <stop offset="66%" stop-color="color-mix(in srgb, {{ a.hue }} 55%, #ff6bd0)" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="color-mix(in srgb, {{ a.hue }} 40%, #4fd6e0)" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="aura-f-{{ id }}" x="-40%" y="-40%" width="180%" height="180%">
+      <feTurbulence type="fractalNoise" baseFrequency="{{ '%.4f'|format(0.006 + a.turbulence * 0.028) }}"
+                    numOctaves="2" seed="7" result="n"/>
+      <feDisplacementMap in="SourceGraphic" in2="n" scale="{{ '%.0f'|format(12 + a.reach * 64) }}"/>
+      <feGaussianBlur stdDeviation="{{ '%.1f'|format(1.5 + a.warmth * 3.5) }}"/>
+    </filter>
+  </defs>
+  <circle cx="120" cy="112" r="{{ '%.0f'|format(52 + a.reach * 30) }}"
+          fill="url(#aura-g-{{ id }})" filter="url(#aura-f-{{ id }})"/>
+  <circle cx="120" cy="112" r="{{ '%.0f'|format(30 + a.turbulence * 24) }}"
+          fill="url(#aura-g-{{ id }})" filter="url(#aura-f-{{ id }})" opacity="0.75"/>
+</svg>
+{%- endmacro %}

@@ -8,10 +8,34 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
+from yt_playlist.library.album_fetch import fetch_album, is_upload_album
 from yt_playlist.providers import enrichment, lastfm, waterfall
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util.duration import parse_duration
-from yt_playlist.util.thumbnails import best_thumb
+from yt_playlist.util.thumbnails import best_thumb, is_placeholder_art
+
+
+_MOSAIC_TILES = 4
+
+
+def cover_and_mosaic(album, tracks):
+    """(cover, mosaic) for the album head. A personal compilation has no cover of its own, and
+    YouTube hands back a generic grey disc rather than nothing, so fall back to a mosaic of the
+    tracks' own covers: honest that it is a collection, where picking one track's art to stand for
+    the whole thing would not be. Returns a single cover when the album really has one."""
+    cover = (album or {}).get("thumbnail")
+    if cover and not is_placeholder_art(cover):
+        return cover, []
+    seen = []
+    for t in tracks or []:
+        art = t.get("thumbnail")
+        if art and not is_placeholder_art(art) and art not in seen:
+            seen.append(art)
+            if len(seen) == _MOSAIC_TILES:
+                break
+    if len(seen) == 1:            # one cover is not a mosaic, it is just the cover
+        return seen[0], []
+    return (None, seen) if seen else (cover, [])
 
 
 def build(ctx) -> APIRouter:
@@ -30,7 +54,7 @@ def build(ctx) -> APIRouter:
         try:
             client = next(iter((ctx.client_provider() or {}).values()), None)
             if client and browse_id:
-                a = client.get_album(browse_id)
+                a = fetch_album(client, browse_id)
                 album = {
                     "title": a.get("title"),
                     "artist": ", ".join(x.get("name", "") for x in (a.get("artists") or [])),
@@ -41,16 +65,24 @@ def build(ctx) -> APIRouter:
                                 "duration": t.get("duration")} for t in (a.get("tracks") or [])],
                 }
         except Exception:  # noqa: BLE001 - no client / network / parse all degrade gracefully
-            ctx.logger.info("album fetch failed for %r (non-fatal)", browse_id)
+            ctx.logger.info("album fetch failed for %r (non-fatal)", browse_id, exc_info=True)
         saved = browse_id in RecDao(store).saved_album_ids()
-        # The editable "folded-in library" table is only for SAVED albums (whose full track list has
-        # been materialized for enrichment). For an unsaved album, regular sync may still have stamped
+        upload = is_upload_album(browse_id)
+        # An album is "in your library" when you saved it, or when it IS your library: an upload
+        # (privately owned release) is yours by definition, and can never appear in saved_albums
+        # because saving means liking an audioPlaylistId, which an upload has none of.
+        in_library = saved or upload
+        # The editable "folded-in library" table is only for library albums (whose full track list has
+        # been materialized for enrichment). For any other album, regular sync may still have stamped
         # one incidental track with this album_browse_id (because it's in one of your playlists). That
-        # partial subset must NOT shadow the full live-fetched album, so only read it when saved.
-        tracks = store.album_tracks_detail(browse_id) if (browse_id and saved) else []
-        # Fold a saved album's tracks into the library ON DEMAND (using the tracks we just fetched
-        # live), so enrichment is available the moment you open it, no waiting for a full sync.
-        if saved and not tracks and album and album.get("tracks"):
+        # partial subset must NOT shadow the full live-fetched album, so only read it when in-library.
+        tracks = store.album_tracks_detail(browse_id) if (browse_id and in_library) else []
+        # Fold a library album's tracks in ON DEMAND (using the tracks we just fetched live), so
+        # enrichment is available the moment you open it, no waiting for a full sync. Fold whenever
+        # the live album has more than we hold: an upload typically arrives as a PARTIAL subset (sync
+        # stamps only the tracks that appear in a playlist), and a `not tracks` guard would skip the
+        # fold entirely for it, leaving 3 of 17 rows on screen.
+        if in_library and album and album.get("tracks") and len(tracks) < len(album["tracks"]):
             for t in album["tracks"]:
                 if t.get("video_id") and t.get("title"):
                     store.upsert_track(t["video_id"], t["title"], t.get("artist") or album.get("artist") or "",
@@ -62,8 +94,11 @@ def build(ctx) -> APIRouter:
             album = {"title": meta.get("title") or tracks[0]["album"] or "Album",
                      "artist": meta.get("artist") or tracks[0]["artist"], "year": meta.get("year"),
                      "thumbnail": meta.get("thumbnail") or tracks[0]["thumbnail"], "tracks": tracks}
+        cover, mosaic = cover_and_mosaic(album, tracks)
         return templates.TemplateResponse(request, "album.html", {
             "album": album, "browse_id": browse_id, "tracks": tracks, "saved": saved,
+            "is_upload": upload, "in_library": in_library,
+            "cover": cover, "mosaic": mosaic,
             "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
             "conflict_count": store.conflict_count_for_album(browse_id)})
@@ -84,7 +119,7 @@ def build(ctx) -> APIRouter:
         if not vids:
             try:
                 client = next(iter((ctx.client_provider() or {}).values()), None)
-                a = client.get_album(browse) if client else {}
+                a = fetch_album(client, browse) if client else {}
                 title = title or a.get("title")
                 vids = [t.get("videoId") for t in (a.get("tracks") or []) if t.get("videoId")]
             except Exception:  # noqa: BLE001 - no client / network all degrade to a 404

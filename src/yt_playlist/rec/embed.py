@@ -5,6 +5,8 @@ and listening sessions, a latent model of *their* taste, not the crowd's. Neighb
 space capture second-order similarity (tracks that never share a playlist but both sit near a
 third), which plain co-occurrence cannot. CPU-only, no GPU, no external models.
 """
+import hashlib
+import itertools
 import json
 import math
 
@@ -323,6 +325,31 @@ def _build_library_content(store):
     return keys, V, model
 
 
+def content_model_fingerprint(model) -> str:
+    """Identify the content SPACE, so a vector built in one is never compared against another.
+
+    `build_content_model` assigns categorical columns by insertion order, so a single new sub-genre
+    or musical key both grows the dimension and can shift what a column *means*. Anything holding a
+    persisted vector (taste-mode centroids) must be able to notice that its space is gone: a bare
+    dimension check would miss a same-size reordering and silently produce meaningless cosines.
+
+    Keyed on the token→column mapping and the continuous feature order, NOT on the z-score mu/sd,
+    which drift on every rebuild. Treating that drift as a new space would retire every taste mode
+    each pass; the geometry it induces is close enough for centroid matching to remain meaningful.
+    """
+    payload = json.dumps({
+        "cat": sorted(model.get("cat", {}).items(), key=lambda kv: (kv[1], kv[0])),
+        "cont": [c[0] for c in model.get("cont", [])],
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def content_space_id(store) -> str:
+    """Fingerprint of the currently-persisted content model, or "" when none is built yet."""
+    raw = store.get_setting("rec_content_model")
+    return content_model_fingerprint(json.loads(raw)) if raw else ""
+
+
 def build_content_vectors(store, dim=None):  # dim kept for signature symmetry; ignored
     """Return (keys, V): L2-normalized library content vectors (genre/era + audio sounds-like)."""
     keys, V, _ = _build_library_content(store)
@@ -413,6 +440,34 @@ def neighbors(store, key, topn=12, exclude=None):
     if V is None or key not in idx:
         return []
     return _rank(keys, V, V[idx[key]], (exclude or set()) | {key}, topn)
+
+
+def neighbors_blended(store, key, topn=12):
+    """#105 Neighbours from BOTH spaces, so "songs like this" can reach tracks you do not own yet.
+
+    The collaborative space is built from playlist co-occurrence, so by construction it can only ever
+    contain tracks that are already in your playlists: the discovered pool is invisible to it, and
+    "songs like this" could only ever hand back your own catalogue. The content space (genre/era/
+    audio) is where the pool lives, and _content_space widens it with them.
+
+    Merged by RANK, not score: the two spaces are different metrics and their numbers are not
+    comparable, but "this space's 1st pick" and "that space's 1st pick" are. Collaborative leads,
+    since it is the stronger signal for tracks you own.
+    """
+    collab = neighbors(store, key, topn=topn)
+    ckeys, CV, cidx = _content_space(store, include_new=True)
+    content = (_rank(ckeys, CV, CV[cidx[key]], {key}, topn)
+               if CV is not None and key in cidx else [])
+    out, seen = [], {key}
+    for pair in itertools.zip_longest(collab, content):
+        for cand in pair:
+            if cand is None or cand[0] in seen:
+                continue
+            seen.add(cand[0])
+            out.append(cand)
+            if len(out) >= topn:
+                return out
+    return out
 
 
 def neighbors_for_unmodeled(store, key, topn=12):

@@ -32,6 +32,7 @@ class ModesRepo(Repo):
                 "active": r["active"],
                 "first_seen": r["first_seen"],
                 "last_seen": r["last_seen"],
+                "space": r["space"],
             })
         return out
 
@@ -52,9 +53,10 @@ class ModesRepo(Repo):
             first_seen = existing["first_seen"] if existing is not None else now
             self.conn.execute(
                 "INSERT OR REPLACE INTO taste_modes"
-                "(mode_id, label, families, centroid, size, rep_keys, active, first_seen, last_seen) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
-                (u["mode_id"], u["label"], fam, blob, int(u["size"]), reps, first_seen, now))
+                "(mode_id, label, families, centroid, size, rep_keys, active, first_seen, last_seen, space) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                (u["mode_id"], u["label"], fam, blob, int(u["size"]), reps, first_seen, now,
+                 u.get("space") or ""))
         for mid in retired_ids:
             self.conn.execute("UPDATE taste_modes SET active=0 WHERE mode_id=?", (mid,))
         self.conn.commit()
@@ -107,7 +109,17 @@ class ModesRepo(Repo):
     @synchronized
     def log_pick(self, playlist_id, mode_id, now, ranker=None) -> None:
         """Record a Save & play of a mode card, with the in-mode ranker it was served under (#57).
-        Idempotent per playlist_id."""
+        Idempotent per playlist_id.
+
+        This is MODE-LEVEL signal, deliberately exempt from the GENERATED_GROUP quarantine (see
+        repos/base.py). Each generated playlist is built from one taste mode, so the user choosing to
+        play it is a weak signal for that mode at the top of the model stack: it feeds the Thompson
+        sampler through rec.mode_eval.mode_bandit_stats. It is evidence about the MODE, never about the
+        tracks, which stay quarantined so the engine cannot feed on its own suggestions.
+
+        Do not "fix" this by excluding generated playlists here. Every row in this table is, by
+        construction, a play of a generated playlist. Quarantining it would delete the signal entirely.
+        """
         self.conn.execute(
             "INSERT OR IGNORE INTO rec_mode_picks(playlist_id, mode_id, ranker, created_at) "
             "VALUES (?, ?, ?, ?)", (int(playlist_id), int(mode_id), ranker, float(now)))

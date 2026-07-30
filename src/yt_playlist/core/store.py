@@ -18,6 +18,7 @@ from yt_playlist.repos.overlaps import OverlapRepo
 from yt_playlist.repos.playlists import PlaylistRepo
 from yt_playlist.repos.player_events import PlayerEventsRepo
 from yt_playlist.repos.rec import RecRepo
+from yt_playlist.repos.road_trip import RoadTripRepo
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.search import SearchRepo
 from yt_playlist.repos.settings import SettingsRepo
@@ -98,7 +99,11 @@ CREATE TABLE IF NOT EXISTS play_events (
   video_id TEXT,                           -- real timestamps (the (track,day) history model stays
   played_at REAL NOT NULL,                 -- the coarse view every existing consumer reads)
   playlist_ytm_id TEXT,                    -- provenance: the list= id when played from a playlist
-  like_status TEXT                         -- LIKE | DISLIKE | INDIFFERENT at report time
+  like_status TEXT,                        -- LIKE | DISLIKE | INDIFFERENT at report time
+  -- Where this row came from. 'takeout' is account-wide (every device) and is therefore AUTHORITATIVE
+  -- for the span it covers: a history row it does not corroborate never happened. 'live' comes from
+  -- the browser extension and sees only browser plays, so its silence proves nothing. '' is legacy.
+  source TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_play_events_time ON play_events(played_at);
 -- #93v2 recent_plays_with_ts' radio-shadow suppression probes play_events by identity_key per
@@ -247,7 +252,11 @@ CREATE TABLE IF NOT EXISTS taste_modes (
   rep_keys    TEXT NOT NULL,
   active      INTEGER NOT NULL,
   first_seen  REAL NOT NULL,
-  last_seen   REAL NOT NULL
+  last_seen   REAL NOT NULL,
+  -- Fingerprint of the content space `centroid` lives in (embed.content_model_fingerprint). A
+  -- centroid is only comparable to one from the same space; '' means "built before we tracked
+  -- this", which never matches and so retires cleanly on the next recompute.
+  space       TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS rec_mode_impressions (
   epoch      INTEGER NOT NULL,
@@ -320,10 +329,11 @@ class Store:
         self.wiki = WikiRepo(self)
         self.modes = ModesRepo(self)
         self.trends = TrendsRepo(self)
+        self.road_trip = RoadTripRepo(self)
         self._repos = (self.overlaps, self.discovery, self.genres, self.settings, self.actions,
                        self.identities, self.history, self.collection, self.rec, self.charts,
                        self.tracks, self.playlists, self.player_events, self.search, self.enrichment, self.wiki, self.modes,
-                       self.trends)
+                       self.trends, self.road_trip)
 
     def __getattr__(self, name):
         # Delegate any attribute Store no longer defines to the DAO that owns it. Only hit on a
@@ -402,12 +412,39 @@ class Store:
         pcols2 = {r["name"] for r in self.conn.execute("PRAGMA table_info(rec_mode_picks)")}
         if "ranker" not in pcols2:
             self.conn.execute("ALTER TABLE rec_mode_picks ADD COLUMN ranker TEXT")
+        ecols = {r["name"] for r in self.conn.execute("PRAGMA table_info(play_events)")}
+        if "source" not in ecols:
+            self.conn.execute("ALTER TABLE play_events ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+            # Legacy rows: the extension did not exist before its first event, so everything earlier is
+            # a Takeout backfill. Only the extension writes like_status/playlist_ytm_id, which dates it.
+            row = self.conn.execute(
+                "SELECT MIN(played_at) t FROM play_events "
+                "WHERE like_status IS NOT NULL OR playlist_ytm_id IS NOT NULL").fetchone()
+            live_first = row["t"] if row and row["t"] is not None else None
+            if live_first is None:
+                self.conn.execute("UPDATE play_events SET source='takeout' WHERE source=''")
+            else:
+                self.conn.execute("UPDATE play_events SET source='takeout' WHERE source='' AND played_at < ?",
+                                  (live_first,))
+                self.conn.execute("UPDATE play_events SET source='live' WHERE source='' AND played_at >= ?",
+                                  (live_first,))
+        mcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(taste_modes)")}
+        if "space" not in mcols:
+            # Existing centroids were built in an unknown content space. '' matches no live space,
+            # so the next recompute retires them and re-discovers with fresh ids instead of matmul-ing
+            # vectors from two different spaces together.
+            self.conn.execute("ALTER TABLE taste_modes ADD COLUMN space TEXT NOT NULL DEFAULT ''")
         # #76-#79 first-play index: whole-table create in SCHEMA covers fresh + existing DBs; this
         # guard is only a belt-and-braces create so an older DB without it gets the table.
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS trend_first_play ("
             "kind TEXT NOT NULL, id_key TEXT NOT NULL, first_day INTEGER NOT NULL, "
             "first_ts REAL NOT NULL, source TEXT NOT NULL, PRIMARY KEY (kind, id_key))")
+        self.conn.commit()
+        # One-time data repairs, each guarded by its own settings key. Local import keeps core.store
+        # free of an import-time dependency, matching the style above.
+        from yt_playlist.core import repair
+        repair.run_once(self)
         # #75 the legacy recently-played window cache is gone (live play events + the (track, date)
         # dedup made it obsolete); drop it from existing databases
         self.conn.execute("DROP TABLE IF EXISTS history_window")

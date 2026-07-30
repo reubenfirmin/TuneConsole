@@ -52,7 +52,7 @@ def test_enrich_loop_aborts_when_host_unreachable(provider, store, monkeypatch):
     def fake_enrich(title, artist, *extra):       # discogs/lastfm pass a token/key as a 3rd arg
         calls.append(title)
         provider._breaker.record(dns)             # stand in for the failing network call
-        return (None, None, None) if provider is musicbrainz else (None, None)
+        return (None, None, None, []) if provider is musicbrainz else (None, None)
 
     monkeypatch.setattr(provider, seam, fake_enrich)
     # lastfm refuses to start without a key; give it one so we reach the loop
@@ -80,7 +80,7 @@ def test_enrich_loop_completes_when_host_reachable(provider, store, monkeypatch)
     def fake_enrich(title, artist, *extra):
         calls.append(title)
         provider._breaker.record()                # reachable, just no match for this track
-        return (None, None, None) if provider is musicbrainz else (None, None)
+        return (None, None, None, []) if provider is musicbrainz else (None, None)
 
     monkeypatch.setattr(provider, seam, fake_enrich)
     monkeypatch.setattr(lastfm, "api_key", lambda *a, **k: "k", raising=False)

@@ -476,6 +476,38 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
         store.set_recipe(new_pid, recipe, now)           # remember exactly how this one was made
     return {"new_ytm": new_pid, "pid": db_pid, "title": title, "added": added, "skipped": len(skipped)}
 
+def _playlist_ready(client, ytm_id) -> bool:
+    """Has YouTube materialized this playlist enough to load it? A just-created playlist returns a
+    valid id from create_playlist before its watch?list= page is loadable, so 'the API gave us an id'
+    is not 'it exists to play'. get_playlist returning tracks is a far better proxy. A throw (a 404
+    while it is still propagating) is a clean not-ready, not an error."""
+    try:
+        return bool((client.get_playlist(ytm_id, limit=1) or {}).get("tracks"))
+    except Exception:  # noqa: BLE001 - not-yet-propagated shows up as a fetch error; treat as not ready
+        return False
+
+
+def navigate_when_ready(client, bridge, ytm_id, watch_url, *, tries=20, interval_s=1.5,
+                        sleep=None) -> bool:
+    """Send the extension a navigate to a freshly-created playlist, but only once YouTube confirms it
+    exists. Navigating immediately lands on a not-yet-ready playlist (and, since #101, foregrounds
+    that tab), so poll get_playlist until it reports tracks, then navigate. Best-effort: if it never
+    confirms within tries*interval_s, skip the switch entirely rather than foreground a broken tab
+    (the in-app redirect and the manual 'Open on YouTube Music' link still work). Meant to run on a
+    background thread so the HTTP response is never held for the poll."""
+    import time
+    sleep = sleep or time.sleep
+    for i in range(tries):
+        if _playlist_ready(client, ytm_id):
+            bridge.send_control({"type": "navigate", "url": watch_url})
+            return True
+        if i < tries - 1:
+            sleep(interval_s)
+    logger.warning("playlist %s not confirmed ready after ~%.0fs; skipping the YTM switch",
+                   ytm_id, tries * interval_s)
+    return False
+
+
 def create_playlist_from_album(store, browse_id, name, client, now, identity_id) -> dict:
     """Create a NEW playlist from an album's tracks (non-destructive). Fetches the album, creates a
     real (un-grouped) playlist under `identity_id` with its songs, and materializes it into the store

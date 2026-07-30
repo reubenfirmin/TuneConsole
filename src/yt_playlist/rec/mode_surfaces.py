@@ -9,7 +9,9 @@ from collections import Counter
 
 import numpy as np
 
-from yt_playlist.rec import embed, layers, mode_eval, rec_params, recommend, surfaces, transient
+from yt_playlist.rec import (embed, layers, mode_eval, rec_params, recommend, surfaces,
+                             taste_modes, transient)
+from yt_playlist.rec.rec_dao import RecDao
 
 CARD_SURFACES = ("wheelhouse", "explore", "comfort", "fresh")
 _MIN_CARD = 4          # below this many tracks (even after backfill) a card is dropped, not shown thin
@@ -57,7 +59,7 @@ def _nearest_mode(key, mode_ids, C, lidx, LV, didx, DV):
 def prepare_bundles(store, now) -> dict:
     """Bucket each surface's pool by nearest mode; cache under rec_proposals['mode_bundles']. Payload
     {str(mode_id): {surface: [item_dict, ...]}}. Empty dict when there are no modes."""
-    modes = store.modes.list_modes(active_only=True)
+    modes = taste_modes.live_modes(store)
     if not modes:
         store.put_proposals("mode_bundles", {}, now)
         return {}
@@ -326,7 +328,13 @@ def assemble_cards(store, now, epoch) -> list[dict]:
         used_s.add(surf)
         used_m.add(m)
 
-    cards, seen = [], set()
+    # Songs already bundled into a generated playlist are spoken for, and must not be offered again
+    # however stale the bundles are. The bundles apply this exclusion when they are BUILT, but
+    # creating a playlist does not rebuild them, so every card between one build and the next handed
+    # back exactly what you had just bundled: generate twice in a day and you got the same tracks.
+    # Seeding `seen` makes it a render-time fact rather than a build-time snapshot, and reuses the
+    # per-render machinery that already blocks a track across cards.
+    cards, seen = [], set(RecDao(store).generated_track_keys())
 
     def _card_for(surf, mid, ranker, ppr_pos):
         """Build one card for (surface, mode), or return (None, bucket) when it is too thin. Reads the
