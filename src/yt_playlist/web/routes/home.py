@@ -1,6 +1,7 @@
 """Home tab: the default landing page: Sync control, Take-Action triage, and For-You recs."""
 import asyncio
 import json
+import threading
 import time
 from datetime import datetime
 
@@ -537,15 +538,16 @@ def build(ctx) -> APIRouter:
                     executor.create_generated_playlist, store, name, tracks, client, now_fn(),
                     identity_id, recipe=recipe)
                 # Land playback in the already-open YouTube Music tab, not a new one. The watch URL
-                # (list=...) autoplays the playlist. The extension swaps the existing tab; the result
-                # template never opens a YouTube tab itself.
+                # (list=...) autoplays the playlist. But YouTube returns the new id before the
+                # watch?list= page is loadable, so the switch waits until get_playlist confirms the
+                # playlist exists (executor.navigate_when_ready), on a background thread so this
+                # response is not held for the poll. The result template never opens a YouTube tab.
                 watch_url = f"https://music.youtube.com/watch?list={res['new_ytm']}"
                 bridge = getattr(ctx, "bridge", None)
                 if bridge is not None and getattr(bridge, "connected", False):
-                    try:
-                        bridge.send_control({"type": "navigate", "url": watch_url})
-                    except Exception:  # noqa: BLE001 - navigation is best-effort
-                        pass
+                    threading.Thread(
+                        target=executor.navigate_when_ready,
+                        args=(client, bridge, res["new_ytm"], watch_url), daemon=True).start()
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
                 if isinstance(recipe, dict) and recipe.get("mode_id") is not None and res.get("pid"):
                     try:

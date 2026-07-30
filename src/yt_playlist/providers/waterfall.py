@@ -13,8 +13,9 @@ preempt older ones at track boundaries.
 import uuid
 
 from yt_playlist.providers import musicbrainz, lastfm, discogs, deezer, acousticbrainz
-from yt_playlist.providers import base
+from yt_playlist.providers import base, coverart
 from yt_playlist.providers.enrich_queue import PriorityGate
+from yt_playlist.util.thumbnails import is_placeholder_art
 
 REGISTRY = {m.name: m for m in (musicbrainz, lastfm, discogs, deezer, acousticbrainz)}
 _gate = PriorityGate()
@@ -23,6 +24,16 @@ _gate = PriorityGate()
 _AUDIO = ("bpm", "energy", "danceability", "music_key", "music_scale", "mood_happy", "mood_sad",
           "mood_relaxed", "mood_acoustic", "instrumental", "loudness", "dynamic_complexity",
           "popularity", "gain", "label")
+
+# Plumbing a provider hands to another step rather than a finding about the track. Never logged (it
+# would pollute the enrichment log and the transparency UI) and never persisted.
+_INTERNAL = ("mb_release_ids",)
+
+# Providers that return a ready-to-use cover URL, in priority order. Art is deliberately NOT applied
+# per-provider like the other fields: providers run in the user's configured order (musicbrainz
+# first, deezer last, by default), so a fill-only write would let whoever ran first win. Art is
+# picked once per track, after every provider has answered, by THIS order instead.
+_ART_SOURCES = ("deezer",)
 
 
 class TrackSink:
@@ -40,6 +51,9 @@ class TrackSink:
 
     def set_audio(self, **audio):
         self.store.set_track_audio(self.track["id"], **audio)
+
+    def set_art(self, url):
+        self.store.set_track_art(self.track["id"], url)
 
     def log(self, run_id, provider, field, value):
         self.store.log_enrichment(self.track["id"], run_id, provider, field, value)
@@ -69,6 +83,10 @@ class DiscoveredSink:
     def set_mbid(self, mbid):
         pass
 
+    def set_art(self, url):
+        # A discovered track is a candidate, not a library row: it carries no art of its own.
+        pass
+
     def set_audio(self, **audio):
         self.store.set_discovered_audio(self.key, **audio)
 
@@ -94,6 +112,40 @@ def _apply(sink, track, res) -> None:
     audio = {k: v for k, v in f.items() if k in _AUDIO}
     if audio:
         sink.set_audio(**audio)
+
+
+def needs_art(track) -> bool:
+    """No cover worth keeping? A track dict without a `thumbnail` key predates this column in the
+    pending query, so treat it as needing art and let the fill-only sink decide."""
+    thumb = track.get("thumbnail")
+    return not thumb or is_placeholder_art(thumb)
+
+
+def _pick_art(results):
+    """A cover from the highest-priority provider that found one."""
+    for name in _ART_SOURCES:
+        for r in results:
+            art = r.fields.get("art")
+            if r.provider == name and art:
+                return art
+    return None
+
+
+def _resolve_art(sink, track, results):
+    """Give the track a cover if it has none. YouTube serves a generic grey disc rather than nothing
+    when it has no art (always, for your own uploads), so a thumbnail is not proof of a cover.
+
+    Cover Art Archive is the fallback only: it costs an HTTP call per candidate release, so it runs
+    only when the primary found nothing AND the track actually needs art."""
+    if not needs_art(track):
+        return
+    art = _pick_art(results)
+    if not art:
+        release_ids = next((r.fields["mb_release_ids"] for r in results
+                            if r.fields.get("mb_release_ids")), None)
+        if release_ids:
+            art = coverart.front_cover(release_ids)
+    sink.set_art(art)
 
 
 def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=None, registry=None,
@@ -147,6 +199,8 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                     continue
                 res = m.probe(t, store)
                 for fld, val in res.fields.items():
+                    if fld in _INTERNAL:
+                        continue
                     sink.log(run_id, m.name, fld, val)
                 _apply(sink, t, res)
                 results.append(res)
@@ -154,6 +208,7 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                     dead.add(m.name)
                     on_progress({"type": "info", "text": f"{m.name} looks unreachable. "
                                  "Skipping it for the rest of this run."})
+            _resolve_art(sink, t, results)
             for fld, candidates in base.detect_conflicts(results).items():
                 sink.upsert_conflict(fld, candidates)
                 conflicts_found += 1

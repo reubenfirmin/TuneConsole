@@ -43,6 +43,18 @@ def test_reel_renders_every_beat():
     assert "reel(" in r.text
 
 
+def test_reel_exits_land_on_the_dashboard_not_the_removed_trends_tab():
+    """#102 The reel's three exits (close, Escape, past-the-last-slide) all pointed at /trends, which
+    was removed with the Trends tab: every way out of the recap dead-ended on a 404. Home is the only
+    place the recap is reachable from, so it is where leaving it belongs."""
+    c, _ = _client(_STORY)
+    html = c.get("/trends/story/2026-06").text
+    assert 'href="/trends"' not in html
+    assert "'/trends'" not in html                  # the Escape and last-slide handlers
+    assert 'class="reel-close" href="/"' in html
+    assert html.count("window.location.href = '/'") == 2
+
+
 def test_reel_404_for_unknown_or_missing():
     c, _ = _client(_STORY)
     assert c.get("/trends/story/1999-01").status_code == 404

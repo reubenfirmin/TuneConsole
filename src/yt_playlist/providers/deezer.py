@@ -61,7 +61,7 @@ def _get_json(url):
     return data
 
 
-_FIELDS = ("bpm", "popularity", "gain", "label")
+_FIELDS = ("bpm", "popularity", "gain", "label", "art")
 
 
 def _empty():
@@ -108,7 +108,12 @@ def enrich(title, artist):
         feat["gain"] = float(gain) if gain is not None else None
     except (TypeError, ValueError):
         feat["gain"] = None
-    album_id = (track.get("album") or {}).get("id")
+    # The cover is embedded in the /track response, so it costs no extra request. YouTube has no art
+    # at all for an upload (it serves a generic grey disc), and Deezer knows these tracks: they are
+    # ordinary catalogue songs, whatever compilation you happened to rip them onto.
+    track_album = track.get("album") or {}
+    feat["art"] = track_album.get("cover_xl") or track_album.get("cover_big") or None
+    album_id = track_album.get("id")
     if album_id is not None:
         try:
             album = _get_json(_API + f"/album/{album_id}")
@@ -131,7 +136,11 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
             on_progress({"type": "err", "text": "Deezer looks unreachable. Stopped. "
                          "The remaining tracks will retry next time."})
             return False
+        # Art is not an audio feature: it has its own fill-only rule, so it never reaches
+        # set_track_audio (whose kwargs are the audio columns).
+        art = feat.pop("art", None)
         store.set_track_audio(t["id"], **feat)
+        store.set_track_art(t["id"], art)
         shown = f"{feat['bpm']:.0f} BPM" if feat["bpm"] else "no BPM"
         if feat["popularity"]:
             shown += f" · pop {feat['popularity']}"

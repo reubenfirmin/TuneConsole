@@ -4,7 +4,8 @@
   <span class="eyebrow">Album</span>
   <h1>Album unavailable</h1>
   <p>Couldn't load this album.{% if browse_id %}
-    <a href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">Open it on YouTube Music ↗</a>.{% endif %}
+    <a href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener"
+       data-yt-info>Open it on YouTube Music ↗</a>.{% endif %}
     A connected account is required to fetch album details.</p>
 </div>
 {% else %}
@@ -14,19 +15,31 @@
      @conflicts-count.window="conflictCount = $event.detail.count">
 <div class="artist-head pl-head" x-data="{ artH: 0 }"
      x-init="const fit = () => artH = $refs.main.offsetHeight; fit(); new ResizeObserver(fit).observe($refs.main)">
-  {% if album.thumbnail %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ album.thumbnail }}" alt=""
+  {% if mosaic %}
+  {# No cover of its own (a personal compilation has none, and YouTube hands back a grey disc rather
+     than nothing), so show what it is actually made of. #}
+  <span class="pl-art pl-art-mosaic" :style="`height:${artH}px`">
+    {% for src in mosaic %}<img src="{{ src }}" alt="" referrerpolicy="no-referrer"
+         onerror="this.remove()">{% endfor %}</span>
+  {% elif cover %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ cover }}" alt=""
        referrerpolicy="no-referrer" onerror="this.closest('.pl-art').remove()"></span>{% endif %}
   <div class="pl-headmain" x-ref="main">
     <span class="eyebrow">Album</span>
     <h1>{{ album.title }}</h1>
     <p class="pl-stats">
-      <span class="tag amber">{{ album.artist }}</span>
+      {# A compilation upload has no single album artist, so YouTube returns none: an empty amber
+         pill in the header is worse than no pill. #}
+      {% if album.artist %}<span class="tag amber">{{ album.artist }}</span>{% endif %}
       {% if album.year %}<span class="stat">{{ album.year }}</span>{% endif %}
       <span class="stat"><strong>{{ album.tracks|length }}</strong>&nbsp;track{{ '' if album.tracks|length == 1 else 's' }}</span>
     </p>
     <div class="pl-actions">
       <a class="cta" href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">▶ Play on YouTube Music ↗</a>
       {% if saved %}<span class="tag teal">✓ In your library</span>
+      {% elif is_upload %}
+      {# Your own upload: it is already in your library, and there is no audio playlist to like, so
+         there is nothing a save button could do here. #}
+      <span class="tag teal">✓ Your upload</span>
       {% else %}
       <form hx-post="/collection/save-album" hx-swap="none" style="display:inline">
         <input type="hidden" name="browse_id" value="{{ browse_id }}">
@@ -35,7 +48,8 @@
     </div>
   </div>
   {# Enrichment runs over the album's tracks once they're folded into the library, which happens when
-     you save it, so the icons are always shown (parity with playlists) but disabled until saved. #}
+     you save it (or immediately, if it's your own upload), so the icons are always shown (parity
+     with playlists) but disabled until the album is in your library. #}
   <div class="head-tools" x-data="{ cpOpen: false }">
     <button type="button" class="head-icon" @click="cpOpen = true"
             title="Create a playlist from this album" aria-label="Create a playlist from this album">
@@ -75,8 +89,10 @@
       </svg>
     </a>
     <button type="button" class="head-icon" :class="{ on: running }"
-            @click="start()" :disabled="running{% if not saved %} || true{% endif %}"
-            title="{{ 'Save to library first to enrich' if not saved else 'Enrich genre, year &amp; audio features: runs every enabled provider in order' }}"
+            @click="start()" :disabled="running{% if not in_library %} || true{% endif %}"
+            {# A bare & here on purpose: this string is inside {{ }}, so Jinja escapes it to &amp;
+               on output. Writing &amp; would double-escape and the tooltip would read "&amp;". #}
+            title="{{ 'Save to library first to enrich' if not in_library else 'Enrich genre, year & audio features: runs every enabled provider in order' }}"
             aria-label="Enrich">
       <span class="spinner" x-show="running" x-cloak></span>
       <svg x-show="!running" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
@@ -146,7 +162,7 @@
       </td>
       <td class="t-wrap" title="{{ t.title }}">
         {% if t.video_id %}<a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-           target="_blank" rel="noopener">{{ t.title }}&nbsp;↗</a>
+           target="_blank" rel="noopener" data-yt-info>{{ t.title }}&nbsp;↗</a>
         {% else %}{{ t.title }}{% endif %}</td>
       <td class="t-wrap" title="{{ t.artist or album.artist }}">{{ t.artist or album.artist }}</td>
       <td class="num mono">{{ t.duration or '' }}</td>
@@ -180,7 +196,6 @@
     </div>
   </div>
 </template>
-<div id="similar-modal"></div>   {# "Songs like this" modal loads here via htmx #}
 </div>
 {% endif %}
 {% endblock %}

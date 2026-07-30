@@ -65,11 +65,16 @@ def build(ctx) -> APIRouter:
         into that playlist, slotted just below `vid`."""
         dao = RecDao(store)
         key = dao.key_for_video(vid)
-        nbrs = embed.neighbors(store, key, topn=12) if key else []
+        nbrs = embed.neighbors_blended(store, key, topn=12) if key else []
         if not nbrs and key:                              # new/quarantined track: proxy via its artist
             nbrs = embed.neighbors_for_unmodeled(store, key, topn=12)
-        meta = store.tracks_by_keys([k for k, _ in nbrs] + ([key] if key else []))
-        items = [meta[k] for k, _ in nbrs if k in meta]
+        # #105: a neighbour can now come from the out-of-corpus pool, which lives in its own table, so
+        # resolve against both. A discovered row carries the same video_id/title/artist/album/thumbnail
+        # the modal renders and posts, so the two kinds are interchangeable from here on.
+        keys = [k for k, _ in nbrs]
+        meta = store.tracks_by_keys(keys + ([key] if key else []))
+        pool = store.discovered_tracks_by_keys([k for k in keys if k not in meta])
+        items = [meta.get(k) or pool[k] for k in keys if k in meta or k in pool]
         return templates.TemplateResponse(request, "_partials/similar_modal.html",
                                           {"items": items, "seed": meta.get(key, {}),
                                            "have_model": store.rec_vectors_count() > 0,

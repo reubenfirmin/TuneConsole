@@ -18,6 +18,7 @@ from yt_playlist.repos.overlaps import OverlapRepo
 from yt_playlist.repos.playlists import PlaylistRepo
 from yt_playlist.repos.player_events import PlayerEventsRepo
 from yt_playlist.repos.rec import RecRepo
+from yt_playlist.repos.road_trip import RoadTripRepo
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.search import SearchRepo
 from yt_playlist.repos.settings import SettingsRepo
@@ -328,10 +329,11 @@ class Store:
         self.wiki = WikiRepo(self)
         self.modes = ModesRepo(self)
         self.trends = TrendsRepo(self)
+        self.road_trip = RoadTripRepo(self)
         self._repos = (self.overlaps, self.discovery, self.genres, self.settings, self.actions,
                        self.identities, self.history, self.collection, self.rec, self.charts,
                        self.tracks, self.playlists, self.player_events, self.search, self.enrichment, self.wiki, self.modes,
-                       self.trends)
+                       self.trends, self.road_trip)
 
     def __getattr__(self, name):
         # Delegate any attribute Store no longer defines to the DAO that owns it. Only hit on a

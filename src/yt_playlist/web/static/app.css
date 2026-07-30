@@ -559,6 +559,11 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
 .pl-art { position: relative; flex: none; aspect-ratio: 1; border-radius: 12px; overflow: hidden;
   border: 1px solid var(--border-2); box-shadow: 0 14px 34px -16px rgba(0,0,0,0.75); }
 .pl-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+/* An album with no cover of its own (a personal compilation) is shown as what it is made of: a grid
+   of its tracks' covers. Static flow, so the tiles lay out instead of stacking on inset:0. */
+.pl-art-mosaic { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr; gap: 1px; }
+.pl-art-mosaic img { position: static; inset: auto; }
+.pl-art-mosaic img:only-child, .pl-art-mosaic img:nth-child(3):last-child { grid-column: span 2; }
 .pl-headmain { min-width: 0; }
 .share-link { align-self: flex-start; }
 .pl-headmain { display: flex; flex-direction: column; min-width: 0; }
@@ -573,6 +578,9 @@ tr.group-row td { font-family: var(--font-display); font-size: 0.92rem; color: v
   color: var(--dim); font-size: 0.92rem; margin: 0.8rem 0 0; }
 .pl-stats .stat { display: inline-flex; align-items: baseline; }
 .pl-stats .stat::before { content: "·"; color: var(--faint); margin-right: 0.85rem; }
+/* A separator only separates: when the artist pill is absent (a compilation upload has no album
+   artist) the first stat leads the line, and must not open with a dangling "·". */
+.pl-stats .stat:first-child::before { content: none; }
 .pl-stats strong { color: var(--text); font-weight: 700; }
 .pl-actions { margin-top: 1.25rem; }
 /* bare icon tools (share, MusicBrainz, Last.fm) stacked at the right, spread to fill the header height */
@@ -731,7 +739,11 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
 /* "Songs like this" modal: narrower, and never taller than the viewport (the row list scrolls). */
 .modal.modal-similar { width: min(34rem, calc(100vw - 2rem)); max-width: none;
   max-height: calc(100dvh - 3rem); display: flex; flex-direction: column; }
-.modal.modal-similar #similar-results { flex: 1; min-height: 0; overflow-y: auto; }
+/* padding-inline matches .alt-list's negative margins below: the rows bleed outward so a row hover
+   spans the full width, and this is the room they bleed INTO. Without it they overhang this box,
+   and since overflow-y:auto forces overflow-x to compute to auto, that overhang became a horizontal
+   scrollbar (#106). */
+.modal.modal-similar #similar-results { flex: 1; min-height: 0; overflow-y: auto; padding-inline: 0.4rem; }
 .modal.modal-similar .alt-list { max-height: none; overflow: visible; margin: 0.2rem -0.4rem 0; }
 
 /* per-row "⋯" actions menu */
@@ -2610,3 +2622,19 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .unopened-meta strong { font-size: 0.82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .unopened-meta span { font-size: 0.74rem; color: var(--dim); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
+
+.rt-suggestions { display: flex; flex-direction: column; border: 1px solid var(--border);
+  border-radius: 8px; margin: 0.25rem 0; max-height: 10rem; overflow-y: auto; }
+.rt-suggestion { text-align: left; background: transparent; border: none; padding: 0.4rem 0.6rem;
+  cursor: pointer; color: inherit; }
+.rt-suggestion:hover { background: var(--accent-soft); }
+.rt-recipe-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.rt-recipe-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0.5rem 0; }
+.rt-recipe-actions { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.5rem; }
+.genre-chip.red { background: var(--danger-soft); color: var(--danger); }
+
+/* Generate button: swap label <-> spinner while the (multi-second: per-track Deezer popularity
+   lookups) request is in flight. htmx adds .htmx-request to the button itself for its duration. */
+.rt-gen-btn .rt-gen-loading { display: none; align-items: center; gap: 0.35rem; }
+.rt-gen-btn.htmx-request .rt-gen-loading { display: inline-flex; }
+.rt-gen-btn.htmx-request .rt-gen-label { display: none; }

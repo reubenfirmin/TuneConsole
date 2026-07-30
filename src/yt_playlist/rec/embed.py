@@ -6,6 +6,7 @@ space capture second-order similarity (tracks that never share a playlist but bo
 third), which plain co-occurrence cannot. CPU-only, no GPU, no external models.
 """
 import hashlib
+import itertools
 import json
 import math
 
@@ -439,6 +440,34 @@ def neighbors(store, key, topn=12, exclude=None):
     if V is None or key not in idx:
         return []
     return _rank(keys, V, V[idx[key]], (exclude or set()) | {key}, topn)
+
+
+def neighbors_blended(store, key, topn=12):
+    """#105 Neighbours from BOTH spaces, so "songs like this" can reach tracks you do not own yet.
+
+    The collaborative space is built from playlist co-occurrence, so by construction it can only ever
+    contain tracks that are already in your playlists: the discovered pool is invisible to it, and
+    "songs like this" could only ever hand back your own catalogue. The content space (genre/era/
+    audio) is where the pool lives, and _content_space widens it with them.
+
+    Merged by RANK, not score: the two spaces are different metrics and their numbers are not
+    comparable, but "this space's 1st pick" and "that space's 1st pick" are. Collaborative leads,
+    since it is the stronger signal for tracks you own.
+    """
+    collab = neighbors(store, key, topn=topn)
+    ckeys, CV, cidx = _content_space(store, include_new=True)
+    content = (_rank(ckeys, CV, CV[cidx[key]], {key}, topn)
+               if CV is not None and key in cidx else [])
+    out, seen = [], {key}
+    for pair in itertools.zip_longest(collab, content):
+        for cand in pair:
+            if cand is None or cand[0] in seen:
+                continue
+            seen.add(cand[0])
+            out.append(cand)
+            if len(out) >= topn:
+                return out
+    return out
 
 
 def neighbors_for_unmodeled(store, key, topn=12):

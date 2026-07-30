@@ -26,7 +26,8 @@
            onerror="this.closest('.gen-th').classList.add('no-art'); this.remove()">{% endif %}</span>
       <span class="gen-meta">
         <a class="gen-title" href="https://music.youtube.com/watch?v={{ f.video_id }}"
-           target="_blank" rel="noopener" title="Preview this one on YouTube Music">{{ f.title }}</a>
+           target="_blank" rel="noopener" data-yt-info
+           title="Preview this one on YouTube Music">{{ f.title }}</a>
         <span class="gen-artist">{{ f.artist }}{% if f.reason %} · <span class="gen-why">{{ f.reason }}</span>{% endif %}</span>
       </span>
       {% if p.feedback_surface and f.key %}

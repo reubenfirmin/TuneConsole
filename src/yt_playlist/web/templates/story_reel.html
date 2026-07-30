@@ -23,7 +23,9 @@
             @click="go({{ loop.index0 }})" aria-label="Beat {{ loop.index }}"></button>
     {% endfor %}
   </div>
-  <a class="reel-close" href="/trends" aria-label="Close">✕</a>
+  {# Home, not /trends: the Trends tab is gone, and the Home nag card is the recap's only entry
+     point, so it is also where leaving the recap belongs. #}
+  <a class="reel-close" href="/" aria-label="Close">✕</a>
   <button type="button" class="reel-auto" @click="toggleAuto()"
           :class="{on: autoplay}" x-text="autoplay ? '❚❚ Auto' : '▶ Auto'"></button>
 
@@ -115,12 +117,12 @@ function reel(n) {
       this._key = (e) => {
         if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); this.next(); }
         else if (e.key === 'ArrowLeft') this.prev();
-        else if (e.key === 'Escape') window.location.href = '/trends';
+        else if (e.key === 'Escape') window.location.href = '/';
       };
       window.addEventListener('keydown', this._key);
     },
     go(k) { this.i = Math.max(0, Math.min(this.n - 1, k)); },
-    next() { if (this.i < this.n - 1) this.i++; else window.location.href = '/trends'; },
+    next() { if (this.i < this.n - 1) this.i++; else window.location.href = '/'; },
     prev() { this.go(this.i - 1); },
     toggleAuto() { this.autoplay = !this.autoplay; this._tick(); },
     _tick() { clearTimeout(this._t); if (this.autoplay && this.i < this.n - 1) this._t = setTimeout(() => this.next(), 5200); },

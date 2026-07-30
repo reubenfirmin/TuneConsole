@@ -669,6 +669,10 @@ document.addEventListener('click', function (e) {
   if (e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
   var a = e.target.closest && e.target.closest('a[href*="music.youtube.com/"]');
   if (!a) return;
+  // Informational opens (a song title, "open it on YouTube Music"): you want to LOOK at it, not start
+  // it. Leave the link alone so the browser honours target="_blank" and whatever is playing in the
+  // YouTube Music tab keeps playing. Play controls carry no marker and still route to that tab.
+  if (a.hasAttribute('data-yt-info')) return;
   var u;
   try { u = new URL(a.href || a.getAttribute('href'), location.href); } catch (err) { return; }
   if (u.hostname !== 'music.youtube.com') return;
@@ -866,6 +870,64 @@ function genrePicker() {
       }).catch(() => {});
     },
     reset() { this.query = ''; this.open = false; this.sel = -1; },
+  };
+}
+
+// Road Trip "New recipe" form: chip inputs for their-artists / their-genres / blacklist-genres,
+// a mine/theirs split slider, and an hours+minutes length pair. Genre suggestions reuse the same
+// fetch-once-then-filter-client-side cache as genrePicker() (the taxonomy is small and static);
+// artist suggestions can't be cached that way, so they're a debounced server search instead.
+function roadTripForm(initial) {
+  return {
+    name: initial.name || '',
+    ownPct: initial.own_pct != null ? initial.own_pct : 60,
+    hours: initial.hours || 1,
+    minutes: initial.minutes || 0,
+    artists: initial.artists || [],
+    genres: initial.genres || [],
+    blacklist: initial.blacklist_genres || [],
+    artistQuery: '', artistSuggestions: [], artistTimer: null,
+    genreOpts: [], genreQuery: '', blacklistQuery: '',
+    loadGenres() {
+      if (window.__genreOpts) { this.genreOpts = window.__genreOpts; return; }
+      fetch('/home/genres').then(r => r.json())
+        .then(d => { window.__genreOpts = d.options || []; this.genreOpts = window.__genreOpts; })
+        .catch(() => {});
+    },
+    genreSuggest(query) {
+      const q = query.trim().toLowerCase();
+      if (!q) return [];
+      return this.genreOpts.filter(o => o.name.toLowerCase().includes(q)).slice(0, 8);
+    },
+    addGenre(name) { if (!this.genres.includes(name)) this.genres.push(name); this.genreQuery = ''; },
+    removeGenre(name) { this.genres = this.genres.filter(g => g !== name); },
+    addBlacklist(name) {
+      if (!this.blacklist.includes(name)) this.blacklist.push(name);
+      this.blacklistQuery = '';
+    },
+    removeBlacklist(name) { this.blacklist = this.blacklist.filter(g => g !== name); },
+    searchArtists() {
+      clearTimeout(this.artistTimer);
+      const q = this.artistQuery.trim();
+      if (!q) { this.artistSuggestions = []; return; }
+      this.artistTimer = setTimeout(() => {
+        fetch('/road_trip/autocomplete/artists?q=' + encodeURIComponent(q))
+          .then(r => r.json()).then(d => { this.artistSuggestions = d.results || []; }).catch(() => {});
+      }, 250);
+    },
+    addArtist(name) {
+      if (!this.artists.includes(name)) this.artists.push(name);
+      this.artistQuery = ''; this.artistSuggestions = [];
+    },
+    removeArtist(name) { this.artists = this.artists.filter(a => a !== name); },
+    submit() {
+      const form = this.$refs.form;
+      form.querySelector('[name=artists]').value = JSON.stringify(this.artists);
+      form.querySelector('[name=genres]').value = JSON.stringify(this.genres);
+      form.querySelector('[name=blacklist_genres]').value = JSON.stringify(this.blacklist);
+      form.querySelector('[name=target_minutes]').value = String(this.hours * 60 + this.minutes);
+      htmx.trigger(form, 'roadtrip:submit');
+    },
   };
 }
 

@@ -1,5 +1,6 @@
 """TrackRepo: track rows and their genre/year enrichment."""
 from yt_playlist.util.matching import identity_key
+from yt_playlist.util.thumbnails import is_placeholder_art
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -73,8 +74,16 @@ class TrackRepo(Repo):
         return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"], "artist": r["artist"]}
                 for r in rows]
 
+    # A track still has work when anything is missing, INCLUDING its cover: YouTube serves a generic
+    # grey disc rather than nothing when it has no art, so a track can be complete on genre/year/audio
+    # and still have no real cover. Without these clauses the waterfall would never revisit it and the
+    # cover could never arrive. `_` is a LIKE wildcard, hence the ESCAPE.
+    _NO_ART = (r"t.thumbnail IS NULL OR t.thumbnail='' "
+               r"OR t.thumbnail LIKE '%cover\_track\_default%' ESCAPE '\' "
+               r"OR t.thumbnail LIKE '%cover\_album\_default%' ESCAPE '\'")
     _NEEDS = ("t.genre IS NULL OR t.genre='' OR t.mb_year IS NULL OR t.mb_year='' "
-              "OR t.bpm IS NULL OR t.energy IS NULL OR t.danceability IS NULL")
+              "OR t.bpm IS NULL OR t.energy IS NULL OR t.danceability IS NULL "
+              "OR " + _NO_ART)
 
     @synchronized
     def tracks_for_waterfall(self, playlist_id) -> list:
@@ -82,7 +91,7 @@ class TrackRepo(Repo):
         core audio features) in playlist order. Carries mb_recording_id so AcousticBrainz can key
         off an already-resolved MBID."""
         rows = self.conn.execute(
-            "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id FROM playlist_tracks pt "
+            "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id, t.thumbnail FROM playlist_tracks pt "
             f"JOIN tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? AND ({self._NEEDS}) "
             "ORDER BY pt.position", (playlist_id,)).fetchall()
         return [dict(r) for r in rows]
@@ -92,9 +101,22 @@ class TrackRepo(Repo):
         """A saved album's folded-in tracks the waterfall still has work for, album-scoped twin of
         tracks_for_waterfall."""
         rows = self.conn.execute(
-            "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id FROM tracks t "
+            "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id, t.thumbnail FROM tracks t "
             f"WHERE t.album_browse_id=? AND ({self._NEEDS}) ORDER BY t.id", (album_browse_id,)).fetchall()
         return [dict(r) for r in rows]
+
+    @synchronized
+    def set_track_art(self, track_id, url) -> None:
+        """Fill-only cover art from a provider. YouTube's own cover is authoritative and is never
+        overwritten, but its generic grey disc (served whenever it has no art, which for an upload is
+        always) counts as no art, so a real cover may replace it."""
+        if not url:
+            return
+        row = self.conn.execute("SELECT thumbnail FROM tracks WHERE id=?", (track_id,)).fetchone()
+        if row is None or (row["thumbnail"] and not is_placeholder_art(row["thumbnail"])):
+            return
+        self.conn.execute("UPDATE tracks SET thumbnail=? WHERE id=?", (url, track_id))
+        self.conn.commit()
 
     @synchronized
     def set_track_genre(self, track_id, genre) -> None:
