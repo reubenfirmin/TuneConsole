@@ -31,7 +31,7 @@ JOURNEY_HINTS = {
     "odyssey": "Hops between contrasting genres",
     "time_machine": "Oldest first, moving forward",
     "throwback": "Newest first, working backward",
-    "deep_dive": "Favourites first, then deeper cuts",
+    "deep_dive": "Favorites first, then deeper cuts",
     "rediscovery": "Leads with long-unplayed tracks",
     "shuffle": "Shuffle, keeping artists apart",
 }
@@ -45,7 +45,7 @@ JOURNEY_DESCRIPTIONS = {
     "odyssey": "Hops between contrasting genres for variety.",
     "time_machine": "Oldest tracks first, moving forward in time.",
     "throwback": "Newest tracks first, working back in time.",
-    "deep_dive": "Your most-played favourites first, then deeper cuts.",
+    "deep_dive": "Your most-played favorites first, then deeper cuts.",
     "rediscovery": "Leads with what you haven't played in the longest.",
     "shuffle": "A straight shuffle that just keeps artists apart.",
 }

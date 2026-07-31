@@ -76,6 +76,37 @@ def _lucene_escape(text):
     return "".join("\\" + c if c in '+-&|!(){}[]^"~*?:\\/' else c for c in (text or ""))
 
 
+def tag_artists(tag, decade=None, limit=25):
+    """Artists MusicBrainz files under a genre tag, optionally narrowed to those who RELEASED in a
+    given decade. [] on error.
+
+    Queries release-groups rather than artists when a decade is given: an artist's own date range is
+    when they existed, not when they put anything out, and "80s new wave" means records from the 80s.
+    MB has no popularity ranking, so this is a source of NAMES - the ordering that matters comes from
+    whoever consumes them (Last.fm's listener counts, then YouTube's own per-artist track ranking)."""
+    tag = (tag or "").strip()
+    if not tag:
+        return []
+    query = f'tag:"{_lucene_escape(tag)}"'
+    try:
+        if decade:
+            query += f" AND firstreleasedate:[{int(decade)} TO {int(decade) + 9}]"
+            res = _get("release-group", {"query": query, "fmt": "json", "limit": str(limit)})
+            rows = res.get("release-groups") or []
+            names = [((r.get("artist-credit") or [{}])[0].get("name") or "").strip() for r in rows]
+        else:
+            res = _get("artist", {"query": query, "fmt": "json", "limit": str(limit)})
+            names = [(a.get("name") or "").strip() for a in (res.get("artists") or [])]
+    except Exception as e:  # noqa: BLE001 - network/parse all degrade to "no artists found"
+        logger.warning("MusicBrainz tag artists failed for %r: %s", tag, e)
+        return []
+    out = []
+    for nm in names:
+        if nm and nm not in out:
+            out.append(nm)
+    return out
+
+
 def _years(dates):
     return [d[:4] for d in dates if d and len(d) >= 4 and d[:4].isdigit()]
 

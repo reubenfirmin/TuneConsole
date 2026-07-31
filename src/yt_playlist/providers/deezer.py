@@ -62,16 +62,34 @@ def _get_json(url):
 
 
 _FIELDS = ("bpm", "popularity", "gain", "label", "art")
+# Catalogue facts the same two lookups already pay for, but which are not audio features and so are
+# NOT part of enrich()'s contract (set_track_audio only takes _FIELDS): release year, genre and
+# duration. Road Trip reads these off `lookup` to place a YouTube-sourced track on the era/genre
+# sliders and to budget the mix by length without a get_song call per track.
+_EXTRA_FIELDS = ("year", "genre", "duration")
 
 
-def _empty():
-    return {k: None for k in _FIELDS}
+def _empty(fields=_FIELDS):
+    return {k: None for k in fields}
+
+
+def _year(value):
+    """Leading 4-digit year of a Deezer release_date ('1997-06-16'), or None."""
+    text = str(value or "")[:4]
+    return int(text) if text.isdigit() else None
 
 
 def enrich(title, artist):
-    """Return a dict {bpm, popularity, gain, label} for a track; each value float/int/str or None.
-    All-None on no match / unknown / error."""
-    feat = _empty()
+    """Return a dict {bpm, popularity, gain, label, art} for a track; each value float/int/str or
+    None. All-None on no match / unknown / error. The audio-feature projection of `lookup`."""
+    feat = lookup(title, artist)
+    return {k: feat[k] for k in _FIELDS}
+
+
+def lookup(title, artist):
+    """Every catalogue fact the track+album lookups yield: _FIELDS plus _EXTRA_FIELDS. Same two (or
+    three) requests enrich() has always made; the extra keys are free."""
+    feat = _empty(_FIELDS + _EXTRA_FIELDS)
     q = " ".join(p for p in (f'artist:"{artist}"' if artist else "",
                              f'track:"{title}"' if title else "") if p)
     search_url = _API + "/search/track?" + urllib.parse.urlencode({"q": q, "limit": "1"})
@@ -111,6 +129,12 @@ def enrich(title, artist):
     # The cover is embedded in the /track response, so it costs no extra request. YouTube has no art
     # at all for an upload (it serves a generic grey disc), and Deezer knows these tracks: they are
     # ordinary catalogue songs, whatever compilation you happened to rip them onto.
+    try:
+        secs = int(track.get("duration"))
+        feat["duration"] = secs if secs > 0 else None
+    except (TypeError, ValueError):
+        feat["duration"] = None
+    feat["year"] = _year(track.get("release_date"))
     track_album = track.get("album") or {}
     feat["art"] = track_album.get("cover_xl") or track_album.get("cover_big") or None
     album_id = track_album.get("id")
@@ -119,6 +143,10 @@ def enrich(title, artist):
             album = _get_json(_API + f"/album/{album_id}")
             if isinstance(album, dict) and not album.get("error"):
                 feat["label"] = album.get("label") or None
+                # A track carries no genre of its own on Deezer; its album does.
+                genres = ((album.get("genres") or {}).get("data")) or []
+                feat["genre"] = (genres[0].get("name") or None) if genres else None
+                feat["year"] = feat["year"] or _year(album.get("release_date"))
         except Exception as e:  # noqa: BLE001
             logger.info("Deezer album lookup failed for %s: %s", album_id, e)
     return feat

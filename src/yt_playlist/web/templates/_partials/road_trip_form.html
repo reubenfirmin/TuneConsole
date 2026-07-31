@@ -1,0 +1,104 @@
+{# The recipe editor. Not a modal and not create-only: it stays on the page next to the playlist and
+   edits land on the draft you're looking at (routes/road_trip.py -> rec.apply_recipe), so it doubles
+   as the steering panel. Chip and slider changes apply themselves; text fields wait for Apply, so a
+   re-render can't yank the field you're typing in. #}
+{# Single-quoted x-data: tojson leaves double quotes intact (it only escapes <, >, & and '), so the
+   JSON has to sit inside single quotes or it terminates the attribute and Alpine never boots. Same
+   convention as data-recipe in generated_playlist.html. #}
+<div class="card rt-form" x-data='roadTripForm({{ form_recipe | tojson }})' x-init="loadGenres()">
+  <div class="rt-form-head">
+    <h2 x-text="id ? 'Editing “' + name + '”' : 'New recipe'"></h2>
+    <span class="rt-form-actions">
+      <button type="button" class="btn ghost" x-show="id" @click="reset()">New recipe</button>
+      <button type="button" class="btn" @click="submit()" x-text="id ? 'Apply' : 'Save recipe'"></button>
+    </span>
+  </div>
+  <form x-ref="form" hx-post="/road_trip/recipes" hx-target="#road-trip-body" hx-swap="innerHTML"
+        hx-trigger="roadtrip:submit" hx-disabled-elt="find button">
+    <input type="hidden" name="id" :value="id || ''">
+    <input type="hidden" name="artists">
+    <input type="hidden" name="genres">
+    <input type="hidden" name="target_minutes">
+    <input type="hidden" name="own_pct" :value="ownPct">
+    <input type="hidden" name="familiarity_pct" :value="familiarity">
+
+    <label>Recipe name<br>
+      <input type="text" name="name" x-model="name" placeholder="Beach Run" required>
+    </label>
+
+    <div class="rt-form-cols">
+      <div>
+        <label>Their artists<br>
+          <input type="text" x-model="artistQuery" @input="searchArtists()"
+                 placeholder="Type an artist name…">
+        </label>
+        <div class="rt-suggestions" x-show="artistSuggestions.length" x-cloak>
+          <template x-for="s in artistSuggestions" :key="s">
+            <button type="button" class="rt-suggestion" @click="addArtist(s)" x-text="s"></button>
+          </template>
+        </div>
+        <div class="genre-chips">
+          <template x-for="a in artists" :key="a">
+            <span class="genre-chip"><span x-text="a"></span>
+              <button type="button" class="chip-x" @click="removeArtist(a)">×</button></span>
+          </template>
+        </div>
+
+        <label>Their genres<br>
+          <input type="text" x-model="genreQuery" placeholder="Type a genre…">
+        </label>
+        <div class="rt-suggestions" x-show="genreQuery && genreSuggest(genreQuery).length" x-cloak>
+          <template x-for="o in genreSuggest(genreQuery)" :key="o.name">
+            <button type="button" class="rt-suggestion" @click="addGenre(o.name)" x-text="o.name"></button>
+          </template>
+        </div>
+        <div class="genre-chips">
+          <template x-for="g in genres" :key="g">
+            <span class="genre-chip"><span x-text="g"></span>
+              <button type="button" class="chip-x" @click="removeGenre(g)">×</button></span>
+          </template>
+        </div>
+      </div>
+
+      <div>
+        {# There is no "exclude these genres" list here any more: the genre bars on the playlist do
+           that job better. Sliding one to 0 drops it, and you can see the effect and put it back. #}
+        {# Left end is "Mine", so dragging left has to mean more of mine: the slider carries THEIR
+           share and ownPct is its complement. #}
+        <label>Mine <span x-text="ownPct"></span>% / Theirs <span x-text="100 - ownPct"></span>%</label>
+        <div class="rt-mix-track">
+          <span class="rt-mix-end">Mine</span>
+          <input type="range" min="0" max="100" step="5" :value="100 - ownPct"
+                 @input="ownPct = 100 - Number($event.target.value)" @change="steer()">
+          <span class="rt-mix-end">Theirs</span>
+        </div>
+
+        {# Both ends stay inside the taste model: from the lesser-played corners of it to the
+           most-played favorites, never random catalog. #}
+        <label>Deeper cuts ↔ favorites (<span x-text="familiarity"></span>%)</label>
+        <input type="range" min="0" max="100" step="5" x-model.number="familiarity" @change="steer()">
+
+        <label>Target length</label>
+        <div class="rt-duration">
+          <span class="rt-duration-field">
+            <input type="number" min="0" max="12" x-model.number="hours" @change="steer()"
+                   aria-label="hours">
+            <span class="rt-duration-unit">h</span>
+          </span>
+          <span class="rt-duration-field">
+            <input type="number" min="0" max="59" step="5" x-model.number="minutes" @change="steer()"
+                   aria-label="minutes">
+            <span class="rt-duration-unit">m</span>
+          </span>
+          <span class="rt-duration-presets">
+            <template x-for="p in [30, 60, 120, 240]" :key="p">
+              <button type="button" class="rt-preset" :class="{ on: hours * 60 + minutes === p }"
+                      @click="hours = Math.floor(p / 60); minutes = p % 60; steer()"
+                      x-text="p < 60 ? p + ' min' : (p / 60) + ' h'"></button>
+            </template>
+          </span>
+        </div>
+      </div>
+    </div>
+  </form>
+</div>

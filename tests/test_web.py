@@ -1,3 +1,6 @@
+import urllib.error
+
+import pytest
 from fastapi.testclient import TestClient
 from yt_playlist.rec import recommend
 from yt_playlist.rec.actions import CLEANUP_SURFACE
@@ -808,6 +811,63 @@ def test_lastfm_enrich_scrapes_release_year(monkeypatch):
     monkeypatch.setattr(lf, "_fetch_text", fake_fetch)
     assert lf.enrich("Sizzling Love", "Ph 1", "key") == ("House", "1996")
     assert fetched == ["https://www.last.fm/music/Ph+1/Sizzling+Love"]   # the album page, not the track
+
+
+def test_lastfm_takes_the_year_from_tags_without_fetching_the_page(monkeypatch):
+    """The tags come back in the same getInfo call, so a year tag costs nothing. Only when they
+    don't carry one is the album page worth a request."""
+    import yt_playlist.providers.lastfm as lf
+    monkeypatch.setattr(lf, "_get", lambda params: {"track": {
+        "album": {"url": "https://www.last.fm/music/Ph+1/Sizzling+Love"},
+        "toptags": {"tag": [{"name": "house"}, {"name": "1996"}]}}})
+    fetched = []
+    monkeypatch.setattr(lf, "_fetch_text", lambda url: fetched.append(url) or "")
+
+    assert lf.enrich("Sizzling Love", "Ph 1", "key") == ("House", "1996")
+    assert fetched == []
+
+
+def test_lastfm_stands_down_after_the_album_pages_keep_failing(monkeypatch):
+    """Last.fm 502s its album pages in bursts. After a few, stop asking for a while: the answer
+    costs a request every time and no longer arrives. Genre and every other year source are
+    untouched."""
+    import yt_playlist.providers.lastfm as lf
+    monkeypatch.setattr(lf, "_get", lambda params: {"track": {
+        "album": {"url": "https://www.last.fm/music/A/B"},
+        "toptags": {"tag": [{"name": "house"}]}}})           # tags carry no year
+    attempts = []
+
+    def boom(url):
+        attempts.append(url)
+        raise urllib.error.HTTPError(url, 502, "Bad Gateway", {}, None)
+
+    monkeypatch.setattr(lf, "_fetch_text", boom)
+    monkeypatch.setattr(lf, "_page_fails", 0)
+    monkeypatch.setattr(lf, "_page_blocked_until", 0.0)
+
+    for _ in range(lf._PAGE_FAIL_LIMIT + 3):
+        assert lf.enrich("S", "A", "key") == ("House", None)   # genre still comes back
+
+    assert len(attempts) == lf._PAGE_FAIL_LIMIT      # then it stopped asking
+    monkeypatch.setattr(lf, "_page_blocked_until", 0.0)        # cooldown elapses -> it tries again
+    lf.enrich("S", "A", "key")
+    assert len(attempts) == lf._PAGE_FAIL_LIMIT + 1
+
+
+def test_lastfm_page_fetch_does_not_retry_a_server_error(monkeypatch):
+    """A 502 is the server answering. Asking again a second later returned the same 502 in practice,
+    at twice the cost - so only connection-level failures are worth a retry."""
+    import yt_playlist.providers.lastfm as lf
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", {}, None)
+
+    monkeypatch.setattr(lf.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(urllib.error.HTTPError):
+        lf._fetch_text("https://www.last.fm/music/A/B")
+    assert len(calls) == 1
 
 
 def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):

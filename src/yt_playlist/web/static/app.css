@@ -361,7 +361,9 @@ button, .btn {
   box-shadow: 0 8px 20px -12px rgba(109,93,252,0.8);
   transition: transform 0.08s ease, box-shadow 0.18s ease, background 0.2s ease, color 0.2s ease;
 }
-/* All primary CTAs go neon-green on hover (matches the .cta accent). */
+/* All primary CTAs go neon-green on hover. NB the `color` here is chosen to sit on that gradient:
+   any button that overrides the background (menu rows, ✕ affordances, autosuggest options) must
+   override the colour too, or it renders near-black on whatever it painted instead. */
 button:hover, .btn:hover {
   background-image: linear-gradient(135deg, #6bffab, #15e98c);
   color: #042b16; border-color: transparent;
@@ -686,7 +688,8 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
 .banner-body { flex: 1; }
 .banner-x, .authbar-x { background: transparent; border: none; box-shadow: none; color: inherit;
   opacity: 0.55; cursor: pointer; font-size: 1.25rem; line-height: 1; padding: 0 0.25rem; border-radius: 6px; }
-.banner-x:hover, .authbar-x:hover { opacity: 1; background: rgba(255,255,255,0.08); box-shadow: none; }
+.banner-x:hover, .authbar-x:hover { opacity: 1; background: rgba(255,255,255,0.08); box-shadow: none;
+  color: inherit; }   /* keep the banner's own colour: see the note on button:hover */
 .authbar { display: flex; align-items: center; gap: 0.8rem; }
 .authbar > span:first-child, .authbar-body { flex: 1; }
 
@@ -838,7 +841,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 1.4rem 0; }
 .toast-body { flex: 1; }
 .toast-x { background: none; border: 0; color: inherit; font-size: 1.1rem;
   line-height: 1; cursor: pointer; opacity: .7; }
-.toast-x:hover { opacity: 1; }
+.toast-x:hover { opacity: 1; color: inherit; }   /* not the CTA hover colour */
 
 /* discover: reproduce the old Alpine row states with htmx lifecycle classes */
 tr.htmx-request { opacity: .35; transition: opacity .2s ease; }
@@ -2627,14 +2630,118 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   border-radius: 8px; margin: 0.25rem 0; max-height: 10rem; overflow-y: auto; }
 .rt-suggestion { text-align: left; background: transparent; border: none; padding: 0.4rem 0.6rem;
   cursor: pointer; color: inherit; }
-.rt-suggestion:hover { background: var(--accent-soft); }
+/* A hovered suggestion has to stay readable. `button:hover` paints text #042b16 (near-black green,
+   for the neon CTA gradient it normally sits on), and .rt-suggestion's `color: inherit` is a weaker
+   selector than it - so without this the hovered row was near-black on translucent violet. Measured:
+   rgb(4,43,22) on rgba(124,108,255,0.16). */
+.rt-suggestion:hover, .rt-suggestion:focus-visible {
+  background: var(--accent-soft); color: var(--text); }
+.rt-list-head { margin: 1.4rem 0 0.6rem; font-size: 1rem; color: var(--dim); }
+.rt-form-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.4rem; }
+.rt-form-head h2 { margin: 0; }
+.rt-form-actions { display: flex; gap: 0.4rem; margin-left: auto; }
+.rt-form-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 0.2rem 1.8rem; }
+.rt-form-cols input[type="range"] { width: 100%; }
+/* The recipe currently loaded in the editor above. */
+.rt-recipe.is-loaded { border-color: var(--accent-2); }
 .rt-recipe-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .rt-recipe-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0.5rem 0; }
 .rt-recipe-actions { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.5rem; }
 .genre-chip.red { background: var(--danger-soft); color: var(--danger); }
 
-/* Generate button: swap label <-> spinner while the (multi-second: per-track Deezer popularity
-   lookups) request is in flight. htmx adds .htmx-request to the button itself for its duration. */
+/* Build button: swap label <-> spinner while the (multi-second: per-track Deezer popularity
+   lookups) request is in flight. htmx adds .htmx-request to the button itself for its duration.
+   Only the BUILD pays that cost; every slider on the draft re-picks from the cached pool. */
 .rt-gen-btn .rt-gen-loading { display: none; align-items: center; gap: 0.35rem; }
 .rt-gen-btn.htmx-request .rt-gen-loading { display: inline-flex; }
 .rt-gen-btn.htmx-request .rt-gen-label { display: none; }
+
+/* Target length: two small numeric fields with their unit inside the box, plus one-tap presets. */
+.rt-duration { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; margin: 0.15rem 0 0.9rem; }
+.rt-duration-field { display: inline-flex; align-items: baseline; gap: 0.15rem; padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); }
+.rt-duration-field:focus-within { border-color: var(--accent-2); }
+.rt-duration-field input { width: 2.6rem; border: none; background: transparent; padding: 0.2rem 0;
+  text-align: right; font-variant-numeric: tabular-nums; color: inherit; }
+.rt-duration-field input:focus { outline: none; }
+.rt-duration-unit { font-size: 0.78rem; color: var(--dim); }
+.rt-duration-presets { display: inline-flex; gap: 0.25rem; margin-left: 0.3rem; }
+.rt-preset { border: 1px solid var(--border); border-radius: 999px; background: transparent;
+  color: var(--dim); font-size: 0.75rem; padding: 0.15rem 0.6rem; cursor: pointer; }
+.rt-preset:hover { border-color: var(--accent-2); color: var(--text); }
+.rt-preset.on { background: var(--accent-soft); border-color: transparent; color: var(--accent-2); }
+
+/* The on-screen draft: header, the two mix sliders, the per-party genre/era bars, the track list. */
+.rt-draft-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.rt-draft-head h2 { margin: 0; }
+.rt-draft-actions { display: flex; align-items: center; gap: 0.4rem; margin-left: auto; }
+.rt-draft-actions .rt-save { margin-left: 0.9rem; }   /* set apart from the in-place actions */
+.rt-short { margin: 0.3rem 0 0; font-size: 0.82rem; }
+.rt-building { display: flex; align-items: center; gap: 0.45rem; }
+/* Their slots are still being filled: keep the rows that are already there readable, but signal
+   that the list is not settled yet. */
+.rt-draft.is-building .rt-list { opacity: 0.85; }
+.rt-mix { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.6rem 1.6rem; margin: 0.8rem 0 0.4rem; }
+.rt-mix-slider { display: flex; flex-direction: column; gap: 0.2rem; }
+.rt-mix-slider .fp-slider { width: 100%; flex: 1; }
+/* Left-anchored fill, for a slider that is a QUANTITY (this genre is 30% of the mix) rather than a
+   nudge. The .fp-* bars on Home paint outward from the centre because their neutral IS the centre -
+   a 0-2 multiplier with 1.0 in the middle. These run 0-100% with neutral at zero, so a centre fill
+   reads as "minus 20%" and the bar disagrees with the number printed beside it. Must come after the
+   .fp-slider rule it overrides: same specificity, so source order decides. */
+input[type="range"].pct-slider {
+  background: linear-gradient(to right, var(--accent-2) var(--p, 0%), var(--border) var(--p, 0%));
+}
+.rt-axes { margin-top: 0.6rem; }
+/* Group heading inside a party's column ("Genres", then "Years"), quieter than the column's own. */
+.fp-sublabel { display: block; margin: 0.6rem 0 0.1rem; font-size: 0.72rem; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--dim); }
+.fp-barset + .fp-sublabel { margin-top: 0.9rem; }
+.rt-axis-pct { flex: none; width: 2.6rem; text-align: right; font-size: 0.75rem; color: var(--dim);
+  font-variant-numeric: tabular-nums; }
+/* A pinned bar is held to the share you asked for; an unpinned one floats with the mix. */
+.rt-axes .fp-row.is-pinned .fp-name { color: var(--accent-2); }
+.rt-axes .fp-row.is-pinned .rt-axis-pct { color: var(--accent-2); }
+/* The picked playlist, as columns. Each row carries the same grid template, so the columns line up
+   down the list without the rows being a real <table>; the flexible columns take up the slack, which
+   is what keeps the ✕ next to the content instead of stranded at the far edge. */
+.rt-list { list-style: none; margin: 0.9rem 0 0; padding: 0.4rem 0 0; counter-reset: rt;
+  border-top: 1px solid var(--border); }
+/* Square corners: the row carries a full-height stripe down its left edge, and a rounded row bends
+   that stripe into a comma. */
+.rt-row { display: grid; align-items: center; gap: 0.65rem; padding: 0.15rem 0.3rem;
+  border-bottom: 1px solid var(--border);
+  grid-template-columns: 1.6rem 2rem minmax(0, 2.2fr) minmax(0, 1.5fr) minmax(0, 1fr)
+                         3.2rem 3.4rem 2rem; }
+.rt-row:last-child { border-bottom: none; }
+.rt-row:hover { background: var(--accent-soft); }
+.rt-row::before { counter-increment: rt; content: counter(rt); text-align: right;
+  font-size: 0.76rem; color: var(--faint); font-variant-numeric: tabular-nums; }
+.rt-c-art { width: 2rem; height: 2rem; border-radius: 4px; overflow: hidden; background: var(--grad-soft); }
+.rt-c-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.rt-c-art.no-art { background: var(--surface-2); }
+/* Every text cell truncates rather than wrapping: one track, one line. */
+.rt-c-title, .rt-c-artist, .rt-c-genre { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rt-c-title { color: var(--text); font-size: 0.86rem; }
+.rt-c-title:hover { color: var(--accent-2); }
+.rt-c-artist { color: var(--dim); font-size: 0.82rem; }
+.rt-c-genre { color: var(--faint); font-size: 0.78rem; }
+.rt-c-year { color: var(--faint); font-size: 0.78rem; font-variant-numeric: tabular-nums;
+  text-align: right; }
+.rt-c-src { color: var(--faint); font-size: 0.72rem; text-transform: uppercase;
+  letter-spacing: 0.06em; }
+/* A full-cell hit target, not a bare glyph: the ✕ was fiddly to land on at glyph size. */
+.rt-x { width: 2rem; height: 2rem; display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; background: transparent; border: none; box-shadow: none; border-radius: 6px;
+  color: var(--faint); font-size: 0.9rem; opacity: 0.5; cursor: pointer; }
+.rt-row:hover .rt-x { opacity: 1; }
+.rt-x:hover, .rt-x:focus-visible { background: var(--danger-soft); color: var(--danger); opacity: 1;
+  box-shadow: none; }
+/* Their tracks carry a tint down the left edge, so the balance of the mix is legible at a glance. */
+.rt-row.is-theirs { box-shadow: inset 2px 0 0 var(--accent-2); }
+@media (max-width: 720px) {   /* drop the least load-bearing columns before the row starts squeezing */
+  .rt-row { grid-template-columns: 1.4rem 2rem minmax(0, 2fr) minmax(0, 1.3fr) 3.2rem 2rem; }
+  .rt-c-genre, .rt-c-src { display: none; }
+}

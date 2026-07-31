@@ -8,7 +8,7 @@ grouped here because the generators all depend on the same exclusion logic (excl
 from collections import Counter
 
 from yt_playlist.repos.base import (  # noqa: F401  (GENERATED_GROUP re-exported)
-    GENERATED_GROUP, Repo, synchronized)
+    GENERATED_GROUP, LIKED_EXISTS, Repo, synchronized)
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import normalize, search_squash
 
@@ -505,6 +505,58 @@ class RecQueryRepo(Repo):
         catalog)."""
         return {r["identity_key"]: r["c"] for r in self.conn.execute(
             "SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key")}
+
+    @synchronized
+    def library_songs(self) -> list[dict]:
+        """Every playable song you own, once per identity_key: {key, video_id, title, artist, album,
+        thumbnail, duration, genre, year, liked}.
+
+        The whole collection in one query (~30ms for 4k songs), so a feature that wants to choose
+        from everything you have doesn't need to sample it first and then discover the sample was
+        missing what you asked for.
+
+        DJ mixes and live sets are excluded on the same rule as every other candidate generator
+        here (_not_a_mix): a 2.5-hour festival set is not a track, and one of them would swallow a
+        whole playlist's duration budget by itself."""
+        rows = self.conn.execute(
+            "SELECT t.identity_key k, MIN(t.video_id) vid, MIN(t.title) title, MIN(t.artist) artist, "
+            "       MIN(t.album) album, MIN(t.thumbnail) thumb, MIN(t.duration_s) dur, "
+            "       MIN(NULLIF(t.genre,'')) genre, MIN(NULLIF(t.mb_year,'')) yr, "
+            f"      MAX(CASE WHEN {LIKED_EXISTS} THEN 1 ELSE 0 END) liked "
+            "FROM tracks t WHERE t.video_id IS NOT NULL AND t.video_id<>'' "
+            f"  AND {_not_a_mix('t.duration_s')} "
+            "GROUP BY t.identity_key").fetchall()
+        out = []
+        for r in rows:
+            year = str(r["yr"] or "")[:4]
+            out.append({"key": r["k"], "video_id": r["vid"], "title": r["title"] or "",
+                        "artist": r["artist"] or "", "album": r["album"] or "",
+                        "thumbnail": r["thumb"], "duration": r["dur"],
+                        "genre": r["genre"] or "", "year": int(year) if year.isdigit() else None,
+                        "liked": bool(r["liked"])})
+        return out
+
+    @synchronized
+    def artist_genre_years(self) -> dict:
+        """{artist: {"genre": g, "year": y}} inferred from that artist's TAGGED tracks: their most
+        common genre and earliest known year. A per-artist stand-in for tracks enrichment hasn't
+        reached yet - most libraries are tagged in patches, and an untagged track by an artist you
+        have five tagged tracks for is not really unknown. Artists with nothing tagged are absent."""
+        genres, years = {}, {}
+        for r in self.conn.execute(
+                "SELECT artist, genre, mb_year FROM tracks "
+                "WHERE artist<>'' AND (genre<>'' OR mb_year<>'')"):
+            if r["genre"]:
+                genres.setdefault(r["artist"], Counter())[r["genre"]] += 1
+            y = str(r["mb_year"] or "")[:4]
+            if y.isdigit():
+                years[r["artist"]] = min(int(y), years.get(r["artist"], 9999))
+        out = {}
+        for artist in set(genres) | set(years):
+            counts = genres.get(artist)
+            out[artist] = {"genre": counts.most_common(1)[0][0] if counts else "",
+                           "year": years.get(artist)}
+        return out
 
     # --- genre distributions / adjacency ---
     @synchronized

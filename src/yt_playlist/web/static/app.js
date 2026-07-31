@@ -873,21 +873,30 @@ function genrePicker() {
   };
 }
 
-// Road Trip "New recipe" form: chip inputs for their-artists / their-genres / blacklist-genres,
+// Road Trip recipe form: chip inputs for their-artists / their-genres,
 // a mine/theirs split slider, and an hours+minutes length pair. Genre suggestions reuse the same
 // fetch-once-then-filter-client-side cache as genrePicker() (the taxonomy is small and static);
 // artist suggestions can't be cached that way, so they're a debounced server search instead.
+// The Road Trip recipe editor. Server-rendered pre-filled (the recipe currently on screen), and it
+// steers that recipe's live draft: chip and slider changes submit themselves, so the form works as a
+// control panel rather than a one-shot create dialog. Text fields wait for Apply, so the re-render a
+// submit triggers can't pull the field out from under you mid-word.
 function roadTripForm(initial) {
+  initial = initial || {};
+  const mins = initial.target_minutes != null ? initial.target_minutes : 60;
   return {
+    id: initial.id || null,
     name: initial.name || '',
-    ownPct: initial.own_pct != null ? initial.own_pct : 60,
-    hours: initial.hours || 1,
-    minutes: initial.minutes || 0,
+    ownPct: initial.own_pct != null ? initial.own_pct : 50,   // an even split to start
+    // 0 = the lesser-played corners of the taste model, 100 = the most-played favorites.
+    familiarity: initial.familiarity_pct != null ? initial.familiarity_pct : 50,
+    hours: Math.floor(mins / 60),
+    minutes: mins % 60,
     artists: initial.artists || [],
     genres: initial.genres || [],
-    blacklist: initial.blacklist_genres || [],
+    steerTimer: null,
     artistQuery: '', artistSuggestions: [], artistTimer: null,
-    genreOpts: [], genreQuery: '', blacklistQuery: '',
+    genreOpts: [], genreQuery: '',
     loadGenres() {
       if (window.__genreOpts) { this.genreOpts = window.__genreOpts; return; }
       fetch('/home/genres').then(r => r.json())
@@ -899,13 +908,11 @@ function roadTripForm(initial) {
       if (!q) return [];
       return this.genreOpts.filter(o => o.name.toLowerCase().includes(q)).slice(0, 8);
     },
-    addGenre(name) { if (!this.genres.includes(name)) this.genres.push(name); this.genreQuery = ''; },
-    removeGenre(name) { this.genres = this.genres.filter(g => g !== name); },
-    addBlacklist(name) {
-      if (!this.blacklist.includes(name)) this.blacklist.push(name);
-      this.blacklistQuery = '';
+    addGenre(name) {
+      if (!this.genres.includes(name)) this.genres.push(name);
+      this.genreQuery = ''; this.steer();
     },
-    removeBlacklist(name) { this.blacklist = this.blacklist.filter(g => g !== name); },
+    removeGenre(name) { this.genres = this.genres.filter(g => g !== name); this.steer(); },
     searchArtists() {
       clearTimeout(this.artistTimer);
       const q = this.artistQuery.trim();
@@ -915,16 +922,37 @@ function roadTripForm(initial) {
           .then(r => r.json()).then(d => { this.artistSuggestions = d.results || []; }).catch(() => {});
       }, 250);
     },
+    // Adding an artist also pre-fills their genre, which is what makes the mix reach past that one
+    // artist (a genre input pulls that genre's other top artists). It lands as an ordinary chip, so
+    // it can be removed like any other. The steer waits for it, so both arrive in one request.
     addArtist(name) {
       if (!this.artists.includes(name)) this.artists.push(name);
       this.artistQuery = ''; this.artistSuggestions = [];
+      fetch('/road_trip/artist_genre?name=' + encodeURIComponent(name))
+        .then(r => r.json())
+        .then(d => { if (d.genre && !this.genres.includes(d.genre)) this.genres.push(d.genre); })
+        .catch(() => {})
+        .finally(() => this.steer());
     },
-    removeArtist(name) { this.artists = this.artists.filter(a => a !== name); },
+    removeArtist(name) { this.artists = this.artists.filter(a => a !== name); this.steer(); },
+    // Apply an edit to the recipe already on screen. Debounced, so tapping through a few chips or
+    // dragging a slider sends one request rather than one per step. A recipe that has never been
+    // saved waits for the button: it has no draft to steer yet.
+    steer() {
+      if (!this.id) return;
+      clearTimeout(this.steerTimer);
+      this.steerTimer = setTimeout(() => this.submit(), 350);
+    },
+    reset() {
+      this.id = null; this.name = ''; this.artists = []; this.genres = [];
+      this.artistQuery = ''; this.genreQuery = '';
+      this.artistSuggestions = [];
+    },
     submit() {
+      clearTimeout(this.steerTimer);
       const form = this.$refs.form;
       form.querySelector('[name=artists]').value = JSON.stringify(this.artists);
       form.querySelector('[name=genres]').value = JSON.stringify(this.genres);
-      form.querySelector('[name=blacklist_genres]').value = JSON.stringify(this.blacklist);
       form.querySelector('[name=target_minutes]').value = String(this.hours * 60 + this.minutes);
       htmx.trigger(form, 'roadtrip:submit');
     },

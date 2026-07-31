@@ -3,82 +3,11 @@
 <div class="page-head">
   <span class="eyebrow">Road Trip</span>
   <h1>Road Trip playlists</h1>
-  <p>Blend your taste with the artists and genres other people in the car enjoy. Their tracks are
-     pulled fresh from YouTube and never affect your taste model; the whole mix lives in the
-     Generated bucket and is cleaned up on the normal schedule.</p>
+  <p>Blend your taste with the artists and genres other people in the car enjoy. Build a mix here,
+     tune it slot by slot, and only then send it to YouTube. Their tracks are pulled fresh from
+     YouTube and never affect your taste model; a saved mix lives in the Generated bucket and is
+     cleaned up on the normal schedule.</p>
 </div>
 
-<div id="road-trip-recipes">{% include "_partials/road_trip_recipes.html" %}</div>
-
-<div class="card" x-data="roadTripForm({})" x-init="loadGenres()">
-  <h2>New recipe</h2>
-  <form x-ref="form" hx-post="/road_trip/recipes" hx-target="#road-trip-recipes" hx-swap="innerHTML"
-        hx-trigger="roadtrip:submit">
-    <input type="hidden" name="artists">
-    <input type="hidden" name="genres">
-    <input type="hidden" name="blacklist_genres">
-    <input type="hidden" name="target_minutes">
-
-    <label>Recipe name<br>
-      <input type="text" name="name" x-model="name" placeholder="Beach Run" required>
-    </label>
-
-    <label>Their artists<br>
-      <input type="text" x-model="artistQuery" @input="searchArtists()"
-             placeholder="Type an artist name…">
-    </label>
-    <div class="rt-suggestions" x-show="artistSuggestions.length" x-cloak>
-      <template x-for="s in artistSuggestions" :key="s">
-        <button type="button" class="rt-suggestion" @click="addArtist(s)" x-text="s"></button>
-      </template>
-    </div>
-    <div class="genre-chips">
-      <template x-for="a in artists" :key="a">
-        <span class="genre-chip"><span x-text="a"></span>
-          <button type="button" class="chip-x" @click="removeArtist(a)">×</button></span>
-      </template>
-    </div>
-
-    <label>Their genres<br>
-      <input type="text" x-model="genreQuery" placeholder="Type a genre…">
-    </label>
-    <div class="rt-suggestions" x-show="genreQuery && genreSuggest(genreQuery).length" x-cloak>
-      <template x-for="o in genreSuggest(genreQuery)" :key="o.name">
-        <button type="button" class="rt-suggestion" @click="addGenre(o.name)" x-text="o.name"></button>
-      </template>
-    </div>
-    <div class="genre-chips">
-      <template x-for="g in genres" :key="g">
-        <span class="genre-chip"><span x-text="g"></span>
-          <button type="button" class="chip-x" @click="removeGenre(g)">×</button></span>
-      </template>
-    </div>
-
-    <label>Exclude these genres from MY contribution<br>
-      <input type="text" x-model="blacklistQuery" placeholder="Type a genre…">
-    </label>
-    <div class="rt-suggestions" x-show="blacklistQuery && genreSuggest(blacklistQuery).length" x-cloak>
-      <template x-for="o in genreSuggest(blacklistQuery)" :key="o.name">
-        <button type="button" class="rt-suggestion" @click="addBlacklist(o.name)" x-text="o.name"></button>
-      </template>
-    </div>
-    <div class="genre-chips">
-      <template x-for="g in blacklist" :key="g">
-        <span class="genre-chip red"><span x-text="g"></span>
-          <button type="button" class="chip-x" @click="removeBlacklist(g)">×</button></span>
-      </template>
-    </div>
-
-    <label>Mine <span x-text="ownPct"></span>% / Theirs <span x-text="100 - ownPct"></span>%<br>
-      <input type="range" min="0" max="100" x-model.number="ownPct">
-    </label>
-
-    <label>Target length<br>
-      <input type="number" min="0" x-model.number="hours" style="width:4rem"> h
-      <input type="number" min="0" max="59" x-model.number="minutes" style="width:4rem"> m
-    </label>
-
-    <button type="button" class="btn" @click="submit()">Save recipe</button>
-  </form>
-</div>
+<div id="road-trip-body">{% include "_partials/road_trip_body.html" %}</div>
 {% endblock %}

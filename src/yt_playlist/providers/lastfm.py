@@ -105,7 +105,10 @@ def _get(params):
 
 
 def _fetch_text(url):
-    for attempt in (1, 2):                         # Last.fm pages 502 transiently. Retry once
+    """Fetch a Last.fm WEBSITE page (not the API). Retries once on a connection-level failure, which
+    is genuinely transient - but not on an HTTP error: the server answered, and asking it the same
+    question a second later has been observed to return the same 502, at double the cost."""
+    for attempt in (1, 2):
         _pacer.wait()
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
         try:
@@ -113,15 +116,44 @@ def _fetch_text(url):
                 text = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
             _breaker.record(e)                     # server answered (an error). Host is reachable
-            if e.code >= 500 and attempt == 1:
-                time.sleep(1.0)
-                continue
             raise
         except Exception as e:
             _breaker.record(e)
+            if attempt == 1:
+                time.sleep(1.0)
+                continue
             raise
         _breaker.record()
         return text
+
+
+# The album-page scrape is the only part of this provider that reads the WEBSITE instead of the API,
+# and Last.fm 502s those pages in bursts - measured at 6 of 8 well-known albums, with a browser
+# User-Agent failing identically, so it is their side and not something we can dress our way around.
+# Once it is clearly not working, stand down for a while rather than spending a request per track to
+# rediscover that. Nothing else is affected: the API keeps working, and the year has other providers.
+_PAGE_FAIL_LIMIT = 5
+_PAGE_COOLDOWN_S = 900
+_page_fails = 0
+_page_blocked_until = 0.0
+
+
+def _page_scrape_ready():
+    return time.monotonic() >= _page_blocked_until
+
+
+def _record_page_result(ok):
+    global _page_fails, _page_blocked_until
+    if ok:
+        _page_fails = 0
+        return
+    _page_fails += 1
+    if _page_fails >= _PAGE_FAIL_LIMIT:
+        _page_fails = 0
+        _page_blocked_until = time.monotonic() + _PAGE_COOLDOWN_S
+        logger.info("Last.fm album pages keep failing; skipping the release-year scrape for %d min. "
+                    "Genre (API) is unaffected, and MusicBrainz/Discogs/Deezer still supply the year.",
+                    _PAGE_COOLDOWN_S // 60)
 
 
 def _page_release_year(html):
@@ -183,15 +215,17 @@ def enrich(title, artist, key):
                 _get({"method": "artist.gettoptags", "artist": artist, **common})))
         except Exception as e:  # noqa: BLE001
             logger.warning("Last.fm artist tags failed for %r: %s", artist, e)
-    year = None
-    album_url = (track.get("album") or {}).get("url")   # the ALBUM page carries the Release Date
-    if album_url:
+    # Cheapest source first: the tags are already in hand, so a year tag costs nothing. Only when
+    # they don't carry one is the album page worth a request (it holds the real Release Date).
+    year = _year_from_tags(track_tags)
+    album_url = (track.get("album") or {}).get("url")
+    if not year and album_url and _page_scrape_ready():
         try:
             year = _page_release_year(_fetch_text(album_url))
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Last.fm album page fetch failed for %s: %s", album_url, e)
-    if not year:
-        year = _year_from_tags(track_tags)        # fall back to a year tag if the page had none
+            _record_page_result(True)
+        except Exception as e:  # noqa: BLE001 - a missing year is a miss, not a failure
+            _record_page_result(False)
+            logger.info("Last.fm album page unavailable for %s: %s", album_url, e)
     return (genre, year)
 
 
@@ -226,6 +260,28 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, key=None, s
         done_text=lambda n: f"Tagged {n} track(s).",
         wait_text="Waiting: a newer playlist is tagging first…",
         per_item=_per_item)
+
+
+def tag_top_artists(tag, key, limit=25):
+    """Last.fm tag.getTopArtists -> [artist_name], most-listened first. [] on error/no key.
+
+    The ranking is what makes this useful: "who are the big alternative rock artists" is a question
+    Last.fm's own listening data answers well, and far better than a text search for the genre name.
+    """
+    if not tag or not key:
+        return []
+    try:
+        data = _get({"method": "tag.getTopArtists", "tag": tag, "api_key": key,
+                     "format": "json", "limit": limit})
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        logger.warning("Last.fm tag.getTopArtists failed for %r: %s", tag, e)
+        return []
+    out = []
+    for a in (data.get("topartists") or {}).get("artist") or []:
+        nm = (a.get("name") or "").strip()
+        if nm and nm not in out:
+            out.append(nm)
+    return out
 
 
 def similar_artists(name, key, limit=50):
