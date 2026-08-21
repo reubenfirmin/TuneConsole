@@ -8,9 +8,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Your {{ story.month_name }} · TuneConsole</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
-  <!-- Design tokens first: app.css/story.css consume them and contain no colour literals. -->
+  <!-- Token layer first, then shared components and feature modules in cascade order. -->
   <link rel="stylesheet" href="/static/tokens.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/home.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/clusters.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/onboarding.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/analytics.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/page-overrides.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/story.css?v={{ asset_v }}">
   <!-- CSS token -> canvas bridge; must load before any script that paints. -->
   <script src="/static/theme.js?v={{ asset_v }}"></script>

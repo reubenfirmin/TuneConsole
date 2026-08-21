@@ -1,6 +1,6 @@
 """The theming contract: exactly one file in the codebase may name a colour.
 
-Colour used to be scattered across app.css, story.css, three inline <style> blocks, two canvas
+Colour used to be scattered across stylesheets, three inline <style> blocks, two canvas
 renderers with their own hard-coded palettes, and two Python dicts that disagreed with each other.
 Retheming meant a grep-and-hope across four languages. These tests keep it collapsed to
 static/tokens.css so a new theme is a single-file edit.
@@ -109,8 +109,17 @@ def test_tokens_css_loads_before_the_stylesheets_that_use_it(template):
     assert sheets[0] == "tokens.css", f"{template} loads stylesheets in the wrong order: {sheets}"
 
 
+@pytest.mark.parametrize("template", ["base.html", "story_reel.html", "generating.html"])
+def test_application_stylesheets_keep_cascade_order(template):
+    expected = ["tokens.css", "app.css", "home.css", "clusters.css", "onboarding.css",
+                "analytics.css", "page-overrides.css"]
+    text = (WEB / "templates" / template).read_text()
+    sheets = re.findall(r'<link[^>]+href="/static/([a-z_-]+\.css)', text)
+    assert sheets[:len(expected)] == expected, f"{template} stylesheet order changed: {sheets}"
+
+
 def test_no_inline_style_blocks_in_templates():
-    """Page CSS belongs in app.css (scoped via the page_class block), not in a <style> tag, or it
+    """Page CSS belongs in a versioned stylesheet, not in a <style> tag, or it
     escapes the token contract and the asset-version cache bust."""
     offenders = [p.name for p in (WEB / "templates").rglob("*.html") if "<style" in p.read_text()]
     assert not offenders, f"inline <style> blocks found in: {offenders}"
@@ -126,6 +135,13 @@ def test_elements_do_not_repeat_style_attributes():
                 lineno = path.read_text()[:match.start()].count("\n") + 1
                 offenders.append(f"{path.name}:{lineno}")
     assert not offenders, f"duplicate style attributes found: {offenders}"
+
+
+def test_generating_takeover_title_is_scoped():
+    """The takeover heading must not override dashboard playlist-row song titles."""
+    css = (WEB / "static" / "page-overrides.css").read_text()
+    assert ".gen-stage .gen-title" in css
+    assert not re.search(r"(?m)^\.gen-title\s*\{", css)
 
 
 def test_python_returns_token_references_not_colours():

@@ -1,0 +1,365 @@
+/* Interactive Clusters graph and its controls. */
+/* ===== Clusters tab ===================================================== */
+/* Full-bleed: break out of <main>'s centred max-width + padding so the canvas is the whole viewport. */
+.cluster-page {
+  position: relative; display: flex; flex-direction: column; box-sizing: border-box;
+  width: 100vw; margin-left: calc(50% - 50vw);
+  margin-top: calc(-1 * clamp(1.4rem, 4vw, 2.8rem)); margin-bottom: -5rem;
+  height: calc(100vh - var(--topbar-h, 3.45rem));
+}
+.cluster-canvas {
+  position: relative; overflow: hidden; touch-action: none; cursor: grab; flex: 1; min-height: 0;
+  user-select: none; -webkit-user-select: none;   /* a drag must pan, not select card text */
+  isolation: isolate;                    /* contain the starfield z-index layering */
+  border-top: 1px solid var(--border);
+  /* deep space: dark radial base + three faint nebula washes for depth */
+  background:
+    radial-gradient(58% 48% at 80% 14%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 70%),
+    radial-gradient(50% 44% at 14% 86%, color-mix(in srgb, var(--cosmic-cyan) 9%, transparent), transparent 70%),
+    radial-gradient(46% 40% at 62% 74%, color-mix(in srgb, var(--danger-glow) 6%, transparent), transparent 72%),
+    radial-gradient(130% 105% at 50% -8%, var(--space-1) 0%, var(--space-2) 55%, var(--space-3) 100%);
+}
+.cluster-canvas:active { cursor: grabbing; }
+/* force-graph renders its <canvas> inside here, filling the panel; it handles pan/zoom/drag itself. */
+.cluster-graph { position: absolute; inset: 0; z-index: 1; }
+.cluster-graph canvas { display: block; }
+/* override force-graph's inline canvas cursor while hovering a mid-edge info dot (see pointermove in init) */
+.cluster-graph.dot-hover canvas { cursor: pointer !important; }
+/* hover/click action menu, floated over the canvas at a node's screen position (set in _positionOverlays) */
+.cluster-actions { position: absolute; top: 0; left: 0; z-index: 6; }
+/* full card width (width set per-node in _positionOverlays); flex:1 buttons stretch to fill = big targets */
+.cluster-actions .ca-row { display: flex; gap: 4px; padding: 4px; border-radius: 9px; width: 100%; box-sizing: border-box;
+  background: color-mix(in srgb, var(--space-2) 94%, transparent); border: 1px solid var(--border-2); box-shadow: var(--shadow); }
+
+/* Starfield BEHIND the graph (cluster-world is z-index 1), with the spacetime grid (<canvas>) over it.
+   Two star layers (element bg + ::before) for depth. DELIBERATELY STATIC — no animation. ANY animation
+   here (background-position drift, filter, or even an opacity twinkle) repaints the whole viewport-sized
+   field of radial-gradients EVERY frame, idle included, which pinned the entire canvas at ~20fps. Painted
+   once, it costs nothing. (Measured: animated => ~20fps idle; static => 60fps.) */
+.cluster-stars { position: absolute; inset: -60px; z-index: 0; pointer-events: none; background-repeat: repeat;
+  /* drifting star field: mixed sizes/colours for depth */
+  background-size: 210px 210px;          /* smaller tile ⇒ the dim dust is more densely packed */
+  background-image:
+    radial-gradient(1.5px 1.5px at 40px 60px, color-mix(in srgb, var(--light-source) 85%, transparent), transparent),
+    radial-gradient(1.6px 1.6px at 175px 150px, color-mix(in srgb, var(--star-warm) 80%, transparent), transparent),
+    radial-gradient(1.3px 1.3px at 110px 30px, color-mix(in srgb, var(--star-cool) 65%, transparent), transparent),
+    /* dense faint dust (the dimmest layer) */
+    radial-gradient(1px 1px at 18px 120px, color-mix(in srgb, var(--light-source) 40%, transparent), transparent),
+    radial-gradient(1px 1px at 95px 90px, color-mix(in srgb, var(--star-cool) 42%, transparent), transparent),
+    radial-gradient(1px 1px at 150px 200px, color-mix(in srgb, var(--light-source) 36%, transparent), transparent),
+    radial-gradient(1px 1px at 60px 175px, color-mix(in srgb, var(--star-rose) 40%, transparent), transparent),
+    radial-gradient(1px 1px at 200px 70px, color-mix(in srgb, var(--light-source) 34%, transparent), transparent),
+    radial-gradient(1px 1px at 130px 110px, color-mix(in srgb, var(--star-cool) 38%, transparent), transparent),
+    radial-gradient(1px 1px at 30px 30px, color-mix(in srgb, var(--light-source) 32%, transparent), transparent),
+    radial-gradient(1px 1px at 75px 200px, color-mix(in srgb, var(--light-source) 30%, transparent), transparent),
+    radial-gradient(1px 1px at 190px 175px, color-mix(in srgb, var(--star-cool) 36%, transparent), transparent),
+    radial-gradient(1px 1px at 160px 55px, color-mix(in srgb, var(--light-source) 30%, transparent), transparent),
+    radial-gradient(1px 1px at 100px 160px, color-mix(in srgb, var(--star-warm) 34%, transparent), transparent);
+}
+/* a sparser, brighter layer for depth (static: no animation, so it never forces a repaint) */
+.cluster-stars::before {
+  content: ''; position: absolute; inset: 0; background-repeat: repeat; background-size: 540px 540px; opacity: 0.95;
+  background-image:
+    radial-gradient(2.4px 2.4px at 120px 160px, var(--light-source) 35%, color-mix(in srgb, var(--star-azure) 40%, transparent) 62%, transparent 76%),
+    radial-gradient(2.2px 2.2px at 470px 90px, var(--light-source) 35%, color-mix(in srgb, var(--star-amber) 40%, transparent) 62%, transparent 76%),
+    radial-gradient(2.3px 2.3px at 300px 430px, var(--light-source) 35%, color-mix(in srgb, var(--star-violet) 40%, transparent) 62%, transparent 76%),
+    radial-gradient(1.6px 1.6px at 60px 360px, color-mix(in srgb, var(--light-source) 80%, transparent), transparent),
+    radial-gradient(1.6px 1.6px at 400px 320px, color-mix(in srgb, var(--star-cool) 75%, transparent), transparent);
+}
+/* (the spacetime grid is now the warped <canvas>.cluster-grid, drawn in JS, see drawGrid) */
+.cluster-grid { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) {
+  .cluster-stars, .cluster-stars::before, .cluster-stars::after { animation: none; }
+}
+.cluster-world { position: absolute; top: 0; left: 0; width: 0; height: 0; z-index: 1; }
+.cluster-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+.edge-path { fill: none; stroke: var(--edge); stroke-width: 2; }   /* neutral gray vertices */
+/* #30 the clicked spine, drawn as bright-green glowing lines over the faint branches */
+.edge-path.trunk { stroke: var(--trunk); stroke-width: 5; stroke-linecap: round;
+  filter: drop-shadow(0 0 3px var(--trunk)) drop-shadow(0 0 9px color-mix(in srgb, var(--trunk) 90%, transparent))
+          drop-shadow(0 0 16px color-mix(in srgb, var(--trunk) 55%, transparent));
+  animation: trunkGlow 1.8s ease-in-out infinite; }
+@keyframes trunkGlow { 0%, 100% { opacity: 1; } 50% { opacity: 0.78; } }
+
+/* Bright-green midpoint dot on every edge: click it to ask "why this connection?". */
+.edge-dot {
+  /* positioned via inline transform translate (compositor-only, no per-frame reflow); centred on its
+     point with a negative margin so the transform is free for positioning (hover grows via box-shadow). */
+  position: absolute; left: 0; top: 0; margin: -5.5px 0 0 -5.5px; z-index: 3;
+  width: 11px; height: 11px; padding: 0; border-radius: 50%; cursor: pointer;
+  background: var(--edge); border: 2px solid var(--bg-2);   /* same gray as the edges, quiet */
+  opacity: 0.6; transition: opacity 0.12s, background 0.12s, box-shadow 0.12s;
+}
+.edge-dot:hover { opacity: 1; background: var(--accent-2); box-shadow: 0 0 0 3px var(--accent-soft); }
+.edge-dot.on { opacity: 1; background: var(--accent-2); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.cluster-explain {
+  position: absolute; z-index: 7; transform: translate(-50%, calc(-100% - 14px));
+  width: 248px; padding: 0.7rem 0.8rem 0.75rem;
+  background: var(--surface); border: 1px solid var(--cta); border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--cta) 18%, transparent), var(--shadow);
+}
+/* Little pointer down toward the dot. */
+.cluster-explain::after {
+  content: ''; position: absolute; left: 50%; bottom: -7px; transform: translateX(-50%) rotate(45deg);
+  width: 12px; height: 12px; background: var(--surface);
+  border-right: 1px solid var(--cta); border-bottom: 1px solid var(--cta);
+}
+.ce-close { position: absolute; top: 0.3rem; right: 0.35rem; border: none; background: none;
+  color: var(--faint); cursor: pointer; font-size: 0.8rem; line-height: 1; padding: 0.15rem; }
+.ce-close:hover { color: var(--text); }
+.ce-loading { margin: 0; color: var(--dim); font-size: 0.85rem; }
+.ce-why { margin: 0 1rem 0 0; font-size: 0.86rem; line-height: 1.32; color: var(--text); }
+.ce-reasons { margin: 0.5rem 0 0; padding-left: 1rem; display: flex; flex-direction: column; gap: 0.2rem; }
+.ce-reasons li { font-size: 0.76rem; color: var(--dim); line-height: 1.28; }
+.ce-score { margin: 0.55rem 0 0; padding-top: 0.45rem; border-top: 1px solid var(--border);
+  font-size: 0.72rem; color: var(--faint); }
+.ce-pct { color: var(--cta); font-weight: 700; font-size: 0.82rem; }
+
+.cluster-node {
+  position: absolute; left: 0; top: 0;   /* positioned via inline transform translate (compositor-only, no per-frame reflow); -50% centring is folded into that transform */
+  width: 190px; background: var(--surface); border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm); padding: 0.5rem 0.55rem; box-shadow: var(--shadow);
+}
+.cluster-node.central {
+  width: 230px; background: var(--grad-soft); border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow);
+}
+/* #14 colour-coding: a track card is tinted by its branch hue; depth desaturates/lightens it (the
+   hue vars are set inline per node, see app.js nodeStyle). Declared before .trunk/.pruned so those
+   states still override the border colour. */
+.cluster-node.track {
+  border-color: hsl(var(--node-hue, 210) var(--node-sat, 60%) var(--node-light, 60%));
+  background: color-mix(in srgb, var(--surface) 88%,
+              hsl(var(--node-hue, 210) var(--node-sat, 60%) var(--node-light, 60%)) 12%);
+  box-shadow: 0 0 0 1px hsl(var(--node-hue, 210) var(--node-sat, 60%) var(--node-light, 60%) / 0.22),
+              var(--shadow);
+}
+/* #30 a clicked (trunk) card: green edge so the spine reads as one piece with its highlighted lines */
+.cluster-node.trunk { border-color: var(--cta); box-shadow: 0 0 0 1px color-mix(in srgb, var(--cta) 35%, transparent), var(--shadow); }
+/* Pruned = a spent negative-signal marker: shrink to a single struck-through line. */
+.cluster-node.pruned { opacity: 0.55; border-color: var(--danger); width: auto; max-width: 165px;
+  padding: 0.3rem 0.45rem; }
+.cluster-node.pruned .cn-thumb, .cluster-node.pruned .cn-sub { display: none; }
+.cluster-node.pruned .cn-label { text-decoration: line-through; font-size: 0.74rem; }
+.cluster-node.pruned .cn-actions { margin-top: 0.25rem; }
+.cluster-node.pruned:hover { opacity: 0.9; }                  /* hover to read it (its title shows what it was) */
+/* Filtered-out (by the genre chip) reads as a neutral, reversible "set aside", NOT a red rejection. */
+.cluster-node.pruned.filtered { border-color: var(--border-2); border-style: dashed; }
+.cn-body { cursor: grab; }
+.cn-body:active { cursor: grabbing; }
+.cn-track { display: flex; gap: 0.5rem; align-items: center; position: relative; }
+/* #13 P2: out-of-corpus (new, not-yet-owned) tracks: a light ✨ corner badge (no card-wide glow) */
+.cn-new { position: absolute; top: -7px; right: -7px; font-size: 12px; line-height: 1;
+  filter: drop-shadow(0 1px 2px color-mix(in srgb, var(--shadow-ink) 60%, transparent)); pointer-events: none; z-index: 2; }
+.cn-track.new-music .cn-label { color: var(--accent-2); }
+.cn-central { display: flex; flex-direction: column; gap: 0.35rem; }
+.cn-eyebrow { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.14em; color: var(--accent-2); }
+.cn-seeds { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.cn-seed { font-size: 0.78rem; font-weight: 600; padding: 0.12rem 0.45rem; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--border-2); }
+.cn-thumb { width: 34px; height: 34px; border-radius: 6px; object-fit: cover; flex: none;
+  -webkit-user-drag: none; user-drag: none; pointer-events: none; }   /* don't let a drag grab the image */
+.cn-text { min-width: 0; }
+.cn-label { display: block; font-size: 0.82rem; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cn-sub { display: block; font-size: 0.7rem; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cn-actions { display: flex; gap: 0.25rem; margin-top: 0.4rem; opacity: 0; transition: opacity 0.12s; }
+.cluster-node:hover .cn-actions, .cluster-node.central .cn-actions, .cluster-node.pruned .cn-actions { opacity: 1; }
+.cn-btn {
+  flex: 1; border: 1px solid var(--border-2); background: var(--surface-2); color: var(--text);
+  border-radius: 6px; padding: 0.18rem 0; font-size: 0.78rem; cursor: pointer; line-height: 1;
+}
+.cn-btn:hover { border-color: var(--accent); }
+.cn-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.cn-btn:disabled:hover { border-color: var(--border-2); }   /* no hover affordance when dead */
+.cn-btn.play { color: var(--accent-2); }
+.cn-btn.play:hover { background: var(--accent-soft); border-color: var(--accent); }
+/* When a card is pruned, its ✕ becomes a ↺ RESTORE control: colour it like an action to bring back,
+   not a destructive delete. */
+.cn-btn.prune.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-2); }
+.cn-btn.prune.on:hover { background: var(--accent); color: var(--light-source); }
+/* 🔥 emphasis toggle: dim until lit, then glows when steering picks toward this track */
+.cn-btn.boost { filter: grayscale(1); opacity: 0.7; }
+.cn-btn.boost:hover { filter: none; opacity: 1; }
+.cn-btn.boost.on { filter: none; opacity: 1; background: color-mix(in srgb, var(--boost) 16%, transparent); border-color: var(--boost);
+  box-shadow: 0 0 8px -1px color-mix(in srgb, var(--boost) 80%, transparent); }
+/* 🔥 boosted card: a cosmic-fire effect around the border. Two parts, both robust against the card's
+   transform stacking context:
+   1) an animated box-shadow that pulses a warm/violet glow (always paints with the card);
+   2) ::before is a gradient BORDER RING (masked to the border, so it sits over the edge without
+      covering content) whose colours rotate via @property --boostAngle, flames licking the border. */
+@property --boostAngle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
+.cluster-node.boosted { border-color: var(--boost); animation: boostGlow 1.5s ease-in-out infinite; }
+.cluster-node.boosted::before, .cluster-node.boosted::after {
+  content: ''; position: absolute; inset: -3px; border-radius: calc(var(--radius-sm) + 3px); padding: 3px;
+  pointer-events: none; --boostAngle: 0deg;   /* fallback for browsers without @property (static ring) */
+  /* space FIRE: deep red → orange → amber → white-hot, with one cosmic-magenta flicker (no rainbow) */
+  background: conic-gradient(from var(--boostAngle),
+    var(--fire-0), var(--fire-1), var(--fire-2), var(--fire-3), var(--fire-4), var(--fire-amber), var(--fire-orange-hot), var(--fire-5), var(--fire-0));
+  -webkit-mask: linear-gradient(var(--shadow-ink) 0 0) content-box, linear-gradient(var(--shadow-ink) 0 0); -webkit-mask-composite: xor;
+          mask: linear-gradient(var(--shadow-ink) 0 0) content-box, linear-gradient(var(--shadow-ink) 0 0); mask-composite: exclude;
+  animation: boostAngle 2.4s linear infinite;
+}
+.cluster-node.boosted::before { filter: blur(1px); }
+/* a wider, blurrier, counter-rotating copy throws the flames outward as a soft halo */
+.cluster-node.boosted::after { inset: -7px; padding: 7px; filter: blur(7px); opacity: 0.8;
+  animation: boostAngleRev 3.4s linear infinite; }
+@keyframes boostAngle { to { --boostAngle: 360deg; } }
+@keyframes boostAngleRev { to { --boostAngle: -360deg; } }
+@keyframes boostGlow {
+  0%, 100% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--fire-orange) 70%, transparent), 0 0 14px -2px color-mix(in srgb, var(--fire-orange-hot) 85%, transparent),
+                         0 0 30px -8px color-mix(in srgb, var(--cosmic-purple) 38%, transparent); }
+  50%      { box-shadow: 0 0 0 1px color-mix(in srgb, var(--fire-amber) 95%, transparent), 0 0 22px -1px var(--fire-orange-hot),
+                         0 0 42px -5px color-mix(in srgb, var(--cosmic-purple) 58%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cluster-node.boosted, .cluster-node.boosted::before, .cluster-node.boosted::after { animation: none; }
+}
+
+/* search: centered hero when empty, docked strip once seeded */
+.cluster-search { display: flex; flex-direction: column; align-items: center; gap: 0.6rem;
+  padding: 0.6rem clamp(1rem, 4vw, 2.4rem) 0;
+  position: relative; z-index: 4;          /* sit above the (positioned) canvas so the input stays clickable */
+  transition: transform 0.55s cubic-bezier(0.2, 0.7, 0.2, 1); }
+/* Empty state: float the search to mid-screen; it slides up to the top on the first graph render.
+   Absolute (out of flow) so it reserves NO height at the top: otherwise its in-flow box leaves an
+   empty "top bar" band above the canvas before the search has docked. Both states anchor at the top,
+   so only the transform animates on dock (the position swap is visually inert). */
+.cluster-search:not(.docked) { position: absolute; left: 0; right: 0; top: 0;
+  margin: 0; transform: translateY(40vh); }
+.cluster-search.docked { margin: 0 0 0.6rem; transform: translateY(0); }
+/* search box + genre combo share one row */
+.cluster-search-row { display: flex; gap: 0.6rem; align-items: center; justify-content: center;
+  width: 100%; flex-wrap: wrap; }
+.cluster-search-box { position: relative; flex: 1 1 22rem; max-width: 34rem; min-width: 0; }
+.cluster-search.docked .cluster-search-box { flex-basis: 24rem; max-width: 26rem; }
+.cluster-search-icon { position: absolute; left: 0.8rem; top: 50%; transform: translateY(-50%); color: var(--faint); }
+.cluster-search-box input {
+  width: 100%; padding: 0.7rem 0.9rem 0.7rem 2.1rem; font-size: 1rem;
+  background: var(--surface); color: var(--text); border-radius: 999px;
+  border: 1.5px solid var(--cta);                                  /* CTA green, distinct from the topbar search */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--cta) 25%, transparent), 0 6px 18px -10px color-mix(in srgb, var(--cta) 65%, transparent);
+}
+.cluster-search-box input:focus { outline: none; border-color: var(--cta-2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cta-2) 30%, transparent), 0 0 18px -2px color-mix(in srgb, var(--cta-2) 55%, transparent); }
+.cluster-suggest {
+  position: absolute; z-index: 5; top: calc(100% + 0.35rem); left: 0; right: 0; margin: 0; padding: 0.3rem;
+  list-style: none; background: var(--surface); border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow); max-height: 20rem; overflow-y: auto;
+}
+.cluster-suggest li { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.4rem 0.5rem; border-radius: 6px; cursor: pointer; }
+.cluster-suggest li:hover, .cluster-suggest li.sel { background: var(--accent-soft); }
+.cs-kind { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.08em; padding: 0.1rem 0.35rem;
+  border-radius: 4px; background: var(--surface-2); color: var(--dim); flex: none; }
+.cs-kind.artist { color: var(--accent-2); } .cs-kind.playlist { color: var(--teal); } .cs-kind.song { color: var(--dim); }
+.cs-label { font-weight: 600; }
+.cs-sub { font-size: 0.75rem; color: var(--faint); margin-left: auto; }
+.cluster-hint { color: var(--dim); font-size: 0.85rem; }
+
+/* #29 genre-family whitelist: an autosuggest combo beside the seed search: type to filter, pick to
+   add a chip. Neutral border (the bright green is the seed search's signature); green once active. */
+.cluster-genres { position: relative; flex: 0 1 15rem; min-width: 11rem; }
+.cluster-reset { flex: none; cursor: pointer; padding: 0.45rem 0.8rem; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--border-2); color: var(--dim); font-size: 0.82rem;
+  white-space: nowrap; align-self: center; }
+.cluster-reset:hover { border-color: var(--danger); color: var(--danger); }
+.cg-box { display: flex; align-items: center; flex-wrap: wrap; gap: 0.3rem; cursor: text;
+  padding: 0.4rem 0.6rem; min-height: 2.65rem; box-sizing: border-box; width: 100%;
+  /* #d: the box grows taller ONLY when chips truly run out of horizontal room. It used to wrap early
+     because the input demanded a wide min-width and got bumped to its own line; the input now shrinks
+     (see .cg-box input) so it tucks in after the chips and a second row appears only when needed. */
+  background: var(--surface); border: 1.5px solid var(--border-2); border-radius: 1.3rem; }
+.cg-box.on { border-color: var(--cta); }
+.cg-box:focus-within { border-color: var(--cta-2); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cta-2) 18%, transparent); }
+.cg-icon { color: var(--faint); font-size: 0.9rem; flex: none; }
+.cg-box input { flex: 1 1 2rem; min-width: 2rem; border: none; background: none; outline: none;
+  color: var(--text); font-size: 0.9rem; padding: 0.1rem 0; }
+.cg-chip { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; flex: none;
+  white-space: nowrap; background: color-mix(in srgb, var(--cta) 12%, transparent); color: var(--cta); border: 1px solid color-mix(in srgb, var(--cta) 40%, transparent);
+  border-radius: 999px; padding: 0.08rem 0.5rem; font-size: 0.76rem; font-weight: 600;
+  text-transform: capitalize; }
+.cg-chip::after { content: '✕'; font-size: 0.6rem; opacity: 0.7; }
+.cg-chip:hover { background: color-mix(in srgb, var(--cta) 22%, transparent); }
+.cg-x { flex: none; border: none; background: none; color: var(--faint); cursor: pointer;
+  font-size: 0.72rem; line-height: 1; padding: 0 0.1rem; }
+.cg-x:hover { color: var(--text); }
+.cg-suggest { position: absolute; z-index: 6; top: calc(100% + 0.35rem); left: 0; right: 0; margin: 0;
+  padding: 0.3rem; list-style: none; background: var(--surface); border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow); max-height: 20rem; overflow-y: auto; }
+.cg-suggest li { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.5rem;
+  border-radius: 6px; cursor: pointer; }
+.cg-suggest li:hover, .cg-suggest li.sel { background: var(--accent-soft); }
+.cg-name { flex: 1; text-transform: capitalize; }
+.cg-kind { font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.08em; flex: none;
+  padding: 0.08rem 0.35rem; border-radius: 4px; background: var(--surface-2); color: var(--faint); }
+.cg-kind.family { color: var(--accent-2); }
+.cg-n { font-size: 0.72rem; color: var(--faint); min-width: 1.5rem; text-align: right; }
+
+.cluster-zoombar { position: absolute; right: 0.8rem; bottom: 0.8rem; z-index: 4; display: flex; flex-direction: column; gap: 0.3rem; }
+.cluster-zoombar button {
+  width: 2rem; height: 2rem; padding: 0; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center;   /* centre the glyph, no UA padding offset */
+  border: 1px solid var(--border-2); background: var(--surface);
+  color: var(--text); border-radius: 6px; cursor: pointer; font-size: 0.95rem; line-height: 1;
+}
+.cluster-zoombar button:hover { border-color: var(--accent); }
+
+.cluster-savebar {
+  position: absolute; z-index: 6; bottom: 1rem; left: 50%; transform: translateX(-50%);
+  width: min(60rem, calc(100% - 3rem));
+  display: flex; align-items: center; gap: 0.8rem; padding: 0.7rem 0.9rem;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-2); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.cluster-count { color: var(--dim); font-size: 0.85rem; white-space: nowrap; }
+.cluster-count strong { color: var(--text); font-size: 1.05rem; }
+/* save scope toggle: all non-hidden vs trunk only */
+.cluster-mode { display: inline-flex; flex: none; border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm); overflow: hidden; }
+.cluster-mode button { display: flex; flex-direction: column; align-items: center; gap: 0.05rem;
+  border: none; background: var(--bg-2); color: var(--dim); cursor: pointer; padding: 0.34rem 0.7rem;
+  line-height: 1.1; }
+.cluster-mode button + button { border-left: 1px solid var(--border-2); }
+.cluster-mode button strong { color: var(--text); font-size: 1.05rem; }
+.cluster-mode button span { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--faint); white-space: nowrap; }
+.cluster-mode button.on { background: var(--accent-soft); }
+.cluster-mode button.on strong, .cluster-mode button.on span { color: var(--accent-2); }
+.cluster-mode button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* DJ Journey picker: two-line items (name + short hint), opens upward from the save bar */
+.cluster-journey { position: relative; flex: none; }
+.cj-toggle { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 0.04rem;
+  cursor: pointer; padding: 0.3rem 1.6rem 0.3rem 0.7rem; border-radius: var(--radius-sm);
+  background: var(--bg-2); border: 1px solid var(--border-2); color: var(--text); min-width: 8.5rem; }
+.cj-toggle:hover { border-color: var(--accent); }
+.cj-eyebrow { font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--faint); }
+.cj-cur { font-size: 0.88rem; font-weight: 600; white-space: nowrap; }
+.cj-caret { position: absolute; right: 0.55rem; top: 50%; transform: translateY(-50%); color: var(--faint); font-size: 0.7rem; }
+.cj-panel { position: absolute; z-index: 8; bottom: calc(100% + 0.4rem); left: 0; width: 17rem;
+  max-height: 56vh; overflow-y: auto; padding: 0.3rem;
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow); }
+.cj-item { display: flex; flex-direction: column; gap: 0.05rem; width: 100%; text-align: left; border: none;
+  background: none; cursor: pointer; padding: 0.4rem 0.55rem; border-radius: 6px; color: var(--text); }
+.cj-item:hover { background: var(--surface-2); }
+.cj-item.on { background: var(--accent-soft); }
+.cj-item strong { font-size: 0.85rem; }
+.cj-item.on strong { color: var(--accent-2); }
+.cj-item span { font-size: 0.7rem; color: var(--faint); }
+.cluster-savebar input[name="name"] {
+  flex: 1; padding: 0.55rem 0.7rem; background: var(--bg-2); border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm); color: var(--text);
+}
+/* Save CTA spinner: shown while the save request is in flight (htmx adds .htmx-request to the form). */
+.cluster-savebar .cta { position: relative; }
+.cluster-savebar .cta-spin { display: none; position: absolute; left: 50%; top: 50%;
+  width: 1.05em; height: 1.05em; margin: -0.55em 0 0 -0.55em; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--light-source) 40%, transparent); border-top-color: var(--light-source); animation: ctaspin 0.7s linear infinite; }
+.cluster-savebar.htmx-request .cta-txt { visibility: hidden; }
+.cluster-savebar.htmx-request .cta-spin { display: block; }
+.cluster-savebar .cta:disabled { opacity: 0.85; cursor: progress; }
+@keyframes ctaspin { to { transform: rotate(360deg); } }
+.sync-urgent { border-color: var(--danger, var(--danger-deep)); box-shadow: 0 0 0 2px var(--danger, var(--danger-deep)) inset; }
+.sync-urgent .sync-nudge { color: var(--danger, var(--danger-deep)); font-weight: 600; }

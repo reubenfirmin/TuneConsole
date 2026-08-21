@@ -7,9 +7,14 @@
   <!-- Vendored from npm (see package.json); refresh with `npm run sync-assets`. Served locally
        so nothing is fetched from a third-party CDN at runtime. -->
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
-  <!-- Design tokens first: app.css/story.css consume them and contain no colour literals. -->
+  <!-- Token layer first, then shared components and feature modules in cascade order. -->
   <link rel="stylesheet" href="/static/tokens.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/home.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/clusters.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/onboarding.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/analytics.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/page-overrides.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/story.css?v={{ asset_v }}">
   {% block page_styles %}{% endblock %}
   <script src="/static/vendor/htmx.min.js"></script>
@@ -96,7 +101,7 @@
       the extension will pick the session back up.</span>
     <button type="button" class="authbar-x" @click="dismissed = true" title="Dismiss" aria-label="Dismiss">×</button>
   </div>
-  {# `page_class` scopes a page's own rules in app.css (e.g. .page-merge) so bare-element
+  {# `page_class` scopes page rules (e.g. .page-merge) so bare-element
    selectors like `table` cannot leak to every other page. #}
   <main class="{% block page_class %}{% endblock %}">{% block body %}{% endblock %}</main>
   {# Enrichment conflict resolver loads here, OUTSIDE <main>: main's entrance animation keeps a
