@@ -2,7 +2,6 @@
 <div class="artist-head">
   {% if info and info.thumbnail %}<img class="artist-thumb" src="{{ info.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
   <div>
-    <span class="eyebrow">Artist</span>
     <h1>{{ artist }}</h1>
     <p class="artist-meta">
       <strong>{{ songs|length }}</strong> song{{ '' if songs|length == 1 else 's' }} in your playlists ·

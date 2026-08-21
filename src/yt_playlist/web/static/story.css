@@ -130,7 +130,10 @@
 .close-stats strong { font-size: 1.15rem; font-weight: 800; }
 .close-stats span { font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; color: var(--reel-ink-65); }
 .close-brand { margin-top: clamp(.7rem, 2vh, 1.1rem); font-size: .72rem; letter-spacing: .18em; text-transform: uppercase; color: var(--reel-ink-50); }
-.close-share { margin-top: clamp(.9rem, 2.4vh, 1.4rem); }
+.close-share { margin-top: clamp(.9rem, 2.4vh, 1.4rem); color: var(--reel-ink);
+  background: var(--control-primary); border-color: transparent;
+  box-shadow: 0 8px 20px -12px var(--accent); }
+.close-share:hover { background: var(--cta); color: var(--cta-ink); border-color: transparent; }
 
 /* entrance motion (Alpine x-transition) */
 .s-enter { transition: opacity .5s ease, transform .5s cubic-bezier(.2,.7,.2,1); }

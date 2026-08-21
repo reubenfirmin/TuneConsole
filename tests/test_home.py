@@ -34,7 +34,7 @@ def test_home_is_default_route(store):
     assert 'id="home"' in r.text          # Home shell marker
     assert "home-status" in r.text         # live status card is present
     assert "Library synced" not in r.text  # freshness line only appears after a first sync
-    assert 'class="presync card"' in r.text     # never-synced: the pre-sync placeholder instead
+    assert 'class="presync card card--featured"' in r.text  # never-synced placeholder
 
 
 def test_home_rediscovers_unplayed_saved_albums(store):
@@ -90,7 +90,7 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     assert "Gem" in cards                        # the track appears in the card row
 
     home = c.get("/").text
-    assert 'class="home-status card is-live"' in home    # live status card present on Home
+    assert 'class="home-status card card--status is-live"' in home
 
     # The status card is Home-only (never on the other tabs)
     assert "home-status" not in c.get("/playlists").text
@@ -183,7 +183,7 @@ def test_presync_shows_recs_placeholder_not_feed(store):
     c = TestClient(app, base_url="http://127.0.0.1")
 
     html = c.get("/").text
-    assert 'class="presync card"' in html                                  # placeholder shown
+    assert 'class="presync card card--featured"' in html                    # placeholder shown
     assert "recommendations will start appearing here" in html             # the copy
     assert "More in your wheelhouse" not in html                           # feed hidden pre-sync
 

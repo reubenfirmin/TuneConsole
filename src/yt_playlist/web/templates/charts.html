@@ -1,14 +1,13 @@
 {% extends "base.html" %}{% from "_partials/ticker.html" import ticker_chart %}
 {% block title %}Charts · TuneConsole{% endblock %}{% block body %}
 <div class="page-head">
-  <span class="eyebrow">Charts</span>
   <h1>Your top charts</h1>
   <p>Ranked by plays captured in your sync history (how often each song turns up in recently-played).
      The more you sync, the richer this gets.</p>
 </div>
 
 <div x-data="{ view: 'songs' }">
-  <div class="card pl-toolbar" style="margin-bottom:1.1rem">
+  <div class="card card--toolbar pl-toolbar" style="margin-bottom:1.1rem">
     <span class="seg">
       <button type="button" :class="{ on: view === 'songs' }" @click="view = 'songs'">Top songs</button>
       <button type="button" :class="{ on: view === 'artists' }" @click="view = 'artists'">Artists</button>
@@ -27,7 +26,7 @@
     </span>
   </div>
 
-  <div class="card" x-show="view === 'songs'">
+  <div class="card card--data" x-show="view === 'songs'">
     {% if songs %}{% set smax = songs[0].plays %}
     <table class="chart">
       <thead><tr><th class="rank">#</th><th style="width:2.6rem"></th><th>Song</th><th>Artist</th><th class="barhead"></th><th class="num">Plays</th></tr></thead>
@@ -48,10 +47,10 @@
     {% else %}<p class="empty" style="margin:0">No play history yet. Sync a few times to build it up.</p>{% endif %}
   </div>
 
-  <div class="card" x-show="view === 'artists'" x-cloak>{{ ticker_chart(tickers.artist, 'artist') }}</div>
-  <div class="card" x-show="view === 'genres'" x-cloak>{{ ticker_chart(tickers.genre, 'genre') }}</div>
-  <div class="card" x-show="view === 'years'" x-cloak>{{ ticker_chart(tickers.year, 'year') }}</div>
-  <div class="card" x-show="view === 'albums'" x-cloak>{{ ticker_chart(tickers.album, 'album') }}</div>
-  <div class="card" x-show="view === 'playlists'" x-cloak>{{ ticker_chart(tickers.playlist, 'playlist') }}</div>
+  <div class="card card--data" x-show="view === 'artists'" x-cloak>{{ ticker_chart(tickers.artist, 'artist') }}</div>
+  <div class="card card--data" x-show="view === 'genres'" x-cloak>{{ ticker_chart(tickers.genre, 'genre') }}</div>
+  <div class="card card--data" x-show="view === 'years'" x-cloak>{{ ticker_chart(tickers.year, 'year') }}</div>
+  <div class="card card--data" x-show="view === 'albums'" x-cloak>{{ ticker_chart(tickers.album, 'album') }}</div>
+  <div class="card card--data" x-show="view === 'playlists'" x-cloak>{{ ticker_chart(tickers.playlist, 'playlist') }}</div>
 </div>
 {% endblock %}

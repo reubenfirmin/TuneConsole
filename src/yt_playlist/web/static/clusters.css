@@ -1,4 +1,9 @@
 /* Interactive Clusters graph and its controls. */
+.cluster-page-label {
+  font-family: var(--font-mono); font-size: .66rem; font-weight: 600;
+  letter-spacing: .22em; text-transform: uppercase; color: var(--accent);
+  display: block; margin-bottom: .5rem;
+}
 /* ===== Clusters tab ===================================================== */
 /* Full-bleed: break out of <main>'s centred max-width + padding so the canvas is the whole viewport. */
 .cluster-page {

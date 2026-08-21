@@ -171,6 +171,72 @@ def test_ordinary_controls_do_not_use_legacy_gradient_tokens():
     assert "background: var(--cluster-seed-bg)" in (WEB / "static" / "clusters.css").read_text()
 
 
+def test_application_shell_is_flat():
+    app = (WEB / "static" / "app.css").read_text()
+    body = re.search(r"(?s)^body\s*\{(.*?)\}", app, re.M).group(1)
+    topbar = re.search(r"(?s)\.topbar\s*\{(.*?)\}", app).group(1)
+    assert "background: var(--canvas)" in body
+    assert "gradient(" not in body
+    assert "body::before" not in app
+    assert "background: var(--surface-card)" in topbar
+    assert "gradient(" not in topbar and "backdrop-filter" not in topbar
+
+
+def test_flat_card_variants_exist_and_are_used():
+    app = (WEB / "static" / "app.css").read_text()
+    templates = "\n".join(p.read_text() for p in (WEB / "templates").rglob("*.html"))
+    for variant in ("interactive", "featured", "status", "data", "inset", "toolbar"):
+        selector = f".card--{variant}"
+        assert selector in app, f"missing {selector} rules"
+        assert f"card--{variant}" in templates, f"{selector} is not used"
+    base = re.search(r"(?s)\.card\s*\{(.*?)\}", app).group(1)
+    hover = re.search(r"(?s)\.card--interactive:hover\s*\{(.*?)\}", app).group(1)
+    assert "box-shadow: none" in base and "gradient(" not in base
+    assert "transform" not in hover and "gradient(" not in hover
+
+
+def test_neon_green_is_reserved_for_explicit_primary_actions():
+    app = (WEB / "static" / "app.css").read_text()
+    base = re.search(r"(?s)button, \.btn\s*\{(.*?)\}", app).group(1)
+    base_hover = re.search(r"(?s)button:hover, \.btn:hover\s*\{(.*?)\}", app).group(1)
+    primary = re.search(r"(?s)\.btn-primary\s*\{(.*?)\}", app).group(1)
+    assert "var(--cta)" not in base and "var(--cta)" not in base_hover
+    assert "background: var(--surface-interactive)" in base
+    assert "background: var(--cta)" in primary
+
+    templates = "\n".join(p.read_text() for p in (WEB / "templates").rglob("*.html"))
+    for label in ("Import history", "Create playlist", "Save choices", "Save recipe"):
+        line = next(line for line in templates.splitlines() if label in line)
+        assert "btn-primary" in line, f"primary action is not classified: {line.strip()}"
+
+
+def test_serif_is_limited_to_the_generating_takeover():
+    offenders = {}
+    for path in (WEB / "static").glob("*.css"):
+        if path.name in {"tokens.css", "page-overrides.css"}:
+            continue
+        if "var(--font-display)" in path.read_text():
+            offenders[path.name] = True
+    assert not offenders, f"routine application CSS still uses the serif face: {offenders}"
+
+    overrides = (WEB / "static" / "page-overrides.css").read_text()
+    uses = re.findall(r"font-family:\s*var\(--font-display\)", overrides)
+    assert len(uses) == 1
+    assert ".gen-stage .gen-title" in overrides
+
+
+def test_eyebrows_are_limited_to_protected_experiences():
+    ordinary_templates = [p for p in (WEB / "templates").rglob("*.html")
+                          if p.name not in {"story_reel.html", "clusters.html"}]
+    offenders = [p.name for p in ordinary_templates if re.search(r"\beyebrow(?:-|\b)", p.read_text())]
+    assert not offenders, f"ordinary templates still use eyebrows: {offenders}"
+    assert ".eyebrow" not in (WEB / "static" / "app.css").read_text()
+
+    assert "slide-eyebrow" in (WEB / "templates" / "story_reel.html").read_text()
+    assert "cj-eyebrow" in (WEB / "templates" / "clusters.html").read_text()
+    assert "gen-status" in (WEB / "templates" / "generating.html").read_text()
+
+
 def test_python_returns_token_references_not_colours():
     from yt_playlist.web import theme
 

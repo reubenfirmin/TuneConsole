@@ -1,11 +1,10 @@
 {% extends "base.html" %}{% block title %}Albums · TuneConsole{% endblock %}{% block body %}
 <div class="page-head">
-  <span class="eyebrow">Albums</span>
   <h1>Albums</h1>
   <p>Albums across your playlists, or the ones you've saved in your YouTube library.</p>
 </div>
 
-<div class="card pl-toolbar" style="margin-bottom:1.1rem">
+<div class="card card--toolbar pl-toolbar" style="margin-bottom:1.1rem">
   <span class="seg">
     <a href="/albums?view=playlists" class="{{ 'on' if view == 'playlists' }}">In my playlists</a>
     <a href="/albums?view=saved" class="{{ 'on' if view == 'saved' }}">Saved in YouTube</a>

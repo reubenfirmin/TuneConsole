@@ -1,7 +1,6 @@
 {% extends "base.html" %}{% from "_macros.html" import pllink, banner with context %}{% block title %}Move · TuneConsole{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 <div class="page-head">
-  <span class="eyebrow">Move</span>
   <h1>Move playlists between identities</h1>
   <p><strong>Move</strong> recreates a playlist under the target identity and deletes the original
      (backup first). <strong>Copy</strong> keeps both. Tracks are re-matched in the target account.</p>

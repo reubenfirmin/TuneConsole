@@ -1,7 +1,6 @@
 {% extends "base.html" %}{% block title %}{{ album.title if album else 'Album' }} · TuneConsole{% endblock %}{% block body %}
 {% if not album %}
 <div class="page-head">
-  <span class="eyebrow">Album</span>
   <h1>Album unavailable</h1>
   <p>Couldn't load this album.{% if browse_id %}
     <a href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener"
@@ -24,7 +23,6 @@
   {% elif cover %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ cover }}" alt=""
        referrerpolicy="no-referrer" onerror="this.closest('.pl-art').remove()"></span>{% endif %}
   <div class="pl-headmain" x-ref="main">
-    <span class="eyebrow">Album</span>
     <h1>{{ album.title }}</h1>
     <p class="pl-stats">
       {# A compilation upload has no single album artist, so YouTube returns none: an empty amber
@@ -74,7 +72,7 @@
                    x-ref="cpName" x-init="$watch('cpOpen', v => v && $nextTick(() => $refs.cpName.focus()))">
             <div class="modal-actions">
               <button type="button" class="btn-ghost" @click="cpOpen = false">Cancel</button>
-              <button type="submit">Create playlist</button>
+              <button type="submit" class="btn-primary">Create playlist</button>
             </div>
           </form>
         </div>

@@ -2,7 +2,6 @@
 {% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
   &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}{% endcall %}{% endif %}
 <div class="page-head">
-  <span class="eyebrow">Playlists</span>
   <h1>All playlists</h1>
   <p>Select playlists to merge, delete, or assign to a group. Sort by name or by your listening,
      and split the view by group.</p>
@@ -66,7 +65,7 @@
   {# "Generated" lives in its own card above the table, always a separate block, collapsible #}
   <div class="card gen-grp" x-show="genRows().length" x-cloak>
     <div class="gen-grp-head" @click="toggleGen()" title="Click to collapse / expand">
-      <span class="eyebrow">Generated</span>
+      <span class="section-label">Generated</span>
       <span class="gen-grp-count" x-text="'(' + genRows().length + ')'"></span>
       <span class="gen-grp-caret" x-text="collapsed.Generated ? '▸' : '▾'"></span>
     </div>

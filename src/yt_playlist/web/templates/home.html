@@ -33,16 +33,16 @@
         {% endfor %}
       </svg>
       <div class="onb-body">
-        <span class="onb-eyebrow"><span class="onb-dot" aria-hidden="true"></span> Waiting for the extension</span>
+        <span class="connection-waiting"><span class="onb-dot" aria-hidden="true"></span> Waiting for the extension</span>
         <h2 class="onb-title">Connect the extension</h2>
         <p class="onb-sub">Install the TuneConsole extension to connect. It pairs automatically.</p>
-        <a class="btn" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
+        <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
            target="_blank" rel="noopener">Get the extension →</a>
       </div>
     </section>
 
     {# Connected: compact live strip (what's playing + library freshness). #}
-    <section class="home-status card is-live" x-show="connected" x-cloak>
+    <section class="home-status card card--status is-live" x-show="connected" x-cloak>
       <div class="hs-main">
         <span class="hs-dot" aria-hidden="true"></span>
         <template x-if="nowPlaying && (nowPlaying.title || nowPlaying.artist)">
@@ -142,7 +142,7 @@
   {% else %}
   {# Pre-sync placeholder: only once the extension is connected (not while the live sync console is
      streaming). Before connecting, the onboard hero above is the whole first-run screen. #}
-  <section class="presync card" x-show="connected && !running" x-cloak>
+  <section class="presync card card--featured" x-show="connected && !running" x-cloak>
     <svg class="presync-art" viewBox="0 0 132 72" aria-hidden="true">
       <defs><linearGradient id="presync-g" x1="0" y1="1" x2="0" y2="0">
         <stop offset="0" style="stop-color:var(--accent)"/><stop offset="1" style="stop-color:var(--accent-2)"/>

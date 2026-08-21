@@ -5,7 +5,7 @@
 <ul class="omni-list" role="listbox" aria-label="Search results">
   {% for s in sections %}
   <li class="omni-section">
-    <div class="omni-head eyebrow">{{ s.title }}</div>
+    <div class="omni-head">{{ s.title }}</div>
     {% for it in s.rows %}
     <a class="omni-row" role="option" tabindex="-1"
        href="{{ it.href }}"{% if it.external %} target="_blank" rel="noopener"{% endif %}>

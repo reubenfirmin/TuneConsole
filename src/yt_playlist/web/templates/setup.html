@@ -2,7 +2,6 @@
 {% block page_styles %}<link rel="stylesheet" href="/static/setup.css?v={{ asset_v }}">{% endblock %}
 {% block body %}
 <div class="page-head">
-  <span class="eyebrow">Connect</span>
   <h1>Set up TuneConsole</h1>
   <p>Pair the browser extension, name your identities, and you're in.</p>
 </div>
@@ -28,7 +27,7 @@
 
   {# ── Tab 1: Pairing (the browser-extension bridge) ────────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'browser'" x-cloak>
-    <div class="card connection-card" x-cloak :class="connected ? 'is-connected' : 'is-disconnected'">
+    <div class="card card--status connection-card" x-cloak :class="connected ? 'is-connected' : 'is-disconnected'">
       <span class="connection-dot">&#9679;</span>
       <div>
         <strong x-text="connected ? 'Extension connected' : 'Extension not connected'"></strong>
@@ -74,7 +73,7 @@
         The extension is recognized by its identity, so no other program can use this connection.</p>
 
       <div class="btn-row btn-row-spaced" x-show="!connected" x-cloak>
-        <a class="btn" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
+        <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
            target="_blank" rel="noopener">Get the extension →</a>
       </div>
     </div>
@@ -113,7 +112,7 @@
 
   <div class="setup-actions" x-show="tab === 'browser' || tab === 'identities'" x-cloak>
     <span class="muted setup-connected-copy" x-show="connected" x-cloak>✓ Extension connected</span>
-    <button type="submit" class="setup-save">Save</button>
+    <button type="submit" class="btn-primary setup-save">Save</button>
   </div>
 </form>
 
@@ -166,7 +165,7 @@
                 x-text="fname || 'no file selected'"></span>
         </div>
         <div class="btn-row btn-row-spaced">
-          <button type="submit" class="btn-sm">Import history</button>
+          <button type="submit" class="btn-primary btn-sm">Import history</button>
         </div>
       </form>
       <div id="takeout-import-result"></div>

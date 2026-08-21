@@ -3,7 +3,7 @@
 <section class="alerts" aria-label="Needs attention">
   {# The welcome always leads the row. #}
   {% if show_intro %}
-  <div class="alert-card card alert-nudge" id="intro-nudge">
+  <div class="alert-card card card--featured alert-nudge" id="intro-nudge">
     <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
             hx-post="/onboard/intro/dismiss" hx-target="#intro-nudge" hx-swap="outerHTML swap:200ms">×</button>
     <span class="alert-cover"><img src="/static/nag/intro.png" alt="" loading="lazy"
@@ -18,7 +18,7 @@
   {# The monthly recap is the marquee moment in the row: right after the welcome. Links into the
      full-screen reel (#79); the Trends tab was removed -- this is the recap's only entry point. #}
   {% if recap %}
-  <div class="alert-card card alert-nudge recap-nudge" id="recap-nudge">
+  <div class="alert-card card card--featured alert-nudge recap-nudge" id="recap-nudge">
     <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
             hx-post="/onboard/recap/dismiss?month={{ recap.month }}" hx-target="#recap-nudge" hx-swap="outerHTML swap:200ms">×</button>
     <span class="alert-cover"><img src="/static/nag/trends.png" alt="" loading="lazy"
@@ -31,7 +31,7 @@
   {% endif %}
 
   {% if show_backend_update %}
-  <div class="alert-card card alert-nudge" id="update-nudge">
+  <div class="alert-card card card--featured alert-nudge" id="update-nudge">
     <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
             hx-post="/onboard/update/dismiss?v={{ backend_update.latest }}" hx-target="#update-nudge" hx-swap="outerHTML swap:200ms">×</button>
     <span class="alert-cover"><img src="/static/nag/update.png" alt="" loading="lazy"
@@ -50,7 +50,7 @@
   {% endif %}
 
   {% for a in actions %}
-  <div class="alert-card card alert-{{ a.severity }}">
+  <div class="alert-card card card--featured alert-{{ a.severity }}">
     <button type="button" class="alert-x" aria-label="Snooze" title="Snooze this"
             hx-post="/recs/feedback" hx-target="closest .alert-card" hx-swap="outerHTML swap:200ms"
             hx-vals='{"item": {{ a.key|tojson }}, "surface": "alert", "kind": "not_now"}'>×</button>
@@ -70,7 +70,7 @@
   {% endfor %}
 
   {% if show_lastfm_nudge %}
-  <div class="alert-card card alert-nudge" id="lastfm-nudge">
+  <div class="alert-card card card--featured alert-nudge" id="lastfm-nudge">
     <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
             hx-post="/onboard/lastfm/dismiss" hx-target="#lastfm-nudge" hx-swap="outerHTML swap:200ms">×</button>
     <span class="alert-cover"><img src="/static/nag/lastfm.png" alt="" loading="lazy"
@@ -83,7 +83,7 @@
   {% endif %}
 
   {% if show_identities_nudge %}
-  <div class="alert-card card alert-nudge" id="identities-nudge">
+  <div class="alert-card card card--featured alert-nudge" id="identities-nudge">
     <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
             hx-post="/onboard/identities/dismiss" hx-target="#identities-nudge" hx-swap="outerHTML swap:200ms">×</button>
     <span class="alert-cover"><img src="/static/nag/identities.png" alt="" loading="lazy"
@@ -98,7 +98,7 @@
   {# Pad a sparse row with muted skeletons so a lone nag fills the 4-slot row instead of orphaning. #}
   {% set pad = 4 - (actions|length + nudge_count) %}
   {% if pad > 0 %}{% for _ in range(pad) %}
-  <div class="alert-card card alert-skeleton" aria-hidden="true">
+  <div class="alert-card card card--featured alert-skeleton" aria-hidden="true">
     <span class="alert-cover skel-block"></span>
     <div class="alert-body">
       <span class="skel-block skel-line"></span>

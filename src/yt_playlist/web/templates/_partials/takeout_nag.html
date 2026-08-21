@@ -3,7 +3,7 @@
    itself, same as any other nag in _partials/alerts.html. #}
 {% if show_takeout_nag %}
 <section class="alerts" aria-label="Needs attention">
-  <div class="alert-card card alert-nudge" id="takeout-nag">
+  <div class="alert-card card card--featured alert-nudge" id="takeout-nag">
     <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
             hx-post="/onboard/takeout/dismiss" hx-target="#takeout-nag" hx-swap="outerHTML swap:200ms">×</button>
     <span class="alert-cover"><img src="/static/nag/takeout.png" alt="" loading="lazy"

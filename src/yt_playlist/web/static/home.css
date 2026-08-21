@@ -13,7 +13,7 @@
 
 /* Live sync console: streams the library sync's results as they happen (background or manual). */
 .sync-console { margin-bottom: 1.6rem; padding: 0.85rem 1rem 0.75rem; border: 1px solid var(--border-2);
-  border-radius: 12px; background: var(--bg-deep); overflow: hidden; }
+  border-radius: 12px; background: var(--surface-inset); overflow: hidden; }
 .sc-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.55rem; }
 .sc-eye { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase;
   color: var(--accent-2); }
@@ -45,11 +45,11 @@
 .onboard-card .onb-art { flex: none; width: 132px; height: 72px;
   filter: drop-shadow(0 3px 24px color-mix(in srgb, var(--accent) 55%, transparent)); }
 .onb-body { flex: 1 1 20rem; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }
-.onb-eyebrow { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.7rem; font-weight: 700;
-  letter-spacing: 0.11em; text-transform: uppercase; color: var(--warn-2); margin-bottom: 0.55rem; }
+.connection-waiting { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.78rem; font-weight: 650;
+  color: var(--warn-2); margin-bottom: 0.55rem; }
 .onb-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--warn);
   animation: ob-pulse 1.6s ease-in-out infinite; }
-.onb-title { font-family: var(--font-display); font-size: 1.6rem; font-weight: 600; color: var(--text);
+.onb-title { font-family: var(--font-sans); font-size: 1.6rem; font-weight: 600; color: var(--text);
   margin: 0 0 0.4rem; letter-spacing: -0.01em; }
 .onb-sub { color: var(--dim); font-size: 0.98rem; line-height: 1.5; margin: 0 0 1.15rem; }
 @keyframes ob-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
@@ -106,7 +106,7 @@
    into the now-playing card (see #radio-steer-slot above), so this card shows just the toggle row. */
 .radio-launch { margin-bottom: 1.4rem; }
 .rl-top { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; }
-.rl-eyebrow { display: inline-flex; align-items: center; gap: 0.45rem; font-weight: 600; color: var(--text); }
+.radio-label { display: inline-flex; align-items: center; gap: 0.45rem; font-weight: 650; color: var(--text); }
 .rl-dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--faint); flex: none; }
 .radio-launch.is-active .rl-dot { background: var(--accent-2); box-shadow: 0 0 0 3px var(--accent-soft);
   animation: rl-pulse 2.4s ease-in-out infinite; }
@@ -219,7 +219,7 @@
 /* Taste Model page */
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 1.2rem; }
 .stat-grid > div { display: flex; flex-direction: column; gap: 0.2rem; }
-.stat-grid strong { font-family: var(--font-display); font-size: 1.7rem; }
+.stat-grid strong { font-family: var(--font-sans); font-size: 1.7rem; }
 .stat-grid span { color: var(--dim); font-size: 0.8rem; }
 .bar-row { display: grid; grid-template-columns: 9rem 1fr 3rem; align-items: center; gap: 0.7rem; padding: 0.25rem 0; }
 .bar-label { color: var(--dim); font-size: 0.85rem; }
@@ -325,7 +325,7 @@
 .tile-cover.no-art .tile-scrim { opacity: 1; transform: none;
   position: static; inset: auto; align-items: center; text-align: center; background: none;
   padding: 0.7rem; min-width: 0; }
-.tile-cover.no-art .tile-title { white-space: normal; font-family: var(--font-display); font-size: 1.05rem; }
+.tile-cover.no-art .tile-title { white-space: normal; font-family: var(--font-sans); font-size: 1.05rem; }
 .tile-cover.no-art .tile-sub, .tile-cover.no-art .tile-note { white-space: normal; }
 
 @media (prefers-reduced-motion: reduce) {
@@ -383,7 +383,7 @@
   line-height: 1; color: var(--dim); padding: 0.1rem 0.35rem; border-radius: 5px; }
 .gen-refresh:hover { color: var(--cta); background: var(--surface-2); }   /* CTA green on hover */
 .gen-refresh[disabled] { opacity: 0.45; cursor: wait; }
-.gen-name { font-family: var(--font-display); font-size: 1.12rem; line-height: 1.25;
+.gen-name { font-family: var(--font-sans); font-size: 1.12rem; line-height: 1.25;
   letter-spacing: -0.01em; margin: 0.2rem 0 0; color: var(--text);
   /* Reserve 2 lines so a 1-line title still aligns its tagline/track-list with a 2-line neighbour. */
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
@@ -434,7 +434,7 @@
 .redis-head { display: flex; gap: 0.7rem; align-items: center; margin-bottom: 0.7rem; }
 .redis-head .gen-th { width: 3rem; height: 3rem; }
 .redis-meta { min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
-.redis-title { font-family: var(--font-display); font-size: 1.05rem; line-height: 1.25;
+.redis-title { font-family: var(--font-sans); font-size: 1.05rem; line-height: 1.25;
   letter-spacing: -0.01em; color: var(--text); font-weight: 650; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 .redis-title:hover { color: var(--accent-2); text-decoration: none; }
@@ -487,8 +487,8 @@
 .fb-lever button.fb-less.fb-sel { color: var(--light-source); background: var(--danger); border-color: var(--danger); }
 .fb-note { color: var(--dim); font-size: 0.76rem; margin: 0.6rem 0 0; line-height: 1.4; }
 .mood-done { background: color-mix(in srgb, var(--teal-muted) 10%, transparent); border-style: solid; border-color: transparent; }
-.eyebrow-ok { color: var(--teal); }
-.eyebrow-warn { color: var(--danger); }
+.status-label--success { color: var(--ok-2); }
+.status-label--error { color: var(--danger-3); }
 
 /* --- Taste Model control panel (sliders, genre shares, live sample) --- */
 .knob-list { display: grid; gap: 1.15rem; }
@@ -532,8 +532,7 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .fp-bar { display: flex; align-items: center; gap: 0.8rem; }
 .fp-collapse { background: none; border: none; cursor: pointer; padding: 0; color: var(--text);
   font-weight: 700; font-size: 0.95rem; letter-spacing: 0.01em; display: inline-flex; align-items: center; gap: 0.45rem; }
-/* These two are plain header buttons, not CTAs, so opt them out of the global green button:hover
-   (which paints a neon gradient + dark text). Just a subtle colour shift instead. */
+/* Plain header controls: a subtle colour shift, not a filled button treatment. */
 .fp-collapse:hover { color: var(--accent-2); background-image: none; box-shadow: none; }
 .fp-caret { color: var(--faint); font-size: 0.8rem; width: 0.8rem; text-align: center; }
 .fp-reset { margin-left: auto; background: none; border: 1px solid var(--border-2); color: var(--dim);
@@ -626,7 +625,7 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 /* "Generated" pinned as its own collapsible card above the playlists table */
 .gen-grp { border: 1px solid var(--accent); margin-bottom: 1rem; }
 .gen-grp-head { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
-.gen-grp-head .eyebrow { color: var(--accent); }
+.gen-grp-head .section-label { color: var(--text); }
 .gen-grp-head .gen-grp-count { color: var(--faint); font-size: 0.85rem; }
 .gen-grp-head .gen-grp-caret { margin-left: auto; color: var(--accent-2); }
 .gen-grp table { margin-top: 0.6rem; }

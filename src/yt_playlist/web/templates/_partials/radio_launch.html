@@ -6,9 +6,9 @@
    (homeStatus() in app.js), so radioActive/startRadio/stopRadio/customizeOpen are already in scope. #}
 <section class="card radio-launch" id="radio-launch" x-show="connected" x-cloak :class="{ 'is-active': radioActive }">
   <div class="rl-top">
-    <span class="rl-eyebrow"><span class="rl-dot" aria-hidden="true"></span> Radio</span>
+    <span class="radio-label"><span class="rl-dot" aria-hidden="true"></span> Radio</span>
     <span class="rl-actions">
-      <button type="button" class="btn btn-sm" x-show="!radioActive" x-cloak
+      <button type="button" class="btn btn-primary btn-sm" x-show="!radioActive" x-cloak
               @click="startRadio()" title="Start radio" aria-label="Start radio">Start radio</button>
       <button type="button" class="btn btn-ghost btn-sm" x-show="radioActive" x-cloak
               @click="stopRadio()" title="Stop radio" aria-label="Stop radio">Stop</button>

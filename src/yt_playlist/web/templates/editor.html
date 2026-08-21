@@ -1,6 +1,5 @@
 {% extends "base.html" %}{% block title %}Merge · TuneConsole{% endblock %}{% block page_class %}page-merge{% endblock %}{% block body %}
 <div class="page-head">
-  <span class="eyebrow">Merge</span>
   <h1>Merge {{ members|length }} playlist{{ '' if members|length == 1 else 's' }}</h1>
   <div class="cmp-ids">
     {% for m in members %}

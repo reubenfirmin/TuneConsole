@@ -34,7 +34,7 @@
             <div class="btn-row">
               <input type="text" x-model="val" placeholder="API key" autocomplete="off" spellcheck="false"
                      @keydown.enter.prevent="save()">
-              <button type="button" class="btn-sm" :disabled="busy" @click="save()"
+              <button type="button" class="btn-primary btn-sm" :disabled="busy" @click="save()"
                       x-text="busy ? 'Saving…' : 'Save'"></button>
             </div>
             <p class="notice err" x-show="err" x-text="err" x-cloak></p>

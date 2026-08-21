@@ -10,7 +10,7 @@
     <h2 x-text="id ? 'Editing “' + name + '”' : 'New recipe'"></h2>
     <span class="rt-form-actions">
       <button type="button" class="btn ghost" x-show="id" @click="reset()">New recipe</button>
-      <button type="button" class="btn" @click="submit()" x-text="id ? 'Apply' : 'Save recipe'"></button>
+      <button type="button" class="btn btn-primary" @click="submit()" x-text="id ? 'Apply' : 'Save recipe'"></button>
     </span>
   </div>
   <form x-ref="form" hx-post="/road_trip/recipes" hx-target="#road-trip-body" hx-swap="innerHTML"

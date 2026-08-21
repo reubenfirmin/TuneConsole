@@ -17,7 +17,7 @@
   <p class="section-note">Playlists that have gone quiet - worth dipping back into.</p>
   <div class="for-you-grid rediscover-grid">
     {% for p in rediscover %}
-    <div class="card redis-card">
+    <div class="card card--interactive redis-card">
       <header class="redis-head">
         <span class="gen-th{{ ' no-art' if not p.thumbnail }}">{% if p.thumbnail %}<img src="{{ p.thumbnail }}"
              alt="" loading="lazy" referrerpolicy="no-referrer"

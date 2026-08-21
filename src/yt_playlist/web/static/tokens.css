@@ -10,7 +10,7 @@
    ============================================================================ */
 
 /* TuneConsole, "late-night studio console"
-   warm near-black, amber accent, editorial serif + grotesque + mono. */
+   indigo-black, neon accents, sans-led UI + mono instrumentation. */
 
 @font-face {
   font-family: "Fraunces";
@@ -238,7 +238,6 @@
 
   /* Compatibility aliases while components migrate to the explicit roles. */
   --bg:          var(--canvas);
-  --bg-deep:     var(--p-ink);
   --bg-2:        var(--p-night-3);
   --surface:     var(--surface-card);
   --surface-2:   var(--surface-interactive);
@@ -256,7 +255,6 @@
   --on-cta:      var(--p-green-900);    /* type sitting on the neon CTA fill */
   --light-source:var(--p-white);        /* highlights, stars and masks */
   --shadow-ink:  var(--p-black);
-  --atmosphere-violet: var(--p-violet-800);
   --accent-shadow: var(--p-violet-600);
   --accent-pale-1: var(--p-lilac-100);
   --accent-pale-2: var(--p-lilac-200);
@@ -512,7 +510,7 @@
   --gen-pulse-glow: color-mix(in srgb, var(--trunk) 90%, transparent);
 
   /* ---- typography ---- */
-  --font-display: "Fraunces", Georgia, serif;
+  --font-display: "Fraunces", Georgia, serif; /* immersive generating takeover only */
   --font-sans: "Hanken Grotesk", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
 

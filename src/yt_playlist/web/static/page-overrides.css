@@ -21,11 +21,12 @@
 .pidx:hover:not(.sole) { background: var(--hairline); box-shadow: none; transform: none; }
 .pidx.picked { border-color: currentColor; }
 .pidx.sole { cursor: default; }
-.page-merge .cmp-h { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 .6rem; }
+.page-merge .cmp-h { font-family: var(--font-sans); font-size: 1.05rem; font-weight: 700; margin: 0 0 .6rem; }
 .page-merge .cfg { display: flex; justify-content: space-between; gap: 1.5rem; align-items: flex-start; flex-wrap: wrap; }
 .page-merge .opt { display: block; font-weight: 600; padding: .2rem 0; cursor: pointer; }
 .page-merge .opt input { width: auto; margin-right: .4rem; }
-.page-merge .col-head { font-family: var(--font-display); font-size: 1.05rem; margin-bottom: .5rem; display: flex; align-items: center; gap: .4rem; }
+.page-merge .col-head { font-family: var(--font-sans); font-size: 1.05rem; font-weight: 700; margin-bottom: .5rem; display: flex; align-items: center; gap: .4rem; }
+.page-merge .merge-count { font-family: var(--font-sans); font-size: 1.8rem; font-weight: 750; }
 .page-merge table { width: 100%; }
 .page-merge tbody td { padding: .35rem .4rem; border-bottom: 1px solid var(--border); font-size: .84rem; vertical-align: middle; }
 .page-merge tr.rowdel td { opacity: .4; text-decoration: none; }
@@ -114,10 +115,10 @@
 /* Brand, top-left. */
 .gen-brand { position: absolute; z-index: 5; top: clamp(1.2rem, 4vh, 2.2rem); left: clamp(1.4rem, 5vw, 4rem); }
 
-/* Console status block, bottom-left: left-aligned, mono eyebrow with a live dot + blinking cursor. */
+/* Console status block, bottom-left: live system state with a blinking cursor. */
 .gen-copy { position: absolute; z-index: 5; left: clamp(1.4rem, 5vw, 4rem); bottom: clamp(1.4rem, 6vh, 4rem);
   max-width: 32rem; }
-.gen-eyebrow {
+.gen-status {
   font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.14em; text-transform: lowercase;
   color: var(--trunk); display: inline-flex; align-items: center; gap: 0.55rem;
 }

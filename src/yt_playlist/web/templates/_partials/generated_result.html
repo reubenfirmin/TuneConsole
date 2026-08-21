@@ -1,7 +1,7 @@
 {# Swapped in for a proto-playlist card after "Save & play": success or a friendly failure. #}
 <section class="gen-card card gen-done">
   {% if error %}
-  <header class="gen-head"><span class="eyebrow eyebrow-warn">Couldn't save</span>
+  <header class="gen-head"><span class="status-label status-label--error">Couldn't save</span>
     <h2 class="gen-name">{{ name }}</h2></header>
   <p class="section-note">{{ error }}</p>
   {# Close the loading window we opened on click, otherwise it spins forever on a failure (e.g. no
@@ -9,7 +9,7 @@
   <script>(function () { var t = window.__ytTab; window.__ytTab = null;
     if (t && !t.closed) { try { t.close(); } catch (e) {} } })();</script>
   {% else %}
-  <header class="gen-head"><span class="eyebrow eyebrow-ok">Saved ✓. Opening in your YouTube Music tab…</span>
+  <header class="gen-head"><span class="status-label status-label--success">Saved ✓. Opening in your YouTube Music tab…</span>
     <h2 class="gen-name">{{ name }}</h2></header>
   <p class="section-note">{{ added }} track{{ '' if added == 1 else 's' }} added to a new playlist in
     your <strong>Generated</strong> group, kept out of your recommendations until you promote it to

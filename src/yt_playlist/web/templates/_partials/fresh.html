@@ -1,6 +1,6 @@
 {% if building %}
 <div class="gen-card card" hx-get="/home/fresh" hx-trigger="load delay:4s" hx-swap="outerHTML">
-  <header class="gen-head"><span class="eyebrow">Fresh songs <span class="refreshing">finding…</span></span></header>
+  <header class="gen-head"><span class="section-label">Fresh songs <span class="refreshing">finding…</span></span></header>
   <div class="gen-list">{% for _ in range(6) %}<div class="gen-row skeleton" style="min-height:2.6rem"></div>{% endfor %}</div>
 </div>
 {% elif proto %}
