@@ -44,6 +44,11 @@ def live_road_trip_app(monkeypatch):
                         lambda title, artist: {"popularity": 500, "year": 2015,
                                                "genre": "psychedelic", "duration": 245})
     monkeypatch.setattr(road_trip_rec, "artist_genre", lambda s, name: "Psychedelic Rock")
+    # Picking an artist auto-fills their GENRE, and a genre input resolves through Last.fm and
+    # MusicBrainz to find that genre's top artists. Stub it: without this the build makes real
+    # network calls, which is both wrong for a test and slow enough to miss the timeout.
+    monkeypatch.setattr(road_trip_rec, "genre_artists",
+                        lambda store, genre, decade=None, limit=12: ["Tame Impala"])
 
     client = FakeClient(
         # "artist" is what /road_trip/autocomplete/artists reads for the suggestion label; without

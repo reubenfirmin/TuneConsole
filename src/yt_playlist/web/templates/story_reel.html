@@ -8,8 +8,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Your {{ story.month_name }} · TuneConsole</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
+  <!-- Design tokens first: app.css/story.css consume them and contain no colour literals. -->
+  <link rel="stylesheet" href="/static/tokens.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/story.css?v={{ asset_v }}">
+  <!-- CSS token -> canvas bridge; must load before any script that paints. -->
+  <script src="/static/theme.js?v={{ asset_v }}"></script>
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
 <body class="reel-body">
@@ -153,20 +157,28 @@ function reel(n) {
       const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
       const ctx = cv.getContext('2d'); ctx.textAlign = 'center';
       const F = (w, s) => `${w} ${s}px "Hanken Grotesk", system-ui, sans-serif`;
+      // Every colour below is resolved from tokens.css via theme.js; the canvas holds no palette.
+      const T = window.themeColor;
+      // alpha() re-opens a resolved rgb()/rgba() string to apply an alpha, replacing the old
+      // `hex + 'aa'` string concatenation (which only worked while hues were literal hexes).
+      const alpha = (c, a) => { const m = c.match(/[\d.]+/g);
+        return m && m.length >= 3 ? `rgba(${m[0]},${m[1]},${m[2]},${a})` : c; };
       let bg = ctx.createLinearGradient(0, 0, 0, H);
-      bg.addColorStop(0, '#1c1656'); bg.addColorStop(1, '#070516');
+      bg.addColorStop(0, T('--card-top')); bg.addColorStop(1, T('--card-bottom'));
       ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
-      const hue = d.hue || '#8b7cff', ay = H * 0.31, ar = W * 0.42;
+      // d.hue arrives as a token reference (e.g. `var(--fam-house)`) from web/theme.py.
+      const hue = T(d.hue ? d.hue.replace(/^var\(|\)$/g, '') : '--fam-house');
+      const ay = H * 0.31, ar = W * 0.42;
       let ag = ctx.createRadialGradient(cx, ay, 8, cx, ay, ar);
-      ag.addColorStop(0, 'rgba(255,255,255,0.55)'); ag.addColorStop(0.30, hue);
-      ag.addColorStop(0.62, hue + 'aa'); ag.addColorStop(0.82, 'rgba(255,107,208,0.20)');
-      ag.addColorStop(1, hue + '00');
+      ag.addColorStop(0, T('--card-halo')); ag.addColorStop(0.30, hue);
+      ag.addColorStop(0.62, alpha(hue, 0.667)); ag.addColorStop(0.82, T('--card-glow'));
+      ag.addColorStop(1, alpha(hue, 0));
       ctx.fillStyle = ag; ctx.beginPath(); ctx.arc(cx, ay, ar, 0, 6.29); ctx.fill();
-      ctx.fillStyle = '#b6a9ff'; ctx.letterSpacing = '7px'; ctx.font = F(700, 30);
+      ctx.fillStyle = T('--card-ink'); ctx.letterSpacing = '7px'; ctx.font = F(700, 30);
       ctx.fillText(('Your ' + (d.month || '')).toUpperCase(), cx, H * 0.585);
       ctx.letterSpacing = '0px';
       const ng = ctx.createLinearGradient(W * 0.12, 0, W * 0.88, 0);
-      ng.addColorStop(0, '#ffffff'); ng.addColorStop(0.5, '#bd91ff'); ng.addColorStop(1, '#4fd6e0');
+      ng.addColorStop(0, T('--reel-ink')); ng.addColorStop(0.5, T('--p-purple-300')); ng.addColorStop(1, T('--teal'));
       ctx.fillStyle = ng;
       const size = 118; ctx.font = F(800, size);
       const words = (d.personality || '').split(' '), lines = []; let line = '';
@@ -178,12 +190,12 @@ function reel(n) {
       if (d.artist) stats.push([d.artist, 'MOST PLAYED']);
       const gap = W * 0.72 / stats.length, x0 = cx - gap * (stats.length - 1) / 2, sy = H * 0.865;
       stats.forEach(([v, lab], i) => { const x = x0 + gap * i, s = String(v);
-        ctx.fillStyle = '#ffffff'; ctx.font = F(800, s.length > 9 ? Math.max(28, 460 / s.length) : 48);
+        ctx.fillStyle = T('--reel-ink'); ctx.font = F(800, s.length > 9 ? Math.max(28, 460 / s.length) : 48);
         ctx.fillText(s, x, sy);
-        ctx.fillStyle = '#9a92c8'; ctx.letterSpacing = '2px'; ctx.font = F(600, 21);
+        ctx.fillStyle = T('--card-ink-2'); ctx.letterSpacing = '2px'; ctx.font = F(600, 21);
         ctx.fillText(lab, x, sy + 40); ctx.letterSpacing = '0px';
       });
-      ctx.fillStyle = '#6f699f'; ctx.letterSpacing = '6px'; ctx.font = F(600, 24);
+      ctx.fillStyle = T('--card-ink-3'); ctx.letterSpacing = '6px'; ctx.font = F(600, 24);
       ctx.fillText('TUNECONSOLE', cx, H * 0.955); ctx.letterSpacing = '0px';
       const a = document.createElement('a');
       a.download = 'your-' + (d.month || 'recap').toLowerCase() + '.png';

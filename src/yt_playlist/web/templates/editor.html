@@ -1,11 +1,10 @@
-{% extends "base.html" %}{% block title %}Merge · TuneConsole{% endblock %}{% block body %}
-{% set palette = ['#7c6cff', '#4fd6e0', '#ff6b8b', '#6bffab', '#f4c66a', '#c08cff', '#ff9d5c', '#5cc8ff'] %}
+{% extends "base.html" %}{% block title %}Merge · TuneConsole{% endblock %}{% block page_class %}page-merge{% endblock %}{% block body %}
 <div class="page-head">
   <span class="eyebrow">Merge</span>
   <h1>Merge {{ members|length }} playlist{{ '' if members|length == 1 else 's' }}</h1>
   <div class="cmp-ids">
     {% for m in members %}
-    <div><span class="ab" style="background:{{ palette[loop.index0 % palette|length] }}">{{ m.letter }}</span> <strong>{{ m.ident }}</strong> ·
+    <div><span class="ab ab-{{ loop.index0 % 8 }}">{{ m.letter }}</span> <strong>{{ m.ident }}</strong> ·
       <a href="https://music.youtube.com/playlist?list={{ m.ytm }}" target="_blank" rel="noopener">{{ m.title }}&nbsp;↗</a>
       <span class="pid">{{ m.ytm }}</span></div>
     {% endfor %}
@@ -14,31 +13,4 @@
 
 <div id="merge-body">{% include "_partials/merge_body.html" %}</div>
 
-<style>
-  .cmp-ids { margin: .2rem 0 .5rem; display: flex; flex-direction: column; gap: .3rem; font-size: .9rem; }
-  .ab { display: inline-block; min-width: 1.3rem; text-align: center; font-family: var(--font-mono);
-        font-weight: 700; color: #fff; background: var(--accent); border-radius: 5px; padding: 0 .35rem; }
-  .ab-sm { min-width: 1rem; font-size: .7rem; margin-right: .2rem; }
-  .pidx { background: none; border: 1px solid transparent; box-shadow: none; font-family: var(--font-mono);
-          font-size: .74rem; font-weight: 600; padding: 0 .2rem; margin-left: .2rem; cursor: pointer;
-          border-radius: 4px; line-height: 1.4; }
-  .pidx:hover:not(.sole) { background: rgba(255,255,255,.08); box-shadow: none; transform: none; }
-  .pidx.picked { border-color: currentColor; }
-  .pidx.sole { cursor: default; }
-  .cmp-h { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 .6rem; }
-  .cfg { display: flex; justify-content: space-between; gap: 1.5rem; align-items: flex-start; flex-wrap: wrap; }
-  .opt { display: block; font-weight: 600; padding: .2rem 0; cursor: pointer; }
-  .opt input { width: auto; margin-right: .4rem; }
-  .col-head { font-family: var(--font-display); font-size: 1.05rem; margin-bottom: .5rem; display: flex; align-items: center; gap: .4rem; }
-  table { width: 100%; }
-  tbody td { padding: .35rem .4rem; border-bottom: 1px solid var(--border); font-size: .84rem; vertical-align: middle; }
-  tr.rowdel td { opacity: .4; text-decoration: none; }
-  .tk-t { font-weight: 600; }
-  .unavail { color: var(--danger); }
-  .seg { display: inline-flex; border: 1px solid var(--border-2); border-radius: 7px; overflow: hidden; }
-  .seg button { background: transparent; color: var(--dim); border: none; box-shadow: none; border-radius: 0;
-                font-size: .78rem; padding: .25rem .6rem; }
-  .seg button.on { background: var(--accent); color: #fff; }
-  .seg button:hover { box-shadow: none; transform: none; }
-</style>
 {% endblock %}

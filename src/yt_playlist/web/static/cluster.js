@@ -19,8 +19,18 @@ function clusterCanvas() {
   const WORLD = 8000, CENTER = 0;
   const LINK_D = 215, NODE_R = 128;          // spoke length; collision radius
   const CARD_W = 190, CARD_H = 50, CEN_W = 232, THUMB = 38;   // node card geometry (graph units)
-  const C = { bg: '#0b0920', surface: '#171340', border: '#3d3582', text: '#ece9ff', dim: '#a59edd',
-              accent: '#7c6cff', trunk: '#15e98c', danger: '#ff6b8b', boost: '#ff8a00' };
+  // Resolved from tokens.css (see theme.js) so the canvas can never drift from the stylesheet.
+  // Lazy + memoised: the first read happens at first paint, after the token sheet has applied.
+  let _C = null;
+  const C = new Proxy({}, { get: (_, k) => (_C || (_C = window.themePalette({
+    bg: '--bg', surface: '--graph-node', border: '--border-2', text: '--text', dim: '--dim',
+    accent: '--accent', trunk: '--trunk', danger: '--danger', boost: '--boost',
+    chip: '--graph-chip', nodeHi: '--graph-node-hi', node2: '--graph-node-2',
+    link: '--graph-link', grid: '--graph-grid', glow: '--graph-glow',
+    dotOn: '--graph-dot-on', dotOff: '--graph-dot-off',
+    fire0: '--fire-0', fire1: '--fire-1', fire2: '--fire-2', fire3: '--fire-3',
+    fire4: '--fire-4', fire5: '--fire-5', fireGlow: '--boost',
+  })))[k] });
   return {
     WORLD,
     nodes: [], nextId: 1, rootId: null,
@@ -41,7 +51,7 @@ function clusterCanvas() {
       this._fg = fg;
       this._imgs = new Map();                  // thumbnail cache (url -> HTMLImageElement)
       fg.nodeId('id')
-        .backgroundColor('rgba(0,0,0,0)')      // transparent: let the CSS nebula on .cluster-canvas show through
+        .backgroundColor('transparent')      // let the CSS nebula on .cluster-canvas show through
         .nodeCanvasObject((n, ctx, gs) => this._drawNode(n, ctx, gs))
         .nodePointerAreaPaint((n, color, ctx) => this._nodeHit(n, color, ctx))
         .nodeCanvasObjectMode(() => 'replace')
@@ -49,7 +59,7 @@ function clusterCanvas() {
         // links a pointer-pick area silently kills node hit-testing (node hover/click stop firing). The
         // clickable mid-edge "info" dots are drawn by us in onRenderFramePost and clicked via background
         // proximity (see _bgClick→_dotAt), so node interaction is never touched.
-        .linkColor(l => this._isTrunkLink(l) ? C.trunk : 'rgba(140,140,170,0.35)')
+        .linkColor(l => this._isTrunkLink(l) ? C.trunk : C.link)
         .linkWidth(l => this._isTrunkLink(l) ? 3 : 1)
         .minZoom(0.15).maxZoom(2.5)
         .enableNodeDrag(true)
@@ -221,7 +231,7 @@ function clusterCanvas() {
       const x = n.x - w / 2, y = n.y - h / 2;
       if (n.state === 'pruned') {             // minimal struck pill (small = quiet)
         ctx.globalAlpha = 0.9;
-        this._roundRect(ctx, x, y, w, h, 5); ctx.fillStyle = '#15102e'; ctx.fill();
+        this._roundRect(ctx, x, y, w, h, 5); ctx.fillStyle = C.chip; ctx.fill();
         ctx.strokeStyle = C.danger; ctx.lineWidth = 1; ctx.stroke();
         ctx.fillStyle = C.dim; ctx.font = '500 9px Hanken Grotesk, sans-serif'; ctx.textBaseline = 'middle';
         const lbl = n.label || ''; this._clipText(ctx, lbl, x + 8, n.y, w - 16);
@@ -236,7 +246,7 @@ function clusterCanvas() {
       ctx.globalAlpha = 1;
       // card body
       this._roundRect(ctx, x, y, w, h, 7);
-      ctx.fillStyle = central ? '#221a55' : C.surface; ctx.fill();
+      ctx.fillStyle = central ? C.nodeHi : C.surface; ctx.fill();
       ctx.lineWidth = isTrunk || central ? 2.2 : 1.4;
       ctx.strokeStyle = border; ctx.stroke();
       if (this.boosted.includes(n.key)) {      // 🔥 cosmic-fire emphasis border (animated; see _animBoost)
@@ -244,12 +254,12 @@ function clusterCanvas() {
         ctx.save(); ctx.globalAlpha = 1;
         let cg = null; try { cg = ctx.createConicGradient(ang, n.x, n.y); } catch (e) {}
         if (cg) {
-          cg.addColorStop(0, '#c20d00'); cg.addColorStop(0.15, '#ff3000'); cg.addColorStop(0.32, '#ff7a00');
-          cg.addColorStop(0.5, '#ffd24a'); cg.addColorStop(0.62, '#fff2c0'); cg.addColorStop(0.78, '#ff7a00');
-          cg.addColorStop(0.88, '#b81ad6'); cg.addColorStop(1, '#c20d00');
+          cg.addColorStop(0, C.fire0); cg.addColorStop(0.15, C.fire1); cg.addColorStop(0.32, C.fire2);
+          cg.addColorStop(0.5, C.fire3); cg.addColorStop(0.62, C.fire4); cg.addColorStop(0.78, C.fire2);
+          cg.addColorStop(0.88, C.fire5); cg.addColorStop(1, C.fire0);
           ctx.strokeStyle = cg;
         } else { ctx.strokeStyle = C.boost; }
-        ctx.shadowColor = 'rgba(255,90,0,0.7)'; ctx.shadowBlur = 10;
+        ctx.shadowColor = C.fireGlow; ctx.shadowBlur = 10;
         this._roundRect(ctx, x - 4, y - 4, w + 8, h + 8, 10); ctx.lineWidth = 3; ctx.stroke();
         ctx.restore();
       }
@@ -266,7 +276,7 @@ function clusterCanvas() {
       const tx = x + 6, ty = y + (h - THUMB) / 2, img = this._img(n.thumbnail);
       ctx.save(); this._roundRect(ctx, tx, ty, THUMB, THUMB, 4); ctx.clip();
       if (img) ctx.drawImage(img, tx, ty, THUMB, THUMB);
-      else { ctx.fillStyle = '#241e57'; ctx.fillRect(tx, ty, THUMB, THUMB); }
+      else { ctx.fillStyle = C.node2; ctx.fillRect(tx, ty, THUMB, THUMB); }
       ctx.restore();
       // title + artist
       const txx = tx + THUMB + 8, tw = w - (THUMB + 22);
@@ -301,7 +311,7 @@ function clusterCanvas() {
         const mx = (n.x + p.x) / 2, my = (n.y + p.y) / 2;
         const on = this.explain && this.explain.childId === n.id;
         ctx.beginPath(); ctx.arc(mx, my, on ? 7 : 4.5, 0, 7);
-        ctx.fillStyle = on ? '#a596ff' : '#7d77a8'; ctx.fill();
+        ctx.fillStyle = on ? C.dotOn : C.dotOff; ctx.fill();
         ctx.lineWidth = 1.5 / gs; ctx.strokeStyle = C.bg; ctx.stroke();
       }
     },
@@ -348,7 +358,7 @@ function clusterCanvas() {
       const rad = R0 * 0.85, spr = this._wellSprite(Math.round(rad));
       ctx.save();
       for (let i = 0; i < wn; i++) ctx.drawImage(spr, wells[i][0] - rad, wells[i][1] - rad, rad * 2, rad * 2);
-      ctx.lineWidth = 1 / gs; ctx.strokeStyle = 'rgba(74,78,158,0.16)';
+      ctx.lineWidth = 1 / gs; ctx.strokeStyle = C.grid;
       for (let gx = X0; gx <= X1; gx += GRID) {
         ctx.beginPath();
         for (let py = Y0, f = true; py <= Y1; py += STEP) {
@@ -373,7 +383,7 @@ function clusterCanvas() {
       if (this._wellSpr && this._wellSprR === rad) return this._wellSpr;
       const c = document.createElement('canvas'); c.width = c.height = rad * 2;
       const g2 = c.getContext('2d'), g = g2.createRadialGradient(rad, rad, rad * 0.06, rad, rad, rad);
-      g.addColorStop(0, 'rgba(66,70,150,0.20)'); g.addColorStop(1, 'rgba(66,70,150,0)');
+      g.addColorStop(0, C.glow); g.addColorStop(1, 'transparent');
       g2.fillStyle = g; g2.beginPath(); g2.arc(rad, rad, rad, 0, 7); g2.fill();
       this._wellSpr = c; this._wellSprR = rad; return c;
     },

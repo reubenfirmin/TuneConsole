@@ -1,0 +1,512 @@
+/* ============================================================================
+   TuneConsole design tokens — THE ONLY FILE IN THE CODEBASE THAT MAY CONTAIN A
+   COLOUR LITERAL.
+
+   Layer 1 (palette) holds raw hues. Layer 2 (roles) says what each hue MEANS.
+   Every stylesheet, template and script consumes layer 2 by name; nothing
+   downstream hard-codes a colour. To build a new theme, redefine layer 2.
+
+   Loaded FIRST, before app.css and story.css. Enforced by tests/test_theming.py.
+   ============================================================================ */
+
+/* TuneConsole, "late-night studio console"
+   warm near-black, amber accent, editorial serif + grotesque + mono. */
+
+@font-face {
+  font-family: "Fraunces";
+  src: url("/static/vendor/fonts/fraunces.woff2") format("woff2");
+  font-weight: 100 900; font-display: swap; font-style: normal;
+}
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("/static/vendor/fonts/hanken-grotesk.woff2") format("woff2");
+  font-weight: 100 900; font-display: swap; font-style: normal;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/static/vendor/fonts/jetbrains-mono.woff2") format("woff2");
+  font-weight: 100 800; font-display: swap; font-style: normal;
+}
+@font-face {
+  /* TuneConsole brand wordmark only (see .brand). */
+  font-family: "Chakra Petch";
+  src: url("/static/vendor/fonts/chakra-petch.woff2") format("woff2");
+  font-weight: 700; font-display: swap; font-style: normal;
+}
+
+/* ============================================================================
+   TOKEN LAYER 1 — PALETTE.  The ONLY place a colour literal may appear.
+   Raw hues, named by hue + lightness. Nothing outside this block references a
+   literal; nothing inside it references a role. To retheme, redefine layer 2
+   (roles) against these, or swap these values wholesale.
+   ============================================================================ */
+:root {
+  /* neutrals */
+  --p-black:       #000;
+  --p-white:       #fff;
+
+  /* indigo/violet ground ramp (darkest -> lightest) */
+  --p-void:        #06051a;
+  --p-abyss:       #070518;
+  --p-ink:         #0a0819;
+  --p-night:       #0b0920;
+  --p-night-2:     #0b0a23;
+  --p-night-3:     #110e2e;
+  --p-indigo-950:  #14103a;
+  --p-indigo-900:  #16132f;
+  --p-indigo-870:  #15102e;
+  --p-indigo-850:  #171340;
+  --p-indigo-800:  #1a1430;
+  --p-indigo-750:  #1d1850;
+  --p-indigo-700:  #1f1a4f;
+  --p-indigo-650:  #221a55;
+  --p-indigo-600:  #241e57;
+  --p-indigo-500:  #2c2660;
+  --p-indigo-400:  #3d3582;
+  --p-indigo-300:  #4a4e9e;
+  --p-indigo-250:  #424696;
+
+  /* slate (recessive greys) */
+  --p-slate-900:   #14152b;
+  --p-slate-500:   #5c6a8f;
+  --p-slate-400:   #6b6a7d;
+  --p-slate-350:   #7d77a8;
+
+  /* lilac text ramp */
+  --p-lilac-50:    #ece9ff;
+  --p-lilac-100:   #ded6ff;
+  --p-lilac-200:   #cfc6ff;
+  --p-lilac-300:   #c5bcff;
+  --p-lilac-500:   #a59edd;
+  --p-lilac-700:   #6f699f;
+  --p-mist:        #e6edf3;
+
+  /* violet / purple */
+  --p-violet-300:  #a596ff;
+  --p-violet-400:  #9a8cff;
+  --p-violet-450:  #8b7cff;
+  --p-violet-500:  #7c6cff;
+  --p-violet-600:  #6d5dfc;
+  --p-violet-700:  #8b5cf6;
+  --p-violet-800:  #4f46e5;
+  --p-purple-300:  #bd91ff;
+  --p-purple-400:  #b06cff;
+  --p-purple-500:  #8d63e6;
+  --p-purple-700:  #9628c8;
+  --p-lavender-300:#bb9af7;
+
+  /* cyan / teal / mint */
+  --p-cyan-100:    #c4f6fa;
+  --p-cyan-200:    #9bf3f8;
+  --p-cyan-400:    #4fd6e0;
+  --p-cyan-500:    #2bc8dd;
+  --p-cyan-700:    #2ba3b8;
+  --p-mint-300:    #57e3a0;
+  --p-mint-400:    #46e2b0;
+  --p-mint-500:    #3df0d0;
+  --p-teal-600:    #5bb7a4;
+
+  /* green — the neon CTA family */
+  --p-green-50:    #d9ffe6;
+  --p-green-100:   #b6ffd5;
+  --p-green-150:   #c2f6df;
+  --p-green-300:   #6bffab;
+  --p-green-350:   #2dffa3;
+  --p-green-500:   #15e98c;
+  --p-green-550:   #199e70;
+  --p-green-600:   #3fb950;
+  --p-green-700:   #3b7a52;
+  --p-green-800:   #1d3a26;
+  --p-green-900:   #042b16;
+  --p-green-950:   #04160e;
+  --p-sage-300:    #7fd88f;
+  --p-sage-400:    #9ece6a;
+
+  /* amber / orange */
+  --p-cream-100:   #fff2c0;
+  --p-amber-100:   #ffe1ad;
+  --p-amber-200:   #f6c177;
+  --p-amber-300:   #ffb628;
+  --p-amber-400:   #e0b355;
+  --p-amber-500:   #d29922;
+  --p-amber-600:   #c98500;
+  --p-amber-700:   #a06e28;
+  --p-amber-950:   #2b1a08;
+  --p-tan-400:     #d99a4e;
+  --p-tan-500:     #d6a86a;
+  --p-orange-300:  #ff9d5c;
+  --p-orange-400:  #ff8a00;
+  --p-orange-450:  #ff7a00;
+  --p-orange-500:  #ff6e00;
+  --p-orange-550:  #ff5000;
+  --p-orange-600:  #ff3000;
+
+  /* red / pink / magenta */
+  --p-pink-100:    #ffd2dc;
+  --p-pink-150:    #ffd9d9;
+  --p-pink-200:    #ff8fa6;
+  --p-pink-400:    #ff6b8b;
+  --p-pink-450:    #ff5c8a;
+  --p-pink-500:    #ff5096;
+  --p-pink-600:    #d6457f;
+  --p-magenta-400: #e879f9;
+  --p-magenta-600: #b81ad6;
+  --p-magenta-700: #b5179e;
+  --p-red-500:     #e66767;
+  --p-red-600:     #c0392b;
+  --p-red-800:     #c20d00;
+  --p-maroon-700:  #7a3b3b;
+  --p-maroon-900:  #3a1d1d;
+
+  /* pale star tints — near-whites, deliberately low-chroma; do NOT fold these
+     into the saturated hues above or the starfield turns into confetti */
+  --p-star-warm:   #fff0e1;
+  --p-star-amber:  #ffd7b4;
+  --p-star-cool:   #d2e1ff;
+  --p-star-azure:  #b4cdff;
+  --p-star-rose:   #ffe6f5;
+  --p-star-violet: #dcc3ff;
+  --p-amber-450:   #f5b955;
+  --p-abyss-2:     #04030e;
+
+  /* recap-reel slide hues — a deliberately vivid, SATURATED set. The reel is an
+     inverted surface (white type on colour), so these do not belong to the app
+     ramps above and must not be folded into them. */
+  --p-reel-violet:   #8f6dff;  --p-reel-violet-2: #7a3fda;  --p-reel-violet-3: #6a2bc0;
+  --p-reel-cyan:     #22cadd;  --p-reel-blue:     #2f7fe6;  --p-reel-indigo:   #4448dd;
+  --p-reel-sky:      #52a0ff;  --p-reel-periwinkle: #6360ec; --p-reel-purple:  #7d3fd8;
+  --p-reel-orchid:   #bd7bff;  --p-reel-magenta:  #cd4fdc;  --p-reel-plum:     #a233c8;
+  --p-reel-peach:    #ffad5e;  --p-reel-rose:     #f25792;  --p-reel-lilac:    #a24fe0;
+  --p-reel-mint:     #45ecb6;  --p-reel-teal:     #21c1d6;  --p-reel-azure:    #2f8fe0;
+  --p-reel-pink:     #f088fb;  --p-reel-mauve:    #ac5cf8;  --p-reel-iris:     #8b57f2;
+  --p-reel-blush:    #ff7f9d;  --p-reel-coral:    #ff936c;  --p-reel-fuchsia:  #e35f9a;
+  --p-reel-deep:     #5443c4;  --p-reel-deep-2:   #1c1550;
+  --p-reel-night:    #4638ad;  --p-reel-night-2:  #150e3e;
+  --p-reel-base:     #6d5dfc;  --p-reel-base-2:   #4f3fc0;
+  --p-reel-halo:     #1a1550;  --p-reel-void:     #060414;
+  --p-reel-lens:     #060414;
+
+  /* genre-family tints (the saturated "fun" set used to glow subject cards).
+     Consumed from Python via web/theme.py — never re-listed there as literals. */
+  --p-g-techno:      #15e98c;  --p-g-house:        #ff8a3d;  --p-g-trance:     #7c6cff;
+  --p-g-dnb:         #ff4f8b;  --p-g-breakbeat:    #ffb01f;  --p-g-garage:     #3df0d0;
+  --p-g-ambient:     #6cc6ff;  --p-g-electro:      #a596ff;  --p-g-rock-classic:#ff6b4a;
+  --p-g-rock-indie:  #4fd6e0;  --p-g-rock-post:    #9a8cff;  --p-g-metal:      #c0c6d0;
+  --p-g-punk:        #ff5470;  --p-g-pop:          #ff7ad1;  --p-g-hiphop:     #ffd23f;
+  --p-g-soul-funk:   #ff9e3d;  --p-g-jazz:         #5db4ff;  --p-g-blues:      #4f9dff;
+  --p-g-folk-country:#d6a86a;  --p-g-world-latin:  #ff6f3c;  --p-g-classical:  #e8d9a0;
+  --p-g-experimental:#b06cff;
+
+  /* merge-slot letters (A/B/C…) and taste "rose" categorical wheel */
+  --p-slot-violet: #c08cff;  --p-slot-sky: #5cc8ff;
+  --p-rose-sand:   #e0af68;  --p-rose-melon: #ff9e64;  --p-rose-cyan: #2ac3de;
+
+  /* aura / share-card */
+  --p-aura-rim:    #ff6bd0;
+  --p-card-top:    #1c1656;  --p-card-bottom: #070516;
+  --p-card-ink:    #b6a9ff;  --p-card-ink-2:  #9a92c8;
+
+  /* setup connection status (deliberately GitHub-ish, distinct from --ok/--warn
+     which are used for run state, not connection state) */
+  --p-conn-ok:     #1a7f37;  --p-conn-warn:  #b4841e;
+
+  /* blue */
+  --p-blue-300:    #7aa2f7;
+  --p-blue-400:    #56a6f5;
+  --p-blue-500:    #3987e5;
+  --p-blue-600:    #3d6fd0;
+}
+
+/* ============================================================================
+   TOKEN LAYER 2 — ROLES.  What a colour MEANS. Every rule below the token
+   layers references these, never layer 1 and never a literal. A new theme
+   redefines this block only.
+   ============================================================================ */
+:root {
+  /* ---- surfaces & structure ---- */
+  --bg:          var(--p-night);
+  --bg-deep:     var(--p-ink);          /* body gradient floor */
+  --bg-2:        var(--p-night-3);
+  --surface:     var(--p-indigo-850);
+  --surface-2:   var(--p-indigo-700);
+  --surface-3:   var(--p-indigo-750);   /* raised: menus, popovers */
+  --surface-sunk:var(--p-abyss);        /* inset wells: console, code */
+  --surface-alt: var(--p-indigo-800);
+  --border:      var(--p-indigo-500);
+  --border-2:    var(--p-indigo-400);
+
+  /* ---- type ---- */
+  --text:        var(--p-lilac-50);
+  --dim:         var(--p-lilac-500);
+  --faint:       var(--p-lilac-700);
+  --on-accent:   var(--p-white);        /* type sitting on a filled accent */
+  --on-cta:      var(--p-green-900);    /* type sitting on the neon CTA fill */
+  --light-source:var(--p-white);        /* highlights, stars and masks */
+  --shadow-ink:  var(--p-black);
+  --atmosphere-violet: var(--p-violet-800);
+  --accent-shadow: var(--p-violet-600);
+  --accent-pale-1: var(--p-lilac-100);
+  --accent-pale-2: var(--p-lilac-200);
+  --teal-muted: var(--p-teal-600);
+  --mint-bright: var(--p-mint-300);
+  --green-pale: var(--p-green-150);
+  --danger-pale: var(--p-pink-100);
+  --danger-deep: var(--p-pink-600);
+  --danger-glow: var(--p-pink-500);
+  --danger-shadow: var(--p-magenta-700);
+  --cosmic-cyan: var(--p-cyan-500);
+  --cosmic-purple: var(--p-purple-700);
+  --fire-amber: var(--p-amber-300);
+  --fire-amber-muted: var(--p-amber-700);
+  --fire-well: var(--p-amber-950);
+  --fire-orange: var(--p-orange-500);
+  --fire-orange-hot: var(--p-orange-550);
+  --surface-deep-violet: var(--p-indigo-950);
+  --glyph-ink: var(--p-slate-900);
+  --status-light: var(--p-mist);
+  --chart-album: var(--p-tan-400);
+
+  /* ---- brand accents ---- */
+  --accent:      var(--p-violet-500);
+  --accent-2:    var(--p-violet-300);
+  --accent-3:    var(--p-violet-400);
+  --accent-pale: var(--p-lilac-300);
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  --teal:        var(--p-cyan-400);
+  --teal-bright: var(--p-cyan-200);
+  --teal-pale:   var(--p-cyan-100);
+  --teal-deep:   var(--p-cyan-700);
+  --amber:       var(--p-amber-200);
+  --amber-pale:  var(--p-amber-100);
+  --amber-deep:  var(--p-amber-400);
+
+  /* ---- call to action (the neon green) ---- */
+  --cta:         var(--p-green-500);
+  --cta-2:       var(--p-green-300);
+  --cta-pale:    var(--p-green-100);
+  --cta-ink:     var(--p-green-900);
+  --cta-well:    var(--p-green-950);
+
+  /* ---- status ---- */
+  --ok:          var(--p-green-600);
+  --ok-2:        var(--p-sage-300);
+  --warn:        var(--p-amber-500);
+  --warn-2:      var(--p-amber-400);
+  --warn-3:      var(--p-amber-450);   /* lighter amber used by badge fills */
+  --danger:      var(--p-pink-400);
+  --danger-2:    var(--p-pink-450);
+  --danger-3:    var(--p-pink-200);
+  --danger-deep: var(--p-red-600);
+  --danger-soft: color-mix(in srgb, var(--danger) 15%, transparent);
+  --up:          var(--p-sage-400);     /* ticker "heating up" */
+  --down:        var(--p-pink-400);     /* ticker "cooling" (shares --danger hue) */
+
+  /* ---- inline notice blocks ---- */
+  --notice-err-bg:     var(--p-maroon-900);
+  --notice-err-text:   var(--p-pink-150);
+  --notice-err-border: var(--p-maroon-700);
+  --notice-ok-bg:      var(--p-green-800);
+  --notice-ok-text:    var(--p-green-50);
+  --notice-ok-border:  var(--p-green-700);
+
+  /* ---- scrims / overlays (alpha over the page, not over a surface) ---- */
+  --scrim:       color-mix(in srgb, var(--p-black) 55%, transparent);
+  --scrim-soft:  color-mix(in srgb, var(--p-black) 25%, transparent);
+  --scrim-heavy: color-mix(in srgb, var(--p-black) 75%, transparent);
+  --veil:        color-mix(in srgb, var(--p-abyss) 60%, transparent);
+  --veil-heavy:  color-mix(in srgb, var(--p-abyss) 94%, transparent);
+  --hairline:    color-mix(in srgb, var(--p-white) 8%, transparent);
+
+  /* ---- categorical set A: chart series (magnitude-neutral identity) ----
+     Assigned in a FIXED order and never cycled, so a genre family keeps its hue
+     when another overtakes it. A 6th family folds into --series-other.
+     Validated against this app's card surface with the dataviz skill's
+     validate_palette.js: lightness band, chroma floor, adjacent-pair CVD
+     separation (worst 41.3 dE, protan) and 3:1 contrast all pass.
+     Do not hand-edit the palette values behind these; re-run the validator. */
+  --series-1:     var(--p-blue-500);
+  --series-2:     var(--p-green-550);
+  --series-3:     var(--p-amber-600);
+  --series-4:     var(--p-violet-400);
+  --series-5:     var(--p-red-500);
+  --series-other: var(--p-slate-400);
+
+  /* ---- categorical set B: genre-family bands (cohesive COOL set, reads in the
+     same register as the cyan phosphor trace). Slot 5 is a recessive slate. ---- */
+  --fam-0: var(--p-cyan-400);
+  --fam-1: var(--p-blue-400);
+  --fam-2: var(--p-violet-450);
+  --fam-3: var(--p-mint-400);
+  --fam-4: var(--p-purple-300);
+  --fam-5: var(--p-slate-500);
+
+  /* ---- categorical set C: listening-overlay comparison lines (warm/mixed set,
+     painted OVER the base trace so it must not collide with set B) ---- */
+  --ov-0: var(--p-pink-400);
+  --ov-1: var(--p-sage-400);
+  --ov-2: var(--p-purple-300);
+  --ov-3: var(--p-orange-300);
+  --ov-4: var(--p-blue-400);
+  --ov-5: var(--p-magenta-400);
+
+  /* ---- ticker / tk-bar per-dimension gradient stops ---- */
+  --dim-genre-a:    var(--accent);        --dim-genre-b:    var(--p-violet-400);
+  --dim-year-a:     var(--p-cyan-700);    --dim-year-b:     var(--teal);
+  --dim-album-a:    var(--p-tan-400);     --dim-album-b:    var(--amber);
+  --dim-playlist-a: var(--p-purple-500);  --dim-playlist-b: var(--p-lavender-300);
+  --dim-artist-a:   var(--p-blue-600);    --dim-artist-b:   var(--p-blue-300);
+
+  /* ---- cluster / starfield ---- */
+  --star-bright:  var(--p-white);
+  --star-warm:    var(--p-star-warm);
+  --star-amber:   var(--p-star-amber);
+  --star-cool:    var(--p-star-cool);
+  --star-azure:   var(--p-star-azure);
+  --star-rose:    var(--p-star-rose);
+  --star-violet:  var(--p-star-violet);
+  --nebula-1:     color-mix(in srgb, var(--accent) 13%, transparent);
+  --nebula-2:     color-mix(in srgb, var(--p-cyan-500) 9%, transparent);
+  --nebula-3:     color-mix(in srgb, var(--p-pink-500) 6%, transparent);
+  --space-1:      var(--p-indigo-900);
+  --space-2:      var(--p-night-2);
+  --space-3:      var(--p-void);
+  --scrim-space:  color-mix(in srgb, var(--p-abyss-2) 62%, transparent);
+  --edge:         var(--p-slate-400);
+  --trunk:        var(--p-green-350);
+  --graph-node:   var(--surface);
+  --graph-node-hi:var(--p-indigo-650);
+  --graph-node-2: var(--p-indigo-600);
+  --graph-chip:   var(--p-indigo-870);
+  --graph-grid:   color-mix(in srgb, var(--p-indigo-300) 16%, transparent);
+  --graph-glow:   color-mix(in srgb, var(--p-indigo-250) 20%, transparent);
+  --graph-link:   color-mix(in srgb, var(--p-slate-400) 35%, transparent);
+  --graph-dot-on: var(--p-violet-300);
+  --graph-dot-off:var(--p-slate-350);
+
+  /* ---- "boost"/supernova fire ramp (cluster central node) ---- */
+  --fire-0: var(--p-red-800);   --fire-1: var(--p-orange-600);
+  --fire-2: var(--p-orange-450); --fire-3: var(--p-amber-300);
+  --fire-4: var(--p-cream-100);  --fire-5: var(--p-magenta-600);
+  --boost:  var(--p-orange-400);
+
+  /* ---- gradients ---- */
+  --grad:      linear-gradient(135deg, var(--p-violet-600) 0%, var(--p-violet-700) 45%, var(--p-violet-800) 100%);
+  --grad-soft: linear-gradient(135deg, color-mix(in srgb, var(--p-violet-600) 18%, transparent),
+                                       color-mix(in srgb, var(--p-violet-800) 10%, transparent));
+  --grad-cta:  linear-gradient(135deg, var(--cta-2), var(--cta));
+  --grad-danger: linear-gradient(135deg, var(--danger), var(--p-pink-600) 55%, var(--p-magenta-700));
+
+  /* ---- recap reel ("Your Month") — an INVERTED surface: white type on vivid
+     colour. Its ink/scrim roles are therefore white-based, not lilac-based. ---- */
+  --reel-ink:        var(--p-white);
+  --reel-ink-90:     color-mix(in srgb, var(--p-white) 90%, transparent);
+  --reel-ink-82:     color-mix(in srgb, var(--p-white) 82%, transparent);
+  --reel-ink-78:     color-mix(in srgb, var(--p-white) 78%, transparent);
+  --reel-ink-72:     color-mix(in srgb, var(--p-white) 72%, transparent);
+  --reel-ink-70:     color-mix(in srgb, var(--p-white) 70%, transparent);
+  --reel-ink-65:     color-mix(in srgb, var(--p-white) 65%, transparent);
+  --reel-ink-60:     color-mix(in srgb, var(--p-white) 60%, transparent);
+  --reel-ink-55:     color-mix(in srgb, var(--p-white) 55%, transparent);
+  --reel-ink-50:     color-mix(in srgb, var(--p-white) 50%, transparent);
+  --reel-chrome:     color-mix(in srgb, var(--p-white) 8%, transparent);
+  --reel-chrome-hi:  color-mix(in srgb, var(--p-white) 16%, transparent);
+  --reel-rule:       color-mix(in srgb, var(--p-white) 14%, transparent);
+  --reel-track:      color-mix(in srgb, var(--p-white) 18%, transparent);
+  --reel-lens:       color-mix(in srgb, var(--p-reel-lens) 34%, transparent);
+  --reel-halo:       var(--p-reel-halo);
+  --reel-void:       var(--p-reel-void);
+  --reel-type-shadow:      color-mix(in srgb, var(--p-black) 40%, transparent);
+  --reel-type-shadow-soft: color-mix(in srgb, var(--p-black) 35%, transparent);
+  --reel-card-shadow:      var(--p-black);
+  --reel-hero-shadow:      color-mix(in srgb, var(--p-black) 80%, transparent);
+  --reel-aura-shadow:      color-mix(in srgb, var(--p-black) 40%, transparent);
+  --reel-glow:             color-mix(in srgb, var(--p-white) 60%, transparent);
+
+  /* per-slide background washes, one role per beat */
+  --slide-default:     linear-gradient(155deg, var(--p-reel-base), var(--p-reel-base-2));
+  --slide-cover:       linear-gradient(150deg, var(--p-reel-violet) 0%, var(--p-reel-violet-2) 55%, var(--p-reel-violet-3) 100%);
+  --slide-numbers:     linear-gradient(150deg, var(--p-reel-cyan) 0%, var(--p-reel-blue) 52%, var(--p-reel-indigo) 100%);
+  --slide-wide-net:    linear-gradient(150deg, var(--p-reel-sky) 0%, var(--p-reel-periwinkle) 52%, var(--p-reel-purple) 100%);
+  --slide-all-in:      linear-gradient(150deg, var(--p-reel-orchid) 0%, var(--p-reel-magenta) 52%, var(--p-reel-plum) 100%);
+  --slide-night:       linear-gradient(158deg, var(--p-reel-peach) 0%, var(--p-reel-rose) 42%, var(--p-reel-lilac) 100%);
+  --slide-new:         linear-gradient(150deg, var(--p-reel-mint) 0%, var(--p-reel-teal) 52%, var(--p-reel-azure) 100%);
+  --slide-diversity:   linear-gradient(150deg, var(--p-reel-pink) 0%, var(--p-reel-mauve) 52%, var(--p-reel-iris) 100%);
+  --slide-revival:     linear-gradient(150deg, var(--p-reel-blush) 0%, var(--p-reel-coral) 52%, var(--p-reel-fuchsia) 100%);
+  --slide-personality: radial-gradient(100% 82% at 50% 32%, var(--p-reel-deep), var(--p-reel-deep-2) 76%);
+  --slide-closing:     radial-gradient(100% 82% at 50% 28%, var(--p-reel-night), var(--p-reel-night-2) 76%);
+  --slide-name-grad:   linear-gradient(100deg, var(--p-white) 8%, var(--p-purple-300) 52%, var(--p-cyan-400) 100%);
+  --reel-hero-cta:     linear-gradient(135deg, var(--accent), var(--p-violet-800));
+  --reel-card-bg:      linear-gradient(160deg, var(--surface), var(--bg));
+
+  /* ---- genre families, by NAME. The single mapping Python resolves against
+     (see web/theme.py). Two sets on purpose, because they do different jobs:
+       --fam-<name>   the cohesive COOL band set, for charts and the recap aura
+       --genre-<name> the saturated tint set, for glowing subject cards
+     Both live here so neither can drift out of sync with the other again. ---- */
+  --fam-ambient:       var(--fam-0);
+  --fam-electro-synth: var(--fam-1);
+  --fam-house:         var(--fam-2);
+  --fam-techno:        var(--fam-3);
+  --fam-trance:        var(--fam-4);
+  --fam-other:         var(--fam-0);
+
+  --genre-techno: var(--p-g-techno);   --genre-house: var(--p-g-house);
+  --genre-trance: var(--p-g-trance);   --genre-dnb: var(--p-g-dnb);
+  --genre-breakbeat: var(--p-g-breakbeat); --genre-garage-bass: var(--p-g-garage);
+  --genre-ambient: var(--p-g-ambient); --genre-electro-synth: var(--p-g-electro);
+  --genre-rock-classic: var(--p-g-rock-classic); --genre-rock-indie: var(--p-g-rock-indie);
+  --genre-rock-post: var(--p-g-rock-post); --genre-metal: var(--p-g-metal);
+  --genre-punk: var(--p-g-punk);       --genre-pop: var(--p-g-pop);
+  --genre-hiphop: var(--p-g-hiphop);   --genre-soul-funk: var(--p-g-soul-funk);
+  --genre-jazz: var(--p-g-jazz);       --genre-blues: var(--p-g-blues);
+  --genre-folk-country: var(--p-g-folk-country); --genre-world-latin: var(--p-g-world-latin);
+  --genre-classical: var(--p-g-classical); --genre-experimental: var(--p-g-experimental);
+  --genre-default: var(--accent-2);    /* artists + unknown families */
+
+  /* ---- merge-slot letters: A/B/C… badges on the merge/compare screens ---- */
+  --slot-0: var(--accent);      --slot-1: var(--teal);        --slot-2: var(--danger);
+  --slot-3: var(--cta-2);       --slot-4: var(--amber);       --slot-5: var(--p-slot-violet);
+  --slot-6: var(--ov-3);        --slot-7: var(--p-slot-sky);
+
+  /* ---- taste "rose" wheel: categorical identity around the fingerprint ---- */
+  --rose-0: var(--accent);      --rose-1: var(--teal);        --rose-2: var(--danger);
+  --rose-3: var(--amber);       --rose-4: var(--up);          --rose-5: var(--p-lavender-300);
+  --rose-6: var(--p-blue-300);  --rose-7: var(--p-rose-sand);  --rose-8: var(--p-rose-melon);
+  --rose-9: var(--p-rose-cyan);
+
+  /* ---- recap aura (SVG gradient stops) ---- */
+  --aura-core: var(--p-white);
+  --aura-rim:  var(--p-aura-rim);
+  --aura-edge: var(--teal);
+
+  /* ---- share card (canvas-rendered, read from JS via getComputedStyle) ---- */
+  --card-top:    var(--p-card-top);
+  --card-bottom: var(--p-card-bottom);
+  --card-ink:    var(--p-card-ink);
+  --card-ink-2:  var(--p-card-ink-2);
+  --card-ink-3:  var(--faint);
+  --card-halo:   color-mix(in srgb, var(--p-white) 55%, transparent);
+  --card-glow:   color-mix(in srgb, var(--p-aura-rim) 20%, transparent);
+
+  /* ---- connection status (setup screen) ---- */
+  --conn-ok:        var(--p-conn-ok);
+  --conn-ok-soft:   color-mix(in srgb, var(--p-conn-ok) 12%, transparent);
+  --conn-warn:      var(--p-conn-warn);
+  --conn-warn-soft: color-mix(in srgb, var(--p-conn-warn) 12%, transparent);
+
+  /* ---- "generating" takeover canvas (read from JS via theme.js) ---- */
+  --gen-edge-hub:   color-mix(in srgb, var(--trunk) 34%, transparent);
+  --gen-edge-rim:   color-mix(in srgb, var(--accent) 5%, transparent);
+  --gen-pulse-glow: color-mix(in srgb, var(--trunk) 90%, transparent);
+
+  /* ---- typography ---- */
+  --font-display: "Fraunces", Georgia, serif;
+  --font-sans: "Hanken Grotesk", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* ---- geometry & elevation ---- */
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 20px 46px -20px var(--scrim-heavy);
+  --maxw: 68rem;
+}

@@ -1,6 +1,5 @@
 {# Server-rendered merge editor body. Every control posts to /merge/update (which mutates the
    in-memory draft) and swaps this whole partial back into #merge-body. #}
-{% set palette = ['#7c6cff', '#4fd6e0', '#ff6b8b', '#6bffab', '#f4c66a', '#c08cff', '#ff9d5c', '#5cc8ff'] %}
 {% set upd = '/merge/update?ids=' ~ ids_csv %}
 <div class="card" style="margin-bottom:1.2rem">
   <div class="cfg">
@@ -10,7 +9,7 @@
       {% if not liked_id or m.id == liked_id %}{# Liked can't be deleted, so a non-Liked keeper is never offered #}
       <label class="opt"><input type="radio" name="keep" value="{{ m.id }}" {{ 'checked' if draft.keep == m.id|string }}
              hx-post="{{ upd }}" hx-vals='{"field": "keep", "value": "{{ m.id }}"}' hx-target="#merge-body" hx-swap="innerHTML">
-        Keep <span class="ab" style="background:{{ palette[loop.index0 % palette|length] }}">{{ m.letter }}</span> ({{ m.title }}), delete the other{{ 's' if members|length > 2 else '' }}</label>
+        Keep <span class="ab ab-{{ loop.index0 % 8 }}">{{ m.letter }}</span> ({{ m.title }}), delete the other{{ 's' if members|length > 2 else '' }}</label>
       {% endif %}
       {% endfor %}
       <label class="opt"><input type="radio" name="keep" value="all" {{ 'checked' if draft.keep == 'all' }}
@@ -54,9 +53,9 @@
       <tr class="{{ '' if t.included else 'rowdel' }}">
         <td><input type="checkbox" {{ 'checked' if t.included }} style="width:auto"
                    hx-post="{{ upd }}" hx-vals='{"field": "toggle", "value": "{{ t.tid }}"}' hx-target="#merge-body" hx-swap="innerHTML"></td>
-        <td>{% for i in range(members|length) %}{% if t.present[i] %}<span class="ab ab-sm" style="background:{{ palette[i % palette|length] }}">{{ members[i].letter }}</span>{% endif %}{% endfor %}</td>
+        <td>{% for i in range(members|length) %}{% if t.present[i] %}<span class="ab ab-sm ab-{{ i % 8 }}">{{ members[i].letter }}</span>{% endif %}{% endfor %}</td>
         <td class="num">{% for i in range(members|length) %}{% if t.present[i] %}<button type="button"
-              class="pidx{{ ' picked' if t.picked == i }}{{ ' sole' if t.present_count < 2 }}" style="color:{{ palette[i % palette|length] }}"
+              class="pidx pidx-{{ i % 8 }}{{ ' picked' if t.picked == i }}{{ ' sole' if t.present_count < 2 }}"
               hx-post="{{ upd }}" hx-vals='{"field": "pick", "value": "{{ t.tid }}:{{ i }}"}' hx-target="#merge-body" hx-swap="innerHTML"
               title="{{ 'Place this track by ' ~ members[i].letter ~ '’s position (#' ~ t.pos[i] ~ ')' if t.present_count > 1 else '' }}">{{ t.pos[i] }}</button>{% endif %}{% endfor %}</td>
         <td>

@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Res
 from yt_playlist.providers import enrichment, lastfm, waterfall
 from yt_playlist.rec import journeys, rec_params, recommend
 from yt_playlist.repos.base import GENERATED_GROUP
+from yt_playlist.library import executor
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.live_plays import resolve_identity
 
@@ -444,10 +445,25 @@ def build(ctx) -> APIRouter:
     @router.post("/playlist/{pid}/promote")
     def playlist_promote(pid: int):
         """Promote a Generated playlist into the library: move it out of the quarantine group so it
-        counts as a real playlist and starts shaping the taste model (graduation by user intent)."""
+        counts as a real playlist and starts shaping the taste model (graduation by user intent).
+
+        The quarantine marker lives in the playlist's YouTube description (executor), because that is
+        the only thing your machines share - so promoting rewrites it there too. Without that, this
+        machine releases the playlist and every other one keeps quarantining it, and even this one
+        re-quarantines it on the next sync (clearing a group deletes the row, leaving no local trace
+        of the decision). Best-effort: if the write fails, the local promotion still stands."""
         pl = store.get_playlist(pid)
-        if pl is not None:
-            store.set_playlist_group(pl.ytm_playlist_id, "")
+        if pl is None:
+            return _refresh()
+        store.set_playlist_group(pl.ytm_playlist_id, "")
+        client = (ctx.client_provider() or {}).get(pl.identity_id)
+        if client is not None:
+            try:
+                client.edit_playlist(pl.ytm_playlist_id,
+                                     description=executor.PROMOTED_DESCRIPTION)
+            except Exception as e:  # noqa: BLE001 - the promotion is local truth either way
+                logger.warning("couldn't clear the generated marker on %s: %s",
+                               pl.ytm_playlist_id, e)
         return _refresh()
 
     @router.post("/playlists/group")

@@ -149,15 +149,28 @@ def genre_adjusted_scores(scores, genre_of, gweights):
     return {k: base[k] * gweights.get(genre_of.get(k), 1.0) for k in scores}
 
 
-def axis_adjusted_scores(scores, mult):
+# The largest preference multiplier the axes can produce: four axes, each clamped to GENRE_MAX. At
+# this cap the bound below is a mathematical no-op, which is why it is the default.
+AXIS_WEIGHT_UNBOUNDED = rec_params.GENRE_MAX ** 4
+
+
+def axis_adjusted_scores(scores, mult, cap=AXIS_WEIGHT_UNBOUNDED):
     """Re-weight taste scores by a precomputed per-key multiplier (generalizes genre weighting).
 
     #86: rank/percentile base (bounds pool influence; see embed.percentile_scores), not
-    shift-by-min. No-op when `mult` is falsy or all-neutral. Returns a new {key: score}."""
+    shift-by-min. No-op when `mult` is falsy or all-neutral. Returns a new {key: score}.
+
+    `cap` bounds the multiplier from ABOVE only. The base is a percentile in (0, 1] while the
+    multiplier reaches 16, so uncapped it doesn't tilt the ranking, it replaces it: a favored track
+    at the 50th percentile of taste fit beats an unfavored one at the 99th. And since only a track
+    with a known genre/era can earn a multiplier, a part-tagged library hides its untagged half
+    entirely - measured on a 30%-tagged library, the Catalog surface's top 60 was 100% tagged.
+    Capping at ~1.4 turns preference back into a strong tilt. Nothing is bounded from BELOW: a muted
+    genre (weight 0) must stay a hard exclusion, and a de-emphasis must keep biting."""
     if not scores or not mult or all(m == 1.0 for m in mult.values()):
         return scores
     base = embed.percentile_scores(scores)
-    return {k: base[k] * mult.get(k, 1.0) for k in scores}
+    return {k: base[k] * min(cap, mult.get(k, 1.0)) for k in scores}
 
 
 # Breadth steering (#7): how far one full drag of the bias can push a single family's weight. The
@@ -271,9 +284,12 @@ def _axis_weights_for(store, keys, now=None):
 
 
 def _apply_axis_weights(store, sims, now=None):
-    """Re-weight a {key: taste-score} map by permanent preferences × the live transient facet leans."""
+    """Re-weight a {key: taste-score} map by permanent preferences × the live transient facet leans,
+    bounded by the axis_weight_cap knob (default: unbounded, i.e. exactly as before)."""
     mult = _axis_weights_for(store, list(sims), now=now)
-    return sims if mult is None else axis_adjusted_scores(sims, mult)
+    if mult is None:
+        return sims
+    return axis_adjusted_scores(sims, mult, cap=rec_params.get_param(store, "axis_weight_cap"))
 
 
 def discovery_facet_weight(store, family, now):

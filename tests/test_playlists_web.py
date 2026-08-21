@@ -179,6 +179,41 @@ def test_promote_moves_playlist_out_of_generated(store):
     assert store.get_playlist_groups().get("PLG", "") != "Generated"   # graduated out of quarantine
 
 
+def test_promote_clears_the_marker_on_youtube_too(store):
+    """The quarantine marker lives in the playlist's YouTube description, because that is what your
+    machines share. Promoting has to clear it there, or every other install keeps quarantining the
+    playlist - and this one re-quarantines it on the next sync, since clearing a group deletes the
+    row and leaves no local trace of the decision."""
+    from yt_playlist.library import executor
+    iid = store.upsert_identity("main", "cred", None, True)
+    pid = store.upsert_playlist(iid, "PLG", "Gen Mix", 3, "h", 0.0)
+    store.set_playlist_group("PLG", "Generated")
+    client = FakeClient()
+
+    c = _client(store, lambda: {iid: client})
+    c.post(f"/playlist/{pid}/promote")
+
+    assert client.edited == [("PLG", {"description": executor.PROMOTED_DESCRIPTION})]
+    assert not executor.is_generated_description(executor.PROMOTED_DESCRIPTION)
+
+
+def test_promote_still_works_when_youtube_refuses_the_edit(store):
+    """Best-effort upstream: the local promotion is the user's decision either way."""
+    class Refuses(FakeClient):
+        def edit_playlist(self, playlistId, **kw):
+            raise RuntimeError("nope")
+
+    iid = store.upsert_identity("main", "cred", None, True)
+    pid = store.upsert_playlist(iid, "PLG", "Gen Mix", 3, "h", 0.0)
+    store.set_playlist_group("PLG", "Generated")
+
+    c = _client(store, lambda: {iid: Refuses()})
+    r = c.post(f"/playlist/{pid}/promote")
+
+    assert r.status_code == 200
+    assert store.get_playlist_groups().get("PLG", "") != "Generated"
+
+
 def test_playlists_page_carries_generated_created_at(store):
     # The Generated card is ordered newest-first client-side (genRows in app.js sorts by `created`),
     # which relies on each generated playlist's recipe created_at flowing into the page rows.

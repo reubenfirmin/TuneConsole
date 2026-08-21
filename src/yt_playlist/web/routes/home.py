@@ -18,7 +18,14 @@ from yt_playlist.web.context import form_float
 
 # How many tracks each generated proto-playlist offers.
 PROTO_SIZE = 12
-ROTATION_POOL = PROTO_SIZE * 5      # fetch this deep so each epoch's random slice is genuinely fresh
+# How deep each card fetches. This is the card's ENTIRE universe: the theme picks from it and every
+# refresh draws its 12 tracks from it, so at PROTO_SIZE * 5 = 60 a card cycled the same 60 tracks
+# forever (28 artists / 11 genres on a 4k-track library) and refreshes felt like variations on one
+# card. Depth is close to free here - the surfaces score every modelled track regardless of `limit`,
+# so the query cost is flat (measured: explore 194ms at 60, 202ms at 300) - and it buys the variety
+# back: 142 artists and 35 genres at 300. Not deeper still only because a card should be drawn from
+# tracks that genuinely fit, and the tail of a taste ranking stops being that.
+ROTATION_POOL = PROTO_SIZE * 25
 ARTISTS_PER_CARD = 10              # new-artist tiles fetched per epoch (grid caps 5 cols, clamps to 2 rows)
 ALBUMS_PER_CARD = 15               # discover album tiles fetched per epoch (grid caps 5 cols, clamps to 3 rows)
 # Home cards that rotate. Each holds its content for erosion_view_cap real Home visits, then advances
@@ -71,19 +78,16 @@ def takeout_nag_due(store, now=None) -> bool:
     return True
 
 
-_NOTES = {
-    "wheelhouse": "Deeper into what you already love.",
-    "explore": "Unplayed corners of your own library.",
-    "fresh": "Songs you don't own yet.",
-    "comfort": "Old favorites you haven't played lately.",
-}
+def _proto(store, lane, label, items, now):
+    """Shape a recommendation lane into a dated, saveable proto-playlist card.
 
-
-def _proto(lane, label, items, now):
-    """Shape a recommendation lane into a dated, saveable proto-playlist card."""
+    The note describes THIS card's actual mix (recipes.theme_sentence), not just its lane: each card
+    also rolls a theme, so two cards from one lane can be different music entirely and a fixed
+    per-lane line ("Deeper into what you already love") described neither of them."""
     when = datetime.fromtimestamp(now).strftime("%B %-d %Y")   # e.g. "June 21 2026"
+    tracks = items[:PROTO_SIZE]
     return {"lane": lane, "label": label, "name": f"{label} - {when}",
-            "note": _NOTES.get(lane, ""), "tracks": items[:PROTO_SIZE],
+            "note": recommend.theme_sentence(store, lane, tracks), "tracks": tracks,
             # #50: only the Fresh (out-of-corpus discovery) card carries persistent per-row feedback.
             # Owned-track proto cards stay curate-before-listen (client-side remove only).
             "feedback_surface": "for_you" if lane == "fresh" else None}
@@ -110,18 +114,54 @@ def _order_by_journey(store, items, journey, seed):
     return journeys.journey_order(items, journey, seed, feat)
 
 
-def _carded(store, lane, label, items, now):
-    """A proto-card built from a rolled recipe: roll the theme + journey (seeded by the card's
-    rotation epoch so it's stable across steer/stance previews), focus the items on the theme, then
-    order them by the rolled JOURNEY (energy arc, eras, deep dive…). Recipes predating journeys fall
-    back to 'shuffle'."""
-    recipe = recommend.roll_recipe(store, lane, seed=_epoch(store, lane), now=now)
-    items = recommend.theme_filter(store, items, recipe.get("facets", {}))
+# The order the four cards roll their themes in. Each avoids what the ones before it took, so the
+# row explores four corners of your taste instead of four views of one - which is the whole point of
+# offering four: which card you reach for only means something if they differ.
+_ROW_LANES = ("wheelhouse", "explore", "comfort", "fresh")
+
+
+def _rolled_theme(store, lane, pool, now):
+    """This lane's theme, rolled from what its own pool holds and away from its siblings' themes.
+
+    Seeded per (lane, epoch): with the epoch alone every card in the row drew the SAME random
+    sequence and so the same genre, era and journey. The avoidance set is rebuilt by re-rolling the
+    earlier lanes, which is deterministic, so a single-card refresh lands the same theme it would
+    have had in a full render. Siblings are rolled against the library distribution (their own pools
+    aren't in hand here) purely to know what to steer clear of."""
+    dists = recommend.pool_facets(store, pool)
+    avoid = {"genres": set(), "eras": set()}
+    for other in _ROW_LANES:
+        this_one = other == lane
+        recipe = recommend.roll_recipe(store, other, seed=f"{other}:{_epoch(store, other)}",
+                                       now=now, avoid=avoid, dists=dists if this_one else None)
+        if this_one:
+            return recipe
+        avoid["genres"] |= set(recipe.get("facets", {}).get("genres", []))
+        avoid["eras"] |= set(recipe.get("facets", {}).get("eras", []))
+    return recommend.roll_recipe(store, lane, seed=f"{lane}:{_epoch(store, lane)}", now=now,
+                                 dists=dists)
+
+
+def _carded(store, lane, label, pool, now):
+    """A proto-card built from a rolled recipe: roll the theme + journey (seeded by the card's lane
+    and rotation epoch so it's stable across steer/stance previews), focus the POOL on the theme,
+    take the card's slice from what's left, then order it by the rolled JOURNEY (energy arc, eras,
+    deep dive…). Recipes predating journeys fall back to 'shuffle'.
+
+    The slice is taken AFTER the theme, not before. Rotating first and theming the twelve tracks that
+    came out let the theme reorder a card it could not change - so every refresh returned the pool's
+    dominant genre no matter what rolled."""
+    pool = recommend.attach_genres(store, list(pool))     # the theme is rolled from these genres
+    recipe = _rolled_theme(store, lane, pool, now)
+    focused = recommend.theme_filter(store, pool, recipe.get("facets", {}))
+    # Rotate within the themed head of the pool: still a fresh slice each epoch, but one drawn from
+    # the tracks that match, rather than from the whole pool.
+    items = recommend.rotate_sample(focused[:PROTO_SIZE * 2], PROTO_SIZE, _epoch(store, lane))
     # roll_recipe forces Fresh to journey="shuffle" (unowned proposals have no plays/recency signal),
     # so the stored recipe and this preview ordering agree. Owned lanes order by their rolled journey.
     items = _order_by_journey(store, items, recipe.get("journey", "shuffle"),
                               recipe.get("dj", {}).get("seed", 0))
-    p = _proto(lane, label, items, now)
+    p = _proto(store, lane, label, items, now)
     p["recipe"] = recipe
     return p
 
@@ -147,29 +187,32 @@ def _record_lane_impressions(store, items, now):
 
 
 def _one_card(store, card, now):
-    """Build a single Home card's proto (its pool, rotated at the card's CURRENT epoch). Used by the
-    per-card Refresh route after the rotation has been advanced. Returns None if the card is empty."""
+    """Build a single Home card's proto from its full candidate POOL. Used by the per-card Refresh
+    route after the rotation has been advanced. Returns None if the card is empty.
+
+    The pool is handed over whole: _carded rolls the theme from it and takes the card's slice after
+    focusing on that theme. Slicing here first (as this used to) left the theme nothing to choose
+    from - it could only reorder twelve tracks that were picked before it was known."""
     if card == "wheelhouse":
-        items = recommend.rotate_sample(recommend.for_you(store, now, limit=ROTATION_POOL),
-                                        PROTO_SIZE, _epoch(store, "wheelhouse"))
+        pool = list(recommend.for_you(store, now, limit=ROTATION_POOL))
     elif card == "explore":
         fy = {i.key for i in recommend.for_you(store, now, limit=ROTATION_POOL)}
         pool = [i for i in recommend.explore_for_you(store, now, limit=ROTATION_POOL) if i.key not in fy]
-        items = recommend.rotate_sample(pool, PROTO_SIZE, _epoch(store, "explore"))
     elif card == "comfort":
-        items = recommend.rotate_sample(recommend.comfort_listening(store, now, limit=ROTATION_POOL),
-                                        PROTO_SIZE, _epoch(store, "comfort"))
+        pool = list(recommend.comfort_listening(store, now, limit=ROTATION_POOL))
     elif card == "fresh":
         from yt_playlist.rec import surfaces
-        pool = surfaces.cold_candidates(store, now, limit=PROTO_SIZE)
-        items = [surfaces._item_to_fresh_dict(i) for i in pool]
+        # Fetch the pool deep here too, so the theme has something to pick from (it was capped at one
+        # card's worth, which is the same "nothing to choose from" problem by another route).
+        pool = [surfaces._item_to_fresh_dict(i)
+                for i in surfaces.cold_candidates(store, now, limit=ROTATION_POOL)]
         # NB: #53 offered-count is stamped by the CALLER (the /home/cards loop or the per-card refresh
         # route), not here, so the cold-start fallback path doesn't double-count fresh tracks.
     else:
         return None
-    if not items:
+    if not pool:
         return None
-    p = _carded(store, card, _CARD_LABELS[card], items, now)
+    p = _carded(store, card, _CARD_LABELS[card], pool, now)
     _record_lane_impressions(store, p["tracks"], now)   # #87: log what was actually rendered
     return p
 
@@ -297,14 +340,14 @@ def build(ctx) -> APIRouter:
         now = now_fn()
         client = next(iter((ctx.client_provider() or {}).values()), None)
         tracks = onboarding.radio_sample(store, client, now, n=PROTO_SIZE)
-        proto = _proto("onboard_radio", "YouTube radio for you", tracks, now) if tracks else None
+        proto = _proto(store, "onboard_radio", "YouTube radio for you", tracks, now) if tracks else None
         return templates.TemplateResponse(request, "_partials/onboard_playlist.html", {"proto": proto})
 
     @router.get("/home/onboard/library")
     def home_onboard_library(request: Request):
         now = now_fn()
         tracks = onboarding.library_sample(store, n=PROTO_SIZE)
-        proto = _proto("onboard_library", "From your library", tracks, now) if tracks else None
+        proto = _proto(store, "onboard_library", "From your library", tracks, now) if tracks else None
         return templates.TemplateResponse(request, "_partials/onboard_playlist.html", {"proto": proto})
 
     @router.post("/onboard/done")
@@ -382,7 +425,7 @@ def build(ctx) -> APIRouter:
                 rolled = recommend.roll_recipe(store, c["lane"], seed=f"{epoch}:{c['mode_id']}", now=now)
                 journey, dj = rolled.get("journey", "shuffle"), rolled.get("dj", {})
                 tracks = _order_by_journey(store, c["tracks"], journey, dj.get("seed", 0))
-                protos.append(_proto(c["lane"], c["label"], tracks, now)
+                protos.append(_proto(store, c["lane"], c["label"], tracks, now)
                               | {"mode_id": c["mode_id"], "ranker": c["ranker"],
                                  "recipe": {"model": "mode", "mode_id": c["mode_id"],
                                             "ranker": c["ranker"],

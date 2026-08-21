@@ -54,16 +54,6 @@
   <span class="enrich-status" x-text="status"></span>
 </div>
 
-<style>
-  /* Fixed layout so a wide playlist can't push columns past the card; the three free-text columns
-     truncate with an ellipsis instead of overflowing. Scoped to this table so other tables and the
-     genre/⋯ popups (which need visible overflow) are unaffected, and the sticky header is preserved
-     (no scroll/overflow context is introduced). */
-  .track-table { table-layout: fixed; }
-  /* free-text columns wrap to as many lines as needed (never cropped); fixed layout keeps the
-     column widths bounded so the table still fits the card. break long unspaced tokens too. */
-  .track-table td.t-wrap { white-space: normal; overflow-wrap: anywhere; }
-</style>
 <div x-data="rowSort({{ pl.id }})" x-init="$nextTick(() => initSortable())">
 <div class="card">
   <table class="track-table{{ ' is-lm' if pl.ytm_playlist_id == 'LM' }}">

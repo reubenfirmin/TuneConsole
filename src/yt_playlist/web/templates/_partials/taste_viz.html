@@ -7,7 +7,9 @@
    ordered rows, so a given genre/decade is the SAME color in all four - making the layers directly
    comparable. Sign is carried by geometry (beyond the neutral ring = boosted, inside = muted), so
    color is free to encode identity. The mode ribbons index this same palette by mode. #}
-{% set ROSE_PALETTE = ['#7c6cff', '#4fd6e0', '#ff6b8b', '#f6c177', '#9ece6a', '#bb9af7', '#7aa2f7', '#e0af68', '#ff9e64', '#2ac3de'] %}
+{# Indexes the --rose-N role tokens in static/tokens.css; the hues themselves live there. #}
+{% set ROSE_PALETTE = ['var(--rose-0)', 'var(--rose-1)', 'var(--rose-2)', 'var(--rose-3)', 'var(--rose-4)',
+                       'var(--rose-5)', 'var(--rose-6)', 'var(--rose-7)', 'var(--rose-8)', 'var(--rose-9)'] %}
 
 {# ── The stack, stated once ──────────────────────────────────────────────── #}
 <section class="card viz-dim layer-key">

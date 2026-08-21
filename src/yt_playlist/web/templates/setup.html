@@ -1,4 +1,6 @@
-{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Setup · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Setup · TuneConsole{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/setup.css?v={{ asset_v }}">{% endblock %}
+{% block body %}
 <div class="page-head">
   <span class="eyebrow">Connect</span>
   <h1>Set up TuneConsole</h1>
@@ -26,22 +28,19 @@
 
   {# ── Tab 1: Pairing (the browser-extension bridge) ────────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'browser'" x-cloak>
-    <div class="card" x-cloak
-         :style="connected
-           ? 'border:1px solid #1a7f37;background:rgba(26,127,55,.12);display:flex;gap:.8rem;align-items:center;margin-bottom:1rem'
-           : 'border:1px solid #b4841e;background:rgba(180,132,30,.12);display:flex;gap:.8rem;align-items:center;margin-bottom:1rem'">
-      <span :style="connected ? 'color:#3fb950' : 'color:#d29922'" style="font-size:1.5rem;line-height:1">&#9679;</span>
+    <div class="card connection-card" x-cloak :class="connected ? 'is-connected' : 'is-disconnected'">
+      <span class="connection-dot">&#9679;</span>
       <div>
         <strong x-text="connected ? 'Extension connected' : 'Extension not connected'"></strong>
-        <div class="section-note" style="margin:.15rem 0 0"
+        <div class="section-note connection-copy"
              x-text="connected
                ? 'Requests are authenticated live by your signed-in browser session. The app stores no cookies and holds no credential of its own.'
                : 'Open a signed-in music.youtube.com tab. Until the extension connects, the app cannot reach YouTube Music at all.'"></div>
       </div>
     </div>
     <div class="card">
-      <h2 class="section" style="margin-top:0">Pair the browser extension</h2>
-      <details class="advanced" style="margin-bottom:1rem">
+      <h2 class="section section-flush">Pair the browser extension</h2>
+      <details class="advanced advanced-spaced">
         <summary>Why an extension?</summary>
         <p class="section-note">YouTube Music has no public, official API for managing your library and
           playlists. Google does offer an OAuth path (the YouTube Data API), and it can create and edit
@@ -56,7 +55,7 @@
           the app sends only the request (method, URL, body), and the extension adds auth and sends the
           response back. Nothing credential-related is stored on disk here.</p>
       </details>
-      <details class="advanced" style="margin-bottom:1rem">
+      <details class="advanced advanced-spaced">
         <summary>What does this give access to?</summary>
         <p class="section-note">Only your YouTube Music library, playlists, and listening history. The
           extension uses the sign-in your browser already has for YouTube Music, but
@@ -74,7 +73,7 @@
         nothing to paste. Keep a <code class="mono">music.youtube.com</code> tab open while signed in.
         The extension is recognized by its identity, so no other program can use this connection.</p>
 
-      <div class="btn-row" x-show="!connected" x-cloak style="margin-top:.8rem">
+      <div class="btn-row btn-row-spaced" x-show="!connected" x-cloak>
         <a class="btn" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
            target="_blank" rel="noopener">Get the extension →</a>
       </div>
@@ -84,7 +83,7 @@
   {# ── Tab 2: Identities ────────────────────────────────────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'identities'" x-cloak>
     <div class="card">
-      <h2 class="section" style="margin-top:0">Your identities</h2>
+      <h2 class="section section-flush">Your identities</h2>
       <p class="section-note">One row per YouTube identity. Exactly one is the <strong>master</strong>:
         your main account, where cross-identity merges land. A brand identity also needs its
         <code class="mono">brand_account_id</code>: open
@@ -92,13 +91,13 @@
         pick the account, and copy the id from the URL <code class="mono">…/b/&lt;id&gt;/</code>. Leave it blank for your main account.</p>
 
       <table>
-        <thead><tr><th>Label</th><th>brand_account_id</th><th style="width:4rem">Master</th><th style="width:2rem"></th></tr></thead>
+        <thead><tr><th>Label</th><th>brand_account_id</th><th class="col-master">Master</th><th class="col-actions"></th></tr></thead>
         <tbody>
           <template x-for="(row, i) in rows" :key="i">
             <tr>
               <td><input name="label" x-model="row.label" placeholder="main"></td>
               <td><input name="brand_account_id" x-model="row.brand" placeholder="(blank for main account)"></td>
-              <td style="text-align:center"><input type="radio" name="master" :value="i" x-model.number="masterIdx" style="width:auto"></td>
+              <td class="cell-center"><input class="input-auto" type="radio" name="master" :value="i" x-model.number="masterIdx"></td>
               <td><button type="button" class="btn-ghost btn-sm" x-show="rows.length > 1"
                           @click="rows.splice(i, 1); if (masterIdx >= rows.length) masterIdx = 0">×</button></td>
             </tr>
@@ -106,14 +105,14 @@
         </tbody>
       </table>
 
-      <div class="btn-row" style="margin-top:1rem">
+      <div class="btn-row btn-row-roomy">
         <button type="button" class="btn-ghost btn-sm" @click="rows.push({label: '', brand: ''})">+ Add identity</button>
       </div>
     </div>
   </div>
 
   <div class="setup-actions" x-show="tab === 'browser' || tab === 'identities'" x-cloak>
-    <span class="muted" x-show="connected" x-cloak style="margin-right:auto">✓ Extension connected</span>
+    <span class="muted setup-connected-copy" x-show="connected" x-cloak>✓ Extension connected</span>
     <button type="submit" class="setup-save">Save</button>
   </div>
 </form>
@@ -121,7 +120,7 @@
   {# ── Tab 3: Enrichment (provider order + Last.fm key) ──────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'enrichment'" x-cloak>
     <div class="card">
-      <h2 class="section" style="margin-top:0">Metadata providers</h2>
+      <h2 class="section section-flush">Metadata providers</h2>
       {% include "_partials/enrichment_panel.html" %}
     </div>
   </div>
@@ -129,7 +128,7 @@
   {# ── Tab 4: Import YouTube history (Google Takeout) ────────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'import'" x-cloak>
     <div class="card">
-      <h2 class="section" style="margin-top:0">Import YouTube history (Google Takeout)</h2>
+      <h2 class="section section-flush">Import YouTube history (Google Takeout)</h2>
       {# On a successful import the route retargets the htmx swap at this whole block, replacing
          the instructions + form with the result card. Errors keep the narrower default target
          (#takeout-import-result) so the form survives for a retry. #}
@@ -137,9 +136,9 @@
       <p class="section-note">The live sync only sees new plays going forward. Upload your Google
         Takeout <code class="mono">watch-history.json</code> to backfill your full listening
         history. Everything is processed locally on this machine: the file never leaves it.</p>
-      <details class="advanced" style="margin-bottom:1rem">
+      <details class="advanced advanced-spaced">
         <summary>How to export</summary>
-        <ul class="section-note" style="margin:0;padding-left:1.2rem">
+        <ul class="section-note takeout-steps">
           <li>Go to <a href="https://takeout.google.com" target="_blank"
             rel="noopener">takeout.google.com</a></li>
           <li>Click <strong>Deselect all</strong></li>
@@ -155,19 +154,18 @@
       </details>
       <form hx-post="/import/takeout" hx-target="#takeout-import-result" hx-swap="innerHTML"
             hx-encoding="multipart/form-data" hx-disabled-elt="find button">
-        <div x-data="{ fname: '' }" style="display:flex;align-items:center;gap:.6rem;position:relative">
-          <label class="btn-ghost btn-sm" style="cursor:pointer;margin:0">
+        <div class="takeout-file" x-data="{ fname: '' }">
+          <label class="btn-ghost btn-sm takeout-file-label">
             Choose file
             <!-- visually hidden rather than display:none, so the browser can still anchor the
                  required-field validation bubble to the input -->
-            <input type="file" name="file" accept=".json,.zip,application/json,application/zip" required
-                   style="position:absolute;opacity:0;width:1px;height:1px;pointer-events:none"
+            <input class="visually-hidden-file" type="file" name="file" accept=".json,.zip,application/json,application/zip" required
                    @change="fname = $event.target.files.length ? $event.target.files[0].name : ''">
           </label>
-          <span class="section-note mono" style="margin:0"
+          <span class="section-note mono flush-margin"
                 x-text="fname || 'no file selected'"></span>
         </div>
-        <div class="btn-row" style="margin-top:.8rem">
+        <div class="btn-row btn-row-spaced">
           <button type="submit" class="btn-sm">Import history</button>
         </div>
       </form>

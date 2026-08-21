@@ -24,13 +24,17 @@ def attach_genres(store, items):
     and returns `items`. Without this, dj_order sees no genre and collapses to 'shuffle, but space
     same-artist', no genre journey at all (the comfort-playlist bug). Untagged tracks stay '' (the
     segue just can't smooth across them), never an error.
+
+    A genre the item ALREADY carries is kept when the library has none: out-of-corpus tracks (the
+    Fresh card's proposals) know their own genre and can never be looked up here, so overwriting
+    would throw that away.
     """
     key_of = {id(it): (_field(it, "key")
                        or identity_key(_field(it, "title") or "", _field(it, "artist") or ""))
               for it in items}
     genres = RecDao(store).track_genres([k for k in key_of.values() if k])
     for it in items:
-        g = genres.get(key_of[id(it)], "")
+        g = genres.get(key_of[id(it)]) or (_field(it, "genre") or "")
         if isinstance(it, dict):
             it["genre"] = g
         else:

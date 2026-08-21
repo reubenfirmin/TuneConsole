@@ -134,6 +134,14 @@ PARAMS = [
     ParamSpec("audio_transient_w", "Recent-sound push", "transient",
               "How hard recent listening tilts the feed toward similar SOUND (tempo, energy, mood), "
               "not just genre/era. 0 = the sound of recent plays doesn't steer.", 0.0, 2.0, 0.05, 0.30),
+    ParamSpec("axis_weight_cap", "How hard your preferences bind", "discovery",
+              "Your genre/era/artist preferences multiply a track's taste score. That score is a "
+              "percentile (0-1) but the multiplier can reach 16, so a favored track can outrank a "
+              "better-fitting one outright - and only a track with a KNOWN genre can earn a "
+              "multiplier at all, so a part-tagged library hides its untagged half. This caps the "
+              "multiplier: 16 leaves it unbounded (a hard filter), ~1.4 makes it a strong tilt that "
+              "still lets a great-fitting track through. Muted genres stay excluded at any setting.",
+              1.0, 16.0, 0.1, 16.0, advanced=True),
     ParamSpec("facet_gain", "Facet responsiveness", "transient",
               "How strongly a genre/era/artist lean re-ranks the feed. Higher = right-now leans bite "
               "harder.", 0.0, 1.0, 0.05, 0.35),
@@ -266,6 +274,11 @@ PARAMS = [
     ParamSpec("modes_menu_size", "Taste modes: cards", "discovery",
               "How many distinct taste modes the Home card row surfaces at once.",
               2, 6, 1, 4, integer=True, advanced=True),
+    ParamSpec("fresh_artist_cap", "Fresh songs: max per artist", "discovery",
+              "The most tracks from one artist the Fresh card will offer. Discovery scans whole "
+              "discographies, so without a cap a taste ranking hands back one artist's back "
+              "catalogue instead of a spread of new music.",
+              1, 12, 1, 2, integer=True, advanced=True),
     ParamSpec("modes_artist_cap", "Taste modes: max per artist", "discovery",
               "The most tracks from a single artist allowed in one mode-focused card, so a card can't "
               "collapse into one artist.",

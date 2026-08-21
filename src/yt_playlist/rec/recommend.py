@@ -23,7 +23,7 @@ from yt_playlist.rec.surfaces import (  # noqa: F401
     explore_for_you, complete_playlist, related_artist_suggestions, _rotation_reason,
     wheelhouse, catalog)
 from yt_playlist.rec.recipes import (  # noqa: F401
-    roll_recipe, cluster_recipe, theme_filter, versioned_title)
+    roll_recipe, cluster_recipe, pool_facets, theme_filter, theme_sentence, versioned_title)
 from yt_playlist.rec.graduation import (  # noqa: F401
     apply_dislikes, graduate_facet, graduate_moods, graduate_slider_exposure, graduate_play_exposure)
 from yt_playlist.rec.actions import (  # noqa: F401

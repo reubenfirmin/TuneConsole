@@ -7,8 +7,11 @@
   <!-- Vendored from npm (see package.json); refresh with `npm run sync-assets`. Served locally
        so nothing is fetched from a third-party CDN at runtime. -->
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
+  <!-- Design tokens first: app.css/story.css consume them and contain no colour literals. -->
+  <link rel="stylesheet" href="/static/tokens.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/story.css?v={{ asset_v }}">
+  {% block page_styles %}{% endblock %}
   <script src="/static/vendor/htmx.min.js"></script>
   <script src="/static/vendor/sortable.min.js"></script>
   {# d3-force graph layout for the Clusters canvas. Order matters: d3-force reads its deps off the
@@ -19,6 +22,8 @@
   <script src="/static/vendor/d3-force.min.js"></script>
   {# Clusters canvas renderer (global `ForceGraph`); bundles its own d3-force, draws on demand. #}
   <script src="/static/vendor/force-graph.min.js"></script>
+  <!-- CSS token -> canvas bridge; must load before any script that paints. -->
+  <script src="/static/theme.js?v={{ asset_v }}"></script>
   <script src="/static/app.js?v={{ asset_v }}"></script>
   {# Clusters canvas component (templates/clusters.html). Split out of app.js; a classic global script
      like app.js, so load order between them doesn't matter as long as both precede Alpine. #}
@@ -31,7 +36,7 @@
     <a class="brand" href="/" aria-label="TuneConsole home">
       <svg class="brand-eq" viewBox="0 0 28 24" width="28" height="24" aria-hidden="true">
         <defs><linearGradient id="eqg" x1="0" y1="1" x2="0" y2="0">
-          <stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#a596ff"/>
+          <stop offset="0" style="stop-color:var(--accent)"/><stop offset="1" style="stop-color:var(--accent-2)"/>
         </linearGradient></defs>
         <rect class="eqbar" style="animation-delay:-.9s" x="0"  y="9"  width="4" height="15" rx="2" fill="url(#eqg)"/>
         <rect class="eqbar" style="animation-delay:-.3s" x="6"  y="3"  width="4" height="21" rx="2" fill="url(#eqg)"/>
@@ -91,7 +96,9 @@
       the extension will pick the session back up.</span>
     <button type="button" class="authbar-x" @click="dismissed = true" title="Dismiss" aria-label="Dismiss">×</button>
   </div>
-  <main>{% block body %}{% endblock %}</main>
+  {# `page_class` scopes a page's own rules in app.css (e.g. .page-merge) so bare-element
+   selectors like `table` cannot leak to every other page. #}
+  <main class="{% block page_class %}{% endblock %}">{% block body %}{% endblock %}</main>
   {# Enrichment conflict resolver loads here, OUTSIDE <main>: main's entrance animation keeps a
      transform (its fill state), which would otherwise become this fixed modal's containing block
      and push it off-screen. At body level the backdrop is viewport-relative. #}

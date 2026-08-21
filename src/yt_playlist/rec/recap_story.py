@@ -10,6 +10,7 @@ Nothing here renders HTML."""
 from datetime import datetime, timezone
 
 from yt_playlist.util import genre_map
+from yt_playlist.web import theme
 
 # ── personality axes ─────────────────────────────────────────────────────────────────────────
 # Genre-family energy priors (0 calm .. 1 charged), used to fill the energy axis where a played track
@@ -36,10 +37,6 @@ _ARCHETYPES = {
     (False, False, False): ("Steady Companion", "calm and loyal -- the same trusted rotation, on repeat"),
 }
 
-# aura hue borrows the genre-family colours the app already uses (kept in sync with app.css .fam-N).
-_FAMILY_HUE = {"house": "#8b7cff", "electro-synth": "#57a6f5", "techno": "#46e2b0",
-               "trance": "#bd91ff", "ambient": "#4fd6e0"}
-_DEFAULT_HUE = "#4fd6e0"
 
 
 def _month_bounds(month):
@@ -122,7 +119,7 @@ def personality(store, month, month_row, meta):
         "kind": "personality", "name": name, "blurb": blurb,
         "axes": {"energy": round(energy, 3), "exploration": round(explore, 3), "rhythm": round(rhythm, 3)},
         "energy_source": e_src, "top_family": top_fam,
-        "aura": {"hue": _FAMILY_HUE.get(top_fam, _DEFAULT_HUE),
+        "aura": {"hue": theme.family_hue(top_fam),
                  "turbulence": round(energy, 3), "reach": round(explore, 3), "warmth": round(rhythm, 3)},
     }
 

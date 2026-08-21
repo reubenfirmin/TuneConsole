@@ -10,6 +10,7 @@ import numpy as np
 from yt_playlist.library import analysis
 from yt_playlist.util import genre_map
 from yt_playlist.util.duration import ago as _ago
+from yt_playlist.util.matching import normalize
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood,
@@ -29,6 +30,7 @@ class ForYouItem:
     key: str = ""      # track identity_key, for feedback (dismiss/less/mute)
     lane: str = ""     # source lane (neighbourhood/rotation/deep_cut/comfort), for weighting
     genre: str = ""    # filled in at DJ-ordering time (attach_genres) so dj_order can do genre segues
+    year: int | None = None   # release year, for lanes whose tracks aren't in the library to look up
 
 
 def rotate_sample(items, size, epoch):
@@ -250,6 +252,30 @@ def _rotation_reason(n) -> str:
 # producer (fresh_songs) was removed (#53: pool-only, no unscored radio rows).
 
 
+def _cap_per_artist(scored, cap):
+    """Hold an artist to `cap` tracks in a scored [(score, row), ...] pool, best first.
+
+    Discovery walks whole discographies, so the pool is lumpy by construction - measured on a real
+    library, 464 pooled tracks with Muse 48 / Shpongle 34 / Underworld 31 of them - and a plain taste
+    ranking over that returns one artist's back catalogue: a twelve-track "fresh songs" card that was
+    nine Underworld tracks.
+
+    Held-back tracks are appended rather than dropped, so a pool with few artists still fills the
+    card instead of coming up short (at the cost of the cap bending once the alternatives run out).
+    Counted on the NORMALIZED name: YouTube credits the same act both ways ("Einstürzende Neubauten"
+    and "Einsturzende Neubauten" both appear in this pool), and an exact-string cap would give each
+    spelling its own allowance."""
+    per, capped, overflow = Counter(), [], []
+    for pair in scored:
+        artist = normalize((pair[1] or {}).get("artist") or "")
+        if per[artist] < cap:
+            per[artist] += 1
+            capped.append(pair)
+        else:
+            overflow.append(pair)
+    return capped + overflow
+
+
 def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
     """Rank out-of-corpus (cold) tracks from the discovered pool by taste + the transient tilts (#50).
 
@@ -299,23 +325,35 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
             continue
         scored.append((float(scores[idx[k]]) * fw, r))
     scored.sort(key=lambda t: -t[0])
+    scored = _cap_per_artist(scored, int(rec_params.get_param(store, "fresh_artist_cap")))
     out: list[ForYouItem] = []
     for _, r in (scored[:limit] if limit else scored):
         # The Fresh card label already says these are new, taste-fit tracks, so a generic "fits your
         # taste" per row is pure redundancy: leave it blank. Only the audio-matched tracks get a row
         # note, because "sounds like your recent listening" is genuinely distinguishing info.
         reason = "Sounds like your recent listening" if r.get("audio") else ""
+        # The discovered row already knows the genre and year (the projection above scores on
+        # them). Carry both onto the item: these tracks are out-of-corpus, so nothing downstream
+        # can look them up in the library, and without them the card can say nothing about itself.
         out.append(ForYouItem(r.get("title") or "", r.get("artist") or "", r.get("album") or "",
                               r.get("video_id"), r.get("thumbnail"), 0, reason,
-                              r["identity_key"], lane="cold"))
+                              r["identity_key"], lane="cold", genre=r.get("genre") or "",
+                              year=_as_year(r.get("year"))))
     return out
+
+
+def _as_year(value):
+    """A 4-digit year from a discovered row's loose year field ('1997', '1997-06-16'), or None."""
+    text = str(value or "")[:4]
+    return int(text) if text.isdigit() else None
 
 
 def _item_to_fresh_dict(item) -> dict:
     """ForYouItem -> the Fresh-proposal dict. Superset of today's radio dict (adds key/reason/lane for
     feedback parity); the Fresh card template reads video_id/title/artist/thumbnail and ignores extras."""
     return {"video_id": item.video_id, "title": item.title, "artist": item.artist,
-            "thumbnail": item.thumbnail, "key": item.key, "reason": item.reason, "lane": item.lane}
+            "thumbnail": item.thumbnail, "key": item.key, "reason": item.reason, "lane": item.lane,
+            "genre": item.genre, "year": item.year}
 
 
 CATALOG_CONTENT_FRAC = 0.25   # share of Catalog reserved for content-only (genre/era) rediscovery tracks

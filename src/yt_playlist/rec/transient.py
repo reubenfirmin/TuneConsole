@@ -41,6 +41,29 @@ def radio_list_ids(store) -> list[str]:
     return [i for i in ids if i]
 
 
+def evidence_plays(store, limit):
+    """Recent plays that are actually EVIDENCE OF TASTE, for the transient model. Two filters, because
+    a machine-chosen play can reach the store two different ways:
+
+      · by provenance - a live play_event carrying a radio playlist's id (radio_list_ids above);
+      · by identity - a song that exists only inside a quarantined generated playlist. The YTM
+        history sync records plays a day at a time with NO playlist attribution, so a generated
+        playlist played outside the live bridge arrives looking exactly like organic listening.
+        Nothing about the row says where it came from - but the SONG says it: if the only reason
+        it's in the library is that a generated playlist put it there, playing it says nothing you
+        chose. (store.generated_only_keys, which the embedding baskets already respect.)
+
+    Pressing play on a generated playlist is a verdict on the PLAYLIST, not on each track the app
+    picked for it. Rating one, or promoting the playlist out of the Generated group, is the
+    deliberate act that makes it evidence - the rule generated_only_keys already states: plays don't
+    lift the quarantine, promotion does. The user's own signals on those tracks (likes, dislikes,
+    skips, steering) flow through their own channels and are untouched."""
+    quarantined = store.generated_only_keys()
+    return [(k, ts) for k, ts in
+            store.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store))
+            if k not in quarantined]
+
+
 def decay_weight(age_s, half_life_d) -> float:
     """#85 Wall-clock event decay: 0.5 ** (age_days / half_life_days). A fresh (or clock-skewed
     future) event weighs 1.0. This kernel is the whole lifecycle now: no rank decay, no separate
@@ -101,7 +124,7 @@ def facet_leans(store, now) -> dict:
 
     for ts, direction, keys in store.recent_mood_events():
         add(keys, direction * decay_weight(now - ts, mood_hl))
-    for k, ts in store.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store)):
+    for k, ts in evidence_plays(store, limit):
         add([k], play_w * decay_weight(now - ts, play_hl))
     # Likes here are ACTION-provenance only (recent_liked_with_ts filters at the repo): a like
     # observed live has a real event time and belongs at the top of the model stack. A like the
@@ -139,7 +162,7 @@ def play_facet_leans(store, now) -> dict:
     play_hl = gp(store, "play_halflife_d")
     limit = gp(store, "recent_play_limit")
     leans: dict = {}
-    for k, ts in store.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store)):
+    for k, ts in evidence_plays(store, limit):
         for f in facets_for(store, [k]):                # one key -> its facets, each gets the play push
             leans[f] = leans.get(f, 0.0) + play_w * decay_weight(now - ts, play_hl)
     return leans
@@ -159,7 +182,7 @@ def centroid_tilt(store, now, V, idx):
     limit = gp(store, "recent_play_limit")
     skip_hl, skip_w = gp(store, "skip_halflife_d"), gp(store, "skip_transient_w")
     events = store.recent_mood_events()
-    plays = store.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store))
+    plays = evidence_plays(store, limit)
     likes = store.recent_liked_with_ts(limit=limit)
     skips = store.recent_skips_with_ts(now - 4 * skip_hl * 86400)     # #84: same lookback as facet_leans
     if not events and not plays and not likes and not skips:
@@ -249,7 +272,7 @@ def audio_centroid_tilt(store, now):
                 continue
             tilt = tilt + w_base * decay_weight(now - ts, half_life_d) * CV[cidx[k]]  # rows already unit
 
-    _add_dir(store.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store)),
+    _add_dir(evidence_plays(store, limit),
              play_w, play_hl)
     _add_dir(store.recent_liked_with_ts(limit=limit), like_w, like_hl)
     # #84: same lookback rationale as facet_leans/centroid_tilt (4 half-lives); negative weight pulls

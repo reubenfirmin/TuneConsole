@@ -1,4 +1,5 @@
 from yt_playlist.rec import into_recently
+from yt_playlist.web import theme
 
 
 class FakeWiki:
@@ -66,11 +67,15 @@ def test_ignores_era_facets_and_negative_leans(monkeypatch):
 
 
 def test_subject_color_genre_maps_to_family_else_accent():
-    assert into_recently.subject_color({"kind": "genre", "subject": "genre:techno"}) == "#15e98c"
+    # colours are token references resolved against static/tokens.css, never literals
+    default = theme.genre_tint(None)
+    assert into_recently.subject_color({"kind": "genre", "subject": "genre:techno"}) == "var(--genre-techno)"
+    # a subgenre resolves through its family
+    assert into_recently.subject_color({"kind": "genre", "subject": "genre:psytrance"}) == "var(--genre-trance)"
     # unknown genre token falls back to the accent
-    assert into_recently.subject_color({"kind": "genre", "subject": "genre:zzz"}) == into_recently._DEFAULT_COLOR
+    assert into_recently.subject_color({"kind": "genre", "subject": "genre:zzz"}) == default
     # artists always use the accent
-    assert into_recently.subject_color({"kind": "artist", "subject": "artist:X"}) == into_recently._DEFAULT_COLOR
+    assert into_recently.subject_color({"kind": "artist", "subject": "artist:X"}) == default
 
 
 def _warm(wiki, subject, now=0.0):

@@ -1,0 +1,30 @@
+/* Setup page. Kept separate because its connection, identity and import controls
+   are not shared application components. Colour always comes from role tokens. */
+.setup-actions { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end;
+  gap: .7rem; margin-top: 1.4rem; padding: 1rem 0 .2rem;
+  background: var(--bg); border-top: 1px solid var(--border); }
+.setup-save { font-size: 1rem; padding: .6rem 1.6rem; }
+
+.connection-card { display: flex; gap: .8rem; align-items: center; margin-bottom: 1rem; }
+.connection-card.is-connected { border-color: var(--conn-ok); background: var(--conn-ok-soft); }
+.connection-card.is-disconnected { border-color: var(--conn-warn); background: var(--conn-warn-soft); }
+.connection-card.is-connected .connection-dot { color: var(--ok); }
+.connection-card.is-disconnected .connection-dot { color: var(--warn); }
+.connection-dot { font-size: 1.5rem; line-height: 1; }
+.connection-copy { margin: .15rem 0 0; }
+
+.section-flush { margin-top: 0; }
+.advanced-spaced { margin-bottom: 1rem; }
+.btn-row-spaced { margin-top: .8rem; }
+.btn-row-roomy { margin-top: 1rem; }
+.setup-connected-copy { margin-right: auto; }
+.col-master { width: 4rem; }
+.col-actions { width: 2rem; }
+.cell-center { text-align: center; }
+.input-auto { width: auto; }
+
+.takeout-steps { margin: 0; padding-left: 1.2rem; }
+.takeout-file { display: flex; align-items: center; gap: .6rem; position: relative; }
+.takeout-file-label { cursor: pointer; margin: 0; }
+.visually-hidden-file { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.flush-margin { margin: 0; }

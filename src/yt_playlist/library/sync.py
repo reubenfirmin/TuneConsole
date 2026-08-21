@@ -4,6 +4,8 @@ from yt_playlist.core.bridge import BridgeError
 from yt_playlist.util.matching import identity_key, track_artist, track_album
 from yt_playlist.util.retry import with_retry
 from yt_playlist.util.thumbnails import best_thumb
+from yt_playlist.library.executor import is_generated_description
+from yt_playlist.repos.base import GENERATED_GROUP
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,27 @@ def _album_id(t):
 # deleting and re-recording the like each day. LIKE must beat INDIFFERENT; only DISLIKE beats LIKE.
 # A track that reads INDIFFERENT across the WHOLE run is a genuine un-like and still clears.
 _STATUS_PRIORITY = {"INDIFFERENT": 0, "LIKE": 1, "DISLIKE": 2}
+
+
+def _sync_generated_group(store, ytm, description, groups):
+    """Reconcile one playlist's quarantine against the marker in its YouTube description.
+
+    The description is the only place this survives across machines: which group a playlist is in
+    lives in the local DB, so a second install (or a reinstall) sees the app's own generated
+    playlists as ordinary library playlists and starts treating its own suggestions as your taste.
+    The account is what every install shares, so it decides - in both directions:
+
+      · marked, and ungrouped here      -> quarantine it (this machine hadn't been told)
+      · unmarked, but quarantined here  -> release it (promoted on another machine)
+
+    A playlist you filed in a group of your own is never touched: only the Generated group is
+    managed from the marker."""
+    marked = is_generated_description(description)
+    current = groups.get(ytm)
+    if marked and current is None:
+        store.set_playlist_group(ytm, GENERATED_GROUP)
+    elif not marked and current == GENERATED_GROUP:
+        store.set_playlist_group(ytm, "")
 
 
 def _emit(on_progress, type, text, **extra):
@@ -72,6 +95,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     _emit(on_progress, "info", f"{label}: {len(playlists)} playlists", count=len(playlists))
     total = len(playlists)
     seen_ytm = set()
+    groups = store.get_playlist_groups()        # for the generated-quarantine reconciliation below
     rated: dict[str, str] = {}                  # identity_key -> likeStatus; see _STATUS_PRIORITY
     for i, pl in enumerate(playlists, 1):
         pid = pl["playlistId"]
@@ -100,6 +124,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         db_pid = store.upsert_playlist(identity_id, pid, pl.get("title", ""),
                                        len(track_ids), chash, now, best_thumb(pl.get("thumbnails")))
         store.set_playlist_tracks(db_pid, track_ids)
+        _sync_generated_group(store, pid, detail.get("description"), groups)
         _emit(on_progress, "step", f"{label} › {pl.get('title', '')} ({len(track_ids)} tracks)",
               i=i, total=total)
 

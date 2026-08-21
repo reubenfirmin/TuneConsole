@@ -41,6 +41,26 @@ def test_taste_page_shows_transient_and_graduation_controls(store):
     assert 'id="param-play_transient_w"' in html
 
 
+def test_preference_binding_knob_is_on_the_page_and_round_trips(store):
+    """The axis_weight_cap knob decides whether a stated genre preference tilts the ranking or
+    replaces it, so it has to be reachable and reversible from the Taste page, not just settable in
+    code. Defaults to the no-op value, so finding it does nothing until it's moved."""
+    from yt_playlist.rec import rec_params
+    from yt_playlist.rec.scoring import AXIS_WEIGHT_UNBOUNDED
+    c = _client(store)
+
+    html = c.get("/taste").text
+    assert "How hard your preferences bind" in html
+    assert 'id="param-axis_weight_cap"' in html
+    assert rec_params.get_param(store, "axis_weight_cap") == AXIS_WEIGHT_UNBOUNDED
+
+    assert c.post("/taste/param", data={"name": "axis_weight_cap", "value": "1.4"}).status_code == 200
+    assert rec_params.get_param(store, "axis_weight_cap") == 1.4
+
+    assert c.post("/taste/reset-param", data={"name": "axis_weight_cap"}).status_code == 200
+    assert rec_params.get_param(store, "axis_weight_cap") == AXIS_WEIGHT_UNBOUNDED
+
+
 def test_autotune_done_status_refreshes_model_status(store):
     c = _client(store)
     # The completed (idle) status poll fires the event the Model status card listens for.

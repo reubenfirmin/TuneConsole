@@ -7,6 +7,7 @@ zero, so the card surfaces a specific rising taste ('shoegaze') rather than a tr
 """
 from yt_playlist.rec import transient
 from yt_playlist.util import genre_map
+from yt_playlist.web import theme
 
 FAVORITE_TOP_N = 15        # all-time top artists treated as settled favorites (excluded)
 GENRE_OBVIOUS_SHARE = 0.20  # a genre at or above this share of the library is fully "obvious"
@@ -15,17 +16,6 @@ PREWARM_POOL = 12          # how many top subjects RecWorker pre-fetches wiki ca
 SUBGENRE_TIEBREAK = 1.05    # nudge specific subgenres above their broad family
 CLUSTER_DEPTH = 2          # how many rings the "explore in your catalog" CTA grows (kept tight)
 
-# A fun, saturated colour per genre family, used to tint + glow the card heading (techno -> green,
-# etc). Genre subjects map by family; artists (and unknown families) fall back to the accent.
-_FAMILY_COLORS = {
-    "techno": "#15e98c", "house": "#ff8a3d", "trance": "#7c6cff", "dnb": "#ff4f8b",
-    "breakbeat": "#ffb01f", "garage-bass": "#3df0d0", "ambient": "#6cc6ff", "electro-synth": "#a596ff",
-    "rock-classic": "#ff6b4a", "rock-indie": "#4fd6e0", "rock-post": "#9a8cff", "metal": "#c0c6d0",
-    "punk": "#ff5470", "pop": "#ff7ad1", "hiphop": "#ffd23f", "soul-funk": "#ff9e3d",
-    "jazz": "#5db4ff", "blues": "#4f9dff", "folk-country": "#d6a86a", "world-latin": "#ff6f3c",
-    "classical": "#e8d9a0", "experimental": "#b06cff",
-}
-_DEFAULT_COLOR = "#a596ff"  # artists and unknown genres glow in the house accent
 
 
 def _norm(s):
@@ -131,9 +121,10 @@ def prewarm_pool(store, now, fetch_fn=None, limit=PREWARM_POOL) -> int:
 def subject_color(subj) -> str:
     """The heading tint/glow colour for a picked subject. Genres map by family; artists use accent."""
     if subj["kind"] != "genre":
-        return _DEFAULT_COLOR
+        return theme.genre_tint(None)
     token = subj["subject"].split(":", 1)[1]
-    return _FAMILY_COLORS.get(token) or _FAMILY_COLORS.get(genre_map.family(token), _DEFAULT_COLOR)
+    tint = theme.genre_tint(token)
+    return tint if tint != "var(--genre-default)" else theme.genre_tint(genre_map.family(token))
 
 
 def _genres_in_token(store, token) -> list:

@@ -25,7 +25,7 @@
     {% for r in rows %}
       <tr>
         <td class="mono" style="white-space:nowrap; color:var(--dim)">{{ r.ts }}</td>
-        <td>{% if r.verdict == 'BLOCK' %}<span class="tag" style="background:var(--err,#c0392b); color:#fff">BLOCK</span>
+        <td>{% if r.verdict == 'BLOCK' %}<span class="tag" style="background:var(--danger-deep); color:var(--on-accent)">BLOCK</span>
             {% elif r.verdict == 'ALLOW' %}<span class="tag teal">ALLOW</span>
             {% else %}{{ r.raw }}{% endif %}</td>
         <td><span class="muted">{{ r.via }}</span></td>

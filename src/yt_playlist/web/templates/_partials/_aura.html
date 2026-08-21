@@ -8,10 +8,10 @@
     {# Iridescent, not monochrome: a bright core, the genre hue in the body, and a cool cyan rim, so
        the aura reads as colour rather than one flat wash. #}
     <radialGradient id="aura-g-{{ id }}" cx="50%" cy="44%" r="64%">
-      <stop offset="0%" stop-color="color-mix(in srgb, {{ a.hue }} 35%, #ffffff)" stop-opacity="1"/>
-      <stop offset="34%" stop-color="{{ a.hue }}" stop-opacity="0.95"/>
-      <stop offset="66%" stop-color="color-mix(in srgb, {{ a.hue }} 55%, #ff6bd0)" stop-opacity="0.6"/>
-      <stop offset="100%" stop-color="color-mix(in srgb, {{ a.hue }} 40%, #4fd6e0)" stop-opacity="0"/>
+      <stop offset="0%" style="stop-color:color-mix(in srgb, {{ a.hue }} 35%, var(--aura-core))" stop-opacity="1"/>
+      <stop offset="34%" style="stop-color:{{ a.hue }}" stop-opacity="0.95"/>
+      <stop offset="66%" style="stop-color:color-mix(in srgb, {{ a.hue }} 55%, var(--aura-rim))" stop-opacity="0.6"/>
+      <stop offset="100%" style="stop-color:color-mix(in srgb, {{ a.hue }} 40%, var(--aura-edge))" stop-opacity="0"/>
     </radialGradient>
     <filter id="aura-f-{{ id }}" x="-40%" y="-40%" width="180%" height="180%">
       <feTurbulence type="fractalNoise" baseFrequency="{{ '%.4f'|format(0.006 + a.turbulence * 0.028) }}"
