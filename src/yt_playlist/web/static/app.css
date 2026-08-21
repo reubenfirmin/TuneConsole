@@ -76,7 +76,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   transition: background 0.12s ease, color 0.12s ease;
 }
 .topbar nav a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
-.topbar nav a.active { color: var(--light-source); background: var(--grad); box-shadow: 0 6px 16px -10px var(--accent); }
+.topbar nav a.active { color: var(--light-source); background: var(--control-primary); box-shadow: 0 6px 16px -10px var(--accent); }
 
 /* Tools dropdown (cleanup / move / actions / setup) at the right of the nav */
 .tools-menu { position: relative; display: flex; }
@@ -86,7 +86,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   box-shadow: none; cursor: pointer; display: inline-flex; align-items: center; gap: 0.35rem;
 }
 .tools-btn:hover { color: var(--text); background: var(--surface-2); box-shadow: none; }
-.tools-btn.active { color: var(--light-source); background: var(--grad); box-shadow: 0 6px 16px -10px var(--accent); }
+.tools-btn.active { color: var(--light-source); background: var(--control-primary); box-shadow: 0 6px 16px -10px var(--accent); }
 .tools-btn .caret { font-size: 0.66rem; transition: transform 0.15s ease; }
 .tools-btn .caret.up { transform: rotate(180deg); }
 .tools-pop {
@@ -99,7 +99,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   color: var(--dim); font-weight: 600; font-size: 0.9rem; padding: 0.45rem 0.7rem; border-radius: 7px;
 }
 .tools-pop a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
-.tools-pop a.active { color: var(--light-source); background: var(--grad); }
+.tools-pop a.active { color: var(--light-source); background: var(--control-primary); }
 
 /* ---- navbar omnisearch ---- */
 .omni { flex: 1 1 auto; min-width: 0; display: flex; justify-content: center; align-self: center; }
@@ -284,7 +284,7 @@ td.num { font-family: var(--font-mono); }
 /* ---- buttons ---- */
 button, .btn {
   font-family: var(--font-sans); font-size: 0.88rem; font-weight: 650;
-  color: var(--light-source); background: var(--grad); background-size: 140% 140%;
+  color: var(--light-source); background: var(--control-primary); background-size: 140% 140%;
   border: 1px solid transparent; border-radius: var(--radius-sm);
   padding: 0.5rem 1rem; cursor: pointer; letter-spacing: 0.01em;
   box-shadow: 0 8px 20px -12px color-mix(in srgb, var(--accent-shadow) 80%, transparent);
@@ -294,7 +294,7 @@ button, .btn {
    any button that overrides the background (menu rows, ✕ affordances, autosuggest options) must
    override the colour too, or it renders near-black on whatever it painted instead. */
 button:hover, .btn:hover {
-  background-image: linear-gradient(135deg, var(--cta-2), var(--cta));
+  background: var(--control-primary-hover);
   color: var(--cta-ink); border-color: transparent;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--cta-2) 45%, transparent), 0 10px 26px -10px color-mix(in srgb, var(--cta) 90%, transparent);
 }
@@ -303,9 +303,9 @@ button:active, .btn:active { transform: translateY(1px); }
   background: transparent; color: var(--text); border-color: var(--border-2);
 }
 .btn-ghost:hover { background: var(--surface-2); box-shadow: none; border-color: var(--faint); }
-.btn-danger { background: linear-gradient(135deg, var(--danger), var(--danger-deep) 55%, var(--danger-shadow)); color: var(--light-source); }
+.btn-danger { background: var(--control-danger); color: var(--light-source); }
 .btn-danger:hover {
-  background-image: linear-gradient(135deg, var(--danger), var(--danger-deep) 55%, var(--danger-shadow)); color: var(--light-source);
+  background: var(--control-danger); color: var(--light-source);
   box-shadow: 0 10px 26px -10px color-mix(in srgb, var(--danger-deep) 90%, transparent);
 }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -315,14 +315,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Green primary button: used for the pre-sync "Sync now" onboarding CTA (resting green, not just
    on hover like other buttons). */
 .sync-cta {
-  background-image: linear-gradient(135deg, var(--cta-2), var(--cta)); color: var(--cta-ink);
+  background: var(--cta); color: var(--cta-ink);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--cta-2) 35%, transparent), 0 8px 20px -12px color-mix(in srgb, var(--cta) 90%, transparent);
 }
 
 /* neon-green call-to-action link (e.g. table "Review") */
 .cta {
   display: inline-block; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.02em;
-  color: var(--cta-ink); background: linear-gradient(135deg, var(--cta-2), var(--cta));
+  color: var(--cta-ink); background: var(--cta);
   padding: 0.32rem 0.75rem; border-radius: 999px; white-space: nowrap;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--cta-2) 35%, transparent), 0 6px 18px -9px color-mix(in srgb, var(--cta) 90%, transparent);
   transition: transform 0.08s ease, box-shadow 0.18s ease, filter 0.15s ease;
@@ -630,8 +630,8 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
   padding: .5rem .95rem; border-radius: var(--radius-sm);
   display: inline-flex; align-items: center; gap: .5rem; transition: color .12s ease, background .12s ease; }
 .tab-btn:hover { color: var(--text); background: var(--surface-2); }
-.tab-btn.active { color: var(--on-accent); background: var(--grad); box-shadow: 0 6px 16px -10px var(--accent); }
-.tab-btn.active:hover { background: var(--grad); }
+.tab-btn.active { color: var(--on-accent); background: var(--control-primary); box-shadow: 0 6px 16px -10px var(--accent); }
+.tab-btn.active:hover { background: var(--control-primary); }
 
 /* genre whitelist editor */
 .genre-add { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }

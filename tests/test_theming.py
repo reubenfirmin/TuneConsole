@@ -158,6 +158,19 @@ def test_flat_surface_foundation_and_protected_experiences():
     assert "--reel-card-bg:      linear-gradient(160deg, var(--p-indigo-850), var(--p-night))" in tokens
 
 
+def test_ordinary_controls_do_not_use_legacy_gradient_tokens():
+    """Flat controls have semantic solid fills; gradient roles belong to protected experiences."""
+    tokens = TOKENS.read_text()
+    for legacy in ("--grad:", "--grad-soft:", "--grad-cta:", "--grad-danger:"):
+        assert legacy not in tokens
+    consumers = "\n".join(
+        p.read_text() for p in (WEB / "static").glob("*.css") if p.name != "tokens.css"
+    )
+    assert not re.search(r"var\(--grad(?:-soft|-cta|-danger)?\)", consumers)
+    assert "background: var(--control-primary)" in (WEB / "static" / "app.css").read_text()
+    assert "background: var(--cluster-seed-bg)" in (WEB / "static" / "clusters.css").read_text()
+
+
 def test_python_returns_token_references_not_colours():
     from yt_playlist.web import theme
 

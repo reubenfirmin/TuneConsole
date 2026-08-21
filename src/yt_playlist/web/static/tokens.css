@@ -234,6 +234,7 @@
   --surface-subtle:      var(--p-indigo-800);
   --border-subtle:       var(--p-indigo-500);
   --border-strong:       var(--p-indigo-400);
+  --placeholder:         var(--surface-interactive);
 
   /* Compatibility aliases while components migrate to the explicit roles. */
   --bg:          var(--canvas);
@@ -263,9 +264,7 @@
   --mint-bright: var(--p-mint-300);
   --green-pale: var(--p-green-150);
   --danger-pale: var(--p-pink-100);
-  --danger-deep: var(--p-pink-600);
   --danger-glow: var(--p-pink-500);
-  --danger-shadow: var(--p-magenta-700);
   --cosmic-cyan: var(--p-cyan-500);
   --cosmic-purple: var(--p-purple-700);
   --fire-amber: var(--p-amber-300);
@@ -273,7 +272,6 @@
   --fire-well: var(--p-amber-950);
   --fire-orange: var(--p-orange-500);
   --fire-orange-hot: var(--p-orange-550);
-  --surface-deep-violet: var(--p-indigo-950);
   --glyph-ink: var(--p-slate-900);
   --status-light: var(--p-mist);
   --chart-album: var(--p-tan-400);
@@ -298,6 +296,11 @@
   --cta-pale:    var(--p-green-100);
   --cta-ink:     var(--p-green-900);
   --cta-well:    var(--p-green-950);
+
+  /* ---- flat control fills ---- */
+  --control-primary:       var(--accent);
+  --control-primary-hover: var(--cta);
+  --control-danger:        var(--danger);
 
   /* ---- status ---- */
   --ok:          var(--p-green-600);
@@ -395,19 +398,15 @@
   --graph-link:   color-mix(in srgb, var(--p-slate-400) 35%, transparent);
   --graph-dot-on: var(--p-violet-300);
   --graph-dot-off:var(--p-slate-350);
+  --cluster-seed-bg: linear-gradient(135deg,
+      color-mix(in srgb, var(--p-violet-600) 18%, transparent),
+      color-mix(in srgb, var(--p-violet-800) 10%, transparent));
 
   /* ---- "boost"/supernova fire ramp (cluster central node) ---- */
   --fire-0: var(--p-red-800);   --fire-1: var(--p-orange-600);
   --fire-2: var(--p-orange-450); --fire-3: var(--p-amber-300);
   --fire-4: var(--p-cream-100);  --fire-5: var(--p-magenta-600);
   --boost:  var(--p-orange-400);
-
-  /* ---- gradients ---- */
-  --grad:      linear-gradient(135deg, var(--p-violet-600) 0%, var(--p-violet-700) 45%, var(--p-violet-800) 100%);
-  --grad-soft: linear-gradient(135deg, color-mix(in srgb, var(--p-violet-600) 18%, transparent),
-                                       color-mix(in srgb, var(--p-violet-800) 10%, transparent));
-  --grad-cta:  linear-gradient(135deg, var(--cta-2), var(--cta));
-  --grad-danger: linear-gradient(135deg, var(--danger), var(--p-pink-600) 55%, var(--p-magenta-700));
 
   /* ---- recap reel ("Your Month") — an INVERTED surface: white type on vivid
      colour. Its ink/scrim roles are therefore white-based, not lilac-based. ---- */

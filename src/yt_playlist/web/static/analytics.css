@@ -46,7 +46,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vb-val { flex: none; width: 3.2rem; text-align: right; font-size: 0.78rem; color: var(--dim); }
 .vb-perm { flex: 1; height: 0.55rem; background: var(--accent-soft); border-radius: 3px; overflow: hidden; }
-.vb-perm i { display: block; height: 100%; background: var(--grad); border-radius: 3px; }
+.vb-perm i { display: block; height: 100%; background: var(--control-primary); border-radius: 3px; }
 .vb-div { flex: 1; position: relative; height: 0.55rem; background: var(--surface);
   border-radius: 3px; overflow: hidden; }
 .vb-div::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px;
@@ -79,7 +79,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .viz-tip {
   position: fixed; z-index: 80; max-width: 17.5rem; pointer-events: none;
   opacity: 0; transform: translateY(3px);
-  background: linear-gradient(180deg, var(--surface-3), var(--surface-deep-violet));
+  background: var(--surface-raised);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   box-shadow: var(--shadow); padding: 0.6rem 0.7rem;
   font-family: var(--font-sans); font-size: 0.78rem; line-height: 1.35; color: var(--text);
@@ -217,7 +217,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   gap: 0.7rem; }
 .cov-label { color: var(--dim); font-size: 0.85rem; }
 .cov-bar { height: 0.7rem; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
-.cov-bar > i { display: block; height: 100%; background: var(--grad); border-radius: 999px;
+.cov-bar > i { display: block; height: 100%; background: var(--control-primary); border-radius: 999px;
   transition: width 0.4s ease; }
 .cov-pct, .cov-raw { font-size: 0.8rem; white-space: nowrap; text-align: right;
   font-variant-numeric: tabular-nums; }
@@ -410,7 +410,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
    display-font number, instead of the plain stat-grid's bare strong/span pair. */
 .stat-grid.tiles { gap: 0.9rem; }
 .stat-grid.tiles > div {
-  background: linear-gradient(160deg, var(--surface-2), var(--bg-2));
+  background: var(--surface-interactive);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   padding: 0.85rem 1rem; gap: 0.15rem;
 }
@@ -424,8 +424,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
    directional glyphs. */
 .review-headline {
   font-family: var(--font-display); font-size: 1.6rem; font-weight: 600; margin: 0.1rem 0 0.5rem;
-  background: linear-gradient(120deg, var(--amber), var(--accent-2));
-  -webkit-background-clip: text; background-clip: text; color: transparent;
+  color: var(--amber);
 }
 .heat-strip { display: flex; flex-wrap: wrap; gap: 3px; margin: 1rem 0 0.2rem; }
 .heat-day {
@@ -507,9 +506,9 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .autotune-grid td.track { width: auto; }
 .autotune-grid td.val { white-space: nowrap; text-align: right; width: 4.5rem; padding-left: 0.9rem; }
 .autotune-grid .bar { display: block; height: 0.55rem; min-width: 2px; border-radius: 999px;
-  background: var(--grad); opacity: 0.55; }
+  background: var(--control-primary); opacity: 0.55; }
 .autotune-grid tr.win td.cfg, .autotune-grid tr.win td.val { color: var(--text); font-weight: 700; }
-.autotune-grid tr.win .bar { opacity: 1; background: linear-gradient(135deg, var(--cta-2), var(--cta)); }
+.autotune-grid tr.win .bar { opacity: 1; background: var(--cta); }
 
 .autotune-rotated { margin: 0 0 0.55rem; font-size: 0.85rem; color: var(--text); }
 .autotune-diff { display: flex; flex-direction: column; gap: 0.4rem; }
@@ -544,7 +543,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   align-items: flex-end; gap: 0.4rem; max-width: calc(100% - 6rem); }
 .canvas-chip { max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   padding: 0.35rem 0.75rem; border-radius: 999px; font-size: 0.82rem; color: var(--dim);
-  background: linear-gradient(135deg, var(--surface), var(--surface-2));
+  background: var(--surface-raised);
   border: 1px solid var(--border); box-shadow: var(--shadow); }
 .canvas-chip:hover { color: var(--text); border-color: var(--border-2); }
 .canvas-chip.active { color: var(--text); font-weight: 600;
@@ -562,7 +561,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .insight-card { display: flex; gap: 1rem; align-items: center; padding: 0.9rem 1.1rem; }
 .insight-art { position: relative; flex: none; width: 3.6rem; height: 3.6rem;
   border-radius: var(--radius-sm); overflow: hidden; display: grid; place-items: center;
-  background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); border: 1px solid var(--border-2); }
+  background: var(--surface-interactive); border: 1px solid var(--border-2); }
 .insight-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .insight-glyph { display: none; font-size: 1.35rem; color: var(--amber);
   text-shadow: 0 0 10px color-mix(in srgb, var(--amber) 60%, transparent); }
@@ -612,12 +611,12 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .artist-podium { display: flex; gap: 0.9rem; margin: 0.4rem 0 1.4rem; flex-wrap: wrap; }
 .podium-tile { flex: 1 1 8rem; display: flex; flex-direction: column; align-items: center; gap: 0.35rem;
   padding: 0.9rem 0.7rem 0.8rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
-  background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); text-align: center; }
+  background: var(--surface-interactive); text-align: center; }
 .podium-tile:first-child { border-color: color-mix(in srgb, var(--amber) 45%, var(--border-2));
   box-shadow: 0 0 18px -6px color-mix(in srgb, var(--amber) 50%, transparent); }
 .podium-rank { font-family: var(--font-mono); font-size: 0.72rem; color: var(--faint); }
 .podium-art { width: 3.6rem; height: 3.6rem; border-radius: 50%; overflow: hidden;
-  background: var(--grad-soft); display: block; }
+  background: var(--placeholder); display: block; }
 .podium-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .podium-name { font-weight: 650; font-size: 0.9rem; white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; max-width: 100%; }
@@ -630,9 +629,9 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 
 .song-of-month { display: flex; gap: 0.9rem; align-items: center; margin: 0.2rem 0 1.3rem;
   padding: 0.8rem 0.9rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
-  background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); }
+  background: var(--surface-interactive); }
 .som-art { width: 3.4rem; height: 3.4rem; flex: none; border-radius: var(--radius-sm);
-  overflow: hidden; background: var(--grad-soft); }
+  overflow: hidden; background: var(--placeholder); }
 .som-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .som-meta { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
 .som-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); }
@@ -653,7 +652,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .review-stats { display: flex; gap: 0.7rem; }
 .rs-tile { display: flex; flex-direction: column; align-items: center; text-align: center;
   padding: 0.6rem 1.15rem; min-width: 5.2rem; border: 1px solid var(--border);
-  border-radius: var(--radius-sm); background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); }
+  border-radius: var(--radius-sm); background: var(--surface-interactive); }
 .rs-tile strong { font-family: var(--font-display); font-size: 1.85rem; line-height: 1; color: var(--text);
   text-shadow: 0 0 14px color-mix(in srgb, var(--amber) 30%, transparent); }
 .rs-tile span { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em;
@@ -676,7 +675,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .moved-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.7rem; }
 .moved { display: flex; align-items: center; gap: 0.85rem; padding: 0.8rem 0.95rem;
   border: 1px solid var(--border); border-radius: var(--radius-sm);
-  background: linear-gradient(160deg, var(--surface-2), var(--bg-2)); }
+  background: var(--surface-interactive); }
 .moved-glyph { width: 2.1rem; height: 2.1rem; flex: none; display: grid; place-items: center;
   border-radius: 50%; font-size: 0.95rem; }
 .moved-new .moved-glyph { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
@@ -708,7 +707,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .unopened-tile { display: flex; flex-direction: column; gap: 0.35rem; color: var(--text); }
 .unopened-tile:hover .unopened-meta strong { color: var(--accent-2); }
 .unopened-art { display: block; width: 100%; aspect-ratio: 1 / 1; border-radius: var(--radius-sm);
-  overflow: hidden; background: var(--grad-soft); border: 1px solid var(--border); }
+  overflow: hidden; background: var(--placeholder); border: 1px solid var(--border); }
 .unopened-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .unopened-meta { display: flex; flex-direction: column; gap: 0.05rem; min-width: 0; }
 .unopened-meta strong { font-size: 0.82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -808,7 +807,7 @@ input[type="range"].pct-slider {
 .rt-row:hover { background: var(--accent-soft); }
 .rt-row::before { counter-increment: rt; content: counter(rt); text-align: right;
   font-size: 0.76rem; color: var(--faint); font-variant-numeric: tabular-nums; }
-.rt-c-art { width: 2rem; height: 2rem; border-radius: 4px; overflow: hidden; background: var(--grad-soft); }
+.rt-c-art { width: 2rem; height: 2rem; border-radius: 4px; overflow: hidden; background: var(--placeholder); }
 .rt-c-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .rt-c-art.no-art { background: var(--surface-2); }
 /* Every text cell truncates rather than wrapping: one track, one line. */

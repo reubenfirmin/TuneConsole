@@ -21,7 +21,7 @@
 .sc-state.is-run { color: var(--ok); }
 .sc-state.is-err { color: var(--danger); }
 .sc-bar { height: 2px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 16%, transparent); overflow: hidden; margin-bottom: 0.6rem; }
-.sc-bar i { display: block; height: 100%; width: 38%; border-radius: 2px; background: var(--grad);
+.sc-bar i { display: block; height: 100%; width: 38%; border-radius: 2px; background: var(--control-primary);
   animation: sc-bar 1.1s ease-in-out infinite; }
 @keyframes sc-bar { 0% { transform: translateX(-110%); } 100% { transform: translateX(330%); } }
 .sync-log { font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; max-height: 15rem;
@@ -55,7 +55,7 @@
 @keyframes ob-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 @media (prefers-reduced-motion: reduce) { .onb-dot { animation: none; } }
 .home-status::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px;
-  background: var(--grad); opacity: 0.9; }
+  background: var(--control-primary); opacity: 0.9; }
 .home-status.is-down::before { background: var(--warn); }
 .hs-main { display: flex; align-items: center; gap: 0.7rem; min-width: 0; }
 .hs-dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; flex: none; }
@@ -143,7 +143,7 @@
 @media (max-width: 64rem) { .alerts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 34rem) { .alerts { grid-template-columns: 1fr; } }
 .alert-card { position: relative; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
-.alert-cover { display: block; width: 100%; height: 7.5rem; overflow: hidden; background: var(--grad-soft); }
+.alert-cover { display: block; width: 100%; height: 7.5rem; overflow: hidden; background: var(--placeholder); }
 .alert-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .alert-cover-2 { display: flex; gap: 1px; }   /* two playlists, split the banner down the middle */
 .alert-cover-2 img { width: 50%; }
@@ -224,7 +224,7 @@
 .bar-row { display: grid; grid-template-columns: 9rem 1fr 3rem; align-items: center; gap: 0.7rem; padding: 0.25rem 0; }
 .bar-label { color: var(--dim); font-size: 0.85rem; }
 .bar-row .bar { height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
-.bar-row .bar > i { display: block; height: 100%; background: var(--grad); }
+.bar-row .bar > i { display: block; height: 100%; background: var(--control-primary); }
 .bar-val { font-family: var(--font-mono); font-size: 0.78rem; color: var(--faint); text-align: right; }
 .weight-row { display: flex; align-items: center; gap: 0.7rem; padding: 0.3rem 0; }
 .weight-row label { width: 9rem; text-transform: capitalize; }
@@ -320,7 +320,7 @@
 /* art-less tiles (artists): gradient placeholder; name shown by default since there's no cover.
    These carry the name + "because…/fits…" context as text, which can run several lines, so they grow
    to fit it (square minimum) instead of inheriting the cover's fixed 1:1 ratio + clip that cut it off. */
-.tile-cover.no-art { background: var(--grad-soft); display: grid; place-items: center;
+.tile-cover.no-art { background: var(--placeholder); display: grid; place-items: center;
   aspect-ratio: auto; min-height: 10.5rem; overflow: visible; }
 .tile-cover.no-art .tile-scrim { opacity: 1; transform: none;
   position: static; inset: auto; align-items: center; text-align: center; background: none;
@@ -398,7 +398,7 @@
 .gen-th { width: 2.3rem; height: 2.3rem; border-radius: 6px; overflow: hidden; background: var(--surface-2);
   border: 1px solid var(--border); flex-shrink: 0; }
 .gen-th img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.gen-th.no-art { background: var(--grad-soft); }
+.gen-th.no-art { background: var(--placeholder); }
 .gen-meta { min-width: 0; display: flex; flex-direction: column; }
 .gen-title { font-weight: 600; font-size: 0.86rem; color: var(--text); white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
