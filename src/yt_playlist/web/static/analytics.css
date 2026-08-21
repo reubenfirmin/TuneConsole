@@ -656,6 +656,9 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .rs-tile span { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em;
   color: var(--dim); margin-top: 0.3rem; }
 .review-sub { margin: 0.55rem 0 0; }
+.breadth-note { margin: .55rem 0 0; }
+.source-note { margin: .2rem 0 .8rem; }
+.engine-note { margin: .45rem 0 0; }
 
 .review-body { display: grid; grid-template-columns: 22rem minmax(0, 1fr); gap: 2.2rem;
   margin-top: 1.5rem; align-items: start; }

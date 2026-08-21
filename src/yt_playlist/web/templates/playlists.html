@@ -64,7 +64,9 @@
 
   {# "Generated" lives in its own card above the table, always a separate block, collapsible #}
   <div class="card gen-grp" x-show="genRows().length" x-cloak>
-    <div class="gen-grp-head" @click="toggleGen()" title="Click to collapse / expand">
+    <div class="gen-grp-head" tabindex="0" role="button" @click="toggleGen()"
+         @keydown.enter.space.prevent="toggleGen()" :aria-expanded="!collapsed.Generated"
+         title="Click to collapse / expand">
       <span class="section-label">Generated</span>
       <span class="gen-grp-count" x-text="'(' + genRows().length + ')'"></span>
       <span class="gen-grp-caret" x-text="collapsed.Generated ? '▸' : '▾'"></span>
@@ -86,12 +88,12 @@
     <table class="playlist-index">
       <thead><tr>
         <th class="col-action"></th>
-        <th class="sorth" @click="sortBy('title')">Playlist<span x-text="ind('title')"></span></th>
-        <th class="sorth col-group" @click="sortBy('group')">Group<span x-text="ind('group')"></span></th>
-        <th class="sorth num col-count" @click="sortBy('count')">Songs<span x-text="ind('count')"></span></th>
-        <th class="sorth num col-last" @click="sortBy('last')"
+        <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Playlist<span x-text="ind('title')"></span></th>
+        <th class="sorth col-group" tabindex="0" role="button" @click="sortBy('group')" @keydown.enter.space.prevent="sortBy('group')">Group<span x-text="ind('group')"></span></th>
+        <th class="sorth num col-count" tabindex="0" role="button" @click="sortBy('count')" @keydown.enter.space.prevent="sortBy('count')">Songs<span x-text="ind('count')"></span></th>
+        <th class="sorth num col-last" tabindex="0" role="button" @click="sortBy('last')" @keydown.enter.space.prevent="sortBy('last')"
             title="Most recent time a song from this playlist showed up in your play history">Last<span x-text="ind('last')"></span></th>
-        <th class="sorth num col-length" @click="sortBy('listens')"
+        <th class="sorth num col-length" tabindex="0" role="button" @click="sortBy('listens')" @keydown.enter.space.prevent="sortBy('listens')"
             title="Total plays of this playlist's songs across your sync history. Sums per-song plays, so big playlists score high. Not playlist-level plays.">Plays<span x-text="ind('listens')"></span></th>
       </tr></thead>
       <template x-for="sec in sections()" :key="sec.name">

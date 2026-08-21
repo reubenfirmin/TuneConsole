@@ -19,9 +19,9 @@
   <table class="album-index" x-data="rowSort()">
     <thead><tr>
       <th class="col-avatar"></th>
-      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
-      <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
-      <th class="sorth num" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.space.prevent="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year<span x-text="ind('year')"></span></th>
     </tr></thead>
     <tbody x-ref="body">
     {% for a in saved %}
@@ -45,11 +45,11 @@
   <table class="album-index" x-data="rowSort()">
     <thead><tr>
       <th class="col-avatar"></th>
-      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
-      <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
-      <th class="sorth num" @click="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
-      <th class="sorth num" @click="sortBy('pls')">Playlists<span x-text="ind('pls')"></span></th>
-      <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.space.prevent="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('songs')" @keydown.enter.space.prevent="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('pls')" @keydown.enter.space.prevent="sortBy('pls')">Playlists<span x-text="ind('pls')"></span></th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
     </tr></thead>
     <tbody x-ref="body">
     {% for a in albums %}

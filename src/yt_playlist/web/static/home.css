@@ -38,12 +38,8 @@
    animated equalizer + display headline so it greets a first-run user with some life (not a bare strip). */
 .onboard-card { position: relative; overflow: hidden; display: flex; align-items: center; gap: 1.7rem;
   flex-wrap: wrap; padding: 1.7rem 1.9rem; margin-bottom: 1.6rem; border-radius: 16px;
-  border: 1px solid var(--border);
-  /* Flourish: the equalizer reads as a live signal source — a soft glow pools behind it (left-centre)
-     and the bars cast light, so the "waiting for a signal" idea carries the visual (no accent stripe). */
-  background: radial-gradient(240px 220px at 10% 50%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 70%), var(--surface); }
-.onboard-card .onb-art { flex: none; width: 132px; height: 72px;
-  filter: drop-shadow(0 3px 24px color-mix(in srgb, var(--accent) 55%, transparent)); }
+  border: 1px solid var(--border-strong); background: var(--surface-card); }
+.onboard-card .onb-art { flex: none; width: 132px; height: 72px; }
 .onb-body { flex: 1 1 20rem; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }
 .connection-waiting { display: inline-flex; align-items: center; gap: 0.5rem; font-size: var(--type-xs); font-weight: 650;
   color: var(--warn-2); margin-bottom: 0.55rem; }

@@ -66,7 +66,7 @@
   </div>
   {% endfor %}
 </div>
-<p class="section-note" style="margin:.45rem 0 0">
+<p class="section-note engine-note">
   {% if engine.contexts_total > engine.contexts|length %}Top {{ engine.contexts|length }} of {{ engine.contexts_total }} playlists. {% endif %}
   The percentages are each playlist's slice of the blend, so they add up across all of them.</p>
 {% else %}<p class="section-note">No taste contexts yet - build the model and play some playlists.</p>{% endif %}

@@ -47,7 +47,7 @@
     <button type="button" class="btn-ghost btn-sm" hx-post="{{ upd }}" hx-vals='{"field": "setall", "value": "0"}' hx-target="#merge-body" hx-swap="innerHTML">none</button>
   </div>
   <table>
-    <thead><tr><th style="width:2rem"></th><th style="width:4.5rem">In</th><th class="num" style="width:3.5rem" title="Track number within each playlist">#</th><th>Song</th><th class="num" style="width:4rem">Length</th></tr></thead>
+    <thead><tr><th class="merge-col-toggle"></th><th class="merge-col-source">In</th><th class="num merge-col-position" title="Track number within each playlist">#</th><th>Song</th><th class="num merge-col-length">Length</th></tr></thead>
     <tbody>
       {% for t in rows %}
       <tr class="{{ '' if t.included else 'rowdel' }}">

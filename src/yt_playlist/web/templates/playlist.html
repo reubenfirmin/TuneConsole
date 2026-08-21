@@ -60,13 +60,13 @@
       <th class="num col-thumb">#</th>
       <th class="col-thumb"></th>
       <th class="liked-col col-like"></th>
-      <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
-      <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
-      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
-      <th class="sorth num col-year" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
-      <th class="sorth col-last" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
-      <th class="sorth num col-count" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
-      <th class="sorth num col-length" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Song<span x-text="ind('title')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.space.prevent="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th class="sorth num col-year" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth col-last" tabindex="0" role="button" @click="sortBy('genre')" @keydown.enter.space.prevent="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
+      <th class="sorth num col-count" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth num col-length" tabindex="0" role="button" @click="sortBy('len')" @keydown.enter.space.prevent="sortBy('len')">Length<span x-text="ind('len')"></span></th>
       <th class="col-action"></th>
     </tr></thead>
     <tbody x-ref="body">

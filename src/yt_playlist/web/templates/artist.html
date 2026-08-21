@@ -22,13 +22,13 @@
 <div class="card">
   <table x-data="rowSort()">
     <thead><tr>
-      <th style="width:2.6rem"></th>
-      <th style="width:1.6rem"></th>
-      <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
-      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th class="col-thumb"></th>
+      <th class="col-kind"></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Song<span x-text="ind('title')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album<span x-text="ind('album')"></span></th>
       <th>In playlists</th>
-      <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
-      <th class="sorth num" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('len')" @keydown.enter.space.prevent="sortBy('len')">Length<span x-text="ind('len')"></span></th>
     </tr></thead>
     <tbody x-ref="body">
     {% for s in songs %}
@@ -63,13 +63,13 @@
 <div class="card">
   <table x-data="rowSort()">
     <thead><tr>
-      <th style="width:3rem"></th>
-      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
-      <th class="sorth num" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
-      <th class="sorth num" @click="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
-      <th class="sorth num" @click="sortBy('pls')">Playlists<span x-text="ind('pls')"></span></th>
-      <th class="sorth num" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
-      <th class="sorth" @click="sortBy('saved')">Saved<span x-text="ind('saved')"></span></th>
+      <th class="col-avatar"></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('songs')" @keydown.enter.space.prevent="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('pls')" @keydown.enter.space.prevent="sortBy('pls')">Playlists<span x-text="ind('pls')"></span></th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('saved')" @keydown.enter.space.prevent="sortBy('saved')">Saved<span x-text="ind('saved')"></span></th>
     </tr></thead>
     <tbody x-ref="body">
     {% for al in collection %}
@@ -99,9 +99,9 @@
 <div class="card">
   <table x-data="rowSort()">
     <thead><tr>
-      <th style="width:3rem"></th>
-      <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
-      <th class="sorth num" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="col-avatar"></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album<span x-text="ind('album')"></span></th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year<span x-text="ind('year')"></span></th>
       <th></th>
     </tr></thead>
     <tbody x-ref="body">

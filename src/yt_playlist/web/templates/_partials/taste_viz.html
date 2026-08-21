@@ -211,7 +211,7 @@
             {"l": "Share of plays", "v": "%.1f"|format((1-shown)*100) ~ "%", "t": "strong"},
             {"l": "Families", "v": (viz.n_families - viz.genres|length) ~ " smaller ones", "n": "everything outside your top " ~ viz.genres|length}]) }} style="width:{{ '%.1f'|format((1-shown)*100) }}%"></i>{% endif %}
     </div>
-    <p class="section-note" style="margin:.55rem 0 0">Each band is a genre family, sized by share of plays.
+    <p class="section-note breadth-note">Each band is a genre family, sized by share of plays.
       A few wide bands means <strong>focused</strong>; many even bands means <strong>eclectic</strong>.
       Your top genre is {{ '%.0f'|format(viz.genres[0].share*100) }}% of plays, across {{ viz.n_families }} families.</p>
     {% else %}<p class="section-note">No genre tags yet. Enrich your library to populate this.</p>{% endif %}
@@ -255,7 +255,7 @@
     <span class="tag" {{ vt.tip("Dislikes", [
           {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.dislike) ~ "d", "t": "strong"}]) }}>⃠ dislikes {{ viz.sources.dislikes }}</span>
   </p>
-  <p class="section-note" style="margin:.2rem 0 .8rem">These are the events behind every Transient
+  <p class="section-note source-note">These are the events behind every Transient
     shape above. Each source fades on its own wall-clock half-life (hover a tag) - a month-old vibe
     tap is nearly gone even if you never interact again. There's no separate sync-freshness scaling:
     every event decays on its own clock, sync or no sync.</p>

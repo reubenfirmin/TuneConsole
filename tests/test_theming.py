@@ -273,7 +273,7 @@ def test_shared_spacing_scale_and_layout_primitives_are_used():
         assert role in tokens
     for role in ("--sp-1", "--sp-2", "--sp-3", "--sp-4", "--sp-5", "--sp-6"):
         assert f"var({role})" in app
-    for selector in (".flow", ".cluster", ".toolbar", ".layout-grid", ".section-block"):
+    for selector in (".cluster", ".toolbar", ".section-block"):
         assert selector in app
     for utility in ("toolbar", "section-block", "flush", "push-end", "inline-control"):
         assert re.search(rf'class="[^"]*\b{utility}\b', templates), utility
@@ -317,6 +317,48 @@ def test_dense_pages_have_scoped_compact_screen_behavior():
     for name in ("playlist.html", "album.html"):
         text = (WEB / "templates" / name).read_text()
         assert 'table-scroll"><table class="track-table' not in text
+
+
+def test_ordinary_interactions_have_keyboard_and_motion_support():
+    app = (WEB / "static" / "app.css").read_text()
+    assert "main:not(.page-clusters)" in app
+    assert ":focus-visible" in app
+    assert "@media (pointer: coarse)" in app
+    assert "@media (prefers-reduced-motion: reduce)" in app
+    assert "animation-duration: .01ms !important" in app
+
+    sort_headers = re.findall(
+        r'<th class="sorth[^>]+>',
+        "\n".join(p.read_text() for p in (WEB / "templates").rglob("*.html")),
+    )
+    assert sort_headers
+    for header in sort_headers:
+        assert 'tabindex="0"' in header
+        assert 'role="button"' in header
+        assert '@keydown.enter.space.prevent=' in header
+
+    clusters = (WEB / "templates" / "clusters.html").read_text()
+    assert "{% block page_class %}page-clusters{% endblock %}" in clusters
+
+
+def test_final_style_foundation_has_no_obsolete_layout_aliases():
+    app = (WEB / "static" / "app.css").read_text()
+    tokens = TOKENS.read_text()
+    for obsolete in (".pl-toolbar", ".layout-grid", ".stack >", ".flow >"):
+        assert obsolete not in app
+    for obsolete in ("--flow-space", "--grid-space", "--grid-min"):
+        assert obsolete not in tokens
+
+    home = (WEB / "static" / "home.css").read_text()
+    onboard = re.search(r"(?s)\.onboard-card\s*\{(.*?)\}", home).group(1)
+    assert "background: var(--surface-card)" in onboard
+    assert "gradient(" not in onboard
+
+    # Static SVG presentation belongs with the shared brand component.
+    for name in ("base.html", "generating.html", "home.html"):
+        text = (WEB / "templates" / name).read_text()
+        assert 'style="stop-color:' not in text
+    assert ".eq-stop-start" in app and ".eq-delay-1" in app
 
 
 def test_python_returns_token_references_not_colours():

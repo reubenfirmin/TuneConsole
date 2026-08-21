@@ -28,6 +28,10 @@
 .page-merge .col-head { font-family: var(--font-sans); font-size: 1.05rem; font-weight: 700; margin-bottom: .5rem; display: flex; align-items: center; gap: .4rem; }
 .page-merge .merge-count { font-family: var(--font-sans); font-size: 1.8rem; font-weight: 750; }
 .page-merge table { width: 100%; }
+.page-merge .merge-col-toggle { width: 2rem; }
+.page-merge .merge-col-source { width: 4.5rem; }
+.page-merge .merge-col-position { width: 3.5rem; }
+.page-merge .merge-col-length { width: 4rem; }
 .page-merge tbody td { padding: .35rem .4rem; border-bottom: 1px solid var(--border); font-size: .84rem; vertical-align: middle; }
 .page-merge tr.rowdel td { opacity: .4; text-decoration: none; }
 .page-merge .tk-t { font-weight: 600; }

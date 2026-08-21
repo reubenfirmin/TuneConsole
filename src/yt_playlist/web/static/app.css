@@ -49,6 +49,13 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .brand:hover .b-console { color: var(--light-source); }
 
 .brand-eq { flex: none; }
+.eq-stop-start { stop-color: var(--accent); }
+.eq-stop-end { stop-color: var(--accent-2); }
+.eq-delay-1 { animation-delay: -.9s; }
+.eq-delay-2 { animation-delay: -.3s; }
+.eq-delay-3 { animation-delay: -.6s; }
+.eq-delay-4 { animation-delay: 0s; }
+.eq-delay-5 { animation-delay: -.45s; }
 .brand-eq .eqbar {
   transform-box: fill-box; transform-origin: 50% 100%;
   animation: eq-bounce 1.05s ease-in-out infinite;
@@ -160,18 +167,11 @@ main {
 /* ---- composition ----
    Small layout primitives keep page rhythm consistent without coupling content
    to one screen. Component-specific rules can still choose their own internals. */
-.flow > * { margin-block: 0; }
-.flow > * + * { margin-block-start: var(--flow-space, var(--sp-4)); }
 .cluster, .toolbar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--cluster-space, var(--sp-3));
-}
-.layout-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(var(--grid-min, 8.5rem), 1fr));
-  gap: var(--grid-space, var(--sp-4));
 }
 .section-block { margin-block-end: var(--sp-5); }
 .space-before { margin-block-start: var(--sp-5); }
@@ -198,12 +198,14 @@ main {
 .cell-actions { text-align: end; white-space: nowrap; }
 .tag-danger { background: var(--danger-deep); color: var(--on-accent); }
 .col-thumb { width: 2.6rem; }
+.col-kind { width: 1.6rem; }
 .col-avatar { width: 3rem; }
 .col-like, .col-action { width: 2.4rem; }
 .col-year, .col-count { width: 4.5rem; }
 .col-length { width: 5rem; }
 .col-last { width: 6rem; }
 .col-group { width: 8rem; }
+.skeleton-row-compact { min-height: 2.6rem; }
 .table-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
 .table-scroll > table { min-width: var(--table-min, 46rem); }
 
@@ -276,8 +278,6 @@ h2.section .scope-tag, h3.section .scope-tag {
   border-color: var(--border-strong);
   padding: .75rem .875rem;
 }
-.stack > * + * { margin-top: var(--sp-4); }
-
 /* metric strip */
 .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: var(--sp-4); }
 .metric {
@@ -497,7 +497,6 @@ ol.steps > li::before {
 .seg button.on, .seg a.on { background: var(--accent); color: var(--light-source); }
 .seg button:hover, .seg a:hover { box-shadow: none; transform: none; color: var(--text); }
 /* playlists tab */
-.pl-toolbar { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
 .pl-actionbar { position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%); z-index: 60;
   display: flex; align-items: center; gap: 0.6rem; padding: 0.55rem 0.7rem 0.55rem .9375rem;
   background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 999px;
@@ -575,7 +574,6 @@ tr.group-row td { font-family: var(--font-sans); font-size: var(--type-body); co
 .pl-art-mosaic { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr; gap: 1px; }
 .pl-art-mosaic img { position: static; inset: auto; }
 .pl-art-mosaic img:only-child, .pl-art-mosaic img:nth-child(3):last-child { grid-column: span 2; }
-.pl-headmain { min-width: 0; }
 .share-link { align-self: flex-start; }
 .pl-headmain { display: flex; flex-direction: column; min-width: 0; }
 .pl-head h1 { margin: 0.2rem 0 0; line-height: 1.12; }
@@ -900,4 +898,39 @@ button.htmx-request .check-busy { display: inline; }
   .album-index th:nth-child(4), .album-index td:nth-child(4),
   .album-index th:nth-child(5), .album-index td:nth-child(5) { display: none; }
   .cluster > .notice { flex-basis: 100%; }
+}
+
+/* ---- keyboard and motion ----
+   Clusters owns a purpose-built interaction layer; Recap has a standalone shell. */
+.topbar :where(a, button, input):focus-visible,
+main:not(.page-clusters) :where(a, button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 3px;
+}
+main:not(.page-clusters) th.sorth:focus-visible {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+main:not(.page-clusters) .editable-title:focus-visible,
+main:not(.page-clusters) .section.toggle:focus-visible { border-radius: var(--radius-sm); }
+
+@media (pointer: coarse) {
+  .topbar nav a, .tools-btn { min-height: 2.75rem; display: inline-flex; align-items: center; }
+  main:not(.page-clusters) :where(.btn-sm, .dots, .head-icon, .chip-x, .banner-x, .toast-x) {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  main:not(.page-clusters),
+  main:not(.page-clusters) *,
+  main:not(.page-clusters) *::before,
+  main:not(.page-clusters) *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

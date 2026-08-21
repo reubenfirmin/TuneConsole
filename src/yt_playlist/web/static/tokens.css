@@ -537,10 +537,7 @@
   --sp-5: 1.5rem;
   --sp-6: 2rem;
   --sp-7: 3rem;
-  --flow-space: var(--sp-4);
   --cluster-space: var(--sp-3);
-  --grid-space: var(--sp-4);
-  --grid-min: 8.5rem;
 
   /* ---- geometry & elevation ---- */
   --radius: 12px;

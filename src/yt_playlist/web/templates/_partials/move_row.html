@@ -2,8 +2,8 @@
 {# One movable playlist. htmx: Copy/Move post to /move/run; the to-identity comes from the
    #move-to select via hx-include. A move that deletes the source returns empty (row fades out);
    copy / kept-source / error re-render this row with a message. from-filter stays Alpine. #}
-<tbody class="move-row" x-show="from === {{ p.identity_id }}"
-       x-transition.opacity.duration.300ms style="display:none">
+<tbody class="move-row" x-show="from === {{ p.identity_id }}" x-cloak
+       x-transition.opacity.duration.300ms>
   <tr>
     <td>{{ pllink(p.ytm_playlist_id, p.title, p.track_count) }}</td>
     <td class="cell-actions">
