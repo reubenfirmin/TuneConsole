@@ -192,8 +192,8 @@ h2.section .scope-tag, h3.section .scope-tag {
 
 /* ---- cards ---- */
 .card {
-  background: linear-gradient(180deg, var(--surface), var(--bg-2));
-  border: 1px solid var(--border);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   padding: 1.3rem 1.4rem;
@@ -203,22 +203,20 @@ h2.section .scope-tag, h3.section .scope-tag {
 /* metric strip */
 .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 1rem; }
 .metric {
-  background: linear-gradient(160deg, var(--surface-2), var(--bg-2));
-  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface-card);
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
   padding: 1rem 1.1rem; position: relative; overflow: hidden;
 }
 .metric::before {
-  content: ""; position: absolute; inset: 0; opacity: 0.5; pointer-events: none;
-  background: radial-gradient(120px 80px at 90% 0%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 70%);
+  content: none;
 }
 .metric::after {
   content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-  background: var(--grad);
+  background: var(--accent);
 }
 .metric .n {
   font-family: var(--font-display); font-size: 2rem; font-weight: 600; line-height: 1;
-  background: linear-gradient(135deg, var(--accent-pale), var(--accent) 60%, var(--teal));
-  -webkit-background-clip: text; background-clip: text; color: transparent;
+  color: var(--accent-pale);
 }
 .metric .l { font-size: 0.78rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 0.35rem; }
 .metric.warn::after { background: var(--danger); }

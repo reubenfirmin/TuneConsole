@@ -144,6 +144,20 @@ def test_generating_takeover_title_is_scoped():
     assert not re.search(r"(?m)^\.gen-title\s*\{", css)
 
 
+def test_flat_surface_foundation_and_protected_experiences():
+    """Ordinary cards use flat roles; Clusters and Recap keep their palette bindings."""
+    tokens = TOKENS.read_text()
+    app = (WEB / "static" / "app.css").read_text()
+    for role in ("--canvas", "--surface-card", "--surface-interactive", "--surface-raised",
+                 "--surface-inset", "--border-subtle", "--border-strong"):
+        assert role in tokens
+    card = re.search(r"(?s)\.card\s*\{(.*?)\}", app).group(1)
+    assert "background: var(--surface-card)" in card
+    assert "gradient(" not in card
+    assert "--graph-node:   var(--p-indigo-850)" in tokens
+    assert "--reel-card-bg:      linear-gradient(160deg, var(--p-indigo-850), var(--p-night))" in tokens
+
+
 def test_python_returns_token_references_not_colours():
     from yt_playlist.web import theme
 

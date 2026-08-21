@@ -223,17 +223,29 @@
    redefines this block only.
    ============================================================================ */
 :root {
-  /* ---- surfaces & structure ---- */
-  --bg:          var(--p-night);
-  --bg-deep:     var(--p-ink);          /* body gradient floor */
+  /* ---- flat application surfaces ----
+     Ordinary components use solid fills; hierarchy comes from contrast and
+     borders, not gradients. Clusters and Recap keep protected roles below. */
+  --canvas:              var(--p-night);
+  --surface-card:        var(--p-indigo-850);
+  --surface-interactive: var(--p-indigo-700);
+  --surface-raised:      var(--p-indigo-750);
+  --surface-inset:       var(--p-abyss);
+  --surface-subtle:      var(--p-indigo-800);
+  --border-subtle:       var(--p-indigo-500);
+  --border-strong:       var(--p-indigo-400);
+
+  /* Compatibility aliases while components migrate to the explicit roles. */
+  --bg:          var(--canvas);
+  --bg-deep:     var(--p-ink);
   --bg-2:        var(--p-night-3);
-  --surface:     var(--p-indigo-850);
-  --surface-2:   var(--p-indigo-700);
-  --surface-3:   var(--p-indigo-750);   /* raised: menus, popovers */
-  --surface-sunk:var(--p-abyss);        /* inset wells: console, code */
-  --surface-alt: var(--p-indigo-800);
-  --border:      var(--p-indigo-500);
-  --border-2:    var(--p-indigo-400);
+  --surface:     var(--surface-card);
+  --surface-2:   var(--surface-interactive);
+  --surface-3:   var(--surface-raised);
+  --surface-sunk:var(--surface-inset);
+  --surface-alt: var(--surface-subtle);
+  --border:      var(--border-subtle);
+  --border-2:    var(--border-strong);
 
   /* ---- type ---- */
   --text:        var(--p-lilac-50);
@@ -373,7 +385,8 @@
   --scrim-space:  color-mix(in srgb, var(--p-abyss-2) 62%, transparent);
   --edge:         var(--p-slate-400);
   --trunk:        var(--p-green-350);
-  --graph-node:   var(--surface);
+  /* Protected: application-surface changes must not restyle Clusters. */
+  --graph-node:   var(--p-indigo-850);
   --graph-node-hi:var(--p-indigo-650);
   --graph-node-2: var(--p-indigo-600);
   --graph-chip:   var(--p-indigo-870);
@@ -436,7 +449,7 @@
   --slide-closing:     radial-gradient(100% 82% at 50% 28%, var(--p-reel-night), var(--p-reel-night-2) 76%);
   --slide-name-grad:   linear-gradient(100deg, var(--p-white) 8%, var(--p-purple-300) 52%, var(--p-cyan-400) 100%);
   --reel-hero-cta:     linear-gradient(135deg, var(--accent), var(--p-violet-800));
-  --reel-card-bg:      linear-gradient(160deg, var(--surface), var(--bg));
+  --reel-card-bg:      linear-gradient(160deg, var(--p-indigo-850), var(--p-night));
 
   /* ---- genre families, by NAME. The single mapping Python resolves against
      (see web/theme.py). Two sets on purpose, because they do different jobs:
@@ -507,6 +520,6 @@
   /* ---- geometry & elevation ---- */
   --radius: 12px;
   --radius-sm: 8px;
-  --shadow: 0 20px 46px -20px var(--scrim-heavy);
+  --shadow: 0 12px 28px -20px var(--scrim-heavy);
   --maxw: 68rem;
 }
