@@ -1,12 +1,12 @@
 /* Enrichment, taste visualization, trends, discovery, and road-trip tools. */
 /* ── Setup → Enrichment: draggable metadata-provider cards ─────────────────────────── */
-.provider-list { display: flex; flex-direction: column; gap: 0.6rem; margin-top: 1rem; }
+.provider-list { display: flex; flex-direction: column; gap: 0.6rem; margin-top: .9375rem; }
 .provider-card {
-  display: flex; align-items: flex-start; gap: 0.8rem;
+  display: flex; align-items: flex-start; gap: .8125rem;
   background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); padding: 0.8rem 0.9rem;
+  border-radius: var(--radius-sm); padding: .8125rem .875rem;
 }
-.provider-card .drag-handle { cursor: grab; font-size: 1.1rem; line-height: 1.4; padding-top: 0.1rem; }
+.provider-card .drag-handle { cursor: grab; font-size: var(--type-lg); line-height: 1.4; padding-top: 0.1rem; }
 .provider-card:hover .drag-handle { color: var(--accent-2); }
 .provider-card.off { opacity: 0.5; }
 .provider-toggle { display: flex; align-items: center; padding-top: 0.15rem; }
@@ -14,7 +14,7 @@
 .provider-meta { display: flex; flex-direction: column; gap: 0.15rem; flex: 1; min-width: 0; }
 .provider-meta > strong { color: var(--text); }
 .provider-key { margin-top: 0.5rem; }
-.provider-key-saved { color: var(--dim); font-size: 0.85rem; display: flex; align-items: center; gap: 0.5rem; }
+.provider-key-saved { color: var(--dim); font-size: var(--type-ui); display: flex; align-items: center; gap: 0.5rem; }
 .provider-key-edit .btn-row { margin-top: 0.4rem; gap: 0.5rem; }
 .provider-key-edit input { max-width: 22rem; }
 .provider-card.srow-chosen { box-shadow: 0 8px 24px -12px var(--accent); }
@@ -23,14 +23,14 @@
 
 /* ── Taste-model transparency visualizations ─────────────────────────────── */
 .viz-dim { margin-bottom: 1.1rem; }
-.viz-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem; }
+.viz-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 1.375rem; }
 .viz-pair-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; }
 @media (max-width: 640px) { .viz-pair, .viz-pair-cards { grid-template-columns: 1fr; } }
 
 /* A column flex so the footer caption sits on the baseline across all four roses of a card, even
    when one of them carries an extra "quiet" line above it. */
 figure.rose { margin: 0; text-align: center; display: flex; flex-direction: column; }
-.rose-cap { font-size: 0.8rem; font-weight: 650; color: var(--text); margin-bottom: 0.4rem; }
+.rose-cap { font-size: var(--type-sm); font-weight: 650; color: var(--text); margin-bottom: 0.4rem; }
 .rose-cap .muted { font-weight: 400; }
 .rose-svg { width: 100%; max-width: 360px; height: auto; }
 .rose-svg .petal { fill: var(--petal-c, var(--accent)); stroke: var(--bg); stroke-width: 0.6;
@@ -38,13 +38,13 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .rose-svg .petal:hover { filter: brightness(1.18); }
 .rose-svg .petal.away { opacity: 0.78; }   /* leaning away - same hue, gently receded */
 .rose-svg .rose-neutral { fill: none; stroke: var(--faint); stroke-width: 0.8; stroke-dasharray: 2 3; }
-.rose-quiet { font-size: 0.78rem; color: var(--dim); margin: 0.3rem 0 0; }
+.rose-quiet { font-size: var(--type-xs); color: var(--dim); margin: 0.3rem 0 0; }
 
 .viz-bars { display: flex; flex-direction: column; gap: 0.4rem; }
 .viz-bar-row { display: flex; align-items: center; gap: 0.5rem; }
-.vb-name { flex: none; width: 8rem; font-size: 0.82rem; color: var(--text);
+.vb-name { flex: none; width: 8rem; font-size: var(--type-sm); color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vb-val { flex: none; width: 3.2rem; text-align: right; font-size: 0.78rem; color: var(--dim); }
+.vb-val { flex: none; width: 3.2rem; text-align: right; font-size: var(--type-xs); color: var(--dim); }
 .vb-perm { flex: 1; height: 0.55rem; background: var(--accent-soft); border-radius: 3px; overflow: hidden; }
 .vb-perm i { display: block; height: 100%; background: var(--control-primary); border-radius: 3px; }
 .vb-div { flex: 1; position: relative; height: 0.55rem; background: var(--surface);
@@ -54,7 +54,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .vb-div i { position: absolute; top: 0; bottom: 0; min-width: 1px; }
 .vb-div i.pos { left: 50%; background: var(--teal); border-radius: 0 3px 3px 0; }
 .vb-div i.neg { right: 50%; background: var(--danger); border-radius: 3px 0 0 3px; }
-.vb-legend { margin: 0.5rem 0 0; font-size: 0.75rem; }
+.vb-legend { margin: 0.5rem 0 0; font-size: var(--type-xs); }
 
 /* ── Enrichment conflicts: header badge icon + resolver modal ──────────────────────── */
 .head-icon.conflict-icon { position: relative; color: var(--amber, var(--warn-2)); }
@@ -68,11 +68,11 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .conflict-track:first-of-type { border-top: none; }
 .conflict-track > strong { display: block; color: var(--text); margin-bottom: 0.35rem; }
 .conflict-field { display: flex; gap: 0.7rem; align-items: baseline; margin: 0.3rem 0 0.3rem 0.4rem; }
-.conflict-label { min-width: 4rem; color: var(--dim); font-size: 0.82rem; text-transform: capitalize; }
-.conflict-options { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
+.conflict-label { min-width: 4rem; color: var(--dim); font-size: var(--type-sm); text-transform: capitalize; }
+.conflict-options { display: flex; flex-wrap: wrap; gap: 0.5rem .9375rem; }
 .conflict-option { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
 .conflict-option input { width: auto; }
-.conflict-prov { font-size: 0.72rem; }
+.conflict-prov { font-size: var(--type-xs); }
 
 /* Taste-viz floating tooltip - a formatted readout: composed inputs above a hairline,
    the effective result emphasized below. Reuses the brand palette; mono for figures. */
@@ -82,23 +82,23 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   background: var(--surface-raised);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   box-shadow: var(--shadow); padding: 0.6rem 0.7rem;
-  font-family: var(--font-sans); font-size: 0.78rem; line-height: 1.35; color: var(--text);
+  font-family: var(--font-sans); font-size: var(--type-xs); line-height: 1.35; color: var(--text);
   transition: opacity 0.12s ease, transform 0.12s ease;
 }
 .viz-tip.on { opacity: 1; transform: none; pointer-events: auto; }   /* clickable when shown */
 .vt-copy {
   position: absolute; top: 0.4rem; right: 0.4rem; display: inline-flex;
-  align-items: center; justify-content: center; width: 1.4rem; height: 1.4rem; padding: 0;
+  align-items: center; justify-content: center; width: 1.375rem; height: 1.375rem; padding: 0;
   border: 1px solid var(--border-2); border-radius: 5px; background: color-mix(in srgb, var(--light-source) 4%, transparent);
   color: var(--dim); cursor: pointer; transition: color 0.12s, border-color 0.12s, background 0.12s;
 }
 .vt-copy:hover { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
 .vt-copy.done { color: var(--teal); border-color: var(--teal); }
 .vt-copy.done svg { display: none; }
-.vt-copy.done::after { content: "✓"; font-size: 0.85rem; line-height: 1; }
+.vt-copy.done::after { content: "✓"; font-size: var(--type-ui); line-height: 1; }
 .vt-title {
   display: flex; align-items: center; gap: 0.42rem; padding-right: 1.5rem;   /* clear the copy btn */
-  font-weight: 700; font-size: 0.88rem; letter-spacing: -0.01em; margin-bottom: 0.45rem;
+  font-weight: 700; font-size: var(--type-ui); letter-spacing: -0.01em; margin-bottom: 0.45rem;
 }
 .vt-title::before {
   content: ""; width: 0.5rem; height: 0.5rem; border-radius: 2px; flex: none;
@@ -108,7 +108,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .vt-title.neg::before { background: var(--dot, var(--danger)); }
 .vt-row { display: flex; justify-content: space-between; align-items: baseline; gap: 1.1rem; }
 .vt-l { color: var(--dim); white-space: nowrap; }
-.vt-v { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text); white-space: nowrap; text-align: right; }
+.vt-v { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--text); white-space: nowrap; text-align: right; }
 .vt-v.pos { color: var(--teal); }
 .vt-v.neg { color: var(--danger); }
 .vt-v.strong { color: var(--light-source); font-weight: 700; }
@@ -125,7 +125,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
    breadth: a few wide bands = focused, many even bands = eclectic. */
 .breadth-head { display: flex; align-items: baseline; justify-content: space-between; margin: 0.2rem 0 0.55rem; }
 .breadth-word { font-family: var(--font-sans); font-size: 1.55rem; line-height: 1; text-transform: capitalize; }
-.breadth-idx { font-size: 0.9rem; color: var(--dim); }
+.breadth-idx { font-size: var(--type-ui); color: var(--dim); }
 .breadth-idx small { color: var(--faint); }
 .breadth-ribbon { display: flex; height: 20px; border-radius: 6px; overflow: hidden;
   background: var(--bg); box-shadow: inset 0 0 0 1px var(--border); }
@@ -136,15 +136,15 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 
 /* #88 The layered taste model. `.layer-name` / `.layer-scale` are shared by the key card and the
    modes card so a layer always looks the same wherever it is named. */
-.layer-name { font-family: var(--font-sans); font-size: 0.9rem; letter-spacing: 0.03em; }
+.layer-name { font-family: var(--font-sans); font-size: var(--type-ui); letter-spacing: 0.03em; }
 .layer-scale { font-size: 0.7rem; }
 
 /* The key: one row per layer, naming its timescale, what it is, and which cards draw it. */
-.layer-key-list { list-style: none; margin: 0.7rem 0 1rem; padding: 0; }
-.layer-key-list li { display: grid; grid-template-columns: 7rem 8rem 1fr; gap: 0.2rem 1rem;
+.layer-key-list { list-style: none; margin: 0.7rem 0 .9375rem; padding: 0; }
+.layer-key-list li { display: grid; grid-template-columns: 7rem 8rem 1fr; gap: 0.2rem .9375rem;
   align-items: baseline; padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
 .layer-key-list li:last-child { border-bottom: none; }
-.layer-what { font-size: 0.78rem; color: var(--dim); line-height: 1.45; }
+.layer-what { font-size: var(--type-xs); color: var(--dim); line-height: 1.45; }
 .layer-what em { color: var(--faint); font-style: normal; }
 @media (max-width: 720px) {
   .layer-key-list li { grid-template-columns: 1fr; gap: 0.15rem; }
@@ -164,7 +164,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 
 /* A facet axis read at four readings side by side: evidence, then the three multipliers that
    compose. Two-up before it gets cramped, one-up on a phone. */
-.viz-quad { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+.viz-quad { display: grid; grid-template-columns: repeat(4, 1fr); gap: .9375rem; }
 @media (max-width: 1100px) { .viz-quad { grid-template-columns: 1fr 1fr; gap: 1.3rem; } }
 @media (max-width: 560px) { .viz-quad { grid-template-columns: 1fr; } }
 .rose-foot { font-size: 0.68rem; color: var(--faint); margin: 0.25rem 0 0; line-height: 1.3;
@@ -192,34 +192,34 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .fr-dot { flex: none; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--teal);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal) 18%, transparent); }
 .freshness.fading .fr-dot { background: var(--ov-3); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ov-3) 18%, transparent); }
-.fr-status { flex: none; font-weight: 650; font-size: 0.85rem; color: var(--teal); }
+.fr-status { flex: none; font-weight: 650; font-size: var(--type-ui); color: var(--teal); }
 .freshness.fading .fr-status { color: var(--ov-3); }
 .fr-meter { flex: 1; max-width: 11rem; height: 0.45rem; background: var(--surface); border-radius: 3px; overflow: hidden; }
 .fr-meter i { display: block; height: 100%; background: var(--teal); border-radius: 3px; }
 .freshness.fading .fr-meter i { background: var(--ov-3); }
-.fr-val { flex: none; font-size: 0.78rem; color: var(--dim); }
+.fr-val { flex: none; font-size: var(--type-xs); color: var(--dim); }
 
 /* ── Tools › Enrichment: worker state, coverage bars, trend sparkline ──────────────── */
-.enrich-head { display: flex; align-items: center; gap: 0.8rem; margin-bottom: 1rem; }
-.enrich-state { font-weight: 650; font-size: 0.9rem; padding: 0.2rem 0.6rem; border-radius: 999px; }
+.enrich-head { display: flex; align-items: center; gap: .8125rem; margin-bottom: .9375rem; }
+.enrich-state { font-weight: 650; font-size: var(--type-ui); padding: 0.2rem 0.6rem; border-radius: 999px; }
 .enrich-state.state-running { color: var(--notice-ok-text); background: color-mix(in srgb, var(--notice-ok-border) 35%, transparent); }
 .enrich-state.state-idle { color: var(--dim); background: var(--surface-2); }
 .enrich-state.state-paused { color: var(--amber-pale); background: color-mix(in srgb, var(--fire-amber-muted) 30%, transparent); }
 .enrich-head .btn-sm { margin-left: auto; }
-.enrich-tiles { display: flex; gap: 0.8rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
+.enrich-tiles { display: flex; gap: .8125rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
 .enrich-tiles .metric { background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); padding: 0.7rem 1rem; min-width: 7rem; }
-.enrich-tiles .metric .v { font-family: var(--font-sans); font-size: 1.4rem; color: var(--text); }
+  border-radius: var(--radius-sm); padding: 0.7rem .9375rem; min-width: 7rem; }
+.enrich-tiles .metric .v { font-family: var(--font-sans); font-size: var(--type-xl); color: var(--text); }
 .cov-grid { display: flex; flex-direction: column; gap: 0.55rem; }
 /* Fixed columns: label · bar (1fr, so every bar shares the same max width) · percent · raw count.
    Percent and raw count each get their own column so they align down the list. */
 .cov-row { display: grid; grid-template-columns: 7rem 1fr 2.8rem 4.5rem; align-items: center;
   gap: 0.7rem; }
-.cov-label { color: var(--dim); font-size: 0.85rem; }
+.cov-label { color: var(--dim); font-size: var(--type-ui); }
 .cov-bar { height: 0.7rem; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
 .cov-bar > i { display: block; height: 100%; background: var(--control-primary); border-radius: 999px;
   transition: width 0.4s ease; }
-.cov-pct, .cov-raw { font-size: 0.8rem; white-space: nowrap; text-align: right;
+.cov-pct, .cov-raw { font-size: var(--type-sm); white-space: nowrap; text-align: right;
   font-variant-numeric: tabular-nums; }
 .cov-pct { color: var(--text); }
 .cov-raw { color: var(--faint); }
@@ -304,7 +304,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   color: var(--faint); margin: 0.35rem 0.1rem 0;
 }
 
-.stat-grid.mini { gap: 0.9rem; margin-bottom: 0.9rem; }
+.stat-grid.mini { gap: .875rem; margin-bottom: .875rem; }
 .stat-grid.mini strong { font-size: 1.2rem; }
 
 /* Trends page (#76-#80) round-2 polish: page-level card rhythm, chart legend, and a shared
@@ -326,13 +326,13 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   gap: 1.8rem;
 }
 .trends-page > .full { width: 100%; }
-.trends-footnote { color: var(--faint); font-size: 0.78rem; margin: -0.6rem 0.2rem 0; line-height: 1.5; }
+.trends-footnote { color: var(--faint); font-size: var(--type-xs); margin: -0.6rem 0.2rem 0; line-height: 1.5; }
 
 /* Listening-over-time legend (#2): chip colors mirror the exact stacked-area mapping (teal fam-N
    opacities from the .instrument .fam-N rules above; solid amber for the total trace) so the
    legend is always honest about what's on screen, never a separate palette. */
-.chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1rem;
-  margin: 0.6rem 0.1rem 0; font-size: 0.78rem; color: var(--dim); }
+.chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem .9375rem;
+  margin: 0.6rem 0.1rem 0; font-size: var(--type-xs); color: var(--dim); }
 .legend-chip { display: inline-flex; align-items: center; gap: 0.35rem; }
 .chip-dot { width: 0.6rem; height: 0.6rem; border-radius: 3px; flex: none;
   border: 1px solid var(--border-2); background: var(--series-other); }
@@ -357,7 +357,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .chart-tick-bot { margin: 0.25rem 0.1rem 0; }
 
 /* ── #76 Listening overlays: window filter + per-artist/genre comparison lines ─────────────── */
-.listening-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.listening-head { display: flex; justify-content: space-between; align-items: center; gap: .9375rem; flex-wrap: wrap; }
 .listening-head h2 { margin: 0; }
 .window-seg { flex: none; }
 .overlay-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem 0.5rem; margin: 0.5rem 0 1.2rem; }
@@ -365,7 +365,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .ov-group-label + .ov-chip { margin-left: 0.1rem; }
 .overlay-chips .ov-group-label:not(:first-child) { margin-left: 0.7rem; }
 .ov-chip { background: var(--bg-2); border: 1px solid var(--border-2); color: var(--dim);
-  border-radius: 999px; padding: 0.26rem 0.78rem; font-size: 0.8rem; font-family: var(--font-sans);
+  border-radius: 999px; padding: 0.26rem .75rem; font-size: var(--type-sm); font-family: var(--font-sans);
   line-height: 1.3; cursor: pointer; box-shadow: none; transform: none; }
 .ov-chip:hover { color: var(--text); border-color: var(--faint); box-shadow: none; transform: none; }
 .ov-chip.on { color: var(--light-source); }
@@ -406,17 +406,17 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .chart-pair .chart { margin: 0; min-width: 0; }
 
 /* Shared stat-tile treatment: each figure gets its own inset panel. */
-.stat-grid.tiles { gap: 0.9rem; }
+.stat-grid.tiles { gap: .875rem; }
 .stat-grid.tiles > div {
   background: var(--surface-interactive);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 0.85rem 1rem; gap: 0.15rem;
+  padding: .875rem .9375rem; gap: 0.15rem;
 }
 .stat-grid.tiles strong {
   font-family: var(--font-sans); font-size: 1.7rem; color: var(--text);
   text-shadow: 0 0 14px color-mix(in srgb, var(--amber) 35%, transparent);
 }
-.stat-grid.tiles span { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--dim); }
+.stat-grid.tiles span { font-size: var(--type-xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--dim); }
 
 /* Month in review (#79): "wrapped" headline, listen-day heat strip, insight bullets with
    directional glyphs. */
@@ -424,18 +424,18 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   font-family: var(--font-sans); font-size: 1.6rem; font-weight: 600; margin: 0.1rem 0 0.5rem;
   color: var(--amber);
 }
-.heat-strip { display: flex; flex-wrap: wrap; gap: 3px; margin: 1rem 0 0.2rem; }
+.heat-strip { display: flex; flex-wrap: wrap; gap: 3px; margin: .9375rem 0 0.2rem; }
 .heat-day {
   width: 0.6rem; height: 0.6rem; border-radius: 2px; flex: none;
   border: 1px solid var(--border);
   background: color-mix(in srgb, var(--amber) calc(var(--heat, 0) * 100%), var(--bg-2));
   box-shadow: 0 0 calc(var(--heat, 0) * 6px) color-mix(in srgb, var(--amber) calc(var(--heat, 0) * 90%), transparent);
 }
-.review-list { margin: 0.9rem 0 0; padding: 0; list-style: none; display: grid; gap: 0.4rem;
-  color: var(--dim); font-size: 0.88rem; }
+.review-list { margin: .875rem 0 0; padding: 0; list-style: none; display: grid; gap: 0.4rem;
+  color: var(--dim); font-size: var(--type-ui); }
 .review-list li { display: flex; align-items: baseline; gap: 0.4rem; }
 .review-list strong { color: var(--text); }
-.review-list .rl-glyph { display: inline-block; width: 1rem; text-align: center; flex: none; font-size: 0.82rem; }
+.review-list .rl-glyph { display: inline-block; width: .9375rem; text-align: center; flex: none; font-size: var(--type-sm); }
 .rl-up .rl-glyph { color: var(--teal); }
 .rl-down .rl-glyph { color: var(--danger); }
 .rl-new .rl-glyph { color: var(--amber); }
@@ -445,102 +445,102 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
    panels. The old thin ribbon read as an empty grey bar; a bar chart with per-bucket rows makes
    the aging legible and honest -- the huge "never" bar IS the story. */
 .health-diag { display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
-  gap: 1.4rem 2.4rem; align-items: center; margin: 0.4rem 0 1.6rem; }
+  gap: 1.375rem 2.4rem; align-items: center; margin: 0.4rem 0 1.6rem; }
 @media (max-width: 640px) { .health-diag { grid-template-columns: 1fr; } }
-.hh-figure { display: flex; align-items: center; gap: 0.9rem; }
+.hh-figure { display: flex; align-items: center; gap: .875rem; }
 .hh-figure strong { font-family: var(--font-sans); font-size: 4rem; line-height: 0.8;
   color: var(--text); font-weight: 600; letter-spacing: -0.015em; flex: none; }
 .hh-figure > span { display: flex; flex-direction: column; gap: 0.15rem;
-  font-size: 0.84rem; color: var(--dim); line-height: 1.45; }
+  font-size: var(--type-ui); color: var(--dim); line-height: 1.45; }
 .hh-figure em { font-style: normal; text-transform: uppercase; letter-spacing: 0.07em;
-  font-size: 0.72rem; color: var(--faint); }
+  font-size: var(--type-xs); color: var(--faint); }
 
 .stale-bars { display: flex; flex-direction: column; gap: 0.45rem; }
 .sb-row { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr) 3rem; align-items: center;
   gap: 0.7rem; cursor: default; }
-.sb-label { font-size: 0.78rem; color: var(--dim); text-align: right; white-space: nowrap; }
+.sb-label { font-size: var(--type-xs); color: var(--dim); text-align: right; white-space: nowrap; }
 .sb-track { height: 12px; border-radius: 999px; background: var(--bg-2);
   border: 1px solid var(--border); overflow: hidden; }
 .sb-track > i { display: block; height: 100%; border-radius: 999px; min-width: 3px; }
-.sb-val { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text); text-align: right; }
+.sb-val { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--text); text-align: right; }
 
 /* Doorway panels: three inset actions in a responsive grid, each its own panel with a subhead. */
 .health-doors { display: grid; grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr));
   gap: 1.2rem; margin-top: 0.4rem; }
-.door { padding: 1.1rem 1.15rem; border: 1px solid var(--border); border-radius: var(--radius);
+.door { padding: 1.1rem 1.125rem; border: 1px solid var(--border); border-radius: var(--radius);
   background: color-mix(in srgb, var(--bg-2) 70%, transparent); min-width: 0; }
-.door-head { margin: 0 0 0.9rem; font-family: var(--font-sans); font-weight: 650; font-size: 0.92rem;
+.door-head { margin: 0 0 .875rem; font-family: var(--font-sans); font-weight: 650; font-size: var(--type-body);
   color: var(--text); display: flex; flex-direction: column; gap: 0.15rem; }
-.door-head span { font-weight: 400; font-size: 0.74rem; color: var(--faint); }
+.door-head span { font-weight: 400; font-size: var(--type-xs); color: var(--faint); }
 .tag-more { border-style: dashed; }
-.rc-go-icon { flex: none; color: var(--faint); font-size: 1.1rem; }
+.rc-go-icon { flex: none; color: var(--faint); font-size: var(--type-lg); }
 .rc-row:hover .rc-go-icon { color: var(--accent-2); }
 .rc-row:hover .rc-title { color: var(--accent-2); }
 
-.health-top { display: flex; align-items: center; gap: 1.6rem; flex-wrap: wrap; margin: 0.2rem 0 1rem; }
+.health-top { display: flex; align-items: center; gap: 1.6rem; flex-wrap: wrap; margin: 0.2rem 0 .9375rem; }
 .health-top .stat-grid { flex: 1 1 12rem; }
 .dead-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0; }
 .dead-chips a.tag:hover { background: var(--accent); color: var(--light-source); border-color: transparent; }
-.health-cta { display: inline-block; margin-top: 1.1rem; color: var(--dim); font-size: 0.85rem;
+.health-cta { display: inline-block; margin-top: 1.1rem; color: var(--dim); font-size: var(--type-ui);
   border-bottom: 1px dashed var(--border-2); }
 .health-cta:hover { color: var(--accent-2); border-color: var(--accent-2); }
 
 /* ── Auto-tune control + result panel ─────────────────────────────────────── */
-.autotune-ctl { display: flex; align-items: center; gap: 0.85rem; flex-wrap: wrap;
-  margin: 0.2rem 0 1rem; }
-.autotune-note { color: var(--dim); font-size: 0.82rem; line-height: 1.4; max-width: 40rem; }
+.autotune-ctl { display: flex; align-items: center; gap: .875rem; flex-wrap: wrap;
+  margin: 0.2rem 0 .9375rem; }
+.autotune-note { color: var(--dim); font-size: var(--type-sm); line-height: 1.4; max-width: 40rem; }
 
 .autotune-result { margin: 0 0 1.8rem; }
 .autotune-result-head { display: flex; align-items: center; justify-content: space-between;
-  gap: 0.75rem; margin-bottom: 0.5rem; }
-.autotune-result-head h3 { margin: 0; font-family: var(--font-sans); font-size: 1.05rem; }
+  gap: .75rem; margin-bottom: 0.5rem; }
+.autotune-result-head h3 { margin: 0; font-family: var(--font-sans); font-size: var(--type-lg); }
 .autotune-result .section-note { margin-bottom: 1.1rem; }
 .autotune-stats { margin-bottom: 1.2rem; }
 
 .autotune-grid { width: 100%; border-collapse: collapse; margin: 0 0 1.1rem;
-  font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+  font-size: var(--type-ui); font-variant-numeric: tabular-nums; }
 .autotune-grid td { padding: 0.32rem 0; vertical-align: middle; }
-.autotune-grid td.cfg { white-space: nowrap; color: var(--dim); width: 7rem; padding-right: 0.9rem; }
+.autotune-grid td.cfg { white-space: nowrap; color: var(--dim); width: 7rem; padding-right: .875rem; }
 .autotune-grid td.track { width: auto; }
-.autotune-grid td.val { white-space: nowrap; text-align: right; width: 4.5rem; padding-left: 0.9rem; }
+.autotune-grid td.val { white-space: nowrap; text-align: right; width: 4.5rem; padding-left: .875rem; }
 .autotune-grid .bar { display: block; height: 0.55rem; min-width: 2px; border-radius: 999px;
   background: var(--control-primary); opacity: 0.55; }
 .autotune-grid tr.win td.cfg, .autotune-grid tr.win td.val { color: var(--text); font-weight: 700; }
 .autotune-grid tr.win .bar { opacity: 1; background: var(--cta); }
 
-.autotune-rotated { margin: 0 0 0.55rem; font-size: 0.85rem; color: var(--text); }
+.autotune-rotated { margin: 0 0 0.55rem; font-size: var(--type-ui); color: var(--text); }
 .autotune-diff { display: flex; flex-direction: column; gap: 0.4rem; }
 .autotune-diff .diff-row { display: flex; gap: 0.55rem; align-items: baseline; }
-.autotune-diff .diff-list { color: var(--dim); font-size: 0.82rem; line-height: 1.45; }
+.autotune-diff .diff-list { color: var(--dim); font-size: var(--type-sm); line-height: 1.45; }
 
 /* "You're into [X] recently" Wikipedia card: big squared thumbnail in the left column, body right. */
 .wiki-card { display: grid; grid-template-columns: auto 1fr; gap: 1.2rem; align-items: stretch; }
 .wiki-th { width: 11rem; align-self: stretch; aspect-ratio: 1 / 1; border-radius: var(--radius-sm);
   background-size: cover; background-position: center; border: 1px solid var(--border); }
 .wiki-body { display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; }
-.wiki-title { font-size: 1.05rem; margin: 0; font-weight: 500; }
+.wiki-title { font-size: var(--type-lg); margin: 0; font-weight: 500; }
 /* The featured subject is tinted in its genre colour (--subj, set inline). */
 .wiki-subject { font-family: var(--font-sans); font-weight: 600; font-size: 1.5rem;
   color: var(--subj, var(--accent-2)); letter-spacing: 0.01em;
   text-shadow: 0 0 18px color-mix(in srgb, var(--subj, var(--accent-2)) 55%, transparent); }
 .wiki-extract { margin: 0; color: var(--dim); line-height: 1.5;
   display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
-.wiki-foot { display: flex; align-items: baseline; gap: 0.8rem; flex-wrap: wrap; }
-.wiki-cta { font-size: 0.9rem; font-weight: 600; color: var(--subj, var(--accent-2));
+.wiki-foot { display: flex; align-items: baseline; gap: .8125rem; flex-wrap: wrap; }
+.wiki-cta { font-size: var(--type-ui); font-weight: 600; color: var(--subj, var(--accent-2));
   padding: 0.32rem 0.7rem; border-radius: var(--radius-sm);
   border: 1px solid color-mix(in srgb, var(--subj, var(--accent-2)) 45%, transparent);
   background: color-mix(in srgb, var(--subj, var(--accent-2)) 12%, transparent); }
 .wiki-cta:hover { background: color-mix(in srgb, var(--subj, var(--accent-2)) 22%, transparent); }
-.wiki-link { font-size: 0.9rem; }
-.wiki-attr { font-size: 0.78rem; color: var(--faint); margin-left: auto; }
+.wiki-link { font-size: var(--type-ui); }
+.wiki-attr { font-size: var(--type-xs); color: var(--faint); margin-left: auto; }
 
 /* Clusters: switcher between multiple saved canvases. Sits at the bottom, just left of the zoombar
-   (which lives at right:0.8rem), as a horizontal row that wraps UPWARD when there are many. */
-.canvas-switcher { position: absolute; right: 3.6rem; bottom: 0.8rem; z-index: 4;
+   (which lives at right:.8125rem), as a horizontal row that wraps UPWARD when there are many. */
+.canvas-switcher { position: absolute; right: 3.6rem; bottom: .8125rem; z-index: 4;
   display: flex; flex-direction: row; flex-wrap: wrap-reverse; justify-content: flex-end;
   align-items: flex-end; gap: 0.4rem; max-width: calc(100% - 6rem); }
 .canvas-chip { max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  padding: 0.35rem 0.75rem; border-radius: 999px; font-size: 0.82rem; color: var(--dim);
+  padding: 0.35rem .75rem; border-radius: 999px; font-size: var(--type-sm); color: var(--dim);
   background: var(--surface-raised);
   border: 1px solid var(--border); box-shadow: var(--shadow); }
 .canvas-chip:hover { color: var(--text); border-color: var(--border-2); }
@@ -556,12 +556,12 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
    ribbon down the left with dead space beside it. */
 .insights-list { display: grid; gap: 0.7rem;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr)); }
-.insight-card { display: flex; gap: 1rem; align-items: center; padding: 0.9rem 1.1rem; }
+.insight-card { display: flex; gap: .9375rem; align-items: center; padding: .875rem 1.1rem; }
 .insight-art { position: relative; flex: none; width: 3.6rem; height: 3.6rem;
   border-radius: var(--radius-sm); overflow: hidden; display: grid; place-items: center;
   background: var(--surface-interactive); border: 1px solid var(--border-2); }
 .insight-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.insight-glyph { display: none; font-size: 1.35rem; color: var(--amber);
+.insight-glyph { display: none; font-size: var(--type-xl); color: var(--amber);
   text-shadow: 0 0 10px color-mix(in srgb, var(--amber) 60%, transparent); }
 .insight-art.no-art .insight-glyph { display: block; }
 .insight-art.k-emergence .insight-glyph::before { content: "\25B2"; }      /* growth */
@@ -572,18 +572,18 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .insight-art.k-binge .insight-glyph::before { content: "\26A1"; }          /* big day */
 .insight-art.k-song_of_week .insight-glyph::before { content: "\266A"; }   /* top track */
 .insight-body { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; flex: 1 1 auto; }
-.insight-body strong { font-size: 0.98rem; }
-.insight-body p { margin: 0; color: var(--dim); font-size: 0.88rem; line-height: 1.4; }
-.insight-evidence { color: var(--teal) !important; font-size: 0.76rem !important; letter-spacing: 0.02em; }
+.insight-body strong { font-size: var(--type-body); }
+.insight-body p { margin: 0; color: var(--dim); font-size: var(--type-ui); line-height: 1.4; }
+.insight-evidence { color: var(--teal) !important; font-size: var(--type-xs) !important; letter-spacing: 0.02em; }
 .insight-card .btn-sm { align-self: flex-start; margin-top: 0.15rem; }
 @media (max-width: 40rem) { .insight-card { flex-wrap: wrap; } .insight-card .btn-sm { margin-left: 4.6rem; } }
 
 /* ── T10f: Month in review redesign ───────────────────────────────────────────────────────
    Demoted stat strip, a full calendar heat grid, a top-3 artist podium, song of the month,
    and a binge-day callout, all sitting above the existing new-favorite/riser/faller lines. */
-.stat-row { display: flex; flex-wrap: wrap; gap: 1.4rem; margin: 0.2rem 0 1.3rem;
-  color: var(--dim); font-size: 0.85rem; }
-.stat-row strong { color: var(--text); font-family: var(--font-sans); font-size: 1.05rem; }
+.stat-row { display: flex; flex-wrap: wrap; gap: 1.375rem; margin: 0.2rem 0 1.3rem;
+  color: var(--dim); font-size: var(--type-ui); }
+.stat-row strong { color: var(--text); font-family: var(--font-sans); font-size: var(--type-lg); }
 
 /* The calendar sizes to a comfortable maximum and centers, rather than being capped at a cramped 22px
    per cell. Cells fill the width up to that cap, so the numbers are actually readable. */
@@ -596,7 +596,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .cal-pad { visibility: hidden; }
 .cal-day {
   display: flex; align-items: center; justify-content: center;
-  font-family: var(--font-mono); font-size: 0.76rem; font-weight: 500;
+  font-family: var(--font-mono); font-size: var(--type-xs); font-weight: 500;
   /* Ink brightens with the day's heat: quiet days sit back, heavy days read white and lit. */
   color: color-mix(in srgb, var(--text) calc(55% + var(--heat, 0) * 45%), var(--faint));
   border: 1px solid color-mix(in srgb, var(--series-1) calc(var(--heat, 0) * 55%), var(--border));
@@ -606,39 +606,39 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   box-shadow: 0 0 calc(var(--heat, 0) * 12px) color-mix(in srgb, var(--series-1) calc(var(--heat, 0) * 65%), transparent);
 }
 
-.artist-podium { display: flex; gap: 0.9rem; margin: 0.4rem 0 1.4rem; flex-wrap: wrap; }
+.artist-podium { display: flex; gap: .875rem; margin: 0.4rem 0 1.375rem; flex-wrap: wrap; }
 .podium-tile { flex: 1 1 8rem; display: flex; flex-direction: column; align-items: center; gap: 0.35rem;
-  padding: 0.9rem 0.7rem 0.8rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: .875rem 0.7rem .8125rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--surface-interactive); text-align: center; }
 .podium-tile:first-child { border-color: color-mix(in srgb, var(--amber) 45%, var(--border-2));
   box-shadow: 0 0 18px -6px color-mix(in srgb, var(--amber) 50%, transparent); }
-.podium-rank { font-family: var(--font-mono); font-size: 0.72rem; color: var(--faint); }
+.podium-rank { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--faint); }
 .podium-art { width: 3.6rem; height: 3.6rem; border-radius: 50%; overflow: hidden;
   background: var(--placeholder); display: block; }
 .podium-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.podium-name { font-weight: 650; font-size: 0.9rem; white-space: nowrap; overflow: hidden;
+.podium-name { font-weight: 650; font-size: var(--type-ui); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; max-width: 100%; }
-.podium-plays { font-size: 0.76rem; color: var(--dim); }
+.podium-plays { font-size: var(--type-xs); color: var(--dim); }
 .play-bar { display: block; width: 100%; height: 6px; background: var(--surface-2);
   border-radius: 999px; overflow: hidden; }
 /* Flat, not a gradient. A bar's LENGTH is the encoding; a hue ramp along that length implies a
    second variable that does not exist. */
 .play-bar > i { display: block; height: 100%; background: var(--series-1); border-radius: 999px; }
 
-.song-of-month { display: flex; gap: 0.9rem; align-items: center; margin: 0.2rem 0 1.3rem;
-  padding: 0.8rem 0.9rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
+.song-of-month { display: flex; gap: .875rem; align-items: center; margin: 0.2rem 0 1.3rem;
+  padding: .8125rem .875rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--surface-interactive); }
 .som-art { width: 3.4rem; height: 3.4rem; flex: none; border-radius: var(--radius-sm);
   overflow: hidden; background: var(--placeholder); }
 .som-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .som-meta { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
 .som-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); }
-.som-title { font-size: 0.98rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.som-artist { font-size: 0.8rem; color: var(--dim); }
+.som-title { font-size: var(--type-body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.som-artist { font-size: var(--type-sm); color: var(--dim); }
 
-.binge-callout { margin: 0 0 1rem; padding: 0.6rem 0.85rem; border-radius: var(--radius-sm);
+.binge-callout { margin: 0 0 .9375rem; padding: 0.6rem .875rem; border-radius: var(--radius-sm);
   border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border-2));
-  background: color-mix(in srgb, var(--danger) 10%, transparent); font-size: 0.86rem; color: var(--dim); }
+  background: color-mix(in srgb, var(--danger) 10%, transparent); font-size: var(--type-ui); color: var(--dim); }
 .binge-callout strong { color: var(--text); }
 
 /* ── Month in review, full-width recast ───────────────────────────────────────────────────
@@ -649,7 +649,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .review-head h2 { margin: 0; }
 .review-stats { display: flex; gap: 0.7rem; }
 .rs-tile { display: flex; flex-direction: column; align-items: center; text-align: center;
-  padding: 0.6rem 1.15rem; min-width: 5.2rem; border: 1px solid var(--border);
+  padding: 0.6rem 1.125rem; min-width: 5.2rem; border: 1px solid var(--border);
   border-radius: var(--radius-sm); background: var(--surface-interactive); }
 .rs-tile strong { font-family: var(--font-sans); font-size: 1.85rem; line-height: 1; color: var(--text);
   text-shadow: 0 0 14px color-mix(in srgb, var(--amber) 30%, transparent); }
@@ -661,29 +661,29 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   margin-top: 1.5rem; align-items: start; }
 @media (max-width: 760px) { .review-body { grid-template-columns: 1fr; } }
 
-.cal-legend { display: flex; align-items: center; gap: 0.5rem; margin: 0.8rem 0 0;
-  font-size: 0.72rem; color: var(--faint); }
+.cal-legend { display: flex; align-items: center; gap: 0.5rem; margin: .8125rem 0 0;
+  font-size: var(--type-xs); color: var(--faint); }
 .cal-ramp { width: 5rem; height: 8px; border-radius: 999px; flex: none;
   background: linear-gradient(90deg, var(--bg-2), var(--series-1)); border: 1px solid var(--border); }
 .cal-peak { margin-left: auto; color: var(--dim); font-family: var(--font-mono); font-size: 0.68rem; }
 
 .review-aside { min-width: 0; }
-.review-subhead { font-family: var(--font-sans); font-weight: 650; font-size: 0.95rem;
-  margin: 0 0 0.85rem; color: var(--text); }
+.review-subhead { font-family: var(--font-sans); font-weight: 650; font-size: var(--type-body);
+  margin: 0 0 .875rem; color: var(--text); }
 .moved-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.7rem; }
-.moved { display: flex; align-items: center; gap: 0.85rem; padding: 0.8rem 0.95rem;
+.moved { display: flex; align-items: center; gap: .875rem; padding: .8125rem .9375rem;
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--surface-interactive); }
 .moved-glyph { width: 2.1rem; height: 2.1rem; flex: none; display: grid; place-items: center;
-  border-radius: 50%; font-size: 0.95rem; }
+  border-radius: 50%; font-size: var(--type-body); }
 .moved-new .moved-glyph { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
 .moved-up .moved-glyph { color: var(--up); background: color-mix(in srgb, var(--up) 16%, transparent); }
 .moved-down .moved-glyph { color: var(--danger); background: color-mix(in srgb, var(--danger) 16%, transparent); }
 .moved-meta { display: flex; flex-direction: column; gap: 0.12rem; min-width: 0; flex: 1 1 auto; }
 .moved-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); }
-.moved-meta strong { font-size: 0.98rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.moved-fig { font-family: var(--font-mono); font-size: 0.9rem; color: var(--dim); flex: none; }
-.moved-flat .moved-meta { color: var(--dim); font-size: 0.9rem; }
+.moved-meta strong { font-size: var(--type-body); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.moved-fig { font-family: var(--font-mono); font-size: var(--type-ui); color: var(--dim); flex: none; }
+.moved-flat .moved-meta { color: var(--dim); font-size: var(--type-ui); }
 
 /* ── T10g: Library health redesign ────────────────────────────────────────────────────────
    Rediscover candidates (named tracks, quiet a long time) and albums saved but never opened --
@@ -696,8 +696,8 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   overflow: hidden; background: var(--surface-2); border: 1px solid var(--border); }
 .rc-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .rc-meta { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; flex: 1 1 auto; }
-.rc-title { font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.rc-sub { font-size: 0.78rem; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rc-title { font-size: var(--type-ui); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rc-sub { font-size: var(--type-xs); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rc-go { flex: none; white-space: nowrap; }
 
 .unopened-albums { display: grid; grid-template-columns: repeat(2, 1fr);
@@ -708,8 +708,8 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
   overflow: hidden; background: var(--placeholder); border: 1px solid var(--border); }
 .unopened-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .unopened-meta { display: flex; flex-direction: column; gap: 0.05rem; min-width: 0; }
-.unopened-meta strong { font-size: 0.82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.unopened-meta span { font-size: 0.74rem; color: var(--dim); white-space: nowrap; overflow: hidden;
+.unopened-meta strong { font-size: var(--type-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.unopened-meta span { font-size: var(--type-xs); color: var(--dim); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
 
 .rt-suggestions { display: flex; flex-direction: column; border: 1px solid var(--border);
@@ -719,7 +719,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 /* Suggestions use a row highlight instead of the shared secondary-button fill. */
 .rt-suggestion:hover, .rt-suggestion:focus-visible {
   background: var(--accent-soft); color: var(--text); }
-.rt-list-head { margin: 1.4rem 0 0.6rem; font-size: 1rem; color: var(--dim); }
+.rt-list-head { margin: 1.375rem 0 0.6rem; font-size: var(--type-body); color: var(--dim); }
 .rt-form-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.4rem; }
 .rt-form-head h2 { margin: 0; }
 .rt-form-actions { display: flex; gap: 0.4rem; margin-left: auto; }
@@ -741,17 +741,17 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .rt-gen-btn.htmx-request .rt-gen-label { display: none; }
 
 /* Target length: two small numeric fields with their unit inside the box, plus one-tap presets. */
-.rt-duration { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; margin: 0.15rem 0 0.9rem; }
+.rt-duration { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; margin: 0.15rem 0 .875rem; }
 .rt-duration-field { display: inline-flex; align-items: baseline; gap: 0.15rem; padding: 0.15rem 0.5rem;
   border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); }
 .rt-duration-field:focus-within { border-color: var(--accent-2); }
 .rt-duration-field input { width: 2.6rem; border: none; background: transparent; padding: 0.2rem 0;
   text-align: right; font-variant-numeric: tabular-nums; color: inherit; }
 .rt-duration-field input:focus { outline: none; }
-.rt-duration-unit { font-size: 0.78rem; color: var(--dim); }
+.rt-duration-unit { font-size: var(--type-xs); color: var(--dim); }
 .rt-duration-presets { display: inline-flex; gap: 0.25rem; margin-left: 0.3rem; }
 .rt-preset { border: 1px solid var(--border); border-radius: 999px; background: transparent;
-  color: var(--dim); font-size: 0.75rem; padding: 0.15rem 0.6rem; cursor: pointer; }
+  color: var(--dim); font-size: var(--type-xs); padding: 0.15rem 0.6rem; cursor: pointer; }
 .rt-preset:hover { border-color: var(--accent-2); color: var(--text); }
 .rt-preset.on { background: var(--accent-soft); border-color: transparent; color: var(--accent-2); }
 
@@ -759,14 +759,14 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .rt-draft-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .rt-draft-head h2 { margin: 0; }
 .rt-draft-actions { display: flex; align-items: center; gap: 0.4rem; margin-left: auto; }
-.rt-draft-actions .rt-save { margin-left: 0.9rem; }   /* set apart from the in-place actions */
-.rt-short { margin: 0.3rem 0 0; font-size: 0.82rem; }
+.rt-draft-actions .rt-save { margin-left: .875rem; }   /* set apart from the in-place actions */
+.rt-short { margin: 0.3rem 0 0; font-size: var(--type-sm); }
 .rt-building { display: flex; align-items: center; gap: 0.45rem; }
 /* Their slots are still being filled: keep the rows that are already there readable, but signal
    that the list is not settled yet. */
 .rt-draft.is-building .rt-list { opacity: 0.85; }
 .rt-mix { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-  gap: 0.6rem 1.6rem; margin: 0.8rem 0 0.4rem; }
+  gap: 0.6rem 1.6rem; margin: .8125rem 0 0.4rem; }
 .rt-mix-slider { display: flex; flex-direction: column; gap: 0.2rem; }
 .rt-mix-slider .fp-slider { width: 100%; flex: 1; }
 /* Left-anchored fill, for a slider that is a QUANTITY (this genre is 30% of the mix) rather than a
@@ -779,10 +779,10 @@ input[type="range"].pct-slider {
 }
 .rt-axes { margin-top: 0.6rem; }
 /* Group heading inside a party's column ("Genres", then "Years"), quieter than the column's own. */
-.fp-sublabel { display: block; margin: 0.6rem 0 0.1rem; font-size: 0.72rem; letter-spacing: 0.08em;
+.fp-sublabel { display: block; margin: 0.6rem 0 0.1rem; font-size: var(--type-xs); letter-spacing: 0.08em;
   text-transform: uppercase; color: var(--dim); }
-.fp-barset + .fp-sublabel { margin-top: 0.9rem; }
-.rt-axis-pct { flex: none; width: 2.6rem; text-align: right; font-size: 0.75rem; color: var(--dim);
+.fp-barset + .fp-sublabel { margin-top: .875rem; }
+.rt-axis-pct { flex: none; width: 2.6rem; text-align: right; font-size: var(--type-xs); color: var(--dim);
   font-variant-numeric: tabular-nums; }
 /* A pinned bar is held to the share you asked for; an unpinned one floats with the mix. */
 .rt-axes .fp-row.is-pinned .fp-name { color: var(--accent-2); }
@@ -790,7 +790,7 @@ input[type="range"].pct-slider {
 /* The picked playlist, as columns. Each row carries the same grid template, so the columns line up
    down the list without the rows being a real <table>; the flexible columns take up the slack, which
    is what keeps the ✕ next to the content instead of stranded at the far edge. */
-.rt-list { list-style: none; margin: 0.9rem 0 0; padding: 0.4rem 0 0; counter-reset: rt;
+.rt-list { list-style: none; margin: .875rem 0 0; padding: 0.4rem 0 0; counter-reset: rt;
   border-top: 1px solid var(--border); }
 /* Square corners: the row carries a full-height stripe down its left edge, and a rounded row bends
    that stripe into a comma. */
@@ -801,30 +801,30 @@ input[type="range"].pct-slider {
 .rt-row:last-child { border-bottom: none; }
 .rt-row:hover { background: var(--accent-soft); }
 .rt-row::before { counter-increment: rt; content: counter(rt); text-align: right;
-  font-size: 0.76rem; color: var(--faint); font-variant-numeric: tabular-nums; }
+  font-size: var(--type-xs); color: var(--faint); font-variant-numeric: tabular-nums; }
 .rt-c-art { width: 2rem; height: 2rem; border-radius: 4px; overflow: hidden; background: var(--placeholder); }
 .rt-c-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .rt-c-art.no-art { background: var(--surface-2); }
 /* Every text cell truncates rather than wrapping: one track, one line. */
 .rt-c-title, .rt-c-artist, .rt-c-genre { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rt-c-title { color: var(--text); font-size: 0.86rem; }
+.rt-c-title { color: var(--text); font-size: var(--type-ui); }
 .rt-c-title:hover { color: var(--accent-2); }
-.rt-c-artist { color: var(--dim); font-size: 0.82rem; }
-.rt-c-genre { color: var(--faint); font-size: 0.78rem; }
-.rt-c-year { color: var(--faint); font-size: 0.78rem; font-variant-numeric: tabular-nums;
+.rt-c-artist { color: var(--dim); font-size: var(--type-sm); }
+.rt-c-genre { color: var(--faint); font-size: var(--type-xs); }
+.rt-c-year { color: var(--faint); font-size: var(--type-xs); font-variant-numeric: tabular-nums;
   text-align: right; }
-.rt-c-src { color: var(--faint); font-size: 0.72rem; text-transform: uppercase;
+.rt-c-src { color: var(--faint); font-size: var(--type-xs); text-transform: uppercase;
   letter-spacing: 0.06em; }
 /* A full-cell hit target, not a bare glyph: the ✕ was fiddly to land on at glyph size. */
 .rt-x { width: 2rem; height: 2rem; display: inline-flex; align-items: center; justify-content: center;
   padding: 0; background: transparent; border: none; box-shadow: none; border-radius: 6px;
-  color: var(--faint); font-size: 0.9rem; opacity: 0.5; cursor: pointer; }
+  color: var(--faint); font-size: var(--type-ui); opacity: 0.5; cursor: pointer; }
 .rt-row:hover .rt-x { opacity: 1; }
 .rt-x:hover, .rt-x:focus-visible { background: var(--danger-soft); color: var(--danger); opacity: 1;
   box-shadow: none; }
 /* Their tracks carry a tint down the left edge, so the balance of the mix is legible at a glance. */
 .rt-row.is-theirs { box-shadow: inset 2px 0 0 var(--accent-2); }
 @media (max-width: 720px) {   /* drop the least load-bearing columns before the row starts squeezing */
-  .rt-row { grid-template-columns: 1.4rem 2rem minmax(0, 2fr) minmax(0, 1.3fr) 3.2rem 2rem; }
+  .rt-row { grid-template-columns: 1.375rem 2rem minmax(0, 2fr) minmax(0, 1.3fr) 3.2rem 2rem; }
   .rt-c-genre, .rt-c-src { display: none; }
 }

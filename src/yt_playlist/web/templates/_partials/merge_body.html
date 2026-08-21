@@ -1,7 +1,7 @@
 {# Server-rendered merge editor body. Every control posts to /merge/update (which mutates the
    in-memory draft) and swaps this whole partial back into #merge-body. #}
 {% set upd = '/merge/update?ids=' ~ ids_csv %}
-<div class="card" style="margin-bottom:1.2rem">
+<div class="card section-block">
   <div class="cfg">
     <div>
       <div class="cmp-h">Where should the result go?</div>
@@ -15,21 +15,21 @@
       <label class="opt"><input type="radio" name="keep" value="all" {{ 'checked' if draft.keep == 'all' }}
              hx-post="{{ upd }}" hx-vals='{"field": "keep", "value": "all"}' hx-target="#merge-body" hx-swap="innerHTML">
         Update <strong>all</strong> (keep them all, set each to the result)</label>
-      {% if liked_id %}<p class="muted" style="font-size:.8rem; margin:.5rem 0 0">Liked Music can’t be deleted, so the result always lands there.</p>{% endif %}
+      {% if liked_id %}<p class="muted note-compact">Liked Music can’t be deleted, so the result always lands there.</p>{% endif %}
     </div>
-    <div style="text-align:right">
-      <div class="muted" style="font-size:.85rem">Result</div>
+    <div class="text-end">
+      <div class="muted small">Result</div>
       <div class="merge-count">{{ count }} songs</div>
       <button type="button" hx-post="/merge/apply?ids={{ ids_csv }}" hx-swap="none">Apply</button>
     </div>
   </div>
-  <p class="muted" style="font-size:.82rem; margin:.6rem 0 0"><strong>Nothing changes until you click Apply.</strong>
+  <p class="muted note-compact"><strong>Nothing changes until you click Apply.</strong>
      Tick the songs you want in the result. A backup of any deleted playlist is written first, and it's undoable from Actions.</p>
 </div>
 
 <div class="card">
   <div class="col-head">Songs <span class="count">{{ count }} / {{ total }}</span>
-    <span style="margin-left:auto"></span>
+    <span class="push-end"></span>
     <span class="seg" title="Sort order">
       <button type="button" class="{{ 'on' if draft.sort == 'alpha' }}"
               hx-post="{{ upd }}" hx-vals='{"field": "sort", "value": "alpha"}' hx-target="#merge-body" hx-swap="innerHTML">alpha</button>
@@ -51,7 +51,7 @@
     <tbody>
       {% for t in rows %}
       <tr class="{{ '' if t.included else 'rowdel' }}">
-        <td><input type="checkbox" {{ 'checked' if t.included }} style="width:auto"
+        <td><input type="checkbox" {{ 'checked' if t.included }} class="control-auto"
                    hx-post="{{ upd }}" hx-vals='{"field": "toggle", "value": "{{ t.tid }}"}' hx-target="#merge-body" hx-swap="innerHTML"></td>
         <td>{% for i in range(members|length) %}{% if t.present[i] %}<span class="ab ab-sm ab-{{ i % 8 }}">{{ members[i].letter }}</span>{% endif %}{% endfor %}</td>
         <td class="num">{% for i in range(members|length) %}{% if t.present[i] %}<button type="button"

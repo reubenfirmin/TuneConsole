@@ -513,10 +513,39 @@
   --font-display: "Fraunces", Georgia, serif; /* immersive generating takeover only */
   --font-sans: "Hanken Grotesk", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --type-xs: .75rem;
+  --type-sm: .8125rem;
+  --type-ui: .875rem;
+  --type-body: .9375rem;
+  --type-lg: 1.125rem;
+  --type-xl: 1.375rem;
+  --type-2xl: 2rem;
+  --type-page: clamp(2rem, 4vw, 2.75rem);
+  --weight-normal: 450;
+  --weight-medium: 600;
+  --weight-bold: 700;
+  --weight-heavy: 750;
+  --leading-tight: 1.1;
+  --leading-compact: 1.3;
+  --leading-body: 1.55;
+
+  /* ---- spacing ---- */
+  --sp-1: .25rem;
+  --sp-2: .5rem;
+  --sp-3: .75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+  --sp-7: 3rem;
+  --flow-space: var(--sp-4);
+  --cluster-space: var(--sp-3);
+  --grid-space: var(--sp-4);
+  --grid-min: 8.5rem;
 
   /* ---- geometry & elevation ---- */
   --radius: 12px;
   --radius-sm: 8px;
   --shadow: 0 12px 28px -20px var(--scrim-heavy);
   --maxw: 68rem;
+  --table-min: 46rem;
 }

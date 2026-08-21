@@ -39,7 +39,7 @@
          there is nothing a save button could do here. #}
       <span class="tag teal">✓ Your upload</span>
       {% else %}
-      <form hx-post="/collection/save-album" hx-swap="none" style="display:inline">
+      <form hx-post="/collection/save-album" hx-swap="none" class="inline">
         <input type="hidden" name="browse_id" value="{{ browse_id }}">
         <button type="submit" class="btn-ghost">Save to library</button>
       </form>{% endif %}
@@ -118,22 +118,22 @@
 </div>
 {% endif %}
 
-<div class="card" style="margin-top:1.1rem">
+<div class="card card-offset">
   {% if tracks %}
   {# Folded-in library tracks: genre/year columns that fill in live as enrichment runs, and are
      click-to-edit by hand (same flow as playlists, scoped to this album). #}
   <table class="track-table" x-data="rowSort(0, '/album/{{ browse_id }}')">
     <thead><tr>
-      <th class="num" style="width:2.6rem">#</th>
-      <th style="width:2.6rem"></th>
-      <th class="liked-col" style="width:2.4rem"></th>
+      <th class="num col-thumb">#</th>
+      <th class="col-thumb"></th>
+      <th class="liked-col col-like"></th>
       <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
       <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
-      <th class="sorth num" style="width:4.5rem" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
-      <th class="sorth" style="width:6rem" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
-      <th class="sorth num" style="width:4.5rem" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
-      <th class="sorth num" style="width:5rem" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
-      <th style="width:2.4rem"></th>
+      <th class="sorth num col-year" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth col-last" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
+      <th class="sorth num col-count" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth num col-length" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
+      <th class="col-action"></th>
     </tr></thead>
     <tbody x-ref="body">
       {% for t in tracks %}{% set idx = loop.index %}{% include "_partials/album_track_row.html" %}{% endfor %}
@@ -144,8 +144,8 @@
   {# Not in your library yet. Read-only preview from YouTube. Save it to enrich. #}
   <table class="track-table">
     <thead><tr>
-      <th class="num" style="width:2.6rem">#</th><th style="width:2.6rem"></th>
-      <th>Song</th><th>Artist</th><th class="num" style="width:5rem">Length</th>
+      <th class="num col-thumb">#</th><th class="col-thumb"></th>
+      <th>Song</th><th>Artist</th><th class="num col-length">Length</th>
     </tr></thead>
     <tbody>
     {% for t in album.tracks %}

@@ -9,18 +9,18 @@
 {% set cmp = t.compare %}
 {% set cd = t.close_days %}{% set sd = t.span_days %}
 {% if t.rows %}
-<p class="small" style="color:var(--faint);margin:0 0 0.7rem">
+<p class="small text-faint flush section-block">
   Ranked by your last-{{ cd }}-day listening. The bar is each {{ heads[dim]|lower }}'s share of
-  recent plays.{% if cmp %} The dashed <span style="color:var(--teal)">tick</span> is its share of
+  recent plays.{% if cmp %} The dashed <span class="text-teal">tick</span> is its share of
   your library; bar past the tick = you're playing it more than you own (over-indexed).{% endif %}
-  The faint <span style="color:var(--dim)">◦</span> marks where it sat earlier, and the thin
+  The faint <span class="text-dim">◦</span> marks where it sat earlier, and the thin
   whisker is its range over your {{ sd }}d of history. Hover for detail.
 </p>
 <table class="chart ticker">
   <thead><tr>
     <th class="rank">#</th>
     <th>{{ heads[dim] }}</th>
-    <th class="tickhead">recent listening share{% if cmp %} &nbsp;·&nbsp; <span style="color:var(--teal)">┊</span> library{% endif %}</th>
+    <th class="tickhead">recent listening share{% if cmp %} &nbsp;·&nbsp; <span class="text-teal">┊</span> library{% endif %}</th>
     <th class="num">{{ cd }}d</th>
     {% if cmp %}<th class="num">vs library</th>{% endif %}
   </tr></thead>
@@ -49,6 +49,6 @@
   </tbody>
 </table>
 {% else %}
-<p class="empty" style="margin:0">No play history yet. Sync a few times to build it up.</p>
+<p class="empty flush">No play history yet. Sync a few times to build it up.</p>
 {% endif %}
 {% endmacro %}

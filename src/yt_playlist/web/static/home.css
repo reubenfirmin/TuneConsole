@@ -1,30 +1,30 @@
 /* Home feed, recommendation tiles, generated playlists, and taste controls. */
 /* ---- Home tab ---- */
-.home-control { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
-  padding: 0.9rem 1.1rem; margin-bottom: 1.4rem; }
+.home-control { display: flex; align-items: center; gap: .9375rem; flex-wrap: wrap;
+  padding: .875rem 1.1rem; margin-bottom: 1.375rem; }
 .home-control .sync-bar { margin-bottom: 0 !important; }
 .sync-status { display: flex; align-items: center; gap: 0.6rem; }
-.sync-nudge { color: var(--accent-2); font-size: 0.86rem; font-weight: 600; }
+.sync-nudge { color: var(--accent-2); font-size: var(--type-ui); font-weight: 600; }
 .home-control.sync-stale { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
 
 /* Home status card: live extension connection, now-playing, and library freshness. */
-.home-status { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-  padding: 0.85rem 1.15rem; margin-bottom: 1.6rem; position: relative; overflow: hidden; }
+.home-status { display: flex; align-items: center; justify-content: space-between; gap: .9375rem;
+  padding: .875rem 1.125rem; margin-bottom: 1.6rem; position: relative; overflow: hidden; }
 
 /* Live sync console: streams the library sync's results as they happen (background or manual). */
-.sync-console { margin-bottom: 1.6rem; padding: 0.85rem 1rem 0.75rem; border: 1px solid var(--border-2);
+.sync-console { margin-bottom: 1.6rem; padding: .875rem .9375rem .75rem; border: 1px solid var(--border-2);
   border-radius: 12px; background: var(--surface-inset); overflow: hidden; }
 .sc-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.55rem; }
 .sc-eye { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase;
   color: var(--accent-2); }
-.sc-state { font-family: var(--font-mono); font-size: 0.72rem; color: var(--faint); }
+.sc-state { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--faint); }
 .sc-state.is-run { color: var(--ok); }
 .sc-state.is-err { color: var(--danger); }
 .sc-bar { height: 2px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 16%, transparent); overflow: hidden; margin-bottom: 0.6rem; }
 .sc-bar i { display: block; height: 100%; width: 38%; border-radius: 2px; background: var(--control-primary);
   animation: sc-bar 1.1s ease-in-out infinite; }
 @keyframes sc-bar { 0% { transform: translateX(-110%); } 100% { transform: translateX(330%); } }
-.sync-log { font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; max-height: 15rem;
+.sync-log { font-family: var(--font-mono); font-size: var(--type-sm); line-height: 1.55; max-height: 15rem;
   overflow-y: auto; color: var(--dim); }
 .sc-line { display: flex; gap: 0.55rem; white-space: pre-wrap; word-break: break-word; }
 .sc-line.done { color: var(--ok-2); }
@@ -45,13 +45,13 @@
 .onboard-card .onb-art { flex: none; width: 132px; height: 72px;
   filter: drop-shadow(0 3px 24px color-mix(in srgb, var(--accent) 55%, transparent)); }
 .onb-body { flex: 1 1 20rem; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }
-.connection-waiting { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.78rem; font-weight: 650;
+.connection-waiting { display: inline-flex; align-items: center; gap: 0.5rem; font-size: var(--type-xs); font-weight: 650;
   color: var(--warn-2); margin-bottom: 0.55rem; }
 .onb-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--warn);
   animation: ob-pulse 1.6s ease-in-out infinite; }
 .onb-title { font-family: var(--font-sans); font-size: 1.6rem; font-weight: 600; color: var(--text);
   margin: 0 0 0.4rem; letter-spacing: -0.01em; }
-.onb-sub { color: var(--dim); font-size: 0.98rem; line-height: 1.5; margin: 0 0 1.15rem; }
+.onb-sub { color: var(--dim); font-size: var(--type-body); line-height: 1.5; margin: 0 0 1.125rem; }
 @keyframes ob-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 @media (prefers-reduced-motion: reduce) { .onb-dot { animation: none; } }
 .home-status::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px;
@@ -62,7 +62,7 @@
 .home-status.is-live .hs-dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
 .home-status.is-down .hs-dot { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
 .hs-state { font-weight: 600; color: var(--text); }
-.hs-now { display: flex; align-items: center; gap: 0.75rem; min-width: 0; flex-wrap: wrap; }
+.hs-now { display: flex; align-items: center; gap: .75rem; min-width: 0; flex-wrap: wrap; }
 /* #93 Task 9: the migrated radio customize panel (x-teleport'ed here while radio is active) takes
    the full card width on its own row, rather than squeezing into the now-playing flex row. Empty
    (radio off, or panel collapsed) contributes nothing, so the row height is unaffected. */
@@ -72,40 +72,40 @@
 .hs-rate-group { display: inline-flex; align-items: center; gap: 0.15rem; margin-left: 0.35rem; flex: none; }
 .hs-rate { background: none; border: none; cursor: pointer; padding: 0.3rem; line-height: 0;
   color: var(--dim); border-radius: 6px; transition: color 0.12s, background 0.12s; }
-.hs-rate svg { width: 1.35rem; height: 1.35rem; display: block; fill: none; stroke: currentColor;
+.hs-rate svg { width: 1.375rem; height: 1.375rem; display: block; fill: none; stroke: currentColor;
   stroke-width: 1.7; stroke-linejoin: round; }
 .hs-rate:hover { background: var(--accent-soft); color: var(--text); }
 .hs-heart.on { color: var(--danger-2); }
 .hs-skull.on { color: var(--status-light); }
 .hs-rate.on svg { fill: currentColor; stroke: none; }
 .hs-now-text { min-width: 0; display: flex; align-items: baseline; gap: 0.5rem; }
-.hs-now-title { font-weight: 700; font-size: 1.1rem; color: var(--text); white-space: nowrap;
+.hs-now-title { font-weight: 700; font-size: var(--type-lg); color: var(--text); white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; max-width: 34ch; }
-.hs-now-artist { color: var(--dim); font-weight: 500; font-size: 0.95rem; white-space: nowrap; }
+.hs-now-artist { color: var(--dim); font-weight: 500; font-size: var(--type-body); white-space: nowrap; }
 .hs-now-artist::before { content: "·"; margin-right: 0.5rem; }
-.hs-eq { display: inline-flex; align-items: flex-end; gap: 2px; height: 0.95rem; flex: none; }
+.hs-eq { display: inline-flex; align-items: flex-end; gap: 2px; height: .9375rem; flex: none; }
 .hs-eq i { width: 3px; height: 100%; border-radius: 2px; background: var(--accent-2);
   transform-origin: bottom; animation: hs-eq 0.9s ease-in-out infinite; }
 .hs-eq i:nth-child(1) { animation-delay: -0.15s; }
 .hs-eq i:nth-child(2) { animation-delay: -0.5s; }
 .hs-eq i:nth-child(3) { animation-delay: -0.35s; }
 @keyframes hs-eq { 0%, 100% { transform: scaleY(0.35); } 50% { transform: scaleY(1); } }
-.hs-playpause { font-size: 0.85rem; }
+.hs-playpause { font-size: var(--type-ui); }
 .hs-now.paused .hs-art, .hs-now.paused .hs-now-text { opacity: 0.55; }
 .hs-now.paused .hs-eq i { animation-play-state: paused; }
-.hs-meta { display: flex; align-items: center; gap: 0.9rem; flex: none; }
-.hs-sync { color: var(--dim); font-size: 0.82rem; white-space: nowrap; }
-.hs-refresh { color: var(--accent-2); font-size: 0.82rem; font-weight: 600; }
+.hs-meta { display: flex; align-items: center; gap: .875rem; flex: none; }
+.hs-sync { color: var(--dim); font-size: var(--type-sm); white-space: nowrap; }
+.hs-refresh { color: var(--accent-2); font-size: var(--type-sm); font-weight: 600; }
 .hs-refresh.is-busy { opacity: 0.6; pointer-events: none; }
-.home-footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border);
-  text-align: center; font-size: 0.85rem; }
+.home-footer { margin-top: 2rem; padding-top: .9375rem; border-top: 1px solid var(--border);
+  text-align: center; font-size: var(--type-ui); }
 .home-footer a { color: var(--dim); }
 
 /* #93 Task 9: the radio launch card - its own card, not a status-strip button. Off: Start radio +
    collapsed Customize. On (.is-active): Stop + Customize, and the customize panel has migrated up
    into the now-playing card (see #radio-steer-slot above), so this card shows just the toggle row. */
-.radio-launch { margin-bottom: 1.4rem; }
-.rl-top { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; }
+.radio-launch { margin-bottom: 1.375rem; }
+.rl-top { display: flex; align-items: center; gap: .875rem; flex-wrap: wrap; }
 .radio-label { display: inline-flex; align-items: center; gap: 0.45rem; font-weight: 650; color: var(--text); }
 .rl-dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--faint); flex: none; }
 .radio-launch.is-active .rl-dot { background: var(--accent-2); box-shadow: 0 0 0 3px var(--accent-soft);
@@ -113,33 +113,33 @@
 @keyframes rl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 .rl-actions { display: inline-flex; align-items: center; gap: 0.5rem; margin-left: auto; }
 .rl-customize-toggle { background: none; border: 1px solid var(--border-2); color: var(--dim);
-  border-radius: 999px; padding: 0.3rem 0.75rem; font-size: 0.82rem; font-weight: 600; cursor: pointer; }
+  border-radius: 999px; padding: 0.3rem .75rem; font-size: var(--type-sm); font-weight: 600; cursor: pointer; }
 .rl-customize-toggle:hover { color: var(--text); border-color: var(--text); }
-.rl-sub { color: var(--dim); font-size: 0.9rem; margin: 0.5rem 0 0; }
+.rl-sub { color: var(--dim); font-size: var(--type-ui); margin: 0.5rem 0 0; }
 .rl-reason { display: inline-block; margin-top: 0.4rem; }
-.rl-customize-inline, .rl-customize-teleported { margin-top: 0.9rem; }
+.rl-customize-inline, .rl-customize-teleported { margin-top: .875rem; }
 .rl-customize-teleported .radio-customize { padding-top: 0.2rem; }
 
 /* Mode transparency (visibility wave): a small, unobtrusive line, never alarming even when a
    fallback hint is appended -- the full reason lives in the title tooltip, not the visible text. */
-.rl-mode { font-size: 0.82rem; opacity: 0.85; }
+.rl-mode { font-size: var(--type-sm); opacity: 0.85; }
 
 /* "Up next" feedback loop (visibility wave): one row of compact chips, wraps rather than scrolls so
    nothing is hidden. This is the only place a Populate-tail / steer tweak is visibly confirmed in
    dual mode (the live deck's own queue is a frozen YTM snapshot until the next toggle). */
 .rl-upcoming { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.4rem 0.5rem;
   margin-top: 0.6rem; }
-.rl-upcoming-label { color: var(--dim); font-size: 0.78rem; font-weight: 600; text-transform: uppercase;
+.rl-upcoming-label { color: var(--dim); font-size: var(--type-xs); font-weight: 600; text-transform: uppercase;
   letter-spacing: 0.03em; flex: none; }
 .rl-upcoming-chip { background: var(--accent-soft); border-radius: 999px; padding: 0.15rem 0.65rem;
-  font-size: 0.82rem; color: var(--text); white-space: nowrap; }
+  font-size: var(--type-sm); color: var(--text); white-space: nowrap; }
 .rl-upcoming-artist { color: var(--dim); }
 .rl-upcoming-artist::before { content: " \00b7 "; }
 
 /* Poster action cards: a big cover across the top, minimal orienting text, then the CTA. auto-fit
    so the cards stretch to FILL the row (no trailing empty columns). */
 /* Four fixed slots on desktop so a lone nag + skeleton fillers make one clean row; collapse on smaller. */
-.alerts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.8rem; margin-bottom: 1.8rem; }
+.alerts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .8125rem; margin-bottom: 1.8rem; }
 @media (max-width: 64rem) { .alerts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 34rem) { .alerts { grid-template-columns: 1fr; } }
 .alert-card { position: relative; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
@@ -148,11 +148,11 @@
 .alert-cover-2 { display: flex; gap: 1px; }   /* two playlists, split the banner down the middle */
 .alert-cover-2 img { width: 50%; }
 .alert-body { display: flex; flex-direction: column; gap: 0.5rem;
-  padding: 0.8rem 0.9rem 0.9rem; flex: 1 1 auto; }
-.alert-title { font-weight: 650; font-size: 0.92rem; line-height: 1.3; min-height: 2.4em;
+  padding: .8125rem .875rem .875rem; flex: 1 1 auto; }
+.alert-title { font-weight: 650; font-size: var(--type-body); line-height: 1.3; min-height: 2.4em;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .alert-foot { display: flex; align-items: center; gap: 0.5rem; margin-top: auto; }   /* CTAs all align */
-.alert-badge { flex: 0 0 auto; font-family: var(--font-mono); font-size: 0.74rem; font-weight: 600;
+.alert-badge { flex: 0 0 auto; font-family: var(--font-mono); font-size: var(--type-xs); font-weight: 600;
   color: var(--accent-2); background: var(--accent-soft); border: 1px solid var(--border-2);
   border-radius: 999px; padding: 0.22rem 0.5rem; white-space: nowrap; cursor: help; }
 .alert-go { flex: 1 1 auto; text-align: center; }   /* button fills the rest of the foot row */
@@ -162,20 +162,20 @@
 .alert-x { position: absolute; top: 0.4rem; right: 0.45rem; z-index: 2;
   width: 1.6rem; height: 1.6rem; display: grid; place-items: center; padding: 0;
   background: color-mix(in srgb, var(--surface-sunk) 60%, transparent); border: 1px solid var(--border-2); border-radius: 999px;
-  color: var(--light-source); font-size: 1rem; line-height: 1; box-shadow: none; cursor: pointer; }
+  color: var(--light-source); font-size: var(--type-body); line-height: 1; box-shadow: none; cursor: pointer; }
 .alert-x:hover { background: var(--accent); box-shadow: none; }
 /* Muted filler cards so a lone nag fills its row instead of sitting orphaned. Decorative only. */
 .alert-skeleton { opacity: 0.5; pointer-events: none; }
 .skel-block { background: var(--surface-2); border-radius: 6px; }
 .alert-skeleton .alert-cover { height: 7.5rem; }
-.alert-skeleton .alert-body { gap: 0.6rem; padding: 0.9rem; }
-.alert-skeleton .skel-line { display: block; height: 0.72rem; }
+.alert-skeleton .alert-body { gap: 0.6rem; padding: .875rem; }
+.alert-skeleton .skel-line { display: block; height: .75rem; }
 .alert-skeleton .skel-short { width: 55%; }
 @media (max-width: 64rem) { .alert-skeleton { display: none; } }   /* fillers only in the 4-slot desktop row */
 /* Setup/onboarding nudges rendered as nag cards: an emoji "cover" instead of a thumbnail, and their
    full message in the body (not clamped like an action title). */
 .alert-cover-icon { display: grid; place-items: center; font-size: 2.4rem; background: var(--accent-soft); }
-.alert-nudge .alert-title { -webkit-line-clamp: unset; min-height: 0; font-weight: 600; font-size: 0.86rem;
+.alert-nudge .alert-title { -webkit-line-clamp: unset; min-height: 0; font-weight: 600; font-size: var(--type-ui);
   line-height: 1.42; }
 .alert-cmd {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -188,25 +188,25 @@
   overflow: auto;
 }
 
-.for-you-grid { display: grid; gap: 1rem;
+.for-you-grid { display: grid; gap: .9375rem;
   grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); }
-.fy-card { display: flex; gap: 0.8rem; padding: 0.7rem; align-items: center; }
+.fy-card { display: flex; gap: .8125rem; padding: 0.7rem; align-items: center; }
 .fy-cover { position: relative; width: 3.4rem; height: 3.4rem; flex: 0 0 auto;
   border-radius: var(--radius-sm); overflow: hidden; display: grid; place-items: center;
   background: var(--surface-2); }
 .fy-cover img { width: 100%; height: 100%; object-fit: cover; }
-.fy-play { position: absolute; color: var(--light-source); opacity: 0.85; font-size: 0.9rem; }
+.fy-play { position: absolute; color: var(--light-source); opacity: 0.85; font-size: var(--type-ui); }
 .fy-meta { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1 1 auto; }
 .fy-title { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.fy-artist { color: var(--dim); font-size: 0.84rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.fy-reason { color: var(--accent-2); font-size: 0.76rem; margin-top: 0.15rem; }
+.fy-artist { color: var(--dim); font-size: var(--type-ui); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fy-reason { color: var(--accent-2); font-size: var(--type-xs); margin-top: 0.15rem; }
 .fy-add { flex: 0 0 auto; align-self: center; white-space: nowrap; }
 .fy-add.added { color: var(--teal); border-color: transparent; }
 
 /* For-You dismiss (feedback persistence) */
 .fy-card { position: relative; }
 .fy-x { position: absolute; top: 0.35rem; right: 0.45rem; background: transparent; border: none;
-  color: var(--faint); font-size: 1rem; line-height: 1; padding: 0.1rem 0.25rem; cursor: pointer;
+  color: var(--faint); font-size: var(--type-body); line-height: 1; padding: 0.1rem 0.25rem; cursor: pointer;
   box-shadow: none; opacity: 0; transition: opacity 0.12s ease; }
 .fy-card:hover .fy-x { opacity: 1; }
 .fy-x:hover { color: var(--danger); background: transparent; box-shadow: none; }
@@ -220,12 +220,12 @@
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 1.2rem; }
 .stat-grid > div { display: flex; flex-direction: column; gap: 0.2rem; }
 .stat-grid strong { font-family: var(--font-sans); font-size: 1.7rem; }
-.stat-grid span { color: var(--dim); font-size: 0.8rem; }
+.stat-grid span { color: var(--dim); font-size: var(--type-sm); }
 .bar-row { display: grid; grid-template-columns: 9rem 1fr 3rem; align-items: center; gap: 0.7rem; padding: 0.25rem 0; }
-.bar-label { color: var(--dim); font-size: 0.85rem; }
+.bar-label { color: var(--dim); font-size: var(--type-ui); }
 .bar-row .bar { height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
 .bar-row .bar > i { display: block; height: 100%; background: var(--control-primary); }
-.bar-val { font-family: var(--font-mono); font-size: 0.78rem; color: var(--faint); text-align: right; }
+.bar-val { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--faint); text-align: right; }
 .weight-row { display: flex; align-items: center; gap: 0.7rem; padding: 0.3rem 0; }
 .weight-row label { width: 9rem; text-transform: capitalize; }
 .weight-row input { width: 6rem; background: var(--bg-2); color: var(--text); border: 1px solid var(--border-2); border-radius: 6px; padding: 0.3rem 0.5rem; }
@@ -233,7 +233,7 @@
 /* Auto-playlist proposals */
 .auto-card { display: flex; flex-direction: column; gap: 0.5rem; }
 .auto-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
-.auto-sample { margin: 0; padding-left: 1rem; color: var(--dim); font-size: 0.82rem; line-height: 1.5; }
+.auto-sample { margin: 0; padding-left: .9375rem; color: var(--dim); font-size: var(--type-sm); line-height: 1.5; }
 .auto-sample .auto-more { list-style: none; margin-left: -1rem; color: var(--faint); font-style: italic; }
 .auto-foot { margin-top: auto; padding-top: 0.4rem; }
 
@@ -243,7 +243,7 @@
 .fy-fb-pop { position: absolute; right: 0; top: 1.5rem; z-index: 20; display: flex; flex-direction: column;
   min-width: 11rem; background: var(--surface); border: 1px solid var(--border-2); border-radius: 9px;
   padding: 0.3rem; box-shadow: 0 14px 34px -12px color-mix(in srgb, var(--shadow-ink) 70%, transparent); }
-.fy-fb-pop button { background: transparent; color: var(--dim); text-align: left; font-size: 0.82rem;
+.fy-fb-pop button { background: transparent; color: var(--dim); text-align: left; font-size: var(--type-sm);
   padding: 0.35rem 0.5rem; border: none; box-shadow: none; border-radius: 6px; cursor: pointer; }
 .fy-fb-pop button:hover { background: var(--surface-2); color: var(--text); box-shadow: none; }
 .fy-fb-pop button.more { color: var(--teal); }
@@ -260,19 +260,19 @@
 
 /* New-artist discovery */
 .na-card { display: flex; flex-direction: column; gap: 0.25rem; }
-.na-name { font-weight: 650; font-size: 1rem; }
-.na-because { color: var(--dim); font-size: 0.8rem; }
-.na-fits { color: var(--accent-2); font-size: 0.76rem; }
+.na-name { font-weight: 650; font-size: var(--type-body); }
+.na-because { color: var(--dim); font-size: var(--type-sm); }
+.na-fits { color: var(--accent-2); font-size: var(--type-xs); }
 
 /* ============ Recommendation tiles (graphics-first, hover-reveal) ============ */
-.tile-grid { display: grid; gap: 0.9rem; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); }
+.tile-grid { display: grid; gap: .875rem; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); }
 /* "Explore your artists' catalogs": a responsive album grid of normal-sized covers that flows by width
    (stepping down to 4 / 3 / 2 as it narrows). It spans the full content width so it's exactly as wide
    as the double-playlist .gen-lanes above it; at the page max-width auto-fill still tops out at 5
    columns of 11rem. A small script in the partial then clamps the rows. */
-.album-grid { display: grid; gap: 0.9rem;
+.album-grid { display: grid; gap: .875rem;
   grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
-  margin-bottom: 1.4rem; }
+  margin-bottom: 1.375rem; }
 /* New-artists tile grid: match .album-grid exactly (same column min and gap, same full width) so the
    two Home cards line up with the lanes above. The shared .tile-grid stays narrower elsewhere. */
 #new-artist-grid { grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); }
@@ -302,16 +302,16 @@
   background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--surface-sunk) 55%, transparent) 35%, color-mix(in srgb, var(--surface-sunk) 94%, transparent));
   opacity: 0; transform: translateY(0.5rem); transition: opacity 0.18s ease, transform 0.18s ease; }
 .tile:hover .tile-scrim, .tile:focus-within .tile-scrim { opacity: 1; transform: none; }
-.tile-title { font-weight: 650; font-size: 0.84rem; line-height: 1.2; color: var(--light-source);
+.tile-title { font-weight: 650; font-size: var(--type-ui); line-height: 1.2; color: var(--light-source);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tile-sub  { font-size: 0.74rem; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-sub  { font-size: var(--type-xs); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile-note { font-size: 0.68rem; color: var(--accent-2); margin-top: 0.12rem;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* hover-to-play */
 .tile-play { position: absolute; top: 50%; left: 50%; z-index: 4;
   width: 2.7rem; height: 2.7rem; transform: translate(-50%,-50%) scale(0.7);
-  display: grid; place-items: center; border-radius: 50%; padding: 0; font-size: 1rem; color: var(--light-source);
+  display: grid; place-items: center; border-radius: 50%; padding: 0; font-size: var(--type-body); color: var(--light-source);
   background: color-mix(in srgb, var(--accent) 92%, transparent); box-shadow: 0 8px 22px -8px var(--shadow-ink); border: none;
   opacity: 0; transition: opacity 0.16s ease, transform 0.16s cubic-bezier(0.2,0.7,0.2,1); }
 .tile:hover .tile-play, .tile:focus-within .tile-play { opacity: 1; transform: translate(-50%,-50%) scale(1); }
@@ -325,7 +325,7 @@
 .tile-cover.no-art .tile-scrim { opacity: 1; transform: none;
   position: static; inset: auto; align-items: center; text-align: center; background: none;
   padding: 0.7rem; min-width: 0; }
-.tile-cover.no-art .tile-title { white-space: normal; font-family: var(--font-sans); font-size: 1.05rem; }
+.tile-cover.no-art .tile-title { white-space: normal; font-family: var(--font-sans); font-size: var(--type-lg); }
 .tile-cover.no-art .tile-sub, .tile-cover.no-art .tile-note { white-space: normal; }
 
 @media (prefers-reduced-motion: reduce) {
@@ -342,9 +342,9 @@
 .tile-suggest .tile-play { top: 50%; }
 
 .tile-cap { display: flex; flex-direction: column; gap: 0.04rem; padding: 0.5rem 0.1rem 0; min-width: 0; }
-.tile-cap-title { font-weight: 650; font-size: 0.82rem; line-height: 1.25; color: var(--text);
+.tile-cap-title { font-weight: 650; font-size: var(--type-sm); line-height: 1.25; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tile-cap-sub { font-size: 0.72rem; color: var(--dim);
+.tile-cap-sub { font-size: var(--type-xs); color: var(--dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile-cap-note { font-size: 0.67rem; color: var(--accent-2); margin-top: 0.08rem;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -352,17 +352,17 @@
 .tile-foot { position: relative; display: flex; align-items: center; gap: 0.35rem;
   margin-top: 0.45rem; padding: 0 0.1rem; }
 .tile-foot form { flex: 1; min-width: 0; }
-.tile-add { width: 100%; font-family: var(--font-sans); font-size: 0.75rem; font-weight: 600;
+.tile-add { width: 100%; font-family: var(--font-sans); font-size: var(--type-xs); font-weight: 600;
   color: var(--text); background: var(--surface-2); border: 1px solid var(--border-2);
   border-radius: 7px; padding: 0.34rem 0.5rem; cursor: pointer; box-shadow: none; line-height: 1.2; }
 .tile-add:hover { background: var(--accent); color: var(--light-source); border-color: transparent; box-shadow: none; }
-.tile-foot .dots { font-size: 1.1rem; flex: none; }
+.tile-foot .dots { font-size: var(--type-lg); flex: none; }
 /* anchor the shared rowmenu popup under the ⋯ at the tile's right edge */
 .tile-menu { right: 0; }
 
 /* --- generated proto-playlists: the two dated, saveable lanes at the top of Home --- */
-.gen-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem; align-items: stretch;
-  margin-bottom: 1.4rem; }   /* stretch: both cards in a row take the row's max height */
+.gen-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.375rem; align-items: stretch;
+  margin-bottom: 1.375rem; }   /* stretch: both cards in a row take the row's max height */
 @media (max-width: 60rem) { .gen-lanes { grid-template-columns: 1fr; } }
 /* Dynamic: a lone card in a row (1 card, or the odd last of 3) spans full width instead of sitting at
    half. On wide screens its tracklist splits into two columns so it fills the width, not one sparse run. */
@@ -379,52 +379,52 @@
    decade pair stays inside. */
 .gen-head .section-note { margin: 0.35rem 0 0; line-height: 1.4; min-height: 2.8em;
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.gen-refresh { float: right; background: none; border: 0; cursor: pointer; font-size: 1.15rem;
+.gen-refresh { float: right; background: none; border: 0; cursor: pointer; font-size: var(--type-lg);
   line-height: 1; color: var(--dim); padding: 0.1rem 0.35rem; border-radius: 5px; }
 .gen-refresh:hover { color: var(--cta); background: var(--surface-2); }   /* CTA green on hover */
 .gen-refresh[disabled] { opacity: 0.45; cursor: wait; }
-.gen-name { font-family: var(--font-sans); font-size: 1.12rem; line-height: 1.25;
+.gen-name { font-family: var(--font-sans); font-size: var(--type-lg); line-height: 1.25;
   letter-spacing: -0.01em; margin: 0.2rem 0 0; color: var(--text);
   /* Reserve 2 lines so a 1-line title still aligns its tagline/track-list with a 2-line neighbour. */
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   min-height: 2.5em; }
 .gen-list { list-style: none; margin: 0 0 0.2rem; padding: 0; counter-reset: gen; }
-.gen-row { position: relative; display: grid; grid-template-columns: 1.4rem 2.3rem 1fr 1.6rem;
+.gen-row { position: relative; display: grid; grid-template-columns: 1.375rem 2.3rem 1fr 1.6rem;
   align-items: center; gap: 0.55rem; padding: 0.4rem 0.2rem; border-bottom: 1px solid var(--border); }
 .gen-row:last-child { border-bottom: none; }
 .gen-row:hover { background: var(--accent-soft); border-radius: var(--radius-sm); }
 .gen-row::before { counter-increment: gen; content: counter(gen); text-align: right;
-  font-size: 0.72rem; color: var(--faint); font-variant-numeric: tabular-nums; }
+  font-size: var(--type-xs); color: var(--faint); font-variant-numeric: tabular-nums; }
 .gen-th { width: 2.3rem; height: 2.3rem; border-radius: 6px; overflow: hidden; background: var(--surface-2);
   border: 1px solid var(--border); flex-shrink: 0; }
 .gen-th img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .gen-th.no-art { background: var(--placeholder); }
 .gen-meta { min-width: 0; display: flex; flex-direction: column; }
-.gen-title { font-weight: 600; font-size: 0.86rem; color: var(--text); white-space: nowrap;
+.gen-title { font-weight: 600; font-size: var(--type-ui); color: var(--text); white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 .gen-title:hover { color: var(--accent-2); text-decoration: none; }
-.gen-artist { font-size: 0.76rem; color: var(--dim); white-space: nowrap; overflow: hidden;
+.gen-artist { font-size: var(--type-xs); color: var(--dim); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
 .gen-why { color: var(--accent-2); }
 .gen-rm { justify-self: end; background: transparent; border: none; box-shadow: none; color: var(--faint);
-  cursor: pointer; font-size: 0.85rem; line-height: 1; padding: 0.2rem 0.3rem; border-radius: 6px;
+  cursor: pointer; font-size: var(--type-ui); line-height: 1; padding: 0.2rem 0.3rem; border-radius: 6px;
   opacity: 0.5; transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease; }
 .gen-row:hover .gen-rm, .gen-rm:focus-visible { opacity: 1; }
 .gen-rm:hover { color: var(--danger); background: var(--surface-2); box-shadow: none; }
-.gen-foot { margin-top: auto; padding-top: 0.8rem; display: flex; flex-direction: column;
+.gen-foot { margin-top: auto; padding-top: .8125rem; display: flex; flex-direction: column;
   align-items: flex-start; gap: 0.5rem; }
-.gen-foot-note { color: var(--dim); font-size: 0.78rem; line-height: 1.4; }
+.gen-foot-note { color: var(--dim); font-size: var(--type-xs); line-height: 1.4; }
 .gen-done { justify-content: center; }
 /* "More mixes coming" note, shown below the taste panel while the model still produces < 4 cards. */
-.gen-more { display: flex; align-items: center; gap: 0.85rem; margin-bottom: 1.4rem; }
+.gen-more { display: flex; align-items: center; gap: .875rem; margin-bottom: 1.375rem; }
 /* display:flex above beats the UA stylesheet's [hidden] rule, so the JS reveal toggle silently
    stopped hiding this card (seen live: it sat under a full 4-mix row). Re-assert the attribute. */
 .gen-more[hidden] { display: none; }
-.gen-more-icon { flex: none; color: var(--accent-2); font-size: 1.15rem; }
-.gen-more p { margin: 0; color: var(--dim); font-size: 0.92rem; line-height: 1.5; }
+.gen-more-icon { flex: none; color: var(--accent-2); font-size: var(--type-lg); }
+.gen-more p { margin: 0; color: var(--dim); font-size: var(--type-body); line-height: 1.5; }
 
 /* --- Rediscover: a couple of stale library playlists spotlighted on Home --- */
-.rediscover-grid { grid-template-columns: 1fr 1fr; gap: 1.4rem; margin-bottom: 1.4rem; }
+.rediscover-grid { grid-template-columns: 1fr 1fr; gap: 1.375rem; margin-bottom: 1.375rem; }
 @media (max-width: 60rem) { .rediscover-grid { grid-template-columns: 1fr; } }
 /* The 3 "Revisit" album tiles span the full row (equal thirds), instead of .album-grid's auto-fill
    that would leave only-3 tiles bunched at min-width on the left. */
@@ -434,70 +434,70 @@
 .redis-head { display: flex; gap: 0.7rem; align-items: center; margin-bottom: 0.7rem; }
 .redis-head .gen-th { width: 3rem; height: 3rem; }
 .redis-meta { min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
-.redis-title { font-family: var(--font-sans); font-size: 1.05rem; line-height: 1.25;
+.redis-title { font-family: var(--font-sans); font-size: var(--type-lg); line-height: 1.25;
   letter-spacing: -0.01em; color: var(--text); font-weight: 650; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 .redis-title:hover { color: var(--accent-2); text-decoration: none; }
-.redis-sub { font-size: 0.78rem; color: var(--dim); }
+.redis-sub { font-size: var(--type-xs); color: var(--dim); }
 .redis-list { list-style: none; margin: 0 0 0.2rem; padding: 0; }
 .redis-row { display: flex; gap: 0.5rem; align-items: baseline; padding: 0.35rem 0.2rem;
   border-bottom: 1px solid var(--border); }
 .redis-row:last-child { border-bottom: none; }
-.redis-row-title { font-size: 0.86rem; color: var(--text); white-space: nowrap; overflow: hidden;
+.redis-row-title { font-size: var(--type-ui); color: var(--text); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
-.redis-row-artist { font-size: 0.76rem; color: var(--dim); white-space: nowrap; overflow: hidden;
+.redis-row-artist { font-size: var(--type-xs); color: var(--dim); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; flex: 0 1 auto; }
-.redis-more { font-size: 0.76rem; color: var(--faint); padding: 0.4rem 0.2rem 0; font-style: italic; }
-.redis-foot { margin-top: auto; padding-top: 0.8rem; display: flex; flex-wrap: wrap;
+.redis-more { font-size: var(--type-xs); color: var(--faint); padding: 0.4rem 0.2rem 0; font-style: italic; }
+.redis-foot { margin-top: auto; padding-top: .8125rem; display: flex; flex-wrap: wrap;
   align-items: center; gap: 0.6rem; }
 
 /* transient mood feedback panel (post-save card + generated playlist page) */
-.mood-panel { margin-top: 1rem; padding: 0.9rem 1rem; border: 1px dashed var(--border-2);
+.mood-panel { margin-top: .9375rem; padding: .875rem .9375rem; border: 1px dashed var(--border-2);
   border-radius: var(--radius-sm); background: var(--accent-soft); }
-.mood-q { display: block; font-weight: 650; font-size: 0.92rem; color: var(--text); }
+.mood-q { display: block; font-weight: 650; font-size: var(--type-body); color: var(--text); }
 .mood-btns { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.6rem 0 0.4rem; }
-.mood-btn { font-size: 0.85rem; background: var(--surface-2); color: var(--text);
-  border: 1px solid var(--border-2); border-radius: 999px; padding: 0.35rem 0.8rem; box-shadow: none; }
+.mood-btn { font-size: var(--type-ui); background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border-2); border-radius: 999px; padding: 0.35rem .8125rem; box-shadow: none; }
 .mood-btn:hover { background: var(--accent); box-shadow: none; }
-.mood-note { color: var(--dim); font-size: 0.76rem; margin: 0.3rem 0 0; line-height: 1.4; }
+.mood-note { color: var(--dim); font-size: var(--type-xs); margin: 0.3rem 0 0; line-height: 1.4; }
 
 /* Transient feedback control panel (Generated playlist). Generous margins so the enriching UI
    above and the track table below both keep clear room around it. */
-.fb-panel { margin: 1.2rem 0; padding: 1rem 1.1rem; border: 1px dashed var(--border-2);
+.fb-panel { margin: 1.2rem 0; padding: .9375rem 1.1rem; border: 1px dashed var(--border-2);
   border-radius: var(--radius-sm); background: var(--accent-soft); }
 .fb-simple { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem; }
-.fb-q { font-weight: 650; font-size: 0.92rem; color: var(--text); }
+.fb-q { font-weight: 650; font-size: var(--type-body); color: var(--text); }
 .fb-btns { display: inline-flex; flex-wrap: wrap; gap: 0.5rem; margin-left: auto; }
 .mood-btn.fb-sel { background: var(--accent); color: var(--light-source); border-color: var(--accent); }
 .rowmenu-sep { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint);
   padding: 0.35rem 0.6rem 0.15rem; border-top: 1px solid var(--border); margin-top: 0.2rem; }
-.fb-detailed { margin-top: 0.8rem; }
-.fb-detailed > summary { cursor: pointer; color: var(--accent-2); font-weight: 600; font-size: 0.85rem; }
-.fb-sub { color: var(--dim); font-size: 0.8rem; margin: 0.5rem 0 0.6rem; }
-.fb-group { margin: 0.5rem 0 0.8rem; }
+.fb-detailed { margin-top: .8125rem; }
+.fb-detailed > summary { cursor: pointer; color: var(--accent-2); font-weight: 600; font-size: var(--type-ui); }
+.fb-sub { color: var(--dim); font-size: var(--type-sm); margin: 0.5rem 0 0.6rem; }
+.fb-group { margin: 0.5rem 0 .8125rem; }
 .fb-group .fb-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--faint); }
 .fb-lever { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.3rem; }
-.fb-name { flex: 1; font-size: 0.85rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-name { flex: 1; font-size: var(--type-ui); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fb-lever button { background: none; border: 1px solid var(--border-2); color: var(--faint);
-  border-radius: 6px; padding: 0.05rem 0.55rem; font-size: 0.8rem; cursor: pointer; }
+  border-radius: 6px; padding: 0.05rem 0.55rem; font-size: var(--type-sm); cursor: pointer; }
 .fb-lever button.fb-more:hover { color: var(--light-source); background: var(--accent); border-color: var(--accent); }
 .fb-lever button.fb-less:hover { color: var(--light-source); background: var(--danger); border-color: var(--danger); }
 .fb-lever button.fb-done { color: var(--light-source); background: var(--accent-2); border-color: var(--accent-2); }
 .fb-lever button.fb-more.fb-sel { color: var(--light-source); background: var(--accent); border-color: var(--accent); }
 .fb-lever button.fb-less.fb-sel { color: var(--light-source); background: var(--danger); border-color: var(--danger); }
-.fb-note { color: var(--dim); font-size: 0.76rem; margin: 0.6rem 0 0; line-height: 1.4; }
+.fb-note { color: var(--dim); font-size: var(--type-xs); margin: 0.6rem 0 0; line-height: 1.4; }
 .mood-done { background: color-mix(in srgb, var(--teal-muted) 10%, transparent); border-style: solid; border-color: transparent; }
 .status-label--success { color: var(--ok-2); }
 .status-label--error { color: var(--danger-3); }
 
 /* --- Taste Model control panel (sliders, genre shares, live sample) --- */
-.knob-list { display: grid; gap: 1.15rem; }
+.knob-list { display: grid; gap: 1.125rem; }
 .knob { display: grid; gap: 0.35rem; }
 .knob-head { display: flex; align-items: center; gap: 0.6rem; }
 .knob-head label { font-weight: 600; min-width: 11rem; }
-.knob-sub { font-weight: 400; color: var(--faint); font-size: 0.82rem; }
+.knob-sub { font-weight: 400; color: var(--faint); font-size: var(--type-sm); }
 .knob-head output { font-family: var(--font-mono); color: var(--accent-2); min-width: 3ch; text-align: right; }
-.knob-help { margin: 0; color: var(--dim); font-size: 0.85rem; }
+.knob-help { margin: 0; color: var(--dim); font-size: var(--type-ui); }
 .knob-reset { margin-left: auto; background: none; border: 1px solid var(--border-2); color: var(--faint);
   border-radius: var(--radius-sm); cursor: pointer; padding: 0 0.45rem; line-height: 1.6; }
 .knob-reset:hover { color: var(--accent-2); border-color: var(--accent); }
@@ -511,35 +511,35 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: none;
 
 details.advanced { margin-top: 0.3rem; }
 details.advanced > summary { cursor: pointer; color: var(--accent-2); font-weight: 600; padding: 0.3rem 0; }
-details.advanced[open] > summary { margin-bottom: 1rem; }
-details.advanced .knob { margin-bottom: 1.15rem; }
+details.advanced[open] > summary { margin-bottom: .9375rem; }
+details.advanced .knob { margin-bottom: 1.125rem; }
 
 .foryou-sample.stale #sample-body { opacity: 0.35; filter: grayscale(0.7); pointer-events: none; transition: opacity .2s ease; }
 .foryou-sample.stale .sample-note { color: var(--accent-2); }
-.sample-head { display: flex; align-items: center; gap: 0.8rem; margin-bottom: 0.8rem; }
-.sample-note { color: var(--dim); font-size: 0.85rem; }
+.sample-head { display: flex; align-items: center; gap: .8125rem; margin-bottom: .8125rem; }
+.sample-note { color: var(--dim); font-size: var(--type-ui); }
 .preview-list { margin: 0; padding-left: 1.2rem; display: grid; gap: 0.45rem; }
 .preview-list .preview-lane { display: inline-block; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 0 0.4rem; margin-right: 0.5rem; }
-.preview-list .preview-reason { color: var(--dim); font-size: 0.85rem; margin-left: 0.4rem; }
+.preview-list .preview-reason { color: var(--dim); font-size: var(--type-ui); margin-left: 0.4rem; }
 
 .htmx-indicator { opacity: 0; transition: opacity .2s ease; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
 
 /* --- Home: taste fingerprint + steering --- */
-.fingerprint { display: grid; gap: 0.8rem; margin-bottom: 1.4rem; }
+.fingerprint { display: grid; gap: .8125rem; margin-bottom: 1.375rem; }
 /* Collapse bar: the always-visible toggle row; the rest of the panel (.fp-collapsible) folds away. */
-.fp-bar { display: flex; align-items: center; gap: 0.8rem; }
+.fp-bar { display: flex; align-items: center; gap: .8125rem; }
 .fp-collapse { background: none; border: none; cursor: pointer; padding: 0; color: var(--text);
-  font-weight: 700; font-size: 0.95rem; letter-spacing: 0.01em; display: inline-flex; align-items: center; gap: 0.45rem; }
+  font-weight: 700; font-size: var(--type-body); letter-spacing: 0.01em; display: inline-flex; align-items: center; gap: 0.45rem; }
 /* Plain header controls: a subtle colour shift, not a filled button treatment. */
 .fp-collapse:hover { color: var(--accent-2); background-image: none; box-shadow: none; }
-.fp-caret { color: var(--faint); font-size: 0.8rem; width: 0.8rem; text-align: center; }
+.fp-caret { color: var(--faint); font-size: var(--type-sm); width: .8125rem; text-align: center; }
 .fp-reset { margin-left: auto; background: none; border: 1px solid var(--border-2); color: var(--dim);
-  font-size: 0.78rem; padding: 0.2rem 0.6rem; border-radius: 999px; cursor: pointer; white-space: nowrap; }
+  font-size: var(--type-xs); padding: 0.2rem 0.6rem; border-radius: 999px; cursor: pointer; white-space: nowrap; }
 .fp-reset:hover { border-color: var(--danger); color: var(--danger); background-image: none; box-shadow: none; }
-.fp-collapsible { display: grid; gap: 0.8rem; margin-top: 0.8rem; }
-.fp-head { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.fp-collapsible { display: grid; gap: .8125rem; margin-top: .8125rem; }
+.fp-head { display: flex; align-items: center; gap: .9375rem; flex-wrap: wrap; }
 .fp-tune { margin-left: auto; color: var(--accent-2); font-weight: 600; }
 /* Row tools live OVER THE LABEL, not the slider: pinned to the label's right edge and revealed only
    when you hover the label (never the slider, which stays fully usable). Self-contained chips so they
@@ -550,9 +550,9 @@ details.advanced .knob { margin-bottom: 1.15rem; }
   transition: opacity 0.12s ease; }
 .fp-name-wrap:hover .fp-row-tools, .fp-row-tools:hover { opacity: 1; pointer-events: auto; }
 .fp-icon-btn { background: var(--surface-2); border: 1px solid var(--border); cursor: pointer;
-  color: var(--dim); line-height: 1; font-size: 0.78rem; padding: 0.12rem 0.32rem; border-radius: 5px; }
+  color: var(--dim); line-height: 1; font-size: var(--type-xs); padding: 0.12rem 0.32rem; border-radius: 5px; }
 .fp-expand-btn:hover { color: var(--light-source); border-color: var(--accent); background: var(--accent); }
-.fp-remove-btn { font-size: 0.86rem; }
+.fp-remove-btn { font-size: var(--type-ui); }
 .fp-remove-btn:hover { color: var(--light-source); border-color: var(--danger); background: var(--danger); }
 .fp-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1.2rem; }
 .fp-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--faint); }
@@ -560,13 +560,13 @@ details.advanced .knob { margin-bottom: 1.15rem; }
 .fp-row { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.35rem; }
 /* Fixed width + ellipsis so a long name (e.g. "progressive trance") can't push the slider right; the
    full name is in the title tooltip. Fixed width also keeps the over-label tools at a consistent x. */
-.fp-name { width: 6.5rem; flex: none; font-size: 0.85rem; white-space: nowrap; overflow: hidden;
+.fp-name { width: 6.5rem; flex: none; font-size: var(--type-ui); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
 /* Drill-down subgenres: a quiet group; the NAME is indented (within its fixed width) so the slider
    stays aligned with the family sliders, important so the neutral guide line below lines up too. */
 .fp-expand-btn.on { color: var(--accent-2); transform: rotate(180deg); }
 .fp-subgenres { margin: 0.1rem 0 0.35rem; }
-.fp-subname { padding-left: 1rem; font-size: 0.8rem; color: var(--dim); }
+.fp-subname { padding-left: .9375rem; font-size: var(--type-sm); color: var(--dim); }
 /* Neutral (1.0) guide: a faint dashed line down the midpoint of a bar set, so you can see where a
    slider sits at neutral (centre) vs nudged. The track runs from the label span (6.5rem name + 0.6rem
    gap = 7.1rem) to the column's right edge, so its centre is 50% + half that span (3.55rem). */
@@ -607,42 +607,42 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 .fp-breadth-track .fp-breadth-slider { flex: 1; }
 .fp-breadth-tick { position: absolute; top: 50%; transform: translate(-50%, -50%);
   width: 2px; height: 13px; background: var(--text); border-radius: 1px; pointer-events: none; }
-.fp-breadth-end { font-size: 0.72rem; color: var(--faint); }
-.fp-breadth-note { font-size: 0.72rem; color: var(--dim); font-style: italic; }
+.fp-breadth-end { font-size: var(--type-xs); color: var(--faint); }
+.fp-breadth-note { font-size: var(--type-xs); color: var(--dim); font-style: italic; }
 /* Home genre picker (autosuggest combo, reuses the Clusters .cg-box widget). The wrapper is the
    positioning context for the absolute .cg-suggest dropdown; small gap below the genre sliders. */
 .fp-genre-pick { position: relative; margin-top: 0.5rem; }
 /* Shrink the borrowed Clusters .cg-box pill to row scale here: its default (2.65rem tall, 1.3rem
    radius) reads as jumbo next to the slim slider rows. */
 .fp-genre-pick .cg-box { min-height: 0; padding: 0.28rem 0.5rem; border-radius: 8px; border-width: 1px; }
-.fp-genre-pick .cg-box input { font-size: 0.82rem; padding: 0; min-width: 6rem; }
-.fp-genre-pick .cg-icon { font-size: 0.8rem; }
+.fp-genre-pick .cg-box input { font-size: var(--type-sm); padding: 0; min-width: 6rem; }
+.fp-genre-pick .cg-icon { font-size: var(--type-sm); }
 .fp-genre-empty { margin: 0.4rem 0 0; }
 .steer-toast { background: var(--accent-soft); border: 1px solid var(--border-2); border-radius: 8px;
-  padding: 0.5rem 0.8rem; color: var(--accent-2); margin-bottom: 0.8rem; }
+  padding: 0.5rem .8125rem; color: var(--accent-2); margin-bottom: .8125rem; }
 [x-cloak] { display: none !important; }
 
 /* "Generated" pinned as its own collapsible card above the playlists table */
-.gen-grp { border: 1px solid var(--accent); margin-bottom: 1rem; }
+.gen-grp { border: 1px solid var(--accent); margin-bottom: .9375rem; }
 .gen-grp-head { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
 .gen-grp-head .section-label { color: var(--text); }
-.gen-grp-head .gen-grp-count { color: var(--faint); font-size: 0.85rem; }
+.gen-grp-head .gen-grp-count { color: var(--faint); font-size: var(--type-ui); }
 .gen-grp-head .gen-grp-caret { margin-left: auto; color: var(--accent-2); }
 .gen-grp table { margin-top: 0.6rem; }
 .gen-gc-note { margin: 0.7rem 0 0; padding-top: 0.7rem; border-top: 1px solid var(--border);
-  font-size: 0.82rem; line-height: 1.5; }
+  font-size: var(--type-sm); line-height: 1.5; }
 .promote-btn { margin-left: 0.6rem; background: var(--accent-soft); border: 1px solid var(--border-2);
-  color: var(--accent-2); border-radius: 6px; padding: 0.05rem 0.5rem; font-size: 0.8rem; cursor: pointer; }
+  color: var(--accent-2); border-radius: 6px; padding: 0.05rem 0.5rem; font-size: var(--type-sm); cursor: pointer; }
 .promote-btn:hover { border-color: var(--accent); color: var(--light-source); background: var(--accent); }
 
 /* #15 recipe-type line: a cluster mix is flagged as its own kind */
-.fb-type { margin: 0 0 0.4rem; font-size: 0.78rem; color: var(--faint); }
+.fb-type { margin: 0 0 0.4rem; font-size: var(--type-xs); color: var(--faint); }
 .fb-type-chip { display: inline-block; background: color-mix(in srgb, var(--cta) 12%, transparent); color: var(--cta);
   border: 1px solid color-mix(in srgb, var(--cta) 40%, transparent); border-radius: 999px; padding: 0.05rem 0.55rem;
-  font-weight: 700; font-size: 0.72rem; margin-right: 0.4rem; }
+  font-weight: 700; font-size: var(--type-xs); margin-right: 0.4rem; }
 .fb-reopen { margin-left: 0.5rem; color: var(--cta); text-decoration: none; font-weight: 600; white-space: nowrap; }
 .fb-reopen:hover { text-decoration: underline; }
 /* "Made from" recipe line on a generated playlist's feedback panel */
-.fb-recipe { margin: 0 0 0.6rem; font-size: 0.85rem; color: var(--dim); }
+.fb-recipe { margin: 0 0 0.6rem; font-size: var(--type-ui); color: var(--dim); }
 .fb-recipe .fb-chip { display: inline-block; background: var(--accent-soft); color: var(--accent-2);
   border-radius: 6px; padding: 0.05rem 0.5rem; margin: 0 0.15rem; }

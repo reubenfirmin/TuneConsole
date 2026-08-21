@@ -13,7 +13,7 @@
 
 {# ── The stack, stated once ──────────────────────────────────────────────── #}
 <section class="card card--data viz-dim layer-key">
-  <h2 class="section" style="margin-top:0">The four layers</h2>
+  <h2 class="section section-flush">The four layers</h2>
   <p class="section-note">Your taste is modelled at four timescales at once, fastest to slowest. They
     do not all speak the same language, so each card below shows only the layers that genuinely exist
     on its axis - the rest would be invented.</p>
@@ -35,7 +35,7 @@
         sliders you hold, and the embedding itself.
         <em>See: everything below.</em></span></li>
   </ol>
-  <p class="section-note" style="margin-bottom:0">This view is read-only; adjust anything on the
+  <p class="section-note flush">This view is read-only; adjust anything on the
     <em>Controls</em> tab.</p>
 </section>
 
@@ -48,7 +48,7 @@
 {%- endmacro %}
 
 <section class="card card--data viz-dim mode-layers">
-  <h2 class="section" style="margin-top:0">Taste modes <span class="scope-tag">now · session · permanent</span></h2>
+  <h2 class="section section-flush">Taste modes <span class="scope-tag">now · session · permanent</span></h2>
   <p class="section-note">The distinct regions of your taste, discovered from your library. All three
     readings are shares over the same modes, so they stack: <strong>permanent</strong> is the durable
     shape of your taste, and the faster two are how far this sitting has departed from it. Same mode,
@@ -133,20 +133,20 @@
 {%- endmacro %}
 
 <section class="card card--data viz-dim">
-  <h2 class="section" style="margin-top:0">Genre families <span class="scope-tag">permanent · transient</span></h2>
+  <h2 class="section section-flush">Genre families <span class="scope-tag">permanent · transient</span></h2>
   {% if viz.genres %}{{ chain_roses(viz.genres, "genre") }}
   {% else %}<p class="section-note">No genre tags yet. Enrich your library to populate this.</p>{% endif %}
 </section>
 
 <section class="card card--data viz-dim">
-  <h2 class="section" style="margin-top:0">Eras <span class="scope-tag">permanent · transient</span></h2>
+  <h2 class="section section-flush">Eras <span class="scope-tag">permanent · transient</span></h2>
   {% if viz.eras %}{{ chain_roses(viz.eras, "decade") }}
   {% else %}<p class="section-note">No decade data yet.</p>{% endif %}
 </section>
 
 {# Artists: a variable, long-tailed count -> honest bars, but the same four readings. #}
 <section class="card card--data viz-dim">
-  <h2 class="section" style="margin-top:0">Artists <span class="scope-tag">permanent · transient</span></h2>
+  <h2 class="section section-flush">Artists <span class="scope-tag">permanent · transient</span></h2>
   {% if viz.artists %}
   {# Shares are full-population (tiny for big libraries), so scale the play bar to the top artist for
      legibility; the exact % is in the tooltip. Rows are sorted by share, so the first is the max. #}
@@ -175,7 +175,7 @@
 {# ── Candidate lanes + Taste breadth (both permanent, but unrelated → own cards) ── #}
 <div class="viz-pair-cards">
   <section class="card card--data viz-dim">
-    <h2 class="section" style="margin-top:0">Candidate lanes <span class="scope-tag">permanent</span></h2>
+    <h2 class="section section-flush">Candidate lanes <span class="scope-tag">permanent</span></h2>
     <p class="section-note">Your Home feed is drafted from four <strong>lanes</strong>, each digging up
       candidates a different way. The weight sets how often a lane wins a slot - 1.0 is neutral, higher
       favors it, lower mutes it. Hover a lane to see what it finds.</p>
@@ -192,7 +192,7 @@
     </div>
   </section>
   <section class="card card--data viz-dim">
-    <h2 class="section" style="margin-top:0">Taste breadth <span class="scope-tag">permanent</span></h2>
+    <h2 class="section section-flush">Taste breadth <span class="scope-tag">permanent</span></h2>
     {% if viz.genres %}
     {% set shown = viz.genres | sum(attribute='share') %}
     <div class="breadth-head" {{ vt.tip("Taste breadth", [
@@ -220,7 +220,7 @@
 
 {# ── Graduation funnel: how transient becomes permanent ───────────────────── #}
 <section class="card card--data viz-dim">
-  <h2 class="section" style="margin-top:0">Graduation funnel <span class="scope-tag">transient → permanent</span></h2>
+  <h2 class="section section-flush">Graduation funnel <span class="scope-tag">transient → permanent</span></h2>
   <p class="section-note">The one path between two layers. Repeated transient leans accumulate here;
     when a facet crosses the threshold it nudges its <em>permanent</em> weight up or down, changing
     the Permanent rose above. This is how a passing mood becomes lasting taste. Sources graduate at
@@ -242,7 +242,7 @@
 
 {# ── Transient sources: what's feeding the transient layer ───────────────── #}
 <section class="card card--data viz-dim">
-  <h2 class="section" style="margin-top:0">What feeds the transient layer <span class="scope-tag">transient inputs</span></h2>
+  <h2 class="section section-flush">What feeds the transient layer <span class="scope-tag">transient inputs</span></h2>
   <p>
     <span class="tag" {{ vt.tip("Mood taps", [
           {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.mood) ~ "d", "t": "strong"}]) }}>👍 mood +{{ viz.sources.mood_pos }}</span>
@@ -263,7 +263,7 @@
 
 {# ── Embedding engine + the two free-direction layers (expensive → lazy) ──── #}
 <section class="card card--data viz-dim">
-  <h2 class="section" style="margin-top:0">Embedding engine <span class="scope-tag">session · transient · permanent</span></h2>
+  <h2 class="section section-flush">Embedding engine <span class="scope-tag">session · transient · permanent</span></h2>
   <div hx-get="/taste/viz/engine" hx-trigger="load" hx-swap="innerHTML">
     <p class="section-note">Loading the embedding model…</p>
   </div>

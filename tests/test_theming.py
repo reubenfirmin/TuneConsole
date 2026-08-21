@@ -237,6 +237,88 @@ def test_eyebrows_are_limited_to_protected_experiences():
     assert "gen-status" in (WEB / "templates" / "generating.html").read_text()
 
 
+def test_shared_typography_uses_the_application_scale():
+    tokens = TOKENS.read_text()
+    for role in ("--type-xs", "--type-sm", "--type-ui", "--type-body", "--type-lg",
+                 "--type-xl", "--type-2xl", "--type-page", "--leading-tight",
+                 "--leading-compact", "--leading-body"):
+        assert role in tokens
+
+    app = (WEB / "static" / "app.css").read_text()
+    for selector, role in ((".page-head h1", "--type-page"), ("h2.section", "--type-xl"),
+                           ("h3.section", "--type-lg"), ("button, .btn", "--type-ui"),
+                           (".section-note", "--type-ui")):
+        rules = re.findall(rf"(?s){re.escape(selector)}\s*\{{(.*?)\}}", app)
+        assert rules and any(f"var({role})" in rule for rule in rules), selector
+
+    ordinary = "\n".join(
+        (WEB / "static" / name).read_text()
+        for name in ("app.css", "home.css", "onboarding.css", "analytics.css", "setup.css")
+    )
+    assert not re.search(
+        r"font-size:\s*(?:\.7[24568]|\.8(?:0|2|4|5|6|8)?|\.9(?:0|2|5|8)?|1\.(?:05|1|12|15))rem",
+        ordinary,
+    )
+
+
+def test_shared_spacing_scale_and_layout_primitives_are_used():
+    tokens = TOKENS.read_text()
+    app = (WEB / "static" / "app.css").read_text()
+    templates = "\n".join(
+        (WEB / "templates" / name).read_text()
+        for name in ("albums.html", "charts.html", "cleanup.html", "move.html",
+                     "network.html", "playlists.html")
+    )
+    for role in ("--sp-1", "--sp-2", "--sp-3", "--sp-4", "--sp-5", "--sp-6", "--sp-7"):
+        assert role in tokens
+    for role in ("--sp-1", "--sp-2", "--sp-3", "--sp-4", "--sp-5", "--sp-6"):
+        assert f"var({role})" in app
+    for selector in (".flow", ".cluster", ".toolbar", ".layout-grid", ".section-block"):
+        assert selector in app
+    for utility in ("toolbar", "section-block", "flush", "push-end", "inline-control"):
+        assert re.search(rf'class="[^"]*\b{utility}\b', templates), utility
+
+
+def test_static_presentation_is_not_repeated_inline():
+    """Common static layout belongs to CSS; inline styles are reserved for runtime data."""
+    templates = "\n".join(
+        p.read_text() for p in (WEB / "templates").rglob("*.html")
+        if p.name not in {"story_reel.html", "clusters.html"}
+    )
+    forbidden = (
+        'style="margin-left:auto"', 'style="margin-top:0"',
+        'style="display:inline"', 'style="width:auto"',
+        'style="text-align:right; white-space:nowrap"',
+        'style="white-space:nowrap; color:var(--dim)"',
+    )
+    assert not [rule for rule in forbidden if rule in templates]
+
+    app = (WEB / "static" / "app.css").read_text()
+    for selector in (".push-end", ".section-flush", ".inline", ".control-auto",
+                     ".cell-actions", ".col-thumb", ".col-length"):
+        assert selector in app
+
+
+def test_dense_pages_have_scoped_compact_screen_behavior():
+    app = (WEB / "static" / "app.css").read_text()
+    assert "@media (max-width: 720px)" in app
+    for selector in (".playlist-index", ".track-table", ".album-index", ".table-scroll"):
+        assert selector in app
+
+    playlists = (WEB / "templates" / "playlists.html").read_text()
+    albums = (WEB / "templates" / "albums.html").read_text()
+    assert playlists.count('class="playlist-index"') == 2
+    assert albums.count('class="album-index"') == 2
+    for name in ("network.html", "actions.html"):
+        assert 'class="table-scroll"' in (WEB / "templates" / name).read_text()
+
+    # Interactive track tables have popovers and must not be placed in an
+    # overflow container that would clip them.
+    for name in ("playlist.html", "album.html"):
+        text = (WEB / "templates" / name).read_text()
+        assert 'table-scroll"><table class="track-table' not in text
+
+
 def test_python_returns_token_references_not_colours():
     from yt_playlist.web import theme
 

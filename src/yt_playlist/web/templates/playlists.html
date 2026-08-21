@@ -8,9 +8,9 @@
 </div>
 
 <div x-data='playlistsTab({{ rows|tojson }})'>
-  <div class="card" style="margin-bottom:1.1rem">
-    <div class="pl-toolbar">
-      <span class="muted" style="font-size:.85rem">Click a column heading to sort.</span>
+  <div class="card card--toolbar section-block">
+    <div class="toolbar">
+      <span class="muted">Click a column heading to sort.</span>
       {% if has_groups %}
       <span class="seg" title="Group the list by your group names">
         <button type="button" :class="{ on: !split }" @click="split = false">All together</button>
@@ -69,7 +69,7 @@
       <span class="gen-grp-count" x-text="'(' + genRows().length + ')'"></span>
       <span class="gen-grp-caret" x-text="collapsed.Generated ? '▸' : '▾'"></span>
     </div>
-    <table x-show="!collapsed.Generated" x-cloak>
+    <table class="playlist-index" x-show="!collapsed.Generated" x-cloak>
       <tbody>
         <template x-for="r in genRows()" :key="r.id">{{ pl_row(promote=True) }}</template>
       </tbody>
@@ -83,15 +83,15 @@
   </div>
 
   <div class="card">
-    <table>
+    <table class="playlist-index">
       <thead><tr>
-        <th style="width:2.4rem"></th>
+        <th class="col-action"></th>
         <th class="sorth" @click="sortBy('title')">Playlist<span x-text="ind('title')"></span></th>
-        <th class="sorth" style="width:8rem" @click="sortBy('group')">Group<span x-text="ind('group')"></span></th>
-        <th class="sorth num" style="width:4.5rem" @click="sortBy('count')">Songs<span x-text="ind('count')"></span></th>
-        <th class="sorth num" style="width:6rem" @click="sortBy('last')"
+        <th class="sorth col-group" @click="sortBy('group')">Group<span x-text="ind('group')"></span></th>
+        <th class="sorth num col-count" @click="sortBy('count')">Songs<span x-text="ind('count')"></span></th>
+        <th class="sorth num col-last" @click="sortBy('last')"
             title="Most recent time a song from this playlist showed up in your play history">Last<span x-text="ind('last')"></span></th>
-        <th class="sorth num" style="width:5rem" @click="sortBy('listens')"
+        <th class="sorth num col-length" @click="sortBy('listens')"
             title="Total plays of this playlist's songs across your sync history. Sums per-song plays, so big playlists score high. Not playlist-level plays.">Plays<span x-text="ind('listens')"></span></th>
       </tr></thead>
       <template x-for="sec in sections()" :key="sec.name">

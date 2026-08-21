@@ -21,14 +21,14 @@
    (For You, Explore, Discover, "more like this"). The <strong>knobs</strong>, however, are narrower;
    each section says exactly what it touches. Changes apply immediately; the live sample recomputes when
    you click <em>Refresh</em>. Start over any time with one button:</p>
-<div class="pl-actions" style="margin-bottom:1.8rem">
+<div class="pl-actions actions-roomy">
   <button class="btn-ghost" hx-post="/taste/reset-all" hx-swap="none"
           hx-confirm="Reset every weight and knob on this page back to its default? Your vectors and feedback are left alone.">↺ Reset everything to defaults</button>
 </div>
 
 <h2 class="section">Model status <span class="scope-tag">All surfaces</span></h2>
 {% include "_partials/model_status.html" %}
-<p class="section-note" style="margin-top:1rem"><strong>Auto-tune</strong> tries a few embedding sizes, scores
+<p class="section-note note-roomy"><strong>Auto-tune</strong> tries a few embedding sizes, scores
    each by how well it predicts tracks you actually played together (<em>recall@k</em>), then rebuilds on the
    winner. The result panel below shows what it found. Your vectors also rebuild automatically on every sync.</p>
 {% include "_partials/autotune_status.html" %}

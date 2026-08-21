@@ -1,28 +1,28 @@
 /* Shared onboarding and connection nudges. */
 /* Pre-sync onboarding placeholder: stands in for the whole rec feed before the first sync. */
 .presync { text-align: center; padding: 3.2rem 1.5rem; margin-bottom: 1.6rem; }
-.presync-art { display: block; width: 132px; height: 72px; margin: 0 auto 1.4rem;
+.presync-art { display: block; width: 132px; height: 72px; margin: 0 auto 1.375rem;
   filter: drop-shadow(0 6px 18px color-mix(in srgb, var(--accent) 35%, transparent)); }
 .presync-art .pbar { transform-box: fill-box; transform-origin: 50% 100%;
   animation: presync-eq 1.9s ease-in-out infinite; }
 @keyframes presync-eq { 0%, 100% { transform: scaleY(0.28); opacity: 0.55; } 50% { transform: scaleY(1); opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .presync-art .pbar { animation: none; } }
-.presync-title { font-family: var(--font-sans); font-size: 1.35rem; font-weight: 600;
+.presync-title { font-family: var(--font-sans); font-size: var(--type-xl); font-weight: 600;
   color: var(--text); margin: 0 0 0.45rem; }
-.presync-sub { color: var(--dim); font-size: 1rem; max-width: 42ch; margin: 0 auto; line-height: 1.5; }
+.presync-sub { color: var(--dim); font-size: var(--type-body); max-width: 42ch; margin: 0 auto; line-height: 1.5; }
 
 /* Home nudge banner: icon, text, and dismiss as three columns so the copy never wraps under the
    icon. Violet-tinted to match the recommendation theme. */
 .home-nudge {
-  display: flex; align-items: flex-start; gap: 0.85rem;
-  padding: 0.95rem 1.05rem; margin-bottom: 1.4rem; border-radius: var(--radius-sm);
+  display: flex; align-items: flex-start; gap: .875rem;
+  padding: .9375rem 1.125rem; margin-bottom: 1.375rem; border-radius: var(--radius-sm);
   background: var(--surface-card);
   border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
 }
-.home-nudge-icon { flex: none; font-size: 1.35rem; line-height: 1.35; }
+.home-nudge-icon { flex: none; font-size: var(--type-xl); line-height: 1.35; }
 .home-nudge-body { flex: 1; display: flex; flex-direction: column; gap: 0.18rem; min-width: 0; }
 .home-nudge-body strong { color: var(--text); font-weight: 650; }
-.home-nudge-body span { color: var(--dim); font-size: 0.92rem; line-height: 1.5; }
+.home-nudge-body span { color: var(--dim); font-size: var(--type-body); line-height: 1.5; }
 .home-nudge-x { flex: none; align-self: flex-start; margin: -0.2rem -0.3rem 0 0; }
 /* The post-first-sync welcome leads the nudge stack; a touch more accent so it reads as a greeting. */
 .home-nudge-intro { background: color-mix(in srgb, var(--accent) 18%, var(--surface-card));

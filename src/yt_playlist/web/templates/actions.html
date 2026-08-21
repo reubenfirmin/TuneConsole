@@ -7,14 +7,14 @@
 </div>
 
 <div class="card">
-  <table>
+  <div class="table-scroll"><table>
     <thead><tr><th class="num">#</th><th>When</th><th>Action</th><th>Status</th><th></th></tr></thead>
     <tbody>
     {% for row in rows %}
       {% set a = row.a %}
       <tr>
         <td class="num">{{ a.id }}</td>
-        <td class="mono" style="white-space:nowrap; color:var(--dim)">{{ row.when }}</td>
+        <td class="mono nowrap text-dim">{{ row.when }}</td>
         <td>{{ row.desc }} <span class="tag">{{ a.kind }}</span></td>
         <td>
           {% if a.status == 'executed' %}<span class="tag teal">{{ a.status }}</span>
@@ -24,7 +24,7 @@
         </td>
         <td>
           {% if a.status == 'executed' and row.undoable %}
-            <form method="post" action="/undo/{{ a.id }}" style="display:inline">
+            <form method="post" action="/undo/{{ a.id }}" class="inline">
               <button class="btn-ghost btn-sm">Undo</button>
             </form>
           {% endif %}
@@ -34,6 +34,6 @@
       <tr><td colspan="4" class="empty">No actions yet.</td></tr>
     {% endfor %}
     </tbody>
-  </table>
+  </table></div>
 </div>
 {% endblock %}

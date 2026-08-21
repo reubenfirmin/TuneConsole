@@ -4,7 +4,7 @@
   <tr>
     <td><span class="tag amber">{{ identities[p.identity_id] }}</span>
         {{ pllink(p.ytm_playlist_id, p.title) }}</td>
-    <td style="text-align:right; white-space:nowrap">
+    <td class="cell-actions">
       <button type="button" class="btn-ghost btn-sm"
               hx-post="/cleanup/ignore" hx-vals='{"ytm": "{{ p.ytm_playlist_id }}", "category": "empty"}'
               title="Keep this playlist; stop listing it here">Ignore</button>

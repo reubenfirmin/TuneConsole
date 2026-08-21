@@ -2,10 +2,10 @@
    this REPLACES the instructions + upload form with a completed state, instead of stacking a
    run-on one-liner under the button. Each number gets its own label and the counts that look
    alarming out of context (unmatched, especially) get an honest plain-language explanation. #}
-<p class="section-note" style="color:var(--ok);margin-bottom:1rem"><strong>&#10003; Import complete</strong></p>
+<p class="section-note text-ok"><strong>&#10003; Import complete</strong></p>
 
 {% if report.matched %}
-<div class="stat-grid" style="margin-bottom:1.1rem">
+<div class="stat-grid section-block">
   <div><strong>{{ report.matched }}</strong><span>plays matched your library</span></div>
   <div><strong>{{ report.events_added }}</strong><span>new plays recorded</span></div>
   <div><strong>{{ report.span_days }}</strong><span>days of history</span></div>

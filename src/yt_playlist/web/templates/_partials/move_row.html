@@ -6,7 +6,7 @@
        x-transition.opacity.duration.300ms style="display:none">
   <tr>
     <td>{{ pllink(p.ytm_playlist_id, p.title, p.track_count) }}</td>
-    <td style="text-align:right; white-space:nowrap">
+    <td class="cell-actions">
       <button type="button" class="btn-ghost btn-sm" :disabled="!canMove()"
               hx-post="/move/run" hx-include="#move-to" hx-vals='{"playlist": {{ p.id }}, "copy_only": "1"}'
               hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Copy →</button>
@@ -14,7 +14,7 @@
               hx-post="/move/run" hx-include="#move-to" hx-vals='{"playlist": {{ p.id }}}'
               hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Move →</button>
       {% if message %}<span class="muted">{{ message }}</span>{% endif %}
-      {% if error %}<span class="notice err" style="padding:.2rem .5rem">{{ error }}</span>{% endif %}
+      {% if error %}<span class="notice notice--compact err">{{ error }}</span>{% endif %}
     </td>
   </tr>
 </tbody>

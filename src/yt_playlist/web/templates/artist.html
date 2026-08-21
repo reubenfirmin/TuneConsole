@@ -10,7 +10,7 @@
     </p>
     {% if info and info.bio %}<p class="artist-bio">{{ info.bio|linkify }}</p>{% endif %}
     {% if info and info.browse_id %}
-    <div class="pl-actions" style="margin-top:.7rem">
+    <div class="pl-actions actions-compact">
       <a class="cta" href="https://music.youtube.com/channel/{{ info.browse_id }}"
          target="_blank" rel="noopener">▶ Open in YouTube Music ↗</a>
     </div>
@@ -110,7 +110,7 @@
         <td>{% if al.thumbnail %}<img class="album-thumb" src="{{ al.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
         <td>{% if al.browse_id %}<a class="ptitle" href="/album?browse={{ al.browse_id }}">{{ al.title }}</a>{% else %}<span class="ptitle">{{ al.title }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>
-        <td style="text-align:right">{% if al.browse_id %}<button type="button" class="btn-ghost btn-sm" hx-disabled-elt="this"
+        <td class="text-end">{% if al.browse_id %}<button type="button" class="btn-ghost btn-sm" hx-disabled-elt="this"
               hx-post="/collection/{{ 'unsave-album' if al.saved else 'save-album' }}"
               hx-vals='{"browse_id": {{ al.browse_id|tojson }}}'
               title="{{ 'Remove from your YouTube library' if al.saved else 'Save to your YouTube library' }}">{{ 'Unsave' if al.saved else 'Save' }}</button>{% endif %}</td>

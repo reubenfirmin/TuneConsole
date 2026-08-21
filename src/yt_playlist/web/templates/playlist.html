@@ -57,17 +57,17 @@
 <div class="card">
   <table class="track-table{{ ' is-lm' if pl.ytm_playlist_id == 'LM' }}">
     <thead><tr>
-      <th class="num" style="width:2.6rem">#</th>
-      <th style="width:2.6rem"></th>
-      <th class="liked-col" style="width:2.4rem"></th>
+      <th class="num col-thumb">#</th>
+      <th class="col-thumb"></th>
+      <th class="liked-col col-like"></th>
       <th class="sorth" @click="sortBy('title')">Song<span x-text="ind('title')"></span></th>
       <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
       <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
-      <th class="sorth num" style="width:4.5rem" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
-      <th class="sorth" style="width:6rem" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
-      <th class="sorth num" style="width:4.5rem" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
-      <th class="sorth num" style="width:5rem" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
-      <th style="width:2.4rem"></th>
+      <th class="sorth num col-year" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th class="sorth col-last" @click="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
+      <th class="sorth num col-count" @click="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth num col-length" @click="sortBy('len')">Length<span x-text="ind('len')"></span></th>
+      <th class="col-action"></th>
     </tr></thead>
     <tbody x-ref="body">
     {% for t in tracks %}{% set idx = loop.index %}{% include "_partials/track_row.html" %}
@@ -138,7 +138,7 @@
     </div>
   </template>
 </div>
-<section class="pl-suggest" style="margin-top:2.2rem"
+<section class="pl-suggest space-before"
          hx-get="/playlist/{{ pl.id }}/suggestions" hx-trigger="load" hx-swap="innerHTML">
   <p class="section-note">Finding tracks that fit…</p>
 </section>

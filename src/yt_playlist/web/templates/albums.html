@@ -4,7 +4,7 @@
   <p>Albums across your playlists, or the ones you've saved in your YouTube library.</p>
 </div>
 
-<div class="card card--toolbar pl-toolbar" style="margin-bottom:1.1rem">
+<div class="card card--toolbar toolbar section-block">
   <span class="seg">
     <a href="/albums?view=playlists" class="{{ 'on' if view == 'playlists' }}">In my playlists</a>
     <a href="/albums?view=saved" class="{{ 'on' if view == 'saved' }}">Saved in YouTube</a>
@@ -14,11 +14,11 @@
 {% if view == 'saved' %}
 <div class="card">
   {% if saved is none %}
-    <p class="empty" style="margin:0">Couldn't reach YouTube to load your saved albums. Make sure the app is connected, then reload.</p>
+    <p class="empty flush">Couldn't reach YouTube to load your saved albums. Make sure the app is connected, then reload.</p>
   {% else %}
-  <table x-data="rowSort()">
+  <table class="album-index" x-data="rowSort()">
     <thead><tr>
-      <th style="width:3rem"></th>
+      <th class="col-avatar"></th>
       <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
       <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
       <th class="sorth num" @click="sortBy('year')">Year<span x-text="ind('year')"></span></th>
@@ -42,9 +42,9 @@
 
 {% else %}
 <div class="card">
-  <table x-data="rowSort()">
+  <table class="album-index" x-data="rowSort()">
     <thead><tr>
-      <th style="width:3rem"></th>
+      <th class="col-avatar"></th>
       <th class="sorth" @click="sortBy('album')">Album<span x-text="ind('album')"></span></th>
       <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
       <th class="sorth num" @click="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>

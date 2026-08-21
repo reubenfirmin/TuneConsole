@@ -7,7 +7,7 @@
 <div class="card">
   <table x-data="rowSort()">
     <thead><tr>
-      <th style="width:3rem"></th>
+      <th class="col-avatar"></th>
       <th class="sorth" @click="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
       <th class="sorth num" @click="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
       <th class="sorth num" @click="sortBy('albums')">Albums<span x-text="ind('albums')"></span></th>
