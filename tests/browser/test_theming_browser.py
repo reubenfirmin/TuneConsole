@@ -37,20 +37,16 @@ def test_tokens_resolve_at_runtime(page, live_app):
       palette: window.themePalette({a: '--cta', b: '--trunk'}),
     })""")
     # every bridged colour is normalised to rgba() so callers can safely restyle the alpha
-    assert bridged["plain"] == "rgba(124, 108, 255, 1)", bridged
+    assert bridged["plain"] == "rgba(57, 135, 229, 1)", bridged
     assert bridged["mixed"].startswith("rgba("), f"color-mix did not resolve: {bridged['mixed']}"
     # a color-mix token must come back with 0-255 channels, not CSS Color 4 floats
     chans = [float(x) for x in bridged["mixed"][5:-1].split(",")]
     assert max(chans[:3]) > 1.5, f"color-mix channels look like 0-1 floats: {bridged['mixed']}"
     assert bridged["missing"] == "rgba(1, 2, 3, 1)", bridged
-    assert bridged["palette"]["a"] == "rgba(21, 233, 140, 1)", bridged
+    assert bridged["palette"]["a"] == "rgba(255, 182, 40, 1)", bridged
 
     # 4. no stylesheet failed to load
     assert page.evaluate("() => [...document.styleSheets].length") >= 3
 
-    # 5. the brand SVG gradient stops resolve (var() in a style attr, not an attribute)
-    stop = page.evaluate("""() => {
-      const s = document.querySelector('#eqg stop');
-      return s ? getComputedStyle(s).stopColor : null;
-    }""")
-    assert stop == "rgb(124, 108, 255)", f"brand gradient stop did not resolve: {stop}"
+    # 5. the current text-only brand renders after the identity refresh
+    assert page.get_by_role("link", name="TuneConsole home").is_visible()

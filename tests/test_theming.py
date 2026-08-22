@@ -77,7 +77,7 @@ def test_every_referenced_token_is_defined():
     # set from JS or inline style at runtime, so they have no static definition
     runtime = {
         "--topbar-h", "--p", "--card", "--dot", "--heat", "--subj", "--petal-c",
-        "--node-hue", "--node-sat", "--node-light", "--bg-grad", "--v",
+            "--node-hue", "--node-sat", "--node-light", "--bg-grad", "--v", "--tile",
     }
     missing = {}
     for p in _source_files():

@@ -73,5 +73,5 @@ def test_overlap_hide_pair_via_pie_menu(live_cleanup_app, page):
     row.locator(".kebab").click()                                   # open the radial pie menu
     row.locator(".wedge.w-hide").dispatch_event("click")           # "hide this pair" wedge
     # htmx.ajax -> HX-Refresh -> reload; the pair is now suppressed and appears under "Hidden"
-    expect(page.get_by_role("heading", name="Hidden overlaps")).to_be_visible()
+    expect(page.get_by_role("button", name="Hidden overlaps 1")).to_be_visible()
     expect(page.locator("tbody.ov-row")).to_have_count(0)          # gone from the Overlaps table

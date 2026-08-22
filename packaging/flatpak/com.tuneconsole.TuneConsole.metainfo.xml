@@ -49,6 +49,12 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.8" date="2026-08-22">
+      <description>
+        <p>A new Road Trip playlist builder, a broad interface refresh, Month in Review improvements,
+          and more reliable YouTube Music playback and now-playing presence.</p>
+      </description>
+    </release>
     <release version="0.1.4" date="2026-07-02">
       <description>
         <p>New app icon, a self-hosted Flatpak bundle attached to each release, and reliability fixes:
