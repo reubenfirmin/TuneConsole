@@ -1,5 +1,40 @@
 /* Narrow page-level overrides and standalone generating takeover. */
 
+/* ===== Graphic direction: indexed editorial console ==========================================
+   Art direction comes from composition, scale and rhythm—not a palette swap. Ordinary page heads
+   become ruled editorial blocks; dense application content below retains its familiar order. */
+main:not(.page-clusters) .page-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(15rem, 0.7fr);
+  align-items: end;
+  gap: var(--sp-3) var(--sp-6);
+  padding-block: var(--sp-4);
+  border-block: 1px solid var(--border-strong);
+}
+main:not(.page-clusters) .page-head h1 {
+  font-size: clamp(2.8rem, 6vw, 4.6rem);
+  line-height: 0.9;
+  letter-spacing: -0.055em;
+  max-width: 13ch;
+}
+main:not(.page-clusters) .page-head p {
+  padding-block-end: 0.25rem;
+  border-inline-start: 3px solid var(--cta);
+  padding-inline-start: var(--sp-4);
+}
+main:not(.page-clusters) h2.section::after {
+  content: "";
+  flex: 1 1 auto;
+  min-width: 2rem;
+  height: 1px;
+  margin-inline-start: var(--sp-2);
+  background: var(--border-strong);
+}
+@media (max-width: 45rem) {
+  main:not(.page-clusters) .page-head { grid-template-columns: 1fr; }
+  main:not(.page-clusters) .page-head h1 { font-size: clamp(2.6rem, 13vw, 4rem); }
+}
+
 /* ===== Phase 1 geometry: sharp application surfaces, protected immersive modes ===============
    The shared tokens carry this geometry across ordinary pages. Clusters restores its established
    radii in clusters.css; these selectors deliberately exclude it as a second boundary. */
@@ -48,51 +83,10 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
   border-radius: 4px;
 }
 
-/* ===== Phase 2 identity trial: provisional indexing + stronger type hierarchy ================
-   Like the geometry trial above, page hierarchy is tested on Home and Playlists before it is
-   allowed to become an application-wide convention. */
-.page-index {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  margin: 0 0 var(--sp-4);
-  padding-block-end: var(--sp-2);
-  border-block-end: 1px solid var(--border-subtle);
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  font-weight: 650;
-  letter-spacing: 0.13em;
-  line-height: var(--leading-compact);
-  color: var(--faint);
-}
-.page-index span:first-child {
-  color: var(--accent-2);
-}
-.page-playlists .page-head h1 {
-  font-size: clamp(2.4rem, 5vw, 3.4rem);
-  letter-spacing: -0.04em;
-}
-.page-home {
-  counter-reset: home-section;
-}
-.page-home h2.section::before {
-  counter-increment: home-section;
-  content: counter(home-section, decimal-leading-zero);
-  flex: none;
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  color: var(--faint);
-}
+/* ===== Phase 2 identity: stronger type hierarchy ============================================ */
 .page-home h2.section {
   font-size: clamp(1.45rem, 2.6vw, 1.8rem);
   letter-spacing: -0.025em;
-}
-
-@media (max-width: 34rem) {
-  .page-index span:last-child { display: none; }
 }
 
 /* ===== Phase 3 Home composition: live desk + asymmetric recommendations ====================== */
@@ -135,6 +129,33 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
 .page-home .home-mixes > .section-note {
   max-width: 42rem;
 }
+.page-home .gen-lanes { counter-reset: mix-card; }
+.page-home .gen-card {
+  position: relative;
+  overflow: hidden;
+  counter-increment: mix-card;
+  border-block-start: 3px solid var(--border-strong);
+}
+.page-home .gen-card::before {
+  content: counter(mix-card, decimal-leading-zero);
+  position: absolute;
+  top: -0.22rem;
+  right: 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 3.2rem;
+  font-weight: 750;
+  line-height: 1;
+  letter-spacing: -0.08em;
+  color: var(--border-subtle);
+  pointer-events: none;
+}
+.page-home .gen-card .gen-head {
+  position: relative;
+  z-index: 1;
+  padding-inline-end: 3.5rem;
+}
+.page-home .gen-card .gen-list,
+.page-home .gen-card .gen-foot { position: relative; z-index: 1; }
 @media (max-width: 45rem) {
   .page-home .home-status:has(.hs-now) {
     align-items: flex-start;
@@ -154,17 +175,16 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
   }
 }
 
-/* ===== Phase 4 shell comparison: optional desktop side rail ==================================
-   The top shell remains the baseline. This candidate is selected locally from the Tools menu and
-   intentionally collapses back to the top shell on compact screens. Clusters forces data-shell=top
-   before first paint in base.html. */
+/* ===== Phase 4 shell: desktop side rail =======================================================
+   The selected application shell. Compact screens retain the responsive top bar, while Clusters
+   removes application chrome entirely and supplies its own small exit control. */
 @media (min-width: 65rem) {
-  html[data-shell="rail"] body {
+  body:not(:has(.page-clusters)) {
     /* The rail overlays the viewport rather than redefining its coordinate system. Main content is
        therefore centred on the physical window, with a symmetric rail-sized safety area. */
     padding-inline-start: 0;
   }
-  html[data-shell="rail"] .topbar {
+  body:not(:has(.page-clusters)) .topbar {
     position: fixed;
     inset: 0 auto 0 0;
     width: 13.5rem;
@@ -175,22 +195,24 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
     border-inline-end: 1px solid var(--border-strong);
     border-block-end: 0;
   }
-  html[data-shell="rail"] .topbar .brand {
+  body:not(:has(.page-clusters)) .topbar .brand {
     min-height: 2rem;
     justify-content: space-between;
+    padding-block-end: 1rem;
+    border-block-end: 1px solid var(--border-strong);
   }
-  html[data-shell="rail"] .topbar .omni {
+  body:not(:has(.page-clusters)) .topbar .omni {
     flex: none;
     width: 100%;
   }
-  html[data-shell="rail"] .topbar .omni-box {
+  body:not(:has(.page-clusters)) .topbar .omni-box {
     max-width: none;
   }
-  html[data-shell="rail"] .topbar .omni-input {
+  body:not(:has(.page-clusters)) .topbar .omni-input {
     padding-inline: 0.65rem;
     font-size: var(--type-ui);
   }
-  html[data-shell="rail"] .topbar nav {
+  body:not(:has(.page-clusters)) .topbar nav {
     width: 100%;
     margin: 0;
     flex: 1 1 auto;
@@ -199,12 +221,12 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
     gap: 1.1rem;
     overflow: visible;
   }
-  html[data-shell="rail"] .topbar .nav-group {
+  body:not(:has(.page-clusters)) .topbar .nav-group {
     display: flex;
     flex-direction: column;
     gap: 0.1rem;
   }
-  html[data-shell="rail"] .topbar .nav-group-label {
+  body:not(:has(.page-clusters)) .topbar .nav-group-label {
     display: block;
     margin: 0 0 0.3rem 0.65rem;
     font-family: var(--font-mono);
@@ -214,37 +236,32 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
     text-transform: uppercase;
     color: var(--faint);
   }
-  html[data-shell="rail"] .topbar nav a,
-  html[data-shell="rail"] .topbar .tools-btn {
+  body:not(:has(.page-clusters)) .topbar nav a,
+  body:not(:has(.page-clusters)) .topbar .tools-btn {
     width: 100%;
     justify-content: flex-start;
     padding: 0.48rem 0.65rem;
     border-radius: 2px;
   }
-  html[data-shell="rail"] .topbar nav a.active,
-  html[data-shell="rail"] .topbar .tools-btn.active {
+  body:not(:has(.page-clusters)) .topbar nav a.active,
+  body:not(:has(.page-clusters)) .topbar .tools-btn.active {
     border-inline-start: 3px solid var(--control-selected-border);
   }
-  html[data-shell="rail"] .topbar .tools-menu {
+  body:not(:has(.page-clusters)) .topbar .tools-menu {
     width: 100%;
     margin-top: auto;
   }
-  html[data-shell="rail"] .topbar .tools-pop {
+  body:not(:has(.page-clusters)) .topbar .tools-pop {
     left: calc(100% + 0.5rem);
     right: auto;
     top: auto;
     bottom: 0;
   }
-  html[data-shell="rail"] .topbar .shell-toggle {
-    width: 100%;
-    padding: 0.5rem 0.65rem;
-    text-align: left;
-  }
-  html[data-shell="rail"] main {
+  body:not(:has(.page-clusters)) main {
     width: min(var(--maxw), calc(100vw - 27rem));
     margin-inline: auto;
   }
-  html[data-shell="rail"] .authbar {
+  body:not(:has(.page-clusters)) .authbar {
     position: relative;
   }
 }

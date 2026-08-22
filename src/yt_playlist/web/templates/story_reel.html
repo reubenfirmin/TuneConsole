@@ -46,12 +46,10 @@
            x-transition:enter="s-enter" x-transition:enter-start="s-enter-start" x-transition:enter-end="s-enter-end"
            role="group" aria-roledescription="slide" aria-label="{{ b.kind }}">
     {% if b.kind == 'cover' %}
-      <span class="slide-eyebrow">Monthly recap</span>
       <h1 class="slide-h1">Your {{ b.month_name }}</h1>
       <p class="slide-thesis">{{ b.thesis }}</p>
       <span class="slide-hint">tap to begin</span>
     {% elif b.kind == 'numbers' %}
-      <span class="slide-eyebrow">By the numbers</span>
       <div class="num-grid">
         <div><strong data-count="{{ b.plays }}">{{ b.plays }}</strong><span>plays</span></div>
         <div><strong data-count="{{ b.listen_days }}">{{ b.listen_days }}</strong><span>days listening</span></div>
@@ -59,34 +57,27 @@
         {% if b.distinct_artists %}<div><strong data-count="{{ b.distinct_artists }}">{{ b.distinct_artists }}</strong><span>artists</span></div>{% endif %}
       </div>
     {% elif b.kind == 'all_in' %}
-      <span class="slide-eyebrow">You went all in on</span>
       <h1 class="slide-h1 slide-name">{{ b.artist }}</h1>
       <p class="slide-big"><strong data-count="{{ (b.share * 100)|round|int }}">{{ (b.share * 100)|round|int }}</strong>%<span> of everything you played</span></p>
       <p class="slide-sub">{{ b.plays }} plays</p>
     {% elif b.kind == 'wide_net' %}
-      <span class="slide-eyebrow">You cast a wide net</span>
       <h1 class="slide-h1"><strong data-count="{{ b.artists }}">{{ b.artists }}</strong> artists</h1>
       <p class="slide-sub">across {{ b.plays }} plays — no one act ran the month. You were exploring.</p>
     {% elif b.kind == 'night' %}
-      <span class="slide-eyebrow">Your biggest day</span>
       <h1 class="slide-h1">{{ b.label }}</h1>
       <p class="slide-big"><strong data-count="{{ b.plays }}">{{ b.plays }}</strong><span> plays in a day</span></p>
       <p class="slide-sub">{{ (b.pct * 100)|round|int }}% of it was {{ b.artist }}</p>
     {% elif b.kind == 'new' %}
-      <span class="slide-eyebrow">A new obsession</span>
       <h1 class="slide-h1 slide-name">{{ b.artist }}</h1>
       <p class="slide-sub">Never in your world before this month — then <strong data-count="{{ b.plays }}">{{ b.plays }}</strong> plays.</p>
     {% elif b.kind == 'diversity' %}
-      <span class="slide-eyebrow">Your taste</span>
       <h1 class="slide-h1">You {{ b.direction }}</h1>
       <p class="slide-sub">Genre spread {{ b.prev }} → <strong>{{ b.cur }}</strong> vs last month
         {{ '(wider)' if b.delta > 0 else '(tighter)' }}.</p>
     {% elif b.kind == 'revival' %}
-      <span class="slide-eyebrow">Back from the dead</span>
       <h1 class="slide-h1 slide-name">{{ b.artist }}</h1>
       <p class="slide-sub">{{ b.detail }}</p>
     {% elif b.kind == 'personality' %}
-      <span class="slide-eyebrow">Your listening personality</span>
       <div class="pers-aura">{{ aura(b.aura, 'p') }}</div>
       <h1 class="slide-h1 slide-name">{{ b.name }}</h1>
       <p class="slide-sub">{{ b.blurb }}.</p>
@@ -101,7 +92,7 @@
            data-plays="{{ b.plays }}" data-days="{{ b.listen_days }}"
            data-artist="{{ b.top_artist or '' }}" data-hue="{{ b.aura.hue }}">
         <div class="close-aura">{{ aura(b.aura, 'c') }}</div>
-        <span class="slide-eyebrow">Your {{ b.month_name }}</span>
+        <h2 class="close-month">Your {{ b.month_name }}</h2>
         <h1 class="slide-h1 slide-name">{{ b.personality }}</h1>
         <div class="close-stats">
           <div><strong>{{ b.plays }}</strong><span>plays</span></div>

@@ -222,9 +222,9 @@
      Ordinary components use solid fills; hierarchy comes from contrast and
      borders, not gradients. Clusters and Recap keep protected roles below. */
   --canvas:              var(--p-night);
-  --surface-card:        var(--p-indigo-850);
-  --surface-interactive: var(--p-indigo-700);
-  --surface-raised:      var(--p-indigo-750);
+  --surface-card:        var(--p-indigo-900);
+  --surface-interactive: var(--p-indigo-750);
+  --surface-raised:      var(--p-indigo-700);
   --surface-inset:       var(--p-abyss);
   --surface-subtle:      var(--p-indigo-800);
   --border-subtle:       var(--p-indigo-500);
@@ -233,7 +233,7 @@
 
   /* Compatibility aliases while components migrate to the explicit roles. */
   --bg:          var(--canvas);
-  --bg-2:        var(--p-night-3);
+  --bg-2:        var(--surface-subtle);
   --surface:     var(--surface-card);
   --surface-2:   var(--surface-interactive);
   --surface-3:   var(--surface-raised);
@@ -243,9 +243,9 @@
   --border-2:    var(--border-strong);
 
   /* ---- type ---- */
-  --text:        var(--p-lilac-50);
-  --dim:         var(--p-lilac-500);
-  --faint:       var(--p-lilac-700);
+  --text:        var(--p-mist);
+  --dim:         var(--p-blue-300);
+  --faint:       var(--p-slate-350);
   --on-accent:   var(--p-white);        /* type sitting on a filled accent */
   --on-cta:      var(--p-green-900);    /* type sitting on the neon CTA fill */
   --light-source:var(--p-white);        /* highlights, stars and masks */
@@ -270,10 +270,10 @@
   --chart-album: var(--p-tan-400);
 
   /* ---- brand accents ---- */
-  --accent:      var(--p-indigo-300);
-  --accent-2:    var(--p-indigo-200);
-  --accent-3:    var(--p-indigo-250);
-  --accent-pale: var(--p-indigo-100);
+  --accent:      var(--p-blue-500);
+  --accent-2:    var(--p-blue-300);
+  --accent-3:    var(--p-blue-600);
+  --accent-pale: var(--p-cyan-100);
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
   --immersive-accent:      var(--p-violet-500);
   --immersive-accent-2:    var(--p-violet-300);
@@ -287,18 +287,18 @@
   --amber-pale:  var(--p-amber-100);
   --amber-deep:  var(--p-amber-400);
 
-  /* ---- call to action (the neon green) ---- */
-  --cta:         var(--p-green-500);
-  --cta-2:       var(--p-green-300);
-  --cta-pale:    var(--p-green-100);
-  --cta-ink:     var(--p-green-900);
-  --cta-well:    var(--p-green-950);
+  /* ---- call to action (warm counterpoint to the blue application signal) ---- */
+  --cta:         var(--p-amber-300);
+  --cta-2:       var(--p-amber-100);
+  --cta-pale:    var(--p-cream-100);
+  --cta-ink:     var(--p-amber-950);
+  --cta-well:    var(--p-amber-950);
 
   /* ---- flat control fills ---- */
-  --control-selected:      var(--p-indigo-650);
-  --control-selected-hover:var(--p-indigo-600);
-  --control-selected-border:var(--p-indigo-300);
-  --focus-ring:            var(--p-cyan-400);
+  --control-selected:      var(--p-blue-600);
+  --control-selected-hover:var(--p-blue-500);
+  --control-selected-border:var(--p-blue-300);
+  --focus-ring:            var(--p-amber-200);
   --control-primary:       var(--control-selected);
   --control-primary-hover: var(--control-selected-hover);
   --control-danger:        var(--danger);
@@ -373,6 +373,22 @@
   --dim-artist-a:   var(--p-blue-600);    --dim-artist-b:   var(--p-blue-300);
 
   /* ---- cluster / starfield ---- */
+  --cluster-canvas:             var(--p-night);
+  --cluster-surface-card:       var(--p-indigo-850);
+  --cluster-surface-interactive:var(--p-indigo-700);
+  --cluster-surface-raised:     var(--p-indigo-750);
+  --cluster-surface-inset:      var(--p-abyss);
+  --cluster-surface-subtle:     var(--p-indigo-800);
+  --cluster-border-subtle:      var(--p-indigo-500);
+  --cluster-border-strong:      var(--p-indigo-400);
+  --cluster-text:               var(--p-lilac-50);
+  --cluster-dim:                var(--p-lilac-500);
+  --cluster-faint:              var(--p-lilac-700);
+  --cluster-cta:                var(--p-green-500);
+  --cluster-cta-2:              var(--p-green-300);
+  --cluster-cta-pale:           var(--p-green-100);
+  --cluster-cta-ink:            var(--p-green-900);
+  --cluster-cta-well:           var(--p-green-950);
   --star-bright:  var(--p-white);
   --star-warm:    var(--p-star-warm);
   --star-amber:   var(--p-star-amber);

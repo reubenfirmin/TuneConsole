@@ -42,8 +42,6 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 }
 .brand-name { font-family: var(--font-sans); font-size: 1.18rem; font-weight: 750;
   letter-spacing: -0.025em; line-height: 1; }
-.brand-edition { font-family: var(--font-mono); font-size: 0.56rem; font-weight: 600;
-  letter-spacing: 0.11em; line-height: 1.2; color: var(--faint); }
 .brand:hover { text-decoration: none; }
 .brand:hover .brand-name { color: var(--light-source); }
 
@@ -98,10 +96,6 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 }
 .tools-pop a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
 .tools-pop a.active { color: var(--light-source); background: var(--control-primary); }
-.shell-toggle { flex: none; padding: 0.35rem 0.55rem; background: transparent;
-  border-color: var(--border); color: var(--faint); font-family: var(--font-mono);
-  font-size: 0.62rem; letter-spacing: 0.04em; }
-.shell-toggle:hover { background: var(--surface-2); color: var(--text); }
 
 /* ---- navbar omnisearch ---- */
 .omni { flex: 1 1 auto; min-width: 0; display: flex; justify-content: center; align-self: center; }
@@ -144,14 +138,12 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .omni-empty { padding: .875rem 0.7rem; color: var(--dim); font-size: var(--type-ui); }
 @media (max-width: 1050px) {
   .topbar { gap: .7rem; }
-  .brand-edition { display: none; }
   .omni-box { max-width: 20rem; }
   .topbar nav a, .tools-btn { padding-inline: .5rem; }
 }
 @media (max-width: 720px) {
   .topbar { padding: .75rem; }
   .omni { display: none; }
-  .shell-toggle { display: none; }
 }
 
 /* ---- layout ---- */

@@ -225,15 +225,11 @@ def test_serif_is_limited_to_the_generating_takeover():
     assert ".gen-stage .gen-title" in overrides
 
 
-def test_eyebrows_are_limited_to_protected_experiences():
-    ordinary_templates = [p for p in (WEB / "templates").rglob("*.html")
-                          if p.name not in {"story_reel.html", "clusters.html"}]
-    offenders = [p.name for p in ordinary_templates if re.search(r"\beyebrow(?:-|\b)", p.read_text())]
-    assert not offenders, f"ordinary templates still use eyebrows: {offenders}"
+def test_decorative_eyebrows_are_absent_everywhere():
+    offenders = [p.name for p in (WEB / "templates").rglob("*.html")
+                 if re.search(r"\beyebrow(?:-|\b)", p.read_text())]
+    assert not offenders, f"templates still use decorative eyebrows: {offenders}"
     assert ".eyebrow" not in (WEB / "static" / "app.css").read_text()
-
-    assert "slide-eyebrow" in (WEB / "templates" / "story_reel.html").read_text()
-    assert "cj-eyebrow" in (WEB / "templates" / "clusters.html").read_text()
     assert "gen-status" in (WEB / "templates" / "generating.html").read_text()
 
 
@@ -361,13 +357,13 @@ def test_final_style_foundation_has_no_obsolete_layout_aliases():
     assert ".eq-stop-start" in app and ".eq-delay-1" in app
 
 
-def test_selected_controls_are_flat_indigo_not_violet():
+def test_selected_controls_use_the_flat_blue_application_signal():
     tokens = TOKENS.read_text()
     app = (WEB / "static" / "app.css").read_text()
     merge = (WEB / "static" / "page-overrides.css").read_text()
-    assert "--control-selected:      var(--p-indigo-650)" in tokens
+    assert "--control-selected:      var(--p-blue-600)" in tokens
     assert "--control-primary:       var(--control-selected)" in tokens
-    assert "--accent:      var(--p-indigo-300)" in tokens
+    assert "--accent:      var(--p-blue-500)" in tokens
     assert "--immersive-accent:      var(--p-violet-500)" in tokens
 
     for selector in (".seg button.on, .seg a.on", ".tab-btn.active"):

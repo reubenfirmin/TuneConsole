@@ -1,20 +1,46 @@
 /* Interactive Clusters graph and its controls. */
 .page-clusters {
+  /* Protected immersive palette: the application now uses blue + warm, but this workspace keeps
+     the violet/cyan/green language its graph interactions were designed around. */
+  --canvas: var(--cluster-canvas);
+  --surface-card: var(--cluster-surface-card);
+  --surface-interactive: var(--cluster-surface-interactive);
+  --surface-raised: var(--cluster-surface-raised);
+  --surface-inset: var(--cluster-surface-inset);
+  --surface-subtle: var(--cluster-surface-subtle);
+  --border-subtle: var(--cluster-border-subtle);
+  --border-strong: var(--cluster-border-strong);
+  --text: var(--cluster-text);
+  --dim: var(--cluster-dim);
+  --faint: var(--cluster-faint);
   --accent: var(--immersive-accent);
   --accent-2: var(--immersive-accent-2);
   --accent-3: var(--immersive-accent-3);
   --accent-pale: var(--immersive-accent-pale);
   --accent-soft: color-mix(in srgb, var(--immersive-accent) 16%, transparent);
+  --cta: var(--cluster-cta);
+  --cta-2: var(--cluster-cta-2);
+  --cta-pale: var(--cluster-cta-pale);
+  --cta-ink: var(--cluster-cta-ink);
+  --cta-well: var(--cluster-cta-well);
   /* Clusters is a protected immersive workspace, not an ordinary application page. Keep its
      established, softer overlay geometry when the shared application shell becomes sharper. */
   --radius: 12px;
   --radius-sm: 8px;
 }
-.cluster-page-label {
-  font-family: var(--font-mono); font-size: .66rem; font-weight: 600;
-  letter-spacing: .22em; text-transform: uppercase; color: var(--accent);
-  display: block; margin-bottom: .5rem;
+/* Clusters is a mode, not another destination inside the application chrome. Give the graph the
+   entire viewport and retain one small, predictable way back to the shell. */
+body:has(.page-clusters) .topbar { display: none; }
+.cluster-exit {
+  position: fixed; z-index: 20; top: 0.7rem; left: 0.75rem;
+  display: inline-flex; align-items: baseline; gap: 0.3rem;
+  padding: 0.42rem 0.55rem; border: 1px solid var(--border-2); border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent); color: var(--text);
+  font-family: var(--font-mono); font-size: 0.68rem; font-weight: 750; letter-spacing: 0.08em;
+  text-decoration: none; box-shadow: var(--shadow);
 }
+.cluster-exit span { color: var(--faint); font-size: 0.58rem; }
+.cluster-exit:hover { color: var(--cta); border-color: var(--cta); text-decoration: none; }
 /* ===== Clusters tab ===================================================== */
 /* Full-bleed: break out of <main>'s centred max-width + padding so the canvas is the whole viewport. */
 .cluster-page {
@@ -170,7 +196,6 @@
   filter: drop-shadow(0 1px 2px color-mix(in srgb, var(--shadow-ink) 60%, transparent)); pointer-events: none; z-index: 2; }
 .cn-track.new-music .cn-label { color: var(--accent-2); }
 .cn-central { display: flex; flex-direction: column; gap: 0.35rem; }
-.cn-eyebrow { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.14em; color: var(--accent-2); }
 .cn-seeds { display: flex; flex-wrap: wrap; gap: 0.3rem; }
 .cn-seed { font-size: 0.78rem; font-weight: 600; padding: 0.12rem 0.45rem; border-radius: 999px;
   background: var(--surface); border: 1px solid var(--border-2); }
@@ -244,6 +269,7 @@
 .cluster-search:not(.docked) { position: absolute; left: 0; right: 0; top: 0;
   margin: 0; transform: translateY(40vh); }
 .cluster-search.docked { margin: 0 0 0.6rem; transform: translateY(0); }
+.cluster-search.docked .cluster-search-row { padding-inline-start: 4.8rem; }
 /* search box + genre combo share one row */
 .cluster-search-row { display: flex; gap: 0.6rem; align-items: center; justify-content: center;
   width: 100%; flex-wrap: wrap; }
@@ -350,8 +376,8 @@
   cursor: pointer; padding: 0.3rem 1.6rem 0.3rem 0.7rem; border-radius: var(--radius-sm);
   background: var(--bg-2); border: 1px solid var(--border-2); color: var(--text); min-width: 8.5rem; }
 .cj-toggle:hover { border-color: var(--accent); }
-.cj-eyebrow { font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--faint); }
-.cj-cur { font-size: 0.88rem; font-weight: 600; white-space: nowrap; }
+.cj-cur { font-size: 0.82rem; font-weight: 600; white-space: nowrap; }
+.cj-cur > span { color: var(--accent-2); }
 .cj-caret { position: absolute; right: 0.55rem; top: 50%; transform: translateY(-50%); color: var(--faint); font-size: 0.7rem; }
 .cj-panel { position: absolute; z-index: 8; bottom: calc(100% + 0.4rem); left: 0; width: 17rem;
   max-height: 56vh; overflow-y: auto; padding: 0.3rem;
