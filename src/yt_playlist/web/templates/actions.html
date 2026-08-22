@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Actions · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Actions · TuneConsole{% endblock %}{% block page_class %}page-workflow page-actions{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 {% if flasherr %}{% call banner('err') %}{{ flasherr }}{% endcall %}{% endif %}
 <div class="page-head">
@@ -6,7 +6,7 @@
   <p>Every merge, move, and undo, newest first. Executed plans can be reverted.</p>
 </div>
 
-<div class="card">
+<div class="card workflow-sheet">
   <div class="table-scroll"><table>
     <thead><tr><th class="num">#</th><th>When</th><th>Action</th><th>Status</th><th></th></tr></thead>
     <tbody>

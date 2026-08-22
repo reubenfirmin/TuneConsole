@@ -9,18 +9,19 @@
 {% set cmp = t.compare %}
 {% set cd = t.close_days %}{% set sd = t.span_days %}
 {% if t.rows %}
-<p class="small text-faint flush section-block">
-  Ranked by your last-{{ cd }}-day listening. The bar is each {{ heads[dim]|lower }}'s share of
-  recent plays.{% if cmp %} The dashed <span class="text-teal">tick</span> is its share of
-  your library; bar past the tick = you're playing it more than you own (over-indexed).{% endif %}
-  The faint <span class="text-dim">◦</span> marks where it sat earlier, and the thin
-  whisker is its range over your {{ sd }}d of history. Hover for detail.
-</p>
+<div class="chart-key section-block">
+  <strong class="chart-key-title">How to read this</strong>
+  <span class="chart-key-item"><i class="key-now"></i><span><b>Now</b>share of plays in the last {{ cd }}d</span></span>
+  <span class="chart-key-item"><i class="key-range"></i><span><b>Range</b>low to high over {{ sd }}d</span></span>
+  <span class="chart-key-item"><i class="key-earlier"></i><span><b>Earlier</b>share at the start of that period</span></span>
+  {% if cmp %}<span class="chart-key-item"><i class="key-library"></i><span><b>Library</b>share of tracks you own</span></span>{% endif %}
+  <span class="chart-key-help">Point to any bar for the exact values and trend.</span>
+</div>
 <table class="chart ticker">
   <thead><tr>
     <th class="rank">#</th>
     <th>{{ heads[dim] }}</th>
-    <th class="tickhead">recent listening share{% if cmp %} &nbsp;·&nbsp; <span class="text-teal">┊</span> library{% endif %}</th>
+    <th class="tickhead">recent listening share{% if cmp %} &nbsp;·&nbsp; <span class="chart-warm">┊</span> library{% endif %}</th>
     <th class="num">{{ cd }}d</th>
     {% if cmp %}<th class="num">vs library</th>{% endif %}
   </tr></thead>

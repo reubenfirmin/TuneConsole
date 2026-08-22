@@ -1,7 +1,7 @@
 {# Server-rendered merge editor body. Every control posts to /merge/update (which mutates the
    in-memory draft) and swaps this whole partial back into #merge-body. #}
 {% set upd = '/merge/update?ids=' ~ ids_csv %}
-<div class="card section-block">
+<div class="card section-block workflow-control merge-control">
   <div class="cfg">
     <div>
       <div class="cmp-h">Where should the result go?</div>
@@ -27,7 +27,7 @@
      Tick the songs you want in the result. A backup of any deleted playlist is written first, and it's undoable from Actions.</p>
 </div>
 
-<div class="card">
+<div class="card workflow-sheet merge-sheet">
   <div class="col-head">Songs <span class="count">{{ count }} / {{ total }}</span>
     <span class="push-end"></span>
     <span class="seg" title="Sort order">

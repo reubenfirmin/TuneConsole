@@ -256,6 +256,408 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
   }
 }
 
+/* ===== Phase 7 charts: one visual grammar, with warm colour reserved for meaning ============= */
+.page-charts .chart-toolbar {
+  padding: 0 0 .35rem;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  gap: .75rem 1.25rem;
+}
+.page-charts .chart-toolbar .seg {
+  border: 0;
+  border-radius: 0;
+  gap: .15rem;
+}
+.page-charts .chart-toolbar .seg :is(button, a) {
+  min-height: 2.25rem;
+  padding-inline: .7rem;
+  color: color-mix(in srgb, var(--text) 64%, transparent);
+  border-block-end: 2px solid transparent;
+}
+.page-charts .chart-toolbar .seg :is(button, a).on {
+  color: var(--text);
+  background: transparent;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.page-charts .chart-window {
+  font-family: var(--font-mono);
+}
+.page-charts .chart-panel {
+  padding: clamp(.5rem, 1.5vw, 1rem) 0 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+.page-charts .chart-key {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .8rem 1.35rem;
+  margin-block: 0 var(--sp-5);
+  color: color-mix(in srgb, var(--text) 72%, transparent);
+  font-size: var(--type-sm);
+  line-height: 1.35;
+}
+.page-charts .chart-key-title {
+  flex-basis: 100%;
+  color: var(--text);
+  font-size: var(--type-ui);
+}
+.page-charts .chart-key-item {
+  display: inline-flex;
+  align-items: center;
+  gap: .55rem;
+}
+.page-charts .chart-key-item > span {
+  display: flex;
+  flex-direction: column;
+}
+.page-charts .chart-key-item b {
+  color: var(--text);
+  font-weight: 700;
+}
+.page-charts .chart-key-item > i {
+  position: relative;
+  display: inline-block;
+  width: 2.4rem;
+  height: 1rem;
+  flex: none;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.page-charts .key-now::after {
+  content: "";
+  position: absolute;
+  inset: .2rem .65rem .2rem 0;
+  background: var(--accent);
+}
+.page-charts .key-range::after {
+  content: "";
+  position: absolute;
+  inset: calc(50% - .5px) .3rem auto;
+  height: 1px;
+  background: var(--text);
+  box-shadow: -.05rem -.2rem 0 -.02rem var(--text), .05rem .2rem 0 -.02rem var(--text);
+}
+.page-charts .key-earlier::after {
+  content: "";
+  position: absolute;
+  left: 1rem;
+  top: .25rem;
+  width: .5rem;
+  height: .5rem;
+  border: 2px solid var(--text);
+  background: var(--canvas);
+  transform: rotate(45deg);
+}
+.page-charts .key-library::after {
+  content: "";
+  position: absolute;
+  left: 1.15rem;
+  inset-block: -.15rem;
+  border-inline-start: 3px solid var(--cta);
+}
+.page-charts .chart-key-help {
+  flex-basis: 100%;
+  color: var(--text);
+  font-size: var(--type-ui);
+}
+.page-charts .chart :is(th, td) {
+  border-block-end: 0;
+}
+.page-charts .chart thead th {
+  color: color-mix(in srgb, var(--text) 55%, transparent);
+  background: var(--canvas);
+}
+.page-charts .chart tbody td {
+  padding-block: .72rem;
+}
+.page-charts .chart tbody tr:hover {
+  background: var(--surface-raised);
+}
+.page-charts .chart .rank {
+  min-width: 3.25rem;
+  font-size: 1.05rem;
+  font-weight: 720;
+  letter-spacing: -.05em;
+  color: color-mix(in srgb, var(--text) 34%, transparent);
+}
+.page-charts .chart tbody tr:nth-child(-n + 3) .rank {
+  color: var(--accent-2);
+}
+.page-charts .chart .ptitle,
+.page-charts .chart .tklabel {
+  font-weight: 680;
+  letter-spacing: -.01em;
+}
+.page-charts .chart .album-thumb {
+  width: 3rem;
+  height: 3rem;
+}
+.page-charts .ticker-candle {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.page-charts .playbar,
+.page-charts .tk-bar,
+.page-charts :is(.dim-genre, .dim-year, .dim-album, .dim-playlist, .dim-artist) .tk-bar {
+  border-radius: 0;
+  background: var(--accent);
+}
+.page-charts .playbar {
+  height: 1rem;
+}
+.page-charts .ticker-candle {
+  height: 1.35rem;
+  cursor: help;
+}
+.page-charts .tk-bar {
+  z-index: 2;
+  height: .72rem;
+}
+.page-charts .tk-bar.over {
+  background: var(--cta);
+  box-shadow: none;
+}
+.page-charts .tk-corpus {
+  z-index: 4;
+  border-inline-start-color: var(--cta);
+  border-inline-start-width: 3px;
+  border-inline-start-style: solid;
+}
+.page-charts .tk-open {
+  z-index: 5;
+  width: .55rem;
+  height: .55rem;
+  border-radius: 0;
+  border: 2px solid var(--text);
+  background: var(--canvas);
+  box-shadow: 0 0 0 2px var(--canvas);
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.page-charts .tk-whisker,
+.page-charts .tk-whisker::before,
+.page-charts .tk-whisker::after {
+  background: var(--text);
+}
+.page-charts .tk-whisker {
+  z-index: 3;
+}
+.page-charts .tkratio .tk-over {
+  color: var(--cta-2);
+}
+body:has(.page-charts) .viz-tip {
+  max-width: 22rem;
+  padding: .85rem .95rem;
+  font-size: var(--type-ui);
+  line-height: 1.5;
+}
+body:has(.page-charts) .viz-tip .vt-title {
+  font-size: var(--type-body);
+}
+body:has(.page-charts) .viz-tip .vt-v {
+  font-size: var(--type-sm);
+}
+body:has(.page-charts) .viz-tip .vt-n {
+  font-size: var(--type-sm);
+  line-height: 1.45;
+}
+
+@media (max-width: 45rem) {
+  .page-charts .chart-toolbar {
+    align-items: flex-start;
+  }
+  .page-charts .chart-toolbar .push-end {
+    display: none;
+  }
+  .page-charts .chart-window {
+    flex-basis: auto;
+  }
+}
+
+/* ===== Phase 8 workflows: control desks, working sheets and decision cases =================== */
+.page-workflow .page-head p,
+.page-workflow .section-note {
+  max-width: 68ch;
+}
+.page-workflow .workflow-control {
+  padding: clamp(1rem, 2.5vw, 1.5rem);
+  background: var(--surface-subtle);
+  border: 0;
+  box-shadow: none;
+}
+.page-workflow .workflow-console {
+  padding: clamp(1rem, 3vw, 1.8rem);
+  background: var(--surface-inset);
+  border-color: var(--border-strong);
+  box-shadow: none;
+}
+.page-workflow .workflow-sheet {
+  padding-inline: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+.page-workflow .workflow-sheet thead th {
+  color: color-mix(in srgb, var(--text) 58%, transparent);
+  background: var(--canvas);
+}
+.page-workflow .workflow-sheet tbody tr:hover {
+  background: var(--surface-raised);
+}
+.page-workflow .workflow-case {
+  padding: clamp(1rem, 2.5vw, 1.4rem);
+  background: var(--surface-subtle);
+  border: 0;
+  box-shadow: none;
+}
+.page-workflow .workflow-case .group-head {
+  margin-block-end: .8rem;
+  font-size: clamp(1.05rem, 2vw, 1.25rem);
+}
+.page-workflow .workflow-case tbody tr:last-child td {
+  border-block-end: 0;
+}
+.page-workflow .workflow-metrics {
+  gap: clamp(1rem, 3vw, 2rem);
+  margin-block-end: var(--sp-6);
+}
+.page-workflow .workflow-metrics .metric {
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.page-workflow .workflow-metrics .metric::after {
+  content: none;
+}
+.page-workflow .workflow-metrics .metric .n {
+  font-size: clamp(2.4rem, 5vw, 3.8rem);
+  line-height: .9;
+  letter-spacing: -.055em;
+  color: var(--text);
+}
+.page-workflow .workflow-metrics .metric .l {
+  margin-block-start: .55rem;
+  color: color-mix(in srgb, var(--text) 62%, transparent);
+}
+.page-workflow .workflow-metrics a.metric:hover {
+  transform: none;
+}
+.page-workflow .workflow-metrics a.metric:hover .n {
+  color: var(--accent-2);
+}
+
+/* Merge is a dense editor: keep source colours, but let the choices and song ledger occupy their
+   own clear planes. */
+.page-merge .merge-control .cfg {
+  align-items: stretch;
+}
+.page-merge .merge-control .cfg > div:first-child {
+  max-width: 48rem;
+}
+.page-merge .merge-control .cfg > .text-end {
+  min-width: 9rem;
+  padding-inline-start: var(--sp-4);
+  border-inline-start: 1px solid var(--border-strong);
+}
+.page-merge .merge-sheet .col-head {
+  margin-block-end: .8rem;
+}
+.page-merge .merge-sheet .seg {
+  border: 0;
+  border-radius: 0;
+}
+.page-merge .merge-sheet .seg button.on {
+  background: transparent;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Move's identity selection is the main decision, not a small form floating in a card. */
+.page-move .workflow-control .cluster {
+  gap: clamp(.8rem, 3vw, 1.6rem);
+}
+.page-move .workflow-control .opt {
+  display: grid;
+  gap: .4rem;
+  color: color-mix(in srgb, var(--text) 62%, transparent);
+  font-size: var(--type-xs);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.page-move .workflow-control .inline-control {
+  min-width: min(15rem, 70vw);
+  color: var(--text);
+  font-size: var(--type-body);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.page-move .move-arrow {
+  color: var(--accent-2);
+  font-size: 2rem;
+}
+
+/* Enrichment reads as a live instrument panel instead of a card full of smaller cards. */
+.page-enrich .enrich-head {
+  margin-block-end: var(--sp-5);
+}
+.page-enrich .enrich-state {
+  border-radius: 2px;
+  padding: .35rem .55rem;
+  font-family: var(--font-mono);
+}
+.page-enrich .enrich-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-4);
+  margin-block-end: var(--sp-6);
+}
+.page-enrich .enrich-tiles .metric {
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.page-enrich .enrich-tiles .metric .v {
+  font-size: clamp(1.8rem, 4vw, 2.8rem);
+  font-weight: 720;
+  letter-spacing: -.04em;
+}
+.page-enrich .cov-bar,
+.page-enrich .cov-bar > i {
+  border-radius: 0;
+}
+
+.page-network .network-policy code {
+  color: var(--accent-2);
+}
+.page-genres .genre-add {
+  align-items: stretch;
+}
+.page-genres .genre-add input {
+  min-height: 2.75rem;
+  font-size: var(--type-body);
+}
+.page-genres .genre-chips {
+  gap: .4rem;
+}
+.page-genres .genre-chip,
+.page-genres .chip-x {
+  border-radius: 2px;
+}
+
+@media (max-width: 45rem) {
+  .page-merge .merge-control .cfg > .text-end {
+    width: 100%;
+    padding: var(--sp-3) 0 0;
+    border-inline-start: 0;
+    border-block-start: 1px solid var(--border-strong);
+    text-align: start;
+  }
+  .page-enrich .enrich-tiles {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ===== Phase 2 identity: stronger type hierarchy ============================================ */
 .page-home h2.section {
   font-size: clamp(1.45rem, 2.6vw, 1.8rem);

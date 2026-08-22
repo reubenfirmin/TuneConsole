@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_macros.html" import pllink, banner with context %}{% block title %}Cleanup · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import pllink, banner with context %}{% block title %}Cleanup · TuneConsole{% endblock %}{% block page_class %}page-workflow page-cleanup{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
   &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}{% endcall %}{% endif %}
 {% if flasherr %}{% call banner('err') %}{{ flasherr }}{% endcall %}{% endif %}
@@ -7,7 +7,7 @@
   <p>Dedupe, consolidate, and prune playlists across your YouTube identities.</p>
 </div>
 
-<div class="metrics">
+<div class="metrics workflow-metrics">
   <div class="metric"><div class="n">{{ n_playlists }}</div><div class="l">Playlists</div></div>
   <a class="metric cool" href="/setup"><div class="n">{{ n_identities }}</div><div class="l">Identities</div></a>
   <a class="metric warn" href="#dupes"><div class="n">{{ n_groups }}</div><div class="l">Exact-dup groups ↓</div></a>
@@ -26,7 +26,7 @@
    other copy is deleted (backup first, remote-verified). One click resolves the whole group.</p>
 {% for g in groups %}
   {% set member_ytms = g.playlists | map(attribute='ytm_playlist_id') | join(',') %}
-  <div class="card group section-block">
+  <div class="card group section-block workflow-case">
     <div class="group-head cluster">
       <strong>{{ g.playlists|length }} identical copies</strong>
       <span class="muted">· {{ g.track_count }} tracks</span>
@@ -62,7 +62,7 @@
 {% for g in near_groups %}
   {% set member_csv = g.playlists | map(attribute='id') | join(',') %}
   {% set member_ytms = g.playlists | map(attribute='ytm_playlist_id') | join(',') %}
-  <div class="card section-block">
+  <div class="card section-block workflow-case">
     <div class="group-head cluster">
       <span>{{ g.playlists|length }} similar playlists <span class="muted">· ~{{ '%.0f'|format(g.avg_similarity*100) }}% alike</span></span>
       <button type="button" class="btn-ghost btn-sm push-end"
@@ -87,7 +87,7 @@
 {% if empties %}
 <h2 class="section" id="empty">Empty playlists <span class="count">{{ empties|length }}</span></h2>
 <p class="section-note">Playlists with no tracks. Delete the ones you don't need (a backup is written first).</p>
-<div class="card">
+<div class="card workflow-sheet">
   <table>
     <thead><tr><th>Playlist</th><th></th></tr></thead>
     {% for p in empties %}
@@ -99,7 +99,7 @@
 
 <h2 class="section" id="overlaps">Overlaps <span class="count">shared tracks · {{ n_overlaps }}</span></h2>
 <p class="section-note">Playlists that share songs without being duplicates.</p>
-<div class="card" x-data="overlapSort()" x-init="start()">
+<div class="card workflow-sheet" x-data="overlapSort()" x-init="start()">
   <table x-ref="tbl">
     <thead><tr>
       <th class="sorth" tabindex="0" role="button" @click="sortBy('a')" @keydown.enter.space.prevent="sortBy('a')">Playlist A<span x-text="ind('a')"></span></th>
@@ -203,7 +203,7 @@
 <h2 class="section" id="tiny">Tiny playlists <span class="count">{{ tiny|length }}</span></h2>
 <p class="section-note">Playlists with just 1–3 tracks. Often stragglers worth merging into a bigger
    playlist or pruning; open one to decide.</p>
-<div class="card">
+<div class="card workflow-sheet">
   <table>
     <thead><tr><th>Playlist</th><th class="num">Songs</th><th></th></tr></thead>
     <tbody>

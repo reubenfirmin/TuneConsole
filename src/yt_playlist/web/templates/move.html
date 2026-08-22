@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_macros.html" import pllink, banner with context %}{% block title %}Move · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import pllink, banner with context %}{% block title %}Move · TuneConsole{% endblock %}{% block page_class %}page-workflow page-move{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 <div class="page-head">
   <h1>Move playlists between identities</h1>
@@ -11,7 +11,7 @@
     Add another in <a href="/setup">Setup</a>.</p></div>
 {% else %}
 <div x-data='moveTab({{ identities[0].id }}, {{ identities[1].id }})'>
-  <div class="card section-block">
+  <div class="card section-block workflow-control">
     <div class="cluster">
       <label class="opt">From
         <select x-model.number="from" class="inline-control">
@@ -28,7 +28,7 @@
     </div>
   </div>
 
-  <div class="card">
+  <div class="card workflow-sheet">
     <table>
       <thead><tr><th>Playlist</th><th></th></tr></thead>
       {% for p in playlists %}

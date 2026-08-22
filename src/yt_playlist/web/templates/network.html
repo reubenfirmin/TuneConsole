@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% block title %}Network · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% block title %}Network · TuneConsole{% endblock %}{% block page_class %}page-workflow page-network{% endblock %}{% block body %}
 <div class="page-head">
   <h1>Network log</h1>
   <p>Every request the server makes is checked against a fixed allowlist <em>before</em> it leaves the
@@ -6,7 +6,7 @@
     metadata-enrichment services, and never sends your sign-in anywhere else.</p>
 </div>
 
-<div class="card section-block">
+<div class="card section-block workflow-control network-policy">
   <h2 class="section section-flush">Allowlist</h2>
   <p class="section-note">The only hosts the server is permitted to reach. Anything else is blocked
     and shows up below in red. To change this list you have to edit the source
@@ -16,7 +16,7 @@
   </p>
 </div>
 
-<div class="card">
+<div class="card workflow-sheet">
   <h2 class="section section-flush">Recent requests <span class="muted">(newest first)</span></h2>
   <div class="table-scroll">
   <table>

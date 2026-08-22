@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% block title %}Genres · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% block title %}Genres · TuneConsole{% endblock %}{% block page_class %}page-workflow page-genres{% endblock %}{% block body %}
 <div class="page-head">
   <h1>Genre whitelist</h1>
   <p>Last.fm and Discogs return noisy tags; we pin a genre by matching them against this list, so the
@@ -6,7 +6,7 @@
      don't. (MusicBrainz returns its own genres and isn't filtered by this list.)</p>
 </div>
 
-<div class="card">
+<div class="card workflow-console">
   <div class="genre-add">
     <input type="text" name="name" placeholder="Add a genre…" autocomplete="off"
            hx-post="/genres/add" hx-trigger="keyup[key=='Enter']"
