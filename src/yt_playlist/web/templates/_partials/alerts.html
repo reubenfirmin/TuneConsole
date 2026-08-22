@@ -95,44 +95,17 @@
   </div>
   {% endif %}
 
-  {# Pad a sparse row with muted skeletons so a lone nag fills the 4-slot row instead of orphaning. #}
-  {% set pad = 4 - (actions|length + nudge_count) %}
-  {% if pad > 0 %}{% for _ in range(pad) %}
-  <div class="alert-card card card--featured alert-skeleton" aria-hidden="true">
-    <span class="alert-cover skel-block"></span>
-    <div class="alert-body">
-      <span class="skel-block skel-line"></span>
-      <span class="skel-block skel-line skel-short"></span>
-    </div>
-  </div>
-  {% endfor %}{% endif %}
 </section>
 <script>
   (function () {
     const sec = document.currentScript.previousElementSibling;
     if (!sec || !sec.classList.contains('alerts') || sec.__nagBound) return;
     sec.__nagBound = true;
-    function makeSkeleton() {
-      const d = document.createElement('div');
-      d.className = 'alert-card card alert-skeleton';
-      d.setAttribute('aria-hidden', 'true');
-      d.innerHTML = '<span class="alert-cover skel-block"></span><div class="alert-body">' +
-        '<span class="skel-block skel-line"></span><span class="skel-block skel-line skel-short"></span></div>';
-      return d;
-    }
     // A MutationObserver (not an htmx event) so it fires even though a dismissed card detaches before
-    // its event could bubble. Keep the row at 4 by filling a freed slot with a skeleton; when no real
-    // nags remain, drop the whole row.
+    // its event could bubble. Once the final real notice is gone, remove the now-empty section.
     const obs = new MutationObserver(function () {
-      const real = sec.querySelectorAll('.alert-card:not(.alert-skeleton)').length;
+      const real = sec.querySelectorAll('.alert-card').length;
       if (real === 0) { obs.disconnect(); sec.remove(); return; }
-      const want = Math.max(0, 4 - real);
-      const skels = sec.querySelectorAll('.alert-skeleton');
-      if (skels.length === want) return;                 // no change needed → don't re-trigger ourselves
-      obs.disconnect();
-      for (let i = skels.length - 1; i >= want; i--) skels[i].remove();
-      for (let i = sec.querySelectorAll('.alert-skeleton').length; i < want; i++) sec.appendChild(makeSkeleton());
-      obs.observe(sec, { childList: true });
     });
     obs.observe(sec, { childList: true });
   })();

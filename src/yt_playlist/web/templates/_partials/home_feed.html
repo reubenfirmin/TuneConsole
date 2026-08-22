@@ -1,9 +1,13 @@
 <div id="home-feed" class="home-feed">
   {# The mode-focused cards lead the dash so it does not open on a wall of taste sliders. They load
      lazily from the worker's prepared bundles (spinner while assembling). #}
-  <div hx-get="/home/cards" hx-trigger="load" hx-swap="innerHTML" class="card-row-loading">
-    <div class="spinner" aria-label="Building your mixes"></div>
-  </div>
+  <section class="home-mixes" aria-labelledby="home-mixes-title">
+    <h2 class="section" id="home-mixes-title">Made for your library</h2>
+    <p class="section-note">Ready-to-shape playlists drawn from what you save, play, and revisit.</p>
+    <div hx-get="/home/cards" hx-trigger="load" hx-swap="innerHTML" class="card-row-loading">
+      <div class="spinner" aria-label="Building your mixes"></div>
+    </div>
+  </section>
   {# The steering panel sits BELOW the cards (only meaningful once the library has genres to steer), so
      the page starts with playlists, not controls. #}
   {% if fingerprint.families %}{% include "_partials/taste_fingerprint.html" %}{% endif %}

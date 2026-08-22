@@ -134,8 +134,9 @@
 
 /* Poster action cards: a big cover across the top, minimal orienting text, then the CTA. auto-fit
    so the cards stretch to FILL the row (no trailing empty columns). */
-/* Four fixed slots on desktop so a lone nag + skeleton fillers make one clean row; collapse on smaller. */
-.alerts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .8125rem; margin-bottom: 1.8rem; }
+/* Notices occupy the space they actually need; the page no longer fabricates muted filler cards. */
+.alerts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: .8125rem; margin-bottom: 1.8rem; }
 @media (max-width: 64rem) { .alerts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 34rem) { .alerts { grid-template-columns: 1fr; } }
 .alert-card { position: relative; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
@@ -160,14 +161,6 @@
   background: color-mix(in srgb, var(--surface-sunk) 60%, transparent); border: 1px solid var(--border-2); border-radius: 999px;
   color: var(--light-source); font-size: var(--type-body); line-height: 1; box-shadow: none; cursor: pointer; }
 .alert-x:hover { background: var(--control-selected-hover); box-shadow: none; }
-/* Muted filler cards so a lone nag fills its row instead of sitting orphaned. Decorative only. */
-.alert-skeleton { opacity: 0.5; pointer-events: none; }
-.skel-block { background: var(--surface-2); border-radius: 6px; }
-.alert-skeleton .alert-cover { height: 7.5rem; }
-.alert-skeleton .alert-body { gap: 0.6rem; padding: .875rem; }
-.alert-skeleton .skel-line { display: block; height: .75rem; }
-.alert-skeleton .skel-short { width: 55%; }
-@media (max-width: 64rem) { .alert-skeleton { display: none; } }   /* fillers only in the 4-slot desktop row */
 /* Setup/onboarding nudges rendered as nag cards: an emoji "cover" instead of a thumbnail, and their
    full message in the body (not clamped like an action title). */
 .alert-cover-icon { display: grid; place-items: center; font-size: 2.4rem; background: var(--accent-soft); }
@@ -357,15 +350,14 @@
 .tile-menu { right: 0; }
 
 /* --- generated proto-playlists: the two dated, saveable lanes at the top of Home --- */
-.gen-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.375rem; align-items: stretch;
+.gen-lanes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9375rem; align-items: stretch;
   margin-bottom: 1.375rem; }   /* stretch: both cards in a row take the row's max height */
-@media (max-width: 60rem) { .gen-lanes { grid-template-columns: 1fr; } }
-/* Dynamic: a lone card in a row (1 card, or the odd last of 3) spans full width instead of sitting at
-   half. On wide screens its tracklist splits into two columns so it fills the width, not one sparse run. */
-.gen-lanes > :last-child:nth-child(odd) { grid-column: 1 / -1; }
-@media (min-width: 60.01rem) {
-  .gen-lanes > :last-child:nth-child(odd) .gen-list { columns: 2; column-gap: 1.8rem; }
-  .gen-lanes > :last-child:nth-child(odd) .gen-row { break-inside: avoid; }
+.gen-lanes > .gen-card { grid-column: span 1; }
+.gen-lanes > .gen-card:only-child,
+.gen-lanes > .gen-card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+@media (max-width: 60rem) {
+  .gen-lanes { grid-template-columns: 1fr; }
+  .gen-lanes > .gen-card { grid-column: 1; }
 }
 .gen-card { display: flex; flex-direction: column; }
 .gen-head { margin-bottom: 0.7rem; }
@@ -385,8 +377,9 @@
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   min-height: 2.5em; }
 .gen-list { list-style: none; margin: 0 0 0.2rem; padding: 0; counter-reset: gen; }
-.gen-row { position: relative; display: grid; grid-template-columns: 1.375rem 2.3rem 1fr 1.6rem;
-  align-items: center; gap: 0.55rem; padding: 0.4rem 0.2rem; border-bottom: 1px solid var(--border); }
+.gen-row { position: relative; display: grid; grid-template-columns: 1.375rem 2.3rem minmax(0, 1fr) 1.6rem;
+  align-items: center; column-gap: 0.65rem; row-gap: 0.35rem; padding: 0.4rem 0.2rem;
+  border-bottom: 1px solid var(--border); }
 .gen-row:last-child { border-bottom: none; }
 .gen-row:hover { background: var(--accent-soft); border-radius: var(--radius-sm); }
 .gen-row::before { counter-increment: gen; content: counter(gen); text-align: right;
