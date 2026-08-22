@@ -19,8 +19,6 @@ main:not(.page-clusters) .page-head h1 {
 }
 main:not(.page-clusters) .page-head p {
   padding-block-end: 0.25rem;
-  border-inline-start: 3px solid var(--cta);
-  padding-inline-start: var(--sp-4);
 }
 main:not(.page-clusters) h2.section::after {
   content: "";
@@ -66,21 +64,196 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
 .page-playlists .playlist-toolbar {
   background: transparent;
   border-inline: 0;
-  border-block-start: 1px solid var(--border-strong);
-  border-block-end: 1px solid var(--border-strong);
+  border-block: 0;
 }
 .page-playlists .playlist-table-card {
   padding-inline: 0;
   background: transparent;
   border-inline: 0;
-  border-block-start-color: var(--border-strong);
-  border-block-end-color: var(--border-strong);
+  border-block: 0;
+}
+.page-playlists .playlist-table-card thead th,
+.page-playlists .playlist-table-card tbody td {
+  border-block-end: 0;
+}
+.page-playlists .playlist-table-card thead th {
+  color: color-mix(in srgb, var(--text) 62%, transparent);
+  background: var(--canvas);
 }
 .page-playlists .playlist-generated {
   border-inline-start: 4px solid var(--accent);
 }
 .pl-actionbar {
   border-radius: 4px;
+}
+
+/* ===== Phase 6 library: artwork-led indexes and editorial detail sheets ======================
+   Library pages are dense by nature. Keep their familiar tables, but strip away the nested-card
+   look and use artwork, rules and type scale to establish the hierarchy. */
+.library-index-card,
+.library-table-card {
+  padding-inline: 0;
+  background: transparent;
+  border-inline: 0;
+  border-block-color: var(--border-strong);
+  box-shadow: none;
+}
+.library-index-card {
+  border-block: 0;
+}
+.library-index-card tbody tr:last-child td,
+.library-table-card tbody tr:last-child td {
+  border-block-end: 0;
+}
+.library-index-card tbody td {
+  padding-block: .65rem;
+  border-block-end: 0;
+}
+.library-index-card tbody tr {
+  transition: background .12s ease;
+}
+.library-index-card tbody tr:hover {
+  background: var(--surface-raised);
+}
+.library-index-card thead th,
+.library-table-card thead th {
+  color: color-mix(in srgb, var(--text) 62%, transparent);
+  background: var(--canvas);
+}
+.library-index-card thead th {
+  border-block-end: 0;
+}
+.library-index-card thead th.sorth:hover,
+.library-table-card thead th.sorth:hover {
+  color: var(--text);
+}
+.library-index-card .ptitle {
+  font-size: 1rem;
+  font-weight: 720;
+  letter-spacing: -.012em;
+}
+.page-artists .library-index-card .artist-avatar,
+.page-albums .library-index-card .album-thumb {
+  width: 3.1rem;
+  height: 3.1rem;
+}
+.page-artists .library-index-card .artist-avatar {
+  border-radius: 50%;
+  border-width: 2px;
+}
+.library-viewbar {
+  padding: .7rem 0;
+  background: transparent;
+  border-inline: 0;
+  border-block: 0;
+  box-shadow: none;
+}
+.library-viewbar .seg {
+  border-radius: 0;
+}
+
+.library-hero {
+  position: relative;
+  margin-block: .5rem 2rem;
+  padding-block: clamp(1rem, 2.5vw, 1.75rem);
+  border-block: 1px solid var(--border-strong);
+}
+.library-hero::after {
+  content: "";
+  position: absolute;
+  inset: -1px 0 auto;
+  width: clamp(4rem, 11vw, 8rem);
+  height: 4px;
+  background: var(--cta);
+}
+.library-hero h1 {
+  max-width: 16ch;
+  font-size: clamp(2.75rem, 6vw, 4.75rem);
+  font-weight: 680;
+  line-height: .91;
+  letter-spacing: -.055em;
+}
+.artist-hero {
+  display: grid;
+  grid-template-columns: clamp(9rem, 19vw, 13rem) minmax(0, 1fr);
+  gap: clamp(1.25rem, 4vw, 3rem);
+  align-items: end;
+}
+.artist-hero.artist-head:not(.pl-head) .artist-thumb {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  border-radius: 0;
+  border: 1px solid var(--border-strong);
+  box-shadow: none;
+}
+.artist-hero .artist-meta {
+  max-width: 52rem;
+  margin-block-start: 1rem;
+  padding-inline-start: var(--sp-3);
+  border-inline-start: 3px solid var(--accent);
+}
+.artist-hero .artist-bio {
+  max-width: 68ch;
+}
+.release-hero {
+  gap: clamp(1.25rem, 3.5vw, 2.75rem);
+  align-items: stretch;
+}
+.release-hero .pl-art {
+  min-width: 9rem;
+  max-width: 15rem;
+  border-color: var(--border-strong);
+  box-shadow: none;
+}
+.release-hero .pl-headmain {
+  justify-content: flex-end;
+  padding-block: .25rem;
+}
+.release-hero .tag {
+  border-radius: 2px;
+}
+.release-hero .head-tools {
+  padding-block: .2rem;
+  border-inline-start: 1px solid var(--border);
+  padding-inline-start: var(--sp-2);
+}
+.release-hero .head-icon {
+  border-radius: 2px;
+}
+
+@media (max-width: 45rem) {
+  .artist-hero {
+    grid-template-columns: minmax(7rem, 32vw) minmax(0, 1fr);
+    align-items: start;
+  }
+  .library-hero h1 {
+    font-size: clamp(2.25rem, 11vw, 3.5rem);
+  }
+  .release-hero {
+    flex-wrap: wrap;
+  }
+  .release-hero .pl-art {
+    min-width: 7rem;
+    max-width: 10rem;
+  }
+  .release-hero .head-tools {
+    width: 100%;
+    margin-inline-start: 0;
+    padding: var(--sp-2) 0 0;
+    border-inline-start: 0;
+    border-block-start: 1px solid var(--border);
+    flex-direction: row;
+    justify-content: flex-start;
+  }
+}
+@media (max-width: 32rem) {
+  .artist-hero {
+    grid-template-columns: 1fr;
+  }
+  .artist-hero.artist-head:not(.pl-head) .artist-thumb {
+    width: min(11rem, 58vw);
+  }
 }
 
 /* ===== Phase 2 identity: stronger type hierarchy ============================================ */

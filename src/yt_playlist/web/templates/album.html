@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% block title %}{{ album.title if album else 'Album' }} · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% block title %}{{ album.title if album else 'Album' }} · TuneConsole{% endblock %}{% block page_class %}page-album{% endblock %}{% block body %}
 {% if not album %}
 <div class="page-head">
   <h1>Album unavailable</h1>
@@ -12,7 +12,7 @@
    enrichBase scopes the start POST to this album). #}
 <div x-data="enrichPanel(0, {{ 'true' if lastfm_configured else 'false' }}, 0, '', '/album/{{ browse_id }}', {{ conflict_count }})"
      @conflicts-count.window="conflictCount = $event.detail.count">
-<div class="artist-head pl-head" x-data="{ artH: 0 }"
+<div class="artist-head pl-head library-hero release-hero" x-data="{ artH: 0 }"
      x-init="const fit = () => artH = $refs.main.offsetHeight; fit(); new ResizeObserver(fit).observe($refs.main)">
   {% if mosaic %}
   {# No cover of its own (a personal compilation has none, and YouTube hands back a grey disc rather
@@ -118,7 +118,7 @@
 </div>
 {% endif %}
 
-<div class="card card-offset">
+<div class="card card-offset library-table-card">
   {% if tracks %}
   {# Folded-in library tracks: genre/year columns that fill in live as enrichment runs, and are
      click-to-edit by hand (same flow as playlists, scoped to this album). #}

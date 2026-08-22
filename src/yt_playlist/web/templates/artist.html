@@ -1,5 +1,5 @@
-{% extends "base.html" %}{% block title %}{{ artist }} · TuneConsole{% endblock %}{% block body %}
-<div class="artist-head">
+{% extends "base.html" %}{% block title %}{{ artist }} · TuneConsole{% endblock %}{% block page_class %}page-artist{% endblock %}{% block body %}
+<div class="artist-head library-hero artist-hero">
   {% if info and info.thumbnail %}<img class="artist-thumb" src="{{ info.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
   <div>
     <h1>{{ artist }}</h1>
@@ -19,7 +19,7 @@
 </div>
 
 <h2 class="section">Songs <span class="count">{{ songs|length }}</span></h2>
-<div class="card">
+<div class="card library-table-card">
   <table x-data="rowSort()">
     <thead><tr>
       <th class="col-thumb"></th>
@@ -60,7 +60,7 @@
 {% if collection %}
 <h2 class="section">Albums in your collection <span class="count">{{ collection|length }}</span></h2>
 <p class="section-note">Albums from your playlists and your saved YouTube albums.</p>
-<div class="card">
+<div class="card library-table-card">
   <table x-data="rowSort()">
     <thead><tr>
       <th class="col-avatar"></th>
@@ -96,7 +96,7 @@
 {% if yt_albums %}
 <h2 class="section">All albums on YouTube <span class="count">{{ yt_albums|length }}</span></h2>
 <p class="section-note">{{ artist }}’s full discography. Save any to your YouTube library.</p>
-<div class="card">
+<div class="card library-table-card">
   <table x-data="rowSort()">
     <thead><tr>
       <th class="col-avatar"></th>

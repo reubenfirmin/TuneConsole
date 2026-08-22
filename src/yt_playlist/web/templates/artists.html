@@ -1,10 +1,10 @@
-{% extends "base.html" %}{% block title %}Artists · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% block title %}Artists · TuneConsole{% endblock %}{% block page_class %}page-artists{% endblock %}{% block body %}
 <div class="page-head">
   <h1>Artists in your collection</h1>
   <p>Every artist represented across your playlists. Click a heading to sort, or an artist for their page.</p>
 </div>
 
-<div class="card">
+<div class="card library-index-card">
   <table x-data="rowSort()">
     <thead><tr>
       <th class="col-avatar"></th>

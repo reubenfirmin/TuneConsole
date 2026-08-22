@@ -1,7 +1,7 @@
-{% extends "base.html" %}{% block title %}{{ pl.title }} · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% block title %}{{ pl.title }} · TuneConsole{% endblock %}{% block page_class %}page-playlist{% endblock %}{% block body %}
 <div x-data="enrichPanel({{ pl.id }}, {{ 'true' if lastfm_configured else 'false' }}, {{ active_job.id if active_job else 0 }}, '{{ active_job.source if active_job else '' }}', null, {{ conflict_count }})"
      x-init="rejoinIfActive()" @conflicts-count.window="conflictCount = $event.detail.count">
-<div class="artist-head pl-head" x-data="{ artH: 0 }"
+<div class="artist-head pl-head library-hero release-hero" x-data="{ artH: 0 }"
      x-init="const fit = () => artH = $refs.main.offsetHeight; fit(); new ResizeObserver(fit).observe($refs.main)">
   {% if pl.thumbnail %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ pl.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.closest('.pl-art').remove()"></span>{% endif %}
   <div class="pl-headmain" x-ref="main">
@@ -54,7 +54,7 @@
 </div>
 
 <div x-data="rowSort({{ pl.id }})" x-init="$nextTick(() => initSortable())">
-<div class="card">
+<div class="card library-table-card">
   <table class="track-table{{ ' is-lm' if pl.ytm_playlist_id == 'LM' }}">
     <thead><tr>
       <th class="num col-thumb">#</th>
