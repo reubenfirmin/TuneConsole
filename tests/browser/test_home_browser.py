@@ -20,3 +20,23 @@ def test_nav_has_home_and_playlists(live_app, page):
     nav = page.locator("header nav")
     assert nav.get_by_role("link", name="Home").is_visible()
     assert nav.get_by_role("link", name="Playlists").is_visible()
+
+
+def test_shell_comparison_switches_live_but_clusters_stays_protected(live_app, page):
+    page.set_viewport_size({"width": 1280, "height": 800})
+    page.goto(f"{live_app}/")
+    page.get_by_role("button", name="Tools").click()
+    assert page.get_by_role("link", name="Setup").is_visible()
+    page.get_by_role("button", name="Tools").click()
+    page.get_by_role("button", name="Switch navigation layout").click()
+    assert page.locator("html").get_attribute("data-shell") == "rail"
+    assert page.locator("header.topbar").evaluate("el => getComputedStyle(el).position") == "fixed"
+    main_box = page.locator("main").bounding_box()
+    rail_box = page.locator("header.topbar").bounding_box()
+    assert main_box and rail_box
+    assert abs((main_box["x"] + main_box["width"] / 2) - 640) < 1
+    assert main_box["x"] >= rail_box["x"] + rail_box["width"]
+
+    page.goto(f"{live_app}/clusters")
+    assert page.locator("html").get_attribute("data-shell") == "top"
+    assert page.locator("header.topbar").evaluate("el => getComputedStyle(el).position") == "sticky"

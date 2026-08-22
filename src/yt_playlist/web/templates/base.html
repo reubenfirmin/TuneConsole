@@ -17,6 +17,16 @@
   <link rel="stylesheet" href="/static/page-overrides.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/story.css?v={{ asset_v }}">
   {% block page_styles %}{% endblock %}
+  <script>
+    // Temporary Phase 4 shell comparison. Clusters always keeps the compact top shell so its
+    // viewport and spatial interaction contract cannot be changed by this experiment.
+    (function () {
+      var shell = 'top';
+      try { shell = localStorage.getItem('tc:shell') || 'top'; } catch (e) {}
+      if (location.pathname.indexOf('/clusters') === 0) shell = 'top';
+      document.documentElement.dataset.shell = shell;
+    })();
+  </script>
   <script src="/static/vendor/htmx.min.js"></script>
   <script src="/static/vendor/sortable.min.js"></script>
   {# d3-force graph layout for the Clusters canvas. Order matters: d3-force reads its deps off the
@@ -61,13 +71,19 @@
     {% endif %}
     {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') or path.startswith('/discovery') %}
     <nav>
-      <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>
-      <a href="/playlists" class="{{ 'active' if path.startswith('/playlist') else '' }}">Playlists</a>
-      <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
-      <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
-      <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
-      <a href="/clusters" class="{{ 'active' if path.startswith('/clusters') else '' }}">Clusters</a>
-      <a href="/road_trip" class="{{ 'active' if path.startswith('/road_trip') else '' }}">Road Trip</a>
+      <div class="nav-group">
+        <span class="nav-group-label">Library</span>
+        <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>
+        <a href="/playlists" class="{{ 'active' if path.startswith('/playlist') else '' }}">Playlists</a>
+        <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
+        <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
+        <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
+      </div>
+      <div class="nav-group">
+        <span class="nav-group-label">Explore</span>
+        <a href="/clusters" class="{{ 'active' if path.startswith('/clusters') else '' }}">Clusters</a>
+        <a href="/road_trip" class="{{ 'active' if path.startswith('/road_trip') else '' }}">Road Trip</a>
+      </div>
       <div class="tools-menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
         <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"
                 @click="open = !open" :aria-expanded="open">Tools <span class="caret" :class="{ up: open }">▾</span></button>
@@ -84,6 +100,10 @@
         </div>
       </div>
     </nav>
+    {% if not path.startswith('/clusters') %}
+    <button type="button" class="shell-toggle" onclick="toggleShell(this)"
+            aria-label="Switch navigation layout">Side rail</button>
+    {% endif %}
   </header>
   <div class="authbar" x-data='authBanner({{ (auth_expired.values()|list)|tojson }})'
        x-show="labels.length && !dismissed" x-cloak @auth-expired.window="add($event.detail.label)">

@@ -66,6 +66,8 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .topbar nav { display: flex; gap: 0.15rem; margin-left: auto; min-width: 0;
   overflow-x: auto; scrollbar-width: none; }
 .topbar nav::-webkit-scrollbar { display: none; }
+.nav-group { display: contents; }
+.nav-group-label { display: none; }
 .topbar nav a {
   color: var(--dim); font-weight: var(--weight-medium); font-size: var(--type-ui); letter-spacing: 0.01em;
   padding: 0.4rem 0.65rem; border-radius: var(--radius-sm); border: 1px solid transparent;
@@ -96,6 +98,10 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 }
 .tools-pop a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
 .tools-pop a.active { color: var(--light-source); background: var(--control-primary); }
+.shell-toggle { flex: none; padding: 0.35rem 0.55rem; background: transparent;
+  border-color: var(--border); color: var(--faint); font-family: var(--font-mono);
+  font-size: 0.62rem; letter-spacing: 0.04em; }
+.shell-toggle:hover { background: var(--surface-2); color: var(--text); }
 
 /* ---- navbar omnisearch ---- */
 .omni { flex: 1 1 auto; min-width: 0; display: flex; justify-content: center; align-self: center; }
@@ -145,6 +151,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 @media (max-width: 720px) {
   .topbar { padding: .75rem; }
   .omni { display: none; }
+  .shell-toggle { display: none; }
 }
 
 /* ---- layout ---- */

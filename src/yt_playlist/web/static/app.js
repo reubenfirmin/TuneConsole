@@ -1,10 +1,28 @@
 // Keep --topbar-h in sync with the real navbar height so sticky table headers pin right below it.
 function syncTopbarH() {
   const tb = document.querySelector('.topbar');
-  if (tb) document.documentElement.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
+  if (tb) {
+    const rail = getComputedStyle(tb).position === 'fixed' && tb.offsetHeight >= window.innerHeight;
+    document.documentElement.style.setProperty('--topbar-h', (rail ? 0 : tb.offsetHeight) + 'px');
+  }
 }
 window.addEventListener('DOMContentLoaded', syncTopbarH);
 window.addEventListener('resize', syncTopbarH);
+
+// Phase 4 shell comparison. Kept outside Alpine so experimenting with the application frame cannot
+// interfere with the Tools dropdown's own small open/closed state machine.
+function syncShellToggle(button) {
+  const el = button || document.querySelector('.shell-toggle');
+  if (el) el.textContent = document.documentElement.dataset.shell === 'rail' ? 'Top bar' : 'Side rail';
+}
+function toggleShell(button) {
+  const root = document.documentElement;
+  root.dataset.shell = root.dataset.shell === 'rail' ? 'top' : 'rail';
+  try { localStorage.setItem('tc:shell', root.dataset.shell); } catch (e) {}
+  syncShellToggle(button);
+  syncTopbarH();
+}
+window.addEventListener('DOMContentLoaded', () => syncShellToggle());
 
 // htmx: a 422 carries an OOB error toast. By default htmx won't process a 4xx body,
 // so opt this status in. The server sets `HX-Reswap: none` to keep the primary

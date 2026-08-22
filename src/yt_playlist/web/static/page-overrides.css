@@ -153,6 +153,101 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
     padding-inline-start: 0;
   }
 }
+
+/* ===== Phase 4 shell comparison: optional desktop side rail ==================================
+   The top shell remains the baseline. This candidate is selected locally from the Tools menu and
+   intentionally collapses back to the top shell on compact screens. Clusters forces data-shell=top
+   before first paint in base.html. */
+@media (min-width: 65rem) {
+  html[data-shell="rail"] body {
+    /* The rail overlays the viewport rather than redefining its coordinate system. Main content is
+       therefore centred on the physical window, with a symmetric rail-sized safety area. */
+    padding-inline-start: 0;
+  }
+  html[data-shell="rail"] .topbar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 13.5rem;
+    padding: 1.5rem 1rem;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1.5rem;
+    border-inline-end: 1px solid var(--border-strong);
+    border-block-end: 0;
+  }
+  html[data-shell="rail"] .topbar .brand {
+    min-height: 2rem;
+    justify-content: space-between;
+  }
+  html[data-shell="rail"] .topbar .omni {
+    flex: none;
+    width: 100%;
+  }
+  html[data-shell="rail"] .topbar .omni-box {
+    max-width: none;
+  }
+  html[data-shell="rail"] .topbar .omni-input {
+    padding-inline: 0.65rem;
+    font-size: var(--type-ui);
+  }
+  html[data-shell="rail"] .topbar nav {
+    width: 100%;
+    margin: 0;
+    flex: 1 1 auto;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1.1rem;
+    overflow: visible;
+  }
+  html[data-shell="rail"] .topbar .nav-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+  html[data-shell="rail"] .topbar .nav-group-label {
+    display: block;
+    margin: 0 0 0.3rem 0.65rem;
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    font-weight: 650;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  html[data-shell="rail"] .topbar nav a,
+  html[data-shell="rail"] .topbar .tools-btn {
+    width: 100%;
+    justify-content: flex-start;
+    padding: 0.48rem 0.65rem;
+    border-radius: 2px;
+  }
+  html[data-shell="rail"] .topbar nav a.active,
+  html[data-shell="rail"] .topbar .tools-btn.active {
+    border-inline-start: 3px solid var(--control-selected-border);
+  }
+  html[data-shell="rail"] .topbar .tools-menu {
+    width: 100%;
+    margin-top: auto;
+  }
+  html[data-shell="rail"] .topbar .tools-pop {
+    left: calc(100% + 0.5rem);
+    right: auto;
+    top: auto;
+    bottom: 0;
+  }
+  html[data-shell="rail"] .topbar .shell-toggle {
+    width: 100%;
+    padding: 0.5rem 0.65rem;
+    text-align: left;
+  }
+  html[data-shell="rail"] main {
+    width: min(var(--maxw), calc(100vw - 27rem));
+    margin-inline: auto;
+  }
+  html[data-shell="rail"] .authbar {
+    position: relative;
+  }
+}
 /* ===== Merge / compare screen (was an inline <style> in editor.html) ==========================
    Scoped to .page-merge: the bare `table` / `tbody td` rules below deliberately override the
    global table styling for this page only, which is exactly what the inline block used to do. */
