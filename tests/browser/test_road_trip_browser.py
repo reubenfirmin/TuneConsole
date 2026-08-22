@@ -80,15 +80,15 @@ def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page):
     page.goto(f"{base_url}/road_trip")
 
     page.fill("form input[x-model='name']", "Beach Run")
+    page.locator(".rt-duration input").first.fill("0")      # a 20-minute trip, so the pool outlasts
+    page.locator(".rt-duration input").last.fill("20")      # the playlist and a swap has somewhere to go
+    page.click("button:has-text('Choose passenger music')")
     page.fill("form input[x-model='artistQuery']", "Tame Impala")
     page.wait_for_selector(".rt-suggestion")
     page.click(".rt-suggestion")
     expect(page.locator(".genre-chip").first).to_contain_text("Tame Impala")
     # Picking an artist also drops their genre in, as a chip you can remove like any other.
     expect(page.locator(".genre-chip")).to_contain_text(["Tame Impala", "Psychedelic Rock"])
-    page.locator(".rt-duration input").first.fill("0")      # a 20-minute trip, so the pool outlasts
-    page.locator(".rt-duration input").last.fill("20")      # the playlist and a swap has somewhere to go
-
     page.click(".rt-form button:has-text('Save recipe')")
     expect(page.locator(".rt-recipe")).to_contain_text("Beach Run")
 

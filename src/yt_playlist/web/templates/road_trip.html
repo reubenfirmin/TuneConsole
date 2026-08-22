@@ -1,11 +1,13 @@
 {% extends "base.html" %}
-{% block title %}Road Trip · TuneConsole{% endblock %}{% block body %}
-<div class="page-head">
-  <h1>Road Trip playlists</h1>
-  <p>Blend your taste with the artists and genres other people in the car enjoy. Build a mix here,
-     tune it slot by slot, and only then send it to YouTube. Their tracks are pulled fresh from
-     YouTube and never affect your taste model; a saved mix lives in the Generated bucket and is
-     cleaned up on the normal schedule.</p>
+{% block title %}Road Trip · TuneConsole{% endblock %}
+{% block page_class %}page-road-trip{% endblock %}{% block body %}
+<div class="page-head rt-hero">
+  <img class="rt-hero-art" src="/static/road-trip-hero.png" alt="An open road winding toward a vivid sunset" fetchpriority="high">
+  <div class="rt-hero-copy"><span class="rt-eyebrow">Your music · their music · one route</span>
+    <h1>Road Trip</h1>
+    <p>Bring everyone along. Blend your library with the artists and genres your passengers love,
+       tune the running order, then send the finished mix to YouTube.</p>
+  </div>
 </div>
 
 <div id="road-trip-body">{% include "_partials/road_trip_body.html" %}</div>

@@ -82,7 +82,7 @@ def build(ctx) -> APIRouter:
                 "tracks": road_trip_rec.draft_tracks(state)}
 
     BLANK_RECIPE = {"id": None, "name": "", "own_pct": 50, "familiarity_pct": 50,
-                    "target_minutes": 60, "artists": [], "genres": []}
+                    "target_minutes": 60, "artists": [], "genres": [], "blacklist_genres": []}
 
     def _body(request, recipe_id=None, error=None, blank=False):
         """The whole page body. `recipe_id` picks which recipe the editor is loaded with (and whose
@@ -113,6 +113,14 @@ def build(ctx) -> APIRouter:
         """Load a saved recipe into the editor (and show its draft, if it has one)."""
         return _body(request, recipe_id)
 
+    @router.post("/road_trip/new")
+    def new_road_trip(request: Request):
+        """Clear the editor without mixing route creation into the live tuning controls."""
+        return templates.TemplateResponse(request, "_partials/road_trip_body.html",
+                                          {"recipes": store.list_road_trip_recipes(),
+                                           "draft": None, "error": None,
+                                           "form_recipe": BLANK_RECIPE})
+
     @router.post("/road_trip/recipes")
     async def save_recipe(request: Request):
         form = await request.form()
@@ -131,7 +139,8 @@ def build(ctx) -> APIRouter:
         recipe_id = store.save_road_trip_recipe(
             recipe_id, name, own_pct, _clean_list(form.get("artists")),
             _clean_list(form.get("genres")), target_minutes, now_fn(),
-            familiarity_pct=familiarity_pct)
+            familiarity_pct=familiarity_pct,
+            blacklist_genres=_clean_list(form.get("blacklist_genres")))
         # Editing the recipe a draft is already showing steers THAT draft rather than starting over:
         # tracks for a removed artist leave at once, an added one streams in, the rest is a re-pick.
         state = store.get_road_trip_draft(recipe_id)

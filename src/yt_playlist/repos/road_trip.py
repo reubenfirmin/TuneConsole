@@ -60,22 +60,22 @@ class RoadTripRepo(Repo):
 
     @synchronized
     def save_road_trip_recipe(self, recipe_id, name, own_pct, artists, genres,
-                              target_minutes, now, familiarity_pct=DEFAULT_FAMILIARITY_PCT) -> int:
+                              target_minutes, now, familiarity_pct=DEFAULT_FAMILIARITY_PCT,
+                              blacklist_genres=None) -> int:
         """Insert (recipe_id is None) or update (recipe_id given) a recipe. Returns its id."""
         if recipe_id is None:
             cur = self.conn.execute(
-                # blacklist_genres is a dead but NOT NULL legacy column: write an empty list.
                 "INSERT INTO road_trip_recipes(name, own_pct, artists, genres, blacklist_genres, "
                 "target_minutes, familiarity_pct, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (name, own_pct, json.dumps(artists), json.dumps(genres),
-                 "[]", target_minutes, familiarity_pct, now, now))
+                 json.dumps(blacklist_genres or []), target_minutes, familiarity_pct, now, now))
             self.conn.commit()
             return cur.lastrowid
         self.conn.execute(
-            "UPDATE road_trip_recipes SET name=?, own_pct=?, artists=?, genres=?, "
+            "UPDATE road_trip_recipes SET name=?, own_pct=?, artists=?, genres=?, blacklist_genres=?, "
             "target_minutes=?, familiarity_pct=?, updated_at=? WHERE id=?",
             (name, own_pct, json.dumps(artists), json.dumps(genres),
-             target_minutes, familiarity_pct, now, recipe_id))
+             json.dumps(blacklist_genres or []), target_minutes, familiarity_pct, now, recipe_id))
         self.conn.commit()
         return recipe_id
 
@@ -124,6 +124,7 @@ class RoadTripRepo(Repo):
     def _row(self, r) -> dict:
         return {"id": r["id"], "name": r["name"], "own_pct": r["own_pct"],
                 "artists": json.loads(r["artists"]), "genres": json.loads(r["genres"]),
+                "blacklist_genres": json.loads(r["blacklist_genres"]),
                 "target_minutes": r["target_minutes"],
                 "familiarity_pct": r["familiarity_pct"],
                 "last_playlist_id": r["last_playlist_id"],

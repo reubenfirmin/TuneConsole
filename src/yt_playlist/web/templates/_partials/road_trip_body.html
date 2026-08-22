@@ -3,7 +3,9 @@
    re-steers its draft, saving a draft updates the recipe's "last saved" link, deleting a recipe
    drops its draft. #}
 {% if error %}<p class="muted rt-error">{{ error }}</p>{% endif %}
-{% if draft %}{% include "_partials/road_trip_draft.html" %}{% endif %}
-{% include "_partials/road_trip_form.html" %}
-<h2 class="rt-list-head">Saved recipes</h2>
 {% include "_partials/road_trip_recipes.html" %}
+{% if draft %}
+  {% include "_partials/road_trip_draft.html" %}
+{% else %}
+  {% include "_partials/road_trip_form.html" %}
+{% endif %}

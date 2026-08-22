@@ -118,6 +118,9 @@ def own_candidates(store, now, state=None):
     songs = store.library_songs()
     plays = store.play_counts()
     hard = store.suppressed_keys("for_you", now) | RecDao(store).generated_track_keys()
+    blocked_genres = (state or {}).get("blacklist_genres") or []
+    if blocked_genres:
+        hard |= store.keys_in_genre_selection(blocked_genres)
     muted = store.muted_artists()
     by_artist = store.artist_genre_years()
     learned = (state or {}).get("own_facts") or {}
@@ -590,6 +593,16 @@ def _feat(item):
             "source": item.get("source") or "theirs"}
 
 
+def _is_overlap(candidate, state):
+    """Whether one of the user's tracks also matches the passengers' explicit taste inputs."""
+    inputs = state.get("inputs") or {}
+    artists = {a.strip().lower() for a in inputs.get("artists", []) if a}
+    if (candidate.get("artist") or "").strip().lower() in artists:
+        return True
+    wanted = {genre_map.family(g) for g in inputs.get("genres", []) if g}
+    return bool(wanted and genre_map.family(candidate.get("genre")) in wanted)
+
+
 def repick(state, store, now=0.0):
     """Re-draw the whole playlist under the state's current mix, familiarity, genre/era quotas and
     crossed-out slots. Mutates and returns `state` (picked, stats, axes).
@@ -604,11 +617,35 @@ def repick(state, store, now=0.0):
     penalized = set(state.get("prev") or [])
     fam = state["familiarity_pct"] / 100.0
     target_s = state["target_minutes"] * 60
-    own_budget = target_s * state["own_pct"] / 100.0
+    own_all = [c for c in pool if c["source"] == "mine" and c["video_id"] not in banned]
+    overlap = [c for c in own_all if _is_overlap(c, state)]
+    # When shared taste exists, reserve the quiet middle third for it. The visible slider divides
+    # the remaining two thirds between the user's exclusive taste and the passengers' catalogue.
+    overlap_budget = target_s / 3.0 if overlap else 0.0
+    outer_budget = target_s - overlap_budget
+    own_exclusive_budget = outer_budget * state["own_pct"] / 100.0
+    own_budget = own_exclusive_budget + overlap_budget
 
     sides = {}
+    shared_ids = set()
     for side, budget in (("mine", own_budget), ("theirs", target_s - own_budget)):
         cands = [c for c in pool if c["source"] == side and c["video_id"] not in banned]
+        if side == "mine" and overlap:
+            exclusive = [c for c in cands if c not in overlap]
+            overlap_order = _sample_order(overlap, rng, lambda c: _weight(c, fam, penalized))
+            exclusive_order = _sample_order(exclusive, rng, lambda c: _weight(c, fam, penalized))
+            overlap_cap = _artist_cap(overlap, max(1, round(overlap_budget / AVG_TRACK_S)))
+            own_cap = _artist_cap(exclusive, max(1, round(own_exclusive_budget / AVG_TRACK_S)))
+            shared, shared_s, shared_rest = _fill_side(
+                overlap_order, overlap_budget, overlap_cap, state, "mine", overlap)
+            shared_ids = {c["video_id"] for c in shared}
+            personal, personal_s, personal_rest = _fill_side(
+                exclusive_order, own_exclusive_budget, own_cap, state, "mine", exclusive)
+            sides[side] = {"picked": personal + shared, "secs": personal_s + shared_s,
+                           "rest": personal_rest + shared_rest, "budget": budget,
+                           "order": overlap_order + exclusive_order,
+                           "cap": max(overlap_cap, own_cap), "cands": cands}
+            continue
         order = _sample_order(cands, rng, lambda c: _weight(c, fam, penalized))
         cap = _artist_cap(cands, max(1, round(budget / AVG_TRACK_S)))
         picked, secs, rest = _fill_side(order, budget, cap, state, side, cands)
@@ -644,6 +681,7 @@ def repick(state, store, now=0.0):
     total_s = sum((c["duration"] or AVG_TRACK_S) for c in ordered)
     state["stats"] = {"minutes": round(total_s / 60), "own_count": len(mine),
                       "their_count": len(theirs),
+                      "overlap_count": sum(1 for c in mine if c["video_id"] in shared_ids),
                       "own_minutes": round(sides["mine"]["secs"] / 60),
                       "their_minutes": round(sides["theirs"]["secs"] / 60),
                       "short": short}
@@ -767,6 +805,7 @@ def start_draft(store, recipe, now, seed, previous=None):
     bare = sum(1 for c in own_candidates(store, now) if not (c["genre"] and c["year"]))
     state = {"recipe_id": recipe["id"], "name": recipe["name"], "seed": seed,
              "own_pct": recipe["own_pct"],
+             "blacklist_genres": list(recipe.get("blacklist_genres") or []),
              "familiarity_pct": recipe.get("familiarity_pct", 50),
              "target_minutes": recipe["target_minutes"], "pool": [], "picks": [],
              "picked": [], "banned": [], "own_facts": {},
@@ -849,6 +888,7 @@ def apply_recipe(state, store, now, recipe):
     state["name"] = recipe["name"]
     state["target_minutes"] = recipe["target_minutes"]
     state["own_pct"] = recipe["own_pct"]
+    state["blacklist_genres"] = list(recipe.get("blacklist_genres") or [])
     state["familiarity_pct"] = recipe.get("familiarity_pct", state["familiarity_pct"])
     _, other_size = _pool_targets(recipe)
     state["other_limit"] = other_size

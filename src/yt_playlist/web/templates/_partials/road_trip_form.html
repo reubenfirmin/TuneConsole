@@ -1,104 +1,107 @@
-{# The recipe editor. Not a modal and not create-only: it stays on the page next to the playlist and
-   edits land on the draft you're looking at (routes/road_trip.py -> rec.apply_recipe), so it doubles
-   as the steering panel. Chip and slider changes apply themselves; text fields wait for Apply, so a
-   re-render can't yank the field you're typing in. #}
-{# Single-quoted x-data: tojson leaves double quotes intact (it only escapes <, >, & and '), so the
-   JSON has to sit inside single quotes or it terminates the attribute and Alpine never boots. Same
-   convention as data-recipe in generated_playlist.html. #}
-<div class="card rt-form" x-data='roadTripForm({{ form_recipe | tojson }})' x-init="loadGenres()">
-  <div class="rt-form-head">
-    <h2 x-text="id ? 'Editing “' + name + '”' : 'New recipe'"></h2>
-    <span class="rt-form-actions">
-      <button type="button" class="btn ghost" x-show="id" @click="reset()">New recipe</button>
-      <button type="button" class="btn btn-primary" @click="submit()" x-text="id ? 'Apply' : 'Save recipe'"></button>
-    </span>
-  </div>
+<div class="{{ '' if embedded else 'card ' }}rt-form{{ ' is-embedded' if embedded }}"
+     x-data='roadTripForm({{ form_recipe | tojson }})'
+     x-init="loadGenres(); activeDrawer = '{{ 'theirs' if draft else 'mix' }}'">
   <form x-ref="form" hx-post="/road_trip/recipes" hx-target="#road-trip-body" hx-swap="innerHTML"
         hx-trigger="roadtrip:submit" hx-disabled-elt="find button">
-    <input type="hidden" name="id" :value="id || ''">
-    <input type="hidden" name="artists">
-    <input type="hidden" name="genres">
-    <input type="hidden" name="target_minutes">
+    <input type="hidden" name="id" :value="id || ''"><input type="hidden" name="name" :value="name">
+    <input type="hidden" name="artists"><input type="hidden" name="genres">
+    <input type="hidden" name="blacklist_genres"><input type="hidden" name="target_minutes">
     <input type="hidden" name="own_pct" :value="ownPct">
     <input type="hidden" name="familiarity_pct" :value="familiarity">
 
-    <label>Recipe name<br>
-      <input type="text" name="name" x-model="name" placeholder="Beach Run" required>
-    </label>
-
-    <div class="rt-form-cols">
-      <div>
-        <label>Their artists<br>
-          <input type="text" x-model="artistQuery" @input="searchArtists()"
-                 placeholder="Type an artist name…">
-        </label>
-        <div class="rt-suggestions" x-show="artistSuggestions.length" x-cloak>
-          <template x-for="s in artistSuggestions" :key="s">
-            <button type="button" class="rt-suggestion" @click="addArtist(s)" x-text="s"></button>
-          </template>
+    <details class="rt-step" :open="activeDrawer === 'mix'" @toggle="if ($event.target.open) activeDrawer = 'mix'">
+      <summary><span class="rt-step-number">1</span><span><strong>Shape the mix</strong><small>Balance, familiarity and trip length</small></span><span class="rt-step-value" x-text="(hours ? hours + 'h ' : '') + minutes + 'm'"></span></summary>
+      <section class="rt-mixer">
+      <div class="rt-mixer-head"><div><p>The shared middle is blended in automatically.</p></div>
+        <span class="rt-mixer-route" x-show="id" x-text="name"></span></div>
+      <div class="rt-mixer-grid">
+        <div class="rt-shape-control rt-balance-control">
+          <div class="rt-control-label"><label for="rt-balance">Music balance</label><output><span x-text="Math.round(ownPct * 2 / 3)"></span>% yours · <span x-text="Math.round((100 - ownPct) * 2 / 3)"></span>% theirs</output></div>
+          <div class="rt-slider-row"><span>Yours</span><input id="rt-balance" class="rt-shape-slider" type="range"
+            min="0" max="100" step="5" :value="100 - ownPct" :style="'--p:' + (100 - ownPct) + '%'"
+            @input="ownPct = 100 - Number($event.target.value)" @change="steer()"><span>Theirs</span></div>
         </div>
-        <div class="genre-chips">
-          <template x-for="a in artists" :key="a">
-            <span class="genre-chip"><span x-text="a"></span>
-              <button type="button" class="chip-x" @click="removeArtist(a)">×</button></span>
-          </template>
+        <div class="rt-shape-control rt-familiarity-control">
+          <div class="rt-control-label"><label for="rt-familiarity">Familiarity</label><output x-text="familiarity + '% favorites'"></output></div>
+          <div class="rt-slider-row"><span>Deep cuts</span><input id="rt-familiarity" class="rt-shape-slider" type="range"
+            min="0" max="100" step="5" x-model.number="familiarity" :style="'--p:' + familiarity + '%'"
+            @change="steer()"><span>Favorites</span></div>
         </div>
-
-        <label>Their genres<br>
-          <input type="text" x-model="genreQuery" placeholder="Type a genre…">
-        </label>
-        <div class="rt-suggestions" x-show="genreQuery && genreSuggest(genreQuery).length" x-cloak>
-          <template x-for="o in genreSuggest(genreQuery)" :key="o.name">
-            <button type="button" class="rt-suggestion" @click="addGenre(o.name)" x-text="o.name"></button>
-          </template>
-        </div>
-        <div class="genre-chips">
-          <template x-for="g in genres" :key="g">
-            <span class="genre-chip"><span x-text="g"></span>
-              <button type="button" class="chip-x" @click="removeGenre(g)">×</button></span>
-          </template>
+        <div class="rt-shape-control rt-length-control">
+          <div class="rt-control-label"><span>Trip length</span><output x-text="(hours ? hours + 'h ' : '') + minutes + 'm'"></output></div>
+          <div class="rt-duration">
+            <span class="rt-duration-field"><input type="number" min="0" max="12" x-model.number="hours" @change="steer()" aria-label="hours"><span class="rt-duration-unit">h</span></span>
+            <span class="rt-duration-field"><input type="number" min="0" max="59" step="5" x-model.number="minutes" @change="steer()" aria-label="minutes"><span class="rt-duration-unit">m</span></span>
+            <span class="rt-duration-presets"><template x-for="p in [30, 60, 120, 240]" :key="p"><button type="button" class="rt-preset" :class="{ on: hours * 60 + minutes === p }" @click="hours = Math.floor(p / 60); minutes = p % 60; steer()" x-text="p < 60 ? p + ' min' : (p / 60) + ' h'"></button></template></span>
+          </div>
         </div>
       </div>
+      <div class="rt-step-next"><button type="button" class="btn" @click="activeDrawer = 'theirs'">Choose passenger music <span aria-hidden="true">↓</span></button></div>
+      </section>
+    </details>
 
-      <div>
-        {# There is no "exclude these genres" list here any more: the genre bars on the playlist do
-           that job better. Sliding one to 0 drops it, and you can see the effect and put it back. #}
-        {# Left end is "Mine", so dragging left has to mean more of mine: the slider carries THEIR
-           share and ownPct is its complement. #}
-        <label>Mine <span x-text="ownPct"></span>% / Theirs <span x-text="100 - ownPct"></span>%</label>
-        <div class="rt-mix-track">
-          <span class="rt-mix-end">Mine</span>
-          <input type="range" min="0" max="100" step="5" :value="100 - ownPct"
-                 @input="ownPct = 100 - Number($event.target.value)" @change="steer()">
-          <span class="rt-mix-end">Theirs</span>
+    <details class="rt-step" :open="activeDrawer === 'theirs'" @toggle="if ($event.target.open) activeDrawer = 'theirs'">
+      <summary><span class="rt-step-number">2</span><span><strong>Passenger music</strong><small>Artists and genres they want to hear</small></span><span class="rt-step-value" x-text="(artists.length + genres.length) ? (artists.length + genres.length) + ' picked' : 'Add music'"></span></summary>
+      <section class="rt-step-body rt-axes">
+        <div class="rt-picker-grid">
+          <div class="rt-picker-card">
+            <div class="rt-genre-add">
+              <label>Add an artist<input type="text" x-model="artistQuery" @input="searchArtists()" placeholder="Search artists…"></label>
+              <div class="rt-suggestions" x-show="artistSuggestions.length" x-cloak><template x-for="a in artistSuggestions" :key="a"><button type="button" class="rt-suggestion" @click="addArtist(a)" x-text="a"></button></template></div>
+              <p class="rt-picker-hint">Their genre is added with them, so the mix can reach related artists too.</p>
+              <div class="rt-picked-links"><template x-for="a in artists" :key="a"><button type="button" class="rt-picked-link is-artist genre-chip" @click="removeArtist(a)" :aria-label="'Remove ' + a"><span x-text="a"></span><span aria-hidden="true">×</span></button></template></div>
+            </div>
+          </div>
+          <div class="rt-picker-card">
+            <div class="rt-genre-add rt-combobox">
+              <label>Add a genre<input type="text" x-model="genreQuery" placeholder="Search and choose…" autocomplete="off"
+                role="combobox" aria-label="Add a passenger genre" :aria-expanded="genreQuery && genreSuggest(genreQuery).length ? 'true' : 'false'"
+                @keydown.enter.prevent="genreSuggest(genreQuery)[0] && addGenre(genreSuggest(genreQuery)[0].name)"></label>
+              <div class="rt-suggestions rt-select-menu" x-show="genreQuery && genreSuggest(genreQuery).length" x-cloak><template x-for="o in genreSuggest(genreQuery)" :key="o.name"><button type="button" class="rt-suggestion" @click="addGenre(o.name)"><span x-text="o.name"></span><small x-text="o.kind === 'family' ? 'family' : 'genre'"></small></button></template></div>
+              <p class="rt-picker-hint">Pick as many as you need. Each one expands the passenger pool.</p>
+              <div class="rt-picked-links"><template x-for="g in genres" :key="g"><button type="button" class="rt-picked-link is-theirs genre-chip" @click="removeGenre(g)" :aria-label="'Remove ' + g"><span x-text="g"></span><span aria-hidden="true">×</span></button></template></div>
+            </div>
+          </div>
         </div>
+        {% if draft and not s.building %}<div class="rt-weight-group"><h3>Passenger genre balance</h3>{% set party = 'theirs' %}{% set kind = 'genre' %}{% include "_partials/road_trip_axis_rows.html" %}</div>{% endif %}
+        <div class="rt-step-next"><button type="button" class="btn" @click="activeDrawer = 'mine'">Tune your music <span aria-hidden="true">↓</span></button></div>
+      </section>
+    </details>
 
-        {# Both ends stay inside the taste model: from the lesser-played corners of it to the
-           most-played favorites, never random catalog. #}
-        <label>Deeper cuts ↔ favorites (<span x-text="familiarity"></span>%)</label>
-        <input type="range" min="0" max="100" step="5" x-model.number="familiarity" @change="steer()">
-
-        <label>Target length</label>
-        <div class="rt-duration">
-          <span class="rt-duration-field">
-            <input type="number" min="0" max="12" x-model.number="hours" @change="steer()"
-                   aria-label="hours">
-            <span class="rt-duration-unit">h</span>
-          </span>
-          <span class="rt-duration-field">
-            <input type="number" min="0" max="59" step="5" x-model.number="minutes" @change="steer()"
-                   aria-label="minutes">
-            <span class="rt-duration-unit">m</span>
-          </span>
-          <span class="rt-duration-presets">
-            <template x-for="p in [30, 60, 120, 240]" :key="p">
-              <button type="button" class="rt-preset" :class="{ on: hours * 60 + minutes === p }"
-                      @click="hours = Math.floor(p / 60); minutes = p % 60; steer()"
-                      x-text="p < 60 ? p + ' min' : (p / 60) + ' h'"></button>
-            </template>
-          </span>
+    <details class="rt-step" :open="activeDrawer === 'mine'" @toggle="if ($event.target.open) activeDrawer = 'mine'">
+      <summary><span class="rt-step-number">3</span><span><strong>Your music</strong><small>Shape what comes from your library</small></span><span class="rt-step-value" x-text="blacklist.length ? blacklist.length + ' excluded' : 'Full library'"></span></summary>
+      <section class="rt-step-body rt-axes">
+        <div class="rt-picker-grid">
+          {% if draft and not s.building %}<div class="rt-picker-card"><div class="rt-genre-add rt-combobox is-dropup">
+            <label>Bring a genre forward<input type="text" x-model="ownGenreQuery" placeholder="Search and choose…" autocomplete="off"
+              role="combobox" aria-label="Bring one of your genres forward"
+              @keydown.enter.prevent="genreSuggest(ownGenreQuery)[0] && addOwnGenre(genreSuggest(ownGenreQuery)[0].name, {{ rid }})"></label>
+            <div class="rt-suggestions rt-select-menu" x-show="ownGenreQuery && genreSuggest(ownGenreQuery).length" x-cloak><template x-for="o in genreSuggest(ownGenreQuery)" :key="o.name"><button type="button" class="rt-suggestion" @click="addOwnGenre(o.name, {{ rid }})"><span x-text="o.name"></span><small x-text="o.kind === 'family' ? 'family' : 'genre'"></small></button></template></div>
+            <p class="rt-picker-hint">Adds a genre balance control below.</p>
+          </div></div>{% endif %}
+          <div class="rt-picker-card"><div class="rt-genre-add rt-combobox is-dropup">
+            <label>Leave a genre out<input type="text" x-model="blacklistQuery" placeholder="Search and choose…" autocomplete="off"
+              role="combobox" aria-label="Leave a genre out"
+              @keydown.enter.prevent="genreSuggest(blacklistQuery)[0] && addBlacklist(genreSuggest(blacklistQuery)[0].name)"></label>
+            <div class="rt-suggestions rt-select-menu" x-show="blacklistQuery && genreSuggest(blacklistQuery).length" x-cloak><template x-for="o in genreSuggest(blacklistQuery)" :key="o.name"><button type="button" class="rt-suggestion" @click="addBlacklist(o.name)"><span x-text="o.name"></span><small x-text="o.kind === 'family' ? 'family' : 'genre'"></small></button></template></div>
+            <p class="rt-picker-hint">Useful when one part of your library is wrong for this trip.</p>
+            <div class="rt-picked-links"><template x-for="g in blacklist" :key="g"><button type="button" class="rt-picked-link is-excluded genre-chip" @click="removeBlacklist(g)" :aria-label="'Remove ' + g"><span x-text="g"></span><span aria-hidden="true">×</span></button></template></div>
+          </div></div>
         </div>
-      </div>
+        {% if draft %}
+          {% if not s.building %}
+          <div class="rt-weight-grid"><div class="rt-weight-group"><h3>Your genre balance</h3>{% set party = 'mine' %}{% set kind = 'genre' %}{% include "_partials/road_trip_axis_rows.html" %}</div>
+          <div class="rt-weight-group"><h3>Your years</h3>{% set party = 'mine' %}{% set kind = 'era' %}{% include "_partials/road_trip_axis_rows.html" %}</div>
+          <div class="rt-weight-group"><h3>Passenger years</h3>{% set party = 'theirs' %}{% set kind = 'era' %}{% include "_partials/road_trip_axis_rows.html" %}</div></div>
+          {% else %}<p class="section-note">Genre and year controls appear here when tagging finishes.</p>{% endif %}
+        {% endif %}
+      </section>
+    </details>
+
+    <div class="rt-route-save">
+      <label x-show="!id || renaming">Route name<input type="text" x-model="name" placeholder="Beach Run" :required="!id"></label>
+      <span x-show="id && !renaming">Saved as <strong x-text="name"></strong> <button type="button" class="btn-ghost btn-sm" @click="renaming = true">Rename</button></span>
+      <button type="button" class="btn btn-primary" x-show="!id || renaming" @click="submit(); renaming = false" x-text="id ? 'Save name' : 'Save recipe'"></button>
     </div>
   </form>
 </div>

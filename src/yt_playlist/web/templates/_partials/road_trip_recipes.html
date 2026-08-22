@@ -1,33 +1,39 @@
-{% for r in recipes %}
-<div class="card card--interactive rt-recipe{{ ' is-loaded' if form_recipe and form_recipe.id == r.id }}">
-  <div class="rt-recipe-head">
-    <h3>{{ r.name }}</h3>
-    <span class="tag teal">{{ r.own_pct }}% mine / {{ 100 - r.own_pct }}% theirs</span>
-    <span class="tag">{{ (r.target_minutes / 60) | round(1) }}h target</span>
-    <span class="tag">{{ r.familiarity_pct }}% favorites</span>
+<div class="rt-library-bar">
+<details class="rt-saved-routes rt-drawer"{% if form_recipe and form_recipe.id and not draft %} open{% endif %}>
+  <summary>
+    <span class="rt-library-label">Route library</span>
+    <strong>{{ form_recipe.name if form_recipe and form_recipe.id else 'Choose a saved route' }}</strong>
+    <small>{{ recipes|length }} saved</small>
+  </summary>
+  <div class="rt-recipes">
+  {% for r in recipes %}
+    <div class="rt-recipe{{ ' is-loaded' if form_recipe and form_recipe.id == r.id }}">
+      <button type="button" class="rt-recipe-select" hx-post="/road_trip/recipes/{{ r.id }}/edit"
+              hx-target="#road-trip-body" hx-swap="innerHTML">
+        <span class="rt-recipe-title"><strong>{{ r.name }}</strong>{% if form_recipe and form_recipe.id == r.id %}<span class="rt-editing">Current</span>{% endif %}</span>
+        <span class="rt-recipe-summary">{{ (r.own_pct * 2 / 3)|round|int }}% yours · {{ ((100 - r.own_pct) * 2 / 3)|round|int }}% theirs · {{ (r.target_minutes / 60) | round(1) }}h</span>
+        <span class="rt-recipe-seeds">{{ (r.artists + r.genres)|join(', ') }}</span>
+      </button>
+      <div class="rt-recipe-actions">
+        <button type="button" class="btn btn-primary rt-gen-btn" hx-post="/road_trip/recipes/{{ r.id }}/build"
+                hx-target="#road-trip-body" hx-swap="innerHTML" hx-disabled-elt="this">
+          <span class="rt-gen-label">Build playlist</span>
+          <span class="rt-gen-loading htmx-indicator"><span class="spinner"></span> Building…</span>
+        </button>
+        <button type="button" class="btn-ghost rt-delete" hx-delete="/road_trip/recipes/{{ r.id }}"
+                hx-target="#road-trip-body" hx-swap="innerHTML"
+                hx-confirm="Delete the &quot;{{ r.name }}&quot; recipe?">Delete</button>
+        {% if r.last_playlist_id %}
+        <a class="muted" href="https://music.youtube.com/playlist?list={{ r.last_playlist_id }}"
+           target="_blank" rel="noopener" data-yt-info>Last saved ↗</a>
+        {% endif %}
+      </div>
+    </div>
+  {% else %}
+    <p class="rt-empty">No saved routes yet.</p>
+  {% endfor %}
   </div>
-  <div class="rt-recipe-chips">
-    {% for a in r.artists %}<span class="genre-chip"><span>{{ a }}</span></span>{% endfor %}
-    {% for g in r.genres %}<span class="genre-chip"><span>{{ g }}</span></span>{% endfor %}
-  </div>
-  <div class="rt-recipe-actions">
-    <button type="button" class="btn btn-primary rt-gen-btn" hx-post="/road_trip/recipes/{{ r.id }}/build"
-            hx-target="#road-trip-body" hx-swap="innerHTML" hx-disabled-elt="this">
-      <span class="rt-gen-label">Build playlist</span>
-      <span class="rt-gen-loading htmx-indicator"><span class="spinner"></span> Building…</span>
-    </button>
-    <button type="button" class="btn ghost" hx-post="/road_trip/recipes/{{ r.id }}/edit"
-            hx-target="#road-trip-body" hx-swap="innerHTML"
-            title="Load this recipe into the editor above">Edit</button>
-    <button type="button" class="btn ghost" hx-delete="/road_trip/recipes/{{ r.id }}"
-            hx-target="#road-trip-body" hx-swap="innerHTML"
-            hx-confirm="Delete the &quot;{{ r.name }}&quot; recipe?">Delete</button>
-    {% if r.last_playlist_id %}
-    <a class="muted" href="https://music.youtube.com/playlist?list={{ r.last_playlist_id }}"
-       target="_blank" rel="noopener" data-yt-info>Last saved ↗</a>
-    {% endif %}
-  </div>
+</details>
+<button type="button" class="btn-ghost" hx-post="/road_trip/new" hx-target="#road-trip-body"
+        hx-swap="innerHTML">New route</button>
 </div>
-{% else %}
-<p class="muted">No Road Trip recipes yet. Add one below.</p>
-{% endfor %}

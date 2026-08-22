@@ -920,6 +920,8 @@ function roadTripForm(initial) {
   return {
     id: initial.id || null,
     name: initial.name || '',
+    renaming: false,
+    activeDrawer: 'mix',
     ownPct: initial.own_pct != null ? initial.own_pct : 50,   // an even split to start
     // 0 = the lesser-played corners of the taste model, 100 = the most-played favorites.
     familiarity: initial.familiarity_pct != null ? initial.familiarity_pct : 50,
@@ -927,9 +929,10 @@ function roadTripForm(initial) {
     minutes: mins % 60,
     artists: initial.artists || [],
     genres: initial.genres || [],
+    blacklist: initial.blacklist_genres || [],
     steerTimer: null,
     artistQuery: '', artistSuggestions: [], artistTimer: null,
-    genreOpts: [], genreQuery: '',
+    genreOpts: [], genreQuery: '', blacklistQuery: '', ownGenreQuery: '',
     loadGenres() {
       if (window.__genreOpts) { this.genreOpts = window.__genreOpts; return; }
       fetch('/home/genres').then(r => r.json())
@@ -946,6 +949,19 @@ function roadTripForm(initial) {
       this.genreQuery = ''; this.steer();
     },
     removeGenre(name) { this.genres = this.genres.filter(g => g !== name); this.steer(); },
+    addBlacklist(name) {
+      if (!this.blacklist.includes(name)) this.blacklist.push(name);
+      this.blacklistQuery = ''; this.steer();
+    },
+    removeBlacklist(name) { this.blacklist = this.blacklist.filter(g => g !== name); this.steer(); },
+    addOwnGenre(name, recipeId) {
+      this.ownGenreQuery = '';
+      if (!recipeId || !window.htmx) return;
+      htmx.ajax('POST', '/road_trip/draft/' + recipeId + '/tilt', {
+        target: '#road-trip-body', swap: 'innerHTML',
+        values: { party: 'mine', axis: 'genre:' + name, share: '20' },
+      });
+    },
     searchArtists() {
       clearTimeout(this.artistTimer);
       const q = this.artistQuery.trim();
@@ -977,8 +993,9 @@ function roadTripForm(initial) {
       this.steerTimer = setTimeout(() => this.submit(), 350);
     },
     reset() {
-      this.id = null; this.name = ''; this.artists = []; this.genres = [];
-      this.artistQuery = ''; this.genreQuery = '';
+      this.id = null; this.name = ''; this.artists = []; this.genres = []; this.blacklist = [];
+      this.renaming = false;
+      this.artistQuery = ''; this.genreQuery = ''; this.blacklistQuery = '';
       this.artistSuggestions = [];
     },
     submit() {
@@ -986,6 +1003,7 @@ function roadTripForm(initial) {
       const form = this.$refs.form;
       form.querySelector('[name=artists]').value = JSON.stringify(this.artists);
       form.querySelector('[name=genres]').value = JSON.stringify(this.genres);
+      form.querySelector('[name=blacklist_genres]').value = JSON.stringify(this.blacklist);
       form.querySelector('[name=target_minutes]').value = String(this.hours * 60 + this.minutes);
       htmx.trigger(form, 'roadtrip:submit');
     },

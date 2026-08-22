@@ -11,29 +11,29 @@
 {% set stats = s.stats %}
 <section class="card rt-draft{{ ' is-building' if s.building }}">
   <header class="rt-draft-head">
-    <h2>{{ s.name }}</h2>
-    <span class="tag teal">{{ stats.own_count }} mine · {{ stats.their_count }} theirs</span>
-    <span class="tag">{{ stats.minutes }} min of {{ s.target_minutes }}</span>
+    <div class="rt-draft-title">
+      <h2>{{ s.name }}</h2>
+      <p>Tune the live draft</p>
+    </div>
+    <div class="rt-draft-metrics">
+      <span><strong>{{ stats.own_count + stats.their_count }}</strong> songs</span>
+      <span><strong>{{ stats.minutes }}</strong> / {{ s.target_minutes }} min</span>
+      <span><strong>{{ stats.own_count }}</strong> yours · <strong>{{ stats.their_count }}</strong> theirs</span>
+    </div>
     {% if s.saved_playlist_id %}
-    <a class="tag teal" href="https://music.youtube.com/playlist?list={{ s.saved_playlist_id }}"
+    <a class="rt-status is-saved" href="https://music.youtube.com/playlist?list={{ s.saved_playlist_id }}"
        target="_blank" rel="noopener" data-yt-info>Saved ↗</a>
+    {% elif s.building %}
+    <span class="rt-status is-building">Building</span>
+    {% else %}
+    <span class="rt-status is-ready">Ready</span>
     {% endif %}
     {# The two that act on the draft in place sit together on the left; the one that sends it
        somewhere is set apart on the right, where it can't be hit by accident. #}
     <span class="rt-draft-actions">
-      {% if not s.building %}
-      <button type="button" class="btn ghost" hx-post="/road_trip/draft/{{ rid }}/shuffle"
-              hx-target="#road-trip-body" hx-swap="innerHTML" hx-disabled-elt="this"
-              title="Another draw from the same candidates">Shuffle</button>
-      {% endif %}
-      <button type="button" class="btn ghost" hx-delete="/road_trip/draft/{{ rid }}"
+      <button type="button" class="btn-ghost rt-delete" hx-delete="/road_trip/draft/{{ rid }}"
               hx-target="#road-trip-body" hx-swap="innerHTML"
               hx-confirm="Discard this playlist?">Discard</button>
-      {% if not s.building %}
-      <button type="button" class="cta rt-save" hx-post="/road_trip/draft/{{ rid }}/save"
-              hx-target="#road-trip-body" hx-swap="innerHTML" hx-disabled-elt="this">
-        Save to YouTube ↗</button>
-      {% endif %}
     </span>
   </header>
   {% if s.building %}
@@ -52,121 +52,48 @@
     {% endif %}
   </p>
   {% else %}
-  <p class="section-note">Cross out anything you don't want and the recipe fills the slot back in.
-    Nothing reaches YouTube until you save.</p>
   {% endif %}
   {% if s.build_error %}
   <p class="muted rt-error">Couldn't finish pulling their tracks ({{ s.build_error }}). What's here
     is still yours to save.</p>
   {% endif %}
-  {% if stats.short %}
-  <p class="muted rt-short">
-    {% if stats.short.theirs %}Their artists and genres only stretched to
-      {{ stats.their_minutes }} min - {{ stats.short.theirs }} min of their share came from your
-      library. Add another artist or genre for a fuller half.{% endif %}
-    {% if stats.short.mine %}Your side ran short by {{ stats.short.mine }} min (excluded genres, or
-      a thin library), so their tracks made up the difference.{% endif %}
-  </p>
-  {% endif %}
-
-  {# Every control below re-picks the playlist, so none of them appear until the pool has stopped
-     growing under them. #}
-  {# These two are BALANCES between two poles, so their fill runs out from the centre - 50/50 and
-     "no lean" are the neutral each is measured against. The genre and year bars below are quantities
-     (30% of the playlist is rock), so those fill from the left. #}
-  {% if not s.building %}
-  <div class="rt-mix">
-    <label class="rt-mix-slider">
-      {# The ask, and what the pool could actually deliver against it - by MINUTES, which is what the
-         mix is budgeted in (your tracks are often longer, so the track counts differ legitimately).
-         The slider carries THEIR share, so dragging toward the "Mine" end gives more of yours: a bar
-         whose left label is "Mine" has to grow mine as it moves left. #}
-      <span class="fp-label">Mine ↔ theirs ({{ s.own_pct }}% mine)
-        <span class="muted">— {{ stats.own_minutes }} / {{ stats.their_minutes }} min,
-          {{ stats.own_count }} / {{ stats.their_count }} songs</span></span>
-      <input type="range" class="fp-slider" min="0" max="100" step="5" name="their_pct"
-             value="{{ 100 - s.own_pct }}" style="--p:{{ 100 - s.own_pct }}%"
-             hx-post="/road_trip/draft/{{ rid }}/mix" hx-target="#road-trip-body"
-             hx-swap="innerHTML" hx-trigger="change"
-             aria-label="drag left for more of your tracks, right for more of theirs">
-    </label>
-    <label class="rt-mix-slider">
-      <span class="fp-label">Deeper cuts ↔ favorites ({{ s.familiarity_pct }}%)</span>
-      <input type="range" class="fp-slider" min="0" max="100" step="5" name="familiarity_pct"
-             value="{{ s.familiarity_pct }}" style="--p:{{ s.familiarity_pct }}%"
-             hx-post="/road_trip/draft/{{ rid }}/mix" hx-target="#road-trip-body"
-             hx-swap="innerHTML" hx-trigger="change"
-             aria-label="lean toward favorites or toward lesser-played tracks">
-    </label>
+  <div class="rt-control-deck{{ ' is-building' if s.building }}">
+  {% set embedded = true %}
+  {% include "_partials/road_trip_form.html" %}
   </div>
-
-  {# Each bar sits at the share that genre or decade actually has in the list below, and dragging it
-     asks for a different share (the server re-picks until it gets there, or as near as the pool
-     allows). Position and meaning are the same quantity, so a bar never says something the playlist
-     doesn't. A pinned bar is held to its request until you release it. #}
-  {% macro bars(party, axes, kind) %}
-    {# One group of bars: all the genres, or all the years. Two axes that mean different things don't
-       belong in one list - a decade sitting between two genres reads as a third genre. #}
-    {% set rows = axes | selectattr('kind', 'equalto', kind) | list %}
-    {% if rows %}
-    <span class="fp-sublabel">{{ 'Genres' if kind == 'genre' else 'Years' }}</span>
-    <div class="fp-barset">
-      {% for a in rows %}
-      {% set pct = (a.get('share', 0) * 100) | round | int %}
-      {% set target = a.get('target') %}
-      <div class="fp-row{{ ' is-pinned' if target is not none }}">
-        <span class="fp-name" title="{{ a.name }}{{ 's' if a.kind == 'era' }} — {{ pct }}% of {{ 'your' if party == 'mine' else 'their' }} tracks{% if target is not none %} (asked for {{ (target * 100) | round | int }}%){% endif %}">
-          {{ a.name }}{{ 's' if a.kind == 'era' }}</span>
-        <span class="fp-slider-wrap">
-          <input type="range" class="fp-slider pct-slider" min="0" max="100" step="5" value="{{ pct }}"
-                 style="--p:{{ pct }}%" name="share"
-                 hx-post="/road_trip/draft/{{ rid }}/tilt" hx-target="#road-trip-body"
-                 hx-swap="innerHTML" hx-trigger="change"
-                 hx-vals='{"party": "{{ party }}", "axis": "{{ a.key }}"}'
-                 aria-label="how much of the {{ party }} side is {{ a.name }} (now {{ pct }}%)">
-        </span>
-        <span class="rt-axis-pct">{{ pct }}%</span>
-        {% if target is not none %}
-        <button type="button" class="fp-icon-btn" title="Release {{ a.name }} — let it float again"
-                aria-label="release {{ a.name }}" hx-post="/road_trip/draft/{{ rid }}/unpin"
-                hx-vals='{"party": "{{ party }}", "axis": "{{ a.key }}"}'
-                hx-target="#road-trip-body" hx-swap="innerHTML">&times;</button>
-        {% endif %}
-      </div>
-      {% endfor %}
-    </div>
-    {% endif %}
-  {% endmacro %}
-  <div class="fp-body rt-axes">
-    {% for party, heading in (("mine", "My side"), ("theirs", "Their side")) %}
-    {% set count = stats.own_count if party == 'mine' else stats.their_count %}
-    <div class="fp-col">
-      <span class="fp-label">{{ heading }}</span>
-      {% set axes = s.axes.get(party) or [] %}
-      {% if axes %}
-      {{ bars(party, axes, 'genre') }}
-      {{ bars(party, axes, 'era') }}
-      {% elif count %}
-      {# Tracks are there, they just carry no genre or year to steer by. Say that, rather than
-         claiming the side is empty. #}
-      <p class="section-note">{{ count }} track{{ 's' if count != 1 }} here, but
-        {{ 'none of them are' if count != 1 else 'it is not' }} genre-tagged yet, so there is nothing
-        to slide. Enrichment fills these in over time.</p>
-      {% else %}
-      <p class="section-note">Nothing from {{ 'your library' if party == 'mine' else 'them' }} in the
-        mix yet.</p>
-      {% endif %}
-      {% if axes and (s.untagged or {}).get(party) %}
-      <p class="section-note">{{ s.untagged[party] }} more untagged, not on any bar.</p>
-      {% endif %}
-    </div>
-    {% endfor %}
-  </div>
-  {% endif %}
 
   {# One track per row, laid out as columns rather than a stacked title/subtitle: every row uses the
      same track, so title, artist, genre and year line up down the list and the ✕ sits right after
      the last column instead of across a gulf of empty space. #}
+  <div class="rt-queue-toolbar">
+    <div><h3>Track list</h3><span>{{ stats.own_count + stats.their_count }} songs · {{ stats.minutes }} min</span></div>
+    {% if not s.building %}
+    <button type="button" class="btn-ghost" hx-post="/road_trip/draft/{{ rid }}/shuffle"
+            hx-target="#road-trip-body" hx-swap="innerHTML" hx-disabled-elt="this"
+            title="Another draw from the same candidates">Shuffle</button>
+    <button type="button" class="btn btn-primary rt-save" hx-post="/road_trip/draft/{{ rid }}/save"
+            hx-target="#road-trip-body" hx-swap="innerHTML" hx-disabled-elt="this">
+      Save to YouTube ↗</button>
+    {% endif %}
+  </div>
+  {% if not s.building %}
+  <div class="rt-queue-notes">
+    <p class="section-note">Swap anything you don't want and the recipe fills the slot back in.
+      Nothing reaches YouTube until you save.</p>
+    {% if stats.short %}
+    <p class="muted rt-short">
+      {% if stats.short.theirs %}Their artists and genres only stretched to
+        {{ stats.their_minutes }} min - {{ stats.short.theirs }} min of their share came from your
+        library. Add another artist or genre for a fuller half.{% endif %}
+      {% if stats.short.mine %}Your side ran short by {{ stats.short.mine }} min (excluded genres, or
+        a thin library), so their tracks made up the difference.{% endif %}
+    </p>
+    {% endif %}
+  </div>
+  {% endif %}
+  <div class="rt-queue-head">
+    <span></span><span></span><span>Track</span><span>Artist</span><span>Genre</span><span>Year</span><span>Source</span><span></span>
+  </div>
   <ol class="rt-list">
     {% for t in draft.tracks %}
     <li class="rt-row{{ ' is-theirs' if t.source != 'mine' }}" data-vid="{{ t.video_id }}">
@@ -179,11 +106,11 @@
       <span class="rt-c-artist" title="{{ t.artist }}">{{ t.artist }}</span>
       <span class="rt-c-genre" title="{{ t.genre }}">{{ t.genre }}</span>
       <span class="rt-c-year">{{ t.year or '' }}</span>
-      <span class="rt-c-src">{{ 'yours' if t.source == 'mine' else 'theirs' }}</span>
+      <span class="rt-c-src {{ 'is-yours' if t.source == 'mine' else 'is-theirs' }}">{{ 'yours' if t.source == 'mine' else 'theirs' }}</span>
       {% if not s.building %}
-      <button type="button" class="rt-x" title="Swap this one out"
-              aria-label="Swap this one out" hx-post="/road_trip/draft/{{ rid }}/slot/{{ loop.index0 }}"
-              hx-target="#road-trip-body" hx-swap="innerHTML">✕</button>
+      <button type="button" class="rt-x" title="Swap this song"
+              aria-label="Swap this song" hx-post="/road_trip/draft/{{ rid }}/slot/{{ loop.index0 }}"
+              hx-target="#road-trip-body" hx-swap="innerHTML">↻</button>
       {% else %}<span></span>{% endif %}
     </li>
     {% endfor %}

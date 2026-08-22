@@ -1,0 +1,23 @@
+{% set axes = s.axes.get(party) or [] %}
+{% set rows = axes | selectattr('kind', 'equalto', kind) | list %}
+{% if rows %}
+<div class="rt-axis-rows">
+  {% for a in rows %}
+  {% set pct = (a.get('share', 0) * 100) | round | int %}
+  {% set target = a.get('target') %}
+  <div class="fp-row{{ ' is-pinned' if target is not none }}">
+    <span class="fp-name" title="{{ a.name }}{{ 's' if a.kind == 'era' }} — {{ pct }}%">{{ a.name }}{{ 's' if a.kind == 'era' }}</span>
+    <span class="fp-slider-wrap"><input type="range" class="fp-slider pct-slider" min="0" max="100"
+      step="5" value="{{ pct }}" style="--p:{{ pct }}%" name="share"
+      hx-post="/road_trip/draft/{{ rid }}/tilt" hx-target="#road-trip-body" hx-swap="innerHTML"
+      hx-trigger="change" hx-vals='{"party":"{{ party }}","axis":"{{ a.key }}"}'></span>
+    <span class="rt-axis-pct">{{ pct }}%</span>
+    {% if target is not none %}<button type="button" class="fp-icon-btn" title="Let {{ a.name }} float again"
+      hx-post="/road_trip/draft/{{ rid }}/unpin" hx-vals='{"party":"{{ party }}","axis":"{{ a.key }}"}'
+      hx-target="#road-trip-body" hx-swap="innerHTML">&times;</button>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% elif draft and not s.building %}
+<p class="section-note">No {{ 'genres' if kind == 'genre' else 'years' }} in this side yet.</p>
+{% endif %}

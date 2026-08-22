@@ -56,16 +56,30 @@ def test_road_trip_page_renders(store):
     assert "Road Trip" in r.text
 
 
+def test_new_route_is_a_library_action_and_hides_the_active_draft(store):
+    c, _ = _app(store)
+    rid = _recipe(store)
+    store.save_road_trip_draft(rid, {"name": "Old draft", "stats": {}, "picked": []}, 1000.0)
+
+    html = c.post("/road_trip/new").text
+
+    assert "Build a route" not in html       # the mixer is the creation surface, not a CRUD heading
+    assert "Old draft" not in html
+    assert 'placeholder="Beach Run"' in html
+
+
 def test_save_list_and_delete_recipe(store):
     c, _ = _app(store)
     r = c.post("/road_trip/recipes", data={
         "name": "Beach Run", "own_pct": "60", "familiarity_pct": "80", "target_minutes": "240",
-        "artists": json.dumps(["Tame Impala"]), "genres": json.dumps(["synthpop"])})
+        "artists": json.dumps(["Tame Impala"]), "genres": json.dumps(["synthpop"]),
+        "blacklist_genres": json.dumps(["Metal"])})
     assert r.status_code == 200
     assert "Beach Run" in r.text
     recipes = store.list_road_trip_recipes()
     assert len(recipes) == 1
     assert recipes[0]["own_pct"] == 60 and recipes[0]["familiarity_pct"] == 80
+    assert recipes[0]["blacklist_genres"] == ["Metal"]
     rid = recipes[0]["id"]
 
     r = c.delete(f"/road_trip/recipes/{rid}")

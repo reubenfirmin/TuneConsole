@@ -21,6 +21,7 @@ def test_road_trip_recipe_crud(store):
     r = recipes[0]
     assert r == {"id": rid, "name": "Beach Run", "own_pct": 60, "artists": ["Tame Impala"],
                 "genres": ["synthpop"], "target_minutes": 240,
+                "blacklist_genres": [],
                 "familiarity_pct": 80, "last_playlist_id": None, "created_at": 1000.0,
                 "updated_at": 1000.0}
 
@@ -120,6 +121,15 @@ def test_own_side_honours_the_taste_models_exclusions(store, monkeypatch):
     monkeypatch.setattr(store, "muted_artists", lambda: {"Muted Artist"})
 
     assert [c["video_id"] for c in road_trip.own_candidates(store, 1000.0)] == ["v_a"]
+
+
+def test_own_side_honours_recipe_genre_blacklist(store, monkeypatch):
+    _library(monkeypatch, store, [("k_a", "v_a", "Keep", "Artist A", 1, False),
+                                  ("k_b", "v_b", "Blocked", "Artist B", 1, False)])
+    monkeypatch.setattr(store, "keys_in_genre_selection", lambda genres: {"k_b"})
+
+    state = {"blacklist_genres": ["Metal"]}
+    assert [c["video_id"] for c in road_trip.own_candidates(store, 1000.0, state)] == ["v_a"]
 
 
 def test_artist_songs_resolves_via_search_then_get_artist():
@@ -312,6 +322,17 @@ def test_build_draft_honours_the_requested_mix(store, monkeypatch):
     assert stats["own_count"] == stats["their_count"] == 6      # 60 min of 5-minute tracks
     assert stats["short"] == {}
     assert 55 <= stats["minutes"] <= 65
+
+
+def test_default_mix_reserves_an_implicit_overlap_third(store, monkeypatch):
+    _stub_pools(monkeypatch, store, own_genre=lambda i: "Rock" if i % 2 == 0 else "Jazz")
+
+    state = road_trip.build_draft(
+        store, FakeClient(), _recipe(own_pct=50, genres=["Rock"]), 1000.0, seed=1)
+
+    assert state["stats"]["overlap_count"] == 4
+    assert state["stats"]["own_count"] == 8       # 4 personal + 4 shared, surfaced simply as yours
+    assert state["stats"]["their_count"] == 4
 
 
 def test_build_draft_honours_a_lopsided_mix(store, monkeypatch):
