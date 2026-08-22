@@ -27,13 +27,6 @@
   src: url("/static/vendor/fonts/jetbrains-mono.woff2") format("woff2");
   font-weight: 100 800; font-display: swap; font-style: normal;
 }
-@font-face {
-  /* TuneConsole brand wordmark only (see .brand). */
-  font-family: "Chakra Petch";
-  src: url("/static/vendor/fonts/chakra-petch.woff2") format("woff2");
-  font-weight: 700; font-display: swap; font-style: normal;
-}
-
 /* ============================================================================
    TOKEN LAYER 1 — PALETTE.  The ONLY place a colour literal may appear.
    Raw hues, named by hue + lightness. Nothing outside this block references a
@@ -550,8 +543,8 @@
   --cluster-space: var(--sp-3);
 
   /* ---- geometry & elevation ---- */
-  --radius: 12px;
-  --radius-sm: 8px;
+  --radius: 4px;
+  --radius-sm: 3px;
   --shadow: 0 12px 28px -20px var(--scrim-heavy);
   --maxw: 68rem;
   --table-min: 46rem;

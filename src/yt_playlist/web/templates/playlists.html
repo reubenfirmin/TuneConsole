@@ -1,14 +1,15 @@
-{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Playlists · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Playlists · TuneConsole{% endblock %}{% block page_class %}page-playlists{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
   &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}{% endcall %}{% endif %}
 <div class="page-head">
+  <div class="page-index"><span>02 / PLAYLISTS</span><span>LIBRARY INDEX</span></div>
   <h1>All playlists</h1>
   <p>Select playlists to merge, delete, or assign to a group. Sort by name or by your listening,
      and split the view by group.</p>
 </div>
 
 <div x-data='playlistsTab({{ rows|tojson }})'>
-  <div class="card card--toolbar section-block">
+  <div class="card card--toolbar section-block playlist-toolbar">
     <div class="toolbar">
       <span class="muted">Click a column heading to sort.</span>
       {% if has_groups %}
@@ -63,7 +64,7 @@
   {% endmacro %}
 
   {# "Generated" lives in its own card above the table, always a separate block, collapsible #}
-  <div class="card gen-grp" x-show="genRows().length" x-cloak>
+  <div class="card gen-grp playlist-generated" x-show="genRows().length" x-cloak>
     <div class="gen-grp-head" tabindex="0" role="button" @click="toggleGen()"
          @keydown.enter.space.prevent="toggleGen()" :aria-expanded="!collapsed.Generated"
          title="Click to collapse / expand">
@@ -84,7 +85,7 @@
     </p>
   </div>
 
-  <div class="card">
+  <div class="card playlist-table-card">
     <table class="playlist-index">
       <thead><tr>
         <th class="col-action"></th>

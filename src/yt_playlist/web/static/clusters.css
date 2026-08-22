@@ -5,6 +5,10 @@
   --accent-3: var(--immersive-accent-3);
   --accent-pale: var(--immersive-accent-pale);
   --accent-soft: color-mix(in srgb, var(--immersive-accent) 16%, transparent);
+  /* Clusters is a protected immersive workspace, not an ordinary application page. Keep its
+     established, softer overlay geometry when the shared application shell becomes sharper. */
+  --radius: 12px;
+  --radius-sm: 8px;
 }
 .cluster-page-label {
   font-family: var(--font-mono); font-size: .66rem; font-weight: 600;

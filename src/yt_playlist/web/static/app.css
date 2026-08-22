@@ -34,20 +34,21 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   background: var(--surface-card);
   border-bottom: 1px solid var(--border-strong);
 }
-/* TuneConsole logo: an equalizer logomark (bars belong on a console) beside a
-   two-tone wordmark: "Tune" in ink, "Console" in violet. The bars bounce like
-   a live EQ. */
+/* Provisional typographic identity. It intentionally uses the product type system instead of a
+   standalone display face while the permanent mark is still being explored. */
 .brand {
-  font-family: "Chakra Petch", var(--font-sans);
-  font-weight: 700; font-size: 1.34rem; letter-spacing: 0.005em; line-height: 1;
-  display: inline-flex; align-items: baseline; gap: 0.5rem;
-  text-decoration: none;
+  display: inline-flex; align-items: center; gap: 0.65rem; color: var(--text);
+  text-decoration: none; white-space: nowrap;
 }
-.brand .b-tune    { color: var(--text); }
-.brand .b-console { color: var(--accent-2); }
+.brand-name { font-family: var(--font-sans); font-size: 1.18rem; font-weight: 750;
+  letter-spacing: -0.025em; line-height: 1; }
+.brand-edition { font-family: var(--font-mono); font-size: 0.56rem; font-weight: 600;
+  letter-spacing: 0.11em; line-height: 1.2; color: var(--faint); }
 .brand:hover { text-decoration: none; }
-.brand:hover .b-console { color: var(--light-source); }
+.brand:hover .brand-name { color: var(--light-source); }
 
+/* The EQ remains available to the immersive generating sequence, where it represents activity
+   rather than serving as the application logo. */
 .brand-eq { flex: none; }
 .eq-stop-start { stop-color: var(--accent); }
 .eq-stop-end { stop-color: var(--accent-2); }
@@ -137,7 +138,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .omni-empty { padding: .875rem 0.7rem; color: var(--dim); font-size: var(--type-ui); }
 @media (max-width: 1050px) {
   .topbar { gap: .7rem; }
-  .brand .b-word { display: none; }
+  .brand-edition { display: none; }
   .omni-box { max-width: 20rem; }
   .topbar nav a, .tools-btn { padding-inline: .5rem; }
 }

@@ -39,17 +39,8 @@
   {% set path = request.url.path if request else "/" %}
   <header class="topbar">
     <a class="brand" href="/" aria-label="TuneConsole home">
-      <svg class="brand-eq" viewBox="0 0 28 24" width="28" height="24" aria-hidden="true">
-        <defs><linearGradient id="eqg" x1="0" y1="1" x2="0" y2="0">
-          <stop class="eq-stop-start" offset="0"/><stop class="eq-stop-end" offset="1"/>
-        </linearGradient></defs>
-        <rect class="eqbar eq-delay-1" x="0"  y="9"  width="4" height="15" rx="2" fill="url(#eqg)"/>
-        <rect class="eqbar eq-delay-2" x="6"  y="3"  width="4" height="21" rx="2" fill="url(#eqg)"/>
-        <rect class="eqbar eq-delay-3" x="12" y="12" width="4" height="12" rx="2" fill="url(#eqg)"/>
-        <rect class="eqbar eq-delay-4" x="18" y="6"  width="4" height="18" rx="2" fill="url(#eqg)"/>
-        <rect class="eqbar eq-delay-5" x="24" y="14" width="4" height="10" rx="2" fill="url(#eqg)"/>
-      </svg>
-      <span class="b-word"><span class="b-tune">Tune</span><span class="b-console">Console</span></span>
+      <span class="brand-name">TuneConsole</span>
+      <span class="brand-edition" aria-hidden="true">LOCAL / 01</span>
     </a>
     {# Clusters has its own seed search; the library omni-search would only compete with it there #}
     {% if not path.startswith('/clusters') %}

@@ -1,5 +1,6 @@
 {% extends "base.html" %}{% from "_macros.html" import banner %}
 {% block title %}Home - TuneConsole{% endblock %}
+{% block page_class %}page-home{% endblock %}
 {# Transient success toast (e.g. re-authed with auto-sync on, nothing for them to do). Mirrors the
    OOB error toast: Alpine auto-dismisses after 5s. Renders into base.html's #toasts container. #}
 {% block toasts %}{% if toast %}
@@ -10,6 +11,7 @@
 </div>
 {% endif %}{% endblock %}
 {% block body %}
+<div class="page-index"><span>01 / HOME</span><span>YOUR LIBRARY, NOW</span></div>
 {% if flash %}
 {# Setup flash: dismissible, and auto-retires the moment a sync is kicked off (see homeStatus.refresh). #}
 <div class="notice ok banner" x-data="{ show: true }" x-show="show" x-cloak @sync-started.window="show = false">

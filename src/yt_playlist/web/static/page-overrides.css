@@ -1,4 +1,99 @@
 /* Narrow page-level overrides and standalone generating takeover. */
+
+/* ===== Phase 1 geometry: sharp application surfaces, protected immersive modes ===============
+   The shared tokens carry this geometry across ordinary pages. Clusters restores its established
+   radii in clusters.css; these selectors deliberately exclude it as a second boundary. */
+main:not(.page-clusters) .card--featured {
+  box-shadow: none;
+}
+
+/* Artwork is already the strongest geometry in the product; let its square silhouette lead. */
+main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album-thumb,
+  .pl-art, .pl-cover, .pl-thumb) {
+  border-radius: 0;
+}
+
+/* Home's operational surfaces should read as instrument strips, not soft floating cards. */
+.page-home :where(.sync-console, .onboard-card) {
+  border-radius: 4px;
+}
+.page-home .home-status {
+  border-inline-start-width: 4px;
+}
+.page-home .gen-row:hover {
+  border-radius: 2px;
+}
+.page-home :where(.alert-badge, .tile-badge, .rl-customize-toggle, .rl-upcoming-chip) {
+  border-radius: 3px;
+}
+
+/* The playlist toolbar and index become ruled working surfaces instead of nested rounded cards. */
+.page-playlists .playlist-toolbar {
+  background: transparent;
+  border-inline: 0;
+  border-block-start: 1px solid var(--border-strong);
+  border-block-end: 1px solid var(--border-strong);
+}
+.page-playlists .playlist-table-card {
+  padding-inline: 0;
+  background: transparent;
+  border-inline: 0;
+  border-block-start-color: var(--border-strong);
+  border-block-end-color: var(--border-strong);
+}
+.page-playlists .playlist-generated {
+  border-inline-start: 4px solid var(--accent);
+}
+.pl-actionbar {
+  border-radius: 4px;
+}
+
+/* ===== Phase 2 identity trial: provisional indexing + stronger type hierarchy ================
+   Like the geometry trial above, page hierarchy is tested on Home and Playlists before it is
+   allowed to become an application-wide convention. */
+.page-index {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin: 0 0 var(--sp-4);
+  padding-block-end: var(--sp-2);
+  border-block-end: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 650;
+  letter-spacing: 0.13em;
+  line-height: var(--leading-compact);
+  color: var(--faint);
+}
+.page-index span:first-child {
+  color: var(--accent-2);
+}
+.page-playlists .page-head h1 {
+  font-size: clamp(2.4rem, 5vw, 3.4rem);
+  letter-spacing: -0.04em;
+}
+.page-home {
+  counter-reset: home-section;
+}
+.page-home h2.section::before {
+  counter-increment: home-section;
+  content: counter(home-section, decimal-leading-zero);
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+}
+.page-home h2.section {
+  font-size: clamp(1.45rem, 2.6vw, 1.8rem);
+  letter-spacing: -0.025em;
+}
+
+@media (max-width: 34rem) {
+  .page-index span:last-child { display: none; }
+}
 /* ===== Merge / compare screen (was an inline <style> in editor.html) ==========================
    Scoped to .page-merge: the bare `table` / `tbody td` rules below deliberately override the
    global table styling for this page only, which is exactly what the inline block used to do. */
