@@ -5,11 +5,24 @@
     <h2 class="section" id="home-mixes-title">Made for your library</h2>
     <p class="section-note">Ready-to-shape playlists drawn from what you save, play, and revisit.</p>
     <div hx-get="/home/cards" hx-trigger="load" hx-swap="innerHTML" class="card-row-loading">
-      <div class="spinner" aria-label="Building your mixes"></div>
+      <div class="mix-loader" role="status" aria-label="Building four mixes from your library">
+        <div class="mix-loader-copy">
+          <span class="mix-loader-mark" aria-hidden="true">✦</span>
+          <div><strong>Finding four ways into your library</strong><span>Shaping mixes from what you save, play, and revisit</span></div>
+        </div>
+        <div class="mix-loader-grid" aria-hidden="true">
+          {% for card in range(4) %}
+          <div class="mix-loader-card">
+            <div class="mix-loader-art">{% for tile in range(4) %}<i style="--tile:{{ tile }};--card:{{ card }}"></i>{% endfor %}</div>
+            <div class="mix-loader-label"><i></i><i></i></div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
     </div>
   </section>
-  {# The steering panel sits BELOW the cards (only meaningful once the library has genres to steer), so
-     the page starts with playlists, not controls. #}
+  {# Steering stays attached to this fragment: changing it replaces #home-feed so the four choices
+     and their controls update atomically. #}
   {% if fingerprint.families %}{% include "_partials/taste_fingerprint.html" %}{% endif %}
   {# More mixes are coming while the model is still learning. Revealed by JS when the loaded card row
      has 1-3 generated playlists (hidden at 0 — that's the warming-up state — and at the full 4). #}
@@ -36,6 +49,7 @@
     })();
   </script>
   <div id="steer-toast" class="steer-toast" x-data="{show:false}" x-show="show" x-cloak x-transition
+       @mixes-reranked.window="show=true; setTimeout(()=>show=false, 3500)"
        x-init="$nextTick(() => { if (sessionStorage.getItem('steered')) { sessionStorage.removeItem('steered'); show=true; setTimeout(()=>show=false, 3500); } })">
     Re-ranked. <a href="/taste">Fine-tune your taste model →</a>
   </div>

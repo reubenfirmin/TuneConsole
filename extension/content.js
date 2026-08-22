@@ -238,7 +238,13 @@ if (!window.__tcBridgeLoaded) {
     np.likeStatus = readLikeStatus();
     // Include likeStatus in the key so a like/dislike change re-reports even when the track is the same.
     const key = np.title + " | " + np.artist + " | " + np.likeStatus + " | " + (np.videoId || "");
-    if (key === lastNowPlaying) return;
+    // The backend ages this card out when the YTM tab disappears. Keep its presence fresh even
+    // when the track is paused and none of its metadata changes; this is deliberately a separate
+    // heartbeat so it does not get persisted as another play every two seconds.
+    if (key === lastNowPlaying) {
+      try { chrome.runtime.sendMessage({ type: "now-heartbeat" }); } catch (e) {}
+      return;
+    }
     lastNowPlaying = key;
     let vid = np.videoId || "", lst = np.playlist || "";
     if (!vid || !lst) {  // DOM-fallback reports carry neither; the watch URL has both

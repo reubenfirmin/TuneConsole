@@ -1,17 +1,24 @@
-<section class="fingerprint card" id="fingerprint" x-data="fpPanel()">
+<section class="fingerprint card" id="fingerprint" x-data="fpPanel()" :class="{ 'is-collapsed': collapsed }">
   {# Collapsible: the whole panel folds to a single bar. The open/closed state is remembered in
      localStorage (see fpPanel) so it survives reloads and every #home-feed re-render. #}
   <div class="fp-bar">
     <button type="button" class="fp-collapse" @click="toggle()"
             :aria-expanded="(!collapsed).toString()" :title="collapsed ? 'Expand taste panel' : 'Collapse taste panel'">
-      <span class="fp-caret" x-text="collapsed ? '▸' : '▾'"></span> Your listening mood
+      <span class="fp-mood-mark" aria-hidden="true">≋</span>
+      <span class="fp-mood-copy"><strong>Tune these mixes</strong><small>Adjust what the four playlists lean toward</small></span>
+      <span class="fp-caret" x-text="collapsed ? '＋' : '−'"></span>
     </button>
-    {# Always available (a header-level global control, not per-row): clears leans, un-hides removed
-       bars, re-centers breadth. A no-op when nothing is steered. #}
+    <button type="button" class="fp-refresh-all" x-show="!collapsed" x-cloak
+            hx-post="/home/refresh-cards" hx-target="#home-mode-cards" hx-swap="outerHTML"
+            hx-disabled-elt="this" title="Create four new playlists and themes">↻ Refresh all</button>
+    {# Clears only this panel's temporary adjustments. Permanent learned taste remains, so a knob can
+       legitimately return to a non-central learned position. #}
     <button type="button" class="fp-reset" x-show="!collapsed" x-cloak
-            hx-post="/home/fingerprint/reset" hx-target="#home-feed" hx-swap="outerHTML"
-            hx-on::before-request="sessionStorage.setItem('steered','1')"
-            title="Clear all your steering: every bar back to neutral">Reset to default</button>
+            hx-post="/home/fingerprint/reset" hx-target="#fingerprint" hx-swap="outerHTML"
+            hx-on::after-request="htmx.ajax('GET','/home/cards',{target:'#home-mode-cards',swap:'outerHTML'}); window.dispatchEvent(new CustomEvent('mixes-reranked'))"
+            title="Remove adjustments made here; learned taste remains">Clear adjustments</button>
+    <button type="button" class="fp-close" x-show="!collapsed" x-cloak @click="toggle()"
+            title="Close mix controls" aria-label="Close mix controls">×</button>
   </div>
   <div class="fp-collapsible" x-show="!collapsed" x-cloak>
   {# Header pairs the two GLOBAL controls: Breadth (the focused<->eclectic master dial, #7) on the
@@ -25,8 +32,8 @@
         <input type="range" class="fp-breadth-slider" min="-1" max="1" step="0.05"
                value="{{ fingerprint.breadth_bias }}" name="breadth_bias"
                style="--p:{{ '%.0f'|format((fingerprint.breadth_bias + 1) / 2 * 100) }}%"
-               hx-post="/home/breadth" hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
-               hx-on::before-request="sessionStorage.setItem('steered','1')"
+               hx-post="/home/breadth" hx-target="#home-mode-cards" hx-swap="outerHTML" hx-trigger="change"
+               hx-on::after-request="window.dispatchEvent(new CustomEvent('mixes-reranked'))"
                aria-label="steer the feed from focused to eclectic">
         {# Tick at the transient model's current measured breadth (0=focused..1=eclectic), so you see
            where you naturally sit vs the thumb (your bias steer). Inset 8px each side for the thumb. #}
@@ -40,7 +47,7 @@
     </div>
     <a class="fp-tune" href="/taste">Tune your taste model →</a>
   </div>
-  <p class="fp-hint section-note">Drag a genre or era bar to favor or mute it - your picks re-rank instantly.</p>
+  <p class="fp-hint section-note">Drag a genre or era to reshape these mixes. Knobs include your learned taste; clearing adjustments may leave a learned preference off-center.</p>
   <div class="fp-body">
     <div class="fp-col">
       <span class="fp-label">Genres</span>
@@ -83,13 +90,9 @@
         <input type="range" class="fp-slider" min="0" max="2" step="0.1" value="{{ e.effective }}"
                style="--p:{{ '%.0f'|format(e.effective / 2 * 100) }}%"
                name="weight" hx-post="/home/steer" hx-vals='{"axis":"era:{{ e.name }}"}'
-               hx-target="#home-feed" hx-swap="outerHTML" hx-trigger="change"
-               hx-on::before-request="sessionStorage.setItem('steered','1')"
+               hx-target="#home-mode-cards" hx-swap="outerHTML" hx-trigger="change"
+               hx-on::after-request="window.dispatchEvent(new CustomEvent('mixes-reranked'))"
                aria-label="favor or mute the {{ e.name }}s">
-        {% if e.live_active %}
-        <span class="fp-marker" style="left:calc(8px + {{ '%.3f'|format(e.live / 2) }} * (100% - 16px))"
-              title="where your recent listening has the {{ e.name }}s right now"></span>
-        {% endif %}
         </span>
       </div>
       {% endfor %}

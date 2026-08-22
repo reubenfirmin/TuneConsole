@@ -43,7 +43,14 @@ def build(ctx) -> APIRouter:
                 radio_dual = bool(radio.dual_deck)
                 radio_fallback_reason = getattr(radio, "fallback_reason", None)
                 radio_upcoming = radio_mod.upcoming_picks(radio)
-        return {"connected": bridge.connected, "now_playing": bridge.now_playing,
+        now_playing = bridge.now_playing
+        seen_at = getattr(bridge, "now_playing_seen_at", None)
+        # The page sensor refreshes this every two seconds. pagehide is best-effort, so closing or
+        # crashing the YTM tab must also age the last track out instead of leaving fake playback UI.
+        if now_playing is not None and seen_at is not None and time.monotonic() - seen_at > 8:
+            bridge.now_playing = now_playing = None
+            bridge.now_playing_seen_at = None
+        return {"connected": bridge.connected, "now_playing": now_playing,
                 "radio": bool(radio is not None and radio.active),
                 "radio_waiting": bool(radio is not None and getattr(radio, "waiting", False)),
                 "radio_dual": radio_dual,
@@ -659,6 +666,13 @@ def build(ctx) -> APIRouter:
                     continue
                 # The extension can push unsolicited events (not replies to a request). A play
                 # notification carries what is currently playing in the YouTube Music tab.
+                if isinstance(msg, dict) and msg.get("type") == "now-heartbeat":
+                    # Metadata reports are intentionally deduplicated in the extension. This
+                    # presence-only frame keeps a paused track visible without recording it as a
+                    # fresh play, while the normal expiry still clears a closed/crashed tab.
+                    if msg.get("deck") != "standby" and bridge.now_playing is not None:
+                        bridge.now_playing_seen_at = time.monotonic()
+                    continue
                 if isinstance(msg, dict) and msg.get("type") == "play":
                     if msg.get("deck") == "standby":
                         continue   # a muted, paused standby deck must never register a play or flip the bar
@@ -677,6 +691,7 @@ def build(ctx) -> APIRouter:
                                           "likeStatus": msg.get("likeStatus"),
                                           "video_id": msg.get("videoId"),
                                           "paused": bool(msg.get("paused"))}
+                    bridge.now_playing_seen_at = time.monotonic()
                     # #75 persist it: play_events + the (track, day) model + freshness stamp.
                     # Store calls block, so run off the event loop; a bad frame or a stub store
                     # (tests) must never kill the bridge socket.
@@ -754,6 +769,7 @@ def build(ctx) -> APIRouter:
                                 bridge.now_playing["paused"] = (msg.get("state") == "paused")
                         elif kind == "bye":
                             bridge.now_playing = None
+                            bridge.now_playing_seen_at = None
                     except Exception:  # noqa: BLE001
                         logger.warning("failed to update now_playing from pevent", exc_info=True)
                     # #91 raw player/curation event; persist off the loop, never kill the socket.
@@ -789,6 +805,7 @@ def build(ctx) -> APIRouter:
             ping_task.cancel()
             bridge.disconnect(conn_id)
             bridge.now_playing = None      # nothing is playing once the extension is gone
+            bridge.now_playing_seen_at = None
             # #93 the WS dropping is the real "tab gone" signal (a pagehide "bye" is not: it also
             # fires on every in-tab navigation, including the radio's own). Reset the session here,
             # not on bye, so the radio does not kill itself on its own hard navigation.

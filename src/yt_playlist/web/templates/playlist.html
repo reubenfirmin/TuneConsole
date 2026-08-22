@@ -1,13 +1,19 @@
 {% extends "base.html" %}{% block title %}{{ pl.title }} · TuneConsole{% endblock %}{% block page_class %}page-playlist{% endblock %}{% block body %}
 <div x-data="enrichPanel({{ pl.id }}, {{ 'true' if lastfm_configured else 'false' }}, {{ active_job.id if active_job else 0 }}, '{{ active_job.source if active_job else '' }}', null, {{ conflict_count }})"
      x-init="rejoinIfActive()" @conflicts-count.window="conflictCount = $event.detail.count">
-<div class="artist-head pl-head library-hero release-hero" x-data="{ artH: 0 }"
-     x-init="const fit = () => artH = $refs.main.offsetHeight; fit(); new ResizeObserver(fit).observe($refs.main)">
-  {% if pl.thumbnail %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ pl.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.closest('.pl-art').remove()"></span>{% endif %}
-  <div class="pl-headmain" x-ref="main">
+<div class="artist-head pl-head library-hero release-hero{{ ' has-art' if pl.thumbnail }}">
+  <span class="pl-art pl-art-strip" aria-hidden="true">
+    {% set art = namespace(count=0, seen=[]) %}
+    {% for t in tracks[:16] %}{% if t.thumbnail and t.thumbnail not in art.seen and art.count < 8 %}
+      <img src="{{ t.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
+      {% set art.seen = art.seen + [t.thumbnail] %}{% set art.count = art.count + 1 %}
+    {% endif %}{% endfor %}
+    {% if art.count == 0 and pl.thumbnail %}<img src="{{ pl.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+  </span>
+  <div class="pl-headmain">
     {% include "_partials/playlist_head.html" %}
     <p class="pl-stats">
-      <span class="tag amber">{{ identity }}</span>
+      {% if show_identity %}<span class="pl-identity">Account: {{ identity }}</span>{% endif %}
       <span class="stat"><strong>{{ tracks|length }}</strong>&nbsp;track{{ '' if tracks|length == 1 else 's' }}</span>
       <span class="stat"><strong>{{ total_plays }}</strong>&nbsp;total plays</span>
     </p>
@@ -16,35 +22,35 @@
          target="_blank" rel="noopener">▶ Play on YouTube Music ↗</a>
     </div>
   </div>
-  <div class="head-tools">
-    <a class="head-icon" href="/playlist/{{ pl.id }}/share.txt" download="{{ pl.title }}.txt"
-       title="Share: download one song URL per line as a .txt" aria-label="Share playlist">
-      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
-           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
-        <line x1="8.6" y1="10.7" x2="15.4" y2="6.3"/><line x1="8.6" y1="13.3" x2="15.4" y2="17.7"/>
-      </svg>
-    </a>
-    <button type="button" class="head-icon" :class="{ on: running }"
-            @click="start()" :disabled="running"
-            title="Enrich genre, year &amp; audio features: runs every enabled provider in order"
-            aria-label="Enrich">
-      <span class="spinner" x-show="running" x-cloak></span>
-      <svg x-show="!running" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M5 3v4M3 5h4M6 17v4M4 19h4M13 3l2.5 6.5L22 12l-6.5 2.5L13 21l-2.5-6.5L4 12l6.5-2.5z"/>
-      </svg>
-    </button>
-    <button type="button" class="head-icon conflict-icon" x-show="conflictCount > 0" x-cloak
-            @click="openConflicts()"
-            :title="conflictCount + ' provider disagreement(s): click to resolve'"
-            aria-label="Resolve enrichment disagreements">
-      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
-           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 3 2 20h20L12 3z"/><line x1="12" y1="10" x2="12" y2="14"/><line x1="12" y1="17" x2="12" y2="17"/>
-      </svg>
-      <span class="conflict-badge" x-text="conflictCount"></span>
-    </button>
+  <div class="head-tools" aria-label="Playlist tools">
+        <a class="head-icon" href="/playlist/{{ pl.id }}/share.txt" download="{{ pl.title }}.txt"
+           title="Share: download one song URL per line as a .txt" aria-label="Share playlist">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+            <line x1="8.6" y1="10.7" x2="15.4" y2="6.3"/><line x1="8.6" y1="13.3" x2="15.4" y2="17.7"/>
+          </svg>
+        </a>
+        <button type="button" class="head-icon" :class="{ on: running }"
+                @click="start()" :disabled="running"
+                title="Enrich genre, year &amp; audio features: runs every enabled provider in order"
+                aria-label="Enrich">
+          <span class="spinner" x-show="running" x-cloak></span>
+          <svg x-show="!running" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 3v4M3 5h4M6 17v4M4 19h4M13 3l2.5 6.5L22 12l-6.5 2.5L13 21l-2.5-6.5L4 12l6.5-2.5z"/>
+          </svg>
+        </button>
+        <button type="button" class="head-icon conflict-icon" x-show="conflictCount > 0" x-cloak
+                @click="openConflicts()"
+                :title="conflictCount + ' provider disagreement(s): click to resolve'"
+                aria-label="Resolve enrichment disagreements">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
+               stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3 2 20h20L12 3z"/><line x1="12" y1="10" x2="12" y2="14"/><line x1="12" y1="17" x2="12" y2="17"/>
+          </svg>
+          <span class="conflict-badge" x-text="conflictCount"></span>
+        </button>
   </div>
 </div>
 {% if is_generated %}{% with pid = pl.id %}{% include "_partials/feedback_panel.html" %}{% endwith %}{% endif %}

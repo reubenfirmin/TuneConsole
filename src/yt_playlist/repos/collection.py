@@ -89,30 +89,40 @@ class CollectionRepo(Repo):
         """Every artist across your playlists: song count, distinct albums, #playlists, total plays."""
         plays = self._play_counts()
         rows = self.conn.execute(
-            "SELECT t.artist artist, t.identity_key key, t.album album, MIN(t.artist_browse_id) browse, "
+            "SELECT t.artist artist, t.identity_key key, t.album album, t.artist_browse_id browse, "
             "       GROUP_CONCAT(DISTINCT pt.playlist_id) pls "
             "FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id "
-            "WHERE t.artist<>'' GROUP BY t.artist, t.identity_key, t.album").fetchall()
+            "WHERE t.artist<>'' GROUP BY t.artist, t.artist_browse_id, t.identity_key, t.album").fetchall()
+        known_ids = {}
+        for r in rows:
+            if r["browse"]:
+                known_ids.setdefault(r["artist"], set()).add(r["browse"])
         artists = {}
         for r in rows:
-            a = artists.setdefault(r["artist"], {"artist": r["artist"], "browse": r["browse"],
-                                                 "songs": 0, "plays": 0, "_albums": set(), "_pls": set()})
+            browse = r["browse"]
+            # Older syncs may not have stored an ID. Fold those tracks into the only known identity;
+            # keep them separate when the name genuinely maps to several YouTube artists.
+            if not browse and len(known_ids.get(r["artist"], ())) == 1:
+                browse = next(iter(known_ids[r["artist"]]))
+            artist_key = (r["artist"], browse)
+            a = artists.setdefault(artist_key, {"artist": r["artist"], "browse": r["browse"],
+                                                 "songs": 0, "plays": 0, "_songs": set(),
+                                                 "_albums": set(), "_pls": set()})
+            a["browse"] = a["browse"] or browse
             a["plays"] += plays.get(r["key"], 0)
+            a["_songs"].add(r["key"])
             if r["album"]:
                 a["_albums"].add(r["album"])
             a["_pls"].update((r["pls"] or "").split(","))
-        # song count = distinct identity_keys per artist (separate, since the query groups by album too)
-        scount = {r["artist"]: r["c"] for r in self.conn.execute(
-            "SELECT artist, COUNT(DISTINCT identity_key) c FROM tracks WHERE artist<>'' GROUP BY artist")}
-        thumbs = {r["artist"]: r["thumb"] for r in self.conn.execute(
-            "SELECT artist, MIN(thumbnail) thumb FROM tracks "
-            "WHERE artist<>'' AND thumbnail IS NOT NULL GROUP BY artist")}
+        thumbs = {(r["artist"], r["browse"]): r["thumb"] for r in self.conn.execute(
+            "SELECT artist, artist_browse_id browse, MIN(thumbnail) thumb FROM tracks "
+            "WHERE artist<>'' AND thumbnail IS NOT NULL GROUP BY artist, artist_browse_id")}
         out = []
-        for a in artists.values():
-            a["songs"] = scount.get(a["artist"], 0)
+        for artist_key, a in artists.items():
+            a["songs"] = len(a.pop("_songs"))
             a["n_albums"] = len(a.pop("_albums"))
             a["n_pls"] = len([x for x in a.pop("_pls") if x])
-            a["thumbnail"] = thumbs.get(a["artist"])
+            a["thumbnail"] = thumbs.get(artist_key) or thumbs.get((a["artist"], None))
             out.append(a)
         out.sort(key=lambda a: (-a["plays"], a["artist"].lower()))
         return out

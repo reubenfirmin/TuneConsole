@@ -585,7 +585,7 @@ def test_playlists_tab_renders(store):
     store.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
     page = c.get("/playlists").text                                # Playlists moved off / to /playlists
-    assert "All playlists" in page and "playlistsTab(" in page
+    assert "Playlists" in page and "playlistsTab(" in page
     assert c.get("/cleanup").status_code == 200                    # cleanup moved here
     assert 'href="/cleanup"' in page                              # nav points at it
     assert c.get("/").status_code == 200                          # / is now the Home tab

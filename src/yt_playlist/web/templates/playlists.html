@@ -1,31 +1,30 @@
-{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Playlists · TuneConsole{% endblock %}{% block page_class %}page-playlists{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner, library_icon %}{% block title %}Playlists · TuneConsole{% endblock %}{% block page_class %}page-playlists{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
   &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}{% endcall %}{% endif %}
-<div class="page-head">
-  <h1>All playlists</h1>
-  <p>Select playlists to merge, delete, or assign to a group. Sort by name or by your listening,
-     and split the view by group.</p>
-</div>
-
-<div x-data='playlistsTab({{ rows|tojson }})'>
-  <div class="card card--toolbar section-block playlist-toolbar">
-    <div class="toolbar">
-      <span class="muted">Click a column heading to sort.</span>
-      {% if has_groups %}
+<div x-data='playlistsTab({{ rows|tojson }})'{% if not has_groups %} class="playlists-no-groups"{% endif %}>
+<div class="page-head library-page-head">
+  <div class="library-page-title">{{ library_icon('playlists') }}<h1>Playlists</h1></div>
+  <p>Select playlists to merge, delete, or assign to a group. Sort by name or by your listening.</p>
+  <div class="library-head-actions playlist-head-actions card--toolbar toolbar">
+    {% if has_groups %}
       <span class="seg" title="Group the list by your group names">
         <button type="button" :class="{ on: !split }" @click="split = false">All together</button>
         <button type="button" :class="{ on: split }" @click="split = true">By group</button>
       </span>
-      {% endif %}
-    </div>
+    {% endif %}
+    <button type="button" class="generated-shortcut" x-show="genRows().length && collapsed.Generated"
+            x-cloak @click="toggleGen()" title="Show generated playlists">
+      <span>Generated playlists</span><strong x-text="genRows().length"></strong><span aria-hidden="true">▾</span>
+    </button>
   </div>
+</div>
 
   <!-- floating bulk-action bar: teleported to body so it stays fixed to the viewport (and isn't
        captured by <main>'s transform) and is reachable however far you've scrolled -->
   <template x-teleport="body">
     <div class="pl-actionbar" x-show="count() > 0" x-cloak x-transition.scale.origin.bottom>
       <strong x-text="count() + ' selected'"></strong>
-      <button type="button" class="btn-sm" :disabled="count() < 2"
+      <button type="button" class="btn-sm" x-show="count() > 1"
               @click="merge()" title="Open the merge editor with the selected playlists">Merge</button>
       <button type="button" class="btn-sm" @click="openCopy()"
               :title="count() > 1 ? 'Combine the selected playlists into a new one' : 'Duplicate the selected playlist'"
@@ -35,7 +34,8 @@
       <button type="button" class="btn-sm" @click="openGroup()"
               title="Assign the selected playlists to a named group">Group</button>
       <button type="button" class="btn-danger btn-sm" @click="delModal = true">Delete</button>
-      <button type="button" class="btn-ghost btn-sm" @click="selectAll(false)">Clear</button>
+      <button type="button" class="btn-ghost btn-sm" @click="selectAll(false)"
+              title="Deselect all selected playlists">Deselect all</button>
     </div>
   </template>
 
@@ -43,34 +43,39 @@
   <tr :class="{ selrow: sel[r.id] }">
     <td class="selcell" @click="rowCheck(r, $event)">
       <input type="checkbox" :checked="sel[r.id]" @click.stop="rowCheck(r, $event)"></td>
-    <td>
+    <td class="playlist-art-cell">
       <span class="pl-cover">
         <img class="pl-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
         <a class="pl-play" :href="'https://music.youtube.com/playlist?list=' + r.ytm"
            target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
-        <span class="pl-ptype" x-show="r.kind"
-              :title="r.kind" x-text="({ audio: '♪', video: '▦', mixed: '◑', mix: '≋' })[r.kind] || ''"></span>
       </span>
+    </td>
+    <td>
       <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in TuneConsole"></a>
       {% if promote %}<button type="button" class="promote-btn" @click.stop="promote(r)"
               title="Move into your library so it counts as a real playlist and shapes your recommendations">Promote to library ↑</button>{% endif %}
     </td>
-    <td><span class="gtag" x-show="r.group" x-text="r.group"></span></td>
+    {% if has_groups %}<td><span class="gtag" x-show="r.group" x-text="r.group"></span></td>{% endif %}
     <td class="num mono" x-text="r.count"></td>
     <td class="num lastcol" x-text="fmtLast(r.last)"></td>
-    <td class="num mono" x-text="r.listens || ''"></td>
+    <td class="pl-activity-cell">
+      <span class="pl-activity" role="img" :title="activityLabel(r)" :aria-label="activityLabel(r)">
+        <i :style="{ '--heat': activity(r) }"></i>
+      </span>
+    </td>
   </tr>
   {% endmacro %}
 
   {# "Generated" lives in its own card above the table, always a separate block, collapsible #}
-  <div class="card gen-grp playlist-generated" x-show="genRows().length" x-cloak>
-    <div class="gen-grp-head" tabindex="0" role="button" @click="toggleGen()"
-         @keydown.enter.space.prevent="toggleGen()" :aria-expanded="!collapsed.Generated"
-         title="Click to collapse / expand">
-      <span class="section-label">Generated</span>
-      <span class="gen-grp-count" x-text="'(' + genRows().length + ')'"></span>
-      <span class="gen-grp-caret" x-text="collapsed.Generated ? '▸' : '▾'"></span>
-    </div>
+  <div class="card gen-grp playlist-generated" x-show="genRows().length && !collapsed.Generated" x-cloak>
+    <button type="button" class="gen-grp-head" @click="toggleGen()"
+            :aria-expanded="!collapsed.Generated"
+            :title="collapsed.Generated ? 'Expand generated playlists' : 'Collapse generated playlists'">
+      <span class="gen-grp-caret" aria-hidden="true" x-text="collapsed.Generated ? '▸' : '▾'"></span>
+      <span class="section-label">Generated playlists</span>
+      <span class="gen-grp-count" x-text="genRows().length"></span>
+      <span class="gen-grp-toggle" x-text="collapsed.Generated ? 'Expand' : 'Collapse'"></span>
+    </button>
     <table class="playlist-index" x-show="!collapsed.Generated" x-cloak>
       <tbody>
         <template x-for="r in genRows()" :key="r.id">{{ pl_row(promote=True) }}</template>
@@ -88,21 +93,22 @@
     <table class="playlist-index">
       <thead><tr>
         <th class="col-action"></th>
+        <th class="col-thumb"></th>
         <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Playlist<span x-text="ind('title')"></span></th>
-        <th class="sorth col-group" tabindex="0" role="button" @click="sortBy('group')" @keydown.enter.space.prevent="sortBy('group')">Group<span x-text="ind('group')"></span></th>
+        {% if has_groups %}<th class="sorth col-group" tabindex="0" role="button" @click="sortBy('group')" @keydown.enter.space.prevent="sortBy('group')">Group<span x-text="ind('group')"></span></th>{% endif %}
         <th class="sorth num col-count" tabindex="0" role="button" @click="sortBy('count')" @keydown.enter.space.prevent="sortBy('count')">Songs<span x-text="ind('count')"></span></th>
         <th class="sorth num col-last" tabindex="0" role="button" @click="sortBy('last')" @keydown.enter.space.prevent="sortBy('last')"
             title="Most recent time a song from this playlist showed up in your play history">Last<span x-text="ind('last')"></span></th>
-        <th class="sorth num col-length" tabindex="0" role="button" @click="sortBy('listens')" @keydown.enter.space.prevent="sortBy('listens')"
-            title="Total plays of this playlist's songs across your sync history. Sums per-song plays, so big playlists score high. Not playlist-level plays.">Plays<span x-text="ind('listens')"></span></th>
+        <th class="sorth col-length" tabindex="0" role="button" @click="sortBy('listens')" @keydown.enter.space.prevent="sortBy('listens')"
+            title="Relative activity based on track plays within each playlist. Hover a meter for the exact total.">Activity<span x-text="ind('listens')"></span></th>
       </tr></thead>
       <template x-for="sec in sections()" :key="sec.name">
         <tbody>
-          <tr x-show="split && sec.name" class="group-row"><td colspan="6" x-text="sec.name"></td></tr>
+          <tr x-show="split && sec.name" class="group-row"><td colspan="{{ 7 if has_groups else 6 }}" x-text="sec.name"></td></tr>
           <template x-for="r in sec.rows" :key="r.id">{{ pl_row() }}</template>
         </tbody>
       </template>
-      <tbody x-show="rows.length === 0"><tr><td colspan="7" class="empty">No playlists yet. Sync first.</td></tr></tbody>
+      <tbody x-show="rows.length === 0"><tr><td colspan="{{ 7 if has_groups else 6 }}" class="empty">No playlists yet. Sync first.</td></tr></tbody>
     </table>
   </div>
 

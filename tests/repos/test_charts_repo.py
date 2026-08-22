@@ -46,6 +46,18 @@ def test_listen_stats_and_artist_songs(store):
            {p["ytm"] for p in songs[0]["playlists"]} == {"LM", "P1"}
 
 
+def test_artist_songs_can_disambiguate_same_name_by_browse_id(store):
+    iid = store.upsert_identity("me", "c", None, True)
+    first = store.upsert_track("v1", "First act", "Shared Name", "One", 180,
+                               artist_browse_id="UC_first")
+    second = store.upsert_track("v2", "Second act", "Shared Name", "Two", 180,
+                                artist_browse_id="UC_second")
+    playlist = store.upsert_playlist(iid, "P1", "Mix", 2, "h", 0.0)
+    store.set_playlist_tracks(playlist, [first, second])
+
+    assert [s["title"] for s in store.artist_songs("Shared Name", "UC_first")] == ["First act"]
+
+
 def test_facade_delegates(store):
     _seed(store)
     assert store.top_tracks()[0]["title"] == "Alpha"       # legacy store.x() call site

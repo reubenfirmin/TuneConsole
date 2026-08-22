@@ -262,14 +262,16 @@ function overlapSort() {
 function playlistsTab(rows) {
   return {
     rows, sel: {}, sortKey: 'title', sortDir: 1, split: false, busy: false,
-    groupModal: false, groupName: '', delModal: false, collapsed: {},
+    groupModal: false, groupName: '', delModal: false, collapsed: { Generated: true },
     init() {
       // remember view preferences across reloads (the tab reloads after group/delete)
       try {
         this.split = localStorage.getItem('pl.split') === '1';
         this.sortKey = localStorage.getItem('pl.sortKey') || 'title';
         this.sortDir = +localStorage.getItem('pl.sortDir') || 1;
-        this.collapsed = JSON.parse(localStorage.getItem('pl.collapsed') || '{}');
+        const savedCollapsed = JSON.parse(localStorage.getItem('pl.collapsed') || '{}');
+        this.collapsed = { Generated: true,
+          ...(savedCollapsed && typeof savedCollapsed === 'object' ? savedCollapsed : {}) };
       } catch (e) {}
       this.$watch('split', v => { try { localStorage.setItem('pl.split', v ? '1' : '0'); } catch (e) {} });
       this.$watch('sortKey', v => { try { localStorage.setItem('pl.sortKey', v); } catch (e) {} });
@@ -304,6 +306,14 @@ function playlistsTab(rows) {
       else { this.sortKey = key; this.sortDir = ['count', 'listens', 'last'].includes(key) ? -1 : 1; }
     },
     ind(key) { return this.sortKey === key ? (this.sortDir === 1 ? ' ▲' : ' ▼') : ''; },
+    activity(r) {
+      const max = Math.max(0, ...this.rows.map(row => row.listens || 0));
+      return r.listens && max ? Math.log1p(r.listens) / Math.log1p(max) : 0;
+    },
+    activityLabel(r) {
+      const n = r.listens || 0;
+      return n.toLocaleString() + ' track play' + (n === 1 ? '' : 's');
+    },
     cmp(a, b) {
       const k = this.sortKey, numeric = (k === 'count' || k === 'listens' || k === 'last');
       const r = numeric ? ((a[k] || 0) - (b[k] || 0))
@@ -535,7 +545,8 @@ function homeStatus() {
                      this.radioActive = !!d.radio; this.radioWaiting = !!d.radio_waiting;
                      this.radioDual = !!d.radio_dual;
                      this.radioFallbackReason = d.radio_fallback_reason || '';
-                     this.radioUpcoming = d.radio_upcoming || []; })
+                     this.radioUpcoming = d.radio_upcoming || [];
+                     window.dispatchEvent(new CustomEvent('bridge-status', { detail: d })); })
         .catch(() => {});
       poll();
       setInterval(poll, 3000);
@@ -651,6 +662,25 @@ function homeStatus() {
           setTimeout(() => { this.radioReason = ''; }, 5000);
         })
         .catch(() => { this.radioReason = ''; });
+    },
+  };
+}
+function playerStatus() {
+  return {
+    connected: false,
+    nowPlaying: null,
+    apply(d) { this.connected = !!d.connected; this.nowPlaying = d.now_playing || null; },
+    rate(action) {
+      if (!this.nowPlaying) return;
+      const want = action === 'like' ? 'LIKE' : 'DISLIKE';
+      this.nowPlaying.likeStatus = this.nowPlaying.likeStatus === want ? 'INDIFFERENT' : want;
+      fetch('/now-playing/rate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }) }).catch(() => {});
+    },
+    toggle() {
+      if (!this.nowPlaying) return;
+      this.nowPlaying.paused = !this.nowPlaying.paused;
+      fetch('/now-playing/toggle', { method: 'POST' }).catch(() => {});
     },
   };
 }
@@ -784,9 +814,8 @@ function omniSearch() {
 }
 
 // A genre row's subgenre drill-down toggle. The open/closed state is kept per-family on `window`
-// (not localStorage: it's session-scoped, not worth persisting across reloads) so it survives the
-// #home-feed re-render that fires when you steer a bar. Without this, adjusting a subgenre would
-// re-render the panel and collapse the drill-down you were working in. Family name comes from
+// (not localStorage: it's session-scoped, not worth persisting across targeted bar-list swaps).
+// Family name comes from
 // data-fam (safe for any name; no string interpolation into the expression).
 function fpGenre() {
   return {
@@ -821,7 +850,8 @@ document.addEventListener('input', function (e) {
 // flag on init). Plain localStorage (no Alpine persist plugin needed).
 function fpPanel() {
   return {
-    collapsed: localStorage.getItem('fp_collapsed') === '1',
+    // Power-user control: compact on first encounter; an explicit expansion remains remembered.
+    collapsed: localStorage.getItem('fp_collapsed') !== '0',
     toggle() {
       this.collapsed = !this.collapsed;
       localStorage.setItem('fp_collapsed', this.collapsed ? '1' : '0');
@@ -1066,9 +1096,12 @@ function initVizTooltip() {
        + (dot ? ' style="--dot:' + dot + '"' : '') + '>' + esc(d.title) + '</div>';
     if (d.desc) h += '<div class="vt-desc">' + esc(d.desc) + '</div>';
     for (const row of (d.rows || [])) {
+      const value = row.arrow
+        ? String(row.v).split(' → ').map(esc).join(' <span class="vt-arrow">→</span> ')
+        : esc(row.v);
       h += '<div class="vt-row' + (row.div ? ' vt-div' : '') + '">'
          + '<span class="vt-l">' + esc(row.l) + '</span>'
-         + '<span class="vt-v' + (row.t ? ' ' + row.t : '') + '">' + esc(row.v) + '</span></div>';
+         + '<span class="vt-v' + (row.t ? ' ' + row.t : '') + '">' + value + '</span></div>';
       if (row.n) h += '<div class="vt-n">' + esc(row.n) + '</div>';
       lines.push(row.l + ': ' + row.v + (row.n ? ', ' + row.n : ''));
     }

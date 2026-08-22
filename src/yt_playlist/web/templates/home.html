@@ -18,7 +18,7 @@
   <button type="button" class="banner-x" @click="show = false" title="Dismiss" aria-label="Dismiss">×</button>
 </div>
 {% endif %}
-<div id="home" x-data="homeStatus()">
+<div id="home" x-data="homeStatus()" x-init="$nextTick(() => mountHomeDock())">
   {# Extension state, one homeStatus() poller (~3s): a first-run hero until the extension connects,
      then a compact live strip with what's playing and library freshness. #}
   <div>
@@ -43,14 +43,17 @@
     </section>
 
     {# Connected: compact live strip (what's playing + library freshness). #}
-    <section class="home-status card card--status is-live" x-show="connected" x-cloak>
+    <div id="home-status-origin">
+    <section class="home-status card card--status is-live" x-data="playerStatus()"
+             @bridge-status.window="apply($event.detail)"
+             x-show="connected && nowPlaying && (nowPlaying.title || nowPlaying.artist)" x-cloak>
       <div class="hs-main">
         <span class="hs-dot" aria-hidden="true"></span>
         <template x-if="nowPlaying && (nowPlaying.title || nowPlaying.artist)">
           <div class="hs-now" :class="{ paused: nowPlaying.paused }">
             <img class="hs-art" x-show="nowPlaying.thumbnail" :src="nowPlaying.thumbnail" alt=""
                  referrerpolicy="no-referrer">
-            <span class="hs-eq" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="hs-eq" x-show="!nowPlaying.paused" x-cloak aria-hidden="true"><i></i><i></i><i></i></span>
             <button type="button" class="hs-rate hs-playpause" @click="toggle()"
                     :title="nowPlaying.paused ? 'Play' : 'Pause'"
                     :aria-label="nowPlaying.paused ? 'Play' : 'Pause'">
@@ -77,20 +80,9 @@
             <div id="radio-steer-slot"></div>
           </div>
         </template>
-        <template x-if="!(nowPlaying && (nowPlaying.title || nowPlaying.artist))">
-          <span class="hs-state">Extension connected</span>
-        </template>
       </div>
-      {# Only once the library has actually synced (no awkward "not yet"), and not while a sync runs
-         (the console below owns that status). #}
-      {% if sync.last_synced_ago %}
-      <div class="hs-meta" x-show="!running" x-cloak>
-        <span class="hs-sync">Library synced {{ sync.last_synced_ago }}</span>
-        <a href="#" class="hs-refresh" @click.prevent="refresh()" :class="{ 'is-busy': refreshing }"
-           x-text="refreshing ? 'Starting…' : 'Refresh'"></a>
-      </div>
-      {% endif %}
     </section>
+    </div>
 
     {# #93 Task 9: the radio launch card, its own card (not a status-strip button). Off: Start radio +
        collapsed Customize. On: Stop + Customize, and the customize panel migrates up into the
@@ -101,7 +93,9 @@
     {% include "_partials/radio_launch.html" %}
     {% endif %}
 
-    {# Live sync console: streams the library sync's results (background or manual) as they happen. #}
+    {# First-run only: progress is useful while the initial library is being assembled. Once Home is
+       established, background syncing is an implementation detail and stays out of the interface. #}
+    {% if not sync.last_synced_ago %}
     <section class="sync-console" x-show="running || lines.length" x-cloak>
       <div class="sc-head">
         <span class="sc-eye">Library sync</span>
@@ -115,32 +109,80 @@
         </template>
       </div>
     </section>
+    {% endif %}
   </div>
 
-  {# The Takeout nag deliberately escapes the first-sync gate (importing early is the point, #61);
-     everything else keeps waiting for first sync. #}
-  {% include "_partials/takeout_nag.html" %}
-
   {% if sync.last_synced_ago %}
-  {% include "_partials/alerts.html" %}
+  {% set dash_default = 'start' if onboarding else 'directions' %}
+  {% set has_notices = show_takeout_nag or actions or show_intro or show_lastfm_nudge or
+      show_identities_nudge or show_backend_update or recap %}
+  <div class="home-dashboard"
+       x-data="{ panel: location.hash.slice(1) || '{{ dash_default }}',
+                 go(p) { this.panel = p; history.replaceState(null, '', '#' + p); } }"
+       x-init='$nextTick(() => { if (!$el.querySelector(`[data-dash="${panel}"]`)) go({{ dash_default|tojson }}) })'>
+    <nav class="dash-nav" aria-label="Home areas" role="tablist"
+         @keydown.right.prevent="$event.target.nextElementSibling?.focus()"
+         @keydown.left.prevent="$event.target.previousElementSibling?.focus()">
+      {% if onboarding %}
+      <button type="button" role="tab" :class="{ on: panel === 'start' }" :aria-selected="panel === 'start'"
+              @click="go('start')">Start here</button>
+      {% else %}
+      <button type="button" role="tab" :class="{ on: panel === 'directions' }" :aria-selected="panel === 'directions'"
+              @click="go('directions')">Listen</button>
+      {% endif %}
+      {% if not onboarding and (rediscover_albums or rediscover) %}
+      <button type="button" role="tab" :class="{ on: panel === 'rediscover' }" :aria-selected="panel === 'rediscover'"
+              @click="go('rediscover')">Revisit</button>
+      {% endif %}
+      {% if not onboarding %}
+      <button type="button" role="tab" :class="{ on: panel === 'recent' }" :aria-selected="panel === 'recent'"
+              @click="go('recent')">Into recently</button>
+      <button type="button" role="tab" :class="{ on: panel === 'discover' }" :aria-selected="panel === 'discover'"
+              @click="go('discover')">Discover</button>
+      {% endif %}
+      {% if has_notices %}
+      <button type="button" role="tab" :class="{ on: panel === 'notices' }" :aria-selected="panel === 'notices'"
+              @click="go('notices')">Needs attention</button>
+      {% endif %}
+    </nav>
 
-  {% if onboarding %}
-  {% include "_partials/onboarding_feed.html" %}
+    {% if onboarding %}
+    <section class="dash-panel dash-onboarding" data-dash="start" role="tabpanel" x-show="panel === 'start'" x-cloak>
+      {% include "_partials/onboarding_feed.html" %}
+    </section>
+    {% else %}
+    <section class="dash-panel dash-directions" data-dash="directions" role="tabpanel" x-show="panel === 'directions'" x-cloak>
+      {% include "_partials/home_feed.html" %}
+    </section>
+    {% if rediscover_albums or rediscover %}
+    <section class="dash-panel" data-dash="rediscover" role="tabpanel" x-show="panel === 'rediscover'" x-cloak>
+      {% include "_partials/rediscover.html" %}
+    </section>
+    {% endif %}
+    <section class="dash-panel dash-async" data-dash="recent" role="tabpanel" x-show="panel === 'recent'" x-cloak>
+      <div hx-get="/home/into-recently" hx-trigger="load" hx-swap="innerHTML"></div>
+    </section>
+    <section class="dash-panel dash-async" data-dash="discover" role="tabpanel" x-show="panel === 'discover'" x-cloak>
+      <div hx-get="/home/discover" hx-trigger="load" hx-swap="innerHTML"></div>
+      <div hx-get="/home/new-artists" hx-trigger="load" hx-swap="innerHTML"></div>
+    </section>
+    {% if muted_count %}
+    <p class="section-note muted-note" x-show="panel === 'directions'" x-cloak>
+      Hiding {{ muted_count }} muted artist{{ 's' if muted_count != 1 }} based on your feedback -
+      <a href="/taste">manage on the Taste Model page</a>.</p>
+    {% endif %}
+    {% endif %}
+
+    {% if has_notices %}
+    <section class="dash-panel dash-notices" data-dash="notices" role="tabpanel" x-show="panel === 'notices'" x-cloak>
+      {% include "_partials/takeout_nag.html" %}
+      {% include "_partials/alerts.html" %}
+    </section>
+    {% endif %}
+  </div>
   {% else %}
-  {% include "_partials/home_feed.html" %}
-
-  {% if muted_count %}
-  <p class="section-note muted-note">Hiding {{ muted_count }} muted artist{{ 's' if muted_count != 1 }} based on your feedback -
-    <a href="/taste">manage on the Taste Model page</a>.</p>
-  {% endif %}
-
-  {% include "_partials/rediscover.html" %}
-
-  <div hx-get="/home/into-recently" hx-trigger="load" hx-swap="innerHTML"></div>
-  <div hx-get="/home/discover" hx-trigger="load" hx-swap="innerHTML"></div>
-  <div hx-get="/home/new-artists" hx-trigger="load" hx-swap="innerHTML"></div>
-  {% endif %}
-  {% else %}
+  <div class="home-first-stage">
+    {% include "_partials/takeout_nag.html" %}
   {# Pre-sync placeholder: only once the extension is connected (not while the live sync console is
      streaming). Before connecting, the onboard hero above is the whole first-run screen. #}
   <section class="presync card card--featured" x-show="connected && !running" x-cloak>
@@ -156,6 +198,7 @@
     <h2 class="presync-title">Connecting in 30 seconds or less</h2>
     <p class="presync-sub">We're pulling in your library. Your recommendations will start appearing here as soon as it syncs.</p>
   </section>
+  </div>
   {% endif %}
 
   <footer class="home-footer">
@@ -167,6 +210,18 @@
 <script>
 function genName(id) { return document.getElementById(id).dataset.name; }
 function genRecipe(id) { return document.getElementById(id).dataset.recipe || ''; }
+// Detail rows are native-lazy while their card is closed. Once a mix is selected, promote just
+// that mix's artwork so its full grid is ready as the user scrolls down the page.
+function genReveal(id) {
+  requestAnimationFrame(function () {
+    document.querySelectorAll('#' + CSS.escape(id) + ' .gen-focus img').forEach(function (img) {
+      img.loading = 'eager';
+    });
+    var play = document.querySelector('#' + CSS.escape(id) + ' .gen-play');
+    // Alpine applies x-show on its next render; one more frame ensures the control is focusable.
+    if (play) requestAnimationFrame(function () { play.focus({preventScroll: true}); });
+  });
+}
 // Save & play: open the cool generating screen NOW, synchronously inside the click (a user gesture)
 // so the browser does not block it, and stash the card's thumbnails for its animation. When the save
 // finishes, the extension plays the playlist in your existing YouTube Music tab and the result closes
@@ -184,6 +239,20 @@ function genTracks(id) {
   return JSON.stringify([...document.getElementById(id).querySelectorAll('.gen-row')].map(r => ({
     video_id: r.dataset.vid, title: r.dataset.title, artist: r.dataset.artist,
     album: r.dataset.album, thumbnail: r.dataset.thumb })));
+}
+// The player owns a small state boundary of its own, fed by the page's single bridge poll. That
+// boundary moves with the node into the desktop rail, so Alpine lookups remain valid after docking.
+function mountHomeDock() {
+  var card = document.querySelector('.home-status');
+  var slot = document.querySelector('.sidebar-dock-slot');
+  var origin = document.getElementById('home-status-origin');
+  if (!card || !slot || !origin) return;
+  var target = window.matchMedia('(min-width: 65rem)').matches ? slot : origin;
+  if (card.parentElement !== target) target.appendChild(card);
+  if (!window.__homeDockBound) {
+    window.__homeDockBound = true;
+    window.addEventListener('resize', mountHomeDock);
+  }
 }
 </script>
 {% endblock %}

@@ -1,14 +1,13 @@
-{% extends "base.html" %}{% block title %}Albums · TuneConsole{% endblock %}{% block page_class %}page-albums{% endblock %}{% block body %}
-<div class="page-head">
-  <h1>Albums</h1>
+{% extends "base.html" %}{% from "_macros.html" import library_icon %}{% block title %}Albums · TuneConsole{% endblock %}{% block page_class %}page-albums{% endblock %}{% block body %}
+<div class="page-head library-page-head">
+  <div class="library-page-title">{{ library_icon('albums') }}<h1>Albums</h1></div>
   <p>Albums across your playlists, or the ones you've saved in your YouTube library.</p>
-</div>
-
-<div class="card card--toolbar toolbar section-block library-viewbar">
-  <span class="seg">
-    <a href="/albums?view=playlists" class="{{ 'on' if view == 'playlists' }}">In my playlists</a>
-    <a href="/albums?view=saved" class="{{ 'on' if view == 'saved' }}">Saved in YouTube</a>
-  </span>
+  <div class="library-head-actions albums-head-actions card--toolbar toolbar">
+    <span class="seg" aria-label="Album source">
+      <a href="/albums?view=playlists" class="{{ 'on' if view == 'playlists' }}">In my playlists</a>
+      <a href="/albums?view=saved" class="{{ 'on' if view == 'saved' }}">Saved in YouTube</a>
+    </span>
+  </div>
 </div>
 
 {% if view == 'saved' %}

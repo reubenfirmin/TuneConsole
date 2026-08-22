@@ -375,10 +375,10 @@ def build(ctx) -> APIRouter:
         artist/genre in the transient model. Lazy HTMX fragment; empty body when there is nothing
         fresh or no usable page (the card is then simply absent)."""
         now = now_fn()
-        # Walk the epoch-ordered pool and render the FIRST subject that resolves to a usable card. The
-        # warm (cached) subjects are rotated by epoch so the card erodes through them one per epoch; a
-        # pick with no Wikipedia page or no thumbnail falls through to the next instead of blanking the
-        # card. Misses are negative-cached, so later refreshes don't refetch the dead subjects.
+        # Walk the epoch-ordered pool and render up to three usable subjects. A single card was too
+        # slight to justify a whole dashboard area; a small editorial stack makes the transient model
+        # legible without stretching one Wikipedia extract beyond its value. Misses are negative-cached.
+        cards = []
         for subj in into_recently.subjects_for_epoch(store, now, epoch=_epoch(store, "into_recently")):
             row = store.wiki.get(subj["subject"])
             if row is None or not store.wiki.is_fresh(row, now):
@@ -393,7 +393,12 @@ def build(ctx) -> APIRouter:
                 continue
             card = {**row, "thumbnail": thumbnail, "color": extras["color"],
                     "seed": extras["seed"], "genre": extras["genre"], "depth": into_recently.CLUSTER_DEPTH}
-            return templates.TemplateResponse(request, "_partials/into_recently.html", {"card": card})
+            cards.append(card)
+            if len(cards) == 3:
+                break
+        if cards:
+            return templates.TemplateResponse(request, "_partials/into_recently.html",
+                                              {"cards": cards, "card": cards[0]})
         return Response(status_code=200)
 
     @router.post("/home/refresh-card/{card}")
@@ -477,18 +482,18 @@ def build(ctx) -> APIRouter:
 
     @router.post("/home/breadth")
     async def home_breadth(request: Request):
-        # Drag the Breadth bar -> persist the focused<->eclectic bias and return the re-ranked feed in
-        # one request (a preview like /home/steer). The bias is a scalar param (not a per-axis weight),
+        # Drag the Breadth bar -> persist the focused<->eclectic bias and return only the re-ranked
+        # four-card board. The bias is a scalar param (not a per-axis weight),
         # so it gets its own route; set_param clamps it to the spec range [-1, 1]. Center (0) is neutral.
         bias = (await request.form()).get("breadth_bias")
         if bias is not None:
             rec_params.set_param(store, "breadth_bias", bias)
-        return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(now_fn()))
+        return _cards_safe(request, now_fn())
 
     @router.post("/home/steer")
     async def home_steer(request: Request):
         # Drag a fingerprint bar -> set a STANDING TRANSIENT LEAN (not a permanent weight) and return
-        # the re-ranked feed in one request. The bar shows the EFFECTIVE multiplier (permanent x lean);
+        # only the re-ranked four-card board. The bar shows the EFFECTIVE multiplier (permanent x lean);
         # we store the lean so permanent x lean == the dragged target. Long-term taste is edited only
         # on the Taste Model page. The held lean bakes into permanent over days (graduate_slider_exposure).
         form = await request.form()
@@ -501,7 +506,7 @@ def build(ctx) -> APIRouter:
             lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
             lean = max(lo, min(hi, lean))
             store.set_lean(axis, lean, now_fn())
-        return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(now_fn()))
+        return _cards_safe(request, now_fn())
 
     @router.post("/home/fingerprint/add")
     async def fingerprint_add(request: Request):
@@ -538,12 +543,14 @@ def build(ctx) -> APIRouter:
     @router.post("/home/fingerprint/reset")
     async def fingerprint_reset(request: Request):
         """Reset Home steering to default: wipe every standing lean, un-hide every removed bar, and
-        re-center the breadth bias. Re-ranks the feed (so swaps the whole #home-feed). Permanent
-        weights (long-term taste, on the Taste page) are deliberately left alone."""
+        re-center the breadth bias. Returns only the controls; the client independently refreshes the
+        four-card fragment. Permanent weights (long-term taste, on the Taste page) are left alone."""
         store.clear_all_leans()
         store.clear_hidden_facets()
         rec_params.set_param(store, "breadth_bias", rec_params.PARAMS_BY_NAME["breadth_bias"].default)
-        return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(now_fn()))
+        return templates.TemplateResponse(
+            request, "_partials/taste_fingerprint.html",
+            {"fingerprint": recommend.taste_fingerprint(store, now_fn())})
 
     @router.get("/home/genres")
     def home_genres():

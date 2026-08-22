@@ -25,9 +25,14 @@ def test_nav_has_home_and_playlists(live_app, page):
 def test_desktop_uses_side_rail_but_clusters_has_only_exit_control(live_app, page):
     page.set_viewport_size({"width": 1280, "height": 800})
     page.goto(f"{live_app}/")
-    page.get_by_role("button", name="Tools").click()
+    tools = page.get_by_role("button", name="Tools")
+    # The button is server-rendered before Alpine owns its state; wait for hydration so this tests
+    # the menu rather than racing a click against the framework startup.
+    page.wait_for_function("el => el.getAttribute('aria-expanded') === 'false'", arg=tools.element_handle())
+    tools.click()
+    page.wait_for_function("el => getComputedStyle(el).opacity === '1'", arg=page.locator(".tools-pop").element_handle())
     assert page.get_by_role("link", name="Setup").is_visible()
-    page.get_by_role("button", name="Tools").click()
+    tools.click()
     assert page.locator("header.topbar").evaluate("el => getComputedStyle(el).position") == "fixed"
     main_box = page.locator("main").bounding_box()
     rail_box = page.locator("header.topbar").bounding_box()

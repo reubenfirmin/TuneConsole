@@ -1,13 +1,14 @@
-{% extends "base.html" %}{% from "_partials/ticker.html" import ticker_chart %}{% import "_partials/_viz_tip.html" as vt %}
+{% extends "base.html" %}{% from "_macros.html" import library_icon %}{% from "_partials/ticker.html" import ticker_chart %}
 {% block title %}Charts · TuneConsole{% endblock %}{% block page_class %}page-charts{% endblock %}{% block body %}
-<div class="page-head">
-  <h1>Your top charts</h1>
+{% set window_names = {'all': 'all recorded history', '90d': 'the last 90 days', '30d': 'the last 30 days', '7d': 'the last 7 days'} %}
+{% set requested_view = request.query_params.get('view', 'songs') %}
+{% set chart_view = requested_view if requested_view in ['songs', 'artists', 'genres', 'years', 'albums', 'playlists'] else 'songs' %}
+<div class="chart-shell" x-data="{ view: '{{ chart_view }}', keyOpen: false }">
+<div class="page-head library-page-head">
+  <div class="library-page-title">{{ library_icon('charts') }}<h1>Charts</h1></div>
   <p>Ranked by plays captured in your sync history (how often each song turns up in recently-played).
      The more you sync, the richer this gets.</p>
-</div>
-
-<div class="chart-shell" x-data="{ view: 'songs' }">
-  <div class="card card--toolbar toolbar section-block chart-toolbar">
+  <div class="library-head-actions card--toolbar toolbar">
     <span class="seg chart-views" aria-label="Chart view">
       <button type="button" :class="{ on: view === 'songs' }" @click="view = 'songs'">Top songs</button>
       <button type="button" :class="{ on: view === 'artists' }" @click="view = 'artists'">Artists</button>
@@ -16,25 +17,47 @@
       <button type="button" :class="{ on: view === 'albums' }" @click="view = 'albums'">Albums</button>
       <button type="button" :class="{ on: view === 'playlists' }" @click="view = 'playlists'">Playlists</button>
     </span>
-    <span class="push-end"></span>
-    <span class="seg chart-window" title="Limit to plays in this window of your sync history"
-          x-show="view === 'songs'">
-      <a href="/charts?window=all" class="{{ 'on' if window == 'all' }}">All time</a>
-      <a href="/charts?window=90d" class="{{ 'on' if window == '90d' }}">90d</a>
-      <a href="/charts?window=30d" class="{{ 'on' if window == '30d' }}">30d</a>
-      <a href="/charts?window=7d" class="{{ 'on' if window == '7d' }}">7d</a>
+    <span class="chart-context-actions">
+      <span class="chart-context-label">History</span>
+      <span class="seg chart-window" title="Limit to plays in this window of your sync history">
+        <a :href="'/charts?window=all&amp;view=' + view" class="{{ 'on' if window == 'all' }}">All time</a>
+        <a :href="'/charts?window=90d&amp;view=' + view" class="{{ 'on' if window == '90d' }}">90d</a>
+        <a :href="'/charts?window=30d&amp;view=' + view" class="{{ 'on' if window == '30d' }}">30d</a>
+        <a :href="'/charts?window=7d&amp;view=' + view" class="{{ 'on' if window == '7d' }}">7d</a>
+      </span>
+      <button type="button" class="chart-help-button" @click="keyOpen = true">How to read</button>
     </span>
   </div>
+</div>
+
+  <template x-teleport="body">
+    <div class="modal-backdrop" x-show="keyOpen" x-cloak x-transition.opacity
+         @click="keyOpen = false" @keydown.escape.window="keyOpen = false">
+      <div class="modal chart-key-popup" @click.stop x-transition.scale.origin.center>
+        <h3 x-text="view === 'songs' ? 'How to read Top songs' : 'How to read this chart'">How to read this chart</h3>
+        <div class="chart-key" x-show="view === 'songs'">
+          <span class="chart-key-item"><i class="key-now"></i><span><b>Play count</b>Bar length relative to the #1 song</span></span>
+          <span class="chart-key-item"><i class="key-window"></i><span><b>Window</b>{{ window_names[window] }}</span></span>
+          <span class="chart-key-help">Point to any bar for its exact play count.</span>
+        </div>
+        <div class="chart-key" x-show="view !== 'songs'" x-cloak>
+          <p class="chart-key-intro">{% if window == 'all' %}All of your recorded plays are combined into one period.{% else %}The selected {{ window[:-1] }}-day range is compared with three equally long periods before it.{% endif %}</p>
+          <span class="chart-key-item"><i class="key-now"></i><span><b>Selected period</b>The colored bar shows this item’s share of all plays during the selected range.</span></span>
+          {% if window != 'all' %}
+          <span class="chart-key-item"><i class="key-range"></i><span><b>How much it moved</b>The thin line runs from its lowest to highest share across all four periods.</span></span>
+          <span class="chart-key-item"><i class="key-earlier"></i><span><b>Where it started</b>The diamond marks its share in the oldest of the four periods.</span></span>
+          {% endif %}
+          <span class="chart-key-item" x-show="['artists', 'genres', 'years'].includes(view)"><i class="key-library"></i><span><b>Your collection</b>The blue marker shows how much of your library belongs to this artist, genre, or decade—not how often you played it.</span></span>
+          <span class="chart-key-item"><i class="key-window"></i><span><b>Time shown</b>{{ window_names[window] }}. Change it from the History control above the chart.</span></span>
+          <span class="chart-key-help">Point to a row’s chart for its exact percentages.</span>
+        </div>
+        <div class="modal-actions"><button type="button" class="btn-ghost" @click="keyOpen = false">Close</button></div>
+      </div>
+    </div>
+  </template>
 
   <div class="card card--data chart-panel" x-show="view === 'songs'">
     {% if songs %}{% set smax = songs[0].plays %}
-    {% set window_names = {'all': 'all recorded history', '90d': 'the last 90 days', '30d': 'the last 30 days', '7d': 'the last 7 days'} %}
-    <div class="chart-key section-block song-chart-key">
-      <strong class="chart-key-title">How to read this</strong>
-      <span class="chart-key-item"><i class="key-now"></i><span><b>Play count</b>length relative to the #1 song</span></span>
-      <span class="chart-key-item"><span><b>Window</b>{{ window_names[window] }}</span></span>
-      <span class="chart-key-help">Point to any bar for its exact play count.</span>
-    </div>
     <table class="chart">
       <thead><tr><th class="rank">#</th><th class="col-thumb"></th><th>Song</th><th>Artist</th><th class="barhead">relative play count</th><th class="num">Plays</th></tr></thead>
       <tbody>
@@ -45,8 +68,7 @@
           <td><a class="ptitle" href="https://music.youtube.com/watch?v={{ s.video_id }}"
                  target="_blank" rel="noopener" data-yt-info>{{ s.title }}&nbsp;↗</a></td>
           <td><a class="alink" href="/artist?name={{ s.artist|urlencode }}">{{ s.artist }}</a></td>
-          <td class="barcell"><span class="ticker-candle top-song-candle" tabindex="0"
-              {{ vt.tip(s.title, [{"l": "Plays", "v": s.plays, "n": window_names[window], "t": "strong"}]) }}>
+          <td class="barcell"><span class="ticker-candle top-song-candle" aria-hidden="true">
             <i class="tk-bar" style="width:{{ (s.plays / smax * 100)|round(1) }}%"></i>
           </span></td>
           <td class="num mono">{{ s.plays }}</td>

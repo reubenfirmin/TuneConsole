@@ -12,22 +12,21 @@
    enrichBase scopes the start POST to this album). #}
 <div x-data="enrichPanel(0, {{ 'true' if lastfm_configured else 'false' }}, 0, '', '/album/{{ browse_id }}', {{ conflict_count }})"
      @conflicts-count.window="conflictCount = $event.detail.count">
-<div class="artist-head pl-head library-hero release-hero" x-data="{ artH: 0 }"
-     x-init="const fit = () => artH = $refs.main.offsetHeight; fit(); new ResizeObserver(fit).observe($refs.main)">
+<div class="artist-head pl-head library-hero release-hero album-release-hero{{ ' has-art' if cover or mosaic }}">
   {% if mosaic %}
   {# No cover of its own (a personal compilation has none, and YouTube hands back a grey disc rather
      than nothing), so show what it is actually made of. #}
-  <span class="pl-art pl-art-mosaic" :style="`height:${artH}px`">
+  <span class="pl-art pl-art-mosaic pl-art-strip" aria-hidden="true">
     {% for src in mosaic %}<img src="{{ src }}" alt="" referrerpolicy="no-referrer"
          onerror="this.remove()">{% endfor %}</span>
-  {% elif cover %}<span class="pl-art" :style="`height:${artH}px`"><img src="{{ cover }}" alt=""
+  {% elif cover %}<span class="pl-art" aria-hidden="true"><img src="{{ cover }}" alt=""
        referrerpolicy="no-referrer" onerror="this.closest('.pl-art').remove()"></span>{% endif %}
-  <div class="pl-headmain" x-ref="main">
+  <div class="pl-headmain">
     <h1>{{ album.title }}</h1>
     <p class="pl-stats">
       {# A compilation upload has no single album artist, so YouTube returns none: an empty amber
          pill in the header is worse than no pill. #}
-      {% if album.artist %}<span class="tag amber">{{ album.artist }}</span>{% endif %}
+      {% if album.artist %}<a class="album-artist" href="/artist?name={{ album.artist|urlencode }}">{{ album.artist }}</a>{% endif %}
       {% if album.year %}<span class="stat">{{ album.year }}</span>{% endif %}
       <span class="stat"><strong>{{ album.tracks|length }}</strong>&nbsp;track{{ '' if album.tracks|length == 1 else 's' }}</span>
     </p>
@@ -118,7 +117,7 @@
 </div>
 {% endif %}
 
-<div class="card card-offset library-table-card">
+<div class="card library-table-card">
   {% if tracks %}
   {# Folded-in library tracks: genre/year columns that fill in live as enrichment runs, and are
      click-to-edit by hand (same flow as playlists, scoped to this album). #}

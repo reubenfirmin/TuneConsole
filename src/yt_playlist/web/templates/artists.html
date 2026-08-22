@@ -1,7 +1,7 @@
-{% extends "base.html" %}{% block title %}Artists · TuneConsole{% endblock %}{% block page_class %}page-artists{% endblock %}{% block body %}
-<div class="page-head">
-  <h1>Artists in your collection</h1>
-  <p>Every artist represented across your playlists. Click a heading to sort, or an artist for their page.</p>
+{% extends "base.html" %}{% from "_macros.html" import library_icon %}{% block title %}Artists · TuneConsole{% endblock %}{% block page_class %}page-artists{% endblock %}{% block body %}
+<div class="page-head library-page-head">
+  <div class="library-page-title">{{ library_icon('artists') }}<h1>Artists</h1></div>
+  <p>Every artist represented across your playlists, with their songs, albums, and listening activity.</p>
 </div>
 
 <div class="card library-index-card">
@@ -19,7 +19,7 @@
       <tr class="srow" data-artist="{{ a.artist|lower }}" data-songs="{{ a.songs }}"
           data-albums="{{ a.n_albums }}" data-pls="{{ a.n_pls }}" data-plays="{{ a.plays }}">
         <td>{% if a.thumbnail %}<img class="artist-avatar" src="{{ a.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
-        <td><a class="ptitle alink" href="/artist?name={{ a.artist|urlencode }}">{{ a.artist }}</a></td>
+        <td><a class="ptitle alink" href="/artist?name={{ a.artist|urlencode }}{% if a.browse %}&amp;browse={{ a.browse|urlencode }}{% endif %}">{{ a.artist }}</a></td>
         <td class="num mono">{{ a.songs }}</td>
         <td class="num mono">{{ a.n_albums }}</td>
         <td class="num mono">{{ a.n_pls }}</td>

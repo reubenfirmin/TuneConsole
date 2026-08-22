@@ -115,10 +115,13 @@ def test_actionbar_labels_are_clean(live_pl_app, page):
     # #74: no arrows or ellipses on the action bar; short labels only.
     page.goto(f"{live_pl_app}/playlists")
     _select(page, "Alpha")
-    _select(page, "Beta")
     bar = page.locator(".pl-actionbar")
-    for name in ("Merge", "Combine", "Copy into", "Group", "Delete", "Clear"):
+    expect(bar.get_by_role("button", name="Merge", exact=True)).to_be_hidden()
+    _select(page, "Beta")
+    for name in ("Merge", "Combine", "Copy into", "Group", "Delete", "Deselect all"):
         expect(bar.get_by_role("button", name=name, exact=True)).to_be_visible()
+    expect(bar.get_by_role("button", name="Deselect all", exact=True)).to_have_attribute(
+        "title", "Deselect all selected playlists")
     assert "→" not in bar.inner_text() and "…" not in bar.inner_text()
 
 

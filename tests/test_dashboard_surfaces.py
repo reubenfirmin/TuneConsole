@@ -32,7 +32,7 @@ def test_fresh_renders_as_saveable_proto(store):
     html = c.get("/home/cards").text
     assert 'id="gen-fresh"' in html                 # rendered as a proto-playlist card
     assert "Fresh songs -" in html                  # dated name
-    assert "Save &amp; play on YouTube" in html     # same save flow as the other lanes
+    assert "Play this mix" in html                   # same save flow as the other lanes
     assert "New One" in html
 
 

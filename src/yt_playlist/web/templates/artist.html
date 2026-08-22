@@ -1,14 +1,28 @@
 {% extends "base.html" %}{% block title %}{{ artist }} · TuneConsole{% endblock %}{% block page_class %}page-artist{% endblock %}{% block body %}
-<div class="artist-head library-hero artist-hero">
-  {% if info and info.thumbnail %}<img class="artist-thumb" src="{{ info.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
-  <div>
+<div class="artist-head library-hero artist-hero artist-release-hero">
+  <span class="artist-art-strip" aria-hidden="true">
+    {% set art = namespace(count=0, seen=[]) %}
+    {% for s in songs[:16] %}{% if s.thumbnail and s.thumbnail not in art.seen and art.count < 8 %}
+      <img src="{{ s.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
+      {% set art.seen = art.seen + [s.thumbnail] %}{% set art.count = art.count + 1 %}
+    {% endif %}{% endfor %}
+    {% if art.count == 0 and info and info.thumbnail %}<img src="{{ info.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+  </span>
+  <div class="artist-headmain">
     <h1>{{ artist }}</h1>
     <p class="artist-meta">
-      <strong>{{ songs|length }}</strong> song{{ '' if songs|length == 1 else 's' }} in your playlists ·
-      <strong>{{ total_plays }}</strong> total plays{% if info and info.subscribers %} ·
-      {{ info.subscribers }} subscribers{% endif %}
+      <span><strong>{{ songs|length }}</strong> track{{ '' if songs|length == 1 else 's' }} in your playlists</span>
+      <span><strong>{{ total_plays }}</strong> total plays</span>
+      {% if info and info.subscribers %}<span>{{ info.subscribers }} subscribers</span>{% endif %}
     </p>
-    {% if info and info.bio %}<p class="artist-bio">{{ info.bio|linkify }}</p>{% endif %}
+    {% if info and info.bio %}
+    <div class="artist-bio-wrap" x-data="{ expanded: false }">
+      <p class="artist-bio" :class="{ expanded: expanded }">{{ info.bio|linkify }}</p>
+      <button type="button" class="artist-bio-toggle" @click="expanded = !expanded"
+              :aria-expanded="expanded.toString()"
+              x-text="expanded ? 'Show less' : 'Read full bio'">Read full bio</button>
+    </div>
+    {% endif %}
     {% if info and info.browse_id %}
     <div class="pl-actions actions-compact">
       <a class="cta" href="https://music.youtube.com/channel/{{ info.browse_id }}"
@@ -18,7 +32,8 @@
   </div>
 </div>
 
-<h2 class="section">Songs <span class="count">{{ songs|length }}</span></h2>
+<h2 class="section">Tracks in your playlists <span class="count">{{ songs|length }}</span></h2>
+<p class="section-note">Distinct tracks credited to {{ artist }} across your synced playlists. Plays counts listens to each track, not playlist starts.</p>
 <div class="card library-table-card">
   <table x-data="rowSort()">
     <thead><tr>
@@ -62,6 +77,11 @@
 <p class="section-note">Albums from your playlists and your saved YouTube albums.</p>
 <div class="card library-table-card">
   <table x-data="rowSort()">
+    <colgroup class="artist-album-columns">
+      <col class="album-art-col"><col class="album-title-col"><col class="album-year-col">
+      <col class="album-songs-col"><col class="album-playlists-col"><col class="album-plays-col">
+      <col class="album-save-col">
+    </colgroup>
     <thead><tr>
       <th class="col-avatar"></th>
       <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album<span x-text="ind('album')"></span></th>
@@ -69,7 +89,7 @@
       <th class="sorth num" tabindex="0" role="button" @click="sortBy('songs')" @keydown.enter.space.prevent="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
       <th class="sorth num" tabindex="0" role="button" @click="sortBy('pls')" @keydown.enter.space.prevent="sortBy('pls')">Playlists<span x-text="ind('pls')"></span></th>
       <th class="sorth num" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('saved')" @keydown.enter.space.prevent="sortBy('saved')">Saved<span x-text="ind('saved')"></span></th>
+      <th class="sorth text-end" tabindex="0" role="button" @click="sortBy('saved')" @keydown.enter.space.prevent="sortBy('saved')">Saved<span x-text="ind('saved')"></span></th>
     </tr></thead>
     <tbody x-ref="body">
     {% for al in collection %}
@@ -82,7 +102,7 @@
         <td class="num mono">{{ al.songs or '' }}</td>
         <td class="num mono">{{ al.n_pls or '' }}</td>
         <td class="num mono">{{ al.plays or '' }}</td>
-        <td>{% if al.browse %}<button type="button" class="btn-ghost btn-sm" hx-disabled-elt="this"
+        <td class="text-end">{% if al.browse %}<button type="button" class="btn-ghost btn-sm" hx-disabled-elt="this"
               hx-post="/collection/{{ 'unsave-album' if al.saved else 'save-album' }}"
               hx-vals='{"browse_id": {{ al.browse|tojson }}}'
               title="{{ 'Remove from your YouTube library' if al.saved else 'Save to your YouTube library' }}">{{ 'Unsave' if al.saved else 'Save' }}</button>{% elif al.saved %}<span class="kind kind-audio" title="Saved in your YouTube library">✓</span>{% endif %}</td>
@@ -94,14 +114,22 @@
 {% endif %}
 
 {% if yt_albums %}
-<h2 class="section">All albums on YouTube <span class="count">{{ yt_albums|length }}</span></h2>
-<p class="section-note">{{ artist }}’s full discography. Save any to your YouTube library.</p>
+<h2 class="section">More albums on YouTube <span class="count">{{ yt_albums|length }}</span></h2>
+<p class="section-note">Albums not already shown in your collection. Save any to your YouTube library.</p>
 <div class="card library-table-card">
   <table x-data="rowSort()">
+    <colgroup class="artist-album-columns">
+      <col class="album-art-col"><col class="album-title-col"><col class="album-year-col">
+      <col class="album-songs-col"><col class="album-playlists-col"><col class="album-plays-col">
+      <col class="album-save-col">
+    </colgroup>
     <thead><tr>
       <th class="col-avatar"></th>
       <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album<span x-text="ind('album')"></span></th>
       <th class="sorth num" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year<span x-text="ind('year')"></span></th>
+      <th></th>
+      <th></th>
+      <th></th>
       <th></th>
     </tr></thead>
     <tbody x-ref="body">
@@ -110,6 +138,7 @@
         <td>{% if al.thumbnail %}<img class="album-thumb" src="{{ al.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
         <td>{% if al.browse_id %}<a class="ptitle" href="/album?browse={{ al.browse_id }}">{{ al.title }}</a>{% else %}<span class="ptitle">{{ al.title }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>
+        <td colspan="3"></td>
         <td class="text-end">{% if al.browse_id %}<button type="button" class="btn-ghost btn-sm" hx-disabled-elt="this"
               hx-post="/collection/{{ 'unsave-album' if al.saved else 'save-album' }}"
               hx-vals='{"browse_id": {{ al.browse_id|tojson }}}'

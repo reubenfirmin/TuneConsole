@@ -234,6 +234,33 @@ def test_playlists_page_carries_generated_created_at(store):
     assert created["PLold"] == 100.0 and created["PLnew"] == 200.0
 
 
+def test_playlists_page_hides_group_view_and_column_without_groups(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 0.0)
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    html = c.get("/playlists").text
+
+    assert "All together" not in html and "By group" not in html
+    assert 'class="sorth col-group"' not in html
+
+
+def test_generated_only_does_not_show_main_table_group_controls(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_playlist(iid, "PLG", "Generated playlist", 1, "h", 0.0)
+    store.set_playlist_group("PLG", "Generated")
+    c = _client(store, lambda: {iid: FakeClient()})
+
+    html = c.get("/playlists").text
+
+    assert "All together" not in html and "By group" not in html
+    assert 'class="sorth col-group"' not in html
+    assert "Click a column heading to sort." not in html
+    assert 'class="gen-grp-head"' in html and 'class="generated-shortcut"' in html
+    assert "Generated playlists" in html and "Collapse generated playlists" in html
+    assert ">Activity<span" in html and 'class="pl-activity"' in html
+
+
 def test_waterfall_registry_includes_all_providers():
     from yt_playlist.providers import waterfall
     # the waterfall harness can dispatch to every provider, each exposing the probe interface

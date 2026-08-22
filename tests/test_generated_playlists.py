@@ -156,7 +156,7 @@ def test_home_renders_generated_cards(store):
 
     r = c.get("/home/cards")
     assert r.status_code == 200
-    assert "More in your wheelhouse" in r.text and "Save &amp; play on YouTube" in r.text
+    assert "More in your wheelhouse" in r.text and "Play this mix" in r.text
 
 
 def test_comfort_proto_card_dj_ordered_with_genre(store, monkeypatch):

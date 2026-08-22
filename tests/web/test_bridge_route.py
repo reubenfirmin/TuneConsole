@@ -164,6 +164,26 @@ def test_bye_pevent_clears_now_playing():
         assert bridge.now_playing is None
 
 
+def test_now_playing_heartbeat_refreshes_presence_without_replacing_track():
+    bridge = Bridge()
+    with TestClient(_app(bridge)).websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        ws.send_json({"type": "play", "title": "Song", "artist": "Artist", "thumbnail": "",
+                      "likeStatus": "INDIFFERENT", "videoId": "v1", "paused": True})
+        deadline = time.time() + 5
+        while time.time() < deadline and bridge.now_playing is None:
+            time.sleep(0.05)
+        original = bridge.now_playing
+        bridge.now_playing_seen_at = 1.0
+
+        ws.send_json({"type": "now-heartbeat", "deck": "unknown"})
+        deadline = time.time() + 5
+        while time.time() < deadline and bridge.now_playing_seen_at == 1.0:
+            time.sleep(0.05)
+
+        assert bridge.now_playing is original
+        assert bridge.now_playing_seen_at > 1.0
+
+
 def test_ws_disconnect_resets_radio_session_and_clears_setting():
     # #93 defect 1: the WS dropping is the real "tab gone" signal (unlike a pagehide "bye", which
     # also fires on the radio's own hard navigation and must NOT reset the session, see

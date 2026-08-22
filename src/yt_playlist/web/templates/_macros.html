@@ -17,6 +17,25 @@
 </div>
 {%- endmacro %}
 
+{# A small, shared line-icon family for the four Library indexes. #}
+{% macro library_icon(name) -%}
+<svg class="library-page-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+  {% if name == 'playlists' %}
+    <path d="M5 7.5h22M5 16h22M5 24.5h22"/>
+    <path d="m9 4 5 3.5L9 11Zm0 8.5 5 3.5L9 19.5ZM9 21l5 3.5L9 28Z"/>
+  {% elif name == 'artists' %}
+    <circle cx="12" cy="11" r="4"/><circle cx="22.5" cy="13" r="3"/>
+    <path d="M4.5 27c.7-5 3.2-8 7.5-8s6.8 3 7.5 8M18 21c1.2-1.4 2.7-2 4.5-2 3.1 0 4.8 2.4 5.3 6"/>
+  {% elif name == 'albums' %}
+    <rect x="4.5" y="5" width="20" height="22" rx="1"/>
+    <circle cx="17.5" cy="16" r="6.5"/><circle cx="17.5" cy="16" r="1.5"/>
+    <path d="M24.5 8h3v19h-20"/>
+  {% elif name == 'charts' %}
+    <path d="M5 27V16h5v11M13.5 27V9h5v18M22 27V4h5v23M3 27.5h26"/>
+  {% endif %}
+</svg>
+{%- endmacro %}
+
 {# Graphics-first recommendation tile: cover art + a source badge by default; title/subtitle/note
    and a ▶ play button reveal on hover. The cover routes into the app (`land`); ▶ opens YouTube
    Music (`play`). One hue per signal, so the feed scans at a glance. Extras (feedback, Add) via

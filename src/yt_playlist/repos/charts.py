@@ -218,18 +218,23 @@ class ChartsRepo(Repo):
                  "genre": r["genre"] or "", "year": r["mb_year"] or ""} for r in rows]
 
     @synchronized
-    def artist_songs(self, artist) -> list[dict]:
+    def artist_songs(self, artist, browse_id=None) -> list[dict]:
         """An artist's songs that appear in your playlists: play count + which playlists hold each."""
+        artist_filter = "t.artist=?"
+        params = [artist]
+        if browse_id:
+            artist_filter += " AND t.artist_browse_id=?"
+            params.append(browse_id)
         songs = self.conn.execute(
             "SELECT t.identity_key key, MIN(t.title) title, MIN(t.album) album, MIN(t.video_id) vid, "
             "       MIN(t.duration_s) dur, MIN(t.thumbnail) thumb, MIN(t.album_browse_id) abrowse, "
             "       (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=t.identity_key) plays, "
             f"      {LIKED_EXISTS} liked "
-            "FROM tracks t WHERE t.artist=? GROUP BY t.identity_key", (artist,)).fetchall()
+            f"FROM tracks t WHERE {artist_filter} GROUP BY t.identity_key", params).fetchall()
         membership = self.conn.execute(
             "SELECT DISTINCT t.identity_key key, pl.title title, pl.ytm_playlist_id ytm FROM tracks t "
             "JOIN playlist_tracks pt ON pt.track_id=t.id JOIN playlists pl ON pl.id=pt.playlist_id "
-            "WHERE t.artist=?", (artist,)).fetchall()
+            f"WHERE {artist_filter}", params).fetchall()
         by_key = {}
         for r in membership:
             by_key.setdefault(r["key"], []).append({"title": r["title"], "ytm": r["ytm"]})

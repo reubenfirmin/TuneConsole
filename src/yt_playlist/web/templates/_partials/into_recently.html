@@ -1,4 +1,9 @@
-<section class="card wiki-card">
+<section class="into-stack" aria-labelledby="into-title">
+<h2 class="section" id="into-title">Into recently</h2>
+<p class="section-note">Fresh signals in your listening—not necessarily your settled favorites.</p>
+<div class="into-grid">
+{% for card in cards|default([card]) %}
+<article class="card wiki-card">
   <div class="wiki-th" style="background-image:url('{{ card.thumbnail }}')" aria-hidden="true"></div>
   <div class="wiki-body">
     <h2 class="wiki-title">You're into
@@ -17,4 +22,7 @@
       <span class="wiki-attr">from Wikipedia</span>
     </div>
   </div>
+</article>
+{% endfor %}
+</div>
 </section>

@@ -4,7 +4,7 @@
   <div class="gen-list">{% for _ in range(6) %}<div class="gen-row skeleton skeleton-row-compact"></div>{% endfor %}</div>
 </div>
 {% elif proto %}
-<div{% if stale %} hx-get="/home/fresh" hx-trigger="load delay:3s" hx-swap="outerHTML"{% endif %}>
+<div x-data="{ focus: null }"{% if stale %} hx-get="/home/fresh" hx-trigger="load delay:3s" hx-swap="outerHTML"{% endif %}>
 {% with p = proto %}{% include "_partials/generated_playlist.html" %}{% endwith %}
 </div>
 {% endif %}

@@ -831,6 +831,8 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     ws.send(JSON.stringify({ type: "play", title: msg.title, artist: msg.artist,
       thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
       playlist: msg.playlist || "", brandId: msg.brandId || "", paused: !!msg.paused, deck }));
+  } else if (msg.type === "now-heartbeat") {
+    ws.send(JSON.stringify({ type: "now-heartbeat", deck }));
   } else if (msg.type === "pevent") {
     ws.send(JSON.stringify(Object.assign({}, msg, { deck })));   // #91 already a flat, self-describing frame
   }

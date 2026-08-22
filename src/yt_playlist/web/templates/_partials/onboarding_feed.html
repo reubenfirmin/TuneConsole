@@ -16,7 +16,7 @@
       <a href="/cleanup">Tidy them up →</a></p>
   </section>
   {% endif %}
-  <div class="gen-lanes">
+  <div class="gen-lanes" x-data="{ focus: null }" :class="{ 'has-focus': focus }">
     <div hx-get="/home/onboard/radio" hx-trigger="load" hx-swap="outerHTML">
       <div class="spinner" aria-label="Loading radio"></div>
     </div>

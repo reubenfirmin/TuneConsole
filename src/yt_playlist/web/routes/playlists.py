@@ -114,8 +114,11 @@ def build(ctx) -> APIRouter:
                 "created": created.get(p.ytm_playlist_id),   # for newest-first Generated ordering
             })
         group_names = sorted({g for g in groups.values() if g}, key=str.lower)
+        # Generated playlists are pinned in their own card, so they do not make the
+        # main table's grouping controls or Group column useful on their own.
+        has_groups = any(r["group"] and r["group"] != GENERATED_GROUP for r in rows)
         return templates.TemplateResponse(request, "playlists.html", {
-            "rows": rows, "has_groups": bool(groups), "group_names": group_names,
+            "rows": rows, "has_groups": has_groups, "group_names": group_names,
             "gc_days": rec_params.get_param(store, "generated_gc_days"),
             "flash": request.query_params.get("flash"),
             "flash_pl": request.query_params.get("flash_pl"),
@@ -132,6 +135,7 @@ def build(ctx) -> APIRouter:
         recipe = store.get_recipe(pl.ytm_playlist_id) if is_generated else None
         return templates.TemplateResponse(request, "playlist.html", {
             "pl": pl, "tracks": tracks, "identity": labels.get(pl.identity_id, "?"),
+            "show_identity": len(labels) > 1,
             "is_generated": is_generated,
             "facets": recommend.playlist_facets(store, pid) if is_generated else None,
             "mood_state": recommend.playlist_mood_state(store, pid, now_fn()) if is_generated else 0,

@@ -620,20 +620,17 @@ tr.group-row td { font-family: var(--font-sans); font-size: var(--type-body); co
   border: 1px solid var(--border-2); }
 .pl-thumb { width: 1.7rem; height: 1.7rem; border-radius: 4px; object-fit: cover; vertical-align: middle;
   margin-right: 0.45rem; }
-/* cover slot: shows the playlist art; on row hover a neon-green ▶ overlays it (click = play on YT).
-   A small corner badge always marks the content type (audio/video/mixed/mix). */
+/* cover slot: shows the artwork; on row hover a bright ▶ overlays it (click = play on YT). */
 .pl-cover { position: relative; display: inline-flex; width: 2rem; height: 2rem; flex: none;
   vertical-align: middle; margin-right: 0.6rem; border-radius: 5px; background: var(--surface-2); }
 .pl-cover .pl-thumb { width: 2rem; height: 2rem; border-radius: 5px; object-fit: cover; margin: 0; }
 .pl-play { position: absolute; inset: 0; display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 5px; background: color-mix(in srgb, var(--cta-well) 55%, transparent); color: var(--cta-2); font-size: var(--type-ui); padding-left: 2px;
+  border-radius: 5px; background: color-mix(in srgb, var(--accent) 88%, var(--teal)); color: var(--light-source); font-size: var(--type-ui); padding-left: 2px;
+  text-shadow: 0 1px 2px var(--shadow-ink);
   text-decoration: none; opacity: 0; transition: opacity 0.12s ease; }
-tr:hover .pl-play, tr.selrow .pl-play { opacity: 1; }
-.pl-play:hover { background: color-mix(in srgb, var(--cta-well) 72%, transparent); color: var(--cta-pale); box-shadow: inset 0 0 0 1.5px var(--cta); }
-.pl-ptype { position: absolute; right: -4px; bottom: -4px; min-width: .9375rem; height: .9375rem; z-index: 1;
-  display: inline-flex; align-items: center; justify-content: center; padding: 0 1px; border-radius: 999px;
-  background: var(--surface-2); border: 1px solid var(--border-2); font-size: 0.5rem; line-height: 1;
-  color: var(--dim); }
+tr:hover .pl-play, .pl-play:focus-visible { opacity: 1; text-decoration: none; }
+.pl-play:hover { background: var(--teal); color: var(--light-source); text-decoration: none;
+  box-shadow: inset 0 0 0 2px var(--light-source), 0 0 10px color-mix(in srgb, var(--teal) 70%, transparent); }
 .unavail { color: var(--danger); margin-left: 0.3rem; }
 .liked-col { text-align: center; padding: 0 .5rem 0 .9375rem; }   /* extra left gap from the thumbnail */
 .liked-heart { color: var(--danger-2); font-size: var(--type-ui); line-height: 1;
@@ -881,9 +878,15 @@ button.htmx-request .check-busy { display: inline; }
   .toolbar .push-end { display: none; }
   .toolbar > .seg { max-width: 100%; overflow-x: auto; }
 
-  .playlist-index th:nth-child(3), .playlist-index td:nth-child(3),
-  .playlist-index th:nth-child(5), .playlist-index td:nth-child(5),
-  .playlist-index th:nth-child(6), .playlist-index td:nth-child(6) { display: none; }
+  .playlist-index th:nth-child(4), .playlist-index td:nth-child(4),
+  .playlist-index th:nth-child(6), .playlist-index td:nth-child(6),
+  .playlist-index th:nth-child(7), .playlist-index td:nth-child(7) { display: none; }
+  .playlists-no-groups .playlist-index th:nth-child(4),
+  .playlists-no-groups .playlist-index td:nth-child(4) { display: table-cell; }
+  .playlists-no-groups .playlist-index th:nth-child(5),
+  .playlists-no-groups .playlist-index td:nth-child(5),
+  .playlists-no-groups .playlist-index th:nth-child(6),
+  .playlists-no-groups .playlist-index td:nth-child(6) { display: none; }
 
   .track-table th:nth-child(6), .track-table td:nth-child(6),
   .track-table th:nth-child(7), .track-table td:nth-child(7),

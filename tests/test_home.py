@@ -33,22 +33,23 @@ def test_home_is_default_route(store):
     assert r.status_code == 200
     assert 'id="home"' in r.text          # Home shell marker
     assert "home-status" in r.text         # live status card is present
+    assert "Extension connected" not in r.text  # connection alone is not useful Home content
     assert "Library synced" not in r.text  # freshness line only appears after a first sync
     assert 'class="presync card card--featured"' in r.text  # never-synced placeholder
 
 
 def test_home_rediscovers_unplayed_saved_albums(store):
-    # A saved album with no recent plays surfaces as a "Revisit" tile at the top of the Rediscover
-    # section, linking to its in-app album page.
+    # A saved album with no recent plays leads the memory-focused Rediscover surface and links to
+    # its in-app album page (rather than looking like another Discover catalog tile).
     store.set_setting("last_sync_at", "1.0")          # Rediscover only renders on a synced Home
     store.set_setting("onboard_dismissed", "1")       # graduated user: testing the normal feed, not onboarding
     store.collection.add_saved_album({"browse": "MPREb_x", "title": "Kind of Blue", "artist": "Miles Davis",
                                       "year": "1959", "type": "Album", "thumbnail": "http://img/x.jpg"})
     c = _client(store)
     html = c.get("/").text
-    assert "Rediscover in your library" in html
+    assert "Something you used to love" in html
     assert "Kind of Blue" in html and "Miles Davis" in html
-    assert "Revisit" in html                          # the relabeled badge (not "New album")
+    assert "Bring this one back" in html
     assert "/album?browse=MPREb_x" in html            # tile links to the in-app album page
 
 
@@ -145,7 +146,8 @@ def test_home_steer_writes_lean_not_permanent_weight(store):
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/home/steer", data={"axis": "genre:techno", "weight": "1.5"})
     assert r.status_code == 200
-    assert 'id="home-feed"' in r.text
+    assert 'id="home-mode-cards"' in r.text
+    assert 'id="home-feed"' not in r.text
     assert "genre:techno" not in store.get_weights()      # NOT a permanent write anymore
     # permanent is neutral (1.0) so effective target 1.5 -> lean 1.5
     assert store.get_lean("genre:techno") == 1.5
@@ -159,8 +161,7 @@ def test_home_feed_has_steer_toast_scaffold(store):
 
 
 def test_home_status_card_replaces_sync_buttons(store):
-    """Syncing is automatic in the background now: Home shows a live status card (connection +
-    now-playing + freshness) with no Full-sync button and no Sync-plays toggle."""
+    """Syncing is automatic and stays out of the regular-user status card."""
     c = _client(store)
     html = c.get("/").text
     assert "homeStatus()" in html            # the status card's Alpine component
@@ -170,8 +171,8 @@ def test_home_status_card_replaces_sync_buttons(store):
 
     store.set_setting("last_sync_at", "1000")   # after a first sync (now_fn -> 1000.0)
     html = c.get("/").text
-    assert "Library synced" in html and "not yet" not in html
-    assert "hs-refresh" in html              # the small unobtrusive power-user refresh link
+    assert "Library synced" not in html and "not yet" not in html
+    assert "hs-refresh" not in html          # background maintenance is not a regular-user action
 
 
 def test_presync_shows_recs_placeholder_not_feed(store):
@@ -314,7 +315,7 @@ def test_fingerprint_renders_pinned_genre_beyond_top6():
 
 def test_home_breadth_bar_is_interactive(store):
     """#7: the Breadth bar steers the feed. It posts to /home/breadth bound to the breadth_bias param,
-    and a post persists the bias and re-renders the feed (a preview, exactly like /home/steer)."""
+    and a post persists the bias and re-renders only the four-card board."""
     from yt_playlist.rec import rec_params
     iid = store.upsert_identity("main", "cred", None, True)
     t = store.upsert_track("v1", "Song", "Band", None, None)
@@ -325,7 +326,8 @@ def test_home_breadth_bar_is_interactive(store):
     assert "/home/breadth" in html                       # the breadth bar is now a steering control
     assert 'name="breadth_bias"' in html                 # ...bound to the breadth_bias param
     r = c.post("/home/breadth", data={"breadth_bias": "0.5"})
-    assert r.status_code == 200 and 'id="home-feed"' in r.text
+    assert r.status_code == 200 and 'id="home-mode-cards"' in r.text
+    assert 'id="home-feed"' not in r.text
     assert rec_params.get_param(store, "breadth_bias") == 0.5
 
 

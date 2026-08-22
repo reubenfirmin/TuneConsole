@@ -89,6 +89,7 @@
         </div>
       </div>
     </nav>
+    <div class="sidebar-dock-slot" aria-label="Now playing"></div>
   </header>
   <div class="authbar" x-data='authBanner({{ (auth_expired.values()|list)|tojson }})'
        x-show="labels.length && !dismissed" x-cloak @auth-expired.window="add($event.detail.label)">

@@ -18,21 +18,31 @@ _TICKER_TOP = 100     # cap rows per tab (ranked by recent share); genres/years 
 _TICKER_BUCKETS = 4   # candle periods, sliced across the actual history span
 
 
-def _ticker_periods(earliest, now):
-    """DISJOINT, newest-first [since, until) periods sized to the ACTUAL history span (earliest ->
-    now), so a young library doesn't get mostly-empty fixed 90d/1y windows. Returns
-    (periods, close_days, span_days); periods is [] when there's no history.
+def _more_albums(discography, collection):
+    """Return only discography albums not already represented in the local collection."""
+    browse_ids = {a.get("browse") for a in collection if a.get("browse")}
+    titles = {(a.get("album") or "").strip().casefold() for a in collection}
+    return [a for a in discography
+            if a.get("browse_id") not in browse_ids
+            and (a.get("title") or "").strip().casefold() not in titles]
 
-    Slicing the real span keeps every period populated, so the 'earlier' marker and range whisker
-    reflect real data instead of collapsing on null windows.
+
+def _ticker_periods(earliest, now, window_days=None):
+    """DISJOINT, newest-first [since, until) periods. A selected range is the width of each
+    period—the 7d chart shows all of the latest seven days and compares it with three earlier 7d
+    periods. All-time combines the complete recorded history into one period.
+    Returns (periods, close_days, span_days); all-time periods are [] without history.
     """
+    if window_days is not None:
+        width = window_days * 86400.0
+        periods = [(f"w{k}", (now - width * (k + 1), None if k == 0 else now - width * k))
+                   for k in range(_TICKER_BUCKETS)]
+        return periods, window_days, window_days * _TICKER_BUCKETS
     if earliest is None or earliest >= now:
         return [], 1, 1
     span = now - earliest
-    periods = [(f"w{k}", (now - span * (k + 1) / _TICKER_BUCKETS,
-                          None if k == 0 else now - span * k / _TICKER_BUCKETS))
-               for k in range(_TICKER_BUCKETS)]
-    close_days = max(1, round(span / _TICKER_BUCKETS / 86400.0))
+    periods = [("w0", (earliest, None))]
+    close_days = max(1, round(span / 86400.0))
     span_days = max(1, round(span / 86400.0))
     return periods, close_days, span_days
 
@@ -76,7 +86,7 @@ def build(ctx) -> APIRouter:
         now = now_fn()
         since = None if days is None else now - days * 86400.0
         earliest, _latest = store.history_bounds()
-        periods, close_days, span_days = _ticker_periods(earliest, now)
+        periods, close_days, span_days = _ticker_periods(earliest, now, days)
         tickers = {dim: _build_ticker(store, dim, periods) for dim in _TICKER_DIMS}
         for dim, t in tickers.items():
             t["close_days"], t["span_days"] = close_days, span_days
@@ -90,10 +100,11 @@ def build(ctx) -> APIRouter:
     @router.get("/artist")
     def artist_page(request: Request):
         name = (request.query_params.get("name") or "").strip()
+        browse_id = (request.query_params.get("browse") or "").strip() or None
         if not name:
             raise HTTPException(status_code=404, detail="no artist specified")
-        songs = store.artist_songs(name)
-        info = fetch_artist_info(ctx, name, store.artist_browse_id(name))
+        songs = store.artist_songs(name, browse_id)
+        info = fetch_artist_info(ctx, name, browse_id or store.artist_browse_id(name))
 
         # "Saved" is a single source of truth (membership in the saved-album set, keyed by browse_id)
         # so the collection table and the YouTube-discography table below always agree.
@@ -133,6 +144,7 @@ def build(ctx) -> APIRouter:
 
         # Section 2, full discography pulled live from YouTube; mark which you've already saved.
         yt_albums = info["albums"] if info and info.get("albums") else []
+        yt_albums = _more_albums(yt_albums, collection)
         for ya in yt_albums:
             ya["saved"] = ya.get("browse_id") in saved_ids
         return templates.TemplateResponse(request, "artist.html", {
