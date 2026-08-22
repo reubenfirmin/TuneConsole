@@ -28,7 +28,14 @@
 .recap-empty h1 { font-family: var(--font-sans); font-weight: 800; letter-spacing: -.02em; }
 
 /* ── The reel (full-viewport takeover) ─────────────────────────────────────────────────────── */
-.reel-body { margin: 0; overflow: hidden; height: 100vh; }
+.reel-body {
+  --accent: var(--immersive-accent);
+  --accent-2: var(--immersive-accent-2);
+  --accent-3: var(--immersive-accent-3);
+  --accent-pale: var(--immersive-accent-pale);
+  --accent-soft: color-mix(in srgb, var(--immersive-accent) 16%, transparent);
+  margin: 0; overflow: hidden; height: 100vh;
+}
 .reel {
   position: fixed; inset: 0; z-index: 200; overflow: hidden;
   display: grid; place-items: center; text-align: center;

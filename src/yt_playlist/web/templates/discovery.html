@@ -20,9 +20,9 @@
 
 <div class="card" x-data="{ tab: 'tracks' }">
   <div class="tabs">
-    <button type="button" :class="{ active: tab === 'tracks' }" @click="tab = 'tracks'">Tracks ({{ tracks|length }})</button>
-    <button type="button" :class="{ active: tab === 'albums' }" @click="tab = 'albums'">Albums ({{ albums|length }})</button>
-    <button type="button" :class="{ active: tab === 'artists' }" @click="tab = 'artists'">Artists ({{ artists|length }})</button>
+    <button type="button" class="tab-btn" :class="{ active: tab === 'tracks' }" @click="tab = 'tracks'">Tracks ({{ tracks|length }})</button>
+    <button type="button" class="tab-btn" :class="{ active: tab === 'albums' }" @click="tab = 'albums'">Albums ({{ albums|length }})</button>
+    <button type="button" class="tab-btn" :class="{ active: tab === 'artists' }" @click="tab = 'artists'">Artists ({{ artists|length }})</button>
   </div>
 
   <table class="pool-table" x-show="tab === 'tracks'">

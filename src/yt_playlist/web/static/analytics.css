@@ -480,7 +480,7 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .health-top { display: flex; align-items: center; gap: 1.6rem; flex-wrap: wrap; margin: 0.2rem 0 .9375rem; }
 .health-top .stat-grid { flex: 1 1 12rem; }
 .dead-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0; }
-.dead-chips a.tag:hover { background: var(--accent); color: var(--light-source); border-color: transparent; }
+.dead-chips a.tag:hover { background: var(--control-selected-hover); color: var(--light-source); border-color: var(--control-selected-border); }
 .health-cta { display: inline-block; margin-top: 1.1rem; color: var(--dim); font-size: var(--type-ui);
   border-bottom: 1px dashed var(--border-2); }
 .health-cta:hover { color: var(--accent-2); border-color: var(--accent-2); }

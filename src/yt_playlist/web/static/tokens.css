@@ -65,6 +65,8 @@
   --p-indigo-400:  #3d3582;
   --p-indigo-300:  #4a4e9e;
   --p-indigo-250:  #424696;
+  --p-indigo-200:  #7183d9;
+  --p-indigo-100:  #aeb8ff;
 
   /* slate (recessive greys) */
   --p-slate-900:   #14152b;
@@ -255,7 +257,7 @@
   --on-cta:      var(--p-green-900);    /* type sitting on the neon CTA fill */
   --light-source:var(--p-white);        /* highlights, stars and masks */
   --shadow-ink:  var(--p-black);
-  --accent-shadow: var(--p-violet-600);
+  --accent-shadow: var(--p-indigo-300);
   --accent-pale-1: var(--p-lilac-100);
   --accent-pale-2: var(--p-lilac-200);
   --teal-muted: var(--p-teal-600);
@@ -275,11 +277,15 @@
   --chart-album: var(--p-tan-400);
 
   /* ---- brand accents ---- */
-  --accent:      var(--p-violet-500);
-  --accent-2:    var(--p-violet-300);
-  --accent-3:    var(--p-violet-400);
-  --accent-pale: var(--p-lilac-300);
+  --accent:      var(--p-indigo-300);
+  --accent-2:    var(--p-indigo-200);
+  --accent-3:    var(--p-indigo-250);
+  --accent-pale: var(--p-indigo-100);
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  --immersive-accent:      var(--p-violet-500);
+  --immersive-accent-2:    var(--p-violet-300);
+  --immersive-accent-3:    var(--p-violet-400);
+  --immersive-accent-pale: var(--p-lilac-300);
   --teal:        var(--p-cyan-400);
   --teal-bright: var(--p-cyan-200);
   --teal-pale:   var(--p-cyan-100);
@@ -296,8 +302,12 @@
   --cta-well:    var(--p-green-950);
 
   /* ---- flat control fills ---- */
-  --control-primary:       var(--accent);
-  --control-primary-hover: var(--cta);
+  --control-selected:      var(--p-indigo-650);
+  --control-selected-hover:var(--p-indigo-600);
+  --control-selected-border:var(--p-indigo-300);
+  --focus-ring:            var(--p-cyan-400);
+  --control-primary:       var(--control-selected);
+  --control-primary-hover: var(--control-selected-hover);
   --control-danger:        var(--danger);
 
   /* ---- status ---- */

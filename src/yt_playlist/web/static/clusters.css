@@ -1,4 +1,11 @@
 /* Interactive Clusters graph and its controls. */
+.page-clusters {
+  --accent: var(--immersive-accent);
+  --accent-2: var(--immersive-accent-2);
+  --accent-3: var(--immersive-accent-3);
+  --accent-pale: var(--immersive-accent-pale);
+  --accent-soft: color-mix(in srgb, var(--immersive-accent) 16%, transparent);
+}
 .cluster-page-label {
   font-family: var(--font-mono); font-size: .66rem; font-weight: 600;
   letter-spacing: .22em; text-transform: uppercase; color: var(--accent);

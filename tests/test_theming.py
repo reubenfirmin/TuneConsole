@@ -361,6 +361,33 @@ def test_final_style_foundation_has_no_obsolete_layout_aliases():
     assert ".eq-stop-start" in app and ".eq-delay-1" in app
 
 
+def test_selected_controls_are_flat_indigo_not_violet():
+    tokens = TOKENS.read_text()
+    app = (WEB / "static" / "app.css").read_text()
+    merge = (WEB / "static" / "page-overrides.css").read_text()
+    assert "--control-selected:      var(--p-indigo-650)" in tokens
+    assert "--control-primary:       var(--control-selected)" in tokens
+    assert "--accent:      var(--p-indigo-300)" in tokens
+    assert "--immersive-accent:      var(--p-violet-500)" in tokens
+
+    for selector in (".seg button.on, .seg a.on", ".tab-btn.active"):
+        rule = re.search(rf"(?s){re.escape(selector)}\s*\{{(.*?)\}}", app).group(1)
+        assert "background: var(--control-selected)" in rule
+        assert "var(--accent)" not in rule
+        assert "gradient(" not in rule
+    tab = re.search(r"(?s)\.tab-btn\.active\s*\{(.*?)\}", app).group(1)
+    assert "box-shadow: none" in tab
+
+    merge_seg = re.search(r"(?s)\.page-merge \.seg button\.on\s*\{(.*?)\}", merge).group(1)
+    assert "background: var(--control-selected)" in merge_seg
+    discovery = (WEB / "templates" / "discovery.html").read_text()
+    assert discovery.count('class="tab-btn"') == 3
+
+    assert "--accent: var(--immersive-accent)" in (WEB / "static" / "clusters.css").read_text()
+    assert "--accent: var(--immersive-accent)" in (WEB / "static" / "story.css").read_text()
+    assert "--accent: var(--immersive-accent)" in (WEB / "static" / "page-overrides.css").read_text()
+
+
 def test_python_returns_token_references_not_colours():
     from yt_playlist.web import theme
 

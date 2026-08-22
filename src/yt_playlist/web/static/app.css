@@ -71,7 +71,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   transition: background 0.12s ease, color 0.12s ease; white-space: nowrap;
 }
 .topbar nav a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
-.topbar nav a.active { color: var(--light-source); background: var(--control-primary); border-color: var(--accent-2); }
+.topbar nav a.active { color: var(--light-source); background: var(--control-primary); border-color: var(--control-selected-border); }
 
 /* Tools dropdown (cleanup / move / actions / setup) at the right of the nav */
 .tools-menu { position: relative; display: flex; }
@@ -81,7 +81,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   box-shadow: none; cursor: pointer; display: inline-flex; align-items: center; gap: 0.35rem;
 }
 .tools-btn:hover { color: var(--text); background: var(--surface-2); box-shadow: none; }
-.tools-btn.active { color: var(--light-source); background: var(--control-primary); border-color: var(--accent-2); }
+.tools-btn.active { color: var(--light-source); background: var(--control-primary); border-color: var(--control-selected-border); }
 .tools-btn .caret { font-size: 0.66rem; transition: transform 0.15s ease; }
 .tools-btn .caret.up { transform: rotate(180deg); }
 .tools-pop {
@@ -370,7 +370,7 @@ button, .btn {
 }
 button:hover, .btn:hover {
   background: var(--surface-raised);
-  color: var(--text); border-color: var(--accent);
+  color: var(--text); border-color: var(--control-selected-border);
 }
 button:active, .btn:active { transform: translateY(1px); }
 .btn-primary {
@@ -420,7 +420,7 @@ input[type=text], input:not([type]), textarea, select {
   padding: 0.5rem 0.7rem; width: 100%;
 }
 textarea { font-family: var(--font-mono); font-size: var(--type-sm); line-height: 1.45; resize: vertical; }
-input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--focus-ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus-ring) 18%, transparent); }
 input::placeholder, textarea::placeholder { color: var(--faint); }
 
 ol.steps { padding-left: 0; counter-reset: step; list-style: none; }
@@ -460,8 +460,8 @@ ol.steps > li::before {
 .sync-toggle .sync-toggle-thumb { position: absolute; top: 0.15rem; left: 0.15rem;
   width: .8125rem; height: .8125rem; border-radius: 50%; background: var(--faint);
   transition: transform 0.18s ease, background 0.18s ease; }
-.sync-toggle.on { border-color: var(--accent); color: var(--text); }
-.sync-toggle.on .sync-toggle-track { background: var(--accent); }
+.sync-toggle.on { border-color: var(--control-selected-border); color: var(--text); }
+.sync-toggle.on .sync-toggle-track { background: var(--control-selected); }
 .sync-toggle.on .sync-toggle-thumb { transform: translateX(.875rem); background: var(--light-source); }
 .sync-note { color: var(--accent-2); font-size: var(--type-ui); font-weight: 600; margin: 0; }
 
@@ -494,7 +494,11 @@ ol.steps > li::before {
 .seg button, .seg a { background: transparent; color: var(--dim); border: none; box-shadow: none;
   border-radius: 0; font-size: var(--type-xs); padding: 0.25rem 0.6rem; cursor: pointer; text-decoration: none;
   display: inline-flex; align-items: center; }
-.seg button.on, .seg a.on { background: var(--accent); color: var(--light-source); }
+.seg button.on, .seg a.on {
+  background: var(--control-selected);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--control-selected-border);
+}
 .seg button:hover, .seg a:hover { box-shadow: none; transform: none; color: var(--text); }
 /* playlists tab */
 .pl-actionbar { position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%); z-index: 60;
@@ -708,8 +712,13 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
   padding: .5rem .9375rem; border-radius: var(--radius-sm);
   display: inline-flex; align-items: center; gap: .5rem; transition: color .12s ease, background .12s ease; }
 .tab-btn:hover { color: var(--text); background: var(--surface-2); }
-.tab-btn.active { color: var(--on-accent); background: var(--control-primary); box-shadow: 0 6px 16px -10px var(--accent); }
-.tab-btn.active:hover { background: var(--control-primary); }
+.tab-btn.active {
+  color: var(--text);
+  background: var(--control-selected);
+  border-color: var(--control-selected-border);
+  box-shadow: none;
+}
+.tab-btn.active:hover { background: var(--control-selected-hover); }
 
 /* genre whitelist editor */
 .genre-add { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
@@ -904,7 +913,7 @@ button.htmx-request .check-busy { display: inline; }
    Clusters owns a purpose-built interaction layer; Recap has a standalone shell. */
 .topbar :where(a, button, input):focus-visible,
 main:not(.page-clusters) :where(a, button, input, textarea, select, [tabindex]):focus-visible {
-  outline: 2px solid var(--accent-2);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 3px;
 }
 main:not(.page-clusters) th.sorth:focus-visible {

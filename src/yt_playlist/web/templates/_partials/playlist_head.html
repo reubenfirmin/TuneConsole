@@ -2,7 +2,9 @@
    standalone and htmx swaps it into #pl-title with the new title. The click-to-edit toggle stays
    Alpine (pure client state); Enter/blur posts via htmx. Escape reverts the draft and closes. #}
 <div id="pl-title" x-data="titleEditor({{ pl.id }})">
-  <h1 x-show="!editing" @click="start()" x-ref="h1" class="editable-title" title="Click to rename">{{ pl.title }}</h1>
+  <h1 x-show="!editing" @click="start()" x-ref="h1" class="editable-title" title="Click to rename">
+    {% if pl.ytm_playlist_id == 'LM' %}<svg class="lm-heart" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-8-4.8-8-11a4.5 4.5 0 0 1 8-2.7A4.5 4.5 0 0 1 20 10c0 6.2-8 11-8 11z"/></svg>{% endif %}{{ pl.title }}
+  </h1>
   <input x-show="editing" x-cloak class="title-input" x-model="draft" x-ref="inp" name="title"
          hx-post="/playlist/{{ pl.id }}/rename"
          hx-trigger="keyup[key=='Enter'], blur[event.target.dataset.cancel!=='1']"
