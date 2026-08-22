@@ -45,7 +45,7 @@
           <td><a class="ptitle" href="https://music.youtube.com/watch?v={{ s.video_id }}"
                  target="_blank" rel="noopener" data-yt-info>{{ s.title }}&nbsp;↗</a></td>
           <td><a class="alink" href="/artist?name={{ s.artist|urlencode }}">{{ s.artist }}</a></td>
-          <td class="barcell"><span class="ticker-candle top-song-candle"
+          <td class="barcell"><span class="ticker-candle top-song-candle" tabindex="0"
               {{ vt.tip(s.title, [{"l": "Plays", "v": s.plays, "n": window_names[window], "t": "strong"}]) }}>
             <i class="tk-bar" style="width:{{ (s.plays / smax * 100)|round(1) }}%"></i>
           </span></td>

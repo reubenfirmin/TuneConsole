@@ -1098,6 +1098,21 @@ function initVizTooltip() {
     const el = e.target.closest && e.target.closest('[data-tip]');
     if (el && el === current && !el.contains(e.relatedTarget)) scheduleHide();
   });
+  // Keyboard users get the same structured readout. Place it beside the focused mark rather than
+  // requiring pointer coordinates; focusout mirrors the mouseleave grace period.
+  document.addEventListener('focusin', (e) => {
+    const el = e.target.closest && e.target.closest('[data-tip]');
+    if (!el) return;
+    cancelHide();
+    let d; try { d = JSON.parse(el.getAttribute('data-tip')); } catch (_) { return; }
+    current = el; render(d); ensure().classList.add('on');
+    const r = el.getBoundingClientRect();
+    place({ clientX: r.right, clientY: r.top });
+  });
+  document.addEventListener('focusout', (e) => {
+    const el = e.target.closest && e.target.closest('[data-tip]');
+    if (el && el === current && !el.contains(e.relatedTarget)) scheduleHide();
+  });
   // A scroll or htmx swap can pull the hovered element out from under the cursor.
   document.addEventListener('scroll', hide, true);
   document.body.addEventListener('htmx:beforeSwap', hide);

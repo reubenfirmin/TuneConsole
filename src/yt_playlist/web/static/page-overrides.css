@@ -658,6 +658,103 @@ body:has(.page-charts) .viz-tip .vt-n {
   }
 }
 
+/* ===== Phase 9 final polish: ordinary-shell consistency, compact layouts and input parity ===== */
+body:not(:has(.page-clusters)) :where(.tools-btn, .tools-pop, .tools-pop a, .omni-results,
+  .omni-row, .seg, .editable-title, .title-input, .head-icon, .modal, .modal-input,
+  .tag, .count, .kind, .gtag, .scope-tag, .tab-btn) {
+  border-radius: 2px;
+}
+body:not(:has(.page-clusters)) :where(.sim-bar > i, .bar > i, .enrich-bar, .enrich-bar > i) {
+  border-radius: 0;
+  background-image: none;
+}
+body:not(:has(.page-clusters)) :where(.sim-bar > i, .bar > i, .enrich-bar > i) {
+  background-color: var(--accent);
+}
+body:not(:has(.page-clusters)) .modal {
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: min(44rem, calc(100dvh - 2rem));
+  overflow-y: auto;
+}
+
+/* Secondary analytical/settings pages inherit the same bare tab and working-sheet language. */
+.page-taste > div > .tabs,
+.page-discovery .tabs {
+  border-block-end: 0;
+  gap: .2rem;
+}
+.page-taste > div > .tabs .tab-btn,
+.page-discovery .tabs .tab-btn {
+  color: color-mix(in srgb, var(--text) 64%, transparent);
+  background: transparent;
+  border: 0;
+  border-block-end: 2px solid transparent;
+  box-shadow: none;
+}
+.page-taste > div > .tabs .tab-btn.active,
+.page-discovery .tabs .tab-btn.active {
+  color: var(--text);
+  background: transparent;
+  border-block-end-color: var(--accent);
+  box-shadow: none;
+}
+.page-discovery .discovery-sheet {
+  padding-inline: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  overflow-x: auto;
+}
+.page-discovery .discovery-sheet thead th {
+  color: color-mix(in srgb, var(--text) 58%, transparent);
+  background: var(--canvas);
+}
+.page-taste .scope-tag {
+  border-radius: 2px;
+}
+
+@media (max-width: 45rem) {
+  main:not(.page-clusters) .page-head h1 {
+    overflow-wrap: anywhere;
+  }
+  .page-artists .library-index-card th:nth-child(n + 4),
+  .page-artists .library-index-card td:nth-child(n + 4) {
+    display: none;
+  }
+  .page-artists .library-index-card .artist-avatar,
+  .page-albums .library-index-card .album-thumb {
+    width: 2.65rem;
+    height: 2.65rem;
+  }
+  .page-actions .workflow-sheet,
+  .page-network .workflow-sheet,
+  .page-discovery .discovery-sheet {
+    margin-inline: calc(-1 * var(--sp-3));
+    padding-inline: var(--sp-3);
+  }
+  .page-charts .chart-key {
+    align-items: flex-start;
+  }
+  .page-charts .chart-key-item {
+    flex-basis: calc(50% - .7rem);
+  }
+}
+@media (max-width: 32rem) {
+  .page-charts .chart-key-item {
+    flex-basis: 100%;
+  }
+  .page-move .workflow-control .inline-control {
+    width: 100%;
+    min-width: 0;
+  }
+  .page-move .workflow-control .opt {
+    flex: 1 1 100%;
+  }
+  .page-move .move-arrow {
+    transform: rotate(90deg);
+  }
+}
+
 /* ===== Phase 2 identity: stronger type hierarchy ============================================ */
 .page-home h2.section {
   font-size: clamp(1.45rem, 2.6vw, 1.8rem);

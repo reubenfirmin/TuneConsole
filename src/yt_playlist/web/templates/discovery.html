@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% block title %}Discovery Pools · TuneConsole{% endblock %}{% block body %}
+{% extends "base.html" %}{% block title %}Discovery Pools · TuneConsole{% endblock %}{% block page_class %}page-discovery{% endblock %}{% block body %}
 <div class="page-head">
   <h1>Discovery Pools</h1>
   <p>Out-of-corpus candidates we have surfaced to you: new tracks, albums, and artists you do not own
@@ -18,7 +18,7 @@
   {{ 'today' if d <= 0 else (d ~ 'd ago') }}
 {%- endmacro %}
 
-<div class="card" x-data="{ tab: 'tracks' }">
+<div class="card discovery-sheet" x-data="{ tab: 'tracks' }">
   <div class="tabs">
     <button type="button" class="tab-btn" :class="{ active: tab === 'tracks' }" @click="tab = 'tracks'">Tracks ({{ tracks|length }})</button>
     <button type="button" class="tab-btn" :class="{ active: tab === 'albums' }" @click="tab = 'albums'">Albums ({{ albums|length }})</button>
