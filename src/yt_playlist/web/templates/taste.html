@@ -48,6 +48,18 @@
   </div>
 </div>
 
+<h2 class="section">Control comparison · For You</h2>
+<div class="card">
+  <div class="sample-head">
+    <button class="btn-ghost btn-sm" hx-post="/taste/comparison/baseline" hx-target="#comparison-body">Set current baseline</button>
+    <button class="btn-ghost btn-sm" hx-get="/taste/comparison" hx-target="#comparison-body">Compare current controls</button>
+    <span class="sample-note">Uses the same fixed tracks on both sides, so movement is attributable to model changes.</span>
+  </div>
+  <div id="comparison-body" hx-get="/taste/comparison" hx-trigger="load">
+    <p class="section-note">Loading…</p>
+  </div>
+</div>
+
 <h2 class="section">Blend weights <span class="scope-tag">For You only</span></h2>
 <p class="section-note">How much each candidate lane contributes to the <strong>For You</strong> feed (and nothing else). 1.0 = neutral; feedback nudges these too, or set them yourself.</p>
 <div class="card knob-list">

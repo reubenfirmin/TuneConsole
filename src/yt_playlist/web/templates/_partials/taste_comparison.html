@@ -1,0 +1,28 @@
+{% if comparison is none %}
+<p class="section-note">Set a baseline, adjust controls, then compare the same tracks under the new model.</p>
+{% elif comparison %}
+<p class="section-note">Movement is rank within this fixed cohort, not turnover from the rotating sample.</p>
+<ol class="preview-list comparison-list">
+  {% for i in comparison %}
+  <li>
+    <span class="preview-lane">{% if i.rank_delta > 0 %}↑{{ i.rank_delta }}{% elif i.rank_delta < 0 %}↓{{ -i.rank_delta }}{% else %}—{% endif %}</span>
+    <span class="preview-song"><strong>{{ i.title }}</strong> · {{ i.artist }}</span>
+    <span class="preview-reason">#{{ i.old_rank }} → #{{ i.rank }} · {{ '%+.3f'|format(i.score_delta) }}</span>
+    <details class="score-trace">
+      <summary>Current score · {{ '%.3f'|format(i.score) }}</summary>
+      <div class="trace-grid">
+        <span>Baseline score</span><strong>{{ '%.3f'|format(i.old_score) }}</strong>
+        <span>Current score</span><strong>{{ '%.3f'|format(i.score) }}</strong>
+        <span>Durable context fit</span><strong>{{ '%+.3f'|format(i.trace.durable) }}</strong>
+        <span>Transient direction</span><strong>{{ '%+.3f'|format(i.trace.transient_delta) }}</strong>
+        <span>Session direction</span><strong>{{ '%+.3f'|format(i.trace.session_delta) }}</strong>
+        <span>Audio direction</span><strong>{{ '%+.3f'|format(i.trace.audio_delta) }}</strong>
+        <span>Applied facet product</span><strong>×{{ '%.3f'|format(i.trace.axis_applied) }}</strong>
+      </div>
+    </details>
+  </li>
+  {% endfor %}
+</ol>
+{% else %}
+<p class="section-note">No comparable modeled tracks yet. Build the model, then set a baseline.</p>
+{% endif %}

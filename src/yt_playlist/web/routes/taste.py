@@ -1,4 +1,5 @@
 """Tools > Taste Model: full visibility into the recommendation model + tinkering controls."""
+import json
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
@@ -10,6 +11,7 @@ from yt_playlist.web.context import form_float
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates = ctx.store, ctx.templates
+    comparison_setting = "taste_comparison_baseline_v1"
 
     # The three multiplier layers of a facet's chain, in the order the ranker composes them:
     # lasting bias (permanent weight x standing lean), the transient tilt, and their product.
@@ -149,6 +151,40 @@ def build(ctx) -> APIRouter:
         # even when the knobs haven't changed.
         items = recommend.taste_sample(store, ctx.now(), limit=8)
         return templates.TemplateResponse(request, "_partials/taste_preview.html", {"items": items})
+
+    def _comparison_context():
+        raw = store.get_setting(comparison_setting)
+        if not raw:
+            return {"comparison": None}
+        try:
+            baseline = json.loads(raw)
+        except (TypeError, ValueError):
+            return {"comparison": None}
+        current = recommend.taste_comparison(store, ctx.now(), [row["key"] for row in baseline])
+        before = {row["key"]: row for row in baseline}
+        rows = []
+        for row in current:
+            old = before[row["key"]]
+            row["old_rank"] = old["rank"]
+            row["old_score"] = old["score"]
+            row["rank_delta"] = old["rank"] - row["rank"]
+            row["score_delta"] = row["score"] - old["score"]
+            rows.append(row)
+        return {"comparison": rows}
+
+    @router.post("/taste/comparison/baseline")
+    def taste_comparison_baseline(request: Request):
+        baseline = recommend.taste_comparison(store, ctx.now())
+        compact = [{"key": row["key"], "rank": row["rank"], "score": row["score"]}
+                   for row in baseline]
+        store.set_setting(comparison_setting, json.dumps(compact))
+        return templates.TemplateResponse(request, "_partials/taste_comparison.html",
+                                          _comparison_context())
+
+    @router.get("/taste/comparison")
+    def taste_comparison(request: Request):
+        return templates.TemplateResponse(request, "_partials/taste_comparison.html",
+                                          _comparison_context())
 
     @router.post("/taste/weight")
     async def taste_weight(request: Request):

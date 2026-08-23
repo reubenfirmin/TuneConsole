@@ -235,6 +235,27 @@ def test_taste_preview_renders_production_score_trace(store, monkeypatch):
     assert "Night drive" in html and "0.960" in html
 
 
+def test_taste_comparison_keeps_fixed_baseline_and_shows_delta(store, monkeypatch):
+    from yt_playlist.rec import recommend
+    calls = []
+
+    def comparison(_store, _now, keys=None, limit=24):
+        calls.append(keys)
+        score = 0.8 if keys is None else 0.9
+        return [{"key": "track|artist", "title": "Track", "artist": "Artist",
+                 "rank": 1, "score": score, "trace": {"durable": 0.4,
+                 "transient_delta": 0.1, "session_delta": 0.0, "audio_delta": 0.0,
+                 "axis_applied": 1.1}}]
+
+    monkeypatch.setattr(recommend, "taste_comparison", comparison)
+    c = _client(store)
+    assert c.post("/taste/comparison/baseline").status_code == 200
+    html = c.get("/taste/comparison").text
+    assert calls[-1] == ["track|artist"]
+    assert "#1 → #1" in html and "+0.100" in html
+    assert "fixed cohort" in html
+
+
 def test_taste_page_lists_and_clears_bans(store):
     store.record_dislike("song|band", until=99999.0, now=1.0)
     c = _client(store)

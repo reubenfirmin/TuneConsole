@@ -256,6 +256,33 @@ def taste_sample(store, now, limit=8, pool_factor=8) -> list[ForYouItem]:
     return [pool[i] for i in sorted(random.sample(range(len(pool)), limit))]  # keep ranked order in-slice
 
 
+def taste_comparison(store, now, keys=None, limit=24) -> list[dict]:
+    """Score a fixed cohort for an honest before/after view of Taste controls.
+
+    With no ``keys``, choose a deterministic cohort from the production For You ranking. With keys,
+    re-score exactly those tracks against the current model. Rank is deliberately *within this fixed
+    cohort*: the live preview remains a rotating sample, and presenting its turnover as knob-driven
+    movement would be misleading.
+    """
+    pt = playlist_taste(store)
+    model_keys, V, idx = embed.load_vectors(store)
+    if not pt or V is None:
+        return []
+    scores, traces = score_with_traces(store, pt, model_keys, V, idx, now)
+    if keys is None:
+        keys = [item.key for item in for_you(store, now, limit=limit) if item.key in traces]
+    else:
+        keys = [key for key in keys if key in traces]
+    meta = store.tracks_by_keys(keys)
+    rows = [{"key": key, "title": meta[key]["title"], "artist": meta[key]["artist"],
+             "score": scores[key], "trace": traces[key]}
+            for key in keys if key in meta]
+    rows.sort(key=lambda row: (-row["score"], row["key"]))
+    for rank, row in enumerate(rows, 1):
+        row["rank"] = rank
+    return rows
+
+
 def _rotation_reason(n) -> str:
     return f"Sits with your favorites in {n} of your playlist{'s' if n != 1 else ''}"
 
