@@ -107,6 +107,29 @@ def now_mode_posterior(store, now) -> dict | None:
     return posterior
 
 
+def evidence_coverage(store, now) -> dict:
+    """Coverage/confidence facts for the UI, computed from the exact NOW/Session play source.
+
+    `total` is distinct eligible real-time plays after radio provenance exclusion; `mapped` is the
+    subset with a content vector and therefore able to vote in the mode posterior.
+    """
+    _keys, CV, cidx = embed.load_content_vectors(store)
+    cidx = cidx if CV is not None else {}
+
+    def one(window_h):
+        rows = store.play_events_since(now - window_h * 3600.0,
+                                       exclude_list_ids=_radio_list_ids(store))
+        latest = {r["identity_key"]: r["played_at"] for r in rows}
+        mapped = sum(k in cidx for k in latest)
+        total = len(latest)
+        return {"total": total, "mapped": mapped,
+                "coverage": mapped / total if total else None,
+                "window_h": window_h}
+
+    return {"now": one(rec_params.get_param(store, "now_window_h")),
+            "session": one(24)}
+
+
 def session_tilt(store, now, V, idx) -> np.ndarray | None:
     """Unit embedding direction from plays in the current listening session: plays from the last
     24 hours (the kernel does the shaping), each wall-clock decayed by `session_halflife_h` (hours).

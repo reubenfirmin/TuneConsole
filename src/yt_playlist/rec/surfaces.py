@@ -14,7 +14,8 @@ from yt_playlist.util.matching import normalize
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood,
-                                     content_taste, discovery_facet_weight, playlist_taste)
+                                     content_taste, discovery_facet_weight, playlist_taste,
+                                     score_with_traces)
 from yt_playlist.repos.base import GENERATED_GROUP
 
 
@@ -31,6 +32,7 @@ class ForYouItem:
     lane: str = ""     # source lane (neighbourhood/rotation/deep_cut/comfort), for weighting
     genre: str = ""    # filled in at DJ-ordering time (attach_genres) so dj_order can do genre segues
     year: int | None = None   # release year, for lanes whose tracks aren't in the library to look up
+    trace: dict | None = None  # Taste-page-only production score decomposition; absent on normal serving
 
 
 def rotate_sample(items, size, epoch):
@@ -57,15 +59,17 @@ def rotate_page(items, size, epoch):
     return [items[(start + i) % n] for i in range(min(size, n))]
 
 
-def _score_candidates(store, pt, keys, V, idx, now):
+def _score_candidates(store, pt, keys, V, idx, now, include_traces=False):
     """Per-key taste score: per-playlist taste fit, tilted by the transient mood centroid, then scaled
     by the permanent x transient facet weights. The shared scoring core of the Wheelhouse and Catalog
     surfaces. Caller loads pt/keys/V/idx (Catalog needs `keys` afterward) and guards V is not None."""
+    if include_traces:
+        return score_with_traces(store, pt, keys, V, idx, now)
     scores = _apply_mood(pt.score_all(V), store, now, V, idx)
     return _apply_axis_weights(store, {keys[i]: float(scores[i]) for i in range(len(keys))}, now)
 
 
-def _weighted_fair_queue(queues, limit, hard, muted):
+def _weighted_fair_queue(queues, limit, hard, muted, traces=None):
     """Interleave lane queues by learned weight: each turn serve the lane with the highest
     weight/(taken+1) ratio (default weight 1.0 => round-robin), dedup across lanes, and skip rows that
     are suppressed (`hard`) or by a muted artist. `queues` items are [rows, reason_fn, lane, weight, taken]."""
@@ -85,14 +89,15 @@ def _weighted_fair_queue(queues, limit, hard, muted):
         q[4] += 1
         out.append(ForYouItem(
             title=r["title"], artist=r["artist"], album=r["album"], video_id=r["video_id"],
-            thumbnail=r["thumbnail"], plays=r["plays"], reason=reason(r), key=r["key"], lane=lane))
+            thumbnail=r["thumbnail"], plays=r["plays"], reason=reason(r), key=r["key"], lane=lane,
+            trace=(traces or {}).get(r["key"])))
     return out
 
 
 # HOME CARD: "Wheelhouse" ("More in your wheelhouse"). Deeper into what you already love.
 # Internal lanes here are 'neighbourhood' + 'deep_cut'. When naming new code/vars, prefer the home
 # heading "wheelhouse" over the legacy function name "for_you".
-def for_you(store, now, limit=24) -> list[ForYouItem]:
+def for_you(store, now, limit=24, include_traces=False) -> list[ForYouItem]:
     """Blended local recommendations from your taste model, interleaved and deduped, best-ranked
     first. Returns a deep, ranked pool; per-card rotation (a random epoch-seeded slice) happens at
     the surface, not here: for_you itself carries no anti-staleness state.
@@ -109,12 +114,13 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
     # The taste-embedding scores: per-playlist taste fit, tilted by the transient model (mood centroid
     # + genre/era/artist facet leans, staleness-gated). This single score drives both the neighbourhood
     # lane's candidate selection AND every lane's final ordering: no separate recency mechanism.
-    sims = None
+    sims, traces, pt, V, idx = None, None, None, None, None
     if store.rec_vectors_count():
         pt = playlist_taste(store)
         keys, V, idx = embed.load_vectors(store)
         if pt and V is not None:
-            sims = _score_candidates(store, pt, keys, V, idx, now)
+            scored = _score_candidates(store, pt, keys, V, idx, now, include_traces=include_traces)
+            sims, traces = scored if include_traces else (scored, None)
 
     if sims is not None:
         # Neighbourhood lane: top tracks by taste×transient, excluding your most-played (so it's the
@@ -145,7 +151,15 @@ def for_you(store, now, limit=24) -> list[ForYouItem]:
     # weighted fair queuing: each lane gets turns ∝ its learned weight (default 1.0 => round-robin)
     queues = [[list(rows), reason, lane, weights.get(f"lane:{lane}", 1.0), 0]
               for rows, reason, lane in sources]
-    return _weighted_fair_queue(queues, limit, hard, muted)
+    out = _weighted_fair_queue(queues, limit, hard, muted, traces=traces)
+    if include_traces and pt and V is not None:
+        for item in out:
+            if item.trace is None or item.key not in idx:
+                continue
+            _score, because = pt.score(V[idx[item.key]])
+            item.trace["contexts"] = [
+                {"name": name, "contribution": value} for name, value in because]
+    return out
 
 
 # HOME CARD: "Comfort" ("Comfort listening"). Most-played favourites that have gone quiet.
@@ -236,7 +250,7 @@ def taste_sample(store, now, limit=8, pool_factor=8) -> list[ForYouItem]:
     'refresh sample'. Unlike for_you (a deterministic ranking), this draws a deeper matching pool and
     samples from it, so every refresh is a new set even when the knobs are unchanged.
     """
-    pool = for_you(store, now, limit=limit * pool_factor)
+    pool = for_you(store, now, limit=limit * pool_factor, include_traces=True)
     if len(pool) <= limit:
         return pool
     return [pool[i] for i in sorted(random.sample(range(len(pool)), limit))]  # keep ranked order in-slice

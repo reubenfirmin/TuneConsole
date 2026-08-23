@@ -171,6 +171,21 @@ def test_mode_layers_three_ribbons_share_colors_for_the_same_mode(store, monkeyp
     assert ml["now"]["window_h"] == rec_params.get_param(store, "now_window_h")
     assert ml["session"]["halflife_h"] == rec_params.get_param(store, "session_halflife_h")
     assert ml["min_events"] == int(rec_params.get_param(store, "now_min_events"))
+    assert ml["evidence"]["now"]["total"] == 3
+    assert ml["evidence"]["now"]["mapped"] == 3
+    assert ml["evidence"]["now"]["coverage"] == pytest.approx(1.0)
+
+
+def test_mode_evidence_reports_unmapped_realtime_plays(store, monkeypatch):
+    _install_now_modes(store)
+    _install_now_content_vectors(store, monkeypatch, ["mapped"], np.array([[1.0, 0.0]]))
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.import_play_events(iid, [("mapped", "v1", 1000.0), ("unmapped", "v2", 1000.0)])
+
+    evidence = taste_viz.model_transparency(store, now=1000.0)["modes"]["evidence"]
+
+    assert evidence["now"] == {"total": 2, "mapped": 1, "coverage": 0.5, "window_h": 6}
+    assert evidence["session"]["mapped"] == 1
 
 
 def test_mode_layers_permanent_stands_alone_when_the_fast_layers_are_quiet(store):

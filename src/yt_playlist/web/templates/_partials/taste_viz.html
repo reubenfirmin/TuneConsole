@@ -39,6 +39,22 @@
     <em>Controls</em> tab.</p>
 </section>
 
+<section class="card card--data viz-dim">
+  <h2 class="section section-flush">Where each layer acts <span class="scope-tag">decision routing</span></h2>
+  <p class="section-note">The layers are not blended into one universal taste number. Each one acts
+    at a particular decision seam; this is why the same play can inform several timescales without
+    being counted twice inside one calculation.</p>
+  <div class="chain-bars routing-list">
+    {% for r in viz.routing %}
+    <div class="chain-row routing-row">
+      <span class="layer-name">{{ r.layer }}</span>
+      <span class="muted">{{ r.evidence }}</span>
+      <span>{{ r.consumers }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
 {# ── Modes axis: the only axis on which NOW and SESSION exist ─────────────── #}
 {% macro mode_ribbon(segments, layer, scale, note) -%}
 <div class="breadth-ribbon layer-ribbon">
@@ -55,7 +71,7 @@
     same color, in all three.</p>
 
   <div class="layer-row">
-    <div class="layer-meta"><span class="layer-name">NOW</span><span class="layer-scale muted">last {{ viz.modes.now.window_h }}h</span></div>
+    <div class="layer-meta"><span class="layer-name">NOW</span><span class="layer-scale muted">last {{ viz.modes.now.window_h }}h · {{ viz.modes.evidence.now.mapped }}/{{ viz.modes.evidence.now.total }} mapped · gate {{ viz.modes.min_events }}</span></div>
     <div class="layer-reading">
       {% if viz.modes.now.segments %}{{ mode_ribbon(viz.modes.now.segments, "Now", "last " ~ viz.modes.now.window_h ~ "h", "a flat count of distinct plays in a hard window") }}
       {% elif not viz.modes.modes %}<p class="rose-quiet">No taste modes yet.</p>
@@ -64,7 +80,7 @@
   </div>
 
   <div class="layer-row">
-    <div class="layer-meta"><span class="layer-name">SESSION</span><span class="layer-scale muted">last 24h · {{ '%.0f'|format(viz.modes.session.halflife_h) }}h half-life</span></div>
+    <div class="layer-meta"><span class="layer-name">SESSION</span><span class="layer-scale muted">last 24h · {{ '%.0f'|format(viz.modes.session.halflife_h) }}h half-life · {{ viz.modes.evidence.session.mapped }}/{{ viz.modes.evidence.session.total }} mapped · gate {{ viz.modes.min_events }}</span></div>
     <div class="layer-reading">
       {% if viz.modes.session.segments %}{{ mode_ribbon(viz.modes.session.segments, "Session", "last 24h", "the same plays, weighted so fresher ones count for more") }}
       {% elif not viz.modes.modes %}<p class="rose-quiet">No taste modes yet.</p>
@@ -245,20 +261,28 @@
   <h2 class="section section-flush">What feeds the transient layer <span class="scope-tag">transient inputs</span></h2>
   <p>
     <span class="tag" {{ vt.tip("Mood taps", [
-          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.mood) ~ "d", "t": "strong"}]) }}>👍 mood +{{ viz.sources.mood_pos }}</span>
+          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.mood) ~ "d", "t": "strong"},
+          {"l": "Effective mass now", "v": "%.2f"|format(viz.sources.effective.mood), "n": "stored events after wall-clock decay"}]) }}>👍 mood +{{ viz.sources.mood_pos }}</span>
     <span class="tag" {{ vt.tip("Mood taps", [
           {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.mood) ~ "d", "t": "strong"}]) }}>👎 mood −{{ viz.sources.mood_neg }}</span>
     <span class="tag" {{ vt.tip("Recent plays", [
-          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.play) ~ "d", "t": "strong"}]) }}>▶ recent plays {{ viz.sources.plays }}</span>
+          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.play) ~ "d", "t": "strong"},
+          {"l": "Effective mass now", "v": "%.2f"|format(viz.sources.effective.play), "n": "play weight × decay, summed"}]) }}>▶ recent plays {{ viz.sources.plays }}</span>
     <span class="tag" {{ vt.tip("Likes", [
-          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.like) ~ "d", "t": "strong"}]) }}>♥ likes {{ viz.sources.likes }}</span>
+          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.like) ~ "d", "t": "strong"},
+          {"l": "Effective mass now", "v": "%.2f"|format(viz.sources.effective.like), "n": "like weight × decay, summed"}]) }}>♥ likes {{ viz.sources.likes }}</span>
     <span class="tag" {{ vt.tip("Dislikes", [
-          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.dislike) ~ "d", "t": "strong"}]) }}>⃠ dislikes {{ viz.sources.dislikes }}</span>
+          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.dislike) ~ "d", "t": "strong"},
+          {"l": "Effective mass now", "v": "%.2f"|format(viz.sources.effective.dislike), "n": "dislike weight × decay, summed"}]) }}>⃠ dislikes {{ viz.sources.dislikes }}</span>
+    <span class="tag" {{ vt.tip("Skips", [
+          {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.skip) ~ "d", "t": "strong"},
+          {"l": "Effective mass now", "v": "%.2f"|format(viz.sources.effective.skip), "n": "skip weight × decay, summed"}]) }}>↷ skips {{ viz.sources.skips }}</span>
   </p>
   <p class="section-note source-note">These are the events behind every Transient
     shape above. Each source fades on its own wall-clock half-life (hover a tag) - a month-old vibe
     tap is nearly gone even if you never interact again. There's no separate sync-freshness scaling:
-    every event decays on its own clock, sync or no sync.</p>
+    every event decays on its own clock, sync or no sync.{% if viz.sources.latest_age_h is not none %}
+    Newest eligible evidence: {{ '%.1f'|format(viz.sources.latest_age_h) }}h ago.{% endif %}</p>
 </section>
 
 {# ── Embedding engine + the two free-direction layers (expensive → lazy) ──── #}

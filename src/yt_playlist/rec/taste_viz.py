@@ -104,6 +104,7 @@ def mode_layers(store, now) -> dict:
     """
     now_shares, now_n, modes = layers.now_mode_mix(store, now)
     session_shares, session_n, _ = layers.session_mode_mix(store, now)
+    evidence = layers.evidence_coverage(store, now)
     return {
         "modes": modes,
         "now": {"segments": _ribbon_segments(now_shares, modes), "n": now_n,
@@ -113,30 +114,49 @@ def mode_layers(store, now) -> dict:
         "permanent": {"segments": _ribbon_segments(_permanent_mode_shares(modes), modes),
                       "n": sum(m["size"] for m in modes)},
         "min_events": int(rec_params.get_param(store, "now_min_events")),
+        "evidence": evidence,
     }
 
 
-def _sources(store):
+def _sources(store, now):
     """#85: there is no longer a single rank-based recency alpha blending these sources - each one
     fades independently on its own wall-clock half-life (transient.decay_weight). Report those
     half-lives instead so the page states the real per-source decay, not a retired blend knob."""
     mood_pos = mood_neg = 0
-    for _ts, direction, _keys in store.recent_mood_events():
+    mood_events = store.recent_mood_events()
+    for _ts, direction, _keys in mood_events:
         if direction > 0:
             mood_pos += 1
         elif direction < 0:
             mood_neg += 1
     limit = rec_params.get_param(store, "recent_play_limit")
     gp = rec_params.get_param
+    plays = transient.evidence_plays(store, limit)
+    likes = store.recent_liked_with_ts(limit=limit)
+    dislikes = store.disliked_with_ts()
+    skip_hl = gp(store, "skip_halflife_d")
+    skips = store.recent_skips_with_ts(now - 4 * skip_hl * 86400)
+    half = {"mood": gp(store, "mood_halflife_d"), "play": gp(store, "play_halflife_d"),
+            "like": gp(store, "like_halflife_d"), "dislike": gp(store, "dislike_halflife_d"),
+            "skip": skip_hl}
+    weights = {"mood": 1.0, "play": gp(store, "play_transient_w"),
+               "like": gp(store, "like_transient_w"), "dislike": gp(store, "dislike_transient_w"),
+               "skip": gp(store, "skip_transient_w")}
+
+    def mass(pairs, source):
+        return sum(weights[source] * transient.decay_weight(now - ts, half[source]) for _k, ts in pairs)
+
+    source_pairs = {
+        "mood": [("", ts) for ts, direction, _keys in mood_events if direction],
+        "play": plays, "like": likes, "dislike": dislikes, "skip": skips,
+    }
+    latest = max((ts for pairs in source_pairs.values() for _k, ts in pairs), default=None)
     return {
         "mood_pos": mood_pos, "mood_neg": mood_neg,
-        "plays": len(store.recent_keys_ordered(0, limit=limit)),
-        "likes": len(store.recent_liked_keys(limit=limit)),
-        "dislikes": len(store.disliked_identity_keys()),
-        "halflife_days": {
-            "mood": gp(store, "mood_halflife_d"), "play": gp(store, "play_halflife_d"),
-            "like": gp(store, "like_halflife_d"), "dislike": gp(store, "dislike_halflife_d"),
-        },
+        "plays": len(plays), "likes": len(likes), "dislikes": len(dislikes), "skips": len(skips),
+        "halflife_days": half,
+        "effective": {source: mass(pairs, source) for source, pairs in source_pairs.items()},
+        "latest_age_h": max(0.0, (now - latest) / 3600.0) if latest is not None else None,
     }
 
 
@@ -174,7 +194,19 @@ def model_transparency(store, now) -> dict:
         "breadth_word": _breadth_word(bd["breadth"]),
         # #85: no "freshness" key any more - the old sync-staleness relax of the whole transient read
         # is gone; each source in `sources` now fades independently on its own wall-clock half-life.
-        "sources": _sources(store),
+        "sources": _sources(store, now),
+        "routing": [
+            {"layer": "NOW", "evidence": "real-time plays, confidence-gated into taste modes",
+             "consumers": "which Home taste-mode card leads"},
+            {"layer": "SESSION", "evidence": "real-time plays over 24h, hours-scale decay",
+             "consumers": "track ordering inside embedding-scored recommendation pools"},
+            {"layer": "TRANSIENT", "evidence": "plays, likes, dislikes, mood taps and skips",
+             "consumers": "vector score deltas, audio deltas, and genre/era/artist reranking"},
+            {"layer": "PERMANENT", "evidence": "library contexts, embedding, graduated weights",
+             "consumers": "baseline taste fit, discovery, lane preferences and durable facet bias"},
+            {"layer": "GRADUATION", "evidence": "sustained intent and behavior",
+             "consumers": "writes bounded changes into Permanent weights"},
+        ],
         "funnel": [{"facet": f, "score": s, "threshold": graduation_threshold,
                     "frac": max(-1.0, min(1.0, s / graduation_threshold))}
                    for f, s in sorted(theme.items(), key=lambda x: -abs(x[1]))],

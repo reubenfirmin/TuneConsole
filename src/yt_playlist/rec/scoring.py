@@ -238,7 +238,7 @@ def _pop_band(popularity, threshold):
     return "mainstream" if popularity >= threshold else None
 
 
-def _axis_weights_for(store, keys, now=None):
+def _axis_weights_for(store, keys, now=None, with_details=False):
     """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
     the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
     w = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
@@ -268,19 +268,26 @@ def _axis_weights_for(store, keys, now=None):
                rec_params.get_param(store, "facet_mult_min"),
                rec_params.get_param(store, "facet_mult_max"))
 
-    mult = {}
+    mult, details = {}, {}
     for k in keys:
         fam = genre_map.family(genres[k]) if k in genres else None
         sub = genre_map.subgenre(genres[k]) if k in genres else None
-        gm = _axis_mult(gw, "genre", fam, standing, leans, fparams) * bfac.get(fam, 1.0)   # breadth folds in
+        breadth = bfac.get(fam, 1.0)
+        gm = _axis_mult(gw, "genre", fam, standing, leans, fparams) * breadth
         if sub and sub != fam:
             gm *= _axis_mult(gw, "genre", sub, standing, leans, fparams)
         em = _axis_mult(ew, "era", decades.get(k), standing, leans, fparams)
         am = _axis_mult(aw, "artist", artists.get(k), standing, leans, fparams)
         pm = _axis_mult(pw, "pop", _pop_band(pops.get(k), pop_min), standing, leans, fparams)
-        mult[k] = (max(lo, min(hi, gm)) * max(lo, min(hi, em))
-                   * max(lo, min(hi, am)) * max(lo, min(hi, pm)))
-    return mult
+        axes = {"genre": max(lo, min(hi, gm)), "era": max(lo, min(hi, em)),
+                "artist": max(lo, min(hi, am)), "popularity": max(lo, min(hi, pm))}
+        mult[k] = axes["genre"] * axes["era"] * axes["artist"] * axes["popularity"]
+        if with_details:
+            details[k] = {"axes": axes, "genre": fam, "subgenre": sub,
+                          "era": decades.get(k), "artist": artists.get(k),
+                          "popularity_band": _pop_band(pops.get(k), pop_min),
+                          "breadth": breadth, "raw_product": mult[k]}
+    return (mult, details) if with_details else mult
 
 
 def _apply_axis_weights(store, sims, now=None):
@@ -363,6 +370,30 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None):
     return boost
 
 
+def _mood_components(scores, store, now, V, idx, content_vecs=None):
+    """Return the exact additive vector-score components used by `_apply_mood`."""
+    base = np.asarray(scores, dtype=np.float64)
+    components = {"durable": base.copy(), "transient": np.zeros(len(base)),
+                  "session": np.zeros(len(base)), "audio": np.zeros(len(base))}
+    Vn = None
+    tilt = transient.centroid_tilt(store, now, V, idx)
+    if tilt is not None:
+        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
+        components["transient"] = MOOD_ALPHA * (Vn @ tilt)
+    st = layers.session_tilt(store, now, V, idx)
+    if st is not None:
+        if Vn is None:
+            Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
+        components["session"] = rec_params.get_param(store, "session_alpha") * (Vn @ st)
+    w = rec_params.get_param(store, "audio_transient_w")
+    if w > 0:
+        boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs)
+        if boost is not None:
+            components["audio"] = w * boost
+    components["combined"] = sum(components[name] for name in ("durable", "transient", "session", "audio"))
+    return components
+
+
 def _apply_mood(scores, store, now, V, idx, content_vecs=None):
     """Blend the transient tilts into per-track scores. #85: each tilt decays internally, per event, on
     its own wall clock (see transient.decay_weight); there is no separate external staleness relax here
@@ -379,18 +410,44 @@ def _apply_mood(scores, store, now, V, idx, content_vecs=None):
 
     `content_vecs` selects the audio tilt's content-vector source: warm callers leave it None (library
     vectors); the cold path passes the discovered-content vectors so out-of-corpus tracks get the tilt."""
-    tilt = transient.centroid_tilt(store, now, V, idx)
-    if tilt is not None:
-        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
-        scores = scores + MOOD_ALPHA * (Vn @ tilt)
-    st = layers.session_tilt(store, now, V, idx)
-    if st is not None:
-        Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
-        session_alpha = rec_params.get_param(store, "session_alpha")
-        scores = scores + session_alpha * (Vn @ st)
-    w = rec_params.get_param(store, "audio_transient_w")
-    if w > 0:
-        boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs)
-        if boost is not None:
-            scores = scores + w * boost
-    return scores
+    return _mood_components(scores, store, now, V, idx, content_vecs)["combined"]
+
+
+def score_with_traces(store, taste, keys, V, idx, now):
+    """Production warm-track scorer plus an exact, per-key decision trace.
+
+    This is used only by the Taste live sample. It shares the same component producers and axis
+    multipliers as normal serving; the returned final scores are contract-tested against the lean
+    production path so transparency cannot become a parallel scoring implementation.
+    """
+    components = _mood_components(taste.score_all(V), store, now, V, idx)
+    combined = {keys[i]: float(components["combined"][i]) for i in range(len(keys))}
+    weighted = _axis_weights_for(store, keys, now=now, with_details=True)
+    if weighted is None:
+        mult, axis_details, final, ranked_base = None, {}, combined, combined
+    else:
+        mult, axis_details = weighted
+        ranked_base = embed.percentile_scores(combined)
+        cap = rec_params.get_param(store, "axis_weight_cap")
+        final = {k: ranked_base[k] * min(cap, mult.get(k, 1.0)) for k in combined}
+    traces = {}
+    cap = rec_params.get_param(store, "axis_weight_cap")
+    for i, key in enumerate(keys):
+        axis = axis_details.get(key, {"axes": {}, "raw_product": 1.0, "breadth": 1.0})
+        traces[key] = {
+            "durable": float(components["durable"][i]),
+            "contexts": [],
+            "transient_delta": float(components["transient"][i]),
+            "session_delta": float(components["session"][i]),
+            "audio_delta": float(components["audio"][i]),
+            "combined": float(components["combined"][i]),
+            "rank_base": float(ranked_base[key]),
+            "axes": axis["axes"], "axis_labels": {
+                "genre": axis.get("genre"), "era": axis.get("era"),
+                "artist": axis.get("artist"), "popularity": axis.get("popularity_band")},
+            "breadth": float(axis.get("breadth", 1.0)),
+            "axis_product": float(axis.get("raw_product", 1.0)),
+            "axis_applied": float(min(cap, axis.get("raw_product", 1.0))),
+            "axis_cap": float(cap), "final": float(final[key]),
+        }
+    return final, traces

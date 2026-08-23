@@ -216,6 +216,25 @@ def test_taste_preview_renders_without_recs(store):
     assert c.get("/taste/preview").status_code == 200     # no model yet -> still 200
 
 
+def test_taste_preview_renders_production_score_trace(store, monkeypatch):
+    from yt_playlist.rec import recommend
+    trace = {"durable": 0.4, "transient_delta": 0.1, "session_delta": -0.02,
+             "audio_delta": 0.03, "combined": 0.51, "rank_base": 0.8,
+             "axes": {"genre": 1.2, "era": 1.0},
+             "axis_labels": {"genre": "electronic", "era": "2010s"},
+             "axis_product": 1.2, "axis_applied": 1.2, "axis_cap": 1.4,
+             "final": 0.96, "contexts": [{"name": "Night drive", "contribution": 0.3}]}
+    item = recommend.ForYouItem("Track", "Artist", "", "v", None, 0, "reason",
+                                key="track|artist", lane="neighbourhood", trace=trace)
+    monkeypatch.setattr(recommend, "taste_sample", lambda *a, **kw: [item])
+
+    html = _client(store).get("/taste/preview").text
+
+    assert "Why this rank" in html
+    assert "Durable context fit" in html and "Session direction" in html
+    assert "Night drive" in html and "0.960" in html
+
+
 def test_taste_page_lists_and_clears_bans(store):
     store.record_dislike("song|band", until=99999.0, now=1.0)
     c = _client(store)
@@ -235,6 +254,8 @@ def test_taste_page_has_viz_and_controls_tabs(store):
     assert "What feeds the transient layer" in html   # transient sources panel present
     assert "Graduation funnel" in html            # transient -> permanent funnel present
     assert "The four layers" in html              # the layer key replaces the old "Layer stack" card
+    assert "Where each layer acts" in html
+    assert "which Home taste-mode card leads" in html
     assert "Layer stack" not in html
 
 

@@ -5,6 +5,27 @@
     <span class="preview-lane">{{ i.lane or 'pick' }}</span>
     <span class="preview-song"><strong>{{ i.title }}</strong> · {{ i.artist }}</span>
     <span class="preview-reason">{{ i.reason }}</span>
+    {% if i.trace %}
+    <details class="score-trace">
+      <summary>Why this rank · {{ '%.3f'|format(i.trace.final) }}</summary>
+      <div class="trace-grid">
+        <span>Durable context fit</span><strong>{{ '%+.3f'|format(i.trace.durable) }}</strong>
+        <span>Transient direction</span><strong>{{ '%+.3f'|format(i.trace.transient_delta) }}</strong>
+        <span>Session direction</span><strong>{{ '%+.3f'|format(i.trace.session_delta) }}</strong>
+        <span>Audio direction</span><strong>{{ '%+.3f'|format(i.trace.audio_delta) }}</strong>
+        <span>Combined vector score</span><strong>{{ '%+.3f'|format(i.trace.combined) }}</strong>
+        <span>Rank-normalized base</span><strong>{{ '%.3f'|format(i.trace.rank_base) }}</strong>
+        {% for axis, value in i.trace.axes.items() %}
+        <span>{{ axis|capitalize }} multiplier{% if i.trace.axis_labels.get(axis) %} · {{ i.trace.axis_labels.get(axis) }}{% endif %}</span><strong>×{{ '%.3f'|format(value) }}</strong>
+        {% endfor %}
+        <span>Applied facet product{% if i.trace.axis_product > i.trace.axis_cap %} · capped from ×{{ '%.3f'|format(i.trace.axis_product) }}{% endif %}</span><strong>×{{ '%.3f'|format(i.trace.axis_applied) }}</strong>
+        <span>Final score</span><strong>{{ '%.3f'|format(i.trace.final) }}</strong>
+      </div>
+      {% if i.trace.contexts %}<p class="trace-contexts"><span class="muted">Strongest durable contexts:</span>
+        {% for c in i.trace.contexts %}{{ c.name }} {{ '%+.3f'|format(c.contribution) }}{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+      <p class="muted trace-note">NOW does not appear here: it selects the leading taste-mode card; it is not a track-score term.</p>
+    </details>
+    {% endif %}
   </li>
   {% endfor %}
 </ol>

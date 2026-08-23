@@ -511,6 +511,13 @@ details.advanced .knob { margin-bottom: 1.125rem; }
 .preview-list .preview-lane { display: inline-block; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 0 0.4rem; margin-right: 0.5rem; }
 .preview-list .preview-reason { color: var(--dim); font-size: var(--type-ui); margin-left: 0.4rem; }
+.score-trace { margin: .35rem 0 .2rem; font-size: var(--type-ui); }
+.score-trace summary { color: var(--accent-2); cursor: pointer; }
+.trace-grid { display: grid; grid-template-columns: minmax(11rem, 1fr) auto; gap: .2rem .8rem;
+  max-width: 34rem; margin-top: .45rem; }
+.trace-grid strong { font-family: var(--font-mono); font-weight: 500; text-align: right; }
+.trace-contexts, .trace-note { margin: .4rem 0 0; }
+.routing-list .routing-row { grid-template-columns: 7rem minmax(13rem, .8fr) minmax(16rem, 1fr); }
 
 .htmx-indicator { opacity: 0; transition: opacity .2s ease; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
