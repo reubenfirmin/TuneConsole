@@ -19,6 +19,31 @@ def test_log_enrichment_rows(store):
         ("musicbrainz", "genre", "Electronic"), ("discogs", "genre", "Art Pop")]
 
 
+def test_genre_provenance_returns_latest_value_per_provider_and_current(store):
+    tid = _track(store, genre="Art Pop")
+    store.log_enrichment(tid, "run1", "lastfm", "genre", "Electronic", now=1.0)
+    store.log_enrichment(tid, "run2", "lastfm", "genre", "Art Pop", now=2.0)
+    store.log_enrichment(tid, "run2", "discogs", "genre", None, now=2.0)
+
+    result = store.genre_provenance(tid)
+
+    assert result["current"] == "Art Pop"
+    assert result["candidates"] == [
+        {"provider": "lastfm", "value": "Art Pop"},
+        {"provider": "discogs", "value": ""},
+    ]
+
+
+def test_genre_provenance_falls_back_to_retained_conflict_candidates(store):
+    tid = _track(store, genre="Electronic")
+    store.upsert_conflict(tid, "genre", [{"provider": "musicbrainz", "value": "Electronic"},
+                                          {"provider": "discogs", "value": "Art Pop"}])
+    assert store.genre_provenance(tid)["candidates"] == [
+        {"provider": "musicbrainz", "value": "Electronic"},
+        {"provider": "discogs", "value": "Art Pop"},
+    ]
+
+
 def test_upsert_conflict_then_resolve_overwrites_column(store):
     tid = _track(store, genre="Electronic")
     cands = [{"provider": "musicbrainz", "value": "Electronic"},

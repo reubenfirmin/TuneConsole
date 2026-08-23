@@ -22,6 +22,33 @@ _FIELD_COLUMN = {
 
 class EnrichmentRepo(Repo):
     @synchronized
+    def genre_provenance(self, track_id) -> dict | None:
+        """Current genre plus the latest retained answer from each enrichment provider."""
+        track = self.conn.execute(
+            "SELECT id, title, artist, COALESCE(genre, '') genre FROM tracks WHERE id=?", (track_id,)
+        ).fetchone()
+        if track is None:
+            return None
+        rows = self.conn.execute(
+            "SELECT provider, value FROM enrichment_log e WHERE track_id=? AND field='genre' "
+            "AND id=(SELECT MAX(id) FROM enrichment_log newer WHERE newer.track_id=e.track_id "
+            "AND newer.field=e.field AND newer.provider=e.provider) ORDER BY id", (track_id,)
+        ).fetchall()
+        candidates = [{"provider": r["provider"], "value": r["value"] or ""} for r in rows]
+        conflict = self.conn.execute(
+            "SELECT candidates FROM enrichment_conflict WHERE track_id=? AND field='genre'", (track_id,)
+        ).fetchone()
+        seen = {(c["provider"], c["value"]) for c in candidates}
+        if conflict:
+            for c in json.loads(conflict["candidates"]):
+                pair = (str(c.get("provider") or "unknown"), str(c.get("value") or ""))
+                if pair not in seen:
+                    candidates.append({"provider": pair[0], "value": pair[1]})
+                    seen.add(pair)
+        return {"track_id": track["id"], "title": track["title"], "artist": track["artist"],
+                "current": track["genre"], "candidates": candidates}
+
+    @synchronized
     def log_enrichment(self, track_id, run_id, provider, field, value, now=None) -> None:
         self.conn.execute(
             "INSERT INTO enrichment_log(track_id, run_id, provider, field, value, created_at) "

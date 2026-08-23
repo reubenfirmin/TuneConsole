@@ -108,6 +108,8 @@
   {# "Songs like this" loads here for the same reason, and on every page: it used to sit inside each
      page's own body block, where main's transform captured it and opened it off-screen (#104). #}
   <div id="similar-modal"></div>
+  {# Per-song genre provenance inspector (#103), also kept outside transformed <main>. #}
+  <div id="genre-candidates-modal"></div>
   <div id="toasts" class="toasts" aria-live="polite">{% block toasts %}{% endblock %}</div>
   {% if exit_on_idle %}
   <script>

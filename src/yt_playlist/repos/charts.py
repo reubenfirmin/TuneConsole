@@ -189,13 +189,13 @@ class ChartsRepo(Repo):
     def playlist_tracks_detail(self, playlist_id) -> list[dict]:
         """Full per-track detail for our own playlist view (in playlist order)."""
         rows = self.conn.execute(
-            "SELECT t.video_id vid, t.identity_key ikey, t.title, t.artist, t.orig_title otitle, t.orig_artist oartist, t.album, t.album_browse_id abrowse, "
+            "SELECT t.id tid, t.video_id vid, t.identity_key ikey, t.title, t.artist, t.orig_title otitle, t.orig_artist oartist, t.album, t.album_browse_id abrowse, "
             "       t.duration_s dur, t.available avail, t.thumbnail thumb, t.genre, t.mb_year, "
             "       (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=t.identity_key) plays, "
             f"      {LIKED_EXISTS} liked "
             "FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
             "WHERE pt.playlist_id=? ORDER BY pt.position", (playlist_id,)).fetchall()
-        return [{"video_id": r["vid"], "identity_key": r["ikey"], "title": r["title"], "artist": r["artist"],
+        return [{"track_id": r["tid"], "video_id": r["vid"], "identity_key": r["ikey"], "title": r["title"], "artist": r["artist"],
                  "title_edited": bool(r["otitle"] is not None and r["title"] != r["otitle"]),
                  "artist_edited": bool(r["oartist"] is not None and r["artist"] != r["oartist"]),
                  "album": r["album"] or "", "album_browse": r["abrowse"], "duration": r["dur"],
@@ -207,12 +207,12 @@ class ChartsRepo(Repo):
         """Per-track detail for a saved album's folded-in tracks (same shape as playlist_tracks_detail,
         so the row partial renders identically). Album order ≈ insertion order (t.id)."""
         rows = self.conn.execute(
-            "SELECT t.video_id vid, t.title, t.artist, t.album, t.album_browse_id abrowse, "
+            "SELECT t.id tid, t.video_id vid, t.title, t.artist, t.album, t.album_browse_id abrowse, "
             "       t.duration_s dur, t.available avail, t.thumbnail thumb, t.genre, t.mb_year, "
             "       (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=t.identity_key) plays, "
             f"      {LIKED_EXISTS} liked "
             "FROM tracks t WHERE t.album_browse_id=? ORDER BY t.id", (album_browse_id,)).fetchall()
-        return [{"video_id": r["vid"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
+        return [{"track_id": r["tid"], "video_id": r["vid"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
                  "album_browse": r["abrowse"], "duration": r["dur"], "available": r["avail"],
                  "thumbnail": r["thumb"], "plays": r["plays"], "liked": bool(r["liked"]),
                  "genre": r["genre"] or "", "year": r["mb_year"] or ""} for r in rows]

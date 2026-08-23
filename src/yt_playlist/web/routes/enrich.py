@@ -1,6 +1,7 @@
 """Tools › Enrichment: corpus coverage charts + worker state/pause, all served from the store's
 enrichment stats. The page polls /enrich/stats so the bars advance live as the worker drains."""
 from fastapi import APIRouter, Request
+from fastapi.responses import Response
 
 from yt_playlist.web import viz
 
@@ -47,5 +48,30 @@ def build(ctx) -> APIRouter:
         if was_on is False and ctx.enrich_worker:     # just turned ON -> wake the drain loop
             ctx.enrich_worker.trigger()
         return templates.TemplateResponse(request, "_partials/enrich_stats.html", _ctx())
+
+    def _genre_candidates(request, track_id):
+        track = store.genre_provenance(track_id)
+        if track is None:
+            return Response(status_code=404)
+        return templates.TemplateResponse(request, "_partials/genre_candidates.html", {"track": track})
+
+    @router.get("/track/{track_id}/genre-candidates")
+    def genre_candidates(request: Request, track_id: int):
+        return _genre_candidates(request, track_id)
+
+    @router.post("/track/{track_id}/genre-candidates")
+    async def choose_genre_candidate(request: Request, track_id: int):
+        track = store.genre_provenance(track_id)
+        if track is None:
+            return Response(status_code=404)
+        value = ((await request.form()).get("genre") or "").strip()
+        allowed = {c["value"] for c in track["candidates"] if c["value"]}
+        if value not in allowed:
+            return Response(status_code=400)
+        store.set_track_genre(track_id, value)
+        # The same track can occur on several visible rows. A reload updates all of them and their
+        # sort data consistently; candidate choice is rare enough that a partial multi-row swap is
+        # needless complexity.
+        return Response(status_code=204, headers={"HX-Refresh": "true"})
 
     return router

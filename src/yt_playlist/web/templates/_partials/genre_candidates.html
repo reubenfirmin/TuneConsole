@@ -1,0 +1,27 @@
+<div class="modal-backdrop" x-data="{ open: true }" x-show="open" x-cloak x-transition.opacity
+     @click="open = false" @keydown.escape.window="open = false">
+  <div class="modal genre-candidates" @click.stop x-transition.scale.origin.center>
+    <h3>Genre for &ldquo;{{ track.title }}&rdquo;</h3>
+    <p class="section-note">{{ track.artist }} · provider answers retained from enrichment.</p>
+    {% if track.current %}
+    <div class="genre-current"><span>Currently used</span><strong class="gtag">{{ track.current }}</strong></div>
+    {% endif %}
+    {% if track.candidates %}
+    <div class="genre-candidate-list">
+      {% for c in track.candidates %}
+      <form hx-post="/track/{{ track.track_id }}/genre-candidates" hx-swap="none">
+        <input type="hidden" name="genre" value="{{ c.value }}">
+        <button type="submit" class="genre-candidate"{% if not c.value or c.value == track.current %} disabled{% endif %}>
+          <span><strong>{{ c.value or 'No genre returned' }}</strong><small>{{ c.provider }}</small></span>
+          {% if c.value == track.current %}<em>Current</em>{% elif c.value %}<em>Use this</em>{% endif %}
+        </button>
+      </form>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="section-note">No provider candidates were retained for this track. It was probably enriched before candidate history was recorded.</p>
+    {% endif %}
+    <p class="muted genre-custom-note">For a custom value, close this and click the genre pill in the track row.</p>
+    <div class="modal-actions"><button type="button" class="btn-ghost" @click="open = false">Close</button></div>
+  </div>
+</div>

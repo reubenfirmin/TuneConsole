@@ -36,6 +36,9 @@
           @click="startEditGenre('{{ t.video_id }}')" title="Click to set genre">
       {% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">＋</span>{% endif %}
     </span>
+    <button type="button" class="genre-info" title="See genre candidates" aria-label="See genre candidates for {{ t.title }}"
+            hx-get="/track/{{ t.track_id }}/genre-candidates" hx-target="#genre-candidates-modal"
+            hx-swap="innerHTML">ⓘ</button>
     <span class="ginput-wrap" x-show="editVid === '{{ t.video_id }}'" x-cloak>
       <input class="ginput" type="text" autocomplete="off"
              @input="filterGenres($event.target.value)"
