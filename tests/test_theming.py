@@ -78,6 +78,7 @@ def test_every_referenced_token_is_defined():
     runtime = {
         "--topbar-h", "--p", "--card", "--dot", "--heat", "--subj", "--petal-c",
             "--node-hue", "--node-sat", "--node-light", "--bg-grad", "--v", "--tile",
+            "--mix-order", "--mix-x", "--mix-y",
     }
     missing = {}
     for p in _source_files():

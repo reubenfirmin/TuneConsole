@@ -108,10 +108,11 @@ def test_save_button_opens_generating_screen(store):
     c = _client(store, lambda: {iid: FakeClient()})
 
     r = c.get("/")
+    app_js = c.get("/static/app.js")
 
-    assert r.status_code == 200
-    assert "genOpenYT(" in r.text                              # save-button hook present
-    assert "window.open('/home/generating'" in r.text          # opens the generating screen on click
+    assert r.status_code == 200 and app_js.status_code == 200
+    assert "function genOpenYT(" in app_js.text                  # save-button behavior is external JS
+    assert "window.open('/home/generating'" in app_js.text       # opens during the user gesture
 
 
 def test_saved_proto_tracks_not_re_offered(store):

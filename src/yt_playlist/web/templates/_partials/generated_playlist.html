@@ -1,9 +1,11 @@
 {# A dated, saveable proto-playlist built from a For-You lane. Rows can be pruned via feedback;
    "Save & play" posts the surviving rows to /home/generate, which creates the real YouTube
    playlist (auto-grouped "Generated") and swaps this card for the saved-state confirmation. #}
-<section class="gen-card card" id="gen-{{ p.lane }}" data-name="{{ p.name }}"
+<section class="gen-card card" id="gen-{{ p.lane }}"
          :class="{ 'is-focused': focus === {{ p.lane|tojson|forceescape }}, 'is-muted': focus && focus !== {{ p.lane|tojson|forceescape }} }"
-         {% if p.recipe %}data-recipe='{{ p.recipe|tojson }}'{% endif %}>
+         >
+  <div class="gen-card-body{% if regenerating %} is-arriving{% endif %}" id="gen-body-{{ p.lane }}"
+       data-name="{{ p.name }}"{% if p.recipe %} data-recipe='{{ p.recipe|tojson }}'{% endif %}>
   <div class="gen-poster gen-poster--{{ p.tracks[:4]|length }}" role="button" tabindex="0" aria-label="Explore {{ p.note or p.label }}"
        @click="focus = {{ p.lane|tojson|forceescape }}; genReveal('gen-{{ p.lane }}')"
        @keydown.enter.prevent="focus = {{ p.lane|tojson|forceescape }}; genReveal('gen-{{ p.lane }}')"
@@ -31,14 +33,16 @@
     </div>
     {% if p.mode_id is defined %}
     <button type="button" class="gen-refresh" x-show="focus === {{ p.lane|tojson|forceescape }}" x-cloak
-            title="Regenerate mixes" aria-label="Regenerate mixes" @click.stop
-            hx-post="/home/refresh-cards" hx-target="#home-mode-cards" hx-swap="outerHTML"
+            title="Regenerate this mix" aria-label="Regenerate this mix" @click.stop="regenerateMix($el)"
+            hx-trigger="mix-regenerate" hx-post="/home/refresh-cards" hx-target="#gen-body-{{ p.lane }}"
+            hx-select="#gen-body-{{ p.lane }}" hx-swap="outerHTML"
             hx-disabled-elt="this">↻ <span class="gen-refresh-label">Regenerate</span></button>
     {% else %}
     <button type="button" class="gen-refresh" x-show="focus === {{ p.lane|tojson|forceescape }}" x-cloak
-            title="Regenerate this mix"
-            aria-label="Regenerate this mix" @click.stop hx-post="/home/refresh-card/{{ p.lane }}"
-            hx-target="#gen-{{ p.lane }}" hx-swap="outerHTML" hx-disabled-elt="this">↻ <span class="gen-refresh-label">Regenerate</span></button>
+            title="Regenerate this mix" aria-label="Regenerate this mix" @click.stop="regenerateMix($el)"
+            hx-trigger="mix-regenerate" hx-post="/home/refresh-card/{{ p.lane }}"
+            hx-target="#gen-body-{{ p.lane }}" hx-select="#gen-body-{{ p.lane }}"
+            hx-swap="outerHTML" hx-disabled-elt="this">↻ <span class="gen-refresh-label">Regenerate</span></button>
     {% endif %}
   </header>
   {% if p.tracks %}
@@ -81,4 +85,5 @@
   {% else %}
   <p class="section-note">Nothing to bundle yet - sync your library to get started.</p>
   {% endif %}
+  </div>
 </section>

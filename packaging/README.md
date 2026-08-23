@@ -13,10 +13,12 @@ Build TuneConsole (package `yt-playlist`) as a **Flatpak** (Linux) or a **self-c
 Where the app keeps its data:
 
 - **Linux/Flatpak:** `~/.var/app/com.tuneconsole.TuneConsole/{config,data}` — its private sandbox dir.
-- **macOS:** `~/.config/yt-playlist` and `~/.local/share/yt-playlist` (override with `YT_PLAYLIST_HOME`).
+- **macOS:** `~/Library/Application Support/TuneConsole` for config/data and
+  `~/Library/Logs/TuneConsole` for logs.
 
-`paths.py` honours `$YT_PLAYLIST_HOME`, then `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME`, then the usual
-`~/.config` / `~/.local/share`.
+`paths.py` honours `$YT_PLAYLIST_HOME` first and explicit `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME`
+second. Otherwise it uses the platform-native paths above on macOS and the usual XDG fallbacks on
+Linux.
 
 ---
 
@@ -69,11 +71,26 @@ cd packaging/macos
 ```
 
 Produces `dist/TuneConsole.app` and `dist/TuneConsole-0.1.1.dmg`. Python and all dependencies are
-embedded — nothing is required on the target Mac.
+embedded — nothing is required on the target Mac. The DMG contains an Applications shortcut for
+normal drag-to-install behavior.
+
+The release workflow builds two independent packages:
+
+- `TuneConsole-macos-arm64.dmg` for Apple Silicon Macs.
+- `TuneConsole-macos-x86_64.dmg` for Intel Macs.
+
+`TuneConsole-macos.dmg` remains an Apple Silicon alias for the website's stable download URL.
 
 ### First launch (unsigned)
-The bundle is unsigned, so Gatekeeper blocks a double-click the first time. Right-click the app →
-**Open** (or System Settings → Privacy & Security → **Open Anyway**). After that it opens normally.
+TuneConsole is open source and the macOS bundle is intentionally unsigned. Gatekeeper therefore
+blocks an ordinary double-click the first time:
+
+1. Open the downloaded DMG and drag TuneConsole to Applications.
+2. In Applications, Control-click or right-click TuneConsole and choose **Open**.
+3. Confirm **Open** in the warning dialog.
+
+If macOS does not offer Open there, attempt one normal launch, then use System Settings → Privacy &
+Security → **Open Anyway**. Do not disable Gatekeeper globally. Subsequent launches open normally.
 
 The server has no window of its own — it runs in the background and opens your browser. To stop it,
 right-click the Dock icon → **Quit** (or quit from Activity Monitor).
@@ -83,10 +100,17 @@ right-click the Dock icon → **Quit** (or quit from Activity Monitor).
 (`brew install librsvg`) and `iconutil` are present. Without them the app gets PyInstaller's default
 icon — harmless.
 
-### Signing & notarization (optional, for distribution)
-With an Apple Developer ID:
+### Verify the packaged app
+
 ```sh
-codesign --deep --force --options runtime --sign "Developer ID Application: NAME (TEAMID)" "dist/TuneConsole.app"
-xcrun notarytool submit "dist/TuneConsole-0.1.1.dmg" --apple-id you@example.com --team-id TEAMID --wait
-xcrun stapler staple "dist/TuneConsole.app"
+./smoke.sh
 ```
+
+This launches the frozen executable without opening a browser, waits for its HTTP server, checks a
+live endpoint, confirms its database/log files, and verifies the DMG. CI runs it on both CPU builds.
+
+### Updates
+
+There is no privileged installer or background updater. The app checks GitHub Releases once daily;
+when a newer version exists, download the matching DMG and replace TuneConsole in Applications.
+User data remains in Application Support and is not part of the app bundle.

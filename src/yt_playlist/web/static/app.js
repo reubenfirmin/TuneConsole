@@ -17,6 +17,114 @@ document.addEventListener('htmx:beforeSwap', (e) => {
   if (e.detail.xhr.status === 422) { e.detail.shouldSwap = true; e.detail.isError = false; }
 });
 
+// Home generated mixes. Alpine owns the board's `focus` state; htmx fetches regenerated fragments;
+// this layer keeps the focused shell mounted and choreographs the in-place content transition.
+function genPayload(id) { return document.querySelector('#' + CSS.escape(id) + ' > .gen-card-body'); }
+function genName(id) { const el = genPayload(id); return el ? el.dataset.name : ''; }
+function genRecipe(id) { const el = genPayload(id); return el ? (el.dataset.recipe || '') : ''; }
+
+function genReveal(id) {
+  requestAnimationFrame(() => {
+    document.querySelectorAll('#' + CSS.escape(id) + ' .gen-focus img').forEach((img) => { img.loading = 'eager'; });
+    const play = document.querySelector('#' + CSS.escape(id) + ' .gen-play');
+    if (play) requestAnimationFrame(() => play.focus({ preventScroll: true }));
+  });
+}
+
+function genOpenYT(id) {
+  try {
+    const thumbs = Array.from(document.getElementById(id).querySelectorAll('.gen-row'))
+      .map((row) => row.dataset.thumb).filter(Boolean).slice(0, 16);
+    localStorage.setItem('tc_gen_thumbs', JSON.stringify(thumbs));
+  } catch (_) {}
+  try { window.__ytTab = window.open('/home/generating', '_blank'); } catch (_) {}
+}
+
+function genTracks(id) {
+  return JSON.stringify(Array.from(document.getElementById(id).querySelectorAll('.gen-row')).map((row) => ({
+    video_id: row.dataset.vid, title: row.dataset.title, artist: row.dataset.artist,
+    album: row.dataset.album, thumbnail: row.dataset.thumb
+  })));
+}
+
+function regenerateMix(button) {
+  if (!button || button.dataset.regenerating === '1') return;
+  const card = button.closest('.gen-card');
+  if (!card) return;
+  button.dataset.regenerating = '1';
+  button.setAttribute('aria-busy', 'true');
+  card.classList.add('is-regenerating');
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  Array.from(card.querySelectorAll('.gen-focus .gen-row')).forEach((row, index) => {
+    row.animate([
+      { opacity: 1, filter: 'saturate(1)', transform: 'translateX(0)' },
+      { opacity: reduced ? .82 : .58, filter: reduced ? 'saturate(.85)' : 'saturate(.35)',
+        transform: reduced ? 'translateX(0)' : 'translateX(.22rem)' },
+      { opacity: 1, filter: 'saturate(1)', transform: 'translateX(0)' }
+    ], { duration: reduced ? 900 : 1250, delay: index * 55, iterations: Infinity, easing: 'ease-in-out' });
+  });
+  htmx.trigger(button, 'mix-regenerate');
+}
+
+document.addEventListener('htmx:beforeSwap', (event) => {
+  const target = event.detail.target;
+  if (!target || !target.matches('.gen-card-body')) return;
+  const card = target.closest('.gen-card.is-regenerating');
+  if (!card) return;
+  const response = new DOMParser().parseFromString(event.detail.serverResponse, 'text/html');
+  const replacement = response.getElementById(target.id);
+  if (!replacement) return;
+
+  event.detail.shouldSwap = false;
+  const rows = Array.from(target.querySelectorAll('.gen-focus .gen-row'));
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const step = reduced ? 16 : 38;
+  const duration = reduced ? 110 : 280;
+  rows.forEach((row, index) => {
+    row.getAnimations().forEach((animation) => animation.cancel());
+    row.animate([
+      { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0)' },
+      { opacity: 0, transform: reduced ? 'scale(.99)' : 'translateX(1.25rem) scale(.97)',
+        filter: reduced ? 'blur(0)' : 'blur(5px)' }
+    ], { duration, delay: index * step, easing: 'cubic-bezier(.55,0,.8,.35)', fill: 'both' });
+  });
+
+  const sequenceLength = duration + Math.max(0, rows.length - 1) * step;
+  window.setTimeout(() => {
+    const incoming = Array.from(replacement.querySelectorAll('.gen-focus .gen-row'));
+    incoming.forEach((row) => { row.style.opacity = '0'; });
+    target.replaceChildren(...replacement.childNodes);
+    target.dataset.name = replacement.dataset.name || '';
+    if (replacement.dataset.recipe) target.dataset.recipe = replacement.dataset.recipe;
+    else delete target.dataset.recipe;
+    htmx.process(target);
+    const enterStep = reduced ? 16 : 44;
+    incoming.forEach((row, index) => {
+      const animation = row.animate([
+        { opacity: 0, transform: reduced ? 'scale(.99)' : 'translateX(-1rem) scale(.98)',
+          filter: reduced ? 'blur(0)' : 'blur(5px)' },
+        { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0)' }
+      ], { duration: reduced ? 130 : 400, delay: index * enterStep,
+           easing: 'cubic-bezier(.18,.78,.2,1)', fill: 'both' });
+      animation.finished.then(() => row.style.removeProperty('opacity')).catch(() => {});
+    });
+    card.classList.remove('is-regenerating');
+  }, sequenceLength + 20);
+});
+
+function mountHomeDock() {
+  const card = document.querySelector('.home-status');
+  const slot = document.querySelector('.sidebar-dock-slot');
+  const origin = document.getElementById('home-status-origin');
+  if (!card || !slot || !origin) return;
+  const target = window.matchMedia('(min-width: 65rem)').matches ? slot : origin;
+  if (card.parentElement !== target) target.appendChild(card);
+  if (!window.__homeDockBound) {
+    window.__homeDockBound = true;
+    window.addEventListener('resize', mountHomeDock);
+  }
+}
+
 // Alpine component factories for the various pages (loaded globally via base.html).
 function rowSort(pid, editBase) {
   // Generic click-to-sort for a static-row table; reorders <tr class="srow"> by data-<key>.

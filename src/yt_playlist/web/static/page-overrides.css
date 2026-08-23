@@ -1727,6 +1727,7 @@ body:not(:has(.page-clusters)) .modal {
   grid-template-columns: 1fr;
   transition: border-color .18s ease, opacity .18s ease, transform .18s ease;
 }
+.page-home .dash-directions .gen-card-body { display: contents; }
 .page-home .dash-directions .gen-card::before { content: none; }
 .page-home .dash-directions .gen-card:hover { border-color: var(--accent-2); }
 .page-home .dash-directions .gen-lanes:not(.has-focus):has(.gen-card:hover) .gen-card:not(:hover) { opacity: .42; transform: scale(.985); }
@@ -1847,6 +1848,9 @@ body:not(:has(.page-clusters)) .modal {
   transition: background .15s ease, transform .15s ease;
 }
 .page-home .dash-directions .gen-focus .gen-row:hover { background: var(--surface-raised); transform: translateX(.15rem); }
+.page-home .dash-directions .gen-card.is-regenerating .gen-focus .gen-row {
+  pointer-events: none;
+}
 .page-home .dash-directions .gen-index { color: var(--faint); font-size: .72rem; font-variant-numeric: tabular-nums; text-align: end; }
 .page-home .dash-directions .gen-focus .gen-th { width: 3.25rem; height: 3.25rem; border-radius: .35rem; overflow: hidden; background: var(--placeholder); }
 .page-home .dash-directions .gen-focus .gen-th img { width: 100%; height: 100%; display: block; object-fit: cover; }
@@ -1857,18 +1861,109 @@ body:not(:has(.page-clusters)) .modal {
 .page-home .dash-directions .gen-focus .gen-row:hover .gen-rm,
 .page-home .dash-directions .gen-focus .gen-rm:focus-visible { opacity: 1; }
 
+/* The four-way board gets a short curtain-up when its async fragment lands. The album art remains
+   the hero: light gathers at the centre seam, the quadrants settle outward, then the ornament is
+   completely gone. Refreshing all four mixes intentionally replays the downbeat. */
+.page-home .dash-directions .gen-lanes {
+  position: relative;
+  isolation: isolate;
+}
+.page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card {
+  z-index: 1;
+  animation: mix-quadrant-in .72s cubic-bezier(.2, .78, .18, 1) both;
+  animation-delay: calc(.07s + (var(--mix-order, 0) * .09s));
+}
+.page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card:nth-child(1) { --mix-order: 0; --mix-x: -1.1rem; --mix-y: -1.1rem; }
+.page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card:nth-child(2) { --mix-order: 1; --mix-x: 1.1rem; --mix-y: -1.1rem; }
+.page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card:nth-child(3) { --mix-order: 2; --mix-x: -1.1rem; --mix-y: 1.1rem; }
+.page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card:nth-child(4) { --mix-order: 3; --mix-x: 1.1rem; --mix-y: 1.1rem; }
+.page-home .dash-directions .gen-card::after {
+  content: "";
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(112deg, transparent 24%, color-mix(in srgb, var(--light-source) 14%, transparent) 46%, transparent 67%);
+  transform: translateX(-130%);
+  transition: transform .65s cubic-bezier(.2, .7, .2, 1);
+}
+.page-home .dash-directions .gen-card:hover::after,
+.page-home .dash-directions .gen-card:focus-within::after { transform: translateX(130%); }
+.page-home .mix-opening-mark {
+  position: absolute;
+  z-index: 8;
+  left: 50%;
+  top: 50%;
+  width: 5.5rem;
+  height: 5.5rem;
+  display: grid;
+  place-items: center;
+  color: var(--accent-2);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: mix-mark-out 1.55s .1s ease-out both;
+}
+.page-home .mix-opening-ring {
+  position: absolute;
+  inset: 0;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 72%, transparent);
+  border-radius: 50%;
+  box-shadow: 0 0 2.2rem color-mix(in srgb, var(--accent) 26%, transparent),
+              inset 0 0 1.2rem color-mix(in srgb, var(--accent-2) 15%, transparent);
+  animation: mix-ring-open 1.1s .18s cubic-bezier(.15, .7, .2, 1) both;
+}
+.page-home .mix-opening-spark {
+  display: grid;
+  place-items: center;
+  width: 2.15rem;
+  height: 2.15rem;
+  color: var(--on-accent);
+  background: var(--control-primary);
+  border-radius: 50%;
+  box-shadow: 0 0 1.6rem color-mix(in srgb, var(--accent) 58%, transparent);
+  font-size: .85rem;
+  animation: mix-spark-in .72s .24s cubic-bezier(.2, .85, .2, 1) both;
+}
+@keyframes mix-quadrant-in {
+  from { opacity: 0; transform: translate(var(--mix-x), var(--mix-y)) scale(.955); filter: saturate(.55) brightness(.7); }
+  72% { opacity: 1; filter: saturate(1.08) brightness(1.04); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+@keyframes mix-ring-open {
+  from { opacity: 0; transform: scale(.18) rotate(-24deg); }
+  35% { opacity: 1; }
+  to { opacity: 0; transform: scale(1.55) rotate(8deg); }
+}
+@keyframes mix-spark-in {
+  from { opacity: 0; transform: scale(.25) rotate(-35deg); }
+  55% { opacity: 1; transform: scale(1.12) rotate(8deg); }
+  to { opacity: 1; transform: scale(1) rotate(0); }
+}
+@keyframes mix-mark-out {
+  0%, 68% { opacity: 1; visibility: visible; }
+  100% { opacity: 0; visibility: hidden; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card,
+  .page-home .mix-opening-mark,
+  .page-home .mix-opening-ring,
+  .page-home .mix-opening-spark { animation: none; }
+  .page-home .mix-opening-mark { display: none; }
+  .page-home .dash-directions .gen-card::after { display: none; }
+}
+
 /* Loading mirrors the four choices that will replace it, so the async wait feels like part of the
    listening experience rather than a generic application pause. */
 .page-home .card-row-loading:has(.mix-loader) { min-height: 34rem; }
 .page-home .home-feed:has(.mix-loader) .fingerprint { opacity: 0; pointer-events: none; }
 .page-home .mix-loader { position: relative; height: min(44rem, calc(100dvh - 9rem)); min-height: 34rem; }
-.page-home .mix-loader-copy { position: absolute; z-index: 2; left: 1rem; bottom: 1.15rem; display: flex; align-items: center; gap: .8rem; color: var(--text); pointer-events: none; }
+.page-home .mix-loader-copy { position: absolute; z-index: 4; left: 50%; top: 50%; bottom: auto; width: min(28rem, calc(100% - 2rem)); padding: 1rem 1.15rem; display: flex; align-items: center; gap: .8rem; color: var(--text); background: color-mix(in srgb, var(--surface-sunk) 88%, transparent); border: 1px solid var(--border-strong); box-shadow: 0 1.2rem 3.5rem color-mix(in srgb, var(--shadow-ink) 55%, transparent); backdrop-filter: blur(12px); pointer-events: none; transform: translate(-50%, -50%); }
 .page-home .mix-loader-copy strong,
 .page-home .mix-loader-copy span { display: block; }
 .page-home .mix-loader-copy strong { font-size: 1rem; letter-spacing: -.015em; }
 .page-home .mix-loader-copy span { margin-top: .18rem; color: var(--dim); font-size: .74rem; }
 .page-home .mix-loader-mark { display: grid; place-items: center; width: 2.4rem; height: 2.4rem; color: var(--accent-2); border: 1px solid var(--border-strong); border-radius: 50%; animation: mix-loader-turn 2.8s linear infinite; }
-.page-home .mix-loader-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: clamp(.65rem, 1.2vw, 1rem); height: 100%; min-height: 0; }
+.page-home .mix-loader-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: clamp(.65rem, 1.2vw, 1rem); height: 100%; min-height: 0; opacity: .46; filter: saturate(.6); }
 .page-home .mix-loader-card { display: grid; grid-template-rows: minmax(0, 4fr) minmax(5.5rem, 1fr); overflow: hidden; background: var(--surface-card); border: 1px solid var(--border-strong); }
 .page-home .mix-loader-art { display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); gap: 1px; background: var(--border-strong); }
 .page-home .mix-loader-art i { background: color-mix(in srgb, var(--surface-raised) calc(72% + var(--tile) * 4%), var(--accent-2)); animation: mix-loader-breathe 1.8s ease-in-out infinite alternate; animation-delay: calc((var(--card) * .13s) + (var(--tile) * .09s)); }

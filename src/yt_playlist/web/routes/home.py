@@ -414,9 +414,10 @@ def build(ctx) -> APIRouter:
             return Response(status_code=204)
         keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None)) for t in p["tracks"]]
         store.mark_offered("track", [k for k in keys if k], now)   # #53: this route is the sole counter here
-        return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": p})
+        return templates.TemplateResponse(request, "_partials/generated_playlist.html",
+                                          {"p": p, "regenerating": True})
 
-    def _cards_fragment(request, now):
+    def _cards_fragment(request, now, *, regenerating=False):
         from yt_playlist.rec import mode_surfaces
         epoch = _epoch(store, "cards")
         cards = mode_surfaces.assemble_cards(store, now, epoch)
@@ -455,7 +456,8 @@ def build(ctx) -> APIRouter:
             keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None))
                     for t in p["tracks"]]
             store.mark_offered("track", [k for k in keys if k], now)
-        return templates.TemplateResponse(request, "_partials/mode_cards.html", {"protos": protos})
+        return templates.TemplateResponse(request, "_partials/mode_cards.html",
+                                          {"protos": protos, "regenerating": regenerating})
 
     def _cards_safe(request, now):
         # The row loads via hx-trigger=load with the spinner as placeholder content: a 500 here leaves
@@ -478,7 +480,11 @@ def build(ctx) -> APIRouter:
         """Re-roll the whole mode-card row (advance its shared rotation epoch)."""
         now = now_fn()
         RecDao(store).refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
-        return _cards_safe(request, now)
+        try:
+            return _cards_fragment(request, now, regenerating=True)
+        except Exception:  # noqa: BLE001 - preserve the same safe-fragment contract as the GET
+            ctx.logger.exception("home cards refresh render failed")
+            return templates.TemplateResponse(request, "_partials/mode_cards.html", {"protos": []})
 
     @router.post("/home/breadth")
     async def home_breadth(request: Request):

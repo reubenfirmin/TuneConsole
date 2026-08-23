@@ -19,9 +19,16 @@ permissions:
 
 jobs:
   build:
-    # macos-14 = Apple Silicon (arm64). For Intel too, add a matrix job on macos-13 and publish a
-    # second asset (e.g. TuneConsole-macos-x86_64.dmg).
-    runs-on: macos-14
+    name: Build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }          # hatch-vcs needs the tag for the version
@@ -32,46 +39,28 @@ jobs:
 
       - name: Build .app and .dmg
         run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
           cd packaging/macos
           ./build.sh
 
-      # Stable asset name so the site's /releases/latest/download URL is constant across versions.
-      - name: Stage DMG with a stable name
-        run: cp packaging/macos/dist/TuneConsole-*.dmg TuneConsole-macos.dmg   # version-agnostic: no bump needed
+      - name: Smoke-test frozen app and DMG
+        run: packaging/macos/smoke.sh
 
-      # --- Code signing + notarization (optional; fill in the secrets to enable) ------------------
-      # Needs an Apple Developer account: a Developer ID Application cert (exported .p12) and an
-      # app-specific password. Add repo secrets MACOS_CERT_P12 (base64), MACOS_CERT_PASSWORD,
-      # APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD, then uncomment:
-      #
-      # - name: Sign & notarize
-      #   env:
-      #     CERT: ${{ secrets.MACOS_CERT_P12 }}
-      #     CERT_PW: ${{ secrets.MACOS_CERT_PASSWORD }}
-      #     APPLE_ID: ${{ secrets.APPLE_ID }}
-      #     TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      #     APP_PW: ${{ secrets.APPLE_APP_PASSWORD }}
-      #   run: |
-      #     echo "$CERT" | base64 -d > cert.p12
-      #     security create-keychain -p "" build.keychain
-      #     security import cert.p12 -k build.keychain -P "$CERT_PW" -T /usr/bin/codesign
-      #     security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
-      #     security list-keychains -s build.keychain
-      #     codesign --deep --force --options runtime \
-      #       --sign "Developer ID Application" "packaging/macos/dist/TuneConsole.app"
-      #     xcrun notarytool submit TuneConsole-macos.dmg --apple-id "$APPLE_ID" \
-      #       --team-id "$TEAM_ID" --password "$APP_PW" --wait
-      #     xcrun stapler staple "packaging/macos/dist/TuneConsole.app"
-      # --------------------------------------------------------------------------------------------
+      - name: Stage architecture-specific release asset
+        run: |
+          cp packaging/macos/dist/TuneConsole-*.dmg "TuneConsole-macos-${{ matrix.arch }}.dmg"
+          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
+            cp "TuneConsole-macos-${{ matrix.arch }}.dmg" TuneConsole-macos.dmg
+          fi
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TuneConsole-macos-dmg
-          path: TuneConsole-macos.dmg
+          name: TuneConsole-macos-${{ matrix.arch }}-dmg
+          path: TuneConsole-macos*.dmg
 
       - name: Attach to the release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: TuneConsole-macos.dmg
+          files: TuneConsole-macos*.dmg

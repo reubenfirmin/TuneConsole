@@ -7,9 +7,7 @@
 #   dist/TuneConsole.app
 #   dist/TuneConsole-<version>.dmg   (version comes from the git tag)
 #
-# The bundle is unsigned, so first launch needs right-click -> Open (or System Settings ->
-# Privacy & Security -> Open Anyway). Add an Apple Developer cert + notarization later for
-# distribution; see ../README.md.
+# The bundle is intentionally unsigned. First launch needs right-click -> Open; see ../README.md.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$(cd ../.. && pwd)
@@ -32,10 +30,15 @@ VERSION=$(python -c "import importlib.metadata as m; print(m.version('yt-playlis
 rm -rf build dist
 pyinstaller --noconfirm --clean yt-playlist.spec
 
-# 4. Wrap it in a compressed .dmg.
+# 4. Wrap it in a compressed drag-to-install .dmg.
 APP="dist/TuneConsole.app"
 DMG="dist/TuneConsole-$VERSION.dmg"
-hdiutil create -volname "TuneConsole" -srcfolder "$APP" -ov -format UDZO "$DMG"
+DMG_ROOT="dist/dmg-root"
+mkdir -p "$DMG_ROOT"
+cp -R "$APP" "$DMG_ROOT/TuneConsole.app"
+ln -s /Applications "$DMG_ROOT/Applications"
+hdiutil create -volname "TuneConsole" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG"
+rm -rf "$DMG_ROOT"
 
 echo
 echo "Built:"
