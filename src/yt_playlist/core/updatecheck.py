@@ -18,14 +18,15 @@ _HTTP_TIMEOUT_S = 8
 _CHECK_INTERVAL_S = 86400          # once a day; well under GitHub's 60 req/hr unauth limit
 _USER_AGENT = "yt-playlist-updatecheck"
 
-# (command-or-label, optional link) per install kind. flatpak/pip are copy-paste commands;
-# macOS is a frozen .app you cannot pip-upgrade, so it is a link to the latest release. There is
+# (command-or-label, optional link) per install kind. Flatpak is a copy-paste command; packaged macOS
+# and otherwise-unrecognized release installs go to the release page. TuneConsole does not offer or
+# document pip-based installation, so the update card must not invent a pip upgrade path. There is
 # deliberately no "dev" entry: a source/editable checkout is never nagged (see update_nudge), so it
 # never needs an update command -- you update it with git, not a package manager.
 _INSTRUCTIONS = {
     "flatpak": ("flatpak update --user com.tuneconsole.TuneConsole", None),
     "macos": ("Get the latest release", "https://github.com/reubenfirmin/TuneConsole/releases/latest"),
-    "pip": ("pip install -U yt-playlist", None),
+    "release": ("Get the latest release", "https://github.com/reubenfirmin/TuneConsole/releases/latest"),
 }
 
 
@@ -98,20 +99,20 @@ def check_latest(store, now, *, interval_s=_CHECK_INTERVAL_S):
 
 def install_kind() -> str:
     """How this backend was installed: 'dev' (source/editable checkout), 'flatpak' (sandbox env),
-    'macos' (frozen .app), else 'pip'. 'dev' is checked first: a checkout running inside a flatpak
-    or frozen bundle is still checkout code, and 'flatpak update' / a dmg link would be wrong advice."""
+    'macos' (frozen .app), else an unrecognized 'release'. 'dev' is checked first: a checkout inside a flatpak
+    or frozen bundle is still checkout code, and packaged-release advice would be wrong."""
     if is_dev_install():
         return "dev"
     if os.environ.get("FLATPAK_ID"):
         return "flatpak"
     if getattr(sys, "frozen", False):
         return "macos"
-    return "pip"
+    return "release"
 
 
 def update_instruction(kind: str):
     """(command-or-label, optional-link) describing how to update this install kind."""
-    return _INSTRUCTIONS.get(kind, _INSTRUCTIONS["pip"])
+    return _INSTRUCTIONS.get(kind, _INSTRUCTIONS["release"])
 
 
 def _ver_tuple(v):
@@ -134,7 +135,7 @@ def update_nudge(store):
 
     A source/editable checkout (is_dev_install) is never nagged: it runs HEAD code, its reported
     version is a stale hatch-vcs snapshot, and it is not managed by any package manager, so 'you are
-    behind, run pip install -U' would be both wrong and unactionable."""
+    behind, reinstall a release' would be both wrong and unactionable."""
     if is_dev_install():
         return None
     latest = store.get_setting("latest_version_seen")

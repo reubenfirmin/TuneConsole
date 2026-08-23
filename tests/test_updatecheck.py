@@ -33,11 +33,11 @@ def test_install_kind_macos(monkeypatch):
     assert uc.install_kind() == "macos"
 
 
-def test_install_kind_pip(monkeypatch):
+def test_install_kind_unrecognized_release(monkeypatch):
     monkeypatch.setattr(uc, "is_dev_install", lambda: False)
     monkeypatch.delenv("FLATPAK_ID", raising=False)
     monkeypatch.setattr(sys, "frozen", False, raising=False)
-    assert uc.install_kind() == "pip"
+    assert uc.install_kind() == "release"
 
 
 def test_install_kind_dev_beats_everything(monkeypatch):
@@ -72,7 +72,8 @@ def test_update_instruction_per_kind():
     label, link = uc.update_instruction("macos")
     assert label == "Get the latest release"
     assert link == "https://github.com/reubenfirmin/TuneConsole/releases/latest"
-    assert uc.update_instruction("pip") == ("pip install -U yt-playlist", None)
+    assert uc.update_instruction("release") == (
+        "Get the latest release", "https://github.com/reubenfirmin/TuneConsole/releases/latest")
 
 
 def test_update_nudge_none_when_no_latest_seen(monkeypatch):
@@ -95,8 +96,9 @@ def test_update_nudge_present_when_behind(monkeypatch):
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     store = FakeStore({"latest_version_seen": "0.2.0"})
     nudge = uc.update_nudge(store)
-    assert nudge == {"current": "0.1.6", "latest": "0.2.0",
-                     "kind": "pip", "command": "pip install -U yt-playlist", "link": None}
+    assert nudge == {"current": "0.1.6", "latest": "0.2.0", "kind": "release",
+                     "command": "Get the latest release",
+                     "link": "https://github.com/reubenfirmin/TuneConsole/releases/latest"}
 
 
 def test_update_nudge_dev_build_on_latest_does_not_nag(monkeypatch):
