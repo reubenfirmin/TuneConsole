@@ -8,9 +8,9 @@
 {% endif %}
 
 {% if temporal.recall is not none %}
-<div><strong>{{ '%.0f'|format(temporal.recall * 100) }}%</strong><span>temporal recall@{{ temporal.k }} (holdout: {{ holdout_days }}d, {{ temporal.trials }} held out{% if temporal.generated_excluded %}, {{ temporal.generated_excluded }} self-generated excluded{% endif %})</span></div>
+<div><strong>{{ '%.0f'|format(temporal.recall * 100) }}%</strong><span>causal temporal recall@{{ temporal.k }} ({{ temporal.viable_windows }}/{{ temporal.requested_windows }} windows, {{ temporal.trials }} held out{% if temporal.generated_excluded %}, {{ temporal.generated_excluded }} self-generated excluded{% endif %})</span></div>
 {% else %}
-<div><strong>-</strong><span>temporal recall (needs more history, holdout: {{ holdout_days }}d)</span></div>
+<div><strong>-</strong><span>causal temporal recall (no reconstructable window yet; holdout: {{ holdout_days }}d; current playlist membership is never assumed historical)</span></div>
 {% endif %}
 
 {% if proj.recall is not none %}

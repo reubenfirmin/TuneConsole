@@ -46,14 +46,24 @@ def build_vectors(store, dim=DIM):
     """Return (keys, V), L2-normalised per-track embeddings. Method ('svd' default, or 'item2vec')
     comes from the recall@k-tuned `rec_embed_method` setting."""
     baskets = store.rec_baskets()
+    return build_vectors_from_baskets(
+        baskets, dim=dim,
+        method=store.get_setting("rec_embed_method") or "svd",
+        weights=_cooc_weights(store) if store.get_setting("rec_cooc_weighting") == "1" else None,
+    )
+
+
+def build_vectors_from_baskets(baskets, dim=DIM, method="svd", weights=None):
+    """Fit vectors from an explicit basket snapshot without touching live model state.
+
+    The offline evaluator uses this seam to fit an as-of model.  Keeping the vectors in memory is
+    important: a backtest must neither read the current persisted vectors nor replace the live model.
+    """
     keys = sorted({k for b in baskets for k in b})
     if len(keys) < dim + _MIN_VOCAB_MARGIN:
         return [], np.zeros((0, dim), dtype=np.float32)
-    if (store.get_setting("rec_embed_method") or "svd") == "item2vec":
+    if method == "item2vec":
         return _item2vec(baskets, keys, dim)
-    # #38 §4c: optionally weight co-occurrence by play frequency. OFF by default (the `rec_cooc_weighting`
-    # setting is unset); see _cooc_weights for the measured verdict on why it stays off.
-    weights = _cooc_weights(store) if store.get_setting("rec_cooc_weighting") == "1" else None
     return _svd(baskets, keys, dim, weights)
 
 

@@ -708,6 +708,26 @@ class RecQueryRepo(Repo):
         return {r["k"] for r in rows if r["non_generated"] == 0}
 
     @synchronized
+    def generated_only_keys_between(self, start_ts, end_ts, group=GENERATED_GROUP) -> set[str]:
+        """Windowed generated-only provenance for causal evaluation's [start, end) interval."""
+        excl = self.excluded_playlist_ids(group)
+        if not excl:
+            return set()
+        qs = ",".join("?" * len(excl))
+        ytm_ids = {r["ytm_playlist_id"] for r in self.conn.execute(
+            f"SELECT ytm_playlist_id FROM playlists WHERE id IN ({qs})", list(excl))}
+        if not ytm_ids:
+            return set()
+        generated_ids = ytm_ids | {"RDAMPL" + y for y in ytm_ids}
+        gqs = ",".join("?" * len(generated_ids))
+        rows = self.conn.execute(
+            "SELECT identity_key k, "
+            f"SUM(CASE WHEN playlist_ytm_id IN ({gqs}) THEN 0 ELSE 1 END) non_generated "
+            "FROM play_events WHERE played_at>=? AND played_at<? GROUP BY identity_key",
+            list(generated_ids) + [start_ts, end_ts]).fetchall()
+        return {r["k"] for r in rows if r["non_generated"] == 0}
+
+    @synchronized
     def plays_by_list_ids_since(self, ytm_ids, since_ts) -> set[str]:
         """#93 identity keys with a play_events row whose playlist_ytm_id is one of `ytm_ids` at/after
         since_ts. Used by dynamic radio's cross-session freshness cooldown: a track radio already
@@ -797,6 +817,74 @@ class RecQueryRepo(Repo):
         out += [list(s) for s in fam.values() if 1 < len(s) <= _CONTENT_BASKET_CAP]
         out += [list(s) for s in yr.values() if 1 < len(s) <= _CONTENT_BASKET_CAP]
         return out
+
+    @synchronized
+    def rec_baskets_as_of(self, cutoff, max_album=30, max_session=120) -> tuple[list[list[str]], dict]:
+        """Conservative, reconstructable basket snapshot strictly before ``cutoff``.
+
+        Playlist membership has no version table, so current membership is admitted only when the
+        playlist was first seen by the cutoff and has not changed since it. Tracks likewise need a
+        reliable ``created_at`` at/before the cutoff. Album/artist fields are immutable after insert;
+        mutable enrichment-derived genre/year baskets are deliberately excluded. Listening-session
+        baskets are naturally historical and are truncated at the cutoff.
+
+        Returns (baskets, coverage) so callers can disclose what was provable rather than presenting
+        a partial reconstruction as perfect historical state.
+        """
+        excl = self.excluded_playlist_ids() | self.catchall_playlist_ids()
+        safe_playlists = {r["id"] for r in self.conn.execute(
+            "SELECT id FROM playlists WHERE first_seen IS NOT NULL AND first_seen<=? "
+            "AND last_changed IS NOT NULL AND last_changed<=?", (cutoff, cutoff))}
+        safe_playlists -= excl
+        # Older installations have NULL track.created_at. Membership in a playlist whose current
+        # version is proven unchanged since the cutoff is independent proof that the track existed.
+        proven_by_playlist = set()
+        if safe_playlists:
+            qs = ",".join("?" * len(safe_playlists))
+            proven_by_playlist = {r["k"] for r in self.conn.execute(
+                f"SELECT DISTINCT t.identity_key k FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
+                f"WHERE pt.playlist_id IN ({qs})", list(safe_playlists))}
+        good = {r["k"] for r in self.conn.execute(
+            "SELECT DISTINCT identity_key k FROM tracks WHERE created_at IS NOT NULL AND created_at<=? "
+            "AND (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
+            "AND (duration_s IS NULL OR duration_s <= ?)", (cutoff, _MAX_TRACK_DURATION_S))}
+        good |= proven_by_playlist
+        good -= self.generated_only_keys()
+        out = []
+        pbuckets = {}
+        if safe_playlists:
+            qs = ",".join("?" * len(safe_playlists))
+            for r in self.conn.execute(
+                    f"SELECT pt.playlist_id g, t.identity_key k FROM playlist_tracks pt "
+                    f"JOIN tracks t ON t.id=pt.track_id WHERE pt.playlist_id IN ({qs})",
+                    list(safe_playlists)):
+                if r["k"] in good:
+                    pbuckets.setdefault(r["g"], set()).add(r["k"])
+        out += [list(s) for s in pbuckets.values() if len(s) > 1]
+
+        for sql, cap in (("SELECT album g, identity_key k FROM tracks WHERE album<>''", max_album),
+                         ("SELECT artist g, identity_key k FROM tracks WHERE artist<>''", _ARTIST_BASKET_CAP)):
+            buckets = {}
+            for r in self.conn.execute(sql):
+                if r["k"] in good:
+                    buckets.setdefault(r["g"], set()).add(r["k"])
+            out += [list(s) for s in buckets.values() if 1 < len(s) <= cap]
+
+        gen_only_days = self.generated_only_play_days()
+        sbuckets = {}
+        for r in self.conn.execute(
+                "SELECT hi.snapshot_id g, hi.identity_key k, hs.taken_at t FROM history_items hi "
+                "JOIN history_snapshots hs ON hs.id=hi.snapshot_id WHERE hs.taken_at<?", (cutoff,)):
+            if r["k"] in good and (int(r["t"] // 86400), r["k"]) not in gen_only_days:
+                sbuckets.setdefault(r["g"], set()).add(r["k"])
+        out += [list(s) for s in sbuckets.values() if 1 < len(s) <= max_session]
+
+        total_playlists = self.conn.execute(
+            "SELECT COUNT(*) n FROM playlists WHERE first_seen IS NOT NULL AND first_seen<=?", (cutoff,)).fetchone()["n"]
+        coverage = {"eligible_tracks": len(good), "safe_playlists": len(safe_playlists),
+                    "known_playlists": int(total_playlists), "session_baskets": len(sbuckets),
+                    "mutable_content_baskets_excluded": True}
+        return out, coverage
 
     # --- candidate-surface generators ---
     @synchronized

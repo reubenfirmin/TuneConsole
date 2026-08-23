@@ -1,7 +1,7 @@
 {# Last Auto-tune result. `autotune_result` = autotune_run.last_result() shape, or None. #}
 {% set r = autotune_result %}
 {% if r %}
-{% set metric_label = "temporal recall@20" if r.metric == "temporal_recall" else "recall@20" %}
+{% set metric_label = "causal temporal recall@20" if r.metric == "causal_temporal_recall" else ("temporal recall@20" if r.metric == "temporal_recall" else "recall@20") %}
 <div class="card autotune-result">
   <div class="autotune-result-head">
     <h3>Auto-tune result</h3>

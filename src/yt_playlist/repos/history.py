@@ -165,6 +165,24 @@ class HistoryRepo(Repo):
         return {r["identity_key"] for r in rows}
 
     @synchronized
+    def history_keys_between(self, start_ts, end_ts) -> set[str]:
+        """Distinct day-model keys in the half-open interval [start_ts, end_ts)."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT hi.identity_key FROM history_items hi "
+            "JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
+            "WHERE hs.taken_at>=? AND hs.taken_at<?", (start_ts, end_ts)).fetchall()
+        return {r["identity_key"] for r in rows}
+
+    @synchronized
+    def play_counts_before(self, ts) -> dict[str, int]:
+        """Per-key day-model play counts strictly before an evaluation cutoff."""
+        rows = self.conn.execute(
+            "SELECT hi.identity_key k, COUNT(*) c FROM history_items hi "
+            "JOIN history_snapshots hs ON hs.id=hi.snapshot_id WHERE hs.taken_at<? "
+            "GROUP BY hi.identity_key", (ts,)).fetchall()
+        return {r["k"]: int(r["c"]) for r in rows}
+
+    @synchronized
     def recent_play_counts(self, limit) -> dict:
         """{identity_key: play count} over the most recent `limit` play events (one row per history
         item, newest-first). Frequency-weighted recent listening - repeats count - for the taste page's

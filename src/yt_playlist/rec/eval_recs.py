@@ -5,6 +5,8 @@ library tracks by similarity to the centroid of the rest, and check whether the 
 track lands in the top-k. recall@k is the share of playlists where it does, a single number
 that says "does the model put tracks that genuinely belong together near each other?".
 """
+import math
+
 import numpy as np
 
 from yt_playlist.rec import artist_model, embed
@@ -132,6 +134,89 @@ def temporal_recall(store, holdout_days=30, k=20) -> dict:
             "baseline": baseline, "lift": (recall / baseline) if recall and baseline else None}
 
 
+def _causal_window(store, cutoff, end, k, dim, method) -> dict:
+    """Fit at ``cutoff`` and score organic, previously-unplayed outcomes in [cutoff, end).
+
+    Unlike temporal_recall, this never loads the live vectors. The explicit as-of baskets are fitted
+    in memory, so neither persisted model state nor a later basket can leak into the representation.
+    """
+    baskets, coverage = store.rec_baskets_as_of(cutoff)
+    weights = None
+    if store.get_setting("rec_cooc_weighting") == "1":
+        weights = {key: 1.0 + math.log1p(count)
+                   for key, count in store.play_counts_before(cutoff).items() if count}
+    keys, V = embed.build_vectors_from_baskets(
+        baskets, dim=dim, method=method, weights=weights)
+    base = {"cutoff": cutoff, "end": end, "k": k, "coverage": coverage,
+            "baskets": len(baskets), "vectors": len(keys)}
+    if not keys:
+        return {**base, "recall": None, "trials": 0, "generated_excluded": 0,
+                "reason": "no reconstructable as-of vectors"}
+    idx = {key: i for i, key in enumerate(keys)}
+    before = store.history_keys_before(cutoff)
+    after = store.history_keys_between(cutoff, end)
+    context = [key for key in before if key in idx]
+    held = [key for key in after if key in idx and key not in before]
+    gen_only = store.generated_only_keys_between(cutoff, end)
+    generated_excluded = sum(key in gen_only for key in held)
+    held = [key for key in held if key not in gen_only]
+    if not context or not held:
+        return {**base, "recall": None, "trials": len(held),
+                "generated_excluded": generated_excluded,
+                "reason": "insufficient causal split"}
+    Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
+    centroid = Vn[[idx[key] for key in context]].mean(0)
+    centroid /= np.linalg.norm(centroid) + 1e-9
+    sims = Vn @ centroid
+    ranked = [keys[j] for j in np.argsort(-sims) if keys[j] not in before]
+    pos = {key: i for i, key in enumerate(ranked)}
+    hits = sum(pos.get(key, len(ranked)) < k for key in held)
+    recall = hits / len(held)
+    baseline = k / len(ranked) if ranked else None
+    return {**base, "recall": recall, "trials": len(held), "hits": hits,
+            "generated_excluded": generated_excluded, "baseline": baseline,
+            "lift": (recall / baseline) if recall and baseline else None}
+
+
+def rolling_temporal_recall(store, holdout_days=None, k=20, windows=3, dim=None, method=None) -> dict:
+    """Leakage-free rolling forward-prediction evaluation.
+
+    Each window independently fits an in-memory model from conservatively reconstructable state at
+    its cutoff. Windows with insufficient evidence are retained in the result, never replaced by a
+    different metric. The aggregate is trial-weighted and reports across-window variability.
+    """
+    if holdout_days is None:
+        holdout_days = best_holdout(store)
+    _lo, hi = store.history_bounds()
+    if hi is None:
+        return {"recall": None, "trials": 0, "windows": [], "viable_windows": 0,
+                "holdout_days": holdout_days, "reason": "no history"}
+    if dim is None:
+        _keys, live, _idx = embed.load_vectors(store)
+        dim = live.shape[1] if live is not None and live.ndim == 2 else embed.DIM
+    if method is None:
+        method = store.get_setting("rec_embed_method") or "svd"
+    span = holdout_days * 86400.0
+    rows = []
+    for i in range(max(1, int(windows))):
+        end = hi - i * span + 1e-6       # include a snapshot exactly at the newest known timestamp
+        cutoff = end - span
+        rows.append(_causal_window(store, cutoff, end, k, int(dim), method))
+    viable = [row for row in rows if row["recall"] is not None]
+    trials = sum(row["trials"] for row in viable)
+    hits = sum(row.get("hits", 0) for row in viable)
+    recalls = [row["recall"] for row in viable]
+    out = {"recall": hits / trials if trials else None, "k": k, "trials": trials,
+           "windows": rows, "viable_windows": len(viable), "requested_windows": len(rows),
+           "holdout_days": holdout_days, "method": method, "dim": int(dim),
+           "generated_excluded": sum(row["generated_excluded"] for row in rows),
+           "stddev": float(np.std(recalls)) if recalls else None,
+           "causal": True, "partial_reconstruction": True}
+    if not viable:
+        out["reason"] = "no viable reconstructable windows"
+    return out
+
+
 def _era_band(y):
     return f"{int(y) // 10 * 10}s" if y else "unknown"
 
@@ -230,13 +315,13 @@ def content_rankable(store) -> dict:
 
 
 def _pick_metric(store, k) -> str:
-    """Decide the sweep's metric ONCE, on the model as currently built (#83). autotune must never let a
+    """Decide the sweep's metric ONCE, on the model as currently built (#83/#111). autotune must never let a
     grid compare temporal scores against in-sample ones, so this is called a single time per run and the
     result is threaded through every score in that run rather than re-decided per call. Prefers
-    temporal_recall, the model's real job (predict the next plays); falls back to recall@k only when
-    history is too thin for a temporal split at pick time."""
-    tr = temporal_recall(store, holdout_days=best_holdout(store), k=k).get("recall")
-    return "temporal_recall" if tr is not None else "recall_at_k"
+    leakage-free rolling temporal recall; falls back to in-sample recall@k only when no causal window
+    can be reconstructed at pick time."""
+    tr = rolling_temporal_recall(store, holdout_days=best_holdout(store), k=k).get("recall")
+    return "causal_temporal_recall" if tr is not None else "recall_at_k"
 
 
 def _tune_score(store, k, metric):
@@ -245,8 +330,11 @@ def _tune_score(store, k, metric):
     a dim change starves the context side), that config scores 0.0 and is flagged failed=True so the grid
     can show it and the winner can exclude it, rather than silently falling back to the in-sample metric.
     Returns (score, failed)."""
-    if metric == "temporal_recall":
-        tr = temporal_recall(store, holdout_days=best_holdout(store), k=k).get("recall")
+    if metric == "causal_temporal_recall":
+        dim = int(store.get_setting("rec_dim") or embed.DIM)
+        method = store.get_setting("rec_embed_method") or "svd"
+        tr = rolling_temporal_recall(store, holdout_days=best_holdout(store), k=k,
+                                     dim=dim, method=method).get("recall")
         if tr is None:
             return 0.0, True
         return tr, False
@@ -254,7 +342,7 @@ def _tune_score(store, k, metric):
 
 
 def autotune(store, svd_dims=(48, 64, 96, 128), item2vec_probe_dim=64, k=20) -> dict:
-    """A/B the embedding method+dimensionality, scored by the model's real job (temporal_recall, #38 §5)
+    """A/B embedding method+dimensionality using causal rolling temporal recall (#111)
     with a recall@k fallback when history is too thin for a temporal split, plus a single item2vec sanity
     probe. The metric is picked ONCE for the whole run (#83) so the grid's max() never compares temporal
     scores against in-sample ones. Persists and rebuilds on the winner. Returns the winner, the previous
@@ -272,6 +360,7 @@ def autotune(store, svd_dims=(48, 64, 96, 128), item2vec_probe_dim=64, k=20) -> 
     configs = [("svd", d) for d in svd_dims] + [("item2vec", item2vec_probe_dim)]
     for method, d in configs:
         store.set_setting("rec_embed_method", method)
+        store.set_setting("rec_dim", str(d))
         embed.build_and_store(store, dim=d)
         score, failed = _tune_score(store, k, metric)
         row = {"method": method, "dim": d, "recall": score, "metric": metric}

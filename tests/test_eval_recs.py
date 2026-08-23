@@ -7,8 +7,8 @@ def test_recall_recovers_held_out_cluster_track(store):
     iid = store.upsert_identity("main", "cred", None, True)
     # one tight 8-track cluster (one playlist) + a distractor cluster, so the held-out
     # track should rank near the rest of its own playlist.
-    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(8)]
-    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(8)]
+    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0) for i in range(8)]
+    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None, created_at=0) for i in range(8)]
     store.set_playlist_tracks(store.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
     store.set_playlist_tracks(store.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
     embed.build_and_store(store, dim=4)
@@ -26,8 +26,8 @@ def test_recall_none_without_vectors(store):
 def _two_cluster_playlists(store):
     """Two tight 8-track clusters, one per playlist, so the embedding separates A from B. Returns iid."""
     iid = store.upsert_identity("main", "cred", None, True)
-    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(8)]
-    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(8)]
+    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0) for i in range(8)]
+    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None, created_at=0) for i in range(8)]
     store.set_playlist_tracks(store.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
     store.set_playlist_tracks(store.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
     embed.build_and_store(store, dim=4)
@@ -106,6 +106,38 @@ def test_temporal_recall_none_without_history(store):
     assert eval_recs.temporal_recall(store)["recall"] is None
 
 
+def test_rolling_temporal_recall_rebuilds_as_of_cutoff(store):
+    iid = _two_cluster_playlists(store)
+    day, t = 86400, 5_000_000.0
+    store.add_history_snapshot(iid, t - 20 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
+    store.add_history_snapshot(iid, t, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+
+    result = eval_recs.rolling_temporal_recall(store, holdout_days=5, windows=3, k=8, dim=4)
+
+    assert result["causal"] is True
+    assert result["viable_windows"] == 1
+    assert result["trials"] == 4
+    assert result["recall"] == 1.0
+    assert len(result["windows"]) == 3
+    assert result["windows"][0]["coverage"]["safe_playlists"] == 2
+
+
+def test_as_of_baskets_ignore_post_cutoff_playlist_changes(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    tracks = [store.upsert_track(f"v{i}", f"T{i}", "Artist", None, None, created_at=10) for i in range(8)]
+    stable = store.upsert_playlist(iid, "stable", "Stable", 4, "s", 20)
+    changed = store.upsert_playlist(iid, "changed", "Changed", 4, "old", 20)
+    store.set_playlist_tracks(stable, tracks[:4])
+    store.set_playlist_tracks(changed, tracks[4:])
+    store.upsert_playlist(iid, "changed", "Changed", 4, "future", 200)
+
+    before, coverage = store.rec_baskets_as_of(100)
+    changed_keys = {identity_key(f"T{i}", "Artist") for i in range(4, 8)}
+
+    assert coverage["safe_playlists"] == 1
+    assert not any(set(basket) == changed_keys for basket in before)
+
+
 def test_projection_recall_breakdown_by_family_and_coverage(store):
     # The scalar projection_recall hides where grounding fails. The breakdown must partition trials by
     # genre family, era, and coverage band so the failure modes are locatable.
@@ -170,7 +202,7 @@ def test_autotune_scores_by_temporal_recall_when_history_spans_the_window(store)
     store.add_history_snapshot(iid, t, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
     res = eval_recs.autotune(store, svd_dims=(4,), item2vec_probe_dim=4, k=8)
     assert res["grid"]
-    assert all(g.get("metric") == "temporal_recall" for g in res["grid"]), \
+    assert all(g.get("metric") == "causal_temporal_recall" for g in res["grid"]), \
         "with a usable temporal split, autotune scores configs by forward-prediction recall"
 
 

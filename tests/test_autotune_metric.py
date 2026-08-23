@@ -1,6 +1,6 @@
 """#83 one metric per sweep: a grid can never compare temporal scores against in-sample scores.
 
-Tests via monkeypatching temporal_recall/recall_at_k at the eval_recs module level to deterministic
+Tests via monkeypatching rolling_temporal_recall/recall_at_k to deterministic
 stubs (this is pure orchestration logic; the metrics themselves have their own suites). autotune also
 calls embed.build_and_store per config, so that is stubbed too (it only needs to not crash on a tiny
 in-memory store), following tests/test_autotune.py's mechanics.
@@ -31,22 +31,22 @@ def _stub_build_and_store_tracking_dim(monkeypatch):
 
 def test_temporal_available_every_row_temporal_and_not_in_sample(store, monkeypatch):
     _stub_build_and_store(monkeypatch)
-    monkeypatch.setattr(eval_recs, "temporal_recall", lambda store, holdout_days=30, k=20: {"recall": 0.5})
+    monkeypatch.setattr(eval_recs, "rolling_temporal_recall", lambda store, holdout_days=30, k=20, **kw: {"recall": 0.5})
     monkeypatch.setattr(eval_recs, "recall_at_k",
                          lambda store, k=20, min_size=5, seed=0: {"recall_at_k": None})
 
     res = eval_recs.autotune(store)
 
-    assert res["metric"] == "temporal_recall"
+    assert res["metric"] == "causal_temporal_recall"
     assert res["in_sample"] is False
     for row in res["grid"]:
-        assert row["metric"] == "temporal_recall"
-    assert res["previous"]["metric"] == "temporal_recall"
+        assert row["metric"] == "causal_temporal_recall"
+    assert res["previous"]["metric"] == "causal_temporal_recall"
 
 
 def test_temporal_unavailable_at_pick_time_every_row_recall_at_k_in_sample(store, monkeypatch):
     _stub_build_and_store(monkeypatch)
-    monkeypatch.setattr(eval_recs, "temporal_recall", lambda store, holdout_days=30, k=20: {"recall": None})
+    monkeypatch.setattr(eval_recs, "rolling_temporal_recall", lambda store, holdout_days=30, k=20, **kw: {"recall": None})
     monkeypatch.setattr(eval_recs, "recall_at_k",
                          lambda store, k=20, min_size=5, seed=0: {"recall_at_k": 0.3})
 
@@ -67,25 +67,25 @@ def test_temporal_none_mid_sweep_scores_zero_failed_and_keeps_metric(store, monk
     # svd/48 fails temporal mid-sweep; every other config succeeds.
     scores = {"svd": {48: None, 64: 0.4, 96: 0.6, 128: 0.2}, "item2vec": {64: 0.1}}
 
-    def _temporal(store, holdout_days=30, k=20):
+    def _temporal(store, holdout_days=30, k=20, **kwargs):
         if builds["n"] == 0:
             return {"recall": 0.9}   # pre-sweep: metric pick + previous-score calls, nothing built yet
         method = store.get_setting("rec_embed_method") or "svd"
         dim = int(store.get_setting("rec_dim") or 48)
         return {"recall": scores.get(method, {}).get(dim)}
 
-    monkeypatch.setattr(eval_recs, "temporal_recall", _temporal)
+    monkeypatch.setattr(eval_recs, "rolling_temporal_recall", _temporal)
 
     res = eval_recs.autotune(store, svd_dims=(48, 64, 96, 128), item2vec_probe_dim=64)
 
-    assert res["metric"] == "temporal_recall"
+    assert res["metric"] == "causal_temporal_recall"
     assert res["in_sample"] is False
     failed_rows = [g for g in res["grid"] if g.get("failed")]
     assert len(failed_rows) == 1
     failed = failed_rows[0]
     assert failed["method"] == "svd" and failed["dim"] == 48
     assert failed["recall"] == 0.0
-    assert failed["metric"] == "temporal_recall"          # no silent switch to recall_at_k
+    assert failed["metric"] == "causal_temporal_recall"   # no silent switch to recall_at_k
     # the winner must not be the failed (zeroed) row
     assert not (res["winner"]["method"] == "svd" and res["winner"]["dim"] == 48)
     assert res["winner"]["method"] == "svd" and res["winner"]["dim"] == 96   # 0.6 is the max
@@ -103,12 +103,12 @@ def test_all_configs_fail_restores_previous_config_with_sweep_failed(store, monk
     store.set_setting("rec_dim", "96")
 
     # Every config in the sweep fails (returns None)
-    def _temporal(store, holdout_days=30, k=20):
+    def _temporal(store, holdout_days=30, k=20, **kwargs):
         if builds["n"] == 0:
             return {"recall": 0.5}   # pre-sweep: metric pick + previous-score calls
         return {"recall": None}     # all swept configs fail
 
-    monkeypatch.setattr(eval_recs, "temporal_recall", _temporal)
+    monkeypatch.setattr(eval_recs, "rolling_temporal_recall", _temporal)
 
     res = eval_recs.autotune(store, svd_dims=(48, 64, 96, 128), item2vec_probe_dim=64)
 
