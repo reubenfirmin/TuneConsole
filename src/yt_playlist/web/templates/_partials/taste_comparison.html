@@ -1,24 +1,32 @@
 {% if comparison is none %}
 <p class="section-note">Set a baseline, adjust controls, then compare the same tracks under the new model.</p>
 {% elif comparison %}
-<p class="section-note">Movement is rank within this fixed cohort, not turnover from the rotating sample.</p>
+<p class="section-note">This compares deterministic production cohorts, never the rotating sample. Score changes and lane-allocation changes are labeled separately.</p>
 <ol class="preview-list comparison-list">
   {% for i in comparison %}
   <li>
-    <span class="preview-lane">{% if i.rank_delta > 0 %}↑{{ i.rank_delta }}{% elif i.rank_delta < 0 %}↓{{ -i.rank_delta }}{% else %}—{% endif %}</span>
+    <span class="preview-lane">{% if i.status == 'entered' %}NEW{% elif i.status == 'exited' %}OUT{% elif i.rank_delta > 0 %}↑{{ i.rank_delta }}{% elif i.rank_delta < 0 %}↓{{ -i.rank_delta }}{% else %}—{% endif %}</span>
     <span class="preview-song"><strong>{{ i.title }}</strong> · {{ i.artist }}</span>
-    <span class="preview-reason">#{{ i.old_rank }} → #{{ i.rank }} · {{ '%+.3f'|format(i.score_delta) }}</span>
+    <span class="preview-reason">
+      {% if i.status == 'entered' %}Entered current top {{ comparison_limit }} at #{{ i.rank }}
+      {% elif i.status == 'exited' %}Was #{{ i.old_rank }} · {% if not i.eligible %}ineligible: {{ i.eligibility_reason }}{% else %}now below the cohort cutoff{% endif %}
+      {% else %}#{{ i.old_rank }} → #{{ i.rank }}{% if i.score_delta is not none %} · {{ '%+.3f'|format(i.score_delta) }}{% endif %}{% endif %}
+    </span>
     <details class="score-trace">
-      <summary>Current score · {{ '%.3f'|format(i.score) }}</summary>
+      <summary>{% if i.changes %}Largest change: {{ i.changes[0].label }} {{ '%+.3f'|format(i.changes[0].delta) }}{% elif i.status == 'entered' %}Entered the production cohort{% elif i.status == 'exited' %}Left the production cohort{% else %}No scoring component changed{% endif %}</summary>
       <div class="trace-grid">
-        <span>Baseline score</span><strong>{{ '%.3f'|format(i.old_score) }}</strong>
+        {% if i.old_score is not none %}<span>Baseline score</span><strong>{{ '%.3f'|format(i.old_score) }}</strong>{% endif %}
         <span>Current score</span><strong>{{ '%.3f'|format(i.score) }}</strong>
-        <span>Durable context fit</span><strong>{{ '%+.3f'|format(i.trace.durable) }}</strong>
-        <span>Transient direction</span><strong>{{ '%+.3f'|format(i.trace.transient_delta) }}</strong>
-        <span>Session direction</span><strong>{{ '%+.3f'|format(i.trace.session_delta) }}</strong>
-        <span>Audio direction</span><strong>{{ '%+.3f'|format(i.trace.audio_delta) }}</strong>
-        <span>Applied facet product</span><strong>×{{ '%.3f'|format(i.trace.axis_applied) }}</strong>
+        {% for c in i.changes %}
+        <span>{{ c.label }}</span>
+        <strong>{% if c.multiplier %}×{{ '%.3f'|format(c.before) }} → ×{{ '%.3f'|format(c.after) }}{% else %}{{ '%+.3f'|format(c.before) }} → {{ '%+.3f'|format(c.after) }}{% endif %}</strong>
+        {% endfor %}
+        {% if i.old_lane_weight is not none or i.lane_weight is not none %}
+        <span>Serving lane</span><strong>{{ i.old_lane or '—' }}{% if i.old_lane != i.lane %} → {{ i.lane or 'outside cohort' }}{% endif %}</strong>
+        {% endif %}
       </div>
+      {% if not i.eligible %}<p class="muted trace-note">This track is currently excluded: {{ i.eligibility_reason }}.</p>{% endif %}
+      {% if not i.changes and i.status == 'stayed' %}<p class="muted trace-note">Its score inputs are unchanged; any rank movement came from changes to other candidates or lane allocation.</p>{% endif %}
     </details>
   </li>
   {% endfor %}

@@ -242,10 +242,13 @@ def test_taste_comparison_keeps_fixed_baseline_and_shows_delta(store, monkeypatc
     def comparison(_store, _now, keys=None, limit=24):
         calls.append(keys)
         score = 0.8 if keys is None else 0.9
+        durable = 0.4 if keys is None else 0.5
         return [{"key": "track|artist", "title": "Track", "artist": "Artist",
-                 "rank": 1, "score": score, "trace": {"durable": 0.4,
+                 "rank": 1, "in_cohort": True, "score": score, "trace": {"durable": durable,
                  "transient_delta": 0.1, "session_delta": 0.0, "audio_delta": 0.0,
-                 "axis_applied": 1.1}}]
+                 "rank_base": 0.7, "axes": {"genre": 1.1}, "axis_applied": 1.1},
+                 "lane": "neighbourhood", "lane_weight": 1.0,
+                 "eligible": True, "eligibility_reason": None}]
 
     monkeypatch.setattr(recommend, "taste_comparison", comparison)
     c = _client(store)
@@ -253,7 +256,37 @@ def test_taste_comparison_keeps_fixed_baseline_and_shows_delta(store, monkeypatc
     html = c.get("/taste/comparison").text
     assert calls[-1] == ["track|artist"]
     assert "#1 → #1" in html and "+0.100" in html
-    assert "fixed cohort" in html
+    assert "Durable context fit" in html and "+0.400 → +0.500" in html
+    assert "deterministic production cohorts" in html
+
+
+def test_taste_comparison_labels_entries_exits_and_exclusions(store, monkeypatch):
+    from yt_playlist.rec import recommend
+
+    trace = {"durable": 0.4, "transient_delta": 0.0, "session_delta": 0.0,
+             "audio_delta": 0.0, "rank_base": 0.7, "axes": {}, "axis_applied": 1.0}
+
+    def comparison(_store, _now, keys=None, limit=24):
+        if keys is None:
+            return [{"key": "old|artist", "title": "Old", "artist": "Artist", "rank": 1,
+                     "in_cohort": True, "score": 0.8, "trace": trace, "lane": "deep_cut",
+                     "lane_weight": 1.0, "eligible": True, "eligibility_reason": None}]
+        return [
+            {"key": "new|artist", "title": "New", "artist": "Artist", "rank": 1,
+             "in_cohort": True, "score": 0.9, "trace": trace, "lane": "neighbourhood",
+             "lane_weight": 1.0, "eligible": True, "eligibility_reason": None},
+            {"key": "old|artist", "title": "Old", "artist": "Artist", "rank": None,
+             "in_cohort": False, "score": 0.8, "trace": trace, "lane": "",
+             "lane_weight": None, "eligible": False, "eligibility_reason": "dismissed or snoozed"},
+        ]
+
+    monkeypatch.setattr(recommend, "taste_comparison", comparison)
+    client = _client(store)
+    client.post("/taste/comparison/baseline")
+    html = client.get("/taste/comparison").text
+    assert "Entered current top 24 at #1" in html
+    assert "ineligible: dismissed or snoozed" in html
+    assert "NEW" in html and "OUT" in html
 
 
 def test_taste_page_lists_and_clears_bans(store):

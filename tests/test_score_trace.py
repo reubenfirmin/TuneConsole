@@ -46,3 +46,19 @@ def test_taste_sample_items_carry_trace_but_normal_serving_does_not(store):
     assert normal and all(item.trace is None for item in normal)
     assert observed and all(item.trace is not None for item in observed)
     assert all("contexts" in item.trace for item in observed)
+
+
+def test_taste_comparison_retains_suppressed_baseline_track_with_reason(store):
+    _model(store)
+    baseline = surfaces.taste_comparison(store, now=100.0, limit=6)
+    assert baseline and all(row["in_cohort"] for row in baseline)
+    key = baseline[0]["key"]
+    store.record_feedback("for_you", key, "dismiss", until=1000.0, now=101.0)
+
+    current = surfaces.taste_comparison(store, now=102.0, keys=[key], limit=6)
+    retained = next(row for row in current if row["key"] == key)
+
+    assert retained["in_cohort"] is False
+    assert retained["eligible"] is False
+    assert retained["eligibility_reason"] == "dismissed or snoozed"
+    assert retained["trace"]["final"] == pytest.approx(retained["score"])

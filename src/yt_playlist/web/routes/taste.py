@@ -11,7 +11,7 @@ from yt_playlist.web.context import form_float
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates = ctx.store, ctx.templates
-    comparison_setting = "taste_comparison_baseline_v1"
+    comparison_setting = "taste_comparison_baseline_v2"
 
     # The three multiplier layers of a facet's chain, in the order the ranker composes them:
     # lasting bias (permanent weight x standing lean), the transient tilt, and their product.
@@ -162,20 +162,66 @@ def build(ctx) -> APIRouter:
             return {"comparison": None}
         current = recommend.taste_comparison(store, ctx.now(), [row["key"] for row in baseline])
         before = {row["key"]: row for row in baseline}
+        weights = store.get_weights(
+            now=ctx.now(),
+            revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
         rows = []
         for row in current:
-            old = before[row["key"]]
-            row["old_rank"] = old["rank"]
-            row["old_score"] = old["score"]
-            row["rank_delta"] = old["rank"] - row["rank"]
-            row["score_delta"] = row["score"] - old["score"]
+            old = before.get(row["key"])
+            row["old_rank"] = old.get("rank") if old else None
+            row["old_score"] = old.get("score") if old else None
+            row["old_lane"] = old.get("lane", "") if old else ""
+            row["old_lane_weight"] = old.get("lane_weight") if old else None
+            if row["lane_weight"] is None and row["old_lane"]:
+                # A baseline track outside today's top cohort has no current served lane, but the
+                # allocation knob for the lane it occupied is still directly comparable.
+                row["lane_weight"] = weights.get(f"lane:{row['old_lane']}", 1.0)
+            row["status"] = ("entered" if old is None and row["in_cohort"] else
+                             "exited" if old and not row["in_cohort"] else "stayed")
+            row["rank_delta"] = ((row["old_rank"] - row["rank"])
+                                 if row["old_rank"] and row["rank"] else None)
+            row["score_delta"] = ((row["score"] - row["old_score"])
+                                  if row["old_score"] is not None else None)
+            row["changes"] = _trace_changes(old.get("trace", {}) if old else {}, row["trace"])
+            if row["old_lane_weight"] is not None and row["lane_weight"] is not None:
+                delta = row["lane_weight"] - row["old_lane_weight"]
+                if abs(delta) > 1e-9:
+                    row["changes"].append({"label": "Lane allocation weight", "delta": delta,
+                                           "before": row["old_lane_weight"],
+                                           "after": row["lane_weight"], "multiplier": True})
+            row["changes"].sort(key=lambda c: -abs(c["delta"]))
             rows.append(row)
-        return {"comparison": rows}
+        return {"comparison": rows, "comparison_limit": 24}
+
+    def _trace_changes(old, current):
+        fields = (("durable", "Durable context fit", False),
+                  ("transient_delta", "Transient direction", False),
+                  ("session_delta", "Session direction", False),
+                  ("audio_delta", "Audio direction", False),
+                  ("rank_base", "Rank-normalized base", False),
+                  ("axis_applied", "Applied facet product", True))
+        changes = []
+        for key, label, multiplier in fields:
+            if key not in old or key not in current:
+                continue
+            delta = float(current[key]) - float(old[key])
+            if abs(delta) > 1e-9:
+                changes.append({"label": label, "delta": delta, "before": old[key],
+                                "after": current[key], "multiplier": multiplier})
+        old_axes, current_axes = old.get("axes", {}), current.get("axes", {})
+        for axis in sorted(set(old_axes) | set(current_axes)):
+            before, after = float(old_axes.get(axis, 1.0)), float(current_axes.get(axis, 1.0))
+            if abs(after - before) > 1e-9:
+                changes.append({"label": f"{axis.capitalize()} multiplier", "delta": after - before,
+                                "before": before, "after": after, "multiplier": True})
+        return changes
 
     @router.post("/taste/comparison/baseline")
     def taste_comparison_baseline(request: Request):
         baseline = recommend.taste_comparison(store, ctx.now())
-        compact = [{"key": row["key"], "rank": row["rank"], "score": row["score"]}
+        compact = [{"key": row["key"], "rank": row["rank"], "score": row["score"],
+                    "trace": row["trace"], "lane": row["lane"],
+                    "lane_weight": row["lane_weight"]}
                    for row in baseline]
         store.set_setting(comparison_setting, json.dumps(compact))
         return templates.TemplateResponse(request, "_partials/taste_comparison.html",

@@ -257,29 +257,42 @@ def taste_sample(store, now, limit=8, pool_factor=8) -> list[ForYouItem]:
 
 
 def taste_comparison(store, now, keys=None, limit=24) -> list[dict]:
-    """Score a fixed cohort for an honest before/after view of Taste controls.
+    """A deterministic production cohort plus traces for requested baseline keys.
 
-    With no ``keys``, choose a deterministic cohort from the production For You ranking. With keys,
-    re-score exactly those tracks against the current model. Rank is deliberately *within this fixed
-    cohort*: the live preview remains a rotating sample, and presenting its turnover as knob-driven
-    movement would be misleading.
+    The current top ``limit`` is always included so the UI can identify entrants and exits. Requested
+    keys are retained even when they leave that cohort (or become suppressed), allowing an honest
+    before/after explanation without treating random live-sample turnover as model movement.
     """
     pt = playlist_taste(store)
     model_keys, V, idx = embed.load_vectors(store)
     if not pt or V is None:
         return []
     scores, traces = score_with_traces(store, pt, model_keys, V, idx, now)
-    if keys is None:
-        keys = [item.key for item in for_you(store, now, limit=limit) if item.key in traces]
-    else:
-        keys = [key for key in keys if key in traces]
-    meta = store.tracks_by_keys(keys)
-    rows = [{"key": key, "title": meta[key]["title"], "artist": meta[key]["artist"],
-             "score": scores[key], "trace": traces[key]}
-            for key in keys if key in meta]
-    rows.sort(key=lambda row: (-row["score"], row["key"]))
-    for rank, row in enumerate(rows, 1):
-        row["rank"] = rank
+    served = for_you(store, now, limit=limit, include_traces=True)
+    current = {item.key: (rank, item) for rank, item in enumerate(served, 1)}
+    wanted = list(dict.fromkeys([*(keys or []), *current]))
+    meta = store.tracks_by_keys([key for key in wanted if key in traces])
+    suppressed = store.suppressed_keys("for_you", now)
+    generated = RecDao(store).generated_track_keys()
+    muted = store.muted_artists()
+    weights = store.get_weights(
+        now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
+    rows = []
+    for key in wanted:
+        if key not in traces or key not in meta:
+            continue
+        rank, item = current.get(key, (None, None))
+        artist = meta[key]["artist"]
+        reason = ("dismissed or snoozed" if key in suppressed else
+                  "already saved from a generated recommendation" if key in generated else
+                  "artist muted" if artist in muted else None)
+        lane = item.lane if item else ""
+        rows.append({"key": key, "title": meta[key]["title"], "artist": artist,
+                     "score": scores[key], "trace": traces[key], "rank": rank,
+                     "in_cohort": rank is not None, "lane": lane,
+                     "lane_weight": weights.get(f"lane:{lane}", 1.0) if lane else None,
+                     "eligible": reason is None, "eligibility_reason": reason})
+    rows.sort(key=lambda row: (row["rank"] is None, row["rank"] or 0, row["key"]))
     return rows
 
 
