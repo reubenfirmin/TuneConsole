@@ -9,6 +9,9 @@ dependencies = [
     # contract, not ytmusicapi internals, so the security guarantee survives upgrades —
     # but we cap the major for reproducibility and to review breaking changes deliberately.
     "ytmusicapi>=1.12,<2",
+    # Direct dependency for the transient Spotify import adapter (ytmusicapi also uses requests,
+    # but TuneConsole must not rely on that implementation detail).
+    "requests>=2.31,<3",
     "fastapi>=0.110",
     # [standard] pulls in a WebSocket implementation (websockets), which the extension bridge
     # endpoint (/bridge/ws) requires; plain uvicorn returns 404 on the WS upgrade without it.
