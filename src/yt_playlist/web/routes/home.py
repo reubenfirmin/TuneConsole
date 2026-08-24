@@ -1,8 +1,10 @@
 """Home tab: the default landing page: Sync control, Take-Action triage, and For-You recs."""
 import asyncio
+import hashlib
 import json
 import threading
 import time
+import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Request, Response
@@ -11,7 +13,7 @@ from fastapi.responses import JSONResponse
 from yt_playlist.core import updatecheck
 from yt_playlist.library import executor
 from yt_playlist.util import genre_map
-from yt_playlist.rec import arc_energy, journeys, onboarding, rec_params, recommend, into_recently
+from yt_playlist.rec import arc_energy, embed, journeys, onboarding, rec_params, recommend, into_recently
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.providers import wikipedia, lastfm
 from yt_playlist.web.context import form_float
@@ -172,6 +174,7 @@ _CARD_LABELS = {"wheelhouse": "More in your wheelhouse", "explore": "From your c
 
 # #87 retention only needs to outlive the future lane-bandit's evidence window, not forever.
 _LANE_IMPRESSION_RETAIN_D = 30
+_SERVED_IMPRESSION_RETAIN_D = 90
 
 
 def _record_lane_impressions(store, items, now):
@@ -184,6 +187,33 @@ def _record_lane_impressions(store, items, now):
               (it.get("key") if isinstance(it, dict) else it.key)) for it in items]
     store.record_lane_impressions(pairs, now,
                                   prune_before=now - _LANE_IMPRESSION_RETAIN_D * 86400)
+
+
+def _served_model_version(store, ranker):
+    """Stable identity for the serving model, intentionally excluding request/recipe randomness."""
+    raw = json.dumps({"schema": "home-cards-v1", "ranker": ranker or "lane",
+                      "content_space": embed.content_space_id(store)}, sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _record_served_cards(store, protos, now):
+    """#113 log only the final twelve-track cards handed to the template."""
+    request_id = uuid.uuid4().hex
+    rows = []
+    rank = 0
+    for card_position, proto in enumerate(protos, 1):
+        ranker = proto.get("ranker") or "lane"
+        for track_position, track in enumerate(proto["tracks"], 1):
+            rank += 1
+            key = track.get("key") if isinstance(track, dict) else getattr(track, "key", None)
+            rows.append({"identity_key": key, "rank": rank, "lane": proto["lane"],
+                         "mode_id": proto.get("mode_id"), "score": None,
+                         "model_version": _served_model_version(store, ranker),
+                         "provenance": {"ranker": ranker, "card_position": card_position,
+                                        "track_position": track_position,
+                                        "recipe": proto.get("recipe", {})}})
+    store.record_served_impressions(request_id, "home", rows, now,
+                                     prune_before=now - _SERVED_IMPRESSION_RETAIN_D * 86400)
 
 
 def _one_card(store, card, now):
@@ -456,6 +486,10 @@ def build(ctx) -> APIRouter:
             keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None))
                     for t in p["tracks"]]
             store.mark_offered("track", [k for k in keys if k], now)
+        try:
+            _record_served_cards(store, protos, now)
+        except Exception:  # noqa: BLE001 - measurement must never break recommendation serving
+            ctx.logger.warning("served-impression log failed", exc_info=True)
         return templates.TemplateResponse(request, "_partials/mode_cards.html",
                                           {"protos": protos, "regenerating": regenerating})
 

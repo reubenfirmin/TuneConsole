@@ -18,6 +18,7 @@ def test_health_panel_renders_when_empty(store):
     r = _client(store).get("/taste/recall")
     assert r.status_code == 200
     assert "recall@20" in r.text                       # the placeholder copy for a vectorless model
+    assert "rendered → played" in r.text
 
 
 def test_health_panel_shows_graduation_counts(store):

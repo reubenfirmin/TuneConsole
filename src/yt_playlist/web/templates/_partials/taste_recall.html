@@ -20,3 +20,13 @@
 {% endif %}
 
 <div><strong>{{ grad_counts.values()|sum }}</strong><span>graduations{% if grad_counts %}: {% for src, c in grad_counts.items() %}{{ src }} {{ c }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</span></div>
+
+{% if served.impressions %}
+<div><strong>{{ '%.0f'|format(served.acceptance_rate * 100) }}%</strong><span>rendered → played
+  ({{ served.played }}/{{ served.impressions }}, last 30d; {{ served.organic }} organic,
+  {{ served.generated }} generated-playlist){% if not served.powered %} · collecting evidence,
+  needs {{ served.min_impressions }} impressions before a verdict{% endif %}</span></div>
+{% else %}
+<div><strong>-</strong><span>rendered → played (measurement starts with the next For You render;
+  no efficacy verdict yet)</span></div>
+{% endif %}

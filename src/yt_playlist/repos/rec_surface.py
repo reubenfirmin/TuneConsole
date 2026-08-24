@@ -5,6 +5,8 @@ Owns its own tables (created lazily/idempotently) since they're rec-internal ser
 """
 import json
 
+from yt_playlist.library.listen_derive import classify_exit
+
 from yt_playlist.repos.base import Repo, synchronized
 
 MOOD_EVENT_CAP = 200   # bound the rec_mood table (count, not age); this repo owns that table
@@ -69,6 +71,25 @@ CREATE TABLE IF NOT EXISTS rec_grad_log (
   new_weight REAL NOT NULL,                 -- the resulting permanent weight after the nudge
   created_at REAL NOT NULL
 );
+-- #113 what the recommender actually put on screen. Outcomes are deliberately derived from the
+-- immutable play/player ledgers at read time, so attribution rules can improve without rewriting
+-- history. One request/rank is one opportunity; retries of the same render are idempotent.
+CREATE TABLE IF NOT EXISTS rec_served_impressions (
+  id                INTEGER PRIMARY KEY,
+  request_id        TEXT NOT NULL,
+  surface           TEXT NOT NULL,
+  lane              TEXT NOT NULL,
+  mode_id           INTEGER,
+  identity_key      TEXT NOT NULL,
+  rank               INTEGER NOT NULL,
+  score              REAL,
+  model_version      TEXT NOT NULL,
+  provenance         TEXT NOT NULL,
+  served_at          REAL NOT NULL,
+  UNIQUE(request_id, surface, rank)
+);
+CREATE INDEX IF NOT EXISTS ix_rec_served_at ON rec_served_impressions(served_at);
+CREATE INDEX IF NOT EXISTS ix_rec_served_key_at ON rec_served_impressions(identity_key, served_at);
 """
 
 
@@ -77,6 +98,126 @@ class RecSurfaceRepo(Repo):
         super().__init__(db)
         with self._lock:
             self.conn.executescript(_SCHEMA)   # this DAO owns its tables (idempotent)
+
+    # --- #113 served recommendation -> observed outcome ledger -------------------------------
+    @synchronized
+    def record_served_impressions(self, request_id, surface, items, now, prune_before=None) -> None:
+        """Persist final rendered order, not the larger candidate set.
+
+        ``items`` are dictionaries containing lane/key/rank plus optional mode_id, score and
+        provenance. The request/rank uniqueness key makes an HTMX retry idempotent. Instrumentation
+        is fail-open at route call sites and bounded by ``prune_before``.
+        """
+        rows = []
+        for item in items:
+            key = item.get("identity_key") or item.get("key")
+            if not key:
+                continue
+            rows.append((request_id, surface, item.get("lane") or "", item.get("mode_id"), key,
+                         int(item["rank"]), item.get("score"), item.get("model_version") or "unknown",
+                         json.dumps(item.get("provenance") or {}, sort_keys=True), now))
+        if rows:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO rec_served_impressions("
+                "request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+        if prune_before is not None:
+            self.conn.execute("DELETE FROM rec_served_impressions WHERE served_at < ?", (prune_before,))
+        self.conn.commit()
+
+    @synchronized
+    def recommendation_scorecard(self, start, end, outcome_window_h=24, min_impressions=100) -> dict:
+        """Attribute subsequent play/exit events to the nearest preceding rendered opportunity.
+
+        The impression range is bounded to ``[start, end)``; outcomes may arrive for
+        ``outcome_window_h`` after each impression. Generated-playlist plays are useful response
+        evidence but are reported separately and never counted as organic preference evidence.
+        """
+        impressions = [dict(r) for r in self.conn.execute(
+            "SELECT * FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
+            "ORDER BY served_at,id", (start, end)).fetchall()]
+        horizon = max(0.0, float(outcome_window_h)) * 3600.0
+        states = {r["id"]: {"played": False, "organic": False, "generated": False,
+                             "skip": False, "completion": False} for r in impressions}
+
+        by_key = {}
+        for imp in impressions:
+            by_key.setdefault(imp["identity_key"], []).append(imp)
+
+        def nearest(key, at):
+            eligible = [r for r in by_key.get(key, ())
+                        if r["served_at"] <= at <= r["served_at"] + horizon]
+            return max(eligible, key=lambda r: (r["served_at"], r["id"])) if eligible else None
+
+        generated = {r["ytm"] for r in self.conn.execute(
+            "SELECT ytm FROM playlist_group WHERE name='Generated'").fetchall()}
+        generated |= {"RDAMPL" + y for y in generated}
+        for play in self.conn.execute(
+                "SELECT identity_key,played_at,playlist_ytm_id FROM play_events "
+                "WHERE played_at>=? AND played_at<=? ORDER BY played_at,id", (start, end + horizon)):
+            imp = nearest(play["identity_key"], play["played_at"])
+            if not imp:
+                continue
+            state = states[imp["id"]]
+            state["played"] = True
+            if play["playlist_ytm_id"] in generated:
+                state["generated"] = True
+            else:
+                state["organic"] = True
+
+        exits = self.conn.execute(
+            "SELECT pe.video_id,pe.position,pe.duration,pe.at,"
+            "(SELECT identity_key FROM tracks WHERE video_id=pe.video_id LIMIT 1) identity_key "
+            "FROM player_events pe WHERE pe.kind IN ('track_exit','bye','ended') "
+            "AND pe.at>=? AND pe.at<=? ORDER BY pe.at,pe.id", (start, end + horizon)).fetchall()
+        for event in exits:
+            if event["identity_key"] is None:
+                continue
+            imp = nearest(event["identity_key"], event["at"])
+            if not imp:
+                continue
+            outcome = classify_exit(event["position"], event["duration"])
+            if outcome in ("skip", "completion"):
+                states[imp["id"]][outcome] = True
+
+        n = len(impressions)
+        counts = {name: sum(1 for state in states.values() if state[name])
+                  for name in ("played", "organic", "generated", "skip", "completion")}
+
+        def breakdown(field):
+            groups = {}
+            for imp in impressions:
+                label = imp[field] or "unknown"
+                bucket = groups.setdefault(label, {"impressions": 0, "played": 0,
+                                                    "skip": 0, "completion": 0})
+                bucket["impressions"] += 1
+                for outcome in ("played", "skip", "completion"):
+                    bucket[outcome] += int(states[imp["id"]][outcome])
+            for bucket in groups.values():
+                bucket["acceptance_rate"] = bucket["played"] / bucket["impressions"]
+            return groups
+
+        unique_keys = {r["identity_key"] for r in impressions}
+        repeats = n - len(unique_keys)
+        powered = n >= int(min_impressions)
+        return {
+            "start": start, "end": end, "outcome_window_h": outcome_window_h,
+            "impressions": n, **counts,
+            "acceptance_rate": counts["played"] / n if n else None,
+            "organic_rate": counts["organic"] / n if n else None,
+            "skip_rate": counts["skip"] / n if n else None,
+            "completion_rate": counts["completion"] / n if n else None,
+            # Acceptance is the north star because a live play is the broadest reliable response
+            # sensor today. Completion and skip are guardrails; organic_rate is evidence suitable
+            # for taste learning, while generated response is product efficacy only.
+            "north_star": "rendered_to_played", "guardrails": ["skip_rate", "completion_rate"],
+            "unique_items": len(unique_keys), "repeat_rate": repeats / n if n else None,
+            "by_surface": breakdown("surface"), "by_lane": breakdown("lane"),
+            "min_impressions": int(min_impressions), "powered": powered,
+            # A volume threshold can make a descriptive rate stable; it cannot manufacture a
+            # counterfactual. #110's controlled comparison may add a verdict later.
+            "verdict": None,
+        }
 
     # --- recipes: the exact theme/params a generated playlist was made from (legible + re-runnable) ---
     @synchronized

@@ -142,13 +142,16 @@ def build(ctx) -> APIRouter:
         # panel: warm-path recall@k, leakage-free rolling temporal recall, cold-path projection (with
         # its failure-mode breakdown), and graduation counts by source from the §1c log.
         holdout_days = eval_recs.best_holdout(store)
+        now = ctx.now()
         return templates.TemplateResponse(request, "_partials/taste_recall.html",
                                           {"recall": eval_recs.recall_at_k(store, k=20),
                                            "proj": eval_recs.projection_recall(store, k=20),
                                            "temporal": eval_recs.rolling_temporal_recall(
                                                store, holdout_days=holdout_days, k=20),
                                            "holdout_days": holdout_days,
-                                           "grad_counts": store.graduation_log_counts()})
+                                           "grad_counts": store.graduation_log_counts(),
+                                           "served": store.recommendation_scorecard(
+                                               now - 30 * 86400, now)})
 
     @router.get("/taste/preview")
     def taste_preview(request: Request):
