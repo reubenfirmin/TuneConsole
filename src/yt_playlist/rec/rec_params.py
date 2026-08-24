@@ -134,14 +134,14 @@ PARAMS = [
     ParamSpec("audio_transient_w", "Recent-sound push", "transient",
               "How hard recent listening tilts the feed toward similar SOUND (tempo, energy, mood), "
               "not just genre/era. 0 = the sound of recent plays doesn't steer.", 0.0, 2.0, 0.05, 0.30),
-    ParamSpec("axis_weight_cap", "How hard your preferences bind", "discovery",
+    ParamSpec("axis_weight_cap", "Preference strength", "discovery",
               "Your genre/era/artist preferences multiply a track's taste score. That score is a "
               "percentile (0-1) but the multiplier can reach 16, so a favored track can outrank a "
               "better-fitting one outright - and only a track with a KNOWN genre can earn a "
               "multiplier at all, so a part-tagged library hides its untagged half. This caps the "
-              "multiplier: 16 leaves it unbounded (a hard filter), ~1.4 makes it a strong tilt that "
-              "still lets a great-fitting track through. Muted genres stay excluded at any setting.",
-              1.0, 16.0, 0.1, 16.0, advanced=True),
+              "multiplier. The default 1.4 is a strong bounded tilt that still lets a great-fitting "
+              "track through. Muted genres stay excluded at any setting.",
+              1.0, 16.0, 0.1, 1.4, advanced=True),
     ParamSpec("facet_gain", "Facet responsiveness", "transient",
               "How strongly a genre/era/artist lean re-ranks the feed. Higher = right-now leans bite "
               "harder.", 0.0, 1.0, 0.05, 0.35),
@@ -377,6 +377,10 @@ PARAMS = [
 ]
 
 PARAMS_BY_NAME = {p.name: p for p in PARAMS}
+
+# #114: the small public control vocabulary. Everything else remains available in the diagnostic
+# disclosure, but these are the only scalar knobs presented as everyday taste controls.
+SEMANTIC_PARAMS = ("breadth_bias", "play_transient_w", "like_transient_w", "audio_transient_w")
 
 
 # Lane weights (rec_weights table, axis `lane:<name>`): labels + help for the page. Clamp [0.2, 3.0].

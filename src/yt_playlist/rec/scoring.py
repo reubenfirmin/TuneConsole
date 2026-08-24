@@ -2,6 +2,8 @@
 re-weighted by genre/era/artist preferences, the breadth steer, and the transient mood/facet overlay.
 
 Split out of the former monolithic recommend.py; recommend re-exports these for existing callers."""
+import math
+
 import numpy as np
 
 from yt_playlist.util import genre_map
@@ -268,7 +270,7 @@ def _axis_weights_for(store, keys, now=None, with_details=False):
                rec_params.get_param(store, "facet_mult_min"),
                rec_params.get_param(store, "facet_mult_max"))
 
-    mult, details = {}, {}
+    mult, details, present = {}, {}, {}
     for k in keys:
         fam = genre_map.family(genres[k]) if k in genres else None
         sub = genre_map.subgenre(genres[k]) if k in genres else None
@@ -281,18 +283,41 @@ def _axis_weights_for(store, keys, now=None, with_details=False):
         pm = _axis_mult(pw, "pop", _pop_band(pops.get(k), pop_min), standing, leans, fparams)
         axes = {"genre": max(lo, min(hi, gm)), "era": max(lo, min(hi, em)),
                 "artist": max(lo, min(hi, am)), "popularity": max(lo, min(hi, pm))}
+        present[k] = {"genre": fam is not None, "era": decades.get(k) is not None,
+                      "artist": bool(artists.get(k)), "popularity": True}
+        details[k] = {"axes": axes, "genre": fam, "subgenre": sub,
+                      "era": decades.get(k), "artist": artists.get(k),
+                      "popularity_band": _pop_band(pops.get(k), pop_min),
+                      "breadth": breadth}
+
+    # #114 metadata neutrality. A literal 1.0 for an unknown genre/year is not neutral when every
+    # tagged candidate can collect an upside multiplier. Whenever an axis has missing candidates,
+    # center the KNOWN positive multipliers on geometric mean 1.0 and leave unknowns at exactly 1.0.
+    # Known zeros are explicit facet mutes and remain hard exclusions.
+    for axis in ("genre", "era", "artist"):
+        if not any(not present[k][axis] for k in keys):
+            continue
+        known = [details[k]["axes"][axis] for k in keys
+                 if present[k][axis] and details[k]["axes"][axis] > 0]
+        center = math.exp(sum(math.log(v) for v in known) / len(known)) if known else 1.0
+        for k in keys:
+            if not present[k][axis]:
+                details[k]["axes"][axis] = 1.0
+            elif details[k]["axes"][axis] > 0:
+                details[k]["axes"][axis] /= center
+
+    for k in keys:
+        axes = details[k]["axes"]
         mult[k] = axes["genre"] * axes["era"] * axes["artist"] * axes["popularity"]
         if with_details:
-            details[k] = {"axes": axes, "genre": fam, "subgenre": sub,
-                          "era": decades.get(k), "artist": artists.get(k),
-                          "popularity_band": _pop_band(pops.get(k), pop_min),
-                          "breadth": breadth, "raw_product": mult[k]}
+            details[k]["raw_product"] = mult[k]
+            details[k]["metadata_present"] = present[k]
     return (mult, details) if with_details else mult
 
 
 def _apply_axis_weights(store, sims, now=None):
     """Re-weight a {key: taste-score} map by permanent preferences × the live transient facet leans,
-    bounded by the axis_weight_cap knob (default: unbounded, i.e. exactly as before)."""
+    bounded by the axis_weight_cap knob (a strong 1.4x tilt by default; explicit mutes remain zero)."""
     mult = _axis_weights_for(store, list(sims), now=now)
     if mult is None:
         return sims
@@ -431,6 +456,7 @@ def score_with_traces(store, taste, keys, V, idx, now):
         cap = rec_params.get_param(store, "axis_weight_cap")
         final = {k: ranked_base[k] * min(cap, mult.get(k, 1.0)) for k in combined}
     traces = {}
+    audio_keys = set(RecDao(store).track_audio_features())
     cap = rec_params.get_param(store, "axis_weight_cap")
     for i, key in enumerate(keys):
         axis = axis_details.get(key, {"axes": {}, "raw_product": 1.0, "breadth": 1.0})
@@ -445,6 +471,8 @@ def score_with_traces(store, taste, keys, V, idx, now):
             "axes": axis["axes"], "axis_labels": {
                 "genre": axis.get("genre"), "era": axis.get("era"),
                 "artist": axis.get("artist"), "popularity": axis.get("popularity_band")},
+            "metadata_present": {**axis.get("metadata_present", {}),
+                                 "audio": key in audio_keys},
             "breadth": float(axis.get("breadth", 1.0)),
             "axis_product": float(axis.get("raw_product", 1.0)),
             "axis_applied": float(min(cap, axis.get("raw_product", 1.0))),

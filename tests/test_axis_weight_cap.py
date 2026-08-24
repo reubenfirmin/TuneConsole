@@ -30,11 +30,10 @@ def _ranked(cap):
     return sorted(out, key=lambda k: -out[k])
 
 
-def test_the_default_is_a_no_op():
-    """The cap defaults to the largest multiplier the axes can produce, so nothing changes until the
-    knob is moved."""
+def test_the_default_is_a_bounded_tilt():
+    """#114 preferences steer taste fit by default rather than replacing it."""
     assert AXIS_WEIGHT_UNBOUNDED == rec_params.GENRE_MAX ** 4
-    assert rec_params.PARAMS_BY_NAME["axis_weight_cap"].default == AXIS_WEIGHT_UNBOUNDED
+    assert rec_params.PARAMS_BY_NAME["axis_weight_cap"].default == 1.4
     assert axis_adjusted_scores(dict(_SCORES), dict(_MULT)) == \
            axis_adjusted_scores(dict(_SCORES), dict(_MULT), cap=AXIS_WEIGHT_UNBOUNDED)
 
@@ -75,8 +74,8 @@ def test_the_knob_is_in_range_and_never_reorders_equals(cap):
     assert out["a"] == out["b"]
 
 
-def test_the_store_wired_knob_defaults_to_todays_behaviour():
+def test_the_store_wired_knob_defaults_to_bounded_and_preserves_explicit_override():
     s = _store()
-    assert rec_params.get_param(s, "axis_weight_cap") == AXIS_WEIGHT_UNBOUNDED
-    rec_params.set_param(s, "axis_weight_cap", 1.4)
     assert rec_params.get_param(s, "axis_weight_cap") == 1.4
+    rec_params.set_param(s, "axis_weight_cap", AXIS_WEIGHT_UNBOUNDED)
+    assert rec_params.get_param(s, "axis_weight_cap") == AXIS_WEIGHT_UNBOUNDED

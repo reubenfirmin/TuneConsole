@@ -12,11 +12,11 @@
         <span>Durable context fit</span><strong>{{ '%+.3f'|format(i.trace.durable) }}</strong>
         <span>Transient direction</span><strong>{{ '%+.3f'|format(i.trace.transient_delta) }}</strong>
         <span>Session direction</span><strong>{{ '%+.3f'|format(i.trace.session_delta) }}</strong>
-        <span>Audio direction</span><strong>{{ '%+.3f'|format(i.trace.audio_delta) }}</strong>
+        <span>Audio direction{% if i.trace.metadata_present and not i.trace.metadata_present.audio %} · unavailable, neutral{% endif %}</span><strong>{{ '%+.3f'|format(i.trace.audio_delta) }}</strong>
         <span>Combined vector score</span><strong>{{ '%+.3f'|format(i.trace.combined) }}</strong>
         <span>Rank-normalized base</span><strong>{{ '%.3f'|format(i.trace.rank_base) }}</strong>
         {% for axis, value in i.trace.axes.items() %}
-        <span>{{ axis|capitalize }} multiplier{% if i.trace.axis_labels.get(axis) %} · {{ i.trace.axis_labels.get(axis) }}{% endif %}</span><strong>×{{ '%.3f'|format(value) }}</strong>
+        <span>{{ axis|capitalize }} multiplier{% if i.trace.axis_labels.get(axis) %} · {{ i.trace.axis_labels.get(axis) }}{% elif i.trace.metadata_present and axis in i.trace.metadata_present and not i.trace.metadata_present.get(axis) %} · unavailable, neutral{% endif %}</span><strong>×{{ '%.3f'|format(value) }}</strong>
         {% endfor %}
         <span>Applied facet product{% if i.trace.axis_product > i.trace.axis_cap %} · capped from ×{{ '%.3f'|format(i.trace.axis_product) }}{% endif %}</span><strong>×{{ '%.3f'|format(i.trace.axis_applied) }}</strong>
         <span>Final score</span><strong>{{ '%.3f'|format(i.trace.final) }}</strong>

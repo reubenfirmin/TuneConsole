@@ -85,7 +85,9 @@ def build(ctx) -> APIRouter:
                 "boolean": spec.boolean, "value": rec_params.get_param(store, spec.name)}
 
     def _group(g):
-        return {"main": [_param_view(s) for s in rec_params.PARAMS if s.group == g and not s.advanced],
+        return {"main": [_param_view(s) for s in rec_params.PARAMS
+                         if s.group == g and not s.advanced
+                         and s.name not in rec_params.SEMANTIC_PARAMS],
                 "advanced": [_param_view(s) for s in rec_params.PARAMS if s.group == g and s.advanced]}
 
     def _model_context():
@@ -109,7 +111,11 @@ def build(ctx) -> APIRouter:
                        for f, share in families],
             "genre_min": rec_params.GENRE_MIN, "genre_max": rec_params.GENRE_MAX,
             "genre_default": rec_params.GENRE_DEFAULT, "genre_step": rec_params.GENRE_STEP,
-            "params": [_param_view(s) for s in rec_params.PARAMS if not s.advanced and s.group == "discovery"],
+            "semantic_params": [_param_view(rec_params.PARAMS_BY_NAME[name])
+                                for name in rec_params.SEMANTIC_PARAMS],
+            "params": [_param_view(s) for s in rec_params.PARAMS
+                       if not s.advanced and s.group == "discovery"
+                       and s.name not in rec_params.SEMANTIC_PARAMS],
             "advanced_params": [_param_view(s) for s in rec_params.PARAMS if s.advanced and s.group == "discovery"],
             "groups": {"transient": _group("transient"), "graduation": _group("graduation")},
             "feedback": dao.feedback_summary(),

@@ -32,9 +32,11 @@ class RecModelRepo(Repo):
     @synchronized
     def get_weights(self, now=None, revert_halflife_d=60.0) -> dict:
         """Learned blend weights by axis (missing axis = prior 1.0), with time-proportional reversion
-        toward 1.0 applied at read time (non-persisting: the stored value is untouched)."""
+        toward 1.0 applied at read time (non-persisting: the stored value is untouched). An explicit
+        genre mute is a categorical exclusion, not a soft preference, so zero never mean-reverts."""
         now = time.time() if now is None else now
-        return {r["axis"]: _reverted(r["weight"], r["updated_at"], now, revert_halflife_d)
+        return {r["axis"]: (0.0 if r["axis"].startswith("genre:") and r["weight"] == 0.0
+                            else _reverted(r["weight"], r["updated_at"], now, revert_halflife_d))
                 for r in self.conn.execute("SELECT axis, weight, updated_at FROM rec_weights")}
 
     @synchronized

@@ -60,6 +60,15 @@
   </div>
 </div>
 
+<h2 class="section">Everyday taste controls <span class="scope-tag">Semantic</span></h2>
+<p class="section-note">These are the few controls intended for normal use. Each moves in one documented direction; the model operates automatically at their defaults.</p>
+<div class="card knob-list semantic-controls">
+  {% for p in semantic_params %}{% include "_partials/taste_knob.html" %}{% endfor %}
+</div>
+
+<details class="advanced diagnostic-controls">
+<summary>Model details &amp; diagnostic controls</summary>
+<div class="diagnostic-controls-body">
 <h2 class="section">Blend weights <span class="scope-tag">For You only</span></h2>
 <p class="section-note">How much each candidate lane contributes to the <strong>For You</strong> feed (and nothing else). 1.0 = neutral; feedback nudges these too, or set them yourself.</p>
 <div class="card knob-list">
@@ -166,6 +175,9 @@
     {% for p in advanced_params %}{% include "_partials/taste_knob.html" %}{% endfor %}
   </details>
 </div>
+
+</div>
+</details>
 
 <h2 class="section">Feedback</h2>
 <div class="card">
