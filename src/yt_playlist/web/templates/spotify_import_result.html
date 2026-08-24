@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% from "_macros.html" import banner %}
+{% block title %}Spotify import complete · TuneConsole{% endblock %}
+{% block page_class %}page-workflow page-spotify-import{% endblock %}
+{% block body %}
+<div class="page-head">
+  <h1>Spotify import complete</h1>
+  <p>Each successfully created playlist will appear in TuneConsole after the next YouTube sync.</p>
+</div>
+{% for result in results %}
+<div class="card">
+  <h2 class="section section-flush">{{ result.name }}</h2>
+  {% if result.error %}
+    {% call banner('err') %}{{ result.error }} Nothing else was changed for this playlist.{% endcall %}
+  {% else %}
+    <p><strong>{{ result.added }}</strong> track{{ '' if result.added == 1 else 's' }} added.
+      {% if result.unmatched %}{{ result.unmatched }} ambiguous or unmatched skipped.{% endif %}
+      {% if result.failed %}{{ result.failed }} matched track{{ '' if result.failed == 1 else 's' }} rejected by YouTube.{% endif %}</p>
+    <a class="btn-ghost btn-sm" href="https://music.youtube.com/playlist?list={{ result.playlist_id }}"
+       target="_blank" rel="noopener">Open in YouTube Music ↗</a>
+  {% endif %}
+</div>
+{% endfor %}
+<div class="btn-row btn-row-roomy">
+  <a class="btn-primary" href="/spotify/import">Import another playlist</a>
+  <a class="btn-ghost" href="/">Done</a>
+</div>
+{% endblock %}

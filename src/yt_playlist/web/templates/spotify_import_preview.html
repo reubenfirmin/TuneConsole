@@ -1,0 +1,38 @@
+{% extends "base.html" %}{% from "_macros.html" import banner %}
+{% block title %}Preview Spotify import · TuneConsole{% endblock %}
+{% block page_class %}page-workflow page-spotify-import{% endblock %}
+{% block body %}
+<div class="page-head">
+  <h1>Preview Spotify import</h1>
+  <p>Destination: <strong>{{ target.label if target else 'YouTube Music' }}</strong>. Only exact or
+    duration-supported matches will be copied; ambiguous and unmatched tracks stay out.</p>
+</div>
+{% for preview in previews %}
+<div class="card workflow-sheet">
+  <h2 class="section section-flush">{{ preview.name }}</h2>
+  <table>
+    <thead><tr><th>Spotify track</th><th>Status</th><th>YouTube Music match</th></tr></thead>
+    <tbody>
+    {% for row in preview.rows %}
+    <tr>
+      <td><strong>{{ row.source.title }}</strong><span class="muted"> · {{ row.source.artist }}</span></td>
+      <td>
+        {% if row.status == 'matched' %}<span class="ok">Matched</span>
+        {% elif row.status == 'ambiguous' %}<span class="warn">Ambiguous—skipped</span>
+        {% else %}<span class="muted">No match</span>{% endif %}
+      </td>
+      <td>{% if row.target_title %}{{ row.target_title }}<span class="muted"> · {{ row.target_artist }}</span>{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endfor %}
+<form method="post" action="/spotify/import/confirm">
+  <input type="hidden" name="token" value="{{ token }}">
+  <div class="btn-row btn-row-roomy">
+    <button class="btn-primary" type="submit">Create YouTube playlist{% if previews|length != 1 %}s{% endif %}</button>
+    <a class="btn-ghost" href="/spotify/import">Back</a>
+  </div>
+</form>
+{% endblock %}

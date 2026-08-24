@@ -127,6 +127,35 @@
   {# ── Tab 4: Import YouTube history (Google Takeout) ────────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'import'" x-cloak>
     <div class="card">
+      <h2 class="section section-flush">Import playlists from Spotify</h2>
+      {% if spotify_connected %}
+      <p class="section-note"><strong>Connected{% if spotify_profile_name %} as
+        {{ spotify_profile_name }}{% endif %}.</strong> Spotify is used only while you choose and copy
+        playlists into YouTube Music. Its playlist contents never enter TuneConsole’s taste model.</p>
+      <div class="btn-row btn-row-spaced">
+        <a class="btn-primary btn-sm" href="/spotify/import">Choose playlists</a>
+        <form method="post" action="/spotify/disconnect">
+          <button class="btn-ghost btn-sm" type="submit">Disconnect Spotify</button>
+        </form>
+      </div>
+      {% else %}
+      <p class="section-note">Create a Spotify developer app, add the callback below, then paste its
+        Client ID. TuneConsole uses read-only playlist access with PKCE—there is no client secret.</p>
+      <label>Spotify callback URL</label>
+      <code class="mono">{{ spotify_redirect_uri }}</code>
+      <form method="post" action="/spotify/connect">
+        <label for="spotify-client-id">Spotify Client ID</label>
+        <input id="spotify-client-id" name="client_id" value="{{ spotify_client_id }}"
+               autocomplete="off" required placeholder="Client ID">
+        <div class="btn-row btn-row-spaced">
+          <button class="btn-primary btn-sm" type="submit">Connect Spotify</button>
+        </div>
+      </form>
+      <p class="section-note">The Client ID and OAuth tokens are stored only in TuneConsole’s local
+        database. Disconnecting deletes them. Spotify playlist metadata is not retained after import.</p>
+      {% endif %}
+    </div>
+    <div class="card">
       <h2 class="section section-flush">Import YouTube history (Google Takeout)</h2>
       {# On a successful import the route retargets the htmx swap at this whole block, replacing
          the instructions + form with the result card. Errors keep the narrower default target

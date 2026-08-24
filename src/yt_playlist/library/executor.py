@@ -166,7 +166,18 @@ def _add_items(client, ytm_playlist_id, video_ids):
                 skipped.append(v)
         if skipped:
             logger.warning("skipped %d unaddable item(s) for %s", len(skipped), ytm_playlist_id)
-        return added, skipped
+    return added, skipped
+
+
+def add_items_resilient(client, playlist_id, item_ids, batch_size=100):
+    """Public import boundary: bounded batches, with per-item recovery for a rejected batch."""
+    added, skipped = 0, []
+    ids = list(item_ids)
+    for start in range(0, len(ids), max(1, batch_size)):
+        n, bad = _add_items(client, playlist_id, ids[start:start + max(1, batch_size)])
+        added += n
+        skipped.extend(bad)
+    return added, skipped
 
 def _reconcile(client, ytm_playlist_id, desired_video_ids):
     """Make a playlist's contents equal desired_video_ids: add what's missing, remove the extras.
