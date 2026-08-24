@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.providers.spotify import ImportPlaylist, SpotifyError
 from yt_playlist.providers.spotify import ImportTrack
-from yt_playlist.library.importing import ImportResolution
+from yt_playlist.library.importing import ExistingOverlap, ImportResolution
 from yt_playlist.web.app import create_app
 
 
@@ -125,3 +125,53 @@ def test_confirm_recovers_when_one_matched_item_poisons_batch(store):
     assert response.status_code == 200
     assert "<strong>1</strong> track added" in response.text
     assert "1 matched track rejected" in response.text
+
+
+def test_exact_duplicate_is_skipped_by_default(store):
+    client, iid = _client(store)
+    source = ImportTrack("sp", "Song", "Artist", None, 200)
+    row = ImportResolution(source, "matched", "yt", "Song", "Artist", 1.0)
+    overlap = ExistingOverlap(7, "Already here", 1.0, True, 1, 0, 0)
+    client.app.state.ctx.spotify_imports["exact"] = {
+        "created_at": 1000, "target_identity": iid,
+        "playlists": [{"source_id": "sp1", "name": "Mix", "rows": [row],
+                       "overlaps": [overlap]}],
+    }
+
+    class YouTube:
+        def create_playlist(self, *a): raise AssertionError("must skip")
+
+    client.app.state.ctx.client_provider = lambda: {iid: YouTube()}
+    response = client.post("/spotify/import/confirm", data={"token": "exact"})
+    assert response.status_code == 200 and "no duplicate playlist was created" in response.text
+    assert store.get_actions() == []
+
+
+def test_near_duplicate_can_add_only_missing_tracks(store):
+    client, iid = _client(store)
+    existing_track = store.upsert_track("old", "Old", "Artist", None, 200)
+    pid = store.upsert_playlist(iid, "PLEXIST", "Existing", 1, "h", 1)
+    store.set_playlist_tracks(pid, [existing_track])
+    old = ImportTrack("sp-old", "Old", "Artist", None, 200)
+    new = ImportTrack("sp-new", "New", "Artist", None, 200)
+    rows = [ImportResolution(old, "matched", "old", "Old", "Artist", 1.0),
+            ImportResolution(new, "matched", "new", "New", "Artist", 1.0)]
+    overlap = ExistingOverlap(pid, "Existing", .5, False, 1, 1, 0)
+    client.app.state.ctx.spotify_imports["near"] = {
+        "created_at": 1000, "target_identity": iid,
+        "playlists": [{"source_id": "sp1", "name": "Mix", "rows": rows,
+                       "overlaps": [overlap]}],
+    }
+
+    class YouTube:
+        def __init__(self): self.added = []
+        def add_playlist_items(self, playlist, ids): self.added.append((playlist, list(ids)))
+        def create_playlist(self, *a): raise AssertionError("must merge")
+
+    youtube = YouTube()
+    client.app.state.ctx.client_provider = lambda: {iid: youtube}
+    response = client.post("/spotify/import/confirm",
+                           data={"token": "near", "decision": f"0|merge|{pid}"})
+    assert response.status_code == 200
+    assert youtube.added == [("PLEXIST", ["new"])]
+    assert "Added missing tracks to <strong>Existing</strong>" in response.text

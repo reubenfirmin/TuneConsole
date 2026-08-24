@@ -10,6 +10,15 @@
 {% for preview in previews %}
 <div class="card workflow-sheet">
   <h2 class="section section-flush">{{ preview.name }}</h2>
+  {% set exact = preview.overlaps|selectattr('exact')|first %}
+  {% set near = preview.overlaps|rejectattr('exact')|first %}
+  {% if exact %}
+  {% call banner('ok') %}<strong>Already present as “{{ exact.title }}”.</strong>
+    All {{ exact.shared }} confidently resolved tracks are identical. Smart import will skip it by default.{% endcall %}
+  {% elif near %}
+  {% call banner('') %}<strong>{{ '%.0f'|format(near.similarity * 100) }}% overlaps with “{{ near.title }}”.</strong>
+    {{ near.shared }} shared, {{ near.source_only }} new from Spotify, {{ near.existing_only }} only in the existing playlist.{% endcall %}
+  {% endif %}
   <table>
     <thead><tr><th>Spotify track</th><th>Status</th><th>YouTube Music match</th></tr></thead>
     <tbody>
@@ -26,6 +35,20 @@
     {% endfor %}
     </tbody>
   </table>
+  <label>Import decision
+    <select name="decision">
+      {% if exact %}
+      <option value="{{ loop.index0 }}|skip|{{ exact.playlist_id }}" selected>Skip exact duplicate</option>
+      <option value="{{ loop.index0 }}|create|0">Create another copy</option>
+      {% elif near %}
+      <option value="{{ loop.index0 }}|create|0" selected>Create separately</option>
+      <option value="{{ loop.index0 }}|merge|{{ near.playlist_id }}">Add missing tracks to “{{ near.title }}”</option>
+      <option value="{{ loop.index0 }}|skip|{{ near.playlist_id }}">Skip</option>
+      {% else %}
+      <option value="{{ loop.index0 }}|create|0" selected>Create playlist</option>
+      {% endif %}
+    </select>
+  </label>
 </div>
 {% endfor %}
 <form method="post" action="/spotify/import/confirm">

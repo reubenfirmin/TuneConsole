@@ -9,10 +9,13 @@
 {% for result in results %}
 <div class="card">
   <h2 class="section section-flush">{{ result.name }}</h2>
-  {% if result.error %}
+  {% if result.skipped %}
+    <p>Skipped by smart import; no duplicate playlist was created.</p>
+  {% elif result.error %}
     {% call banner('err') %}{{ result.error }} Nothing else was changed for this playlist.{% endcall %}
   {% else %}
-    <p><strong>{{ result.added }}</strong> track{{ '' if result.added == 1 else 's' }} added.
+    <p>{% if result.merged_into %}Added missing tracks to <strong>{{ result.merged_into }}</strong>: {% endif %}
+      <strong>{{ result.added }}</strong> track{{ '' if result.added == 1 else 's' }} added.
       {% if result.unmatched %}{{ result.unmatched }} ambiguous or unmatched skipped.{% endif %}
       {% if result.failed %}{{ result.failed }} matched track{{ '' if result.failed == 1 else 's' }} rejected by YouTube.{% endif %}</p>
     <a class="btn-ghost btn-sm" href="https://music.youtube.com/playlist?list={{ result.playlist_id }}"

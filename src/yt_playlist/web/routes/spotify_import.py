@@ -8,9 +8,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
 from yt_playlist.providers.spotify import SpotifyError
-from yt_playlist.library.importing import resolve_track
-from yt_playlist.library.executor import add_items_resilient
+from yt_playlist.library.importing import existing_overlaps, resolve_track
+from yt_playlist.library.executor import add_items_resilient, add_tracks_to_playlist
 from yt_playlist.util.action_kinds import COPY_PLAYLIST
+from yt_playlist.util.matching import identity_key
 from yt_playlist.web.spotify_session import SpotifyDisconnected, import_client
 
 _PREVIEW_TTL_S = 1800
@@ -64,7 +65,9 @@ def build(ctx) -> APIRouter:
                     continue
                 tracks = source.playlist_tracks(playlist_id)
                 rows = [resolve_track(target, track) for track in tracks]
-                previews.append({"source_id": playlist_id, "name": names[playlist_id], "rows": rows})
+                overlaps = existing_overlaps(store, target_identity, rows)
+                previews.append({"source_id": playlist_id, "name": names[playlist_id], "rows": rows,
+                                 "overlaps": overlaps})
         except (SpotifyDisconnected, SpotifyError):
             return RedirectResponse(
                 f"/setup?tab=import&flash={quote('Spotify could not be read. Reconnect and try again.')}",
@@ -101,14 +104,53 @@ def build(ctx) -> APIRouter:
             return RedirectResponse(
                 f"/spotify/import?flash={quote('The YouTube destination is no longer connected.')}",
                 status_code=303)
+        decisions = {}
+        for raw in form.getlist("decision"):
+            parts = raw.split("|", 2)
+            if len(parts) == 3 and parts[0].isdigit() and parts[1] in ("skip", "create", "merge"):
+                decisions[int(parts[0])] = (parts[1], int(parts[2]) if parts[2].isdigit() else None)
         results = []
-        for playlist in preview["playlists"]:
+        for index, playlist in enumerate(preview["playlists"]):
             ids = [row.target_video_id for row in playlist["rows"]
                    if row.status == "matched" and row.target_video_id]
+            exact = next((o for o in playlist.get("overlaps", []) if o.exact), None)
+            default = ("skip", exact.playlist_id) if exact else ("create", None)
+            decision, existing_id = decisions.get(index, default)
+            allowed = {o.playlist_id: o for o in playlist.get("overlaps", [])}
+            if decision == "merge" and existing_id not in allowed:
+                decision, existing_id = default
+            if decision == "skip":
+                results.append({"name": playlist["name"], "playlist_id": None, "added": 0,
+                                "unmatched": 0, "failed": 0, "error": None,
+                                "skipped": True, "merged_into": None})
+                continue
+            if decision == "merge":
+                existing = store.get_playlist(existing_id)
+                current = store.get_playlist_track_keys(existing_id) if existing else set()
+                missing = [row for row in playlist["rows"]
+                           if row.status == "matched" and row.target_video_id
+                           and identity_key(row.source.title, row.source.artist) not in current]
+                if existing is None:
+                    results.append({"name": playlist["name"], "playlist_id": None, "added": 0,
+                                    "unmatched": 0, "failed": 0,
+                                    "error": "The selected existing playlist is no longer available.",
+                                    "skipped": False, "merged_into": None})
+                    continue
+                merge_result = add_tracks_to_playlist(store, existing_id, [{
+                    "videoId": row.target_video_id, "title": row.target_title,
+                    "artist": row.target_artist, "album": None, "duration": row.source.duration_s,
+                } for row in missing], target, ctx.now()) if missing else {"added": 0, "skipped": 0}
+                results.append({"name": playlist["name"], "playlist_id": existing.ytm_playlist_id,
+                                "added": merge_result["added"],
+                                "unmatched": len(playlist["rows"]) - len(ids),
+                                "failed": merge_result["skipped"], "error": None, "skipped": False,
+                                "merged_into": existing.title})
+                continue
             if not ids:
                 results.append({"name": playlist["name"], "playlist_id": None, "added": 0,
                                 "unmatched": len(playlist["rows"]), "failed": 0,
-                                "error": "No confident YouTube Music matches were found."})
+                                "error": "No confident YouTube Music matches were found.",
+                                "skipped": False, "merged_into": None})
                 continue
             try:
                 new_id = target.create_playlist(playlist["name"], "Imported from Spotify by TuneConsole")
@@ -123,12 +165,14 @@ def build(ctx) -> APIRouter:
                     json.dumps({"new_ytm": new_id, "target_identity": target_identity}), ctx.now())
                 results.append({"name": playlist["name"], "playlist_id": new_id, "added": added,
                                 "unmatched": len(playlist["rows"]) - len(ids),
-                                "failed": len(skipped), "error": None})
+                                "failed": len(skipped), "error": None, "skipped": False,
+                                "merged_into": None})
             except Exception:  # noqa: BLE001 - one playlist failure must not block the others
                 ctx.logger.warning("Spotify playlist import failed for %s", playlist["name"], exc_info=True)
                 results.append({"name": playlist["name"], "playlist_id": None, "added": 0,
                                 "unmatched": len(playlist["rows"]), "failed": 0,
-                                "error": "YouTube Music could not create this playlist."})
+                                "error": "YouTube Music could not create this playlist.",
+                                "skipped": False, "merged_into": None})
         return templates.TemplateResponse(request, "spotify_import_result.html", {"results": results})
 
     return router

@@ -712,7 +712,8 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_
         if after_video_id in order:
             i = order.index(after_video_id)
             successor_vid = order[i + 1] if i + 1 < len(order) else None
-    added, skipped = _add_items(client, pl.ytm_playlist_id, [t["videoId"] for t in items])
+    added, skipped = add_items_resilient(client, pl.ytm_playlist_id,
+                                          [t["videoId"] for t in items])
     skipped_set = set(skipped)
     existing = store.get_playlist_track_ids(playlist_id)
     new_ids, titles = [], []
