@@ -10,6 +10,10 @@
 /* Home status card: live extension connection, now-playing, and library freshness. */
 .home-status { display: flex; align-items: center; justify-content: space-between; gap: .9375rem;
   padding: .875rem 1.125rem; margin-bottom: 1.6rem; position: relative; overflow: hidden; }
+.global-now-playing-slot { padding: .75rem 1rem 0; }
+.global-now-playing-slot .global-now-playing { margin: 0; }
+body:has(.page-clusters) .global-now-playing-slot { display: none; }
+@media (min-width: 65rem) { .global-now-playing-slot { display: none; } }
 
 /* Live sync console: streams the library sync's results as they happen (background or manual). */
 .sync-console { margin-bottom: 1.6rem; padding: .875rem .9375rem .75rem; border: 1px solid var(--border-2);

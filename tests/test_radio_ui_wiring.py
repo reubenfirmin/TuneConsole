@@ -5,9 +5,10 @@ WEB = Path(__file__).resolve().parents[1] / "src" / "yt_playlist" / "web"
 
 def test_launch_card_present_and_status_button_removed():
     home = (WEB / "templates" / "home.html").read_text()
+    now_playing = (WEB / "templates" / "_partials" / "now_playing.html").read_text()
     assert "radio_launch.html" in home                 # launch card included
     assert 'class="hs-radio"' not in home              # v1 status-strip button removed
-    assert 'id="radio-steer-slot"' in home             # teleport target in the now-playing card
+    assert 'id="radio-steer-slot"' in now_playing      # global now-playing card owns teleport target
 
 
 def test_launch_card_is_parked_behind_the_radio_query_param():

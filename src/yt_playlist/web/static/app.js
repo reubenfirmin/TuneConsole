@@ -112,16 +112,16 @@ document.addEventListener('htmx:beforeSwap', (event) => {
   }, sequenceLength + 20);
 });
 
-function mountHomeDock() {
-  const card = document.querySelector('.home-status');
+function mountNowPlayingDock() {
+  const card = document.querySelector('.global-now-playing');
   const slot = document.querySelector('.sidebar-dock-slot');
-  const origin = document.getElementById('home-status-origin');
+  const origin = document.querySelector('.global-now-playing-slot');
   if (!card || !slot || !origin) return;
   const target = window.matchMedia('(min-width: 65rem)').matches ? slot : origin;
   if (card.parentElement !== target) target.appendChild(card);
   if (!window.__homeDockBound) {
     window.__homeDockBound = true;
-    window.addEventListener('resize', mountHomeDock);
+    window.addEventListener('resize', mountNowPlayingDock);
   }
 }
 
@@ -221,47 +221,6 @@ function rowSort(pid, editBase) {
     },
     renumber() {
       this.$refs.body.querySelectorAll('tr.srow .rownum').forEach((el, i) => { el.textContent = i + 1; });
-    },
-
-    // --- click-to-edit genre with a custom, constrained autosuggest dropdown ---
-    editVid: null, genreList: [], gSuggest: [], gSel: -1,
-    _loadGenres() {
-      if (!this.genreList.length)
-        this.genreList = Array.from(document.querySelectorAll('#genrelist option')).map(o => o.value);
-    },
-    filterGenres(val) {
-      this._loadGenres();
-      const q = (val || '').trim().toLowerCase();
-      const all = this.genreList;
-      this.gSuggest = (q ? all.filter(g => g.toLowerCase().includes(q)) : all).slice(0, 8);
-      this.gSel = -1;
-    },
-    moveGenreSel(d) {
-      if (!this.gSuggest.length) return;
-      this.gSel = (this.gSel + d + this.gSuggest.length) % this.gSuggest.length;
-    },
-    startEditGenre(vid) {
-      this._loadGenres();
-      this.editVid = vid; this.gSuggest = []; this.gSel = -1;
-      this.$nextTick(() => {
-        const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
-        const inp = tr && tr.querySelector('.ginput');
-        const tag = tr && tr.querySelector('.gtag');
-        if (inp) { inp.value = tag ? tag.textContent.trim() : ''; inp.focus(); inp.select(); this.filterGenres(inp.value); }
-      });
-    },
-    async saveGenre(vid, value) {
-      if (this.editVid !== vid) return;          // ignore the trailing blur after enter/escape
-      this.editVid = null; this.gSuggest = []; this.gSel = -1;
-      const genre = (value || '').trim();
-      const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(vid)}"]`);
-      if (!tr) return;
-      // htmx owns the request + swap: the server re-renders the whole row, keeping the data-*
-      // the sort reads in sync. (Alpine just triggers it; it never builds the HTML itself.)
-      try {
-        await htmx.ajax('POST', `${this.editBase}/track-genre`,
-          { values: { video_id: vid, genre }, target: tr, swap: 'outerHTML' });
-      } catch (e) { /* leave the row as-is; a reload would resync */ }
     },
 
     // --- click-to-edit year ---
@@ -634,6 +593,7 @@ function homeStatus() {
   return {
     connected: false,
     nowPlaying: null,
+    sensorHealth: null,
     radioActive: false,
     radioWaiting: false,   // waiting-state net: radio is active but a deck-play attempt was blocked
     radioReason: '',       // unobtrusive note when a radio start attempt is rejected
@@ -650,6 +610,7 @@ function homeStatus() {
     init() {
       const poll = () => fetch('/bridge/status').then(r => r.json())
         .then(d => { this.connected = !!d.connected; this.nowPlaying = d.now_playing || null;
+          this.sensorHealth = d.sensor_health || null;
                      this.radioActive = !!d.radio; this.radioWaiting = !!d.radio_waiting;
                      this.radioDual = !!d.radio_dual;
                      this.radioFallbackReason = d.radio_fallback_reason || '';
@@ -777,11 +738,31 @@ function playerStatus() {
   return {
     connected: false,
     nowPlaying: null,
-    apply(d) { this.connected = !!d.connected; this.nowPlaying = d.now_playing || null; },
+    init() {
+      // Home already owns the shared status poll for radio/onboarding. Everywhere else this global
+      // instrument polls for itself, so there is one poller per page rather than one per component.
+      if (document.getElementById('home')) return;
+      const poll = () => fetch('/bridge/status').then(r => r.json()).then(d => this.apply(d)).catch(() => {});
+      poll();
+      setInterval(poll, 2500);
+    },
+    publishLike() {
+      if (!this.nowPlaying || !this.nowPlaying.video_id) return;
+      window.dispatchEvent(new CustomEvent('track-like-changed', { detail: {
+        videoId: this.nowPlaying.video_id,
+        liked: this.nowPlaying.likeStatus === 'LIKE',
+      }}));
+    },
+    apply(d) {
+      this.connected = !!d.connected;
+      this.nowPlaying = d.now_playing || null;
+      this.publishLike();
+    },
     rate(action) {
       if (!this.nowPlaying) return;
       const want = action === 'like' ? 'LIKE' : 'DISLIKE';
       this.nowPlaying.likeStatus = this.nowPlaying.likeStatus === want ? 'INDIFFERENT' : want;
+      this.publishLike();
       fetch('/now-playing/rate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }) }).catch(() => {});
     },
@@ -792,6 +773,7 @@ function playerStatus() {
     },
   };
 }
+window.mountNowPlayingDock = mountNowPlayingDock;
 
 // Route every YouTube Music play/open link through the extension so it plays in the EXISTING YouTube
 // Music tab (in the background, you stay on TuneConsole) instead of opening a new tab. Falls back to
@@ -860,9 +842,10 @@ document.addEventListener('click', function (e) {
       (d.cells || []).forEach(function (c) {
         var row = rowByVid(c.video_id); if (!row) return;
         if (c.genre) {
-          var g = row.querySelector('.gdisplay');
+          var g = row.querySelector('.genre-display-wrap');
           if (g && !g.querySelector('.gtag')) {
-            g.innerHTML = '<span class="gtag">' + esc(c.genre) + '</span>';
+            var hint = g.querySelector('.ghint');
+            if (hint) hint.outerHTML = '<span class="gtag">' + esc(c.genre) + '</span>';
             row.setAttribute('data-genre', String(c.genre).toLowerCase());
           }
         }

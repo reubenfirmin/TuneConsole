@@ -15,6 +15,23 @@ def test_sync_button_absent_from_playlists_tab(live_app, page):
     assert page.get_by_role("button", name="Full sync").count() == 0
 
 
+def test_now_playing_widget_is_global(live_app, page):
+    page.route("**/bridge/status", lambda route: route.fulfill(json={
+        "connected": True,
+        "now_playing": {"title": "Global Song", "artist": "Global Artist",
+                        "thumbnail": "", "likeStatus": "INDIFFERENT",
+                        "video_id": "global-v", "paused": False},
+        "sensor_health": {"healthy": True, "ytm_tabs": 1, "responding_tabs": 1,
+                          "reinjected_tabs": 0, "error": ""},
+        "radio": False, "radio_waiting": False, "radio_dual": False,
+        "radio_fallback_reason": None, "radio_upcoming": [],
+    }))
+    page.goto(f"{live_app}/playlists")
+    assert page.locator(".global-now-playing").is_visible()
+    assert page.get_by_text("Global Song", exact=True).is_visible()
+    assert page.get_by_text("Global Artist", exact=True).is_visible()
+
+
 def test_nav_has_home_and_playlists(live_app, page):
     page.goto(f"{live_app}/")
     nav = page.locator("header nav")

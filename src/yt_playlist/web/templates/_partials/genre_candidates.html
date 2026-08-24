@@ -21,7 +21,14 @@
     {% else %}
     <p class="section-note">No provider candidates were retained for this track. It was probably enriched before candidate history was recorded.</p>
     {% endif %}
-    <p class="muted genre-custom-note">For a custom value, close this and click the genre pill in the track row.</p>
+    <form class="genre-custom" hx-post="/track/{{ track.track_id }}/genre-candidates" hx-swap="none">
+      <label for="genre-custom-{{ track.track_id }}">Custom genre</label>
+      <div>
+        <input id="genre-custom-{{ track.track_id }}" name="genre" type="text" maxlength="80"
+               value="{{ track.current or '' }}" list="genrelist" autocomplete="off" required>
+        <button type="submit" class="btn-ghost">Use custom genre</button>
+      </div>
+    </form>
     <div class="modal-actions"><button type="button" class="btn-ghost" @click="open = false">Close</button></div>
   </div>
 </div>

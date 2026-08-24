@@ -65,8 +65,8 @@ def build(ctx) -> APIRouter:
         if track is None:
             return Response(status_code=404)
         value = ((await request.form()).get("genre") or "").strip()
-        allowed = {c["value"] for c in track["candidates"] if c["value"]}
-        if value not in allowed:
+        # Provider candidates and custom user labels deliberately share one write path.
+        if not value or len(value) > 80:
             return Response(status_code=400)
         store.set_track_genre(track_id, value)
         # The same track can occur on several visible rows. A reload updates all of them and their

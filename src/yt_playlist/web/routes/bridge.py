@@ -51,6 +51,7 @@ def build(ctx) -> APIRouter:
             bridge.now_playing = now_playing = None
             bridge.now_playing_seen_at = None
         return {"connected": bridge.connected, "now_playing": now_playing,
+                "sensor_health": getattr(bridge, "sensor_health", None),
                 "radio": bool(radio is not None and radio.active),
                 "radio_waiting": bool(radio is not None and getattr(radio, "waiting", False)),
                 "radio_dual": radio_dual,
@@ -666,12 +667,40 @@ def build(ctx) -> APIRouter:
                     continue
                 # The extension can push unsolicited events (not replies to a request). A play
                 # notification carries what is currently playing in the YouTube Music tab.
+                if isinstance(msg, dict) and msg.get("type") == "sensor-health":
+                    # This is operational state only: it makes the service-worker -> tab boundary
+                    # observable and never enters playback/history persistence.
+                    try:
+                        ytm_tabs = max(0, int(msg.get("ytmTabs") or 0))
+                        responding_tabs = max(0, int(msg.get("respondingTabs") or 0))
+                        reinjected_tabs = max(0, int(msg.get("reinjectedTabs") or 0))
+                    except (TypeError, ValueError):
+                        logger.warning("malformed sensor-health frame, ignoring: %r", msg)
+                        continue
+                    bridge.sensor_health = {
+                        "healthy": bool(msg.get("healthy")),
+                        "ytm_tabs": ytm_tabs,
+                        "responding_tabs": responding_tabs,
+                        "reinjected_tabs": reinjected_tabs,
+                        "error": str(msg.get("error") or "")[:500],
+                    }
+                    continue
                 if isinstance(msg, dict) and msg.get("type") == "now-heartbeat":
                     # Metadata reports are intentionally deduplicated in the extension. This
-                    # presence-only frame keeps a paused track visible without recording it as a
-                    # fresh play, while the normal expiry still clears a closed/crashed tab.
-                    if msg.get("deck") != "standby" and bridge.now_playing is not None:
-                        bridge.now_playing_seen_at = time.monotonic()
+                    # frame keeps a paused track visible without recording it as a fresh play. It
+                    # also carries a snapshot so it can rebuild UI state after Chrome throttles the
+                    # page beyond the expiry window (e.g. while switching Bluetooth audio devices).
+                    if msg.get("deck") != "standby":
+                        if msg.get("title"):
+                            bridge.now_playing = {
+                                "title": msg.get("title"), "artist": msg.get("artist"),
+                                "thumbnail": msg.get("thumbnail"),
+                                "likeStatus": msg.get("likeStatus"),
+                                "video_id": msg.get("videoId"),
+                                "paused": bool(msg.get("paused")),
+                            }
+                        if bridge.now_playing is not None:
+                            bridge.now_playing_seen_at = time.monotonic()
                     continue
                 if isinstance(msg, dict) and msg.get("type") == "play":
                     if msg.get("deck") == "standby":
@@ -806,6 +835,7 @@ def build(ctx) -> APIRouter:
             bridge.disconnect(conn_id)
             bridge.now_playing = None      # nothing is playing once the extension is gone
             bridge.now_playing_seen_at = None
+            bridge.sensor_health = None
             # #93 the WS dropping is the real "tab gone" signal (a pagehide "bye" is not: it also
             # fires on every in-tab navigation, including the radio's own). Reset the session here,
             # not on bye, so the radio does not kill itself on its own hard navigation.

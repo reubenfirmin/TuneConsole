@@ -91,11 +91,11 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     assert "Gem" in cards                        # the track appears in the card row
 
     home = c.get("/").text
-    assert 'class="home-status card card--status is-live"' in home
+    assert 'class="home-status card card--status is-live global-now-playing"' in home
 
-    # The status card is Home-only (never on the other tabs)
-    assert "home-status" not in c.get("/playlists").text
-    assert "home-status" not in c.get("/charts").text
+    # Now Playing belongs to the shared layout, not Home, so it follows the user across the app.
+    assert "global-now-playing" in c.get("/playlists").text
+    assert "global-now-playing" in c.get("/charts").text
 
 
 def test_home_feed_fragment_renders_fingerprint(store):

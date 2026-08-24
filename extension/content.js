@@ -118,6 +118,14 @@ if (!window.__tcBridgeLoaded) {
   };
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg.type === "sensor-ping") {
+      // Explicit liveness handshake: reaching this listener proves the isolated-world sensor is
+      // installed in this particular YTM tab. Keep it synchronous so the service worker can use a
+      // rejected sendMessage as the signal to reinject.
+      const v = document.querySelector("video");
+      sendResponse({ ok: true, hasVideo: !!v, paused: !!(v && v.paused), url: location.href });
+      return;
+    }
     if (msg.type === "rate") { clickRate(msg.action); return; }
     if (msg.type === "playpause") { clickPlayPause(); return; }
     if (msg.type === "ensure-playing") {
@@ -242,7 +250,18 @@ if (!window.__tcBridgeLoaded) {
     // when the track is paused and none of its metadata changes; this is deliberately a separate
     // heartbeat so it does not get persisted as another play every two seconds.
     if (key === lastNowPlaying) {
-      try { chrome.runtime.sendMessage({ type: "now-heartbeat" }); } catch (e) {}
+      // Carry the current snapshot as well as presence. Chrome can suspend/throttle this page while
+      // audio devices change; if that gap exceeds the backend's stale-card timeout, a presence-only
+      // heartbeat cannot rebuild Now Playing and the UI stays blank until the next track. This frame
+      // is still a heartbeat (never a persisted play), but is now self-healing.
+      let hvid = np.videoId || "";
+      if (!hvid) {
+        try { hvid = new URL(location.href).searchParams.get("v") || ""; } catch (e) {}
+      }
+      try { chrome.runtime.sendMessage({
+        type: "now-heartbeat", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
+        likeStatus: np.likeStatus, videoId: hvid, paused: !!np.paused,
+      }); } catch (e) {}
       return;
     }
     lastNowPlaying = key;

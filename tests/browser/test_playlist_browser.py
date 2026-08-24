@@ -8,6 +8,7 @@ alternates). Asserts on user-visible outcomes, not the transport.
 import socket
 import threading
 import time
+import re
 
 import pytest
 import uvicorn
@@ -81,24 +82,44 @@ def test_set_year_click_to_edit(live_playlist_app, page):
     expect(page.get_by_role("row").filter(has_text="Song B").get_by_text("1999")).to_be_visible()
 
 
-def test_set_genre_by_typing(live_playlist_app, page):
+def test_genre_control_opens_dialog_and_accepts_custom_value(live_playlist_app, page):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     page.goto(f"{base}/playlist/{pid}")
     row = page.get_by_role("row").filter(has_text="Song B")
-    row.locator(".gdisplay").click()
-    row.locator(".ginput").fill("Jazz")
-    row.locator(".ginput").press("Enter")
-    expect(row.get_by_text("Jazz")).to_be_visible()
+    row.get_by_role("button", name="See or change genre for Song B").click()
+    expect(page.get_by_role("heading", name="Genre for “Song B”")).to_be_visible()
+    page.get_by_label("Custom genre").fill("Jazz Fusion")
+    page.get_by_role("button", name="Use custom genre").click()
+    expect(page.get_by_role("heading", name="Mix")).to_be_visible()  # HX-Refresh completed
+    row = page.get_by_role("row").filter(has_text="Song B")
+    expect(row.get_by_text("Jazz Fusion", exact=True)).to_be_visible()
 
 
-def test_set_genre_via_suggestion_click(live_playlist_app, page):
+def test_genre_badge_itself_opens_candidate_dialog(live_playlist_app, page):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     page.goto(f"{base}/playlist/{pid}")
-    row = page.get_by_role("row").filter(has_text="Song B")
-    row.locator(".gdisplay").click()
-    row.locator(".ginput").fill("Jaz")                     # filters the autosuggest
-    row.get_by_role("button", name="Jazz", exact=True).click()   # pick the suggestion
-    expect(row.get_by_text("Jazz")).to_be_visible()
+    row = page.get_by_role("row").filter(has_text="Song A")
+    row.get_by_text("Rock", exact=True).click()
+    expect(page.get_by_role("heading", name="Genre for “Song A”")).to_be_visible()
+
+
+def test_now_playing_heart_immediately_updates_matching_playlist_row(live_playlist_app, page):
+    base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    page.route("**/bridge/status", lambda route: route.fulfill(json={
+        "connected": True,
+        "now_playing": {"title": "Song A", "artist": "Artist X", "thumbnail": "",
+                        "likeStatus": "INDIFFERENT", "video_id": "v0", "paused": False},
+        "sensor_health": {"healthy": True, "ytm_tabs": 1, "responding_tabs": 1,
+                          "reinjected_tabs": 0, "error": ""},
+        "radio": False, "radio_waiting": False, "radio_dual": False,
+        "radio_fallback_reason": None, "radio_upcoming": [],
+    }))
+    page.route("**/now-playing/rate", lambda route: route.fulfill(json={"ok": True}))
+    page.goto(f"{base}/playlist/{pid}")
+    row = page.get_by_role("row").filter(has_text="Song A")
+    expect(row.locator(".like-btn")).not_to_have_class(re.compile(r".*\bon\b.*"))
+    page.locator(".global-now-playing .hs-heart").click()
+    expect(row.locator(".like-btn")).to_have_class(re.compile(r".*\bon\b.*"))
 
 
 def test_remove_track_drops_row(live_playlist_app, page):

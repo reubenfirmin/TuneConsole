@@ -184,6 +184,50 @@ def test_now_playing_heartbeat_refreshes_presence_without_replacing_track():
         assert bridge.now_playing_seen_at > 1.0
 
 
+def test_rich_now_playing_heartbeat_restores_expired_ui_without_recording_play():
+    """A throttled YTM page may miss the eight-second presence window during an audio-device
+    switch. Its next deduplicated heartbeat must rebuild Now Playing without entering the play
+    persistence path."""
+    from yt_playlist.core.store import Store
+    store = Store(":memory:"); store.init_schema()
+    store.upsert_identity("main", "bridge", None, True)
+    bridge = Bridge()
+    app = FastAPI()
+    ctx = type("C", (), {"bridge": bridge, "store": store})()
+    app.include_router(build_bridge_route(ctx))
+    with TestClient(app) as client, client.websocket_connect(
+            "/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        assert bridge.now_playing is None
+        ws.send_json({"type": "now-heartbeat", "deck": "unknown", "title": "Recovered",
+                      "artist": "Artist", "thumbnail": "art", "likeStatus": "LIKE",
+                      "videoId": "v-recovered", "paused": False})
+        deadline = time.time() + 1
+        while time.time() < deadline and bridge.now_playing is None:
+            time.sleep(0.01)
+        assert bridge.now_playing == {
+            "title": "Recovered", "artist": "Artist", "thumbnail": "art",
+            "likeStatus": "LIKE", "video_id": "v-recovered", "paused": False,
+        }
+        assert store.play_events_since(0) == []
+
+
+def test_sensor_health_is_observable_and_clears_on_disconnect():
+    bridge = Bridge()
+    client = TestClient(_app(bridge))
+    with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        ws.send_json({"type": "sensor-health", "healthy": False, "ytmTabs": 1,
+                      "respondingTabs": 0, "reinjectedTabs": 1,
+                      "error": "content sensor did not answer"})
+        deadline = time.time() + 1
+        while time.time() < deadline and bridge.sensor_health is None:
+            time.sleep(0.01)
+        assert client.get("/bridge/status").json()["sensor_health"] == {
+            "healthy": False, "ytm_tabs": 1, "responding_tabs": 0,
+            "reinjected_tabs": 1, "error": "content sensor did not answer",
+        }
+    assert bridge.sensor_health is None
+
+
 def test_ws_disconnect_resets_radio_session_and_clears_setting():
     # #93 defect 1: the WS dropping is the real "tab gone" signal (unlike a pagehide "bye", which
     # also fires on the radio's own hard navigation and must NOT reset the session, see

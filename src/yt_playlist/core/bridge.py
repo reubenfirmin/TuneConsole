@@ -29,6 +29,7 @@ class Bridge:
         self._lock = threading.Lock()
         self.now_playing = None    # {"title", "artist"} pushed by the extension, or None
         self.now_playing_seen_at = None  # monotonic heartbeat; expires stale state after a tab vanishes
+        self.sensor_health = None  # latest extension probe of YTM tab/content-script health
 
     @property
     def connected(self) -> bool:

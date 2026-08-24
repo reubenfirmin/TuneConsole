@@ -2262,12 +2262,12 @@ body:not(:has(.page-clusters)) .modal {
 }
 
 @media (min-width: 65rem) {
-  body:has(.page-home) .sidebar-dock-slot {
+  body:not(:has(.page-clusters)) .sidebar-dock-slot {
     display: block;
     width: 100%;
     margin-block-start: auto;
   }
-  body:has(.page-home) .home-status {
+  body:not(:has(.page-clusters)) .global-now-playing {
     position: relative;
     inset: auto;
     width: 100%;
@@ -2280,37 +2280,28 @@ body:not(:has(.page-clusters)) .modal {
     background: var(--surface-raised);
     border: 1px solid var(--border-strong);
   }
-  body:has(.page-home) .home-status::before,
-  body:has(.page-home) .home-status .hs-dot,
-  body:has(.page-home) .home-status .hs-eq {
+  body:not(:has(.page-clusters)) .global-now-playing::before,
+  body:not(:has(.page-clusters)) .global-now-playing .hs-dot,
+  body:not(:has(.page-clusters)) .global-now-playing .hs-eq {
     display: none;
   }
-  body:has(.page-home) .home-status .hs-main,
-  body:has(.page-home) .home-status .hs-now {
+  body:not(:has(.page-clusters)) .global-now-playing .hs-main,
+  body:not(:has(.page-clusters)) .global-now-playing .hs-now {
     width: 100%;
   }
-  body:has(.page-home) .home-status .hs-now {
+  body:not(:has(.page-clusters)) .global-now-playing .hs-now {
     display: grid;
     grid-template-columns: 3.25rem minmax(0, 1fr);
     gap: .55rem .65rem;
     align-items: center;
   }
-  body:has(.page-home) .home-status:has(.hs-now) .hs-art {
+  body:not(:has(.page-clusters)) .global-now-playing:has(.hs-now) .hs-art {
     grid-column: 1;
     grid-row: 1;
     width: 3.25rem;
     height: 3.25rem;
   }
-  body:has(.page-home) .home-status .hs-playpause {
-    grid-column: 1;
-    grid-row: 1;
-    z-index: 1;
-    align-self: end;
-    justify-self: end;
-    color: var(--light-source);
-    background: color-mix(in srgb, var(--surface-sunk) 72%, transparent);
-  }
-  body:has(.page-home) .home-status:has(.hs-now) .hs-now-text {
+  body:not(:has(.page-clusters)) .global-now-playing:has(.hs-now) .hs-now-text {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
@@ -2318,30 +2309,30 @@ body:not(:has(.page-clusters)) .modal {
     grid-row: 1;
     gap: .05rem;
   }
-  body:has(.page-home) .home-status:has(.hs-now) .hs-now-title {
+  body:not(:has(.page-clusters)) .global-now-playing:has(.hs-now) .hs-now-title {
     max-width: 100%;
     font-size: var(--type-ui);
   }
-  body:has(.page-home) .home-status .hs-now-artist {
+  body:not(:has(.page-clusters)) .global-now-playing .hs-now-artist {
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     font-size: var(--type-xs);
   }
-  body:has(.page-home) .home-status .hs-now-artist::before { content: none; }
-  body:has(.page-home) .home-status .hs-rate-group {
+  body:not(:has(.page-clusters)) .global-now-playing .hs-now-artist::before { content: none; }
+  body:not(:has(.page-clusters)) .global-now-playing .hs-rate-group {
     grid-column: 1 / -1;
     grid-row: 2;
     margin: 0;
   }
-  body:has(.page-home) .home-status .hs-meta {
+  body:not(:has(.page-clusters)) .global-now-playing .hs-meta {
     width: 100%;
     padding: .55rem 0 0 !important;
     border-block-start: 1px solid var(--border);
     flex-wrap: wrap;
     gap: .25rem .65rem;
   }
-  body:has(.page-home) .home-status .hs-sync {
+  body:not(:has(.page-clusters)) .global-now-playing .hs-sync {
     white-space: normal;
     line-height: 1.35;
   }

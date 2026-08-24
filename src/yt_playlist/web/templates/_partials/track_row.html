@@ -53,27 +53,13 @@
            @blur="saveYear('{{ t.video_id }}', $event.target.value)">
   </td>
   <td class="mb-genre">
-    <span class="gdisplay" x-show="editVid !== '{{ t.video_id }}'"
-          @click="startEditGenre('{{ t.video_id }}')" title="Click to set genre">
-      {% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">＋</span>{% endif %}
-    </span>
-    <button type="button" class="genre-info" title="See genre candidates" aria-label="See genre candidates for {{ t.title }}"
+    <button type="button" class="genre-display-wrap" title="See or change genre"
+            aria-label="See or change genre for {{ t.title }}"
             hx-get="/track/{{ t.track_id }}/genre-candidates" hx-target="#genre-candidates-modal"
-            hx-swap="innerHTML">ⓘ</button>
-    <span class="ginput-wrap" x-show="editVid === '{{ t.video_id }}'" x-cloak>
-      <input class="ginput" type="text" autocomplete="off"
-             @input="filterGenres($event.target.value)"
-             @keydown.enter.prevent="saveGenre('{{ t.video_id }}', gSel >= 0 ? gSuggest[gSel] : $event.target.value)"
-             @keydown.escape="editVid = null" @keydown.arrow-down.prevent="moveGenreSel(1)"
-             @keydown.arrow-up.prevent="moveGenreSel(-1)"
-             @blur="saveGenre('{{ t.video_id }}', $event.target.value)">
-      <div class="genre-suggest" x-show="gSuggest.length" x-cloak>
-        <template x-for="(g, i) in gSuggest" :key="g">
-          <button type="button" class="genre-opt" :class="{ sel: i === gSel }"
-                  @mousedown.prevent="saveGenre('{{ t.video_id }}', g)" x-text="g"></button>
-        </template>
-      </div>
-    </span>
+            hx-swap="innerHTML">
+      {% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">Set genre</span>{% endif %}
+      <span class="genre-info" aria-hidden="true">ⓘ</span>
+    </button>
   </td>
   <td class="num mono">{{ t.plays or '' }}</td>
   <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>

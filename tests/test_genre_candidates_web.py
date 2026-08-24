@@ -48,7 +48,9 @@ def test_candidate_choice_updates_canonical_genre_and_refreshes(store):
     assert store.genre_provenance(tid)["current"] == "Art Pop"
 
 
-def test_candidate_choice_rejects_unretained_value(store):
+def test_custom_genre_is_accepted_and_empty_value_rejected(store):
     client, iid = _client(store)
     _pid, tid = _seed(store, iid)
-    assert client.post(f"/track/{tid}/genre-candidates", data={"genre": "Metal"}).status_code == 400
+    assert client.post(f"/track/{tid}/genre-candidates", data={"genre": "Dream Metal"}).status_code == 204
+    assert store.genre_provenance(tid)["current"] == "Dream Metal"
+    assert client.post(f"/track/{tid}/genre-candidates", data={"genre": ""}).status_code == 400

@@ -42,7 +42,14 @@ async function inject(tabId) {
     // The MAIN-world now-playing companion (reads the page's MediaSession).
     await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", files: ["nowplaying_main.js"] });
     await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", files: ["observer_main.js"] });
-  } catch (e) {}
+    return { ok: true, error: "" };
+  } catch (e) {
+    // Injection failures used to disappear here, leaving the backend "connected" with no tab
+    // sensor and no explanation. Preserve the failure for the health report and DevTools.
+    const error = String(e && e.message ? e.message : e);
+    console.warn("[TuneConsole] YTM sensor injection failed for tab", tabId, error);
+    return { ok: false, error };
+  }
 }
 async function injectAllYtmTabs() {
   const tabs = await chrome.tabs.query({ url: "https://music.youtube.com/*" });
@@ -54,6 +61,42 @@ async function injectAllYtmTabs() {
 async function resyncNowPlaying() {
   const tabs = await chrome.tabs.query({ url: "https://music.youtube.com/*" });
   for (const t of tabs) { try { await chrome.tabs.sendMessage(t.id, { type: "resync-now" }); } catch (e) {} }
+}
+
+async function pingSensor(tabId) {
+  try {
+    const reply = await chrome.tabs.sendMessage(tabId, { type: "sensor-ping" });
+    return reply && reply.ok ? { ok: true, reply } : { ok: false, error: "invalid sensor reply" };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+// Observable + self-healing tab boundary. A live WebSocket proves only the service worker is alive;
+// this independently proves that each YTM tab has a responding content sensor. One failed probe gets
+// one reinjection and retry, and the result is reported to /bridge/status without touching play data.
+async function probeSensorHealth() {
+  let tabs = [], responding = 0, reinjected = 0, errors = [];
+  try { tabs = await chrome.tabs.query({ url: "https://music.youtube.com/*" }); }
+  catch (e) { errors.push(String(e && e.message ? e.message : e)); }
+  for (const tab of tabs) {
+    let probe = await pingSensor(tab.id);
+    if (!probe.ok) {
+      const installed = await inject(tab.id);
+      if (installed.ok) reinjected += 1;
+      else errors.push(installed.error);
+      probe = installed.ok ? await pingSensor(tab.id) : probe;
+    }
+    if (probe.ok) responding += 1;
+    else errors.push(`tab ${tab.id}: ${probe.error || "sensor did not answer"}`);
+  }
+  const report = { type: "sensor-health", ytmTabs: tabs.length, respondingTabs: responding,
+                   reinjectedTabs: reinjected, healthy: tabs.length > 0 && responding === tabs.length,
+                   error: errors.filter(Boolean).join("; ").slice(0, 500) };
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send(JSON.stringify(report)); } catch (e) {}
+  }
+  return report;
 }
 
 // On extension install/reload, reload any open YouTube Music tabs so they pick up the fresh content
@@ -733,7 +776,7 @@ function connect() {
   ws = sock;
   sock.onopen = async () => {
     console.log("[TuneConsole bridge] connected");
-    await injectAllYtmTabs();   // make sure existing tabs have the content script (and now-playing watcher)
+    await probeSensorHealth();  // prove/recover the tab sensor; reports failures instead of hiding them
     resyncNowPlaying();         // backend cleared now_playing on the last disconnect; re-emit the current track
   };
   sock.onmessage = async (ev) => {
@@ -832,7 +875,11 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
       playlist: msg.playlist || "", brandId: msg.brandId || "", paused: !!msg.paused, deck }));
   } else if (msg.type === "now-heartbeat") {
-    ws.send(JSON.stringify({ type: "now-heartbeat", deck }));
+    // Metadata makes the non-persisting heartbeat able to restore a card that aged out while Chrome
+    // throttled the YTM page (commonly during an audio-device switch).
+    ws.send(JSON.stringify({ type: "now-heartbeat", deck, title: msg.title, artist: msg.artist,
+      thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
+      paused: !!msg.paused }));
   } else if (msg.type === "pevent") {
     ws.send(JSON.stringify(Object.assign({}, msg, { deck })));   // #91 already a flat, self-describing frame
   }
@@ -841,7 +888,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
 // Belt and suspenders: an alarm wakes the service worker periodically so it reconnects if the
 // socket ever dropped while it was suspended (the backend ping keeps it alive while connected).
 chrome.alarms.create("bridge-keepalive", { periodInMinutes: 0.4 });
-chrome.alarms.onAlarm.addListener(connect);
+chrome.alarms.onAlarm.addListener(() => { connect(); probeSensorHealth(); });
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 chrome.runtime.onInstalled.addListener(reloadYtmTabs);   // reload open YTM tabs so one reload suffices
@@ -872,6 +919,9 @@ async function dedupeAppTabs() {
   }
 }
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.status === "complete" && tab.url && tab.url.startsWith("https://music.youtube.com/")) {
+    probeSensorHealth();
+  }
   if (info.status === "complete" && tab.url && tab.url.startsWith("http://127.0.0.1:8765/")) {
     dedupeAppTabs();
   }
