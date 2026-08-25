@@ -111,8 +111,9 @@ else. **`/setup`** is optional and only worth visiting if you have **multiple Yo
 Syncing is automatic: a full library sync runs once the extension is connected, then refreshes daily,
 and plays are captured live.
 
-You can backfill your full listening history by importing a Google Takeout JSON export from the
-**Import** panel in Setup. The import processes entirely locally and accepts JSON exports only.
+You can backfill listening history from a Google Takeout export or Spotify Extended Streaming
+History in the **Import** panel in Setup. Both imports process entirely locally and accept the
+downloaded zip directly (Google's extracted JSON or HTML and Spotify's audio-history JSON also work).
 
 On Linux, config and data live in `~/.config/yt-playlist/` and `~/.local/share/yt-playlist/`. The
 macOS app uses `~/Library/Application Support/TuneConsole`, with logs under

@@ -88,8 +88,17 @@ def test_genre_control_opens_dialog_and_accepts_custom_value(live_playlist_app, 
     row = page.get_by_role("row").filter(has_text="Song B")
     row.get_by_role("button", name="See or change genre for Song B").click()
     expect(page.get_by_role("heading", name="Genre for “Song B”")).to_be_visible()
+    override = page.get_by_role("button", name="Override")
+    apply = page.get_by_role("button", name="Apply genre")
+    ob, ab = override.bounding_box(), apply.bounding_box()
+    assert abs((ob["y"] + ob["height"] / 2) - (ab["y"] + ab["height"] / 2)) < 2
+    override.click()
+    suggestions = page.locator(".genre-suggest")
+    expect(suggestions).to_be_visible()
+    assert suggestions.bounding_box()["y"] + suggestions.bounding_box()["height"] <= \
+        page.locator(".genre-picker .modal-actions").bounding_box()["y"]
     page.get_by_label("Custom genre").fill("Jazz Fusion")
-    page.get_by_role("button", name="Use custom genre").click()
+    page.get_by_role("button", name="Apply genre").click()
     expect(page.get_by_role("heading", name="Mix")).to_be_visible()  # HX-Refresh completed
     row = page.get_by_role("row").filter(has_text="Song B")
     expect(row.get_by_text("Jazz Fusion", exact=True)).to_be_visible()

@@ -45,8 +45,21 @@ class EnrichmentRepo(Repo):
                 if pair not in seen:
                     candidates.append({"provider": pair[0], "value": pair[1]})
                     seen.add(pair)
+        options = []
+        by_value = {}
+        for candidate in candidates:
+            value = candidate["value"]
+            if not value:
+                continue
+            option = by_value.get(value)
+            if option is None:
+                option = {"value": value, "providers": []}
+                by_value[value] = option
+                options.append(option)
+            if candidate["provider"] not in option["providers"]:
+                option["providers"].append(candidate["provider"])
         return {"track_id": track["id"], "title": track["title"], "artist": track["artist"],
-                "current": track["genre"], "candidates": candidates}
+                "current": track["genre"], "candidates": candidates, "options": options}
 
     @synchronized
     def log_enrichment(self, track_id, run_id, provider, field, value, now=None) -> None:
@@ -209,6 +222,23 @@ class EnrichmentRepo(Repo):
         self.conn.execute(
             f"UPDATE tracks SET first_enriched_at = COALESCE(first_enriched_at, ?), "
             f"last_enriched_at = ? WHERE id IN ({qs})", [now, now, *track_ids])
+        self.conn.commit()
+
+    @synchronized
+    def requeue_enrichment(self, track_ids) -> None:
+        """Put explicitly requested incomplete tracks back on the worker's primary queue.
+
+        A prior provider miss is normally retried only by the slow stale sweep. Adding a genreless
+        suggestion is fresh user intent, so it deserves an immediate retry even when that library
+        track was attempted before.
+        """
+        track_ids = list(dict.fromkeys(track_ids))
+        if not track_ids:
+            return
+        qs = ",".join("?" * len(track_ids))
+        self.conn.execute(
+            f"UPDATE tracks SET first_enriched_at=NULL, last_enriched_at=NULL WHERE id IN ({qs})",
+            track_ids)
         self.conn.commit()
 
     @synchronized

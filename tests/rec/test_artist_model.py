@@ -225,6 +225,7 @@ def test_related_artist_suggestions_pulls_out_of_corpus():
         _playlist(s, iid, f"PA{p}", cluster)
     target = s.upsert_playlist(iid, "TARGET", "t", 1, "h", 0.0)
     s.set_playlist_tracks(target, [cluster[0]])               # playlist of just A0
+    s.set_track_genre(cluster[0], "Techno")
     artist_model.build_collab_and_store(s, dim=4)
     s.cache_similar(normalize("A0"), [["Gamma", 0.9]], now=1.0)
     s.upsert_discovered_track("song x|gamma", "vg", "Song X", "Gamma", "", None, "Techno", None, "src", 1.0)
@@ -235,3 +236,7 @@ def test_related_artist_suggestions_pulls_out_of_corpus():
     g = next(x for x in sugg if x.key == "song x|gamma")
     assert g.lane == "related_artist" and g.reason.startswith("New:")
     assert not (keys & set(s.get_playlist_track_keys(target)))   # never the playlist's own tracks
+
+    complete = recommend.complete_playlist(s, target, now=1.0)
+    picked = next(x for x in complete if x.key == "song x|gamma")
+    assert picked.reason == "New · Related artist · shared techno genre"

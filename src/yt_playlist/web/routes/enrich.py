@@ -1,8 +1,13 @@
 """Tools › Enrichment: corpus coverage charts + worker state/pause, all served from the store's
 enrichment stats. The page polls /enrich/stats so the bars advance live as the worker drains."""
-from fastapi import APIRouter, Request
-from fastapi.responses import Response
+import asyncio
+import json
+import threading
 
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+
+from yt_playlist.providers import enrichment, waterfall
 from yt_playlist.web import viz
 
 
@@ -58,6 +63,48 @@ def build(ctx) -> APIRouter:
     @router.get("/track/{track_id}/genre-candidates")
     def genre_candidates(request: Request, track_id: int):
         return _genre_candidates(request, track_id)
+
+    @router.post("/track/{track_id}/genre-lookup")
+    def genre_lookup(track_id: int):
+        """Start the normal provider waterfall for one track; progress streams over SSE."""
+        track = store.track_for_waterfall(track_id)
+        if track is None:
+            return Response(status_code=404)
+        job = ctx.jobs.create()
+        job.source = "genre-dialog"
+
+        def run():
+            try:
+                waterfall.run_waterfall(store, [track], enrichment.load_config(store), job.events.append)
+            except Exception as exc:  # noqa: BLE001
+                job.error = str(exc) or type(exc).__name__
+                job.events.append({"type": "err", "text": f"Lookup failed: {job.error}"})
+            finally:
+                job.done = True
+
+        threading.Thread(target=run, daemon=True).start()
+        return JSONResponse({"job_id": job.id})
+
+    @router.get("/track/genre-lookup/events/{job_id}")
+    async def genre_lookup_events(request: Request, job_id: int):
+        job = ctx.jobs.get(job_id)
+        if job is None or job.source != "genre-dialog":
+            raise HTTPException(status_code=404, detail="no such genre lookup")
+
+        async def events():
+            sent = 0
+            while True:
+                while sent < len(job.events):
+                    yield f"data: {json.dumps(job.events[sent])}\n\n"
+                    sent += 1
+                if job.done:
+                    yield f"data: {json.dumps({'type': 'end', 'error': job.error})}\n\n"
+                    return
+                if await request.is_disconnected():
+                    return
+                await asyncio.sleep(.1)
+
+        return StreamingResponse(events(), media_type="text/event-stream")
 
     @router.post("/track/{track_id}/genre-candidates")
     async def choose_genre_candidate(request: Request, track_id: int):

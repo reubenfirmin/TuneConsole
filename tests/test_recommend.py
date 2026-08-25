@@ -186,6 +186,8 @@ def test_complete_playlist_suggests_fitting_owned_tracks(store):
     a = store.upsert_track("v1", "Anchor", "Band", None, None)      # in the target playlist
     b = store.upsert_track("v2", "Bonus", "Band", None, None)       # same artist, not in target
     c = store.upsert_track("v3", "Cooc", "Other", None, None)       # co-occurs with anchor elsewhere
+    for tid in (a, b, c):
+        store.set_track_genre(tid, "Techno")
     target = store.upsert_playlist(iid, "PT", "Target", 1, "h", 0.0)
     store.set_playlist_tracks(target, [a])
     other = store.upsert_playlist(iid, "PO", "Other", 3, "h2", 0.0)
@@ -195,9 +197,25 @@ def test_complete_playlist_suggests_fitting_owned_tracks(store):
     titles = {i.title for i in items}
 
     assert "Bonus" in titles          # same artist as a member
-    assert "Cooc" in titles           # co-occurs with a member in another playlist
+    assert "Cooc" not in titles       # playlist overlap alone is deliberately not eligibility
     assert "Anchor" not in titles     # already in the playlist
     assert all(i.reason for i in items)
+
+
+def test_complete_playlist_rejects_genreless_embedding_neighbor(store, monkeypatch):
+    iid = store.upsert_identity("main", "cred", None, True)
+    seed = store.upsert_track("v1", "Anchor", "Seed Artist", None, None)
+    store.upsert_track("v2", "Candidate", "Other Artist", None, None)
+    target = store.upsert_playlist(iid, "PT", "Target", 1, "h", 0.0)
+    store.set_playlist_tracks(target, [seed])
+    seed_key, candidate_key = next(iter(store.get_playlist_track_keys(target))), "candidate|other artist"
+    store.replace_rec_vectors([(seed_key, b"vector")])  # select the embedding branch
+    monkeypatch.setattr(embed, "centroid_neighbors",
+                        lambda *args, **kwargs: [(candidate_key, 0.9)])
+
+    items = recommend.complete_playlist(store, target, limit=4)
+
+    assert items == []                 # neither a genre match nor artist-model relation
 
 
 def test_take_action_auth_and_cleanup_no_sync(store):
@@ -329,6 +347,8 @@ def test_complete_playlist_caps_flooding_artist_on_eclectic_playlist(store):
     for n in range(9):
         a = f"Art{n}"
         others[a] = [store.upsert_track(f"a{n}_{i}", f"{a} song {i}", a, None, None) for i in range(2)]
+    for tid in wl + [t for ts in others.values() for t in ts]:
+        store.set_track_genre(tid, "Techno")
     # eclectic target: 1 WL + 1 from each of the 9 others -> 10 distinct artists
     target = store.upsert_playlist(iid, "PT", "Eclectic", 10, "h", 0.0)
     store.set_playlist_tracks(target, [wl[0]] + [others[a][0] for a in others])
@@ -340,6 +360,7 @@ def test_complete_playlist_caps_flooding_artist_on_eclectic_playlist(store):
     by_artist = Counter(i.artist for i in items)
     assert by_artist.get("WL", 0) <= 2     # the big-catalog artist no longer floods (was ~9)
     assert len(by_artist) >= 4             # eclectic variety preserved
+    assert len({i.artist for i in items[:4]}) == 4  # first round deals one card per artist
 
 
 def test_playlist_facets_groups_genres_eras_tracks(store):

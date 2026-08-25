@@ -97,6 +97,14 @@ class TrackRepo(Repo):
         return [dict(r) for r in rows]
 
     @synchronized
+    def track_for_waterfall(self, track_id) -> dict | None:
+        """One track for an explicit user-requested lookup, even if other metadata is complete."""
+        row = self.conn.execute(
+            "SELECT id, video_id, title, artist, mb_recording_id, thumbnail FROM tracks WHERE id=?",
+            (track_id,)).fetchone()
+        return dict(row) if row is not None else None
+
+    @synchronized
     def album_tracks_for_waterfall(self, album_browse_id) -> list:
         """A saved album's folded-in tracks the waterfall still has work for, album-scoped twin of
         tracks_for_waterfall."""

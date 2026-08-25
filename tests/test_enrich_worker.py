@@ -71,3 +71,16 @@ def test_enrichment_fills_via_waterfall_are_persisted(store):
     w = make_worker(store, now=1000.0, fill=lambda s, tr: s.set_track_enrichment(tr["id"], "Rock", "1999"))
     w.drain_once()
     assert store.coverage_stats()["genre"] == 1
+
+
+def test_tracks_skipped_by_waterfall_remain_in_primary_queue(store):
+    first = _unprocessed(store, "v1", "One")
+    second = store.upsert_track("v2", "Two", "A", None, 200, created_at=1.0)
+    w = make_worker(store, now=1000.0)
+    w.waterfall_fn = lambda *_args, **_kwargs: [first]
+    assert w.drain_once(limit=10) == 1
+    assert store.conn.execute(
+        "SELECT first_enriched_at FROM tracks WHERE id=?", (first,)).fetchone()[0] == 1000.0
+    assert store.conn.execute(
+        "SELECT first_enriched_at FROM tracks WHERE id=?", (second,)).fetchone()[0] is None
+    assert [t["id"] for t in store.next_enrich_batch(10)] == [second]

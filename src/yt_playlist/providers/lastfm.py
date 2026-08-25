@@ -225,7 +225,7 @@ def enrich(title, artist, key):
             _record_page_result(True)
         except Exception as e:  # noqa: BLE001 - a missing year is a miss, not a failure
             _record_page_result(False)
-            logger.info("Last.fm album page unavailable for %s: %s", album_url, e)
+            logger.debug("Last.fm album page unavailable for %s: %s", album_url, e)
     return (genre, year)
 
 

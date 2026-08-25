@@ -1,0 +1,5 @@
+{# A template is deliberately used as neutral staging: parsing a tr beside a div causes browsers to
+   discard or relocate it before HTMX can append it to the playlist table. app.js moves its content. #}
+<div class="suggestion-add-result" data-track-count="{{ idx }}" hidden>
+  <template class="suggestion-track-row">{% include "_partials/track_row.html" %}</template>
+</div>

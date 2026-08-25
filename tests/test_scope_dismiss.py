@@ -9,6 +9,8 @@ def test_playlist_local_dismiss_only_affects_that_playlist(store):
     iid = store.upsert_identity("main", "cred", None, True)
     anchor = store.upsert_track("v1", "Anchor", "Band", None, None)
     bonus = store.upsert_track("v2", "Bonus", "Band", None, None)
+    store.set_track_genre(anchor, "Techno")
+    store.set_track_genre(bonus, "Techno")
     target = store.upsert_playlist(iid, "PT", "Target", 1, "h", 0.0)
     store.set_playlist_tracks(target, [anchor])
     store.set_playlist_tracks(store.upsert_playlist(iid, "PO", "Other", 2, "h2", 0.0), [anchor, bonus])

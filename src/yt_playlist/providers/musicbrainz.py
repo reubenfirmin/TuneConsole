@@ -149,7 +149,7 @@ def _artist_genre(mbid):
         try:
             art = _get(f"artist/{mbid}", {"inc": "genres+tags", "fmt": "json"})
         except Exception as e:  # noqa: BLE001
-            logger.warning("MB artist lookup failed for %s: %s", mbid, e)
+            logger.debug("MB artist lookup failed for %s: %s", mbid, e)
             return None        # transient failure: don't cache, so a later track retries
         _artist_genre_cache[mbid] = _top_label(art)   # cache only on success (incl. a legit None)
     return _artist_genre_cache.get(mbid)
@@ -179,7 +179,7 @@ def _search_recordings(title, artist):
     try:
         res = _get("recording", {"query": query, "fmt": "json", "limit": "25"})
     except Exception as e:  # noqa: BLE001
-        logger.warning("MB search failed for %r / %r: %s", title, artist, e)
+        logger.debug("MB search failed for %r / %r: %s", title, artist, e)
         return []
     return res.get("recordings") or []
 
@@ -248,7 +248,7 @@ def _genre_year(recordings):
             genre = _top_label(full)
             year = year or _earliest_year([full])
         except Exception as e:  # noqa: BLE001
-            logger.warning("MB lookup failed for %s: %s", mbid, e)
+            logger.debug("MB lookup failed for %s: %s", mbid, e)
     if not genre:                              # recording had no genre/tag, so use the artist's
         genre = _artist_genre(artist_mbid)
     return (genre, year)

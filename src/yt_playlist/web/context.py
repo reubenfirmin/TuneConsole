@@ -55,12 +55,6 @@ class Ctx:
     radio: object | None = None        # #93 in-process RadioSession (dynamic radio), set in create_app
     # Guards library sync so the background sync daemon and a manual POST /sync never run at once.
     sync_lock: object = field(default_factory=threading.Lock)
-    # Pending Spotify PKCE attempts, keyed by the unguessable OAuth state. Verifiers never touch
-    # disk and expire in ten minutes; completed/failed callbacks consume their entry once.
-    spotify_oauth: dict = field(default_factory=dict)
-    # Short-lived import previews. They contain transient Spotify DTOs and resolved YouTube ids,
-    # never DB rows; confirm consumes the token and expiry cleanup drops abandoned previews.
-    spotify_imports: dict = field(default_factory=dict)
 
     def __post_init__(self):
         raw = self.store.get_setting(AUTH_EXPIRED_KEY)

@@ -2,33 +2,62 @@
      @click="open = false" @keydown.escape.window="open = false">
   <div class="modal genre-candidates" @click.stop x-transition.scale.origin.center>
     <h3>Genre for &ldquo;{{ track.title }}&rdquo;</h3>
-    <p class="section-note">{{ track.artist }} · provider answers retained from enrichment.</p>
-    {% if track.current %}
-    <div class="genre-current"><span>Currently used</span><strong class="gtag">{{ track.current }}</strong></div>
-    {% endif %}
-    {% if track.candidates %}
-    <div class="genre-candidate-list">
-      {% for c in track.candidates %}
-      <form hx-post="/track/{{ track.track_id }}/genre-candidates" hx-swap="none">
-        <input type="hidden" name="genre" value="{{ c.value }}">
-        <button type="submit" class="genre-candidate"{% if not c.value or c.value == track.current %} disabled{% endif %}>
-          <span><strong>{{ c.value or 'No genre returned' }}</strong><small>{{ c.provider }}</small></span>
-          {% if c.value == track.current %}<em>Current</em>{% elif c.value %}<em>Use this</em>{% endif %}
+    <p class="section-note genre-track-artist">{{ track.artist }}</p>
+    <form class="genre-picker" hx-post="/track/{{ track.track_id }}/genre-candidates" hx-swap="none"
+          x-data='genreDialog({{ track.track_id }}, {{ (track.current or "")|tojson }})'>
+      {% if track.options %}
+      <fieldset class="genre-option-list">
+        {% for option in track.options %}
+        <label class="genre-option" :class="{ selected: choice === {{ option.value|tojson }} }">
+          <input type="radio" x-model="choice" value="{{ option.value }}">
+          <span class="genre-option-value">{{ option.value }}</span>
+          <span class="genre-providers">
+            {% for provider in option.providers %}<small>{{ provider }}</small>{% endfor %}
+          </span>
+          {% if track.options|length > 1 and option.value == track.current %}<em>Current</em>{% endif %}
+        </label>
+        {% endfor %}
+      </fieldset>
+      {% else %}
+      <div class="genre-empty-state">
+        <span>No genre suggestions yet.</span>
+        <button type="button" class="genre-lookup" aria-label="Look up genre metadata"
+                title="Look up genre metadata" @click="startLookup()" :disabled="lookupRunning">
+          <span class="spinner" x-show="lookupRunning" x-cloak></span>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+               x-show="!lookupRunning"
+               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 3v4M3 5h4M6 17v4M4 19h4M13 3l2.5 6.5L22 12l-6.5 2.5L13 21l-2.5-6.5L4 12l6.5-2.5z"/>
+          </svg>
         </button>
-      </form>
-      {% endfor %}
-    </div>
-    {% else %}
-    <p class="section-note">No provider candidates were retained for this track. It was probably enriched before candidate history was recorded.</p>
-    {% endif %}
-    <form class="genre-custom" hx-post="/track/{{ track.track_id }}/genre-candidates" hx-swap="none">
-      <label for="genre-custom-{{ track.track_id }}">Custom genre</label>
-      <div>
-        <input id="genre-custom-{{ track.track_id }}" name="genre" type="text" maxlength="80"
-               value="{{ track.current or '' }}" list="genrelist" autocomplete="off" required>
-        <button type="submit" class="btn-ghost">Use custom genre</button>
+      </div>
+      {% endif %}
+      <div class="genre-lookup-progress" x-show="lookupRunning || lookupFinished" x-cloak>
+        <div class="enrich-bar"><i :style="`width:${lookupPct}%`"></i></div>
+        <span class="enrich-status" x-text="lookupStatus"></span>
+      </div>
+      <div class="genre-override" x-show="overriding" x-cloak>
+        <label for="genre-custom-{{ track.track_id }}">Custom genre</label>
+        <div class="ginput-wrap">
+          <input id="genre-custom-{{ track.track_id }}" class="ginput" type="text" maxlength="80"
+                 x-ref="override" x-model="choice" autocomplete="off" placeholder="Type or choose a genre"
+                 @input="filterGenres()" @focus="filterGenres()" @keydown.escape="overriding = false">
+          <div class="genre-suggest" x-show="genreSuggestions.length" x-cloak>
+            <template x-for="genre in genreSuggestions" :key="genre">
+              <button type="button" class="genre-opt" @click="choice = genre; genreSuggestions = []"
+                      x-text="genre"></button>
+            </template>
+          </div>
+        </div>
+      </div>
+      <input type="hidden" name="genre" :value="choice">
+      <div class="modal-actions">
+        <button type="button" class="genre-override-link" x-show="!overriding" @click="openOverride()">
+          Override
+        </button>
+        <button type="button" class="btn-ghost" @click="open = false">Cancel</button>
+        <button type="submit" class="btn-primary" :disabled="!choice.trim()">Apply genre</button>
       </div>
     </form>
-    <div class="modal-actions"><button type="button" class="btn-ghost" @click="open = false">Close</button></div>
   </div>
 </div>

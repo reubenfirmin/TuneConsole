@@ -124,36 +124,46 @@
     </div>
   </div>
 
-  {# ── Tab 4: Import YouTube history (Google Takeout) ────────────────────────────────── #}
+  {# ── Tab 4: Local listening-history imports ─────────────────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'import'" x-cloak>
     <div class="card">
-      <h2 class="section section-flush">Import playlists from Spotify</h2>
-      {% if spotify_connected %}
-      <p class="section-note"><strong>Connected{% if spotify_profile_name %} as
-        {{ spotify_profile_name }}{% endif %}.</strong> Spotify is used only while you choose and copy
-        playlists into YouTube Music. Its playlist contents never enter TuneConsole’s taste model.</p>
-      <div class="btn-row btn-row-spaced">
-        <a class="btn-primary btn-sm" href="/spotify/import">Choose playlists</a>
-        <form method="post" action="/spotify/disconnect">
-          <button class="btn-ghost btn-sm" type="submit">Disconnect Spotify</button>
-        </form>
-      </div>
-      {% else %}
-      <p class="section-note">Create a Spotify developer app, add the callback below, then paste its
-        Client ID. TuneConsole uses read-only playlist access with PKCE—there is no client secret.</p>
-      <label>Spotify callback URL</label>
-      <code class="mono">{{ spotify_redirect_uri }}</code>
-      <form method="post" action="/spotify/connect">
-        <label for="spotify-client-id">Spotify Client ID</label>
-        <input id="spotify-client-id" name="client_id" value="{{ spotify_client_id }}"
-               autocomplete="off" required placeholder="Client ID">
+      <h2 class="section section-flush">Import Spotify listening history</h2>
+      <div id="spotify-import-block">
+      <p class="section-note">Upload your Spotify Extended Streaming History to fold past Spotify
+        listening into TuneConsole’s taste model. Everything is processed locally on this machine:
+        the file never leaves it.</p>
+      <details class="advanced advanced-spaced">
+        <summary>How to export</summary>
+        <ul class="section-note takeout-steps">
+          <li>Open Spotify’s <a href="https://www.spotify.com/account/privacy/" target="_blank"
+            rel="noopener"><strong>Account Privacy</strong></a> page.</li>
+          <li>Under <strong>Download your data</strong>, select both
+            <strong>Account data</strong> and <strong>Extended streaming history</strong>, then request
+            the data. Spotify may ask you to confirm the request by email.</li>
+          <li>When Spotify emails that each package is ready, download and keep both zip files.
+            Account data contains your playlists, saved songs, albums, and artists; Extended
+            streaming history contains your past plays.</li>
+          <li>Upload the <strong>Extended streaming history</strong> zip here as-is. Support for the
+            separate Account data zip is coming next.</li>
+        </ul>
+      </details>
+      <form hx-post="/import/spotify" hx-target="#spotify-import-result" hx-swap="innerHTML"
+            hx-encoding="multipart/form-data" hx-disabled-elt="find button">
+        <div class="takeout-file" x-data="{ fname: '' }">
+          <label class="btn-ghost btn-sm takeout-file-label">
+            Choose file
+            <input class="visually-hidden-file" type="file" name="file"
+                   accept=".json,.zip,application/json,application/zip" required
+                   @change="fname = $event.target.files.length ? $event.target.files[0].name : ''">
+          </label>
+          <span class="section-note mono flush-margin" x-text="fname || 'no file selected'"></span>
+        </div>
         <div class="btn-row btn-row-spaced">
-          <button class="btn-primary btn-sm" type="submit">Connect Spotify</button>
+          <button type="submit" class="btn-primary btn-sm">Import Spotify history</button>
         </div>
       </form>
-      <p class="section-note">The Client ID and OAuth tokens are stored only in TuneConsole’s local
-        database. Disconnecting deletes them. Spotify playlist metadata is not retained after import.</p>
-      {% endif %}
+      <div id="spotify-import-result"></div>
+      </div>
     </div>
     <div class="card">
       <h2 class="section section-flush">Import YouTube history (Google Takeout)</h2>

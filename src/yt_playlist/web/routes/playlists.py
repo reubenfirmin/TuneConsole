@@ -208,6 +208,7 @@ def build(ctx) -> APIRouter:
         if not tracks:
             return _toast(request, "select at least one version to add")
         after_video_id = form.get("after_video_id") or None
+        from_suggestion = form.get("suggestion") == "1" and len(tracks) == 1 and not after_video_id
         try:
             await asyncio.to_thread(ctx.ops().add_tracks, pid, tracks, after_video_id)
         except ValueError as e:
@@ -218,6 +219,20 @@ def build(ctx) -> APIRouter:
         _refresh_ytm_view(ctx, store, pid)
         if after_video_id:
             _record_alt_version_events(pid, after_video_id, tracks)
+        if from_suggestion:
+            video_id = tracks[0].get("videoId")
+            details = store.playlist_tracks_detail(pid)
+            added = next((t for t in reversed(details) if t["video_id"] == video_id), None)
+            if added is not None:
+                if not added.get("genre"):
+                    store.requeue_enrichment([added["track_id"]])
+                    if ctx.enrich_worker:
+                        ctx.enrich_worker.trigger()
+                gen = _is_generated(pid)
+                return templates.TemplateResponse(request, "_partials/suggestion_added.html", {
+                    "t": added, "idx": len(details), "is_generated": gen,
+                    "mood_states": recommend.track_mood_states(store, now_fn()) if gen else {},
+                })
         return _refresh()                             # reload so the new tracks drop into the table
 
     @router.post("/playlist/{pid}/enrich")

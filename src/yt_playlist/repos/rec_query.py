@@ -197,10 +197,12 @@ class RecQueryRepo(Repo):
         out = []
         for r in self.conn.execute(
                 "SELECT identity_key k, MIN(title) title, MIN(artist) artist, MIN(album) album, "
-                "MIN(video_id) vid, MIN(thumbnail) thumb FROM tracks WHERE title<>'' GROUP BY identity_key"):
+                "MIN(video_id) vid, MIN(thumbnail) thumb, MIN(NULLIF(genre,'')) genre "
+                "FROM tracks WHERE title<>'' GROUP BY identity_key"):
             if r["k"].rsplit("|", 1)[-1] in want:
                 out.append({"key": r["k"], "title": r["title"], "artist": r["artist"],
-                            "album": r["album"] or "", "video_id": r["vid"], "thumbnail": r["thumb"]})
+                            "album": r["album"] or "", "video_id": r["vid"], "thumbnail": r["thumb"],
+                            "genre": r["genre"] or ""})
         return out
 
     @synchronized

@@ -315,7 +315,7 @@ class HistoryRepo(Repo):
 
     @synchronized
     def import_plays(self, identity_id, plays) -> int:
-        """#61 Bulk (track, day) backfill from a Takeout import: [(identity_key, ts)] -> the same
+        """Bulk (track, day) backfill from a local history import: [(identity_key, ts)] -> the same
         per-date snapshot + (snapshot, key) dedup the live/sync paths use, so imports, syncs, and
         live capture can all see the same play without double counting. Returns NEW rows."""
         by_date: dict = {}
@@ -339,24 +339,25 @@ class HistoryRepo(Repo):
         return added
 
     @synchronized
-    def import_play_events(self, identity_id, rows) -> int:
-        """#61 Bulk play_events backfill: [(identity_key, video_id, ts)]. Idempotency key is
+    def import_play_events(self, identity_id, rows, source="takeout") -> int:
+        """Bulk play_events backfill: [(identity_key, video_id, ts)]. Idempotency key is
         (identity, key, played_at within 2s), NOT exact timestamp equality: Takeout's HTML export
         floors timestamps to whole seconds while the JSON export carries milliseconds, so the same
         play arrives sub-second apart when a user imports one format and later the other (observed
         live: an HTML import then a JSON redo doubled every matched event). No real play of the
         same track can recur within 2 seconds, so the window never swallows a genuine play. Live
-        rows near the same instant also dedupe."""
+        rows near the same instant also dedupe. ``source`` distinguishes Takeout from other local
+        imports without changing that shared deduplication contract."""
         added = 0
         for key, vid, ts in rows:
             if not key:
                 continue
             cur = self.conn.execute(
                 "INSERT INTO play_events(identity_id, identity_key, video_id, played_at, source) "
-                "SELECT ?, ?, ?, ?, 'takeout' WHERE NOT EXISTS ("
+                "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS ("
                 "  SELECT 1 FROM play_events WHERE identity_id=? AND identity_key=? "
                 "  AND played_at BETWEEN ? - 2.0 AND ? + 2.0)",
-                (identity_id, key, vid, ts, identity_id, key, ts, ts))
+                (identity_id, key, vid, ts, source, identity_id, key, ts, ts))
             added += cur.rowcount
         self.conn.commit()
         return added

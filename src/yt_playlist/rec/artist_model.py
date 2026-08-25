@@ -253,16 +253,21 @@ def artist_track_candidates(store, seed_artists, topn=24, include_out_of_corpus=
     Each dict carries key/title/artist/album/video_id/thumbnail (+ out_of_corpus=True for OOC). Powers
     'Complete this playlist' beyond the library (#24). Uses exclude_owned=False so owned related artists
     contribute their tracks."""
-    related = {a for a, _ in related_artists(store, seed_artists, topn=topn, exclude_owned=False)}
-    if not related:
+    ranked = related_artists(store, seed_artists, topn=topn, exclude_owned=False)
+    scores = dict(ranked)
+    if not scores:
         return []
-    out = list(RecDao(store).tracks_by_artists(related))
+    out = list(RecDao(store).tracks_by_artists(scores))
+    for row in out:
+        row["artist_score"] = scores.get(normalize(row.get("artist") or ""), 0.0)
     if include_out_of_corpus:
         for r in store.get_discovered_tracks():
-            if normalize(r.get("artist") or "") in related:
+            artist = normalize(r.get("artist") or "")
+            if artist in scores:
                 out.append({"key": r.get("identity_key"), "title": r.get("title"),
                             "artist": r.get("artist"), "album": r.get("album") or "",
                             "video_id": r.get("video_id"), "thumbnail": r.get("thumbnail"),
+                            "genre": r.get("genre") or "", "artist_score": scores[artist],
                             "out_of_corpus": True})
     return out
 

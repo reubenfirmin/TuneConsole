@@ -1,0 +1,7 @@
+<div class="notice success">
+  <strong>Spotify import complete.</strong>
+  <span>{{ report.matched }} plays matched your library; {{ report.unmatched }} were not in your library.</span>
+  <span>{{ report.plays_added }} new track-days and {{ report.events_added }} timestamped plays were added.</span>
+  {% if report.skipped %}<span>Skipped {{ report.skipped }} non-music or unreadable entries.</span>{% endif %}
+  {% if seeded %}<span>Seeded {{ seeded }} artists for discovery.</span>{% endif %}
+</div>

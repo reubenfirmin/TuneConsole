@@ -50,14 +50,18 @@ def test_for_you_uses_taste_neighbourhood_when_built(store):
     assert any(i.reason == "In your taste neighbourhood" for i in items)
 
 
-def test_complete_playlist_uses_embedding_centroid(store):
+def test_complete_playlist_uses_same_artist_and_genre_not_track_embedding(store):
     iid, A, B = _two_clusters(store)
+    for tid in A:
+        store.set_track_genre(tid, "Techno")
+    for tid in B:
+        store.set_track_genre(tid, "Rock")
     target = store.upsert_playlist(iid, "PT", "Target", 2, "h3", 0.0)
     store.set_playlist_tracks(target, [A[0], A[1]])             # seed with two A tracks
     embed.build_and_store(store, dim=4)
     items = recommend.complete_playlist(store, target, limit=4)
     assert items
-    assert all(i.artist == "AB" for i in items)                # centroid pulls A-cluster, not B
+    assert all(i.artist == "AB" for i in items)                # same artist + genre; B is ineligible
 
 
 # --- content-space fingerprint -------------------------------------------------------------------

@@ -9,8 +9,7 @@ dependencies = [
     # contract, not ytmusicapi internals, so the security guarantee survives upgrades —
     # but we cap the major for reproducibility and to review breaking changes deliberately.
     "ytmusicapi>=1.12,<2",
-    # Direct dependency for the transient Spotify import adapter (ytmusicapi also uses requests,
-    # but TuneConsole must not rely on that implementation detail).
+    # Direct dependency for the extension bridge's guarded HTTP transport.
     "requests>=2.31,<3",
     "fastapi>=0.110",
     # [standard] pulls in a WebSocket implementation (websockets), which the extension bridge

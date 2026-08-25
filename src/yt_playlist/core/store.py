@@ -398,6 +398,18 @@ class Store:
                 "  last_enriched_at  = (SELECT MAX(created_at) FROM enrichment_log el WHERE el.track_id=tracks.id) "
                 "WHERE id IN (SELECT DISTINCT track_id FROM enrichment_log)")
             self.set_setting("enrich_ts_backfilled", "1")
+        # Older workers stamped an entire batch even when circuit breakers caused providers to skip
+        # its later tracks. A processed row with no provider log and no enrichment result has no
+        # evidence of a real attempt; clear the stamp once so it returns to the primary queue.
+        if not self.get_setting("enrich_unattempted_batch_repaired"):
+            self.conn.execute(
+                "UPDATE tracks SET first_enriched_at=NULL, last_enriched_at=NULL "
+                "WHERE first_enriched_at IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM enrichment_log e WHERE e.track_id=tracks.id) "
+                "AND (genre IS NULL OR genre='') AND (mb_year IS NULL OR mb_year='') "
+                "AND bpm IS NULL AND energy IS NULL AND danceability IS NULL "
+                "AND mb_recording_id IS NULL")
+            self.set_setting("enrich_unattempted_batch_repaired", "1")
         pcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(playlists)")}
         if "thumbnail" not in pcols:
             self.conn.execute("ALTER TABLE playlists ADD COLUMN thumbnail TEXT")

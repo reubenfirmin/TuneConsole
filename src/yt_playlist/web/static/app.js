@@ -17,6 +17,28 @@ document.addEventListener('htmx:beforeSwap', (e) => {
   if (e.detail.xhr.status === 422) { e.detail.shouldSwap = true; e.detail.isError = false; }
 });
 
+// A suggestion-add response stages its table row in a <template>. Moving it here avoids the browser's
+// special table parser relocating a bare out-of-band <tr>, while keeping the original grid tile as a
+// fixed-size vacancy so the remaining suggestions do not reflow.
+document.addEventListener('htmx:afterSwap', (e) => {
+  const tile = e.detail.target.closest && e.detail.target.closest('.tile-suggest');
+  const result = tile && tile.querySelector('.suggestion-add-result');
+  if (!result) return;
+  const template = result.querySelector('.suggestion-track-row');
+  const body = document.getElementById('playlist-track-body');
+  if (!template || !body) return;
+  const row = template.content.firstElementChild;
+  if (!row) return;
+  body.appendChild(row);
+  htmx.process(row);
+  const count = document.getElementById('playlist-track-count');
+  if (count) count.textContent = result.dataset.trackCount;
+  tile.classList.remove('suggestion-departing');
+  tile.classList.add('suggestion-vacancy');
+  tile.setAttribute('aria-hidden', 'true');
+  document.dispatchEvent(new CustomEvent('playlist-track-added'));
+});
+
 // Home generated mixes. Alpine owns the board's `focus` state; htmx fetches regenerated fragments;
 // this layer keeps the focused shell mounted and choreographs the in-place content transition.
 function genPayload(id) { return document.querySelector('#' + CSS.escape(id) + ' > .gen-card-body'); }
@@ -578,6 +600,59 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
     },
   };
 }
+
+function genreDialog(trackId, initialChoice) {
+  return {
+    trackId, choice: initialChoice || '', overriding: false,
+    genreList: [], genreSuggestions: [],
+    lookupRunning: false, lookupFinished: false, lookupPct: 0, lookupStatus: '',
+    openOverride() {
+      this.overriding = true;
+      if (!this.genreList.length)
+        this.genreList = Array.from(document.querySelectorAll('#genrelist option')).map(o => o.value);
+      this.genreSuggestions = this.genreList.slice(0, 12);
+      this.$nextTick(() => { this.$refs.override.focus(); this.$refs.override.select(); });
+    },
+    filterGenres() {
+      const q = (this.choice || '').trim().toLowerCase();
+      this.genreSuggestions = (q ? this.genreList.filter(g => g.toLowerCase().includes(q))
+                                 : this.genreList).slice(0, 12);
+    },
+    async startLookup() {
+      if (this.lookupRunning) return;
+      this.lookupRunning = true; this.lookupFinished = false; this.lookupPct = 0;
+      this.lookupStatus = 'Starting metadata lookup…';
+      let job;
+      try {
+        const response = await fetch(`/track/${this.trackId}/genre-lookup`, { method: 'POST' });
+        if (!response.ok) throw new Error('start failed');
+        job = (await response.json()).job_id;
+      } catch (e) {
+        this.lookupRunning = false; this.lookupStatus = 'Could not start lookup.'; return;
+      }
+      const stream = new EventSource(`/track/genre-lookup/events/${job}`);
+      stream.onmessage = (message) => {
+        const event = JSON.parse(message.data);
+        if (event.type === 'track') {
+          this.lookupPct = Math.round((event.i / event.n) * 100); this.lookupStatus = event.text;
+        } else if (event.type === 'info' || event.type === 'done' || event.type === 'err') {
+          this.lookupStatus = event.text;
+          if (event.type === 'done') this.lookupPct = 100;
+        } else if (event.type === 'end') {
+          stream.close(); this.lookupRunning = false; this.lookupFinished = true;
+          if (!event.error) {
+            setTimeout(() => htmx.ajax('GET', `/track/${this.trackId}/genre-candidates`,
+              { target: '#genre-candidates-modal', swap: 'innerHTML' }), 650);
+          }
+        }
+      };
+      stream.onerror = () => {
+        stream.close(); this.lookupRunning = false; this.lookupFinished = true;
+        this.lookupStatus = 'Lookup stream interrupted.';
+      };
+    },
+  };
+}
 function authBanner(initial) {
   // The "session expired" bar, seeded from the server, and updated live by the sync panel so it
   // pops up during an AJAX sync (no page reload needed).
@@ -821,6 +896,10 @@ document.addEventListener('click', function (e) {
   }
   var plId = (location.pathname.match(/^\/playlist\/(\d+)/) || [])[1];
   var metaDone = false;
+  document.addEventListener('playlist-track-added', function () {
+    metaDone = false;
+    refreshCells();
+  });
 
   // Returns true if the now-playing track is one of the rows on this page.
   function highlight(np) {
@@ -860,10 +939,10 @@ document.addEventListener('click', function (e) {
 
   function poll() {
     if (!document.querySelector('tr[data-vid]')) return;   // only on pages that list tracks
+    if (plId) refreshCells();                              // enrichment updates even when not playing
     fetch('/bridge/status').then(function (r) { return r.json(); }).then(function (d) {
       var np = d && d.connected ? d.now_playing : null;
-      // Only refresh metadata while THIS list is the one playing (stop otherwise).
-      if (highlight(np)) refreshCells();
+      highlight(np);
     }).catch(function () {});
   }
   poll();

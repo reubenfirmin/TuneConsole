@@ -64,6 +64,17 @@ def test_batch_excludes_processed_and_respects_limit(store):
     assert len(store.next_enrich_batch(1)) == 1         # limit honored
 
 
+def test_startup_requeues_legacy_processed_rows_with_no_attempt_evidence(store):
+    tid = _track(store, "v1", "Skipped", "A", created_at=1.0)
+    store.mark_enriched([tid], now=5.0)
+    store.delete_setting("enrich_unattempted_batch_repaired")
+    store.init_schema()
+    row = store.conn.execute(
+        "SELECT first_enriched_at, last_enriched_at FROM tracks WHERE id=?", (tid,)).fetchone()
+    assert row["first_enriched_at"] is None and row["last_enriched_at"] is None
+    assert [t["id"] for t in store.next_enrich_batch(10)] == [tid]
+
+
 def test_coverage_stats_and_queue_remaining(store):
     t1 = _track(store, "v1", "One", "A")
     _track(store, "v2", "Two", "B")

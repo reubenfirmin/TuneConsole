@@ -114,3 +114,24 @@ def test_should_stop_halts_before_processing(store):
     mb = FakeProv("musicbrainz", {"Hyperballad": {"genre": "Rock"}})
     _run(store, [t], [mb], _cfg(("musicbrainz", True)), should_stop=lambda: True)
     assert mb.calls == []
+
+
+def test_tracks_skipped_after_provider_breaker_are_not_reported_as_attempted(store):
+    tracks = [_track(store, f"Song {i}") for i in range(3)]
+
+    class TripsAfterFirst(FakeProv):
+        def probe(self, track, store):
+            result = super().probe(track, store)
+            self.dead = True
+            return result
+        def tripped(self):
+            return getattr(self, "dead", False)
+        def reset(self):
+            self.dead = False
+
+    provider = TripsAfterFirst("musicbrainz")
+    attempted = run_waterfall(
+        store, tracks, _cfg(("musicbrainz", True)), lambda _e: None,
+        registry={"musicbrainz": provider})
+    assert attempted == [tracks[0]["id"]]
+    assert provider.calls == ["Song 0"]

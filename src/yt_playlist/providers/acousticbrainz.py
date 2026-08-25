@@ -128,8 +128,8 @@ def enrich(mbid):
         ll = low.get("lowlevel", {})
         feat["loudness"] = _num(ll, "average_loudness")
         feat["dynamic_complexity"] = _num(ll, "dynamic_complexity")
-    except Exception as e:  # noqa: BLE001
-        logger.info("AcousticBrainz low-level miss for %s: %s", mbid, e)
+    except Exception as e:  # noqa: BLE001 - sparse frozen dataset: misses are routine
+        logger.debug("AcousticBrainz low-level miss for %s: %s", mbid, e)
     try:
         high = _get_json(f"{_API}/{mbid}/high-level").get("highlevel", {})
         feat["energy"] = derive_energy(high)
@@ -139,8 +139,8 @@ def enrich(mbid):
         feat["mood_relaxed"] = _prob(high, "mood_relaxed", "relaxed")
         feat["mood_acoustic"] = _prob(high, "mood_acoustic", "acoustic")
         feat["instrumental"] = _prob(high, "voice_instrumental", "instrumental")
-    except Exception as e:  # noqa: BLE001
-        logger.info("AcousticBrainz high-level miss for %s: %s", mbid, e)
+    except Exception as e:  # noqa: BLE001 - sparse frozen dataset: misses are routine
+        logger.debug("AcousticBrainz high-level miss for %s: %s", mbid, e)
     return feat
 
 

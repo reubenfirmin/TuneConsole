@@ -48,11 +48,6 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="playlist not found")
         now = now_fn()
         suggestions = recommend.complete_playlist(store, pid, now=now)
-        # #24/#28: append related-artist pulls (incl. out-of-corpus tracks the in-library completer
-        # can't reach), deduped against the completer's own picks.
-        have = {s.key for s in suggestions}
-        suggestions += [r for r in recommend.related_artist_suggestions(store, pid, now)
-                        if r.key not in have]
         return templates.TemplateResponse(request, "_partials/playlist_suggestions.html", {
             "suggestions": suggestions,
             "pid": pid,

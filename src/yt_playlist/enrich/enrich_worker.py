@@ -114,19 +114,23 @@ class EnrichWorker:
             return 0
         self._busy = True
         try:
-            self.waterfall_fn(store, batch, enrichment.load_config(store),
-                              on_progress=lambda e: None, should_stop=self._stop)
+            attempted = self.waterfall_fn(store, batch, enrichment.load_config(store),
+                                          on_progress=lambda e: None, should_stop=self._stop)
         finally:
             self._busy = False
         if self._stop():                     # paused/shutting down mid-batch. Re-queue it next time
             return 0
-        store.mark_enriched([t["id"] for t in batch], self.ctx.now_fn())
+        # Older injected/test waterfalls returned None; the production waterfall returns the exact
+        # subset that every selected provider actually reached. Anything skipped after a circuit
+        # breaker trips stays unprocessed and therefore remains in the primary queue.
+        attempted = ([t["id"] for t in batch] if attempted is None else attempted)
+        store.mark_enriched(attempted, self.ctx.now_fn())
         try:                                  # keep the content (genre/era) cluster space current as
             from yt_playlist.rec import embed  # coverage grows; never let a rebuild crash the drain
             embed.maybe_rebuild_content_vectors(store)
         except Exception:  # noqa: BLE001
             self.ctx.logger.warning("content-vector rebuild after enrich batch failed", exc_info=True)
-        return len(batch)
+        return len(attempted)
 
     def _drain_discovered(self, limit):
         """#50: enrich one batch of the discovered (cold) pool, newest pulls first, via DiscoveredSink,
@@ -140,18 +144,20 @@ class EnrichWorker:
             return None
         self._busy = True
         try:
-            self.waterfall_fn(store, dbatch, enrichment.load_config(store),
-                              on_progress=lambda e: None, should_stop=self._stop,
-                              sink_for=lambda t: DiscoveredSink(store, t["identity_key"]))
+            attempted = self.waterfall_fn(
+                store, dbatch, enrichment.load_config(store), on_progress=lambda e: None,
+                should_stop=self._stop,
+                sink_for=lambda t: DiscoveredSink(store, t["identity_key"]))
         finally:
             self._busy = False
         if self._stop():                      # paused/shutting down mid-batch. Re-queue it next time
             return 0
-        store.mark_discovered_enriched([t["identity_key"] for t in dbatch], self.ctx.now_fn())
+        attempted = ([t["identity_key"] for t in dbatch] if attempted is None else attempted)
+        store.mark_discovered_enriched(attempted, self.ctx.now_fn())
         try:                                  # never let a rebuild crash the drain
             from yt_playlist.rec import embed
             embed.build_discovered_content_vectors(store)
         except Exception:  # noqa: BLE001
             self.ctx.logger.warning("discovered content-vector rebuild after cold enrich failed",
                                     exc_info=True)
-        return len(dbatch)
+        return len(attempted)

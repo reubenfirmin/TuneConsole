@@ -529,49 +529,80 @@ def _take_from_ranked(candidates, limit, per_artist_cap, keep):
 
 
 def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem]:
-    """Tracks you own that fit a given playlist but aren't in it yet.
+    """Genre-compatible tracks by the playlist's own or artist-model-related artists.
 
-    Uses the taste-embedding model (nearest to the playlist's centroid) once it's built;
-    falls back to the artist/co-occurrence heuristic until then.
+    Genre is a hard eligibility boundary, evaluated against each genre region present in the
+    playlist (never an averaged playlist centroid). The artist model ranks within that compatible
+    pool. Track-level collaborative proximity is deliberately absent: sharing another playlist is
+    not evidence that copying more of it improves this one.
     """
+    from yt_playlist.rec import artist_model
+
     members = store.get_playlist_track_keys(playlist_id)
+    if not members:
+        return []
     scope = str(playlist_id)
     suppressed = store.suppressed_keys("suggest", now or 0, scope=scope)
     muted = store.muted_artists()
     member_meta = store.tracks_by_keys(members)
-    member_artists = {m["artist"] for m in member_meta.values()}
-    # Spread `limit` suggestions across the playlist's distinct artists (>=2 each) so a tightly-
-    # clustered artist can't flood an eclectic playlist's completion (the '529 repeats' bug). A
-    # single-artist playlist has 1 distinct artist, so the cap is the whole limit. It still gets
-    # plenty of that artist.
-    distinct = len({m["artist"] for m in member_meta.values()}) or 1
+    seed_artists = {normalize(m["artist"]) for m in member_meta.values() if m.get("artist")}
+    dao = RecDao(store)
+    member_genres = [g for g in dao.track_genres(members).values() if g]
+    families = {genre_map.family(g) for g in member_genres}
+    subgenres = {genre_map.subgenre(g) for g in member_genres if genre_map.subgenre(g)}
+    if not seed_artists or not families:
+        return []
+
+    related = dict(artist_model.related_artists(
+        store, seed_artists, topn=limit * 8, exclude_owned=False))
+    candidates = artist_model.artist_track_candidates(
+        store, seed_artists, topn=limit * 8, include_out_of_corpus=True)
+    # Same-artist catalog tracks are relevant without asking the model to rediscover the seed itself.
+    for c in dao.tracks_by_artists(seed_artists):
+        c["artist_score"] = 1.0
+        candidates.append(c)
+
+    distinct = len(seed_artists) or 1
     per_artist_cap = max(2, round(limit / distinct))
+    ranked = []
+    seen = set()
+    for c in candidates:
+        key, artist, genre = c.get("key"), c.get("artist") or "", c.get("genre") or ""
+        norm_artist = normalize(artist)
+        family = genre_map.family(genre) if genre else None
+        if (not key or key in members or key in seen or key in suppressed or artist in muted
+                or family not in families):
+            continue
+        seen.add(key)
+        sub = genre_map.subgenre(genre)
+        exact = int(bool(sub and sub in subgenres))
+        score = float(c.get("artist_score", related.get(norm_artist, 0.0)))
+        ranked.append((exact, score, key, artist, family, c, norm_artist in seed_artists))
 
-    def keep(key, artist):
-        return key not in suppressed and artist not in muted
+    ranked.sort(key=lambda r: (-r[0], -r[1], r[3].lower(), r[2]))
+    # Preserve relevance within each artist, then deal one card per artist per round. A plain global
+    # sort turns a strong artist with several tracks into a visual wall; round-robin keeps the same
+    # candidate set and per-artist ranking while making the grid useful at a glance.
+    by_artist = {}
+    for row in ranked:
+        artist_key = normalize(row[3])
+        bucket = by_artist.setdefault(artist_key, [])
+        if len(bucket) < per_artist_cap:
+            bucket.append(row)
+    dealt = []
+    for depth in range(per_artist_cap):
+        dealt.extend(bucket[depth] for bucket in by_artist.values() if depth < len(bucket))
 
-    if store.rec_vectors_count() and members:
-        nbrs = embed.centroid_neighbors(store, list(members), topn=limit * 8, exclude=members)
-        if nbrs:
-            meta = store.tracks_by_keys([k for k, _ in nbrs])
-            cands = ((k, m["artist"], m,
-                      (f"More from {m['artist']}, already here" if m["artist"] in member_artists
-                       else "Matches the sound of this playlist"))
-                     for k, _ in nbrs if (m := meta.get(k)))
-            out = _take_from_ranked(cands, limit, per_artist_cap, keep)
-            if out:                 # if every embedding neighbor was muted/suppressed, don't return
-                return out          # an empty list, fall through to the co-occurrence heuristic
-
-    def _cooc_reason(r):
-        if r["same_artist"] and r["cooc"]:
-            return f"By {r['artist']} (already here), and in {r['cooc']} related playlist(s)"
-        if r["same_artist"]:
-            return f"More from {r['artist']}, already in this playlist"
-        return f"Sits with these tracks in {r['cooc']} of your playlists"
-
-    cooc = ((r["key"], r["artist"], r, _cooc_reason(r))
-            for r in store.complete_playlist(playlist_id, limit=limit * 8))
-    return _take_from_ranked(cooc, limit, per_artist_cap, keep)
+    out = []
+    for _exact, _score, key, artist, family, c, same_artist in dealt[:limit]:
+        reason = (f"More from {artist} · {family}" if same_artist
+                  else f"Related artist · shared {family} genre")
+        if c.get("out_of_corpus"):
+            reason = "New · " + reason
+        out.append(ForYouItem(c.get("title") or "", artist, c.get("album") or "",
+                              c.get("video_id"), c.get("thumbnail"), 0, reason, key,
+                              lane="related_artist", genre=c.get("genre") or ""))
+    return out
 
 
 def related_artist_suggestions(store, playlist_id, now, limit=8):

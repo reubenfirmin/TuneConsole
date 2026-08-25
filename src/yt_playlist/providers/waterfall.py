@@ -153,7 +153,11 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
     """Enrich `tracks` through the enabled providers in `config` order. `config` is the list from
     enrichment.load_config(store). `registry` (name -> provider module) is injectable for tests.
     `sink_for(track) -> sink` selects per-track persistence: the default builds a TrackSink (library
-    tracks); the cold path (#50) passes one that builds a DiscoveredSink (discovered_tracks)."""
+    tracks); the cold path (#50) passes one that builds a DiscoveredSink (discovered_tracks).
+
+    Returns the ids (or discovered identity keys) of tracks for which every selected/available
+    provider was actually invoked. A provider circuit breaker can skip later tracks in the batch;
+    callers must not mark those tracks processed, because they still need a prompt retry."""
     registry = registry or REGISTRY
     sink_for = sink_for or (lambda t: TrackSink(store, t))
     run_id = run_id or uuid.uuid4().hex
@@ -173,10 +177,10 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
     total = len(tracks)
     if not total:
         on_progress({"type": "done", "text": "Everything is already enriched.", "total": 0})
-        return
+        return []
     if not chosen:
         on_progress({"type": "done", "text": "No enrichment providers are enabled.", "total": 0})
-        return
+        return []
 
     for m in chosen:
         m.reset()
@@ -185,18 +189,21 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
     seq = _gate.enter()
     dead = set()                                  # providers whose breaker tripped mid-run
     conflicts_found = 0
+    fully_attempted = []
     try:
         for i, t in enumerate(tracks, 1):
             if should_stop and should_stop():
                 on_progress({"type": "info", "text": "Stopped."})
-                return
+                return fully_attempted
             _gate.wait_turn(seq, on_wait=lambda: on_progress(
                 {"type": "info", "text": "Waiting: a newer run is enriching first…"}))
             sink = sink_for(t)
             results = []
+            attempted = 0
             for m in chosen:
                 if m.name in dead:
                     continue
+                attempted += 1
                 res = m.probe(t, store)
                 for fld, val in res.fields.items():
                     if fld in _INTERNAL:
@@ -213,10 +220,13 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 sink.upsert_conflict(fld, candidates)
                 conflicts_found += 1
             eff_genre, eff_year = sink.effective_enrichment()
+            if attempted == len(chosen):
+                fully_attempted.append(t.get("id", t.get("identity_key")))
             on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
                          "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']}"})
         note = f" · {conflicts_found} disagreement(s) to review" if conflicts_found else ""
         on_progress({"type": "done", "text": f"Enriched {total} track(s).{note}",
                      "total": total, "conflicts": conflicts_found})
+        return fully_attempted
     finally:
         _gate.leave(seq)

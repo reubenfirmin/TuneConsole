@@ -1,20 +1,14 @@
 """Setup wizard: identities, provider configuration, and local import connections."""
-import secrets
-import threading
 from urllib.parse import quote
 
-import requests
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from yt_playlist.core.setup import BROWSER_CREDENTIAL_FILENAME
 from yt_playlist.library.takeout import (TakeoutFormatError, import_takeout,
                                          seed_discovery_from_unmatched)
-from yt_playlist.providers import enrichment, lastfm, spotify
-
-_SPOTIFY_KEYS = ("spotify_client_id", "spotify_access_token", "spotify_refresh_token",
-                 "spotify_access_expires_at", "spotify_profile_id", "spotify_profile_name")
-_OAUTH_ATTEMPT_TTL_S = 600
+from yt_playlist.library.spotify_data import SpotifyDataFormatError, import_spotify_data
+from yt_playlist.providers import enrichment, lastfm
 
 
 def build(ctx) -> APIRouter:
@@ -28,10 +22,6 @@ def build(ctx) -> APIRouter:
             "flash": request.query_params.get("flash"),
             "enrichment": enrichment.load_config(store),
             "lastfm_configured": lastfm.api_key(store) is not None,
-            "spotify_connected": bool(store.get_setting("spotify_refresh_token")),
-            "spotify_client_id": store.get_setting("spotify_client_id", ""),
-            "spotify_profile_name": store.get_setting("spotify_profile_name", ""),
-            "spotify_redirect_uri": _spotify_redirect_uri(request),
         }, status_code=status_code)
 
     @router.get("/setup")
@@ -105,74 +95,31 @@ def build(ctx) -> APIRouter:
                "open and your library will sync automatically.")
         return RedirectResponse(f"/?flash={quote(msg)}", status_code=303)
 
-    def _spotify_redirect_uri(request):
-        # Spotify permits loopback HTTP only with the literal 127.0.0.1 host (not localhost).
-        port = request.url.port
-        return f"http://127.0.0.1{f':{port}' if port else ''}/spotify/callback"
-
-    @router.post("/spotify/connect")
-    async def spotify_connect(request: Request):
+    @router.post("/import/spotify")
+    async def import_spotify_route(request: Request):
         form = await request.form()
-        client_id = (form.get("client_id") or "").strip()
-        if not client_id or len(client_id) > 200 or any(ch.isspace() for ch in client_id):
-            return RedirectResponse(
-                f"/setup?tab=import&flash={quote('Enter a valid Spotify Client ID.')}", status_code=303)
-        verifier, challenge = spotify.new_pkce()
-        state = secrets.token_urlsafe(32)
-        redirect_uri = _spotify_redirect_uri(request)
-        # Clear expired attempts opportunistically, then retain only this short-lived verifier.
-        now = ctx.now()
-        for old in [k for k, v in ctx.spotify_oauth.items()
-                    if now - v["created_at"] > _OAUTH_ATTEMPT_TTL_S]:
-            ctx.spotify_oauth.pop(old, None)
-        ctx.spotify_oauth[state] = {"verifier": verifier, "client_id": client_id,
-                                    "redirect_uri": redirect_uri, "created_at": now}
-        expiry = threading.Timer(_OAUTH_ATTEMPT_TTL_S, ctx.spotify_oauth.pop,
-                                 args=(state, None))
-        expiry.daemon = True
-        expiry.start()
-        return RedirectResponse(
-            spotify.authorization_url(client_id, redirect_uri, state, challenge), status_code=303)
-
-    @router.get("/spotify/callback")
-    def spotify_callback(request: Request, code: str = "", state: str = "", error: str = ""):
-        attempt = ctx.spotify_oauth.pop(state, None)
-        if error:
-            return RedirectResponse(
-                f"/setup?tab=import&flash={quote('Spotify connection was cancelled.')}", status_code=303)
-        if (not attempt or not code
-                or ctx.now() - attempt["created_at"] > _OAUTH_ATTEMPT_TTL_S):
-            return RedirectResponse(
-                f"/setup?tab=import&flash={quote('Spotify connection expired. Try again.')}", status_code=303)
+        up = form.get("file")
+        if up is None or not hasattr(up, "read"):
+            return HTMLResponse('<p class="section-note">No file selected.</p>', status_code=400)
         try:
-            token = spotify.exchange_code(
-                requests.Session(), attempt["client_id"], attempt["redirect_uri"],
-                code, attempt["verifier"])
-            access = token["access_token"]
-            profile = spotify.SpotifyImportClient(access).profile()
-        except (KeyError, spotify.SpotifyError, OSError):
-            ctx.logger.warning("Spotify OAuth callback failed", exc_info=True)
-            return RedirectResponse(
-                f"/setup?tab=import&flash={quote('Spotify could not be connected. Try again.')}",
-                status_code=303)
-        store.set_setting("spotify_client_id", attempt["client_id"])
-        store.set_setting("spotify_access_token", access)
-        if token.get("refresh_token"):
-            store.set_setting("spotify_refresh_token", token["refresh_token"])
-        store.set_setting("spotify_access_expires_at", str(ctx.now() + int(token.get("expires_in", 3600))))
-        store.set_setting("spotify_profile_id", profile.get("id") or "")
-        store.set_setting("spotify_profile_name", profile.get("name") or "Spotify")
-        return RedirectResponse(
-            f"/setup?tab=import&flash={quote('Spotify connected for playlist import.')}", status_code=303)
-
-    @router.post("/spotify/disconnect")
-    def spotify_disconnect():
-        for key in _SPOTIFY_KEYS:
-            store.delete_setting(key)
-        ctx.spotify_oauth.clear()
-        return RedirectResponse(
-            f"/setup?tab=import&flash={quote('Spotify disconnected and its local tokens deleted.')}",
-            status_code=303)
+            report = import_spotify_data(store, await up.read())
+        except SpotifyDataFormatError:
+            return HTMLResponse(
+                '<p class="section-note">Could not find Spotify Extended Streaming History. '
+                'Upload the downloaded zip as-is, or one Streaming_History_Audio JSON file.</p>')
+        if "error" in report:
+            return HTMLResponse(f'<p class="section-note">{report["error"]}</p>')
+        if report["plays_added"] or report["events_added"]:
+            if ctx.rec_worker:
+                ctx.rec_worker.trigger()
+        if report["matched"]:
+            store.set_setting("spotify_imported_at", str(ctx.now_fn()))
+        min_plays = max(3, round(report["span_days"] / 365))
+        seeded = seed_discovery_from_unmatched(
+            store, report["unmatched_artists"], ctx.now_fn(), min_plays=min_plays)
+        return templates.TemplateResponse(
+            request, "_partials/spotify_result.html", {"report": report, "seeded": seeded},
+            headers={"HX-Retarget": "#spotify-import-block", "HX-Reswap": "innerHTML"})
 
     @router.post("/import/takeout")
     async def import_takeout_route(request: Request):

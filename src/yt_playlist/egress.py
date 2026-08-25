@@ -72,7 +72,6 @@ logger = logging.getLogger(__name__)
 # showing up as BLOCKED on /network is exactly the signal we want to surface.
 ALLOWED_DOMAINS = frozenset({
     "youtube.com",        # ytmusicapi: all API + auth traffic goes to music.youtube.com
-    "spotify.com",        # #22 OAuth + transient playlist import (accounts/api.spotify.com)
     "musicbrainz.org",    # enrichment: release metadata
     "discogs.com",        # enrichment: release metadata (api.discogs.com)
     "audioscrobbler.com",  # enrichment: Last.fm API (ws.audioscrobbler.com)

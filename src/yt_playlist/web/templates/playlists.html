@@ -51,9 +51,11 @@
       </span>
     </td>
     <td>
-      <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in TuneConsole"></a>
-      {% if promote %}<button type="button" class="promote-btn" @click.stop="promote(r)"
-              title="Move into your library so it counts as a real playlist and shapes your recommendations">Promote to library ↑</button>{% endif %}
+      {% if promote %}<div class="generated-title-actions">{% endif %}
+        <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in TuneConsole"></a>
+        {% if promote %}<button type="button" class="promote-btn" @click.stop="promote(r)"
+                title="Move into your library so it counts as a real playlist and shapes your recommendations">Promote to library ↑</button>
+      </div>{% endif %}
     </td>
     {% if has_groups %}<td><span class="gtag" x-show="r.group" x-text="r.group"></span></td>{% endif %}
     <td class="num mono" x-text="r.count"></td>

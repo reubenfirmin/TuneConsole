@@ -14,7 +14,7 @@
     {% include "_partials/playlist_head.html" %}
     <p class="pl-stats">
       {% if show_identity %}<span class="pl-identity">Account: {{ identity }}</span>{% endif %}
-      <span class="stat"><strong>{{ tracks|length }}</strong>&nbsp;track{{ '' if tracks|length == 1 else 's' }}</span>
+      <span class="stat"><strong id="playlist-track-count">{{ tracks|length }}</strong>&nbsp;track{{ '' if tracks|length == 1 else 's' }}</span>
       <span class="stat"><strong>{{ total_plays }}</strong>&nbsp;total plays</span>
     </p>
     <div class="pl-actions">
@@ -75,7 +75,7 @@
       <th class="sorth num col-length" tabindex="0" role="button" @click="sortBy('len')" @keydown.enter.space.prevent="sortBy('len')">Length<span x-text="ind('len')"></span></th>
       <th class="col-action"></th>
     </tr></thead>
-    <tbody x-ref="body">
+    <tbody id="playlist-track-body" x-ref="body">
     {% for t in tracks %}{% set idx = loop.index %}{% include "_partials/track_row.html" %}
     {% else %}
       <tr><td colspan="11" class="empty">This playlist has no tracks.</td></tr>

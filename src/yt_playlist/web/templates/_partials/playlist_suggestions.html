@@ -22,9 +22,13 @@
       {% if f.reason %}<span class="tile-cap-note">{{ f.reason }}</span>{% endif %}
     </div>
     <div class="tile-foot">
-      <form hx-post="/playlist/{{ pid }}/add-tracks" hx-swap="none">
-        <input type="hidden" name="track" value="{{ {'videoId': f.video_id, 'title': f.title, 'artist': f.artist, 'album': f.album, 'thumbnail': f.thumbnail}|tojson }}">
-        <button type="submit" class="tile-add" title="Add to this playlist">+ Add</button>
+      <form hx-post="/playlist/{{ pid }}/add-tracks" hx-target="closest .tile"
+            hx-swap="innerHTML swap:200ms settle:200ms"
+            hx-on::after-request="if ($event.detail.xhr.status >= 400) { let t=$el.closest('.tile'); t.classList.remove('suggestion-departing'); t.style.minHeight='' }">
+        <input type="hidden" name="suggestion" value="1">
+        <input type="hidden" name="track" value='{{ {'videoId': f.video_id, 'title': f.title, 'artist': f.artist, 'album': f.album, 'thumbnail': f.thumbnail}|tojson }}'>
+        <button type="submit" class="tile-add" title="Add to this playlist"
+                onclick="const t=this.closest('.tile'); t.style.minHeight=t.offsetHeight+'px'; t.classList.add('suggestion-departing')">+ Add</button>
       </form>
       <button type="button" class="dots" title="More actions" aria-label="More actions"
               @click="menu = !menu">⋯</button>

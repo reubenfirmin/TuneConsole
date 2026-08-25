@@ -322,14 +322,32 @@ body:has(.page-clusters) .global-now-playing-slot { display: none; }
 .tile-cover.no-art .tile-sub, .tile-cover.no-art .tile-note { white-space: normal; }
 
 @media (prefers-reduced-motion: reduce) {
-  .tile-cover img, .tile-scrim, .tile-play { transition: none; }
+  .tile-cover img, .tile-scrim, .tile-play, .tile-suggest > * { transition: none; }
+  .tile-suggest.suggestion-departing::after, .tile-suggest.suggestion-vacancy::after { animation: none; }
 }
 
 /* ---- "Complete this playlist" suggestion tiles ----------------------------------------------
    A functional pick list, not a graphics-first browse grid: the caption and the Add / ⋯ actions
    are ALWAYS visible (never hover-gated), and the dismiss menu is click-toggled with click-away
    to close, the same stable pattern as the playlist's own track-row ⋯ menu. */
-.tile-suggest { display: flex; flex-direction: column; }
+.tile-suggest { position: relative; display: flex; flex-direction: column; }
+.suggest-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 54rem) { .suggest-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 42rem) { .suggest-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 28rem) { .suggest-grid { grid-template-columns: 1fr; } }
+.tile-suggest > * { transition: opacity .18s ease, transform .18s ease; }
+.tile-suggest.suggestion-departing > * { opacity: 0; transform: translateY(-7px) scale(.97); }
+.tile-suggest.suggestion-departing::after,
+.tile-suggest.suggestion-vacancy::after { position: absolute; inset: 0; display: grid; place-items: center;
+  border: 1px dashed color-mix(in srgb, var(--accent-2) 55%, var(--border-2)); border-radius: 10px;
+  background: radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 58%);
+  color: var(--accent-2); font-size: var(--type-sm); font-weight: 650; letter-spacing: .01em;
+  animation: suggestion-gap-in .22s ease both; }
+.tile-suggest.suggestion-departing::after { content: '♪  Adding…'; }
+.tile-suggest.suggestion-vacancy { pointer-events: none; }
+.tile-suggest.suggestion-vacancy::after { content: '✦  Added to playlist  ↓'; }
+@keyframes suggestion-gap-in { from { opacity: 0; transform: scale(.96); }
+  to { opacity: 1; transform: scale(1); } }
 .tile-suggest .tile-art { position: relative; }
 /* keep the hover ▶ centered on the cover art, not the (now taller) whole tile */
 .tile-suggest .tile-play { top: 50%; }
@@ -625,7 +643,10 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 .gen-grp table { margin-top: 0.6rem; }
 .gen-gc-note { margin: 0.7rem 0 0; padding-top: 0.7rem; border-top: 1px solid var(--border);
   font-size: var(--type-sm); line-height: 1.5; }
-.promote-btn { margin-left: 0.6rem; background: var(--accent-soft); border: 1px solid var(--border-2);
+.generated-title-actions { display: grid; grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center; gap: 0.6rem; }
+.generated-title-actions .ptitle { min-width: 0; }
+.promote-btn { margin-left: 0; background: var(--accent-soft); border: 1px solid var(--border-2);
   color: var(--accent-2); border-radius: 6px; padding: 0.05rem 0.5rem; font-size: var(--type-sm); cursor: pointer; }
 .promote-btn:hover { border-color: var(--control-selected-border); color: var(--light-source); background: var(--control-selected-hover); }
 
