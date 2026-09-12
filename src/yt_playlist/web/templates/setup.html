@@ -127,6 +127,53 @@
   {# ── Tab 4: Local listening-history imports ─────────────────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'import'" x-cloak>
     <div class="card">
+      <h2 class="section section-flush">Import Spotify playlists and albums</h2>
+      <div id="spotify-library-import-block">
+      {% if spotify_library_job and spotify_library_job.status in ('queued', 'running') %}
+        {% with job=spotify_library_job %}{% include "_partials/spotify_library_status.html" %}{% endwith %}
+      {% else %}
+      <p class="section-note">Upload Spotify’s <strong>Account Data</strong> zip to recreate your
+        playlists and save your albums in YouTube Music. TuneConsole matches songs and albums locally
+        through your connected YouTube Music account and remembers imported items, so retrying the
+        same export will not create duplicates.</p>
+      <details class="advanced advanced-spaced">
+        <summary>How to export</summary>
+        <ul class="section-note takeout-steps">
+          <li>Open Spotify’s <a href="https://www.spotify.com/account/privacy/" target="_blank"
+            rel="noopener"><strong>Account Privacy</strong></a> page.</li>
+          <li>Under <strong>Download your data</strong>, select <strong>Account data</strong> and
+            submit the request. Spotify may ask you to confirm it by email.</li>
+          <li><strong>Be prepared to wait several days.</strong> Spotify does not create the download
+            immediately; it emails you when the Account Data zip is finally ready.</li>
+          <li>Download that zip and upload it here as-is. It should contain files such as
+            <code class="mono">Playlist1.json</code> and <code class="mono">YourLibrary.json</code>.
+            Extended Streaming History and Technical Log Information are different packages.</li>
+        </ul>
+      </details>
+      <form hx-post="/import/spotify-library/v4" hx-target="#spotify-library-import-result"
+            hx-swap="innerHTML" hx-encoding="multipart/form-data" hx-disabled-elt="find button"
+            hx-on::response-error="document.getElementById('spotify-library-import-result').textContent = 'TuneConsole was updated while it was running. Restart TuneConsole, then try the import again.'">
+        <div class="takeout-file" x-data="{ fname: '' }">
+          <label class="btn-ghost btn-sm takeout-file-label">
+            Choose file
+            <input class="visually-hidden-file" type="file" name="file"
+                   accept=".zip,application/zip" required
+                   @change="fname = $event.target.files.length ? $event.target.files[0].name : ''">
+          </label>
+          <span class="section-note mono flush-margin" x-text="fname || 'no file selected'"></span>
+        </div>
+        <div class="btn-row btn-row-spaced">
+          <button type="submit" class="btn-primary btn-sm">Import playlists and albums</button>
+        </div>
+      </form>
+      <div id="spotify-library-import-result" class="section-note"></div>
+      {% if spotify_library_job %}
+        {% with job=spotify_library_job %}{% include "_partials/spotify_library_status.html" %}{% endwith %}
+      {% endif %}
+      {% endif %}
+      </div>
+    </div>
+    <div class="card">
       <h2 class="section section-flush">Import Spotify listening history</h2>
       <div id="spotify-import-block">
       <p class="section-note">Upload your Spotify Extended Streaming History to fold past Spotify
@@ -139,12 +186,13 @@
             rel="noopener"><strong>Account Privacy</strong></a> page.</li>
           <li>Under <strong>Download your data</strong>, select both
             <strong>Account data</strong> and <strong>Extended streaming history</strong>, then request
-            the data. Spotify may ask you to confirm the request by email.</li>
+            the data. Spotify may ask you to confirm the request by email, and the download emails
+            can take several days to arrive.</li>
           <li>When Spotify emails that each package is ready, download and keep both zip files.
             Account data contains your playlists, saved songs, albums, and artists; Extended
             streaming history contains your past plays.</li>
-          <li>Upload the <strong>Extended streaming history</strong> zip here as-is. Support for the
-            separate Account data zip is coming next.</li>
+          <li>Upload the <strong>Extended streaming history</strong> zip here as-is. Use the separate
+            form above for the Account Data zip.</li>
         </ul>
       </details>
       <form hx-post="/import/spotify" hx-target="#spotify-import-result" hx-swap="innerHTML"

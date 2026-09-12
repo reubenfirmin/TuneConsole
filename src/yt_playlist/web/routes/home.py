@@ -17,6 +17,7 @@ from yt_playlist.rec import arc_energy, embed, journeys, onboarding, rec_params,
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.providers import wikipedia, lastfm
 from yt_playlist.web.context import form_float
+from yt_playlist.web.spotify_import import current_job as current_spotify_import_job
 
 # How many tracks each generated proto-playlist offers.
 PROTO_SIZE = 12
@@ -280,6 +281,9 @@ def build(ctx) -> APIRouter:
                  if (_story and store.get_setting("last_sync_at") is not None
                      and store.get_setting("recap_dismissed_month") != _story.get("month"))
                  else None)
+        spotify_library_job = current_spotify_import_job(ctx)
+        if spotify_library_job and spotify_library_job.get("dismissed"):
+            spotify_library_job = None
         return templates.TemplateResponse(request, "home.html", {
             "actions": recommend.take_action(store, now, ctx.auth_expired),
             "sync": recommend.sync_status(store, now),
@@ -313,6 +317,9 @@ def build(ctx) -> APIRouter:
             "cleanup_count": onboarding.cleanup_count(store),   # CACHED read, never the O(n^2) scan
             "onboard_progress": onboarding.warmup_progress(store),
             "recap": recap,
+            # Persisted background-import state. Completion stays in Needs attention with its full
+            # report until explicitly dismissed, including across app/browser restarts.
+            "spotify_library_job": spotify_library_job,
             # #93 Task 9: the radio launch card's customize panel is seeded server-side with the
             # current SESSION tilts (never rec_weights) so a reload shows what's actually steering.
             "tilts": (getattr(getattr(ctx, "radio", None), "tilts", None) or {}),

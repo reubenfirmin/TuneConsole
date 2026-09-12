@@ -18,6 +18,9 @@ def test_background_probe_reinjects_and_reports_health():
     assert "await inject(tab.id)" in probe
     assert 'type: "sensor-health"' in probe
     assert "respondingTabs" in probe
+    assert "await reloadUnresponsiveSensor(tab.id)" in probe
+    assert "SENSOR_RELOAD_COOLDOWN_MS" in src
+    assert "await chrome.tabs.reload(tabId)" in src
     assert "probeSensorHealth();" in src[src.index("chrome.alarms.onAlarm"):]
 
 

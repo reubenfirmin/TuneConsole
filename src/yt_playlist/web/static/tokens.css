@@ -27,6 +27,11 @@
   src: url("/static/vendor/fonts/jetbrains-mono.woff2") format("woff2");
   font-weight: 100 800; font-display: swap; font-style: normal;
 }
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("/static/vendor/fonts/bricolage-grotesk-700.ttf") format("truetype");
+  font-weight: 700; font-stretch: normal; font-display: swap; font-style: normal;
+}
 /* ============================================================================
    TOKEN LAYER 1 — PALETTE.  The ONLY place a colour literal may appear.
    Raw hues, named by hue + lightness. Nothing outside this block references a
@@ -530,6 +535,7 @@
 
   /* ---- typography ---- */
   --font-display: "Fraunces", Georgia, serif; /* immersive generating takeover only */
+  --font-brand: "Bricolage Grotesque", "Hanken Grotesk", system-ui, sans-serif;
   --font-sans: "Hanken Grotesk", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
   --type-xs: .75rem;

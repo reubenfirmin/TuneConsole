@@ -82,6 +82,7 @@ ALLOWED_DOMAINS = frozenset({
     "archive.org",        # where coverartarchive.org redirects its JSON + images (its CDN)
     "wikipedia.org",      # into-recently card: keyless page summaries (en.wikipedia.org)
     "github.com",         # update check: latest release tag (api.github.com)
+    "spotify.com",        # Spotify import report: public oEmbed album artwork
 })
 
 

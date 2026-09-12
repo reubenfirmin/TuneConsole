@@ -51,6 +51,12 @@ def _install_idle_shutdown(app, templates):
         while True:
             time.sleep(1.0)
             now = time.monotonic()
+            ctx = getattr(app.state, "ctx", None)
+            # A Spotify library import is explicitly background work. Keep the packaged process
+            # alive even if the TuneConsole UI tab is closed; the extension's YouTube Music tab can
+            # continue servicing lookups, and normal idle shutdown resumes as soon as it finishes.
+            if ctx is not None and ctx.spotify_import_lock.locked():
+                continue
             if not st["seen"]:
                 if now - start > 45:           # browser never connected; do not linger forever
                     break
@@ -224,6 +230,9 @@ def create_app(store, client_provider, *, now_fn=time.time,
     ctx.enrich_worker = EnrichWorker(ctx)                      # drains the corpus through the waterfall
     ctx.enrich_worker.start_ticker()
     templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync
+    templates.env.globals["has_multiple_identities"] = (
+        lambda: len(store.get_identities()) > 1
+    )
     # Background library-sync daemon: runs the full sync (setup + periodic) with no manual card, so
     # the initial post-setup sync fires as soon as the extension connects and the library then
     # refreshes on its own. It gates on bridge.connected, so in tests (no live WS) it never fires.

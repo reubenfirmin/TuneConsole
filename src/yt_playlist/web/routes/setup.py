@@ -1,14 +1,24 @@
 """Setup wizard: identities, provider configuration, and local import connections."""
+import asyncio
+import threading
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from yt_playlist.core.setup import BROWSER_CREDENTIAL_FILENAME
 from yt_playlist.library.takeout import (TakeoutFormatError, import_takeout,
                                          seed_discovery_from_unmatched)
 from yt_playlist.library.spotify_data import SpotifyDataFormatError, import_spotify_data
-from yt_playlist.providers import enrichment, lastfm
+from yt_playlist.library.spotify_library import (SpotifyLibraryFormatError,
+                                                  SPOTIFY_REPORT_SCHEMA,
+                                                  find_album_candidates,
+                                                  import_spotify_library,
+                                                  load_spotify_library,
+                                                  save_selected_album)
+from yt_playlist.providers import enrichment, lastfm, spotify
+from yt_playlist.web.spotify_import import (ACTIVE_STATUSES, JOB_KEY, current_job,
+                                            estimate, save_job)
 
 
 def build(ctx) -> APIRouter:
@@ -22,6 +32,7 @@ def build(ctx) -> APIRouter:
             "flash": request.query_params.get("flash"),
             "enrichment": enrichment.load_config(store),
             "lastfm_configured": lastfm.api_key(store) is not None,
+            "spotify_library_job": current_job(ctx),
         }, status_code=status_code)
 
     @router.get("/setup")
@@ -120,6 +131,197 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(
             request, "_partials/spotify_result.html", {"report": report, "seeded": seeded},
             headers={"HX-Retarget": "#spotify-import-block", "HX-Reswap": "innerHTML"})
+
+    # The versioned URL is intentional: setup.html is read from disk on every request, while
+    # Python modules remain loaded for the lifetime of the server. If TuneConsole is updated while
+    # open, a new form therefore gets a 404 from an old backend instead of silently producing an
+    # obsolete, summary-only report. The unversioned route remains for API compatibility.
+    @router.post("/import/spotify-library")
+    @router.post("/import/spotify-library/v2")
+    @router.post("/import/spotify-library/v3")
+    @router.post("/import/spotify-library/v4")
+    async def import_spotify_library_route(request: Request):
+        form = await request.form()
+        up = form.get("file")
+        if up is None or not hasattr(up, "read"):
+            return HTMLResponse('<p class="section-note">No file selected.</p>', status_code=400)
+        existing = current_job(ctx)
+        if existing and existing.get("status") in ACTIVE_STATUSES:
+            return templates.TemplateResponse(
+                request, "_partials/spotify_library_status.html", {"job": existing},
+                headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
+        identities = store.get_identities()
+        identity = next((i for i in identities if i.is_master), identities[0] if identities else None)
+        client = (ctx.client_provider() or {}).get(identity.id) if identity else None
+        if identity is None or client is None:
+            return HTMLResponse(
+                '<p class="section-note">Connect the extension and configure an identity first.</p>')
+        try:
+            raw = await up.read()
+            parsed = load_spotify_library(raw)
+        except SpotifyLibraryFormatError:
+            return HTMLResponse(
+                '<p class="section-note">Could not find Spotify playlists or saved albums. '
+                'Choose the <strong>Account Data</strong> zip containing Playlist JSON and '
+                'YourLibrary JSON files—not Extended Streaming History or Technical Log Information.</p>')
+        if not ctx.spotify_import_lock.acquire(blocking=False):
+            job = current_job(ctx)
+            return templates.TemplateResponse(
+                request, "_partials/spotify_library_status.html", {"job": job},
+                headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
+
+        job = {"status": "running", "started_at": ctx.now_fn(),
+               "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(parsed)}
+        save_job(store, job)
+
+        def run_import():
+            try:
+                report = import_spotify_library(
+                    store, raw, client, identity.id, ctx.now_fn())
+                if report["playlists_imported"] or report["albums_imported"]:
+                    store.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
+                save_job(store, {**job, "status": "done", "finished_at": ctx.now_fn(),
+                                 "report": report})
+            except Exception:  # noqa: BLE001 - partial progress is recorded for a safe retry
+                ctx.logger.exception("Spotify library import failed")
+                save_job(store, {**job, "status": "error", "finished_at": ctx.now_fn(),
+                                 "error": "The Spotify library import stopped. Anything already "
+                                          "created was recorded, so it is safe to retry."})
+            finally:
+                ctx.spotify_import_lock.release()
+
+        threading.Thread(target=run_import, name="spotify-library-import", daemon=True).start()
+        current = current_job(ctx)
+        return templates.TemplateResponse(
+            request, "_partials/spotify_library_status.html", {"job": current},
+            headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML",
+                     **({"HX-Redirect": "/#notices"} if current.get("status") == "done" else {})})
+
+    @router.get("/import/spotify-library/status")
+    def spotify_library_status(request: Request):
+        job = current_job(ctx)
+        if not job:
+            return Response(status_code=204)
+        return templates.TemplateResponse(
+            request, "_partials/spotify_library_status.html", {"job": job},
+            headers={"HX-Redirect": "/#notices"} if job.get("status") == "done" else None)
+
+    @router.get("/import/spotify-library/notice")
+    def spotify_library_notice(request: Request):
+        job = current_job(ctx)
+        if not job:
+            return Response(status_code=204)
+        return templates.TemplateResponse(
+            request, "_partials/spotify_library_notice.html", {"job": job})
+
+    @router.get("/import/spotify-library/report")
+    def spotify_library_report(request: Request):
+        job = current_job(ctx)
+        if not job or job.get("status") != "done" or not isinstance(job.get("report"), dict):
+            return RedirectResponse("/setup?tab=import", status_code=303)
+        details = job["report"].get("details") or {}
+        for index, item in enumerate(details.get("albums") or []):
+            item["report_index"] = index
+            if not item.get("spotify_url"):
+                item["spotify_url"] = "https://open.spotify.com/search/" + quote(
+                    f"{item.get('title', '')} {item.get('artist', '')}", safe="")
+                item["spotify_link_is_search"] = True
+        for item in details.get("unmatched_tracks") or []:
+            if not item.get("spotify_url"):
+                item["spotify_url"] = "https://open.spotify.com/search/" + quote(
+                    f"{item.get('title', '')} {item.get('artist', '')}", safe="")
+                item["spotify_link_is_search"] = True
+        return templates.TemplateResponse(request, "spotify_library_report.html", {
+            "job": job, "report": job["report"],
+            "spotify_error": request.query_params.get("spotify_error"),
+        })
+
+    def _report_album(job, index):
+        try:
+            position = int(index)
+            if position < 0:
+                raise IndexError
+            albums = job["report"]["details"]["albums"]
+            item = albums[position]
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise HTTPException(status_code=404, detail="album outcome not found") from None
+        if item.get("status") != "unmatched":
+            raise HTTPException(status_code=409, detail="album outcome is already resolved")
+        return item
+
+    def _spotify_client():
+        identities = store.get_identities()
+        identity = next((i for i in identities if i.is_master), identities[0] if identities else None)
+        client = (ctx.client_provider() or {}).get(identity.id) if identity else None
+        if client is None:
+            raise HTTPException(status_code=409, detail="YouTube Music is not connected")
+        return client
+
+    @router.post("/import/spotify-library/find-album-candidates")
+    async def spotify_library_find_candidates(request: Request):
+        job = current_job(ctx)
+        if not job or job.get("status") != "done":
+            raise HTTPException(status_code=404, detail="report not found")
+        form = await request.form()
+        item = _report_album(job, form.get("album_index"))
+        try:
+            # Bridge-backed YTMusic calls wait for replies delivered by this app's
+            # WebSocket handler. Running them on the event loop deadlocks that reply.
+            item["candidates"] = await asyncio.to_thread(
+                find_album_candidates, _spotify_client(), item)
+            save_job(store, job)
+        except Exception:  # noqa: BLE001 - a failed lookup leaves the report intact
+            ctx.logger.exception("Spotify import candidate lookup failed")
+            message = quote("YouTube Music could not search for candidates. Try again when connected.")
+            return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
+        return RedirectResponse(
+            f"/import/spotify-library/report#album-{form.get('album_index')}", status_code=303)
+
+    @router.post("/import/spotify-library/resolve-album")
+    async def spotify_library_resolve_album(request: Request):
+        job = current_job(ctx)
+        if not job or job.get("status") != "done":
+            raise HTTPException(status_code=404, detail="report not found")
+        form = await request.form()
+        item = _report_album(job, form.get("album_index"))
+        try:
+            outcome = await asyncio.to_thread(
+                save_selected_album, store, _spotify_client(), item,
+                (form.get("browse_id") or "").strip())
+        except (ValueError, HTTPException) as exc:
+            message = quote(str(exc.detail if isinstance(exc, HTTPException) else exc))
+            return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
+        except Exception:  # noqa: BLE001 - preserve the report and surface a usable failure
+            ctx.logger.exception("Spotify import selected-album save failed")
+            message = quote("YouTube Music could not save that album. Try again when connected.")
+            return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)
+        report = job["report"]
+        item.update(outcome)
+        item.pop("candidates", None)
+        report["albums_unmatched"] = max(0, report["albums_unmatched"] - 1)
+        report["albums_imported" if outcome["status"] == "imported" else "albums_skipped"] += 1
+        save_job(store, {**job, "report": report})
+        if outcome["status"] == "imported":
+            store.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
+        return RedirectResponse("/import/spotify-library/report", status_code=303)
+
+    @router.get("/import/spotify-library/spotify-thumbnail")
+    def spotify_library_thumbnail(url: str):
+        thumbnail = spotify.thumbnail(url)
+        if not thumbnail:
+            return Response(status_code=404)
+        return RedirectResponse(thumbnail, status_code=307,
+                                headers={"Cache-Control": "private, max-age=86400"})
+
+    @router.post("/import/spotify-library/dismiss")
+    def dismiss_spotify_library_notice():
+        job = current_job(ctx)
+        if not job or job.get("status") not in ACTIVE_STATUSES:
+            if job:
+                save_job(store, {**job, "dismissed": True})
+            else:
+                store.delete_setting(JOB_KEY)
+        return Response(status_code=200)
 
     @router.post("/import/takeout")
     async def import_takeout_route(request: Request):

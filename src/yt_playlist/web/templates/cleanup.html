@@ -117,7 +117,7 @@
         <td><span class="abx">B</span>{{ pllink(by, o.playlist_b.title, o.count_b) }}</td>
         <td>
           <span class="mono">{{ o.shared|length }}</span> shared
-          <span class="pid">{{ o.pct_a() }}% of A · {{ o.pct_b() }}% of B</span>
+          <span class="pid">{{ o.pct_a() }}% of A<br>{{ o.pct_b() }}% of B</span>
         </td>
         <td class="cell-actions">
           <a class="cta" href="/dupe/{{ o.playlist_a.id }}/{{ o.playlist_b.id }}">Review →</a>

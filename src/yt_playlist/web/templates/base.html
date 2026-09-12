@@ -39,7 +39,7 @@
   {% set path = request.url.path if request else "/" %}
   <header class="topbar">
     <a class="brand" href="/" aria-label="TuneConsole home">
-      <span class="brand-name">TuneConsole</span>
+      <span class="brand-name" aria-hidden="true">tuneconsole</span>
     </a>
     {# Clusters has its own seed search; the library omni-search would only compete with it there #}
     {% if not path.startswith('/clusters') %}
@@ -77,15 +77,17 @@
         <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"
                 @click="open = !open" :aria-expanded="open">Tools <span class="caret" :class="{ up: open }">▾</span></button>
         <div class="tools-pop" x-show="open" x-cloak x-transition.opacity.scale.origin.top.right>
+          <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
           <a href="/cleanup" class="{{ 'active' if path.startswith('/cleanup') else '' }}">Cleanup</a>
+          {% if has_multiple_identities() %}
           <a href="/move" class="{{ 'active' if path.startswith('/move') else '' }}">Move</a>
-          <a href="/actions" class="{{ 'active' if path.startswith('/actions') else '' }}">Actions</a>
-          <a href="/genres" class="{{ 'active' if path.startswith('/genres') else '' }}">Genres</a>
+          {% endif %}
           <a href="/enrich" class="{{ 'active' if path.startswith('/enrich') else '' }}">Enrichment</a>
           <a href="/taste" class="{{ 'active' if path.startswith('/taste') else '' }}">Taste Model</a>
           <a href="/discovery" class="{{ 'active' if path.startswith('/discovery') else '' }}">Discovery Pools</a>
+          <a href="/genres" class="{{ 'active' if path.startswith('/genres') else '' }}">Genres</a>
           <a href="/network" class="{{ 'active' if path.startswith('/network') else '' }}">Network</a>
-          <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
+          <a href="/actions" class="{{ 'active' if path.startswith('/actions') else '' }}">Audit Log</a>
         </div>
       </div>
     </nav>

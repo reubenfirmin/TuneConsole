@@ -247,6 +247,29 @@ def test_no_external_cdn_in_pages(store):
     assert "/static/vendor/htmx.min.js" in body
 
 
+def test_tools_menu_only_shows_move_for_multiple_identities(store):
+    store.upsert_identity("main", "cred", None, True)
+    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
+    c = TestClient(app)
+
+    assert '<a href="/move"' not in c.get("/").text
+
+    store.upsert_identity("other", "cred-2", "brand-2", False)
+    assert '<a href="/move"' in c.get("/").text
+
+
+def test_audit_log_is_last_in_tools_menu(store):
+    app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
+    body = TestClient(app).get("/").text
+    menu = body.split('class="tools-pop"', 1)[1].split("</div>", 1)[0]
+
+    assert '>Audit Log</a>' in menu
+    assert menu.find('href="/setup"') < menu.find('href="/cleanup"')
+    assert menu.rfind('href="/genres"') > menu.rfind('href="/setup"')
+    assert menu.rfind('href="/network"') > menu.rfind('href="/genres"')
+    assert menu.rfind('href="/actions"') > menu.rfind('href="/network"')
+
+
 def test_setup_page_alpine_attr_well_formed(store):
     # Regression: tojson emits double quotes, so x-data MUST be single-quoted or the JSON
     # terminates the HTML attribute early and Alpine (the whole check UI) never initializes.

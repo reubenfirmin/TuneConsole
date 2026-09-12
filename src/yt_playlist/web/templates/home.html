@@ -42,14 +42,14 @@
       </div>
     </section>
 
-    {# The global layout owns Now Playing; Home only adds sensor diagnostics. #}
-    <section class="notice warning banner" x-show="connected && sensorHealth && !sensorHealth.healthy" x-cloak>
-      <span class="banner-body" x-show="sensorHealth.ytm_tabs === 0">
-        The bridge is online, but no YouTube Music tab is open.
-      </span>
-      <span class="banner-body" x-show="sensorHealth.ytm_tabs > 0">
-        The bridge is online, but the YouTube Music tab sensor is not responding.
-        <span x-show="sensorHealth.error" x-text="sensorHealth.error"></span>
+    {# The global layout owns Now Playing; only surface a sensor failure when there is a YTM tab
+       that should be responding. Having no YTM tab open is normal and needs no warning. #}
+    <section class="notice warning banner"
+             x-show="connected && sensorHealth && !sensorHealth.healthy && sensorHealth.ytm_tabs > 0"
+             x-cloak>
+      <span class="banner-body">
+        <span x-show="sensorHealth.recovering">Reloading the YouTube Music tab to reconnect it…</span>
+        <span x-show="!sensorHealth.recovering">YouTube Music did not reconnect automatically. Reload the tab to try again.</span>
       </span>
     </section>
 
@@ -82,9 +82,10 @@
   </div>
 
   {% if sync.last_synced_ago %}
-  {% set dash_default = 'start' if onboarding else 'directions' %}
+  {% set spotify_result_waiting = spotify_library_job and spotify_library_job.status in ('done', 'error') %}
+  {% set dash_default = 'notices' if spotify_result_waiting else ('start' if onboarding else 'directions') %}
   {% set has_notices = show_takeout_nag or actions or show_intro or show_lastfm_nudge or
-      show_identities_nudge or show_backend_update or recap %}
+      show_identities_nudge or show_backend_update or recap or spotify_library_job %}
   <div class="home-dashboard"
        x-data="{ panel: location.hash.slice(1) || '{{ dash_default }}',
                  go(p) { this.panel = p; history.replaceState(null, '', '#' + p); } }"

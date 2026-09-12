@@ -217,13 +217,15 @@ def test_sensor_health_is_observable_and_clears_on_disconnect():
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
         ws.send_json({"type": "sensor-health", "healthy": False, "ytmTabs": 1,
                       "respondingTabs": 0, "reinjectedTabs": 1,
+                      "recovering": True, "reloadedTabs": 1,
                       "error": "content sensor did not answer"})
         deadline = time.time() + 1
         while time.time() < deadline and bridge.sensor_health is None:
             time.sleep(0.01)
         assert client.get("/bridge/status").json()["sensor_health"] == {
             "healthy": False, "ytm_tabs": 1, "responding_tabs": 0,
-            "reinjected_tabs": 1, "error": "content sensor did not answer",
+            "reinjected_tabs": 1, "recovering": True, "reloaded_tabs": 1,
+            "error": "content sensor did not answer",
         }
     assert bridge.sensor_health is None
 

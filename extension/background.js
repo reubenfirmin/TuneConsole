@@ -72,11 +72,31 @@ async function pingSensor(tabId) {
   }
 }
 
+// A failed reinjection usually means the tab's renderer predates the extension or Chrome has lost
+// the content-script receiver. A real navigation boundary is the reliable repair. Keep a cooldown
+// per tab so the periodic health alarm can never trap a broken tab in a reload loop.
+const SENSOR_RELOAD_COOLDOWN_MS = 60000;
+const sensorReloadedAt = new Map();
+async function reloadUnresponsiveSensor(tabId) {
+  const last = sensorReloadedAt.get(tabId) || 0;
+  if (Date.now() - last < SENSOR_RELOAD_COOLDOWN_MS) return false;
+  sensorReloadedAt.set(tabId, Date.now());
+  try {
+    await suppressBeforeUnload(tabId);
+    await chrome.tabs.reload(tabId);
+    console.warn("[TuneConsole] reloading YTM tab to restore its sensor", tabId);
+    return true;
+  } catch (e) {
+    console.warn("[TuneConsole] could not reload YTM tab", tabId, e);
+    return false;
+  }
+}
+
 // Observable + self-healing tab boundary. A live WebSocket proves only the service worker is alive;
 // this independently proves that each YTM tab has a responding content sensor. One failed probe gets
 // one reinjection and retry, and the result is reported to /bridge/status without touching play data.
 async function probeSensorHealth() {
-  let tabs = [], responding = 0, reinjected = 0, errors = [];
+  let tabs = [], responding = 0, reinjected = 0, reloading = 0, errors = [];
   try { tabs = await chrome.tabs.query({ url: "https://music.youtube.com/*" }); }
   catch (e) { errors.push(String(e && e.message ? e.message : e)); }
   for (const tab of tabs) {
@@ -88,10 +108,12 @@ async function probeSensorHealth() {
       probe = installed.ok ? await pingSensor(tab.id) : probe;
     }
     if (probe.ok) responding += 1;
+    else if (await reloadUnresponsiveSensor(tab.id)) reloading += 1;
     else errors.push(`tab ${tab.id}: ${probe.error || "sensor did not answer"}`);
   }
   const report = { type: "sensor-health", ytmTabs: tabs.length, respondingTabs: responding,
                    reinjectedTabs: reinjected, healthy: tabs.length > 0 && responding === tabs.length,
+                   recovering: reloading > 0, reloadedTabs: reloading,
                    error: errors.filter(Boolean).join("; ").slice(0, 500) };
   if (ws && ws.readyState === WebSocket.OPEN) {
     try { ws.send(JSON.stringify(report)); } catch (e) {}

@@ -1,6 +1,10 @@
-{% set nudge_count = (1 if show_intro else 0) + (1 if show_lastfm_nudge else 0) + (1 if show_identities_nudge else 0) + (1 if show_backend_update else 0) + (1 if recap else 0) %}
+{% set nudge_count = (1 if show_intro else 0) + (1 if show_lastfm_nudge else 0) + (1 if show_identities_nudge else 0) + (1 if show_backend_update else 0) + (1 if recap else 0) + (1 if spotify_library_job else 0) %}
 {% if actions or nudge_count %}
 <section class="alerts" aria-label="Needs attention">
+  {% if spotify_library_job %}
+    {% with job=spotify_library_job %}{% include "_partials/spotify_library_notice.html" %}{% endwith %}
+  {% endif %}
+
   {# The welcome always leads the row. #}
   {% if show_intro %}
   <div class="alert-card card card--featured alert-nudge" id="intro-nudge">

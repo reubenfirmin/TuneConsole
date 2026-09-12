@@ -34,16 +34,22 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   background: var(--surface-card);
   border-bottom: 1px solid var(--border-strong);
 }
-/* Provisional typographic identity. It intentionally uses the product type system instead of a
-   standalone display face while the permanent mark is still being explored. */
+/* The wordmark gets its character from the letterforms, not attached effects. Bricolage's compact,
+   irregular lowercase silhouette stays playful and legible at the navigation's native size. */
 .brand {
-  display: inline-flex; align-items: center; gap: 0.65rem; color: var(--text);
+  display: inline-flex; align-items: center; color: var(--text);
   text-decoration: none; white-space: nowrap;
 }
-.brand-name { font-family: var(--font-sans); font-size: 1.18rem; font-weight: 750;
-  letter-spacing: -0.025em; line-height: 1; }
+.brand-name { font-family: var(--font-brand); font-size: 1.35rem; font-weight: 700;
+  font-stretch: normal; letter-spacing: -.025em; line-height: 1;
+  color: var(--text);
+  background: linear-gradient(105deg, var(--text) 18%, var(--immersive-accent-2) 72%, var(--teal) 118%);
+  background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  filter:
+    drop-shadow(0 0 .22rem color-mix(in srgb, var(--immersive-accent-2) 38%, transparent))
+    drop-shadow(0 0 .72rem color-mix(in srgb, var(--teal) 16%, transparent));
+}
 .brand:hover { text-decoration: none; }
-.brand:hover .brand-name { color: var(--light-source); }
 
 /* The EQ remains available to the immersive generating sequence, where it represents activity
    rather than serving as the application logo. */

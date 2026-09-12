@@ -1,7 +1,12 @@
 # TuneConsole
 
-A local web console for power-managing your YouTube Music library across multiple YouTube brand
-identities. Dedupe, merge, prune, organize, and grow it, all from one place.
+A privacy-first tool that allows you to manage your YouTube playlists & albums, and find new songs to listen to. Includes a layered recommendation engine that you can fine tune. Also includes the ability to import from Spotify.
+
+I built this because:
+
+a) I find YouTube's recommendations OK but not great
+
+b) And I find YouTube's discovery and playlist management to be pretty bad
 
 **Website: [tuneconsole.com](https://tuneconsole.com)** — overview, install guide, and
 [privacy policy](https://tuneconsole.com/privacy).
@@ -14,17 +19,11 @@ identities. Dedupe, merge, prune, organize, and grow it, all from one place.
   empties. Every destructive action is undoable.
 - **Omnisearch**: instant search across playlists, artists, albums, and tracks in your whole library.
 - **Library browsing**: dedicated Artists, Albums, Charts, and Genres views.
-- **Clusters**: an interactive force-directed graph of how your library hangs together.
-- **Taste model**: a tunable model of your taste, with its own control panel.
+- **Clusters**: a fun visual approach to building playlists.
+- **Road Trip**: build a playlist for a road trip that combines your and passenger's tastes.
 - **Recommendations & discovery**: surfaces new artists, rediscoveries, and a personalized
   "for you" feed driven by the taste model.
-- **Generative playlists**: auto-build playlists from your taste; unplayed ones are
-  garbage-collected after a grace window.
-- **Live now-playing & rating**: see the current track on the home card and like or dislike it in
-  one click; every "play" link swaps your open YouTube Music tab in the background.
-- **Browser-extension bridge**: a small extension carries your live, signed-in YouTube Music
-  session. No pasted cookies, no OAuth, no Google Cloud project. It stays fresh, so it does not
-  disconnect, and your session credential never leaves your browser.
+- **Metadata enrichment**: uses Last.fm, Deezer, Discogs, MusicBrainz and AcousticBrainz.
 
 ## Quickstart
 
@@ -36,26 +35,20 @@ identities. Dedupe, merge, prune, organize, and grow it, all from one place.
 2. **Install the browser extension** (Chrome/Chromium/Edge): go to `chrome://extensions`, turn on
    **Developer mode**, click **Load unpacked**, and select the `extension/` directory. It connects
    to the app automatically, there is nothing to paste (see `extension/README.md`).
-3. **Open `https://music.youtube.com` signed in** and keep that tab open. The app pairs with the
-   extension and starts syncing your library in the background.
+3. **Open `https://music.youtube.com` signed in**. The app pairs with the extension and starts syncing your library in the background.
 
-Design specs live in `docs/superpowers/specs/`.
 
 ## Architecture
 
 ### The stack
 
-TuneConsole is a single local process with no build step and no SPA.
+TuneConsole is a single local process.
 
 - **Python / FastAPI**: an ASGI app served by uvicorn (`--reload` supported). Routes return
   server-rendered HTML, not JSON.
 - **Jinja2**: every page and partial is a server-rendered template.
-- **HTMX**: interactions are HTML over the wire. Buttons and inputs issue requests that swap in
-  server-rendered fragments, so the server stays the source of truth and there is no client-side
-  state to keep in sync.
-- **Alpine.js**: the thin layer of client reactivity HTMX does not cover, such as menus, the
-  omnisearch box, and optimistic toggles. Sortable.js handles drag-to-reorder and d3-force draws
-  the Clusters graph.
+- **HTMX**: hypermedia, baby.
+- **Alpine.js**: for client side interactivity that HTMX doesn't cover. Sortable.js handles drag-to-reorder and d3-force draws the Clusters graph.
 - **SQLite**: the whole library, play history, and model state live in one local SQLite file.
   `store.py` composes per-domain DAOs (the `repos/` package) behind a single connection.
 - **ytmusicapi**: builds the YouTube Music (InnerTube) requests and parses the responses. It does
@@ -65,58 +58,24 @@ TuneConsole is a single local process with no build step and no SPA.
 
 ### The model
 
-Recommendations run entirely on your own library, CPU-only, with no GPU and no external pretrained
-models. Two models work in tandem: a **long-term** model of your settled taste, rebuilt from your
-whole library, and a **transient** model that nudges it toward what you are into right now. The
-long-term model changes only when your library does; the transient one reacts to each interaction
-and fades on its own. At recommendation time the transient signal tilts the long-term scores rather
-than replacing them, so your baseline taste always shows through.
+The recommender is local, CPU-only, and trained on your own library and listening history. Its
+implementation lives in `src/yt_playlist/rec/` and has four main parts:
 
-- **Long-term taste embedding** (`embed.py`): the stable model. A dense vector per track, built from
-  PPMI co-occurrence plus truncated SVD over how tracks co-occur across your playlists, albums, and
-  listening sessions. It is a latent model of *your* taste rather than the crowd's, so neighbours
-  capture second-order similarity that plain co-occurrence misses. It has no decay; it is rebuilt
-  only when your library changes.
-- **Genre map** (`genre_map.py`): a hand-editable meta-genre family tree with family-to-family
-  distances, blended into the embedding and used to measure genre diversity.
-- **Transient model** (`transient.py`): the short-term counterpart to the long-term embedding. A
-  fast, reactive read on recent interaction (mood feedback, recent plays, dislikes) that tilts the
-  taste centroid and leans facets toward what you are into right now. It is keyed to recency of
-  interaction rather than wall-clock time, and its pull relaxes back toward your long-term taste as
-  a sync goes stale, so a passing mood never overwrites your settled preferences.
-- **Discovery** (`discover.py`): new-artist discovery pinned to your taste. External sources
-  (Last.fm) supply similarity edges, while your embedding and play-weighted taste supply the
-  judgement, and each result explains which of your artists bridged to it.
-- **Background worker** (`rec_worker.py`): a single thread rebuilds the taste vectors and
-  materializes the heavy surfaces off the request path. Repeated syncs coalesce into one rebuild.
-- **Tunable knobs** (`rec_params.py`): every result-shaping parameter is registered with a label,
-  range, and default, then surfaced generically in the Taste Model control panel.
-
-## Setup
-
-There is no setup gate: you land straight on the dashboard, which shows the extension connection
-state and, until it connects, an inline prompt to install the extension. The only thing you actually
-have to do is **pair the extension**:
-
-- **Pair the extension.** Install the extension (Quickstart above) and it connects automatically;
-  the dashboard flips to "Extension connected". Authentication is by the extension's identity, so
-  there is nothing to paste and no other program can use the connection. Your session cookie never
-  leaves the browser: the app only ever sends a request (method, URL, body) and the extension
-  applies auth and returns the response.
-
-A single default identity (`main`) is provisioned on first run, so a one-account user needs nothing
-else. **`/setup`** is optional and only worth visiting if you have **multiple YouTube identities**
-(brand accounts): add them there and pick the master that cross-identity merges consolidate into.
-
-Syncing is automatic: a full library sync runs once the extension is connected, then refreshes daily,
-and plays are captured live.
-
-You can backfill listening history from a Google Takeout export or Spotify Extended Streaming
-History in the **Import** panel in Setup. Both imports process entirely locally and accept the
-downloaded zip directly (Google's extracted JSON or HTML and Spotify's audio-history JSON also work).
-
-On Linux, config and data live in `~/.config/yt-playlist/` and `~/.local/share/yt-playlist/`. The
-macOS app uses `~/Library/Application Support/TuneConsole`, with logs under
-`~/Library/Logs/TuneConsole`. No credential file is stored; the live extension session is the
-credential. `YT_PLAYLIST_HOME` overrides the location, and `yt-playlist --help` lists options
-(`--host`, `--port`).
+- **Representations.** `embed.py` maintains a collaborative track space from co-occurrence baskets
+  (playlists, albums, artists, listening sessions, genre families, and decades). The default builder
+  is PPMI plus truncated SVD; Auto-tune can select item2vec instead. A separate content space encodes
+  genre, era, musical key, and enriched audio features. It supports taste modes, clustering, and
+  cold-start candidates that are not yet in the library.
+- **Taste and scoring.** `scoring.py` represents durable taste as one centroid per coherent playlist,
+  weighted by how much that playlist is played. Candidate scores are the weighted fit across those
+  contexts, then adjusted by genre, era, artist, popularity, and breadth preferences. This avoids
+  collapsing a multi-modal library into one user vector.
+- **Recent intent.** `transient.py` and `layers.py` derive decaying signals from recent plays, likes,
+  dislikes, skips, and explicit mood feedback. Collaborative, session, and audio-space tilts affect
+  ranking without replacing durable taste; repeated evidence can graduate into persistent facet
+  weights. Machine-generated radio plays are excluded from taste evidence to prevent feedback loops.
+- **Surfaces and discovery.** Each surface in `surfaces.py` owns its candidate pool, exclusions, and
+  rotation policy. Out-of-library discovery uses YouTube Music catalog data and cached Last.fm edges,
+  but TuneConsole's local models do the ranking. `rec_worker.py` coalesces rebuild requests, persists
+  vectors, and materializes expensive proposals in the background so routes can serve the last good
+  result from SQLite.

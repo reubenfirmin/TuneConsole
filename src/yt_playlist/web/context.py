@@ -55,6 +55,9 @@ class Ctx:
     radio: object | None = None        # #93 in-process RadioSession (dynamic radio), set in create_app
     # Guards library sync so the background sync daemon and a manual POST /sync never run at once.
     sync_lock: object = field(default_factory=threading.Lock)
+    # A Spotify Account Data import may spend hours resolving tracks through the extension. This
+    # both prevents duplicate jobs and lets packaged-app idle shutdown keep the process alive.
+    spotify_import_lock: object = field(default_factory=threading.Lock)
 
     def __post_init__(self):
         raw = self.store.get_setting(AUTH_EXPIRED_KEY)

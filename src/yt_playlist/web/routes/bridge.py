@@ -674,6 +674,7 @@ def build(ctx) -> APIRouter:
                         ytm_tabs = max(0, int(msg.get("ytmTabs") or 0))
                         responding_tabs = max(0, int(msg.get("respondingTabs") or 0))
                         reinjected_tabs = max(0, int(msg.get("reinjectedTabs") or 0))
+                        reloaded_tabs = max(0, int(msg.get("reloadedTabs") or 0))
                     except (TypeError, ValueError):
                         logger.warning("malformed sensor-health frame, ignoring: %r", msg)
                         continue
@@ -682,6 +683,8 @@ def build(ctx) -> APIRouter:
                         "ytm_tabs": ytm_tabs,
                         "responding_tabs": responding_tabs,
                         "reinjected_tabs": reinjected_tabs,
+                        "recovering": bool(msg.get("recovering")),
+                        "reloaded_tabs": reloaded_tabs,
                         "error": str(msg.get("error") or "")[:500],
                     }
                     continue
