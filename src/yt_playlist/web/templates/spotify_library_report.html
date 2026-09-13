@@ -1,0 +1,265 @@
+{% extends "base.html" %}
+{% block title %}Spotify import report · TuneConsole{% endblock %}
+{% block page_class %}page-import-report{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/spotify-report.css?v={{ asset_v }}">{% endblock %}
+{% block body %}
+{% set added = report.playlists_imported + report.tracks_imported + report.albums_imported %}
+{% set unmatched = report.tracks_unmatched + report.albums_unmatched %}
+{% set details = report.get('details') %}
+{% set unmatched_albums = details.albums|selectattr('status', 'equalto', 'unmatched')|list if details else [] %}
+{% set other_albums = details.albums|rejectattr('status', 'equalto', 'unmatched')|list if details else [] %}
+{% set playlist_reasons = {
+  'created': 'Created in YouTube Music',
+  'previously_imported': 'Previously imported by TuneConsole',
+  'already_exists': 'An identical playlist already exists',
+  'name_already_exists': 'A playlist with this name already exists',
+  'empty': 'No importable tracks in the export',
+  'no_tracks_matched': 'None of its tracks could be matched'
+} %}
+{% set album_reasons = {
+  'saved': 'Saved to your YouTube Music library',
+  'previously_imported': 'Previously imported by TuneConsole',
+  'already_in_library': 'Already in your YouTube Music library',
+  'no_confident_match': 'No confident catalog match',
+  'not_saveable': 'Catalog result had no saveable album',
+  'saved_by_user': 'You selected and saved this match'
+} %}
+<div class="import-report-shell">
+  <a class="import-report-back" href="/#notices">← Dashboard</a>
+
+  {% if spotify_error %}<p class="import-report-error">{{ spotify_error }}</p>{% endif %}
+
+  <header class="import-report-hero">
+    <h1>Spotify import report</h1>
+    <p class="import-report-deck">What TuneConsole found in the export, what changed in YouTube
+      Music, and every item it deliberately left alone.</p>
+  </header>
+
+  <section class="import-report-verdict" aria-labelledby="report-outcome">
+    <div>
+      {% if added %}
+      <h2 id="report-outcome">Your YouTube Music library was updated.</h2>
+      <p>TuneConsole created {{ report.playlists_imported }} playlists, added
+        {{ report.tracks_imported }} tracks, and saved {{ report.albums_imported }} albums.</p>
+      {% else %}
+      <h2 id="report-outcome">No new library items were needed.</h2>
+      <p>The export was processed successfully. Its playlists and most saved albums were already
+        represented in YouTube Music; {{ unmatched }} track or album {{ 'entry' if unmatched == 1 else 'entries' }}
+        could not be matched with enough confidence.</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="import-report-scope" aria-label="Export scope">
+    <div><strong>{{ job.playlists_found }}</strong><span>playlists in export</span></div>
+    <div><strong>{{ job.track_entries }}</strong><span>playlist track entries</span></div>
+    <div><strong>{{ job.albums_found }}</strong><span>saved albums in export</span></div>
+    <div><strong>{{ unmatched }}</strong><span>unmatched entries</span></div>
+  </section>
+
+  <div class="import-report-results">
+    <article class="import-result-card">
+      <header><h2>Playlists</h2><strong>{{ report.playlists_imported }} imported</strong></header>
+      <dl>
+        <div><dt>Found in export</dt><dd>{{ report.playlists_found }}</dd></div>
+        <div><dt>Created in YouTube Music</dt><dd>{{ report.playlists_imported }}</dd></div>
+        <div><dt>Skipped</dt><dd>{{ report.playlists_skipped }}</dd></div>
+      </dl>
+    </article>
+
+    <article class="import-result-card">
+      <header><h2>Playlist tracks</h2><strong>{{ report.tracks_imported }} added</strong></header>
+      <dl>
+        <div><dt>Track entries in export</dt><dd>{{ job.track_entries }}</dd></div>
+        <div><dt>Added to new playlists</dt><dd>{{ report.tracks_imported }}</dd></div>
+        <div><dt>Could not be matched</dt><dd>{{ report.tracks_unmatched }}</dd></div>
+      </dl>
+    </article>
+
+    <article class="import-result-card">
+      <header><h2>Saved albums</h2><strong>{{ report.albums_imported }} saved</strong></header>
+      <dl>
+        <div><dt>Found in export</dt><dd>{{ report.albums_found }}</dd></div>
+        <div><dt>Already in your library</dt><dd>{{ report.albums_skipped }}</dd></div>
+        <div><dt>Could not be matched</dt><dd>{{ report.albums_unmatched }}</dd></div>
+      </dl>
+    </article>
+  </div>
+
+  {% if details %}
+  <section class="import-report-audit" x-data="{ q: '' }">
+    <header class="import-audit-head">
+      <div>
+        <h2>Item-by-item audit</h2>
+        <p>Every source item has an outcome and a concrete reason. Search by playlist, track,
+          album, or artist.</p>
+      </div>
+      <label class="import-audit-search">
+        <span class="visually-hidden">Search import results</span>
+        <input type="search" placeholder="Search this report…" x-model.debounce.100ms="q">
+      </label>
+    </header>
+
+    <details class="import-audit-group">
+      <summary><span>Playlist outcomes</span><strong>{{ details.playlists|length }}</strong></summary>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Playlist</th><th>Source tracks</th><th>Outcome</th><th>Reason</th><th></th></tr></thead>
+          <tbody>
+          {% for item in details.playlists %}
+            <tr data-search="{{ (item.name ~ ' ' ~ item.status ~ ' ' ~ playlist_reasons.get(item.reason, item.reason))|lower|e }}"
+                x-show="!q || $el.dataset.search.includes(q.toLowerCase())">
+              <td><strong>{{ item.name }}</strong></td>
+              <td class="mono">{{ item.tracks_found }}</td>
+              <td><span class="tag {{ 'teal' if item.status == 'imported' else 'amber' }}">{{ item.status }}</span></td>
+              <td>{{ playlist_reasons.get(item.reason, item.reason) }}{% if item.tracks_unmatched %}
+                <span class="text-dim"> · {{ item.tracks_unmatched }} unmatched</span>{% endif %}</td>
+              <td class="text-end">{% if item.ytm_playlist_id %}<a href="https://music.youtube.com/playlist?list={{ item.ytm_playlist_id }}"
+                target="_blank" rel="noopener">Open ↗</a>{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    {% if details.unmatched_tracks %}
+    <details class="import-audit-group" open>
+      <summary><span>Unmatched playlist tracks</span><strong>{{ details.unmatched_tracks|length }}</strong></summary>
+      <p class="import-audit-note">These did not meet the strict title-and-artist threshold. They
+        were excluded rather than replaced with an uncertain recording.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Track</th><th>Artist</th><th>Album</th><th>Source playlist</th></tr></thead>
+          <tbody>
+          {% for item in details.unmatched_tracks %}
+            <tr data-search="{{ (item.title ~ ' ' ~ item.artist ~ ' ' ~ item.album ~ ' ' ~ item.playlist)|lower|e }}"
+                x-show="!q || $el.dataset.search.includes(q.toLowerCase())">
+              <td>{% if item.spotify_url %}<a href="{{ item.spotify_url }}" target="_blank"
+                rel="noopener"><strong>{{ item.title }}</strong> ↗</a>{% else %}<strong>{{ item.title }}</strong>{% endif %}
+                {% if item.spotify_link_is_search %}<span class="import-source-note">Spotify search</span>{% endif %}</td>
+              <td>{{ item.artist }}</td>
+              <td class="text-dim">{{ item.album or '—' }}</td><td>{{ item.playlist }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+    {% endif %}
+
+    {% if unmatched_albums %}
+    <details class="import-audit-group" open>
+      <summary><span>Unmatched albums</span><strong>{{ unmatched_albums|length }}</strong></summary>
+      <p class="import-audit-note">TuneConsole would not choose for you when the catalog result was
+        ambiguous. Compare the Spotify source with the YouTube Music candidates, then save the right one.</p>
+      <div class="import-unmatched-albums">
+        {% for item in unmatched_albums %}
+        <article class="import-unmatched-album" id="album-{{ item.report_index }}"
+                 data-search="{{ (item.title ~ ' ' ~ item.artist ~ ' ' ~ album_reasons.get(item.reason, item.reason))|lower|e }}"
+                 x-show="!q || $el.dataset.search.includes(q.toLowerCase())">
+          <header class="import-source-album">
+            {% if item.spotify_url and not item.spotify_link_is_search %}
+            <a href="{{ item.spotify_url }}" target="_blank" rel="noopener" class="import-source-cover">
+              <img src="/import/spotify-library/spotify-thumbnail?url={{ item.spotify_url|urlencode }}"
+                   alt="" loading="lazy" onerror="this.closest('.import-source-cover').remove()">
+            </a>
+            {% endif %}
+            <div>
+              <h3>{% if item.spotify_url %}<a href="{{ item.spotify_url }}" target="_blank"
+                rel="noopener">{{ item.title }} ↗</a>{% else %}{{ item.title }}{% endif %}</h3>
+              <p>{{ item.artist }}</p>
+              <span>{{ album_reasons.get(item.reason, item.reason) }}{% if item.spotify_link_is_search %}
+                · link opens a Spotify search because this older report did not retain the URI{% endif %}</span>
+            </div>
+          </header>
+
+          {% if item.candidates %}
+          <div class="import-candidate-grid" aria-label="Possible YouTube Music matches">
+            {% for candidate in item.candidates %}
+            <article class="import-candidate">
+              {% if candidate.thumbnail %}<img src="{{ candidate.thumbnail }}" alt="" loading="lazy"
+                onerror="this.remove()">{% endif %}
+              <div class="import-candidate-copy">
+                <h4>{{ candidate.title }}</h4>
+                <p>{{ candidate.artist or 'Unknown artist' }}</p>
+                <span>{{ (candidate.title_score * 100)|round|int }}% title ·
+                  {{ (candidate.artist_score * 100)|round|int }}% artist</span>
+              </div>
+              <div class="import-candidate-actions">
+                <a class="btn-ghost btn-sm" href="/album?browse={{ candidate.browse_id }}"
+                   target="_blank" rel="noopener">Inspect</a>
+                <form method="post" action="/import/spotify-library/resolve-album"
+                      x-data="{ saving: false }" @submit="saving = true" :aria-busy="saving">
+                  <input type="hidden" name="album_index" value="{{ item.report_index }}">
+                  <input type="hidden" name="browse_id" value="{{ candidate.browse_id }}">
+                  <button class="btn-primary btn-sm" type="submit" :disabled="saving"
+                          x-text="saving ? 'Saving…' : 'Save this album'">Save this album</button>
+                </form>
+              </div>
+            </article>
+            {% endfor %}
+          </div>
+          {% else %}
+          <div class="import-find-candidates">
+            <p>{{ 'This older report did not retain its candidates.' if not job.report_schema or job.report_schema < 4 else 'YouTube Music returned no album candidates.' }}</p>
+            <form method="post" action="/import/spotify-library/find-album-candidates">
+              <input type="hidden" name="album_index" value="{{ item.report_index }}">
+              <button class="btn-ghost btn-sm" type="submit">Search YouTube Music for candidates</button>
+            </form>
+          </div>
+          {% endif %}
+        </article>
+        {% endfor %}
+      </div>
+    </details>
+    {% endif %}
+
+    {% if other_albums %}
+    <details class="import-audit-group">
+      <summary><span>Other album outcomes</span><strong>{{ other_albums|length }}</strong></summary>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Album</th><th>Artist</th><th>Outcome</th><th>Reason</th><th></th></tr></thead>
+          <tbody>
+          {% for item in other_albums %}
+            <tr data-search="{{ (item.title ~ ' ' ~ item.artist ~ ' ' ~ item.status ~ ' ' ~ album_reasons.get(item.reason, item.reason))|lower|e }}"
+                x-show="!q || $el.dataset.search.includes(q.toLowerCase())">
+              <td>{% if item.spotify_url %}<a href="{{ item.spotify_url }}" target="_blank"
+                rel="noopener"><strong>{{ item.title }}</strong> ↗</a>{% else %}<strong>{{ item.title }}</strong>{% endif %}</td>
+              <td>{{ item.artist }}</td>
+              <td><span class="tag {{ 'teal' if item.status == 'imported' else ('red' if item.status == 'unmatched' else 'amber') }}">{{ item.status }}</span></td>
+              <td>{{ album_reasons.get(item.reason, item.reason) }}</td>
+              <td class="text-end">{% if item.browse_id %}<a href="/album?browse={{ item.browse_id }}">Open →</a>{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+    {% endif %}
+  </section>
+  {% else %}
+  <section class="import-report-legacy">
+    <h2>The importer did not record the item-level audit.</h2>
+    <p>This run was handled by an older backend process that was still in memory after TuneConsole
+      was updated. Its totals are accurate, but its playlist, track, and album decisions cannot be
+      reconstructed after the uploaded zip was discarded. Restart TuneConsole, then use the same
+      export again. Existing work is recorded and will not be duplicated.</p>
+    <a class="btn-primary" href="/setup?tab=import">Import again after restarting</a>
+  </section>
+  {% endif %}
+
+  <section class="import-report-footnote">
+    <div>
+      <h2>Retries do not create duplicates.</h2>
+      <p>TuneConsole records each imported playlist and album as it goes. Reusing this export—or a
+        newer one—skips work already completed, including anything saved before an interrupted run.</p>
+    </div>
+    <div class="btn-row">
+      <a class="btn-ghost" href="/#notices">Back to dashboard</a>
+      <a class="btn-primary" href="/setup?tab=import">Import another export</a>
+    </div>
+  </section>
+</div>
+{% endblock %}

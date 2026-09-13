@@ -7,9 +7,10 @@ per-party genre and era sliders, crossing a slot out - re-picks from the stored 
 (rec/road_trip.py). Only "Save to YouTube" materializes it, the same way every other generated
 playlist is made (Generated group, GC, taste-model quarantine) via executor.create_generated_playlist.
 
-Every endpoint here re-renders the whole page body (draft + recipe list) into #road-trip-body. The
+Editor endpoints re-render the whole page body (draft + recipe list) into #road-trip-body. The
 two are coupled - saving a draft updates its recipe's "last generated" link, deleting a recipe drops
-its draft - so one swap keeps them consistent without out-of-band trickery.
+its draft - so one swap keeps them consistent. Saving to YouTube uses the standard generated-playlist
+result, which closes the loading screen and opens the saved playlist.
 """
 import asyncio
 import json
@@ -74,7 +75,7 @@ def build(ctx) -> APIRouter:
         if not entry or not entry.get("state"):
             return None
         # A draft persisted by an older build must not crash the page it reopens on.
-        state, rid = road_trip_rec.normalized(entry["state"]), entry["recipe_id"]
+        state, rid = road_trip_rec.normalized(entry["state"], store, now_fn()), entry["recipe_id"]
         if state.get("building") and rid not in _BUILDING:      # orphaned build: settle it
             state = road_trip_rec.finish_draft(state, store, now_fn())
             store.save_road_trip_draft(rid, state, now_fn())
@@ -136,9 +137,19 @@ def build(ctx) -> APIRouter:
                                  min(MAX_TARGET_MINUTES, int(form.get("target_minutes") or 60)))
         except (TypeError, ValueError):
             target_minutes = 60
+        artists, genres = _clean_list(form.get("artists")), _clean_list(form.get("genres"))
+        previous = store.get_road_trip_recipe(recipe_id) if recipe_id is not None else None
+        previous_artists = {a.casefold() for a in (previous or {}).get("artists", [])}
+        known_genres = {road_trip_rec._canon_genre(g) for g in genres}
+        for artist in artists:
+            if artist.casefold() in previous_artists:
+                continue
+            genre = road_trip_rec._canon_genre(road_trip_rec.artist_genre(store, artist))
+            if genre and genre not in known_genres:
+                genres.append(genre)
+                known_genres.add(genre)
         recipe_id = store.save_road_trip_recipe(
-            recipe_id, name, own_pct, _clean_list(form.get("artists")),
-            _clean_list(form.get("genres")), target_minutes, now_fn(),
+            recipe_id, name, own_pct, artists, genres, target_minutes, now_fn(),
             familiarity_pct=familiarity_pct,
             blacklist_genres=_clean_list(form.get("blacklist_genres")))
         # Editing the recipe a draft is already showing steers THAT draft rather than starting over:
@@ -146,8 +157,8 @@ def build(ctx) -> APIRouter:
         state = store.get_road_trip_draft(recipe_id)
         if state is not None:
             recipe = store.get_road_trip_recipe(recipe_id)
-            state = road_trip_rec.apply_recipe(road_trip_rec.normalized(state), store, now_fn(),
-                                               recipe)
+            state = road_trip_rec.apply_recipe(
+                road_trip_rec.normalized(state, store, now_fn()), store, now_fn(), recipe)
             store.save_road_trip_draft(recipe_id, state, now_fn())
             _, client = _client()
             if state["pending"] and client is not None:
@@ -238,7 +249,7 @@ def build(ctx) -> APIRouter:
         state = store.get_road_trip_draft(recipe_id)
         if state is None:
             return _body(request, error="That playlist is gone - build it again.")
-        state = change(road_trip_rec.normalized(state))
+        state = change(road_trip_rec.normalized(state, store, now_fn()))
         store.save_road_trip_draft(recipe_id, state, now_fn())
         _, client = _client()
         if state.get("pending") and client is not None:
@@ -248,10 +259,10 @@ def build(ctx) -> APIRouter:
         return _body(request, recipe_id)
 
     @router.post("/road_trip/draft/{recipe_id}/tilt")
+    @router.post("/road_trip/draft/{recipe_id}/tilt/v2")
     async def tilt_draft(request: Request, recipe_id: int):
-        """A genre or era slider moved. The value posted is the SHARE of that party's tracks the
-        genre should have (0-100), which is also where the slider sits, so what you drag and what
-        you see are the same quantity."""
+        """Set the requested percentage and proportionally rebalance the rest of its slider group.
+        The controls retain these targets while the worker finds matching tracks."""
         form = await request.form()
         party, axis = form.get("party") or "", form.get("axis") or ""
         try:
@@ -264,7 +275,7 @@ def build(ctx) -> APIRouter:
 
     @router.post("/road_trip/draft/{recipe_id}/unpin")
     async def unpin_draft(request: Request, recipe_id: int):
-        """Release a pinned slider: that genre floats with the rest of the mix again."""
+        """Reset this genre or year group to follow the available tracks again."""
         form = await request.form()
         party, axis = form.get("party") or "", form.get("axis") or ""
         return _mutate(request, recipe_id,
@@ -313,29 +324,46 @@ def build(ctx) -> APIRouter:
     @router.post("/road_trip/draft/{recipe_id}/save")
     async def save_draft(request: Request, recipe_id: int):
         """Materialize exactly what's on screen as a YouTube playlist (Generated group: quarantined
-        from the taste model and GC'd on the normal schedule)."""
+        from the taste model and GC'd on the normal schedule), using the shared save/play feedback."""
         recipe = store.get_road_trip_recipe(recipe_id)
         state = store.get_road_trip_draft(recipe_id)
+        result = {"name": f"Road Trip: {recipe['name']}" if recipe else "Road Trip"}
+
+        def response(error=None):
+            if error:
+                result["error"] = error
+            return templates.TemplateResponse(request, "_partials/generated_result.html", result)
+
         if recipe is None or state is None:
-            return _body(request, error="That playlist is gone - build it again.")
+            return response("That playlist is gone - build it again.")
+        state = road_trip_rec.normalized(state, store, now_fn())
         identity_id, client = _client()
         tracks = road_trip_rec.draft_tracks(state)
         if client is None or not tracks:
-            return _body(request, recipe_id,
-                         error="Couldn't save it - connect an account and keep at least one track.")
+            return response("Couldn't save it - connect an account and keep at least one track.")
         stats = state["stats"]
-        result = await asyncio.to_thread(
-            executor.create_generated_playlist, store, f"Road Trip: {recipe['name']}", tracks,
-            client, now_fn(), identity_id,
-            recipe={"model": "road_trip", "road_trip_recipe_id": recipe_id, "journey": "road_trip",
-                    "own_pct": state["own_pct"], "familiarity_pct": state["familiarity_pct"],
-                    "target_minutes": state["target_minutes"],
-                    "achieved_minutes": stats.get("minutes"), "own_count": stats.get("own_count"),
-                    "their_count": stats.get("their_count")})
-        store.set_road_trip_last_playlist(recipe_id, result["new_ytm"])
-        state["saved_playlist_id"] = result["new_ytm"]
-        store.save_road_trip_draft(recipe_id, state, now_fn())
-        return _body(request, recipe_id)
+        try:
+            saved = await asyncio.to_thread(
+                executor.create_generated_playlist, store, result["name"], tracks,
+                client, now_fn(), identity_id,
+                recipe={"model": "road_trip", "road_trip_recipe_id": recipe_id, "journey": "road_trip",
+                        "own_pct": state["own_pct"], "familiarity_pct": state["familiarity_pct"],
+                        "target_minutes": state["target_minutes"],
+                        "achieved_minutes": stats.get("minutes"), "own_count": stats.get("own_count"),
+                        "their_count": stats.get("their_count")})
+            store.set_road_trip_last_playlist(recipe_id, saved["new_ytm"])
+            state["saved_playlist_id"] = saved["new_ytm"]
+            store.save_road_trip_draft(recipe_id, state, now_fn())
+            result.update(ytm=saved["new_ytm"], pid=saved["pid"], added=saved["added"])
+            bridge = getattr(ctx, "bridge", None)
+            if bridge is not None and getattr(bridge, "connected", False):
+                watch_url = f"https://music.youtube.com/watch?list={saved['new_ytm']}"
+                threading.Thread(target=executor.navigate_when_ready,
+                                 args=(client, bridge, saved["new_ytm"], watch_url), daemon=True).start()
+        except Exception:  # noqa: BLE001 - close the loading screen and leave the draft available
+            ctx.logger.exception("save road trip %s failed", recipe_id)
+            return response("YouTube returned an unexpected response.")
+        return response()
 
     @router.get("/road_trip/artist_genre")
     def artist_genre(name: str = ""):

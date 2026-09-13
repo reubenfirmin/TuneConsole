@@ -9,7 +9,7 @@
 {% set s = draft.state %}
 {% set rid = draft.recipe_id %}
 {% set stats = s.stats %}
-<section class="card rt-draft{{ ' is-building' if s.building }}">
+<section id="rt-draft-{{ rid }}" class="card rt-draft{{ ' is-building' if s.building }}">
   <header class="rt-draft-head">
     <div class="rt-draft-title">
       <h2>{{ s.name }}</h2>
@@ -18,7 +18,7 @@
     <div class="rt-draft-metrics">
       <span><strong>{{ stats.own_count + stats.their_count }}</strong> songs</span>
       <span><strong>{{ stats.minutes }}</strong> / {{ s.target_minutes }} min</span>
-      <span><strong>{{ stats.own_count }}</strong> yours · <strong>{{ stats.their_count }}</strong> theirs</span>
+      <span class="rt-pool-counts"><strong>{{ stats.get('yours_count', stats.own_count) }}</strong> Yours · <strong>{{ stats.their_count }}</strong> Theirs · <strong>{{ stats.get('blend_count', 0) }}</strong> Blend</span>
     </div>
     {% if s.saved_playlist_id %}
     <a class="rt-status is-saved" href="https://music.youtube.com/playlist?list={{ s.saved_playlist_id }}"
@@ -72,22 +72,28 @@
             hx-target="#road-trip-body" hx-swap="innerHTML" hx-disabled-elt="this"
             title="Another draw from the same candidates">Shuffle</button>
     <button type="button" class="btn btn-primary rt-save" hx-post="/road_trip/draft/{{ rid }}/save"
-            hx-target="#road-trip-body" hx-swap="innerHTML" hx-disabled-elt="this">
+            hx-target="#rt-save-result-{{ rid }}" hx-swap="innerHTML" hx-disabled-elt="this"
+            onclick="genOpenYT('rt-draft-{{ rid }}')">
       Save to YouTube ↗</button>
     {% endif %}
   </div>
+  <div id="rt-save-result-{{ rid }}" role="status"></div>
   {% if not s.building %}
   <div class="rt-queue-notes">
     <p class="section-note">Swap anything you don't want and the recipe fills the slot back in.
       Nothing reaches YouTube until you save.</p>
-    {% if stats.short %}
+    {% if stats.short.theirs or stats.short.mine %}
     <p class="muted rt-short">
-      {% if stats.short.theirs %}Their artists and genres only stretched to
-        {{ stats.their_minutes }} min - {{ stats.short.theirs }} min of their share came from your
-        library. Add another artist or genre for a fuller half.{% endif %}
-      {% if stats.short.mine %}Your side ran short by {{ stats.short.mine }} min (excluded genres, or
-        a thin library), so their tracks made up the difference.{% endif %}
+      {% if stats.short.theirs %}Theirs is short of the requested share by about
+        {{ stats.short.theirs }} min. Add another artist or genre for more options.{% endif %}
+      {% if stats.short.mine %}Yours is short of the requested share by about {{ stats.short.mine }} min
+        with the current library and genre choices.{% endif %}
     </p>
+    {% endif %}
+    {% if stats.get('mix_targets', {}).get('blend', 0) > stats.get('blend_count', 0) %}
+    <p class="muted rt-blend-short">Blend has {{ stats.blend_count }} of the
+      {{ stats.mix_targets.blend }} songs needed for its requested share with the current choices.
+      Other pools fill the remaining slots where possible.</p>
     {% endif %}
   </div>
   {% endif %}
@@ -96,7 +102,9 @@
   </div>
   <ol class="rt-list">
     {% for t in draft.tracks %}
-    <li class="rt-row{{ ' is-theirs' if t.source != 'mine' }}" data-vid="{{ t.video_id }}">
+    {% set mix_source = t.get('mix_source', 'yours' if t.source == 'mine' else 'theirs') %}
+    <li class="rt-row is-{{ mix_source }}" data-vid="{{ t.video_id }}" data-mix-source="{{ mix_source }}"
+        data-thumb="{{ t.thumbnail or '' }}">
       <span class="rt-c-art{{ ' no-art' if not t.thumbnail }}">{% if t.thumbnail %}<img
            src="{{ t.thumbnail }}" alt="" loading="lazy" referrerpolicy="no-referrer"
            onerror="this.closest('.rt-c-art').classList.add('no-art'); this.remove()">{% endif %}</span>
@@ -106,12 +114,12 @@
       <span class="rt-c-artist" title="{{ t.artist }}">{{ t.artist }}</span>
       <span class="rt-c-genre" title="{{ t.genre }}">{{ t.genre }}</span>
       <span class="rt-c-year">{{ t.year or '' }}</span>
-      <span class="rt-c-src {{ 'is-yours' if t.source == 'mine' else 'is-theirs' }}">{{ 'yours' if t.source == 'mine' else 'theirs' }}</span>
+      <span class="rt-c-src is-{{ mix_source }}"{% if mix_source == 'blend' %} title="Music that fits both tastes"{% endif %}>{{ mix_source | capitalize }}</span>
       {% if not s.building %}
       <button type="button" class="rt-x" title="Swap this song"
               aria-label="Swap this song" hx-post="/road_trip/draft/{{ rid }}/slot/{{ loop.index0 }}"
               hx-target="#road-trip-body" hx-swap="innerHTML">↻</button>
-      {% else %}<span></span>{% endif %}
+      {% else %}<span class="rt-x-placeholder"></span>{% endif %}
     </li>
     {% endfor %}
   </ol>

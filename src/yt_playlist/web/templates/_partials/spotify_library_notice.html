@@ -1,0 +1,35 @@
+{% if job.status in ('queued', 'running') %}
+<div class="alert-card card card--featured alert-nudge" id="spotify-library-notice"
+     hx-get="/import/spotify-library/notice" hx-trigger="every 10s" hx-target="this" hx-swap="outerHTML">
+  <span class="alert-cover"><img src="/static/nag/spotify-import.png" alt="" loading="lazy"
+       onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
+  <div class="alert-body">
+    <span class="alert-title"><strong>Spotify import is running.</strong> You can keep using TuneConsole while it checks your library.</span>
+    <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=import">View status →</a></div>
+  </div>
+</div>
+{% elif job.status == 'done' %}
+<div class="alert-card card card--featured alert-nudge" id="spotify-library-notice">
+  <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
+          hx-post="/import/spotify-library/dismiss" hx-target="#spotify-library-notice"
+          hx-swap="outerHTML swap:200ms">×</button>
+  <span class="alert-cover"><img src="/static/nag/spotify-import.png" alt="" loading="lazy"
+       onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
+  <div class="alert-body">
+    <span class="alert-title"><strong>Spotify import complete.</strong> Review what was added, skipped, and unmatched.</span>
+    <div class="alert-foot"><a class="btn btn-sm alert-go" href="/import/spotify-library/report">View report →</a></div>
+  </div>
+</div>
+{% else %}
+<div class="alert-card card card--featured alert-nudge alert-high" id="spotify-library-notice">
+  <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
+          hx-post="/import/spotify-library/dismiss" hx-target="#spotify-library-notice"
+          hx-swap="outerHTML swap:200ms">×</button>
+  <span class="alert-cover"><img src="/static/nag/spotify-import.png" alt="" loading="lazy"
+       onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
+  <div class="alert-body">
+    <span class="alert-title"><strong>Spotify import stopped.</strong> Partial work is safe; review the status before retrying.</span>
+    <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=import">Retry safely →</a></div>
+  </div>
+</div>
+{% endif %}

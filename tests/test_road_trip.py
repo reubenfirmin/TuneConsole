@@ -201,6 +201,162 @@ def test_a_genre_no_database_knows_falls_back_to_searching_youtube(monkeypatch):
     assert [r["video_id"] for r in rows] == ["g1"]
 
 
+def test_passenger_genre_grows_the_seed_artists_neighborhood_and_era(store, monkeypatch):
+    catalog = {
+        "Weezer": (1994, "Alternative Rock", ["Peer A", "Modern Revival", "Jazz Peer"]),
+        "Staind": (1999, "Alternative Rock", ["Peer B", "Peer A"]),
+        "Peer A": (1996, "Alternative Rock", []),
+        "Peer B": (2002, "Alternative Rock", []),
+        "Modern Revival": (2024, "Alternative Rock", []),
+        "Jazz Peer": (1996, "Jazz", []),
+        "Unrelated": (1996, "Alternative Rock", []),
+    }
+
+    def page(client, name):
+        return {"songs": {"results": [{"videoId": name, "title": name,
+                 "artists": [{"name": name}], "duration_seconds": 240}]},
+                "related": {"results": [{"title": n} for n in catalog[name][2]]}}, name
+
+    monkeypatch.setattr(road_trip, "_artist_page", page)
+    monkeypatch.setattr(road_trip, "_facts", lambda title, artist: {
+        "year": catalog[artist][0], "genre": catalog[artist][1], "popularity": 500, "duration": 240})
+    monkeypatch.setattr(road_trip, "artist_genre", lambda store, artist: catalog[artist][1])
+    monkeypatch.setattr(road_trip, "genre_artists", lambda *a, **kw: pytest.fail("Broad genre lookup"))
+    monkeypatch.setattr(road_trip, "_genre_songs", lambda *a, **kw: pytest.fail("Broad genre search"))
+
+    state = road_trip.build_draft(store, FakeClient(), _recipe(
+        own_pct=0, artists=["Weezer", "Staind"], genres=["Alternative Rock"]), 1000, seed=7)
+
+    assert {c["artist"] for c in state["pool"]} == {"Weezer", "Staind", "Peer A", "Peer B"}
+    axis = next(a for a in state["axes"]["theirs"] if a["key"] == "genre:Alternative Rock")
+    assert axis["artists"] == ["Weezer", "Staind"]
+    assert all(c["cluster_genre"] == "Alternative Rock" for c in state["pool"])
+
+    # Older drafts can contain a broad genre pool. The next slider move replaces those results
+    # with the same seed neighborhood, even if there are already enough generic tracks.
+    for name in ("Unrelated", "Modern Revival"):
+        candidate = road_trip._candidate(name, name, name, "", None, 240, "theirs",
+                                         "Alternative Rock", catalog[name][0])
+        candidate["input"] = "Alternative Rock"
+        state["pool"].append(candidate)
+    state.pop("artist_contexts")  # an older persisted draft has to recover its anchors too
+    road_trip.set_share(state, "theirs", "genre:Alternative Rock", .8, store, 1000)
+    assert state["pending"]
+    while state["pending"]:
+        road_trip.add_other_input(state, store, FakeClient(), state["pending"].pop(0))
+    road_trip.finish_draft(state, store, 1000)
+    assert {c["artist"] for c in state["pool"]} == {"Weezer", "Staind", "Peer A", "Peer B"}
+    assert state["targets"]["theirs"]["genre:Alternative Rock"] == .8
+
+    edited = _recipe(own_pct=0, artists=["Staind"], genres=["Alternative Rock"])
+    road_trip.apply_recipe(state, store, 1000, edited)
+    while state["pending"]:
+        road_trip.add_other_input(state, store, FakeClient(), state["pending"].pop(0))
+    road_trip.finish_draft(state, store, 1000)
+    assert "Weezer" not in {c["artist"] for c in state["pool"]}
+    assert set(state["artist_contexts"]) == {"Staind"}
+
+
+@pytest.mark.parametrize("with_store", [False, True])
+def test_passenger_sliders_keep_each_seeds_genre_and_repair_old_assignments(store, monkeypatch, with_store):
+    seeds = ["Weezer", "We Were Promised Jetpacks", "Staind"]
+    catalog = {
+        "Weezer": ("Alternative Rock", ["Alt Peer", "We Were Promised Jetpacks"]),
+        "We Were Promised Jetpacks": ("Indie Rock", ["Indie Peer", "Weezer"]),
+        "Staind": ("Alternative Rock", ["Alt Peer"]),
+        "Alt Peer": ("Alternative Rock", []),
+        "Indie Peer": ("Indie Rock", []),
+    }
+
+    def page(client, name):
+        return {"songs": {"results": [{"videoId": name, "title": name,
+                 "artists": [{"name": name}], "duration_seconds": 240}]},
+                "related": {"results": [{"title": n} for n in catalog[name][1]]}}, name
+
+    monkeypatch.setattr(road_trip, "_artist_page", page)
+    monkeypatch.setattr(road_trip, "_facts", lambda title, artist: {"popularity": 500})
+    monkeypatch.setattr(road_trip, "artist_genre", lambda store, artist: catalog[artist][0])
+    monkeypatch.setattr(road_trip, "genre_artists", lambda *a, **kw: pytest.fail("Broad genre lookup"))
+    monkeypatch.setattr(road_trip, "_genre_songs", lambda *a, **kw: pytest.fail("Broad genre search"))
+    state = road_trip.build_draft(store, FakeClient(), _recipe(
+        own_pct=0, artists=seeds, genres=["alt rock", "indie rock"]), 1000, seed=7)
+    expected = {"Alternative Rock": ["Weezer", "Staind"], "Indie Rock": [seeds[1]]}
+    assert {a["name"]: a["artists"] for a in state["axes"]["theirs"]
+            if a["kind"] == "genre"} == expected
+
+    # Reproduce cached cross-family cluster assignments and a removed artist's lingering genre.
+    for candidate in state["pool"]:
+        candidate["cluster_genre"] = "Alternative Rock"
+    extra = road_trip._candidate("old-peer", "Old peer track", "Alt Peer", "", None, 240,
+                                 "theirs", "Alternative Rock", None)
+    extra.update(cluster_genre="Post-Punk", input="Post-Punk", anchors=seeds)
+    state["pool"].append(extra)
+    for name, origin in (("Ben Folds", "Ben Folds Five"), ("Generic Singer", "Singer-Songwriter")):
+        candidate = road_trip._candidate(name, name, name, "", None, 240,
+                                         "theirs", "Singer-Songwriter", None)
+        candidate["input"] = origin
+        state["pool"].append(candidate)
+    for genre in ("Post-Punk", "Singer-Songwriter"):
+        state["axes"]["theirs"].append({"key": "genre:" + genre, "kind": "genre",
+                                        "name": genre, "share": .25})
+    for axis in state["axes"]["theirs"]:
+        axis.update(artists=seeds, target=.25)
+        state["targets"]["theirs"][axis["key"]] = .25
+    state["picked"] = [{k: c[k] for k in road_trip._ROW_FIELDS} for c in state["pool"]]
+    state["picks"] = [c["video_id"] for c in state["picked"]]
+
+    road_trip.normalized(state, store if with_store else None, 1000)
+
+    assert {a["name"]: a["artists"] for a in state["axes"]["theirs"]} == expected
+    assert sum(a["balance_pct"] for a in state["axes"]["theirs"]) == 100
+    assert set(state["targets"]["theirs"]) == {"genre:" + g for g in expected}
+    assert {c["artist"] for c in state["pool"]} == set(catalog)
+    assert all(c["cluster_genre"] == catalog[c["artist"]][0] for c in state["pool"])
+    assert all(c["cluster_genre"] == catalog[c["artist"]][0] for c in state["picked"])
+
+    # Neither genre can pull the other selected seeds back in, even via a related-artist list.
+    for genre, artists in (("Alternative Rock", {"Weezer", "Staind", "Alt Peer"}),
+                            ("Indie Rock", {seeds[1], "Indie Peer"})):
+        road_trip.set_share(state, "theirs", "genre:" + genre, 1, store, 1000)
+        while state["pending"]:
+            road_trip.add_other_input(state, store, FakeClient(), state["pending"].pop(0))
+        road_trip.finish_draft(state, store, 1000)
+        assert state["picked"]
+        assert {c["artist"] for c in state["picked"]} <= artists
+
+
+def test_an_explicit_passenger_genre_keeps_its_origin_when_widened(store, monkeypatch):
+    state = road_trip.start_draft(store, _recipe(
+        own_pct=0, artists=["Weezer"], genres=["post-rock"]), 1000, seed=7)
+    state["artist_contexts"] = {"Weezer": {"genre": "Alternative Rock", "year": None, "related": []}}
+    state["pending"] = []
+    calls = []
+
+    def songs(client, kind, name, cap, store=None, decade=None):
+        calls.append(name)
+        return ([{"video_id": f"post-{len(calls)}", "title": "Post song", "artist": "Post Band",
+                  "album": "", "thumbnail": None, "duration": 300, "genre": "Post-Punk"}], [])
+
+    monkeypatch.setattr(road_trip, "other_input_songs", songs)
+    road_trip.add_other_input(state, store, FakeClient(), {"kind": "genre", "name": "post-rock"})
+    road_trip.finish_draft(state, store, 1000)
+    assert state["axes"]["theirs"][0]["artists"] == []
+
+    road_trip.set_share(state, "theirs", "genre:Post-Punk", 1, store, 1000)
+    while state["pending"]:
+        road_trip.add_other_input(state, store, FakeClient(), state["pending"].pop(0))
+    road_trip.finish_draft(state, store, 1000)
+    assert calls == ["post-rock", "Post-Punk"]
+    assert len(state["pool"]) == 2
+    assert all(c["genre_input"] == "post-rock" for c in state["pool"])
+    assert next(a for a in state["axes"]["theirs"] if a["kind"] == "genre")["artists"] == []
+
+    # Removing the original input also removes the tracks later fetched through its slider.
+    road_trip.apply_recipe(state, store, 1000, _recipe(own_pct=0, artists=["Weezer"], genres=[]))
+    assert state["pool"] == []
+    assert not [a for a in state["axes"]["theirs"] if a["kind"] == "genre"]
+
+
 def test_genre_artists_prefers_lastfm_and_uses_musicbrainz_for_a_decade(monkeypatch):
     monkeypatch.setattr(road_trip.lastfm, "api_key", lambda store=None: "k")
     monkeypatch.setattr(road_trip.lastfm, "tag_top_artists",
@@ -324,15 +480,102 @@ def test_build_draft_honours_the_requested_mix(store, monkeypatch):
     assert 55 <= stats["minutes"] <= 65
 
 
-def test_default_mix_reserves_an_implicit_overlap_third(store, monkeypatch):
+def test_default_mix_identifies_yours_theirs_and_blend_through_swaps_and_reload(store, monkeypatch):
     _stub_pools(monkeypatch, store, own_genre=lambda i: "Rock" if i % 2 == 0 else "Jazz")
 
     state = road_trip.build_draft(
         store, FakeClient(), _recipe(own_pct=50, genres=["Rock"]), 1000.0, seed=1)
 
     assert state["stats"]["overlap_count"] == 4
-    assert state["stats"]["own_count"] == 8       # 4 personal + 4 shared, surfaced simply as yours
+    assert state["stats"]["own_count"] == 8       # library accounting includes the shared pool
     assert state["stats"]["their_count"] == 4
+    assert state["stats"]["yours_count"] == state["stats"]["blend_count"] == 4
+    assert Counter(c["mix_source"] for c in state["picked"]) == {"yours": 4, "theirs": 4, "blend": 4}
+    assert {c["genre"] for c in state["picked"] if c["mix_source"] == "blend"} == {"Rock"}
+    for source in ("yours", "theirs", "blend"):
+        index = next(i for i, c in enumerate(state["picked"]) if c["mix_source"] == source)
+        previous = state["picked"][index]["video_id"]
+        road_trip.reroll_slot(state, store, index, 1000)
+        assert state["picked"][index]["video_id"] != previous
+        assert state["picked"][index]["mix_source"] == source
+    # Stored drafts from before source labels existed must show the same three pools on reload.
+    for candidate in state["picked"]:
+        candidate.pop("mix_source")
+    for key in ("yours_count", "blend_count", "yours_minutes", "blend_minutes"):
+        state["stats"].pop(key)
+    state.pop("blend_available")
+    road_trip.normalized(state)
+    assert Counter(c["mix_source"] for c in state["picked"]) == {"yours": 4, "theirs": 4, "blend": 4}
+    assert state["stats"]["yours_count"] == state["stats"]["blend_count"] == 4
+    assert state["stats"]["yours_minutes"] == state["stats"]["blend_minutes"] == 20
+    assert state["blend_available"] is True
+
+
+def test_blend_sources_and_totals_include_shortfall_replacements(store, monkeypatch):
+    _stub_pools(monkeypatch, store, other_count=2,
+                own_genre=lambda i: "Rock" if i % 2 == 0 else "Jazz")
+    state = road_trip.build_draft(
+        store, FakeClient(), _recipe(own_pct=50, genres=["Rock"]), 1000, seed=1)
+    assert state["stats"]["short"]["theirs"] > 0
+    for candidate in state["picked"]:
+        if candidate["source"] == "mine":
+            assert candidate["mix_source"] == ("blend" if candidate["genre"] == "Rock" else "yours")
+    counts = Counter(c["mix_source"] for c in state["picked"])
+    assert counts == {"yours": 6, "theirs": 2, "blend": 4}
+    assert state["stats"]["yours_count"] == counts["yours"]
+    assert state["stats"]["blend_count"] == counts["blend"]
+    assert sum(counts.values()) == state["stats"]["own_count"] + state["stats"]["their_count"]
+
+
+@pytest.mark.parametrize("own_pct, uneven_lengths", [(50, False), (50, True), (0, True), (100, True)])
+def test_blend_reserves_song_slots_with_library_genre_and_era_targets(
+        store, monkeypatch, own_pct, uneven_lengths):
+    genres = ["Rock", "Pop", "Trance", "Deep House"]
+    _stub_pools(monkeypatch, store, own_count=160, other_count=80,
+                own_genre=lambda i: genres[i % 4], own_year=lambda i: 1990 if i % 4 == 0 else 2000)
+    state = road_trip.build_draft(store, FakeClient(),
+                                  _recipe(own_pct=own_pct, genres=["Rock"], target_minutes=240),
+                                  1000, seed=7)
+    # Bypass the initial per-input discovery cap so every requested mix has ample candidates.
+    state["pool"] += [{**state["pool"][0], "video_id": f"extra-{i}", "artist": f"Extra artist {i}"}
+                      for i in range(40)]
+    state["targets"]["mine"] = {"genre:Rock": .34, "genre:Pop": .19,
+                                "genre:Trance": .14, "genre:Deep House": .33,
+                                "era:1990": .34, "era:2000": .66}
+    if uneven_lengths:
+        # Blend songs take ten minutes; Theirs takes three. The source percentages still refer
+        # to song counts, and Yours' absent genres/years must not consume Blend's reserved slots.
+        durations = {"Rock": 600, "Pop": 240, "Trance": 480, "Deep House": 360}
+        for candidate in store.library_songs():
+            candidate["duration"] = durations[candidate["genre"]]
+        for candidate in state["pool"]:
+            candidate["duration"] = 180
+    road_trip.repick(state, store, 1000)
+    counts = Counter(c["mix_source"] for c in state["picked"])
+    total = sum(counts.values())
+    assert abs(counts["blend"] - total / 3) <= 1
+    assert abs(counts["yours"] - total * 2 / 3 * own_pct / 100) <= 1
+    assert abs(state["stats"]["minutes"] - 240) <= 6
+    assert not state["stats"]["short"]
+    assert counts == {k: v for k, v in state["stats"]["mix_targets"].items() if v}
+    assert {c["genre"] for c in state["picked"] if c["mix_source"] == "blend"} == {"Rock"}
+    assert {c["year"] for c in state["picked"] if c["mix_source"] == "blend"} == {1990}
+
+
+@pytest.mark.parametrize("rock_share", [0, .34])
+def test_blend_shortage_is_reported_without_overriding_exclusions(store, monkeypatch, rock_share):
+    _stub_pools(monkeypatch, store, own_genre=lambda i: "Rock" if i < 2 else "Jazz")
+    state = road_trip.build_draft(store, FakeClient(), _recipe(genres=["Rock"]), 1000, seed=7)
+    state["targets"]["mine"] = {"genre:Rock": rock_share, "genre:Jazz": 1 - rock_share}
+    road_trip.repick(state, store, 1000)
+    counts = Counter(c["mix_source"] for c in state["picked"])
+    assert sum(counts.values()) == 12
+    assert counts["blend"] == (2 if rock_share else 0)
+    assert state["stats"]["short"]["blend"] > 0
+    assert state["stats"]["mix_targets"]["blend"] == 4
+    assert state["stats"]["minutes"] == 60
+    if not rock_share:
+        assert all(c["genre"] != "Rock" for c in state["picked"])
 
 
 def test_build_draft_honours_a_lopsided_mix(store, monkeypatch):
@@ -467,16 +710,127 @@ def test_a_pin_survives_a_slot_being_crossed_out(store, monkeypatch):
     assert {r["decade"] for r in state["picked"]} == {"2010"}
 
 
-def test_two_pins_share_the_playlist_between_them(store, monkeypatch):
+def test_moving_another_slider_rebalances_the_previous_targets(store, monkeypatch):
     _stub_pools(monkeypatch, store, other_count=0)
     state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
 
     road_trip.set_share(state, "mine", "era:2010", 0.5, store)
+    before = dict(state["targets"]["mine"])
     road_trip.set_share(state, "mine", "era:1990", 0.5, store)
 
     decades = Counter(r["decade"] for r in state["picked"])
-    assert set(decades) == {"2010", "1990"}
-    assert abs(decades["2010"] - decades["1990"]) <= 1
+    targets = state["targets"]["mine"]
+    assert targets["era:1990"] == 0.5
+    assert sum(v for k, v in targets.items() if k.startswith("era:")) == pytest.approx(1)
+    assert targets["era:2010"] / targets["era:2000"] == pytest.approx(
+        before["era:2010"] / before["era:2000"], abs=.1)
+    assert decades["1990"] == sum(decades.values()) // 2
+
+
+@pytest.mark.parametrize("initial, edited, requested, expected", [
+    ([50, 30, 20], 0, 20, [20, 48, 32]),
+    ([20, 48, 32], 1, 60, [15, 60, 25]),
+    ([50, 30, 20], 0, 100, [100, 0, 0]),
+    ([100, 0, 0], 0, 40, [40, 30, 30]),
+    ([0, 0, 0], 0, 33, [33, 34, 33]),
+])
+def test_balance_percentages_sum_to_100(initial, edited, requested, expected):
+    axes = [{"key": f"genre:{i}", "kind": "genre", "share": p / 100}
+            for i, p in enumerate(initial)]
+    state = {"axes": {"theirs": axes},
+             "targets": {"theirs": {"era:1990": .7}, "mine": {"genre:Rock": .4}}}
+    road_trip._rebalance_targets(state, "theirs", f"genre:{edited}", requested / 100)
+    assert [state["targets"]["theirs"][f"genre:{i}"] for i in range(3)] == [p / 100 for p in expected]
+    assert sum(expected) == 100
+    assert state["targets"]["theirs"]["era:1990"] == .7
+    assert state["targets"]["mine"] == {"genre:Rock": .4}
+
+
+@pytest.mark.parametrize("initial, additions, expected", [
+    ([60, 30, 10], ["Funk"], [45, 23, 7, 25]),
+    ([80, 20], ["Funk"], [54, 13, 33]),
+    ([100, 0], ["Funk"], [67, 0, 33]),
+    ([60, 40], ["Funk", "Soul"], [30, 20, 25, 25]),
+    ([], ["Funk"], [100]),
+    ([], ["Funk", "Soul"], [50, 50]),
+])
+def test_new_passenger_genres_get_an_equal_share_of_the_new_count(initial, additions, expected):
+    state = {"axes": {"theirs": [
+        {"key": "genre:" + g, "kind": "genre", "name": g, "share": p / 100}
+        for g, p in zip(["Rock", "Pop", "Jazz"], initial)]},
+        "targets": {"mine": {"genre:Blues": .6}, "theirs": {"era:1990": .8}}}
+    road_trip._add_genre_targets(state, additions)
+    road_trip.normalized(state)
+    rows = [a for a in state["axes"]["theirs"] if a["kind"] == "genre"]
+    assert [a["balance_pct"] for a in rows] == expected
+    assert sum(a["balance_pct"] for a in rows) == 100
+    assert state["targets"]["mine"] == {"genre:Blues": .6}
+    assert state["targets"]["theirs"]["era:1990"] == .8
+    # Repeated saves and aliases must preserve the existing balance and avoid duplicate rows.
+    road_trip._add_genre_targets(state, [g.lower() for g in additions])
+    road_trip.normalized(state)
+    assert [a["balance_pct"] for a in state["axes"]["theirs"] if a["kind"] == "genre"] == expected
+
+
+@pytest.mark.parametrize("seed_tracks", [20, 1])
+@pytest.mark.parametrize("alt_share", [.5, 0])
+def test_named_artists_lead_each_genre_with_related_tracks_filling_the_rest(store, seed_tracks, alt_share):
+    artists = {"Alternative Rock": ["Weezer", "Staind"], "Indie Rock": ["We Were Promised Jetpacks"]}
+    state = road_trip.start_draft(store, _recipe(
+        own_pct=0, target_minutes=120, artists=sum(artists.values(), []), genres=[]), 1000, seed=7)
+    for genre, seeds in artists.items():
+        # Many more, higher-scoring discovery tracks than named-artist tracks: popularity and
+        # the general per-artist cap must not drown out the artists the passenger selected.
+        catalog = [(name, seed_tracks, .05) for name in seeds]
+        catalog += [(f"{genre} Peer {i}", 4, 1) for i in range(12)]
+        for name, count, score in catalog:
+            for i in range(count):
+                candidate = road_trip._candidate(f"{name}-{i}", f"Song {i}", name, "", None,
+                                                 300, "theirs", genre, 1995)
+                candidate["score"] = score
+                state["pool"].append(candidate)
+    state["targets"]["theirs"] = {"genre:Alternative Rock": alt_share, "genre:Indie Rock": 1 - alt_share,
+                                  "era:1990": 1, "era:2000": 0}
+    road_trip.finish_draft(state, store, 1000)
+    assert state["stats"]["minutes"] == 120
+    assert {c["decade"] for c in state["picked"]} == {"1990"}
+    for genre, share in (("Alternative Rock", alt_share), ("Indie Rock", 1 - alt_share)):
+        rows = [c for c in state["picked"] if c["genre"] == genre]
+        assert len(rows) == round(24 * share)
+        counts = Counter(c["artist"] for c in rows)
+        named = sum(counts[a] for a in artists[genre])
+        assert named == min(round(len(rows) * 2 / 3), seed_tracks * len(artists[genre]))
+        if genre == "Alternative Rock":
+            assert abs(counts["Weezer"] - counts["Staind"]) <= 1
+    if seed_tracks > 1:
+        index = next(i for i, c in enumerate(state["picked"]) if c["artist"] in state["inputs"]["artists"])
+        old_id = state["picked"][index]["video_id"]
+        road_trip.reroll_slot(state, store, index, 1000)
+        assert state["picked"][index]["video_id"] != old_id
+        assert state["picked"][index]["artist"] in state["inputs"]["artists"]
+
+
+@pytest.mark.parametrize("shares, targets, expected", [
+    ([.103, .207, .414, .276], [1, .25, .53, .35], [47, 12, 25, 16]),
+    ([.103, .207, .414, .276], [1, None, None, None], [100, 0, 0, 0]),
+    ([.1, .75, .25], [.35, None, None], [35, 49, 16]),
+    ([.333, .333, .333], [None, None, None], [34, 33, 33]),
+    ([1, 0, .4], [1, 0, None], [100, 0, 0]),
+    ([0, 0, 0], [None, None, None], [34, 33, 33]),
+])
+def test_loading_a_saved_balance_uses_one_100_percent_budget(shares, targets, expected):
+    state = {"axes": {"theirs": [
+        {"key": f"genre:{i}", "kind": "genre", "name": str(i), "share": share, "target": target}
+        for i, (share, target) in enumerate(zip(shares, targets))]},
+        "targets": {"theirs": {f"genre:{i}": value for i, value in enumerate(targets) if value is not None}}}
+    road_trip.normalized(state)
+    rows = state["axes"]["theirs"]
+    assert [row["balance_pct"] for row in rows] == expected
+    assert sum(row["balance_pct"] for row in rows) == 100
+    assert [row["share"] for row in rows] == shares  # actual track shares are not UI targets
+    assert sum(state["targets"]["theirs"].values()) <= 1 + 1e-9
+    road_trip.normalized(state)
+    assert [row["balance_pct"] for row in rows] == expected  # no drift on repeated loads
 
 
 def test_sliding_a_genre_down_reaches_the_requested_share(store, monkeypatch):

@@ -10,5 +10,6 @@
   </div>
 </div>
 
-<div id="road-trip-body">{% include "_partials/road_trip_body.html" %}</div>
+{# Keep the selected accordion section outside the content replaced when the mix updates. #}
+<div id="road-trip-body" x-data="{ activeDrawer: '{{ 'theirs' if draft else 'mix' }}' }">{% include "_partials/road_trip_body.html" %}</div>
 {% endblock %}

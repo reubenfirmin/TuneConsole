@@ -1,0 +1,18 @@
+{% if job.status in ('queued', 'running') %}
+<div class="notice ok"
+     hx-get="/import/spotify-library/status" hx-trigger="every 5s" hx-target="this" hx-swap="outerHTML">
+  <strong><span class="spinner" aria-hidden="true"></span> Spotify library import is running in the background.</strong>
+  <span>Found {{ job.playlists_found }} playlists with {{ job.track_entries }} track entries and
+    {{ job.albums_found }} saved albums. This requires about {{ job.lookup_count }} YouTube Music
+    lookups and could take {{ job.estimate_label }}.</span>
+  <span>You can leave this page. Keep TuneConsole running and a signed-in YouTube Music tab open.</span>
+  <span>The complete result will appear here and as a persistent notification on the dashboard.</span>
+</div>
+{% elif job.status == 'done' %}
+<p class="section-note"><a href="/import/spotify-library/report">View latest Spotify import report →</a></p>
+{% else %}
+<div class="notice warning">
+  <strong>Spotify library import stopped.</strong>
+  <span>{{ job.error }}</span>
+</div>
+{% endif %}

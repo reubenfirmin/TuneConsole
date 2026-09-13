@@ -21,7 +21,8 @@ four different playlists: the seed is fresh per build, and the previous build's 
 """
 import math
 import random
-from collections import Counter
+import statistics
+from collections import Counter, deque
 from itertools import zip_longest
 
 # `genre_names` alias: `genres` is a local/parameter name all over this module (the recipe's
@@ -51,7 +52,7 @@ LIKE_BONUS = 8             # plays a Liked song is worth: a like is deliberate, 
 # What a picked row carries into the draft (and on to YouTube). Everything the panel renders plus
 # what the ordering and the bars need, and nothing else - the pool entries also hold scoring scratch.
 _ROW_FIELDS = ("video_id", "title", "artist", "album", "thumbnail", "duration", "source",
-               "genre", "family", "year", "decade")
+               "genre", "family", "year", "decade", "cluster_genre")
 
 
 # --------------------------------------------------------------------------- candidate assembly
@@ -81,7 +82,8 @@ def _candidate(video_id, title, artist, album, thumbnail, duration, source, genr
     return {"video_id": video_id, "title": title or "", "artist": artist or "",
             "album": album or "", "thumbnail": thumbnail, "duration": duration,
             "source": source, "genre": genre, "family": genre_map.family(genre) if genre else "",
-            "year": year, "decade": _decade(year), "plays": plays, "fam": 0.0, "score": 0.0}
+            "year": year, "decade": _decade(year), "plays": plays, "fam": 0.0, "score": 0.0,
+            "cluster_genre": ""}
 
 
 def _rank_scores(cands, value_of):
@@ -361,6 +363,178 @@ def to_candidates(rows, store=None):
     return out
 
 
+def _remember_artist_context(state, name, candidates, related):
+    """The seed's genre and representative era come from its own top songs, not the whole genre."""
+    songs = [c for c in candidates if c["artist"].casefold() == name.casefold()]
+    genres = Counter(c["genre"] for c in songs if c["genre"])
+    years = [c["year"] for c in songs[:5] if c.get("year")]
+    state.setdefault("artist_contexts", {})[name] = {
+        "genre": genres.most_common(1)[0][0] if genres else "",
+        "year": round(statistics.median(years)) if years else None,
+        "related": list(related),
+    }
+
+
+def _genre_contexts(state, genre):
+    """Only a seed's own genre makes it an anchor for a slider. A shared family is too broad:
+    Indie Rock, Alternative Rock and Post-Punk must not all acquire the same seed artists."""
+    genre = _canon_genre(genre)
+    contexts = {name: context for name, context in state.get("artist_contexts", {}).items()
+                if name in state.get("inputs", {}).get("artists", [])}
+    return {name: context for name, context in contexts.items()
+            if genre and _canon_genre(context["genre"]) == genre}
+
+
+def _genre_input(state, genre):
+    """Retain the explicit genre input behind its tracks and any later slider widening."""
+    genres = {_canon_genre(g): g for g in state.get("inputs", {}).get("genres", [])}
+    genre = _canon_genre(genre)
+    if genre in genres:
+        return genres[genre]
+    for candidate in state["pool"]:
+        origin = _canon_genre(candidate.get("genre_input") or candidate.get("input"))
+        if _axis_genre(candidate) == genre and origin in genres:
+            return genres[origin]
+    return None
+
+
+def _repair_artist_clusters(state):
+    """Repair cached family-wide assignments and remove tracks whose input has left the recipe.
+
+    Work from actual artist relationships, rather than trusting an old slider label or anchors.
+    Wait for all seed contexts before pruning legacy tracks with no recorded provenance.
+    """
+    artists = state.get("inputs", {}).get("artists", [])
+    contexts = {n: c for n, c in state.get("artist_contexts", {}).items() if n in artists}
+    if not contexts or any(n not in contexts or not contexts[n]["genre"] for n in artists):
+        return False
+    explicit = {_canon_genre(g) for g in state["inputs"].get("genres", [])}
+    kept, removed_inputs, changed = [], set(), False
+    for candidate in state["pool"]:
+        origin = candidate.get("genre_input") or candidate.get("input")
+        if candidate["source"] == "mine" or not origin:
+            kept.append(candidate)
+            continue
+        direct = next((n for n in contexts if n.casefold() == candidate["artist"].casefold()), None)
+        anchors = ([direct] if direct else _cluster_anchors(candidate, contexts))
+        anchors = [n for n in anchors if not contexts[n]["genre"] or not candidate["genre"]
+                   or genre_map.family(contexts[n]["genre"]) == candidate["family"]]
+        if anchors:
+            matching = [n for n in anchors if n in _genre_contexts(state, candidate.get("cluster_genre"))]
+            if not matching:
+                matching = [n for n in anchors if n in _genre_contexts(state, candidate["genre"])]
+            genre = _canon_genre(contexts[(matching or anchors)[0]]["genre"]) or candidate["genre"]
+            anchors = [n for n in anchors if _canon_genre(contexts[n]["genre"]) == genre]
+            changed |= candidate.get("cluster_genre") != genre or candidate.get("anchors") != anchors
+            candidate.update(cluster_genre=genre, anchors=anchors)
+        elif _canon_genre(origin) in explicit and not _genre_contexts(state, _axis_genre(candidate)):
+            # An explicit genre without seed anchors is still a valid, independent recipe input.
+            changed |= bool(candidate.get("cluster_genre") or candidate.get("anchors"))
+            candidate.update(cluster_genre="", anchors=[])
+        else:
+            removed_inputs.add(origin)
+            changed = True
+            continue
+        kept.append(candidate)
+    state["pool"] = kept
+    live = {"genre:" + _axis_genre(c) for c in kept if c["source"] == "theirs"}
+    axes = state.get("axes", {}).get("theirs", [])
+    genres = {a["key"]: a["name"] for a in axes if a["kind"] == "genre"}
+    genres.update({k: k.split(":", 1)[1] for k in state.get("targets", {}).get("theirs", {})
+                   if k.startswith("genre:")})
+    obsolete = {key for key, genre in genres.items() if key not in live
+                and not _genre_contexts(state, genre) and _canon_genre(genre) not in explicit}
+    if obsolete:
+        state["axes"]["theirs"] = [a for a in axes if a["key"] not in obsolete]
+        for key in obsolete:
+            state.get("targets", {}).get("theirs", {}).pop(key, None)
+        state["pending"] = [p for p in state.get("pending", []) if p.get("want") not in obsolete]
+        changed = True
+    if changed:
+        state["done_widening"] = []  # the previous search may have fetched the wrong neighborhood
+        state["done_inputs"] = [n for n in state.get("done_inputs", [])
+                                if n not in removed_inputs or n in artists or _canon_genre(n) in explicit]
+    return changed
+
+
+def _ensure_artist_contexts(state, store, client):
+    """Hydrate older drafts lazily in the background worker, using the same seed artist pages."""
+    for name in state.get("inputs", {}).get("artists", []):
+        if name in state.get("artist_contexts", {}):
+            continue
+        page, _ = _artist_page(client, name)
+        songs = to_candidates(_page_songs(page, name, limit=5), store)
+        _remember_artist_context(state, name, songs, _related_names(page, limit=GENRE_ARTISTS))
+
+
+def _cluster_anchors(candidate, contexts):
+    """One-hop artist similarity plus a ten-year window around each seed's representative era.
+
+    Explicitly selected artists remain eligible throughout their catalog. Related artists need
+    dated tracks when the seed has an era; missing dates must not silently admit a modern revival.
+    """
+    artist = candidate["artist"].casefold()
+    anchors = []
+    for name, context in contexts.items():
+        if artist == name.casefold():
+            anchors.append(name)
+        elif artist in {a.casefold() for a in context["related"]}:
+            year, seed_year = candidate.get("year"), context.get("year")
+            if seed_year is None or (year and abs(year - seed_year) <= 10):
+                anchors.append(name)
+    return anchors
+
+
+def _cluster_candidates(state, store, client, genre, cap):
+    """Grow this recipe's artist neighborhood; None means the genre has no matching artist seed."""
+    _ensure_artist_contexts(state, store, client)
+    contexts = _genre_contexts(state, genre)
+    if not contexts:
+        artists = state["inputs"].get("artists", [])
+        if (artists and all(state.get("artist_contexts", {}).get(n, {}).get("genre") for n in artists)
+                and not _genre_input(state, genre)):
+            return []  # an obsolete derived slider must not start a broad genre search
+        return None
+    genre = _canon_genre(genre)
+    family = genre_map.family(genre)
+    # Remove broad genre results from older drafts as this slider becomes an anchored cluster.
+    kept = []
+    for candidate in state["pool"]:
+        if candidate["source"] == "theirs" and _matches_axis(candidate, "genre:" + genre):
+            anchors = _cluster_anchors(candidate, contexts)
+            if not anchors:
+                continue
+            candidate.update(cluster_genre=genre, anchors=anchors)
+        kept.append(candidate)
+    state["pool"] = kept
+    known = {c["video_id"] for c in kept}
+    # Interleave the neighborhoods so one seed cannot consume the entire discovery budget.
+    neighborhoods = [[name] + context["related"] for name, context in contexts.items()]
+    names = list(dict.fromkeys(n for group in zip_longest(*neighborhoods) for n in group if n))
+    per_artist = max(2, math.ceil(cap / max(1, len(names))))
+    out = []
+    for name in names[:GENRE_ARTISTS]:
+        if name in state["inputs"]["artists"] and name not in contexts:
+            continue  # another selected seed keeps its own genre, even if a peer list includes it
+        rows = [r for r in _artist_songs(client, name) if r["video_id"] not in known]
+        accepted = 0
+        for candidate in to_candidates(rows[:per_artist * 3], store):
+            anchors = _cluster_anchors(candidate, contexts)
+            compatible = (not candidate["genre"] or candidate["genre"] == genre
+                          or (family and candidate["family"] == family))
+            if not anchors or not compatible:
+                continue
+            candidate.update(cluster_genre=genre, anchors=anchors, input=genre)
+            out.append(candidate)
+            known.add(candidate["video_id"])
+            accepted += 1
+            if len(out) >= cap:
+                return out
+            if accepted >= per_artist:
+                break
+    return out
+
+
 def rank_other(cands):
     """(Re)rank their side by Deezer popularity. Popularity is the signal for BOTH scores here:
     their pool has no play history, so "familiar" means "a hit" and "lesser listen" means "a deeper
@@ -479,7 +653,7 @@ def _axis_genre(cand):
     where one is known, falling back to the coarse family. Specific is the point - "alt rock" is a
     thing people ask for, and a bar labelled with the family it collapses into ("rock-indie") can't
     be asked for at all. Empty string when nothing is tagged."""
-    return cand["genre"] or cand["family"] or ""
+    return cand.get("cluster_genre") or cand["genre"] or cand["family"] or ""
 
 
 def _bucket(cand, kind, quota):
@@ -489,34 +663,60 @@ def _bucket(cand, kind, quota):
     return key if key in quota else ""
 
 
-def _slots(cands, budget_s):
-    """Roughly how many tracks fit this side's budget, using the pool's own average length. The
-    sliders are a share of the SONGS in the playlist ("40% of my songs are rock"), so the quotas they
-    turn into have to be counts, even though the playlist as a whole is budgeted by duration."""
-    durations = [c["duration"] for c in cands if c["duration"]]
-    avg = (sum(durations) / len(durations)) if durations else AVG_TRACK_S
-    return max(1, round(budget_s / max(avg, 60)))
+def _prefer_seed_artists(order, artists):
+    """Within each genre, offer two named-artist tracks for each discovery track.
+
+    Keep the sampled genre order and each artist's familiarity-weighted track order. Rotate
+    between named artists so a large catalogue does not consume another selected artist's share.
+    When either group runs out, use the other group's remaining tracks.
+    """
+    groups = {}
+    for candidate in order:
+        groups.setdefault(_axis_genre(candidate), []).append(candidate)
+    queues = {}
+    for genre, rows in groups.items():
+        named, related = {}, []
+        for candidate in rows:
+            artist = candidate["artist"].casefold()
+            if artist in artists:
+                named.setdefault(artist, []).append(candidate)
+            else:
+                related.append(candidate)
+        seeds = [c for group in zip_longest(*named.values()) for c in group if c]
+        queues[genre] = deque(c for group in zip_longest(seeds[::2], seeds[1::2], related)
+                              for c in group if c)
+    return [queues[_axis_genre(c)].popleft() for c in order]
 
 
-def _fill_side(order, budget_s, cap, state, party, cands):
-    """Fill one side to its duration budget, honouring the genre/era quotas.
+def _quota_weights(state, party, cands, conditional=False):
+    """Requested genre/year shares, optionally conditioned on a library subpool.
 
-    Quotas are counts (the bars are "40% of my songs"), so how many slots the budget buys has to be
-    estimated - and an estimate off by half a minute per track leaves the side minutes short, because
-    the unpinned bucket's count is also a ceiling. So: fill, and if the songs that actually got picked
-    are shorter than the collection's average, re-estimate from THEM and fill again."""
-    quotas = _quotas(state, party, budget_s, cands)
-    picked, secs, rest = _fill(order, budget_s, cap, quotas)
-    for _ in range(2):
-        if not quotas or not picked or secs >= budget_s - AVG_TRACK_S / 2:
-            break
-        slots = max(1, round(budget_s / max(secs / len(picked), 60)))
-        quotas = _quotas(state, party, budget_s, cands, slots=slots)
-        picked, secs, rest = _fill(order, budget_s, cap, quotas)
-    return picked, secs, rest
+    Blend and Yours contain different slices of the library. A 34% Rock library request must not
+    cap a Rock-only Blend pool to 34% of its reserved slots. Redistribute absent buckets among the
+    available ones, retaining explicit zeroes and the unpinned remainder. Passenger quotas remain
+    absolute: a thin requested genre still needs discovery, rather than being silently turned down.
+    """
+    targets = (state.get("targets") or {}).get(party) or {}
+    out = {}
+    for kind in ("genre", "era"):
+        pins = {k: v for k, v in targets.items() if k.startswith(kind + ":")}
+        if not pins:
+            continue
+        claimed = sum(pins.values())
+        if claimed > 1.0:
+            pins = {k: v / claimed for k, v in pins.items()}
+        out[kind] = {**pins, "": max(0, 1 - claimed)}
+    if conditional:
+        # Intersect the genre and era restrictions before finding which buckets are available.
+        eligible = [c for c in cands if all(q[_bucket(c, kind, q)] > 0
+                                           for kind, q in out.items())]
+        for kind, weights in out.items():
+            available = {_bucket(c, kind, weights) for c in eligible}
+            weights.update({k: 0 for k in weights if k not in available})
+    return out
 
 
-def _quotas(state, party, budget_s, cands, slots=None):
+def _quotas(state, party, slots, cands, conditional=False):
     """How many of `party`'s tracks each pinned genre/era gets, plus the "" bucket every unpinned
     track shares. Only kinds with at least one pinned slider get a quota; the rest stay free.
 
@@ -524,41 +724,28 @@ def _quotas(state, party, budget_s, cands, slots=None):
     others back (drag one decade to 100% and the rest empty out). As a floor it is filled first, so
     asking for 40% rock gets 40% rock - weighting alone would just re-order the draw and hand back
     whatever proportion the pool happened to hold, which is not what the number on screen says."""
-    targets = (state.get("targets") or {}).get(party) or {}
-    out, n = {}, (slots or _slots(cands, budget_s))
-    for kind in ("genre", "era"):
-        pins = {k: v for k, v in targets.items() if k.startswith(kind + ":")}
-        if not pins:
-            continue
-        claimed = sum(pins.values())
-        if claimed > 1.0:                       # over-subscribed sliders: scale them back together
-            pins = {k: v / claimed for k, v in pins.items()}
-            claimed = 1.0
-        out[kind] = {k: (max(1, round(v * n)) if v > 0 else 0) for k, v in pins.items()}
-        out[kind][""] = max(0, n - sum(out[kind].values()))
-    return out
+    return {kind: (_apportion_percentages(weights, slots) if any(weights.values())
+                   else dict.fromkeys(weights, 0))
+            for kind, weights in _quota_weights(state, party, cands, conditional).items()}
 
 
-def _fill(order, budget_s, cap, quotas=None):
-    """Take candidates from a sampled order until the duration budget is met, honouring an artist
-    cap and any per-genre/era quotas. Returns (picked, seconds, leftovers).
+def _fill(order, slots, cap, quotas=None, preferred_artists=()):
+    """Fill song slots from a sampled order, honouring artist and genre/era quotas.
 
     Pinned buckets are filled FIRST, up to their count - a quota is a floor as much as a ceiling.
-    Then the rest of the budget is filled in sampled order, with every ceiling still enforced.
-
-    A track is taken when it lands the running total NEARER the budget than stopping would, so each
-    side rounds to its closest whole-track length rather than always overshooting - two sides that
-    each overshoot make a playlist noticeably longer than the trip."""
+    Then the remaining slots are filled in sampled order, with every ceiling still enforced.
+    Returns the chosen tracks and their duration, which _pick_mix uses to fit the whole trip."""
     quotas = quotas or {}
     picked, per, taken = [], Counter(), set()
     spent = {kind: Counter() for kind in quotas}
     total = 0.0
 
     def blocked(c):
-        secs = c["duration"] or AVG_TRACK_S
-        if total + secs - budget_s > secs / 2:
+        if len(picked) >= slots:
             return True
-        if c["artist"] and per[c["artist"]] >= cap:
+        # Named artists are the core of the genre. The discovery artist cap must not prevent
+        # their larger share; _prefer_seed_artists already rotates fairly between them.
+        if c["artist"] and c["artist"].casefold() not in preferred_artists and per[c["artist"]] >= cap:
             return True
         return any(spent[kind][_bucket(c, kind, q)] + 1 > q.get(_bucket(c, kind, q), 0)
                    for kind, q in quotas.items())
@@ -585,7 +772,7 @@ def _fill(order, budget_s, cap, quotas=None):
     for c in order:                             # then everything else, ceilings still on
         if c["video_id"] not in taken and not blocked(c):
             take(c)
-    return picked, total, [c for c in order if c["video_id"] not in taken]
+    return picked, total
 
 
 def _feat(item):
@@ -603,6 +790,93 @@ def _is_overlap(candidate, state):
     return bool(wanted and genre_map.family(candidate.get("genre")) in wanted)
 
 
+def _mix_source(candidate, state):
+    """The three visible pools; shared library tracks still use the library's picking rules."""
+    if candidate.get("source") != "mine":
+        return "theirs"
+    return "blend" if _is_overlap(candidate, state) else "yours"
+
+
+def _mix_weights(state):
+    blend = 1 / 3 if state.get("blend_available") else 0
+    own = state.get("own_pct", 50) / 100
+    return {"yours": (1 - blend) * own, "theirs": (1 - blend) * (1 - own), "blend": blend}
+
+
+def _pick_mix(state, groups, orders, target_s):
+    """Reserve whole-song shares for all three pools, then fit the trip's duration.
+
+    Estimate the total song count, draw that many in the requested proportions, and refine the
+    count using the chosen tracks' actual lengths. Separate minute budgets would give a pool of
+    long songs fewer slots than its displayed percentage. Keep Blend separate during shortfall
+    replacement too, so a thin passenger pool doesn't erase the shared reservation.
+    """
+    weights = _mix_weights(state)
+    artists = {a.casefold() for a in state.get("inputs", {}).get("artists", [])}
+    orders["theirs"] = _prefer_seed_artists(orders["theirs"], artists)
+    averages = {side: (sum(c["duration"] or AVG_TRACK_S for c in rows) / len(rows)
+                       if rows else AVG_TRACK_S) for side, rows in groups.items()}
+
+    def fill(side, count):
+        party = "theirs" if side == "theirs" else "mine"
+        quotas = _quotas(state, party, count, groups[side],
+                         conditional=party == "mine" and state["blend_available"])
+        return _fill(orders[side], count, _artist_cap(groups[side], count), quotas,
+                     artists if side == "theirs" else ())
+
+    attempts = {}
+
+    def draw(count):
+        if count in attempts:
+            return attempts[count]
+        wanted = _apportion_percentages(weights, count)
+        picked, seconds, short = {}, {}, {}
+        expected_s = 0
+        for side, slots in wanted.items():
+            picked[side], seconds[side] = fill(side, slots)
+            avg = seconds[side] / len(picked[side]) if picked[side] else averages[side]
+            missing_s = (slots - len(picked[side])) * avg
+            expected_s += seconds[side] + missing_s
+            if missing_s:
+                short["mine" if side == "yours" else side] = round(missing_s / 60)
+        if not state.get("building"):
+            # Cover missing slots with the outer pools first. Only expand Blend when neither can
+            # supply them; its reserved third remains intact when either outer pool runs short.
+            gap = count - sum(map(len, picked.values()))
+            for side in ("yours", "theirs", "blend"):
+                if not gap:
+                    break
+                replacement, secs = fill(side, len(picked[side]) + gap)
+                added = len(replacement) - len(picked[side])
+                if added > 0:
+                    picked[side], seconds[side] = replacement, secs
+                    gap -= added
+        secs = sum(seconds.values())
+        # While discovery is running, include its still-empty slots in the duration estimate.
+        # Otherwise every progress refresh would temporarily replace them with library songs.
+        fitted_s = expected_s if state.get("building") else secs
+        attempts[count] = (picked, short, fitted_s)
+        return attempts[count]
+
+    avg = sum(weights[side] * averages[side] for side in weights)
+    count = max(1, round(target_s / max(avg, 60)))
+    capacity = max(count, sum(map(len, groups.values())))
+    for _ in range(8):
+        picked, _, secs = draw(count)
+        if not secs:
+            break
+        next_count = max(1, min(capacity, round(count * target_s / secs)))
+        if next_count in attempts:
+            break
+        count = next_count
+    best = min(attempts, key=lambda n: abs(attempts[n][2] - target_s))
+    for count in (best - 1, best + 1):
+        if 1 <= count <= capacity:
+            draw(count)
+    picked, short, _ = min(attempts.values(), key=lambda attempt: abs(attempt[2] - target_s))
+    return picked, short
+
+
 def repick(state, store, now=0.0):
     """Re-draw the whole playlist under the state's current mix, familiarity, genre/era quotas and
     crossed-out slots. Mutates and returns `state` (picked, stats, axes).
@@ -611,91 +885,45 @@ def repick(state, store, now=0.0):
     read fresh from the library every time (own_candidates, ~30ms of local SQL): the collection is
     the pool, so there is nothing to cache and nothing to run out of. No network either way, so this
     stays instant."""
+    _repair_artist_clusters(state)
+    _normalize_balances(state)
     pool = own_candidates(store, now, state) + [c for c in state["pool"] if c["source"] != "mine"]
     rng = random.Random(state["seed"])
     banned = set(state["banned"])
     penalized = set(state.get("prev") or [])
     fam = state["familiarity_pct"] / 100.0
     target_s = state["target_minutes"] * 60
-    own_all = [c for c in pool if c["source"] == "mine" and c["video_id"] not in banned]
-    overlap = [c for c in own_all if _is_overlap(c, state)]
-    # When shared taste exists, reserve the quiet middle third for it. The visible slider divides
-    # the remaining two thirds between the user's exclusive taste and the passengers' catalogue.
-    overlap_budget = target_s / 3.0 if overlap else 0.0
-    outer_budget = target_s - overlap_budget
-    own_exclusive_budget = outer_budget * state["own_pct"] / 100.0
-    own_budget = own_exclusive_budget + overlap_budget
-
-    sides = {}
-    shared_ids = set()
-    for side, budget in (("mine", own_budget), ("theirs", target_s - own_budget)):
-        cands = [c for c in pool if c["source"] == side and c["video_id"] not in banned]
-        if side == "mine" and overlap:
-            exclusive = [c for c in cands if c not in overlap]
-            overlap_order = _sample_order(overlap, rng, lambda c: _weight(c, fam, penalized))
-            exclusive_order = _sample_order(exclusive, rng, lambda c: _weight(c, fam, penalized))
-            overlap_cap = _artist_cap(overlap, max(1, round(overlap_budget / AVG_TRACK_S)))
-            own_cap = _artist_cap(exclusive, max(1, round(own_exclusive_budget / AVG_TRACK_S)))
-            shared, shared_s, shared_rest = _fill_side(
-                overlap_order, overlap_budget, overlap_cap, state, "mine", overlap)
-            shared_ids = {c["video_id"] for c in shared}
-            personal, personal_s, personal_rest = _fill_side(
-                exclusive_order, own_exclusive_budget, own_cap, state, "mine", exclusive)
-            sides[side] = {"picked": personal + shared, "secs": personal_s + shared_s,
-                           "rest": personal_rest + shared_rest, "budget": budget,
-                           "order": overlap_order + exclusive_order,
-                           "cap": max(overlap_cap, own_cap), "cands": cands}
-            continue
-        order = _sample_order(cands, rng, lambda c: _weight(c, fam, penalized))
-        cap = _artist_cap(cands, max(1, round(budget / AVG_TRACK_S)))
-        picked, secs, rest = _fill_side(order, budget, cap, state, side, cands)
-        sides[side] = {"picked": picked, "secs": secs, "rest": rest, "budget": budget,
-                       "order": order, "cap": cap, "cands": cands}
-
-    # One side ran dry (a recipe naming one obscure artist, or a genre slider turned everything off):
-    # spend its unmet budget on the other side rather than shipping a short playlist, and report it,
-    # so the panel can say the mix isn't what was asked for instead of silently drifting.
-    #
-    # Not while the build is still running, though: their side is legitimately incomplete then, and
-    # covering for it would fill the list with your tracks only to evict them a second later. The
-    # slots simply stay empty until their half arrives.
-    short = {}
-    for side, other in (("mine", "theirs"), ("theirs", "mine")):
-        gap = sides[side]["budget"] - sides[side]["secs"]
-        if state.get("building") or gap <= AVG_TRACK_S or not sides[other]["rest"]:
-            continue
-        short[side] = round(gap / 60)
-        # Re-fill the other side against the larger budget rather than appending to it, so its own
-        # quotas still hold: covering a shortfall must not smuggle back a genre you slid out.
-        budget = sides[other]["budget"] + gap
-        picked, secs, rest = _fill_side(sides[other]["order"], budget, sides[other]["cap"],
-                                        state, other, sides[other]["cands"])
-        sides[other].update(picked=picked, secs=secs, rest=rest)
-
-    mine, theirs = sides["mine"]["picked"], sides["theirs"]["picked"]
+    groups = {"yours": [], "theirs": [], "blend": []}
+    for candidate in pool:
+        if candidate["video_id"] not in banned:
+            groups[_mix_source(candidate, state)].append(candidate)
+    state["blend_available"] = bool(groups["blend"])
+    orders = {side: _sample_order(cands, rng, lambda c: _weight(c, fam, penalized))
+              for side, cands in groups.items()}
+    picked, short = _pick_mix(state, groups, orders, target_s)
+    mine, theirs = picked["yours"] + picked["blend"], picked["theirs"]
     ordered = journey_order(mine + theirs, "road_trip", state["seed"], _feat)
     # The chosen rows are stored in full, not as ids into a pool: your side isn't kept anywhere, and
     # rendering the playlist (or saving it to YouTube) shouldn't have to reconstruct it.
     state["picked"] = [{k: c[k] for k in _ROW_FIELDS} for c in ordered]
     state["picks"] = [c["video_id"] for c in ordered]
-    total_s = sum((c["duration"] or AVG_TRACK_S) for c in ordered)
-    state["stats"] = {"minutes": round(total_s / 60), "own_count": len(mine),
-                      "their_count": len(theirs),
-                      "overlap_count": sum(1 for c in mine if c["video_id"] in shared_ids),
-                      "own_minutes": round(sides["mine"]["secs"] / 60),
-                      "their_minutes": round(sides["theirs"]["secs"] / 60),
-                      "short": short}
+    state["stats"] = {"short": short}
+    state["mix_version"] = 2
+    _restat(state)
     state["axes"] = {"mine": _merge_axes(state.get("axes", {}).get("mine"), mine,
-                                         sides["mine"]["cands"]),
+                                         groups["yours"] + groups["blend"]),
                      "theirs": _merge_axes(state.get("axes", {}).get("theirs"), theirs,
-                                           sides["theirs"]["cands"])}
+                                           groups["theirs"])}
     for party, axes in state["axes"].items():        # carry each slider's pinned request, if any
         targets = (state.get("targets") or {}).get(party, {})
         for a in axes:
             a["target"] = targets.get(a["key"])
+            if party == "theirs" and a["kind"] == "genre":
+                a["artists"] = list(_genre_contexts(state, a["name"]))
     # Untagged tracks can't sit on any slider; the panel says so rather than showing an empty column.
     state["untagged"] = {"mine": sum(1 for c in mine if not _axis_genre(c)),
                          "theirs": sum(1 for c in theirs if not _axis_genre(c))}
+    _normalize_balances(state)
     return state
 
 
@@ -715,14 +943,20 @@ def reroll_slot(state, store, index, now=0.0):
     pool = (own_candidates(store, now, state) if side == "mine"
             else [c for c in state["pool"] if c["source"] != "mine"])
     # ...and, where a slider is pinned, from the same genre/decade, so one swap can't breach a quota.
-    quotas = _quotas(state, side, 1.0, [])
+    quotas = _quota_weights(state, side, [])
     cands = [c for c in pool
              if c["video_id"] not in used and c["video_id"] not in banned
+             and _mix_source(c, state) == _mix_source(gone, state)
              and all(_bucket(c, kind, q) == _bucket(gone, kind, q) for kind, q in quotas.items())]
     rng = random.Random(state["seed"] + len(state["banned"]))
     fam = state["familiarity_pct"] / 100.0
     penalized = set(state.get("prev") or [])
     order = _sample_order(cands, rng, lambda c: _weight(c, fam, penalized))
+    if side == "theirs":
+        artists = {a.casefold() for a in state.get("inputs", {}).get("artists", [])}
+        was_named = gone["artist"].casefold() in artists
+        same_group = [c for c in order if (c["artist"].casefold() in artists) == was_named]
+        order = same_group or order
     if order:
         rows[index] = {k: order[0][k] for k in _ROW_FIELDS}
     else:
@@ -735,15 +969,24 @@ def reroll_slot(state, store, index, now=0.0):
 def _restat(state):
     """Recompute the counts/lengths after a slot-level edit (no re-draw)."""
     picked = draft_tracks(state)
+    for candidate in picked:
+        candidate["mix_source"] = _mix_source(candidate, state)
     mine = [c for c in picked if c["source"] == "mine"]
     theirs = [c for c in picked if c["source"] != "mine"]
+    yours = [c for c in picked if c["mix_source"] == "yours"]
+    blend = [c for c in picked if c["mix_source"] == "blend"]
+    state.setdefault("blend_available", bool(blend))
 
     def mins(rows):
         return round(sum((c["duration"] or AVG_TRACK_S) for c in rows) / 60)
 
     state["stats"] = {**state.get("stats", {}), "minutes": mins(picked),
                       "own_count": len(mine), "their_count": len(theirs),
-                      "own_minutes": mins(mine), "their_minutes": mins(theirs)}
+                      "own_minutes": mins(mine), "their_minutes": mins(theirs),
+                      "yours_count": len(yours), "blend_count": len(blend),
+                      "yours_minutes": mins(yours), "blend_minutes": mins(blend),
+                      "overlap_count": len(blend),
+                      "mix_targets": _apportion_percentages(_mix_weights(state), len(picked))}
 
 
 def _merge_axes(previous, cands, available=(), max_genres=GENRE_BARS):
@@ -839,15 +1082,41 @@ def add_other_input(state, store, client, item):
     # question MusicBrainz can answer, and a far better search than hoping the decade shows up.
     want = item.get("want") or ""
     decade = want.split(":", 1)[1] if want.startswith("era:") else item.get("decade")
-    rows, related = other_input_songs(client, kind, name, state["other_cap"], store, decade)
+    fresh, related = None, []
+    if kind == "genre":
+        genre = want.split(":", 1)[1] if want.startswith("genre:") else name
+        if decade:
+            genre = genre.removesuffix(f" {decade}s")
+        fresh = _cluster_candidates(state, store, client, genre, state["other_cap"])
     known = {c["video_id"] for c in state["pool"]}
     theirs = [c for c in state["pool"] if c["source"] != "mine"]
     room = max(0, state["other_limit"] - len(theirs))
     # A track can be in your library AND on their artist's page; it is already yours, so their side
     # doesn't get to claim it twice.
-    for row in rows:
-        row["input"] = name            # so removing that artist/genre can take its tracks with it
-    fresh = to_candidates([r for r in rows if r["video_id"] not in known][:room], store)
+    if fresh is None:
+        rows, related = other_input_songs(client, kind, name, state["other_cap"], store, decade)
+        for row in rows:
+            row["input"] = name        # so removing that artist/genre can take its tracks with it
+        fresh = to_candidates([r for r in rows if r["video_id"] not in known][:room], store)
+        if kind == "genre":
+            origin = _genre_input(state, genre)
+            for candidate in fresh:
+                candidate["genre_input"] = origin or genre
+    else:
+        fresh = fresh[:room]
+    if kind == "artist" and name in state["inputs"]["artists"]:
+        _remember_artist_context(state, name, fresh + theirs, related)
+        for candidate in fresh:
+            candidate.update(cluster_genre=candidate["genre"], anchors=[name])
+    elif item.get("anchor"):
+        context = state.get("artist_contexts", {}).get(item["anchor"])
+        if context:
+            family = genre_map.family(context["genre"])
+            fresh = [c for c in fresh if _cluster_anchors(c, {item["anchor"]: context})
+                     and (not c["genre"] or c["genre"] == context["genre"]
+                          or (family and c["family"] == family))]
+            for candidate in fresh:
+                candidate.update(cluster_genre=context["genre"], anchors=[item["anchor"]])
     if item.get("want"):
         # This search was run to feed one pinned slider: keep only what actually belongs on it, or
         # widening for "alternative rock" would quietly stuff the mix with whatever else ranked.
@@ -855,9 +1124,11 @@ def add_other_input(state, store, client, item):
     _resolve_durations(store, client, fresh, cap=2)
     state["pool"] = [c for c in state["pool"] if c["source"] == "mine"] + rank_other(theirs + fresh)
     state["done_inputs"].append(name)
+    if item.get("widen_key"):
+        state.setdefault("done_widening", []).append(item["widen_key"])
     if related and not item.get("related") and len(theirs) + len(fresh) < state["other_limit"]:
         queued = {p["name"] for p in state["pending"]} | set(state["done_inputs"])
-        state["pending"] += [{"kind": "artist", "name": n, "related": True}
+        state["pending"] += [{"kind": "artist", "name": n, "related": True, "anchor": name}
                              for n in related if n not in queued]
     return repick(state, store)
 
@@ -875,12 +1146,29 @@ def apply_recipe(state, store, now, recipe):
     was = {"artist:" + a for a in state.get("inputs", {}).get("artists", [])} | \
           {"genre:" + g for g in state.get("inputs", {}).get("genres", [])}
     gone = {i.split(":", 1)[1] for i in was - dropped}
+    removed_genres = ({_canon_genre(g) for g in state.get("inputs", {}).get("genres", [])}
+                      - {_canon_genre(g) for g in recipe["genres"]})
+    if set(recipe["artists"]) != set(state.get("inputs", {}).get("artists", [])):
+        artists = set(recipe["artists"])
+        genres = set(recipe["genres"]) | set(state.get("inputs", {}).get("genres", []))
+        state["artist_contexts"] = {a: c for a, c in state.get("artist_contexts", {}).items()
+                                    if a in artists}
+        # Genre pools depend on the seed artists too. Rebuild those neighborhoods after a seed
+        # edit, and remove related tracks whose originating artist is no longer selected.
+        state["pool"] = [c for c in state["pool"] if c.get("input") not in genres
+                         and (not c.get("anchors") or artists.intersection(c["anchors"]))]
+        state["done_inputs"] = [n for n in state["done_inputs"] if n not in genres]
+        state["done_widening"] = []
+        state["pending"] = [p for p in state["pending"] if p["name"] not in genres
+                            and (not p.get("anchor") or p["anchor"] in artists)]
     if gone:      # their tracks came in per input, so they can leave the same way
         keep = {c["video_id"] for c in state["pool"]
-                if c["source"] != "mine" and c.get("input") not in gone}
+                if c["source"] != "mine" and c.get("input") not in gone
+                and c.get("genre_input") not in gone}
         state["pool"] = [c for c in state["pool"]
                          if c["source"] == "mine" or c["video_id"] in keep]
         state["done_inputs"] = [n for n in state["done_inputs"] if n not in gone]
+        state["pending"] = [p for p in state["pending"] if p["name"] not in gone]
     queued = set(state["done_inputs"]) | {p["name"] for p in state["pending"]}
     state["pending"] += [{"kind": k, "name": n}
                          for k, names in (("artist", recipe["artists"]), ("genre", recipe["genres"]))
@@ -891,9 +1179,18 @@ def apply_recipe(state, store, now, recipe):
     state["blacklist_genres"] = list(recipe.get("blacklist_genres") or [])
     state["familiarity_pct"] = recipe.get("familiarity_pct", state["familiarity_pct"])
     _, other_size = _pool_targets(recipe)
-    state["other_limit"] = other_size
     state["other_cap"] = other_cap(recipe["artists"], recipe["genres"], other_size)
+    # A full existing pool must still leave room for the newly selected inputs.
+    state["other_limit"] = max(other_size, sum(c["source"] == "theirs" for c in state["pool"])
+                               + len(state["pending"]) * state["other_cap"])
     state["inputs"] = {"artists": list(recipe["artists"]), "genres": list(recipe["genres"])}
+    for genre in removed_genres:
+        axis = "genre:" + genre
+        if not _genre_contexts(state, genre) and not _axis_seconds(state, "theirs", axis):
+            state["targets"]["theirs"].pop(axis, None)
+            state["axes"]["theirs"] = [a for a in state["axes"]["theirs"] if a["key"] != axis]
+    _repair_artist_clusters(state)
+    _add_genre_targets(state, recipe["genres"])
     if state["pending"]:
         state["building"] = True
         state["phase"] = "theirs"
@@ -943,14 +1240,17 @@ def build_draft(store, client, recipe, now, seed, previous=None):
     return finish_draft(state, store, now)
 
 
-def normalized(state):
+def normalized(state, store=None, now=0.0):
     """Bring a stored draft up to the current shape. A draft is persisted JSON, so one written by an
     earlier build can outlive the code that wrote it (the page reopens the last draft); every field
     added since then has to arrive with a default rather than as a missing key the template blows up
-    on. Mutates and returns `state`."""
+    on. Mutates and returns `state`. With a store, repair stale artist clusters and re-pick from
+    the corrected pool so reopening and saving an old draft use the same tracks."""
     # Your side used to live in the pool alongside theirs; it is read from the library now, so an
     # older draft's copy is stale weight. Drop it and let the next re-pick supply the real thing.
     state["pool"] = [c for c in state.get("pool") or [] if c.get("source") != "mine"]
+    for candidate in state["pool"]:
+        candidate.setdefault("cluster_genre", "")
     state.setdefault("own_facts", {})
     for key, default in (("phase", None), ("pending", []), ("done_inputs", []), ("banned", []),
                          ("prev", []), ("building", False), ("build_error", None),
@@ -968,9 +1268,32 @@ def normalized(state):
         # The panel renders the axes as stored, so ordering has to be applied on the way in as well
         # as on the way out - otherwise an existing draft keeps whatever order it was written with.
         state["axes"][party] = order_axes(state["axes"][party])
+    repaired = _repair_artist_clusters(state)
+    # Existing unsaved drafts otherwise retain the old duration-based, underfilled Blend draw
+    # indefinitely. Reopening repairs it locally; a playlist already saved to YouTube stays put.
+    old_mix = state.get("picked") and state.get("mix_version") != 2 and not state["saved_playlist_id"]
+    if store is not None and (repaired or old_mix):
+        return repick(state, store, now)
+    if repaired:
+        # Without a library handle, keep the existing order and repair its passenger rows too.
+        pool = {c["video_id"]: c for c in state["pool"]}
+        state["picked"] = [({**c, "cluster_genre": pool[c["video_id"]]["cluster_genre"]}
+                            if c["source"] == "theirs" else c)
+                           for c in state.get("picked", [])
+                           if c["source"] != "theirs" or c["video_id"] in pool]
+        state["picks"] = [c["video_id"] for c in state["picked"]]
+        _restat(state)
+        state["axes"]["theirs"] = _merge_axes(state["axes"]["theirs"],
+                                             [c for c in state["picked"] if c["source"] == "theirs"],
+                                             state["pool"])
+    for axis in state["axes"]["theirs"]:
+        if axis["kind"] == "genre":
+            axis["artists"] = list(_genre_contexts(state, axis["name"]))
     for key in ("minutes", "own_count", "their_count", "own_minutes", "their_minutes"):
         state.setdefault("stats", {}).setdefault(key, 0)
     state["stats"].setdefault("short", {})
+    _restat(state)
+    _normalize_balances(state)
     return state
 
 
@@ -1011,28 +1334,140 @@ def _widen_terms(state, axis):
     return terms[:3] or [f"{name}s music"]
 
 
+def _apportion_percentages(weights, total=100):
+    """Scale a group together and allocate rounding leftovers without losing percentage points."""
+    if not weights:
+        return {}
+    weight_sum = sum(weights.values())
+    raw = {k: total * (v / weight_sum if weight_sum else 1 / len(weights))
+           for k, v in weights.items()}
+    allocated = {k: math.floor(v) for k, v in raw.items()}
+    remaining = total - sum(allocated.values())
+    for key in sorted(raw, key=lambda k: -(raw[k] - allocated[k]))[:remaining]:
+        allocated[key] += 1
+    return allocated
+
+
+def _normalize_balances(state):
+    """Give every displayed group one coherent budget, including old and partially pinned drafts.
+
+    Targets and observed shares must never be added as independent percentages. Keep valid pins,
+    give unpinned rows only the remaining budget, and scale oversubscribed legacy pins together.
+    Observed track shares stay separate; balance_pct is the displayed/requested slider position.
+    """
+    for party in ("mine", "theirs"):
+        axes = state.setdefault("axes", {}).setdefault(party, [])
+        targets = state.setdefault("targets", {}).setdefault(party, {})
+        for kind in ("genre", "era"):
+            rows = [a for a in axes if a["kind"] == kind]
+            keys = {a["key"] for a in rows}
+            for key in targets:
+                if key.startswith(kind + ":") and key not in keys:
+                    row = {"key": key, "kind": kind, "name": key.split(":", 1)[1], "share": 0.0}
+                    axes.append(row)
+                    rows.append(row)
+            if not rows:
+                continue
+            pins = {a["key"]: targets[a["key"]] for a in rows if a["key"] in targets}
+            floating = {a["key"]: a.get("share", 0.0) for a in rows if a["key"] not in pins}
+            if pins:
+                # A lone genre can still be turned down/off when there is no sibling to receive
+                # its remainder. Multi-slider groups always share the full 100% budget.
+                if len(rows) == 1:
+                    amounts = {rows[0]["key"]: round(next(iter(pins.values())) * 100)}
+                elif sum(pins.values()) >= 1 or not floating:
+                    amounts = {k: 0 for k in floating}
+                    amounts.update(_apportion_percentages(pins))
+                else:
+                    claimed = round(sum(pins.values()) * 100)
+                    amounts = _apportion_percentages(pins, claimed)
+                    amounts.update(_apportion_percentages(floating, 100 - claimed))
+                targets.update({k: amounts[k] / 100 for k in pins})
+            else:
+                amounts = _apportion_percentages(floating)
+            for row in rows:
+                row["balance_pct"] = amounts[row["key"]]
+                row["target"] = targets.get(row["key"])
+        state["axes"][party] = order_axes(axes)
+
+
+def _add_genre_targets(state, genres):
+    """Show selected passenger genres before discovery, each with 1 / the new genre count.
+
+    Reserve all additions together, then scale the existing balance into the remainder. Pins
+    keep these empty rows visible while the worker fetches tracks and preserve the requested mix.
+    """
+    _normalize_balances(state)
+    axes = state["axes"]["theirs"]
+    existing = {a["key"]: a["balance_pct"] for a in axes if a["kind"] == "genre"}
+    added = {"genre:" + name: name for genre in genres if (name := _canon_genre(genre))
+             and "genre:" + name not in existing}
+    if not added:
+        return
+    reserved = round(100 * len(added) / (len(existing) + len(added)))
+    amounts = _apportion_percentages(existing, 100 - reserved)
+    amounts.update(_apportion_percentages({key: 1 for key in added}, reserved))
+    state["targets"]["theirs"].update({key: pct / 100 for key, pct in amounts.items()})
+    axes.extend({"key": key, "kind": "genre", "name": name, "share": 0.0,
+                 "target": amounts[key] / 100} for key, name in added.items())
+
+
+def _rebalance_targets(state, party, axis, share):
+    """Keep the edited percentage and apportion the remainder among its sibling sliders.
+
+    Largest-remainder rounding keeps displayed whole percentages at exactly 100. If all siblings
+    were at zero (after a 100% selection), spread the remainder evenly so they can come back.
+    Genres and years, and the two parties, are independent groups.
+    """
+    kind, name = axis.split(":", 1)
+    targets = state.setdefault("targets", {}).setdefault(party, {})
+    axes = state.setdefault("axes", {}).setdefault(party, [])
+    if not any(a["key"] == axis for a in axes):
+        axes.append({"key": axis, "kind": kind, "name": name, "share": 0.0, "target": share})
+    siblings = {a["key"]: targets.get(a["key"], a.get("balance_pct", a.get("share", 0.0) * 100) / 100)
+                for a in axes if a["kind"] == kind and a["key"] != axis}
+    siblings.update({k: v for k, v in targets.items()
+                     if k.startswith(kind + ":") and k != axis})
+    pct = round(share * 100)
+    targets[axis] = pct / 100
+    if not siblings:
+        return
+    allocated = _apportion_percentages(siblings, 100 - pct)
+    targets.update({k: v / 100 for k, v in allocated.items()})
+
+
 def set_share(state, party, axis, share, store, now=0.0):
-    """Ask for a genre or era to be `share` (0..1) of that party's tracks, and re-pick under that
-    quota. Where the slider sits IS the share that genre has in the playlist below it, so dragging
-    it says "make it this much" and everything else gives way (see _quotas).
+    """Set a requested share and proportionally rebalance the other genres or years on that side.
 
     Your side needs no widening: it IS your whole collection, so whatever rock you own is already in
     play. Theirs is finite and bought over the network, so a request bigger than their pool queues a
     YouTube search, run in the background by the caller (state["pending"]), classified on arrival and
     filtered to the axis so a loose search can't pollute the mix."""
-    if party not in ("mine", "theirs"):
+    if party not in ("mine", "theirs") or not axis.startswith(("genre:", "era:")):
         return state
     share = max(0.0, min(1.0, float(share)))
-    state.setdefault("targets", {}).setdefault(party, {})[axis] = share
-    if share > 0 and party == "theirs":
+    _rebalance_targets(state, party, axis, share)
+    if party == "theirs":
         budget = state["target_minutes"] * 60 * (100 - state["own_pct"]) / 100.0
-        if _axis_seconds(state, party, axis) < share * budget:
-            queued = set(state["done_inputs"]) | {p["name"] for p in state["pending"]}
-            fresh = [t for t in _widen_terms(state, axis) if t not in queued]
+        prefix = axis.split(":", 1)[0] + ":"
+        for key, target in state["targets"][party].items():
+            if not key.startswith(prefix) or target <= 0:
+                continue
+            needs_context = (key.startswith("genre:") and state["inputs"].get("artists")
+                             and any(not c.get("cluster_genre") for c in state["pool"]
+                                     if _matches_axis(c, key)))
+            if not needs_context and _axis_seconds(state, party, key) >= target * budget:
+                continue
+            queued = set(state.get("done_widening", [])) | {p.get("widen_key") for p in state["pending"]}
+            fresh = []
+            for term in _widen_terms(state, key):
+                widen_key = f"{key}:{target}:{budget}:{term}"
+                if widen_key not in queued:
+                    fresh.append({"kind": "genre", "name": term, "want": key,
+                                  "related": True, "widen_key": widen_key})
             # Room for what the search brings back, or it arrives and is trimmed straight off.
             state["other_limit"] += len(fresh) * state["other_cap"]
-            state["pending"] += [{"kind": "genre", "name": t, "want": axis, "related": True}
-                                 for t in fresh]
+            state["pending"] += fresh
             if state["pending"]:
                 state["building"] = True
                 state["phase"] = "theirs"
@@ -1040,6 +1475,10 @@ def set_share(state, party, axis, share, store, now=0.0):
 
 
 def clear_share(state, party, axis, store, now=0.0):
-    """Unpin a slider: that genre floats with the rest of the mix again."""
-    (state.get("targets") or {}).get(party, {}).pop(axis, None)
+    """Release a balanced group so its genres or years follow the available tracks again."""
+    targets = (state.get("targets") or {}).get(party, {})
+    prefix = axis.split(":", 1)[0] + ":"
+    for key in list(targets):
+        if key.startswith(prefix):
+            del targets[key]
     return repick(state, store, now)

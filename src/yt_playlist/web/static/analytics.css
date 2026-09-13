@@ -844,7 +844,9 @@ input[type="range"].rt-shape-slider { display: block; width: 100%; height: 6px; 
   border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); }
 .rt-duration-field:focus-within { border-color: var(--accent-2); }
 .rt-duration-field input { width: 2.6rem; border: none; background: transparent; padding: 0.2rem 0;
-  text-align: right; font-variant-numeric: tabular-nums; color: inherit; }
+  text-align: right; font-variant-numeric: tabular-nums; color: inherit; appearance: textfield; }
+.rt-duration-field input::-webkit-inner-spin-button,
+.rt-duration-field input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .rt-duration-field input:focus { outline: none; }
 .rt-duration-unit { font-size: var(--type-xs); color: var(--dim); }
 .rt-duration-presets { display: inline-flex; gap: 0.25rem; margin-left: 0.3rem; }
@@ -943,6 +945,7 @@ input[type="range"].pct-slider {
 .rt-form.is-embedded form { padding: 0 0 .8rem; }
 .rt-axis-pct { flex: none; width: 2.6rem; text-align: right; font-size: var(--type-xs); color: var(--dim);
   font-variant-numeric: tabular-nums; }
+.rt-axis-context { display: block; white-space: normal; color: var(--dim); font-size: var(--type-xs); }
 /* A pinned bar is held to the share you asked for; an unpinned one floats with the mix. */
 .rt-axes .fp-row.is-pinned .fp-name { color: var(--accent-2); }
 .rt-axes .fp-row.is-pinned .rt-axis-pct { color: var(--accent-2); }
@@ -989,6 +992,7 @@ input[type="range"].pct-slider {
   border-radius: 3px; color: var(--faint); font-size: .6rem; text-transform: uppercase; letter-spacing: 0.06em; }
 .rt-c-src.is-yours { color: var(--teal); border-color: color-mix(in srgb, var(--teal) 45%, transparent); }
 .rt-c-src.is-theirs { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 45%, transparent); }
+.rt-c-src.is-blend { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
 /* A full-cell hit target, not a bare glyph: the ✕ was fiddly to land on at glyph size. */
 .rt-x { width: 2rem; height: 2rem; display: inline-flex; align-items: center; justify-content: center;
   padding: 0; background: transparent; border: none; box-shadow: none; border-radius: 6px;
@@ -998,6 +1002,7 @@ input[type="range"].pct-slider {
   box-shadow: none; }
 /* Their tracks carry a tint down the left edge, so the balance of the mix is legible at a glance. */
 .rt-row.is-theirs { box-shadow: inset 2px 0 0 var(--accent-2); }
+.rt-row.is-blend { box-shadow: inset 2px 0 0 var(--amber); }
 @media (max-width: 820px) {
   .rt-mixer-grid { grid-template-columns: 1fr 1fr; }
   .rt-length-control { grid-column: 1 / -1; }
@@ -1018,7 +1023,7 @@ input[type="range"].pct-slider {
   .rt-queue-head { display: none; }
   .rt-list { margin-top: .8rem; }
   .rt-row { grid-template-columns: 1.375rem 2.5rem minmax(0, 2fr) minmax(0, 1.3fr) 3.8rem 2.2rem; }
-  .rt-c-genre, .rt-c-src { display: none; }
+  .rt-c-genre, .rt-c-year { display: none; }
   .rt-draft-actions { width: 100%; margin-left: 0; }
   .rt-queue-toolbar { flex-wrap: wrap; }
   .rt-recipe-actions { flex-wrap: wrap; }
@@ -1044,7 +1049,11 @@ input[type="range"].pct-slider {
   .rt-slider-row { grid-template-columns: 3.8rem minmax(5rem, 1fr) 3.8rem; gap: .4rem; }
   .rt-recipe-select { grid-template-columns: 1fr; }
   .rt-recipe-seeds { grid-column: auto; }
-  .rt-row { grid-template-columns: 1.2rem 2.5rem minmax(0, 1fr) 2.2rem; }
-  .rt-c-artist { grid-column: 3; font-size: var(--type-xs); margin-top: -1rem; }
-  .rt-c-genre, .rt-c-year, .rt-c-src { display: none; }
+  .rt-row { grid-template-columns: 1.2rem 2.5rem minmax(0, 1fr) 3.8rem 2.2rem; }
+  .rt-row::before, .rt-c-art { grid-row: 1 / span 2; }
+  .rt-c-title { grid-column: 3; grid-row: 1; }
+  .rt-c-artist { grid-column: 3; grid-row: 2; font-size: var(--type-xs); }
+  .rt-c-src { grid-column: 4; grid-row: 1 / span 2; }
+  .rt-x, .rt-x-placeholder { grid-column: 5; grid-row: 1 / span 2; }
+  .rt-c-genre, .rt-c-year { display: none; }
 }

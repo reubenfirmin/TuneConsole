@@ -1,22 +1,39 @@
 {% set axes = s.axes.get(party) or [] %}
 {% set rows = axes | selectattr('kind', 'equalto', kind) | list %}
 {% if rows %}
-<div class="rt-axis-rows">
+<div class="rt-axis-rows" x-data='roadTripBalance({{ rows | tojson }})'
+     @htmx:response-error="requestFailed($event)"
+     aria-busy="{{ 'true' if s.building else 'false' }}">
   {% for a in rows %}
-  {% set pct = (a.get('share', 0) * 100) | round | int %}
   {% set target = a.get('target') %}
+  {% set pct = a.get('balance_pct', ((target if target is not none else a.get('share', 0)) * 100) | round | int) %}
   <div class="fp-row{{ ' is-pinned' if target is not none }}">
-    <span class="fp-name" title="{{ a.name }}{{ 's' if a.kind == 'era' }} — {{ pct }}%">{{ a.name }}{{ 's' if a.kind == 'era' }}</span>
+    <span class="fp-name" title="{{ a.name }}{{ 's' if a.kind == 'era' }} — {{ pct }}%">{{ a.name }}{{ 's' if a.kind == 'era' }}{% if party == 'theirs' and kind == 'genre' %}<small class="rt-axis-context"
+      x-show="genreArtists({{ a.name | tojson | forceescape }}).length"
+      x-text="'Like ' + genreArtists({{ a.name | tojson | forceescape }}).join(', ')">Like {{ a.get('artists', []) | join(', ') }}</small>{% endif %}</span>
+    {# Override the enclosing form's repeated share fields with this slider's value. #}
     <span class="fp-slider-wrap"><input type="range" class="fp-slider pct-slider" min="0" max="100"
-      step="5" value="{{ pct }}" style="--p:{{ pct }}%" name="share"
-      hx-post="/road_trip/draft/{{ rid }}/tilt" hx-target="#road-trip-body" hx-swap="innerHTML"
-      hx-trigger="change" hx-vals='{"party":"{{ party }}","axis":"{{ a.key }}"}'></span>
-    <span class="rt-axis-pct">{{ pct }}%</span>
-    {% if target is not none %}<button type="button" class="fp-icon-btn" title="Let {{ a.name }} float again"
-      hx-post="/road_trip/draft/{{ rid }}/unpin" hx-vals='{"party":"{{ party }}","axis":"{{ a.key }}"}'
-      hx-target="#road-trip-body" hx-swap="innerHTML">&times;</button>{% endif %}
+      step="1" value="{{ pct }}" style="--p:{{ pct }}%" name="share"
+      aria-label="{{ a.name }}{{ 's' if a.kind == 'era' }}"
+      :value="shares[{{ loop.index0 }}]" :style="'--p:' + shares[{{ loop.index0 }}] + '%'"
+      @pointerdown="dragBase = null" @keydown="dragBase = null"
+      @input="rebalance({{ loop.index0 }}, $event.target.value)"
+      {{ 'disabled' if s.building else '' }}
+      hx-post="/road_trip/draft/{{ rid }}/tilt/v2" hx-target="#road-trip-body" hx-swap="innerHTML"
+      hx-trigger="change" hx-params="party,axis,share"
+      hx-vals='{{ {"party": party, "axis": a.key} | tojson }}'
+      hx-on::config-request="event.detail.parameters.share = this.value"></span>
+    <span class="rt-axis-pct" x-text="Math.round(shares[{{ loop.index0 }}]) + '%'">{{ pct }}%</span>
   </div>
   {% endfor %}
+  <p class="notice warning" x-show="error" x-text="error" x-cloak></p>
+  {% if s.building %}<p class="section-note">Updating the mix…</p>{% endif %}
+  {% if rows | selectattr('target', 'number') | list %}
+  <button type="button" class="btn-ghost btn-sm" {{ 'disabled' if s.building else '' }}
+    hx-post="/road_trip/draft/{{ rid }}/unpin"
+    hx-vals='{{ {"party": party, "axis": rows[0].key} | tojson }}' hx-params="party,axis"
+    hx-target="#road-trip-body" hx-swap="innerHTML">Reset {{ 'genre' if kind == 'genre' else 'year' }} balance</button>
+  {% endif %}
 </div>
 {% elif draft and not s.building %}
 <p class="section-note">No {{ 'genres' if kind == 'genre' else 'years' }} in this side yet.</p>
