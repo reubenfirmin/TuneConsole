@@ -27,6 +27,21 @@ _installed: list[logging.Handler] = []
 _hooks_installed = False
 
 
+def configure_home_audit(path) -> None:
+    """Separate JSONL history of Home offers, retained independently of app.log."""
+    audit = logging.getLogger("yt_playlist.home_audit")
+    for h in list(audit.handlers):
+        audit.removeHandler(h)
+        h.close()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.TimedRotatingFileHandler(
+        path, when="midnight", backupCount=30, encoding="utf-8", utc=True)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    audit.addHandler(handler)
+    audit.setLevel(logging.INFO)
+    audit.propagate = False
+
+
 def _level() -> int:
     """INFO, unless YT_PLAYLIST_LOG_LEVEL names another level. Lets a packaged build be turned
     up to DEBUG without a rebuild, which is the only lever a user of the .app or Flatpak has."""
@@ -78,6 +93,7 @@ def configure(log_path=None) -> None:
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     root.addHandler(handler)
     _installed.append(handler)
+    configure_home_audit(path.with_name("home-cards.jsonl"))
 
     # `console=False` in the PyInstaller spec means sys.stderr is None inside the .app; a
     # StreamHandler built on that raises on first emit.

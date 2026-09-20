@@ -130,6 +130,53 @@ def test_assemble_empty_without_bundles(store):
     assert ms.assemble_cards(store, now=10.0, epoch=0) == []
 
 
+def test_full_buckets_do_not_pin_a_theme_to_one_framing(store):
+    _seed(store)
+    payload = store.get_proposals("mode_bundles")
+    # One theme has the deepest pool in every framing. All the others can fill a
+    # complete card too; raw pool depth must not undo the model's theme rotation.
+    for mid in (2, 3, 4):
+        for surf in ms.CARD_SURFACES:
+            payload[str(mid)][surf] = payload[str(mid)][surf][:12]
+    store.put_proposals("mode_bundles", payload, 1.0)
+    menus = [ms.assemble_cards(store, now=10.0, epoch=e) for e in range(30)]
+    wheelhouse = [next(c["mode_id"] for c in cards if c["lane"] == "wheelhouse") for cards in menus]
+    assert len(set(wheelhouse)) >= 3
+    assert all(len(cards) == 4 for cards in menus)
+    assert all(len(c["tracks"]) == 12 for cards in menus for c in cards)
+
+
+def test_logging_this_menu_does_not_change_its_themes_on_rerender(store):
+    _seed(store)
+    before = ms.assemble_cards(store, now=10.0, epoch=0)
+    store.modes.log_impressions(0, [(c["lane"], c["mode_id"]) for c in before], 10.0)
+    store.modes.log_pick(77, before[0]["mode_id"], 11.0)
+    assert ms.assemble_cards(store, now=12.0, epoch=0) == before
+
+
+@pytest.mark.parametrize("restricted_lane", ["comfort", "fresh"])
+@pytest.mark.parametrize("available", [4, 12])
+def test_assignment_preserves_the_only_mode_that_can_fill_a_lane(store, monkeypatch,
+                                                               restricted_lane, available):
+    _seed(store)
+    payload = store.get_proposals("mode_bundles")
+    # The preferred mode can fill any lane, but is the only source for this one.
+    # Spending it on Wheelhouse loses a card, even when four cards are feasible.
+    payload["1"][restricted_lane] = payload["1"][restricted_lane][:available]
+    for mid in (2, 3, 4):
+        payload[str(mid)][restricted_lane] = []
+    store.put_proposals("mode_bundles", payload, 1.0)
+    monkeypatch.setattr(ms, "select_modes", lambda *args, **kwargs: [1, 2, 3, 4])
+
+    cards = ms.assemble_cards(store, now=10.0, epoch=0)
+
+    assert len(cards) == 4
+    assert len({c["mode_id"] for c in cards}) == 4
+    restricted = next(c for c in cards if c["lane"] == restricted_lane)
+    assert restricted["mode_id"] == 1
+    assert len(restricted["tracks"]) == available
+
+
 def test_diversify_caps_artist_and_album():
     items = (
         [{"artist": "A", "album": "AlbA", "key": f"a{i}"} for i in range(4)]        # same artist -> cap
@@ -164,3 +211,68 @@ def test_thin_bucket_backfilled_from_general_pool(store):
     keys = {t["key"] for t in card["tracks"]}
     assert {"m0", "m1"} <= keys                                # the mode tracks lead
     assert any(k.startswith("g") for k in keys)                # backfilled from the general pool
+
+
+def _genre_items(prefix, genre, count):
+    return [{"key": f"{prefix}{i}", "video_id": f"v{prefix}{i}", "title": f"{prefix}{i}",
+             "artist": f"{prefix} artist {i}", "album": "", "thumbnail": None, "genre": genre}
+            for i in range(count)]
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_thin_mix_exhausts_deeper_family_before_adjacent_tracks(store, monkeypatch, prepared):
+    from types import SimpleNamespace
+    from yt_playlist.rec import embed, recommend
+
+    store.modes.replace_modes([
+        {"mode_id": 1, "label": "Soul", "families": [["soul-funk", 100]],
+         "centroid": _eye(0), "size": 100, "rep_keys": []}], retired_ids=[], now=1.0)
+    core = _genre_items("core", "Soul", 6)
+    deep = _genre_items("deep", "Funk", 12)
+    nearby = _genre_items("near", "Jazz", 20)
+    unrelated = _genre_items("far", "Electronic", 20)
+    payload = {"1": {"wheelhouse": core},
+               "all": {"wheelhouse": unrelated + nearby + (deep if prepared else [])},
+               "_meta": {"full_pools": prepared}}
+    store.put_proposals("mode_bundles", payload, 1.0)
+    store.record_dislike("deep0", until=None, now=1.0)
+    monkeypatch.setattr(ms, "RecDao", lambda s: SimpleNamespace(generated_track_keys=lambda: {"deep1"}))
+
+    def ranked_library(s, now, limit):
+        assert not prepared  # full bundles serve without reranking
+        assert limit >= 500
+        return [SimpleNamespace(**d) for d in deep]
+
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (list(range(500)), None, {}))
+    monkeypatch.setattr(recommend, "for_you", ranked_library)
+
+    cards = ms.assemble_cards(store, 10.0, 0, include_genres=["soul-funk", "electro-synth"])
+
+    assert len(cards) == 1
+    tracks = cards[0]["tracks"]
+    assert len(tracks) == len({d["key"] for d in tracks}) == 12
+    assert all(d["genre"] in {"Soul", "Funk"} for d in tracks)
+    assert not {"deep0", "deep1"} & {d["key"] for d in tracks}
+    assert store.get_proposals("mode_bundles") == payload
+
+
+@pytest.mark.parametrize("lane", ["wheelhouse", "fresh"])
+def test_thin_mix_uses_close_neighbors_but_never_avoided_or_unrelated_genres(store, lane):
+    store.modes.replace_modes([
+        {"mode_id": 1, "label": "Soul", "families": [["soul-funk", 100]],
+         "centroid": _eye(0), "size": 100, "rep_keys": []}], retired_ids=[], now=1.0)
+    core = _genre_items("core", "Soul", 6)
+    nearby = _genre_items("near", "Blues", 20)
+    unrelated = _genre_items("far", "Techno", 20)
+    avoided = _genre_items("avoid", "Jazz", 20)
+    payload = {"1": {lane: core},
+               "all": {lane: unrelated + avoided + nearby + core},
+               "_meta": {"full_pools": True}}
+    store.put_proposals("mode_bundles", payload, 1.0)
+
+    cards = ms.assemble_cards(store, 10.0, 0, include_genres=["soul-funk"], avoid_genres=["jazz"])
+
+    assert len(cards) == 1 and cards[0]["lane"] == lane
+    tracks = cards[0]["tracks"]
+    assert len(tracks) == len({d["key"] for d in tracks}) == 12
+    assert [d["genre"] for d in tracks] == ["Soul"] * 6 + ["Blues"] * 6

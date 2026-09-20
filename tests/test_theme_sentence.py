@@ -89,6 +89,25 @@ def test_an_empty_card_still_reads_as_a_sentence():
     assert recommend.theme_sentence(_store(), "wheelhouse", []) == "Songs close to what you play most."
 
 
+def test_mixed_eras_and_adjacent_genres_do_not_overstate_the_theme():
+    s = _store()
+    items = _tracks(s, [("A", "A", "Funk", 2020), ("B", "B", "Soul", 2015),
+                        ("C", "C", "Funk", 2018), ("D", "D", "Acid Jazz", 1995),
+                        ("E", "E", "Acid Jazz", 2001), ("F", "F", "Soul", 1960)])
+
+    assert recommend.theme_sentence(s, "wheelhouse", items) == (
+        "Songs close to what you play most, with funk and soul.")
+
+
+def test_unknown_metadata_does_not_turn_a_minority_into_mostly():
+    s = _store()
+    items = _tracks(s, [(f"T{i}", f"A{i}", "Funk" if i < 5 else None,
+                         2012 if i < 5 else None) for i in range(12)])
+
+    assert recommend.theme_sentence(s, "wheelhouse", items) == (
+        "Songs close to what you play most, with funk.")
+
+
 def test_the_fresh_card_describes_itself_from_what_the_track_carries():
     """Fresh proposals aren't in your library, so nothing downstream can look their genre or year
     up - they carry both, and the card would otherwise say only "songs you don't own yet"."""

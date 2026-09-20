@@ -79,3 +79,29 @@ implementation lives in `src/yt_playlist/rec/` and has four main parts:
   but TuneConsole's local models do the ranking. `rec_worker.py` coalesces rebuild requests, persists
   vectors, and materializes expensive proposals in the background so routes can serve the last good
   result from SQLite.
+
+### Home recommendation audit
+
+The Home configurator's **These mixes** tab shows your top 12 available genre families by listening,
+with search for the rest. Its single action makes mixes from the selected genres, or shuffles
+away from the current genres when none are selected. Successful changes close the configurator
+to reveal the new mixes. Thin mixes search the full ranked library for the same genre family,
+then fill with nearby styles if needed; artist and album caps still apply. Fresh songs stay in the
+discovery pool, and Comfort stays limited to real listening favorites. Requests can offer fewer
+cards when choices are limited, and explain when no
+matching themes are ready. A request lasts for the current menu, including previews, until the next
+normal refresh/rotation. It does not change taste weights or record dislikes. The **Preferences**
+tab holds the existing sliders. The configurator opens as a modal with a backdrop and contained
+keyboard focus; Escape or a backdrop click closes it.
+
+`home-cards.jsonl` sits alongside `app.log` in the app's logs directory (normally
+`~/.local/share/yt-playlist/logs` on Linux, or `$YT_PLAYLIST_HOME/logs` when overridden).
+It rotates daily in UTC and keeps 30 archives. Logging starts when the updated app starts.
+
+Each JSON line snapshots a successfully rendered Home card response: UTC time, request path,
+rotation epoch, and each card's framing, displayed description, mode, recipe, genre/decade counts,
+missing-metadata counts, and ordered track identities. Counts use the same metadata fallbacks as
+the displayed description. They describe the offered tracks even if these differ from the recipe.
+Normal loads, repeated previews, and refreshes are all recorded; use the path and epoch to separate
+them when reviewing the week. These are server offers, not confirmed views or inferred rejections.
+The audit is diagnostic only and does not feed the recommendation models.

@@ -4,9 +4,9 @@ from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 
 
-def _client(store):
+def _client(store, now=1000.0):
     iid = store.upsert_identity("main", "cred", None, True)
-    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now)
     return TestClient(app, base_url="http://127.0.0.1")
 
 
@@ -36,6 +36,25 @@ def test_home_is_default_route(store):
     assert "Extension connected" not in r.text  # connection alone is not useful Home content
     assert "Library synced" not in r.text  # freshness line only appears after a first sync
     assert 'class="presync card card--featured"' in r.text  # never-synced placeholder
+
+
+def test_next_home_visit_expires_a_day_old_theme_menu(store):
+    from yt_playlist.rec import rec_params
+    from yt_playlist.rec.rec_dao import RecDao
+    from yt_playlist.web.routes import home
+    rec_params.set_param(store, "erosion_view_cap", 10)
+    dao = RecDao(store)
+    dao.bump_card_view("cards", 1000.0)
+    store.modes.log_impressions(0, [("wheelhouse", 1)], 1000.0)
+    assert _client(store, now=1000.0 + home.MENU_MAX_AGE_S - 1).get("/").status_code == 200
+    assert home._epoch(store, "cards") == 0
+    assert _client(store, now=1000.0 + home.MENU_MAX_AGE_S).get("/").status_code == 200
+    assert home._epoch(store, "cards") == 1
+
+    # Fragment previews do not advance the new menu, even if its previous menu was old.
+    views = dao.card_views("cards")
+    assert _client(store, now=1000.0 + home.MENU_MAX_AGE_S).get("/home/cards").status_code == 200
+    assert dao.card_views("cards") == views
 
 
 def test_home_rediscovers_unplayed_saved_albums(store):

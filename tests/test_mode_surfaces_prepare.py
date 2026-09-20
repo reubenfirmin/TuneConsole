@@ -74,6 +74,28 @@ def test_prepare_empty_when_no_modes(store):
     assert store.get_proposals("mode_bundles") == {}
 
 
+def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(monkeypatch, store):
+    store.modes.replace_modes([
+        {"mode_id": m, "label": f"m{m}", "families": [["house", 1]],
+         "centroid": np.eye(2, dtype=np.float32)[m - 1], "size": 50, "rep_keys": []}
+        for m in (1, 2)], retired_ids=[], now=1.0)
+    keys = [f"k{i}" for i in range(500)]
+    vectors = np.array([[1., 0.]] * 450 + [[0., 1.]] * 50, dtype=np.float32)
+    monkeypatch.setattr(embed, "load_content_vectors",
+                        lambda s: (keys, vectors, {key: i for i, key in enumerate(keys)}))
+    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s: ([], None, {}))
+    pool = [_Item(key, 1.0) for key in keys]
+    for fn in ("for_you", "explore_for_you", "comfort_listening"):
+        monkeypatch.setattr(recommend, fn, lambda s, n, limit: pool[:limit])
+    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [])
+
+    payload = ms.prepare_bundles(store, now=10.0)
+
+    assert len(payload["2"]["wheelhouse"]) >= ms.PROTO_SIZE
+    assert len(payload["all"]["wheelhouse"]) == 500
+    assert len(payload["all"]["temporal"]) == 500
+
+
 def test_rebuild_wires_prepare_bundles_and_drops_fresh_songs():
     import inspect
     from yt_playlist.rec import rec_worker

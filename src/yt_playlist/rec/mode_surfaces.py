@@ -3,15 +3,17 @@
 The worker buckets every surface's candidate pool by nearest taste mode (prepare_bundles); the Home
 request cheaply selects 4 distinct modes by acceptance-weighted Thompson sampling and live mood
 (#87), assigns one per card, and tilts/orders/caps within the prepared bucket (assemble_cards). No
-pool ranking happens on the request."""
+pool ranking happens on the request once full-depth bundles have been prepared."""
 import random
 from collections import Counter
+from itertools import permutations
 
 import numpy as np
 
-from yt_playlist.rec import (embed, layers, mode_eval, rec_params, recommend, surfaces,
+from yt_playlist.rec import (embed, home_themes, layers, mode_eval, rec_params, recommend, surfaces,
                              taste_modes, transient)
 from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.util import genre_map
 
 CARD_SURFACES = ("wheelhouse", "explore", "comfort", "fresh")
 _MIN_CARD = 4          # below this many tracks (even after backfill) a card is dropped, not shown thin
@@ -68,7 +70,9 @@ def prepare_bundles(store, now) -> dict:
     lkeys, LV, lidx = embed.load_content_vectors(store)
     dkeys, DV, didx = embed.load_discovered_content_vectors(store)
     cap = int(rec_params.get_param(store, "modes_cand_per_mode"))
-    lim = int(rec_params.get_param(store, "modes_pool_limit"))
+    # Rank through the library before bucketing. A global top-400 cutoff can leave a substantial
+    # genre with only six candidates even when the library contains hundreds of matching songs.
+    lim = max(len(lkeys), int(rec_params.get_param(store, "modes_pool_limit")))
     pools = {
         "wheelhouse": recommend.for_you(store, now, limit=lim),
         "explore": recommend.explore_for_you(store, now, limit=lim),
@@ -87,9 +91,9 @@ def prepare_bundles(store, now) -> dict:
                 b.append(_item_dict(it))
         for mid in mode_ids:
             payload[str(mid)][surf] = buckets[str(mid)]
-        # General backfill pool: the top of the whole surface (no mode filter), used to top up a card
-        # whose assigned-mode bucket is thin so it reaches a full, diverse PROTO_SIZE.
-        payload.setdefault("all", {})[surf] = [_item_dict(it) for it in pool[:cap]
+        # Keep the full ranked surface for backfill: the global head can contain almost none of
+        # a user's smaller genre families, even when they have plenty of eligible library tracks.
+        payload.setdefault("all", {})[surf] = [_item_dict(it) for it in pool
                                                if getattr(it, "key", "")]
     # Temporal surface (#63): each mode's own library member tracks, carrying release year, for the
     # date-banded 4th card (Throwback / Time Flies / Recent Picks). Built from content-vector
@@ -102,7 +106,8 @@ def prepare_bundles(store, now) -> dict:
     yvals = sorted(y for y in years.values() if y)
     cuts = ([int(np.percentile(yvals, 33)), int(np.percentile(yvals, 66))]
             if len(yvals) >= 30 else None)
-    payload["_meta"] = {"comfort_pool": len(pools["comfort"]), "year_cuts": cuts}
+    payload["_meta"] = {"comfort_pool": len(pools["comfort"]), "year_cuts": cuts,
+                        "full_pools": True}
     # #57 per-mode PPR ordering, precomputed for the A/B in-mode ranker. Best-effort: a failure leaves
     # cards on the existing ranker (assemble_cards falls back when a mode has no _ppr entry).
     try:
@@ -143,11 +148,11 @@ def _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, suppressed=froz
     for j, mid in enumerate(mode_ids):
         rows = np.where(near == j)[0]
         rows = rows[np.argsort(-sims[rows, j])]
-        rows = [i for i in rows if lkeys[i] not in suppressed][:cap]   # most central, minus suppressed
+        rows = [i for i in rows if lkeys[i] not in suppressed]
         items = [_temporal_item(lkeys[i], meta, genres, years) for i in rows]
-        payload[str(mid)]["temporal"] = items
+        payload[str(mid)]["temporal"] = items[:cap]
         allt.extend(items)
-    payload.setdefault("all", {})["temporal"] = allt[:cap * 2]
+    payload.setdefault("all", {})["temporal"] = allt
 
 
 def _mode_mood_weight(mode, leans):
@@ -175,9 +180,10 @@ def thompson_mode_scores(stats, mode_ids, rng) -> dict:
 
 
 def select_modes(store, modes, leans, epoch, n=4, stats=None, now_posterior=None) -> list[int]:
-    """Pick n distinct mode_ids: a DOMINANT chosen by Thompson-sampled pick-through x library share x
-    live mood x NOW-layer boost (#88), then (n-1) pushed apart by centroid distance. Deterministic for
-    fixed (modes, leans, epoch, stats, now_posterior).
+    """Pick n distinct mode_ids using acceptance evidence across all card framings. The first uses
+    Thompson-sampled pick-through x library share x live mood x NOW-layer boost (#88). Later choices
+    use that same evidence with a bounded diversity bonus, so an ignored theme cannot keep returning
+    just because its centroid is distant. Deterministic for fixed inputs.
 
     `now_posterior` ({mode_id: share} from `layers.now_mode_posterior`, or None) multiplies the
     dominant draw's context: a mode carrying share `s` of the last `now_window_h` hours' real plays
@@ -204,12 +210,17 @@ def select_modes(store, modes, leans, epoch, n=4, stats=None, now_posterior=None
     # modes stay wide and keep getting explored. Zero pick data reproduces the old behavior in
     # expectation (uniform samples scale every mode equally).
     samples = thompson_mode_scores(stats or {}, [m["mode_id"] for m in modes], rng)
-    dominant = max(modes, key=lambda m: samples[m["mode_id"]] * max(1, m["size"])
-                   * _mode_mood_weight(m, leans) * _now_boost(m["mode_id"]))["mode_id"]
+    scores = {m["mode_id"]: samples[m["mode_id"]] * max(1, m["size"])
+              * _mode_mood_weight(m, leans) * _now_boost(m["mode_id"]) for m in modes}
+    dominant = max(scores, key=scores.get)
     chosen = [dominant]
     remaining = [m["mode_id"] for m in modes if m["mode_id"] != dominant]
     while len(chosen) < min(n, len(modes)):
-        nxt = max(remaining, key=lambda mid: min(1.0 - float(cents[mid] @ cents[c]) for c in chosen))
+        def diverse_score(mid):
+            distance = min(1.0 - float(cents[mid] @ cents[c]) for c in chosen)
+            return scores[mid] * (1.0 + max(0.0, min(2.0, distance)))
+
+        nxt = max(remaining, key=diverse_score)
         chosen.append(nxt)
         remaining.remove(nxt)
     return chosen
@@ -271,14 +282,15 @@ def _in_band(year, band, lo, hi) -> bool:
     return year > hi
 
 
-def assemble_cards(store, now, epoch) -> list[dict]:
+def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> list[dict]:
     """Build the mode-focused Home cards from the prepared bundles. Three always-on surfaces
     (wheelhouse, explore, fresh) plus a resolved 4th slot: COMFORT if its pool is credible
     (>= comfort_min_pool), else the TEMPORAL card whose band rotates per epoch (Throwback / Time Flies /
     Recent Picks) over the user's own release-year terciles. Modes are selected by Thompson-sampled
     pick-through x library share x live mood (#87), NOW-boosted (#88, see `select_modes`), and
-    DEPTH-AWARE assigned (each surface claims the chosen mode it has the most material for, temporal
-    depth measured within the epoch's band). Each card is diversity-capped (artist + album) and, EXCEPT
+    assigned by lane coverage, usable card depth, then selection priority. Extra tracks beyond a full card do not
+    pin a theme to a framing (temporal depth is measured within the epoch's band).
+    Each card is diversity-capped (artist + album) and, EXCEPT
     Comfort, backfilled from its general pool when thin; Comfort shows only real comfort tracks. If a
     Comfort slot comes up thinner than _MIN_CARD after capping (its global pool can be credible while
     the assigned mode's bucket is not), TEMPORAL rotates into the 4th slot so the row stays at four,
@@ -288,16 +300,36 @@ def assemble_cards(store, now, epoch) -> list[dict]:
     modes = store.modes.list_modes(active_only=True)
     if not bundles or not modes:
         return []
+    original_bundles = bundles
+    if avoid_genres or include_genres:
+        # Start each card in the requested families. Backfill searches the complete pool below,
+        # widening to close neighbors only after exhausting its own family. Keep caches untouched.
+        bundles = {mid: ({surf: home_themes.matching_genres(store, items, avoid=avoid_genres,
+                                                          include=include_genres)
+                          for surf, items in bucket.items()}
+                        if mid != "all" and not mid.startswith("_") else bucket)
+                   for mid, bucket in bundles.items()}
+        # Keep the feedback attribution honest: stripping jazz from a jazz-led mode must not
+        # turn its few remaining rock tracks into a card whose pick still trains the jazz mode.
+        modes = [m for m in modes
+                 if (not m.get("families") or max(m["families"], key=lambda f: f[1])[0] not in avoid_genres)
+                 and (not include_genres or not m.get("families")
+                      or max(m["families"], key=lambda f: f[1])[0] in include_genres)
+                 and any(len(items) >= _MIN_CARD
+                         for items in bundles.get(str(m["mode_id"]), {}).values())]
+        if not modes:
+            return []
     leans = transient.facet_leans(store, now)
     n = int(rec_params.get_param(store, "modes_menu_size"))
     now_posterior = layers.now_mode_posterior(store, now)
+    evidence_before = store.modes.epoch_started_at(epoch)
     chosen = select_modes(store, modes, leans, epoch, n=max(n, 4),
-                          stats=mode_eval.mode_bandit_stats(store), now_posterior=now_posterior)
+                          stats=mode_eval.mode_bandit_stats(store, before=evidence_before),
+                          now_posterior=now_posterior)
     if not chosen:
         return []
     cap_a = int(rec_params.get_param(store, "modes_artist_cap"))
     cap_al = int(rec_params.get_param(store, "modes_album_cap"))
-    allb = bundles.get("all", {})
     meta = bundles.get("_meta", {})
     ppr_map = bundles.get("_ppr", {})
     ab_share = float(rec_params.get_param(store, "ppr_ab_share"))
@@ -316,17 +348,33 @@ def assemble_cards(store, now, epoch) -> list[dict]:
             b = [d for d in b if _in_band(d.get("year"), band, year_cuts[0], year_cuts[1])]
         return b
 
-    # Depth-aware assignment (global greedy) over the ACTIVE surfaces: highest (surface, mode) depth
-    # pairs first, each surface/mode used once. Temporal depth is measured within the band.
-    pairs = sorted((-len(_bucket(m, surf)), active.index(surf), m, surf)
-                   for surf in active for m in chosen)
-    assign, used_s, used_m = {}, set(), set()
-    for _negdepth, _si, m, surf in pairs:
-        if surf in used_s or m in used_m:
-            continue
-        assign[surf] = m
-        used_s.add(surf)
-        used_m.add(m)
+    # Depth is a fillability constraint, not a theme preference. Once a bucket can fill a card,
+    # respect the sampled theme priority instead of always handing the deepest mode the same slot.
+    # Count usable tracks: saved songs and diversity-dropped rows cannot fill the preview.
+    generated = set(RecDao(store).generated_track_keys())
+    blocked = generated | store.suppressed_keys("for_you", now)
+    muted = store.muted_artists()
+
+    def _depth(mid, surf):
+        items = [d for d in _bucket(mid, surf) if d.get("key") and d["key"] not in blocked
+                 and d.get("artist") not in muted]
+        return min(PROTO_SIZE, len(_diversify(items, cap_a, cap_al)))
+
+    depths = {(surf, mid): _depth(mid, surf) for surf in active for mid in chosen}
+    priority = {mid: i for i, mid in enumerate(chosen)}
+
+    def assignment_score(mids):
+        sizes = [depths.get((surf, mid), 0) for surf, mid in zip(active, mids)]
+        return (sum(size >= _MIN_CARD for size in sizes), sum(sizes),
+                tuple(-priority.get(mid, len(chosen)) for mid in mids))
+
+    # Consider the whole row before spending a mode that may be a lane's only option.
+    # At most six modes compete for four slots (360 assignments). Prefer credible
+    # cards, then capped depth, then sampled priority in display order. Empty slots
+    # let a smaller menu put its modes where tracks are available.
+    candidates = chosen + [None] * max(0, len(active) - len(chosen))
+    best = max(permutations(candidates, len(active)), key=assignment_score)
+    assign = {surf: mid for surf, mid in zip(active, best) if mid is not None}
 
     # Songs already bundled into a generated playlist are spoken for, and must not be offered again
     # however stale the bundles are. The bundles apply this exclusion when they are BUILT, but
@@ -334,22 +382,59 @@ def assemble_cards(store, now, epoch) -> list[dict]:
     # back exactly what you had just bundled: generate twice in a day and you got the same tracks.
     # Seeding `seen` makes it a render-time fact rather than a build-time snapshot, and reuses the
     # per-render machinery that already blocks a track across cards.
-    cards, seen = [], set(RecDao(store).generated_track_keys())
+    cards, seen = [], set(blocked)
+    full_pools = {}
+    mode_families = {m["mode_id"]: max(m["families"], key=lambda f: f[1])[0]
+                     for m in modes if m.get("families")}
+
+    def _full_pool(surf):
+        if surf not in full_pools:
+            pool = list(original_bundles.get("all", {}).get(surf, []))
+            # Older caches only kept 40 global candidates. Include their other mode buckets, then
+            # reach through the ranked library now; the next worker rebuild caches that full depth.
+            if not meta.get("full_pools"):
+                for mid, bucket in original_bundles.items():
+                    if mid != "all" and not mid.startswith("_"):
+                        pool.extend(bucket.get(surf, []))
+                if surf in ("wheelhouse", "explore"):
+                    keys, _, _ = embed.load_content_vectors(store)
+                    limit = max(len(keys), int(rec_params.get_param(store, "modes_pool_limit")))
+                    scorer = recommend.for_you if surf == "wheelhouse" else recommend.explore_for_you
+                    pool.extend(_item_dict(it) for it in scorer(store, now, limit=limit))
+            unique = {}
+            for item in pool:
+                if item.get("key"):
+                    unique.setdefault(item["key"], item)
+            pool = home_themes.resolved_genres(store, list(unique.values()))
+            full_pools[surf] = [d for d in pool if d.get("artist") not in muted
+                                and genre_map.family(d.get("genre")) not in avoid_genres]
+        return full_pools[surf]
 
     def _card_for(surf, mid, ranker, ppr_pos):
         """Build one card for (surface, mode), or return (None, bucket) when it is too thin. Reads the
         running `seen` set from the enclosing scope."""
         bucket = _bucket(mid, surf)
-        items = [d for d in bucket if d.get("key") and d["key"] not in seen]
+        items = [d for d in bucket if d.get("key") and d["key"] not in seen
+                 and d.get("artist") not in muted]
         items.sort(key=_order_key(ranker, ppr_pos, leans))
         items = _diversify(items, cap_a, cap_al)
         if surf != "comfort" and len(items) < PROTO_SIZE:   # Comfort is NEVER backfilled (#63 credibility)
             taken = {d["key"] for d in items}
-            pool = allb.get(surf, [])
+            pool = _full_pool(surf)
             if surf == "temporal" and year_cuts is not None:
                 pool = [d for d in pool if _in_band(d.get("year"), band, year_cuts[0], year_cuts[1])]
             extra = [d for d in pool if d.get("key") and d["key"] not in seen and d["key"] not in taken]
-            extra.sort(key=_order_key(ranker, ppr_pos, leans))
+            family = mode_families.get(mid)
+            order = _order_key(ranker, ppr_pos, leans)
+            if family:
+                distance = lambda d: genre_map.family_distance(family, genre_map.family(d.get("genre")))
+                # Exhaust the SAME family across the whole library before adding close neighbors.
+                # Never fill a soul mix with unrelated electronic tracks just because both were selected.
+                extra = [d for d in extra if d.get("genre") and distance(d) <= 0.5]
+                extra.sort(key=lambda d: (distance(d), order(d)))
+            else:
+                extra = home_themes.matching_genres(store, extra, include=include_genres)
+                extra.sort(key=order)
             items = _diversify(items + extra, cap_a, cap_al)
         items = items[:PROTO_SIZE]
         if len(items) < _MIN_CARD:                          # credibility gate: too thin to show

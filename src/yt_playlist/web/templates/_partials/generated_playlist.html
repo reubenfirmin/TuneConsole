@@ -5,6 +5,7 @@
          :class="{ 'is-focused': focus === {{ p.lane|tojson|forceescape }}, 'is-muted': focus && focus !== {{ p.lane|tojson|forceescape }} }"
          >
   <div class="gen-card-body{% if regenerating %} is-arriving{% endif %}" id="gen-body-{{ p.lane }}"
+       data-genres='{{ p.genres|default([])|tojson }}'
        data-name="{{ p.name }}"{% if p.recipe %} data-recipe='{{ p.recipe|tojson }}'{% endif %}>
   <div class="gen-poster gen-poster--{{ p.tracks[:4]|length }}" role="button" tabindex="0" aria-label="Explore {{ p.note or p.label }}"
        @click="focus = {{ p.lane|tojson|forceescape }}; genReveal('gen-{{ p.lane }}')"
@@ -19,7 +20,7 @@
   </div>
   <header class="gen-head" @click="focus = {{ p.lane|tojson|forceescape }}; genReveal('gen-{{ p.lane }}')">
     <button type="button" class="gen-back" x-show="focus === {{ p.lane|tojson|forceescape }}" x-cloak
-            @click.stop="focus = null" title="Back to all mixes" aria-label="Back to all four mixes"><span aria-hidden="true">←</span> All mixes</button>
+            @click.stop="focus = null" title="Back to all mixes" aria-label="Back to all mixes"><span aria-hidden="true">←</span> All mixes</button>
     {% if p.tracks %}
     <button type="button" class="gen-play" x-show="focus === {{ p.lane|tojson|forceescape }}" x-cloak
             title="Play this mix" aria-label="Save and play this mix" @click.stop

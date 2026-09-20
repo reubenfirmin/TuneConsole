@@ -264,8 +264,8 @@ PARAMS = [
               "a mode split into a new one more readily as your library shifts.",
               0.0, 1.0, 0.05, 0.60, advanced=True),
     ParamSpec("modes_pool_limit", "Taste modes: pool breadth", "discovery",
-              "How deep into each surface's ranked pool the worker reaches when bucketing tracks by "
-              "taste mode. Bigger gives each mode more candidates to draw from.",
+              "Minimum ranked pool requested when bucketing tracks by taste mode. Library surfaces "
+              "also cover all modeled tracks so smaller genres can fill a mix.",
               50, 2000, 50, 400, integer=True, advanced=True),
     ParamSpec("modes_cand_per_mode", "Taste modes: candidates per mode", "discovery",
               "How many tracks are cached per mode per card. This is the rotation depth a mode card "
