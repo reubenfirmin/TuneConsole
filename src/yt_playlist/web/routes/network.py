@@ -7,7 +7,7 @@ YouTube and the metadata-enrichment hosts. The enforcement lives in
 """
 from fastapi import APIRouter, Request
 
-from yt_playlist.egress import ALLOWED_DOMAINS, guard
+from yt_playlist.egress import ALLOWED_DOMAINS, YOUTUBE_METADATA_ENDPOINTS, guard
 
 
 def _parse(line):
@@ -35,6 +35,7 @@ def build(ctx) -> APIRouter:
         rows = [_parse(ln) for ln in reversed(guard().recent(500))]   # newest first
         return templates.TemplateResponse(request, "network.html", {
             "allowlist": sorted(ALLOWED_DOMAINS),
+            "metadata_endpoints": sorted(YOUTUBE_METADATA_ENDPOINTS),
             "rows": rows,
         })
 

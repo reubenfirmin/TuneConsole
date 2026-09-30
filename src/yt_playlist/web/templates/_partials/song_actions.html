@@ -1,0 +1,101 @@
+{# One menu and one playlist dialog per page, shared by every song launcher. #}
+<div x-data="songActions()" @song-menu-open.window="show($event.detail)">
+  <div id="song-action-menu" class="song-action-menu" x-ref="menu" popover="auto"
+       role="menu" aria-label="Song actions" @toggle="menuToggled($event)"
+       @keydown="menuKey($event)">
+    <button type="button" role="menuitem" @click="play()">Play on YouTube Music</button>
+    <button type="button" role="menuitem" @click="similar()">Songs like this</button>
+    <button type="button" role="menuitem" @click="openPlaylist('create')">Create playlist from song</button>
+    <button type="button" role="menuitem" @click="openPlaylist('add')">Add song to playlist</button>
+    <template x-if="context.playlist">
+      <div role="group" aria-label="This playlist">
+        <button type="button" role="menuitem" @click="localAction('findAlternates')">Find alternate versions</button>
+        <button type="button" role="menuitem" class="danger" @click="localAction('removeTrack')">Remove from playlist</button>
+      </div>
+    </template>
+    <template x-if="context.mood_key">
+      <div role="group" aria-label="Tune your Home picks">
+        <button type="button" role="menuitem" @click="mood(1)">🔥 More like this</button>
+        <button type="button" role="menuitem" @click="mood(-1)">🙅 Less like this</button>
+      </div>
+    </template>
+    <template x-if="context.suggestion">
+      <div role="group" aria-label="Not for this playlist">
+        <span class="song-menu-caption">Not for this playlist</span>
+        <template x-for="reason in reasons" :key="reason[0]">
+          <button type="button" role="menuitem" @click="dismiss(reason[0])" x-text="reason[1]"></button>
+        </template>
+      </div>
+    </template>
+  </div>
+  <dialog class="song-playlist-dialog" x-ref="dialog"
+          aria-labelledby="song-playlist-title"
+          :class="{ 'has-result': result }"
+          @cancel.prevent="closeDialog()" @keydown.tab="trapFocus($event)"
+          @click="backdropClick($event)">
+    <form @submit.prevent="submit()" :aria-busy="busy">
+      <header class="song-dialog-head">
+        <h2 id="song-playlist-title" x-show="!result" x-text="mode === 'create' ? 'Create playlist' : 'Add to playlist'"></h2>
+        <p class="song-dialog-status" role="status" x-show="result" :class="{ 'is-incomplete': result?.added === false }">
+          <svg x-show="result?.added !== false" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></svg>
+          <svg x-show="result?.added === false" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 3v1"/></svg>
+          <span x-text="result?.message"></span>
+        </p>
+        <button type="button" class="song-dialog-close" aria-label="Close playlist dialog" @click="closeDialog()" :disabled="busy">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg>
+        </button>
+      </header>
+      <div class="song-dialog-track">
+        <div class="song-dialog-art" aria-hidden="true">
+          <svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="25"/><circle cx="32" cy="32" r="18"/><circle cx="32" cy="32" r="8"/><circle cx="32" cy="32" r="2"/></svg>
+          <template x-if="song.thumbnail && !artworkFailed">
+            <img :src="song.thumbnail" alt="" referrerpolicy="no-referrer" @error="artworkFailed = true">
+          </template>
+        </div>
+        <div class="song-dialog-track-copy">
+          <strong x-show="!result" x-text="song.title"></strong>
+          <h2 id="song-playlist-result-title" x-show="result" x-text="result?.title"></h2>
+          <p x-show="result?.added !== false"
+             x-text="result && mode === 'add' ? [song.title, song.artist].filter(Boolean).join(' · ') : song.artist"></p>
+        </div>
+      </div>
+      <div class="song-dialog-fields" x-show="!result">
+        <label class="song-dialog-label" x-show="mode === 'create'">Playlist name
+          <input type="text" x-ref="name" x-model="name" maxlength="200" :required="mode === 'create'" :disabled="busy" autocomplete="off">
+        </label>
+        <div x-show="mode === 'add'">
+          <div class="song-dialog-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+            <input type="search" x-ref="search" x-model="query" placeholder="Find a playlist…"
+                   aria-label="Find a playlist" :disabled="busy || loading" autocomplete="off">
+          </div>
+          <p class="song-dialog-note" x-show="loading" role="status">Loading playlists…</p>
+          <div class="song-playlist-options" role="group" aria-label="Choose a playlist">
+            <template x-for="playlist in matches()" :key="playlist.id">
+              <label class="song-playlist-option" :class="{ 'is-selected': String(playlist.id) === selected }">
+                <input type="radio" name="song-destination" :value="String(playlist.id)" x-model="selected"
+                       :disabled="busy || playlist.already_present">
+                <span><strong x-text="playlist.title"></strong>
+                  <small x-show="multipleIdentities" x-text="playlist.identity"></small></span>
+                <small x-show="playlist.already_present">Already added</small>
+              </label>
+            </template>
+          </div>
+          <p x-show="!loading && !error && !matches().length" class="song-dialog-note"
+             x-text="query ? 'No matching playlists.' : 'No playlists available. Create one from the song menu.'"></p>
+        </div>
+      </div>
+      <p class="song-action-error" role="alert" x-show="error" x-text="error"></p>
+      <footer class="song-dialog-actions">
+        <button type="button" class="btn-ghost" @click="closeDialog()" :disabled="busy" x-text="result ? 'Done' : 'Cancel'"></button>
+        <button type="submit" class="btn-primary" x-show="!result"
+                :disabled="busy || loading || (mode === 'create' ? !name.trim() : !selected)"
+                x-text="busy ? 'Saving…' : (mode === 'create' ? 'Create playlist' : 'Add song')"></button>
+        <a class="btn btn-primary" x-show="result" x-ref="resultLink" :href="result?.url">
+          Open playlist
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h16m-6-6 6 6-6 6"/></svg>
+        </a>
+      </footer>
+    </form>
+  </dialog>
+</div>

@@ -413,7 +413,7 @@ def test_non_generated_playlist_has_no_feedback_panel(store):
     c = _client(store, lambda: {iid: FakeClient()})
     html = c.get(f"/playlist/{pid}").text
     assert 'id="fb-' not in html                          # panel only on Generated playlists
-    assert "More like this" not in html                   # ...and no per-track mood feedback either
+    assert '"mood_key": ""' in html                     # shared menu gets no mood actions here
 
 
 def test_generated_playlist_unenriched_nudges_to_enrich(store):

@@ -12,10 +12,15 @@
         <button type="button" :class="{ on: split }" @click="split = true">By group</button>
       </span>
     {% endif %}
-    <button type="button" class="generated-shortcut" x-show="genRows().length && collapsed.Generated"
-            x-cloak @click="toggleGen()" title="Show generated playlists">
-      <span>Generated playlists</span><strong x-text="genRows().length"></strong><span aria-hidden="true">▾</span>
-    </button>
+    <div class="playlist-shortcuts">
+      {% for name, source in [('New', 'newRows'), ('Generated', 'genRows')] %}
+      <button type="button" class="playlist-shortcut" x-show="{{ source }}().length && collapsed.{{ name }}"
+              x-cloak @click="toggleSection('{{ name }}')" title="Show {{ name|lower }} playlists"
+              aria-expanded="false" aria-controls="{{ name|lower }}-playlists">
+        <span>{{ name }} playlists</span><strong x-text="{{ source }}().length"></strong><span aria-hidden="true">▾</span>
+      </button>
+      {% endfor %}
+    </div>
   </div>
 </div>
 
@@ -40,7 +45,7 @@
   </template>
 
   {% macro pl_row(promote=False) %}
-  <tr :class="{ selrow: sel[r.id] }">
+  <tr :data-playlist-id="r.id" :class="{ selrow: sel[r.id] }">
     <td class="selcell" @click="rowCheck(r, $event)">
       <input type="checkbox" :checked="sel[r.id]" @click.stop="rowCheck(r, $event)"></td>
     <td class="playlist-art-cell">
@@ -53,8 +58,8 @@
     <td>
       {% if promote %}<div class="generated-title-actions">{% endif %}
         <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in TuneConsole"></a>
-        {% if promote %}<button type="button" class="promote-btn" @click.stop="promote(r)"
-                title="Move into your library so it counts as a real playlist and shapes your recommendations">Promote to library ↑</button>
+        {% if promote %}<button type="button" class="promote-btn" x-show="r.group === 'Generated'" @click.stop="promote(r)"
+                title="Keep this playlist in your library and use it to shape your recommendations">Promote to library</button>
       </div>{% endif %}
     </td>
     {% if has_groups %}<td><span class="gtag" x-show="r.group" x-text="r.group"></span></td>{% endif %}
@@ -68,17 +73,35 @@
   </tr>
   {% endmacro %}
 
+  {# Recent playlists are shortcuts to the same rows, with shared selection and actions. #}
+  <section class="card gen-grp playlist-pinned playlist-new" x-show="newRows().length && !collapsed.New" x-cloak
+           aria-label="New playlists">
+    <button type="button" class="gen-grp-head" @click="toggleSection('New')"
+            :aria-expanded="!collapsed.New" aria-controls="new-playlists"
+            title="Playlists from the past 7 days">
+      <span class="gen-grp-caret" aria-hidden="true" x-text="collapsed.New ? '▸' : '▾'"></span>
+      <span class="section-label">New playlists</span>
+      <span class="gen-grp-count" x-text="newRows().length"></span>
+      <span class="gen-grp-toggle" x-text="collapsed.New ? 'Expand' : 'Collapse'"></span>
+    </button>
+    <table id="new-playlists" class="playlist-index" x-show="!collapsed.New">
+      <tbody>
+        <template x-for="r in newRows()" :key="r.id">{{ pl_row() }}</template>
+      </tbody>
+    </table>
+  </section>
+
   {# "Generated" lives in its own card above the table, always a separate block, collapsible #}
-  <div class="card gen-grp playlist-generated" x-show="genRows().length && !collapsed.Generated" x-cloak>
-    <button type="button" class="gen-grp-head" @click="toggleGen()"
-            :aria-expanded="!collapsed.Generated"
+  <div class="card gen-grp playlist-pinned playlist-generated" x-show="genRows().length && !collapsed.Generated" x-cloak>
+    <button type="button" class="gen-grp-head" @click="toggleSection('Generated')"
+            :aria-expanded="!collapsed.Generated" aria-controls="generated-playlists"
             :title="collapsed.Generated ? 'Expand generated playlists' : 'Collapse generated playlists'">
       <span class="gen-grp-caret" aria-hidden="true" x-text="collapsed.Generated ? '▸' : '▾'"></span>
       <span class="section-label">Generated playlists</span>
       <span class="gen-grp-count" x-text="genRows().length"></span>
       <span class="gen-grp-toggle" x-text="collapsed.Generated ? 'Expand' : 'Collapse'"></span>
     </button>
-    <table class="playlist-index" x-show="!collapsed.Generated" x-cloak>
+    <table id="generated-playlists" class="playlist-index" x-show="!collapsed.Generated" x-cloak>
       <tbody>
         <template x-for="r in genRows()" :key="r.id">{{ pl_row(promote=True) }}</template>
       </tbody>

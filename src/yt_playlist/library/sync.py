@@ -122,8 +122,10 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         keys = list(dict.fromkeys(keys))
         chash = content_hash(keys)
         db_pid = store.upsert_playlist(identity_id, pid, pl.get("title", ""),
-                                       len(track_ids), chash, now, best_thumb(pl.get("thumbnails")))
+                                       len(track_ids), chash, now,
+                                       best_thumb(pl.get("thumbnails")) or best_thumb(detail.get("thumbnails")))
         store.set_playlist_tracks(db_pid, track_ids)
+        store.ensure_playlist_thumbnail(db_pid)
         _sync_generated_group(store, pid, detail.get("description"), groups)
         _emit(on_progress, "step", f"{label} › {pl.get('title', '')} ({len(track_ids)} tracks)",
               i=i, total=total)
@@ -189,8 +191,9 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now) ->
     track_ids = list(dict.fromkeys(track_ids))   # de-dupe repeated videos
     keys = list(dict.fromkeys(keys))
     db_pid = store.upsert_playlist(identity_id, ytm_playlist_id, title,
-                                   len(track_ids), content_hash(keys), now)
+                                   len(track_ids), content_hash(keys), now, best_thumb(detail.get("thumbnails")))
     store.set_playlist_tracks(db_pid, track_ids)
+    store.ensure_playlist_thumbnail(db_pid)
 
 def _sync_saved_albums(store, clients, on_progress) -> None:
     """Pull the albums saved in each account's library and store them (best-effort)."""
@@ -245,14 +248,33 @@ def _materialize_album_tracks(store, clients, saved, on_progress) -> None:
             added += 1
     _emit(on_progress, "info", f"album tracks folded in: {added} from {len(todo)} album(s)")
 
-def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None) -> None:
+def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None,
+             playlist_dates=None) -> None:
     labels = {idn.id: idn.label for idn in store.get_identities()}
     for identity_id, client in clients.items():
         sync_identity(store, identity_id, client, now,
                       on_progress=on_progress, label=labels.get(identity_id),
                       on_auth_expired=on_auth_expired, on_auth_ok=on_auth_ok)
+    if playlist_dates is not None:
+        sync_playlist_dates(store, playlist_dates, on_progress)
     _sync_saved_albums(store, clients, on_progress)
     store.set_setting("last_sync_at", str(now))   # drives the Home "Time to sync" nudge
     # the recommendation model is rebuilt by the decoupled RecWorker (triggered from the sync
     # route), so a burst of syncs coalesces into one rebuild instead of blocking each sync.
     _emit(on_progress, "done", "sync complete", final=True)
+
+
+def sync_playlist_dates(store, provider, on_progress=None):
+    """An optional metadata outage must not fail or erase the Music library sync."""
+    try:
+        report = provider.refresh(store)
+        if report["updated"]:
+            _emit(on_progress, "info", f"Updated creation dates for {report['updated']} playlists")
+        for message in report["errors"]:
+            _emit(on_progress, "info", message)
+        return report
+    except (OSError, ValueError):
+        logger.warning("playlist creation dates unavailable")
+        message = "Playlist dates could not refresh. Your saved dates are unchanged."
+        _emit(on_progress, "info", message)
+        return {"updated": 0, "errors": [message]}

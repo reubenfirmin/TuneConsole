@@ -78,13 +78,17 @@ main:not(.page-clusters) .library-page-head p {
   overflow-x: auto;
   border-radius: 5px;
 }
-.page-playlists .playlist-head-actions .generated-shortcut {
+.playlist-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: .5rem;
   margin-inline-start: auto;
 }
 .page-albums .albums-head-actions {
   justify-content: flex-end;
 }
-.library-head-actions .generated-shortcut {
+.library-head-actions .playlist-shortcut {
   display: inline-flex;
   align-items: center;
   gap: .45rem;
@@ -96,11 +100,11 @@ main:not(.page-clusters) .library-page-head p {
   box-shadow: none;
   font-size: var(--type-xs);
 }
-.library-head-actions .generated-shortcut strong {
+.library-head-actions .playlist-shortcut strong {
   color: var(--accent-2);
   font-family: var(--font-mono);
 }
-.library-head-actions .generated-shortcut:hover {
+.library-head-actions .playlist-shortcut:hover {
   color: var(--text);
   border-color: var(--border-2);
   background: var(--surface-2);
@@ -274,19 +278,34 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
   background: linear-gradient(90deg, var(--teal), var(--accent-2), var(--accent));
   opacity: calc(.45 + var(--heat) * .55);
 }
-.page-playlists .playlist-generated {
+.page-playlists .playlist-pinned {
   width: calc(100% + 2.5rem);
   margin-inline-start: -2.5rem;
   padding-inline-start: calc(1.375rem + 2.5rem);
   border-inline-start: 1px solid var(--accent);
   padding-block-start: 0;
 }
-@media (max-width: 45rem) {
-  .page-playlists .playlist-generated {
-    padding-inline-start: calc(var(--sp-4) + 2.5rem);
-  }
+.page-playlists .playlist-pinned .ptitle {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
-.page-playlists .playlist-generated .gen-grp-head {
+@media (max-width: 45rem) {
+  .page-playlists .playlist-pinned {
+    width: 100%;
+    margin-inline-start: 0;
+    padding-inline-start: var(--sp-4);
+  }
+  .page-playlists .playlist-index {
+    width: 100%;
+    margin-inline-start: 0;
+  }
+  /* With the metadata columns hidden, give their space to titles, not artwork. */
+  .page-playlists .playlist-index :is(th, td):nth-child(3),
+  .page-playlists .playlists-no-groups .playlist-index :is(th, td):nth-child(3) { width: auto; }
+  .page-playlists .playlist-index :is(th, td):nth-child(5),
+  .page-playlists .playlists-no-groups .playlist-index :is(th, td):nth-child(4) { width: 3rem; }
+}
+.page-playlists .playlist-pinned .gen-grp-head {
   width: 100%;
   min-height: 3.35rem;
   margin: 0;
@@ -301,7 +320,7 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
   box-shadow: none;
   text-align: left;
 }
-.page-playlists .playlist-generated .gen-grp-head:hover {
+.page-playlists .playlist-pinned .gen-grp-head:hover {
   color: var(--text);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
   box-shadow: none;
@@ -332,7 +351,7 @@ main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album
   font-size: var(--type-xs);
   font-weight: var(--weight-medium);
 }
-.page-playlists .playlist-generated tbody tr:last-child td {
+.page-playlists .playlist-pinned tbody tr:last-child td {
   border-block-end: 0;
 }
 .pl-actionbar {
@@ -1849,7 +1868,7 @@ body:not(:has(.page-clusters)) .modal {
 .page-home .dash-directions .gen-focus > .gen-list { padding: 0; }
 .page-home .dash-directions .gen-focus .gen-row {
   display: grid;
-  grid-template-columns: 1.7rem 3.25rem minmax(0, 1fr) 2rem;
+  grid-template-columns: 1.7rem 3.25rem minmax(0, 1fr) auto;
   align-items: center;
   gap: .75rem;
   min-height: 4.2rem;
@@ -2037,7 +2056,8 @@ body:not(:has(.page-clusters)) .modal {
 .page-home .dash-directions .gen-card.is-focused .gen-title { font-size: .88rem; line-height: 1.25; }
 .page-home .dash-directions .gen-card.is-focused .gen-artist { margin-top: .3rem; color: var(--dim); font-size: .74rem; line-height: 1.3; white-space: normal; }
 .page-home .dash-directions .gen-card.is-focused .gen-index { position: absolute; z-index: 1; top: .45rem; left: .45rem; min-width: 1.55rem; padding: .22rem .35rem; color: var(--text); background: color-mix(in srgb, var(--surface-sunk) 82%, transparent); border-radius: 1rem; text-align: center; }
-.page-home .dash-directions .gen-card.is-focused .gen-rm { position: absolute; z-index: 1; top: .4rem; right: .4rem; color: var(--text); background: color-mix(in srgb, var(--surface-sunk) 82%, transparent); border-radius: 50%; opacity: 0; }
+.page-home .dash-directions .gen-card.is-focused .gen-track-actions { position: absolute; z-index: 3; top: .4rem; right: .4rem; background: color-mix(in srgb, var(--surface-sunk) 88%, transparent); border-radius: 1rem; }
+.page-home .dash-directions .gen-card.is-focused .gen-track-actions button { position: static; color: var(--text); opacity: 1; }
 .page-home .dash-directions .gen-track-play { position: absolute; z-index: 2; top: 50%; left: 50%; display: grid; place-items: center; width: 2.8rem; height: 2.8rem; padding-left: .12rem; color: var(--text); background: color-mix(in srgb, var(--surface-sunk) 76%, transparent); border: 1px solid color-mix(in srgb, var(--text) 35%, transparent); border-radius: 50%; opacity: 0; transform: translate(-50%, -50%) scale(.9); transition: opacity .15s ease, transform .15s ease, background .15s ease; }
 .page-home .dash-directions .gen-row:hover .gen-track-play,
 .page-home .dash-directions .gen-track-play:focus-visible { opacity: 1; transform: translate(-50%, -50%) scale(1.08); background: var(--control-primary); }

@@ -70,6 +70,42 @@ def test_content_hash_is_order_independent():
     assert content_hash(["a", "b"]) == content_hash(["b", "a"])
     assert content_hash(["a", "b"]) != content_hash(["a", "c"])
 
+
+def test_sync_saves_cover_from_playlist_detail_when_library_listing_omits_it(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+
+    class CoverClient(FakeClient):
+        def get_playlist(self, playlistId, limit=100):
+            return {**super().get_playlist(playlistId, limit),
+                    "thumbnails": [{"url": "https://example.com/playlist.jpg"}]}
+
+    client = CoverClient(playlists=[{"playlistId": "PL1", "title": "Mix"}],
+                         tracks={"PL1": [_track("v1", "Song", "Artist")]})
+    sync_identity(store, iid, client, now=1000)
+    assert store.get_playlists()[0].thumbnail == "https://example.com/playlist.jpg"
+
+
+def test_refresh_saves_initial_artwork_then_replaces_it_with_youtube_cover(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+
+    class CoverClient(FakeClient):
+        cover = None
+
+        def get_playlist(self, playlistId, limit=100):
+            return {**super().get_playlist(playlistId, limit), "thumbnails": [{"url": self.cover}]}
+
+    client = CoverClient(tracks={"PL1": [{**_track("v1", "Song", "Artist"),
+                                         "thumbnails": [{"url": "https://example.com/song.jpg"}]}]})
+    sync_mod.refresh_playlist(store, iid, client, "PL1", "Mix", 1000)
+    assert store.get_playlists()[0].thumbnail == "https://example.com/song.jpg"
+    client.cover = "https://example.com/playlist.jpg"
+    sync_mod.refresh_playlist(store, iid, client, "PL1", "Mix", 2000)
+    assert store.get_playlists()[0].thumbnail == client.cover
+    client.cover = ""
+    sync_mod.refresh_playlist(store, iid, client, "PL1", "Mix", 3000)
+    assert store.get_playlists()[0].thumbnail == "https://example.com/playlist.jpg"
+
+
 def test_sync_identity_populates_store(store):
     iid = store.upsert_identity("main", "cred", None, True)
     client = FakeClient(

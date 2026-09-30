@@ -954,7 +954,7 @@ input[type="range"].pct-slider {
    is what keeps the ✕ next to the content instead of stranded at the far edge. */
 .rt-queue-head { display: grid; gap: .65rem; padding: .55rem 1.55rem .4rem;
   grid-template-columns: 1.6rem 2.5rem minmax(0, 2.2fr) minmax(0, 1.5fr) minmax(0, 1fr)
-                         3.2rem 3.8rem 2.2rem;
+                         3.2rem 3.8rem 4.2rem;
   color: var(--faint); font-size: .62rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .rt-queue-toolbar { display: flex; align-items: center; gap: .5rem; padding: 1rem 1.25rem .75rem;
   border-top: 1px solid var(--border-strong); }
@@ -972,7 +972,7 @@ input[type="range"].pct-slider {
 .rt-row { display: grid; align-items: center; gap: 0.65rem; padding: .3rem;
   border-bottom: 1px solid var(--border);
   grid-template-columns: 1.6rem 2.5rem minmax(0, 2.2fr) minmax(0, 1.5fr) minmax(0, 1fr)
-                         3.2rem 3.8rem 2.2rem; }
+                         3.2rem 3.8rem 4.2rem; }
 .rt-row:last-child { border-bottom: none; }
 .rt-row:hover { background: var(--accent-soft); }
 .rt-row::before { counter-increment: rt; content: counter(rt); text-align: right;
@@ -1022,7 +1022,7 @@ input[type="range"].pct-slider {
 @media (max-width: 720px) {   /* drop the least load-bearing columns before the row starts squeezing */
   .rt-queue-head { display: none; }
   .rt-list { margin-top: .8rem; }
-  .rt-row { grid-template-columns: 1.375rem 2.5rem minmax(0, 2fr) minmax(0, 1.3fr) 3.8rem 2.2rem; }
+  .rt-row { grid-template-columns: 1.375rem 2.5rem minmax(0, 2fr) minmax(0, 1.3fr) 3.8rem 4.2rem; }
   .rt-c-genre, .rt-c-year { display: none; }
   .rt-draft-actions { width: 100%; margin-left: 0; }
   .rt-queue-toolbar { flex-wrap: wrap; }
@@ -1049,11 +1049,11 @@ input[type="range"].pct-slider {
   .rt-slider-row { grid-template-columns: 3.8rem minmax(5rem, 1fr) 3.8rem; gap: .4rem; }
   .rt-recipe-select { grid-template-columns: 1fr; }
   .rt-recipe-seeds { grid-column: auto; }
-  .rt-row { grid-template-columns: 1.2rem 2.5rem minmax(0, 1fr) 3.8rem 2.2rem; }
+  .rt-row { grid-template-columns: 1.2rem 2.5rem minmax(0, 1fr) 3.8rem 4.2rem; }
   .rt-row::before, .rt-c-art { grid-row: 1 / span 2; }
   .rt-c-title { grid-column: 3; grid-row: 1; }
   .rt-c-artist { grid-column: 3; grid-row: 2; font-size: var(--type-xs); }
   .rt-c-src { grid-column: 4; grid-row: 1 / span 2; }
-  .rt-x, .rt-x-placeholder { grid-column: 5; grid-row: 1 / span 2; }
+  .rt-track-actions { grid-column: 5; grid-row: 1 / span 2; }
   .rt-c-genre, .rt-c-year { display: none; }
 }

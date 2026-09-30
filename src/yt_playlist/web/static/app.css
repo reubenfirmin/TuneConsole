@@ -114,8 +114,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 }
 .omni-input::placeholder { color: var(--faint); }
 .omni-input:focus {
-  outline: none; border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  outline: none; border-color: var(--focus-ring); box-shadow: none;
 }
 .omni-results {
   position: absolute; top: calc(100% + 0.4rem); left: 0; right: 0; z-index: 40;
@@ -426,7 +425,8 @@ input[type=text], input:not([type]), textarea, select {
   padding: 0.5rem 0.7rem; width: 100%;
 }
 textarea { font-family: var(--font-mono); font-size: var(--type-sm); line-height: 1.45; resize: vertical; }
-input:focus, textarea:focus, select:focus { outline: none; border-color: var(--focus-ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus-ring) 18%, transparent); }
+input:not([type=checkbox]):not([type=radio]):not([type=range]):focus,
+textarea:focus, select:focus { outline: none; border-color: var(--focus-ring); box-shadow: none; }
 input::placeholder, textarea::placeholder { color: var(--faint); }
 
 ol.steps { padding-left: 0; counter-reset: step; list-style: none; }
@@ -799,22 +799,109 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
 .modal.modal-similar #similar-results { flex: 1; min-height: 0; overflow-y: auto; padding-inline: 0.4rem; }
 .modal.modal-similar .alt-list { max-height: none; overflow: visible; margin: 0.2rem -0.4rem 0; }
 
-/* per-row "⋯" actions menu */
+/* Shared song menu: native popover escapes table/card clipping. */
 .rowmenu { position: relative; text-align: right; overflow: visible; }
 /* Per-track "more/less like this" marker, shown left of the ⋯ on generated playlists. */
 .mood-flag { font-size: var(--type-body); line-height: 1; margin-right: 0.15rem; vertical-align: middle; cursor: default; }
 .dots { background: transparent; border: none; box-shadow: none; color: var(--faint);
   font-size: var(--type-lg); line-height: 1; padding: 0.15rem 0.4rem; border-radius: 6px; cursor: pointer; }
 .dots:hover { background: var(--surface-2); color: var(--text); box-shadow: none; }
-.rowmenu-pop { position: absolute; right: 0.4rem; top: 100%; z-index: 30; min-width: 12.5rem;
+.song-menu-trigger { min-width: 2rem; min-height: 2rem; flex: none; }
+.song-inline-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: .1rem; }
+.song-action-menu { position: fixed; inset: auto; margin: 0; min-width: 14rem;
+  max-width: calc(100vw - 1rem); max-height: calc(100dvh - 1rem); overflow-y: auto;
   background: var(--surface); border: 1px solid var(--border-2); border-radius: 10px;
   box-shadow: 0 16px 40px -12px color-mix(in srgb, var(--shadow-ink) 70%, transparent); padding: 0.3rem; }
-.rowmenu-pop button, .rowmenu-pop a { display: block; width: 100%; text-align: left; background: transparent;
+.song-action-menu button { display: block; width: 100%; text-align: left; background: transparent;
   border: none; box-shadow: none; color: var(--text); font-weight: 500; font-size: var(--type-ui);
-  padding: 0.45rem 0.6rem; border-radius: 6px; cursor: pointer; text-decoration: none; }
-.rowmenu-pop button:hover, .rowmenu-pop a:hover { background: var(--accent-soft); box-shadow: none; text-decoration: none; }
-.rowmenu-pop button.danger { color: var(--danger); }
-.rowmenu-pop button.danger:hover { background: var(--danger-soft); }
+  padding: 0.6rem; border-radius: 6px; cursor: pointer; }
+.song-action-menu button:hover, .song-action-menu button:focus-visible { background: var(--accent-soft); box-shadow: none; }
+.song-action-menu button.danger { color: var(--danger); }
+.song-action-menu button.danger:hover { background: var(--danger-soft); }
+.song-action-menu [role="group"] { border-top: 1px solid var(--border); margin-top: .25rem; padding-top: .25rem; }
+.song-menu-caption { display: block; padding: .4rem .6rem .2rem; color: var(--dim); font-size: var(--type-xs); }
+
+/* Native modal supplies the backdrop and makes the rest of the page inert. */
+.song-playlist-dialog { width: min(30rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem);
+  margin: auto; padding: 1.75rem; overflow-y: auto; color: var(--text);
+  background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 5%, var(--surface)), var(--surface) 65%);
+  border: 1px solid var(--border-2); border-radius: 14px;
+  box-shadow: 0 32px 96px color-mix(in srgb, var(--shadow-ink) 65%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--light-source) 4%, transparent); }
+.song-playlist-dialog[open] { animation: song-dialog-enter .18s ease-out; }
+.song-playlist-dialog::backdrop { background: color-mix(in srgb, var(--shadow-ink) 70%, transparent); backdrop-filter: blur(5px); }
+.song-playlist-dialog form { display: grid; gap: 1.5rem; min-width: 0; }
+.song-playlist-dialog svg { width: 1.25rem; height: 1.25rem; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.song-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.song-dialog-head h2 { margin: 0; padding-top: .1rem; font-family: var(--font-brand); font-size: 1.75rem;
+  font-weight: 600; line-height: 1.2; letter-spacing: -.035em; }
+.song-dialog-close { display: grid; place-items: center; flex: none; width: 2rem; height: 2rem;
+  margin: -.15rem -.35rem 0 0; padding: 0; color: var(--faint); background: transparent;
+  border: 0; border-radius: 50%; box-shadow: none; }
+.song-dialog-close:hover { color: var(--text); background: var(--surface-2); box-shadow: none; transform: none; }
+.song-dialog-track { display: flex; align-items: center; gap: 1rem; min-width: 0; }
+.song-dialog-art { position: relative; display: grid; place-items: center; width: 4rem; aspect-ratio: 1; flex: none;
+  overflow: hidden; border-radius: 5px; color: color-mix(in srgb, var(--accent-2) 70%, transparent);
+  background: linear-gradient(135deg, var(--surface-raised), var(--surface-inset));
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--shadow-ink) 25%, transparent); }
+.song-dialog-art svg { width: 85%; height: 85%; stroke-width: 1; }
+.song-dialog-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.song-dialog-track-copy { min-width: 0; overflow-wrap: anywhere; }
+.song-dialog-track-copy > strong { display: block; font-size: 1rem; font-weight: 600; line-height: 1.4; }
+.song-dialog-track-copy p { margin: .35rem 0 0; color: color-mix(in srgb, var(--text) 65%, transparent);
+  font-size: var(--type-ui); line-height: 1.45; }
+.song-dialog-track-copy h2 { margin: 0; font-family: var(--font-brand); font-size: 1.5rem; font-weight: 600;
+  line-height: 1.2; letter-spacing: -.025em; text-wrap: pretty; }
+.song-dialog-label { display: block; color: color-mix(in srgb, var(--text) 75%, transparent); font-size: var(--type-ui); }
+.song-playlist-dialog input[type="text"], .song-playlist-dialog input[type="search"] {
+  width: 100%; height: 3rem; margin: .5rem 0 0; padding: .7rem .85rem; color: var(--text);
+  caret-color: var(--accent-2); background: var(--surface-inset); border: 1px solid var(--border-2);
+  border-radius: 6px; box-shadow: none; font: inherit; font-size: 1rem; }
+.song-playlist-dialog input::placeholder { color: var(--faint); opacity: 1; }
+.song-playlist-dialog input[type="text"]:focus, .song-playlist-dialog input[type="search"]:focus {
+  border-color: var(--accent-2); outline: none; box-shadow: none; }
+.song-dialog-search { position: relative; }
+.song-dialog-search svg { position: absolute; top: .9rem; left: .85rem; color: var(--faint); pointer-events: none; }
+.song-dialog-search input[type="search"] { margin: 0; padding-left: 2.75rem; }
+.song-playlist-options { max-height: 15rem; overflow-y: auto; margin-top: .75rem; display: grid; gap: .25rem; }
+.song-playlist-option { display: flex; align-items: center; gap: .8rem; padding: .8rem;
+  border: 1px solid transparent; border-radius: 6px; cursor: pointer; font-size: var(--type-body); }
+.song-playlist-option:hover { background: var(--surface-2); }
+.song-playlist-option.is-selected { background: var(--accent-soft); border-color: var(--border-2); }
+.song-playlist-option:has(input:focus-visible) { outline: 2px solid var(--accent-2); outline-offset: -2px; }
+.song-playlist-option input { appearance: none; width: 1rem; height: 1rem; margin: 0; padding: 0;
+  border: 1px solid var(--faint); border-radius: 50%; background: transparent; box-shadow: none; flex: none; }
+.song-playlist-option input:checked { border: 5px solid var(--accent-2); background: var(--surface-inset); }
+.song-playlist-option input:focus { outline: none; box-shadow: none; }
+.song-playlist-option > span { display: grid; flex: 1; gap: .15rem; min-width: 0; overflow-wrap: anywhere; }
+.song-playlist-option strong { font-weight: 500; }
+.song-playlist-option small { color: var(--faint); font-size: var(--type-xs); }
+.song-playlist-option:has(input:disabled) { opacity: .5; cursor: default; background: transparent; }
+.song-dialog-note { margin: .75rem 0 0; color: var(--faint); font-size: var(--type-ui); }
+.song-action-error { margin: 0; color: var(--danger); font-size: var(--type-ui); }
+.song-dialog-status { display: flex; align-items: center; gap: .55rem; margin: .2rem 0 0;
+  color: var(--teal-pale); font-size: var(--type-ui); line-height: 1.5; }
+.song-dialog-status.is-incomplete { color: var(--cta); align-items: flex-start; }
+.song-dialog-status.is-incomplete svg { margin-top: .1rem; }
+.song-playlist-dialog.has-result .song-dialog-art { width: 5rem; }
+.song-playlist-dialog.has-result .song-dialog-track { padding: .25rem 0 .5rem; }
+.song-dialog-actions { display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+  border-top: 1px solid var(--border); padding-top: 1.25rem; }
+.song-dialog-actions .btn-ghost { padding: .65rem 0; border: 0; background: transparent; box-shadow: none;
+  color: var(--faint); font-weight: 500; }
+.song-dialog-actions .btn-ghost:hover { color: var(--text); background: transparent; transform: none; }
+.song-dialog-actions .btn-primary { display: inline-flex; justify-content: center; align-items: center; gap: .7rem;
+  min-height: 2.75rem; padding: .65rem 1rem; border-radius: 6px; font-size: var(--type-ui); text-decoration: none; }
+.song-dialog-close:focus-visible, .song-dialog-actions :focus-visible { outline: 2px solid var(--accent-2); outline-offset: 4px; }
+@keyframes song-dialog-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 480px) {
+  .song-playlist-dialog { padding: 1.25rem; }
+  .song-dialog-head h2 { font-size: 1.5rem; }
+  .song-playlist-dialog.has-result .song-dialog-art { width: 4rem; }
+  .song-dialog-track-copy h2 { font-size: 1.375rem; }
+}
+@media (prefers-reduced-motion: reduce) { .song-playlist-dialog[open] { animation: none; } }
 
 /* drag-to-reorder handle on the # column */
 .drag-handle { color: var(--faint); cursor: grab; user-select: none; }
@@ -936,6 +1023,8 @@ button.htmx-request .check-busy { display: inline; }
   .track-table th:nth-child(6), .track-table td:nth-child(6),
   .track-table th:nth-child(7), .track-table td:nth-child(7),
   .track-table th:nth-child(8), .track-table td:nth-child(8) { display: none; }
+  /* An unsaved album has fewer columns; its sixth column is the song menu. */
+  .track-table th.col-action, .track-table td.rowmenu { display: table-cell; }
 
   .chart:not(.ticker) .barhead, .chart:not(.ticker) .barcell { display: none; }
   .artist-head { gap: var(--sp-4); }
@@ -959,10 +1048,9 @@ button.htmx-request .check-busy { display: inline; }
 
 /* ---- keyboard and motion ----
    Clusters owns a purpose-built interaction layer; Recap has a standalone shell. */
-.topbar :where(a, button, input):focus-visible,
-main:not(.page-clusters) :where(a, button, input, textarea, select, [tabindex]):focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 3px;
+:where(a, button, [tabindex], input[type=checkbox], input[type=radio], input[type=range]):focus-visible {
+  outline: 1px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 main:not(.page-clusters) th.sorth:focus-visible {
   color: var(--text);

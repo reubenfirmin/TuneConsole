@@ -67,6 +67,12 @@ def build_app():
     # do not drown the log. The endpoint still works, it just is not logged.
     class _QuietPolls(logging.Filter):
         def filter(self, record):
+            # OAuth authorization codes belong only in the exchange, never access logs.
+            if record.args and len(record.args) == 5:
+                args = list(record.args)
+                if str(args[2]).startswith("/setup/playlist-dates/callback"):
+                    args[2] = "/setup/playlist-dates/callback"
+                    record.args = tuple(args)
             return "/bridge/status" not in record.getMessage()
     logging.getLogger("uvicorn.access").addFilter(_QuietPolls())
     # Install the egress guard before anything can make a network call: from here on every
@@ -84,7 +90,9 @@ def build_app():
     # provider, so both sides talk to the same in-process connection.
     bridge = Bridge()
     runtime.bridge = bridge
-    return create_app(store, runtime.clients, now_fn=time.time, setup=runtime, bridge=bridge)
+    from yt_playlist.providers.playlist_dates import PlaylistDates
+    return create_app(store, runtime.clients, now_fn=time.time, setup=runtime, bridge=bridge,
+                      playlist_dates=PlaylistDates(config_path.parent))
 
 def _print_bridge_banner(host, port):
     """Print the bridge address at startup. The extension authenticates by its origin and connects

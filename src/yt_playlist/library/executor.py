@@ -284,6 +284,7 @@ def copy_or_move_playlist(store, playlist_id, target_identity_id, source_client,
             unresolved += 1
     if video_ids:
         target_client.add_playlist_items(new_pid, video_ids)
+    _pull_recreated(store, target_client, target_identity_id, new_pid, src.title, now)
     deleted, backup_path, delete_error = False, None, None
     if delete_source and unresolved == 0:
         bpath = backup_playlist(store, playlist_id, now)
@@ -438,8 +439,10 @@ def copy_playlist(store, playlist_ids, new_name, client, now) -> dict:
     track_ids = [tid_by_vid[v] for v in added_vids if v in tid_by_vid]
     from yt_playlist.library.sync import content_hash   # local import avoids an import cycle
     track_keys = list(dict.fromkeys(keys[v] for v in added_vids if v in keys))
-    db_pid = store.upsert_playlist(identity, new_pid, title, len(track_ids), content_hash(track_keys), now)
+    db_pid = store.upsert_playlist(identity, new_pid, title, len(track_ids), content_hash(track_keys), now,
+                                   created_at=now)
     store.set_playlist_tracks(db_pid, track_ids)
+    store.ensure_playlist_thumbnail(db_pid)
     return {"new_ytm": new_pid, "title": title, "added": added, "skipped": len(skipped), "from": len(pls)}
 
 def create_generated_playlist(store, title, tracks, client, now, identity_id=None, group=None,
@@ -493,8 +496,9 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
                 t["video_id"], ti, ar, t.get("album") or "", dur, thumbnail=t.get("thumbnail")))
             keys.append(identity_key(ti, ar))
         db_pid = store.upsert_playlist(identity_id, new_pid, title, len(track_ids),
-                                       content_hash(list(dict.fromkeys(keys))), now)
+                                       content_hash(list(dict.fromkeys(keys))), now, created_at=now)
         store.set_playlist_tracks(db_pid, track_ids)
+        store.ensure_playlist_thumbnail(db_pid)
     store.record_action(COPY_PLAYLIST,
                         json.dumps({"title": title, "source": "recommendations", "group": group,
                                     "added": added, "skipped": len(skipped)}),
@@ -535,6 +539,26 @@ def navigate_when_ready(client, bridge, ytm_id, watch_url, *, tries=20, interval
     return False
 
 
+def create_playlist_from_song(store, name, track, client, now, identity_id) -> dict:
+    """Create an ordinary user playlist, seeding it through the shared track-add operation.
+
+    Materialize the new playlist before adding so a rejected song still leaves a discoverable
+    playlist and the caller can report the partial result without creating another on retry.
+    """
+    title = (name or "").strip()
+    if not title or not track.get("videoId"):
+        raise ValueError("Choose a song and give the playlist a name.")
+    new_pid = client.create_playlist(title, "Created by TuneConsole")
+    from yt_playlist.library.sync import content_hash
+    db_pid = store.upsert_playlist(identity_id, new_pid, title, 0, content_hash([]), now, created_at=now)
+    result = add_tracks_to_playlist(store, db_pid, [track], client, now)
+    store.record_action(COPY_PLAYLIST,
+                        json.dumps({"title": title, "source": "song", "added": result["added"]}),
+                        "{}", "executed", json.dumps({"new_ytm": new_pid,
+                                                     "target_identity": identity_id}), now)
+    return {**result, "db_pid": db_pid, "new_ytm": new_pid, "title": title}
+
+
 def create_playlist_from_album(store, browse_id, name, client, now, identity_id) -> dict:
     """Create a NEW playlist from an album's tracks (non-destructive). Fetches the album, creates a
     real (un-grouped) playlist under `identity_id` with its songs, and materializes it into the store
@@ -566,8 +590,9 @@ def create_playlist_from_album(store, browse_id, name, client, now, identity_id)
         keys.append(identity_key(ti, ar))
     from yt_playlist.library.sync import content_hash   # local import avoids an import cycle
     db_pid = store.upsert_playlist(identity_id, new_pid, title, len(track_ids),
-                                   content_hash(list(dict.fromkeys(keys))), now)
+                                   content_hash(list(dict.fromkeys(keys))), now, created_at=now)
     store.set_playlist_tracks(db_pid, track_ids)
+    store.ensure_playlist_thumbnail(db_pid)
     store.record_action(COPY_PLAYLIST,
                         json.dumps({"title": title, "source": a.get("title") or "album",
                                     "added": added, "skipped": len(skipped)}),
@@ -607,6 +632,7 @@ def copy_into_playlist(store, source_ids, target_id, client, now) -> dict:
     combined = list(dict.fromkeys(store.get_playlist_track_ids(target_id) + new_ids))
     store.set_playlist_tracks(target_id, combined)
     store.set_playlist_track_count(target_id, len(combined), now)
+    store.ensure_playlist_thumbnail(target_id)
     store.record_action(COPY_INTO,
                         json.dumps({"target": target.title, "added": added, "skipped": len(skipped),
                                     "source": ", ".join(p.title for p in sources)}),
@@ -742,6 +768,7 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_
     combined = existing[:insert_at] + new_unique + existing[insert_at:]
     store.set_playlist_tracks(playlist_id, combined)
     store.set_playlist_track_count(playlist_id, len(combined), now)
+    store.ensure_playlist_thumbnail(playlist_id)
     store.record_action(ADD_TRACKS,
                         json.dumps({"playlist": pl.title, "added": added, "titles": titles}),
                         "{}", "executed", "{}", now)
@@ -896,6 +923,9 @@ def _pull_recreated(store, client, identity_id, new_pid, title, now):
     """Bring a just-recreated playlist into the local store so it appears without a full re-sync."""
     if store is None or now is None:
         return
+    from yt_playlist.library.sync import content_hash
+    store.upsert_playlist(identity_id, new_pid, title or "Restored", 0, content_hash([]), now,
+                          created_at=now)
     try:
         from yt_playlist.library import sync as _sync   # local import avoids an import cycle
         _sync.refresh_playlist(store, identity_id, client, new_pid, title or "Restored", now)
@@ -933,10 +963,10 @@ def undo_action(store, action_id, clients, now) -> None:
         if action.kind in (MOVE_IDENTITY, COPY_PLAYLIST) and undo.get("new_ytm") is not None:
             try:                                          # remove the copy this action created
                 _client_for(clients, undo["target_identity"]).delete_playlist(undo["new_ytm"])
-                if action.kind == COPY_PLAYLIST:          # also drop its local row immediately
-                    doomed = next((p for p in store.get_playlists()
-                                   if p.ytm_playlist_id == undo["new_ytm"]), None)
-                    if doomed is not None:
+                # Copy/move creations are materialized immediately, so undo must remove the
+                # destination row as well as the remote playlist, including duplicate library views.
+                for doomed in store.get_playlists():
+                    if doomed.ytm_playlist_id == undo["new_ytm"]:
                         store.remove_playlist(doomed.id)
             except Exception:  # noqa: BLE001
                 logger.warning("undo: could not delete recreated copy %s", undo.get("new_ytm"))

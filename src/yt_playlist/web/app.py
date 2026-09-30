@@ -142,7 +142,8 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
                 sync_mod.sync_all(ctx.store, clients, ctx.now_fn(),
                                   on_progress=job.events.append,
                                   on_auth_expired=ctx.flag_auth_expired,
-                                  on_auth_ok=ctx.clear_auth_expired)
+                                  on_auth_ok=ctx.clear_auth_expired,
+                                  playlist_dates=ctx.playlist_dates)
             finally:
                 job.done = True
                 ctx.sync_lock.release()
@@ -156,7 +157,7 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
 
 def create_app(store, client_provider, *, now_fn=time.time,
                allowed_hosts=("localhost", "127.0.0.1"), setup=None,
-               bridge=None) -> FastAPI:
+               bridge=None, playlist_dates=None) -> FastAPI:
     # setup: optional Runtime-like collaborator (.configured, .credentials_present, .apply_setup).
     # When None, the app is treated as already configured and the /setup wizard is inert. This
     # keeps the existing two-arg call sites (and their tests) working unchanged.
@@ -221,7 +222,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
 
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
               templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge,
-              radio=RadioSession())
+              radio=RadioSession(), playlist_dates=playlist_dates)
     app.include_router(build_bridge_route(ctx))
     from yt_playlist.rec.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx)                            # decoupled rec computation

@@ -306,7 +306,7 @@ def test_dense_pages_have_scoped_compact_screen_behavior():
 
     playlists = (WEB / "templates" / "playlists.html").read_text()
     albums = (WEB / "templates" / "albums.html").read_text()
-    assert playlists.count('class="playlist-index"') == 2
+    assert playlists.count('class="playlist-index"') == 3
     assert albums.count('class="album-index"') == 2
     for name in ("network.html", "actions.html"):
         assert 'class="table-scroll"' in (WEB / "templates" / name).read_text()

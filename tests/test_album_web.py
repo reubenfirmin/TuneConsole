@@ -37,6 +37,8 @@ def test_create_playlist_from_album_redirects_to_new_playlist(store, monkeypatch
     r = c.post("/album/create-playlist", data={"browse_id": "MPREb_x", "name": "My Album Mix"})
     assert r.status_code == 200
     new_pl = next(p for p in store.get_playlists() if p.title == "My Album Mix")
+    assert new_pl.created_at == 1.0
+    assert new_pl.thumbnail == "http://t/1.jpg"
     assert r.headers["hx-redirect"] == f"/playlist/{new_pl.id}"
     assert store.get_playlist_track_ids(new_pl.id)             # tracks were added
     assert fc.created and fc.added[0][1] == ["v1", "v2"]       # created on YouTube with the album's tracks

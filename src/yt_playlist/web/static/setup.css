@@ -28,3 +28,26 @@
 .takeout-file-label { cursor: pointer; margin: 0; }
 .visually-hidden-file { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
 .flush-margin { margin: 0; }
+
+.playlist-dates-page { max-width: 44rem; margin: 0 auto; }
+.playlist-dates-page > .quiet-link { display: inline-block; margin-bottom: 1.5rem; }
+.playlist-dates-page .page-head { margin-bottom: 2rem; }
+.playlist-dates-page .card { padding: clamp(1.2rem, 4vw, 2rem); }
+.playlist-dates-message { padding: .8rem 1rem; border-left: 2px solid var(--border);
+  color: var(--text); line-height: 1.6; margin-bottom: 1.5rem; }
+.playlist-dates-instructions { margin: 1.5rem 0; }
+.playlist-dates-instructions ol { padding-left: 1.2rem; line-height: 1.7; }
+.playlist-dates-instructions li + li { margin-top: .7rem; }
+.playlist-dates-file { display: grid; gap: .6rem; margin: 1.5rem 0; font-size: var(--type-sm); }
+.playlist-dates-file input { width: 100%; min-width: 0; }
+.playlist-dates-file input::file-selector-button { margin-right: .8rem; padding: .55rem .8rem;
+  font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+  border-radius: .25rem; cursor: pointer; }
+.playlist-dates-file input::file-selector-button:hover { border-color: var(--focus-ring); }
+.playlist-date-accounts { list-style: none; padding: 0; margin: 1.5rem 0; }
+.playlist-date-accounts li { display: flex; justify-content: space-between; align-items: center;
+  gap: 1rem; padding: 1rem 0; border-top: 1px solid var(--border); }
+.playlist-date-accounts strong { overflow-wrap: anywhere; }
+.playlist-dates-coverage { display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: .5rem 1rem; margin: 1.5rem 0; }
+.playlist-dates-coverage p { margin: 0; flex: 1 1 17rem; }

@@ -65,7 +65,8 @@ def test_generate_endpoint_creates_and_groups(store):
     fc = FakeClient()
     c = _client(store, lambda: {iid: fc})
     tracks = json.dumps([{"video_id": "v1", "title": "S1", "artist": "A", "album": "", "thumbnail": ""},
-                         {"video_id": "v2", "title": "S2", "artist": "A", "album": "", "thumbnail": ""}])
+                         {"video_id": "v2", "title": "S2", "artist": "A", "album": "",
+                          "thumbnail": "https://example.com/second-song.jpg"}])
 
     r = c.post("/home/generate", data={"name": "More in your wheelhouse - June 21 2026", "tracks": tracks})
 
@@ -77,6 +78,8 @@ def test_generate_endpoint_creates_and_groups(store):
     # optimistically materialized so it shows in the Playlists tab right away (no sync needed)
     saved = next(p for p in store.get_playlists() if p.ytm_playlist_id == new_ytm)
     assert saved.title == "More in your wheelhouse - June 21 2026" and saved.track_count == 2
+    assert saved.created_at == 1.0
+    assert saved.thumbnail == "https://example.com/second-song.jpg"
 
 
 def test_generate_result_play_and_redirect(store):

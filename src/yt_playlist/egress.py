@@ -5,9 +5,9 @@
 
 WHY THIS CLASS EXISTS (read this before changing anything)
 ----------------------------------------------------------
-This app holds your Google sign-in cookies (see the notes on /setup). The single
-most important promise it makes is: *those credentials only ever travel to
-YouTube, and the app never phones home or hands them to a third party.* "Trust
+The browser bridge keeps Google session cookies in the browser. The optional
+playlist-date connection holds a read-only OAuth token locally. Those credentials
+only travel to the relevant YouTube/Google authorization endpoints, never third parties. "Trust
 me" is not good enough for a promise like that, so we make it both **structural**
 and **observable**:
 
@@ -85,6 +85,14 @@ ALLOWED_DOMAINS = frozenset({
     "spotify.com",        # Spotify import report: public oEmbed album artwork
 })
 
+# The optional playlist-date connection needs precisely these HTTPS resources;
+# do not allow googleapis.com wholesale (Drive, Gmail and other APIs live there).
+YOUTUBE_METADATA_ENDPOINTS = frozenset({
+    ("POST", "oauth2.googleapis.com", "/token"),
+    ("GET", "www.googleapis.com", "/youtube/v3/channels"),
+    ("GET", "www.googleapis.com", "/youtube/v3/playlists"),
+})
+
 
 class BlockedHost(Exception):
     """Raised when a server-side request targets a host not on the allowlist."""
@@ -146,10 +154,13 @@ class EgressGuard:
         """
         parts = urlsplit(url)
         host, path = parts.hostname or "", parts.path or "/"
-        if not host_allowed(host):
+        metadata_allowed = (parts.scheme == "https" and parts.port in (None, 443)
+                            and not parts.username and not parts.password
+                            and (method.upper(), host.lower(), path) in YOUTUBE_METADATA_ENDPOINTS)
+        if not host_allowed(host) and not metadata_allowed:
             # Record the block, shout about it on the main log too, then refuse.
             self.record(verdict="BLOCK", method=method, host=host, path=path, via=via)
-            logger.warning("egress BLOCKED: %s %s (host %r not on allowlist)", method, url, host)
+            logger.warning("egress BLOCKED: %s %s%s", method, host, path)
             raise BlockedHost(f"egress to {host!r} is not allowed")
         return host, path
 

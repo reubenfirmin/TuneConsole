@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS playlists (
   title TEXT, track_count INTEGER,
   content_hash TEXT,
   first_seen REAL, last_seen REAL, last_changed REAL,
+  created_at REAL,                        -- actual creation time; NULL when unknown, never a sync date
+  created_at_source TEXT,                 -- local creation or authoritative youtube metadata
   thumbnail TEXT,
   UNIQUE(identity_id, ytm_playlist_id)
 );
@@ -413,6 +415,26 @@ class Store:
         pcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(playlists)")}
         if "thumbnail" not in pcols:
             self.conn.execute("ALTER TABLE playlists ADD COLUMN thumbnail TEXT")
+        if "created_at" not in pcols:
+            self.conn.execute("ALTER TABLE playlists ADD COLUMN created_at REAL")
+        if "created_at_source" not in pcols:
+            self.conn.execute("ALTER TABLE playlists ADD COLUMN created_at_source TEXT")
+        if not self.get_setting("playlist_created_at_backfilled"):
+            # Recover known creation dates once. Imported playlists with no creation evidence
+            # remain NULL: first_seen says when we synced them, not when they were created.
+            from yt_playlist.util.action_kinds import COPY_PLAYLIST
+            self.conn.execute(
+                "WITH creations AS ("
+                " SELECT json_extract(CASE WHEN json_valid(undo_json) THEN undo_json ELSE '{}' END,"
+                "                     '$.new_ytm') ytm, MIN(COALESCE(executed_at, created_at)) at"
+                " FROM actions WHERE kind=? AND status='executed' GROUP BY ytm) "
+                "UPDATE playlists SET created_at=COALESCE("
+                " (SELECT at FROM creations WHERE ytm=playlists.ytm_playlist_id),"
+                " (SELECT created_at FROM rec_recipes WHERE playlist_ytm=playlists.ytm_playlist_id)) "
+                "WHERE created_at IS NULL", (COPY_PLAYLIST,))
+            self.set_setting("playlist_created_at_backfilled", "1")
+        self.conn.execute("UPDATE playlists SET created_at_source='local' "
+                          "WHERE created_at IS NOT NULL AND created_at_source IS NULL")
         # #85 time-proportional weight reversion needs to know when a weight was last touched
         wcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(rec_weights)")}
         if "updated_at" not in wcols:

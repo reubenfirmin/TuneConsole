@@ -154,12 +154,11 @@ function mountNowPlayingDock() {
 function rowSort(pid, editBase) {
   // Generic click-to-sort for a static-row table; reorders <tr class="srow"> by data-<key>.
   // Numeric when both values parse as numbers, else locale string compare.
-  // Also hosts the per-row "⋯" menu and the "find alternate versions" flow for the playlist view.
+  // Also hosts playlist editing dialogs, invoked by the shared song menu.
   // `editBase` is the URL the genre/year edits POST under (defaults to /playlist/<pid>; the album
   // page passes /album/<browse>). Reorder/remove stay playlist-only.
   return {
     pid: pid, editBase: editBase || ('/playlist/' + pid), key: '', dir: 1,
-    openMenu: null,                                   // video_id whose ⋯ menu is open
     // alternate-versions modal
     altOpen: false, altLoading: false, altTitle: '',
     sortBy(k) {
@@ -184,25 +183,14 @@ function rowSort(pid, editBase) {
     // Open the modal and let htmx fetch + render the results (server builds the list; we only own the
     // modal open/close + loading flag). The "Add" button hx-includes the checked results.
     findAlternates(vid, title) {
-      this.openMenu = null;
       this.altOpen = true; this.altLoading = true; this.altTitle = title;
       htmx.ajax('GET', `/playlist/${this.pid}/alternates?video_id=${encodeURIComponent(vid)}`,
         { target: '#alt-results', swap: 'innerHTML' }).finally(() => { this.altLoading = false; });
     },
 
-    // "Songs like this": server renders the modal (with selectable rows + an Add button) into
-    // #similar-modal. Pass the playlist id so the modal can offer "add below this track"; the seed
-    // vid becomes the insert anchor on the server side.
-    songsLike(vid) {
-      this.openMenu = null;
-      htmx.ajax('GET', `/track/${encodeURIComponent(vid)}/similar?pid=${this.pid}`,
-        { target: '#similar-modal', swap: 'innerHTML' });
-    },
-
     // remove-track confirmation modal
     rmOpen: false, rmBusy: false, rmErr: '', rmVid: '', rmTitle: '',
     removeTrack(vid, title) {
-      this.openMenu = null;
       this.rmVid = vid; this.rmTitle = title; this.rmErr = ''; this.rmOpen = true;
     },
     async confirmRemove() {
@@ -352,9 +340,11 @@ function overlapSort() {
   };
 }
 function playlistsTab(rows) {
+  // Remember the particular row, since New playlists repeats rows from the library below.
+  let lastPickedRow = null;
   return {
     rows, sel: {}, sortKey: 'title', sortDir: 1, split: false, busy: false,
-    groupModal: false, groupName: '', delModal: false, collapsed: { Generated: true },
+    groupModal: false, groupName: '', delModal: false, collapsed: { New: false, Generated: true },
     init() {
       // remember view preferences across reloads (the tab reloads after group/delete)
       try {
@@ -362,9 +352,13 @@ function playlistsTab(rows) {
         this.sortKey = localStorage.getItem('pl.sortKey') || 'title';
         this.sortDir = +localStorage.getItem('pl.sortDir') || 1;
         const savedCollapsed = JSON.parse(localStorage.getItem('pl.collapsed') || '{}');
-        this.collapsed = { Generated: true,
+        this.collapsed = { New: false, Generated: true,
           ...(savedCollapsed && typeof savedCollapsed === 'object' ? savedCollapsed : {}) };
       } catch (e) {}
+      // Both sections share the same expanded slot; older preferences may have both open.
+      if (!this.collapsed.New && !this.collapsed.Generated && this.newRows().length) {
+        this.collapsed.Generated = true;
+      }
       this.$watch('split', v => { try { localStorage.setItem('pl.split', v ? '1' : '0'); } catch (e) {} });
       this.$watch('sortKey', v => { try { localStorage.setItem('pl.sortKey', v); } catch (e) {} });
       this.$watch('sortDir', v => { try { localStorage.setItem('pl.sortDir', v); } catch (e) {} });
@@ -372,26 +366,23 @@ function playlistsTab(rows) {
     selected() { return this.rows.filter(r => this.sel[r.id]); },
     count() { return this.selected().length; },
     toggle(id) { this.sel[id] = !this.sel[id]; },
-    lastPicked: null,
-    // every visible row id in visual order: the Generated card first (unless collapsed), then the table
-    visibleIds() {
-      const gen = this.collapsed.Generated ? [] : this.genRows();
-      return [...gen, ...this.sections().flatMap(s => s.rows)].map(r => r.id);
-    },
     // checkbox (or its cell) clicked: shift extends the anchor row's state across the visible range
     rowCheck(r, ev) {
-      if (ev && ev.shiftKey && this.lastPicked != null && this.lastPicked !== r.id) {
-        const ids = this.visibleIds();
-        const i = ids.indexOf(this.lastPicked), j = ids.indexOf(r.id);
+      const row = ev?.currentTarget.closest('tr');
+      if (ev?.shiftKey && lastPickedRow && lastPickedRow !== row) {
+        const visible = [...this.$root.querySelectorAll('tr[data-playlist-id]')]
+          .filter(el => el.getClientRects().length);
+        const i = visible.indexOf(lastPickedRow), j = visible.indexOf(row);
         if (i !== -1 && j !== -1) {
-          const on = !!this.sel[this.lastPicked];
-          ids.slice(Math.min(i, j), Math.max(i, j) + 1).forEach(id => { this.sel[id] = on; });
-          this.lastPicked = r.id;
+          const on = !!this.sel[lastPickedRow.dataset.playlistId];
+          visible.slice(Math.min(i, j), Math.max(i, j) + 1)
+            .forEach(el => { this.sel[el.dataset.playlistId] = on; });
+          lastPickedRow = row;
           return;
         }
       }
       this.toggle(r.id);
-      this.lastPicked = r.id;
+      lastPickedRow = row;
     },
     sortBy(key) {
       if (this.sortKey === key) { this.sortDir = -this.sortDir; }
@@ -413,9 +404,14 @@ function playlistsTab(rows) {
       return (r ? r * this.sortDir : a.title.localeCompare(b.title));   // stable tiebreak by title
     },
     sorted() { return [...this.rows].sort((a, b) => this.cmp(a, b)); },
-    toggleGen() {
-      this.collapsed.Generated = !this.collapsed.Generated;
+    toggleSection(name) {
+      this.collapsed[name] = !this.collapsed[name];
+      if (!this.collapsed[name]) this.collapsed[name === 'New' ? 'Generated' : 'New'] = true;
       try { localStorage.setItem('pl.collapsed', JSON.stringify(this.collapsed)); } catch (e) {}
+    },
+    newRows() {
+      return this.rows.filter(r => r.is_new)
+        .sort((a, b) => b.created - a.created || b.id - a.id);
     },
     // "Generated" is pinned into its own card above the table (see template), never in the sections.
     // Always newest-first by creation time (independent of the main table's column sort).

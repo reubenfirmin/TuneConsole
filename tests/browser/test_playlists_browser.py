@@ -32,7 +32,7 @@ def _free_port():
 
 
 @pytest.fixture
-def live_pl_app(tmp_path):
+def live_pl_data(tmp_path):
     # delete backs up to disk first, so point YT_PLAYLIST_HOME at a temp dir for this server.
     old_home = os.environ.get("YT_PLAYLIST_HOME")
     os.environ["YT_PLAYLIST_HOME"] = str(tmp_path)
@@ -49,7 +49,7 @@ def live_pl_app(tmp_path):
     client = FakeClient(tracks={"PLA": [_track("v1", "SongA", "X")],
                                 "PLB": [_track("v2", "SongB", "Y")],
                                 "PLG": [_track("v3", "SongC", "Z")]})
-    app = create_app(s, lambda: {iid: client}, now_fn=lambda: 1.0)
+    app = create_app(s, lambda: {iid: client}, now_fn=lambda: 2_000_000)
 
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
@@ -57,7 +57,7 @@ def live_pl_app(tmp_path):
     thread.start()
     while not server.started:
         time.sleep(0.02)
-    yield f"http://127.0.0.1:{port}"
+    yield {"base": f"http://127.0.0.1:{port}", "store": s, "identity": iid}
     server.should_exit = True
     thread.join(timeout=5)
     if old_home is None:
@@ -66,8 +66,34 @@ def live_pl_app(tmp_path):
         os.environ["YT_PLAYLIST_HOME"] = old_home
 
 
+@pytest.fixture
+def live_pl_app(live_pl_data):
+    return live_pl_data["base"]
+
+
+@pytest.fixture
+def recent_pl_app(live_pl_data):
+    store, iid = live_pl_data["store"], live_pl_data["identity"]
+    for ytm, title, age in [
+        ("NEW", "Zulu work in progress", 3600),
+        ("GROOVES", "Evening grooves — funk, soul and everything in between", 2 * 86400),
+        ("GENERATED", "From your catalog — September 20, 2026", 3 * 86400),
+        ("BOUNDARY", "Seven days", 7 * 86400),
+        ("OLDER", "Older draft", 7 * 86400 + 1),
+        ("HIDDEN", "Hidden draft", 60),
+        ("LM", "Liked Music", 60),
+    ]:
+        store.upsert_playlist(iid, ytm, title, 0, "", 2_000_000, created_at=2_000_000 - age)
+    for title in ("303", "Brexit List"):
+        store.upsert_playlist(iid, title, title, 0, "", 2_000_000)
+    store.set_playlist_group("GENERATED", "Generated")
+    store.set_playlist_group("PLA", "Faves")
+    store.hide_playlist("HIDDEN")
+    return live_pl_data["base"]
+
+
 def _select(page, title):
-    page.get_by_role("row").filter(has_text=title).get_by_role("checkbox").check()
+    page.locator(".playlist-table-card").get_by_role("row").filter(has_text=title).get_by_role("checkbox").check()
 
 
 def test_group_assigns_group_after_reload(live_pl_app, page):
@@ -188,7 +214,8 @@ def test_copy_creates_new_playlist_after_reload(live_pl_app, page):
     inp = page.get_by_placeholder("New playlist name")
     inp.fill("Alpha Copy")
     inp.press("Enter")
-    expect(page.get_by_role("link", name="Alpha Copy")).to_be_visible()   # copy in the table after reload
+    expect(page.locator(".playlist-table-card").get_by_role("link", name="Alpha Copy")).to_be_visible()
+    expect(page.get_by_role("region", name="New playlists").get_by_role("link", name="Alpha Copy")).to_be_visible()
 
 
 def test_copy_into_appends_songs_to_existing_playlist(live_pl_app, page):
@@ -199,3 +226,86 @@ def test_copy_into_appends_songs_to_existing_playlist(live_pl_app, page):
     page.get_by_role("button", name="Copy in", exact=True).click()  # modal confirm -> full reload
     # Beta now holds both songs (SongA copied in alongside its own SongB)
     expect(page.get_by_role("row").filter(has_text="Beta").get_by_role("cell").nth(3)).to_have_text("2")
+
+
+def test_recent_playlists_are_duplicate_shortcuts_with_shared_selection(recent_pl_app, page):
+    page.goto(f"{recent_pl_app}/playlists")
+    recent = page.get_by_role("region", name="New playlists")
+    main = page.locator(".playlist-table-card")
+    titles = ["Zulu work in progress", "Evening grooves — funk, soul and everything in between",
+              "Seven days"]
+    expect(recent.locator(".ptitle")).to_have_text(titles)
+    main.get_by_role("button", name="Playlist").click()
+    expect(recent.locator(".ptitle")).to_have_text(titles)  # newest first regardless of the main sort
+    for title in titles:
+        expect(main.get_by_role("link", name=title, exact=True)).to_be_visible()
+    recent.get_by_role("row").filter(has_text="Zulu").get_by_role("checkbox").check()
+    expect(main.get_by_role("row").filter(has_text="Zulu").get_by_role("checkbox")).to_be_checked()
+    expect(page.locator(".pl-actionbar")).to_contain_text("1 selected")
+    main.get_by_role("row").filter(has_text="Zulu").get_by_role("checkbox").uncheck()
+    expect(recent.get_by_role("row").filter(has_text="Zulu").get_by_role("checkbox")).not_to_be_checked()
+    recent.get_by_role("button", name="New playlists", exact=False).click()
+    expect(recent).to_be_hidden()
+    shortcut = page.locator(".playlist-shortcuts").get_by_role("button", name="New playlists", exact=False)
+    expect(shortcut).to_be_visible()
+    page.reload()
+    expect(recent).to_be_hidden()
+    shortcut.click()
+    expect(recent.locator(".ptitle")).to_have_text(titles)
+
+
+def test_shift_selection_uses_clicked_occurrence_of_duplicate(recent_pl_app, page):
+    page.goto(f"{recent_pl_app}/playlists")
+    main = page.locator(".playlist-table-card")
+    _select(page, "Evening grooves")
+    main.get_by_role("row").filter(has_text="Gamma").get_by_role("checkbox").click(modifiers=["Shift"])
+    expect(page.locator(".pl-actionbar")).to_contain_text("2 selected")
+    expect(main.get_by_role("row").filter(has_text="Zulu").get_by_role("checkbox")).not_to_be_checked()
+    page.get_by_role("button", name="Deselect all", exact=True).click()
+    recent = page.get_by_role("region", name="New playlists")
+    recent.get_by_role("row").filter(has_text="Zulu").get_by_role("checkbox").check()
+    main.get_by_role("row").filter(has_text="Alpha").get_by_role("checkbox").click(modifiers=["Shift"])
+    expect(page.locator(".pl-actionbar")).to_contain_text("5 selected")  # three new rows, 303, Alpha
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_recent_and_generated_layout_and_promotion(recent_pl_app, page, width, tmp_path):
+    page.set_viewport_size({"width": width, "height": 900})
+    page.emulate_media(reduced_motion="reduce")
+    page.goto(f"{recent_pl_app}/playlists")
+    page.wait_for_load_state("networkidle")
+    recent, generated = page.locator(".playlist-new"), page.locator(".playlist-generated")
+    recent_box = recent.bounding_box()
+    for section in [recent, page.locator(".playlist-table-card")]:
+        box = section.get_by_role("checkbox").first.bounding_box()
+        assert box["x"] >= 0 and box["x"] + box["width"] <= width
+    page.screenshot(path=tmp_path / f"new-playlists-{width}.png", full_page=True)
+    expect(recent.get_by_role("button", name="Promote to library", exact=True)).to_have_count(0)
+    page.get_by_role("button", name="Generated playlists", exact=False).click()
+    expect(recent).to_be_hidden()
+    assert generated.bounding_box()["y"] == pytest.approx(recent_box["y"], abs=1)
+    assert generated.bounding_box()["width"] == recent_box["width"]
+    row = generated.get_by_role("row").filter(has_text="From your catalog")
+    title, action = row.locator(".ptitle"), row.get_by_role("button", name="Promote to library", exact=True)
+    title_box, action_box = title.bounding_box(), action.bounding_box()
+    assert action_box["y"] >= title_box["y"] + title_box["height"]
+    assert title_box["width"] > 0
+    assert row.locator(".generated-title-actions").evaluate("el => el.scrollWidth <= el.clientWidth")
+    generated.get_by_role("button", name="Generated playlists", exact=False).click()
+    shortcuts = page.locator(".playlist-shortcuts")
+    expect(shortcuts.get_by_role("button")).to_have_count(2)
+    for button in shortcuts.get_by_role("button").all():
+        expect(button).to_be_visible()
+    assert shortcuts.bounding_box()["x"] + shortcuts.bounding_box()["width"] <= width
+    shortcuts.get_by_role("button", name="Generated playlists", exact=False).click()
+    page.screenshot(path=tmp_path / f"recent-playlists-{width}.png", full_page=True)
+    generated.get_by_role("button", name="Promote to library", exact=True).click()
+    expect(page.locator(".playlist-table-card").get_by_role("link", name="From your catalog", exact=False)).to_be_visible()
+    shortcuts.get_by_role("button", name="New playlists", exact=False).click()
+    expect(recent.locator(".ptitle")).to_have_count(4)
+    expect(generated).to_be_hidden()
+
+
+def test_no_recent_playlists_hides_the_section(live_pl_app, page):
+    page.goto(f"{live_pl_app}/playlists")
+    expect(page.get_by_role("region", name="New playlists")).to_be_hidden()

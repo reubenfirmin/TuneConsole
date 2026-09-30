@@ -1,8 +1,16 @@
 """PlaylistRepo: playlists, their track membership/ordering, groups, and hidden flags."""
 import json
+import math
 
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.models import Playlist
+
+
+_FIRST_TRACK_THUMBNAIL = (
+    "(SELECT t.thumbnail FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
+    "WHERE pt.playlist_id=p.id AND NULLIF(t.thumbnail, '') IS NOT NULL "
+    "ORDER BY pt.position, pt.track_id LIMIT 1)"
+)
 
 
 class PlaylistRepo(Repo):
@@ -30,24 +38,47 @@ class PlaylistRepo(Repo):
 
     @synchronized
     def upsert_playlist(self, identity_id, ytm_playlist_id, title, track_count, content_hash, now,
-                        thumbnail=None) -> int:
+                        thumbnail=None, *, created_at=None) -> int:
+        """Sync metadata, preserving the actual creation date when one is known."""
         row = self.conn.execute(
             "SELECT id, first_seen, content_hash, last_changed FROM playlists "
             "WHERE identity_id=? AND ytm_playlist_id=?", (identity_id, ytm_playlist_id)).fetchone()
         if row is None:
             cur = self.conn.execute(
                 "INSERT INTO playlists(identity_id,ytm_playlist_id,title,track_count,"
-                "content_hash,first_seen,last_seen,last_changed,thumbnail) VALUES (?,?,?,?,?,?,?,?,?)",
-                (identity_id, ytm_playlist_id, title, track_count, content_hash, now, now, now, thumbnail))
+                "content_hash,first_seen,last_seen,last_changed,thumbnail,created_at,created_at_source) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (identity_id, ytm_playlist_id, title, track_count, content_hash, now, now, now, thumbnail,
+                 created_at, "local" if created_at is not None else None))
             self.conn.commit()
             return cur.lastrowid
         last_changed = now if row["content_hash"] != content_hash else row["last_changed"]
         self.conn.execute(
             "UPDATE playlists SET title=?, track_count=?, content_hash=?, last_seen=?, last_changed=?, "
-            "thumbnail=COALESCE(?, thumbnail) WHERE id=?",
-            (title, track_count, content_hash, now, last_changed, thumbnail, row["id"]))
+            "thumbnail=COALESCE(NULLIF(?, ''), thumbnail), created_at=COALESCE(created_at, ?), "
+            "created_at_source=COALESCE(created_at_source, ?) WHERE id=?",
+            (title, track_count, content_hash, now, last_changed, thumbnail, created_at,
+             "local" if created_at is not None else None, row["id"]))
         self.conn.commit()
         return row["id"]
+
+    @synchronized
+    def set_youtube_playlist_dates(self, dates) -> int:
+        """YouTube's timestamp supersedes local estimates, across copies of the same ID.
+
+        Metadata never inserts a library row, changes its sync/edit timestamps, or
+        clears an existing date when an account/playlist is unavailable.
+        """
+        changed = 0
+        with self.conn:
+            for ytm, stamp in dates.items():
+                if not isinstance(stamp, (float, int)) or not math.isfinite(stamp) or stamp <= 0:
+                    continue
+                changed += self.conn.execute(
+                    "UPDATE playlists SET created_at=?, created_at_source='youtube' "
+                    "WHERE ytm_playlist_id=? AND (created_at IS NOT ? "
+                    "OR created_at_source IS NOT 'youtube')", (stamp, ytm, stamp)).rowcount
+        return changed
 
     @synchronized
     def set_playlist_tracks(self, playlist_id, track_ids) -> None:
@@ -91,6 +122,14 @@ class PlaylistRepo(Repo):
             "SELECT track_id FROM playlist_tracks WHERE playlist_id=? ORDER BY position",
             (playlist_id,)).fetchall()
         return [r["track_id"] for r in rows]
+
+    @synchronized
+    def playlist_ids_for_video(self, video_id) -> set[int]:
+        """Exact-video membership for the song destination picker, without loading every track."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT pt.playlist_id FROM playlist_tracks pt "
+            "JOIN tracks t ON t.id=pt.track_id WHERE t.video_id=?", (video_id,)).fetchall()
+        return {r["playlist_id"] for r in rows}
 
     @synchronized
     def set_playlist_title(self, playlist_id, title, now) -> None:
@@ -142,7 +181,29 @@ class PlaylistRepo(Repo):
         rows = self.conn.execute("SELECT * FROM playlists").fetchall()
         return [Playlist(r["id"], r["identity_id"], r["ytm_playlist_id"], r["title"],
                          r["track_count"], r["content_hash"], r["first_seen"],
-                         r["last_seen"], r["last_changed"], r["thumbnail"]) for r in rows]
+                         r["last_seen"], r["last_changed"], r["thumbnail"], r["created_at"],
+                         r["created_at_source"]) for r in rows]
+
+    @synchronized
+    def get_playlist_thumbnails(self) -> dict[int, str | None]:
+        """Covers for the playlist list, falling back to the first song with artwork."""
+        rows = self.conn.execute(
+            f"SELECT p.id, COALESCE(NULLIF(p.thumbnail, ''), {_FIRST_TRACK_THUMBNAIL}) "
+            "AS thumbnail FROM playlists p"
+        ).fetchall()
+        return {r["id"]: r["thumbnail"] for r in rows}
+
+    @synchronized
+    def ensure_playlist_thumbnail(self, playlist_id) -> None:
+        """Save initial cover art after songs are added, without replacing an existing cover.
+
+        Use persisted membership so rejected songs cannot supply the cover. A later
+        YouTube sync can replace this initial artwork with its canonical playlist cover.
+        """
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE playlists AS p SET thumbnail={_FIRST_TRACK_THUMBNAIL} "
+                "WHERE p.id=? AND NULLIF(p.thumbnail, '') IS NULL", (playlist_id,))
 
     @synchronized
     def get_playlist(self, playlist_id) -> Playlist | None:
@@ -150,7 +211,7 @@ class PlaylistRepo(Repo):
         return None if row is None else Playlist(
             row["id"], row["identity_id"], row["ytm_playlist_id"], row["title"],
             row["track_count"], row["content_hash"], row["first_seen"],
-            row["last_seen"], row["last_changed"], row["thumbnail"])
+            row["last_seen"], row["last_changed"], row["thumbnail"], row["created_at"], row["created_at_source"])
 
     @synchronized
     def get_playlist_track_keys(self, playlist_id) -> set[str]:
