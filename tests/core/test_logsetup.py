@@ -16,7 +16,17 @@ def _restore_logging():
     """configure() mutates the root logger and two excepthooks; put them back."""
     root = logging.getLogger()
     saved = list(root.handlers), root.level, sys.excepthook, threading_hook()
+    audit = logging.getLogger("yt_playlist.home_audit")
+    saved_audit = list(audit.handlers), audit.level, audit.propagate
     yield
+    for h in list(audit.handlers):
+        audit.removeHandler(h)
+        if h not in saved_audit[0]:
+            h.close()
+    for h in saved_audit[0]:
+        audit.addHandler(h)
+    audit.setLevel(saved_audit[1])
+    audit.propagate = saved_audit[2]
     for h in list(root.handlers):
         root.removeHandler(h)
     for h in saved[0]:
@@ -62,6 +72,11 @@ def test_configure_is_idempotent(tmp_path):
     logsetup.configure(log_path=tmp_path / "app.log")
     logsetup.configure(log_path=tmp_path / "app.log")
     assert len(_file_handlers(logging.getLogger())) == 1
+    audit = logging.getLogger("yt_playlist.home_audit")
+    assert len(_file_handlers(audit)) == 1
+    audit.info('{"event":"test"}')
+    assert (tmp_path / "home-cards.jsonl").read_text() == '{"event":"test"}\n'
+    assert '"event":"test"' not in (tmp_path / "app.log").read_text()
 
 
 def test_configure_leaves_foreign_handlers_alone(tmp_path):

@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Playlist dates · TuneConsole{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/setup.css?v={{ asset_v }}">{% endblock %}
+{% block body %}
+<div class="playlist-dates-page">
+  <a class="quiet-link" href="/playlists">← Playlists</a>
+  <div class="page-head">
+    <h1>Playlist dates</h1>
+    <p>Find your newest playlists, wherever you made them.</p>
+  </div>
+  {% if message %}<p class="playlist-dates-message" role="status">{{ message }}</p>{% endif %}
+  <div class="card">
+    <h2 class="section section-flush">Connect YouTube</h2>
+    <p class="section-note">Read-only access supplies the original creation dates for your playlists,
+      including private ones. Dates refresh with your library.</p>
+    {% if connection.accounts %}
+    <ul class="playlist-date-accounts">
+      {% for account in connection.accounts %}
+      <li>
+        <div><strong>{{ account.title }}</strong>
+          {% if account.error %}<p class="section-note">{{ account.error }}</p>{% endif %}
+        </div>
+        <form method="post" action="/setup/playlist-dates/disconnect">
+          <input type="hidden" name="account" value="{{ account.id }}">
+          <button class="btn-ghost btn-sm" type="submit">Disconnect</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    <form method="post" action="/setup/playlist-dates/connect" enctype="multipart/form-data">
+      {% if not connection.configured %}
+      <details class="advanced playlist-dates-instructions">
+        <summary>First connection: Google project setup</summary>
+        <ol>
+          <li>In your <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com"
+              target="_blank" rel="noopener noreferrer">Google Cloud project</a>, enable YouTube Data API v3.</li>
+          <li>Configure the OAuth consent screen. If the app is in testing, add your Google account as a test user.</li>
+          <li>Create an OAuth client with application type <strong>Desktop app</strong> and download its JSON file.</li>
+        </ol>
+        <p class="section-note">YouTube Music's browser connection does not include these dates.
+          This additional connection uses Google's official API and cannot edit your playlists.</p>
+      </details>
+      <label class="playlist-dates-file">Google Desktop app client
+        <input type="file" name="file" accept=".json,application/json" required>
+      </label>
+      {% endif %}
+      <div class="btn-row btn-row-spaced">
+        <button class="btn-primary" type="submit">{{ 'Connect another account' if connection.accounts else 'Continue with Google' }} →</button>
+      </div>
+    </form>
+  </div>
+  <div class="playlist-dates-coverage">
+    <p class="section-note">Creation dates known for {{ known }} of {{ total }} playlists.
+      Playlists with unknown dates stay out of New.</p>
+    {% if connection.accounts %}
+    <form method="post" action="/setup/playlist-dates/refresh">
+      <button class="btn-ghost btn-sm" type="submit">Refresh dates</button>
+    </form>
+    {% endif %}
+  </div>
+  <p class="section-note">Access is saved only on this computer.
+    You can also revoke it in <a href="https://myaccount.google.com/connections" target="_blank"
+    rel="noopener noreferrer">your Google account</a>.</p>
+</div>
+{% endblock %}

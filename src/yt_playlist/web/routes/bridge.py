@@ -708,15 +708,6 @@ def build(ctx) -> APIRouter:
                 if isinstance(msg, dict) and msg.get("type") == "play":
                     if msg.get("deck") == "standby":
                         continue   # a muted, paused standby deck must never register a play or flip the bar
-                    logger.info("Received play notification: %s by %s",
-                                msg.get("title") or "?", msg.get("artist") or "?")
-                    # Waiting-state net: a real (non-standby) play frame is the confirmation that
-                    # whatever "deck-waiting" episode was pending has resolved, one way or another
-                    # (the retry listener firing, or the owner otherwise getting it playing).
-                    radio = getattr(ctx, "radio", None)
-                    if radio is not None:
-                        with radio.lock:
-                            radio.waiting = False
                     # Surface it for the Home now-playing line (polled via GET /bridge/status).
                     bridge.now_playing = {"title": msg.get("title"), "artist": msg.get("artist"),
                                           "thumbnail": msg.get("thumbnail"),
@@ -724,6 +715,17 @@ def build(ctx) -> APIRouter:
                                           "video_id": msg.get("videoId"),
                                           "paused": bool(msg.get("paused"))}
                     bridge.now_playing_seen_at = time.monotonic()
+                    # Older extension versions may still send paused snapshots as play frames.
+                    # Keep the card fresh, but never count silence as a play or advance radio.
+                    if msg.get("paused"):
+                        continue
+                    logger.info("Received play notification: %s by %s",
+                                msg.get("title") or "?", msg.get("artist") or "?")
+                    # Waiting-state net: actual playback confirms a pending deck-waiting episode.
+                    radio = getattr(ctx, "radio", None)
+                    if radio is not None:
+                        with radio.lock:
+                            radio.waiting = False
                     # #75 persist it: play_events + the (track, day) model + freshness stamp.
                     # Store calls block, so run off the event loop; a bad frame or a stub store
                     # (tests) must never kill the bridge socket.

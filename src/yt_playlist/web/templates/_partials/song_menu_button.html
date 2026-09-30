@@ -1,0 +1,22 @@
+{# All regular song surfaces share one launcher and the single menu in base.html.
+   Context enables playlist-specific actions; it never supplies another menu. #}
+{% macro song_menu(song, context={}, dynamic='') -%}
+{% if dynamic or song.video_id|default('') %}
+<button type="button" class="dots song-menu-trigger" title="More actions"
+        aria-haspopup="menu"
+        aria-controls="song-action-menu" aria-expanded="false"
+        {% if dynamic %}
+        x-show="{{ dynamic }}.video_id"
+        :aria-label="'More actions for ' + {{ dynamic }}.title"
+        :data-song="JSON.stringify({{ dynamic }})"
+        {% else %}
+        aria-label="More actions for {{ song.title }}"
+        data-song='{{ {"video_id": song.video_id, "title": song.title,
+                      "artist": song.artist|default('') or '', "album": song.album|default('') or '',
+                      "thumbnail": song.thumbnail|default(none),
+                      "duration": song.duration|default(none),
+                      "album_browse": song.album_browse|default(none)}|tojson }}'
+        {% endif %}
+        data-song-context='{{ context|tojson }}'>⋯</button>
+{% endif %}
+{%- endmacro %}

@@ -47,7 +47,8 @@ class LibraryClient(FakeClient):
 
     def search(self, query, filter="songs"):
         if filter == "songs" and query == "Song Artist":
-            return [_track("yt1", "Song", "Artist", album="Record")]
+            return [{**_track("yt1", "Song", "Artist", album="Record"),
+                     "thumbnails": [{"url": "https://example.com/song.jpg"}]}]
         if filter == "albums":
             return [{"browseId": "MPRE1", "title": "Saved Record",
                      "artists": [{"name": "Album Artist"}]}]
@@ -106,6 +107,7 @@ def test_library_import_creates_matches_and_is_idempotent():
     assert missing["candidates"][0]["browse_id"] == "MPRE1"
     assert missing["candidates"][0]["confident"] is False
     assert client.created[0][1] == "Road songs"
+    assert store.get_playlists()[0].thumbnail == "https://example.com/song.jpg"
     assert client.added == [(client.created[0][0], ["yt1"])]
     assert client.album_ratings == [("OLAK1", "LIKE")]
     assert store.get_saved_albums()[0]["browse"] == "MPRE1"

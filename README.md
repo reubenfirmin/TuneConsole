@@ -19,6 +19,7 @@ b) And I find YouTube's discovery and playlist management to be pretty bad
   empties. Every destructive action is undoable.
 - **Omnisearch**: instant search across playlists, artists, albums, and tracks in your whole library.
 - **Library browsing**: dedicated Artists, Albums, Charts, and Genres views.
+- **Song actions**: create a playlist from a song or add it to an existing playlist from the shared ⋯ menu.
 - **Clusters**: a fun visual approach to building playlists.
 - **Road Trip**: build a playlist for a road trip that combines your and passenger's tastes.
 - **Recommendations & discovery**: surfaces new artists, rediscoveries, and a personalized
@@ -36,6 +37,24 @@ b) And I find YouTube's discovery and playlist management to be pretty bad
    **Developer mode**, click **Load unpacked**, and select the `extension/` directory. It connects
    to the app automatically, there is nothing to paste (see `extension/README.md`).
 3. **Open `https://music.youtube.com` signed in**. The app pairs with the extension and starts syncing your library in the background.
+
+### Playlist creation dates
+
+**New playlists** duplicates non-generated playlists created during the past seven days.
+It reads `playlists.created_at`, never `first_seen`, `last_seen`, or the last edit time.
+TuneConsole records its own creations immediately. To include playlists created elsewhere,
+open **Setup → Pairing → Playlist dates** and connect the relevant YouTube accounts (including
+brand accounts separately). This uses the official Data API's
+[`playlist.snippet.publishedAt`](https://developers.google.com/youtube/v3/docs/playlists#snippet.publishedAt).
+Dates refresh automatically after library sync and existing dates survive connection failures.
+Unknown dates remain unknown and stay out of New.
+
+The first connection needs a Google Cloud project with YouTube Data API v3 enabled and a
+downloaded **Desktop app** OAuth client JSON. The connection screen explains the steps.
+Only `youtube.readonly` is requested. Tokens stay in `youtube-playlist-dates.json` beside
+`config.toml` (owner-only permissions), never in the library DB or browser bridge.
+The server's egress guard permits only Google's token endpoint and the two read-only metadata
+endpoints; the extension's permissions and allowlist are unchanged.
 
 
 ## Architecture
@@ -55,6 +74,11 @@ TuneConsole is a single local process.
   not make the network calls itself: a custom session routes each request through the browser
   extension, which applies your live session and returns the response. Frontend libraries are
   vendored locally, so nothing is fetched from a CDN at runtime.
+
+Regular song views use the `song_menu` launcher in `web/templates/_partials/song_menu_button.html`.
+`base.html` mounts one menu and playlist dialog from `_partials/song_actions.html`, backed by
+`static/song-actions.js`. Add contextual actions there; specialized tools such as merge can keep
+their own controls.
 
 ### The model
 
@@ -79,3 +103,29 @@ implementation lives in `src/yt_playlist/rec/` and has four main parts:
   but TuneConsole's local models do the ranking. `rec_worker.py` coalesces rebuild requests, persists
   vectors, and materializes expensive proposals in the background so routes can serve the last good
   result from SQLite.
+
+### Home recommendation audit
+
+The Home configurator's **These mixes** tab shows your top 12 available genre families by listening,
+with search for the rest. Its single action makes mixes from the selected genres, or shuffles
+away from the current genres when none are selected. Successful changes close the configurator
+to reveal the new mixes. Thin mixes search the full ranked library for the same genre family,
+then fill with nearby styles if needed; artist and album caps still apply. Fresh songs stay in the
+discovery pool, and Comfort stays limited to real listening favorites. Requests can offer fewer
+cards when choices are limited, and explain when no
+matching themes are ready. A request lasts for the current menu, including previews, until the next
+normal refresh/rotation. It does not change taste weights or record dislikes. The **Preferences**
+tab holds the existing sliders. The configurator opens as a modal with a backdrop and contained
+keyboard focus; Escape or a backdrop click closes it.
+
+`home-cards.jsonl` sits alongside `app.log` in the app's logs directory (normally
+`~/.local/share/yt-playlist/logs` on Linux, or `$YT_PLAYLIST_HOME/logs` when overridden).
+It rotates daily in UTC and keeps 30 archives. Logging starts when the updated app starts.
+
+Each JSON line snapshots a successfully rendered Home card response: UTC time, request path,
+rotation epoch, and each card's framing, displayed description, mode, recipe, genre/decade counts,
+missing-metadata counts, and ordered track identities. Counts use the same metadata fallbacks as
+the displayed description. They describe the offered tracks even if these differ from the recipe.
+Normal loads, repeated previews, and refreshes are all recorded; use the path and epoch to separate
+them when reviewing the week. These are server offers, not confirmed views or inferred rejections.
+The audit is diagnostic only and does not feed the recommendation models.

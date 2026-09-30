@@ -10,6 +10,9 @@
     <li>We don't capture analytics. No tracking, no telemetry, no phoning home.</li>
     <li>This app is entirely local. It only ever talks to YouTube (and the music-metadata
         services you can see on the <a href="/network">Network</a> page) to do its job.</li>
+    <li>If you connect Playlist dates, a read-only Google authorization is stored in a private
+        file on this computer. It is used only to read YouTube channel and playlist metadata.
+        Disconnecting removes that account's saved authorization; dates already read are kept.</li>
   </ul>
 </div>
 {% endblock %}

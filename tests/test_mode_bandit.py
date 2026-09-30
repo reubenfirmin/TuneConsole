@@ -73,3 +73,36 @@ def test_select_modes_deterministic_per_epoch():
     from yt_playlist.rec.mode_surfaces import select_modes
     modes = [_mode(0), _mode(1)]
     assert select_modes(None, modes, {}, 7, n=2) == select_modes(None, modes, {}, 7, n=2)
+
+
+def test_ignored_theme_loses_exposure_across_the_whole_menu():
+    from yt_playlist.rec.mode_surfaces import select_modes
+    modes = [{"mode_id": mid, "size": 80, "families": [],
+              "centroid": [float(i == mid) for i in range(6)]} for mid in range(6)]
+    # All themes are equally far apart. Mode 0 was ignored across different framings;
+    # choosing alternatives by distance alone still put it on almost every menu.
+    stats = {mid: (0 if mid == 0 else 4, 20) for mid in range(6)}
+    menus = [select_modes(None, modes, {}, epoch, n=4, stats=stats) for epoch in range(400)]
+    exposure = {mid: sum(mid in menu for menu in menus) for mid in range(6)}
+    assert exposure[0] < min(exposure[mid] for mid in range(1, 6)) / 2
+    assert exposure[0] > 0  # weak negative evidence reduces exposure, never bans a theme
+
+
+def test_theme_feedback_pools_choices_across_framings():
+    s = Store(":memory:")
+    s.init_schema()
+    for epoch, lane in enumerate(("fresh", "wheelhouse", "comfort")):
+        s.modes.log_impressions(epoch, [(lane, 1), ("explore", 2)], float(epoch))
+    s.modes.log_pick(77, 2, 4.0)
+    assert mode_bandit_stats(s) == {1: (0, 3), 2: (1, 3)}
+
+
+def test_current_menu_feedback_waits_until_the_next_rotation():
+    s = Store(":memory:")
+    s.init_schema()
+    s.modes.log_impressions(0, [("fresh", 1)], 1.0)
+    s.modes.log_pick(76, 1, 2.0)
+    s.modes.log_impressions(1, [("comfort", 1), ("fresh", 2)], 10.0)
+    s.modes.log_pick(77, 2, 11.0)
+    assert mode_bandit_stats(s, before=s.modes.epoch_started_at(1)) == {1: (1, 1)}
+    assert mode_bandit_stats(s, before=s.modes.epoch_started_at(2)) == {1: (1, 2), 2: (1, 1)}

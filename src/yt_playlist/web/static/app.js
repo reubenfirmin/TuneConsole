@@ -117,6 +117,7 @@ document.addEventListener('htmx:beforeSwap', (event) => {
     incoming.forEach((row) => { row.style.opacity = '0'; });
     target.replaceChildren(...replacement.childNodes);
     target.dataset.name = replacement.dataset.name || '';
+    target.dataset.genres = replacement.dataset.genres || '[]';
     if (replacement.dataset.recipe) target.dataset.recipe = replacement.dataset.recipe;
     else delete target.dataset.recipe;
     htmx.process(target);
@@ -131,6 +132,8 @@ document.addEventListener('htmx:beforeSwap', (event) => {
       animation.finished.then(() => row.style.removeProperty('opacity')).catch(() => {});
     });
     card.classList.remove('is-regenerating');
+    // This animated replacement bypasses HTMX's swap/settle events.
+    syncHomeThemes();
   }, sequenceLength + 20);
 });
 
@@ -151,12 +154,11 @@ function mountNowPlayingDock() {
 function rowSort(pid, editBase) {
   // Generic click-to-sort for a static-row table; reorders <tr class="srow"> by data-<key>.
   // Numeric when both values parse as numbers, else locale string compare.
-  // Also hosts the per-row "⋯" menu and the "find alternate versions" flow for the playlist view.
+  // Also hosts playlist editing dialogs, invoked by the shared song menu.
   // `editBase` is the URL the genre/year edits POST under (defaults to /playlist/<pid>; the album
   // page passes /album/<browse>). Reorder/remove stay playlist-only.
   return {
     pid: pid, editBase: editBase || ('/playlist/' + pid), key: '', dir: 1,
-    openMenu: null,                                   // video_id whose ⋯ menu is open
     // alternate-versions modal
     altOpen: false, altLoading: false, altTitle: '',
     sortBy(k) {
@@ -181,25 +183,14 @@ function rowSort(pid, editBase) {
     // Open the modal and let htmx fetch + render the results (server builds the list; we only own the
     // modal open/close + loading flag). The "Add" button hx-includes the checked results.
     findAlternates(vid, title) {
-      this.openMenu = null;
       this.altOpen = true; this.altLoading = true; this.altTitle = title;
       htmx.ajax('GET', `/playlist/${this.pid}/alternates?video_id=${encodeURIComponent(vid)}`,
         { target: '#alt-results', swap: 'innerHTML' }).finally(() => { this.altLoading = false; });
     },
 
-    // "Songs like this": server renders the modal (with selectable rows + an Add button) into
-    // #similar-modal. Pass the playlist id so the modal can offer "add below this track"; the seed
-    // vid becomes the insert anchor on the server side.
-    songsLike(vid) {
-      this.openMenu = null;
-      htmx.ajax('GET', `/track/${encodeURIComponent(vid)}/similar?pid=${this.pid}`,
-        { target: '#similar-modal', swap: 'innerHTML' });
-    },
-
     // remove-track confirmation modal
     rmOpen: false, rmBusy: false, rmErr: '', rmVid: '', rmTitle: '',
     removeTrack(vid, title) {
-      this.openMenu = null;
       this.rmVid = vid; this.rmTitle = title; this.rmErr = ''; this.rmOpen = true;
     },
     async confirmRemove() {
@@ -349,9 +340,11 @@ function overlapSort() {
   };
 }
 function playlistsTab(rows) {
+  // Remember the particular row, since New playlists repeats rows from the library below.
+  let lastPickedRow = null;
   return {
     rows, sel: {}, sortKey: 'title', sortDir: 1, split: false, busy: false,
-    groupModal: false, groupName: '', delModal: false, collapsed: { Generated: true },
+    groupModal: false, groupName: '', delModal: false, collapsed: { New: false, Generated: true },
     init() {
       // remember view preferences across reloads (the tab reloads after group/delete)
       try {
@@ -359,9 +352,13 @@ function playlistsTab(rows) {
         this.sortKey = localStorage.getItem('pl.sortKey') || 'title';
         this.sortDir = +localStorage.getItem('pl.sortDir') || 1;
         const savedCollapsed = JSON.parse(localStorage.getItem('pl.collapsed') || '{}');
-        this.collapsed = { Generated: true,
+        this.collapsed = { New: false, Generated: true,
           ...(savedCollapsed && typeof savedCollapsed === 'object' ? savedCollapsed : {}) };
       } catch (e) {}
+      // Both sections share the same expanded slot; older preferences may have both open.
+      if (!this.collapsed.New && !this.collapsed.Generated && this.newRows().length) {
+        this.collapsed.Generated = true;
+      }
       this.$watch('split', v => { try { localStorage.setItem('pl.split', v ? '1' : '0'); } catch (e) {} });
       this.$watch('sortKey', v => { try { localStorage.setItem('pl.sortKey', v); } catch (e) {} });
       this.$watch('sortDir', v => { try { localStorage.setItem('pl.sortDir', v); } catch (e) {} });
@@ -369,26 +366,23 @@ function playlistsTab(rows) {
     selected() { return this.rows.filter(r => this.sel[r.id]); },
     count() { return this.selected().length; },
     toggle(id) { this.sel[id] = !this.sel[id]; },
-    lastPicked: null,
-    // every visible row id in visual order: the Generated card first (unless collapsed), then the table
-    visibleIds() {
-      const gen = this.collapsed.Generated ? [] : this.genRows();
-      return [...gen, ...this.sections().flatMap(s => s.rows)].map(r => r.id);
-    },
     // checkbox (or its cell) clicked: shift extends the anchor row's state across the visible range
     rowCheck(r, ev) {
-      if (ev && ev.shiftKey && this.lastPicked != null && this.lastPicked !== r.id) {
-        const ids = this.visibleIds();
-        const i = ids.indexOf(this.lastPicked), j = ids.indexOf(r.id);
+      const row = ev?.currentTarget.closest('tr');
+      if (ev?.shiftKey && lastPickedRow && lastPickedRow !== row) {
+        const visible = [...this.$root.querySelectorAll('tr[data-playlist-id]')]
+          .filter(el => el.getClientRects().length);
+        const i = visible.indexOf(lastPickedRow), j = visible.indexOf(row);
         if (i !== -1 && j !== -1) {
-          const on = !!this.sel[this.lastPicked];
-          ids.slice(Math.min(i, j), Math.max(i, j) + 1).forEach(id => { this.sel[id] = on; });
-          this.lastPicked = r.id;
+          const on = !!this.sel[lastPickedRow.dataset.playlistId];
+          visible.slice(Math.min(i, j), Math.max(i, j) + 1)
+            .forEach(el => { this.sel[el.dataset.playlistId] = on; });
+          lastPickedRow = row;
           return;
         }
       }
       this.toggle(r.id);
-      this.lastPicked = r.id;
+      lastPickedRow = row;
     },
     sortBy(key) {
       if (this.sortKey === key) { this.sortDir = -this.sortDir; }
@@ -410,9 +404,14 @@ function playlistsTab(rows) {
       return (r ? r * this.sortDir : a.title.localeCompare(b.title));   // stable tiebreak by title
     },
     sorted() { return [...this.rows].sort((a, b) => this.cmp(a, b)); },
-    toggleGen() {
-      this.collapsed.Generated = !this.collapsed.Generated;
+    toggleSection(name) {
+      this.collapsed[name] = !this.collapsed[name];
+      if (!this.collapsed[name]) this.collapsed[name === 'New' ? 'Generated' : 'New'] = true;
       try { localStorage.setItem('pl.collapsed', JSON.stringify(this.collapsed)); } catch (e) {}
+    },
+    newRows() {
+      return this.rows.filter(r => r.is_new)
+        .sort((a, b) => b.created - a.created || b.id - a.id);
     },
     // "Generated" is pinned into its own card above the table (see template), never in the sections.
     // Always newest-first by creation time (independent of the main table's column sort).
@@ -1015,16 +1014,159 @@ document.addEventListener('input', function (e) {
   }
 });
 
-// The Home "Your taste" panel's collapse toggle. State persists in localStorage so it survives full
-// reloads AND every #home-feed htmx swap (each swap re-creates this component, which re-reads the
-// flag on init). Plain localStorage (no Alpine persist plugin needed).
+// Read actual displayed themes, including a single-card refresh, instead of inferring them from
+// the preference sliders or a different browser tab's last request.
+function homeOfferedGenres() {
+  const genres = new Set();
+  document.querySelectorAll('#home-mode-cards .gen-card-body[data-genres]').forEach(card => {
+    try {
+      JSON.parse(card.dataset.genres).forEach(g => { if (typeof g === 'string' && g) genres.add(g); });
+    } catch (_) { /* A card without metadata cannot establish its genre. */ }
+  });
+  return [...genres].sort();
+}
+
+function syncHomeThemes() {
+  const summary = document.getElementById('home-theme-summary');
+  const options = document.getElementById('home-genre-options');
+  if (!summary || !options) return;
+  const row = document.getElementById('home-mode-cards');
+  // A new menu restores its applied choices. Unrelated swaps preserve drafts and keyboard focus.
+  const signature = JSON.stringify([row?.dataset.epoch, row?.dataset.genreOptions, row?.dataset.requestedGenres]);
+  if (options.dataset.signature !== signature) {
+    options.dataset.signature = signature;
+    const available = JSON.parse(row?.dataset.genreOptions || '[]');
+    const selected = JSON.parse(row?.dataset.requestedGenres || '[]');
+    options.replaceChildren();
+    available.forEach(genre => {
+      const label = document.createElement('label');
+      label.className = 'fp-genre-choice';
+      label.style.setProperty('--genre-tint', genre.tint || 'var(--genre-default)');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.name = 'genres';
+      input.value = genre.family;
+      input.setAttribute('aria-label', genre.label);
+      input.checked = selected.includes(genre.family);
+      const name = document.createElement('span');
+      name.textContent = genre.label;
+      label.append(input, name);
+      options.append(label);
+    });
+    delete summary.dataset.failed;
+    filterHomeGenres();
+  }
+  if (document.getElementById('fp-mixes-panel')?.getAttribute('aria-busy') === 'true') return;
+  if (!summary.dataset.failed) {
+    summary.textContent = row?.dataset.genreWarning || '';
+  }
+  updateHomeGenreSelection();
+}
+
+function filterHomeGenres() {
+  const query = document.getElementById('home-genre-search')?.value.trim().toLowerCase() || '';
+  const choices = [...document.querySelectorAll('#home-genre-options .fp-genre-choice')];
+  const tokens = query.split(/[\s-]+/).filter(Boolean);
+  choices.forEach((choice, index) => {
+    choice.hidden = query ? !tokens.every(token => choice.textContent.toLowerCase().includes(token))
+      : index >= 12 && !choice.querySelector('input').checked;
+  });
+  const heading = document.getElementById('home-genre-heading');
+  if (heading) heading.textContent = query ? 'Matching genres' : 'Your top genres';
+  const empty = document.getElementById('home-genre-empty');
+  if (empty) {
+    empty.hidden = choices.some(choice => !choice.hidden);
+    empty.textContent = choices.length ? 'No matching genres.' : 'Genres will appear when your mixes are ready.';
+  }
+}
+
+function updateHomeGenreSelection() {
+  const form = document.getElementById('home-mix-form');
+  if (!form) return;
+  const count = form.querySelectorAll('input[name="genres"]:checked').length;
+  const busy = document.getElementById('fp-mixes-panel')?.getAttribute('aria-busy') === 'true';
+  document.getElementById('home-make-mixes').disabled = busy || (!count && !homeOfferedGenres().length);
+  form.querySelector('.fp-submit-label').textContent = count ? 'Make mixes' : 'Shuffle genres';
+}
+document.addEventListener('DOMContentLoaded', syncHomeThemes);
+document.addEventListener('htmx:afterSettle', syncHomeThemes);
+document.addEventListener('change', event => {
+  if (event.target.matches('#home-genre-options input')) {
+    updateHomeGenreSelection();
+    filterHomeGenres();
+  }
+});
+document.addEventListener('htmx:configRequest', event => {
+  if (event.detail.elt?.id !== 'home-mix-form') return;
+  if (!event.detail.elt.querySelector('input[name="genres"]:checked')) {
+    event.detail.path = '/home/other-genres';
+    event.detail.parameters.genres = JSON.stringify(homeOfferedGenres());
+  }
+});
+document.addEventListener('htmx:beforeRequest', event => {
+  if (event.detail.elt?.id !== 'home-mix-form') return;
+  document.getElementById('fp-mixes-panel')?.setAttribute('aria-busy', 'true');
+  delete document.getElementById('home-theme-summary').dataset.failed;
+  updateHomeGenreSelection();
+  document.getElementById('home-theme-summary').textContent = '';
+});
+document.addEventListener('htmx:afterRequest', event => {
+  if (event.detail.elt?.id !== 'home-mix-form') return;
+  document.getElementById('fp-mixes-panel')?.removeAttribute('aria-busy');
+  if (!event.detail.successful) {
+    const summary = document.getElementById('home-theme-summary');
+    summary.dataset.failed = 'true';
+    summary.textContent = 'Couldn’t make your mixes. Try again.';
+  }
+  syncHomeThemes();
+  if (event.detail.successful && !document.getElementById('home-mode-cards')?.dataset.genreWarning
+      && document.querySelector('#home-mode-cards .gen-card-body')) {
+    window.dispatchEvent(new CustomEvent('home-mixes-applied'));
+  }
+});
+
+// Remember the taste panel's open/closed state across page loads and fragment swaps.
 function fpPanel() {
   return {
     // Power-user control: compact on first encounter; an explicit expansion remains remembered.
     collapsed: localStorage.getItem('fp_collapsed') !== '0',
-    toggle() {
-      this.collapsed = !this.collapsed;
-      localStorage.setItem('fp_collapsed', this.collapsed ? '1' : '0');
+    tab: sessionStorage.getItem('fp_tab') === 'preferences' ? 'preferences' : 'mixes',
+    init() {
+      if (!this.collapsed) this.$nextTick(() => this.show());
+    },
+    selectTab(name, focus = false) {
+      this.tab = name;
+      sessionStorage.setItem('fp_tab', name);
+      if (focus) this.$nextTick(() => this.$refs[name + 'Tab'].focus());
+    },
+    show() {
+      this.collapsed = false;
+      localStorage.setItem('fp_collapsed', '0');
+      if (!this.$refs.dialog.open) this.$refs.dialog.showModal();
+      this.$refs[this.tab + 'Tab'].focus();
+    },
+    close() {
+      const wasOpen = this.$refs.dialog.open;
+      this.$refs.dialog.close();
+      this.collapsed = true;
+      localStorage.setItem('fp_collapsed', '1');
+      if (wasOpen) this.$refs.launcher.focus({preventScroll: true});
+    },
+    dismissBackdrop(event) {
+      if (event.target !== this.$refs.dialog) return;
+      const rect = this.$refs.dialog.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right ||
+          event.clientY < rect.top || event.clientY > rect.bottom) this.close();
+    },
+    trapFocus(event) {
+      const controls = [...this.$refs.dialog.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')]
+        .filter(el => el.tabIndex >= 0 && !el.matches(':disabled') && el.getClientRects().length);
+      const first = controls[0], last = controls[controls.length - 1];
+      if ((event.shiftKey && document.activeElement === first) ||
+          (!event.shiftKey && document.activeElement === last)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first)?.focus();
+      }
     },
   };
 }
@@ -1050,7 +1192,7 @@ function genrePicker() {
     },
     suggest() {
       const q = this.query.trim().toLowerCase();
-      if (!q) return [];                                    // empty field -> no dropdown (reset state)
+      if (!q) return this.opts.slice(0, 10);                 // favorite genres before typing
       // Tokenized, order-independent match: every word you type must appear somewhere in the name, so
       // "rock post", "rock-post" and "post rock" all find "post-rock" (a plain substring wouldn't).
       const toks = q.split(/[^a-z0-9]+/).filter(Boolean);

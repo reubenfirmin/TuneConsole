@@ -1,5 +1,6 @@
 {# Global playback instrument. playerStatus polls on non-Home pages; on Home it consumes the existing
    homeStatus bridge-status event so the page still has exactly one /bridge/status poller. #}
+{% from "_partials/song_menu_button.html" import song_menu %}
 <section class="home-status card card--status is-live global-now-playing" x-data="playerStatus()"
          x-init="init(); $nextTick(() => mountNowPlayingDock())"
          @bridge-status.window="apply($event.detail)"
@@ -30,6 +31,7 @@
                   @click="rate('dislike')" title="Dislike" aria-label="Dislike">
             <svg viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C7.58 2 4 5.58 4 10c0 2.4 1.06 4.55 2.73 6.02.17.15.27.36.27.59V19c0 .55.45 1 1 1h.5v.5a1 1 0 1 0 2 0V20h1v.5a1 1 0 1 0 2 0V20h.5c.55 0 1-.45 1-1v-2.39c0-.23.1-.44.27-.59A7.99 7.99 0 0 0 20 10c0-4.42-3.58-8-8-8ZM9 8.5A1.5 1.5 0 1 0 9 11.5 1.5 1.5 0 0 0 9 8.5Zm6 0A1.5 1.5 0 1 0 15 11.5 1.5 1.5 0 0 0 15 8.5Z"/></svg>
           </button>
+          {{ song_menu({}, dynamic='nowPlaying') }}
         </span>
         <div id="radio-steer-slot"></div>
       </div>

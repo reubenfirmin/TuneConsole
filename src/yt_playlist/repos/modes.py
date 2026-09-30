@@ -126,22 +126,36 @@ class ModesRepo(Repo):
         self.conn.commit()
 
     @synchronized
-    def impression_counts(self, since=None) -> dict:
-        sql = "SELECT mode_id, COUNT(*) c FROM rec_mode_impressions"
+    def epoch_started_at(self, epoch):
+        """First display of this menu, used to defer its feedback until the next rotation."""
+        row = self.conn.execute(
+            "SELECT MIN(created_at) started FROM rec_mode_impressions WHERE epoch=?",
+            (int(epoch),)).fetchone()
+        return row["started"]
+
+    @synchronized
+    def impression_counts(self, since=None, *, before=None) -> dict:
+        sql = "SELECT mode_id, COUNT(*) c FROM rec_mode_impressions WHERE 1=1"
         args = []
         if since is not None:
-            sql += " WHERE created_at >= ?"
+            sql += " AND created_at >= ?"
             args.append(float(since))
+        if before is not None:
+            sql += " AND created_at < ?"
+            args.append(float(before))
         sql += " GROUP BY mode_id"
         return {r["mode_id"]: r["c"] for r in self.conn.execute(sql, args).fetchall()}
 
     @synchronized
-    def pick_rows(self, since=None) -> list:
-        sql = "SELECT playlist_id, mode_id FROM rec_mode_picks"
+    def pick_rows(self, since=None, *, before=None) -> list:
+        sql = "SELECT playlist_id, mode_id FROM rec_mode_picks WHERE 1=1"
         args = []
         if since is not None:
-            sql += " WHERE created_at >= ?"
+            sql += " AND created_at >= ?"
             args.append(float(since))
+        if before is not None:
+            sql += " AND created_at < ?"
+            args.append(float(before))
         return [(r["playlist_id"], r["mode_id"]) for r in self.conn.execute(sql, args).fetchall()]
 
     @synchronized

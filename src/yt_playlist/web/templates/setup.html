@@ -33,7 +33,7 @@
         <strong x-text="connected ? 'Extension connected' : 'Extension not connected'"></strong>
         <div class="section-note connection-copy"
              x-text="connected
-               ? 'Requests are authenticated live by your signed-in browser session. The app stores no cookies and holds no credential of its own.'
+               ? 'Music requests are authenticated live by your signed-in browser session. Your session cookies stay in the browser.'
                : 'Open a signed-in music.youtube.com tab. Until the extension connects, the app cannot reach YouTube Music at all.'"></div>
       </div>
     </div>
@@ -52,7 +52,7 @@
           extension instead of a one-time pasted capture.</p>
         <p class="section-note">Your session cookies never leave your browser or cross this connection:
           the app sends only the request (method, URL, body), and the extension adds auth and sends the
-          response back. Nothing credential-related is stored on disk here.</p>
+          response back. The extension stores no credentials in the app.</p>
       </details>
       <details class="advanced advanced-spaced">
         <summary>What does this give access to?</summary>
@@ -60,7 +60,7 @@
           extension uses the sign-in your browser already has for YouTube Music, but
           <strong>your session cookie never leaves the browser</strong>: it is applied to each request
           inside the page, and only the response comes back to this app. The app never receives or
-          stores your cookie or any Google credential; it sends only the request (method, URL, body).</p>
+          stores your session cookie; it sends only the request (method, URL, body).</p>
         <p class="section-note">The connection is <strong>scoped to YouTube Music</strong>: the
           extension only signs requests to YouTube Music's own API and refuses anything else, so it
           cannot be used to reach Gmail, Drive, or other Google services. You can watch every request
@@ -115,6 +115,14 @@
     <button type="submit" class="btn-primary setup-save">Save</button>
   </div>
 </form>
+
+  <div class="tab-panel" role="tabpanel" x-show="tab === 'browser'" x-cloak>
+    <div class="card">
+      <h2 class="section section-flush">Playlist dates</h2>
+      <p class="section-note">Include playlists created outside TuneConsole in New, using their original YouTube dates.</p>
+      <a class="quiet-link" href="/setup/playlist-dates">Connect playlist dates →</a>
+    </div>
+  </div>
 
   {# ── Tab 3: Enrichment (provider order + Last.fm key) ──────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'enrichment'" x-cloak>
