@@ -50,10 +50,10 @@ def test_restart_fails_without_starting_when_old_listener_wont_close(monkeypatch
 
 
 def test_native_host_can_run_and_stop_http_server_on_a_worker_thread(monkeypatch):
+    import http.client
     import queue
     import threading
     import time
-    import urllib.request
 
     from fastapi import FastAPI
     from yt_playlist import __main__ as main
@@ -89,8 +89,16 @@ def test_native_host_can_run_and_stop_http_server_on_a_worker_thread(monkeypatch
             time.sleep(0.01)
         assert server.started, failures
         port = server.servers[0].sockets[0].getsockname()[1]
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
+        # This is an external test client. urllib is process-wide guarded by the
+        # app (including guards installed by earlier tests), which blocks localhost.
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            connection.request("GET", "/health")
+            response = connection.getresponse()
+            assert response.status == 200
             assert response.read() == b'{"ok":true}'
+        finally:
+            connection.close()
     finally:
         server.should_exit = True
         worker.join(timeout=5)
