@@ -35,20 +35,44 @@
   {% endif %}
 
   {% if show_backend_update %}
-  <div class="alert-card card card--featured alert-nudge" id="update-nudge">
+  <div class="alert-card card card--featured alert-nudge" id="update-nudge"
+       {% if backend_update.kind in ('flatpak', 'macos') %}x-data="appUpdate()"{% endif %}>
     <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
+            {% if backend_update.kind in ('flatpak', 'macos') %}:disabled="working"{% endif %}
             hx-post="/onboard/update/dismiss?v={{ backend_update.latest }}" hx-target="#update-nudge" hx-swap="outerHTML swap:200ms">×</button>
     <span class="alert-cover"><img src="/static/nag/update.png" alt="" loading="lazy"
          onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
     <div class="alert-body">
-      <span class="alert-title">Backend update available. You're on {{ backend_update.current }}, {{ backend_update.latest }} is out.</span>
+      <span class="alert-title">TuneConsole {{ backend_update.latest }} is available. You're using {{ backend_update.current }}.</span>
       <div class="alert-foot">
-        {% if backend_update.link %}
+        {% if backend_update.kind in ('flatpak', 'macos') %}
+        <button type="button" class="btn btn-sm alert-go" @click="install()" :disabled="working"
+                x-show="['available', 'error', 'current'].includes(phase)"
+                x-text="phase === 'available' ? 'Update now' : 'Try again'">Update now</button>
+        {% if backend_update.kind == 'flatpak' %}
+        <button type="button" class="btn btn-sm alert-go" @click="restart()" :disabled="working"
+                x-show="phase === 'ready'" x-cloak>Restart to update</button>
+        <a class="btn btn-sm alert-go" href="appstream://com.tuneconsole.TuneConsole"
+           x-show="phase === 'unavailable'" x-cloak>Open software manager</a>
+        {% else %}
+        <a class="btn btn-sm alert-go" href="https://github.com/reubenfirmin/TuneConsole/releases/latest"
+           x-show="phase === 'unavailable'" target="_blank" rel="noopener" x-cloak>Get the latest release</a>
+        {% endif %}
+        <button type="button" class="btn btn-sm alert-go" @click="reconnect()"
+                x-show="phase === 'reconnect'" x-cloak>Reload tab</button>
+        {% elif backend_update.link %}
         <a class="btn btn-sm alert-go" href="{{ backend_update.link }}" target="_blank" rel="noopener">{{ backend_update.command }} →</a>
         {% else %}
         <code class="alert-cmd">{{ backend_update.command }}</code>
         {% endif %}
       </div>
+      {% if backend_update.kind in ('flatpak', 'macos') %}
+      <p class="update-status" role="status" aria-live="polite" x-text="message" x-show="message" x-cloak></p>
+      {% if backend_update.kind == 'flatpak' %}
+      <progress class="update-progress" max="100" :value="progress"
+                x-show="phase === 'installing'" aria-label="Update progress" x-cloak></progress>
+      {% endif %}
+      {% endif %}
     </div>
   </div>
   {% endif %}

@@ -1,11 +1,19 @@
 # PyInstaller spec — builds "YT Playlist.app", a self-contained bundle with Python + all deps.
 # Build with packaging/macos/build.sh (which installs the project + pyinstaller into a venv first).
 import importlib.metadata
+import base64
 import os
+import platform
 
 # Version comes from the git tag via hatch-vcs, baked into the installed package metadata — nothing to
 # bump here. Sanitize a dev version (0.1.3.dev3+g...) to plain X.Y.Z for the CFBundle keys.
 _VERSION = importlib.metadata.version("yt-playlist").split(".dev")[0].split("+")[0]
+_PUBLIC_KEY = os.environ["SPARKLE_PUBLIC_ED_KEY"].strip()
+if len(base64.b64decode(_PUBLIC_KEY, validate=True)) != 32:
+    raise ValueError("SPARKLE_PUBLIC_ED_KEY must contain a base64 Ed25519 public key")
+_ARCH = platform.machine()
+if _ARCH not in ("arm64", "x86_64"):
+    raise ValueError(f"Unsupported macOS architecture: {_ARCH}")
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
@@ -30,6 +38,7 @@ hiddenimports += [
 # extension endpoint). collect_submodules is a no-op if a package is absent, so this is safe.
 hiddenimports += collect_submodules("multipart")
 hiddenimports += collect_submodules("websockets")
+hiddenimports += ["objc", "AppKit", "Foundation"]  # Cocoa event loop + dynamically loaded Sparkle
 
 icon = "TuneConsole.icns" if os.path.exists("TuneConsole.icns") else None
 
@@ -68,5 +77,9 @@ app = BUNDLE(
         # the server has no window; keep it a normal app so it appears in the Dock and can be quit
         "LSBackgroundOnly": False,
         "LSMinimumSystemVersion": "11.0",
+        "SUFeedURL": f"https://github.com/reubenfirmin/TuneConsole/releases/latest/download/appcast-macos-{_ARCH}.xml",
+        "SUPublicEDKey": _PUBLIC_KEY,
+        "SUEnableAutomaticChecks": True,
+        "SUVerifyUpdateBeforeExtraction": True,
     },
 )

@@ -28,6 +28,10 @@ class SyncJobs:
     def get(self, job_id) -> "SyncJob | None":
         return self._jobs.get(job_id)
 
+    def has_active(self) -> bool:
+        with self._lock:
+            return any(not job.done for job in self._jobs.values())
+
     def find_active_library(self) -> "SyncJob | None":
         """The most recent still-running library sync, so the dashboard's live console can attach to
         whatever sync is in flight (the automatic background sync as well as a manual one)."""

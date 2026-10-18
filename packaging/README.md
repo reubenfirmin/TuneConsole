@@ -63,10 +63,28 @@ wheel (`uv build --wheel`) whenever the app code changes, before re-running `fla
 
 ---
 
+### Linux updates
+
+The Home update card offers **Update now**. Flatpak may show a desktop permission dialog on the
+first update; the card then shows download/install progress and **Restart to update**. Restart waits
+for sync, imports, and registered background jobs to finish, launches the installed version in a new
+sandbox, and reconnects the same browser tab. Updating doesn't change the app's sandbox permissions.
+
+If an update requires additional permissions, or self-updates are denied/unavailable, the card links
+to the desktop software manager. Updates installed independently by the software manager are also
+detected, so the running app can offer a restart. Published updates must be in the installed app's
+configured Flatpak repository; the GitHub release notice alone doesn't install an update.
+
+To stop a packaged Linux launch normally, close all TuneConsole tabs and wait a few seconds. A
+development launch (`uv run yt-playlist`) stays running until Ctrl-C in its terminal.
+
+---
+
 ## macOS — PyInstaller `.app` + `.dmg`
 
 ```sh
 cd packaging/macos
+export SPARKLE_PUBLIC_ED_KEY="<your Sparkle public key>"
 ./build.sh
 ```
 
@@ -81,8 +99,8 @@ The release workflow builds two independent packages:
 
 `TuneConsole-macos.dmg` remains an Apple Silicon alias for the website's stable download URL.
 
-### First launch (unsigned)
-TuneConsole is open source and the macOS bundle is intentionally unsigned. Gatekeeper therefore
+### First launch
+The macOS bundle is ad-hoc signed without an Apple Developer ID certificate. Gatekeeper therefore
 blocks an ordinary double-click the first time:
 
 1. Open the downloaded DMG and drag TuneConsole to Applications.
@@ -92,8 +110,9 @@ blocks an ordinary double-click the first time:
 If macOS does not offer Open there, attempt one normal launch, then use System Settings → Privacy &
 Security → **Open Anyway**. Do not disable Gatekeeper globally. Subsequent launches open normally.
 
-The server has no window of its own — it runs in the background and opens your browser. To stop it,
-right-click the Dock icon → **Quit** (or quit from Activity Monitor).
+The server opens your browser; a small Cocoa host provides **Check for Updates…** and **Quit
+TuneConsole** in the app menu. Dock → **Quit** also works. Quitting waits for active syncs, imports,
+and registered background jobs before shutting down the server.
 
 ### Custom icon (optional)
 `build.sh` calls `make-icns.sh`, which renders the SVG to `TuneConsole.icns` if `rsvg-convert`
@@ -111,6 +130,39 @@ live endpoint, confirms its database/log files, and verifies the DMG. CI runs it
 
 ### Updates
 
-There is no privileged installer or background updater. The app checks GitHub Releases once daily;
-when a newer version exists, download the matching DMG and replace TuneConsole in Applications.
-User data remains in Application Support and is not part of the app bundle.
+The Home card's **Update now** button opens Sparkle's native update window. Sparkle handles the
+download, Ed25519 signature verification, replacement, and **Install and Relaunch**. It also checks
+automatically (daily by default); users can change automatic-update preferences in its window.
+The app waits for active syncs/imports/jobs, shuts down its server, and reconnects the existing
+browser tab at the same address after relaunch. User data remains in Application Support.
+
+The bundle includes Sparkle 2.10.0, fetched from its upstream release with a pinned SHA-256. Its
+signed framework and helper tools are copied intact. The app remains ad-hoc signed rather than
+Developer ID signed/notarized, so the first-install Gatekeeper instructions above still apply.
+Install in Applications before updating; Sparkle handles read-only disk images and installation
+authorization through its native UI.
+
+Each architecture has its own feed (`appcast-macos-arm64.xml` / `appcast-macos-x86_64.xml`) attached
+to GitHub Releases, pointing to immutable DMG URLs on that tag. The release workflow uses Sparkle's
+`generate_appcast` to sign the DMG and generate the feed. The private key is passed on stdin and
+never bundled. A missing or invalid signing configuration fails the build instead of publishing
+unsigned updates.
+
+One-time release setup, on a Mac with the downloaded Sparkle tools:
+
+```sh
+# build.sh downloads .sparkle/ before checking the public-key setting.
+packaging/macos/.sparkle/bin/generate_keys
+packaging/macos/.sparkle/bin/generate_keys -p
+```
+
+Store the printed public key as the repository Actions variable `SPARKLE_PUBLIC_ED_KEY`, and export
+the same value for local builds. Back up the private key from Keychain using
+`generate_keys -x <secure-file>` and store that exported value as the Actions secret
+`SPARKLE_PRIVATE_ED_KEY`. Keep
+the key stable across releases. Do not commit private keys. These are separate from Apple Developer
+ID certificates and the Flatpak repository signing key.
+
+Existing macOS installs need one manual DMG replacement to acquire Sparkle. Test two successive
+tagged builds on a Mac before shipping broadly: update from Applications, cancel/retry a download,
+reject an invalid signature, wait for active work, and verify relaunch without a second tab.

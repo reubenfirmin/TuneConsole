@@ -35,6 +35,6 @@ $GEN --runtime="org.freedesktop.Sdk//$RUNTIME_VERSION" \
   --output python3-requirements \
   --prefer-wheels=numpy,pydantic-core,rapidfuzz,watchfiles,uvloop,httptools,markupsafe,pyyaml \
   "ytmusicapi>=1.12,<2" "fastapi>=0.110" "uvicorn[standard]>=0.29" "jinja2>=3.1" \
-  "python-multipart>=0.0.9" "rapidfuzz>=3.6" "numpy>=1.26"
+  "python-multipart>=0.0.9" "rapidfuzz>=3.6" "numpy>=1.26" "dbus-next>=0.2.3,<0.3"
 
 echo "Wrote $(pwd)/python3-requirements.json"

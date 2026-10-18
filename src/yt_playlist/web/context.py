@@ -54,6 +54,7 @@ class Ctx:
     bridge: object | None = None       # shared Bridge instance the WS route and runtime read from
     radio: object | None = None        # #93 in-process RadioSession (dynamic radio), set in create_app
     playlist_dates: object | None = None  # optional read-only YouTube Data API connection
+    updater: object | None = None         # platform updater (Flatpak portal / macOS Sparkle)
     # Guards library sync so the background sync daemon and a manual POST /sync never run at once.
     sync_lock: object = field(default_factory=threading.Lock)
     # A Spotify Account Data import may spend hours resolving tracks through the extension. This

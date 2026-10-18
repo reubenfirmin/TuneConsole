@@ -48,8 +48,8 @@
              x-show="connected && sensorHealth && !sensorHealth.healthy && sensorHealth.ytm_tabs > 0"
              x-cloak>
       <span class="banner-body">
-        <span x-show="sensorHealth.recovering">Reloading the YouTube Music tab to reconnect it…</span>
-        <span x-show="!sensorHealth.recovering">YouTube Music did not reconnect automatically. Reload the tab to try again.</span>
+        <span x-show="sensorHealth && sensorHealth.recovering">Reloading the YouTube Music tab to reconnect it…</span>
+        <span x-show="sensorHealth && !sensorHealth.recovering">YouTube Music did not reconnect automatically. Reload the tab to try again.</span>
       </span>
     </section>
 
