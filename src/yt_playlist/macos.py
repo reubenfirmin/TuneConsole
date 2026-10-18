@@ -68,6 +68,8 @@ def run(argv):
             controller = native["controller"]
             return bool(controller and controller.updater().canCheckForUpdates())
 
+        # NSApplicationTerminateReply is NSUInteger on both supported 64-bit Macs.
+        @objc.typedSelector(b"Q@:@")
         def applicationShouldTerminate_(self, sender):
             if native["finished"]:
                 return NSTerminateNow
