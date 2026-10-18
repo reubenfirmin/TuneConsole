@@ -46,6 +46,7 @@ jobs:
           ./build.sh
 
       - name: Smoke-test frozen app and DMG
+        timeout-minutes: 2
         run: packaging/macos/smoke.sh
 
       - name: Stage architecture-specific release asset
