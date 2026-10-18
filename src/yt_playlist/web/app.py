@@ -5,6 +5,7 @@ import re
 import signal
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -52,6 +53,8 @@ def _install_idle_shutdown(app, templates):
             time.sleep(1.0)
             now = time.monotonic()
             ctx = getattr(app.state, "ctx", None)
+            if ctx is not None and ctx.updater is not None and ctx.updater.busy:
+                continue                       # don't cancel an update when the UI tab closes
             # A Spotify library import is explicitly background work. Keep the packaged process
             # alive even if the TuneConsole UI tab is closed; the extension's YouTube Music tab can
             # continue servicing lookups, and normal idle shutdown resumes as soon as it finishes.
@@ -142,7 +145,8 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
                 sync_mod.sync_all(ctx.store, clients, ctx.now_fn(),
                                   on_progress=job.events.append,
                                   on_auth_expired=ctx.flag_auth_expired,
-                                  on_auth_ok=ctx.clear_auth_expired)
+                                  on_auth_ok=ctx.clear_auth_expired,
+                                  playlist_dates=ctx.playlist_dates)
             finally:
                 job.done = True
                 ctx.sync_lock.release()
@@ -156,7 +160,7 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
 
 def create_app(store, client_provider, *, now_fn=time.time,
                allowed_hosts=("localhost", "127.0.0.1"), setup=None,
-               bridge=None) -> FastAPI:
+               bridge=None, playlist_dates=None, updater=None) -> FastAPI:
     # setup: optional Runtime-like collaborator (.configured, .credentials_present, .apply_setup).
     # When None, the app is treated as already configured and the /setup wizard is inert. This
     # keeps the existing two-arg call sites (and their tests) working unchanged.
@@ -168,7 +172,15 @@ def create_app(store, client_provider, *, now_fn=time.time,
     web_dir = Path(__file__).parent
     static_dir = web_dir / "static"
     templates = Jinja2Templates(directory=str(web_dir / "templates"))
-    app = FastAPI()
+    @asynccontextmanager
+    async def lifespan(app):
+        try:
+            yield
+        finally:
+            if app.state.ctx.updater is not None:
+                await app.state.ctx.updater.close()
+
+    app = FastAPI(lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     allowed = set(allowed_hosts)
     # Cache-bust the front-end by a CONTENT hash across ALL top-level static JS/CSS so browsers always
@@ -214,6 +226,11 @@ def create_app(store, client_provider, *, now_fn=time.time,
             origin = request.headers.get("origin") or request.headers.get("referer")
             if origin and urlsplit(origin).hostname not in allowed:
                 return PlainTextResponse("cross-origin request blocked", status_code=403)
+            ctx = getattr(app.state, "ctx", None)
+            if (ctx is not None and ctx.updater is not None
+                    and ctx.updater.phase == "restarting"
+                    and request.url.path not in ("/app-update/restart", "/heartbeat", "/goodbye")):
+                return PlainTextResponse("TuneConsole is restarting. Please wait.", status_code=503)
         return await call_next(request)
 
     from yt_playlist.providers import genres as genre_lib
@@ -221,7 +238,11 @@ def create_app(store, client_provider, *, now_fn=time.time,
 
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
               templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge,
-              radio=RadioSession())
+              radio=RadioSession(), playlist_dates=playlist_dates)
+    if updater is None and updatecheck.install_kind() == "flatpak":
+        from yt_playlist.core.flatpak_update import FlatpakUpdater
+        updater = FlatpakUpdater()
+    ctx.updater = updater
     app.include_router(build_bridge_route(ctx))
     from yt_playlist.rec.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx)                            # decoupled rec computation

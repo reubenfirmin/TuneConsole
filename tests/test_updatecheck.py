@@ -68,10 +68,8 @@ def test_is_dev_install_from_editable_metadata(monkeypatch):
 
 def test_update_instruction_per_kind():
     assert uc.update_instruction("flatpak") == (
-        "flatpak update --user com.tuneconsole.TuneConsole", None)
-    label, link = uc.update_instruction("macos")
-    assert label == "Get the latest release"
-    assert link == "https://github.com/reubenfirmin/TuneConsole/releases/latest"
+        "Update now", None)
+    assert uc.update_instruction("macos") == ("Update now", None)
     assert uc.update_instruction("release") == (
         "Get the latest release", "https://github.com/reubenfirmin/TuneConsole/releases/latest")
 

@@ -6,6 +6,7 @@
      · ✕ on a row         -> /road_trip/draft/{id}/slot/{i}, refilled from the same side
    Only "Save to YouTube" leaves the machine. Bars reuse the Home taste-bar styles (.fp-*), but not
    its semantics: there a bar is a 0-2 steering weight, here it is the actual proportion. #}
+{% from "_partials/song_menu_button.html" import song_menu %}
 {% set s = draft.state %}
 {% set rid = draft.recipe_id %}
 {% set stats = s.stats %}
@@ -115,11 +116,14 @@
       <span class="rt-c-genre" title="{{ t.genre }}">{{ t.genre }}</span>
       <span class="rt-c-year">{{ t.year or '' }}</span>
       <span class="rt-c-src is-{{ mix_source }}"{% if mix_source == 'blend' %} title="Music that fits both tastes"{% endif %}>{{ mix_source | capitalize }}</span>
+      <span class="song-inline-actions rt-track-actions">
+      {{ song_menu(t) }}
       {% if not s.building %}
       <button type="button" class="rt-x" title="Swap this song"
               aria-label="Swap this song" hx-post="/road_trip/draft/{{ rid }}/slot/{{ loop.index0 }}"
               hx-target="#road-trip-body" hx-swap="innerHTML">↻</button>
-      {% else %}<span class="rt-x-placeholder"></span>{% endif %}
+      {% endif %}
+      </span>
     </li>
     {% endfor %}
   </ol>

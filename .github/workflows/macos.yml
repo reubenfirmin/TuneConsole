@@ -29,6 +29,8 @@ jobs:
           - runner: macos-15-intel
             arch: x86_64
     runs-on: ${{ matrix.runner }}
+    env:
+      SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }          # hatch-vcs needs the tag for the version
@@ -53,14 +55,37 @@ jobs:
             cp "TuneConsole-macos-${{ matrix.arch }}.dmg" TuneConsole-macos.dmg
           fi
 
+      - name: Sign the update and generate its architecture-specific feed
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          test -n "$SPARKLE_PRIVATE_ED_KEY"
+          mkdir -p packaging/macos/dist/update-feed
+          cp "TuneConsole-macos-${{ matrix.arch }}.dmg" packaging/macos/dist/update-feed/
+          printf '%s\n' "$SPARKLE_PRIVATE_ED_KEY" | packaging/macos/.sparkle/bin/generate_appcast \
+            --ed-key-file - --maximum-versions 1 --maximum-deltas 0 \
+            --download-url-prefix "https://github.com/reubenfirmin/TuneConsole/releases/download/$GITHUB_REF_NAME/" \
+            --link https://tuneconsole.com \
+            -o "appcast-macos-${{ matrix.arch }}.xml" packaging/macos/dist/update-feed
+          SIGNATURE=$(python packaging/macos/verify_appcast.py \
+            "appcast-macos-${{ matrix.arch }}.xml" "TuneConsole-macos-${{ matrix.arch }}.dmg" \
+            "$GITHUB_REF_NAME" "${{ matrix.arch }}")
+          printf '%s\n' "$SPARKLE_PRIVATE_ED_KEY" | packaging/macos/.sparkle/bin/sign_update \
+            --ed-key-file - --verify "TuneConsole-macos-${{ matrix.arch }}.dmg" "$SIGNATURE"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: TuneConsole-macos-${{ matrix.arch }}-dmg
-          path: TuneConsole-macos*.dmg
+          path: |
+            TuneConsole-macos*.dmg
+            appcast-macos-*.xml
 
       - name: Attach to the release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: TuneConsole-macos*.dmg
+          files: |
+            TuneConsole-macos*.dmg
+            appcast-macos-*.xml

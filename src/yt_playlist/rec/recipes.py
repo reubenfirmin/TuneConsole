@@ -35,9 +35,9 @@ _COVERAGE = 0.4          # skip a clause unless this much of the card carries th
 _THEME_MIN_SHARE = 0.02
 
 
-def _top_shares(counts, floor, limit=2):
+def _top_shares(counts, floor, limit=2, total=None):
     """The (name, share) pairs worth naming: biggest first, each at least `floor` of the whole."""
-    total = sum(counts.values())
+    total = total if total is not None else sum(counts.values())
     if not total:
         return []
     ranked = [(name, n / total) for name, n in counts.most_common() if name]
@@ -48,21 +48,9 @@ def _join(names):
     return names[0] if len(names) == 1 else " and ".join(names)
 
 
-def theme_sentence(store, model, items) -> str:
-    """One sentence describing what is actually IN this card: "Songs you own but hardly ever play,
-    indie rock and post-rock from the 2010s and 2020s."
-
-    Every card of a lane used to carry the same fixed line ("Deeper into what you already love"),
-    but a lane is only half of what a card is - each one also rolls a theme (roll_recipe), so two
-    "More in your wheelhouse" cards can be different music entirely and read identically. This
-    describes the tracks that are there rather than the intent that shaped them, so it stays true
-    when the theme couldn't be filled or the user prunes rows.
-
-    Clauses are dropped rather than guessed at: an untagged library says nothing about genre, and a
-    card spread evenly across five decades has no era worth naming."""
-    lead = _LANE_LEAD.get(model, _DEFAULT_LEAD)
-    if not items:
-        return lead + "."
+def theme_counts(store, items):
+    """Genre and decade counts behind the displayed description and the Home offer audit.
+    Keep their metadata fallbacks identical so the audit explains what the user saw."""
     keys = [_field(it, "key") or "" for it in items]
     genres = Counter()
     by_artist = None
@@ -87,23 +75,35 @@ def theme_sentence(store, model, items) -> str:
         d = (str(int(own) // 10 * 10) if own else None) or from_library.get(_field(it, "key") or "")
         if d:
             decades[d] += 1
-    # Shares are of the tracks that CARRY the data; coverage decides whether that is worth speaking
-    # for. Three tagged tracks out of fourteen are not "mostly trance", they are three tagged tracks.
+    return genres, decades
+
+
+def theme_sentence(store, model, items) -> str:
+    """Describe the actual card's framing, genres and eras, rather than its intended recipe.
+    Clauses are dropped when too few tracks carry metadata or no genre/decade dominates."""
+    lead = _LANE_LEAD.get(model, _DEFAULT_LEAD)
+    if not items:
+        return lead + "."
+    genres, decades = theme_counts(store, items)
+    # Shares describe the whole card, including unknown tags. Sparse metadata cannot justify
+    # "mostly trance", and two 2010s songs among six decades cannot describe the card's era.
     covered = lambda counts: sum(counts.values()) >= _COVERAGE * len(items)   # noqa: E731
 
     parts = [lead]
-    named = _top_shares(genres, _GENRE_FLOOR) if covered(genres) else []
+    named = _top_shares(genres, _GENRE_FLOOR, total=len(items)) if covered(genres) else []
     if named:
         # One genre carrying most of the card is "mostly X" even when a second scrapes the floor:
         # naming both would imply a balance ("trance and ambient" for three trance and one ambient).
         if named[0][1] >= _MOSTLY:
             parts.append(f"mostly {named[0][0]}")
         else:
-            parts.append(_join([n for n, _ in named]))
-    eras = _top_shares(decades, _ERA_FLOOR) if covered(decades) else []
-    if eras:
+            qualifier = "with " if sum(share for _, share in named) < 1 else ""
+            parts.append(qualifier + _join([n for n, _ in named]))
+    eras = _top_shares(decades, _ERA_FLOOR, total=len(items)) if covered(decades) else []
+    era_share = sum(share for _, share in eras)
+    if era_share >= _MOSTLY:
         tail = _join([f"{d}s" for d, _ in sorted(eras, key=lambda e: e[0])])
-        parts.append(f"from the {tail}")
+        parts.append(f"{'mostly ' if era_share < 1 else ''}from the {tail}")
     return (", ".join(parts[:2]) + (" " + parts[2] if len(parts) > 2 else "")) + "."
 
 

@@ -53,11 +53,27 @@ def parse_args(argv=None):
     parser.add_argument("--exit-on-idle", action="store_true", dest="exit_on_idle",
                         help="shut down when the UI tab closes (used by the packaged launchers, "
                              "which have no terminal to Ctrl-C or window to quit)")
+    parser.add_argument("--wait-for-port", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
-def build_app():
+
+def _wait_for_port(host, port, *, timeout=30):
+    """Restart handoff: wait for the old listener to close before constructing the new app."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                pass
+        except ConnectionRefusedError:
+            return
+        except OSError as exc:
+            raise SystemExit(f"Cannot check restart address {host}:{port}: {exc}") from exc
+        time.sleep(0.2)
+    raise SystemExit("The previous TuneConsole process did not stop; restart cancelled.")
+
+def build_app(*, updater=None):
     """Construct the ASGI app from on-disk config. Importable so uvicorn --reload can re-import it."""
-    # NB: both uvicorn.run() calls below pass log_config=None. Uvicorn's default logging config
+    # Both server paths below pass log_config=None. Uvicorn's default logging config
     # sets propagate=False on the `uvicorn` and `uvicorn.access` loggers, which strands their
     # records (including the traceback for any request that 500s) on uvicorn's own stderr
     # handler, which is /dev/null in the packaged builds. Declining that config lets them reach
@@ -67,6 +83,12 @@ def build_app():
     # do not drown the log. The endpoint still works, it just is not logged.
     class _QuietPolls(logging.Filter):
         def filter(self, record):
+            # OAuth authorization codes belong only in the exchange, never access logs.
+            if record.args and len(record.args) == 5:
+                args = list(record.args)
+                if str(args[2]).startswith("/setup/playlist-dates/callback"):
+                    args[2] = "/setup/playlist-dates/callback"
+                    record.args = tuple(args)
             return "/bridge/status" not in record.getMessage()
     logging.getLogger("uvicorn.access").addFilter(_QuietPolls())
     # Install the egress guard before anything can make a network call: from here on every
@@ -84,7 +106,9 @@ def build_app():
     # provider, so both sides talk to the same in-process connection.
     bridge = Bridge()
     runtime.bridge = bridge
-    return create_app(store, runtime.clients, now_fn=time.time, setup=runtime, bridge=bridge)
+    from yt_playlist.providers.playlist_dates import PlaylistDates
+    return create_app(store, runtime.clients, now_fn=time.time, setup=runtime, bridge=bridge,
+                      playlist_dates=PlaylistDates(config_path.parent), updater=updater)
 
 def _print_bridge_banner(host, port):
     """Print the bridge address at startup. The extension authenticates by its origin and connects
@@ -131,7 +155,7 @@ def _cancel_pending_shutdown(host, port):
         pass
 
 
-def main(argv=None):
+def main(argv=None, *, updater=None, server_callback=None):
     # Before anything that can fail: _already_running() and _cancel_pending_shutdown() both do
     # I/O, and the packaged builds have no console to raise on.
     logsetup.configure()
@@ -139,6 +163,8 @@ def main(argv=None):
     if args.exit_on_idle:
         os.environ["YT_PLAYLIST_EXIT_ON_IDLE"] = "1"
     target = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
+    if args.wait_for_port:
+        _wait_for_port(target, args.port)
     # Relaunched from the app menu while already running? Don't crash with EADDRINUSE — just open the
     # existing instance's tab and exit.
     if args.open_browser and _already_running(target, args.port):
@@ -159,11 +185,14 @@ def main(argv=None):
                     reload_dirs=[src_dir], host=args.host, port=args.port,
                     timeout_graceful_shutdown=2, log_config=None)
     else:
-        app = build_app()
+        app = build_app(updater=updater)
         _print_bridge_banner(args.host, args.port)
         # bound graceful shutdown so a Ctrl-C lands promptly even with an open sync SSE stream
-        uvicorn.run(app, host=args.host, port=args.port, timeout_graceful_shutdown=2,
-                    log_config=None)
+        server = uvicorn.Server(uvicorn.Config(
+            app, host=args.host, port=args.port, timeout_graceful_shutdown=2, log_config=None))
+        if server_callback is not None:
+            server_callback(server)
+        server.run()
 
 if __name__ == "__main__":
     main()

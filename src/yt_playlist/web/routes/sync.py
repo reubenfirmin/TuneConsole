@@ -31,7 +31,8 @@ def build(ctx) -> APIRouter:
                 with ctx.sync_lock:               # never overlap the background sync daemon
                     sync_mod.sync_all(store, clients, now_fn(), on_progress=job.events.append,
                                       on_auth_expired=ctx.flag_auth_expired,
-                                      on_auth_ok=ctx.clear_auth_expired)
+                                      on_auth_ok=ctx.clear_auth_expired,
+                                      playlist_dates=ctx.playlist_dates)
             except Exception as e:  # noqa: BLE001 - report any failure to the stream
                 detail = str(e) or type(e).__name__
                 job.error = detail

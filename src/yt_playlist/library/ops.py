@@ -14,7 +14,7 @@ from yt_playlist.library import analysis
 from yt_playlist.library import sync as sync_mod
 from yt_playlist.library.executor import (
     MergePlan, add_tracks_to_playlist, apply_result, copy_into_playlist, copy_or_move_playlist,
-    copy_playlist, create_playlist_from_album, delete_empty_playlist, delete_playlist,
+    copy_playlist, create_playlist_from_album, create_playlist_from_song, delete_empty_playlist, delete_playlist,
     deserialize_plan, execute_planned, remove_track, rename_playlist,
     reorder_track, search_versions, store_plan, undo_action)
 from yt_playlist.library.liked_music import LikedMusic
@@ -103,6 +103,26 @@ class PlaylistOps:
         if client is None:
             raise ValueError("the master account isn't connected")
         return create_playlist_from_album(self.store, browse_id, name, client, self.now_fn(), identity.id)
+
+    # --- shared song actions ------------------------------------------------
+    def create_playlist_from_song(self, name, track) -> dict:
+        identity = self.store.get_master_identity()
+        client = self._clients().get(identity.id)
+        if client is None:
+            raise ValueError("Your main account isn't connected.")
+        return create_playlist_from_song(self.store, name, track, client, self.now_fn(), identity.id)
+
+    def add_song_to_playlist(self, playlist_id, track) -> dict:
+        pl = self.store.get_playlist(playlist_id)
+        if pl is None:
+            raise ValueError("That playlist no longer exists.")
+        if pl.ytm_playlist_id in analysis.SYSTEM_PLAYLIST_IDS:
+            raise ValueError("Choose a regular playlist.")
+        if playlist_id in self.store.playlist_ids_for_video(track["videoId"]):
+            return {"added": 0, "already_present": True}
+        if self._client_for(pl) is None:
+            raise ValueError("That playlist's account isn't connected.")
+        return self.add_tracks(playlist_id, [track])
 
     # --- alternate versions -------------------------------------------------
     def find_alternates(self, playlist_id, video_id) -> list:

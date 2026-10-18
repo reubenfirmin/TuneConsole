@@ -25,3 +25,7 @@ packaging/flatpak/bundle-repo/
 packaging/flatpak/rbuild/
 packaging/flatpak/build-dir/
 packaging/flatpak/.flatpak-builder/
+
+# macOS packaging dependencies and cached Sparkle distribution (never signing keys).
+packaging/macos/.build-venv/
+packaging/macos/.sparkle/

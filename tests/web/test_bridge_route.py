@@ -280,6 +280,41 @@ def test_play_frame_carries_true_paused_state():
         assert bridge.now_playing["paused"] is True
 
 
+def test_repeated_paused_play_frames_only_refresh_presence(monkeypatch, caplog):
+    from yt_playlist.core.store import Store
+    from yt_playlist.rec import radio as radio_mod
+    from yt_playlist.rec.radio import RadioSession
+
+    store = Store(":memory:"); store.init_schema()
+    store.upsert_identity("main", "bridge", None, True)
+    bridge = Bridge()
+    radio = RadioSession()
+    with radio.lock:
+        radio.active = True
+        radio.waiting = True
+    on_play_calls = []
+    monkeypatch.setattr(radio_mod, "on_play", lambda *a, **k: on_play_calls.append(1))
+    app = FastAPI()
+    ctx = type("C", (), {"bridge": bridge, "store": store, "radio": radio})()
+    app.include_router(build_bridge_route(ctx))
+    with TestClient(app).websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        for _ in range(2):
+            previous_seen_at = bridge.now_playing_seen_at
+            ws.send_json({"type": "play", "deck": "live", "title": "Song", "artist": "Artist",
+                          "thumbnail": "", "likeStatus": "INDIFFERENT", "videoId": "v1",
+                          "playlist": "PLabc", "paused": True})
+            deadline = time.time() + 5
+            while time.time() < deadline and bridge.now_playing_seen_at == previous_seen_at:
+                time.sleep(0.01)
+            assert bridge.now_playing_seen_at != previous_seen_at
+            assert bridge.now_playing["video_id"] == "v1"
+            assert bridge.now_playing["paused"] is True
+            assert radio.waiting is True
+            assert store.play_events_since(0) == []
+            assert on_play_calls == []
+        assert "Received play notification" not in caplog.text
+
+
 def test_now_playing_toggle_sends_playpause_control_frame():
     # Mirrors the /now-playing/rate route: POST and WS must share the same app/bridge instance.
     bridge = Bridge()

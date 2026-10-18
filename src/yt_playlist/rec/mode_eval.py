@@ -2,16 +2,16 @@
 
 Aggregates the non-circular signal: how often each mode was offered (impressions), how often it was
 picked (Save & play), and how much its picked playlists were then listened to (existing listen stats).
-Pick and impression counts drive dominant-mode selection via Thompson sampling (#87); mode_scoreboard
+Pick and impression counts drive theme selection across the row via Thompson sampling; mode_scoreboard
 also provides display aggregation. Reads only; writes nothing."""
 
 
-def mode_bandit_stats(store) -> dict:
-    """#87 {mode_id: (picks, impressions)} over all time: the Thompson sampler's evidence. Reads
-    the SAME rows as mode_scoreboard; this is the moment those counts stop being display-only."""
-    offered = store.modes.impression_counts()
+def mode_bandit_stats(store, *, before=None) -> dict:
+    """{mode_id: (picks, impressions)}, pooled across framings. `before` freezes the evidence at
+    a menu's first display so its own impressions/picks only influence the next rotation."""
+    offered = store.modes.impression_counts(before=before)
     picked = {}
-    for _playlist_id, mode_id in store.modes.pick_rows():
+    for _playlist_id, mode_id in store.modes.pick_rows(before=before):
         picked[mode_id] = picked.get(mode_id, 0) + 1
     return {mid: (picked.get(mid, 0), n) for mid, n in offered.items()}
 

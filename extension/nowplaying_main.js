@@ -92,7 +92,7 @@
         // restart (or any resync) reflects reality instead of assuming "playing".
         window.postMessage({ __tcNow: { title: md.title, artist: md.artist || "", thumbnail: art || "",
                                         videoId: info.videoId, playlist: info.playlist, brandId: brand(),
-                                        paused: !!(v && v.paused) } }, "*");
+                                        paused: !v || v.paused } }, "*");
       }
     } catch (e) {}
   }, 2000);

@@ -22,6 +22,25 @@ def test_allowlist_membership():
     assert not host_allowed("")
 
 
+def test_playlist_metadata_allowlist_is_limited_to_exact_https_endpoints(tmp_path):
+    g = EgressGuard(log_path=tmp_path / "net.log")
+    for method, url in (("POST", "https://oauth2.googleapis.com/token"),
+                        ("GET", "https://www.googleapis.com/youtube/v3/playlists?part=snippet"),
+                        ("GET", "https://www.googleapis.com/youtube/v3/channels")):
+        g.gate(url, method=method, via="requests")
+    for method, url in (("POST", "https://www.googleapis.com/youtube/v3/playlists"),
+                        ("GET", "https://www.googleapis.com/drive/v3/files"),
+                        ("GET", "https://gmail.googleapis.com/gmail/v1/users/me"),
+                        ("GET", "https://www.googleapis.com/youtube/v3/videos"),
+                        ("GET", "http://www.googleapis.com/youtube/v3/playlists"),
+                        ("GET", "https://www.googleapis.com:444/youtube/v3/playlists"),
+                        ("POST", "https://oauth2.googleapis.com/revoke")):
+        with pytest.raises(BlockedHost):
+            g.gate(url, method=method, via="requests")
+    assert not host_allowed("googleapis.com")
+    assert not host_allowed("www.googleapis.com")
+
+
 def test_cover_art_hosts_are_allowed():
     """Cover art enrichment reaches Cover Art Archive, which redirects its JSON to archive.org's
     CDN, so BOTH are needed: allowing only coverartarchive.org blocks the redirect and the fallback

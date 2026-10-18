@@ -1,10 +1,12 @@
 {# A dated, saveable proto-playlist built from a For-You lane. Rows can be pruned via feedback;
    "Save & play" posts the surviving rows to /home/generate, which creates the real YouTube
    playlist (auto-grouped "Generated") and swaps this card for the saved-state confirmation. #}
+{% from "_partials/song_menu_button.html" import song_menu %}
 <section class="gen-card card" id="gen-{{ p.lane }}"
          :class="{ 'is-focused': focus === {{ p.lane|tojson|forceescape }}, 'is-muted': focus && focus !== {{ p.lane|tojson|forceescape }} }"
          >
   <div class="gen-card-body{% if regenerating %} is-arriving{% endif %}" id="gen-body-{{ p.lane }}"
+       data-genres='{{ p.genres|default([])|tojson }}'
        data-name="{{ p.name }}"{% if p.recipe %} data-recipe='{{ p.recipe|tojson }}'{% endif %}>
   <div class="gen-poster gen-poster--{{ p.tracks[:4]|length }}" role="button" tabindex="0" aria-label="Explore {{ p.note or p.label }}"
        @click="focus = {{ p.lane|tojson|forceescape }}; genReveal('gen-{{ p.lane }}')"
@@ -19,7 +21,7 @@
   </div>
   <header class="gen-head" @click="focus = {{ p.lane|tojson|forceescape }}; genReveal('gen-{{ p.lane }}')">
     <button type="button" class="gen-back" x-show="focus === {{ p.lane|tojson|forceescape }}" x-cloak
-            @click.stop="focus = null" title="Back to all mixes" aria-label="Back to all four mixes"><span aria-hidden="true">←</span> All mixes</button>
+            @click.stop="focus = null" title="Back to all mixes" aria-label="Back to all mixes"><span aria-hidden="true">←</span> All mixes</button>
     {% if p.tracks %}
     <button type="button" class="gen-play" x-show="focus === {{ p.lane|tojson|forceescape }}" x-cloak
             title="Play this mix" aria-label="Save and play this mix" @click.stop
@@ -68,6 +70,8 @@
         <span class="gen-artist">{{ f.artist }}</span>
       </span>
       {% if f.reason %}<span class="gen-reason-badge">{{ f.reason }}</span>{% endif %}
+      <span class="song-inline-actions gen-track-actions">
+      {{ song_menu(f) }}
       {% if p.feedback_surface and f.key %}
       {# Fresh (out-of-corpus) card: the one ✕ both removes the row AND records a persistent "not
          interested" dismiss, so curating the proposal also teaches the model. #}
@@ -78,6 +82,7 @@
       <button type="button" class="gen-rm" title="Remove from this playlist" aria-label="Remove from this playlist"
               onclick="this.closest('.gen-row').remove()">✕</button>
       {% endif %}
+      </span>
     </li>
     {% endfor %}
   </ol>

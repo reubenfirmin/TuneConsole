@@ -19,6 +19,8 @@ class Playlist:
     track_count: int; content_hash: str
     first_seen: float; last_seen: float; last_changed: float
     thumbnail: str | None = None
+    created_at: float | None = None
+    created_at_source: str | None = None
 
 
 @dataclass

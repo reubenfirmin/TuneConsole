@@ -284,6 +284,7 @@ def import_spotify_library(store, raw, client, identity_id, now) -> dict:
         local_id = store.upsert_playlist(identity_id, new_id, playlist["name"], len(track_ids),
                                          content_hash(keys), now)
         store.set_playlist_tracks(local_id, track_ids)
+        store.ensure_playlist_thumbnail(local_id)
         playlist_state.add(fingerprint)
         existing_playlists.add(source_signature)
         existing_playlist_titles.add(source_signature[0])

@@ -98,20 +98,25 @@ def build(ctx) -> APIRouter:
         labels = {i.id: i.label for i in store.get_identities()}
         groups = store.get_playlist_groups()                 # ytm -> group name
         stats = store.get_playlist_listen_stats()            # pid -> (last_ts, count)
+        thumbnails = store.get_playlist_thumbnails()         # cover or first song artwork
         hidden = store.get_hidden_playlists()                # ytm of playlists hidden from this tab
-        created = store.get_recipe_created_ats()             # ytm -> created_at (generated playlists)
+        now = now_fn()
+        cutoff = now - 7 * 86400
         rows = []
         for p in store.get_playlists():
             if p.ytm_playlist_id in hidden:
                 continue
             last, listens = stats.get(p.id, (None, 0))
+            group = groups.get(p.ytm_playlist_id, "")
             rows.append({
                 "id": p.id, "ytm": p.ytm_playlist_id, "title": p.title,
-                "identity": labels.get(p.identity_id, "?"), "thumbnail": p.thumbnail,
+                "identity": labels.get(p.identity_id, "?"), "thumbnail": thumbnails.get(p.id),
                 "count": p.track_count, "kind": store.playlist_kind(p.id),
-                "group": groups.get(p.ytm_playlist_id, ""),
+                "group": group,
                 "last": last, "listens": listens,
-                "created": created.get(p.ytm_playlist_id),   # for newest-first Generated ordering
+                "created": p.created_at,
+                "is_new": (group != GENERATED_GROUP and p.ytm_playlist_id not in SYSTEM_PLAYLIST_IDS
+                           and p.created_at is not None and cutoff <= p.created_at <= now),
             })
         group_names = sorted({g for g in groups.values() if g}, key=str.lower)
         # Generated playlists are pinned in their own card, so they do not make the

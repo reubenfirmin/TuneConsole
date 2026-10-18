@@ -25,6 +25,25 @@ def test_serialize_deserialize_roundtrip(store):
     assert pe.plan.additions[1].target_video_id == "found"
 
 
+@pytest.mark.parametrize("move", [False, True])
+def test_copy_and_move_record_creation_date_and_undo_removes_new_row(store, tmp_path, monkeypatch, move):
+    from yt_playlist.library.executor import copy_or_move_playlist
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    source = store.upsert_identity("source", "bridge", None, True)
+    target = store.upsert_identity("target", "bridge", None, False)
+    pid = store.upsert_playlist(source, "PLoriginal", "Original", 0, "", 1, created_at=1)
+    source_client, target_client = FakeClient(), FakeClient()
+    copy_or_move_playlist(store, pid, target, source_client, target_client, 100, delete_source=move)
+    created = next(p for p in store.get_playlists() if p.identity_id == target)
+    assert created.created_at == 100
+    action = store.get_actions()[0]
+    undo_action(store, action.id, {source: source_client, target: target_client}, 200)
+    assert not any(p.identity_id == target for p in store.get_playlists())
+    remaining = store.get_playlists()
+    assert len(remaining) == 1
+    assert remaining[0].created_at == (200 if move else 1)
+
+
 def test_backup_filename_sanitizes_remote_playlist_id(store, monkeypatch, tmp_path):
     # ytm_playlist_id comes from the YouTube API; a "../" must not escape backups dir.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))

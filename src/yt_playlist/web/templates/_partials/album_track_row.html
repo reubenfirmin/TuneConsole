@@ -2,6 +2,7 @@
    sortable data-* attrs, ⋯ menu) so the two views render alike. class 'srow' + data-vid lets the
    enrich SSE applyRow replace it, identical to the playlist flow. Needs: t, idx.
    (No reorder/remove/alternates/mood: those are playlist-only.) #}
+{% from "_partials/song_menu_button.html" import song_menu %}
 <tr class="srow" data-vid="{{ t.video_id }}" data-title="{{ t.title|lower }}" data-artist="{{ t.artist|lower }}"
     data-plays="{{ t.plays }}" data-len="{{ t.duration or 0 }}" data-year="{{ t.year or 0 }}"
     data-genre="{{ t.genre|lower }}">
@@ -43,12 +44,6 @@
   <td class="num mono">{{ t.plays or '' }}</td>
   <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
   <td class="rowmenu">
-    <button type="button" class="dots" title="More actions"
-            @click="openMenu = (openMenu === '{{ t.video_id }}' ? null : '{{ t.video_id }}')">⋯</button>
-    <div class="rowmenu-pop" x-show="openMenu === '{{ t.video_id }}'" x-cloak x-transition.opacity
-         @click.away="openMenu = null">
-      <button type="button" data-vid="{{ t.video_id }}"
-              @click="songsLike($event.currentTarget.dataset.vid)">Songs like this</button>
-    </div>
+    {{ song_menu(t) }}
   </td>
 </tr>

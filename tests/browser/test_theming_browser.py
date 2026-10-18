@@ -5,8 +5,38 @@ inside an SVG style attribute, and whether the canvas bridge in static/theme.js 
 canvas can paint with. A token that resolves to nothing fails silently in production — the element
 just inherits — so these assert on concrete computed values rather than on "not empty"."""
 import pytest
+from playwright.sync_api import expect
 
 pytestmark = pytest.mark.browser
+
+
+def test_focus_is_quiet_and_text_fields_have_a_single_indicator(page, live_app):
+    page.goto(f"{live_app}/playlists")
+    heading = page.get_by_role("button", name="Playlist", exact=False).first
+    page.keyboard.press("Tab")
+    heading.focus()
+    style = heading.evaluate("""el => {
+      const s = getComputedStyle(el);
+      return {color: s.outlineColor, width: s.outlineWidth, visible: el.matches(':focus-visible')};
+    }""")
+    assert style == {"color": "rgb(57, 135, 229)", "width": "1px", "visible": True}
+    heading.click()
+    # Moving focus with the pointer doesn't leave a keyboard frame behind.
+    page.locator("h1").click()
+    heading.click()
+    assert not heading.evaluate("el => el.matches(':focus-visible')")
+
+    field = page.locator(".omni-input")
+    field.fill("funk and soul")
+    expect(field).to_be_focused()
+    expect(field).to_have_css("border-color", "rgb(57, 135, 229)")
+    expect(field).to_have_css("outline-style", "none")
+    style = field.evaluate("""el => {
+      const s = getComputedStyle(el);
+      return {border: s.borderColor, outline: s.outlineStyle, shadow: s.boxShadow,
+              readable: s.color !== s.backgroundColor};
+    }""")
+    assert style == {"border": "rgb(57, 135, 229)", "outline": "none", "shadow": "none", "readable": True}
 
 
 def test_tokens_resolve_at_runtime(page, live_app):

@@ -13,11 +13,12 @@ from fastapi.responses import JSONResponse
 from yt_playlist.core import updatecheck
 from yt_playlist.library import executor
 from yt_playlist.util import genre_map
-from yt_playlist.rec import arc_energy, embed, journeys, onboarding, rec_params, recommend, into_recently
+from yt_playlist.rec import arc_energy, embed, home_audit, home_themes, journeys, onboarding, rec_params, recipes, recommend, into_recently
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.providers import wikipedia, lastfm
 from yt_playlist.web.context import form_float
 from yt_playlist.web.spotify_import import current_job as current_spotify_import_job
+from yt_playlist.web.theme import genre_tint
 
 # How many tracks each generated proto-playlist offers.
 PROTO_SIZE = 12
@@ -36,6 +37,7 @@ ALBUMS_PER_CARD = 15               # discover album tiles fetched per epoch (gri
 # own size, so the small new-artist pool cycles through faster than the deep playlist pool.
 ROTATING_CARDS = ("wheelhouse", "explore", "comfort", "fresh", "new_artists", "discover",
                   "rediscover", "into_recently", "cards")
+MENU_MAX_AGE_S = 86400  # a lightly visited Home should not hold the same themes for days
 
 # Genre coverage below this fraction of processed tracks, with no Last.fm key, prompts the user to
 # add one. Last.fm is the densest genre source, so a thin genre coverage is the signal that a key
@@ -89,8 +91,10 @@ def _proto(store, lane, label, items, now):
     per-lane line ("Deeper into what you already love") described neither of them."""
     when = datetime.fromtimestamp(now).strftime("%B %-d %Y")   # e.g. "June 21 2026"
     tracks = items[:PROTO_SIZE]
+    genres, _ = recipes.theme_counts(store, tracks)
     return {"lane": lane, "label": label, "name": f"{label} - {when}",
             "note": recommend.theme_sentence(store, lane, tracks), "tracks": tracks,
+            "genres": list(genres),
             # #50: only the Fresh (out-of-corpus discovery) card carries persistent per-row feedback.
             # Owned-track proto cards stay curate-before-listen (client-side remove only).
             "feedback_surface": "for_you" if lane == "fresh" else None}
@@ -217,7 +221,7 @@ def _record_served_cards(store, protos, now):
                                      prune_before=now - _SERVED_IMPRESSION_RETAIN_D * 86400)
 
 
-def _one_card(store, card, now):
+def _one_card(store, card, now, *, avoid_genres=(), include_genres=()):
     """Build a single Home card's proto from its full candidate POOL. Used by the per-card Refresh
     route after the rotation has been advanced. Returns None if the card is empty.
 
@@ -241,7 +245,9 @@ def _one_card(store, card, now):
         # route), not here, so the cold-start fallback path doesn't double-count fresh tracks.
     else:
         return None
-    if not pool:
+    if avoid_genres or include_genres:
+        pool = home_themes.matching_genres(store, pool, avoid=avoid_genres, include=include_genres)
+    if not pool or ((avoid_genres or include_genres) and len(pool) < 4):
         return None
     p = _carded(store, card, _CARD_LABELS[card], pool, now)
     _record_lane_impressions(store, p["tracks"], now)   # #87: log what was actually rendered
@@ -259,18 +265,32 @@ def build(ctx) -> APIRouter:
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
 
+    def _audit_cards(request, protos, now):
+        try:
+            home_audit.record(store, protos, now, source=request.url.path,
+                              epoch=_epoch(store, "cards"),
+                              card_epochs={p["lane"]: _epoch(store, p["lane"]) for p in protos})
+        except Exception:  # diagnostics must not prevent serving a card
+            ctx.logger.warning("Home offer audit failed", exc_info=True)
+
     def _feed_context(now):
         # Bake held slider exposure + sustained listening into the graduation ledger (idempotent per
         # UTC day). The cards themselves now load lazily via /home/cards from the worker's bundles.
         recommend.graduate_slider_exposure(store, now)
         recommend.graduate_play_exposure(store, now)
-        return {"fingerprint": recommend.taste_fingerprint(store, now)}
+        return {"fingerprint": recommend.taste_fingerprint(store, now),
+                "has_modes": bool(store.modes.list_modes(active_only=True))}
 
     @router.get("/")
     def home_page(request: Request):
         now = now_fn()
         dao = RecDao(store)
         for card in ROTATING_CARDS:   # one tick per genuine Home visit -> per-card rotation advances
+            if card == "cards":
+                started = store.modes.epoch_started_at(_epoch(store, card))
+                if started is not None and now - started >= MENU_MAX_AGE_S:
+                    dao.refresh_card(card, max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+                    continue
             dao.bump_card_view(card, now)
         backend_update = updatecheck.update_nudge(store)
         # Monthly recap ("Your <Month>"): once a calendar month is baked into the rollup, surface it as
@@ -451,13 +471,25 @@ def build(ctx) -> APIRouter:
             return Response(status_code=204)
         keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None)) for t in p["tracks"]]
         store.mark_offered("track", [k for k in keys if k], now)   # #53: this route is the sole counter here
-        return templates.TemplateResponse(request, "_partials/generated_playlist.html",
-                                          {"p": p, "regenerating": True})
+        response = templates.TemplateResponse(request, "_partials/generated_playlist.html",
+                                               {"p": p, "regenerating": True})
+        _audit_cards(request, [p], now)
+        return response
 
-    def _cards_fragment(request, now, *, regenerating=False):
+    def _cards_fragment(request, now, *, regenerating=False, use_genre_request=True, genre_notice=None):
         from yt_playlist.rec import mode_surfaces
         epoch = _epoch(store, "cards")
-        cards = mode_surfaces.assemble_cards(store, now, epoch)
+        genre_request = store.get_proposals("home_genre_request") or {}
+        avoid = (set(genre_request.get("avoid_genres", []))
+                 if use_genre_request and genre_request.get("epoch") == epoch else set())
+        include = (set(genre_request.get("include_genres", []))
+                   if use_genre_request and genre_request.get("epoch") == epoch else set())
+        filters = {}
+        if avoid:
+            filters["avoid_genres"] = avoid
+        if include:
+            filters["include_genres"] = include
+        cards = mode_surfaces.assemble_cards(store, now, epoch, **filters)
         if cards:
             protos = []
             for c in cards:
@@ -483,10 +515,25 @@ def build(ctx) -> APIRouter:
             # evidence would be skewed toward refresh clicks.
             for p in protos:
                 _record_lane_impressions(store, p["tracks"], now)
+        elif filters and store.get_proposals("mode_bundles") and store.modes.list_modes(active_only=True):
+            protos = []  # no qualifying mode; explain and retain the usual menu below
         else:
             # Fallback before the first rebuild: the pre-B per-card builders, so the row is never empty.
-            protos = [p for p in (_one_card(store, name, now) for name in
+            protos = [p for p in (_one_card(store, name, now, **filters) for name in
                                   ("wheelhouse", "explore", "comfort", "fresh")) if p]
+        if filters and not protos:
+            notice = ("Not enough tracks for those genres yet. Here are your usual mixes." if include
+                      else "No other genre themes are ready yet. Here are your usual mixes.")
+            return _cards_fragment(request, now, regenerating=regenerating, use_genre_request=False,
+                                   genre_notice=notice)
+        if filters:
+            genre_notice = ("Your chosen genres, just for this set." if include
+                            else "Different genres for this set of mixes.")
+            recipe_request = ({"kind": "chosen_genres", "include": sorted(include)} if include
+                              else {"kind": "other_genres", "avoid": sorted(avoid)})
+            for p in protos:
+                p["recipe"] = {**(p.get("recipe") or {}),
+                               "genre_request": recipe_request}
         for p in protos:                                   # #53 offered-count parity
             # tracks are dicts on the mode path but ForYouItem objects on the _one_card fallback,
             # so read the key from either shape (a bare t.get here 500s the whole card row).
@@ -497,8 +544,15 @@ def build(ctx) -> APIRouter:
             _record_served_cards(store, protos, now)
         except Exception:  # noqa: BLE001 - measurement must never break recommendation serving
             ctx.logger.warning("served-impression log failed", exc_info=True)
-        return templates.TemplateResponse(request, "_partials/mode_cards.html",
-                                          {"protos": protos, "regenerating": regenerating})
+        response = templates.TemplateResponse(request, "_partials/mode_cards.html",
+                                               {"protos": protos, "regenerating": regenerating,
+                                                "genre_notice": genre_notice,
+                                                "genre_warning": genre_notice if not filters else None,
+                                                "genre_options": [option | {"tint": genre_tint(option["family"])}
+                                                                  for option in home_themes.genre_options(store)],
+                                                "requested_genres": sorted(include), "epoch": epoch})
+        _audit_cards(request, protos, now)
+        return response
 
     def _cards_safe(request, now):
         # The row loads via hx-trigger=load with the spinner as placeholder content: a 500 here leaves
@@ -526,6 +580,39 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001 - preserve the same safe-fragment contract as the GET
             ctx.logger.exception("home cards refresh render failed")
             return templates.TemplateResponse(request, "_partials/mode_cards.html", {"protos": []})
+
+    @router.post("/home/other-genres")
+    async def home_other_genres(request: Request):
+        """One-menu request based on the genres in this browser's currently displayed cards.
+        Expires with the next rotation; no lean, permanent weight or dislike is written."""
+        try:
+            genres = json.loads((await request.form()).get("genres") or "[]")
+        except (TypeError, ValueError):
+            return Response(status_code=400)
+        if not isinstance(genres, list) or not genres or len(genres) > 100 or any(
+                not isinstance(g, str) or not g.strip() or len(g) > 100 for g in genres):
+            return Response(status_code=400)
+        now = now_fn()
+        RecDao(store).refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+        store.put_proposals("home_genre_request", {
+            "epoch": _epoch(store, "cards"),
+            "avoid_genres": sorted({genre_map.family(g) for g in genres}),
+        }, now)
+        return _cards_safe(request, now)
+
+    @router.post("/home/mix-genres")
+    async def home_mix_genres(request: Request):
+        """Choose genre families for one menu, without teaching a lasting preference."""
+        genres = (await request.form()).getlist("genres")
+        available = {option["family"] for option in home_themes.genre_options(store)}
+        if not genres or len(genres) > 100 or any(not isinstance(g, str) or g not in available for g in genres):
+            return Response(status_code=400)
+        now = now_fn()
+        RecDao(store).refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+        store.put_proposals("home_genre_request", {
+            "epoch": _epoch(store, "cards"), "include_genres": sorted(set(genres)),
+        }, now)
+        return _cards_safe(request, now)
 
     @router.post("/home/breadth")
     async def home_breadth(request: Request):
@@ -609,6 +696,13 @@ def build(ctx) -> APIRouter:
         seen = set(fams)
         options = [{"name": f, "kind": "family"} for f in fams]
         options += [{"name": g, "kind": "genre"} for g in genre_map.all_genres() if g not in seen]
+        plays = {g.lower(): count for g, count in RecDao(store).genre_play_distribution().items()}
+        family_plays = {}
+        for genre, count in plays.items():
+            family = genre_map.family(genre)
+            family_plays[family] = family_plays.get(family, 0) + count
+        options.sort(key=lambda o: (-(family_plays.get(o["name"], 0) if o["kind"] == "family"
+                                     else plays.get(o["name"], 0)), o["name"]))
         return JSONResponse({"options": options})
 
     @router.post("/home/generate")

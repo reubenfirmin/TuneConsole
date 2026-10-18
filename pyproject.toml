@@ -20,6 +20,8 @@ dependencies = [
     "rapidfuzz>=3.6",
     "tomli>=2.0; python_version < '3.11'",
     "numpy>=1.26",
+    # Persistent session-bus connection for Flatpak's update/restart portal.
+    "dbus-next>=0.2.3,<0.3; sys_platform == 'linux'",
 ]
 
 [project.scripts]

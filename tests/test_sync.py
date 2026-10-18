@@ -70,6 +70,42 @@ def test_content_hash_is_order_independent():
     assert content_hash(["a", "b"]) == content_hash(["b", "a"])
     assert content_hash(["a", "b"]) != content_hash(["a", "c"])
 
+
+def test_sync_saves_cover_from_playlist_detail_when_library_listing_omits_it(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+
+    class CoverClient(FakeClient):
+        def get_playlist(self, playlistId, limit=100):
+            return {**super().get_playlist(playlistId, limit),
+                    "thumbnails": [{"url": "https://example.com/playlist.jpg"}]}
+
+    client = CoverClient(playlists=[{"playlistId": "PL1", "title": "Mix"}],
+                         tracks={"PL1": [_track("v1", "Song", "Artist")]})
+    sync_identity(store, iid, client, now=1000)
+    assert store.get_playlists()[0].thumbnail == "https://example.com/playlist.jpg"
+
+
+def test_refresh_saves_initial_artwork_then_replaces_it_with_youtube_cover(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+
+    class CoverClient(FakeClient):
+        cover = None
+
+        def get_playlist(self, playlistId, limit=100):
+            return {**super().get_playlist(playlistId, limit), "thumbnails": [{"url": self.cover}]}
+
+    client = CoverClient(tracks={"PL1": [{**_track("v1", "Song", "Artist"),
+                                         "thumbnails": [{"url": "https://example.com/song.jpg"}]}]})
+    sync_mod.refresh_playlist(store, iid, client, "PL1", "Mix", 1000)
+    assert store.get_playlists()[0].thumbnail == "https://example.com/song.jpg"
+    client.cover = "https://example.com/playlist.jpg"
+    sync_mod.refresh_playlist(store, iid, client, "PL1", "Mix", 2000)
+    assert store.get_playlists()[0].thumbnail == client.cover
+    client.cover = ""
+    sync_mod.refresh_playlist(store, iid, client, "PL1", "Mix", 3000)
+    assert store.get_playlists()[0].thumbnail == "https://example.com/playlist.jpg"
+
+
 def test_sync_identity_populates_store(store):
     iid = store.upsert_identity("main", "cred", None, True)
     client = FakeClient(
@@ -128,3 +164,44 @@ def test_sync_prunes_playlists_gone_from_remote(store):
     ytm_ids = {p.ytm_playlist_id for p in store.get_playlists()}
     assert ytm_ids == {"PL1"}                 # GHOST pruned, PL1 present
     assert store.get_playlist(ghost) is None
+
+
+def test_failed_playlist_logs_context_preserves_tracks_and_reports_partial_sync(store, monkeypatch, caplog):
+    import logging
+    from yt_playlist.util.retry import with_retry
+    # Exercise all retry attempts without waiting for backoff in this test.
+    monkeypatch.setattr(sync_mod, "with_retry", lambda fn, **kwargs:
+                        with_retry(fn, sleep=lambda _: None, **kwargs))
+    iid = store.upsert_identity("brand", "cred", "brand-id", True)
+    cached = store.upsert_playlist(iid, "PL_BAD", "Unavailable", 1, "old-hash", 100)
+    old_track = store.upsert_track("old-video", "Old song", "Artist", None, 120)
+    store.set_playlist_tracks(cached, [old_track])
+
+    class PartialClient(FakeClient):
+        failed_calls = 0
+
+        def get_playlist(self, playlistId, limit=100):
+            if playlistId == "PL_BAD":
+                self.failed_calls += 1
+                raise KeyError("Unable to find 'contents' using path ['contents', 'tabs'] on "
+                               "{'responseContext': {'visitorData': 'RAW_RESPONSE_MARKER'}}")
+            return super().get_playlist(playlistId, limit)
+
+    client = PartialClient(playlists=[{"playlistId": "PL_BAD", "title": "Unavailable"},
+                                     {"playlistId": "PL_GOOD", "title": "Working"}],
+                           tracks={"PL_GOOD": [_track("new-video", "New song", "Artist")]})
+    events = []
+    with caplog.at_level(logging.INFO):
+        sync_identity(store, iid, client, now=200, label="Music brand", on_progress=events.append)
+
+    assert client.failed_calls == 3
+    assert store.get_playlist_track_ids(cached) == [old_track]
+    assert store.get_playlist(cached).last_seen == 100
+    assert {p.ytm_playlist_id for p in store.get_playlists()} == {"PL_BAD", "PL_GOOD"}
+    assert "playlist 'Unavailable' (PL_BAD), account 'Music brand'" in caplog.text
+    assert f"identity {iid}" in caplog.text
+    assert "keeping any cached playlist/tracks" in caplog.text
+    assert "https://music.youtube.com/playlist?list=PL_BAD" in caplog.text
+    assert "RAW_RESPONSE_MARKER" not in caplog.text
+    assert "2 playlists listed, 1 refreshed, 1 skipped" in caplog.text
+    assert events[-1]["text"] == "Music brand: done (1 playlists refreshed, 1 skipped)"

@@ -18,14 +18,14 @@ _HTTP_TIMEOUT_S = 8
 _CHECK_INTERVAL_S = 86400          # once a day; well under GitHub's 60 req/hr unauth limit
 _USER_AGENT = "yt-playlist-updatecheck"
 
-# (command-or-label, optional link) per install kind. Flatpak is a copy-paste command; packaged macOS
-# and otherwise-unrecognized release installs go to the release page. TuneConsole does not offer or
+# (button label, optional link) per install kind. Flatpak and macOS have in-app controls;
+# otherwise-unrecognized release installs go to the release page. TuneConsole does not offer or
 # document pip-based installation, so the update card must not invent a pip upgrade path. There is
 # deliberately no "dev" entry: a source/editable checkout is never nagged (see update_nudge), so it
 # never needs an update command -- you update it with git, not a package manager.
 _INSTRUCTIONS = {
-    "flatpak": ("flatpak update --user com.tuneconsole.TuneConsole", None),
-    "macos": ("Get the latest release", "https://github.com/reubenfirmin/TuneConsole/releases/latest"),
+    "flatpak": ("Update now", None),
+    "macos": ("Update now", None),
     "release": ("Get the latest release", "https://github.com/reubenfirmin/TuneConsole/releases/latest"),
 }
 

@@ -1,4 +1,5 @@
 {% extends "base.html" %}{% block title %}{{ album.title if album else 'Album' }} · TuneConsole{% endblock %}{% block page_class %}page-album{% endblock %}{% block body %}
+{% from "_partials/song_menu_button.html" import song_menu %}
 {% if not album %}
 <div class="page-head">
   <h1>Album unavailable</h1>
@@ -145,6 +146,7 @@
     <thead><tr>
       <th class="num col-thumb">#</th><th class="col-thumb"></th>
       <th>Song</th><th>Artist</th><th class="num col-length">Length</th>
+      <th class="col-action"></th>
     </tr></thead>
     <tbody>
     {% for t in album.tracks %}
@@ -163,9 +165,10 @@
         {% else %}{{ t.title }}{% endif %}</td>
       <td class="t-wrap" title="{{ t.artist or album.artist }}">{{ t.artist or album.artist }}</td>
       <td class="num mono">{{ t.duration or '' }}</td>
+      <td class="rowmenu">{{ song_menu(dict(t, artist=t.artist or album.artist, album=album.title, thumbnail=album.thumbnail, album_browse=browse_id)) }}</td>
     </tr>
     {% else %}
-      <tr><td colspan="5" class="empty">This album has no listed tracks.</td></tr>
+      <tr><td colspan="6" class="empty">This album has no listed tracks.</td></tr>
     {% endfor %}
     </tbody>
   </table>

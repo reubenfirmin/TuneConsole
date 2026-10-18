@@ -31,6 +31,6 @@ def test_fresh_cold_item_gets_feedback_radio_does_not(store):
     html = c.get("/home/cards").text
     assert "Cold Song 0" in html
     assert "cold|0" in html                                    # cold item's dismiss is wired
-    assert 'class="dots"' not in html                          # kebab menu removed (merged into the ✕)
-    assert 'class="rowmenu-pop"' not in html                   # popup gone
+    assert 'song-menu-trigger' in html                        # global song actions, no per-row popup
+    assert 'class="rowmenu-pop"' not in html
     assert 'hx-post="/recs/feedback"' in html                  # dismiss fires from the cold items' ✕

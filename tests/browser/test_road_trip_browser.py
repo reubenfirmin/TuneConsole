@@ -105,6 +105,14 @@ def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monke
     assert store.get_road_trip_draft(rid) is not None
     expect(page.locator(".rt-axes .fp-slider").first).to_be_visible()
 
+    # Draft songs open the same global menu as library tracks, while Swap remains immediate.
+    track = page.locator(".rt-list .rt-row").first
+    track.get_by_title("More actions").click()
+    expect(page.locator("#song-action-menu")).to_have_count(1)
+    page.get_by_role("menuitem", name="Create playlist from song").click()
+    expect(page.get_by_label("Playlist name")).to_have_value(track.locator(".rt-c-title").inner_text())
+    page.get_by_role("dialog").get_by_role("button", name="Cancel").click()
+
     # Every mix control saves and replaces the editor. Keep the section the user chose open
     # across those swaps, and verify the edits still reach the recipe.
     mix = page.locator(".rt-step").filter(has=page.locator("summary strong", has_text="Shape the mix"))

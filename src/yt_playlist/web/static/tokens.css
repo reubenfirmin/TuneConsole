@@ -303,7 +303,7 @@
   --control-selected:      var(--p-blue-600);
   --control-selected-hover:var(--p-blue-500);
   --control-selected-border:var(--p-blue-300);
-  --focus-ring:            var(--p-amber-200);
+  --focus-ring:            var(--p-blue-500);
   --control-primary:       var(--control-selected);
   --control-primary-hover: var(--control-selected-hover);
   --control-danger:        var(--danger);

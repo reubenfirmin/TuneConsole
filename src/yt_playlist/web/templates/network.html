@@ -14,6 +14,10 @@
   <p>
     {% for d in allowlist %}<span class="tag teal mono">{{ d }}</span> {% endfor %}
   </p>
+  <p class="section-note">Playlist dates also permits these specific HTTPS requests:</p>
+  <ul class="section-note">
+    {% for method, host, path in metadata_endpoints %}<li><code>{{ method }} {{ host }}{{ path }}</code></li>{% endfor %}
+  </ul>
 </div>
 
 <div class="card workflow-sheet">

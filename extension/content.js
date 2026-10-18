@@ -244,33 +244,34 @@ if (!window.__tcBridgeLoaded) {
   const report = (np) => {
     if (!np || !np.title) return;
     np.likeStatus = readLikeStatus();
-    // Include likeStatus in the key so a like/dislike change re-reports even when the track is the same.
-    const key = np.title + " | " + np.artist + " | " + np.likeStatus + " | " + (np.videoId || "");
-    // The backend ages this card out when the YTM tab disappears. Keep its presence fresh even
-    // when the track is paused and none of its metadata changes; this is deliberately a separate
-    // heartbeat so it does not get persisted as another play every two seconds.
-    if (key === lastNowPlaying) {
+    let vid = np.videoId || "";
+    if (!vid) {
+      try { vid = new URL(location.href).searchParams.get("v") || ""; } catch (e) {}
+    }
+    // The MediaSession and DOM can format the same title/artist differently. Use the video id
+    // when available so switching sources does not re-report a play; a rating change still does.
+    const key = (vid ? "video:" + vid : "track:" + np.title + " | " + np.artist) +
+                " | " + np.likeStatus;
+    // The backend ages this card out when the YTM tab disappears. Keep its presence fresh when
+    // paused or unchanged, without recording another play. Chrome can throttle both sensors in a
+    // background tab, causing them to take turns reporting the same paused track.
+    if (np.paused || key === lastNowPlaying) {
       // Carry the current snapshot as well as presence. Chrome can suspend/throttle this page while
       // audio devices change; if that gap exceeds the backend's stale-card timeout, a presence-only
       // heartbeat cannot rebuild Now Playing and the UI stays blank until the next track. This frame
       // is still a heartbeat (never a persisted play), but is now self-healing.
-      let hvid = np.videoId || "";
-      if (!hvid) {
-        try { hvid = new URL(location.href).searchParams.get("v") || ""; } catch (e) {}
-      }
       try { chrome.runtime.sendMessage({
         type: "now-heartbeat", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
-        likeStatus: np.likeStatus, videoId: hvid, paused: !!np.paused,
+        likeStatus: np.likeStatus, videoId: vid, paused: !!np.paused,
       }); } catch (e) {}
       return;
     }
     lastNowPlaying = key;
-    let vid = np.videoId || "", lst = np.playlist || "";
-    if (!vid || !lst) {  // DOM-fallback reports carry neither; the watch URL has both
+    let lst = np.playlist || "";
+    if (!lst) {  // DOM-fallback reports carry no playlist; the watch URL has it
       try {
         const u = new URL(location.href);
-        vid = vid || u.searchParams.get("v") || "";
-        lst = lst || u.searchParams.get("list") || "";
+        lst = u.searchParams.get("list") || "";
       } catch (e) {}
     }
     console.log("[TuneConsole] now playing:", np.title, "-", np.artist, np.likeStatus);
@@ -349,10 +350,12 @@ if (!window.__tcBridgeLoaded) {
     const img = document.querySelector("img.image.ytmusic-player-bar") ||
                 document.querySelector("ytmusic-player-bar img");
     if (t && t.textContent.trim()) {
+      const v = document.querySelector("video");
       return {
         title: t.textContent.trim(),
         artist: b ? b.textContent.trim().split("•")[0].trim() : "",
         thumbnail: img ? img.src : "",
+        paused: !v || v.paused,
       };
     }
     return null;

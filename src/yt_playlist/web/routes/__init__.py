@@ -6,15 +6,15 @@ destructive merge/dupe operations, move, sync, the action log,
 and the setup wizard.
 """
 from yt_playlist.web.routes import (
-    actions, album, charts, cleanup, clusters, collection, discovery, enrich, genres, home, likes,
-    merge, move, network, playlists, road_trip, search, setup, suggest, sync, taste, trends,
+    actions, album, app_update, charts, cleanup, clusters, collection, discovery, enrich, genres, home, likes,
+    merge, move, network, playlist_dates, playlists, road_trip, search, setup, songs, suggest, sync, taste, trends,
 )
 
 # Order matters only where literal and parameterized paths share a method; the
 # modules here keep those apart, so registration order is otherwise free.
 MODULES = (home, suggest, cleanup, merge, playlists, charts, collection, move, sync, actions,
            setup, genres, likes, taste, album, clusters, search, network, enrich, discovery, trends,
-           road_trip)
+           road_trip, songs, playlist_dates, app_update)
 
 
 def build_all(ctx):

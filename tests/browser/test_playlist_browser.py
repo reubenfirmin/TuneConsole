@@ -136,7 +136,7 @@ def test_remove_track_drops_row(live_playlist_app, page):
     page.goto(f"{base}/playlist/{pid}")
     row = page.get_by_role("row").filter(has_text="Song B")
     row.get_by_title("More actions").click()                        # ⋯ menu
-    row.get_by_role("button", name="Remove from playlist").click()  # opens confirm modal
+    page.get_by_role("menuitem", name="Remove from playlist").click()  # opens confirm modal
     page.get_by_role("button", name="Remove", exact=True).click()   # confirm
     expect(page.get_by_role("row").filter(has_text="Song B")).to_have_count(0)
     expect(page.get_by_role("link", name="Song A ↗")).to_be_visible()           # other row stays
@@ -147,7 +147,7 @@ def test_find_and_add_alternate_version(live_playlist_app, page):
     page.goto(f"{base}/playlist/{pid}")
     row = page.get_by_role("row").filter(has_text="Song A")
     row.get_by_title("More actions").click()
-    row.get_by_role("button", name="Find alternate versions").click()
+    page.get_by_role("menuitem", name="Find alternate versions").click()
     expect(page.get_by_text("Song A (Live)")).to_be_visible()        # htmx-rendered search results
     page.locator('#alt-results input[name="track"]').first.check()
     page.get_by_role("button", name="Add to playlist").click()

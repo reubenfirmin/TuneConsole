@@ -282,8 +282,7 @@ body:has(.page-clusters) .topbar { display: none; }
   border: 1.5px solid var(--cta);                                  /* CTA green, distinct from the topbar search */
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--cta) 25%, transparent), 0 6px 18px -10px color-mix(in srgb, var(--cta) 65%, transparent);
 }
-.cluster-search-box input:focus { outline: none; border-color: var(--cta-2);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cta-2) 30%, transparent), 0 0 18px -2px color-mix(in srgb, var(--cta-2) 55%, transparent); }
+.cluster-search-box input:focus { outline: none; border-color: var(--focus-ring); box-shadow: none; }
 .cluster-suggest {
   position: absolute; z-index: 5; top: calc(100% + 0.35rem); left: 0; right: 0; margin: 0; padding: 0.3rem;
   list-style: none; background: var(--surface); border: 1px solid var(--border-2);
@@ -312,7 +311,7 @@ body:has(.page-clusters) .topbar { display: none; }
      (see .cg-box input) so it tucks in after the chips and a second row appears only when needed. */
   background: var(--surface); border: 1.5px solid var(--border-2); border-radius: 1.3rem; }
 .cg-box.on { border-color: var(--cta); }
-.cg-box:focus-within { border-color: var(--cta-2); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cta-2) 18%, transparent); }
+.cg-box:focus-within { border-color: var(--focus-ring); box-shadow: none; }
 .cg-icon { color: var(--faint); font-size: 0.9rem; flex: none; }
 .cg-box input { flex: 1 1 2rem; min-width: 2rem; border: none; background: none; outline: none;
   color: var(--text); font-size: 0.9rem; padding: 0.1rem 0; }

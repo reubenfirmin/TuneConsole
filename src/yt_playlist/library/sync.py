@@ -2,7 +2,7 @@ import hashlib
 import logging
 from yt_playlist.core.bridge import BridgeError
 from yt_playlist.util.matching import identity_key, track_artist, track_album
-from yt_playlist.util.retry import with_retry
+from yt_playlist.util.retry import error_summary, with_retry
 from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.library.executor import is_generated_description
 from yt_playlist.repos.base import GENERATED_GROUP
@@ -75,7 +75,8 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     logger.info("syncing identity %s", identity_id)
     _emit(on_progress, "info", f"{label}: fetching playlists…")
     try:
-        playlists = with_retry(lambda: client.get_library_playlists(limit=None))
+        playlists = with_retry(lambda: client.get_library_playlists(limit=None),
+                               operation=f"fetch library for {label!r} (identity {identity_id})")
     except BridgeError as e:
         # The extension is disconnected / no signed-in tab / a bridge timeout: a CONNECTION problem,
         # not a dead session. Skip this identity quietly, do NOT flag re-auth, do NOT raise. The
@@ -97,13 +98,18 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     seen_ytm = set()
     groups = store.get_playlist_groups()        # for the generated-quarantine reconciliation below
     rated: dict[str, str] = {}                  # identity_key -> likeStatus; see _STATUS_PRIORITY
+    refreshed = skipped = 0
     for i, pl in enumerate(playlists, 1):
         pid = pl["playlistId"]
+        context = f"playlist {pl.get('title', '')!r} ({pid}), account {label!r} (identity {identity_id})"
         seen_ytm.add(pid)  # mark seen before fetch so a transient read failure doesn't prune it
         try:
-            detail = with_retry(lambda: client.get_playlist(pid, limit=None))
+            detail = with_retry(lambda: client.get_playlist(pid, limit=None), operation=f"fetch {context}")
         except Exception as e:  # noqa: BLE001 - one bad/just-deleted playlist must not abort the sync
-            logger.warning("skipping playlist %s: %s", pid, e)
+            skipped += 1
+            logger.warning("skipping %s: %s; keeping any cached playlist/tracks. "
+                           "Check https://music.youtube.com/playlist?list=%s with this account; "
+                           "full exception at DEBUG", context, error_summary(e), pid)
             _emit(on_progress, "info", f"{label} › skipped {pl.get('title', '')} (couldn't read)")
             continue
         track_ids, keys = [], []
@@ -122,9 +128,12 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         keys = list(dict.fromkeys(keys))
         chash = content_hash(keys)
         db_pid = store.upsert_playlist(identity_id, pid, pl.get("title", ""),
-                                       len(track_ids), chash, now, best_thumb(pl.get("thumbnails")))
+                                       len(track_ids), chash, now,
+                                       best_thumb(pl.get("thumbnails")) or best_thumb(detail.get("thumbnails")))
         store.set_playlist_tracks(db_pid, track_ids)
+        store.ensure_playlist_thumbnail(db_pid)
         _sync_generated_group(store, pid, detail.get("description"), groups)
+        refreshed += 1
         _emit(on_progress, "step", f"{label} › {pl.get('title', '')} ({len(track_ids)} tracks)",
               i=i, total=total)
 
@@ -159,7 +168,8 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     recommend.apply_dislikes(store, rated, now, provenance="sync")
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
-        history = with_retry(lambda: client.get_history())
+        history = with_retry(lambda: client.get_history(),
+                             operation=f"fetch history for {label!r} (identity {identity_id})")
         hist = [(identity_key(t.get("title", ""), _artist(t)), t.get("played")) for t in history]
         # Record plays keyed by (track, played-date): YouTube re-sends the same recently-played window
         # each fetch (~91% overlap), so record_history_plays dedups on the absolute play-date (the
@@ -173,8 +183,9 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     if not auth_bad:
         if on_auth_ok:
             on_auth_ok(identity_id)   # genuine success -> clear any "expired" flag
-        logger.info("synced identity %s: %d playlists", identity_id, len(playlists))
-        _emit(on_progress, "done", f"{label}: done ({len(playlists)} playlists)")
+        logger.info("synced identity %s (%s): %d playlists listed, %d refreshed, %d skipped",
+                    identity_id, label, len(playlists), refreshed, skipped)
+        _emit(on_progress, "done", f"{label}: done ({refreshed} playlists refreshed, {skipped} skipped)")
 
 def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now) -> None:
     """Re-fetch a single playlist's tracks into the store, fast post-merge refresh (no full sync)."""
@@ -189,8 +200,9 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now) ->
     track_ids = list(dict.fromkeys(track_ids))   # de-dupe repeated videos
     keys = list(dict.fromkeys(keys))
     db_pid = store.upsert_playlist(identity_id, ytm_playlist_id, title,
-                                   len(track_ids), content_hash(keys), now)
+                                   len(track_ids), content_hash(keys), now, best_thumb(detail.get("thumbnails")))
     store.set_playlist_tracks(db_pid, track_ids)
+    store.ensure_playlist_thumbnail(db_pid)
 
 def _sync_saved_albums(store, clients, on_progress) -> None:
     """Pull the albums saved in each account's library and store them (best-effort)."""
@@ -245,14 +257,33 @@ def _materialize_album_tracks(store, clients, saved, on_progress) -> None:
             added += 1
     _emit(on_progress, "info", f"album tracks folded in: {added} from {len(todo)} album(s)")
 
-def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None) -> None:
+def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None,
+             playlist_dates=None) -> None:
     labels = {idn.id: idn.label for idn in store.get_identities()}
     for identity_id, client in clients.items():
         sync_identity(store, identity_id, client, now,
                       on_progress=on_progress, label=labels.get(identity_id),
                       on_auth_expired=on_auth_expired, on_auth_ok=on_auth_ok)
+    if playlist_dates is not None:
+        sync_playlist_dates(store, playlist_dates, on_progress)
     _sync_saved_albums(store, clients, on_progress)
     store.set_setting("last_sync_at", str(now))   # drives the Home "Time to sync" nudge
     # the recommendation model is rebuilt by the decoupled RecWorker (triggered from the sync
     # route), so a burst of syncs coalesces into one rebuild instead of blocking each sync.
     _emit(on_progress, "done", "sync complete", final=True)
+
+
+def sync_playlist_dates(store, provider, on_progress=None):
+    """An optional metadata outage must not fail or erase the Music library sync."""
+    try:
+        report = provider.refresh(store)
+        if report["updated"]:
+            _emit(on_progress, "info", f"Updated creation dates for {report['updated']} playlists")
+        for message in report["errors"]:
+            _emit(on_progress, "info", message)
+        return report
+    except (OSError, ValueError):
+        logger.warning("playlist creation dates unavailable")
+        message = "Playlist dates could not refresh. Your saved dates are unchanged."
+        _emit(on_progress, "info", message)
+        return {"updated": 0, "errors": [message]}

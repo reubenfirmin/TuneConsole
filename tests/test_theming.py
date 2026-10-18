@@ -78,7 +78,7 @@ def test_every_referenced_token_is_defined():
     runtime = {
         "--topbar-h", "--p", "--card", "--dot", "--heat", "--subj", "--petal-c",
             "--node-hue", "--node-sat", "--node-light", "--bg-grad", "--v", "--tile",
-            "--mix-order", "--mix-x", "--mix-y",
+            "--mix-order", "--mix-x", "--mix-y", "--genre-tint",
     }
     missing = {}
     for p in _source_files():
@@ -132,7 +132,9 @@ def test_elements_do_not_repeat_style_attributes():
     tag = re.compile(r"<[^>]+>", re.S)
     for path in (WEB / "templates").rglob("*.html"):
         for match in tag.finditer(path.read_text()):
-            if len(re.findall(r"(?:^|\s):?style\s*=", match.group(0))) > 1:
+            # A static style and Alpine's :style binding are distinct attributes.
+            styles = re.findall(r"(?:^|\s)(:?style)\s*=", match.group(0))
+            if len(styles) != len(set(styles)):
                 lineno = path.read_text()[:match.start()].count("\n") + 1
                 offenders.append(f"{path.name}:{lineno}")
     assert not offenders, f"duplicate style attributes found: {offenders}"
@@ -304,7 +306,7 @@ def test_dense_pages_have_scoped_compact_screen_behavior():
 
     playlists = (WEB / "templates" / "playlists.html").read_text()
     albums = (WEB / "templates" / "albums.html").read_text()
-    assert playlists.count('class="playlist-index"') == 2
+    assert playlists.count('class="playlist-index"') == 3
     assert albums.count('class="album-index"') == 2
     for name in ("network.html", "actions.html"):
         assert 'class="table-scroll"' in (WEB / "templates" / name).read_text()

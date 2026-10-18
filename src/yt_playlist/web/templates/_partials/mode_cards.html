@@ -1,4 +1,8 @@
-<div id="home-mode-cards" class="gen-lanes" x-data="{ focus: null }" :class="{ 'has-focus': focus }">
+<div id="home-mode-cards" class="gen-lanes" data-genre-notice="{{ genre_notice or '' }}"
+     data-genre-warning="{{ genre_warning or '' }}"
+     data-genre-options='{{ genre_options|default([])|tojson }}'
+     data-requested-genres='{{ requested_genres|default([])|tojson }}' data-epoch="{{ epoch|default(0) }}"
+     x-data="{ focus: null }" :class="{ 'has-focus': focus }">
   {% for p in protos %}{% include "_partials/generated_playlist.html" %}{% endfor %}
   {# A brief, decorative downbeat when the four-way board arrives. It sits at the crossing of the
      cards and leaves the DOM inert after its one-shot animation; the mixes remain the artwork. #}

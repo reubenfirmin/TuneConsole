@@ -114,7 +114,7 @@ def test_genreless_suggestion_add_requeues_enrichment(store):
 def test_suggestion_dismiss_is_reasoned(store):
     target, c = _seed(store)
     frag = c.get(f"/playlist/{target}/suggestions").text
-    # the × opens reason chips that route to /recs/feedback with a reason (not a bare dismiss)
-    assert "/recs/feedback" in frag
-    assert "wrong era" in frag and "already know it" in frag and "not this artist" in frag
-    assert '"reason":"era"' in frag and '"reason":"own_it"' in frag
+    # The shared song menu gets the suggestion's identity and playlist scope for reasoned feedback.
+    assert '"suggestion": true' in frag and '"key": "bonus|band"' in frag
+    assert f'"pid": {target}' in frag
+    assert 'song-menu-trigger' in frag

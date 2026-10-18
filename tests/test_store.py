@@ -1,4 +1,31 @@
 # tests/test_store.py
+def test_playlist_creation_date_migration_backfills_only_known_dates(store):
+    import json
+    from yt_playlist.util.action_kinds import COPY_PLAYLIST, MOVE_IDENTITY
+
+    iid = store.upsert_identity("main", "cred", None, True)
+    for ytm in ("song", "generated", "303", "Brexit List", "planned", "moved"):
+        store.upsert_playlist(iid, ytm, ytm, 0, "", 9000)
+    for kind, ytm, status, at in ((COPY_PLAYLIST, "song", "executed", 100),
+                                  (COPY_PLAYLIST, "song", "executed", 200),
+                                  (COPY_PLAYLIST, "planned", "planned", 300),
+                                  (MOVE_IDENTITY, "moved", "executed", 400)):
+        store.record_action(kind, "{}", "{}", status, json.dumps({"new_ytm": ytm}), at)
+    store.record_action(COPY_PLAYLIST, "{}", "{}", "executed", "invalid legacy payload", 500)
+    store.set_recipe("generated", {"theme": "mix"}, 50)
+    # Recreate the previous schema, then exercise the real startup migration.
+    with store.conn:
+        store.conn.execute("ALTER TABLE playlists DROP COLUMN created_at")
+        store.conn.execute("DELETE FROM settings WHERE key='playlist_created_at_backfilled'")
+    store.init_schema()
+    dates = {p.ytm_playlist_id: p.created_at for p in store.get_playlists()}
+    assert dates == {"song": 100, "generated": 50, "303": None, "Brexit List": None,
+                     "planned": None, "moved": None}
+    store.set_recipe("generated", {"theme": "updated mix"}, 8000)
+    store.init_schema()
+    assert {p.ytm_playlist_id: p.created_at for p in store.get_playlists()} == dates
+
+
 def test_upsert_playlist_tracks_seen_and_changed(store):
     iid = store.upsert_identity("main", "cred", None, True)
     t1 = store.upsert_track("v1", "Song A", "Artist", "Alb", 200)
