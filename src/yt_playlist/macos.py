@@ -19,8 +19,10 @@ from yt_playlist.core.macos_update import MacOSUpdater, RESUME_KEY, launch_argum
 def run(argv):
     import objc
     from AppKit import (NSApplication, NSApplicationActivationPolicyRegular,
-                        NSMenu, NSMenuItem, NSTerminateLater, NSTerminateNow)
-    from Foundation import NSBundle, NSObject, NSTimer, NSUserDefaults
+                        NSMenu, NSMenuItem, NSModalPanelRunLoopMode,
+                        NSTerminateLater, NSTerminateNow)
+    from Foundation import (NSBundle, NSObject, NSRunLoop, NSRunLoopCommonModes,
+                            NSTimer, NSUserDefaults)
 
     from yt_playlist.__main__ import main
 
@@ -89,7 +91,9 @@ def run(argv):
         def tick_(self, timer):
             if quit_requested.is_set():
                 quit_requested.clear()
-                app.terminate_(None)
+                # Deferred termination enters a nested modal loop. Let this timer
+                # return first so it can fire again there to drain the server.
+                app.performSelector_withObject_afterDelay_("terminate:", None, 0.0)
             try:
                 while True:
                     command = updater.commands.get_nowait()
@@ -146,8 +150,12 @@ def run(argv):
     application_menu.addItemWithTitle_action_keyEquivalent_("Quit TuneConsole", "terminate:", "q")
     application_item.setSubmenu_(application_menu)
     app.setMainMenu_(menu)
-    timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+    timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
         0.2, delegate, "tick:", None, True)
+    run_loop = NSRunLoop.mainRunLoop()
+    run_loop.addTimer_forMode_(timer, NSRunLoopCommonModes)
+    # NSTerminateLater runs this mode while waiting for the server to drain.
+    run_loop.addTimer_forMode_(timer, NSModalPanelRunLoopMode)
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: quit_requested.set())
     app.run()

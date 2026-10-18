@@ -10,11 +10,26 @@ SMOKE_PORT=18765
 SERVER_PID=""
 
 cleanup() {
+  local status=$?
   if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID"
+    kill "$SERVER_PID" 2>/dev/null || true
+    for _ in {1..20}; do
+      if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+    # A broken quit path must fail CI rather than leave the cleanup waiting forever.
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+      kill -KILL "$SERVER_PID" 2>/dev/null || true
+    fi
     wait "$SERVER_PID" 2>/dev/null || true
   fi
+  if [[ "$status" -ne 0 && -f "$SMOKE_HOME/server.out" ]]; then
+    cat "$SMOKE_HOME/server.out" >&2
+  fi
   rm -rf "$SMOKE_HOME"
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -31,7 +46,7 @@ YT_PLAYLIST_HOME="$SMOKE_HOME" YT_PLAYLIST_NO_OPEN=1 TUNECONSOLE_DISABLE_UPDATES
 SERVER_PID=$!
 
 for _ in {1..80}; do
-  if curl --silent --show-error --fail "http://127.0.0.1:$SMOKE_PORT/" >/dev/null; then
+  if curl --connect-timeout 1 --max-time 2 --silent --show-error --fail "http://127.0.0.1:$SMOKE_PORT/" >/dev/null; then
     break
   fi
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -42,8 +57,8 @@ for _ in {1..80}; do
   sleep 0.25
 done
 
-curl --silent --show-error --fail "http://127.0.0.1:$SMOKE_PORT/bridge/status" >/dev/null
-curl --silent --show-error --fail "http://127.0.0.1:$SMOKE_PORT/app-update/status" >/dev/null
+curl --connect-timeout 1 --max-time 2 --silent --show-error --fail "http://127.0.0.1:$SMOKE_PORT/bridge/status" >/dev/null
+curl --connect-timeout 1 --max-time 2 --silent --show-error --fail "http://127.0.0.1:$SMOKE_PORT/app-update/status" >/dev/null
 test -f "$SMOKE_HOME/state.db"
 test -f "$SMOKE_HOME/logs/app.log"
 hdiutil verify dist/TuneConsole-*.dmg
@@ -57,5 +72,8 @@ for _ in {1..80}; do
   fi
   sleep 0.25
 done
-test -z "$SERVER_PID"
+if [[ -n "$SERVER_PID" ]]; then
+  echo "Packaged app did not exit after SIGTERM" >&2
+  exit 1
+fi
 echo "Packaged app smoke test passed ($(uname -m))."
