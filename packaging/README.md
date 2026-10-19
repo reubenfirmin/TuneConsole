@@ -1,7 +1,8 @@
 # Packaging
 
-Build TuneConsole (package `yt-playlist`) as a **Flatpak** (Linux) or a **self-contained `.app` +
-`.dmg`** (macOS). Both launchers start the local server and open it in your browser automatically
+Build TuneConsole (package `yt-playlist`) as a **Flatpak** (Linux), a **self-contained `.app` +
+`.dmg`** (macOS), or a **Docker / Podman image** (Linux x86-64 and ARM64).
+The desktop launchers start the local server and open it in your browser automatically
 (`yt-playlist --open`; the Flatpak opens the host browser via the OpenURI portal).
 
 > **You also need the TuneConsole browser extension.** The app doesn't talk to YouTube Music
@@ -15,10 +16,98 @@ Where the app keeps its data:
 - **Linux/Flatpak:** `~/.var/app/com.tuneconsole.TuneConsole/{config,data}` — its private sandbox dir.
 - **macOS:** `~/Library/Application Support/TuneConsole` for config/data and
   `~/Library/Logs/TuneConsole` for logs.
+- **Docker / Podman:** `/data` in the container, backed by the `tuneconsole-data` named volume.
 
 `paths.py` honours `$YT_PLAYLIST_HOME` first and explicit `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME`
 second. Otherwise it uses the platform-native paths above on macOS and the usual XDG fallbacks on
 Linux.
+
+---
+
+## Docker / Podman
+
+Run the container engine on the same computer as your browser. The extension connects to
+`127.0.0.1:8765`; a remote server or NAS needs a local tunnel and is not the default setup.
+On macOS or Windows, Docker Desktop or a Podman machine supplies the Linux runtime; the
+browser and extension stay on the host. CI tests the Linux images on native x86-64 and ARM64
+runners; desktop VM integrations need verification on those hosts.
+
+### Install and run
+
+```sh
+docker run -d --name tuneconsole \
+  -p 127.0.0.1:8765:8765 \
+  -v tuneconsole-data:/data \
+  ghcr.io/reubenfirmin/tuneconsole:latest
+```
+
+Replace `docker` with `podman` throughout these instructions for rootless Podman.
+Open <http://127.0.0.1:8765> and install the browser extension as usual. The container keeps
+running when you close the UI; `docker stop tuneconsole` stops it and
+`docker start tuneconsole` starts it again. Use `docker logs tuneconsole` for server output.
+
+The image runs as UID/GID 10001, sets `YT_PLAYLIST_HOME=/data`, and keeps config, SQLite,
+logs, and backups in that directory. The engine creates the named volume with suitable
+ownership on first use. Removing the container preserves the volume. Removing the volume
+deletes the app's data. Existing desktop installations have separate data; this starts a new
+library unless you deliberately migrate your config/data while both instances are stopped.
+
+The server listens on `0.0.0.0` inside the container; the published host port binds to
+`127.0.0.1`. Keep that host binding: this is a local application without remote-user
+authentication. The browser bridge retains its extension-origin checks. No browser, audio
+device, privileged mode, or host-network access is needed inside the container.
+
+### Update
+
+Wait for syncs, imports, and model jobs to finish, then pull and replace the container:
+
+```sh
+docker pull ghcr.io/reubenfirmin/tuneconsole:latest
+docker stop tuneconsole
+docker rm tuneconsole
+docker run -d --name tuneconsole \
+  -p 127.0.0.1:8765:8765 \
+  -v tuneconsole-data:/data \
+  ghcr.io/reubenfirmin/tuneconsole:latest
+```
+
+Use the same volume each time. Reload the existing browser tab after the new container starts.
+The app's update card links to these instructions on the website. Versioned tags are also
+published (`:X.Y.Z` and `:vX.Y.Z`); `:latest` follows stable releases. Back up your data before
+upgrading; older images may not understand a newer database schema.
+
+### Build and verify locally
+
+```sh
+docker build -t tuneconsole:local .
+python3 packaging/container/smoke.py --engine docker --image tuneconsole:local --version 0.0.0.dev0
+```
+
+Use `podman build --format docker -t tuneconsole:local .` and `--engine podman` to verify Podman.
+The Docker image format preserves the health check, which Podman's default OCI build format omits.
+The multi-stage Dockerfile installs
+runtime dependencies from `uv.lock`, builds a wheel, and copies only the installed environment
+into the runtime image. Git history and local app data are excluded from the build context.
+A local build defaults to version `0.0.0.dev0`; `--build-arg VERSION=X.Y.Z` stamps a release
+version without needing Git inside the image.
+
+The smoke test uses its own disposable container, volume, and random loopback port. It checks
+the UI/static assets, installed version, non-root storage, extension WebSocket handshake,
+rejection of untrusted origins, persisted database/backups across replacement, and clean
+shutdown. It removes only its own test resources afterward.
+
+### Release publishing
+
+`.github/workflows/container.yml` builds and smoke-tests both architectures on pushes and pull
+requests. A pushed `vX.Y.Z` tag publishes the multi-platform image to
+`ghcr.io/reubenfirmin/tuneconsole` after both tests pass. Publishing uses the repository's
+`GITHUB_TOKEN` with `packages: write`; no registry password or additional secret is needed.
+The image carries source, revision, version, and license labels.
+
+After the first tagged publication, set the GitHub container package's visibility to **Public**
+in its package settings and verify an unauthenticated pull before deploying the website's
+container install option. GHCR creates new packages as private even for public repositories.
+Prerelease tags get their versioned images without moving `latest`.
 
 ---
 
@@ -115,8 +204,8 @@ TuneConsole** in the app menu. Dock → **Quit** also works. Quitting waits for 
 and registered background jobs before shutting down the server.
 
 ### Custom icon (optional)
-`build.sh` calls `make-icns.sh`, which renders the SVG to `TuneConsole.icns` if `rsvg-convert`
-(`brew install librsvg`) and `iconutil` are present. Without them the app gets PyInstaller's default
+`build.sh` calls `make-icns.sh`, which converts the 1024px `TuneConsole.png` export to
+`TuneConsole.icns` using macOS's built-in `sips` and `iconutil`. Without them the app gets PyInstaller's default
 icon — harmless.
 
 ### Verify the packaged app

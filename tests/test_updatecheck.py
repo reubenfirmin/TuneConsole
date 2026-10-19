@@ -45,8 +45,19 @@ def test_install_kind_dev_beats_everything(monkeypatch):
     # not the packaged release, so 'flatpak update' would be the wrong advice.
     monkeypatch.setattr(uc, "is_dev_install", lambda: True)
     monkeypatch.setenv("FLATPAK_ID", "com.tuneconsole.TuneConsole")
+    monkeypatch.setenv("YT_PLAYLIST_CONTAINER", "1")
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     assert uc.install_kind() == "dev"
+
+
+def test_container_update_nudge_uses_container_instructions(monkeypatch):
+    monkeypatch.setattr(uc, "_raw_version", lambda: "0.1.6")
+    monkeypatch.setattr(uc, "_is_editable_install", lambda: False)
+    monkeypatch.setenv("YT_PLAYLIST_CONTAINER", "1")
+    nudge = uc.update_nudge(FakeStore({"latest_version_seen": "0.2.0"}))
+    assert nudge["kind"] == "container"
+    assert nudge["command"] == "Update your container"
+    assert nudge["link"] == "https://tuneconsole.com/#container-updates"
 
 
 def test_is_dev_install_from_version_markers(monkeypatch):

@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Build the app icon (TuneConsole.icns) for the .app bundle from the shared mixer PNG. Runs on macOS,
+# Build the app icon (TuneConsole.icns) for the .app bundle from the shared logo PNG. Runs on macOS,
 # using the built-in `sips` (resize) + `iconutil` (pack). Best-effort: if the tools are missing the
 # build still works — the app just gets PyInstaller's default icon.
 #
-# Source is the same 256px mixer icon used by the web app, extension, and Flatpak (TuneConsole.png, a
-# copy of the shared icon). Sizes above 256 are upscaled; drop in a larger master PNG for crisper
-# Retina @2x tiles.
+# TuneConsole.png is a 1024px export of src/yt_playlist/web/static/favicon.svg. All sizes are
+# downsampled from that master, including the Retina @2x tiles.
 set -euo pipefail
 cd "$(dirname "$0")"
 

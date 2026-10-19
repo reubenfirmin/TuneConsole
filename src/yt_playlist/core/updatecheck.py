@@ -26,6 +26,7 @@ _USER_AGENT = "yt-playlist-updatecheck"
 _INSTRUCTIONS = {
     "flatpak": ("Update now", None),
     "macos": ("Update now", None),
+    "container": ("Update your container", "https://tuneconsole.com/#container-updates"),
     "release": ("Get the latest release", "https://github.com/reubenfirmin/TuneConsole/releases/latest"),
 }
 
@@ -99,10 +100,12 @@ def check_latest(store, now, *, interval_s=_CHECK_INTERVAL_S):
 
 def install_kind() -> str:
     """How this backend was installed: 'dev' (source/editable checkout), 'flatpak' (sandbox env),
-    'macos' (frozen .app), else an unrecognized 'release'. 'dev' is checked first: a checkout inside a flatpak
-    or frozen bundle is still checkout code, and packaged-release advice would be wrong."""
+    'macos' (frozen .app), 'container' (image env), else an unrecognized 'release'.
+    'dev' is checked first: checkout code must not get packaged-release advice."""
     if is_dev_install():
         return "dev"
+    if os.environ.get("YT_PLAYLIST_CONTAINER") == "1":
+        return "container"
     if os.environ.get("FLATPAK_ID"):
         return "flatpak"
     if getattr(sys, "frozen", False):
