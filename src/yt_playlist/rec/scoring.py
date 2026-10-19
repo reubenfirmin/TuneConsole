@@ -3,11 +3,12 @@ re-weighted by genre/era/artist preferences, the breadth steer, and the transien
 
 Split out of the former monolithic recommend.py; recommend re-exports these for existing callers."""
 import math
+import time
 
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, layers, rec_params, transient
+from yt_playlist.rec import embed, layers, mix_tuning, rec_params, transient
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.rec.taste_analysis import taste_breadth
 
@@ -243,6 +244,7 @@ def _pop_band(popularity, threshold):
 def _axis_weights_for(store, keys, now=None, with_details=False):
     """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
     the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
+    mix_tuning.expire(store, time.time() if now is None else now)
     w = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     gw = {a[len("genre:"):]: v for a, v in w.items() if a.startswith("genre:")}
     ew = {a[len("era:"):]: v for a, v in w.items() if a.startswith("era:")}
@@ -333,6 +335,7 @@ def discovery_facet_weight(store, family, now):
     permanent_weight × standing_lean × a DAMPED transient multiplier, so 'mute' bends hard while
     'less house lately' only nudges. An untagged candidate (family falsy) is neutral (1.0) and never
     excluded. We don't banish what we can't classify."""
+    mix_tuning.expire(store, now)
     if not family:
         return 1.0
     perm = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(f"genre:{family}", 1.0)

@@ -1,5 +1,7 @@
 """#79 Monthly recap story: beat builders are honest (fire/omit correctly), personality axes degrade
 gracefully without acoustic data, and build_story assembles a coherent reel."""
+import pytest
+
 from yt_playlist.rec import recap_story as rs
 
 
@@ -105,8 +107,26 @@ def test_build_story_assembles_cover_personality_and_closing():
     assert kinds[0] == "cover" and kinds[-1] == "closing" and "personality" in kinds
     assert "wide_net" in kinds and "all_in" not in kinds          # 14/535 -> wide net, not all in
     cover = story["beats"][0]
-    assert cover["thesis"] == "The month you cast a wide net."
+    assert cover["thesis"] == "535 plays across 19 listening days."
     assert story["month_name"] == "June"
+
+
+@pytest.mark.parametrize("plays, days, artist_plays, expected", [
+    (75, 5, 30, "75 plays across 5 listening days."),
+    (75, 30, 75, "75 plays across 30 listening days."),
+    (535, 1, 300, "535 plays across 1 listening day."),
+    (1500, 25, 600, "1,500 plays across 25 listening days."),
+    (1, 1, 1, "1 play across 1 listening day."),
+])
+def test_cover_reports_activity_even_when_one_artist_dominates(plays, days, artist_plays, expected):
+    review = {"month": "2026-09", "plays": plays, "listen_days": days, "longest_streak": 1,
+              "top_artists": [{"artist": "A", "plays": artist_plays}]}
+    story = rs.build_story(_FakeStore(), [], review, insights=[], month_name="September")
+    assert story["beats"][0]["thesis"] == expected
+    # The artist's share is still useful, but says nothing about how often the app was used.
+    artist = next(b for b in story["beats"] if b["kind"] == "all_in")
+    assert artist["plays"] == artist_plays
+    assert artist["share"] == round(artist_plays / plays, 3)
 
 
 def test_build_story_none_without_review():

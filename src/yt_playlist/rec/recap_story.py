@@ -202,19 +202,16 @@ def _beat_revival(insights):
             "detail": rev.get("detail")}
 
 
-def _cover(review, month_name, beats, personality_beat):
-    """The opening card: a thesis auto-picked from the strongest available beat."""
-    kinds = {b["kind"] for b in beats}
-    if "all_in" in kinds:
-        thesis = "The month you went all in."
-    elif "wide_net" in kinds:
-        thesis = "The month you cast a wide net."
-    elif "new" in kinds:
-        thesis = "The month something new took hold."
-    elif "diversity" in kinds:
-        thesis = "The month your taste shifted."
-    else:
-        thesis = "Your month, replayed."
+def listening_summary(plays, listen_days):
+    """Describe recorded activity without mistaking artist concentration for heavy usage."""
+    play_label = "play" if plays == 1 else "plays"
+    day_label = "day" if listen_days == 1 else "days"
+    return f"{plays:,} {play_label} across {listen_days} listening {day_label}."
+
+
+def _cover(review, month_name, personality_beat):
+    """The opening card states the month's activity; the following beats tell its story."""
+    thesis = listening_summary(review.get("plays", 0), review.get("listen_days", 0))
     return {"kind": "cover", "month_name": month_name, "plays": review.get("plays", 0),
             "thesis": thesis, "personality": personality_beat.get("name")}
 
@@ -227,7 +224,7 @@ def _closing(review, month_name, personality_beat):
             "listen_days": review.get("listen_days", 0)}
 
 
-def build_story(store, months, review, insights, month_name):
+def build_story(store, months, review, insights, month_name, *, detail_beats=None):
     """Assemble a completed month's recap. Returns None when there is no completed month to recap.
     `month_name` is the display name (e.g. 'June'); callers pass their own formatter so tz/locale stay
     in one place."""
@@ -241,10 +238,12 @@ def build_story(store, months, review, insights, month_name):
         _beat_all_in(review),
         _beat_wide_net(review, month_row),      # mutually exclusive with all_in
         _beat_biggest_night(review, month),
-        _beat_new_obsession(review),
-        _beat_diversity(months, month),
-        _beat_revival(insights),
+        # New detail screens replace these older, overlapping single-month comparisons.
+        # None preserves compatibility for callers that haven't prepared detail inputs.
+        _beat_new_obsession(review) if detail_beats is None else None,
+        _beat_diversity(months, month) if detail_beats is None else None,
+        _beat_revival(insights) if detail_beats is None else None,
     ) if b]
-    beats = [_cover(review, month_name, middle, pers), *middle, pers,
+    beats = [_cover(review, month_name, pers), *middle, *(detail_beats or []), pers,
              _closing(review, month_name, pers)]
     return {"month": month, "month_name": month_name, "beats": beats}

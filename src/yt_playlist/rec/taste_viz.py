@@ -26,7 +26,7 @@ shapes ranking).
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, eval_recs, layers, rec_params, recommend, transient
+from yt_playlist.rec import embed, eval_recs, layers, mix_tuning, rec_params, recommend, transient
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -165,6 +165,7 @@ def model_transparency(store, now) -> dict:
     era decade / artist), the modes axis at all three timescales it exists on, lanes, breadth,
     sources, and the graduation funnel. Expensive panels (embedding/recall, playlist contexts,
     centroid tilt) are separate (engine_panel / centroid_tilt_panel), htmx-lazy on the page."""
+    mix_tuning.expire(store, now)
     weights = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     standing = store.get_leans()
     leans = transient.facet_leans(store, now)

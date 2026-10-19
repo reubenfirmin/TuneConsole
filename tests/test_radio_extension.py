@@ -76,14 +76,16 @@ def test_background_manages_deck_window_and_tags_frames():
     assert "sender.tab" in src and '"standby"' in src and '"live"' in src   # frame attribution
 
 
-def test_background_permission_surface_unchanged_by_deck_manager():
+def test_background_permissions_scoped_to_player_and_public_site():
     # chrome.windows.create/remove (the dedicated radio window) need no manifest permission grant in
-    # MV3, so the deck manager must not have moved the declared permission surface at all.
+    # MV3. Only the public TuneConsole site is added for the local-player badge.
     manifest = json.loads((EXT / "manifest.json").read_text())
     assert manifest["permissions"] == ["cookies", "tabs", "alarms", "scripting"]
     assert manifest["host_permissions"] == [
         "https://music.youtube.com/*",
         "http://127.0.0.1:8765/*",
+        "https://tuneconsole.com/*",
+        "https://www.tuneconsole.com/*",
     ]
 
 

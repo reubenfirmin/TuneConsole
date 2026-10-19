@@ -34,6 +34,11 @@ WebSocket only from that `chrome-extension://` origin, which a web page cannot f
   calls. That visibility is the whole point: nothing is hidden in the service worker.
 - Requests outside the allowlist (anything that is not a `youtubei/v1/` call) are refused with a
   "blocked by allowlist" error instead of being sent.
+- On `tuneconsole.com`, a **Local Player** badge appears in the header. Neon green switches to an
+  existing local app tab (including `localhost` tabs and tabs in other windows) or opens a new one;
+  gray opens platform-specific instructions for installing or starting it.
+  The badge follows the local bridge connection automatically. Only
+  the connection status is exposed in the page; no library or playback data is shared with the site.
 
 ## What the extension observes and sends
 
@@ -88,4 +93,12 @@ Check the service worker console for the reason:
 
 - `background.js`: auto-connecting WebSocket client, allowlist, auth header, relay to the content script.
 - `content.js`: on-demand in-page fetch, driven by messages from the service worker.
+- `site_player.js` / `site_player.css`: the public site's local-player badge and setup dialog.
 - `manifest.json`: permissions and wiring for the above.
+
+## Prepare a Chrome Web Store update
+
+Set a version in `manifest.json` higher than the last uploaded version, then run
+`scripts/build-extension.sh` from the repository root. Upload the resulting
+`dist/tuneconsole-extension-<version>.zip` to the existing store listing.
+The package omits the development `key`, README, hidden files, and source maps.

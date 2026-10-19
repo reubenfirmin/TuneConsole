@@ -2,18 +2,18 @@
 import asyncio
 import json
 import re
-import threading
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
-from yt_playlist.providers import enrichment, lastfm, waterfall
+from yt_playlist.providers import lastfm
 from yt_playlist.rec import journeys, rec_params, recommend
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.library import executor
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.live_plays import resolve_identity
+from yt_playlist.web.jobs import start_playlist_enrichment
 
 
 def build(ctx) -> APIRouter:
@@ -246,27 +246,7 @@ def build(ctx) -> APIRouter:
         playlist's not-yet-complete tracks. Logs each provider response and records disagreements."""
         if store.get_playlist(pid) is None:
             raise HTTPException(status_code=404, detail="playlist not found")
-        # Rejoin an already-running job for this playlist rather than starting a duplicate
-        # (double-click, or the same playlist open in two tabs).
-        active = ctx.jobs.find_active(pid)
-        if active is not None:
-            return JSONResponse({"job_id": active.id})
-        job = ctx.jobs.create()
-        job.playlist_id = pid           # so a refreshed page can find + rejoin this job
-        job.source = "waterfall"
-
-        def run():
-            try:
-                waterfall.run_waterfall(store, store.tracks_for_waterfall(pid),
-                                        enrichment.load_config(store), on_progress=job.events.append)
-            except Exception as e:  # noqa: BLE001
-                detail = str(e) or type(e).__name__
-                job.error = detail
-                job.events.append({"type": "err", "text": f"enrichment failed: {detail}"})
-            finally:
-                job.done = True
-
-        threading.Thread(target=run, daemon=True).start()
+        job = start_playlist_enrichment(ctx, pid)
         return JSONResponse({"job_id": job.id})
 
     @router.get("/playlist/{pid}/conflicts")

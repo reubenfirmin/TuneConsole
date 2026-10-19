@@ -25,6 +25,29 @@ _PL_MEMBERSHIP = ("SELECT DISTINCT t.identity_key ik, pt.playlist_id pid "
 
 class ChartsRepo(Repo):
     @synchronized
+    def ticker_thumbnails(self, dimension) -> dict:
+        """Local artwork for chart categories, in one query per dimension."""
+        if dimension == "artist":
+            rows = self.conn.execute(
+                "SELECT artist cat, MIN(NULLIF(thumbnail,'')) thumbnail FROM tracks "
+                "WHERE artist<>'' GROUP BY artist").fetchall()
+        elif dimension == "album":
+            rows = self.conn.execute(
+                "SELECT t.album cat, COALESCE(MIN(NULLIF(sa.thumbnail,'')), "
+                "MIN(NULLIF(t.thumbnail,''))) thumbnail FROM tracks t "
+                "LEFT JOIN saved_albums sa ON sa.browse_id=t.album_browse_id "
+                "WHERE t.album<>'' GROUP BY t.album").fetchall()
+        elif dimension == "playlist":
+            rows = self.conn.execute(
+                "SELECT p.title cat, COALESCE(MIN(NULLIF(p.thumbnail,'')), "
+                "MIN(NULLIF(t.thumbnail,''))) thumbnail FROM playlists p "
+                "LEFT JOIN playlist_tracks pt ON pt.playlist_id=p.id "
+                "LEFT JOIN tracks t ON t.id=pt.track_id GROUP BY p.title").fetchall()
+        else:
+            raise ValueError(f"No ticker artwork for dimension: {dimension}")
+        return {r["cat"]: r["thumbnail"] for r in rows if r["thumbnail"]}
+
+    @synchronized
     def album_browse_ids(self) -> dict:
         """{album_title: a representative album_browse_id} for albums that have one, lets the
         Albums ticker link each row to its /album page. Titles without a browse id are omitted."""

@@ -4,6 +4,7 @@ tilted away from the PRUNED set (the per-cluster "negative model"). Saving reuse
 (materialize a Generated playlist + open it on YouTube); the client decides which tracks to send."""
 import asyncio
 import json
+import random
 import threading
 
 from fastapi import APIRouter, Request
@@ -67,12 +68,20 @@ def build(ctx) -> APIRouter:
         # tokens may be families or specific genres (#29 / C2b); empty = no restriction
         tokens = body.get("allow_genres") or body.get("allow_families") or []
         allow = store.keys_in_genre_selection(tokens) if tokens else None
+        seeds = body.get("central_seeds") or []
+        groups = [s["keys"] for s in seeds if s.get("keys")]
+        artists = [s for s in seeds if s.get("kind") == "artist" and s.get("keys")]
+        artist_keys = [set(s["keys"]) for s in artists]
+        song_keys = {key for s in seeds if s.get("kind") == "song" for key in s.get("keys", [])}
+        preferred = {key for s in artists for key in s["keys"]} - song_keys
         # Over-fetch, then cap per album (#14) so an album can't dominate. The cap is across the WHOLE
         # cluster being built, not just this ring: seed the running count from the tracks already on
         # the canvas (everything in `exclude` that isn't pruned), so once an album hits ALBUM_CAP
         # anywhere in the playlist, no further grow can add more of it.
         nbrs = embed.cluster_expand(store, pos_keys=pos, neg_keys=neg, exclude=exclude,
-                                    topn=max(k * 4, k + 12), allow=allow, include_new=include_new)
+                                    topn=len(preferred) + max(k * 4, k + 12), allow=allow,
+                                    include_new=include_new, seed_groups=groups,
+                                    candidate_seed_keys=preferred, artist_groups=artist_keys)
         # cap basis = the grown tracks already kept (count_keys), NOT the central seeds. A seed
         # artist's album shouldn't pre-spend the per-album budget. Falls back to non-pruned canvas keys.
         basis = body.get("count_keys")
@@ -89,24 +98,41 @@ def build(ctx) -> APIRouter:
         if dmeta:
             store.mark_offered("track", list(dmeta), now_fn())   # #53 offered-in-cluster count
         genres = store.track_genres(cand)               # for the client-side genre filter (#29)
+        # Seeded variation among near matches, stable when a saved canvas is reopened. Balance the
+        # artists while selecting (after album eligibility), so a large catalog cannot crowd out a
+        # second artist. Related tracks fill any remaining places when seed songs run out.
+        rng = random.Random(str(body.get("random_seed", 0)))
+        variation = 0.02 if len(artists) > 1 else 0.12
+        rank = {key: score + rng.uniform(-variation, variation) for key, score in sorted(nbrs)} if seeds else dict(nbrs)
+        memberships = {key: [i for i, keys in enumerate(artist_keys) if key in keys]
+                       for key in cand}
+        artist_counts = [0] * len(artists)
+        candidates = {key: score for key, score in nbrs
+                      if (meta.get(key) or dmeta.get(key) or {}).get("video_id")}
         ring = []
-        for key, score in nbrs:
+        while candidates and len(ring) < k:
+            eligible = [key for key in candidates
+                        if not (album := ((meta.get(key) or dmeta[key]).get("album") or "").strip().lower())
+                        or album_count.get(album, 0) < ALBUM_CAP]
+            if not eligible:
+                break
+            def priority(key):
+                member = memberships[key] if key in preferred else []
+                return (bool(member), -min((artist_counts[i] for i in member), default=0), rank[key])
+            key = max(eligible, key=priority)
+            score = candidates.pop(key)
             new = key not in meta and key in dmeta       # out-of-corpus candidate
             m = meta.get(key) or dmeta.get(key)
-            if not m or not m.get("video_id"):
-                continue
             album = (m.get("album") or "").strip().lower()
-            if album:                                    # untagged albums aren't capped
-                if album_count.get(album, 0) >= ALBUM_CAP:
-                    continue
+            if album:
                 album_count[album] = album_count.get(album, 0) + 1
+            for i in memberships[key]:
+                artist_counts[i] += 1
             g = (m.get("genre") if new else genres.get(key, "")) or ""
             ring.append({"key": key, "video_id": m["video_id"], "title": m["title"],
                          "artist": m["artist"], "album": m["album"], "thumbnail": m["thumbnail"],
                          "genre": g, "family": genre_map.family(g), "score": round(score, 4),
                          "out_of_corpus": new})
-            if len(ring) >= k:
-                break
         return JSONResponse({"ring": ring})
 
     @router.post("/clusters/explain")

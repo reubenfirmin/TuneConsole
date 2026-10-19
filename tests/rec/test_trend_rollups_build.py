@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 from yt_playlist.core.store import Store
 from yt_playlist.rec import trend_rollups as tr
@@ -27,6 +29,41 @@ def _snap(store, day, keys):
         store.conn.execute("INSERT INTO history_items(snapshot_id, identity_key) VALUES (?, ?)", (sid, k))
     store.conn.commit()
     return sid
+
+
+@pytest.mark.parametrize("now, expected", [
+    ("2026-10-01T00:00:00", "2026-09"),
+    ("2026-10-31T23:59:59", "2026-09"),
+    ("2027-01-01T00:00:00", "2026-12"),
+    ("2024-03-01T00:00:00", "2024-02"),
+])
+def test_last_complete_month(now, expected):
+    ts = datetime.fromisoformat(now).replace(tzinfo=timezone.utc).timestamp()
+    assert tr.last_complete_month(ts) == expected
+
+
+def test_build_drops_stale_recap_when_previous_month_has_no_data(store):
+    _track(store, "k1", "A1", "house")
+    for month in (7, 10):
+        day = int(datetime(2026, month, 10, tzinfo=timezone.utc).timestamp() // 86400)
+        _snap(store, day, ["k1"])
+    store.put_proposals("trend_rollups", {"story": {"month": "2026-07"}})
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc).timestamp()
+    payload = tr.build(store, now)
+    assert payload["review"] is None
+    assert payload["story"] is None
+    assert store.get_proposals("trend_rollups")["story"] is None
+
+
+def test_build_recaps_september_in_october(store):
+    _track(store, "k1", "A1", "house")
+    for month in (8, 9, 10):
+        day = int(datetime(2026, month, 10, tzinfo=timezone.utc).timestamp() // 86400)
+        _snap(store, day, ["k1"])
+    payload = tr.build(store, datetime(2026, 10, 19, tzinfo=timezone.utc).timestamp())
+    assert payload["review"]["month"] == "2026-09"
+    assert payload["story"]["month"] == "2026-09"
+    assert payload["story"]["month_name"] == "September"
 
 
 def _track(store, key, artist, genre=""):

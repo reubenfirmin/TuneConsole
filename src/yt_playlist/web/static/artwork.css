@@ -1,0 +1,43 @@
+/* Shape belongs to the entity, independent of its size or the page displaying it.
+   These two geometry properties intentionally override feature-level corner styles. */
+.art-playlist, .art-artist, .art-album {
+  overflow: hidden;
+  clip-path: none !important;
+}
+.art-playlist { border-radius: var(--art-playlist-radius) !important; }
+.art-artist { border-radius: var(--art-artist-radius) !important; }
+.art-album { border-radius: var(--art-album-radius) !important; }
+/* A wrapper clips artwork, its empty state, and any play overlay together. */
+:is(.art-playlist, .art-artist, .art-album) > img {
+  border-radius: 0 !important;
+}
+:is(.art-playlist, .art-artist, .art-album):focus-visible,
+:is(.art-playlist, .art-artist, .art-album) > a:focus-visible {
+  outline-offset: -3px;
+}
+/* Keep captions, source badges, and actions outside the artwork's clipped silhouette. */
+.tile-cover:has(> .tile-image) { background: transparent; border: 0; }
+.tile-image {
+  position: absolute;
+  inset: 0 0 auto;
+  aspect-ratio: 1;
+  display: block;
+  background: var(--placeholder);
+}
+.chart-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 3rem;
+  height: 3rem;
+  background: var(--placeholder);
+  color: var(--dim);
+}
+.chart-art .library-page-icon { width: 55%; height: 55%; }
+.chart-art img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}

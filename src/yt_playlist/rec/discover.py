@@ -429,10 +429,13 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
     albums = store.get_discovered_albums()
     if not albums:
         return []
-    wmap = {}
+    wmap, family_weights = {}, {}
     kept = []
     for a in albums:
-        w = _discovery_facet_w(store, a.get("genre"), now)
+        family = genre_map.family(a["genre"]) if a.get("genre") else None
+        if family not in family_weights:
+            family_weights[family] = _discovery_facet_w(store, a.get("genre"), now)
+        w = family_weights[family]
         if w is None:                                    # muted family: excluded from discovery
             continue
         wmap[a["browse_id"]] = w
@@ -494,8 +497,12 @@ def pick_discovered_artists(store, n, now):
     if not arts:
         return []
     scored = []
+    family_weights = {}
     for a in arts:
-        w = _discovery_facet_w(store, a.get("genre"), now)
+        family = genre_map.family(a["genre"]) if a.get("genre") else None
+        if family not in family_weights:
+            family_weights[family] = _discovery_facet_w(store, a.get("genre"), now)
+        w = family_weights[family]
         if w is None:                                    # muted family: excluded from discovery
             continue
         scored.append((a, (a.get("score") or 0.0) * w))

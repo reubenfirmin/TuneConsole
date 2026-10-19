@@ -130,10 +130,11 @@ class DiscoveryRepo(Repo):
     @synchronized
     def prune_orphan_discovered_tracks(self) -> int:
         """Drop discovered tracks whose source album is no longer in the pool (#52 cleanup). Radio-
-        sourced tracks (source_browse_id 'radio:*') have their own lifecycle and are kept. Returns the
+        and genre-sourced tracks have their own lifecycle and are kept. Returns the
         count removed."""
         cur = self.conn.execute(
             "DELETE FROM discovered_tracks WHERE source_browse_id NOT LIKE 'radio:%' "
+            "AND source_browse_id NOT LIKE 'genre:%' "
             "AND source_browse_id NOT IN (SELECT browse_id FROM discovered_albums)")
         self.conn.commit()
         return cur.rowcount

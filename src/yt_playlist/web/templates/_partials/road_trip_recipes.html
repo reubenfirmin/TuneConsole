@@ -1,8 +1,7 @@
 <div class="rt-library-bar">
 <details class="rt-saved-routes rt-drawer"{% if form_recipe and form_recipe.id and not draft %} open{% endif %}>
   <summary>
-    <span class="rt-library-label">Route library</span>
-    <strong>{{ form_recipe.name if form_recipe and form_recipe.id else 'Choose a saved route' }}</strong>
+    <strong>Saved routes</strong>
     <small>{{ recipes|length }} saved</small>
   </summary>
   <div class="rt-recipes">
@@ -25,7 +24,7 @@
                 hx-confirm="Delete the &quot;{{ r.name }}&quot; recipe?">Delete</button>
         {% if r.last_playlist_id %}
         <a class="muted" href="https://music.youtube.com/playlist?list={{ r.last_playlist_id }}"
-           target="_blank" rel="noopener" data-yt-info>Last saved ↗</a>
+           target="_blank" rel="noopener" data-yt-info>Last saved <svg class="rt-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></a>
         {% endif %}
       </div>
     </div>

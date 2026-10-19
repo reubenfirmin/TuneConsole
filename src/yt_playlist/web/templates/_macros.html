@@ -50,8 +50,10 @@
 }.get(source, (source, 'b-indigo')) -%}
 <div class="tile">
   <a class="tile-cover{{ ' no-art' if not cover }}" href="{{ land }}"{% if land.startswith('http') %} target="_blank" rel="noopener"{% endif %}>
-    {% if cover %}<img src="{{ cover }}" alt="" loading="lazy" referrerpolicy="no-referrer"
-         onerror="this.closest('.tile-cover').classList.add('no-art'); this.remove()">{% endif %}
+    <span class="tile-image{{ ' art-artist' if source == 'artist' else ' art-album' if source in ('album', 'revisit') else '' }}">
+      {% if cover %}<img src="{{ cover }}" alt="" loading="lazy" referrerpolicy="no-referrer"
+           onerror="this.closest('.tile-cover').classList.add('no-art'); this.remove()">{% endif %}
+    </span>
     <span class="tile-badge {{ b[1] }}">{{ b[0] }}</span>
     <span class="tile-scrim">
       <span class="tile-title" title="{{ title }}">{{ title }}</span>

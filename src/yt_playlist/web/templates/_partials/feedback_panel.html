@@ -4,32 +4,38 @@
    the panel (so Advanced stays reachable) and reflect your choice as 'selected', persisted from
    the active mood across a refresh. Per-track feedback lives in the track listing, not here.
    Expects `pid`, `facets` ({genres, eras}), and `mood_state` (+1/-1/0). #}
-<section class="fb-panel card card--inset" id="fb-{{ pid }}">
-  {% if recipe and recipe.model == 'cluster' %}
-  <p class="fb-type"><span class="fb-type-chip">Cluster</span> grown on the canvas
-    {% if has_cluster_canvas %}{# #48: jump back to the exact graph to regrow it differently #}
-    <a class="fb-reopen" href="/clusters?from={{ pl.ytm_playlist_id }}">↩ Reopen in Clusters</a>{% endif %}
-  </p>
-  {% endif %}
-  {% if recipe and recipe.facets %}
+<section class="fb-panel card card--inset" id="fb-{{ pid }}"
+         x-data="{ sel: {{ mood_state|default(0) }}, detailed: false }">
+  {% set is_cluster = recipe and recipe.model == 'cluster' %}
+  {% if recipe and recipe.facets and not is_cluster %}
   <p class="fb-recipe">Made from
     {% if recipe.facets.genres %}<span class="fb-chip">{{ recipe.facets.genres|join(' · ') }}</span>{% endif %}
     {% if recipe.facets.eras %}<span class="fb-chip">{{ recipe.facets.eras|join(' · ') }}s</span>{% endif %}
     {% if recipe.facets.artists %}<span class="fb-chip">{{ recipe.facets.artists|join(' · ') }}</span>{% endif %}
   </p>
   {% endif %}
-  <div class="fb-simple" x-data="{ sel: {{ mood_state|default(0) }} }">
+  <div class="fb-simple">
+    {% if is_cluster %}
+    <a class="fb-type-chip" href="/clusters{% if has_cluster_canvas %}?from={{ pl.ytm_playlist_id|urlencode }}{% endif %}"
+       title="Open cluster editor" aria-label="Open cluster editor">Cluster</a>
+    {% else %}
     <span class="fb-q">How's this mix landing right now?</span>
+    {% endif %}
     <div class="fb-btns">
       <button type="button" class="mood-btn" :class="{ 'fb-sel': sel === 1 }" @click="sel = 1"
               hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": 1}' hx-swap="none">🔥 More of this vibe</button>
       <button type="button" class="mood-btn" :class="{ 'fb-sel': sel === -1 }" @click="sel = -1"
               hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": -1}' hx-swap="none">🙅 Not my mood</button>
+      <button type="button" class="fb-toggle" @click="detailed = !detailed"
+              :aria-expanded="detailed" aria-controls="fb-details-{{ pid }}">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
+             :class="{ 'is-open': detailed }"><path d="M4 8h16l-8 8z"/></svg>
+        Detailed feedback
+      </button>
     </div>
   </div>
 
-  <details class="fb-detailed">
-    <summary>Detailed feedback</summary>
+  <div class="fb-detailed" id="fb-details-{{ pid }}" x-show="detailed" x-cloak>
     {% if journey_label %}
     <div class="fb-group fb-flow">
       <div class="fb-lever" x-data="{ sel: 0 }"><span class="fb-name"><strong>Flow:</strong> {{ journey_label }}</span>
@@ -78,9 +84,8 @@
     <p class="fb-sub">These tracks aren't tagged with genre or era yet. <strong>Enrich it</strong>
       (the ✨ icons above) to get per-genre and per-era levers here.</p>
     {% endif %}
-  </details>
-
-  <p class="fb-note">Shapes your <strong>current</strong> picks. It sticks until you change it, and only nudges your long-term taste if you keep leaning the same way.</p>
+    <p class="fb-note">Shapes your <strong>current</strong> picks. It sticks until you change it, and only nudges your long-term taste if you keep leaning the same way.</p>
+  </div>
 </section>
 <script>
 function fbFlash(btn){ btn.classList.add('fb-done'); setTimeout(function(){ btn.classList.remove('fb-done'); }, 900); }

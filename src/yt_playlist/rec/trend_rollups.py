@@ -5,7 +5,7 @@ play_events is used ONLY in the first-play index (a MIN), never as an added play
 
 Thresholds below are EDITORIAL (when to interrupt the user), not model knobs, so they are constants
 here, not rec_params."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 from yt_playlist.util import genre_map
@@ -60,6 +60,12 @@ def week_start(day) -> int:
 def month_of(day) -> str:
     """UTC 'YYYY-MM' for a UTC day number."""
     return datetime.fromtimestamp(day * 86400, tz=timezone.utc).strftime("%Y-%m")
+
+
+def last_complete_month(now) -> str:
+    """Previous calendar month in UTC, matching the listening rollup's month boundaries."""
+    first = datetime.fromtimestamp(now, tz=timezone.utc).replace(day=1)
+    return (first - timedelta(days=1)).strftime("%Y-%m")
 
 
 def diversity_index(families) -> float:
@@ -270,7 +276,7 @@ def month_peak_day(day_counts, meta, month):
 
 
 def month_review(months, store, now, day_counts=(), meta=None):
-    """Recap of the last fully-elapsed calendar month, or None if none exists. months is ascending.
+    """Recap of the previous calendar month, or None if that month has no listening data.
     day_counts (optional, defaults to ()) is the raw play_day_counts() rows, used to build the per-day
     heat-strip data (`play_days`) and the binge callout (`binge`); meta (optional, defaults to {}) is
     track_meta()'s {key: (artist, genre)}, used only by month_peak_day. Callers that don't care about
@@ -278,11 +284,10 @@ def month_review(months, store, now, day_counts=(), meta=None):
     threads everywhere else, so "past" months are judged against the caller's now, not real wall-clock
     time.time() (which would make every synthetic-now test/backfill diverge from what it's simulating)."""
     meta = meta or {}
-    now_month = month_of(int(now // 86400))
-    past = [m for m in months if m["month"] < now_month]
-    if not past:
+    month = last_complete_month(now)
+    cur = next((m for m in months if m["month"] == month), None)
+    if cur is None:
         return None
-    cur = past[-1]
     # riser / faller vs the prior month, reusing the ticker's own artist play query
     y, mo = (int(x) for x in cur["month"].split("-"))
     start = datetime(y, mo, 1, tzinfo=timezone.utc).timestamp()
@@ -559,10 +564,11 @@ def build(store, now) -> dict:
     floor_day = store.trends.first_play_floor_day()
     days = {day for day, _key, _cnt in day_counts}
     spotlight = detect_spotlight(weeks, months, review, floor_day, store, now, days=days, insights=insights)
-    from yt_playlist.rec import recap_story
+    from yt_playlist.rec import recap_details, recap_story
     month_name = (datetime.strptime(review["month"] + "-01", "%Y-%m-%d").strftime("%B")
                   if review else None)
-    story = recap_story.build_story(store, months, review, insights, month_name)
+    details = recap_details.build(store, review["month"]) if review else []
+    story = recap_story.build_story(store, months, review, insights, month_name, detail_beats=details)
     payload = {"built_at": now, "first_play_floor_day": floor_day, "weeks": weeks, "months": months,
                "overlays": compute_overlay_series(day_counts, meta, weeks),
                "insights": insights, "review": review, "health": health_snapshot(store, now),

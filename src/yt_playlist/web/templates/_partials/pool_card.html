@@ -1,0 +1,25 @@
+<section class="gen-card card fresh-pool{% if pool.building %} is-building{% endif %}" id="gen-{{ pool.lane }}"
+         :class="{ 'is-focused': focus === {{ pool.lane|tojson|forceescape }}, 'is-muted': focus && focus !== {{ pool.lane|tojson|forceescape }} }"
+         aria-busy="{{ 'true' if pool.building else 'false' }}"
+         {% if pool.building %}hx-get="{{ pool.url }}/{{ pool.job.id }}"
+         hx-trigger="every 2s" hx-target="this" hx-swap="outerHTML settle:0ms"{% endif %}>
+  <div class="fresh-pool-shell" id="gen-body-{{ pool.lane }}">
+    <button type="button" class="fresh-pool-back" x-show="focus === {{ pool.lane|tojson|forceescape }}" x-cloak @click="focus = null">All mixes</button>
+    {% if not pool.building %}
+    <button type="button" class="fresh-pool-action" aria-label="{{ pool.action }}"
+            @click="focus = {{ pool.lane|tojson|forceescape }}" hx-post="{{ pool.url }}" hx-target="#gen-{{ pool.lane }}"
+            hx-swap="outerHTML settle:0ms" hx-disabled-elt="this" hx-vals='{{ pool.parameters|tojson }}'
+            hx-on::config-request="event.detail.parameters.exclude_keys = homePoolExclusions()">
+    {% else %}<div class="fresh-pool-action">{% endif %}
+      <span class="fresh-pool-art" aria-hidden="true">
+        {% for i in range(4) %}<span class="fresh-pool-tile"><span></span><span></span><span></span></span>{% endfor %}
+      </span>
+      <span class="fresh-pool-copy">
+        <span class="gen-direction">{{ pool.label }}</span>
+        <span class="gen-theme">{{ pool.building_title if pool.building else pool.title }}</span>
+        {% if pool.genre_labels %}<span class="fresh-pool-genres">{{ pool.genre_labels|join(' · ') }}</span>{% endif %}
+        <span class="fresh-pool-status" role="status">{% if pool.building or pool.job %}{{ pool.message }}{% else %}{{ pool.description }}{% endif %}</span>
+      </span>
+    {% if not pool.building %}</button>{% else %}</div>{% endif %}
+  </div>
+</section>

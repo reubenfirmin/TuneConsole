@@ -1,10 +1,15 @@
 <section class="fingerprint card" id="fingerprint" x-data="fpPanel()" :class="{ 'is-collapsed': collapsed }"
+         data-tuning-remaining="{{ fingerprint.tuning_remaining|default(0) }}"
+         data-tuning-active="{{ 'true' if tuning_active else 'false' }}"
          @home-mix-open.window="close()" @home-mixes-applied.window="close()">
   <button type="button" class="fp-collapse" x-ref="launcher" @click="show()"
           :aria-expanded="(!collapsed).toString()" aria-haspopup="dialog" aria-controls="fp-dialog"
-          title="Tune these mixes" aria-label="Tune these mixes">
+          title="Tune these mixes{{ ' (adjustments active)' if tuning_active else '' }}"
+          aria-label="Tune these mixes" aria-describedby="fp-tuning-status">
     <span class="fp-mood-mark" aria-hidden="true">≋</span>
+    <span class="fp-tuning-dot" aria-hidden="true"{% if not tuning_active %} hidden{% endif %}></span>
   </button>
+  <span id="fp-tuning-status" hidden>{{ 'Selections or biases are set.' if tuning_active else '' }}</span>
   <dialog class="fp-dialog" id="fp-dialog" x-ref="dialog" aria-labelledby="fp-title"
           @cancel.prevent="close()" @keydown.escape.prevent.stop="close()"
           @click="dismissBackdrop($event)" @keydown.tab="trapFocus($event)">
@@ -125,10 +130,14 @@
       </div>
     </div>
   </div>
-  <button type="button" class="fp-reset"
-          hx-post="/home/fingerprint/reset" hx-target="#fingerprint" hx-swap="outerHTML"
-          hx-on::after-request="htmx.ajax('GET','/home/cards',{target:'#home-mode-cards',swap:'outerHTML'}); window.dispatchEvent(new CustomEvent('mixes-reranked'))"
-          title="Remove adjustments made here; learned taste remains">Clear adjustments</button>
+  </div>
+  <div class="fp-footer">
+    <p class="section-note">Selections and biases reset 4 hours after your last adjustment.</p>
+    <button type="button" class="fp-reset"
+            hx-post="/home/fingerprint/reset" hx-target="#fingerprint" hx-swap="outerHTML"
+            hx-sync="#fingerprint:replace" hx-disabled-elt="this"
+            hx-on::after-request="window.dispatchEvent(new CustomEvent('mixes-reranked'))"
+            title="Clear genre choices and adjustments; keep learned taste">Clear selections and biases</button>
   </div>
   </div>
   </dialog>

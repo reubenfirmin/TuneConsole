@@ -117,6 +117,9 @@ def prepare_bundles(store, now) -> dict:
     except Exception:  # noqa: BLE001 - PPR precompute must never break bundle prep
         payload["_ppr"] = {}
     store.put_proposals("mode_bundles", payload, now)
+    # Supersede the last on-demand pool too, so explicit-genre Fresh previews use the worker's
+    # latest metadata/ranking rather than keeping an older clicked job's snapshot forever.
+    store.put_proposals("fresh_pool", [surfaces._item_to_fresh_dict(it) for it in pools["fresh"]], now)
     return payload
 
 

@@ -160,7 +160,7 @@
                  x-show="!q || $el.dataset.search.includes(q.toLowerCase())">
           <header class="import-source-album">
             {% if item.spotify_url and not item.spotify_link_is_search %}
-            <a href="{{ item.spotify_url }}" target="_blank" rel="noopener" class="import-source-cover">
+            <a href="{{ item.spotify_url }}" target="_blank" rel="noopener" class="import-source-cover art-album">
               <img src="/import/spotify-library/spotify-thumbnail?url={{ item.spotify_url|urlencode }}"
                    alt="" loading="lazy" onerror="this.closest('.import-source-cover').remove()">
             </a>
@@ -178,7 +178,7 @@
           <div class="import-candidate-grid" aria-label="Possible YouTube Music matches">
             {% for candidate in item.candidates %}
             <article class="import-candidate">
-              {% if candidate.thumbnail %}<img src="{{ candidate.thumbnail }}" alt="" loading="lazy"
+              {% if candidate.thumbnail %}<img class="art-album" src="{{ candidate.thumbnail }}" alt="" loading="lazy"
                 onerror="this.remove()">{% endif %}
               <div class="import-candidate-copy">
                 <h4>{{ candidate.title }}</h4>

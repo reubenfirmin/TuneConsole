@@ -11,7 +11,7 @@
       <p class="section-note">Nothing left to resolve. 🎉</p>
       <div class="modal-actions"><button type="button" @click="open = false">Close</button></div>
     {% else %}
-      <p class="section-note">Providers returned different values. Pick the one to keep for each track.</p>
+      <p class="section-note">Providers returned different values. Click a provider to look up the track in a new tab, then pick the value to keep.</p>
       <form hx-post="{{ resolve_url }}" hx-target="#conflicts-modal" hx-swap="innerHTML">
         {% for _tid, items in conflicts|groupby('track_id') %}
         <div class="conflict-track">
@@ -21,12 +21,20 @@
             <span class="conflict-label">{{ c.field|capitalize }}</span>
             <div class="conflict-options">
               {% for cand in c.candidates %}
-              <label class="conflict-option">
-                <input type="radio" name="{{ c.track_id }}:{{ c.field }}"
-                       value="{{ cand.value }}"{% if loop.first %} checked{% endif %}>
-                <span class="conflict-value">{{ cand.value }}</span>
+              <div class="conflict-option">
+                <label>
+                  <input type="radio" name="{{ c.track_id }}:{{ c.field }}"
+                         value="{{ cand.value }}"{% if loop.first %} checked{% endif %}>
+                  <span class="conflict-value">{{ cand.value }}</span>
+                </label>
+                {% set provider_url = provider_search_url(cand.provider, c.title, c.artist, c.mb_recording_id) %}
+                {% if provider_url %}
+                <a class="conflict-prov" href="{{ provider_url }}" target="_blank" rel="noopener noreferrer"
+                   title="Look up {{ c.title }} by {{ c.artist }} on {{ cand.provider }} (opens in a new tab)">{{ cand.provider }}</a>
+                {% else %}
                 <span class="muted conflict-prov">{{ cand.provider }}</span>
-              </label>
+                {% endif %}
+              </div>
               {% endfor %}
             </div>
           </div>

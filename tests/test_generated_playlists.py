@@ -4,6 +4,9 @@ Covers the load-bearing constraint: a playlist this app generates (auto-grouped 
 NOT feed the recommendation engine until it's played or re-grouped, plus the create endpoint.
 """
 import json
+import threading
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -97,6 +100,55 @@ def test_generate_result_play_and_redirect(store):
     assert "music.youtube.com/watch?list=" in r.text           # playable watch link
     assert 'window.location.assign("/playlist/' in r.text      # this tab goes to the playlist page
     assert "__ytTab" in r.text                                 # loading window handled (fallback path)
+
+
+@pytest.mark.parametrize("recipe", [{"model": "fresh"},
+                                    {"model": "mode", "lane": "fresh", "mode_id": 1}])
+def test_fresh_creation_starts_enrichment_and_page_rejoins(store, monkeypatch, recipe):
+    from yt_playlist.providers import musicbrainz
+    from tests.conftest import only_provider
+
+    iid = store.upsert_identity("main", "cred", None, True)
+    only_provider(store, "musicbrainz")
+    started, release = threading.Event(), threading.Event()
+
+    def enrich(title, artist):
+        started.set()
+        assert release.wait(timeout=10)
+        return "Rock", "1998", None, []
+
+    monkeypatch.setattr(musicbrainz, "enrich_full", enrich)
+    c = _client(store, lambda: {iid: FakeClient()})
+    try:
+        response = c.post("/home/generate", data={
+            "name": "Fresh songs", "recipe": json.dumps(recipe),
+            "tracks": json.dumps([{"video_id": "fresh1", "title": "New Song", "artist": "Artist"}])})
+
+        assert response.status_code == 200 and "Saved" in response.text
+        assert started.wait(timeout=2)  # No visit to the playlist page or manual enrich click needed.
+        playlist = store.get_playlists()[0]
+        job = c.app.state.ctx.jobs.find_active(playlist.id)
+        assert job is not None
+        page = c.get(f"/playlist/{playlist.id}").text
+        assert f"enrichPanel({playlist.id}, false, {job.id}, 'waterfall'" in page
+        assert c.post(f"/playlist/{playlist.id}/enrich").json()["job_id"] == job.id
+    finally:
+        release.set()
+
+    events = c.get(f"/playlist/enrich/events/{job.id}").text
+    assert '"row_html"' in events and '"error": null' in events
+    track = store.playlist_tracks_detail(playlist.id)[0]
+    assert track["genre"] == "Rock" and track["year"] == "1998"
+
+
+def test_non_fresh_creation_does_not_start_playlist_enrichment(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    c = _client(store, lambda: {iid: FakeClient()})
+    response = c.post("/home/generate", data={
+        "name": "Wheelhouse", "recipe": json.dumps({"model": "mode", "lane": "wheelhouse"}),
+        "tracks": json.dumps([{"video_id": "v1", "title": "Song", "artist": "Artist"}])})
+    assert response.status_code == 200 and "Saved" in response.text
+    assert not c.app.state.ctx.jobs.has_active()
 
 
 def test_save_button_opens_generating_screen(store):

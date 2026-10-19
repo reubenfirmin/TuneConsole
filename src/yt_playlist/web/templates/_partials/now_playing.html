@@ -16,6 +16,18 @@
           <span class="hs-now-title" x-text="nowPlaying.title || ''"></span>
           <span class="hs-now-artist" x-show="nowPlaying.artist" x-text="nowPlaying.artist || ''"></span>
         </span>
+        <template x-if="sourceLinkVisible()">
+          <a class="hs-source" :href="nowPlaying.source.url" data-yt-info
+             :target="nowPlaying.source.external ? '_blank' : null"
+             :rel="nowPlaying.source.external ? 'noopener' : null"
+             :title="'Back to ' + nowPlaying.source.kind + ': ' + nowPlaying.source.title"
+             :aria-label="'Back to ' + nowPlaying.source.kind + ': ' + nowPlaying.source.title">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+              <path d="M11 3 2 12l9 9 3-3-4-4h12v-4H10l4-4z"/>
+            </svg>
+            <span x-text="'Back to ' + nowPlaying.source.kind"></span>
+          </a>
+        </template>
         <span class="hs-rate-group">
           <button type="button" class="hs-rate hs-playpause" @click="toggle()"
                   :title="nowPlaying.paused ? 'Play' : 'Pause'"

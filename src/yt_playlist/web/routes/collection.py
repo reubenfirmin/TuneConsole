@@ -21,7 +21,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/albums")
     def albums_page(request: Request):
-        view = "saved" if request.query_params.get("view") == "saved" else "playlists"
+        view = "playlists" if request.query_params.get("view") == "playlists" else "saved"
         data = {"view": view}
         if view == "saved":
             data["saved"] = store.get_saved_albums()   # populated by sync (get_library_albums)

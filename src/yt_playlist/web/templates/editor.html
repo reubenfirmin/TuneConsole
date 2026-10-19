@@ -1,5 +1,6 @@
 {% extends "base.html" %}{% block title %}Merge · TuneConsole{% endblock %}{% block page_class %}page-workflow page-merge{% endblock %}{% block body %}
 <div class="page-head">
+  <a class="quiet-link" href="{{ draft.return_to }}">← {{ return_label }}</a>
   <h1>Merge {{ members|length }} playlist{{ '' if members|length == 1 else 's' }}</h1>
   <div class="cmp-ids">
     {% for m in members %}

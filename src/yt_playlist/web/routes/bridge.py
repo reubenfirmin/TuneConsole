@@ -9,6 +9,7 @@ import asyncio
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote, urlencode
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from yt_playlist.library import executor, live_plays, player_events
@@ -24,6 +25,20 @@ EXTENSION_ID = "opmmbolbdgdkphfocffpjpgmelkkjkcn"        # Chrome Web Store buil
 DEV_EXTENSION_ID = "edhplcadobipneepllhkkajckoammpnk"    # unpacked extension/ (from manifest `key`)
 EXTENSION_ORIGIN = f"chrome-extension://{EXTENSION_ID}"
 EXTENSION_ORIGINS = {EXTENSION_ORIGIN, f"chrome-extension://{DEV_EXTENSION_ID}"}
+
+
+def _now_playing_snapshot(msg, previous=None):
+    snapshot = {"title": msg.get("title"), "artist": msg.get("artist"),
+                "thumbnail": msg.get("thumbnail"), "likeStatus": msg.get("likeStatus"),
+                "video_id": msg.get("videoId"), "paused": bool(msg.get("paused"))}
+    # Older extensions omit context on rich heartbeats. Keep it only for the same video;
+    # an explicit empty context from a newer sensor clears it when the queue changes.
+    for field, key in (("playlist", "playlist_ytm_id"), ("albumBrowseId", "album_browse_id")):
+        if field in msg:
+            snapshot[key] = msg.get(field) or ""
+        elif previous and previous.get("video_id") == snapshot["video_id"] and key in previous:
+            snapshot[key] = previous[key]
+    return snapshot
 
 
 def build(ctx) -> APIRouter:
@@ -50,6 +65,20 @@ def build(ctx) -> APIRouter:
         if now_playing is not None and seen_at is not None and time.monotonic() - seen_at > 8:
             bridge.now_playing = now_playing = None
             bridge.now_playing_seen_at = None
+        if now_playing is not None:
+            playlist = now_playing.get("playlist_ytm_id")
+            resolve = getattr(getattr(ctx, "store", None), "playback_source", None)
+            source = resolve(playlist, now_playing.get("video_id"),
+                             now_playing.get("album_browse_id")) if resolve else None
+            if source:
+                url = (f"/playlist/{source['id']}" if source["kind"] == "playlist" else
+                       "/album?" + urlencode({"browse": source["browse"]}))
+                source = {"kind": source["kind"], "title": source["title"], "url": url, "external": False}
+            elif playlist:
+                kind = "album" if playlist.startswith("OLAK5uy_") else "playlist"
+                source = {"kind": kind, "title": f"Playing {kind}", "external": True,
+                          "url": "https://music.youtube.com/playlist?list=" + quote(playlist, safe="")}
+            now_playing = {**now_playing, "source": source}
         return {"connected": bridge.connected, "now_playing": now_playing,
                 "sensor_health": getattr(bridge, "sensor_health", None),
                 "radio": bool(radio is not None and radio.active),
@@ -695,13 +724,7 @@ def build(ctx) -> APIRouter:
                     # page beyond the expiry window (e.g. while switching Bluetooth audio devices).
                     if msg.get("deck") != "standby":
                         if msg.get("title"):
-                            bridge.now_playing = {
-                                "title": msg.get("title"), "artist": msg.get("artist"),
-                                "thumbnail": msg.get("thumbnail"),
-                                "likeStatus": msg.get("likeStatus"),
-                                "video_id": msg.get("videoId"),
-                                "paused": bool(msg.get("paused")),
-                            }
+                            bridge.now_playing = _now_playing_snapshot(msg, bridge.now_playing)
                         if bridge.now_playing is not None:
                             bridge.now_playing_seen_at = time.monotonic()
                     continue
@@ -709,11 +732,7 @@ def build(ctx) -> APIRouter:
                     if msg.get("deck") == "standby":
                         continue   # a muted, paused standby deck must never register a play or flip the bar
                     # Surface it for the Home now-playing line (polled via GET /bridge/status).
-                    bridge.now_playing = {"title": msg.get("title"), "artist": msg.get("artist"),
-                                          "thumbnail": msg.get("thumbnail"),
-                                          "likeStatus": msg.get("likeStatus"),
-                                          "video_id": msg.get("videoId"),
-                                          "paused": bool(msg.get("paused"))}
+                    bridge.now_playing = _now_playing_snapshot(msg)
                     bridge.now_playing_seen_at = time.monotonic()
                     # Older extension versions may still send paused snapshots as play frames.
                     # Keep the card fresh, but never count silence as a play or advance radio.

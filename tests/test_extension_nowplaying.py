@@ -27,6 +27,9 @@ const document = {
     if (selector === "video") return video;
     if (selector === ".title.ytmusic-player-bar") return { textContent: "Exoskeleton (Official)" };
     if (selector === ".byline.ytmusic-player-bar") return { textContent: "GAUPA • Album" };
+    if (selector.startsWith('ytmusic-player-bar a[href*="/browse/MPRE"]')) {
+      return { href: "https://music.youtube.com/browse/MPRE_album" };
+    }
     return null;
   },
 };
@@ -52,6 +55,7 @@ intervals[0]();  // DOM fallback after the main sensor was throttled
 main(true);
 assert.deepEqual(messages.map(m => m.type), ["now-heartbeat", "now-heartbeat", "now-heartbeat"]);
 assert(messages.every(m => m.paused));
+assert(messages.every(m => m.playlist === "PL1" && m.albumBrowseId === "MPRE_album"));
 video.paused = false;
 main(false);
 now = 12000;
@@ -59,6 +63,15 @@ intervals[0]();  // different DOM title for the same playing video
 assert.deepEqual(messages.map(m => m.type), [
   "now-heartbeat", "now-heartbeat", "now-heartbeat", "play", "now-heartbeat",
 ]);
+assert(messages.every(m => m.playlist === "PL1" && m.albumBrowseId === "MPRE_album"));
+// A queue change on the same song is context, not another play.
+context.location.href = "https://music.youtube.com/watch?v=v1&list=PL2";
+main(false);
+assert.equal(messages.at(-1).type, "now-heartbeat");
+assert.equal(messages.at(-1).playlist, "PL2");
+context.location.href = "https://music.youtube.com/watch?v=v1";
+main(true);
+assert.equal(messages.at(-1).playlist, "");
 """
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run([node, "-e", script], cwd=root, text=True, capture_output=True,

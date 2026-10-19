@@ -4,7 +4,7 @@ dislike statuses into the model."""
 import math
 import time
 
-from yt_playlist.rec import rec_params, transient
+from yt_playlist.rec import mix_tuning, rec_params, transient
 
 
 def apply_dislikes(store, status_map, now, provenance="sync") -> None:
@@ -105,6 +105,10 @@ def graduate_slider_exposure(store, now) -> None:
     by dividing the lean by the actual permanent ratio so the displayed effective multiplier
     (permanent x lean) is conserved (sticky). Returning a slider to neutral (magnitude 0) stops all
     accrual."""
+    mix_tuning.expire(store, now)
+    # A temporary Home adjustment must not turn into a lasting preference at midnight.
+    if mix_tuning.remaining(store, now) > 0:
+        return
     if not rec_params.get_param(store, "graduation_enabled"):
         return
     threshold = rec_params.get_param(store, "theme_threshold")

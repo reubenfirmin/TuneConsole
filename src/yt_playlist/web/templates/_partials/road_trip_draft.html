@@ -14,7 +14,6 @@
   <header class="rt-draft-head">
     <div class="rt-draft-title">
       <h2>{{ s.name }}</h2>
-      <p>Tune the live draft</p>
     </div>
     <div class="rt-draft-metrics">
       <span><strong>{{ stats.own_count + stats.their_count }}</strong> songs</span>
@@ -23,7 +22,7 @@
     </div>
     {% if s.saved_playlist_id %}
     <a class="rt-status is-saved" href="https://music.youtube.com/playlist?list={{ s.saved_playlist_id }}"
-       target="_blank" rel="noopener" data-yt-info>Saved ↗</a>
+       target="_blank" rel="noopener" data-yt-info>Saved <svg class="rt-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></a>
     {% elif s.building %}
     <span class="rt-status is-building">Building</span>
     {% else %}
@@ -75,7 +74,7 @@
     <button type="button" class="btn btn-primary rt-save" hx-post="/road_trip/draft/{{ rid }}/save"
             hx-target="#rt-save-result-{{ rid }}" hx-swap="innerHTML" hx-disabled-elt="this"
             onclick="genOpenYT('rt-draft-{{ rid }}')">
-      Save to YouTube ↗</button>
+      Save to YouTube <svg class="rt-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></button>
     {% endif %}
   </div>
   <div id="rt-save-result-{{ rid }}" role="status"></div>
@@ -121,7 +120,7 @@
       {% if not s.building %}
       <button type="button" class="rt-x" title="Swap this song"
               aria-label="Swap this song" hx-post="/road_trip/draft/{{ rid }}/slot/{{ loop.index0 }}"
-              hx-target="#road-trip-body" hx-swap="innerHTML">↻</button>
+              hx-target="#road-trip-body" hx-swap="innerHTML"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 1-2.3-5.7"/></svg></button>
       {% endif %}
       </span>
     </li>

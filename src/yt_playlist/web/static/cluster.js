@@ -35,13 +35,16 @@ function clusterCanvas() {
     WORLD,
     nodes: [], nextId: 1, rootId: null,
     query: '', results: [], seedSel: -1, genreSel: -1,
+    editingSeeds: false, seedBusy: false, randomSeed: Math.floor(Math.random() * 0x100000000),
+    _centerHeight: 90,
+    _pendingView: null,
     playlistName: '', saveMode: 'all',
     journey: 'auto', journeyName: 'Pick for me', journeyOpen: false,
     explain: null,            // {childId, loading, data} "why this edge?" popover
     hovered: null,            // node id whose action menu (HTML overlay) is showing
     families: [], genres: [], allowedFamilies: [], genreOpen: false, genreQuery: '',
     trunk: [], subHues: {}, _subHueN: 0, exhaustedIds: [], boosted: [],
-    _overOverlay: false,      // pointer is over the hover action-menu (keep it open)
+    _overOverlay: false, _hoverT: 0,      // pointer is over the hover action-menu (keep it open)
     canvases: [], activeId: null,   // saved canvases ({id,label}) and the active one (bottom-right switcher)
     _byId: null, _topo: null, _raw: null, _rawById: null,
 
@@ -70,6 +73,15 @@ function clusterCanvas() {
         .onBackgroundClick(e => this._click(null, e))   // dot → explain; else dismiss
         .onRenderFramePre((ctx, gs) => this._drawGridBG(ctx, gs))
         .onRenderFramePost((ctx, gs) => { this._drawDots(ctx, gs); this._positionOverlays(); })
+        .onZoomEnd(() => this.persist())
+        .onEngineTick(() => {
+          // force-graph applies its own default zoom when graphData is ingested. Restore our saved
+          // view on the first tick, after that update, so it cannot overwrite the saved camera.
+          const v = this._pendingView; if (!v) return;
+          this._pendingView = null;
+          if (v.cx != null) fg.centerAt(v.cx, v.cy, 0);
+          if (v.z) fg.zoom(v.z, 0);
+        })
         .onEngineStop(() => { this._revivePointer(); if (this._autofit) { this._autofit = false; this.resetView(); } });  // re-arm hit-testing + frame after a settle
       // custom forces, run inside force-graph's d3 simulation.
       // Standard charge to space nodes apart. force-graph's own center force already holds the cloud at the
@@ -79,13 +91,26 @@ function clusterCanvas() {
       fg.d3Force('charge', d3.forceManyBody().strength(-420).distanceMax(1600));
       // pruned (removed) cards shrink to a minimal pill, so they also claim a far smaller collision
       // radius — they pack in tight and stop hogging space, cutting visual noise.
-      fg.d3Force('collide', d3.forceCollide(n => n.state === 'pruned' ? 44 : NODE_R).strength(0.95).iterations(2));
+      fg.d3Force('collide', d3.forceCollide(n => n.state === 'pruned' ? 44 :
+        n.kind === 'central' ? Math.max(NODE_R, this._centerHeight / 2 + 24) : NODE_R).strength(0.95).iterations(2));
       // centroid separation: pushes whole cluster branches apart so their leaves don't intermingle.
       fg.d3Force('separate', this._clusterForce());
       const lf = fg.d3Force('link');
       if (lf) lf.distance(l => LINK_D + Math.min(120, this.descCount(l.target.id) * 12)).strength(0.7);
 
       this._resize(); window.addEventListener('resize', () => this._resize());
+      this._layoutObserver = new ResizeObserver(() => {
+        this._resize();
+        const h = this.$refs.center.offsetHeight;
+        if (h && h !== this._centerHeight) {
+          this._centerHeight = h;
+          fg.d3Force('collide').radius(n => n.state === 'pruned' ? 44 :
+            n.kind === 'central' ? Math.max(NODE_R, h / 2 + 24) : NODE_R);
+          this._kick();
+        }
+      });
+      this._layoutObserver.observe(document.getElementById('cluster-canvas'));
+      this._layoutObserver.observe(this.$refs.center);
       window.addEventListener('pagehide', () => this._flushState());
       // Mid-edge info dot clicks, intercepted at pointerdown in the CAPTURE phase — BEFORE force-graph's
       // own canvas handler. A dot often sits over a card, where force-graph would otherwise start a node
@@ -222,7 +247,7 @@ function clusterCanvas() {
     // removed picks fade into the background. Cached on the node (_dw/_dh) for hit-test + overlay placing.
     _nodeSize(n, ctx) {
       if (n.state === 'pruned') { ctx.font = '500 9px Hanken Grotesk, sans-serif'; const tw = Math.min(150, ctx.measureText(n.label || '').width); return { w: Math.max(46, tw + 16), h: 18 }; }
-      return n.kind === 'central' ? { w: CEN_W, h: 46 } : { w: CARD_W, h: CARD_H };
+      return n.kind === 'central' ? { w: CEN_W, h: this._centerHeight } : { w: CARD_W, h: CARD_H };
     },
     _drawNode(n, ctx, gs) {
       const central = n.kind === 'central';
@@ -264,13 +289,7 @@ function clusterCanvas() {
         ctx.restore();
       }
       if (central) {
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = C.accent; ctx.font = '600 8px Hanken Grotesk, sans-serif';
-        ctx.textBaseline = 'top'; ctx.fillText('CENTRAL CLUSTER', x + 10, y + 7);
-        ctx.fillStyle = C.text; ctx.font = '600 12px Hanken Grotesk, sans-serif';
-        const lbl = (n.seeds || []).map(s => s.label).join(' · ');
-        this._clipText(ctx, lbl, x + 10, y + 20, w - 20);
-        ctx.globalAlpha = 1; return;
+        return;   // accessible HTML overlay owns the wrapped seed labels and edit button
       }
       // thumbnail
       const tx = x + 6, ty = y + (h - THUMB) / 2, img = this._img(n.thumbnail);
@@ -396,6 +415,11 @@ function clusterCanvas() {
     },
     _positionOverlays() {
       const fg = this._fg; if (!fg) return;
+      const root = this._rawById && this._rawById.get(this.rootId);
+      if (root && this.$refs.center) {
+        const p = fg.graph2ScreenCoords(root.x, root.y), z = fg.zoom();
+        this.$refs.center.style.transform = `translate(${p.x}px,${p.y}px) translate(-50%, -50%) scale(${z})`;
+      }
       if (this.hovered != null && this.$refs.actions) {
         const n = this._rawById && this._rawById.get(this.hovered);
         if (n) {
@@ -426,6 +450,7 @@ function clusterCanvas() {
       return { v: 1, nodes: this.nodes, nextId: this.nextId, rootId: this.rootId, trunk: this.trunk,
         subHues: this.subHues, subHueN: this._subHueN, allowedFamilies: this.allowedFamilies, boosted: this.boosted,
         playlistName: this.playlistName, saveMode: this.saveMode, journey: this.journey, journeyName: this.journeyName,
+        randomSeed: this.randomSeed,
         view: this._fg ? { z: this._fg.zoom(), cx: (this._fg.centerAt() || {}).x, cy: (this._fg.centerAt() || {}).y } : null };
     },
     clusterStateJSON() { return this.nodes.length ? JSON.stringify(this._stateBlob()) : ''; },
@@ -453,12 +478,16 @@ function clusterCanvas() {
       this.subHues = s.subHues || {}; this._subHueN = s.subHueN || 0;
       this.allowedFamilies = s.allowedFamilies || []; this.boosted = s.boosted || [];
       this.playlistName = s.playlistName || ''; this.saveMode = s.saveMode || 'all';
+      // Older canvases used only the first seed for their automatic name.
+      this._syncSeedName((this.centralSeeds()[0]?.label || '') + ' cluster');
       this.journey = s.journey || 'auto'; this.journeyName = s.journeyName || 'Pick for me';
+      this.randomSeed = s.randomSeed ?? Math.floor(Math.random() * 0x100000000);
+      this._autofit = false;
+      this._pendingView = s.view || null;
       // restore positions without re-layout: pin every node, feed, release tracks after it settles (instant)
       for (const n of this.nodes) { if (n.x != null) { n.fx = n.x; n.fy = n.y; } }
       this._feed();
       this.$nextTick(() => {
-        const v = s.view; if (v && this._fg) { if (v.cx != null) this._fg.centerAt(v.cx, v.cy, 0); if (v.z) this._fg.zoom(v.z, 0); }
         setTimeout(() => { for (const n of this.nodes) if (n.kind !== 'central' && n.fx != null && !n._userPinned) { n.fx = null; n.fy = null; } }, 60);
         if (this.boosted.length) this._animBoost();   // resume the fire animation for restored 🔥 picks
       });
@@ -508,6 +537,10 @@ function clusterCanvas() {
       this.subHues = {}; this._subHueN = 0; this.exhaustedIds = []; this.boosted = [];
       this.allowedFamilies = []; this.genreQuery = ''; this.genreOpen = false;
       this.query = ''; this.results = []; this.playlistName = ''; this.saveMode = 'all';
+      this.editingSeeds = false; this.seedBusy = false;
+      this._autofit = false;
+      this._pendingView = null;
+      this.randomSeed = Math.floor(Math.random() * 0x100000000);
       this.journey = 'auto'; this.journeyName = 'Pick for me'; this.explain = null; this.hovered = null;
       this._feed();
     },
@@ -553,7 +586,32 @@ function clusterCanvas() {
     },
     seedMove(d) { if (this.results.length) this.seedSel = (this.seedSel + d + this.results.length) % this.results.length; },
     seedChoose() { const r = this.results[this.seedSel >= 0 ? this.seedSel : 0]; if (r) this.addSeed(r); },
+    centralSeeds() { const root = this.nodes.find(n => n.id === this.rootId); return root ? root.seeds : []; },
+    seedName() { const labels = this.seedLabels(); return labels.length ? labels.join(' + ') + ' cluster' : ''; },
+    _syncSeedName(previous = '') {
+      if (!this.playlistName || this.playlistName === previous) this.playlistName = this.seedName();
+    },
+    editSeeds() {
+      this.editingSeeds = true;
+      this.$nextTick(() => this.$refs.seedInput.focus());
+    },
+    async removeSeed(index) {
+      if (this.seedBusy) return;
+      const root = this.nodeById(this.rootId); if (!root) return;
+      const previousName = this.seedName();
+      const removed = root.seeds.splice(index, 1)[0];
+      if (removed.kind === 'genre') this.allowedFamilies = this.allowedFamilies.filter(f => f !== removed.label);
+      root.keys = [...new Set(root.seeds.flatMap(s => s.keys))];
+      this._syncSeedName(previousName);
+      this._autofit = true;
+      this.seedBusy = true;
+      try { await this.refineTree(); }
+      finally { this.seedBusy = false; }
+    },
     async addSeed(r) {
+      if (this.seedBusy || this.centralSeeds().some(s => s.kind === r.kind && s.label === r.label
+        && JSON.stringify(s.keys) === JSON.stringify(r.keys))) return;
+      const previousName = this.seedName();
       this.query = ''; this.results = [];
       let root = this.rootId != null ? this.nodeById(this.rootId) : null;
       const fresh = !root;
@@ -564,8 +622,14 @@ function clusterCanvas() {
       }
       root.seeds.push({ label: r.label, kind: r.kind, keys: r.keys });
       root.keys = [...new Set(root.seeds.flatMap(s => s.keys))];
-      if (!this.playlistName) this.playlistName = r.label + ' cluster';
-      if (fresh) { this._autofit = true; await this.grow(root.id); } else await this.refineTree();   // frame the cluster on the first add only
+      this._syncSeedName(previousName);
+      this._autofit = true;
+      this._feed();
+      this.seedBusy = true;
+      try {
+        if (fresh || !this.children(root.id).length) await this.grow(root.id);
+        else await this.refineTree();
+      } finally { this.seedBusy = false; this._kick(); this.persist(); }
     },
 
     // --- tree growth ------------------------------------------------------------------------------
@@ -575,7 +639,9 @@ function clusterCanvas() {
       try {
         const r = await fetch('/clusters/expand', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pos_keys, neg_keys: this.prunedKeys(), exclude: this.allKeys(),
+          body: JSON.stringify({ pos_keys, neg_keys: this.prunedKeys(),
+            exclude: node.kind === 'central' ? [...this.canvasKeys(), ...this.centralSongKeys()] : this.allKeys(),
+            central_seeds: node.kind === 'central' ? this.centralSeeds() : [], random_seed: this.randomSeed,
             count_keys: this.keepKeys(), k, allow_genres: this.allowedFamilies, include_new: true }),
         });
         return (await r.json()).ring || [];
@@ -603,7 +669,7 @@ function clusterCanvas() {
       for (const parent of parents) {
         if (!this.nodeById(parent.id)) continue;
         const kids = this.children(parent.id);
-        const keep = kids.filter(k => k.state === 'pruned' || k.fx != null || this.children(k.id).length);
+        const keep = kids.filter(k => k.state === 'pruned' || k.fx != null || this.isBoosted(k) || this.children(k.id).length);
         const slots = kids.length - keep.length;
         if (slots <= 0) continue;
         const dropIds = new Set(kids.filter(k => !keep.includes(k)).map(k => k.id));
@@ -612,6 +678,8 @@ function clusterCanvas() {
         if (this.explain && dropIds.has(this.explain.childId)) this.explain = null;
         this.addChildren(parent, await this.expandRing(parent, slots));
       }
+      this.exhaustedIds = [];
+      this._reheat();
     },
     addChildren(parent, ring) {
       if (!ring.length) return;
@@ -682,7 +750,7 @@ function clusterCanvas() {
         seeds: [{ label: fam, kind: 'genre', keys: [] }], keys: [], key: null, vid: null,
         x: CENTER, y: CENTER, fx: CENTER, fy: CENTER };
       this.rootId = root.id; this.nodes.push(root);
-      if (!this.playlistName) this.playlistName = fam + ' cluster';
+      this._syncSeedName();
       await this.grow(root.id);
       this.exhaustedIds = []; this.persist();
     },
@@ -801,6 +869,7 @@ function clusterCanvas() {
       try { window.__ytTab = window.open('/home/generating', '_blank'); } catch (e) {}
     },
     allKeys() { const s = new Set(this.centralKeys()); this.nodes.forEach(n => { if (n.key) s.add(n.key); }); return [...s]; },
+    canvasKeys() { return this.nodes.filter(n => n.key).map(n => n.key); },
     posKeys(node) { const keys = new Set(this.centralKeys()); for (let cur = node; cur && cur.kind === 'track'; cur = this.nodeById(cur.parentId)) keys.add(cur.key); return [...keys]; },
     descendants(id) { const out = new Set(), stack = [id]; while (stack.length) { const p = stack.pop(); this.nodes.filter(n => n.parentId === p).forEach(c => { out.add(c.id); stack.push(c.id); }); } return out; },
 
@@ -809,7 +878,24 @@ function clusterCanvas() {
     // Fit the whole graph in view (so no branch is left off-screen); fall back to centring on an empty canvas.
     resetView() {
       if (!this._fg) return;
-      if (this.nodes.length > 1) { try { this._fg.zoomToFit(400, 80); return; } catch (e) {} }
+      const nodes = (this._raw || []).filter(n => Number.isFinite(n.x) && Number.isFinite(n.y));
+      if (nodes.length) {
+        // Include the entire cards, rather than fitting only node centres.
+        // Reserve the save bar's actual height, including its wrapped layout on narrow screens.
+        let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
+        for (const n of nodes) {
+          const w = n.kind === 'central' ? CEN_W : CARD_W, h = n.kind === 'central' ? this._centerHeight : CARD_H;
+          left = Math.min(left, n.x - w / 2); right = Math.max(right, n.x + w / 2);
+          top = Math.min(top, n.y - h / 2); bottom = Math.max(bottom, n.y + h / 2);
+        }
+        const bar = this.$el.querySelector('.cluster-savebar');
+        const reserve = (bar ? bar.offsetHeight : 60) + 24;
+        const z = Math.min(1.2, Math.max(0.15, Math.min((this._fg.width() - 80) / (right - left),
+          (this._fg.height() - reserve - 60) / (bottom - top))));
+        this._fg.centerAt((left + right) / 2, (top + bottom) / 2 + reserve / (2 * z), 400);
+        this._fg.zoom(z, 400);
+        return;
+      }
       this._fg.centerAt(CENTER, CENTER, 250); this._fg.zoom(1, 250);
     },
   };

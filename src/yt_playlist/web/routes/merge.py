@@ -1,5 +1,5 @@
 import json
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -104,7 +104,10 @@ def build(ctx) -> APIRouter:
         rows = [{**t, "included": t["tid"] not in draft_params["excluded"],
                  "picked": draft_params["pick"].get(t["tid"]), "present_count": sum(t["present"])}
                 for t in _ordered(tracks, draft_params)]
+        return_label = {"/cleanup": "Back to cleanup", "/playlists": "Back to playlists",
+                        "/": "Back to dashboard"}.get(urlsplit(draft_params["return_to"]).path, "Back")
         return {"request": request, "members": members, "rows": rows, "liked_id": _liked_id(members),
+                "return_label": return_label,
                 "count": sum(1 for t in tracks if t["tid"] not in draft_params["excluded"]),
                 "total": len(tracks), "draft": draft_params, "ids_csv": ",".join(str(i) for i in ids)}
 
@@ -195,8 +198,9 @@ def build(ctx) -> APIRouter:
             parts.append("deleted " + ", ".join(f"“{t}”" for t in s["deleted"]))
         detail = (", " + ", ".join(parts)) if parts else ""
         msg = f"Merged into “{s['kept_title']}”{detail}."
-        sep = "&" if "?" in draft_params["return_to"] else "?"
-        url = f"{draft_params['return_to']}{sep}flash={quote(msg)}&flash_pl={quote(s['kept_ytm'])}"
+        ret = urlsplit(draft_params["return_to"])
+        query = (ret.query + "&" if ret.query else "") + f"flash={quote(msg)}&flash_pl={quote(s['kept_ytm'])}"
+        url = urlunsplit((ret.scheme, ret.netloc, ret.path, query, ret.fragment))
         return Response(status_code=200, headers={"HX-Redirect": url})
 
     @router.post("/dupe/delete")
@@ -244,6 +248,6 @@ def build(ctx) -> APIRouter:
     def dupe_detail(a: int, b: int):
         # back-compat: the pairwise compare is just the 2-playlist case of the N-way editor
         ctx.playlist_by_id(a), ctx.playlist_by_id(b)
-        return RedirectResponse(f"/merge?ids={a},{b}", status_code=307)
+        return RedirectResponse(f"/merge?ids={a},{b}&return=/cleanup%23overlaps", status_code=307)
 
     return router

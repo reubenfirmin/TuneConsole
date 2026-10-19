@@ -1,10 +1,63 @@
 """CollectionRepo: the user's album collection: saved-album CRUD plus the aggregate
 library views (every album / artist across all playlists) that power the collection pages.
 """
+import json
+
 from yt_playlist.repos.base import Repo, synchronized
 
 
 class CollectionRepo(Repo):
+    @synchronized
+    def cache_album_tracklist(self, browse_id, title, artist, thumbnail, keys):
+        """Only full album fetches may write this denominator; playlist sync cannot."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO album_tracklists VALUES (?,?,?,?,?)",
+                (browse_id, title, artist, thumbnail, json.dumps(keys)))
+
+    @synchronized
+    def cached_album_tracklist_ids(self):
+        return {r[0] for r in self.conn.execute("SELECT browse_id FROM album_tracklists")}
+
+    @synchronized
+    def complete_album_tracklist_ids(self):
+        """Fetched metadata alone does not mean every track was folded into the library."""
+        materialized = {}
+        for row in self.conn.execute(
+                "SELECT album_browse_id, identity_key FROM tracks WHERE album_browse_id IS NOT NULL"):
+            materialized.setdefault(row[0], set()).add(row[1])
+        return {row[0] for row in self.conn.execute("SELECT browse_id, track_keys FROM album_tracklists")
+                if set(json.loads(row[1])) <= materialized.get(row[0], set())}
+
+    @synchronized
+    def playback_source(self, playlist_ytm_id=None, video_id=None, album_browse_id=None) -> dict | None:
+        """Resolve the actual playback context, without guessing from playlist membership."""
+        if playlist_ytm_id:
+            row = self.conn.execute(
+                "SELECT p.id, p.title FROM playlists p JOIN identities i ON i.id=p.identity_id "
+                "WHERE p.ytm_playlist_id=? ORDER BY i.is_master DESC, p.id LIMIT 1",
+                (playlist_ytm_id,)).fetchone()
+            if row:
+                return {"kind": "playlist", "id": row["id"], "title": row["title"] or "Playlist"}
+            # Album queues use OLAK ids. An unrelated playlist or radio queue must not be
+            # presented as the track's album just because its songs also appear on that album.
+            if not playlist_ytm_id.startswith("OLAK5uy_"):
+                return None
+        if not album_browse_id:
+            row = self.conn.execute(
+                "SELECT album_browse_id FROM tracks WHERE video_id=? "
+                "AND NULLIF(album_browse_id, '') IS NOT NULL ORDER BY id LIMIT 1",
+                (video_id,)).fetchone()
+            album_browse_id = row["album_browse_id"] if row else None
+        if album_browse_id:
+            row = self.conn.execute(
+                "SELECT title FROM saved_albums WHERE browse_id=? AND NULLIF(title, '') IS NOT NULL UNION ALL "
+                "SELECT album title FROM tracks WHERE album_browse_id=? AND NULLIF(album, '') IS NOT NULL "
+                "LIMIT 1", (album_browse_id, album_browse_id)).fetchone()
+            return {"kind": "album", "browse": album_browse_id,
+                    "title": (row["title"] if row else None) or "Album"}
+        return None
+
     # --- saved albums (mirror of the YouTube Music library, synced locally) ---
     @synchronized
     def replace_saved_albums(self, albums) -> None:

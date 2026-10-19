@@ -99,7 +99,7 @@
       <tr class="srow" data-album="{{ al.album|lower }}" data-year="{{ al.year or 0 }}"
           data-songs="{{ al.songs }}" data-pls="{{ al.n_pls }}" data-plays="{{ al.plays }}"
           data-saved="{{ '1' if al.saved else '0' }}">
-        <td>{% if al.thumb %}<img class="album-thumb" src="{{ al.thumb }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
+        <td>{% if al.thumb %}<img class="album-thumb art-album" src="{{ al.thumb }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
         <td>{% if al.browse %}<a class="ptitle" href="/album?browse={{ al.browse }}">{{ al.album }}</a>{% else %}<span class="ptitle">{{ al.album }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>
         <td class="num mono">{{ al.songs or '' }}</td>
@@ -138,7 +138,7 @@
     <tbody x-ref="body">
     {% for al in yt_albums %}
       <tr class="srow" data-album="{{ al.title|lower }}" data-year="{{ al.year or 0 }}">
-        <td>{% if al.thumbnail %}<img class="album-thumb" src="{{ al.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
+        <td>{% if al.thumbnail %}<img class="album-thumb art-album" src="{{ al.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
         <td>{% if al.browse_id %}<a class="ptitle" href="/album?browse={{ al.browse_id }}">{{ al.title }}</a>{% else %}<span class="ptitle">{{ al.title }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>
         <td colspan="3"></td>

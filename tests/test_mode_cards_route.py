@@ -60,8 +60,25 @@ def test_mode_card_recipe_carries_a_journey(store):
                for m in re.findall(r"data-recipe='([^']*)'", r.text)]
     assert recipes, "no mode cards rendered"
     for rec in recipes:
-        assert rec["model"] == "mode" and rec.get("mode_id") is not None
+        if rec["model"] == "mode":
+            assert rec.get("mode_id") is not None
+            assert rec.get("lane") in {"wheelhouse", "explore", "comfort", "fresh", "temporal"}
+        else:
+            assert rec["model"] == "fresh"  # a thin menu can add a prepared Fresh fallback
         assert rec.get("journey") in journeys.JOURNEYS
+
+
+def test_fresh_mode_card_recipe_retains_lane(store, monkeypatch):
+    from yt_playlist.rec import mode_surfaces
+
+    _seed_bundles(store)
+    tracks = store.get_proposals("mode_bundles")["1"]["fresh"]
+    monkeypatch.setattr(mode_surfaces, "assemble_cards", lambda *args, **kwargs: [
+        {"lane": "fresh", "label": "Fresh songs", "mode_id": 1, "ranker": "lane", "tracks": tracks}])
+    response = _client(store).get("/home/cards")
+    assert response.status_code == 200
+    recipe = json.loads(re.search(r"data-recipe='([^']*)'", response.text)[1])
+    assert recipe["model"] == "mode" and recipe["lane"] == "fresh"
 
 
 def test_cards_route_ok_when_empty(store):

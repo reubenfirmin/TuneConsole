@@ -1,4 +1,13 @@
 {% extends "base.html" %}{% block title %}Clusters · TuneConsole{% endblock %}{% block page_class %}page-clusters{% endblock %}{% block body %}
+{% macro cluster_arrow(kind) -%}
+<svg class="cluster-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
+     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  {% if kind == 'restore' %}<path d="M3 11a9 9 0 1 1 2.7 6.3M3 4v7h7"/>
+  {% elif kind == 'fit' %}<path d="M8 3H3v5m13-5h5v5M3 16v5h5m8 0h5v-5"/>
+  {% elif kind == 'down' %}<path d="m6 9 6 6 6-6"/>
+  {% else %}<path d="M14 3h7v7m0-7L10 14M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/>{% endif %}
+</svg>
+{%- endmacro %}
 <a class="cluster-exit" href="/" aria-label="Back to TuneConsole" title="Back to TuneConsole">TC <span>/ EXIT</span></a>
 {% if not have_model %}
 <div class="page-head">
@@ -8,7 +17,7 @@
      seed a cluster and grow it into a playlist.</p>
 </div>
 {% else %}
-<div class="cluster-page" x-data="clusterCanvas()" x-init="init()" @cluster-saved.window="reset()">
+<div class="cluster-page" x-data="clusterCanvas()" @cluster-saved.window="reset()">
 
   {# Bottom-right canvas switcher: appears once there is more than one saved canvas (e.g. after an
      "Explore in your catalog" deep-link opens a new one). Click a chip to switch; reset clears the
@@ -27,11 +36,13 @@
         <input type="text" x-ref="seedInput" x-model="query" @input.debounce.250ms="search()" @focus="search()"
                @keydown.down.prevent="seedMove(1)" @keydown.up.prevent="seedMove(-1)"
                @keydown.enter.prevent="seedChoose()" @keydown.escape="results = []"
-               placeholder="Search an artist, playlist, or song to seed a cluster…"
+               :placeholder="nodes.length ? 'Add artists, playlists, or songs…' : 'Search an artist, playlist, or song to seed a cluster…'"
+               aria-label="Add artists, playlists, or songs to the central cluster"
                autocomplete="off" spellcheck="false">
         <ul class="cluster-suggest" x-show="results.length" x-cloak @click.outside="results = []">
           <template x-for="(r, idx) in results" :key="r.kind + r.label">
-            <li :class="{ sel: seedSel === idx }" @mouseenter="seedSel = idx" @click="addSeed(r)">
+            <li :class="{ sel: seedSel === idx }" @mouseenter="seedSel = idx" @click="addSeed(r)"
+                :aria-disabled="seedBusy ? 'true' : 'false'">
               <span class="cs-kind" :class="r.kind" x-text="r.kind"></span>
               <span class="cs-label" x-text="r.label"></span>
               <span class="cs-sub" x-text="r.sub"></span>
@@ -66,13 +77,33 @@
           </template>
         </ul>
       </div>
+      <button type="button" class="cluster-edit" x-show="nodes.length" x-cloak
+              @click="editSeeds()" :aria-expanded="editingSeeds ? 'true' : 'false'" aria-controls="cluster-seed-editor">Edit seeds</button>
       <!-- trim loose rings: prune everything that isn't the trunk you grew or a 🔥-emphasized pick -->
       <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
               @click="pruneLoose()" title="Trim: prune every track that isn't on the trunk or 🔥-emphasized">✂ Trim</button>
       <!-- explicit reset: wipe the canvas back to a blank slate -->
       <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
-              @click="reset()" title="Reset: clear the whole canvas">⟲ Reset</button>
+              @click="reset()" title="Reset: clear the whole canvas">{{ cluster_arrow('restore') }} Reset</button>
     </div>
+    <section class="cluster-seed-editor" id="cluster-seed-editor" x-show="editingSeeds" x-cloak
+             aria-label="Edit central cluster" :aria-busy="seedBusy ? 'true' : 'false'">
+      <div class="cse-heading">
+        <strong>Central cluster</strong>
+        <button type="button" @click="editingSeeds = false">Done</button>
+      </div>
+      <p>Search above to add artists, playlists, or songs. Remove a seed below to update the loose picks.</p>
+      <div class="cn-seeds">
+        <template x-for="(s, i) in centralSeeds()" :key="s.kind + s.label + JSON.stringify(s.keys)">
+          <span class="cn-seed cse-seed">
+            <span><small x-text="s.kind"></small><span x-text="s.label"></span></span>
+            <button type="button" @click="removeSeed(i)" :disabled="seedBusy"
+                    :aria-label="'Remove ' + s.label" title="Remove seed">✕</button>
+          </span>
+        </template>
+      </div>
+      <p x-show="!centralSeeds().length">Add a seed to start a new ring.</p>
+    </section>
   </div>
 
   <div class="cluster-canvas" id="cluster-canvas">
@@ -81,6 +112,23 @@
     <!-- force-graph (canvas) renders nodes + edges + the warped grid and owns pan/zoom/drag. The HTML
          overlays below float over that canvas, positioned in graph coords each frame (_positionOverlays). -->
     <div class="cluster-graph" x-ref="graph"></div>
+
+    <div class="cluster-center" x-ref="center" x-show="rootId != null" x-cloak
+         :aria-busy="seedBusy ? 'true' : 'false'" @mouseenter="hovered = rootId; clearTimeout(_hoverT)"
+         @mouseleave="_onHover(null)">
+      <div class="cc-heading">
+        <strong>Central cluster</strong>
+        <button type="button" @click="editSeeds()" :aria-expanded="editingSeeds ? 'true' : 'false'"
+                aria-controls="cluster-seed-editor">Edit seeds</button>
+      </div>
+      <div class="cn-seeds">
+        <template x-for="s in centralSeeds()" :key="s.kind + s.label + JSON.stringify(s.keys)">
+          <span class="cn-seed" :title="s.kind + ': ' + s.label" x-text="s.label"></span>
+        </template>
+      </div>
+      <span class="cc-status" x-show="seedBusy" role="status">Updating songs…</span>
+      <span class="cc-status" x-show="!centralSeeds().length">Add an artist, playlist, or song</span>
+    </div>
 
     <!-- Hover/click action menu for one node: play / 🔥 emphasize / ＋ grow / ✕ prune. -->
     <div class="cluster-actions" x-ref="actions" x-show="hovered != null" x-cloak
@@ -98,8 +146,10 @@
                   :title="exhaustedIds.includes(hovered) ? 'Genre filters are exhausted' : 'Grow: add a ring of nearby tracks'">＋</button>
           <button type="button" class="cn-btn prune" x-show="hoveredNode().kind === 'track'"
                   :class="{ on: hoveredNode().state === 'pruned' }" @click="prune(hovered)"
-                  x-text="hoveredNode().state === 'pruned' ? '↺' : '✕'"
-                  :title="hoveredNode().state === 'pruned' ? 'Restore this track' : 'Prune: remove and push this branch away'"></button>
+                  :title="hoveredNode().state === 'pruned' ? 'Restore this track' : 'Prune: remove and push this branch away'">
+            <span x-show="hoveredNode().state === 'pruned'">{{ cluster_arrow('restore') }}</span>
+            <span x-show="hoveredNode().state !== 'pruned'">✕</span>
+          </button>
         </div>
       </template>
     </div>
@@ -127,7 +177,7 @@
     <div class="cluster-zoombar">
       <button type="button" @click="zoomBy(1.2)" title="Zoom in">＋</button>
       <button type="button" @click="zoomBy(0.8)" title="Zoom out">－</button>
-      <button type="button" @click="resetView()" title="Fit / recenter">⤢</button>
+      <button type="button" @click="resetView()" title="Fit / recenter">{{ cluster_arrow('fit') }}</button>
     </div>
   </div>
 
@@ -147,7 +197,7 @@
     <div class="cluster-journey" @click.outside="journeyOpen = false">
       <button type="button" class="cj-toggle" @click="journeyOpen = !journeyOpen" title="DJ Journey: how the mix is ordered">
         <span class="cj-cur">Journey — <span x-text="journeyName"></span></span>
-        <span class="cj-caret">▾</span>
+        <span class="cj-caret">{{ cluster_arrow('down') }}</span>
       </button>
       <div class="cj-panel" x-show="journeyOpen" x-cloak>
         <button type="button" class="cj-item" :class="{ on: journey === 'auto' }"
@@ -163,7 +213,7 @@
       </div>
     </div>
     <input type="hidden" name="journey" :value="journey">
-    <input type="text" name="name" x-model="playlistName" placeholder="Cluster name" required>
+    <input type="text" name="name" x-model="playlistName" @input="persist()" placeholder="Cluster name" required>
     <input type="hidden" name="keep_keys" :value="JSON.stringify(saveKeys())">
     <input type="hidden" name="central_keys" :value="JSON.stringify(centralSongKeys())">
     <input type="hidden" name="seed_labels" :value="JSON.stringify(seedLabels())">
@@ -171,7 +221,7 @@
     <!-- #48: full canvas snapshot, set at submit (not reactively) so reopening restores the exact graph -->
     <input type="hidden" name="state" x-ref="clusterStateField">
     <button type="submit" class="cta" @click="$refs.clusterStateField.value = clusterStateJSON(); openYTTab()">
-      <span class="cta-txt">▶ Save &amp; play on YouTube ↗</span>
+      <span class="cta-txt">▶ Save &amp; play on YouTube {{ cluster_arrow('external') }}</span>
       <span class="cta-spin" aria-hidden="true"></span>
     </button>
   </form>

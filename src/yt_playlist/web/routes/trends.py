@@ -7,6 +7,8 @@ route only renders that reel from the baked `story` payload the rec worker mater
 """
 from fastapi import APIRouter, HTTPException, Request
 
+from yt_playlist.rec.recap_story import listening_summary
+
 
 def build(ctx) -> APIRouter:
     router = APIRouter()
@@ -19,6 +21,16 @@ def build(ctx) -> APIRouter:
         story = (store.get_proposals("trend_rollups") or {}).get("story")
         if not story or story.get("month") != month:
             raise HTTPException(status_code=404, detail="no recap for that month")
-        return templates.TemplateResponse(request, "story_reel.html", {"story": story})
+        # Refresh the copy from baked counts so cached recaps also get accurate wording immediately.
+        numbers = next((b for b in story["beats"] if b["kind"] == "numbers"), None)
+        if numbers:
+            thesis = listening_summary(numbers["plays"], numbers["listen_days"])
+            story = {**story, "beats": [
+                {**b, "thesis": thesis} if b["kind"] == "cover" else b
+                for b in story["beats"]
+            ]}
+        response = templates.TemplateResponse(request, "story_reel.html", {"story": story})
+        store.set_setting("recap_viewed_month", month)
+        return response
 
     return router

@@ -1,0 +1,34 @@
+<h1 class="slide-h1 recap-title">{{ b.title }}</h1>
+<div class="recap-details" tabindex="0" aria-label="{{ b.title }} details"
+     @pointerdown="autoplay = false; _tick()" @focusin="autoplay = false; _tick()">
+  {% if b.kind == 'new_this_month' %}
+    {% for group in b.groups %}
+    <section class="recap-group" aria-label="{{ group.label }}">
+      <h2>{{ group.label }} <span>{{ group.total }}</span></h2>
+      <ul class="recap-entries">
+        {% for entry in group.entries %}
+        <li>
+          <a href="{{ entry.href }}">{{ entry.title }}</a>
+          {% if entry.subtitle %}<span class="recap-subtitle">{{ entry.subtitle }}</span>{% endif %}
+          <span class="recap-evidence">{{ entry.detail }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% if group.total > group.entries|length %}
+      <p class="recap-more">Showing {{ group.entries|length }} of {{ group.total }}</p>
+      {% endif %}
+    </section>
+    {% endfor %}
+  {% else %}
+    <ul class="recap-findings">
+      {% for finding in b.findings %}
+      <li><h2>{{ finding.title }}</h2><p>{{ finding.detail }}</p></li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+  {% if b.note %}<p class="recap-note">{{ b.note }}</p>{% endif %}
+</div>
+<div class="recap-nav">
+  <button type="button" @click="prev()">Back</button>
+  <button type="button" @click="next()">Continue</button>
+</div>
