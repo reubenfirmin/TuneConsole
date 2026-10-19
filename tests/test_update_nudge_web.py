@@ -54,3 +54,19 @@ def test_home_renders_backend_update_card(store, monkeypatch):
     assert 'id="update-nudge"' in html
     assert "999.0.0" in html
     assert "/onboard/update/dismiss" in html
+
+
+def test_home_container_update_links_to_instructions(store, monkeypatch):
+    from yt_playlist.web.app import create_app
+    from yt_playlist.core import updatecheck
+    from tests.conftest import FakeClient
+
+    monkeypatch.setattr(updatecheck, "is_dev_install", lambda: False)
+    monkeypatch.setenv("YT_PLAYLIST_CONTAINER", "1")
+    store.set_setting("last_sync_at", "1700000000")
+    store.set_setting("latest_version_seen", "999.0.0")
+    c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")
+    html = c.get("/").text
+    assert 'href="https://tuneconsole.com/#container-updates"' in html
+    assert "Update your container" in html
+    assert 'x-data="appUpdate()"' not in html

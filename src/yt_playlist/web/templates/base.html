@@ -41,6 +41,7 @@
   {% set path = request.url.path if request else "/" %}
   <header class="topbar">
     <a class="brand" href="/" aria-label="TuneConsole home">
+      <img class="brand-mark" src="/static/favicon.svg?v={{ asset_v }}" width="28" height="28" alt="">
       <span class="brand-name" aria-hidden="true">tuneconsole</span>
     </a>
     {# Clusters has its own seed search; the library omni-search would only compete with it there #}

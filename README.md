@@ -38,6 +38,24 @@ b) And I find YouTube's discovery and playlist management to be pretty bad
    to the app automatically, there is nothing to paste (see `extension/README.md`).
 3. **Open `https://music.youtube.com` signed in**. The app pairs with the extension and starts syncing your library in the background.
 
+### Docker / Podman
+
+With Docker or Podman installed on the same computer as your browser:
+
+```bash
+docker run -d --name tuneconsole \
+  -p 127.0.0.1:8765:8765 \
+  -v tuneconsole-data:/data \
+  ghcr.io/reubenfirmin/tuneconsole:latest
+```
+
+For Podman, replace `docker` with `podman`. Open <http://127.0.0.1:8765>, install the
+browser extension, and keep a signed-in YouTube Music tab open. The named volume preserves
+your library, configuration, logs, and backups when you replace the container.
+
+Images support Linux x86-64 and ARM64. See [container packaging](packaging/README.md#docker--podman)
+for updates, local builds, and verification.
+
 ### Playlist creation dates
 
 **New playlists** duplicates non-generated playlists created during the past seven days.

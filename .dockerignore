@@ -1,0 +1,12 @@
+# Only application sources and build inputs enter the context. This excludes Git,
+# local databases, credentials, logs, virtualenvs, and unrelated packaging output.
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/
+!src/**
+**/__pycache__
+**/*.py[cod]

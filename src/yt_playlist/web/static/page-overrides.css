@@ -2558,7 +2558,7 @@ body:has(.fp-dialog[open]) { overflow: hidden; }
     border-block-end: 1px solid var(--border-strong);
   }
   body:not(:has(.page-clusters)) .topbar .brand-name {
-    font-size: 1.72rem;
+    font-size: 1.35rem;
   }
   body:not(:has(.page-clusters)) .topbar .omni {
     flex: none;
