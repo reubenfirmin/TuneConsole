@@ -62,7 +62,20 @@ def test_routes_audit_mode_offers_previews_and_refreshes(store, audit_path):
     assert [r["source"] for r in rows] == ["/home/cards", "/home/cards", "/home/breadth", "/home/refresh-cards"]
     assert [r["menu_epoch"] for r in rows] == [0, 0, 0, 1]
     assert rows[0]["cards"] == rows[1]["cards"]
-    assert all(c["mode_id"] is not None and c["genres"] for r in rows for c in r["cards"])
+    for row in rows:
+        cards = {c["framing"]: c for c in row["cards"]}
+        assert set(cards) == {"wheelhouse", "explore", "fresh"}
+        for lane in ("wheelhouse", "explore"):
+            card = cards[lane]
+            assert card["mode_id"] in {1, 2}
+            assert card["recipe"]["model"] == "mode"
+            assert card["recipe"]["mode_id"] == card["mode_id"]
+            assert card["epoch"] == row["menu_epoch"]
+        # Fresh comes from the shared pool and keeps its own epoch across menu refreshes.
+        assert cards["fresh"]["mode_id"] is None
+        assert cards["fresh"]["recipe"]["model"] == "fresh"
+        assert cards["fresh"]["epoch"] == 0
+        assert all(c["genres"] for c in cards.values())
 
 
 def test_single_card_refresh_is_audited_and_audit_failure_does_not_break_home(store, audit_path, monkeypatch):
