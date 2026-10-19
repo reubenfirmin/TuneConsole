@@ -135,13 +135,13 @@ class EnrichmentRepo(Repo):
 
     def _conflicts(self, rows) -> list:
         return [{"track_id": r["track_id"], "title": r["title"], "artist": r["artist"],
-                 "video_id": r["video_id"], "field": r["field"],
+                 "video_id": r["video_id"], "mb_recording_id": r["mb_recording_id"], "field": r["field"],
                  "candidates": json.loads(r["candidates"])} for r in rows]
 
     @synchronized
     def unresolved_conflicts_for_playlist(self, playlist_id) -> list:
         rows = self.conn.execute(
-            "SELECT c.track_id, c.field, c.candidates, t.title, t.artist, t.video_id "
+            "SELECT c.track_id, c.field, c.candidates, t.title, t.artist, t.video_id, t.mb_recording_id "
             "FROM enrichment_conflict c "
             "JOIN playlist_tracks pt ON pt.track_id=c.track_id "
             "JOIN tracks t ON t.id=c.track_id "
@@ -152,7 +152,7 @@ class EnrichmentRepo(Repo):
     @synchronized
     def unresolved_conflicts_for_album(self, album_browse_id) -> list:
         rows = self.conn.execute(
-            "SELECT c.track_id, c.field, c.candidates, t.title, t.artist, t.video_id "
+            "SELECT c.track_id, c.field, c.candidates, t.title, t.artist, t.video_id, t.mb_recording_id "
             "FROM enrichment_conflict c JOIN tracks t ON t.id=c.track_id "
             "WHERE t.album_browse_id=? AND c.resolved=0 ORDER BY t.title, c.field",
             (album_browse_id,)).fetchall()

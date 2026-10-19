@@ -5,6 +5,7 @@
 // that can make it.
 
 const ORIGIN = "https://music.youtube.com";
+const APP_ORIGIN = "http://127.0.0.1:8765";
 let ws = null;
 
 function isAllowed(u) {
@@ -151,53 +152,107 @@ async function pickYtmTab() {
 // turns up, show the tab briefly (which is what actually gets YouTube Music going) and put the owner
 // straight back where they were.
 //
-// If even that does not start it, Chrome wants a click we cannot fake, so we STAY on the tab: the
-// player is right there and one click starts it. Bouncing back would hide the problem instead.
+// Return to TuneConsole after the nudge even if the playing report is delayed or autoplay remains
+// blocked. For other starting tabs, keep the existing return-on-success behaviour.
 const RESCUE_WAIT_MS = 2500;   // let a normal navigate + autoplay report in first, so the common case never flickers
-const RESCUE_DWELL_MS = 600;   // long enough for YTM to get going once it is visible
-let rescue = null;             // { tabId, returnTabId, timer } while an episode is in flight
+const RESCUE_DWELL_MS = 600;   // minimum foreground time; a paused/loading player gets longer
+const RESCUE_RETRY_MS = 500;
+const RESCUE_TIMEOUT_MS = 6000;
+let rescue = null;
 // Tabs currently reporting real playback, so the rescue can tell "it worked" from "still silent".
 const playingTabs = new Set();
 
 function cancelPlaybackRescue() {
   if (!rescue) return;
   try { clearTimeout(rescue.timer); } catch (e) {}
+  try { clearTimeout(rescue.retryTimer); } catch (e) {}
   rescue = null;
 }
 
-async function armPlaybackRescue(tabId) {
+function armPlaybackRescue(tabId) {
   cancelPlaybackRescue();          // a newer play supersedes any episode still in flight
   playingTabs.delete(tabId);       // the navigate wipes the old document: assume silence until told otherwise
-  let returnTabId = null;
-  try {
-    // lastFocusedWindow, NOT currentWindow: a service worker has no window of its own, so
-    // "currentWindow" has nothing to resolve against here. The window they were last looking at is
-    // the one to put them back in.
-    const [cur] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (cur && cur.id !== tabId) returnTabId = cur.id;   // null when they are already sitting on YTM
-  } catch (e) {}
-  rescue = { tabId, returnTabId, timer: setTimeout(() => runPlaybackRescue(tabId), RESCUE_WAIT_MS) };
+  rescue = { tabId, foregrounded: false, timer: setTimeout(() => runPlaybackRescue(tabId), RESCUE_WAIT_MS) };
 }
 
 async function runPlaybackRescue(tabId) {
-  if (!rescue || rescue.tabId !== tabId) return;   // superseded or already cancelled by a playing frame
-  const returnTabId = rescue.returnTabId;
-  rescue = null;
+  const episode = rescue;
+  if (!episode || episode.tabId !== tabId || episode.foregrounded) return;
+  let returnTab = null;
   try {
-    await chrome.tabs.update(tabId, { active: true });
+    // lastFocusedWindow, NOT currentWindow: a service worker has no window of its own, so
+    // "currentWindow" has nothing to resolve against here. Capture the tab immediately before the
+    // nudge, since the owner may have changed tabs during the initial autoplay wait.
+    const [cur] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (cur && cur.id !== tabId) returnTab = cur;
+  } catch (e) {}
+  if (rescue !== episode) return;
+  episode.foregrounded = true;
+  try {
+    const shown = await chrome.tabs.update(tabId, { active: true });
+    if (rescue !== episode) return;
+    if (returnTab && shown.windowId != null && shown.windowId !== returnTab.windowId) {
+      await chrome.windows.update(shown.windowId, { focused: true });
+    }
   } catch (e) {
+    if (rescue === episode) cancelPlaybackRescue();
     return;                                        // tab closed under us: nothing to rescue
   }
-  // Foregrounding often is not enough on its own (the page loaded paused). Now that the tab is
-  // visible, ask the page to actually start: a foregrounded, high-engagement music.youtube.com tab
-  // usually honours a direct play(), and content.js falls back to clicking the page play button.
-  try { chrome.tabs.sendMessage(tabId, { type: "ensure-playing" }).catch(() => {}); } catch (e) {}
-  setTimeout(async () => {
-    // Only go back if showing it actually worked. Still silent means Chrome wants a click, so leave
-    // them on the player rather than hiding it behind TuneConsole again.
-    if (returnTabId == null || !playingTabs.has(tabId)) return;
-    try { await chrome.tabs.update(returnTabId, { active: true }); } catch (e) {}
-  }, RESCUE_DWELL_MS);
+  if (rescue !== episode) return;
+  episode.returnTab = returnTab;
+  episode.startedAt = Date.now();
+  // Bound the entire episode, including a message to a navigating/unresponsive document. One
+  // fire-and-forget message followed by a fixed dwell lost requests while YTM was still loading.
+  episode.timer = setTimeout(() => {
+    console.warn("[TuneConsole] playback nudge timed out", tabId);
+    return finishPlaybackRescue(episode);
+  }, RESCUE_TIMEOUT_MS);
+  attemptPlaybackRescue(episode);
+}
+
+async function attemptPlaybackRescue(episode) {
+  if (rescue !== episode || episode.finishing || episode.confirmed) return;
+  episode.retryTimer = setTimeout(() => attemptPlaybackRescue(episode), RESCUE_RETRY_MS);
+  if (episode.inFlight) return;
+  episode.inFlight = true;
+  try {
+    const reply = await chrome.tabs.sendMessage(episode.tabId, { type: "ensure-playing" });
+    if (rescue !== episode || episode.finishing || !reply || !reply.playing) return;
+    // content.js confirms an unpaused media element with playable data. Delivery alone is not
+    // success: an absent video, pending play(), or blocked autoplay must keep the retry alive.
+    playingTabs.add(episode.tabId);
+    episode.confirmed = true;
+    clearTimeout(episode.retryTimer);
+    clearTimeout(episode.timer);
+    const remaining = Math.max(0, RESCUE_DWELL_MS - (Date.now() - episode.startedAt));
+    episode.timer = setTimeout(() => finishPlaybackRescue(episode), remaining);
+  } catch (e) {
+    // Extension reloads and document swaps can leave an open YTM tab without a receiver. Install
+    // the guarded scripts again, then retry; never reload the user's music tab to repair this.
+    if (rescue === episode && !episode.finishing) await inject(episode.tabId);
+  } finally {
+    episode.inFlight = false;
+  }
+}
+
+async function finishPlaybackRescue(episode) {
+  if (rescue !== episode || episode.finishing) return;
+  episode.finishing = true;
+  clearTimeout(episode.timer);
+  clearTimeout(episode.retryTimer);
+  const { tabId, returnTab } = episode;
+  try {
+    const fromApp = returnTab && (returnTab.url || "").startsWith(APP_ORIGIN + "/");
+    if (!returnTab || (!fromApp && !playingTabs.has(tabId))) return;
+    const [cur] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    // A manual tab/window switch or a newer request takes precedence over our temporary nudge.
+    if (rescue !== episode || !cur || cur.id !== tabId) return;
+    await chrome.tabs.update(returnTab.id, { active: true });
+    if (rescue === episode && returnTab.windowId != null && returnTab.windowId !== cur.windowId) {
+      await chrome.windows.update(returnTab.windowId, { focused: true });
+    }
+  } catch (e) {}   // the original tab/window may have closed during the nudge
+  finally { if (rescue === episode) cancelPlaybackRescue(); }
 }
 
 // music.youtube.com so the backend can only ever point our own tab at YouTube Music.
@@ -788,6 +843,83 @@ async function handleFrame(frame) {
   return { id: frame.id, status: res.status, body: res.body };
 }
 
+// The public site gets only the local connection status, never playback or library data.
+const SITE_TAB_GLOBS = ["https://tuneconsole.com/*", "https://www.tuneconsole.com/*"];
+function isTuneConsoleSite(url) {
+  try {
+    return ["https://tuneconsole.com", "https://www.tuneconsole.com"].includes(new URL(url).origin);
+  } catch (e) {
+    return false;
+  }
+}
+function localPlayerStatus() {
+  return { type: "local-player-status", connected: !!ws && ws.readyState === WebSocket.OPEN };
+}
+function isLocalPlayerUrl(url) {
+  try {
+    const candidate = new URL(url), app = new URL(APP_ORIGIN);
+    return candidate.protocol === app.protocol && candidate.port === app.port
+      && [app.hostname, "localhost"].includes(candidate.hostname);
+  } catch (e) {
+    return false;
+  }
+}
+async function localPlayerTabs() {
+  // Both loopback names reach the same app. Inspect pendingUrl too, so a tab still loading
+  // (or restored/discarded by the browser) is reused without navigating away from its page.
+  const tabs = await chrome.tabs.query({});
+  return tabs.filter(tab => isLocalPlayerUrl(tab.pendingUrl || tab.url));
+}
+let localPlayerOpenPromise = null;
+function openLocalPlayer() {
+  if (!localPlayerStatus().connected) return Promise.resolve({ opened: false, connected: false });
+  if (!localPlayerOpenPromise) {
+    localPlayerOpenPromise = (async () => {
+      const tabs = await localPlayerTabs();
+      const tab = tabs.find(t => t.active) || tabs[0];
+      if (tab) {
+        await chrome.tabs.update(tab.id, { active: true });
+        if (tab.windowId != null) {
+          try { await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) {}
+        }
+      } else {
+        await chrome.tabs.create({ url: APP_ORIGIN + "/", active: true });
+      }
+      return { opened: true, connected: true };
+    })().finally(() => { localPlayerOpenPromise = null; });
+  }
+  return localPlayerOpenPromise;
+}
+async function publishLocalPlayerStatus() {
+  let tabs;
+  try { tabs = await chrome.tabs.query({ url: SITE_TAB_GLOBS }); }
+  catch (e) { return; }
+  await Promise.all(tabs.map(async (tab) => {
+    if (!isTuneConsoleSite(tab.url)) return;
+    try {
+      await chrome.tabs.sendMessage(tab.id, localPlayerStatus());
+    } catch (e) {
+      // Include site tabs that were already open when the extension was installed or reloaded.
+      try {
+        await chrome.scripting.insertCSS({ target: { tabId: tab.id }, files: ["site_player.css"] });
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["site_player.js"] });
+        await chrome.tabs.sendMessage(tab.id, localPlayerStatus());
+      } catch (e) {} // The tab may have closed or navigated away.
+    }
+  }));
+}
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || !isTuneConsoleSite(sender.url)) return;
+  if (msg.type === "local-player-status") {
+    sendResponse(localPlayerStatus());
+  } else if (msg.type === "open-local-player") {
+    openLocalPlayer().then(sendResponse).catch(() => {
+      sendResponse({ opened: false, connected: localPlayerStatus().connected });
+    });
+    return true;
+  }
+});
+
 // The backend authenticates us by our extension origin, so there is nothing to configure: we just
 // connect to the local bridge on the default port. The backend binds 127.0.0.1 on this same port.
 const BRIDGE_URL = "ws://127.0.0.1:8765/bridge/ws";
@@ -798,6 +930,7 @@ function connect() {
   ws = sock;
   sock.onopen = async () => {
     console.log("[TuneConsole bridge] connected");
+    publishLocalPlayerStatus();
     await probeSensorHealth();  // prove/recover the tab sensor; reports failures instead of hiding them
     resyncNowPlaying();         // backend cleared now_playing on the last disconnect; re-emit the current track
   };
@@ -818,7 +951,13 @@ function connect() {
     const reply = await handleFrame(frame);
     try { sock.send(JSON.stringify(reply)); } catch (e) {}
   };
-  sock.onclose = () => { if (ws === sock) { ws = null; setTimeout(connect, 3000); } };
+  sock.onclose = () => {
+    if (ws === sock) {
+      ws = null;
+      publishLocalPlayerStatus();
+      setTimeout(connect, 3000);
+    }
+  };
   sock.onerror = () => { try { sock.close(); } catch (e) {} };
 }
 
@@ -888,20 +1027,21 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       playingTabs.delete(srcTabId);
     } else {
       playingTabs.add(srcTabId);
-      if (rescue && rescue.tabId === srcTabId) cancelPlaybackRescue();
+      if (rescue && rescue.tabId === srcTabId && !rescue.foregrounded) cancelPlaybackRescue();
     }
   }
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (msg.type === "play") {
     ws.send(JSON.stringify({ type: "play", title: msg.title, artist: msg.artist,
       thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
-      playlist: msg.playlist || "", brandId: msg.brandId || "", paused: !!msg.paused, deck }));
+      playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "",
+      brandId: msg.brandId || "", paused: !!msg.paused, deck }));
   } else if (msg.type === "now-heartbeat") {
     // Metadata makes the non-persisting heartbeat able to restore a card that aged out while Chrome
     // throttled the YTM page (commonly during an audio-device switch).
     ws.send(JSON.stringify({ type: "now-heartbeat", deck, title: msg.title, artist: msg.artist,
       thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
-      paused: !!msg.paused }));
+      playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "", paused: !!msg.paused }));
   } else if (msg.type === "pevent") {
     ws.send(JSON.stringify(Object.assign({}, msg, { deck })));   // #91 already a flat, self-describing frame
   }
@@ -914,18 +1054,19 @@ chrome.alarms.onAlarm.addListener(() => { connect(); probeSensorHealth(); });
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 chrome.runtime.onInstalled.addListener(reloadYtmTabs);   // reload open YTM tabs so one reload suffices
+chrome.runtime.onInstalled.addListener(publishLocalPlayerStatus);
+chrome.runtime.onStartup.addListener(publishLocalPlayerStatus);
 connect();
 
 // Quality of life: keep a single TuneConsole tab. When a second one appears (the app relaunches and
 // opens another, or you open one by hand), close the extras and focus the one that was already there
 // so you never end up with a pile of 127.0.0.1:8765 tabs.
-const APP_TAB_GLOB = "http://127.0.0.1:8765/*";
 let dedupeBusy = false;
 async function dedupeAppTabs() {
   if (dedupeBusy) return;
   dedupeBusy = true;
   try {
-    const tabs = await chrome.tabs.query({ url: APP_TAB_GLOB });
+    const tabs = await localPlayerTabs();
     if (tabs.length <= 1) return;
     tabs.sort((a, b) => a.id - b.id);       // keep the oldest tab (preserves its state)
     const keep = tabs[0];
@@ -944,7 +1085,7 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.status === "complete" && tab.url && tab.url.startsWith("https://music.youtube.com/")) {
     probeSensorHealth();
   }
-  if (info.status === "complete" && tab.url && tab.url.startsWith("http://127.0.0.1:8765/")) {
+  if (info.status === "complete" && isLocalPlayerUrl(tab.url)) {
     dedupeAppTabs();
   }
 });

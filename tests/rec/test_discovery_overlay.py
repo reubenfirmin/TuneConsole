@@ -41,3 +41,17 @@ def test_pick_albums_excludes_muted_family(store):
     _mute(store, "Techno")
     titles = [a["title"] for a in discover.pick_discovered_albums(store, 5, now=1.0)]
     assert "Album T" not in titles and "Album H" in titles
+
+
+def test_large_album_and_artist_pools_reuse_family_feedback(store, monkeypatch):
+    albums = [{"browse_id": f"b{i}", "artist": f"A{i}", "year": "2026", "genre": "Deep House"}
+              for i in range(300)]
+    artists = [{"artist": f"A{i}", "score": 0.5, "genre": "House"} for i in range(300)]
+    monkeypatch.setattr(store, "get_discovered_albums", lambda: albums)
+    monkeypatch.setattr(store, "get_discovered_artists", lambda: artists)
+    calls = []
+    monkeypatch.setattr(discover.recommend, "discovery_facet_weight",
+                        lambda s, family, now: calls.append(family) or 1.0)
+    assert len(discover.pick_discovered_albums(store, 15, now=1)) == 15
+    assert len(discover.pick_discovered_artists(store, 10, now=1)) == 10
+    assert calls == ["house", "house"]

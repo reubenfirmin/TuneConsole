@@ -69,9 +69,11 @@ def _build_ticker(store, dim, periods):
     data = ticker_rows(corpus, windows)
     rows = [r for r in data["rows"] if r["high"] > 0][:_TICKER_TOP]
     link = _ticker_linker(store, dim)
+    thumbnails = store.ticker_thumbnails(dim) if dim in ("artist", "album", "playlist") else {}
     for r in rows:
         r["geo"] = candle_geometry(r, data["axis_max"])
         r["link"] = link(r["cat"])
+        r["thumbnail"] = thumbnails.get(r["cat"])
     return {"rows": rows, "axis_max": data["axis_max"]}
 
 

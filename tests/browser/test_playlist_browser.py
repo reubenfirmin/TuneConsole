@@ -82,6 +82,34 @@ def test_set_year_click_to_edit(live_playlist_app, page):
     expect(page.get_by_role("row").filter(has_text="Song B").get_by_text("1999")).to_be_visible()
 
 
+def test_conflict_provider_opens_lookup_without_changing_choice(live_playlist_app, page):
+    base, pid, store = (live_playlist_app[key] for key in ("base", "pid", "store"))
+    tid = store.playlist_tracks_detail(pid)[0]["track_id"]
+    store.set_track_enrichment(tid, None, "1952")
+    store.upsert_conflict(tid, "year", [{"provider": "musicbrainz", "value": "1952"},
+                                         {"provider": "discogs", "value": "2001"}])
+    page.context.route("https://www.discogs.com/**", lambda route: route.fulfill(body="Provider results"))
+    page.goto(f"{base}/playlist/{pid}")
+    page.get_by_role("button", name="Resolve enrichment disagreements").click()
+    modal = page.locator("#conflicts-modal")
+    original, alternative = modal.get_by_role("radio", name="1952"), modal.get_by_role("radio", name="2001")
+    expect(original).to_be_checked()
+
+    with page.expect_popup() as opened:
+        modal.get_by_role("link", name="discogs").click()
+    popup = opened.value
+    popup.wait_for_load_state()
+    assert "q=Artist+X+Song+A" in popup.url
+    popup.close()
+    expect(original).to_be_checked()
+    expect(modal.get_by_role("heading", name="Resolve enrichment disagreements")).to_be_visible()
+
+    alternative.check()
+    modal.get_by_role("button", name="Save choices").click()
+    expect(modal.get_by_text("Nothing left to resolve.", exact=False)).to_be_visible()
+    assert store.playlist_tracks_detail(pid)[0]["year"] == "2001"
+
+
 def test_genre_control_opens_dialog_and_accepts_custom_value(live_playlist_app, page):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     page.goto(f"{base}/playlist/{pid}")

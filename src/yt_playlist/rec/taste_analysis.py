@@ -4,7 +4,7 @@ import math
 import statistics
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import rec_params, transient
+from yt_playlist.rec import mix_tuning, rec_params, transient
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -34,6 +34,7 @@ def taste_fingerprint(store, now) -> dict:
     'rock-post', the family post-rock lives under) that ranks past the top few, not just a zero-play
     niche. A pinned axis not in the play distribution at all is appended with share=0.0.
     """
+    mix_tuning.expire(store, now)
     bd = taste_breadth(store)
     w = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     leans = store.get_leans()
@@ -121,7 +122,8 @@ def taste_fingerprint(store, now) -> dict:
     bias = rec_params.get_param(store, "breadth_bias")
     return {"families": families, "eras": eras, "breadth": bd["breadth"],
             "breadth_bias": bias,
-            "has_steering": bool(leans) or bool(hidden) or bias != 0.0}
+            "has_steering": bool(leans) or bool(hidden) or bias != 0.0,
+            "tuning_remaining": mix_tuning.remaining(store, now)}
 
 
 def playlist_facets(store, playlist_id) -> dict:

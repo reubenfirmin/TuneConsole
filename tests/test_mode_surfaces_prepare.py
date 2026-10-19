@@ -34,12 +34,16 @@ def test_prepare_buckets_by_nearest_mode(monkeypatch, store):
     pool = [_Item("k1", 0.9), _Item("k2", 0.8)]
     for fn in ("for_you", "explore_for_you", "comfort_listening"):
         monkeypatch.setattr(recommend, fn, lambda s, n, limit=0, _p=pool: list(_p))
-    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [])
+    fresh = surfaces.ForYouItem("New song", "New artist", "", "new", None, 0, "", key="new|artist",
+                                genre="house", year=2026)
+    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [fresh])
+    store.put_proposals("fresh_pool", [{"key": "stale|artist", "genre": "techno"}], 1)
 
     payload = ms.prepare_bundles(store, now=10.0)
     assert [d["key"] for d in payload["1"]["wheelhouse"]] == ["k1"]
     assert [d["key"] for d in payload["2"]["wheelhouse"]] == ["k2"]
     assert store.get_proposals("mode_bundles") is not None
+    assert store.get_proposals("fresh_pool") == [surfaces._item_to_fresh_dict(fresh)]
 
 
 def test_temporal_excludes_disliked_library_tracks(monkeypatch, store):

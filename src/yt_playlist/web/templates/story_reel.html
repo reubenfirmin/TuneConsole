@@ -67,12 +67,14 @@
       <h1 class="slide-h1">{{ b.label }}</h1>
       <p class="slide-big"><strong data-count="{{ b.plays }}">{{ b.plays }}</strong><span> plays in a day</span></p>
       <p class="slide-sub">{{ (b.pct * 100)|round|int }}% of it was {{ b.artist }}</p>
+    {% elif b.kind in ('new_this_month', 'different', 'same') %}
+      {% include '_partials/recap_details.html' %}
     {% elif b.kind == 'new' %}
       <h1 class="slide-h1 slide-name">{{ b.artist }}</h1>
       <p class="slide-sub">Never in your world before this month — then <strong data-count="{{ b.plays }}">{{ b.plays }}</strong> plays.</p>
     {% elif b.kind == 'diversity' %}
       <h1 class="slide-h1">You {{ b.direction }}</h1>
-      <p class="slide-sub">Genre spread {{ b.prev }} → <strong>{{ b.cur }}</strong> vs last month
+      <p class="slide-sub">Genre spread <strong>{{ b.cur }}</strong>, compared with {{ b.prev }} last month
         {{ '(wider)' if b.delta > 0 else '(tighter)' }}.</p>
     {% elif b.kind == 'revival' %}
       <h1 class="slide-h1 slide-name">{{ b.artist }}</h1>
@@ -200,5 +202,6 @@ function reel(n) {
   };
 }
 </script>
+{% include "_partials/heartbeat.html" %}
 </body>
 </html>

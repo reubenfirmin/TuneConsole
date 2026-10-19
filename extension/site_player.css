@@ -1,0 +1,36 @@
+.site-nav:has(#tuneconsole-local-player) { flex-wrap: wrap; row-gap: 1rem; }
+.nav-links:has(#tuneconsole-local-player) { flex-wrap: wrap; row-gap: .75rem; }
+#tuneconsole-local-player {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  min-height: 2.5rem; padding: .45rem .8rem; border: 2px solid #9ca3af; border-radius: 999px;
+  background: #e5e7eb; color: #374151; font: 700 .875rem/1.2 var(--font-sans, system-ui);
+  text-decoration: none; white-space: nowrap; cursor: pointer; box-sizing: border-box;
+}
+#tuneconsole-local-player:hover { background: #d1d5db; text-decoration: none; }
+#tuneconsole-local-player[data-connected="true"] { background: #15e98c; color: #042b16; border-color: #042b16; }
+#tuneconsole-local-player[data-connected="true"]:hover { background: #6bffab; }
+#tuneconsole-local-player:focus-visible { outline: 3px solid #0b0920; outline-offset: 4px; }
+#tuneconsole-local-player-dialog {
+  width: min(30rem, calc(100% - 2rem)); max-height: 85vh; margin: auto; padding: 1.5rem;
+  border: 2px solid var(--text, #17202a); box-sizing: border-box;
+  background: var(--paper, #fffdf5); color: var(--text, #17202a);
+  font: 400 1rem/1.5 var(--font-sans, system-ui); box-shadow: 8px 8px 0 #17202a40;
+}
+#tuneconsole-local-player-dialog::backdrop { background: #10182080; }
+#tuneconsole-local-player-dialog .tc-player-heading { display: flex; align-items: center; gap: 1rem; margin: 0 0 1rem; }
+#tuneconsole-local-player-dialog h2 { flex: 1; margin: 0; font: 800 1.5rem/1.2 var(--font-sans, system-ui); letter-spacing: -.03em; }
+#tuneconsole-local-player-dialog button {
+  padding: .4rem .65rem; border: 2px solid currentColor; background: transparent;
+  color: inherit; font: 600 .875rem/1.3 var(--font-sans, system-ui); cursor: pointer;
+}
+#tuneconsole-local-player-dialog p { margin: .85rem 0; }
+#tuneconsole-local-player-dialog a { color: var(--accent-2, #3d6fd0); font-weight: 700; text-decoration: underline; }
+#tuneconsole-local-player-dialog pre {
+  padding: .75rem; background: #17202a; color: #fff; border-radius: 4px;
+  white-space: pre-wrap; overflow-wrap: anywhere; font: 400 .85rem/1.5 monospace;
+}
+#tuneconsole-local-player-dialog .tc-player-downloads { display: flex; flex-wrap: wrap; gap: 1rem; }
+#tuneconsole-local-player-dialog .tc-player-hint { font-size: .875rem; color: var(--body-copy, #475569); }
+#tuneconsole-local-player-dialog summary { cursor: pointer; font-weight: 700; }
+#tuneconsole-local-player-dialog .tc-player-open { display: inline-block; padding: .6rem 1rem; background: #15e98c; color: #042b16; text-decoration: none; }
+#tuneconsole-local-player-dialog [hidden] { display: none; }

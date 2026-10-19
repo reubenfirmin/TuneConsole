@@ -1,4 +1,5 @@
 import urllib.error
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -488,7 +489,12 @@ def test_system_playlist_excluded_from_overlaps(store):
     assert find_overlaps(store) == []   # Liked Music never generates overlaps
 
 
-def test_merge_apply_route(store, monkeypatch, tmp_path):
+@pytest.mark.parametrize("return_to, label", [
+    ("/cleanup", "Back to cleanup"),
+    ("/cleanup#overlaps", "Back to cleanup"),
+    ("/playlists?sort=name#list", "Back to playlists"),
+])
+def test_merge_apply_route(store, monkeypatch, tmp_path, return_to, label):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
@@ -498,9 +504,20 @@ def test_merge_apply_route(store, monkeypatch, tmp_path):
     store.set_playlist_tracks(a, [t1]); store.set_playlist_tracks(b, [t2])
     client = FakeClient()
     c = _client(store, lambda: {iid: client})
-    c.get(f"/merge?ids={a},{b}")                          # create the draft (all included, keep = first = A)
+    page = c.get("/merge", params={"ids": f"{a},{b}", "return": return_to})
+    assert f"← {label}" in page.text
+    assert f'href="{return_to}"' in page.text
     r = c.post(f"/merge/apply?ids={a},{b}")
-    assert r.status_code == 200 and "/cleanup" in r.headers.get("hx-redirect", "")   # HX-Redirect on success
+    assert r.status_code == 200
+    destination = urlsplit(r.headers["hx-redirect"])
+    expected = urlsplit(return_to)
+    assert destination.path == expected.path
+    assert destination.fragment == expected.fragment
+    query = parse_qs(destination.query)
+    assert "Merged into" in query["flash"][0]
+    assert query["flash_pl"] == ["PLA"]
+    if expected.query:
+        assert query["sort"] == ["name"]
     assert client.deleted == ["PLB"] and store.get_playlist(b) is None
 
 
@@ -766,10 +783,12 @@ def test_page_rejoins_active_enrichment(store):
 def test_discogs_fills_genre_and_year(store, monkeypatch):
     import json as _json
     import yt_playlist.providers.discogs as dc
-    # stub Discogs search: styles map to the whitelist, earliest year wins
+    # Styles map to the whitelist; the earliest year among matching releases wins.
     monkeypatch.setattr(dc, "_search", lambda q, tok: [
-        {"year": "1996", "genre": ["Electronic"], "style": ["Techno", "Drum n Bass"]},
-        {"year": "1995", "genre": ["Electronic"], "style": ["Techno"]},
+        {"title": "Underworld - Born Slippy", "year": "1996", "genre": ["Electronic"],
+         "style": ["Techno", "Drum n Bass"]},
+        {"title": "Underworld - Born Slippy", "year": "1995", "genre": ["Electronic"], "style": ["Techno"]},
+        {"title": "Unrelated Artist - Different Song", "year": "1952", "genre": ["Classical"]},
     ] if "Born Slippy" in q else [])
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)

@@ -55,7 +55,7 @@
     </header>
   <ol class="gen-list">
     {% for f in p.tracks %}
-    <li class="gen-row" data-vid="{{ f.video_id }}" data-title="{{ f.title }}"
+    <li class="gen-row" data-key="{{ f.key }}" data-vid="{{ f.video_id }}" data-title="{{ f.title }}"
         data-artist="{{ f.artist }}" data-album="{{ f.album }}" data-thumb="{{ f.thumbnail or '' }}">
       <span class="gen-index" aria-hidden="true">{{ loop.index }}</span>
       <span class="gen-th"><img src="{{ f.thumbnail or ('https://i.ytimg.com/vi/' ~ (f.video_id|urlencode) ~ '/hqdefault.jpg') }}"

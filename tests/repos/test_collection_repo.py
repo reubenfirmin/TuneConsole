@@ -6,6 +6,20 @@ def _album(browse, **kw):
             "year": kw.get("year"), "type": kw.get("type", "Album"), "thumbnail": kw.get("thumbnail")}
 
 
+def test_playback_source_uses_exact_playlist_and_prefers_master_copy(store):
+    other = store.upsert_identity("other", "c", None, False)
+    master = store.upsert_identity("main", "c", None, True)
+    store.upsert_playlist(other, "PL1", "Other copy", 1, "h", 0)
+    pid = store.upsert_playlist(master, "PL1", "Playing mix", 1, "h", 0)
+    unrelated = store.upsert_playlist(master, "PL2", "Also contains song", 1, "h", 0)
+    tid = store.upsert_track("v1", "Song", "Artist", "Release", 200, album_browse_id="MPRE_album")
+    store.set_playlist_tracks(unrelated, [tid])
+    assert store.playback_source("PL1", "v1", "MPRE_album") == {
+        "kind": "playlist", "id": pid, "title": "Playing mix"}
+    assert store.playback_source("PL_unknown", "v1", "MPRE_album") is None
+    assert store.playback_source(None, "unknown") is None
+
+
 def test_saved_album_crud(store):
     store.collection.add_saved_album(_album("B1", title="One", artist="Alpha"))
     store.collection.add_saved_album(_album("B2", title="Two", artist="Beta"))

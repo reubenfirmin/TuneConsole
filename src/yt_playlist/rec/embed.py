@@ -554,19 +554,54 @@ SEED_FANOUT = 0.5    # for a MULTI-seed node, how much the ring is drawn to the 
                      # adapting: when seeds are coherent (a focused path) max≈centroid, so it's a no-op.
 
 
-def _branch_scores(pos_keys, neg_keys, beta, allkeys, M, index, fanout=SEED_FANOUT):
+def _branch_scores(pos_keys, neg_keys, beta, allkeys, M, index, fanout=SEED_FANOUT, groups=None,
+                   artist_groups=None):
     """Per-key {key: pos_affinity - beta·cos(centroid_neg)} over one vector space, or None if no seed
     is present. pos_affinity blends proximity to the seeds' CENTROID with proximity to the NEAREST
     single seed (`fanout`, default SEED_FANOUT), so a multi-seed node reaches each seed's neighbourhood
     instead of only the average (a minority seed isn't averaged away). Shared by both the collaborative
-    and content spaces in cluster_expand."""
+    and content spaces in cluster_expand. With multiple central artists, use intersection affinity:
+    each song must match the other artists, without its own artist inflating the score."""
     pi = [index[k] for k in pos_keys if k in index]
     if not pi:
         return None
-    pos = _normalize(M[pi].mean(0))
+    # An artist is one influence, regardless of how many songs we own by them. Ordinary branch
+    # growth keeps its path weighting; the central ring supplies one group per selected seed.
+    seeds = M[pi]
+    owners = []
+    artist_sets = {frozenset(g) for g in artist_groups or ()}
+    groups = groups or artist_groups
+    if groups:
+        present = [g for g in groups if any(k in index for k in g)]
+        centroids = [_normalize(M[[index[k] for k in g if k in index]].mean(0)) for g in present]
+        owners = [set(g) if frozenset(g) in artist_sets else set() for g in present]
+        if centroids:
+            # Repeated positive keys are explicit emphasis (the canvas's fire button). Retain
+            # those extra votes, plus any path keys outside the central artist/playlist groups.
+            covered = {k for g in groups for k in g}
+            for k in pos_keys:
+                if k in covered:
+                    covered.remove(k)
+                elif k in index:
+                    centroids.append(M[index[k]])
+                    owners.append(set())
+            seeds = np.asarray(centroids)
+    pos = _normalize(seeds.mean(0))
     s = M @ pos
-    if len(pi) > 1 and fanout > 0.0:                 # fan out to the nearest single seed (rows are unit)
-        nearest = np.max(M @ M[pi].T, axis=1)         # max cos to any one seed, per candidate
+    if sum(bool(g) for g in owners) > 1:
+        affinities = M @ seeds.T
+        shared = np.min(affinities, axis=1)
+        # A Shpongle song is ranked against Pet Shop Boys, and vice versa. With more artists,
+        # the weakest remaining match defines the intersection. Collaborations belonging to every
+        # artist keep their shared affinity rather than having no comparison left.
+        for j, owned in enumerate(owners):
+            for key in owned:
+                if key in index:
+                    affinities[index[key], j] = np.inf
+        cross = np.min(affinities, axis=1)
+        s = np.where(np.isfinite(cross), cross, shared)
+    elif len(seeds) > 1 and fanout > 0.0:
+        nearest = np.max(M @ seeds.T, axis=1)
         s = (1.0 - fanout) * s + fanout * nearest
     ni = [index[k] for k in neg_keys if k in index]
     if ni:
@@ -636,7 +671,7 @@ def _blend_spaces(collab_s, content_s, w):
 
 
 def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=None, allow=None,
-                   include_new=False):
+                   include_new=False, seed_groups=None, candidate_seed_keys=(), artist_groups=None):
     """A Clusters-canvas ring: tracks nearest a node's PINNED-path centroid, tilted AWAY from the
     PRUNED set, scored as a blend of the collaborative (co-occurrence) embedding and the content
     (genre/era) vector. #86: each space's cosines are rank-normalized first, so the score is
@@ -648,7 +683,11 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=Non
     multi-seed fan-out. Both are read here so the Taste-model page can tune them without a rebuild.
     `allow`, when given, restricts candidates to a whitelist (#29 genre filter).
     `include_new` (Phase 2) widens the candidate pool with OUT-OF-CORPUS discovered tracks: they have
-    no collaborative vector, so they're scored on the content term alone (in the same model space)."""
+    no collaborative vector, so they're scored on the content term alone (in the same model space).
+    Central artist seeds may explicitly keep their own songs eligible via `candidate_seed_keys`;
+    `seed_groups` gives each selected artist/playlist/song equal influence on that opening ring.
+    With multiple `artist_groups`, songs are scored against the OTHER artists; related tracks must
+    match all the selected artists. Other central seeds and explicit emphasis remain targets too."""
     keys, V, idx = load_vectors(store)
     if V is None:
         return []
@@ -663,15 +702,18 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=Non
     # exclude the seed set) so the opening ring fills with the most representative tracks of the genre.
     seed_only = (not pos_keys) and bool(allow)
     src = list(allow) if seed_only else pos_keys
-    collab_s = _branch_scores(src, neg_keys, beta, keys, V, idx, fanout) or {}
+    collab_s = _branch_scores(src, neg_keys, beta, keys, V, idx, fanout, groups=seed_groups,
+                              artist_groups=artist_groups) or {}
     content_s = ({} if (CV is None or w <= 0.0)
-                 else (_branch_scores(src, neg_keys, beta, ckeys, CV, cidx, fanout) or {}))
+                 else (_branch_scores(src, neg_keys, beta, ckeys, CV, cidx, fanout, groups=seed_groups,
+                                      artist_groups=artist_groups) or {}))
     blended = _blend_spaces(collab_s, content_s, w)
 
-    excl = set(exclude or ()) | set(neg_keys) | (set() if seed_only else set(pos_keys))
+    preferred = set(candidate_seed_keys)
+    excl = set(exclude or ()) | set(neg_keys) | (set() if seed_only else set(pos_keys) - preferred)
     allow = None if allow is None else set(allow)
     out = []
-    for k in sorted(blended, key=lambda k: -blended[k]):
+    for k in sorted(blended, key=lambda k: (k not in preferred, -blended[k], k)):
         if k in excl or (allow is not None and k not in allow):
             continue
         out.append((k, blended[k]))

@@ -17,6 +17,7 @@
   <link rel="stylesheet" href="/static/page-overrides.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/story.css?v={{ asset_v }}">
   {% block page_styles %}{% endblock %}
+  <link rel="stylesheet" href="/static/artwork.css?v={{ asset_v }}">
   <script src="/static/vendor/htmx.min.js"></script>
   <script src="/static/vendor/sortable.min.js"></script>
   {# d3-force graph layout for the Clusters canvas. Order matters: d3-force reads its deps off the
@@ -120,20 +121,6 @@
   <div id="genre-candidates-modal"></div>
   {% include "_partials/song_actions.html" %}
   <div id="toasts" class="toasts" aria-live="polite">{% block toasts %}{% endblock %}</div>
-  {% if exit_on_idle %}
-  <script>
-    // Packaged launch (Flatpak/.app): heartbeat the local server so it shuts itself down when this
-    // tab closes — there's no terminal to Ctrl-C and no window to quit.
-    (function () {
-      function beat() { fetch('/heartbeat', { method: 'POST', keepalive: true }).catch(function () {}); }
-      beat();
-      setInterval(beat, 3000);
-      // Refocusing a backgrounded tab (whose interval was throttled) beats immediately so the server's
-      // idle backstop resets right away instead of waiting for the next throttled tick.
-      addEventListener('visibilitychange', function () { if (!document.hidden) beat(); });
-      addEventListener('pagehide', function () { try { navigator.sendBeacon('/goodbye'); } catch (e) {} });
-    })();
-  </script>
-  {% endif %}
+  {% include "_partials/heartbeat.html" %}
 </body>
 </html>

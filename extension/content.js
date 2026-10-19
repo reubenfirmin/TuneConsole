@@ -62,17 +62,47 @@ if (!window.__tcBridgeLoaded) {
     console.log("[TuneConsole] toggled play/pause");
   };
 
-  // #101 Start playback on demand (the rescue's "ensure-playing"): click the page's main play button
-  // -- the big one on a playlist/watch page that starts the queue -- and if it is not there, resume
-  // via the player-bar toggle. Callers must have already confirmed nothing is playing, so this never
-  // pauses a live tab. A synthetic click is untrusted, so this only starts audio when the (now
-  // foregrounded) tab has enough media engagement for gesture-free autoplay; it is a best effort.
-  const clickMainPlay = () => {
-    const main = document.querySelector("ytmusic-play-button-renderer");
-    const btn = main && (main.querySelector("button") || main);
-    if (btn) { btn.click(); console.log("[TuneConsole] clicked the page play button"); return; }
+  // Start the requested queue on browse pages, or resume the player on watch pages. A global
+  // ytmusic-play-button-renderer lookup can select an unrelated song card in a shelf.
+  const pagePlayButton = () => document.querySelector(
+    "ytmusic-detail-header-renderer ytmusic-play-button-renderer, " +
+    "ytmusic-responsive-header-renderer ytmusic-play-button-renderer, " +
+    "ytmusic-immersive-header-renderer ytmusic-play-button-renderer"
+  );
+  const clickPlaybackStart = () => {
     const v = document.querySelector("video");
-    if (v && v.paused) clickPlayPause();
+    if (v && !v.paused) return; // a pending play() must never be toggled back to paused
+    const main = new URL(location.href).pathname.startsWith("/browse/") && pagePlayButton();
+    if (main) {
+      (main.querySelector("button") || main).click();
+    } else {
+      clickPlayPause();
+    }
+  };
+  const playbackStarted = () => {
+    const v = document.querySelector("video");
+    return !!(v && !v.paused && !v.ended && v.readyState >= 2);
+  };
+  const playbackDelay = () => new Promise(resolve => setTimeout(resolve, 250));
+  const ensurePlaying = async () => {
+    if (playbackStarted()) return { playing: true };
+    const v = document.querySelector("video");
+    const browse = new URL(location.href).pathname.startsWith("/browse/");
+    if (browse) {
+      // Do not resume the previous song instead of starting the album/playlist just opened.
+      clickPlaybackStart();
+    } else if (v && v.paused) {
+      try {
+        // Do not await play(): it can remain pending indefinitely while media is loading.
+        const pending = v.play();
+        if (pending) pending.catch(() => {});
+      } catch (e) {}
+    }
+    await playbackDelay();
+    if (playbackStarted()) return { playing: true };
+    if (!browse) clickPlaybackStart();
+    await playbackDelay();
+    return { playing: playbackStarted() };
   };
 
   // Waiting-state net: report a blocked deck-play as a "deck-waiting" pevent (background relays it
@@ -129,16 +159,8 @@ if (!window.__tcBridgeLoaded) {
     if (msg.type === "rate") { clickRate(msg.action); return; }
     if (msg.type === "playpause") { clickPlayPause(); return; }
     if (msg.type === "ensure-playing") {
-      // #101 The rescue foregrounded this tab because a play-open did not start. Prefer a direct
-      // play() (a foregrounded, high-engagement tab honours it); on rejection, or with no <video>
-      // yet, click the page play button. Guarded on paused so a tab already playing is left alone.
-      try {
-        const v = document.querySelector("video");
-        if (v && !v.paused) return;
-        if (v) v.play().catch(() => clickMainPlay());
-        else clickMainPlay();
-      } catch (e) {}
-      return;
+      ensurePlaying().then(sendResponse, () => sendResponse({ playing: false }));
+      return true; // keep the response channel open until playback has been checked
     }
     if (msg.type === "radio-prime") {
       // #93 a null/absent url means "clear the stored prime" (sent by /radio/stop), never a URL to
@@ -248,6 +270,18 @@ if (!window.__tcBridgeLoaded) {
     if (!vid) {
       try { vid = new URL(location.href).searchParams.get("v") || ""; } catch (e) {}
     }
+    let lst = np.playlist || "";
+    if (!lst) {  // DOM-fallback reports carry no playlist; the watch URL has it
+      try { lst = new URL(location.href).searchParams.get("list") || ""; } catch (e) {}
+    }
+    // Read the playing song's album from the player bar, never from the page being browsed.
+    let albumBrowseId = "";
+    const albumLink = document.querySelector(
+      'ytmusic-player-bar a[href*="/browse/MPRE"], ' +
+      'ytmusic-player-bar a[href*="/browse/FEmusic_library_privately_owned_release_detail"]');
+    if (albumLink) {
+      try { albumBrowseId = decodeURIComponent(new URL(albumLink.href, location.href).pathname.split("/browse/")[1] || ""); } catch (e) {}
+    }
     // The MediaSession and DOM can format the same title/artist differently. Use the video id
     // when available so switching sources does not re-report a play; a rating change still does.
     const key = (vid ? "video:" + vid : "track:" + np.title + " | " + np.artist) +
@@ -262,22 +296,15 @@ if (!window.__tcBridgeLoaded) {
       // is still a heartbeat (never a persisted play), but is now self-healing.
       try { chrome.runtime.sendMessage({
         type: "now-heartbeat", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
-        likeStatus: np.likeStatus, videoId: vid, paused: !!np.paused,
+        likeStatus: np.likeStatus, videoId: vid, playlist: lst, albumBrowseId, paused: !!np.paused,
       }); } catch (e) {}
       return;
     }
     lastNowPlaying = key;
-    let lst = np.playlist || "";
-    if (!lst) {  // DOM-fallback reports carry no playlist; the watch URL has it
-      try {
-        const u = new URL(location.href);
-        lst = u.searchParams.get("list") || "";
-      } catch (e) {}
-    }
     console.log("[TuneConsole] now playing:", np.title, "-", np.artist, np.likeStatus);
     chrome.runtime.sendMessage({
       type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
-      likeStatus: np.likeStatus, videoId: vid, playlist: lst, brandId: np.brandId || "",
+      likeStatus: np.likeStatus, videoId: vid, playlist: lst, albumBrowseId, brandId: np.brandId || "",
       paused: !!np.paused,
     });
   };

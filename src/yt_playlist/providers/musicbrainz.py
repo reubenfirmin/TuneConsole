@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 
 from yt_playlist.util import net
+from yt_playlist.util.matching import normalize
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
 from yt_playlist.providers.enrich_queue import PriorityGate
 
@@ -188,12 +189,37 @@ def _recording_search(title, artist):
     """One recording search with the parens-stripped retry (a remaster / live / remix suffix often
     blocks the match). Shared by enrich(), recording_mbid() and enrich_full() so a single track
     costs one search, not one per caller."""
-    recs = _search_recordings(title, artist)
+    recs = [r for r in _search_recordings(title, artist) if _matches_recording(r, title, artist)]
     if not recs:
         stripped = _strip_parens(title)
         if stripped and stripped != title:
-            recs = _search_recordings(stripped, artist)
+            recs = [r for r in _search_recordings(stripped, artist)
+                    if _matches_recording(r, title, artist)]
     return recs
+
+
+def _matches_recording(recording, title, artist):
+    """Search ranking is not identity: verify the title and the credited artist(s).
+
+    A collaboration can credit the requested artist second (e.g. MAARVN & Deco (BE)). Accept
+    individual credits, credited names/aliases, or the combined credit without accepting another
+    artist's recording of the same title. Keep meaningful title qualifiers even on the retry.
+    """
+    wanted_title, wanted_artist = normalize(title), normalize(artist)
+    if not wanted_title or not wanted_artist or normalize(recording.get("title")) != wanted_title:
+        return False
+    names, joined = set(), []
+    for credit in recording.get("artist-credit") or []:
+        if isinstance(credit, str):
+            joined.append(credit)
+            continue
+        credited_artist = credit.get("artist") or {}
+        credited_name = credit.get("name") or credited_artist.get("name") or ""
+        joined.append(credited_name + (credit.get("joinphrase") or ""))
+        names.update(normalize(n) for n in (credited_name, credited_artist.get("name")))
+        names.update(normalize(a.get("name")) for a in credited_artist.get("aliases") or [])
+    names.add(normalize("".join(joined)))
+    return wanted_artist in names
 
 
 def enrich(title, artist):

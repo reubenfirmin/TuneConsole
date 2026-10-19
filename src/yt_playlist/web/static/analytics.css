@@ -70,9 +70,11 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .conflict-field { display: flex; gap: 0.7rem; align-items: baseline; margin: 0.3rem 0 0.3rem 0.4rem; }
 .conflict-label { min-width: 4rem; color: var(--dim); font-size: var(--type-sm); text-transform: capitalize; }
 .conflict-options { display: flex; flex-wrap: wrap; gap: 0.5rem .9375rem; }
-.conflict-option { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+.conflict-option { display: inline-flex; align-items: center; gap: 0.3rem; }
+.conflict-option label { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
 .conflict-option input { width: auto; }
 .conflict-prov { font-size: var(--type-xs); }
+a.conflict-prov { text-decoration: underline; text-underline-offset: 0.15em; }
 
 /* Taste-viz floating tooltip - a formatted readout: composed inputs above a hairline,
    the effective result emphasized below. Reuses the brand palette; mono for figures. */
@@ -725,10 +727,9 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
     color-mix(in srgb, var(--surface-inset) 88%, transparent) 35%,
     color-mix(in srgb, var(--surface-inset) 18%, transparent) 72%, transparent 100%); }
 .rt-hero-copy { position: relative; z-index: 1; width: min(34rem, 58%); }
-.rt-hero-copy h1 { margin: .2rem 0 .35rem; font-size: clamp(2.2rem, 6vw, 4.5rem); line-height: .95; }
+.rt-hero-copy h1 { margin: 0 0 .65rem; font-size: clamp(2.2rem, 6vw, 4.5rem); line-height: .95; }
 .rt-hero-copy p { margin: 0; color: color-mix(in srgb, var(--text) 78%, transparent); }
-.rt-kicker { color: var(--amber); font-family: var(--font-mono); font-size: var(--type-xs);
-  letter-spacing: .08em; text-transform: uppercase; }
+.rt-link-icon { width: 1.125rem; height: 1.125rem; margin-inline-start: .25rem; vertical-align: -.2em; flex-shrink: 0; }
 .page-road-trip #road-trip-body { display: grid; gap: var(--sp-5); }
 .rt-suggestions { display: flex; flex-direction: column; border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm); margin: 0.25rem 0; max-height: 10rem; overflow-y: auto;
@@ -742,8 +743,6 @@ figure.rose { margin: 0; text-align: center; display: flex; flex-direction: colu
 .rt-suggestion:hover, .rt-suggestion:focus-visible {
   background: var(--accent-soft); color: var(--text); }
 .rt-form { position: relative; border-color: var(--border-strong); padding: 0; overflow: visible; }
-.rt-form::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px;
-  background: var(--accent); pointer-events: none; }
 .rt-form form { padding: 1.25rem; }
 .rt-step { border: 1px solid var(--border-strong); background: var(--surface-inset); }
 .rt-step + .rt-step { border-top: 0; }
@@ -800,16 +799,17 @@ input[type="range"].rt-shape-slider { display: block; width: 100%; height: 6px; 
 .rt-drawer > summary::marker { color: var(--accent-2); }
 .rt-drawer > summary small { color: var(--dim); font-weight: 400; font-size: var(--type-xs); }
 .rt-saved-routes { margin-bottom: 0; }
-.rt-saved-routes > summary { display: grid; grid-template-columns: auto minmax(8rem, 1fr) auto;
-  align-items: baseline; padding: .7rem .85rem; border: 1px solid var(--border-strong);
+.rt-saved-routes > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto 1rem;
+  align-items: center; padding: .7rem .85rem; border: 1px solid var(--border-strong);
   background: var(--surface-subtle); }
-.rt-library-label { color: var(--accent-2); font-size: var(--type-xs); }
+.rt-saved-routes > summary::after { content: "+"; color: var(--faint); font-size: var(--type-lg); text-align: center; }
+.rt-saved-routes[open] > summary::after { content: "−"; }
 .rt-saved-routes > summary strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rt-recipes { border: 1px solid var(--border-subtle); border-top: 0; background: var(--surface-inset); }
 .rt-recipe { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
   gap: .75rem 1rem; padding: .75rem .9rem; }
 .rt-recipe + .rt-recipe { border-top: 1px solid var(--border-subtle); }
-.rt-recipe.is-loaded { box-shadow: inset 3px 0 0 var(--teal); background: color-mix(in srgb, var(--teal) 7%, transparent); }
+.rt-recipe.is-loaded { background: var(--surface-interactive); }
 .rt-recipe-select { display: grid; grid-template-columns: minmax(8rem, .6fr) minmax(12rem, .8fr) minmax(10rem, 1fr);
   align-items: baseline; gap: .35rem .8rem; min-width: 0; padding: 0; text-align: left;
   color: inherit; border: 0; background: transparent; }
@@ -860,7 +860,6 @@ input[type="range"].rt-shape-slider { display: block; width: 100%; height: 6px; 
 .rt-draft-head { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap;
   padding: 1.1rem 1.25rem; border-bottom: 1px solid var(--border-strong); background: var(--surface-subtle); }
 .rt-draft-head h2 { margin: 0; }
-.rt-draft-title p { margin: .15rem 0 0; color: var(--teal); font-size: var(--type-xs); }
 .rt-draft-title { min-width: 10rem; }
 .rt-draft-metrics { display: flex; align-items: center; gap: 0; color: var(--dim); font-size: var(--type-xs); }
 .rt-draft-metrics span { padding: 0 .7rem; border-inline-start: 1px solid var(--border-strong); }
@@ -908,8 +907,8 @@ input[type="range"].rt-shape-slider { display: block; width: 100%; height: 6px; 
 .rt-selection { display: inline-flex; align-items: center; gap: .25rem; min-height: 1.8rem;
   padding: .15rem .2rem .15rem .55rem; border: 1px solid var(--border-strong); border-radius: 999px;
   color: var(--text); background: var(--surface-raised); font-size: var(--type-xs); }
-.rt-selection.is-excluded { border-left-color: var(--danger); }
-.rt-selection.is-artist { border-left-color: var(--amber); }
+.rt-selection.is-excluded { color: var(--danger); }
+.rt-selection.is-artist { color: var(--amber); }
 .rt-selection button { width: 1.4rem; height: 1.4rem; padding: 0; border: 0; border-radius: 50%; background: transparent;
   color: var(--faint); }
 .rt-selection button:hover { color: var(--danger); background: var(--danger-soft); }
@@ -941,7 +940,6 @@ input[type="range"].pct-slider {
   background: linear-gradient(to right, var(--accent-2) var(--p, 0%), var(--border) var(--p, 0%));
 }
 .rt-form.is-embedded { border: 0; background: transparent; }
-.rt-form.is-embedded::before { content: none; }
 .rt-form.is-embedded form { padding: 0 0 .8rem; }
 .rt-axis-pct { flex: none; width: 2.6rem; text-align: right; font-size: var(--type-xs); color: var(--dim);
   font-variant-numeric: tabular-nums; }
@@ -961,14 +959,11 @@ input[type="range"].pct-slider {
 .rt-queue-toolbar > div { min-width: 0; margin-right: auto; }
 .rt-queue-toolbar h3 { margin: 0; font-size: var(--type-body); }
 .rt-queue-toolbar div > span { display: block; margin-top: .12rem; color: var(--dim); font-size: var(--type-xs); }
-.rt-queue-notes { margin: 0 1.25rem .75rem; padding: .65rem .75rem; border-left: 2px solid var(--border-strong);
-  background: var(--surface-subtle); }
+.rt-queue-notes { margin: 0 1.25rem .75rem; }
 .rt-queue-notes p { margin: 0; }
 .rt-queue-notes p + p { margin-top: .35rem; }
 .rt-list { list-style: none; margin: 0; padding: 0 1.25rem .65rem; counter-reset: rt;
   border-top: 1px solid var(--border); }
-/* Square corners: the row carries a full-height stripe down its left edge, and a rounded row bends
-   that stripe into a comma. */
 .rt-row { display: grid; align-items: center; gap: 0.65rem; padding: .3rem;
   border-bottom: 1px solid var(--border);
   grid-template-columns: 1.6rem 2.5rem minmax(0, 2.2fr) minmax(0, 1.5fr) minmax(0, 1fr)
@@ -988,21 +983,18 @@ input[type="range"].pct-slider {
 .rt-c-genre { color: var(--faint); font-size: var(--type-xs); }
 .rt-c-year { color: var(--faint); font-size: var(--type-xs); font-variant-numeric: tabular-nums;
   text-align: right; }
-.rt-c-src { width: fit-content; padding: .12rem .35rem; border: 1px solid var(--border-strong);
-  border-radius: 3px; color: var(--faint); font-size: .6rem; text-transform: uppercase; letter-spacing: 0.06em; }
-.rt-c-src.is-yours { color: var(--teal); border-color: color-mix(in srgb, var(--teal) 45%, transparent); }
-.rt-c-src.is-theirs { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 45%, transparent); }
-.rt-c-src.is-blend { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+.rt-c-src { color: var(--dim); font-size: var(--type-xs); }
+.rt-c-src.is-yours { color: var(--teal); }
+.rt-c-src.is-theirs { color: var(--accent-2); }
+.rt-c-src.is-blend { color: var(--amber); }
 /* A full-cell hit target, not a bare glyph: the ✕ was fiddly to land on at glyph size. */
 .rt-x { width: 2rem; height: 2rem; display: inline-flex; align-items: center; justify-content: center;
   padding: 0; background: transparent; border: none; box-shadow: none; border-radius: 6px;
   color: var(--faint); font-size: var(--type-ui); opacity: 0.5; cursor: pointer; }
+.rt-x svg { width: 1.125rem; height: 1.125rem; }
 .rt-row:hover .rt-x { opacity: 1; }
 .rt-x:hover, .rt-x:focus-visible { background: var(--danger-soft); color: var(--danger); opacity: 1;
   box-shadow: none; }
-/* Their tracks carry a tint down the left edge, so the balance of the mix is legible at a glance. */
-.rt-row.is-theirs { box-shadow: inset 2px 0 0 var(--accent-2); }
-.rt-row.is-blend { box-shadow: inset 2px 0 0 var(--amber); }
 @media (max-width: 820px) {
   .rt-mixer-grid { grid-template-columns: 1fr 1fr; }
   .rt-length-control { grid-column: 1 / -1; }

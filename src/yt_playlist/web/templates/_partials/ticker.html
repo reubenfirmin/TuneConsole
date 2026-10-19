@@ -4,14 +4,17 @@
    is intuitive): a dashed corpus tick + over/under ratio column. Per-dimension color via .dim-<dim>.
    t = {"rows":[...], "compare":bool, "close_days":int, "span_days":int}. #}
 {% import "_partials/_viz_tip.html" as vt %}
+{% from "_macros.html" import library_icon %}
 {% macro ticker_chart(t, dim) %}
 {% set heads = {'genre': 'Sub-genre', 'year': 'Decade', 'album': 'Album', 'playlist': 'Playlist', 'artist': 'Artist'} %}
 {% set cmp = t.compare %}
 {% set cd = t.close_days %}{% set sd = t.span_days %}
+{% set has_art = dim in ('artist', 'album', 'playlist') %}
 {% if t.rows %}
-<table class="chart ticker">
+<table class="chart ticker" data-dimension="{{ dim }}">
   <thead><tr>
     <th class="rank">#</th>
+    {% if has_art %}<th class="col-thumb" aria-label="Artwork"></th>{% endif %}
     <th>{{ heads[dim] }}</th>
     <th class="tickhead">share of plays{% if cmp %} &nbsp;·&nbsp; <span class="chart-warm">┊</span> collection share{% endif %}</th>
     <th class="num">{{ cd }}d</th>
@@ -21,6 +24,13 @@
   {% for r in t.rows %}{% set g = r.geo %}
     <tr>
       <td class="rank">{{ loop.index }}</td>
+      {% if has_art %}
+      <td><span class="chart-art art-{{ dim }}" aria-hidden="true">
+        {{ library_icon(dim ~ 's') }}
+        {% if r.thumbnail %}<img src="{{ r.thumbnail }}" alt="" loading="lazy" referrerpolicy="no-referrer"
+             onerror="this.remove()">{% endif %}
+      </span></td>
+      {% endif %}
       <td class="tklabel">{% set lbl = (r.cat ~ 's') if dim == 'year' else r.cat %}{% if r.link %}<a class="alink" href="{{ r.link }}">{{ lbl }}</a>{% else %}{{ lbl }}{% endif %}</td>
       <td class="tkcell">
         <span class="ticker-candle dim-{{ dim }}" tabindex="0" {{ vt.ticker_tip(r, dim, cd, sd, cmp) }}>

@@ -140,7 +140,7 @@ main:not(.page-clusters) .card--featured {
   box-shadow: none;
 }
 
-/* Artwork is already the strongest geometry in the product; let its square silhouette lead. */
+/* Decorative artwork panels stay square. Entity thumbnails use artwork.css shapes. */
 main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album-thumb,
   .pl-art, .pl-cover, .pl-thumb) {
   border-radius: 0;
@@ -2268,6 +2268,7 @@ body:not(:has(.page-clusters)) .modal {
   box-shadow: 0 .5rem 2rem color-mix(in srgb, var(--shadow-ink) 65%, transparent);
 }
 .page-home .dash-directions .fingerprint .fp-collapse {
+  position: relative;
   display: grid;
   grid-template-columns: 1fr;
   place-items: center;
@@ -2283,6 +2284,16 @@ body:not(:has(.page-clusters)) .modal {
   color: var(--surface-sunk);
   background: transparent;
   font-size: 1.55rem;
+}
+.page-home .dash-directions .fp-tuning-dot {
+  position: absolute;
+  top: -.15rem;
+  right: -.15rem;
+  width: .7rem;
+  height: .7rem;
+  border: 2px solid var(--surface-sunk);
+  border-radius: 50%;
+  background: var(--warn);
 }
 .page-home .fp-dialog {
   position: fixed;
@@ -2439,10 +2450,18 @@ body:has(.fp-dialog[open]) { overflow: hidden; }
     font-size: var(--type-xs);
   }
   body:not(:has(.page-clusters)) .global-now-playing .hs-now-artist::before { content: none; }
-  body:not(:has(.page-clusters)) .global-now-playing .hs-rate-group {
+  body:not(:has(.page-clusters)) .global-now-playing .hs-source {
     grid-column: 1 / -1;
     grid-row: 2;
+    justify-self: start;
+  }
+  body:not(:has(.page-clusters)) .global-now-playing .hs-rate-group {
+    grid-column: 1 / -1;
+    grid-row: 3;
     margin: 0;
+  }
+  body:not(:has(.page-clusters)) .global-now-playing .hs-now:not(:has(.hs-source)) .hs-rate-group {
+    grid-row: 2;
   }
   body:not(:has(.page-clusters)) .global-now-playing .hs-meta {
     width: 100%;

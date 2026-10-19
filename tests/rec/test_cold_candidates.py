@@ -61,3 +61,17 @@ def test_muted_family_excluded(monkeypatch, store):
     _patch(monkeypatch)
     monkeypatch.setattr(surfaces, "discovery_facet_weight", lambda s, fam, now: None)  # muted family
     assert surfaces.cold_candidates(store, 0.0) == []
+
+
+def test_large_pool_evaluates_feedback_once_per_genre_family(monkeypatch, store):
+    pool = [_row(f"t{i}|artist{i}", "techno") for i in range(500)] + [_row("m|b", "ambient")]
+    monkeypatch.setattr(store, "get_discovered_tracks", lambda: pool)
+    _patch(monkeypatch)
+    calls = []
+    def weight(store, family, now):
+        calls.append(family)
+        return None if family == "ambient" else 1.0
+    monkeypatch.setattr(surfaces, "discovery_facet_weight", weight)
+    out = surfaces.cold_candidates(store, 0.0)
+    assert len(out) == 500 and all(t.genre == "techno" for t in out)
+    assert calls == ["techno", "ambient"]

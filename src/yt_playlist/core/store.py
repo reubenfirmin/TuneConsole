@@ -161,6 +161,11 @@ CREATE TABLE IF NOT EXISTS hidden_playlists (
 CREATE TABLE IF NOT EXISTS saved_albums (
   browse_id TEXT PRIMARY KEY, title TEXT, artist TEXT, year TEXT, type TEXT, thumbnail TEXT
 );
+-- Full endpoint responses, separate from incidental album tracks found in playlists.
+CREATE TABLE IF NOT EXISTS album_tracklists (
+  browse_id TEXT PRIMARY KEY, title TEXT, artist TEXT, thumbnail TEXT,
+  track_keys TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY, value TEXT   -- small app settings, e.g. lastfm_api_key
 );

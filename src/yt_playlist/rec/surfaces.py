@@ -369,12 +369,15 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
     suppressed = store.suppressed_keys("for_you", now)
     muted = store.muted_artists()
     scored = []
+    family_weights = {}
     for r in kept:
         k = r["identity_key"]
         if k in suppressed or r.get("artist") in muted:
             continue
         fam = genre_map.family(r.get("genre")) if r.get("genre") else None
-        fw = discovery_facet_weight(store, fam, now)
+        if fam not in family_weights:
+            family_weights[fam] = discovery_facet_weight(store, fam, now)
+        fw = family_weights[fam]
         if fw is None:                                  # muted family: hard-exclude (mirrors #18 discovery)
             continue
         scored.append((float(scores[idx[k]]) * fw, r))

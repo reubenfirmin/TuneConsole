@@ -193,7 +193,7 @@ def test_chosen_genres_validate_before_advancing_the_menu(store):
     assert store.get_proposals("home_genre_request") is None
 
 
-def test_chosen_genres_explain_when_the_pool_cannot_fill_a_mix(store):
+def test_chosen_genres_keep_a_fresh_skeleton_when_the_pool_cannot_fill_a_mix(store):
     seed_genres(store)
     bundles = store.get_proposals("mode_bundles")
     for lane in mode_surfaces.CARD_SURFACES:
@@ -202,9 +202,11 @@ def test_chosen_genres_explain_when_the_pool_cannot_fill_a_mix(store):
     store.put_proposals("mode_bundles", bundles, 1.0)
     response = _client(store).post("/home/mix-genres", data={"genres": ["jazz"]})
     assert response.status_code == 200
-    assert "Not enough tracks for those genres yet" in response.text
-    assert offered(response)
-    assert '"kind": "chosen_genres"' not in response.text
+    assert 'id="gen-fresh"' in response.text and 'class="fresh-pool-art"' in response.text
+    assert 'hx-post="/home/fresh-pool"' in response.text
+    assert 'data-requested-genres=\'["jazz"]\'' in response.text
+    assert "Here are your usual mixes" not in response.text
+    assert not offered(response)
 
 
 def test_available_genres_follow_current_metadata_and_artist_fallback(store, monkeypatch):

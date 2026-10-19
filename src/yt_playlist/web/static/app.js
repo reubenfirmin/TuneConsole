@@ -446,7 +446,7 @@ function playlistsTab(rows) {
     },
     merge() {
       if (this.count() < 2) return;
-      location.href = '/merge?ids=' + this.selected().map(r => r.id).join(',') + '&return=/';
+      location.href = '/merge?ids=' + this.selected().map(r => r.id).join(',') + '&return=/playlists';
     },
     copyModal: false, copyName: '', copyIds: [],
     openCopy() {
@@ -812,6 +812,16 @@ function playerStatus() {
   return {
     connected: false,
     nowPlaying: null,
+    sourceLinkVisible() {
+      const source = this.nowPlaying && this.nowPlaying.source;
+      if (!source) return false;
+      const target = new URL(source.url, location.href);
+      const current = new URL(location.href);
+      if (target.origin !== current.origin ||
+          target.pathname.replace(/\/+$/, '') !== current.pathname.replace(/\/+$/, '')) return true;
+      return source.kind === 'album' &&
+        target.searchParams.get('browse') !== current.searchParams.get('browse');
+    },
     init() {
       // Home already owns the shared status poll for radio/onboarding. Everywhere else this global
       // instrument polls for itself, so there is one poller per page rather than one per component.
@@ -1016,15 +1026,86 @@ document.addEventListener('input', function (e) {
 
 // Read actual displayed themes, including a single-card refresh, instead of inferring them from
 // the preference sliders or a different browser tab's last request.
+function homePoolExclusions() {
+  return JSON.stringify(Array.from(
+    document.querySelectorAll('#home-mode-cards .gen-row[data-key]'), row => row.dataset.key));
+}
+
 function homeOfferedGenres() {
   const genres = new Set();
-  document.querySelectorAll('#home-mode-cards .gen-card-body[data-genres]').forEach(card => {
+  // HTMX temporarily preserves a skeleton's CSS classes when it becomes a ready card.
+  // Its genre metadata is current immediately, including before the swap settles.
+  document.querySelectorAll('#home-mode-cards [data-genres]').forEach(card => {
     try {
       JSON.parse(card.dataset.genres).forEach(g => { if (typeof g === 'string' && g) genres.add(g); });
     } catch (_) { /* A card without metadata cannot establish its genre. */ }
   });
   return [...genres].sort();
 }
+
+let mixTuningDeadline = 0;
+let mixTuningTimer;
+let mixTuningPanel;
+let mixTuningRefreshing = false;
+
+function syncMixTuningIndicator(active = null) {
+  const panel = document.getElementById('fingerprint');
+  if (!panel) return;
+  if (active !== null) panel.dataset.tuningActive = active;
+  const set = panel.dataset.tuningActive === 'true' ||
+    !!panel.querySelector('#home-genre-options input:checked');
+  panel.querySelector('.fp-tuning-dot').hidden = !set;
+  panel.querySelector('.fp-collapse').title = 'Tune these mixes' + (set ? ' (adjustments active)' : '');
+  panel.querySelector('#fp-tuning-status').textContent = set ? 'Selections or biases are set.' : '';
+}
+
+function scheduleMixTuningExpiry(seconds) {
+  clearTimeout(mixTuningTimer);
+  mixTuningDeadline = seconds > 0 ? Date.now() + seconds * 1000 : 0;
+  if (mixTuningDeadline) mixTuningTimer = setTimeout(refreshExpiredMixTuning, seconds * 1000);
+}
+
+function refreshExpiredMixTuning() {
+  if (mixTuningRefreshing || !document.getElementById('fingerprint')) return;
+  if (!mixTuningDeadline || Date.now() < mixTuningDeadline) return;
+  mixTuningRefreshing = true;
+  // The server checks the deadline again, including changes made in another tab.
+  htmx.ajax('GET', '/home/fingerprint', {target: '#fingerprint', swap: 'outerHTML'})
+    .catch(() => {})
+    .finally(() => {
+      mixTuningRefreshing = false;
+      if (mixTuningDeadline && Date.now() >= mixTuningDeadline) {
+        mixTuningTimer = setTimeout(refreshExpiredMixTuning, 30000);
+      }
+    });
+}
+
+function syncMixTuningExpiry() {
+  const panel = document.getElementById('fingerprint');
+  if (panel === mixTuningPanel) return;
+  mixTuningPanel = panel;
+  scheduleMixTuningExpiry(Number(panel?.dataset.tuningRemaining || 0));
+}
+
+document.addEventListener('DOMContentLoaded', syncMixTuningExpiry);
+document.addEventListener('htmx:afterSettle', syncMixTuningExpiry);
+document.addEventListener('htmx:afterRequest', event => {
+  syncMixTuningIndicator(event.detail.xhr?.getResponseHeader('X-Mix-Tuning-Active') ?? null);
+  const raw = event.detail.xhr?.getResponseHeader('X-Mix-Tuning-Remaining');
+  if (raw === null || raw === undefined) return;
+  const remaining = Number(raw);
+  if (remaining === 0 && mixTuningDeadline && event.detail.target?.id !== 'fingerprint') {
+    // A fragment can notice expiration before the timer; refresh its controls too.
+    mixTuningDeadline = Date.now();
+    refreshExpiredMixTuning();
+  } else {
+    scheduleMixTuningExpiry(remaining);
+  }
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshExpiredMixTuning();
+});
+window.addEventListener('focus', refreshExpiredMixTuning);
 
 function syncHomeThemes() {
   const summary = document.getElementById('home-theme-summary');
@@ -1087,6 +1168,7 @@ function updateHomeGenreSelection() {
   const busy = document.getElementById('fp-mixes-panel')?.getAttribute('aria-busy') === 'true';
   document.getElementById('home-make-mixes').disabled = busy || (!count && !homeOfferedGenres().length);
   form.querySelector('.fp-submit-label').textContent = count ? 'Make mixes' : 'Shuffle genres';
+  syncMixTuningIndicator();
 }
 document.addEventListener('DOMContentLoaded', syncHomeThemes);
 document.addEventListener('htmx:afterSettle', syncHomeThemes);
@@ -1120,7 +1202,7 @@ document.addEventListener('htmx:afterRequest', event => {
   }
   syncHomeThemes();
   if (event.detail.successful && !document.getElementById('home-mode-cards')?.dataset.genreWarning
-      && document.querySelector('#home-mode-cards .gen-card-body')) {
+      && document.querySelector('#home-mode-cards [data-genres]')) {
     window.dispatchEvent(new CustomEvent('home-mixes-applied'));
   }
 });
@@ -1207,7 +1289,12 @@ function genrePicker() {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'axis=genre:' + encodeURIComponent(name),
-      }).then(r => r.text()).then(html => {
+      }).then(r => {
+        syncMixTuningIndicator(r.headers.get('X-Mix-Tuning-Active'));
+        const remaining = r.headers.get('X-Mix-Tuning-Remaining');
+        if (remaining !== null) scheduleMixTuningExpiry(Number(remaining));
+        return r.text();
+      }).then(html => {
         const bars = document.getElementById('fp-genre-bars');
         if (!bars) return;
         bars.innerHTML = html;                       // server-rendered bars (dedup + order correct)

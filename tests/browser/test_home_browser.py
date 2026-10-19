@@ -1,3 +1,130 @@
+def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, store, page, monkeypatch, tmp_path):
+    import threading
+    from playwright.sync_api import expect
+    from tests.test_fresh_pool import _without_fresh
+    from yt_playlist.rec import fresh_pool, surfaces
+    from yt_playlist.util.matching import identity_key
+
+    _without_fresh(store)
+    store.set_setting("last_sync_at", "1")
+    store.set_setting("onboard_dismissed", "1")
+    release = threading.Event()
+    calls, tracks = [], []
+    def populate(ctx, **params):
+        calls.append(params)
+        params["on_progress"]("Finding fresh jazz songs…")
+        release.wait(15)
+        tracks.extend(surfaces.ForYouItem(f"Fresh song {i}", f"New artist {i}", "", f"new{i}", None,
+                                        0, "", key=identity_key(f"Fresh song {i}", f"New artist {i}"),
+                                        genre="Jazz" if i % 2 else "Techno") for i in range(12))
+    monkeypatch.setattr(fresh_pool, "populate", populate)
+    monkeypatch.setattr(surfaces, "cold_candidates", lambda *args, **kwargs: tracks)
+    page.route("https://i.ytimg.com/**", lambda route: route.abort())
+    page.goto(f"{live_app}/")
+    expect(page.locator("#home-mode-cards")).to_be_visible()
+    page.locator("#fingerprint .fp-collapse").click()
+    panel = page.locator("#fingerprint")
+    panel.get_by_role("checkbox", name="jazz", exact=True).check()
+    panel.get_by_role("checkbox", name="techno", exact=True).check()
+    with page.expect_response("**/home/mix-genres"):
+        panel.get_by_role("button", name="Make mixes", exact=True).click()
+    expect(page.locator("#home-mode-cards")).to_have_attribute("data-requested-genres", '["jazz", "techno"]')
+    card = page.locator("#gen-fresh")
+    expect(card.get_by_role("button", name="Find fresh songs", exact=True)).to_be_visible()
+    assert not calls
+    page.set_viewport_size({"width": 390, "height": 850})
+    card.scroll_into_view_if_needed()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    page.screenshot(path=tmp_path / "fresh-skeleton.png")
+    try:
+        # Native button keyboard activation starts discovery and expands the same card.
+        start = card.get_by_role("button", name="Find fresh songs", exact=True)
+        start.focus()
+        start.press("Enter")
+        expect(card).to_have_attribute("aria-busy", "true")
+        expect(card.get_by_role("status")).to_have_text("Finding fresh jazz songs…")
+        assert calls[0]["include_genres"] == ["jazz", "techno"]
+        expect(card.locator('.fresh-pool-tile > span').first).to_have_css("animation-name", "fresh-pool-beat")
+        page.screenshot(path=tmp_path / "fresh-building.png")
+        page.emulate_media(reduced_motion="reduce")
+        assert card.locator('.fresh-pool-tile > span').first.evaluate("el => getComputedStyle(el).animationName") == "none"
+        page.reload()
+        expect(card).to_have_attribute("aria-busy", "true")
+        assert len(calls) == 1
+    finally:
+        release.set()
+    expect(card.locator(".gen-row")).to_have_count(12, timeout=10000)
+    card.locator(".gen-poster").press("Enter")
+    expect(card.get_by_role("button", name="Save and play this mix")).to_be_visible()
+    page.screenshot(path=tmp_path / "fresh-ready.png")
+
+
+def test_two_ready_mixes_show_clickable_skeletons_for_the_missing_slots(live_app, store, page, monkeypatch, tmp_path):
+    import threading
+    from playwright.sync_api import expect
+    from tests.test_library_pool import two_ready_cards
+    from yt_playlist.rec import recommend, surfaces
+    from yt_playlist.util.matching import identity_key
+
+    two_ready_cards(store, monkeypatch)
+    store.set_setting("last_sync_at", "1")
+    store.set_setting("onboard_dismissed", "1")
+    rows = []
+    for i in range(16):
+        title, artist = f"Catalog song {i}", f"Catalog artist {i}"
+        tid = store.upsert_track(f"v{i}", title, artist, None, None)
+        store.set_track_genre(tid, "Jazz")
+        rows.append(surfaces.ForYouItem(title, artist, "", f"v{i}", None, 0, "",
+                                       key=identity_key(title, artist), genre="Jazz"))
+    release, started = threading.Event(), threading.Event()
+    calls = []
+    def rank(*args, **kwargs):
+        calls.append(kwargs)
+        started.set()
+        release.wait(15)
+        return rows
+    monkeypatch.setattr(recommend, "explore_for_you", rank)
+    page.route("https://i.ytimg.com/**", lambda route: route.abort())
+    page.set_viewport_size({"width": 1280, "height": 1000})
+    page.goto(f"{live_app}/")
+    board = page.locator("#home-mode-cards")
+    expect(board.locator(".gen-card")).to_have_count(4)
+    page.locator("#fingerprint .fp-collapse").click()
+    for genre in ("jazz", "techno", "trance"):
+        page.locator("#fingerprint").get_by_role("checkbox", name=genre, exact=True).check()
+    with page.expect_response("**/home/mix-genres"):
+        page.get_by_role("button", name="Make mixes", exact=True).click()
+    expect(board).to_have_attribute("data-requested-genres", '["jazz", "techno", "trance"]')
+    expect(board.locator(".gen-card-body")).to_have_count(2)
+    expect(board.locator(".fresh-pool")).to_have_count(2)
+    for lane in ("explore", "comfort"):
+        expect(page.locator(f"#gen-{lane}")).to_have_attribute("aria-busy", "false")
+    card = page.locator("#gen-explore")
+    expect(card.get_by_role("button", name="Build from your catalog", exact=True)).to_be_visible()
+    assert not calls
+    assert card.locator('.fresh-pool-tile > span').first.evaluate("el => getComputedStyle(el).animationName") == "none"
+    board.screenshot(path=tmp_path / "two-ready-two-skeletons.png", animations="disabled")
+    try:
+        card.get_by_role("button", name="Build from your catalog", exact=True).click()
+        expect(card).to_have_attribute("aria-busy", "true")
+        assert started.wait(1) and len(calls) == 1
+        expect(card).to_have_class("gen-card card fresh-pool is-building is-focused")
+        expect(card.locator('.fresh-pool-tile > span').first).to_have_css("animation-name", "fresh-pool-beat")
+        expect(page.locator("#gen-comfort")).to_have_attribute("aria-busy", "false")
+        page.set_viewport_size({"width": 390, "height": 850})
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        card.screenshot(path=tmp_path / "catalog-building.png")
+    finally:
+        release.set()
+    expect(card.locator(".gen-row")).to_have_count(12, timeout=10000)
+    expect(card.get_by_role("button", name="Save and play this mix")).to_be_visible()
+    recipe = page.evaluate("JSON.parse(genRecipe('gen-explore'))")
+    assert recipe["genre_request"]["include"] == ["jazz", "techno", "trance"]
+    expect(page.locator("#gen-wheelhouse .gen-row")).to_have_count(12)
+    expect(page.locator("#gen-fresh .gen-row")).to_have_count(12)
+    assert len(calls) == 1
+
+
 def test_home_is_landing_with_status_and_sections(live_app, page):
     page.goto(f"{live_app}/")
     # Home is the default tab. Syncing is automatic in the background now, so there is no manual
@@ -88,10 +215,22 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     expect(button).to_have_accessible_name("Shuffle genres")
     assert set(page.evaluate("homeOfferedGenres()")) == {"jazz", "techno"}
     before = set(page.evaluate("homeOfferedGenres()"))
+    # HTMX restores a placeholder's old CSS classes until settling. Genre metadata
+    # must already include the newly ready fourth card when the swap completes.
+    page.evaluate("""() => {
+        window.shuffledGenresBeforeSettle = null;
+        document.addEventListener('htmx:afterSwap', event => {
+            if (event.detail.xhr?.responseURL.endsWith('/home/other-genres')) {
+                window.shuffledGenresBeforeSettle = homeOfferedGenres();
+            }
+        });
+    }""")
     button.click()
     expect(panel.locator("dialog")).not_to_be_visible()
+    during_swap = set(page.evaluate("window.shuffledGenresBeforeSettle"))
+    assert len(during_swap) == 4 and not before & during_swap
     after = set(page.evaluate("homeOfferedGenres()"))
-    assert len(after) == 4 and not before & after
+    assert after == during_swap
     panel.locator(".fp-collapse").click()
     expect(button).to_be_enabled()
     expect(panel.locator("#home-theme-summary")).to_be_empty()
@@ -114,6 +253,95 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     expect(button).to_be_enabled()
     expect(panel.locator("#fp-mixes-panel")).not_to_have_attribute("aria-busy", "true")
     assert set(page.evaluate("homeOfferedGenres()")) == after
+
+
+def test_clear_mix_controls_resets_applied_and_draft_choices_from_either_tab(live_app, store, page, tmp_path):
+    from playwright.sync_api import expect
+    from tests.test_home_other_genres import seed_genres
+    from yt_playlist.rec import rec_params
+
+    seed_genres(store)
+    store.set_setting("last_sync_at", "1")
+    store.set_setting("onboard_dismissed", "1")
+    store.set_weight("genre:jazz", 1.4, now=1)
+    page.route("https://i.ytimg.com/**", lambda route: route.abort())
+    page.request.post(f"{live_app}/home/mix-genres", form={"genres": "jazz"})
+    page.request.post(f"{live_app}/home/steer", form={"axis": "genre:jazz", "weight": "2"})
+    page.request.post(f"{live_app}/home/breadth", form={"breadth_bias": ".5"})
+    page.goto(f"{live_app}/")
+    panel = page.locator("#fingerprint")
+    panel.locator(".fp-collapse").click()
+    expect(panel.get_by_role("checkbox", name="jazz", exact=True)).to_be_checked()
+    clear = panel.get_by_role("button", name="Clear selections and biases", exact=True)
+    expect(clear).to_be_visible()
+    page.get_by_role("tab", name="Preferences", exact=True).click()
+    expect(clear).to_be_visible()
+    expect(panel.locator(".fp-breadth-slider")).to_have_value("0.5")
+    for width in (1280, 390):
+        page.set_viewport_size({"width": width, "height": 850})
+        expect(clear).to_be_in_viewport()
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        page.screenshot(path=tmp_path / f"mix-reset-{width}.png")
+    clear.click()
+    expect(panel.locator(".fp-breadth-slider")).to_have_value("0")
+    expect(page.locator("#home-mode-cards")).to_have_attribute("data-requested-genres", "[]")
+    assert store.get_leans() == {}
+    assert rec_params.get_param(store, "breadth_bias") == 0
+    assert store.get_weights(now=1)["genre:jazz"] == 1.4
+
+    expect(panel.locator("dialog")).not_to_be_visible()
+    panel.locator(".fp-collapse").click()
+    expect(page.get_by_role("tab", name="Preferences", exact=True)).to_have_attribute("aria-selected", "true")
+    page.get_by_role("tab", name="These mixes", exact=True).click()
+    expect(panel.locator('input[name="genres"]:checked')).to_have_count(0)
+    # Clearing also discards a draft and search text even when no choice was applied.
+    search = panel.get_by_role("searchbox")
+    search.fill("jazz")
+    panel.get_by_role("checkbox", name="jazz", exact=True).check()
+    clear.click()
+    expect(panel.locator("dialog")).not_to_be_visible()
+    panel.locator(".fp-collapse").click()
+    expect(page.get_by_role("tab", name="These mixes", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(search).to_have_value("")
+    expect(panel.locator('input[name="genres"]:checked')).to_have_count(0)
+    expect(panel.get_by_role("checkbox")).to_have_count(6)
+    expect(panel.locator("dialog")).to_be_visible()
+
+
+def test_mix_controls_automatically_reset_an_open_page_after_four_hours(live_app, store, page):
+    from playwright.sync_api import expect
+    from tests.test_home_other_genres import seed_genres
+    from yt_playlist.rec import mix_tuning, rec_params
+
+    seed_genres(store)
+    store.set_setting("last_sync_at", "1")
+    store.set_setting("onboard_dismissed", "1")
+    page.route("https://i.ytimg.com/**", lambda route: route.abort())
+    page.clock.install()
+    page.goto(f"{live_app}/")
+    panel = page.locator("#fingerprint")
+    panel.locator(".fp-collapse").click()
+    panel.get_by_role("checkbox", name="jazz", exact=True).check()
+    panel.get_by_role("button", name="Make mixes", exact=True).click()
+    expect(page.locator("#home-mode-cards")).to_have_attribute("data-requested-genres", '["jazz"]')
+    panel.locator(".fp-collapse").click()
+    page.get_by_role("tab", name="Preferences", exact=True).click()
+    slider = panel.locator(".fp-breadth-slider")
+    with page.expect_response("**/home/breadth"):
+        slider.fill("0.5")
+        slider.dispatch_event("change")
+    expect(slider).to_have_value("0.5")
+    # The fixture's server clock is fixed at 1; age its persisted timestamp as the browser advances.
+    store.set_setting(mix_tuning.UPDATED_AT_SETTING, str(1 - mix_tuning.TTL_S))
+    with page.expect_response("**/home/fingerprint"):
+        page.clock.fast_forward(mix_tuning.TTL_S * 1000)
+    expect(slider).to_have_value("0")
+    expect(page.locator("#home-mode-cards")).to_have_attribute("data-requested-genres", "[]")
+    assert store.get_proposals("home_genre_request") == {}
+    assert rec_params.get_param(store, "breadth_bias") == 0
+    expect(panel.locator("dialog")).to_be_visible()
+    page.get_by_role("tab", name="These mixes", exact=True).click()
+    expect(panel.locator('input[name="genres"]:checked')).to_have_count(0)
 
 
 def test_regenerating_one_mix_updates_shuffle_request(live_app, store, page):

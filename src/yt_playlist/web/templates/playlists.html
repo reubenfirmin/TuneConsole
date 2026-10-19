@@ -49,7 +49,7 @@
     <td class="selcell" @click="rowCheck(r, $event)">
       <input type="checkbox" :checked="sel[r.id]" @click.stop="rowCheck(r, $event)"></td>
     <td class="playlist-art-cell">
-      <span class="pl-cover">
+      <span class="pl-cover art-playlist">
         <img class="pl-thumb" :src="r.thumbnail" x-show="r.thumbnail" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
         <a class="pl-play" :href="'https://music.youtube.com/playlist?list=' + r.ytm"
            target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>

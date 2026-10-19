@@ -1,7 +1,7 @@
 {% if building %}
 <div hx-get="/home/discover" hx-trigger="load delay:4s" hx-swap="outerHTML">
   <h2 class="section">Explore your artists' catalogs <span class="refreshing">finding…</span></h2>
-  <div class="album-grid">{% for _ in range(6) %}<div class="tile"><div class="tile-cover skeleton"></div></div>{% endfor %}</div>
+  <div class="album-grid">{% for _ in range(6) %}<div class="tile"><div class="tile-cover skeleton art-album"></div></div>{% endfor %}</div>
 </div>
 {% elif albums %}
 {% from "_macros.html" import tile %}

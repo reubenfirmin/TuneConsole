@@ -20,6 +20,7 @@ from yt_playlist.core import updatecheck
 from yt_playlist.rec.radio import RadioSession
 from yt_playlist.web.context import Ctx
 from yt_playlist.web.jobs import SyncJobs
+from yt_playlist.web.provider_links import provider_search_url
 from yt_playlist.web.routes import build_all
 from yt_playlist.web.routes.bridge import build as build_bridge_route
 
@@ -208,6 +209,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 return "0"
     templates.env.globals["asset_v"] = _AssetVersion()
     templates.env.filters["linkify"] = _linkify
+    templates.env.globals["provider_search_url"] = provider_search_url
 
     @app.middleware("http")
     async def guard_state_changes(request: Request, call_next):

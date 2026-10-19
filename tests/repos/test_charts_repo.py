@@ -28,6 +28,33 @@ def test_top_artists_sums_plays(store):
     assert top[0]["artist"] == "Artist A" and top[0]["plays"] == 2
 
 
+def test_ticker_artwork_uses_saved_album_cover_and_ignores_empty_thumbnails(store):
+    store.upsert_track("empty", "Empty", "Artist A", "Album A", 180, thumbnail="")
+    store.upsert_track("v1", "Alpha", "Artist A", "Album A", 180,
+                       album_browse_id="MPRE_a", thumbnail="/track-art.png")
+    store.upsert_track("v2", "Beta", "Artist B", "Album B", 180)
+    store.add_saved_album({"browse": "MPRE_a", "title": "Album A", "artist": "Artist A",
+                           "thumbnail": "/album-art.png"})
+
+    assert store.ticker_thumbnails("artist") == {"Artist A": "/track-art.png"}
+    assert store.ticker_thumbnails("album") == {"Album A": "/album-art.png"}
+
+    store.remove_saved_album("MPRE_a")
+    assert store.ticker_thumbnails("album") == {"Album A": "/track-art.png"}
+
+
+def test_playlist_ticker_artwork_prefers_cover_and_falls_back_to_track_art(store):
+    iid = store.upsert_identity("me", "c", None, True)
+    track = store.upsert_track("v1", "Alpha", "Artist A", "Album A", 180, thumbnail="/track.png")
+    cover = store.upsert_playlist(iid, "P1", "With cover", 1, "h", 0.0, thumbnail="/playlist.png")
+    fallback = store.upsert_playlist(iid, "P2", "Track art", 1, "h", 0.0)
+    store.upsert_playlist(iid, "P3", "No art", 0, "h", 0.0)
+    store.set_playlist_tracks(cover, [track])
+    store.set_playlist_tracks(fallback, [track])
+
+    assert store.ticker_thumbnails("playlist") == {"With cover": "/playlist.png", "Track art": "/track.png"}
+
+
 def test_playlist_tracks_detail_marks_liked(store):
     _, pl = _seed(store)
     detail = store.charts.playlist_tracks_detail(pl)

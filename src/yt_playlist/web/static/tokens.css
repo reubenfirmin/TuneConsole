@@ -567,6 +567,10 @@
   /* ---- geometry & elevation ---- */
   --radius: 4px;
   --radius-sm: 3px;
+  /* Entity artwork: playlists round, artists circular, albums square. */
+  --art-playlist-radius: 12.5%;
+  --art-artist-radius: 50%;
+  --art-album-radius: 0;
   --shadow: 0 12px 28px -20px var(--scrim-heavy);
   --maxw: 68rem;
   --table-min: 46rem;

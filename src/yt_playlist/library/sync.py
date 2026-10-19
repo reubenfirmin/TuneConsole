@@ -5,6 +5,7 @@ from yt_playlist.util.matching import identity_key, track_artist, track_album
 from yt_playlist.util.retry import error_summary, with_retry
 from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.library.executor import is_generated_description
+from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.repos.base import GENERATED_GROUP
 
 logger = logging.getLogger(__name__)
@@ -226,12 +227,13 @@ def _sync_saved_albums(store, clients, on_progress) -> None:
 
 def _materialize_album_tracks(store, clients, saved, on_progress) -> None:
     """Fold each saved album's TRACKS into the library so they count in the taste corpus (the model
-    is built from your tracks; metadata alone doesn't). Incremental: only albums not already
-    materialized are fetched (their tracks carry album_browse_id, so we skip them next time)."""
+    is built from your tracks; metadata alone doesn't). Incremental: a cached full track list
+    proves materialization. An incidental playlist track cannot stand in for a complete album."""
     client = next(iter(clients.values()), None)
     if client is None:
         return
-    todo = [bid for bid in saved if bid not in store.materialized_album_ids()]
+    cached = store.collection.complete_album_tracklist_ids()
+    todo = [bid for bid in saved if bid not in cached]
     if not todo:
         return
     # Each album is a separate get_album network call, so stream one step per album (named, with a
@@ -248,6 +250,7 @@ def _materialize_album_tracks(store, clients, saved, on_progress) -> None:
         except Exception as e:  # noqa: BLE001 - one album's failure shouldn't abort the rest
             logger.warning("album-tracks fetch failed for %s: %s", bid, e)
             continue
+        remember_album(store, bid, album, meta)
         for t in (album or {}).get("tracks") or []:
             if not t.get("title"):
                 continue

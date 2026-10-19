@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from yt_playlist.library.album_fetch import fetch_album, is_upload_album
+from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.providers import enrichment, lastfm, waterfall
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util.duration import parse_duration
@@ -55,6 +56,7 @@ def build(ctx) -> APIRouter:
             client = next(iter((ctx.client_provider() or {}).values()), None)
             if client and browse_id:
                 a = fetch_album(client, browse_id)
+                remember_album(store, browse_id, a)
                 album = {
                     "title": a.get("title"),
                     "artist": ", ".join(x.get("name", "") for x in (a.get("artists") or [])),

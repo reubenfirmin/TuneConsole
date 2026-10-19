@@ -200,15 +200,74 @@ def test_rich_now_playing_heartbeat_restores_expired_ui_without_recording_play()
         assert bridge.now_playing is None
         ws.send_json({"type": "now-heartbeat", "deck": "unknown", "title": "Recovered",
                       "artist": "Artist", "thumbnail": "art", "likeStatus": "LIKE",
-                      "videoId": "v-recovered", "paused": False})
+                      "videoId": "v-recovered", "playlist": "OLAK5uy_album",
+                      "albumBrowseId": "MPRE_album", "paused": False})
         deadline = time.time() + 1
         while time.time() < deadline and bridge.now_playing is None:
             time.sleep(0.01)
         assert bridge.now_playing == {
             "title": "Recovered", "artist": "Artist", "thumbnail": "art",
             "likeStatus": "LIKE", "video_id": "v-recovered", "paused": False,
+            "playlist_ytm_id": "OLAK5uy_album", "album_browse_id": "MPRE_album",
         }
         assert store.play_events_since(0) == []
+
+
+@pytest.mark.parametrize("kind", ["play", "now-heartbeat"])
+def test_playback_context_survives_sensor_frames_and_legacy_heartbeats(kind):
+    bridge = Bridge()
+    with TestClient(_app(bridge)) as client, client.websocket_connect(
+            "/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        ws.send_json({"type": kind, "title": "Song", "videoId": "v1", "paused": True,
+                      "playlist": "PL_source", "albumBrowseId": "MPRE_album"})
+        deadline = time.time() + 1
+        while time.time() < deadline and bridge.now_playing is None:
+            time.sleep(0.01)
+        assert bridge.now_playing["playlist_ytm_id"] == "PL_source"
+        assert bridge.now_playing["album_browse_id"] == "MPRE_album"
+
+        ws.send_json({"type": "now-heartbeat", "title": "Legacy refresh", "videoId": "v1", "paused": True})
+        deadline = time.time() + 1
+        while time.time() < deadline and bridge.now_playing["title"] != "Legacy refresh":
+            time.sleep(0.01)
+        assert bridge.now_playing["playlist_ytm_id"] == "PL_source"
+        assert client.get("/bridge/status").json()["now_playing"]["source"]["external"] is True
+
+        ws.send_json({"type": "now-heartbeat", "title": "New queue", "videoId": "v1", "paused": True,
+                      "playlist": "", "albumBrowseId": ""})
+        deadline = time.time() + 1
+        while time.time() < deadline and bridge.now_playing["title"] != "New queue":
+            time.sleep(0.01)
+        assert client.get("/bridge/status").json()["now_playing"]["source"] is None
+
+
+def test_legacy_heartbeat_for_another_video_does_not_inherit_source():
+    from yt_playlist.web.routes.bridge import _now_playing_snapshot
+    previous = {"video_id": "old", "playlist_ytm_id": "PL_old", "album_browse_id": "MPRE_old"}
+    snapshot = _now_playing_snapshot({"videoId": "new", "title": "New"}, previous)
+    assert "playlist_ytm_id" not in snapshot
+    assert "album_browse_id" not in snapshot
+
+
+@pytest.mark.parametrize("playlist, album, expected", [
+    ("PL_source", "MPRE_other", {"kind": "playlist", "title": "Source", "url": "/playlist/1", "external": False}),
+    ("OLAK5uy_album", "", {"kind": "album", "title": "Release", "url": "/album?browse=MPRE_album", "external": False}),
+    ("", "MPRE_other", {"kind": "album", "title": "Other release", "url": "/album?browse=MPRE_other", "external": False}),
+    ("PL_unknown", "MPRE_album", {"kind": "playlist", "title": "Playing playlist",
+                                  "url": "https://music.youtube.com/playlist?list=PL_unknown", "external": True}),
+    ("", "", {"kind": "album", "title": "Release", "url": "/album?browse=MPRE_album", "external": False}),
+])
+def test_bridge_status_links_to_playing_source(store, playlist, album, expected):
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_playlist(iid, "PL_source", "Source", 1, "h", 0)
+    store.upsert_track("v1", "Song", "Artist", "Release", 200, album_browse_id="MPRE_album")
+    store.add_saved_album({"browse": "MPRE_other", "title": "Other release"})
+    bridge = Bridge()
+    bridge.now_playing = {"title": "Song", "video_id": "v1", "playlist_ytm_id": playlist,
+                          "album_browse_id": album}
+    app = FastAPI()
+    app.include_router(build_bridge_route(type("C", (), {"bridge": bridge, "store": store})()))
+    assert TestClient(app).get("/bridge/status").json()["now_playing"]["source"] == expected
 
 
 def test_sensor_health_is_observable_and_clears_on_disconnect():
