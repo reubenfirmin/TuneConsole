@@ -215,10 +215,22 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     expect(button).to_have_accessible_name("Shuffle genres")
     assert set(page.evaluate("homeOfferedGenres()")) == {"jazz", "techno"}
     before = set(page.evaluate("homeOfferedGenres()"))
+    # HTMX restores a placeholder's old CSS classes until settling. Genre metadata
+    # must already include the newly ready fourth card when the swap completes.
+    page.evaluate("""() => {
+        window.shuffledGenresBeforeSettle = null;
+        document.addEventListener('htmx:afterSwap', event => {
+            if (event.detail.xhr?.responseURL.endsWith('/home/other-genres')) {
+                window.shuffledGenresBeforeSettle = homeOfferedGenres();
+            }
+        });
+    }""")
     button.click()
     expect(panel.locator("dialog")).not_to_be_visible()
+    during_swap = set(page.evaluate("window.shuffledGenresBeforeSettle"))
+    assert len(during_swap) == 4 and not before & during_swap
     after = set(page.evaluate("homeOfferedGenres()"))
-    assert len(after) == 4 and not before & after
+    assert after == during_swap
     panel.locator(".fp-collapse").click()
     expect(button).to_be_enabled()
     expect(panel.locator("#home-theme-summary")).to_be_empty()

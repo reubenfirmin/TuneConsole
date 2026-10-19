@@ -1033,7 +1033,9 @@ function homePoolExclusions() {
 
 function homeOfferedGenres() {
   const genres = new Set();
-  document.querySelectorAll('#home-mode-cards .gen-card-body[data-genres]').forEach(card => {
+  // HTMX temporarily preserves a skeleton's CSS classes when it becomes a ready card.
+  // Its genre metadata is current immediately, including before the swap settles.
+  document.querySelectorAll('#home-mode-cards [data-genres]').forEach(card => {
     try {
       JSON.parse(card.dataset.genres).forEach(g => { if (typeof g === 'string' && g) genres.add(g); });
     } catch (_) { /* A card without metadata cannot establish its genre. */ }
@@ -1200,7 +1202,7 @@ document.addEventListener('htmx:afterRequest', event => {
   }
   syncHomeThemes();
   if (event.detail.successful && !document.getElementById('home-mode-cards')?.dataset.genreWarning
-      && document.querySelector('#home-mode-cards .gen-card-body')) {
+      && document.querySelector('#home-mode-cards [data-genres]')) {
     window.dispatchEvent(new CustomEvent('home-mixes-applied'));
   }
 });
