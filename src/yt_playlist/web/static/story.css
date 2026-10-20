@@ -79,29 +79,22 @@
 .slide-new_this_month { --bg-grad: var(--slide-new); }
 .slide-different { --bg-grad: var(--slide-diversity); }
 .slide-same { --bg-grad: var(--slide-revival); }
-/* Detailed beats can scroll within the reel, including short landscape viewports. */
-.slide-h1.recap-title { flex: 0 0 auto; max-width: 24ch;
-  font-size: clamp(1.4rem, min(6vw, 6vh), 2.7rem); }
-.recap-details { width: min(100%, 38rem); min-height: 0; overflow-y: auto;
-  overscroll-behavior: contain; pointer-events: auto; text-align: left;
-  border-radius: 16px; background: var(--reel-card-bg); border: 1px solid var(--reel-rule);
-  padding: clamp(.8rem, 2vh, 1.4rem); }
-.recap-group + .recap-group { margin-top: 1rem; padding-top: .9rem; border-top: 1px solid var(--reel-rule); }
-.recap-group h2, .recap-findings h2 { font-size: 1.05rem; line-height: 1.3; margin: 0 0 .5rem;
-  overflow-wrap: anywhere; color: var(--reel-ink); }
-.recap-group h2 > span { color: var(--reel-ink-65); margin-left: .4rem; font-weight: 500; }
+/* Optional beats use the reel's display type and open colour field. Long lists can scroll. */
+.slide-new_this_month > .slide-h1, .slide-different > .slide-h1, .slide-same > .slide-h1 { flex: 0 0 auto; }
+.recap-details { width: min(100%, 52rem); min-height: 0; overflow-y: auto;
+  overscroll-behavior: contain; pointer-events: auto; padding: .5rem; }
+.recap-group + .recap-group { margin-top: clamp(1rem, 3vh, 2rem); }
+.recap-label { margin: 0 0 .7rem; font-size: .8rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .08em; color: var(--reel-ink-72); }
 .recap-entries, .recap-findings { list-style: none; margin: 0; padding: 0; }
-.recap-entries li + li { margin-top: .7rem; }
-.recap-entries a { color: var(--reel-ink); font-weight: 700; text-decoration: underline;
-  text-underline-offset: .2em; overflow-wrap: anywhere; }
-.recap-subtitle, .recap-evidence { display: block; font-size: .85rem; line-height: 1.45;
-  color: var(--reel-ink-78); overflow-wrap: anywhere; }
-.recap-evidence { font-variant-numeric: tabular-nums; }
-.recap-findings li + li { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--reel-rule); }
-.recap-findings p { margin: 0; color: var(--reel-ink-90); font-size: .95rem; line-height: 1.5; }
-.recap-note, .recap-more { font-size: .75rem; line-height: 1.4; color: var(--reel-ink-65); }
-.recap-note { margin: 1rem 0 0; }
-.recap-more { margin: .6rem 0 0; }
+.recap-entries li + li, .recap-findings li + li { margin-top: clamp(1rem, 3vh, 2rem); }
+.recap-details .slide-h1 { max-width: 28ch; margin: 0 auto;
+  font-size: clamp(1.5rem, min(5.5vw, 5.5vh), 3rem); }
+.recap-entries a { color: inherit; text-decoration: none; }
+.recap-entries a:hover { text-decoration: underline; text-decoration-color: var(--reel-ink);
+  text-underline-offset: .15em; }
+.recap-details .slide-sub { max-width: 38ch; margin: .6rem auto 0; }
+.recap-details .recap-subtitle { color: var(--reel-ink-72); }
 /* type stays legible over any bright corner */
 .slide-h1, .slide-big, .num-grid strong { text-shadow: 0 2px 30px var(--reel-type-shadow); }
 .slide-thesis, .slide-sub, .num-grid span { text-shadow: 0 1px 16px var(--reel-type-shadow-soft); }

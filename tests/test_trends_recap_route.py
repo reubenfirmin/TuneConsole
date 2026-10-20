@@ -30,20 +30,20 @@ _DETAIL_BEATS = [
         {"label": "Albums", "total": 1, "entries": [{"title": "An album with a long title",
           "subtitle": "A newly heard artist", "detail": "7 of 10 tracks played", "href": "/album?browse=MPRE"}]},
         {"label": "Playlists", "total": 1, "entries": [{"title": "September evenings",
-          "detail": "24 songs · 12 recorded plays", "href": "https://music.youtube.com/playlist?list=PL123"}]},
+          "detail": "24 songs · 12 plays", "href": "https://music.youtube.com/playlist?list=PL123"}]},
         {"label": "Artists", "total": 1, "entries": [{"title": "A newly heard artist",
           "detail": "8 plays", "href": "/artist?name=Artist"}]},
-    ], "note": "First heard in your recorded history. Album counts are distinct tracks played."},
+    ]},
     {"kind": "different", "title": "What you did differently", "findings": [
         {"metric": "activity", "title": "A quieter listening month",
-         "detail": "75 recorded plays; 2.5 per day, compared with your usual 9.0."},
+         "detail": "75 plays this month. 2.5 a day, compared with your usual 9.0."},
         {"metric": "genre:jazz", "title": "More jazz",
-         "detail": "25 plays across 5 days (33% of plays); usually 10%."},
-    ], "note": "Compared with the median of 3 comparable months in the previous six."},
+         "detail": "25 plays over 5 days. 33% of your listening, compared with your usual 10%."},
+    ]},
     {"kind": "same", "title": "What you did the same", "findings": [
         {"metric": "artist:Artist", "title": "Artist stayed in rotation",
-         "detail": "20 plays across 5 days (27% of plays); usually 25%."},
-    ], "note": "Compared with the median of 3 comparable months in the previous six."},
+         "detail": "20 plays over 5 days. You keep coming back."},
+    ]},
 ]
 
 
@@ -59,7 +59,7 @@ def test_optional_detail_screens_render_only_the_prepared_findings():
     for kind in ("new_this_month", "different", "same"):
         assert f'class="slide slide-{kind}"' in html
     assert "7 of 10 tracks played" in html
-    assert "75 recorded plays" in html
+    assert "75 plays this month" in html
     assert "Artist stayed in rotation" in html
     client, _ = _client(_STORY)
     html = client.get("/trends/story/2026-06").text

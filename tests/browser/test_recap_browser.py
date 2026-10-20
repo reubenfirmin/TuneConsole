@@ -122,10 +122,11 @@ def test_optional_screens_fit_and_navigate_on_mobile(live_app, store, page, view
         expect(slide.get_by_role("heading", level=1)).to_be_in_viewport()
         panel = slide.locator(".recap-details")
         bounds = panel.bounding_box()
-        assert bounds["height"] >= 90
+        assert bounds["height"] > 0
+        assert bounds["y"] >= 0 and bounds["y"] + bounds["height"] <= viewport["height"]
         assert bounds["x"] >= 0 and bounds["x"] + bounds["width"] <= viewport["width"]
         panel.evaluate("el => { el.scrollTop = el.scrollHeight; }")
-        expect(panel.locator(".recap-note")).to_be_in_viewport()
+        expect(panel.locator(".recap-entries li, .recap-findings li").last).to_be_in_viewport()
         panel.evaluate("el => { el.scrollTop = 0; }")
         page.screenshot(path=str(tmp_path / f"recap-{kind}-{viewport['width']}.png"))
         # Tapping the panel's padding advances just like tapping the background.

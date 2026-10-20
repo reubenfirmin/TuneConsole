@@ -119,11 +119,17 @@ def profile(month, events, meta, spans, playlists):
 
 
 def baselines(data, month):
-    """Three or more uncensored, compatible months from the previous six; never zero-fill."""
+    """Use recorded history for the same identities, including imports and live plays.
+
+    Source changes do not erase musical history. Capture-sensitive measurements apply
+    their own stricter check; incomplete months and missing months remain excluded.
+    """
     current = profile(month, data["plays"], data["meta"], data["spans"], data["playlists"])
     previous = [profile(shift_month(month, -i), data["plays"], data["meta"], data["spans"],
                         data["playlists"]) for i in range(6, 0, -1)]
-    previous = [p for p in previous if p.eligible and p.source_signature == current.source_signature]
+    identities = {identity for identity, _ in current.source_signature}
+    previous = [p for p in previous if p.eligible
+                and {identity for identity, _ in p.source_signature} == identities]
     return current, previous if current.eligible and len(previous) >= 3 else []
 
 

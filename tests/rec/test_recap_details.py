@@ -90,14 +90,12 @@ def test_three_comparable_prior_months_required_and_missing_months_not_zero_fill
     assert [p.month for p in past] == ["2026-04", "2026-05", "2026-06"]
 
 
-@pytest.mark.parametrize("change", ["source", "identity", "partial", "legacy"])
-def test_capture_changes_and_partial_months_suppress_comparisons(data, change):
+@pytest.mark.parametrize("change", ["identity", "partial", "legacy"])
+def test_other_identities_partial_months_and_unknown_sources_suppress_comparisons(data, change):
     familiar_months(data)
     for row in data["plays"]:
         if month_bounds("2026-04")[0] <= row["played_at"] < month_bounds("2026-07")[0]:
-            if change == "source":
-                row["source"] = "takeout"
-            elif change == "identity":
+            if change == "identity":
                 row["identity_id"] = 2
             elif change == "legacy":
                 row["source"] = ""
@@ -110,15 +108,52 @@ def test_capture_changes_and_partial_months_suppress_comparisons(data, change):
     assert not findings(screens(data, "2026-09"), "same")
 
 
+def test_imported_history_supports_music_comparisons_and_recurring_artists(data):
+    data["spans"][(1, "takeout")] = data["spans"][(1, "live")]
+    for month in ("2026-04", "2026-05", "2026-06"):
+        add_plays(data, month, artist="Background", days=10, per_day=10, variants=50,
+                  source="takeout")
+        add_plays(data, month, artist="Favorite", days=4, per_day=3, variants=3,
+                  source="takeout")
+    add_plays(data, "2026-09", artist="Repeated song", days=5, per_day=10, variants=1)
+    add_plays(data, "2026-09", artist="Favorite", days=4, per_day=3, variants=3)
+    data["familiar_artists"].update({"background", "favorite", "repeated song"})
+    current, previous = baselines(data, "2026-09")
+    assert len(previous) == 3
+    assert all(p.source_signature != current.source_signature for p in previous)
+    beats = screens(data, "2026-09")
+    assert any(f["metric"] == "repetition" for f in findings(beats, "different"))
+    habit = next(f for f in findings(beats, "same") if f["metric"] == "artist:Favorite")
+    assert habit["detail"] == "12 plays over 4 days. You keep coming back."
+    # A switch in capture can change total plays, active days, and observed listening runs.
+    assert not any(f["metric"] in {"activity", "days", "intensity", "sessions", "album_runs"}
+                   for kind in ("different", "same") for f in findings(beats, kind))
+    # A positive habit still needs support in at least 75% of earlier months.
+    start, end = month_bounds("2026-04")
+    data["plays"] = [p for p in data["plays"] if not (
+        start <= p["played_at"] < end and p["identity_key"].startswith("Favorite:"))]
+    assert not any(f["metric"] == "artist:Favorite" for f in findings(screens(data, "2026-09"), "same"))
+
+
 def test_sparse_activity_compared_to_real_baseline_and_positive_habits(data):
     familiar_months(data, months=("2026-04", "2026-05", "2026-06"), days=20, per_day=15)
     add_plays(data, "2026-09", days=5, per_day=5)
     beats = screens(data, "2026-09")
     changed = findings(beats, "different")
     assert any(f["title"] == "A quieter listening month" for f in changed)
-    assert any("25 recorded plays" in f["detail"] for f in changed)
+    assert any("25 plays this month" in f["detail"] for f in changed)
     assert all(len(b.get("findings", [])) <= 3 for b in beats)
     assert not any(f["metric"] == "playlist_creation" for f in findings(beats, "same"))
+
+
+def test_activity_uses_matching_capture_months_without_discarding_other_history(data):
+    add_plays(data, "2026-03", days=5, per_day=4, source="takeout")
+    data["spans"][(1, "takeout")] = data["spans"][(1, "live")]
+    familiar_months(data, months=("2026-04", "2026-05", "2026-06"), days=20, per_day=15)
+    add_plays(data, "2026-09", days=5, per_day=5)
+    assert len(baselines(data, "2026-09")[1]) == 4
+    changed = findings(screens(data, "2026-09"), "different")
+    assert any(f["metric"] == "activity" and f["title"] == "A quieter listening month" for f in changed)
 
 
 def test_month_lengths_are_normalized_and_future_content_cannot_affect_results(data):
@@ -209,7 +244,7 @@ def test_repo_excludes_generated_plays_and_requires_real_playlist_dates(store):
     assert [p["ytm_playlist_id"] for p in material["playlists"]] == ["real"]
     beat = build(store, "2026-09")[0]
     assert beat["groups"] == [{"label": "Playlists", "total": 1, "entries": [
-        {"title": "real", "detail": "0 songs · 1 recorded play",
+        {"title": "real", "detail": "0 songs · 1 play",
          "href": "https://music.youtube.com/playlist?list=real"}]}]
 
 
@@ -229,16 +264,16 @@ def test_new_playlist_counts_do_not_multiply_copies_or_attribute_song_matches(st
     beat = build(store, "2026-09")[0]
     playlists = next(g for g in beat["groups"] if g["label"] == "Playlists")
     assert playlists["total"] == 1
-    assert playlists["entries"][0]["detail"] == "4 songs · 2 recorded plays"
+    assert playlists["entries"][0]["detail"] == "4 songs · 2 plays"
 
 
-@pytest.mark.parametrize("songs,expected", [(1, "1 song"), (None, "Song count unavailable")])
+@pytest.mark.parametrize("songs,expected", [(1, "1 song · 0 plays"), (None, "0 plays")])
 def test_new_playlist_distinguishes_unknown_size_from_no_recorded_plays(data, songs, expected):
     since, _ = month_bounds("2026-09")
     data["playlists"] = [{"title": "New mix", "ytm_playlist_id": "real",
                           "created_at": since, "track_count": songs}]
     beat = new_this_month(data, "2026-09")
-    assert beat["groups"][0]["entries"][0]["detail"] == f"{expected} · 0 recorded plays"
+    assert beat["groups"][0]["entries"][0]["detail"] == expected
 
 
 def test_repo_preserves_true_counts_with_video_variants_and_snapshot_familiarity(store):
