@@ -139,7 +139,7 @@
   min-width: 0; padding: 0; background: transparent; font-size: 1.35rem; }
 .taste-controls .taste-feature-section input[type="range"] { grid-area: 1 / 3 / 3 / 4; }
 .taste-controls .taste-feature-section .knob-help { grid-area: 2 / 1; align-self: start; line-height: 1.45; }
-.taste-controls .taste-feature-section .knob-origin { font-size: .75rem; white-space: nowrap; }
+.taste-controls .taste-feature-section .knob-origin { font-size: var(--type-xs); white-space: nowrap; }
 .taste-controls .taste-feature-section .knob-reset { grid-area: 1 / 4 / 3 / 5;
   width: 2.75rem; height: 2.75rem; margin: 0; padding: .5rem; justify-content: center; }
 .taste-learning-settings > .taste-settings-layout { margin-top: .75rem; }
@@ -257,10 +257,9 @@
 .taste-learning .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .learning-intro { margin-bottom: 2.5rem; }
-.learning-eyebrow { font-size: var(--type-xs); letter-spacing: .09em; text-transform: uppercase; color: var(--dim); }
-.learning-intro > .learning-eyebrow { margin: 0 0 .65rem; color: var(--teal); }
+.learning-context { font-size: var(--type-xs); color: var(--dim); }
 .learning-intro h2 { font: 550 clamp(2rem, 4vw, 3rem)/1.15 var(--font-brand); letter-spacing: -.035em; margin: 0 0 1rem; }
-.learning-intro > p:not(.learning-eyebrow) { color: var(--dim); line-height: 1.7; margin: 0; }
+.learning-intro > p { color: var(--dim); line-height: 1.7; margin: 0; }
 .learning-intro > p + p { margin-top: .85rem; }
 .learning-section-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .75rem 1.5rem; }
 .learning-section-head h2 { font-size: var(--type-lg); margin: 0; }

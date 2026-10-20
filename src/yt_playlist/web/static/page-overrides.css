@@ -1376,7 +1376,7 @@ body:has(.page-charts) .viz-tip .vt-div {
   font: inherit;
 }
 .genre-aliases { position: relative; font-size: .85em; }
-.genre-aliases summary { cursor: pointer; color: var(--muted); }
+.genre-aliases summary { cursor: pointer; color: var(--dim); }
 .genre-aliases p {
   position: absolute;
   z-index: 2;

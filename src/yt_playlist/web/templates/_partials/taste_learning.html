@@ -1,7 +1,6 @@
 {% import "_partials/taste_learning_card.html" as lc %}
 <div id="taste-learning-readings" class="taste-learning">
   <header class="learning-intro">
-    <p class="learning-eyebrow">Listening leaves a trace</p>
     <h2>Recent &amp; learning</h2>
     <p><a href="#recommendations" @click="select('recommendations')">Recommendations</a> sets the balance of your picks: variety, genre preferences, and how strongly recent plays and likes count. This tab shows how your listening and feedback change those picks over time. The controls below set how quickly recent influence fades and how much evidence is needed to change a saved preference.</p>
     <p>For example, playing more jazz can temporarily favor jazz. Continued listening can also raise its saved preference—the same value you can adjust in <a href="#recommendations/genres" @click.prevent="selectRecommendation('genres')">Recommendations’ Genres controls</a>. Increasing <a href="#recommendations/main" @click.prevent="selectRecommendation('main')">Follow recent plays</a> also makes plays build learning evidence faster.</p>
@@ -39,7 +38,7 @@
   </section>
 
   <section class="learning-activity" aria-labelledby="learning-sound-title">
-    <div class="learning-section-head"><h2 id="learning-sound-title">Recent sound</h2><span class="learning-eyebrow">Session · recent</span></div>
+    <div class="learning-section-head"><h2 id="learning-sound-title">Recent sound</h2><span class="learning-context">Session · recent</span></div>
     <div id="taste-recent-sound" hx-get="/taste/viz/recent-sound" hx-trigger="intersect once, taste-retry" hx-swap="innerHTML"
          hx-on::after-request="if(event.detail.elt === this &amp;&amp; !event.detail.successful) { this.querySelector('[role=status]').textContent = 'Could not load recent sound.'; this.querySelector('button').hidden = false; }">
       <p class="section-note" role="status">Loading recent sound…</p>
@@ -48,7 +47,7 @@
   </section>
 
   <section class="learning-activity" aria-labelledby="learning-activity-title">
-    <div class="learning-section-head"><h2 id="learning-activity-title">Recent activity</h2><span class="learning-eyebrow">Influence fades with time</span></div>
+    <div class="learning-section-head"><h2 id="learning-activity-title">Recent activity</h2><span class="learning-context">Influence fades with time</span></div>
     <p class="learning-note">Counts show activity available to the recent recommendation model. Each curve shows how one new signal fades over 28 days, using your current settings.</p>
     <div class="learning-sources">
       {% for source in learning.activity %}

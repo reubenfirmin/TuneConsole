@@ -318,7 +318,9 @@ def test_learning_settings_share_compact_layout_and_preserve_edits(live_app, sto
     expect(memory).to_be_focused()
     expect(settings.get_by_role("slider")).to_have_count(6)
     slider = settings.locator("#param-play_halflife_d")
+    expect(slider).to_be_visible()
     slider.focus()
+    expect(slider).to_be_focused()
     with page.expect_response(lambda response: response.url.endswith("/taste/param") and response.request.method == "POST"):
         page.keyboard.press("ArrowRight")
     assert rec_params.get_param(store, "play_halflife_d") == 3.5
@@ -838,7 +840,8 @@ def test_taste_topics_show_one_group_at_a_time(live_app, store, page, width, tmp
     expect(profile.get_by_role("heading", name="Genre families", exact=False)).to_be_visible()
     expect(profile.get_by_role("heading", name="Listening styles", exact=False)).to_be_visible()
     expect(profile.locator("details")).to_have_count(0)
-    expect(profile.locator("input,button")).to_have_count(0)
+    expect(profile.locator("input")).to_have_count(0)
+    expect(profile.get_by_role("button")).to_have_count(0)
     expect(profile.get_by_text("Warehouse techno", exact=True)).to_be_visible()
     expect(profile.locator(".mode-row")).to_have_count(14)
     expect(profile.locator(".mode-tracks li")).to_have_count(42)
