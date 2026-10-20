@@ -1,221 +1,234 @@
 {% extends "base.html" %}{% block title %}Taste Model · TuneConsole{% endblock %}{% block page_class %}page-taste{% endblock %}{% block body %}
+{% import "_partials/taste_tabs.html" as tt %}
 <div class="page-head">
   <h1>Taste Model</h1>
 </div>
 
-<div x-data="{ tab: 'viz' }">
-  <div class="tabs" role="tablist">
-    <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'viz' }"
-            @click="tab = 'viz'" :aria-selected="tab === 'viz'">Visualizations</button>
-    <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'controls' }"
-            @click="tab = 'controls'" :aria-selected="tab === 'controls'">Controls</button>
-  </div>
+<div x-data="tastePage()" @hashchange.window="readHash()">
+  {{ tt.bar([('overview', 'Overview'), ('experiment', 'Experiment'), ('profile', 'Taste profile'),
+             ('generated', 'Generated playlists'),
+             ('recommendations', 'Recommendations'), ('learning', 'Recent & learning'),
+             ('health', 'Model health'), ('feedback', 'Feedback')]) }}
 
-  <div class="tab-panel" role="tabpanel" x-show="tab === 'viz'" x-cloak>
-    {% include "_partials/taste_viz.html" %}
-  </div>
-
-  <div class="tab-panel" role="tabpanel" x-show="tab === 'controls'" x-cloak>
-<p class="section-note">Adjust how TuneConsole recommends music. The model learns from your library and listening.
-   Each section names the recommendations it affects. Changes apply immediately;
-   click <strong>Refresh sample</strong> to preview the results.</p>
-<div class="pl-actions actions-roomy">
-  <button class="btn-ghost" hx-post="/taste/reset-all" hx-swap="none"
-          hx-confirm="Reset all recommendation settings to their defaults? Your trained model and feedback will be kept.">{{ arrow_icon('reset') }} Reset all settings</button>
-</div>
-
-<h2 class="section">Model status <span class="scope-tag">All recommendations</span></h2>
-{% include "_partials/model_status.html" %}
-<p class="section-note note-roomy"><strong>Auto-tune</strong> tests several model sizes and keeps the one that
-   best predicts your listening. The report below shows the results. Your model also rebuilds when your library syncs.</p>
-{% include "_partials/autotune_status.html" %}
-
-<h2 class="section">Live sample · For You</h2>
-<div class="card">
-  <div id="foryou-sample" class="foryou-sample">
-    <div class="sample-head">
-      <button class="btn-ghost btn-sm" hx-get="/taste/preview" hx-target="#sample-body" hx-indicator="#sample-spin">
-        <span id="sample-spin" class="htmx-indicator">{{ arrow_icon('refresh') }}</span> Refresh sample
-      </button>
-      <span class="sample-note">Adjust a slider, then refresh to see your new top picks.</span>
+  {% for key, title in [('overview', 'Overview'), ('experiment', 'experiments'), ('profile', 'taste profile'),
+                         ('generated', 'generated playlists'), ('recommendations', 'recommendations'),
+                         ('learning', 'recent listening and learning'), ('health', 'model health'),
+                         ('feedback', 'feedback')] %}
+  <div {{ tt.panel(key) }}>
+    <div class="taste-panel-content" hx-get="/taste/panels/{{ key }}" hx-trigger="intersect once, taste-retry" hx-swap="innerHTML settle:0ms"
+         hx-on::after-request="if(event.detail.elt === this &amp;&amp; !event.detail.successful) { this.querySelector('[role=status]').textContent = 'Could not load {{ title }}.'; this.querySelector('button').hidden = false; }">
+      <p class="section-note" role="status">Loading {{ title }}…</p>
+      <button type="button" class="btn-ghost btn-sm" hidden onclick="htmx.trigger(this.parentElement, 'taste-retry')">Try again</button>
     </div>
-    <div id="sample-body" hx-get="/taste/preview" hx-trigger="load">
-      <p class="section-note">Loading…</p>
-    </div>
-  </div>
-</div>
-
-<h2 class="section">Control comparison · For You</h2>
-<div class="card">
-  <div class="sample-head">
-    <button class="btn-ghost btn-sm" hx-post="/taste/comparison/baseline" hx-target="#comparison-body">Save starting point</button>
-    <button class="btn-ghost btn-sm" hx-get="/taste/comparison" hx-target="#comparison-body">Compare changes</button>
-    <span class="sample-note">Save your current settings, adjust sliders, then compare rankings for the same tracks.</span>
-  </div>
-  <div id="comparison-body" hx-get="/taste/comparison" hx-trigger="load">
-    <p class="section-note">Loading…</p>
-  </div>
-</div>
-
-<h2 class="section">Main controls</h2>
-<p class="section-note">Choose how much variety you hear and how strongly recent listening affects your recommendations. Leave the defaults to let the model adapt automatically.</p>
-<div class="card knob-list semantic-controls">
-  {% for p in semantic_params %}{% include "_partials/taste_knob.html" %}{% endfor %}
-</div>
-
-<details class="advanced diagnostic-controls">
-<summary>Advanced settings and model details</summary>
-<div class="diagnostic-controls-body">
-<h2 class="section">Recommendation mix <span class="scope-tag">For You only</span></h2>
-<p class="section-note">Choose how much each type of recommendation contributes to <strong>For You</strong>. Higher weights give it more space; 1.0 is neutral. Your feedback can also change these weights.</p>
-<div class="card knob-list">
-  {% for lane in lanes %}
-  <div class="knob">
-    <div class="knob-head">
-      <label>{{ lane.label }}</label>
-      <output id="out-lane-{{ lane.name }}">{{ '%.2f'|format(lane.value) }}</output>
-      <button class="knob-reset" type="button" title="Reset to default" aria-label="Reset {{ lane.label }} to default"
-              data-target="lane-{{ lane.name }}" data-default="{{ lane_default }}" onclick="resetKnob(this)"
-              hx-post="/taste/weight" hx-vals='{"axis":"lane:{{ lane.name }}","weight":"{{ lane_default }}"}' hx-swap="none">{{ arrow_icon('reset') }}</button>
-    </div>
-    <input type="range" id="lane-{{ lane.name }}" name="weight" value="{{ '%.2f'|format(lane.value) }}"
-           min="{{ lane_min }}" max="{{ lane_max }}" step="{{ lane_step }}"
-           hx-post="/taste/weight" hx-vals='{"axis":"lane:{{ lane.name }}"}' hx-trigger="change" hx-swap="none"
-           oninput="updateOut(this)">
-    <p class="knob-help">{{ lane.help }}</p>
   </div>
   {% endfor %}
-</div>
-
-<h2 class="section">Genre families <span class="scope-tag">For You only</span></h2>
-<p class="section-note">Adjust how highly each genre family ranks in <strong>For You</strong>: 1.0 keeps its scores unchanged, 0 gives it the lowest priority, and 2 doubles its scores. The percentage shows its share of your listening, not its weight. <strong>Learning</strong> can also update these weights over time.</p>
-<div class="card knob-list">
-  {% for g in genres[:20] %}
-  <div class="knob">
-    <div class="knob-head">
-      <label>{{ g.family }} <span class="knob-sub">{{ '%.0f'|format(g.share * 100) }}% of your listening</span></label>
-      <output id="out-genre-{{ loop.index }}">{{ '%.1f'|format(g.weight) }}</output>
-      <button class="knob-reset" type="button" title="Reset to neutral" aria-label="Reset {{ g.family }} to neutral"
-              data-target="genre-{{ loop.index }}" data-default="{{ genre_default }}" onclick="resetKnob(this)"
-              hx-post="/taste/weight" hx-vals='{"axis":"genre:{{ g.family }}","weight":"{{ genre_default }}"}' hx-swap="none">{{ arrow_icon('reset') }}</button>
-    </div>
-    <input type="range" id="genre-{{ loop.index }}" name="weight" value="{{ g.weight }}"
-           min="{{ genre_min }}" max="{{ genre_max }}" step="{{ genre_step }}"
-           hx-post="/taste/weight" hx-vals='{"axis":"genre:{{ g.family }}"}' hx-trigger="change" hx-swap="none"
-           oninput="updateOut(this)">
-  </div>
-  {% else %}
-  <p class="section-note">Add genre tags with library enrichment to adjust individual genres.</p>
-  {% endfor %}
-</div>
-
-<h2 class="section">Listening styles <span class="scope-tag">Found automatically</span></h2>
-<div class="card taste-modes">
-  <p class="muted">Groups of tracks with similar genres, eras, and sound, found in your library. These groups are shown for reference.</p>
-  {% if modes %}
-  <ul class="modes-list">
-    {% for m in modes %}
-    <li class="mode-row">
-      <div class="mode-head">
-        <span class="mode-label">{{ m.label }}</span>
-        <span class="mode-size">{{ m.size }} tracks</span>
-        {% if m.fresh %}<span class="mode-new">new</span>{% endif %}
-      </div>
-      <div class="mode-stats">
-        <span title="Times this mode was offered">offered {{ m.offered }}</span>
-        <span title="Times you saved &amp; played it">picked {{ m.picked }}</span>
-        <span title="Plays of your picked playlists for this mode">plays {{ m.plays }}</span>
-      </div>
-      <ul class="mode-tracks">
-        {% for t in m.tracks %}
-        <li><span class="t-title">{{ t.title }}</span> <span class="t-artist">{{ t.artist }}</span></li>
-        {% endfor %}
-      </ul>
-    </li>
-    {% endfor %}
-  </ul>
-  {% else %}
-  <p class="muted">Listening styles appear once enough tracks have genre, era, and audio information.</p>
-  {% endif %}
-</div>
-
-<h2 class="section">Recent listening <span class="scope-tag">All recommendations</span></h2>
-<p class="section-note">Set how strongly recent plays, likes, dislikes, and mood choices affect your recommendations, and how quickly their influence fades. See the results on the Visualizations tab.</p>
-<div class="card knob-list">
-  {% for p in groups.transient.main %}{% include "_partials/taste_knob.html" %}{% endfor %}
-  <details class="advanced"><summary>Advanced</summary>
-    {% for p in groups.transient.advanced %}{% include "_partials/taste_knob.html" %}{% endfor %}
-  </details>
-</div>
-
-<h2 class="section">Learning <span class="scope-tag">Permanent</span></h2>
-<p class="section-note">Repeated listening and feedback gradually update your saved preferences, including genre and recommendation mix weights. Turn learning off to keep those weights fixed while recent listening still affects your current picks.</p>
-<div class="card knob-list">
-  {% for p in groups.graduation.main %}{% include "_partials/taste_knob.html" %}{% endfor %}
-  <details class="advanced"><summary>Advanced learning rates</summary>
-    {% for p in groups.graduation.advanced %}{% include "_partials/taste_knob.html" %}{% endfor %}
-  </details>
-</div>
-
-<h2 class="section">Discovery &amp; timing <span class="scope-tag">For You + Explore</span></h2>
-<p class="section-note">Control which tracks appear in <strong>For You</strong> and <strong>Explore</strong>, and when suggestions refresh. These settings do not affect the new artists and albums on <strong>Discover</strong>.</p>
-<div class="card knob-list">
-  {% for p in params %}{% include "_partials/taste_knob.html" %}{% endfor %}
-  <details class="advanced">
-    <summary>Advanced</summary>
-    {% for p in advanced_params %}{% include "_partials/taste_knob.html" %}{% endfor %}
-  </details>
-</div>
-
-</div>
-</details>
-
-<h2 class="section">Feedback</h2>
-<div class="card">
-  {% if feedback %}
-  <p>{% for kind, c in feedback.items() %}<span class="tag">{{ kind }}: {{ c }}</span> {% endfor %}</p>
-  {% else %}<p class="section-note">No feedback recorded yet.</p>{% endif %}
-  <button class="btn-ghost btn-sm" hx-post="/taste/clear-feedback" hx-swap="none"
-          hx-confirm="Clear all dismissed suggestions, muted items, and the history of recommendations shown to you?">Clear feedback and recommendation history</button>
-</div>
-
-<!-- Banned tracks are a deliberate hard suppression outside the graduation funnel, stored as sync-surface dislikes. -->
-<h2 class="section">Banned tracks</h2>
-<div class="card">
-  {% if bans %}
-  <ul class="ban-list">
-    {% for b in bans %}
-    <li class="ban-item">
-      <span class="ban-key">{{ b.key }}</span>
-      <button class="btn-ghost btn-sm" hx-post="/taste/unban" hx-vals='{"key":"{{ b.key }}"}' hx-swap="none"
-              hx-confirm="Remove ban for {{ b.key }}?">Unban</button>
-    </li>
-    {% endfor %}
-  </ul>
-  {% else %}
-  <p class="section-note">No banned tracks.</p>
-  {% endif %}
-</div>
+</div>{# /taste tabs #}
 
 <script>
+function tastePage(){
+  return {
+    tab: 'overview',
+    tabs: ['overview', 'experiment', 'profile', 'generated', 'recommendations', 'learning', 'health', 'feedback'],
+    recommendationTab: 'intro',
+    recommendationTabs: ['intro', 'main', 'genres', 'features'],
+    experimentTab: 'starting',
+    experimentTabs: ['starting', 'preview'],
+    init(){ this.readHash(); },
+    readHash(){
+      var [topic, subtopic] = location.hash.slice(1).split('/');
+      if(topic === 'recommendations' && subtopic === 'preview'){
+        this.selectExperiment('preview');
+        return;
+      }
+      if(!this.tabs.includes(topic)) return;
+      if(topic === 'recommendations')
+        this.recommendationTab = this.recommendationTabs.includes(subtopic) ? subtopic : 'intro';
+      if(topic === 'experiment')
+        this.experimentTab = this.experimentTabs.includes(subtopic) ? subtopic : 'starting';
+      this.select(topic, false);
+    },
+    selectRecommendation(topic){
+      if(!this.recommendationTabs.includes(topic)) return;
+      this.recommendationTab = topic;
+      this.select('recommendations');
+    },
+    selectExperiment(topic){
+      if(!this.experimentTabs.includes(topic)) return;
+      this.experimentTab = topic;
+      this.select('experiment');
+    },
+    select(topic, updateHash = true){
+      this.tab = topic;
+      var subtopic = '';
+      if(topic === 'recommendations' && this.recommendationTab !== 'intro') subtopic = this.recommendationTab;
+      if(topic === 'experiment' && this.experimentTab !== 'starting') subtopic = this.experimentTab;
+      if(updateHash) history.replaceState(null, '', '#' + topic + (subtopic ? '/' + subtopic : ''));
+      this.$nextTick(() => {
+        var ids = ['taste-' + topic + '-tab'];
+        if(topic === 'recommendations') ids.push('taste-recommendation-' + this.recommendationTab + '-tab');
+        if(topic === 'experiment') ids.push('taste-experiment-' + this.experimentTab + '-tab');
+        for(var id of ids) revealTasteTab(document.getElementById(id));
+      });
+    }
+  };
+}
+function revealTasteTab(button){
+  var bar = button && button.parentElement;
+  if(!bar) return;
+  var bounds = bar.getBoundingClientRect();
+  var buttonBounds = button.getBoundingClientRect();
+  var left = bounds.left + bar.clientLeft;
+  var right = left + bar.clientWidth;
+  if(buttonBounds.left < left) bar.scrollLeft -= Math.ceil(left - buttonBounds.left);
+  else if(buttonBounds.right > right) bar.scrollLeft += Math.ceil(buttonBounds.right - right);
+}
+function moveTasteTab(event){
+  var vertical = event.currentTarget.getAttribute('aria-orientation') === 'vertical';
+  var previous = vertical ? 'ArrowUp' : 'ArrowLeft';
+  var next = vertical ? 'ArrowDown' : 'ArrowRight';
+  if(![previous, next, 'Home', 'End'].includes(event.key)) return;
+  event.stopPropagation();
+  var tabs = Array.from(event.currentTarget.querySelectorAll('[role="tab"]'));
+  var index = tabs.indexOf(event.target);
+  if(index < 0) return;
+  event.preventDefault();
+  if(event.key === 'Home') index = 0;
+  else if(event.key === 'End') index = tabs.length - 1;
+  else index = (index + (event.key === next ? 1 : -1) + tabs.length) % tabs.length;
+  tabs[index].click();
+  tabs[index].focus();
+}
+function learningDate(timestamp){
+  return new Date(timestamp * 1000).toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'short'});
+}
+function learningRows(rows){
+  return {
+    rows, query: '', filter: 'all', page: 0, size: 6,
+    counts: {all: rows.length, boost: rows.filter(row => row.direction === 'boost').length,
+             reduction: rows.filter(row => row.direction === 'reduction').length,
+             chosen: rows.filter(row => row.direction === 'chosen').length,
+             unchosen: rows.filter(row => row.direction === 'unchosen').length},
+    get filtered(){
+      var term = this.query.trim().toLocaleLowerCase();
+      return this.rows.filter(row => (this.filter === 'all' || row.direction === this.filter) &&
+        row.name.toLocaleLowerCase().includes(term));
+    },
+    get pages(){ return Math.max(1, Math.ceil(this.filtered.length / this.size)); },
+    get visible(){ return this.filtered.slice(this.page * this.size, (this.page + 1) * this.size); },
+    get range(){
+      var count = this.filtered.length;
+      return count ? (this.page * this.size + 1) + '–' + Math.min(count, (this.page + 1) * this.size) + ' of ' + count : '0 results';
+    },
+    selectFirst(){},
+    search(){
+      this.page = 0;
+      this.selectFirst();
+    },
+    setFilter(direction){
+      this.filter = direction;
+      this.search();
+    },
+    move(delta){
+      this.page = Math.max(0, Math.min(this.pages - 1, this.page + delta));
+      this.selectFirst();
+    }
+  };
+}
+function learningCard(rows, kind = 'progress', maximum = 3){
+  rows = rows.map(row => {
+    if(kind === 'choices') return {...row, facet: row.mode_id, name: row.label,
+      direction: row.picked ? 'chosen' : 'unchosen'};
+    if(kind === 'sources') return {...row, facet: row.name, name: row.label,
+      percent: Math.max(0, Math.min(100, row.weight / maximum * 100)),
+      direction: row.weight > 1.005 ? 'boost' : row.weight < .995 ? 'reduction' : 'neutral'};
+    if(kind === 'changes') return {...row, facet: row.id};
+    return row;
+  });
+  var browser = learningRows(rows);
+  Object.defineProperties(browser, {
+    current: {get(){ return this.rows.find(row => row.facet === this.selected) || null; }},
+    emptyTitle: {get(){
+      if(this.query.trim()) return kind === 'progress' ? 'No matching preference' : 'No matching entry';
+      if(kind === 'choices') return this.filter === 'chosen' ? 'No groups chosen yet' : this.filter === 'unchosen' ? 'No unchosen groups' : 'No mix choices yet';
+      if(kind === 'sources') return this.filter === 'boost' ? 'No sources above neutral' : this.filter === 'reduction' ? 'No sources below neutral' : 'No sources yet';
+      if(kind === 'changes') return this.filter === 'boost' ? 'No recorded boost steps' : this.filter === 'reduction' ? 'No recorded reduction steps' : 'No saved changes yet';
+      return this.filter === 'boost' ? 'No boosts building' : this.filter === 'reduction' ? 'No reductions building' : 'No evidence yet';
+    }}
+  });
+  browser.selected = rows.length ? rows[0].facet : null;
+  browser.selectFirst = function(){ this.selected = this.visible.length ? this.visible[0].facet : null; };
+  browser.reading = function(row){
+    if(!row) return '—';
+    if(kind === 'choices') return row.picked.toLocaleString();
+    if(kind === 'sources') return '×' + row.weight.toFixed(2);
+    if(kind === 'changes') return '×' + row.new_weight.toFixed(2);
+    return row.percent + '%';
+  };
+  browser.direction = function(row){
+    if(!row) return this.query.trim() || this.filter !== 'all' ? 'Try another search or filter' :
+      kind === 'progress' ? 'Listening and feedback build evidence here' : kind === 'choices' ? 'Choose a mix on Home to start' : 'Completed learning steps will appear here';
+    if(kind === 'choices') return row.offered ? row.picked + ' selected · ' + row.offered + ' offered' : 'Waiting for an offer before these choices affect mixes';
+    if(kind === 'sources') return row.direction === 'boost' ? 'Favors this source' : row.direction === 'reduction' ? 'Less of this source' : 'Neutral balance';
+    if(kind === 'changes') return row.direction === 'boost' ? 'Boost step' : row.direction === 'reduction' ? 'Reduction step' : 'Neutral step';
+    return row.direction === 'boost' ? 'Evidence toward a boost' : row.direction === 'reduction' ? 'Evidence toward a reduction' : 'No change building';
+  };
+  browser.entryDirection = function(row){
+    if(kind === 'choices') return row.offered + ' offered';
+    if(kind === 'sources') return row.direction === 'boost' ? 'More' : row.direction === 'reduction' ? 'Less' : 'Neutral';
+    return row.direction === 'boost' ? 'Boost' : row.direction === 'reduction' ? 'Reduce' : 'Balanced';
+  };
+  browser.axisName = function(row){ return ({artist: 'Artist', genre: 'Genre', era: 'Era'})[row.axis] || 'Preference'; };
+  browser.updatedDate = function(row){
+    if(row.updated_at == null) return kind === 'sources' ? (row.has_record ? 'Saved date unavailable' : 'No adjustment recorded') : 'Update time unavailable';
+    return (kind === 'changes' ? this.axisName(row) + ' · ' : 'Updated ') + learningDate(row.updated_at);
+  };
+  return browser;
+}
 function updateOut(s){
   var o = document.getElementById('out-' + s.id);
-  if(o) o.textContent = s.dataset.int ? Math.round(s.value) : (+s.value).toFixed(2);
+  s.style.setProperty('--knob-position', 100 * (+s.value - +s.min) / (+s.max - +s.min) + '%');
+  if(s.dataset.percentage){
+    var text = +(100 * (+s.value - +s.min) / (+s.max - +s.min)).toFixed(2) + '%';
+    if(o) o.textContent = text;
+    s.setAttribute('aria-valuetext', text);
+    return;
+  }
+  if(o) o.textContent = (s.dataset.prefix || '') + (s.dataset.int ? Math.round(s.value) : (+s.value).toFixed(s.dataset.precision || 2));
 }
 function resetKnob(btn){
   var s = document.getElementById(btn.dataset.target);
   if(s){ s.value = btn.dataset.default; updateOut(s); }
 }
+document.body.addEventListener('htmx:afterRequest', function(event){
+  var path = event.detail.requestConfig && event.detail.requestConfig.path;
+  if(!['/taste/param', '/taste/weight', '/taste/reset-param'].includes(path)) return;
+  var learning = event.detail.elt && event.detail.elt.closest('#taste-learning-panel');
+  if(event.detail.successful && learning)
+    htmx.ajax('GET', '/taste/panels/learning', {target: '#taste-learning-readings', select: '#taste-learning-readings', swap: 'outerHTML'});
+  var generated = event.detail.elt && event.detail.elt.closest('#taste-generated-panel');
+  var status = document.getElementById(generated ? 'taste-generated-save-status' : learning ? 'taste-learning-save-status' : 'taste-save-status');
+  if(status) status.textContent = event.detail.successful
+    ? (generated ? 'Change saved. This source weight will be used when the candidate pool next refreshes.' : learning ? 'Change saved.' : 'Change saved. Check your picks in Experiment.')
+    : 'This change could not be saved. Reload the page to see your saved settings, then try again.';
+});
+function markWeightSaved(control){
+  var knob = control.closest('.knob');
+  var slider = knob && knob.querySelector('input[type="range"]');
+  var origin = knob && knob.querySelector('.knob-origin');
+  if(slider && origin) origin.textContent = 'Saved ×' + (+slider.value).toFixed(2) + ' · just now';
+}
 // A knob change marks the sample stale (no auto-recompute); refreshing it clears the state.
 document.body.addEventListener('taste-stale', function(){
   var p = document.getElementById('foryou-sample'); if(p) p.classList.add('stale');
+  var note = p && p.querySelector('.sample-note');
+  if(note) note.textContent = 'Settings changed. Refresh the sample to see their effect.';
 });
 document.body.addEventListener('htmx:afterSwap', function(e){
   if(e.target && e.target.id === 'sample-body'){
     var p = document.getElementById('foryou-sample'); if(p) p.classList.remove('stale');
+    var note = p && p.querySelector('.sample-note');
+    if(note) note.textContent = 'Sample updated with your saved settings.';
   }
 });
 </script>
-  </div>{# /controls panel #}
-</div>{# /x-data tabs #}
 {% endblock %}

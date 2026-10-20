@@ -59,8 +59,6 @@ def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -
     crosses THEME_THRESHOLD, graduate it (a gentle permanent weight nudge, then a smooth reset).
     `source` is the signal's SOURCE_W_* weight (graduation speed). `source_label` names the driving
     signal for the §1c graduation log. Model-only. NEVER suppresses."""
-    if not rec_params.get_param(store, "graduation_enabled"):
-        return
     threshold = rec_params.get_param(store, "theme_threshold")
     score = store.bump_theme(axis, signed * source, now)
     if abs(score) >= threshold:
@@ -109,8 +107,6 @@ def graduate_slider_exposure(store, now) -> None:
     # A temporary Home adjustment must not turn into a lasting preference at midnight.
     if mix_tuning.remaining(store, now) > 0:
         return
-    if not rec_params.get_param(store, "graduation_enabled"):
-        return
     threshold = rec_params.get_param(store, "theme_threshold")
     w_slider = rec_params.get_param(store, "source_w_slider")
     today = _utc_day(now)
@@ -152,8 +148,6 @@ def graduate_play_exposure(store, now) -> None:
     re-fetches the same window each run, that path re-counted and ratcheted genre weights toward
     GENRE_MAX (#46). The per-UTC-day stamp (rec_play_grad) makes re-runs idempotent by construction.
     """
-    if not rec_params.get_param(store, "graduation_enabled"):
-        return
     threshold = rec_params.get_param(store, "theme_threshold")
     w_play = rec_params.get_param(store, "source_w_play")
     today = _utc_day(now)

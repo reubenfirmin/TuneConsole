@@ -18,13 +18,18 @@ b) And I find YouTube's discovery and playlist management to be pretty bad
 - **Dedupe, merge & prune**: find duplicate and overlapping playlists, merge them, and delete
   empties. Every destructive action is undoable.
 - **Omnisearch**: instant search across playlists, artists, albums, and tracks in your whole library.
-- **Library browsing**: dedicated Artists, Albums, Charts, and Genres views.
+- **Library browsing**: dedicated Artists, Albums, and Charts views.
 - **Song actions**: create a playlist from a song or add it to an existing playlist from the shared ⋯ menu.
 - **Clusters**: a fun visual approach to building playlists.
 - **Road Trip**: build a playlist for a road trip that combines your and passenger's tastes.
 - **Recommendations & discovery**: surfaces new artists, rediscoveries, and a personalized
   "for you" feed driven by the taste model.
 - **Metadata enrichment**: uses Last.fm, Deezer, Discogs, MusicBrainz and AcousticBrainz.
+  Edit recognized genre tags under **Enrichment / Advanced**.
+  MusicBrainz, Last.fm and Discogs share one vocabulary, seeded from MusicBrainz plus curated
+  names and aliases. Expand or search the genre families there; equivalent names share an entry,
+  while distinct subgenres retain their identity. Vocabulary upgrades preserve custom additions
+  and disabled genres. Changes apply to future matching; existing song tags stay as saved.
 
 ## Quickstart
 
@@ -60,19 +65,10 @@ for updates, local builds, and verification.
 
 **New playlists** duplicates non-generated playlists created during the past seven days.
 It reads `playlists.created_at`, never `first_seen`, `last_seen`, or the last edit time.
-TuneConsole records its own creations immediately. To include playlists created elsewhere,
-open **Setup → Pairing → Playlist dates** and connect the relevant YouTube accounts (including
-brand accounts separately). This uses the official Data API's
-[`playlist.snippet.publishedAt`](https://developers.google.com/youtube/v3/docs/playlists#snippet.publishedAt).
-Dates refresh automatically after library sync and existing dates survive connection failures.
-Unknown dates remain unknown and stay out of New.
-
-The first connection needs a Google Cloud project with YouTube Data API v3 enabled and a
-downloaded **Desktop app** OAuth client JSON. The connection screen explains the steps.
-Only `youtube.readonly` is requested. Tokens stay in `youtube-playlist-dates.json` beside
-`config.toml` (owner-only permissions), never in the library DB or browser bridge.
-The server's egress guard permits only Google's token endpoint and the two read-only metadata
-endpoints; the extension's permissions and allowlist are unchanged.
+TuneConsole records its own creations immediately. The browser connection does not supply
+creation dates for playlists created elsewhere; unknown dates stay out of New.
+Existing saved dates are preserved during library sync. YouTube Music authentication stays
+in the browser, with no separate Google OAuth connection.
 
 
 ## Architecture
@@ -105,8 +101,8 @@ implementation lives in `src/yt_playlist/rec/` and has four main parts:
 
 - **Representations.** `embed.py` maintains a collaborative track space from co-occurrence baskets
   (playlists, albums, artists, listening sessions, genre families, and decades). The default builder
-  is PPMI plus truncated SVD; Auto-tune can select item2vec instead. A separate content space encodes
-  genre, era, musical key, and enriched audio features. It supports taste modes, clustering, and
+  is PPMI plus truncated SVD; automatic model selection can select item2vec instead. A separate
+  content space encodes genre, era, musical key, and enriched audio features. It supports taste modes, clustering, and
   cold-start candidates that are not yet in the library.
 - **Taste and scoring.** `scoring.py` represents durable taste as one centroid per coherent playlist,
   weighted by how much that playlist is played. Candidate scores are the weighted fit across those
@@ -121,6 +117,33 @@ implementation lives in `src/yt_playlist/rec/` and has four main parts:
   but TuneConsole's local models do the ranking. `rec_worker.py` coalesces rebuild requests, persists
   vectors, and materializes expensive proposals in the background so routes can serve the last good
   result from SQLite.
+  Background radio collection is disabled unless `radio_discovery_enabled` is explicitly set to `1`;
+  existing discovery tracks remain available to Fresh. Enrichment processes one ordered queue of
+  library and discovery tracks and refreshes Fresh's prepared ranking and Home taste-mode buckets
+  with the resulting genre, year, and audio metadata. Cached tracks retain release years for era
+  filtering and descriptions. Fresh also works without enrichment or a fitted taste model:
+  discoveries with no usable metadata or artist signal remain available after ranked candidates.
+  Explicit genre requests still require a known matching genre.
+  Failed provider requests remain queued; successful misses count as checks. Per-provider outcomes
+  are retained by track identity in the existing settings store until track consolidation.
+  Discovery Pools shows saved metadata and genre, era, and metadata-gap charts. Legacy discovery batch stamps are
+  requeued once because the old sink retained no provider history. Daily cleanup also expires
+  never-shown tracks from their discovery date (30 days by default), while generated playlists
+  protect their tracks. Expired tracks are removed from prepared recommendations too.
+  Track storage consolidation is deferred in [schema_changes_plan.md](schema_changes_plan.md).
+  Album and artist views count tiles visible on Home's Discover tab once per visit.
+  Historical background loads are retained
+  separately and do not start the cleanup clock.
+
+Automatic selection (`rec/model_selection.py`) begins after 14 days of history and 100 modeled
+tracks. It fits alternatives in memory and requires at least 50 paired targets across two periods,
+consistent gains, and a multiple-comparison-adjusted sign test before publishing a different setup.
+Successful comparisons recur no more often than every 28 days and require 30 fresh listening tracks.
+Model Health shows readiness, the selection result, and prospective top-20 prediction measurements.
+Both setups save forecasts on the same candidate pool before exact-timestamped later plays arrive;
+generated-only plays are excluded. Daily forecast refreshes happen during model updates. Measurements
+for an applied selection continue through later checks that retain it. Restoring the exact previous
+vector snapshot pauses selection until explicitly resumed; preferences and regular training are kept.
 
 ### Home recommendation audit
 

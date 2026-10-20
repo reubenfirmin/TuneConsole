@@ -12,7 +12,7 @@
   <div class="artist-headmain">
     <h1>{{ artist }}</h1>
     <p class="artist-meta">
-      <span><strong>{{ songs|length }}</strong> track{{ '' if songs|length == 1 else 's' }} in your playlists</span>
+      <span><strong>{{ songs|length }}</strong> track{{ '' if songs|length == 1 else 's' }} in your library</span>
       <span><strong>{{ total_plays }}</strong> total plays</span>
       {% if info and info.subscribers %}<span>{{ info.subscribers }} subscribers</span>{% endif %}
     </p>
@@ -33,8 +33,8 @@
   </div>
 </div>
 
-<h2 class="section">Tracks in your playlists <span class="count">{{ songs|length }}</span></h2>
-<p class="section-note">Distinct tracks credited to {{ artist }} across your synced playlists. Plays counts listens to each track, not playlist starts.</p>
+<h2 class="section">Tracks in your library <span class="count">{{ songs|length }}</span></h2>
+<p class="section-note">Distinct tracks credited to {{ artist }} across your synced playlists and saved albums. Plays counts listens to each track, not playlist starts.</p>
 <div class="card library-table-card">
   <table x-data="rowSort()">
     <thead><tr>

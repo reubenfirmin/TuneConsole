@@ -65,6 +65,7 @@ def test_pick_discovered_albums_biases_recent_mixes_older_and_avoids_repeats(sto
     yrs = [p["year"] for p in picks]
     assert len(picks) == 4
     assert yrs.count("2025") >= 2 and yrs.count("2009") >= 1     # recency-biased, but older mixed in
+    store.record_discovery_impressions("album", [p["browse_id"] for p in picks], "visit", 10.0)
     # a just-shown album is de-prioritized vs a never-shown one of the same year
     store.upsert_discovered_album("shown", "A", "Shown", "2025", None, now=1.0)
     store.mark_shown("album", ["shown"], now=10.0)

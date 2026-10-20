@@ -5,14 +5,13 @@
 
 WHY THIS CLASS EXISTS (read this before changing anything)
 ----------------------------------------------------------
-The browser bridge keeps Google session cookies in the browser. The optional
-playlist-date connection holds a read-only OAuth token locally. Those credentials
-only travel to the relevant YouTube/Google authorization endpoints, never third parties. "Trust
-me" is not good enough for a promise like that, so we make it both **structural**
-and **observable**:
+The browser bridge keeps Google session cookies in the browser. The server does
+not store Google cookies or OAuth tokens. "Trust me" is not good enough for a
+promise like that, so we make its network access both **structural** and
+**observable**:
 
   • ENFORCE: every server-side HTTP request is checked against a tiny, hard-coded
-    allowlist BEFORE the socket opens. A request to any other host raises
+    allowlist BEFORE the socket opens. A request outside that policy raises
     ``BlockedHost`` and never leaves the machine.
   • OBSERVE: every request (allowed or blocked) is written to a rotating network
     log, surfaced read-only at /network so you can watch exactly where the app
@@ -67,7 +66,7 @@ logger = logging.getLogger(__name__)
 
 # --- The allowlist -----------------------------------------------------------
 # Registrable domains the SERVER is permitted to reach. A request whose host is
-# not one of these (or a subdomain of one) is refused before any bytes are sent.
+# not one of these (or a subdomain of one) needs an exact request rule below.
 # Keep this list tiny and obvious. Every entry is a promise, and anything new
 # showing up as BLOCKED on /network is exactly the signal we want to surface.
 ALLOWED_DOMAINS = frozenset({
@@ -81,21 +80,19 @@ ALLOWED_DOMAINS = frozenset({
     "coverartarchive.org",  # enrichment: album art by MusicBrainz release MBID, no auth
     "archive.org",        # where coverartarchive.org redirects its JSON + images (its CDN)
     "wikipedia.org",      # into-recently card: keyless page summaries (en.wikipedia.org)
-    "github.com",         # update check: latest release tag (api.github.com)
     "spotify.com",        # Spotify import report: public oEmbed album artwork
 })
 
-# The optional playlist-date connection needs precisely these HTTPS resources;
-# do not allow googleapis.com wholesale (Drive, Gmail and other APIs live there).
-YOUTUBE_METADATA_ENDPOINTS = frozenset({
-    ("POST", "oauth2.googleapis.com", "/token"),
-    ("GET", "www.googleapis.com", "/youtube/v3/channels"),
-    ("GET", "www.googleapis.com", "/youtube/v3/playlists"),
+# Exact, bodyless requests only: GitHub hosts arbitrary user content, so allowing
+# the entire domain would also permit unrelated repositories and API operations.
+# Match the full URL to reject query strings, fragments, credentials and ports.
+ALLOWED_REQUESTS = frozenset({
+    ("GET", "https://api.github.com/repos/reubenfirmin/TuneConsole/releases/latest"),
 })
 
 
 class BlockedHost(Exception):
-    """Raised when a server-side request targets a host not on the allowlist."""
+    """Raised when a server-side request is outside the allowlist policy."""
 
 
 def host_allowed(host: str) -> bool:
@@ -146,22 +143,21 @@ class EgressGuard:
                      verdict, via, method or "?", host or "?", path or "/", status, nbytes)
 
     # -- the allow/deny decision -----------------------------------------------
-    def gate(self, url: str, *, method: str, via: str) -> tuple[str, str]:
+    def gate(self, url: str, *, method: str, via: str, body=None) -> tuple[str, str]:
         """Check one request. Returns (host, path); raises BlockedHost if off-allowlist.
 
         `path` is the URL path only. Query string is intentionally dropped before
-        it ever reaches the log (those carry API keys).
+        it ever reaches the log (those carry API keys). Exact request rules also
+        require an absent body; domain-wide rules retain their existing behavior.
         """
         parts = urlsplit(url)
         host, path = parts.hostname or "", parts.path or "/"
-        metadata_allowed = (parts.scheme == "https" and parts.port in (None, 443)
-                            and not parts.username and not parts.password
-                            and (method.upper(), host.lower(), path) in YOUTUBE_METADATA_ENDPOINTS)
-        if not host_allowed(host) and not metadata_allowed:
+        exact_request_allowed = body is None and (method.upper(), url) in ALLOWED_REQUESTS
+        if not host_allowed(host) and not exact_request_allowed:
             # Record the block, shout about it on the main log too, then refuse.
             self.record(verdict="BLOCK", method=method, host=host, path=path, via=via)
             logger.warning("egress BLOCKED: %s %s%s", method, host, path)
-            raise BlockedHost(f"egress to {host!r} is not allowed")
+            raise BlockedHost(f"egress request to {host!r} is not allowed")
         return host, path
 
     # -- installation (called once, at startup) --------------------------------
@@ -173,6 +169,8 @@ class EgressGuard:
         self._patch_urllib()
         self._installed = True
         logger.info("egress guard active, allowlist: %s", ", ".join(sorted(ALLOWED_DOMAINS)))
+        logger.info("egress exact bodyless requests: %s",
+                    ", ".join(f"{method} {url}" for method, url in sorted(ALLOWED_REQUESTS)))
 
     def _patch_requests(self) -> None:
         import requests.adapters
@@ -180,7 +178,8 @@ class EgressGuard:
         self._orig_adapter_send = requests.adapters.HTTPAdapter.send
 
         def send(adapter_self, request, *args, **kwargs):
-            host, path = guard.gate(request.url, method=request.method, via="requests")
+            host, path = guard.gate(request.url, method=request.method, via="requests",
+                                   body=request.body)
             resp = guard._orig_adapter_send(adapter_self, request, *args, **kwargs)
             guard.record(verdict="ALLOW", method=request.method, host=host, path=path,
                          status=getattr(resp, "status_code", None),
@@ -197,8 +196,15 @@ class EgressGuard:
         def open_(opener_self, fullurl, *args, **kwargs):
             # `fullurl` may be a str or a Request; both expose the URL we need.
             url = fullurl.full_url if hasattr(fullurl, "full_url") else fullurl
+            data = kwargs.get("data", args[0] if args else None)
+            if data is None:
+                data = getattr(fullurl, "data", None)
             method = getattr(fullurl, "get_method", lambda: "GET")()
-            host, path = guard.gate(url, method=method, via="urllib")
+            # OpenerDirector applies its data argument after this wrapper runs;
+            # account for the resulting implicit POST before deciding the policy.
+            if data is not None and getattr(fullurl, "method", None) is None:
+                method = "POST"
+            host, path = guard.gate(url, method=method, via="urllib", body=data)
             resp = guard._orig_opener_open(opener_self, fullurl, *args, **kwargs)
             guard.record(verdict="ALLOW", method=method, host=host, path=path,
                          status=getattr(resp, "status", None),

@@ -1,0 +1,37 @@
+{# Shared compact settings navigation and controls. The parent supplies sections and prefix. #}
+<div id="{{ settings_prefix }}-settings" class="taste-settings-section taste-settings-layout"
+     x-data="{ feature: '{{ settings_sections[0].key }}', vertical: matchMedia('(min-width: 1100px)').matches }"
+     @resize.window.debounce.100ms="vertical = matchMedia('(min-width: 1100px)').matches">
+  <div class="taste-feature-nav" role="tablist" aria-label="{{ settings_label }}"
+       :aria-orientation="vertical ? 'vertical' : 'horizontal'" @keydown="moveTasteTab($event)">
+  {% for section in settings_sections %}
+    <button type="button" role="tab" id="{{ settings_prefix }}-{{ section.key }}-tab" data-tone="{{ section.tone }}"
+            aria-label="{{ section.title }}" aria-controls="{{ settings_prefix }}-{{ section.key }}"
+            :aria-selected="feature === '{{ section.key }}'" :tabindex="feature === '{{ section.key }}' ? 0 : -1"
+            @click="feature = '{{ section.key }}'; $nextTick(() => revealTasteTab($el))">
+      <span>{{ section.title }}</span><span class="taste-feature-count" aria-hidden="true">{{ section.count }}</span>
+    </button>
+  {% endfor %}
+  </div>
+  <div class="taste-feature-panels">
+  {% for section in settings_sections %}
+  <section class="taste-feature-section" id="{{ settings_prefix }}-{{ section.key }}" data-tone="{{ section.tone }}"
+           role="tabpanel" aria-labelledby="{{ settings_prefix }}-{{ section.key }}-tab" tabindex="0"
+           x-show="feature === '{{ section.key }}'" x-cloak>
+    <p class="section-note taste-feature-note">{{ section.note }}</p>
+    <div class="taste-feature-body{% if section.groups|length > 1 %} taste-feature-body-grouped{% endif %}">
+      {% set recommendation_controls = true %}
+      {% set feature_controls = true %}
+      {% for group in section.groups %}
+      <div class="taste-feature-group" data-group-tone="{{ loop.index0 % 4 }}">
+        {% if group.title %}<h3>{{ group.title }}</h3>{% endif %}
+        <div class="knob-list">
+          {% for p in group.params %}{% include "_partials/taste_knob.html" %}{% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+  </div>
+</div>

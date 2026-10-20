@@ -1,6 +1,7 @@
 <div id="home-mode-cards" class="gen-lanes" data-genre-notice="{{ genre_notice or '' }}"
      {% if swap_oob %}hx-swap-oob="outerHTML"{% endif %}
      data-genre-warning="{{ genre_warning or '' }}"
+     data-vibe="{{ vibe|default('') }}"
      data-genre-options='{{ genre_options|default([])|tojson }}'
      data-requested-genres='{{ requested_genres|default([])|tojson }}' data-epoch="{{ epoch|default(0) }}"
      x-data="{ focus: null }" :class="{ 'has-focus': focus }">

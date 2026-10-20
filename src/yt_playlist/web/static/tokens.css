@@ -261,6 +261,9 @@
   --accent-pale-1: var(--p-lilac-100);
   --accent-pale-2: var(--p-lilac-200);
   --teal-muted: var(--p-teal-600);
+  --vibe-color: var(--accent-2); /* overridden by each Home vibe card */
+  --setting-accent: var(--teal); /* recommendation control or section accent */
+  --knob-position: 0%;          /* updated by recommendation sliders */
   --mint-bright: var(--p-mint-300);
   --green-pale: var(--p-green-150);
   --danger-pale: var(--p-pink-100);

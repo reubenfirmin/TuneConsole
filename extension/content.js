@@ -271,8 +271,12 @@ if (!window.__tcBridgeLoaded) {
       try { vid = new URL(location.href).searchParams.get("v") || ""; } catch (e) {}
     }
     let lst = np.playlist || "";
-    if (!lst) {  // DOM-fallback reports carry no playlist; the watch URL has it
-      try { lst = new URL(location.href).searchParams.get("list") || ""; } catch (e) {}
+    if (!("playlist" in np)) {  // Only the DOM fallback needs URL context.
+      try {
+        const u = new URL(location.href);
+        // The page being browsed can still point at a different song/queue.
+        if (!vid || u.searchParams.get("v") === vid) lst = u.searchParams.get("list") || "";
+      } catch (e) {}
     }
     // Read the playing song's album from the player bar, never from the page being browsed.
     let albumBrowseId = "";

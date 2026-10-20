@@ -1,8 +1,8 @@
-{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Actions · TuneConsole{% endblock %}{% block page_class %}page-workflow page-actions{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Action Log · TuneConsole{% endblock %}{% block page_class %}page-workflow page-actions{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 {% if flasherr %}{% call banner('err') %}{{ flasherr }}{% endcall %}{% endif %}
 <div class="page-head">
-  <h1>Action log</h1>
+  <h1>Action Log</h1>
   <p>Review playlist changes, newest first. Use Undo to reverse a completed change when available.</p>
 </div>
 

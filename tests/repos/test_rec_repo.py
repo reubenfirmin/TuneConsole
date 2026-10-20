@@ -17,8 +17,8 @@ def test_recrepo_is_a_facade_over_three_focused_daos(store):
     assert isinstance(store.rec.model, RecModelRepo)        # learned model
     assert isinstance(store.rec.surface, RecSurfaceRepo)    # serving surfaces
     assert isinstance(store.rec.query, RecQueryRepo)        # library reads + candidate generators
-    store.rec.set_weight("lane:explore", 1.1)               # -> model, via facade __getattr__
-    assert store.rec.get_weights()["lane:explore"] == pytest.approx(1.1)
+    store.rec.set_weight("lane:neighbourhood", 1.1)         # -> model, via facade __getattr__
+    assert store.rec.get_weights()["lane:neighbourhood"] == pytest.approx(1.1)
     assert store.rec.tracks_total() == 0                    # -> query, via facade __getattr__
     assert store.rec.get_proposals("discover") is None      # -> surface, via facade __getattr__
 
@@ -67,8 +67,8 @@ def test_weights_nudge_set_reset(store):
     assert dao.get_weights(now=1000.0) == {}              # missing axis = prior 1.0 (empty map)
     up = dao.nudge_weight("lane:deep_cut", 2.0, now=1000.0)
     assert 1.0 < up <= 3.0 and dao.get_weights(now=1000.0)["lane:deep_cut"] == pytest.approx(up)
-    dao.set_weight("lane:explore", 0.5, now=1000.0)
-    assert dao.get_weights(now=1000.0)["lane:explore"] == pytest.approx(0.5)
+    dao.set_weight("lane:neighbourhood", 0.5, now=1000.0)
+    assert dao.get_weights(now=1000.0)["lane:neighbourhood"] == pytest.approx(0.5)
     dao.reset_weights()
     assert dao.get_weights(now=1000.0) == {}
 

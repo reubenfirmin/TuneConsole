@@ -40,7 +40,7 @@
    and a ▶ play button reveal on hover. The cover routes into the app (`land`); ▶ opens YouTube
    Music (`play`). One hue per signal, so the feed scans at a glance. Extras (feedback, Add) via
    {% call %}. #}
-{% macro tile(source, cover, title, sub, land, play=None, note=None) -%}
+{% macro tile(source, cover, title, sub, land, play=None, note=None, discovery_id=None) -%}
 {% set b = {
   'neighbourhood': ('Taste', 'b-indigo'), 'rotation': ('Rotation', 'b-indigo'),
   'deep_cut': ('Deep cut', 'b-teal'), 'comfort': ('Comfort', 'b-amber'),
@@ -48,7 +48,7 @@
   'revisit': ('Revisit', 'b-violet'),
   'fresh': ('Fresh', 'b-cyan'), 'artist': ('New artist', 'b-pink'), 'fit': ('Fits here', 'b-teal')
 }.get(source, (source, 'b-indigo')) -%}
-<div class="tile">
+<div class="tile"{% if discovery_id %} data-discovery-kind="{{ source }}" data-discovery-id="{{ discovery_id }}"{% endif %}>
   <a class="tile-cover{{ ' no-art' if not cover }}" href="{{ land }}"{% if land.startswith('http') %} target="_blank" rel="noopener"{% endif %}>
     <span class="tile-image{{ ' art-artist' if source == 'artist' else ' art-album' if source in ('album', 'revisit') else '' }}">
       {% if cover %}<img src="{{ cover }}" alt="" loading="lazy" referrerpolicy="no-referrer"

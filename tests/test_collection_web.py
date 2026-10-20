@@ -35,6 +35,20 @@ def _refreshes(r):
     return r.status_code == 200 and r.headers.get("hx-refresh") == "true"
 
 
+def test_artists_page_includes_saved_albums_without_playlists(store):
+    store.add_saved_album({"browse": "B1", "title": "The Album", "artist": "Album artist"})
+    store.upsert_track("v1", "Album song", "Album artist", "The Album", 200, album_browse_id="B1")
+    client = _client(store, lambda: {})
+
+    response = client.get("/artists")
+    assert response.status_code == 200
+    assert "across your playlists and saved albums" in response.text
+    artist, = response.context["artists"]
+    assert (artist["artist"], artist["songs"], artist["n_albums"], artist["n_pls"]) == (
+        "Album artist", 1, 1, 0)
+    assert '/artist?name=Album%20artist' in response.text
+
+
 def test_save_album_likes_and_refreshes(store):
     iid = store.upsert_identity("main", "cred", None, True)
     fc = AlbumClient()

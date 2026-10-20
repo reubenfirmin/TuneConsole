@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from yt_playlist.core import updatecheck
 from yt_playlist.library import executor
 from yt_playlist.util import genre_map
-from yt_playlist.rec import arc_energy, embed, home_audit, home_themes, journeys, mix_tuning, onboarding, rec_params, recipes, recommend, into_recently
+from yt_playlist.rec import arc_energy, embed, home_audit, home_themes, home_vibe, journeys, mix_tuning, onboarding, rec_params, recipes, recommend, into_recently
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.rec.trend_rollups import last_complete_month
 from yt_playlist.providers import wikipedia, lastfm
@@ -165,13 +165,17 @@ def _carded(store, lane, label, pool, now):
     focused = recommend.theme_filter(store, pool, recipe.get("facets", {}))
     # Rotate within the themed head of the pool: still a fresh slice each epoch, but one drawn from
     # the tracks that match, rather than from the whole pool.
-    items = recommend.rotate_sample(focused[:PROTO_SIZE * 2], PROTO_SIZE, _epoch(store, lane))
+    focused = home_vibe.rank(store, now, focused)
+    items = (focused[:PROTO_SIZE] if home_vibe.current(store, now) else
+             recommend.rotate_sample(focused[:PROTO_SIZE * 2], PROTO_SIZE, _epoch(store, lane)))
     # roll_recipe forces Fresh to journey="shuffle" (unowned proposals have no plays/recency signal),
     # so the stored recipe and this preview ordering agree. Owned lanes order by their rolled journey.
     items = _order_by_journey(store, items, recipe.get("journey", "shuffle"),
                               recipe.get("dj", {}).get("seed", 0))
     p = _proto(store, lane, label, items, now)
     p["recipe"] = recipe
+    if vibe := home_vibe.current(store, now):
+        p["recipe"]["vibe"] = vibe
     return p
 
 
@@ -269,6 +273,7 @@ def build(ctx) -> APIRouter:
     def _tuning_active():
         genres = store.get_proposals("home_genre_request") or {}
         return (bool(store.get_leans()) or bool(store.hidden_facets())
+                or bool(store.get_setting(home_vibe.SETTING))
                 or rec_params.get_param(store, "breadth_bias") != 0
                 or (genres.get("epoch") == _epoch(store, "cards")
                     and bool(genres.get("include_genres") or genres.get("avoid_genres"))))
@@ -293,6 +298,7 @@ def build(ctx) -> APIRouter:
         recommend.graduate_play_exposure(store, now)
         return {"fingerprint": recommend.taste_fingerprint(store, now),
                 "tuning_active": _tuning_active(),
+                "vibe_presets": home_vibe.PRESETS, "vibe": home_vibe.current(store, now),
                 "has_modes": bool(store.modes.list_modes(active_only=True))}
 
     @router.get("/")
@@ -577,6 +583,10 @@ def build(ctx) -> APIRouter:
             for p in protos:
                 p["recipe"] = {**(p.get("recipe") or {}),
                                "genre_request": recipe_request}
+        vibe = home_vibe.current(store, now)
+        for p in protos:
+            if vibe:
+                p["recipe"] = {**(p.get("recipe") or {}), "vibe": vibe}
         for p in protos:                                   # #53 offered-count parity
             # tracks are dicts on the mode path but ForYouItem objects on the _one_card fallback,
             # so read the key from either shape (a bare t.get here 500s the whole card row).
@@ -595,6 +605,7 @@ def build(ctx) -> APIRouter:
                                                                   for option in home_themes.genre_options(store)],
                                                 "slots": slots,
                                                 "requested_genres": sorted(include), "epoch": epoch,
+                                                "vibe": vibe,
                                                 "swap_oob": swap_oob})
         _audit_cards(request, protos, now)
         return _tuning_response(response, now)
@@ -661,6 +672,8 @@ def build(ctx) -> APIRouter:
             if include or avoid:
                 p["recipe"]["genre_request"] = ({"kind": "chosen_genres", "include": include} if include
                                                 else {"kind": "other_genres", "avoid": avoid})
+            if vibe := home_vibe.current(store, now):
+                p["recipe"]["vibe"] = vibe
         return p
 
     def _pool_fragment(request, job):
@@ -790,6 +803,19 @@ def build(ctx) -> APIRouter:
             }, now)
         return await asyncio.to_thread(_cards_safe, request, now)
 
+    @router.post("/home/vibe")
+    async def home_vibe_change(request: Request):
+        vibe = (await request.form()).get("vibe", "")
+        if vibe and vibe not in home_vibe.PRESETS:
+            return Response(status_code=400)
+        now = now_fn()
+        with mix_tuning.adjusting(store, now):
+            if vibe:
+                store.set_setting(home_vibe.SETTING, vibe)
+            else:
+                store.delete_setting(home_vibe.SETTING)
+        return await asyncio.to_thread(_cards_safe, request, now)
+
     @router.post("/home/breadth")
     async def home_breadth(request: Request):
         # Drag the Breadth bar -> persist the focused<->eclectic bias and return only the re-ranked
@@ -860,7 +886,8 @@ def build(ctx) -> APIRouter:
     def _tuning_fragment(request, now):
         controls = templates.TemplateResponse(
             request, "_partials/taste_fingerprint.html",
-            {"fingerprint": recommend.taste_fingerprint(store, now), "tuning_active": _tuning_active()})
+            {"fingerprint": recommend.taste_fingerprint(store, now), "tuning_active": _tuning_active(),
+             "vibe_presets": home_vibe.PRESETS, "vibe": home_vibe.current(store, now)})
         cards = _cards_safe(request, now, swap_oob=True)
         return _tuning_response(Response(controls.body + cards.body, media_type="text/html"), now)
 

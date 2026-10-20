@@ -455,10 +455,10 @@ class RecSurfaceRepo(Repo):
     @synchronized
     def recent_graduations(self, limit=50) -> list:
         """The most recent graduation events, newest-first: rows of
-        {axis, source, score, factor, new_weight, created_at}."""
+        {id, axis, source, score, factor, new_weight, created_at}."""
         return self.conn.execute(
-            "SELECT axis, source, score, factor, new_weight, created_at FROM rec_grad_log "
-            "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            "SELECT id, axis, source, score, factor, new_weight, created_at FROM rec_grad_log "
+            "ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)).fetchall()
 
     @synchronized
     def graduation_audit_rows(self) -> list:

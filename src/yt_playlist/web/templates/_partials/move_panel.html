@@ -1,0 +1,77 @@
+{% from "_macros.html" import banner %}
+<div id="move-panel" x-data='moveTab({{ source|tojson }}, {{ target|tojson }}, {{ selection_rows|tojson }})'>
+{% if error %}{% call banner('err') %}{{ error }}{% endcall %}{% endif %}
+{% if identities|length < 2 %}
+  <div class="card"><p class="muted flush">You need at least two identities.
+    Add another in <a href="/setup">Setup</a>.</p></div>
+{% else %}
+  <div class="card section-block workflow-control">
+    <div class="cluster">
+      <label class="opt">From
+        <select aria-label="From" x-model.number="from" :disabled="busy" class="inline-control">
+          {% for i in identities %}<option value="{{ i.id }}">{{ i.label }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="opt">To
+        <select aria-label="To" x-model.number="to" :disabled="busy" class="inline-control">
+          {% for i in identities %}<option value="{{ i.id }}">{{ i.label }}</option>{% endfor %}
+        </select>
+      </label>
+      <span class="notice notice--compact err" x-show="!canMove()" x-cloak>Pick two different identities.</span>
+    </div>
+    <details class="move-help">
+      <summary>How copy and move work</summary>
+      <p>Each selected playlist is recreated separately in the target identity, with tracks matched
+        in that account. Copy keeps the originals. Move backs them up, then deletes each original
+        only when all its tracks have been matched. Backups are available in <a href="/actions">Actions</a>.</p>
+    </details>
+  </div>
+
+  {% if results %}
+  <section class="move-results section-block" aria-label="Transfer results" role="status">
+    <p class="{{ 'err' if has_issues else 'ok' }}"><strong>{{ summary }}</strong></p>
+    <details{% if has_issues %} open{% endif %}>
+      <summary>Results for {{ labels[target] }}</summary>
+      <ul>
+        {% for result in results %}
+        <li{% if result.warning %} class="err"{% endif %}>
+          <strong>{{ result.title }}</strong><span>{{ result.message }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+    </details>
+  </section>
+  {% endif %}
+  <p class="notice err" role="alert" x-show="error" x-text="error" x-cloak></p>
+
+  <div class="card workflow-sheet move-sheet" :aria-busy="busy">
+    <table aria-label="Playlists to copy or move" x-show="visibleIds().length">
+      <thead><tr>
+        <th class="selcell">
+          <input type="checkbox" aria-label="Select all playlists" :disabled="busy"
+                 :checked="allSelected()" x-effect="$el.indeterminate = count() > 0 && !allSelected()"
+                 @change="selectAll($event.target.checked)">
+        </th>
+        <th>Playlist <span class="muted move-count" x-text="visibleIds().length"></span></th>
+        <th class="num">Tracks</th>
+      </tr></thead>
+      {% for p in playlists %}{% include "_partials/move_row.html" %}{% endfor %}
+    </table>
+    <p class="muted" x-show="!visibleIds().length" x-cloak>No playlists in this identity.</p>
+  </div>
+
+  <template x-teleport="body">
+    <div class="pl-actionbar move-actionbar" role="region" aria-label="Playlist actions"
+         x-show="count() > 0" x-cloak>
+      <strong aria-live="polite" x-text="busy ? progress : count() + ' selected'"></strong>
+      <span class="spinner" x-show="busy" aria-hidden="true"></span>
+      <button type="button" class="btn-ghost btn-sm" :disabled="busy || !canMove()"
+              @click="transfer(true)">Copy</button>
+      <button type="button" class="btn-sm" :disabled="busy || !canMove()"
+              @click="transfer(false)">Move</button>
+      <button type="button" class="btn-ghost btn-sm" :disabled="busy"
+              @click="selectAll(false)">Deselect all</button>
+    </div>
+  </template>
+{% endif %}
+</div>

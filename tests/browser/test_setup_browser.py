@@ -4,14 +4,18 @@ setupForm().init())."""
 import socket
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 import uvicorn
 from playwright.sync_api import expect
 
 from yt_playlist.core.store import Store
+from yt_playlist.core.bridge import BridgeError
+from yt_playlist.core.runtime import Runtime
 from yt_playlist.web.app import create_app
 from tests.test_web import _FakeRuntime
+from tests.web.test_setup_identities import CheckedClient
 
 pytestmark = pytest.mark.browser
 
@@ -64,3 +68,333 @@ def test_setup_identities_tab_accepts_manual_label(live_setup_app, page):
     page.get_by_role("tab", name="Identities").click()
     page.locator('input[name="label"]').first.fill("Reuben")
     expect(page.locator('input[name="label"]').first).to_have_value("Reuben")
+
+
+@pytest.fixture
+def live_identity_setup(tmp_path, monkeypatch):
+    store = Store(":memory:")
+    store.init_schema()
+    store.set_setting("last_sync_at", "1.0")  # previously made any identity edit claim reauthentication
+    runtime = Runtime(store, tmp_path / "config.toml", tmp_path)
+    clients = {"main": CheckedClient("Main account"), "Brand": CheckedClient("My brand", handle="@mybrand")}
+    monkeypatch.setattr("yt_playlist.core.runtime.build_client", lambda cfg, bridge: clients[cfg.label])
+    runtime.apply_setup([{"label": "main", "credential_ref": "browser.json", "is_master": True}])
+    app = create_app(store, runtime.clients, now_fn=lambda: 1.0, setup=runtime)
+    port = _free_port()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "test server did not start"
+        time.sleep(0.02)
+    try:
+        yield SimpleNamespace(base=f"http://127.0.0.1:{port}", clients=clients, store=store, ctx=app.state.ctx)
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        store.conn.close()
+
+
+def _add_identity(page, base):
+    page.goto(f"{base}/setup?tab=identities")
+    page.get_by_role("button", name="+ Add identity", exact=True).click()
+    page.get_by_label("Label for identity 2", exact=True).fill("Brand")
+    page.get_by_label("Brand account ID for identity 2", exact=True).fill("123456789012345678901")
+    page.get_by_label("Brand account ID for identity 2", exact=True).blur()
+    expect(page.locator('form[x-ref="form"]')).to_have_attribute("aria-busy", "false")
+    page.get_by_role("button", name="Close Brand account ID help", exact=True).click()
+
+
+@pytest.mark.parametrize("viewport", [{"width": 1920, "height": 1080}, {"width": 1280, "height": 900}])
+def test_identity_guide_stays_open_while_typing_and_saving(live_identity_setup, page, viewport):
+    page.set_viewport_size(viewport)
+    page.goto(f"{live_identity_setup.base}/setup?tab=identities")
+    page.get_by_role("button", name="+ Add identity", exact=True).click()
+    guide = page.get_by_role("region", name="Find your Brand account ID", exact=True)
+    expect(guide).to_be_visible()
+
+    label = page.get_by_label("Label for identity 2", exact=True)
+    brand = page.get_by_label("Brand account ID for identity 2", exact=True)
+    label.click()
+    label.press_sequentially("Brand")
+    expect(guide).to_be_visible()
+    brand.click()
+    brand.press_sequentially("123456789012345678901")
+    expect(guide).to_be_visible()
+    label.click()
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    expect(guide).to_be_visible()
+    expect(label).to_have_value("Brand")
+    expect(brand).to_have_value("123456789012345678901")
+
+    page.get_by_role("button", name="Close Brand account ID help", exact=True).click()
+    expect(guide).to_be_hidden()
+    page.get_by_role("button", name="How to find your Brand account ID", exact=True).click()
+    expect(guide).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(guide).to_be_hidden()
+
+
+def test_add_identity_stays_on_identities_and_shows_live_validation(live_identity_setup, page):
+    t = live_identity_setup
+    _add_identity(page, t.base)
+    expect(page).to_have_url(f"{t.base}/setup?tab=identities")
+    expect(page.get_by_role("tab", name="Identities", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(page.get_by_role("status")).to_be_hidden()
+    expect(page.get_by_label("Label for identity 2", exact=True)).to_have_value("Brand")
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    expect(page.get_by_role("button", name="Brand: authenticated", exact=True)).to_be_visible()
+    expect(page.get_by_role("region", name="Identity connection checks")).to_have_count(0)
+    expect(page.get_by_text("My brand", exact=False)).to_have_count(0)
+    expect(page.get_by_role("button", name="Save and check", exact=True)).to_be_hidden()
+    expect(page.get_by_text("You’re authenticated again", exact=False)).to_have_count(0)
+    page.reload()
+    expect(page.get_by_role("tab", name="Identities", exact=True)).to_have_attribute("aria-selected", "true")
+
+
+def test_invalid_identity_stays_editable_and_explains_how_to_fix_it(live_identity_setup, page):
+    t = live_identity_setup
+    t.clients["Brand"].error = RuntimeError("Server returned HTTP 403: Forbidden")
+    _add_identity(page, t.base)
+    fields = page.locator('form[x-ref="form"] input:not([type="hidden"])')
+    positions = fields.evaluate_all("fields => fields.map(field => { const r = field.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })")
+    page.get_by_role("button", name="Brand: Cannot access this brand account. Show connection help.", exact=True).click()
+    assert fields.evaluate_all("fields => fields.map(field => { const r = field.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })") == positions
+    expect(page.get_by_text("Cannot access this brand account", exact=True)).to_be_visible()
+    expect(page.get_by_text("owns or manages this brand account", exact=False)).to_be_visible()
+    help_panel = page.get_by_role("region", name="Connection help for Brand", exact=True)
+    expect(help_panel.get_by_role("link", name="Open this identity’s account details", exact=True)).to_have_attribute(
+        "href", "https://myaccount.google.com/b/123456789012345678901/")
+    expect(help_panel.get_by_role("link", name="Open YouTube Music", exact=True)).to_be_hidden()
+    expect(help_panel.get_by_role("link", name="Google Brand Accounts", exact=True)).to_have_attribute("href", "https://myaccount.google.com/brandaccounts")
+    expect(help_panel).to_contain_text("using the same Google account signed in to YouTube Music")
+    expect(help_panel).to_contain_text("Copy the number after /b/")
+    expect(help_panel).to_contain_text("compare it with the Brand account ID above")
+    expect(help_panel).to_contain_text("For a personal account, leave the field blank")
+    expect(help_panel.get_by_role("button")).to_have_count(0)
+    expect(page.get_by_role("link", name="Open Pairing", exact=True)).to_have_count(0)
+    expect(page.get_by_label("Brand account ID for identity 2", exact=True)).to_have_value("123456789012345678901")
+    # Editing hides the previous result; leaving the field saves and checks the correction.
+    page.get_by_label("Brand account ID for identity 2", exact=True).fill("99999")
+    expect(page.get_by_text("Cannot access this brand account", exact=True)).to_be_hidden()
+    expect(page.get_by_role("button", name="Brand: authentication updates after editing", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Save and check", exact=True)).to_have_count(0)
+    t.clients["Brand"].error = None
+    page.get_by_label("Brand account ID for identity 2", exact=True).blur()
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    assert next(i for i in t.store.get_identities() if i.label == "Brand").brand_account_id == "99999"
+
+
+def test_disconnected_identity_is_checked_automatically_after_reconnecting(live_identity_setup, page):
+    t = live_identity_setup
+    connection = {"connected": False}
+    page.route("**/bridge/status", lambda route: route.fulfill(json=connection))
+    t.clients["Brand"].error = BridgeError("no extension connected")
+    _add_identity(page, t.base)
+    page.get_by_role("button", name="Brand: Not checked. Show connection help.", exact=True).click()
+    expect(page.get_by_text("Not checked", exact=True)).to_be_visible()
+    expect(page.get_by_text("TuneConsole extension installed", exact=False)).to_be_visible()
+    expect(page.get_by_role("link", name="Open Pairing", exact=True)).to_have_count(0)
+    expect(page.get_by_role("button", name="Check again", exact=True)).to_have_count(0)
+    t.clients["Brand"].error = None
+    connection["connected"] = True
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    expect(page.locator(".identity-auth-help:visible")).to_have_count(0)
+
+
+@pytest.mark.parametrize("viewport", [{"width": 1280, "height": 900}, {"width": 390, "height": 844}])
+def test_yellow_dot_help_keeps_fields_in_place_and_can_be_dismissed(live_identity_setup, page, viewport):
+    page.set_viewport_size(viewport)
+    t = live_identity_setup
+    t.clients["Brand"].error = BridgeError("no extension connected")
+    _add_identity(page, t.base)
+    dot = page.get_by_role("button", name="Brand: Not checked. Show connection help.", exact=True)
+    expect(dot).to_be_visible()
+    fields = page.locator('form[x-ref="form"] input:not([type="hidden"])')
+    positions = fields.evaluate_all("fields => fields.map(field => { const r = field.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })")
+    dot.click()
+    panel = page.get_by_role("region", name="Connection help for Brand", exact=True)
+    expect(panel).to_be_visible()
+    assert fields.evaluate_all("fields => fields.map(field => { const r = field.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })") == positions
+    expect(dot).to_have_attribute("aria-expanded", "true")
+    expect(panel.get_by_role("button")).to_have_count(0)
+    dot.click()
+    expect(panel).to_be_hidden()
+    dot.click()
+    page.keyboard.press("Escape")
+    expect(panel).to_be_hidden()
+    dot.click()
+    expect(panel).to_be_visible()
+
+
+def test_successful_check_clears_expired_banner_without_reload(live_identity_setup, page):
+    t = live_identity_setup
+    errors = []
+    page.on("pageerror", lambda error: errors.append(error))
+    identity = t.store.get_identities()[0]
+    t.ctx.flag_auth_expired(identity.id, identity.label)
+    t.clients["main"].error = RuntimeError("Server returned HTTP 401: Unauthorized")
+    page.goto(f"{t.base}/setup?tab=identities")
+    page.get_by_role("button", name="main: Sign in required. Show connection help.", exact=True).click()
+    expect(page.get_by_text("Sign in required", exact=True)).to_be_visible()
+    expect(page.locator(".authbar")).to_be_visible()
+    expect(page.get_by_role("link", name="Open YouTube Music", exact=True)).to_be_visible()
+    t.clients["main"].error = None
+    # The browser sends focus when the user returns after signing in to YouTube Music.
+    page.evaluate("window.dispatchEvent(new Event('focus'))")
+    expect(page.locator(".identity-auth--valid")).to_have_count(1)
+    expect(page.locator(".authbar")).to_be_hidden()
+    assert not errors
+
+
+def test_returning_from_brand_account_details_checks_automatically(live_identity_setup, page):
+    t = live_identity_setup
+    t.clients["Brand"].error = RuntimeError("Server returned HTTP 403: Forbidden")
+    _add_identity(page, t.base)
+    page.get_by_role("button", name="Brand: Cannot access this brand account. Show connection help.", exact=True).click()
+    # Keep the external page local to the test while exercising the link and return behavior.
+    page.context.route("https://myaccount.google.com/brandaccounts", lambda route: route.fulfill(
+        content_type="text/html", body="<title>Brand Accounts</title>"))
+    with page.expect_popup() as opened:
+        page.get_by_role("region", name="Connection help for Brand", exact=True).get_by_role(
+            "link", name="Google Brand Accounts", exact=True).click()
+    details = opened.value
+    details.wait_for_load_state()
+    t.clients["Brand"].error = None
+    details.close()
+    page.bring_to_front()
+    # Headless tabs retain visibility; send the event a normal browser emits on returning.
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    expect(page.locator(".identity-auth-help")).to_be_hidden()
+
+
+def test_remove_is_immediate_with_deletion_message_and_no_checks(live_identity_setup, page):
+    t = live_identity_setup
+    _add_identity(page, t.base)
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    checks_before = {name: client.checks for name, client in t.clients.items()}
+    page.get_by_role("button", name="Remove Brand", exact=True).click()
+    expect(page.locator('input[name="label"]')).to_have_count(1)
+    expect(page.get_by_role("status")).to_contain_text('Removed identity "Brand".')
+    expect(page.get_by_role("button", name="Save and check", exact=True)).to_be_hidden()
+    expect(page.locator('.tools-pop a[href="/move"]')).to_have_count(0)
+    assert [i.label for i in t.store.get_identities()] == ["main"]
+    assert {name: client.checks for name, client in t.clients.items()} == checks_before
+    page.reload()
+    expect(page.get_by_role("tab", name="Identities", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(page.locator('input[name="label"]')).to_have_count(1)
+    expect(page.get_by_role("status")).to_contain_text('Removed identity "Brand".')
+    expect(page.get_by_text("Saved 1 identity.", exact=False)).to_have_count(0)
+
+
+def test_remove_finishes_pending_edits_without_an_extra_click(live_identity_setup, page):
+    t = live_identity_setup
+    _add_identity(page, t.base)
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    t.clients["Still editing"] = CheckedClient("Still editing")
+    page.get_by_label("Label for identity 1", exact=True).fill("Still editing")
+    page.get_by_role("button", name="Remove Brand", exact=True).click()
+    expect(page.locator('input[name="label"]')).to_have_count(1)
+    expect(page.get_by_label("Label for identity 1", exact=True)).to_have_value("Still editing")
+    expect(page.get_by_role("button", name="Save and check", exact=True)).to_have_count(0)
+    assert [i.label for i in t.store.get_identities()] == ["Still editing"]
+
+
+def test_failed_removal_keeps_the_row_and_can_be_retried(live_identity_setup, page):
+    t = live_identity_setup
+    _add_identity(page, t.base)
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    page.route("**/setup/identities/*/remove", lambda route: route.fulfill(
+        status=409, content_type="application/json", body='{"detail":"Could not remove this identity. Try again."}'))
+    page.get_by_role("button", name="Remove Brand", exact=True).click()
+    expect(page.get_by_role("alert")).to_have_text("Could not remove this identity. Try again.")
+    expect(page.locator('input[name="label"]')).to_have_count(2)
+    assert len(t.store.get_identities()) == 2
+    page.unroute("**/setup/identities/*/remove")
+    page.get_by_role("button", name="Remove Brand", exact=True).click()
+    expect(page.locator('input[name="label"]')).to_have_count(1)
+
+
+def test_discarding_an_unsaved_row_needs_no_save(live_identity_setup, page):
+    t = live_identity_setup
+    page.goto(f"{t.base}/setup?tab=identities")
+    page.get_by_role("button", name="+ Add identity", exact=True).click()
+    page.get_by_role("button", name="Remove identity 2", exact=True).click()
+    expect(page.locator('input[name="label"]')).to_have_count(1)
+    expect(page.get_by_role("button", name="Save and check", exact=True)).to_be_hidden()
+    assert [i.label for i in t.store.get_identities()] == ["main"]
+
+
+def test_main_choice_saves_immediately_without_auth_checks(live_identity_setup, page):
+    t = live_identity_setup
+    _add_identity(page, t.base)
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    checks_before = {name: client.checks for name, client in t.clients.items()}
+    page.get_by_label("Use Brand as main identity", exact=True).check()
+    expect(page.locator('form[x-ref="form"]')).to_have_attribute("aria-busy", "false")
+    assert t.store.get_master_identity().label == "Brand"
+    assert {name: client.checks for name, client in t.clients.items()} == checks_before
+    page.reload()
+    expect(page.get_by_label("Use Brand as main identity", exact=True)).to_be_checked()
+
+
+@pytest.mark.parametrize("first_fails", [False, True])
+def test_changes_during_an_autosave_are_saved_in_order(live_identity_setup, page, first_fails):
+    t = live_identity_setup
+    _add_identity(page, t.base)
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    held = []
+
+    def hold_first(route):
+        if not held:
+            held.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/setup?tab=identities", hold_first)
+    brand = page.get_by_label("Brand account ID for identity 2", exact=True)
+    brand.fill("11111")
+    brand.blur()
+    expect(page.locator('form[x-ref="form"]')).to_have_attribute("aria-busy", "true")
+    assert len(held) == 1
+    brand.fill("22222")
+    brand.blur()
+    if first_fails:
+        held[0].fulfill(status=503, content_type="application/json", body='{"error":"Temporary failure"}')
+    else:
+        held[0].fulfill(response=held[0].fetch())
+    expect(page.locator('form[x-ref="form"]')).to_have_attribute("aria-busy", "false")
+    assert next(i for i in t.store.get_identities() if i.label == "Brand").brand_account_id == "22222"
+    expect(brand).to_have_value("22222")
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    expect(page.get_by_role("alert")).to_have_count(0)
+
+
+def test_removing_main_selects_remaining_main_without_saving(live_identity_setup, page):
+    t = live_identity_setup
+    _add_identity(page, t.base)
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    page.get_by_role("button", name="Remove main", exact=True).click()
+    expect(page.locator('input[name="label"]')).to_have_count(1)
+    expect(page.get_by_label("Use Brand as main identity", exact=True)).to_be_checked()
+    expect(page.get_by_role("button", name="Save and check", exact=True)).to_be_hidden()
+    assert t.store.get_master_identity().label == "Brand"
+
+
+def test_form_error_keeps_identity_tab_and_all_entered_values(live_identity_setup, page):
+    t = live_identity_setup
+    page.goto(f"{t.base}/setup")
+    page.get_by_role("tab", name="Identities", exact=True).click()
+    page.get_by_role("button", name="+ Add identity", exact=True).click()
+    page.get_by_label("Label for identity 2", exact=True).fill("main")
+    page.get_by_label("Brand account ID for identity 2", exact=True).fill("123456789012345678901")
+    page.get_by_label("Brand account ID for identity 2", exact=True).blur()
+    expect(page.get_by_text("identity labels must be unique", exact=True)).to_be_visible()
+    expect(page.get_by_role("tab", name="Identities", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(page.get_by_label("Label for identity 2", exact=True)).to_have_value("main")
+    expect(page.get_by_label("Brand account ID for identity 2", exact=True)).to_have_value("123456789012345678901")
+    page.get_by_label("Label for identity 2", exact=True).fill("Brand")
+    page.get_by_label("Label for identity 2", exact=True).blur()
+    expect(page.locator(".identity-auth--valid")).to_have_count(2)

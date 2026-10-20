@@ -1,51 +1,70 @@
 {# Last Auto-tune result. `autotune_result` = autotune_run.last_result() shape, or None. #}
 {% set r = autotune_result %}
 {% if r %}
-{% set metric_label = "future-play prediction (historical data only)" if r.metric == "causal_temporal_recall" else ("future-play prediction" if r.metric == "temporal_recall" else "playlist prediction (top 20)") %}
-<div class="card autotune-result">
+{% set methods = {'svd': 'Playlist patterns (SVD)', 'item2vec': 'Listening sequences (Item2Vec)'} %}
+{% set temporal_test = r.metric in ['causal_temporal_recall', 'temporal_recall'] %}
+<div class="autotune-result">
   <div class="autotune-result-head">
-    <h3>Auto-tune result</h3>
-    {% if r.sweep_failed %}<span class="tag">kept previous</span>
-    {% else %}<span class="tag teal">applied &amp; saved</span>{% endif %}
+    <h2>Earlier manual Auto-tune result</h2>
+    {% if r.sweep_failed %}<span class="tag">Previous model kept</span>
+    {% else %}<span class="tag">Applied at the time</span>{% endif %}
   </div>
-  <p class="section-note">Auto-tune tested several models against your library and listening history. The selected model is now used for recommendations.</p>
+  {% if r.ran_at_iso %}<p class="section-note"><time datetime="{{ r.ran_at_iso }}">{{ r.ran_at_label }}</time></p>{% endif %}
+  <p class="section-note">This predates automatic selection and has no saved measurements of later listening.</p>
 
   {% if r.sweep_failed %}
-  <p class="section-note">The model comparison failed. Your previous settings are still in use.</p>
-  {% elif r.in_sample %}
-  <p class="section-note">This test used your existing playlists. Import listening history or keep listening to test predictions of future plays.</p>
+  <p class="model-health-caution">The model comparison failed. The previous settings were kept.</p>
+  {% else %}
+  <p class="section-note">Selected <strong>{{ methods.get(r.winner.method, r.winner.method) }}</strong> with {{ r.winner.dim }} dimensions. Dimensions control how many learned features represent each track.</p>
   {% endif %}
 
-  <div class="stat-grid autotune-stats">
-    <div><strong>{{ r.winner.method }} · {{ r.winner.dim }}</strong><span>selected model and dimensions</span></div>
-    <div><strong>{{ '%.1f'|format(r.winner.recall * 100) }}%</strong><span>{{ metric_label }} (winner)</span></div>
-    <div><strong>{{ '%.1f'|format(r.previous.recall * 100) }}%</strong><span>{{ metric_label }} (before: {{ r.previous.method }}·{{ r.previous.dim }})</span></div>
-  </div>
+  {% if not r.sweep_failed %}
+  <dl class="autotune-comparison">
+    <div><dt>Selected model</dt><dd>{{ '%.1f'|format(r.winner.recall * 100) }}%</dd></div>
+    <div><dt>Previous model</dt><dd>{% if r.previous.failed %}Not scored{% else %}{{ '%.1f'|format(r.previous.recall * 100) }}%{% endif %}</dd></div>
+    {% if not r.previous.failed %}<div><dt>Change</dt><dd>{{ '%+.1f'|format((r.winner.recall - r.previous.recall) * 100) }} <small>percentage points</small></dd></div>{% endif %}
+  </dl>
+  {% endif %}
 
-  <table class="autotune-grid">
+  <p class="section-note">{% if temporal_test %}Test: predict later listening from earlier data.{% if r.metric == 'causal_temporal_recall' %} Each test model used only data available at that time.{% endif %}{% else %}This test used your existing playlists. Import listening history or keep listening to test predictions of future plays.{% endif %} Scores show the percentage of test tracks found in the top 20 matches. Higher is better within this test.</p>
+
+  <section>
+    <h3>Tested models</h3>
+    <p class="section-note">The methods learn track relationships in different ways. Model size is the number of learned features per track; a larger model doesn’t always predict better.</p>
+    <div class="table-scroll">
+    <table class="autotune-grid" aria-label="Auto-tune model comparison">
+      <thead><tr><th scope="col">Method</th><th scope="col">Size</th><th scope="col">Matches in top 20</th><th scope="col">Result</th></tr></thead>
+      <tbody>
     {% for g in r.grid|sort(attribute='recall', reverse=true) %}
-    {% set won = g.method == r.winner.method and g.dim == r.winner.dim %}
+    {% set won = not r.sweep_failed and not g.failed and g.method == r.winner.method and g.dim == r.winner.dim %}
     <tr class="{{ 'win' if won }}">
-      <td class="cfg">{{ g.method }} · {{ g.dim }}</td>
-      <td class="track"><i class="bar" style="width:{{ '%.0f'|format(g.recall * 100) }}%"></i></td>
-      <td class="val">{{ '%.1f'|format(g.recall * 100) }}%{% if won %} ✓{% endif %}</td>
+      <th scope="row">{{ methods.get(g.method, g.method) }}</th>
+      <td>{{ g.dim }}</td>
+      <td>{% if g.failed %}Not scored{% else %}{{ '%.1f'|format(g.recall * 100) }}%{% endif %}</td>
+      <td>{% if g.failed %}Test unavailable{% elif won %}Selected{% else %}Compared{% endif %}</td>
     </tr>
     {% endfor %}
-  </table>
+      </tbody>
+    </table>
+    </div>
+  </section>
 
-  <p class="knob-help">Accuracy is the percentage of test tracks found in the model's top 20 predictions.
-     Higher is better. With enough history, the test predicts later plays from earlier data;
-     otherwise it hides tracks from existing playlists and tries to find them again.
-     Auto-tune chooses the model's method and size automatically.</p>
-
-  <p class="autotune-rotated">The new model replaced {{ r.recs.dropped|length }} of your top {{ r.recs.compared }} For You picks.</p>
-  {% if r.recs.dropped or r.recs.added %}
-  <div class="autotune-diff">
-    {% if r.recs.dropped %}<div class="diff-row"><span class="tag">dropped</span><span class="diff-list">{% for d in r.recs.dropped %}{{ d.artist }}: {{ d.title }}{% if not loop.last %} · {% endif %}{% endfor %}</span></div>{% endif %}
-    {% if r.recs.added %}<div class="diff-row"><span class="tag teal">added</span><span class="diff-list">{% for d in r.recs.added %}{{ d.artist }}: {{ d.title }}{% if not loop.last %} · {% endif %}{% endfor %}</span></div>{% endif %}
+  {% if not r.sweep_failed and r.recs.compared %}
+  <div class="autotune-picks">
+    <p>{{ r.recs.dropped|length }} of the {{ r.recs.compared }} top suggestions captured before this run left the list.</p>
+    {% if r.recs.dropped or r.recs.added %}
+    <section>
+      <h3>Suggestions changed by this run</h3>
+      <div class="autotune-diff">
+        {% for title, items in [('New suggestions', r.recs.added), ('Left the list', r.recs.dropped)] %}{% if items %}
+        <div><h4>{{ title }}</h4><ul>{% for item in items %}<li><strong>{{ item.title }}</strong><span>{{ item.artist }}</span></li>{% endfor %}</ul></div>
+        {% endif %}{% endfor %}
+      </div>
+    </section>
+    {% endif %}
   </div>
   {% endif %}
 </div>
 {% else %}
-<p class="section-note">Auto-tune has not run yet. Run it to compare model sizes using your library.</p>
+<p class="section-note">No earlier manual Auto-tune result was saved.</p>
 {% endif %}

@@ -112,7 +112,7 @@ def build(ctx) -> APIRouter:
         # so the collection table and the YouTube-discography table below always agree.
         saved_ids = store.saved_album_ids()
 
-        # Section 1, your collection: albums from your playlist tracks, merged with saved albums.
+        # Section 1, your collection: albums from library tracks, merged with saved metadata.
         coll = {}
         for s in songs:
             key = s["album"] or "Singles / no album"

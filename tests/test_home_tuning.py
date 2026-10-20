@@ -18,6 +18,7 @@ def assert_cleared(store):
     assert store.hidden_facets() == set()
     assert rec_params.get_param(store, "breadth_bias") == 0
     assert store.get_proposals("home_genre_request") == {}
+    assert store.get_setting("home_mix_vibe") is None
     assert store.get_setting(mix_tuning.UPDATED_AT_SETTING) is None
 
 
@@ -44,6 +45,7 @@ def test_clear_resets_genre_selections_and_all_biases_together(store):
 
 
 @pytest.mark.parametrize("path,data", [
+    ("/home/vibe", {"vibe": "gentle"}),
     ("/home/mix-genres", {"genres": "jazz"}),
     ("/home/other-genres", {"genres": '["Jazz"]'}),
     ("/home/breadth", {"breadth_bias": ".8"}),

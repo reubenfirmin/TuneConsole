@@ -15,7 +15,7 @@ def test_discover_building_polls_when_worker_busy(store):
     app.state.ctx.rec_worker._running = True          # simulate an in-flight rebuild
     c = TestClient(app, base_url="http://127.0.0.1")
     html = c.get("/home/discover").text
-    assert 'hx-trigger="load delay:4s"' in html        # self-poll while building
+    assert 'hx-trigger="intersect once delay:4s"' in html
     assert "skeleton" in html
 
 

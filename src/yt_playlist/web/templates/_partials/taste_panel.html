@@ -1,0 +1,134 @@
+{% import "_partials/taste_viz.html" as tv with context %}
+{% if panel == 'overview' %}
+{{ tv.overview() }}
+{% elif panel == 'experiment' %}
+{% include "_partials/taste_experiment.html" %}
+{% elif panel == 'profile' %}
+{% include "_partials/taste_profile.html" %}
+{% elif panel == 'generated' %}
+{% include "_partials/taste_generated.html" %}
+{% elif panel == 'recommendations' %}
+{% set recommendation_controls = true %}
+{% import "_partials/taste_tabs.html" as tt %}
+<div class="taste-recommendations taste-controls">
+{{ tt.bar([('intro', 'Intro'), ('main', 'Main controls'), ('genres', 'Genres'),
+           ('features', 'Settings by feature')],
+          prefix='taste-recommendation', state='recommendationTab', action='selectRecommendation',
+          label='Recommendation settings', extra_class='taste-subtabs') }}
+<p id="taste-save-status" class="section-note" role="status"></p>
+
+<div {{ tt.panel('intro', prefix='taste-recommendation', state='recommendationTab', extra_class='taste-recommendation-panel') }}>
+<section class="taste-intro" aria-labelledby="taste-intro-context-title">
+  <h2 id="taste-intro-context-title">How your picks take shape</h2>
+  <p>TuneConsole combines several signals: track similarity, relationships between artists, and information about genre, era, and sound. Your playlists, listening history, and feedback help it work out which music fits your taste. Recent activity can shift that balance toward what you’re enjoying now.</p>
+  <p>These settings let you change that balance: give less-played genres more room, make recommendations follow recent listening more closely, or favor specific genres. If a week of jazz is crowding out the rest of your collection, for example, reducing recent-play influence gives your broader taste more say.</p>
+  <p>Your changes are saved immediately. You’ll see them the next time recommendations refresh. In <a href="#experiment" @click.prevent="select('experiment')">Experiment</a>, save a starting point and compare sample picks before and after an adjustment. Home and Discover each use the model differently; each control explains where it applies.</p>
+</section>
+
+<div class="taste-intro-next">
+  <a class="taste-detail-link" href="#recommendations/main" @click.prevent="selectRecommendation('main')">Adjust your balance {{ arrow_icon('right') }}</a>
+  <a class="taste-detail-link" href="#experiment" @click.prevent="select('experiment')">Save and compare in Experiment {{ arrow_icon('right') }}</a>
+</div>
+</div>
+
+<div {{ tt.panel('main', prefix='taste-recommendation', state='recommendationTab', extra_class='taste-recommendation-panel') }}>
+<section class="taste-settings-section" id="taste-main-controls">
+<p class="section-note">These controls shape Home’s <strong>Listen</strong> suggestions; recent plays, likes, and sound also influence other recommendations. For the three <strong>Follow recent</strong> controls, <strong>0% is off and 100% is the strongest influence</strong>. This measures strength, not the percentage of matching songs. <strong>Reset</strong> returns each control to its marked default.</p>
+<div class="card knob-list semantic-controls">
+  {% for p in semantic_params %}{% include "_partials/taste_knob.html" %}{% endfor %}
+</div>
+</section>
+</div>
+
+<div {{ tt.panel('genres', prefix='taste-recommendation', state='recommendationTab', extra_class='taste-recommendation-panel') }}>
+{% include "_partials/taste_genre_controls.html" %}
+</div>
+
+<div {{ tt.panel('features', prefix='taste-recommendation', state='recommendationTab', extra_class='taste-recommendation-panel') }}>
+{% with settings_sections=discovery_sections, settings_prefix='taste-feature', settings_label='Features' %}
+{% include "_partials/taste_settings.html" %}
+{% endwith %}
+</div>
+</div>
+{% elif panel == 'learning' %}
+{% include "_partials/taste_learning.html" %}
+<section class="taste-learning-settings taste-controls" aria-labelledby="taste-learning-controls-title">
+  <h2 class="section" id="taste-learning-controls-title">Controls</h2>
+  <p id="taste-learning-save-status" class="section-note" role="status"></p>
+  {% with settings_sections=learning_sections, settings_prefix='taste-learning-controls', settings_label='Recent activity and learning settings' %}
+  {% include "_partials/taste_settings.html" %}
+  {% endwith %}
+</section>
+{% elif panel == 'health' %}
+{% include "_partials/taste_health.html" %}
+{% elif panel == 'feedback' %}
+{% from "_macros.html" import sort_indicator %}
+<h2 class="section">Your saved feedback</h2>
+<div class="card taste-feedback-summary-card">
+  <p class="section-note">Likes and dislikes come from YouTube Music. Choices on suggestions tell TuneConsole what you want more of, less of, or later. These counts show the feedback currently saved.</p>
+  {% if feedback %}
+  {% set labels = {
+    'like': ('Liked tracks', 'Positive signals that help the model learn what you enjoy.'),
+    'dislike': ('Disliked tracks', 'Excluded from recommendations until their bans expire. Review them below.'),
+    'dismiss': ('Dismissed suggestions', 'Hidden from the recommendation area where you dismissed them.'),
+    'mute': ('Muted artists or items', 'Kept out of suggestions by your mute choices.'),
+    'not_now': ('Snoozed suggestions', 'Hidden temporarily. They can return when the snooze expires.'),
+    'more': ('More like this', 'Requests that encourage similar recommendations.'),
+    'less': ('Less like this', 'Requests for fewer similar recommendations.')
+  } %}
+  <dl class="taste-feedback-summary" aria-label="Recorded feedback">
+    {% for kind, c in feedback.items() %}
+    {% set description = labels.get(kind, (kind|replace('_', ' ')|capitalize, 'Other saved recommendation feedback.')) %}
+    <div>
+      <dt><strong>{{ description[0] }}</strong><span>{{ description[1] }}</span></dt>
+      <dd>{{ '{:,}'.format(c) }}</dd>
+    </div>
+    {% endfor %}
+  </dl>
+  {% else %}<p class="section-note">No feedback recorded yet.</p>{% endif %}
+  <div class="taste-feedback-clear">
+    <p class="section-note">Clearing removes saved feedback and the history of suggestions shown to you. Your trained model and saved taste weights are kept. YouTube ratings stay as they are and may be imported again when you sync.</p>
+    <button type="button" class="btn-ghost btn-sm" hx-post="/taste/clear-feedback" hx-swap="none"
+            hx-confirm="Clear saved likes, dislikes, recommendation feedback, and recommendation history? Your trained model, saved taste weights, and YouTube ratings are kept.">Clear feedback and recommendation history</button>
+  </div>
+</div>
+
+<h2 class="section" id="taste-banned-title">Banned tracks <span class="count">{{ bans|length }}</span></h2>
+<p class="section-note">Tracks excluded from recommendations after a dislike. Unban a track to allow it again.</p>
+<div class="card library-table-card table-scroll">
+  <table class="taste-feedback-table" x-data="rowSort()" aria-labelledby="taste-banned-title">
+    <thead><tr>
+      <th scope="col" class="col-thumb" aria-label="Artwork"></th>
+      <th scope="col" class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.prevent="sortBy('title')" @keydown.space.prevent="sortBy('title')">Song{{ sort_indicator('title') }}</th>
+      <th scope="col" class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.prevent="sortBy('artist')" @keydown.space.prevent="sortBy('artist')">Artist{{ sort_indicator('artist') }}</th>
+      <th scope="col" class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.prevent="sortBy('album')" @keydown.space.prevent="sortBy('album')">Album{{ sort_indicator('album') }}</th>
+      <th scope="col" class="col-expiry">Banned until</th>
+      <th scope="col" class="col-unban" aria-label="Actions"></th>
+    </tr></thead>
+    <tbody x-ref="body">
+    {% for b in bans %}
+      <tr class="srow" data-title="{{ b.title|lower }}" data-artist="{{ b.artist|lower }}" data-album="{{ b.album|lower }}">
+        <td>
+          <span class="pl-cover">
+            {% if b.thumbnail %}<img class="pl-thumb" src="{{ b.thumbnail }}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+            {% if b.video_id %}<a class="pl-play" href="https://music.youtube.com/watch?v={{ b.video_id|urlencode }}"
+               target="_blank" rel="noopener" aria-label="Play {{ b.title }} on YouTube Music">▶</a>{% endif %}
+          </span>
+        </td>
+        <td>{% if b.video_id %}<a class="ptitle" href="https://music.youtube.com/watch?v={{ b.video_id|urlencode }}"
+               target="_blank" rel="noopener" data-yt-info>{{ b.title }}</a>{% else %}{{ b.title }}{% endif %}</td>
+        <td><a class="alink" href="/artist?name={{ b.artist|urlencode }}">{{ b.artist }}</a></td>
+        <td class="muted">{{ b.album or '—' }}</td>
+        <td class="text-dim">{% if b.until_iso %}<time datetime="{{ b.until_iso }}" title="{{ b.until_iso }}">{{ b.until_label }}</time>{% else %}{{ b.until_label }}{% endif %}</td>
+        <td class="cell-actions">
+          <button type="button" class="btn-ghost btn-sm" hx-post="/taste/unban" hx-vals='{{ {"key": b.key}|tojson }}' hx-swap="none"
+                  aria-label="Unban {{ b.title }}" hx-confirm="Unban {{ b.title }}?">Unban</button>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="empty">No banned tracks.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

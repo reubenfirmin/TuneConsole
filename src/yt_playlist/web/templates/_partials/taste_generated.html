@@ -1,0 +1,103 @@
+{% import "_partials/taste_choice_chart.html" as choices %}
+<div class="taste-generated">
+  <header class="taste-generated-lead">
+    <h2>Generated playlists</h2>
+    <p>The four mixes on <a href="/">Home’s Listen tab</a> find music in different ways. Their titles reflect the music in each mix.</p>
+  </header>
+
+  <ol class="generation-process" aria-label="How a mix is built">
+    <li><span>01</span><h3>Choose a music group</h3><p>The model groups tracks by genre, era, and sound. Your library, mix choices, and recent listening help decide which groups to draw from.</p></li>
+    <li><span>02</span><h3>Find the tracks</h3><p>Each mix picks tracks using one of the four approaches below.</p></li>
+    <li><span>03</span><h3>Make room for variety</h3><p>Leave out hidden music, avoid repeats between mixes, and limit tracks by the same artist or album.</p></li>
+    <li><span>04</span><h3>Order the tracks</h3><p>The list is run through a DJ model to produce a coherent progression.</p></li>
+  </ol>
+
+  <section class="taste-generated-section" aria-labelledby="generation-recipes-title">
+    <header class="generation-section-head"><h2 id="generation-recipes-title">Different reasons to listen</h2></header>
+    <div class="generation-recipes">
+      {% set recipes = [
+        {'source':'wheelhouse', 'title':'Familiar music, less obvious tracks',
+         'text':'Combines music that fits your taste with overlooked tracks by artists you play often. Your most-played tracks are left out of the taste matches.',
+         'detail':'Until taste matching is ready, tracks that share playlists with your favorites are used instead. The sliders below balance these sources.'},
+        {'source':'explore', 'title':'Rediscover your library',
+         'text':'Favors music in your library that you rarely play and that fits your taste. Unplayed tracks get the biggest boost.'},
+        {'source':'fresh', 'title':'Discover new music',
+         'text':'Finds music outside your library that fits your taste, using genres and other musical details. Your saved genre preferences and recent listening also guide the choices.'},
+        {'source':'comfort', 'title':'Return to your favorites',
+         'text':'Brings back favorites you’ve played at least ' ~ generation.comfort_min_plays|int ~ ' times, favoring songs you play often but haven’t heard lately.',
+         'detail':'With too few favorites, this can become a mix of older, middle-period, or newer releases from your library, when release dates are available.'}
+      ] %}
+      {% for recipe in recipes %}
+      <article class="generation-recipe">
+        <span class="generation-recipe-number" aria-hidden="true">{{ '%02d'|format(loop.index) }}</span>
+        <div><h3>{{ recipe.title }}</h3></div>
+        <p>{{ recipe.text }}</p>
+        {% if recipe.get('detail') %}<p class="generation-recipe-detail">{{ recipe.detail }}</p>{% endif %}
+        {% set example = generation.examples[recipe.source] %}
+        {% if example %}
+        <div class="generation-example">
+          {% if example.thumbnail %}<img src="{{ example.thumbnail }}" alt="" loading="lazy" width="48" height="48">{% endif %}
+          <div><span>Example track · may not be in your current mix</span><strong>{{ example.title }}</strong><small>{{ example.artist }}</small></div>
+        </div>
+        {% endif %}
+      </article>
+      {% endfor %}
+    </div>
+    <p class="generation-shared-note">Each mix allows up to <strong>{{ generation.artist_cap|int }} tracks per artist</strong> and <strong>{{ generation.album_cap|int }} per album</strong>. Music you’ve hidden or used in generated playlists is left out. These limits and the available tracks can change which groups are offered.</p>
+  </section>
+
+  <section class="taste-generated-section" aria-labelledby="generation-learning-title">
+    <header class="generation-section-head"><h2 id="generation-learning-title">What your mix choices teach the model</h2></header>
+    <p class="generation-deck">When you play the mix, we use that choice to train the model. Future mixes lean toward groups you choose, while giving others a chance.</p>
+    <p class="generation-group-intro">Each row is a group of similar tracks. A group can span several genres, or share a genre with another group but differ in era or sound. The percentages describe the music inside it; your saved genre weights are separate.</p>
+    <div class="generation-evidence-guide">
+      <div><h3>Offers</h3><p>How often a mix from this group appeared on Home. Reloading the same set of mixes doesn’t add to the count.</p></div>
+      <div><h3>Selections</h3><p>Playlists you’ve played.</p></div>
+    </div>
+    {% if generation.choices.rows %}{{ choices.chart(generation.choices.rows) }}
+    {% else %}<p class="taste-quiet">The chart will appear once the model has grouped your library by genre, era, and sound.</p>{% endif %}
+    <div class="generation-calculation">
+      {% set example = generation.choices.rows|selectattr('has_evidence')|sort(attribute='offered', reverse=true)|first %}
+      <h3>Reading your choices</h3>
+      {% if example %}<p><strong>{{ example.profile.title }}:</strong> {{ example.picked }} selection{{ '' if example.picked == 1 else 's' }} from {{ example.offered }} offer{{ '' if example.offered == 1 else 's' }} gives a score of <strong>{{ '%.0f'|format(example.estimate*100) }}/100</strong>. The dot sits at {{ '%.0f'|format(example.estimate*100) }}; its bar spans <strong>{{ '%.0f'|format(example.low*100) }}–{{ '%.0f'|format(example.high*100) }}</strong>. That’s the model’s current range of plausible scores.</p>{% else %}<p>Scores will appear as groups are offered on Home and you choose mixes to play.</p>{% endif %}
+      <p>More offers usually narrow the bar as the model gets a clearer picture. A group can have a low score and a short bar: the model has good evidence that you rarely choose it.</p>
+      <p class="generation-data-note">Scores start with one selection and one pass to soften the first few results. Playing the same mix again adds another selection, so selections can outnumber offers. Sound descriptions compare measured tracks with your library; each shows how many tracks have that measurement.</p>
+    </div>
+  </section>
+
+  <section class="taste-generated-section" id="taste-mix-settings" aria-labelledby="generation-weights-title">
+    <header class="generation-section-head"><h2 id="generation-weights-title">Source weights</h2></header>
+    <p class="generation-deck">These sliders only affect the familiar-music mix. It uses <strong>Deep cuts</strong> plus <strong>Taste matches</strong>, with <strong>Playlist neighbors</strong> standing in until taste matching is ready.</p>
+    <dl class="generation-weight-guide">
+      <div><dt>What the numbers mean</dt><dd><strong>×1 is the default.</strong> ×2 gives a source about twice as many spots on the shortlist as ×1. The final mix still follows genre choices and artist limits.</dd></div>
+      <div><dt>When you give feedback</dt><dd>“More” adds <strong>15%</strong> to a source’s weight. “Less”, dismissing, or snoozing takes <strong>15%</strong> off. “Already know it” just hides the track.</dd></div>
+      <div><dt>Saving and resetting</dt><dd>Sliders save when you let go. Changes apply at the next recommendation refresh. <strong>Reset takes a source back to ×1.</strong> Left alone, weights drift toward ×1: for example, ×2 becomes ×1.5 after <strong>{{ '%.0f'|format(viz.lane_weight_halflife_days) }} days</strong>, even with learning off. Older weights with no saved date stay put.</dd></div>
+    </dl>
+    <div class="generation-source-weights">
+      {% for lane in viz.lanes %}
+      <div class="knob generation-source" data-source="{{ lane.name }}">
+        <div class="knob-head">
+          <label for="lane-{{ lane.name }}">{{ lane.label }}</label>
+          <output id="out-lane-{{ lane.name }}" for="lane-{{ lane.name }}">×{{ '%.2f'|format(lane.weight) }}</output>
+          <button class="knob-reset" type="button" title="Reset to default" aria-label="Reset {{ lane.label }} to default"
+                  data-target="lane-{{ lane.name }}" data-default="{{ lane_default }}" onclick="resetKnob(this)"
+                  hx-post="/taste/weight" hx-vals='{"axis":"lane:{{ lane.name }}","weight":"{{ lane_default }}"}' hx-swap="none"
+                  hx-on::after-request="if(event.detail.successful) markWeightSaved(this)">{{ arrow_icon('reset') }} Reset</button>
+        </div>
+        <p class="knob-help" id="help-lane-{{ lane.name }}">{{ lane.help }} {% if lane.name == 'rotation' %}
+          {% if generation.taste_rank_ready %}Kept as a backup while taste matches are available.{% else %}Used until taste matching is ready.{% endif %}
+          {% elif lane.name == 'neighbourhood' and not generation.taste_rank_ready %}This source will be used once taste matching is ready.{% endif %}</p>
+        <input type="range" id="lane-{{ lane.name }}" name="weight" value="{{ '%.2f'|format(lane.weight) }}"
+               min="{{ lane_min }}" max="{{ lane_max }}" step="{{ lane_step }}" data-prefix="×"
+               aria-describedby="help-lane-{{ lane.name }}"
+               hx-post="/taste/weight" hx-vals='{"axis":"lane:{{ lane.name }}"}' hx-trigger="change" hx-swap="none"
+               hx-on::after-request="if(event.detail.successful) markWeightSaved(this)" oninput="updateOut(this)">
+        <div class="knob-scale"><span>Less often</span><span>More often</span></div>
+        {% set w = lane %}{% include "_partials/taste_weight_origin.html" %}
+      </div>
+      {% endfor %}
+    </div>
+    <p class="section-note" id="taste-generated-save-status" role="status"></p>
+    <a class="taste-detail-link" href="#recommendations" @click="select('recommendations')">More recommendation settings {{ arrow_icon('right') }}</a>
+  </section>
+</div>

@@ -1,13 +1,54 @@
-{# Genre whitelist: count + chips. Page {% include %}s this inside #genre-list; the
-   add/remove/reset routes return it standalone for htmx to swap into #genre-list. #}
-<span class="muted genre-count">{{ genres|length }} genres</span>
-<div class="genre-chips">
-  {% for name in genres %}
-  <span class="genre-chip"><span>{{ name }}</span><button type="button" class="chip-x"
-        title="Remove {{ name }}"
+{# Both the initial page and HTMX edits show the recommendation family's actual assignments. #}
+{% macro chips(names) %}
+<ul class="genre-chips">
+  {% for name in names %}
+  <li class="genre-chip"><span>{{ name }}</span>
+    {% if genre_aliases.get(name) %}
+    <details class="genre-aliases"><summary>{{ genre_aliases[name]|length }} {{ 'alias' if genre_aliases[name]|length == 1 else 'aliases' }}</summary>
+      <p>{{ genre_aliases[name]|join(', ') }}</p>
+    </details>
+    {% endif %}
+    <button type="button" class="chip-x"
+        title="Remove {{ name }}" aria-label="Remove {{ name }}"
         hx-post="/genres/remove" hx-vals='{"name": {{ name|tojson }}}'
-        hx-target="#genre-list" hx-swap="innerHTML">×</button></span>
-  {% else %}
-  <p class="muted">No genres, so tags won't be matched. Add some, or reset to defaults.</p>
+        hx-include="#genre-filter"
+        hx-target="#genre-list" hx-swap="innerHTML">×</button></li>
   {% endfor %}
+</ul>
+{% endmacro %}
+<div class="genre-list-summary">
+  <span class="muted genre-count">{{ genres|length }} genres</span>
+  <span class="muted">{{ genre_family_count }} families</span>
+  {% if genre_query %}<span role="status">{{ matching_genres }} matching genres</span>{% endif %}
 </div>
+{% if genres %}
+<p class="section-note">Expand a family to see its genres. Equivalent tags share one genre;
+  related subgenres stay separate. These are the same families used in recommendations.</p>
+<div class="genre-hierarchy">
+  {% for group in genre_families %}
+  <section class="genre-family" aria-label="{{ group.label }}">
+    <details{% if genre_query %} open{% endif %}>
+    <summary><h3>{{ group.label }} <small class="muted">{{ group.genres|length }}</small></h3>
+      <svg class="genre-chevron" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </summary>
+    {{ chips(group.genres) }}
+    </details>
+  </section>
+  {% endfor %}
+  {% if unassigned_genres %}
+  <section class="genre-family" aria-label="No family assigned">
+    <details{% if genre_query %} open{% endif %}>
+    <summary><h3>No family assigned <small class="muted">{{ unassigned_genres|length }}</small></h3>
+      <svg class="genre-chevron" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </summary>
+    <p class="section-note">A recognized genre can still lack a reliable family assignment.
+      Each of these tags is treated as a separate family in recommendations.</p>
+    {{ chips(unassigned_genres) }}
+    </details>
+  </section>
+  {% endif %}
+</div>
+{% if genre_query and not matching_genres %}<p role="status">No genres match “{{ genre_query }}”.</p>{% endif %}
+{% else %}
+<p class="muted">No genres, so provider tags won't be matched. Add some, or reset to defaults.</p>
+{% endif %}

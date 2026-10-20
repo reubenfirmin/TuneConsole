@@ -27,6 +27,37 @@ from yt_playlist.web.routes import build_all
 from yt_playlist.web.routes.bridge import build as build_bridge_route
 
 
+_UI_STARTUP_GRACE_S = 120.0
+_UI_CLOSE_GRACE_S = 30.0
+_UI_HEARTBEAT_TIMEOUT_S = 300.0
+
+
+class _UIPresence:
+    """Track document leases: pagehide also fires during navigation and browser handoffs."""
+
+    def __init__(self):
+        self._startup_until = time.monotonic() + _UI_STARTUP_GRACE_S
+        self._pages = {}
+        self._lock = threading.Lock()
+
+    def heartbeat(self, page):
+        with self._lock:
+            self._pages[page] = time.monotonic() + _UI_HEARTBEAT_TIMEOUT_S
+
+    def goodbye(self, page):
+        with self._lock:
+            # Tokenless legacy pages and launcher heartbeats remain supported, but their
+            # anonymous goodbye cannot reliably identify which document went away.
+            if page and page in self._pages:
+                self._pages[page] = time.monotonic() + _UI_CLOSE_GRACE_S
+
+    def idle(self):
+        with self._lock:
+            now = time.monotonic()
+            self._pages = {page: until for page, until in self._pages.items() if until > now}
+            return now >= self._startup_until and not self._pages
+
+
 def _install_idle_shutdown(app, templates):
     """The packaged launchers (Flatpak / .app) set YT_PLAYLIST_EXIT_ON_IDLE=1. They run headless with
     no terminal to Ctrl-C and no window to quit, so the UI heartbeats the server and it shuts itself
@@ -36,25 +67,21 @@ def _install_idle_shutdown(app, templates):
         templates.env.globals["exit_on_idle"] = False
         return
     templates.env.globals["exit_on_idle"] = True
-    st = {"last": time.monotonic(), "seen": False, "bye_at": None}
+    presence = _UIPresence()
 
     @app.post("/heartbeat")
-    def _heartbeat():
-        st["last"] = time.monotonic()
-        st["seen"] = True
-        st["bye_at"] = None                    # a live beat cancels a pending goodbye (page reload)
+    def _heartbeat(page: str = ""):
+        presence.heartbeat(page)
         return Response(status_code=204)
 
     @app.post("/goodbye")
-    def _goodbye():
-        st["bye_at"] = time.monotonic()        # tab closing (sendBeacon); a reload will re-beat
+    def _goodbye(page: str = ""):
+        presence.goodbye(page)
         return Response(status_code=204)
 
     def _monitor():
-        start = time.monotonic()
         while True:
             time.sleep(1.0)
-            now = time.monotonic()
             ctx = getattr(app.state, "ctx", None)
             if ctx is not None and ctx.updater is not None and ctx.updater.busy:
                 continue                       # don't cancel an update when the UI tab closes
@@ -63,18 +90,10 @@ def _install_idle_shutdown(app, templates):
             # continue servicing lookups, and normal idle shutdown resumes as soon as it finishes.
             if ctx is not None and ctx.spotify_import_lock.locked():
                 continue
-            if not st["seen"]:
-                if now - start > 45:           # browser never connected; do not linger forever
-                    break
-                continue
-            bye = st["bye_at"]
-            if bye is not None and st["last"] < bye and now - bye > 2.5:
-                break                          # tab closed (pagehide beacon) and no reload within grace
-            # Backstop for a close that never sent the beacon (crash/force-quit). MUST be well above the
-            # browser's background-tab timer throttling: a hidden tab's heartbeat interval gets throttled
-            # to ~once/minute, so a short timeout would kill the server under an open-but-backgrounded
-            # tab. 150s tolerates that; a real close is handled promptly by the beacon above.
-            if now - st["last"] > 150:
+            # Always allow startup to settle, even after an initial page immediately navigates
+            # away. Each document has its own lease, so one closing tab cannot evict another.
+            # Missing beacons expire slowly enough to tolerate background timer throttling.
+            if presence.idle():
                 break
         logging.getLogger("yt_playlist").info("UI idle — shutting down server")
         os.kill(os.getpid(), signal.SIGTERM)
@@ -150,8 +169,7 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
                 sync_mod.sync_all(ctx.store, clients, ctx.now_fn(),
                                   on_progress=job.events.append,
                                   on_auth_expired=ctx.flag_auth_expired,
-                                  on_auth_ok=ctx.clear_auth_expired,
-                                  playlist_dates=ctx.playlist_dates)
+                                  on_auth_ok=ctx.clear_auth_expired)
             finally:
                 job.done = True
                 ctx.sync_lock.release()
@@ -165,7 +183,7 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
 
 def create_app(store, client_provider, *, now_fn=time.time,
                allowed_hosts=("localhost", "127.0.0.1"), setup=None,
-               bridge=None, playlist_dates=None, updater=None) -> FastAPI:
+               bridge=None, updater=None) -> FastAPI:
     # setup: optional Runtime-like collaborator (.configured, .credentials_present, .apply_setup).
     # When None, the app is treated as already configured and the /setup wizard is inert. This
     # keeps the existing two-arg call sites (and their tests) working unchanged.
@@ -179,6 +197,9 @@ def create_app(store, client_provider, *, now_fn=time.time,
     templates = Jinja2Templates(directory=str(web_dir / "templates"))
     @asynccontextmanager
     async def lifespan(app):
+        # Catch up older installations independently of extension connectivity or library sync.
+        # The worker checks/rebuilds local genre groups off the startup and request paths.
+        app.state.ctx.rec_worker.trigger_mode_refresh()
         try:
             yield
         finally:
@@ -245,7 +266,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
 
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
               templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge,
-              radio=RadioSession(), playlist_dates=playlist_dates)
+              radio=RadioSession())
     if updater is None and updatecheck.install_kind() == "flatpak":
         from yt_playlist.core.flatpak_update import FlatpakUpdater
         updater = FlatpakUpdater()

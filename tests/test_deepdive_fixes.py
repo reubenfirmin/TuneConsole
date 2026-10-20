@@ -31,5 +31,5 @@ def test_set_weight_clamps(store):
     import pytest
     store.rec.set_weight("lane:deep_cut", 0.0, now=1000.0)
     assert store.get_weights(now=1000.0)["lane:deep_cut"] == pytest.approx(0.2)          # floored, not 0 (would disable the lane)
-    store.rec.set_weight("lane:explore", 99.0, now=1000.0)
-    assert store.get_weights(now=1000.0)["lane:explore"] == pytest.approx(3.0)           # capped
+    store.rec.set_weight("lane:neighbourhood", 99.0, now=1000.0)
+    assert store.get_weights(now=1000.0)["lane:neighbourhood"] == pytest.approx(3.0)     # capped

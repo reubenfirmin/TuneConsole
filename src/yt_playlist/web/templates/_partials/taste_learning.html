@@ -1,0 +1,70 @@
+{% import "_partials/taste_learning_card.html" as lc %}
+<div id="taste-learning-readings" class="taste-learning">
+  <header class="learning-intro">
+    <p class="learning-eyebrow">Listening leaves a trace</p>
+    <h2>Recent &amp; learning</h2>
+    <p><a href="#recommendations" @click="select('recommendations')">Recommendations</a> sets the balance of your picks: variety, genre preferences, and how strongly recent plays and likes count. This tab shows how your listening and feedback change those picks over time. The controls below set how quickly recent influence fades and how much evidence is needed to change a saved preference.</p>
+    <p>For example, playing more jazz can temporarily favor jazz. Continued listening can also raise its saved preference—the same value you can adjust in <a href="#recommendations/genres" @click.prevent="selectRecommendation('genres')">Recommendations’ Genres controls</a>. Increasing <a href="#recommendations/main" @click.prevent="selectRecommendation('main')">Follow recent plays</a> also makes plays build learning evidence faster.</p>
+  </header>
+
+  <section aria-labelledby="learning-progress-title">
+    <div class="learning-section-head">
+      <h2 id="learning-progress-title">Learning progress</h2>
+    </div>
+    <p class="learning-note">The meters show evidence toward recommending each artist, genre or era more or less often. At 100%, its saved preference gets a small update and the meter builds again.</p>
+    <div class="learning-cards learning-progress-cards">
+      {% for group in learning.groups %}
+      {{ lc.card(group.axis, group.title, group.rows) }}
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="learning-other" aria-labelledby="learning-other-title">
+    <div class="learning-section-head"><h2 id="learning-other-title">Other learning</h2></div>
+    <p class="learning-note">Mix choices guide music groups, source weights balance the shortlist, and saved changes record completed learning steps.</p>
+    <div class="learning-cards">
+      {{ lc.card('choices', 'Mix choices', learning.choices.rows, kind='choices',
+          note='Choosing mixes on Home teaches the model which cross-genre music groups to draw from. Selections are learned in the context of how often each group was offered.',
+          footnote=learning.choices.picked ~ ' selections across ' ~ learning.choices.offered ~ ' offers. Repeat selections count again; other groups still get a chance.',
+          link_text='Explore mix choice learning') }}
+      {{ lc.card('sources', 'Sources', learning.source_weights.lanes, kind='sources', maximum=learning.source_weights.maximum,
+          note='Recommendation feedback and manual adjustments balance the sources supplying library mixes. Above ×1 means more shortlist places; below ×1 means fewer.',
+          footnote='The tick marks neutral ×1 on a scale up to ×' ~ '%g'|format(learning.source_weights.maximum) ~ '. Dated weights drift toward ×1 over time. Track availability and filters also affect the mix.',
+          link_text='See source details and controls') }}
+      {{ lc.card('changes', 'Saved changes', learning.changes, kind='changes',
+          note='When a learning meter reaches 100%, it takes a small step in your saved preference. Inspect the latest recorded steps and the signal that triggered each one.',
+          footnote='Weights shown were saved at the time of each step. Today’s weights can differ after further learning, manual adjustments, or fading.') }}
+    </div>
+    <p class="learning-reading-footnote learning-model-link">The model also learns which tracks belong together from your playlists. See <a href="#profile" @click.prevent="select('profile')">Taste profile</a> for playlist influence and <a href="#health" @click.prevent="select('health')">Model health</a> for its technical setup and prediction checks.</p>
+  </section>
+
+  <section class="learning-activity" aria-labelledby="learning-sound-title">
+    <div class="learning-section-head"><h2 id="learning-sound-title">Recent sound</h2><span class="learning-eyebrow">Session · recent</span></div>
+    <div id="taste-recent-sound" hx-get="/taste/viz/recent-sound" hx-trigger="intersect once, taste-retry" hx-swap="innerHTML"
+         hx-on::after-request="if(event.detail.elt === this &amp;&amp; !event.detail.successful) { this.querySelector('[role=status]').textContent = 'Could not load recent sound.'; this.querySelector('button').hidden = false; }">
+      <p class="section-note" role="status">Loading recent sound…</p>
+      <button type="button" class="btn-ghost btn-sm" hidden onclick="htmx.trigger(this.parentElement, 'taste-retry')">Try recent sound again</button>
+    </div>
+  </section>
+
+  <section class="learning-activity" aria-labelledby="learning-activity-title">
+    <div class="learning-section-head"><h2 id="learning-activity-title">Recent activity</h2><span class="learning-eyebrow">Influence fades with time</span></div>
+    <p class="learning-note">Counts show activity available to the recent recommendation model. Each curve shows how one new signal fades over 28 days, using your current settings.</p>
+    <div class="learning-sources">
+      {% for source in learning.activity %}
+      <article class="learning-source learning-source--{{ source.key }}">
+        <h3>{{ source.title }}</h3>
+        <strong class="learning-source-count">{{ '{:,}'.format(source.count) }}</strong>
+        <svg viewBox="0 0 200 70" preserveAspectRatio="none" aria-hidden="true">
+          <path class="learning-curve-guide" d="M 0 34 H 200 M 0 64 H 200"/>
+          <path class="learning-curve-fill" d="{{ source.fill }}"/>
+          <path class="learning-curve-line" d="{{ source.curve }}"/>
+        </svg>
+        <div class="learning-curve-axis" aria-hidden="true"><span>Today</span><span>28 days</span></div>
+        <p>Half the influence after <strong>{{ '%g'|format(source.half_days) }} {{ 'day' if source.half_days == 1 else 'days' }}</strong></p>
+      </article>
+      {% endfor %}
+    </div>
+    <p class="learning-source-note">These signals shape the Recent readings in Taste profile and fade even when you aren’t listening.{% if learning.latest_age_h is not none %} Latest activity used: {{ '%.1f'|format(learning.latest_age_h) }} hours ago.{% endif %}</p>
+  </section>
+</div>

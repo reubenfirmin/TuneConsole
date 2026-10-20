@@ -31,7 +31,7 @@ def test_taste_page_lists_modes(store):
           "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 2,
           "rep_keys": ["h|1", "h|2"]}], retired_ids=[], now=9_000.0)
     c = _client(store)
-    r = c.get("/taste")
+    r = c.get("/taste/panels/profile")
     assert r.status_code == 200
     assert "house" in r.text
     assert "Strobe" in r.text and "Opus" in r.text
@@ -39,6 +39,6 @@ def test_taste_page_lists_modes(store):
 
 def test_taste_page_empty_modes_state(store):
     c = _client(store)
-    r = c.get("/taste")
+    r = c.get("/taste/panels/profile")
     assert r.status_code == 200
     assert "No listening styles found yet" in r.text

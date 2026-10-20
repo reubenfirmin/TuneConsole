@@ -42,6 +42,7 @@ def test_prepare_buckets_by_nearest_mode(monkeypatch, store):
     payload = ms.prepare_bundles(store, now=10.0)
     assert [d["key"] for d in payload["1"]["wheelhouse"]] == ["k1"]
     assert [d["key"] for d in payload["2"]["wheelhouse"]] == ["k2"]
+    assert payload["all"]["fresh"][0]["year"] == 2026
     assert store.get_proposals("mode_bundles") is not None
     assert store.get_proposals("fresh_pool") == [surfaces._item_to_fresh_dict(fresh)]
 
@@ -76,6 +77,28 @@ def test_temporal_excludes_disliked_library_tracks(monkeypatch, store):
 def test_prepare_empty_when_no_modes(store):
     assert ms.prepare_bundles(store, now=10.0) == {}
     assert store.get_proposals("mode_bundles") == {}
+
+
+def test_fresh_refresh_removes_stale_candidates_and_preserves_library_caches(store):
+    from yt_playlist.rec import fresh_pool
+
+    old = [{"key": "stale", "artist": "Artist", "genre": "house"}]
+    library = [{"key": "owned", "artist": "Library artist", "genre": "house"}]
+    store.put_proposals("fresh_pool", old, 1)
+    store.put_proposals("mode_bundles", {
+        "1": {"fresh": old, "wheelhouse": library},
+        "all": {"fresh": old, "wheelhouse": library},
+        "_meta": {"full_pools": True}, "_ppr": {"1": ["owned"]},
+    }, 1)
+
+    fresh_pool.prepare(store, 10)  # No discoveries remain.
+
+    assert fresh_pool.pick(store, 10) == []
+    bundles = store.get_proposals("mode_bundles")
+    assert bundles["1"] == {"fresh": [], "wheelhouse": library}
+    assert bundles["all"] == {"fresh": [], "wheelhouse": library}
+    assert bundles["_meta"] == {"full_pools": True}
+    assert bundles["_ppr"] == {"1": ["owned"]}
 
 
 def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(monkeypatch, store):

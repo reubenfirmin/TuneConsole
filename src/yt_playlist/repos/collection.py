@@ -1,5 +1,5 @@
-"""CollectionRepo: the user's album collection: saved-album CRUD plus the aggregate
-library views (every album / artist across all playlists) that power the collection pages.
+"""CollectionRepo: saved-album CRUD plus the aggregate playlist and saved-album
+library views that power the collection pages.
 """
 import json
 
@@ -107,7 +107,7 @@ class CollectionRepo(Repo):
             "GROUP BY sa.browse_id").fetchall()
         return {r["browse"]: r["last"] for r in rows}
 
-    # --- aggregate library views (computed across every playlist) ---
+    # --- aggregate library views ---
     def _play_counts(self):
         return {r["identity_key"]: r["c"]
                 for r in self.conn.execute("SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key")}
@@ -139,43 +139,62 @@ class CollectionRepo(Repo):
 
     @synchronized
     def collection_artists(self) -> list[dict]:
-        """Every artist across your playlists: song count, distinct albums, #playlists, total plays."""
+        """Artists across playlists and saved albums, including albums not yet materialized."""
         plays = self._play_counts()
         rows = self.conn.execute(
             "SELECT t.artist artist, t.identity_key key, t.album album, t.artist_browse_id browse, "
+            "       t.album_browse_id album_browse, MIN(NULLIF(t.thumbnail,'')) thumb, "
             "       GROUP_CONCAT(DISTINCT pt.playlist_id) pls "
-            "FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id "
-            "WHERE t.artist<>'' GROUP BY t.artist, t.artist_browse_id, t.identity_key, t.album").fetchall()
+            "FROM tracks t LEFT JOIN playlist_tracks pt ON pt.track_id=t.id "
+            "WHERE t.artist<>'' AND (pt.track_id IS NOT NULL OR "
+            "t.album_browse_id IN (SELECT browse_id FROM saved_albums)) "
+            "GROUP BY t.artist, t.artist_browse_id, t.identity_key, t.album, t.album_browse_id").fetchall()
         known_ids = {}
+        album_artist_ids = {}
         for r in rows:
             if r["browse"]:
                 known_ids.setdefault(r["artist"], set()).add(r["browse"])
+                album_artist_ids.setdefault((r["artist"], r["album_browse"]), set()).add(r["browse"])
         artists = {}
-        for r in rows:
-            browse = r["browse"]
+
+        def artist_row(artist, browse=None):
             # Older syncs may not have stored an ID. Fold those tracks into the only known identity;
             # keep them separate when the name genuinely maps to several YouTube artists.
-            if not browse and len(known_ids.get(r["artist"], ())) == 1:
-                browse = next(iter(known_ids[r["artist"]]))
-            artist_key = (r["artist"], browse)
-            a = artists.setdefault(artist_key, {"artist": r["artist"], "browse": r["browse"],
-                                                 "songs": 0, "plays": 0, "_songs": set(),
-                                                 "_albums": set(), "_pls": set()})
-            a["browse"] = a["browse"] or browse
-            a["plays"] += plays.get(r["key"], 0)
+            if not browse and len(known_ids.get(artist, ())) == 1:
+                browse = next(iter(known_ids[artist]))
+            return artists.setdefault((artist, browse), {
+                "artist": artist, "browse": browse, "plays": 0, "thumbnail": None,
+                "_songs": set(), "_albums": set(), "_pls": set()})
+
+        for r in rows:
+            a = artist_row(r["artist"], r["browse"])
+            if r["key"] not in a["_songs"]:
+                a["plays"] += plays.get(r["key"], 0)
             a["_songs"].add(r["key"])
-            if r["album"]:
-                a["_albums"].add(r["album"])
+            if r["album"] or r["album_browse"]:
+                a["_albums"].add((r["album_browse"], (r["album"] or "").strip().casefold()))
+            a["thumbnail"] = a["thumbnail"] or r["thumb"]
             a["_pls"].update((r["pls"] or "").split(","))
-        thumbs = {(r["artist"], r["browse"]): r["thumb"] for r in self.conn.execute(
-            "SELECT artist, artist_browse_id browse, MIN(thumbnail) thumb FROM tracks "
-            "WHERE artist<>'' AND thumbnail IS NOT NULL GROUP BY artist, artist_browse_id")}
+
+        for album in self.get_saved_albums():
+            if not album["artist"]:
+                continue
+            ids = album_artist_ids.get((album["artist"], album["browse"]), set())
+            a = artist_row(album["artist"], next(iter(ids)) if len(ids) == 1 else None)
+            a["_albums"].add((album["browse"], (album["title"] or "").strip().casefold()))
+            a["thumbnail"] = a["thumbnail"] or album["thumbnail"]
+
         out = []
-        for artist_key, a in artists.items():
+        for a in artists.values():
             a["songs"] = len(a.pop("_songs"))
-            a["n_albums"] = len(a.pop("_albums"))
+            albums = a.pop("_albums")
+            album_ids = {browse for browse, title in albums if browse}
+            identified_titles = {title for browse, title in albums if browse}
+            # Match old title-only playlist metadata to identified releases, while keeping
+            # separate releases with the same title distinct when their IDs are known.
+            title_only = {title for browse, title in albums if not browse}
+            a["n_albums"] = len(album_ids) + len(title_only - identified_titles)
             a["n_pls"] = len([x for x in a.pop("_pls") if x])
-            a["thumbnail"] = thumbs.get(artist_key) or thumbs.get((a["artist"], None))
             out.append(a)
         out.sort(key=lambda a: (-a["plays"], a["artist"].lower()))
         return out

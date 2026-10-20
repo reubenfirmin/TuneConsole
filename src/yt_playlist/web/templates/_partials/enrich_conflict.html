@@ -1,0 +1,36 @@
+<section class="conflict-track enrich-conflict"
+         hx-post="/enrich/conflicts/{{ c.track_id }}/{{ c.field }}?page={{ page }}" hx-include="find form"
+         hx-trigger="change from:input[type='radio'], click[target.checked &amp;&amp; target.defaultChecked] from:input[type='radio']"
+         hx-target="this" hx-swap="outerHTML settle:0" hx-disabled-elt="find fieldset"
+         hx-on::after-settle="this.querySelector('input:checked').focus({preventScroll: true})"
+         hx-on::before-request="const status = this.querySelector('[data-save-status]'); status.textContent = 'Saving…'; status.classList.remove('is-saved', 'is-error')"
+         hx-on::after-request="if (!event.detail.successful) { const status = this.querySelector('[data-save-status]'); status.textContent = 'Could not save. Click a choice to try again.'; status.classList.add('is-error'); this.querySelectorAll('input').forEach(input => input.checked = input.defaultChecked) }">
+  <h2>{{ c.title }} <span class="section-note">by {{ c.artist or 'Unknown artist' }}</span></h2>
+  <form method="post" action="/enrich/conflicts/{{ c.track_id }}/{{ c.field }}?page={{ page }}">
+    <fieldset class="conflict-options"{% if not c.can_resolve %} disabled{% endif %}>
+      <legend>{{ c.field|replace('_', ' ')|capitalize }}</legend>
+      {% for option in c.options %}
+      <div class="conflict-choice{% if option.current %} is-current{% endif %}">
+        <label for="{{ option.id }}" class="conflict-choice-label">
+          <input type="radio" id="{{ option.id }}" name="value" value="{{ option.value }}"
+                 aria-label="{{ option.label }}" aria-describedby="{{ option.id }}-source"{% if option.current %} checked{% endif %}>
+          <span class="conflict-value">{{ option.label }}</span>
+          {% if option.current %}<span class="conflict-current">Current{% if saved|default(false) %}<svg class="conflict-current-check" viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 10 4 4 8-8"/></svg>{% endif %}</span>{% endif %}
+        </label>
+        <span class="conflict-choice-source" id="{{ option.id }}-source">
+          {% if option.source_note %}{{ option.source_note }}{% if option.providers %} · {% endif %}{% endif %}
+          {% if option.providers %}Reported by
+          {% for provider in option.providers %}
+            {% set provider_url = provider_search_url(provider, c.title, c.artist, c.mb_recording_id) %}
+            {% if provider_url %}<a class="conflict-prov" href="{{ provider_url }}" target="_blank" rel="noopener noreferrer">{{ provider_labels.get(provider, provider) }}</a>{% else %}{{ provider_labels.get(provider, provider) }}{% endif %}{% if not loop.last %}, {% endif %}
+          {% endfor %}
+          {% endif %}
+        </span>
+      </div>
+      {% endfor %}
+    </fieldset>
+    <span class="conflict-save-status{% if saved|default(false) %} is-saved{% endif %}" data-save-status role="status" aria-live="polite">
+      {% if saved|default(false) %}<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 10 4 4 8-8"/></svg> Saved{% endif %}
+    </span>
+  </form>
+</section>

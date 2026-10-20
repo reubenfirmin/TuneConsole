@@ -1,7 +1,7 @@
 """On-demand discovery for a Fresh card whose requested genres have too few candidates."""
 from collections import Counter, deque
 
-from yt_playlist.rec import embed, home_themes, rec_params, road_trip, surfaces
+from yt_playlist.rec import embed, home_themes, home_vibe, rec_params, road_trip, surfaces
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
@@ -54,9 +54,12 @@ def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message
 
 
 def prepare(store, now):
-    """Rank newly discovered songs once, in the clicked background job, never during rendering."""
-    tracks = [surfaces._item_to_fresh_dict(t) for t in surfaces.cold_candidates(store, now, limit=None)]
-    store.put_proposals("fresh_pool", tracks, now)
+    """Refresh both Fresh caches in the discovery/enrichment job, never during rendering."""
+    from yt_playlist.rec import mode_surfaces
+
+    pool = surfaces.cold_candidates(store, now, limit=None)
+    store.put_proposals("fresh_pool", [surfaces._item_to_fresh_dict(t) for t in pool], now)
+    mode_surfaces.refresh_fresh(store, pool, now)
 
 
 def pick(store, now, include_genres=(), avoid_genres=(), size=12):
@@ -86,6 +89,7 @@ def pick(store, now, include_genres=(), avoid_genres=(), size=12):
     pool = (home_themes.matching_genres(store, list(unique.values()), include=include_genres, avoid=avoid_genres)
             if include_genres or avoid_genres else home_themes.resolved_genres(store, list(unique.values())))
     pool = [t for t in pool if weights.get(f"genre:{genre_map.family(t.get('genre'))}", 1.0) != 0]
+    pool = home_vibe.rank(store, now, pool)
     buckets = ({g: deque(t for t in pool if genre_map.family(t["genre"]) == g) for g in include_genres}
                if include_genres else {"all": deque(pool)})
     if not buckets or any(not b for b in buckets.values()):

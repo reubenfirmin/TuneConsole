@@ -81,6 +81,31 @@ def test_missing_model_forces_rebuild(monkeypatch):
     assert s.get_setting("rec_content_model")                # re-persisted, so discovered encoding can run
 
 
+def test_genre_revision_refreshes_existing_vectors_once(monkeypatch):
+    s = CovStore(tagged=10, total=100)
+    _patch(monkeypatch, s)
+    embed.maybe_rebuild_content_vectors(s)
+    original_model = s.get_setting("rec_content_model")
+    monkeypatch.setattr(embed.genre_catalog, "REVISION", "next-catalog")
+
+    assert embed.maybe_rebuild_content_vectors(s) is True
+    assert s.builds == 2
+    assert s.get_setting("rec_content_genre_revision") == "next-catalog"
+    assert s.get_setting("rec_content_model") == original_model
+    assert embed.maybe_rebuild_content_vectors(s) is False
+
+
+def test_legacy_vectors_without_genre_revision_refresh_once(monkeypatch):
+    s = CovStore(tagged=10, total=100)
+    _patch(monkeypatch, s)
+    embed.maybe_rebuild_content_vectors(s)
+    s._settings.pop("rec_content_genre_revision")
+
+    assert embed.maybe_rebuild_content_vectors(s) is True
+    assert s.builds == 2
+    assert embed.maybe_rebuild_content_vectors(s) is False
+
+
 def test_multi_boundary_jump_rebuilds_once_and_snaps(monkeypatch):
     s = CovStore(tagged=5, total=100)                        # 5% → bucket 1
     _patch(monkeypatch, s)

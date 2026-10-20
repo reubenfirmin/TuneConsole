@@ -113,7 +113,7 @@ def build(ctx) -> APIRouter:
         # Lane balance stays a direct nudge: it is a UI mechanic (which lane fills the feed), not a
         # taste facet the graduation ledger owns.
         lane = form.get("lane")
-        if lane and reason != "own_it":
+        if lane in rec_params.LANE_NAMES and reason != "own_it":
             halflife = rec_params.get_param(store, "weight_revert_halflife_d")
             if kind in ("dismiss", "less", "not_now"):
                 store.nudge_weight(f"lane:{lane}", 0.85, now=now, revert_halflife_d=halflife)

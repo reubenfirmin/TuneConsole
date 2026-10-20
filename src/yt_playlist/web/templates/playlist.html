@@ -45,10 +45,7 @@
                 @click="openConflicts()"
                 :title="conflictCount + ' provider disagreement(s): click to resolve'"
                 aria-label="Resolve enrichment disagreements">
-          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
-               stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 3 2 20h20L12 3z"/><line x1="12" y1="10" x2="12" y2="14"/><line x1="12" y1="17" x2="12" y2="17"/>
-          </svg>
+          {% from "_partials/_conflict_icon.html" import conflict_icon %}{{ conflict_icon() }}
           <span class="conflict-badge" x-text="conflictCount"></span>
         </button>
   </div>

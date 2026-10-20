@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% from "_partials/_conflict_icon.html" import conflict_icon %}
+{% set heading = {'queue': 'Enrichment queue', 'processed': 'Processed tracks', 'conflicts': 'Enrichment conflicts'}[view] %}
+{% block title %}{{ heading }} · TuneConsole{% endblock %}
+{% block page_class %}page-workflow page-enrich{% endblock %}
+{% block body %}
+<div class="page-head">
+  <div class="enrich-detail-heading">
+    <a href="/enrich" class="section-note">{{ arrow_icon('left') }} Enrichment</a>
+    <h1>{{ heading }}</h1>
+  </div>
+</div>
+<div class="card workflow-console">
+  {% if view == 'queue' %}
+  <p>Library and discovery tracks wait here for a pass through your available metadata providers. New arrivals come first, then your most-played songs, then tracks from playlists, albums, and artists you play.</p>
+  <p class="section-note">Each completed track leaves the queue immediately. Several provider requests may be needed per track. This list is a snapshot; <a href="/enrich/queue?page={{ page }}">refresh the list</a> or <a href="/enrich">watch live activity</a>.</p>
+  {% elif view == 'processed' %}
+  <p>These tracks have had a provider pass. A check can finish without finding every field, or without finding a match. Missing metadata is retried periodically after the queue clears.</p>
+  <p class="section-note">Most recently checked first. Field coverage shows the metadata currently saved for each track.</p>
+  {% else %}
+  <p>A conflict means providers returned different values for the same field. One track can have several conflicts. These are review choices and do not stop the queue.</p>
+  <p class="enrich-conflict-help">You can always fix these later from an album or playlist page: click the <span class="conflict-help-icon">{{ conflict_icon() }}</span> disagreement icon.</p>
+  <p class="section-note">Click a choice to save it automatically. A check mark confirms it was saved. Provider links open their lookup pages in a new tab.</p>
+  {% endif %}
+  <nav class="enrich-pagination" aria-label="Enrichment pages">
+    <span>{{ '{:,}'.format(start) }}–{{ '{:,}'.format(end) }} of {{ '{:,}'.format(total) }} {{ 'disagreements' if view == 'conflicts' else 'tracks' }}</span>
+    {% if page > 1 %}<a href="/enrich/{{ view }}?page={{ page - 1 }}">{{ arrow_icon('left') }} Previous</a>{% endif %}
+    {% if page < pages %}<a href="/enrich/{{ view }}?page={{ page + 1 }}">Next {{ arrow_icon('right') }}</a>{% endif %}
+  </nav>
+  {% if not rows %}
+  <p>{{ 'Nothing waiting in the queue.' if view == 'queue' else 'No tracks checked yet.' if view == 'processed' else 'No open conflicts.' }}</p>
+  {% elif view != 'conflicts' %}
+  <div class="enrich-table-wrap">
+    <table class="enrich-table">
+      <thead><tr><th scope="col">Track</th><th scope="col">Artist</th>{% if view == 'processed' %}<th scope="col">Field coverage</th><th scope="col">Last checked</th>{% endif %}</tr></thead>
+      <tbody>
+      {% for track in rows %}
+      <tr><td>{{ track.title }}</td><td>{{ track.artist or 'Unknown artist' }}</td>
+        {% if view == 'processed' %}
+        <td>{% set fields = [] %}{% for key, label in [('genre', 'Genre'), ('mb_year', 'Year'), ('bpm', 'BPM'), ('energy', 'Energy'), ('danceability', 'Danceability')] %}{% if track[key] is not none and track[key] != '' %}{% set _ = fields.append(label) %}{% endif %}{% endfor %}{{ fields|join(', ') or 'No core fields found' }}</td>
+        <td>{{ age(track.last_enriched_at) }}</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    {% for c in rows %}
+    {% include "_partials/enrich_conflict.html" %}
+    {% endfor %}
+  {% endif %}
+  {% if pages > 1 %}
+  <nav class="enrich-pagination" aria-label="More enrichment pages">
+    <span>Page {{ page }} of {{ pages }}</span>
+    {% if page > 1 %}<a href="/enrich/{{ view }}?page={{ page - 1 }}">{{ arrow_icon('left') }} Previous</a>{% endif %}
+    {% if page < pages %}<a href="/enrich/{{ view }}?page={{ page + 1 }}">Next {{ arrow_icon('right') }}</a>{% endif %}
+  </nav>
+  {% endif %}
+</div>
+{% endblock %}

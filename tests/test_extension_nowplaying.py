@@ -72,6 +72,17 @@ assert.equal(messages.at(-1).playlist, "PL2");
 context.location.href = "https://music.youtube.com/watch?v=v1";
 main(true);
 assert.equal(messages.at(-1).playlist, "");
+// An explicit context clear must not resurrect a playlist from the old page URL.
+context.location.href = "https://music.youtube.com/watch?v=v1&list=PL_old";
+listeners.message({source: window, data: {__tcNow: {
+  title: "Exoskeleton", artist: "GAUPA", videoId: "v1", playlist: "", paused: false,
+}}});
+assert.equal(messages.at(-1).playlist, "");
+// Legacy reports without context cannot borrow the queue of a different video.
+listeners.message({source: window, data: {__tcNow: {
+  title: "Autoplay", artist: "Artist", videoId: "v2", paused: false,
+}}});
+assert.equal(messages.at(-1).playlist, "");
 """
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run([node, "-e", script], cwd=root, text=True, capture_output=True,

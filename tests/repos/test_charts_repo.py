@@ -79,10 +79,22 @@ def test_artist_songs_can_disambiguate_same_name_by_browse_id(store):
                                artist_browse_id="UC_first")
     second = store.upsert_track("v2", "Second act", "Shared Name", "Two", 180,
                                 artist_browse_id="UC_second")
+    store.upsert_track("v3", "Unknown act", "Shared Name", "Three", 180)
     playlist = store.upsert_playlist(iid, "P1", "Mix", 2, "h", 0.0)
     store.set_playlist_tracks(playlist, [first, second])
 
     assert [s["title"] for s in store.artist_songs("Shared Name", "UC_first")] == ["First act"]
+
+
+def test_artist_songs_includes_album_tracks_missing_an_unambiguous_artist_id(store):
+    store.upsert_track("v1", "One", "Artist", "First", 180, artist_browse_id="UC_artist")
+    store.add_saved_album({"browse": "B1", "title": "Second", "artist": "Artist"})
+    store.upsert_track("v2", "Two", "Artist", "Second", 180, album_browse_id="B1")
+
+    songs = store.artist_songs("Artist", "UC_artist")
+    assert {s["title"] for s in songs} == {"One", "Two"}
+    assert all(s["playlists"] == [] for s in songs)
+    assert store.artist_songs("Artist", "UC_unrelated") == []
 
 
 def test_facade_delegates(store):

@@ -3,6 +3,7 @@
 Owns the rec_weights / rec_feedback / rec_vectors tables (created in store.py's central SCHEMA).
 Split out of the former monolithic RecRepo so each rec concern is its own focused DAO.
 """
+import json
 import time
 
 from yt_playlist.repos.base import Repo, synchronized
@@ -29,6 +30,12 @@ def _reverted(weight, updated_at, now, halflife_d):
 
 class RecModelRepo(Repo):
     # --- learned blend weights ---
+    @synchronized
+    def weight_records(self) -> dict:
+        """Last saved values and timestamps, before reversion, for model transparency."""
+        return {r["axis"]: dict(r) for r in self.conn.execute(
+            "SELECT axis, weight, updated_at FROM rec_weights")}
+
     @synchronized
     def get_weights(self, now=None, revert_halflife_d=60.0) -> dict:
         """Learned blend weights by axis (missing axis = prior 1.0), with time-proportional reversion
@@ -69,6 +76,40 @@ class RecModelRepo(Repo):
     def reset_weights(self) -> None:
         self.conn.execute("DELETE FROM rec_weights")
         self.conn.commit()
+
+    @synchronized
+    def save_taste_settings(self, key, param_keys, now, replace=False) -> None:
+        """Keep a recovery point, including raw weights and their original fade timestamps."""
+        if not replace and self.conn.execute("SELECT 1 FROM settings WHERE key=?", (key,)).fetchone():
+            return
+        placeholders = ",".join("?" for _ in param_keys)
+        snapshot = {
+            "saved_at": now,
+            "params": dict(self.conn.execute(
+                f"SELECT key, value FROM settings WHERE key IN ({placeholders})", param_keys)),
+            "weights": list(self.weight_records().values()),
+        }
+        self.conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                          (key, json.dumps(snapshot)))
+        self.conn.commit()
+
+    @synchronized
+    def restore_taste_settings(self, key, param_keys) -> bool:
+        raw = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        if raw is None:
+            return False
+        snapshot = json.loads(raw["value"])
+        from yt_playlist.rec.rec_params import LANE_NAMES
+        weights = [w for w in snapshot["weights"]
+                   if not w["axis"].startswith("lane:") or w["axis"][5:] in LANE_NAMES]
+        with self.conn:
+            self.conn.executemany("DELETE FROM settings WHERE key=?", [(k,) for k in param_keys])
+            self.conn.executemany("INSERT INTO settings(key, value) VALUES (?, ?)",
+                                  [(k, v) for k, v in snapshot["params"].items() if k in param_keys])
+            self.conn.execute("DELETE FROM rec_weights")
+            self.conn.executemany("INSERT INTO rec_weights(axis, weight, updated_at) VALUES (?, ?, ?)",
+                                  [(w["axis"], w["weight"], w["updated_at"]) for w in weights])
+        return True
 
     # --- feedback events (dismiss / less / more / mute / not_now) ---
     @synchronized
@@ -316,6 +357,89 @@ class RecModelRepo(Repo):
         self.conn.execute("DELETE FROM rec_vectors")
         self.conn.executemany("INSERT INTO rec_vectors(identity_key, vec) VALUES (?,?)", rows)
         self.conn.commit()
+
+    @synchronized
+    def selection_runs(self, limit=6):
+        return [{"id": r["id"], **json.loads(r["result_json"])} for r in self.conn.execute(
+            "SELECT id, result_json FROM rec_model_selection_runs ORDER BY id DESC LIMIT ?", (limit,))]
+
+    @synchronized
+    def selection_run(self, run_id):
+        row = self.conn.execute("SELECT id,result_json FROM rec_model_selection_runs WHERE id=?", (run_id,)).fetchone()
+        return {"id": row["id"], **json.loads(row["result_json"])} if row else None
+
+    @synchronized
+    def start_selection(self, now, result):
+        cur = self.conn.execute(
+            "INSERT INTO rec_model_selection_runs(started_at,result_json) VALUES (?,?)",
+            (now, json.dumps(result)))
+        self.conn.commit()
+        return cur.lastrowid
+
+    @synchronized
+    def save_selection(self, run_id, result, *, rows=None):
+        """Publish vectors, their configuration, result, and exact rollback snapshot together."""
+        with self.conn:
+            if rows is not None:
+                paused = self.conn.execute("SELECT value FROM settings WHERE key='rec_selection_paused'").fetchone()
+                if paused and paused["value"] == "1":
+                    raise ValueError("Automatic selection was paused before publication")
+                self.conn.execute(
+                    "INSERT INTO rec_model_previous_vectors SELECT ?,identity_key,vec FROM rec_vectors", (run_id,))
+                self.conn.execute("DELETE FROM rec_vectors")
+                self.conn.executemany("INSERT INTO rec_vectors(identity_key,vec) VALUES (?,?)", rows)
+                self.conn.executemany("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)", [
+                    ("rec_embed_method", result["selected"]["method"]),
+                    ("rec_dim", str(result["selected"]["dim"])),
+                    ("rec_selection_active_run", str(run_id))])
+            self.conn.execute("UPDATE rec_model_selection_runs SET result_json=? WHERE id=?",
+                              (json.dumps(result), run_id))
+
+    @synchronized
+    def save_model_forecast(self, run_id, now, forecast):
+        self.conn.execute("INSERT OR IGNORE INTO rec_model_forecasts VALUES (?,?,?)",
+                          (run_id, now, json.dumps(forecast)))
+        self.conn.commit()
+
+    @synchronized
+    def model_forecasts(self, run_id):
+        return [{"made_at": r["made_at"], **json.loads(r["forecast_json"])} for r in self.conn.execute(
+            "SELECT made_at,forecast_json FROM rec_model_forecasts WHERE run_id=? ORDER BY made_at", (run_id,))]
+
+    @synchronized
+    def restore_model_selection(self, run_id, now):
+        row = self.conn.execute("SELECT result_json FROM rec_model_selection_runs WHERE id=?", (run_id,)).fetchone()
+        if not row:
+            return False
+        result = json.loads(row["result_json"])
+        if result.get("status") != "applied" or not self.conn.execute(
+                "SELECT 1 FROM rec_model_previous_vectors WHERE run_id=? LIMIT 1", (run_id,)).fetchone():
+            return False
+        with self.conn:
+            self.conn.execute("DELETE FROM rec_vectors")
+            self.conn.execute("INSERT INTO rec_vectors SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?",
+                              (run_id,))
+            self.conn.executemany("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)", [
+                ("rec_embed_method", result["previous"]["method"]),
+                ("rec_dim", str(result["previous"]["dim"])),
+                ("rec_selection_paused", "1"), ("rec_selection_restore", ""), ("rec_selection_active_run", ""),
+                ("rec_selection_display_run", str(run_id))])
+            result.update(status="restored", restored_at=now, reason="Previous model restored at your request.")
+            self.conn.execute("UPDATE rec_model_selection_runs SET result_json=? WHERE id=?",
+                              (json.dumps(result), run_id))
+            latest = self.conn.execute("SELECT id,result_json FROM rec_model_selection_runs ORDER BY id DESC LIMIT 1").fetchone()
+            if latest["id"] != run_id:
+                last = json.loads(latest["result_json"])
+                last["ended_at"] = now
+                self.conn.execute("UPDATE rec_model_selection_runs SET result_json=? WHERE id=?",
+                                  (json.dumps(last), latest["id"]))
+        return True
+
+    @synchronized
+    def selection_play_keys(self, start, end):
+        """Only exact play timestamps can establish outcomes after a saved forecast."""
+        return {r["identity_key"] for r in self.conn.execute(
+            "SELECT DISTINCT identity_key FROM play_events WHERE played_at>=? AND played_at<?", (start, end))}
 
     @synchronized
     def get_rec_vectors(self) -> list[tuple]:

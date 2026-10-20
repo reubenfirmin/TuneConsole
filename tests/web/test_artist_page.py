@@ -1,3 +1,6 @@
+from fastapi.testclient import TestClient
+
+from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.charts import _more_albums
 
 
@@ -10,3 +13,25 @@ def test_more_albums_excludes_collection_album_by_browse_id_and_title():
     ]
 
     assert _more_albums(discography, collection) == [discography[2]]
+
+
+def test_artist_page_includes_album_tracks_when_following_artist_index_link(store, monkeypatch):
+    monkeypatch.setattr("yt_playlist.web.routes.charts.fetch_artist_info", lambda *args: None)
+    iid = store.upsert_identity("me", "c", None, True)
+    playlist = store.upsert_playlist(iid, "PL1", "Mix", 0, "h", 0.0)
+    track = store.upsert_track("v1", "Playlist song", "Artist", "First", 180,
+                               artist_browse_id="UC_artist")
+    store.set_playlist_tracks(playlist, [track])
+    store.add_saved_album({"browse": "B1", "title": "Second", "artist": "Artist"})
+    store.upsert_track("v2", "Album song", "Artist", "Second", 180, album_browse_id="B1")
+    store.add_history_snapshot(iid, 1.0, ["playlist song|artist", "album song|artist"])
+    client = TestClient(create_app(store, lambda: {}, now_fn=lambda: 1.0),
+                        base_url="http://127.0.0.1")
+
+    response = client.get("/artist", params={"name": "Artist", "browse": "UC_artist"})
+
+    assert response.status_code == 200
+    assert "Tracks in your library" in response.text
+    assert "synced playlists and saved albums" in response.text
+    assert {s["title"] for s in response.context["songs"]} == {"Playlist song", "Album song"}
+    assert response.context["total_plays"] == 2

@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS discovered_tracks (
   found_at REAL,
   last_enriched REAL                      -- #50: when the cold-enrichment waterfall last probed it (NULL = queued)
 );
+CREATE TABLE IF NOT EXISTS discovery_visible_impressions (
+  view_id TEXT NOT NULL, kind TEXT NOT NULL, item_id TEXT NOT NULL, shown_at REAL NOT NULL,
+  PRIMARY KEY (view_id, kind, item_id)
+);
 """
 
 # Audio/content columns persisted per discovered track (mirrors the library `tracks` audio set).
@@ -67,6 +71,21 @@ class DiscoveryRepo(Repo):
                                   ("offered_count", "INTEGER NOT NULL DEFAULT 0")):
                     if col not in cols:
                         self.conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {decl}")
+            # Album/artist counts used to record GETs, including hidden tabs and polling. Preserve
+            # those values for audit, then start the view count and expiry clock from real exposure.
+            with self.conn:
+                self.conn.execute("SAVEPOINT discovery_views_migration")
+                for tbl in ("discovered_albums", "discovered_artists"):
+                    cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({tbl})")}
+                    if "legacy_offered_count" not in cols:
+                        self.conn.execute(f"ALTER TABLE {tbl} ADD COLUMN legacy_offered_count INTEGER NOT NULL DEFAULT 0")
+                        self.conn.execute(f"ALTER TABLE {tbl} ADD COLUMN legacy_first_shown REAL")
+                        self.conn.execute(f"ALTER TABLE {tbl} ADD COLUMN legacy_last_shown REAL")
+                        self.conn.execute(
+                            f"UPDATE {tbl} SET legacy_offered_count=offered_count, "
+                            "legacy_first_shown=first_shown, legacy_last_shown=last_shown, "
+                            "offered_count=0, first_shown=NULL, last_shown=NULL")
+                self.conn.execute("RELEASE discovery_views_migration")
             self.conn.commit()
 
     # --- interest: every artist you engage with, ranked by engagement intensity. Weights ramp with how
@@ -128,16 +147,19 @@ class DiscoveryRepo(Repo):
         return len(ids)
 
     @synchronized
-    def prune_orphan_discovered_tracks(self) -> int:
+    def prune_orphan_discovered_tracks(self, held_keys=()) -> int:
         """Drop discovered tracks whose source album is no longer in the pool (#52 cleanup). Radio-
         and genre-sourced tracks have their own lifecycle and are kept. Returns the
         count removed."""
-        cur = self.conn.execute(
-            "DELETE FROM discovered_tracks WHERE source_browse_id NOT LIKE 'radio:%' "
+        rows = self.conn.execute(
+            "SELECT identity_key FROM discovered_tracks WHERE source_browse_id NOT LIKE 'radio:%' "
             "AND source_browse_id NOT LIKE 'genre:%' "
-            "AND source_browse_id NOT IN (SELECT browse_id FROM discovered_albums)")
+            "AND source_browse_id NOT IN (SELECT browse_id FROM discovered_albums)").fetchall()
+        held = set(held_keys)
+        gone = [(r["identity_key"],) for r in rows if r["identity_key"] not in held]
+        self.conn.executemany("DELETE FROM discovered_tracks WHERE identity_key=?", gone)
         self.conn.commit()
-        return cur.rowcount
+        return len(gone)
 
     @synchronized
     def mark_scanned(self, artist, now) -> None:
@@ -193,7 +215,10 @@ class DiscoveryRepo(Repo):
                  "source_browse_id", "found_at"] + list(_DTRACK_AUDIO))
         vals = ([identity_key, video_id, title, artist, album, thumbnail, genre, year,
                  source_browse_id, now] + [audio.get(c) for c in _DTRACK_AUDIO])
-        updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c not in ("identity_key", "found_at"))
+        metadata = {"genre", "year", *_DTRACK_AUDIO}
+        updates = ", ".join(
+            f"{c}=COALESCE(excluded.{c}, discovered_tracks.{c})" if c in metadata else f"{c}=excluded.{c}"
+            for c in cols if c not in ("identity_key", "found_at"))
         self.conn.execute(
             f"INSERT INTO discovered_tracks({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) "
             f"ON CONFLICT(identity_key) DO UPDATE SET {updates}", vals)
@@ -203,7 +228,7 @@ class DiscoveryRepo(Repo):
     def _dtrack_row(r) -> dict:
         d = {k: r[k] for k in ("identity_key", "video_id", "title", "artist", "album", "thumbnail",
                                "genre", "year", "source_browse_id", "found_at",
-                               "first_shown", "last_shown", "offered_count")}
+                               "first_shown", "last_shown", "offered_count", "last_enriched")}
         d["audio"] = {c: r[c] for c in _DTRACK_AUDIO if r[c] is not None}
         return d
 
@@ -221,6 +246,22 @@ class DiscoveryRepo(Repo):
         self.conn.commit()
 
     @synchronized
+    def record_discovery_impressions(self, kind, ids, view_id, now) -> None:
+        """Count each visible Home Discover tile once per page visit, including across poll retries."""
+        tbl, col = {"album": ("discovered_albums", "browse_id"),
+                    "artist": ("discovered_artists", "artist")}[kind]
+        shown = []
+        for item_id in dict.fromkeys(ids):
+            if not self.conn.execute(f"SELECT 1 FROM {tbl} WHERE {col}=?", (item_id,)).fetchone():
+                continue
+            inserted = self.conn.execute(
+                "INSERT OR IGNORE INTO discovery_visible_impressions(view_id, kind, item_id, shown_at) "
+                "VALUES (?,?,?,?)", (view_id, kind, item_id, now))
+            if inserted.rowcount:
+                shown.append(item_id)
+        self.mark_offered(kind, shown, now)
+
+    @synchronized
     def get_discovered_tracks(self) -> list:
         return [self._dtrack_row(r) for r in self.conn.execute("SELECT * FROM discovered_tracks")]
 
@@ -233,17 +274,7 @@ class DiscoveryRepo(Repo):
         return {r["identity_key"]: self._dtrack_row(r) for r in self.conn.execute(
             f"SELECT * FROM discovered_tracks WHERE identity_key IN ({qs})", keys)}
 
-    # --- #50 cold-enrichment queue: enrich the discovered pool (genre + audio) so the cold ranker can
-    #     score it and the audio tilt fires. Separate from the library next_enrich_batch queue. ---
-    @synchronized
-    def next_discovered_enrich_batch(self, limit) -> list:
-        """Up to `limit` not-yet-probed discovered tracks, newest pull first (found_at DESC) so freshly
-        pulled candidates jump the queue. v1 probes each row once (last_enriched IS NULL gate)."""
-        rows = self.conn.execute(
-            "SELECT identity_key, video_id, title, artist FROM discovered_tracks "
-            "WHERE last_enriched IS NULL ORDER BY found_at DESC, rowid DESC LIMIT ?", (limit,)).fetchall()
-        return [dict(r) for r in rows]
-
+    # --- Discovery persistence used by the shared enrichment worker. ----------------------------
     @synchronized
     def set_discovered_enrichment(self, identity_key, genre, year) -> None:
         """Fill-only genre/year on a discovered track (a None argument leaves the existing value)."""
@@ -297,7 +328,7 @@ class DiscoveryRepo(Repo):
     @synchronized
     def discovery_track_view(self, now, gc_days) -> list:
         """Discovered tracks with play count (history), library-playlist membership count, offered
-        count, and projected GC date (first_shown + gc_days, or None when never shown). Newest first."""
+        count, saved metadata, and expiry (using found_at until shown). Newest first."""
         rows = self.conn.execute(
             "SELECT dt.*, "
             "  (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=dt.identity_key) plays, "
@@ -308,7 +339,8 @@ class DiscoveryRepo(Repo):
         for r in rows:
             d = self._dtrack_row(r)
             d.update(plays=r["plays"], playlists=r["playlists"],
-                     gc_at=self._gc_at(r["first_shown"], gc_days))
+                     gc_at=self._gc_at(r["first_shown"] if r["first_shown"] is not None
+                                       else r["found_at"], gc_days))
             out.append(d)
         return out
 
@@ -316,21 +348,23 @@ class DiscoveryRepo(Repo):
     def discovery_album_view(self, now, gc_days) -> list:
         rows = self.conn.execute("SELECT * FROM discovered_albums ORDER BY found_at DESC").fetchall()
         return [{**{k: r[k] for k in ("browse_id", "artist", "title", "year", "thumbnail", "genre",
-                                      "found_at", "first_shown", "offered_count")},
+                                      "found_at", "first_shown", "offered_count", "legacy_offered_count")},
                  "gc_at": self._gc_at(r["first_shown"], gc_days)} for r in rows]
 
     @synchronized
     def discovery_artist_view(self, now, gc_days) -> list:
         rows = self.conn.execute("SELECT * FROM discovered_artists ORDER BY found_at DESC").fetchall()
         return [{**{k: r[k] for k in ("artist", "score", "thumbnail", "genre",
-                                      "found_at", "first_shown", "offered_count")},
+                                      "found_at", "first_shown", "offered_count", "legacy_offered_count")},
                  "gc_at": self._gc_at(r["first_shown"], gc_days)} for r in rows]
 
     @synchronized
     def gc_discovery_pool(self, now, gc_days, held_track_keys) -> dict:
-        """#52: strict GC of pool items first shown longer than gc_days ago and never added. Tracks in
-        held_track_keys (live in a not-yet-GC'd generated playlist) are kept. Items never shown
-        (first_shown NULL) are not touched. The acquisition prune runs separately. Returns delete counts."""
+        """Expire old suggestions. Unshown tracks age from discovery instead of living forever.
+
+        Albums/artists retain their first-view lifetime. Tracks in live generated playlists are held.
+        Purge removed tracks from materialized recommendations in the same transaction.
+        """
         cutoff = now - gc_days * 86400
         out = {}
         for key, tbl in (("albums", "discovered_albums"), ("artists", "discovered_artists")):
@@ -339,12 +373,39 @@ class DiscoveryRepo(Repo):
             out[key] = cur.rowcount
         held = set(held_track_keys or ())
         rows = self.conn.execute(
-            "SELECT identity_key FROM discovered_tracks WHERE first_shown IS NOT NULL AND first_shown < ?",
+            "SELECT identity_key, source_browse_id FROM discovered_tracks "
+            "WHERE COALESCE(first_shown, found_at) < ?",
             (cutoff,)).fetchall()
         gone = [r["identity_key"] for r in rows if r["identity_key"] not in held]
         if gone:
+            # Keep successful album-fetch markers after expiry, so the next discovery tick cannot
+            # immediately refill an expired album. These are fetch history, never queue entries.
+            self.conn.executemany("INSERT OR IGNORE INTO settings(key,value) VALUES (?, '1')",
+                                  [("discovery_tracks_fetched:" + r["source_browse_id"],)
+                                   for r in rows if r["source_browse_id"]])
             self.conn.executemany("DELETE FROM discovered_tracks WHERE identity_key=?", [(k,) for k in gone])
+            self.conn.executemany("DELETE FROM settings WHERE key=?",
+                                  [("enrich_attempts:" + k,) for k in gone
+                                   if not self.conn.execute("SELECT 1 FROM tracks WHERE identity_key=?", (k,)).fetchone()])
+            gone_keys = set(gone)
+
+            def prune(value):
+                if isinstance(value, list):
+                    return [prune(item) for item in value if not isinstance(item, dict)
+                            or item.get("key", item.get("identity_key")) not in gone_keys]
+                if isinstance(value, dict):
+                    return {key: prune(item) for key, item in value.items()}
+                return value
+
+            for row in self.conn.execute("SELECT surface, payload FROM rec_proposals").fetchall():
+                payload = json.loads(row["payload"])
+                cleaned = prune(payload)
+                if cleaned != payload:
+                    self.conn.execute("UPDATE rec_proposals SET payload=? WHERE surface=?",
+                                      (json.dumps(cleaned), row["surface"]))
         out["tracks"] = len(gone)
+        self.conn.execute("DELETE FROM discovery_visible_impressions WHERE shown_at < ?",
+                          (now - 90 * 86400,))
         self.conn.commit()
         return out
 

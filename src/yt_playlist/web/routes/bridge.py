@@ -74,7 +74,9 @@ def build(ctx) -> APIRouter:
                 url = (f"/playlist/{source['id']}" if source["kind"] == "playlist" else
                        "/album?" + urlencode({"browse": source["browse"]}))
                 source = {"kind": source["kind"], "title": source["title"], "url": url, "external": False}
-            elif playlist:
+            elif playlist and (not playlist.startswith("RD") or playlist.startswith("RDCLAK5uy_")):
+                # Autoplay/radio queues have no playlist to return to. RDCLAK ids are curated
+                # playlists, so preserve their links alongside ordinary playlists and albums.
                 kind = "album" if playlist.startswith("OLAK5uy_") else "playlist"
                 source = {"kind": kind, "title": f"Playing {kind}", "external": True,
                           "url": "https://music.youtube.com/playlist?list=" + quote(playlist, safe="")}
@@ -541,7 +543,7 @@ def build(ctx) -> APIRouter:
         try:
             bridge.send_control({"type": "navigate", "url": url})
             return {"ok": True}
-        except Exception as e:  # noqa: BLE001 - extension not connected; UI falls back to opening it
+        except Exception as e:  # noqa: BLE001 - UI reports the connection failure for retry
             return {"ok": False, "error": str(e)}
 
     @router.post("/now-playing/rate")

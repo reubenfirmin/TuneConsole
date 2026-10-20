@@ -1,15 +1,116 @@
-{# Auto-tune control: while running, self-poll every 2s; when idle, show the button + last result. #}
-<div id="autotune-status"{% if running %} hx-get="/taste/autotune-status" hx-trigger="load delay:2s" hx-swap="outerHTML"{% endif %}>
-  {% if running %}
-  <div class="autotune-ctl">
-    <button disabled><span class="spinner"></span> Auto-tuning… (rebuilding several models)</button>
+{% set s = selection %}
+{% set r = s.last %}
+{% set latest = s.latest %}
+{% set outcomes = {'applied': 'Improved model applied', 'retained': 'Current model retained', 'insufficient': 'More listening needed', 'failed': 'Comparison interrupted', 'restored': 'Previous model restored', 'running': 'Comparing model setups'} %}
+{% set methods = {'svd': 'Playlist patterns', 'item2vec': 'Track co-occurrence'} %}
+{% set busy = s.state in ['running', 'restoring'] %}
+{% set measured = r and r.status in ['applied', 'retained', 'restored'] %}
+{% set comparison = r.comparison if measured else none %}
+{% set f = r.followup if measured else {} %}
+{% set unchanged = measured and r.previous == r.selected %}
+{% set has_chart = measured and f.points|default([])|length > 1 %}
+{% set evidence = latest.baseline if latest and latest.status == 'insufficient' else none %}
+{% macro gate(id, label, value, total, unit) %}
+<div class="selection-gate">
+  <label for="{{ id }}">{{ label }} <span><strong>{{ value }}</strong> / {{ total }} {{ unit }}</span></label>
+  <progress id="{{ id }}" value="{{ value }}" max="{{ total }}"></progress>
+</div>
+{% endmacro %}
+{% macro score(value) %}{{ '%.1f'|format(value * 100) }}%{% endmacro %}
+<div id="autotune-status" hx-get="/taste/autotune-status?version={{ s.version }}" hx-trigger="every {{ '3' if busy else '30' }}s[document.getElementById('taste-health-panel').offsetParent !== null]" hx-swap="outerHTML">
+  <header class="selection-header">
+    <div class="selection-status" role="status">
+      <span class="selection-dot {{ 'ready' if measured and not evidence and s.state == 'waiting' else s.state }}" aria-hidden="true"></span>
+      <h3>{% if s.state == 'restoring' %}Restoring previous model{% elif s.state == 'paused' %}Automatic selection paused{% elif s.state == 'running' %}Comparing model setups{% elif s.state == 'ready' %}Ready for {{ 'another' if latest else 'the first' }} comparison{% elif r and r.status == 'restored' %}Previous model restored{% elif latest %}{{ outcomes[latest.status] }}{% else %}First comparison hasn’t run yet{% endif %}</h3>
+    </div>
+    {% if latest and not busy %}<time>{{ 'Restored ' ~ r.restored_date if r and r.restored_date else 'Last checked ' ~ latest.date }}</time>{% endif %}
+  </header>
+
+  <div class="selection-overview {{ 'selection-overview--chart' if has_chart and not evidence }} {{ 'selection-overview--with-evidence' if measured and evidence }}">
+    <section class="selection-current" aria-labelledby="selection-current-title">
+      <h4 id="selection-current-title">Model in use</h4>
+      {% if s.checks[1].value %}<p><strong>{{ methods.get(s.current.method, s.current.method) }}</strong><span>{{ s.current.dim }} learned features per track</span></p>
+      {% else %}<p><strong>No model built yet</strong></p>{% endif %}
+      {% if r and r.status == 'applied' %}
+      <p class="selection-note">Replaced {{ methods.get(r.previous.method, r.previous.method) }} with {{ r.previous.dim }} features on {{ r.date }}.</p>
+      {% elif r and r.status == 'restored' %}
+      <p class="selection-note">Previous model restored. Measurements below stopped at restoration.</p>
+      {% elif latest and latest.status != 'running' %}
+      <p class="selection-note">Kept the current model.{% if latest.status == 'retained' %} No alternative showed a reliable improvement.{% endif %}</p>
+      {% else %}<p class="selection-note">Regular training continues when your library syncs.</p>{% endif %}
+    </section>
+
+    {% if evidence %}
+    <section class="selection-evidence" aria-labelledby="selection-evidence-title">
+      <h4 id="selection-evidence-title">{{ 'Last test' if s.state == 'ready' or busy else 'What’s needed to compare' }}</h4>
+      {{ gate('selection-test-tracks', 'First plays we can test', evidence.trials, s.min_trials, 'tracks') }}
+      {% if evidence.windows < s.min_windows %}
+      {{ gate('selection-test-periods', 'Test periods', evidence.windows, s.min_windows, 'periods') }}
+      {% else %}<p class="selection-passed"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 4 4 8-8"/></svg>{{ evidence.windows }} test periods available · {{ s.min_windows }} required</p>{% endif %}
+      <p class="selection-note">We need library data from before those first plays to check the predictions fairly.{% if evidence.trials < s.min_trials %} Your last test was {{ s.min_trials - evidence.trials }} tracks short.{% endif %}</p>
+    </section>
+    {% elif not measured %}
+    <section class="selection-evidence" aria-labelledby="selection-evidence-title">
+      <h4 id="selection-evidence-title">{{ 'Comparison in progress' if s.state == 'running' else 'Before the first comparison' if not latest else 'Before the next comparison' }}</h4>
+      {% if busy %}<p class="selection-summary">{{ s.reason }}</p>
+      {% else %}
+        {% for c in s.checks[:2] if c.value < c.total %}{{ gate('selection-ready-' ~ loop.index, c.label, c.value, c.total, c.unit) }}{% endfor %}
+        {% if s.state == 'ready' %}<p class="selection-summary">The next model update will compare setups automatically.</p>{% endif %}
+        {% if latest and latest.status == 'failed' %}<p class="selection-summary">{{ latest.reason }}</p>{% endif %}
+      {% endif %}
+    </section>
+    {% endif %}
+
+    {% if measured %}
+    <section class="selection-results" aria-labelledby="selection-results-title">
+      <h4 id="selection-results-title">Later plays predicted</h4>
+      {% if latest and latest.id != r.id %}<p class="selection-note">Tracking the change made {{ r.date }}.</p>{% endif %}
+      {% if comparison and comparison.eligible or f.trials %}
+      <table class="selection-comparison" aria-label="Model prediction comparison">
+        <thead><tr><th scope="col">Setup</th><th scope="col">Original test</th><th scope="col">Later listening</th></tr></thead>
+        <tbody>
+          {% if not unchanged %}<tr><th scope="row"><i class="selection-key previous"></i>Previous</th><td>{{ score(comparison.previous_score) if comparison and comparison.eligible else 'Unavailable' }}</td><td>{{ score(f.previous_score) if f.trials else 'Pending' }}</td></tr>{% endif %}
+          <tr><th scope="row"><i class="selection-key selected"></i>{{ 'Current' if unchanged else 'Tried' if r.status == 'restored' else 'Selected' }}</th><td>{{ score(comparison.score) if comparison and comparison.eligible else 'Unavailable' }}</td><td>{{ score(f.score) if f.trials else 'Pending' }}</td></tr>
+        </tbody>
+        {% if not unchanged %}<tfoot><tr><th scope="row">Difference</th><td>{{ '%+.1f'|format((comparison.score - comparison.previous_score) * 100) ~ ' pts' if comparison and comparison.eligible else 'Unavailable' }}</td><td>{{ '%+.1f'|format((f.score - f.previous_score) * 100) ~ ' pts' if f.trials else 'Pending' }}</td></tr></tfoot>{% endif %}
+      </table>
+      {% if comparison and comparison.eligible %}<p class="selection-note">Original test: {{ comparison.trials }} tracks across {{ comparison.windows }} periods.</p>{% endif %}
+      {% endif %}
+      {% if f.trials %}
+      <p class="selection-note">Later listening: {{ f.trials }} tracks.{% if not f.enough %} Too early to judge; {{ s.min_trials }} needed.{% endif %}</p>
+      {% else %}
+      <p class="selection-empty">No later measurements yet</p>
+      <p class="selection-note">{% if f.forecasts %}Waiting for new plays after {{ r.date }} to check both setups’ predictions.{% else %}We need more unplayed tracks known to both setups before we can compare their predictions against your next plays.{% endif %}</p>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    {% if has_chart %}
+    <figure class="selection-chart">
+      <figcaption>Later plays predicted over time <span>{{ f.trials }} later tracks</span></figcaption>
+      <div class="selection-chart-plot">
+        <div class="selection-axis" aria-hidden="true"><span>100%</span><span>50%</span><span>0%</span></div>
+        <svg viewBox="40 20 620 140" preserveAspectRatio="none" role="img" aria-label="Prediction matches since model selection, from zero to one hundred percent">
+          <g class="selection-grid"><path d="M40 20H660 M40 90H660 M40 160H660"/></g>
+          {% if not unchanged %}<polyline class="previous" points="{{ f.previous_path }}"/>{% endif %}<polyline class="selected" points="{{ f.selected_path }}"/>
+        </svg>
+      </div>
+      <div class="selection-chart-dates"><span>{{ r.date }}</span><span>{{ f.updated_date }}</span></div>
+    </figure>
+    {% endif %}
   </div>
-  {% else %}
-  <div class="autotune-ctl">
-    <button hx-post="/taste/autotune" hx-target="#autotune-status" hx-swap="outerHTML"
-            hx-confirm="Test several model sizes and keep the most accurate? This takes about 10 seconds.">Auto-tune model</button>
-    <span class="autotune-note">The chosen model size stays in use for future rebuilds until you run Auto-tune again.</span>
+
+  <div class="selection-schedule">
+    <p>{% if not busy and s.state != 'paused' %}<strong>Next check.</strong> {% endif %}{{ s.reason }}{% if s.next_date %} Retries from {{ s.next_date }}.{% endif %}</p>
+    {% for c in s.checks[2:] if c.value < c.total %}{{ gate('selection-fresh-tracks', 'New tracks since last comparison', c.value, c.total, c.unit) }}{% endfor %}
+    {% if measured %}<p class="selection-note">Scores show the share of your later first plays that appeared in those 20 predictions. For example, 40% means 4 of 10 eligible tracks you played were predicted.</p>{% endif %}
   </div>
-  {% include "_partials/autotune_result.html" %}
-  {% endif %}
+  <footer class="selection-footer">
+    <div><a href="/taste/model-selection/history">History and test details</a><p>Your preferences are kept. Regular training continues.</p></div>
+    {% if s.state == 'paused' %}
+    <button type="button" hx-post="/taste/model-selection/resume" hx-target="#autotune-status" hx-swap="outerHTML">Resume automatic selection</button>
+    {% elif s.restore_id and not busy %}
+    <button type="button" class="btn-secondary" hx-post="/taste/model-selection/restore" hx-target="#autotune-status" hx-swap="outerHTML" hx-confirm="Restore the model saved before this selection? Automatic selection will pause until you resume it. Your preferences and regular training are kept.">Restore previous model</button>
+    {% endif %}
+  </footer>
 </div>

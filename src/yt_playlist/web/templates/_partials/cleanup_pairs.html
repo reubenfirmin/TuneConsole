@@ -1,0 +1,91 @@
+{% from "_macros.html" import pllink, sort_indicator with context %}
+<div class="card workflow-sheet cleanup-pairs" data-section="{{ section }}" x-data="overlapSort()" x-init="start()">
+  <table x-ref="tbl">
+    <thead><tr>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('a')" @keydown.enter.space.prevent="sortBy('a')">Playlist A{{ sort_indicator('a') }}</th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('b')" @keydown.enter.space.prevent="sortBy('b')">Playlist B{{ sort_indicator('b') }}</th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('shared')" @keydown.enter.space.prevent="sortBy('shared')">Overlap{{ sort_indicator('shared') }}</th>
+      <th></th>
+    </tr></thead>
+    {% for o in pairs %}
+    {% set ay = o.playlist_a.ytm_playlist_id %}{% set by = o.playlist_b.ytm_playlist_id %}
+    <tbody class="ov-row" data-a="{{ o.playlist_a.title|lower }}" data-b="{{ o.playlist_b.title|lower }}"
+           data-shared="{{ o.shared|length }}" data-ay="{{ ay }}" data-by="{{ by }}"
+           x-data="{ open: false, mx: 0, my: 0 }">
+      <tr>
+        <td><span class="abx">A</span>{{ pllink(ay, o.playlist_a.title, o.count_a) }}</td>
+        <td><span class="abx">B</span>{{ pllink(by, o.playlist_b.title, o.count_b) }}</td>
+        <td>
+          <span class="mono">{{ o.shared|length }}</span> shared
+          <span class="pid">{{ o.pct_a() }}% of A<br>{{ o.pct_b() }}% of B</span>
+        </td>
+        <td class="cell-actions">
+          <a class="cta" href="/merge?ids={{ o.playlist_a.id }},{{ o.playlist_b.id }}&amp;return=/cleanup%23{{ section }}">Review {{ arrow_icon('right') }}</a>
+          <span class="pie-wrap" @click.outside="open = false" @keydown.escape.window="open = false">
+            <button type="button" class="kebab" :aria-expanded="open" aria-label="More actions" title="More actions"
+                    @click="const w = $el.closest('.pie-wrap').getBoundingClientRect();
+                            mx = w.width / 2; my = w.height / 2; open = !open">⋯</button>
+            <div class="pie" x-show="open" x-cloak x-transition.scale.origin.center
+                 :style="open ? ('left:' + (mx - 140) + 'px;top:' + (my - 80) + 'px') : ''">
+              <svg viewBox="0 0 160 160" width="160" height="160" role="menu" aria-label="Overlap actions">
+                <path class="wedge w-hide" d="M38.9 23.4 A70 70 0 0 1 121.1 23.4 L96.5 57.3 A28 28 0 0 0 63.5 57.3 Z"
+                      @click="open = false; location.hash = '{{ section }}'; htmx.ajax('POST', '/overlaps/suppress', {source: $el, values: {a: '{{ ay }}', b: '{{ by }}'}, swap: 'none'})">
+                  <title>Hide just this A–B pair (unhide later)</title></path>
+                <path class="wedge w-b" d="M121.1 23.4 A70 70 0 0 1 146.6 101.6 L106.6 88.7 A28 28 0 0 0 96.5 57.3 Z"
+                      @click="open = false; location.hash = '{{ section }}'; htmx.ajax('POST', '/overlaps/ignore', {source: $el, values: {ytm: '{{ by }}'}, swap: 'none'})">
+                  <title>Never show B’s overlaps: “{{ o.playlist_b.title }}”</title></path>
+                <path class="wedge w-mute" d="M146.6 101.6 A70 70 0 0 1 80.0 150.0 L80.0 108.0 A28 28 0 0 0 106.6 88.7 Z"
+                      @click="open = false; location.hash = '{{ section }}'; htmx.ajax('POST', '/overlaps/mute-others', {source: $el, values: {a: '{{ ay }}', b: '{{ by }}'}, swap: 'none'})">
+                  <title>Keep this A–B pair, mute every other overlap involving either A or B</title></path>
+                <path class="wedge w-below" :class="{ 'wedge-off': key !== 'shared' }"
+                      d="M80.0 150.0 A70 70 0 0 1 13.4 101.6 L53.4 88.7 A28 28 0 0 0 80.0 108.0 Z"
+                      @click="key === 'shared' && (open = false, dismissFromRow($el.closest('tbody.ov-row')))">
+                  <title>Hide this pair and every pair below it in this section (sort by Overlap first)</title></path>
+                <path class="wedge w-a" d="M13.4 101.6 A70 70 0 0 1 38.9 23.4 L63.5 57.3 A28 28 0 0 0 53.4 88.7 Z"
+                      @click="open = false; location.hash = '{{ section }}'; htmx.ajax('POST', '/overlaps/ignore', {source: $el, values: {ytm: '{{ ay }}'}, swap: 'none'})">
+                  <title>Never show A’s overlaps: “{{ o.playlist_a.title }}”</title></path>
+                <text class="pie-glyph" x="80" y="31" text-anchor="middle" dominant-baseline="central">✕</text>
+                <text class="pie-glyph" x="108.8" y="119.6" text-anchor="middle" dominant-baseline="central">✦</text>
+                <g class="pie-icon pie-arrow" transform="translate(42.2,110.6)"
+                   :class="{ 'wedge-off': key !== 'shared' }" aria-hidden="true">
+                  {{ arrow_icon('down') }}
+                </g>
+                <g class="pie-icon" transform="translate(33.4,64.9)">
+                  <path class="pie-eyeoff" d="M-8 0 C-5 -4.5 5 -4.5 8 0 C5 4.5 -5 4.5 -8 0 Z"/>
+                  <circle class="pie-eyeoff-pupil" cx="0" cy="0" r="2.1"/>
+                  <line class="pie-eyeoff" x1="-8.5" y1="-8.5" x2="8.5" y2="8.5"/>
+                  <text class="pie-glyph pie-sub" x="9" y="-8" text-anchor="middle" dominant-baseline="central">A</text>
+                </g>
+                <g class="pie-icon" transform="translate(126.6,64.9)">
+                  <path class="pie-eyeoff" d="M-8 0 C-5 -4.5 5 -4.5 8 0 C5 4.5 -5 4.5 -8 0 Z"/>
+                  <circle class="pie-eyeoff-pupil" cx="0" cy="0" r="2.1"/>
+                  <line class="pie-eyeoff" x1="-8.5" y1="-8.5" x2="8.5" y2="8.5"/>
+                  <text class="pie-glyph pie-sub" x="9" y="-8" text-anchor="middle" dominant-baseline="central">B</text>
+                </g>
+                <circle class="pie-hub" cx="80" cy="80" r="26" @click="open = false">
+                  <title>Close (make no change)</title></circle>
+                <text class="pie-hub-x" x="80" y="81" text-anchor="middle" dominant-baseline="central">⋯</text>
+              </svg>
+            </div>
+          </span>
+        </td>
+      </tr>
+    </tbody>
+    {% endfor %}
+  </table>
+  <template x-teleport="body">
+    <div class="modal-backdrop" x-show="confirmOpen" x-cloak x-transition.opacity
+         @click="confirmOpen = false" @keydown.escape.window="confirmOpen = false">
+      <div class="modal" @click.stop x-transition.scale.origin.center>
+        <h3>Hide these pairs?</h3>
+        <p>This hides <strong x-text="tail"></strong> pair<span x-show="tail !== 1">s</span>
+           from this section, starting with the selected row. You can unhide them later
+           from the list below.</p>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="confirmOpen = false">No</button>
+          <button type="button" @click="confirmOpen = false; location.hash = '{{ section }}'; htmx.ajax('POST', '/overlaps/suppress-many', {source: $el, values: {pairs: pairsJson()}, swap: 'none'})">Yes, hide them</button>
+        </div>
+      </div>
+    </div>
+  </template>
+</div>

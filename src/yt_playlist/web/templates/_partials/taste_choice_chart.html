@@ -1,0 +1,44 @@
+{% macro chart(rows, compact=false) -%}
+<div class="choice-reading-key">
+  <p><span class="choice-key-dot" aria-hidden="true"></span><strong>Dot position: choice score</strong><span>Further right means a stronger history of choosing this group’s mixes. The score runs from 0 to 100.</span></p>
+  <p><span class="choice-key-band" aria-hidden="true"></span><strong>Bar width: uncertainty</strong><span>A shorter bar means a more certain estimate. A long bar means there’s still a lot to learn.</span></p>
+</div>
+<div class="choice-chart{% if compact %} choice-chart--compact{% endif %}" role="table" aria-label="Music groups and mix choices">
+  <div class="choice-chart-head" role="row"><span role="columnheader">Inside each music group</span><span class="choice-score-heading" role="columnheader">Your choice score<span class="choice-scale" aria-hidden="true"><span>0</span><span>50</span><span>100</span></span></span><span role="columnheader">Offers</span><span role="columnheader">Selections</span></div>
+  {% for r in rows|sort(attribute='estimate', reverse=true)|sort(attribute='has_evidence', reverse=true) %}
+  <div class="choice-chart-row" role="row" style="--petal-c:var(--rose-{{ r.color_idx % 10 }})">
+    <div class="choice-style" role="rowheader">
+      <div class="choice-group-head"><span class="taste-facet-swatch" aria-hidden="true"></span><strong>{{ r.profile.title }}</strong><span>{{ '{:,}'.format(r.profile.size) }} tracks</span></div>
+      {% if r.profile.genres %}
+      <div class="choice-composition" aria-hidden="true">{% for g in r.profile.genres %}<i style="width:{{ g.share*100 }}%;--part-opacity:{{ [1, 0.68, 0.43, 0.2][loop.index0] }}"></i>{% endfor %}</div>
+      {% endif %}
+      <div class="choice-group-details">
+      {% if r.profile.genres %}
+      <ul class="choice-composition-key" aria-label="Genre composition">{% for g in r.profile.genres %}<li style="--part-opacity:{{ [1, 0.68, 0.43, 0.2][loop.index0] }}"><i aria-hidden="true"></i>{{ g.name }} <span>{{ '%.0f'|format(g.share*100) }}%</span></li>{% endfor %}</ul>
+      {% endif %}
+      {% if r.profile.eras %}
+      <p class="choice-group-era">
+        <span>Era</span>
+        {% for era in r.profile.eras %}<span>{{ era.name }} <strong>{{ '%.0f'|format(era.share*100) }}%</strong></span>{% endfor %}
+        {% set other_eras = r.profile.dated - r.profile.eras|sum(attribute='count') %}
+        {% if other_eras / r.profile.size >= 0.005 %}<span>Other eras <strong>{{ '%.0f'|format(other_eras / r.profile.size*100) }}%</strong></span>{% endif %}
+        {% if r.profile.dated < r.profile.size %}<small>{{ r.profile.size - r.profile.dated }} undated</small>{% endif %}
+      </p>
+      {% endif %}
+      {% if r.profile.sound %}<p class="choice-group-sound">{% for trait in r.profile.sound %}<span>{{ trait.text }} <small>({{ trait.measured }}/{{ trait.total }} measured)</small></span>{% endfor %}</p>{% endif %}
+      {% if not r.profile.current %}<p class="choice-group-note">Saved group · era and sound details unavailable</p>{% endif %}
+      </div>
+    </div>
+    <span class="choice-estimate" role="cell">
+      <span class="choice-range" aria-hidden="true">{% if r.has_evidence %}<i class="choice-band" style="left:{{ r.low*100 }}%;width:{{ (r.high-r.low)*100 }}%"></i><i class="choice-dot" style="left:{{ r.estimate*100 }}%"></i>{% endif %}</span>
+      <span class="mono">{% if r.has_evidence %}{{ '%.0f'|format(r.estimate*100) }}<small>/100</small>{% else %}Untried{% endif %}</span>
+      <span class="choice-scale choice-scale--mobile" aria-hidden="true"><span>0</span><span>50</span><span>100</span></span>
+      <span class="choice-interval">{% if r.has_evidence %}Estimated range <strong>{{ '%.0f'|format(r.low*100) }}–{{ '%.0f'|format(r.high*100) }}</strong>{% else %}No offers to learn from yet{% endif %}</span>
+      <span class="sr-only">{% if r.has_evidence %}Choice score out of 100. The shaded bar shows the middle 80% of estimated scores. Shorter means more certain.{% else %}No choice score yet.{% endif %}</span>
+    </span>
+    <span class="choice-count choice-offers" role="cell"><span class="choice-mobile-label">Offers </span>{{ r.offered }}</span>
+    <span class="choice-count choice-selections" role="cell"><span class="choice-mobile-label">Selections </span>{{ r.picked }}</span>
+  </div>
+  {% endfor %}
+</div>
+{%- endmacro %}

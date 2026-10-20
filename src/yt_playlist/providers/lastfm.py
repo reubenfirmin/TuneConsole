@@ -101,6 +101,10 @@ def _get(params):
         _breaker.record(e)
         raise
     _breaker.record()
+    if isinstance(data, dict) and data.get("error") and data["error"] != 6:
+        # Last.fm reports invalid credentials, rate limits and service failures inside HTTP 200.
+        # Error 6 is a missing artist/track, which is a valid no-match answer.
+        net.record_probe_failure("Last.fm API error")
     return data
 
 

@@ -9,6 +9,31 @@ response (even a 4xx/5xx) or a successful read clears the streak: the host is re
 is a per-track miss, not an outage.
 """
 import urllib.error
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_probe_errors = ContextVar("enrichment_probe_errors", default=None)
+
+
+def record_probe_failure(reason):
+    errors = _probe_errors.get()
+    if errors is not None:
+        errors.append(reason)
+
+
+@contextmanager
+def probe_errors():
+    """Capture request failures within one provider probe, isolated from other threads/jobs.
+
+    A missing recording (404) is a valid answer. Transport errors, throttling, server errors and
+    invalid responses need another attempt, even before the provider's circuit breaker trips.
+    """
+    errors = []
+    token = _probe_errors.set(errors)
+    try:
+        yield errors
+    finally:
+        _probe_errors.reset(token)
 
 DEFAULT_THRESHOLD = 5                     # consecutive unreachable failures before we give up
 
@@ -40,6 +65,9 @@ class CircuitBreaker:
 
     def record(self, exc=None):
         """Report one HTTP attempt: `exc` is the exception it raised, or None on success."""
+        if exc is not None:
+            if not isinstance(exc, urllib.error.HTTPError) or exc.code != 404:
+                record_probe_failure(type(exc).__name__)
         if exc is not None and is_unreachable(exc):
             self.consecutive += 1
         else:

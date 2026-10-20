@@ -31,6 +31,9 @@ class ParamSpec:
     integer: bool = False
     advanced: bool = False
     boolean: bool = False
+    low: str = ""
+    high: str = ""
+    percentage: bool = False
 
 
 # Each default equals the constant it replaced, so behaviour is unchanged until a user moves it.
@@ -39,17 +42,16 @@ PARAMS = [
               "Minimum past plays for a forgotten favorite to appear in Comfort Listening. "
               "Raise this to include only tracks you played often.",
               1, 50, 1, 4, integer=True),
-    ParamSpec("comfort_recency_full_days", "Comfort recency window (days)", "discovery",
-              "Days since the last play before a track gets full priority in Comfort Listening. "
-              "Tracks played more recently get lower priority.",
+    ParamSpec("comfort_recency_full_days", "Comfort Listening: wait before full priority (days)", "discovery",
+              "How long a favorite needs to go unplayed to get full priority. Higher favors songs "
+              "you have not heard in longer; lower brings recently played favorites back sooner.",
               1, 365, 1, 30, integer=True),
     ParamSpec("erosion_view_cap", "Home visits before suggestions refresh", "discovery",
               "Number of Home visits before cards show a new set of suggestions. Lower refreshes them sooner.",
               1, 10, 1, 3, integer=True),
     ParamSpec("generated_gc_days", "Generated playlist cleanup (days)", "discovery",
-              "After this many days, a daily cleanup deletes generated playlists if you have played "
-              "fewer than half their tracks. This removes them locally and on YouTube. "
-              "Backups can be restored from the Actions page.",
+              "Generated playlists with fewer than half their tracks played are deleted after this "
+              "many days, both locally and on YouTube.",
               1, 365, 1, 7, integer=True),
     ParamSpec("discovery_artist_limit", "Discovery: artists scanned", "discovery",
               "Number of your most-listened-to artists checked for albums to recommend. "
@@ -61,12 +63,13 @@ PARAMS = [
               1, 10, 1, 3, integer=True, advanced=True),
     ParamSpec("discovery_gc_days", "Unsaved discovery cleanup (days)", "discovery",
               "How long a discovered album, artist, or track stays in the pool after it is first shown "
-              "to you. If you have not added it by then, it is removed. A track held in a generated "
+              "to you. Tracks not yet shown expire this many days after being found. "
+              "If you have not added it by then, it is removed. A track held in a generated "
               "playlist stays until that playlist is cleaned up.",
               1, 365, 1, 30, integer=True),
-    ParamSpec("palette_absence_penalty", "Unfamiliar genre penalty", "discovery",
-              "How much to lower scores for genres missing from your library. "
-              "Higher keeps recommendations closer to familiar genres; your listening variety also affects this.",
+    ParamSpec("palette_absence_penalty", "Favor familiar genres", "discovery",
+              "Higher gives music in unfamiliar genres less priority, keeping suggestions closer to "
+              "genres in your library. Too high can limit discovery of something different.",
               0.0, 2.0, 0.05, 0.5),
     ParamSpec("candidate_pool_factor", "Suggestions prepared per slot", "discovery",
               "Tracks prepared for each displayed recommendation. Higher gives rotating suggestions "
@@ -103,28 +106,32 @@ PARAMS = [
     # --- Breadth steering (#7). The interactive Breadth bar on the Home fingerprint binds to
     # breadth_bias; breadth_gain is its (advanced) sensitivity. Default 0 == today's behaviour. ---
     ParamSpec("breadth_bias", "Genre variety", "discovery",
-              "Move left for more of your most-played genres, right for more of your less-played genres. "
-              "The center follows your usual listening balance. This uses genres already in your library.",
-              -1.0, 1.0, 0.05, 0.0),
+              "Give the genres you play less often more chances, or stick to your usual favorites. "
+              "The middle keeps your usual balance. This draws from genres already in your library.",
+              -1.0, 1.0, 0.05, 0.0, low="Usual favorites", high="Less-played genres"),
     ParamSpec("breadth_gain", "Genre variety sensitivity", "discovery",
               "How strongly the Genre variety slider changes recommendations. Higher makes each adjustment stronger.",
               0.2, 3.0, 0.05, 1.0, advanced=True),
     # --- Right-now responsiveness (transient model). Defaults == the constants below. ---
-    ParamSpec("play_transient_w", "Recent plays: influence", "transient",
-              "How much recent plays favor similar music. 0 ignores them; higher gives them more influence.", 0.0, 2.0, 0.05, 0.30),
-    ParamSpec("like_transient_w", "Recent likes: influence", "transient",
-              "How much recent likes favor similar music. By default, a like counts more than a play.",
-              0.0, 2.0, 0.05, 0.45),
+    ParamSpec("play_transient_w", "Follow recent plays", "transient",
+              "Adds extra preference for music like your recent plays. Off removes this boost; "
+              "your listening history still counts. Stronger settings can let one session take over.",
+              0.0, 2.0, 0.05, 0.30, low="0% · Off", high="100% · Strongest", percentage=True),
+    ParamSpec("like_transient_w", "Follow recent likes", "transient",
+              "Adds extra preference for music like your recent likes. Off removes this boost "
+              "without undoing likes. Stronger settings can crowd out other music you enjoy.",
+              0.0, 2.0, 0.05, 0.45, low="0% · Off", high="100% · Strongest", percentage=True),
     ParamSpec("dislike_transient_w", "Recent dislikes: influence", "transient",
               "How much recent dislikes reduce recommendations for similar music.",
               0.0, 3.0, 0.05, 1.50),
-    ParamSpec("audio_transient_w", "Recent sound: influence", "transient",
-              "How much recent listening favors similar tempo, energy, and mood. "
-              "0 ignores these audio similarities.", 0.0, 2.0, 0.05, 0.30),
+    ParamSpec("audio_transient_w", "Follow recent sound", "transient",
+              "Adds extra preference for similar tempo, energy, and mood. Off removes this boost. "
+              "Stronger settings can make picks sound alike. Requires sound information.",
+              0.0, 2.0, 0.05, 0.30, low="0% · Off", high="100% · Strongest", percentage=True),
     ParamSpec("axis_weight_cap", "Preference strength", "discovery",
-              "Maximum combined boost from your genre, era, and artist preferences. Higher lets these "
-              "preferences outweigh the model's similarity score more strongly. "
-              "Tracks need matching tags to receive a boost. Muted genres remain excluded.",
+              "Higher lets your genre, era, and artist preferences override how well a track otherwise "
+              "matches your taste. Too high can promote weaker matches just because their tags fit. "
+              "Excluded genres stay excluded at every setting.",
               1.0, 16.0, 0.1, 1.4, advanced=True),
     ParamSpec("facet_gain", "Recent genre, era, and artist influence", "transient",
               "How strongly recent genre, era, and artist preferences change recommendation rankings.", 0.0, 1.0, 0.05, 0.35),
@@ -143,7 +150,8 @@ PARAMS = [
               "How strongly a mood choice changes recommendations relative to your saved taste.",
               0.0, 1.0, 0.05, 0.35),
     ParamSpec("weight_revert_halflife_d", "Learned adjustment fade time (days)", "transient",
-              "Days for learned weight adjustments to move halfway back toward your saved taste. "
+              "Days for saved genre and recommendation-mix weights to move halfway back to neutral (1). "
+              "Applies to learned and manual changes. Genre weights set to 0 stay muted until changed. "
               "Higher keeps adjustments longer.", 7, 365, 7, 60, integer=True, advanced=True),
     ParamSpec("recent_play_limit", "Recent plays and likes to consider", "transient",
               "Number of recent plays and likes used to adjust current recommendations.", 5, 200, 5, 50, integer=True),
@@ -179,10 +187,6 @@ PARAMS = [
               "Days until a skip has half its original influence on recommendations.",
               1, 60, 1, 14, integer=True),
     # --- Learning (graduation: right-now -> permanent). Defaults == the constants below. ---
-    ParamSpec("graduation_enabled", "Learning enabled", "graduation",
-              "Repeated listening and feedback update your saved preferences. "
-              "Turn off to keep saved weights fixed while recent activity still affects current picks.",
-              0, 1, 1, True, boolean=True),
     ParamSpec("theme_threshold", "Learning threshold", "graduation",
               "Amount of repeated activity needed to change a saved genre, era, or artist preference. "
               "Higher requires more evidence and learns more slowly.", 0.2, 5.0, 0.1, 1.2),
@@ -263,8 +267,7 @@ PARAMS = [
               "Number of likes and dislikes that unlock the full Home view before enrichment finishes.",
               1, 200, 1, 10, integer=True, advanced=True),
     ParamSpec("onboard_library_min", "Getting started: library tracks needed", "discovery",
-              "Minimum library tracks needed to show a 'from your library' playlist during setup. "
-              "Below this, only the radio playlist appears.",
+              "Minimum library tracks needed to show a 'from your library' playlist during setup.",
               0, 500, 5, 30, integer=True, advanced=True),
     # --- Per-mode Personalized PageRank ranker (#57). Experimental A/B: PPR walk vs the current
     # in-mode ordering. All advanced (a tuner sweeps them; hand-setting only degrades quality). ---
@@ -275,8 +278,9 @@ PARAMS = [
     ParamSpec("ppr_iters", "Experimental ranking: calculation limit", "discovery",
               "Maximum calculation rounds for experimental ranking. It stops sooner if rankings stabilize.",
               10, 200, 5, 50, integer=True, advanced=True),
-    ParamSpec("ppr_tol", "Experimental ranking: stopping tolerance", "discovery",
-              "Stop calculating once rankings change by less than this amount. Lower calculates more precisely.",
+    ParamSpec("ppr_tol", "Experimental ranking: calculation precision", "discovery",
+              "How small a change counts as finished. Lower calculates more precisely but can take "
+              "longer. The default is enough for normal use.",
               0.0, 0.01, 0.000001, 0.000001, advanced=True),
     ParamSpec("ppr_rank_depth", "Experimental ranking: tracks saved", "discovery",
               "Top-ranked tracks saved for each listening-style card by experimental ranking.",
@@ -324,18 +328,17 @@ PARAMS = [
 
 PARAMS_BY_NAME = {p.name: p for p in PARAMS}
 
-# #114: the small public control vocabulary. Everything else remains available in the diagnostic
-# disclosure, but these are the only scalar knobs presented as everyday taste controls.
+# #114: the everyday controls. Other discovery knobs are grouped into visible feature sections.
 SEMANTIC_PARAMS = ("breadth_bias", "play_transient_w", "like_transient_w", "audio_transient_w")
 
 
 # Lane weights (rec_weights table, axis `lane:<name>`): labels + help for the page. Clamp [0.2, 3.0].
 LANES = [
-    ("neighbourhood", "Similar to recent plays", "Tracks similar to what you have played recently."),
-    ("rotation", "Regular favorites", "Tracks you play most often."),
-    ("deep_cut", "Deep cuts", "Overlooked tracks by artists you already have."),
-    ("explore", "Explore", "Music you have not heard that matches your taste."),
+    ("neighbourhood", "Taste matches", "Tracks matched to your playlists, listening history, and preferences."),
+    ("deep_cut", "Deep cuts", "Overlooked tracks by artists you play often."),
+    ("rotation", "Playlist neighbors", "Tracks found in the same playlists as your favorites."),
 ]
+LANE_NAMES = frozenset(name for name, _label, _help in LANES)
 LANE_MIN, LANE_MAX, LANE_DEFAULT = 0.2, 3.0, 1.0
 
 # Genre-family weights (rec_weights table, axis `genre:<family>`): 0 mutes, 1 neutral, 2 favors.

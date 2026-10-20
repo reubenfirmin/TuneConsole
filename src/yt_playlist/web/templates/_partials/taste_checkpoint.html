@@ -1,0 +1,10 @@
+<div id="taste-checkpoint" hx-get="/taste/checkpoint" hx-trigger="taste-stale from:body" hx-swap="outerHTML">
+  <p class="section-note" role="status">{% if checkpoint %}Starting point saved <time datetime="{{ checkpoint.saved_at_iso }}" x-text="new Date($el.dateTime).toLocaleString()">{{ checkpoint.saved_at_iso }}</time>. Kept until you replace it.{% else %}Your first change automatically saves a starting point.{% endif %}</p>
+  <div class="taste-recovery-actions">
+    <button class="btn-primary btn-sm" hx-post="/taste/checkpoint" hx-target="#taste-checkpoint" hx-swap="outerHTML"
+            {% if checkpoint %}hx-confirm="Replace your saved starting point with your current Taste Model settings and preferences? You will no longer be able to restore the previous starting point."{% endif %}>Save new starting point</button>
+    <button class="btn-ghost btn-sm" hx-post="/taste/checkpoint/restore" hx-swap="none"
+            {% if not checkpoint %}disabled{% endif %}
+            hx-confirm="Restore your starting point? This restores all Taste Model settings and saved genre, era, artist, and recommendation mix preferences. Listening history, feedback, and your trained model are kept.">Restore starting point</button>
+  </div>
+</div>

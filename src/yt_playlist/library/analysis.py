@@ -77,13 +77,12 @@ def find_identical_groups(store, ignored_sigs=None):
 
 @dataclass
 class NearGroup:
-    playlists: list      # connected cluster of mutually near-duplicate playlists (2+)
+    playlists: list      # connected cluster of near-duplicate relationships (2+)
     avg_similarity: float
 
 def find_near_duplicate_groups(store, threshold=0.70, exclude_playlist_ids=None, ignored_sigs=None):
-    """Cluster near-duplicates (similar but not identical) into connected components, so N related
-    playlists show as one group instead of N-choose-2 pairwise rows. Identical playlists are handled
-    by find_identical_groups and excluded here.
+    """Cluster near-duplicates into connected components for group-scoped merge dismissals.
+    Identical playlists are handled by find_identical_groups and excluded here.
 
     `ignored_sigs`: merge signatures the user dismissed. Those groups are hidden."""
     exclude = exclude_playlist_ids or set()
@@ -164,6 +163,31 @@ def find_dupes(store, threshold=0.70):
             out.append(DupeFinding(pa, pb, sim, ka & kb, ka - kb, kb - ka))
     return sorted(out, key=lambda f: f.similarity, reverse=True)
 
+def _overlap_visible(pa, pb, suppressed, ignored_ytm, kept):
+    pair = frozenset((pa.ytm_playlist_id, pb.ytm_playlist_id))
+    if suppressed and pair in suppressed:
+        return False
+    if kept and pair in kept:
+        return True
+    return not ignored_ytm or (pa.ytm_playlist_id not in ignored_ytm
+                               and pb.ytm_playlist_id not in ignored_ytm)
+
+def near_duplicate_pairs(store, groups, suppressed=None, ignored_ytm=None, kept=None,
+                         threshold=0.70):
+    """Show each actual near-duplicate relationship with the same preferences as other overlaps.
+
+    Groups have already excluded exact duplicates and previously dismissed merge suggestions.
+    A connected group can contain a less-similar pair, so only emit pairs meeting the threshold.
+    """
+    out = []
+    for group in groups:
+        keyed = [(p, store.get_playlist_track_keys(p.id)) for p in group.playlists]
+        for (pa, ka), (pb, kb) in combinations(keyed, 2):
+            if (_overlap_visible(pa, pb, suppressed, ignored_ytm, kept)
+                    and threshold <= jaccard(ka, kb) < 1):
+                out.append(OverlapFinding(pa, pb, ka & kb, len(ka), len(kb)))
+    return sorted(out, key=lambda f: len(f.shared), reverse=True)
+
 def find_overlaps(store, dupe_threshold=0.70, exclude_playlist_ids=None, suppressed=None,
                   ignored_ytm=None, kept=None):
     # exclude_playlist_ids: playlists already shown as duplicates. Hide them here so the same
@@ -172,17 +196,11 @@ def find_overlaps(store, dupe_threshold=0.70, exclude_playlist_ids=None, suppres
     # ignored_ytm: playlists the user excludes from overlap detection entirely (e.g. a huge mixtape).
     # kept: pairs to ALWAYS keep visible even if one side is ignored (the "keep this pair" exception).
     exclude = exclude_playlist_ids or set()
-    suppressed = suppressed or set()
-    ignored_ytm = ignored_ytm or set()
-    kept = kept or set()
     out = []
     for pa, ka, pb, kb in _pairs_with_keys(store):
-        pair = frozenset((pa.ytm_playlist_id, pb.ytm_playlist_id))
         if pa.id in exclude or pb.id in exclude:
             continue
-        if pair not in kept and (pa.ytm_playlist_id in ignored_ytm or pb.ytm_playlist_id in ignored_ytm):
-            continue
-        if pair in suppressed:
+        if not _overlap_visible(pa, pb, suppressed, ignored_ytm, kept):
             continue
         shared = ka & kb
         if shared and jaccard(ka, kb) < dupe_threshold:
@@ -218,15 +236,19 @@ def cleanup_summary(store):
     exact_ids = {p.id for g in groups for p in g.playlists}
     near_groups = find_near_duplicate_groups(store, exclude_playlist_ids=exact_ids,
                                              ignored_sigs=ignored_sigs)
+    prefs = {"suppressed": store.get_suppressed_overlap_pairs(),
+             "ignored_ytm": store.get_overlap_ignored(), "kept": store.get_overlap_kept_pairs()}
+    near_pairs = near_duplicate_pairs(store, near_groups, **prefs)
     dupe_ids = {p.id for d in find_dupes(store) for p in (d.playlist_a, d.playlist_b)}
-    overlaps = find_overlaps(store, exclude_playlist_ids=dupe_ids,
-                             suppressed=store.get_suppressed_overlap_pairs(),
-                             ignored_ytm=store.get_overlap_ignored(), kept=store.get_overlap_kept_pairs())
+    overlaps = find_overlaps(store, exclude_playlist_ids=dupe_ids, **prefs)
     # Each category already excludes its own dismissals, so the union is simply what's still pending.
     involved = {}
-    for g in (*groups, *near_groups):
+    for g in groups:
         for p in g.playlists:
             involved.setdefault(p.id, p)
+    for o in near_pairs:
+        involved.setdefault(o.playlist_a.id, o.playlist_a)
+        involved.setdefault(o.playlist_b.id, o.playlist_b)
     for p in (*find_empty_playlists(store, ignored=ci.get("empty")),
               *find_tiny_playlists(store, ignored=ci.get("tiny"))):
         involved.setdefault(p.id, p)

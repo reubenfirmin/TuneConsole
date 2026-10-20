@@ -1,4 +1,10 @@
 """The enrichment waterfall harness: ordering/fill, logging, MBID hand-off, conflicts, control flow."""
+import io
+import json
+import urllib.error
+
+import pytest
+
 from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.providers.waterfall import run_waterfall
 
@@ -133,5 +139,33 @@ def test_tracks_skipped_after_provider_breaker_are_not_reported_as_attempted(sto
     attempted = run_waterfall(
         store, tracks, _cfg(("musicbrainz", True)), lambda _e: None,
         registry={"musicbrainz": provider})
-    assert attempted == [tracks[0]["id"]]
+    assert attempted == []                       # the request that tripped the breaker failed too
     assert provider.calls == ["Song 0"]
+
+
+@pytest.mark.parametrize("failure,checked", [(None, True), (404, True), (429, False),
+                                           (503, False), ("timeout", False)])
+def test_real_provider_request_outcome_controls_completion_and_retains_audit(store, monkeypatch, failure, checked):
+    from yt_playlist.providers import musicbrainz
+    from yt_playlist.util.matching import identity_key
+
+    track = _track(store)
+    requests = []
+
+    def request(req, **kwargs):
+        requests.append(req.full_url)
+        if failure == "timeout":
+            raise TimeoutError("provider timed out")
+        if failure:
+            raise urllib.error.HTTPError(req.full_url, failure, "test", {}, None)
+        return io.StringIO('{"recordings": []}')
+
+    monkeypatch.setattr(musicbrainz.urllib.request, "urlopen", request)
+    monkeypatch.setattr(musicbrainz._pacer, "wait", lambda: None)
+    completed = run_waterfall(store, [track], _cfg(("musicbrainz", True)), lambda e: None,
+                              registry={"musicbrainz": musicbrainz})
+    assert bool(completed) == checked
+    assert requests
+    attempts = json.loads(store.get_setting("enrich_attempts:" + identity_key("Hyperballad", "Bjork")))
+    assert attempts["musicbrainz"]["status"] == ("no_match" if checked else "retry")
+    assert attempts["musicbrainz"]["fields"] == {}

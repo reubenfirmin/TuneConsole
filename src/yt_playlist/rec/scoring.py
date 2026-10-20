@@ -413,6 +413,9 @@ def _mood_components(scores, store, now, V, idx, content_vecs=None):
         if Vn is None:
             Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
         components["session"] = rec_params.get_param(store, "session_alpha") * (Vn @ st)
+    # TODO: normalize this legacy 0–2 strength alongside play/like weights in transient.py.
+    # 0 disables this boost; 1 is not neutral (default 0.30). The UI maps it to 0–100%
+    # influence strength, not a share of picks; any range cleanup must migrate saved values.
     w = rec_params.get_param(store, "audio_transient_w")
     if w > 0:
         boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs)

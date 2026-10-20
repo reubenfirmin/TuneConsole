@@ -1,4 +1,4 @@
-"""Albums and Artists tabs (your collection across all playlists) + save/unsave album."""
+"""Albums and Artists tabs (playlists and saved albums) + save/unsave album."""
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 

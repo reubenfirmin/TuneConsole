@@ -3,10 +3,10 @@ import pytest
 from yt_playlist.rec import embed, scoring, surfaces
 
 
-def _model(store):
+def _model(store, album=None, thumbnail=None):
     iid = store.upsert_identity("main", "cred", None, True)
-    a = [store.upsert_track(f"a{i}", f"A{i}", "Alpha", None, None) for i in range(8)]
-    b = [store.upsert_track(f"b{i}", f"B{i}", "Beta", None, None) for i in range(8)]
+    a = [store.upsert_track(f"a{i}", f"A{i}", "Alpha", album, None, thumbnail=thumbnail) for i in range(8)]
+    b = [store.upsert_track(f"b{i}", f"B{i}", "Beta", album, None, thumbnail=thumbnail) for i in range(8)]
     for track in a:
         store.set_track_genre(track, "Techno")
     for track in b:
@@ -49,10 +49,11 @@ def test_taste_sample_items_carry_trace_but_normal_serving_does_not(store):
 
 
 def test_taste_comparison_retains_suppressed_baseline_track_with_reason(store):
-    _model(store)
+    _model(store, album="Comparison album", thumbnail="/static/comparison-cover.jpg")
     baseline = surfaces.taste_comparison(store, now=100.0, limit=6)
     assert baseline and all(row["in_cohort"] for row in baseline)
     key = baseline[0]["key"]
+    metadata = store.tracks_by_keys([key])[key]
     store.record_feedback("for_you", key, "dismiss", until=1000.0, now=101.0)
 
     current = surfaces.taste_comparison(store, now=102.0, keys=[key], limit=6)
@@ -62,3 +63,7 @@ def test_taste_comparison_retains_suppressed_baseline_track_with_reason(store):
     assert retained["eligible"] is False
     assert retained["eligibility_reason"] == "dismissed or snoozed"
     assert retained["trace"]["final"] == pytest.approx(retained["score"])
+    # A track that leaves the shortlist still has the artwork and identity needed to hear it.
+    assert retained["video_id"] == metadata["video_id"]
+    assert retained["album"] == "Comparison album"
+    assert retained["thumbnail"] == "/static/comparison-cover.jpg"

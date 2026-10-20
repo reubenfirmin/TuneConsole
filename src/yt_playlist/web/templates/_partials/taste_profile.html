@@ -1,0 +1,41 @@
+<article class="taste-profile">
+  <header class="taste-profile-lead">
+    <div>
+      <h2>Taste profile</h2>
+      <p class="taste-profile-deck">Your listening history alongside the preferences shaping your recommendations.</p>
+    </div>
+    <dl class="taste-profile-facts">
+      <div><dt>Genre families</dt><dd>{{ viz.n_families }}</dd></div>
+      <div><dt>Listening styles</dt><dd>{{ viz.modes.modes|length }}</dd></div>
+      <div><dt>Genre variety</dt><dd class="taste-profile-word">{{ viz.breadth_word|capitalize if viz.genres else 'Pending' }}</dd></div>
+    </dl>
+  </header>
+
+  <section class="taste-profile-section" aria-label="Genre portrait">
+    {{ tv.genres() }}
+    {{ tv.facet_key(viz.genres) }}
+  </section>
+
+  <section class="taste-profile-section" aria-label="Listening patterns">
+    {{ tv.styles() }}
+    {{ tv.style_tracks() }}
+  </section>
+
+  <section class="taste-profile-section" aria-label="Era portrait">
+    {{ tv.eras() }}
+    {{ tv.facet_key(viz.eras) }}
+  </section>
+
+  <section class="taste-profile-section" aria-label="Artist portrait">
+    {{ tv.artists() }}
+  </section>
+
+  <section class="taste-profile-section" aria-labelledby="taste-playlist-influence-title">
+    <h2 class="section section-flush" id="taste-playlist-influence-title">Playlist influence <span class="scope-tag">saved</span></h2>
+    <div id="taste-playlist-influence" hx-get="/taste/viz/playlist-influence" hx-trigger="intersect once, taste-retry" hx-swap="innerHTML"
+         hx-on::after-request="if(event.detail.elt === this &amp;&amp; !event.detail.successful) { this.querySelector('[role=status]').textContent = 'Could not load playlist influence.'; this.querySelector('button').hidden = false; }">
+      <p class="section-note" role="status">Loading playlist influence…</p>
+      <button type="button" class="btn-ghost btn-sm" hidden onclick="htmx.trigger(this.parentElement, 'taste-retry')">Try playlist influence again</button>
+    </div>
+  </section>
+</article>

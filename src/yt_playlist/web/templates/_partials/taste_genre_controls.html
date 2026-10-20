@@ -1,0 +1,28 @@
+<section class="taste-settings-section" id="taste-genre-settings">
+  <p class="section-note">Ask for more or less of your {{ [genres|length, 20]|min }} most-played genres on <strong>Home and Discover</strong>. <strong>1 follows your usual taste</strong>; above 1 favors a genre, and below 1 reduces it. <strong>0 excludes that genre</strong>, so you may miss music you would otherwise enjoy. Use <strong>Reset</strong> to return it to 1 and allow it again. Doubling a value does not guarantee twice as many tracks.</p>
+  <p class="section-note">These values can come from your listening and feedback as well as your own adjustments. Learning can change them again, and they gradually fade toward 1. A genre set to 0 stays excluded between updates. Adjust learning and fade time in <strong>Recent &amp; learning</strong>.</p>
+  <div class="card taste-genre-controls">
+    {% for g in genres[:20] %}
+    <div class="knob">
+      <div class="knob-head">
+        <label for="genre-{{ loop.index }}">{{ g.family }}<span class="knob-sub">{{ '%.0f'|format(g.share * 100) }}% of your listening</span></label>
+        <output id="out-genre-{{ loop.index }}" for="genre-{{ loop.index }}">{{ '%.2f'|format(g.weight) }}</output>
+      </div>
+      <input type="range" id="genre-{{ loop.index }}" name="weight" value="{{ g.weight }}"
+             style="--knob-position: {{ 100 * (g.weight - genre_min) / (genre_max - genre_min) }}%"
+             min="{{ genre_min }}" max="{{ genre_max }}" step="{{ genre_step }}"
+             aria-describedby="genre-scale-{{ loop.index }}"
+             hx-post="/taste/weight" hx-vals='{"axis":"genre:{{ g.family }}"}' hx-trigger="change" hx-swap="none"
+             hx-on::after-request="if(event.detail.successful) markWeightSaved(this)" oninput="updateOut(this)">
+      <div class="knob-scale" id="genre-scale-{{ loop.index }}"><span>0 · exclude</span><span>1 · neutral</span><span>2 · favor</span></div>
+      <div class="knob-footer">
+        {% set w = g %}{% include "_partials/taste_weight_origin.html" %}
+        <button class="knob-reset" type="button" title="Reset to neutral" aria-label="Reset {{ g.family }} to neutral"
+                data-target="genre-{{ loop.index }}" data-default="{{ genre_default }}" onclick="resetKnob(this)"
+                hx-post="/taste/weight" hx-vals='{"axis":"genre:{{ g.family }}","weight":"{{ genre_default }}"}' hx-swap="none"
+                hx-on::after-request="if(event.detail.successful) markWeightSaved(this)">{{ arrow_icon('reset') }} Reset</button>
+      </div>
+    </div>
+    {% else %}<p class="section-note">Run library enrichment to add genre information for these controls.</p>{% endfor %}
+  </div>
+</section>

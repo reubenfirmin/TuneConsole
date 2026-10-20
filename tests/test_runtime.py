@@ -75,3 +75,56 @@ def test_apply_setup_reloads_over_provisioned_default(store, monkeypatch, tmp_pa
     ])
     assert rt.configured is True
     assert len(rt.clients()) == 2   # load() ran inside apply_setup and swapped the provider in
+
+
+def test_apply_setup_removes_identity_from_active_accounts_and_preserves_history(store, monkeypatch, tmp_path):
+    _stub_ytmusic(monkeypatch)
+    rt = Runtime(store, tmp_path / "config.toml", tmp_path)
+    main = {"label": "main", "credential_ref": "browser.json", "is_master": True}
+    brand = {"label": "brand", "credential_ref": "browser.json", "brand_account_id": "UC9"}
+    rt.apply_setup([main, brand])
+    ids = {i.label: i.id for i in store.get_identities()}
+    snapshot = store.add_history_snapshot(ids["brand"], 1.0, ["song|artist"])
+    playlist = store.upsert_playlist(ids["brand"], "PL1", "Brand mix", 0, "h", 1.0)
+
+    rt.apply_setup([main])
+
+    assert [(i.id, i.label) for i in store.get_identities()] == [(ids["main"], "main")]
+    assert set(rt.clients()) == {ids["main"]}
+    assert store.conn.execute("SELECT identity_id FROM history_snapshots WHERE id=?",
+                              (snapshot,)).fetchone()[0] == ids["brand"]
+    assert store.conn.execute("SELECT identity_key FROM history_items WHERE snapshot_id=?",
+                              (snapshot,)).fetchone()[0] == "song|artist"
+    assert store.get_playlist(playlist).identity_id == ids["brand"]
+    assert list(store.conn.execute("PRAGMA foreign_key_check")) == []
+
+    rt.apply_setup([main, brand])
+    assert {i.label: i.id for i in store.get_identities()} == ids
+    assert set(rt.clients()) == set(ids.values())
+
+
+def test_load_reconciles_stale_database_identities_with_saved_config(store, monkeypatch, tmp_path):
+    _stub_ytmusic(monkeypatch)
+    rt = Runtime(store, tmp_path / "config.toml", tmp_path)
+    rt.apply_setup([{"label": "main", "credential_ref": "browser.json", "is_master": True}])
+    # Reproduce a removal saved by an older version: config is correct, DB still has the old row.
+    removed = store.upsert_identity("brand", "browser.json", "UC9", True)
+    rt.load()
+
+    assert [i.label for i in store.get_identities()] == ["main"]
+    assert removed not in rt.clients()
+    assert store.conn.execute("SELECT is_master FROM identities WHERE id=?", (removed,)).fetchone()[0] == 0
+
+
+def test_apply_setup_invalid_edit_keeps_existing_identities(store, monkeypatch, tmp_path):
+    _stub_ytmusic(monkeypatch)
+    rt = Runtime(store, tmp_path / "config.toml", tmp_path)
+    rt.apply_setup([
+        {"label": "main", "credential_ref": "browser.json", "is_master": True},
+        {"label": "brand", "credential_ref": "browser.json", "brand_account_id": "UC9"},
+    ])
+    before = store.get_identities()
+    with pytest.raises(ValueError, match="exactly one"):
+        rt.apply_setup([{"label": "main", "credential_ref": "browser.json"}])
+    assert store.get_identities() == before
+    assert set(rt.clients()) == {i.id for i in before}

@@ -26,3 +26,14 @@ def test_facade_delegates(store):
     store.upsert_identity("me", "c", None, True)                        # legacy store.x() call site
     assert store.get_master_identity().label == "me"
     assert [i.label for i in store.get_identities()] == ["me"]
+
+
+def test_migration_preserves_existing_identities(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    with store.conn:
+        store.conn.execute("ALTER TABLE identities DROP COLUMN active")
+
+    store.init_schema()
+
+    assert [(i.id, i.label) for i in store.get_identities()] == [(iid, "main")]
+    assert store.get_master_identity().id == iid

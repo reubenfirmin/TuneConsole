@@ -17,11 +17,11 @@ def test_track_view_has_stats_and_gc_at():
     assert r["plays"] == 0 and r["playlists"] == 0 and r["title"] == "Song"
 
 
-def test_unshown_track_has_null_gc_at():
+def test_unshown_track_expires_from_found_date():
     s = _s()
     s.upsert_discovered_track("a|x", "v1", "Song", "Artist", "Alb", None, None, None, "r", 100.0)
     r = s.discovery_track_view(1000.0, gc_days=30)[0]
-    assert r["gc_at"] is None              # never shown -> no GC clock
+    assert r["gc_at"] == 100.0 + 30 * 86400
 
 
 def test_album_and_artist_views():

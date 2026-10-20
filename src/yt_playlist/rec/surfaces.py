@@ -288,6 +288,8 @@ def taste_comparison(store, now, keys=None, limit=24) -> list[dict]:
                   "artist muted" if artist in muted else None)
         lane = item.lane if item else ""
         rows.append({"key": key, "title": meta[key]["title"], "artist": artist,
+                     "album": meta[key].get("album"), "video_id": meta[key].get("video_id"),
+                     "thumbnail": meta[key].get("thumbnail"),
                      "score": scores[key], "trace": traces[key], "rank": rank,
                      "in_cohort": rank is not None, "lane": lane,
                      "lane_weight": weights.get(f"lane:{lane}", 1.0) if lane else None,
@@ -300,10 +302,9 @@ def _rotation_reason(n) -> str:
     return f"Sits with your favorites in {n} of your playlist{'s' if n != 1 else ''}"
 
 
-# HOME CARD: "Fresh" ("Fresh songs"). Sourced ONLY from the taste-scored cold pool (cold_candidates,
-# materialized by rec_worker._fresh_proposal): every row is a scored, feedback-able out-of-corpus track.
-# Radio discovery still feeds that pool via discover.populate_radio_tracks; the old ephemeral radio-dict
-# producer (fresh_songs) was removed (#53: pool-only, no unscored radio rows).
+# HOME CARD: "Fresh" ("Fresh songs"). Draws from the discovery pool. Metadata and artist signals
+# improve ranking when available; unrankable discoveries remain eligible as fallback candidates.
+# Radio harvesting is separately feature-flagged in discover.populate_radio_tracks.
 
 
 def _cap_per_artist(scored, cap):
@@ -336,41 +337,37 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
     Projects each pool track into the collaborative embedding via ContentProjection (so per-playlist
     taste fit and the collaborative mood tilt apply), folds in the audio tilt over the discovered
     content vectors (#45 cold), and scales by the #18 discovery facet overlay (a muted family is
-    hard-excluded, consistent with discovered albums/artists). Returns [] when the projection can't be
-    fit or the pool is empty. Degrades gracefully: a track missing audio still ranks on genre/era; a
-    track with no usable metadata (projection is the zero vector) is dropped, never raising.
+    hard-excluded, consistent with discovered albums/artists). Tracks without a usable vector follow
+    the ranked candidates in discovery order. If the projection or taste model isn't ready, the
+    discovery pool still supplies Fresh. Enrichment improves ordering, never gates eligibility.
     """
     from yt_playlist.rec.discover import ContentProjection   # lazy: avoid the surfaces<->discover cycle
     rows = store.get_discovered_tracks()
     if not rows:
         return []
     proj = ContentProjection.fit(store)
-    if proj is None:
-        return []
-    pt = playlist_taste(store)
-    if not pt:
-        return []
-    keys, vecs, kept = [], [], []
-    for r in rows:
-        v = proj.predict(r.get("genre"), r.get("year"), r.get("audio"), artist=r.get("artist"))
-        if v is None or not np.any(v):                  # no usable features -> not surfaced
-            continue
-        keys.append(r["identity_key"])
-        vecs.append(np.asarray(v, dtype=np.float32))
-        kept.append(r)
-    if not keys:
-        return []
-    V = np.vstack(vecs)
-    idx = {k: i for i, k in enumerate(keys)}
-    # Same scoring pipeline as warm tracks, but the audio tilt scores against the DISCOVERED content
-    # vectors (cold tracks' content vectors live there, not in the library content store).
-    scores = _apply_mood(pt.score_all(V), store, now, V, idx,
-                         content_vecs=embed.load_discovered_content_vectors(store))
+    pt = playlist_taste(store) if proj is not None else None
+    keys, vecs = [], []
+    if proj is not None and pt:
+        for r in rows:
+            v = proj.predict(r.get("genre"), r.get("year"), r.get("audio"), artist=r.get("artist"))
+            if v is None or not np.any(v):
+                continue
+            keys.append(r["identity_key"])
+            vecs.append(np.asarray(v, dtype=np.float32))
+    scores = {}
+    if keys:
+        V = np.vstack(vecs)
+        idx = {k: i for i, k in enumerate(keys)}
+        # Same scoring pipeline as warm tracks, with the discovered content vectors for audio tilt.
+        values = _apply_mood(pt.score_all(V), store, now, V, idx,
+                             content_vecs=embed.load_discovered_content_vectors(store))
+        scores = {k: float(values[i]) for i, k in enumerate(keys)}
     suppressed = store.suppressed_keys("for_you", now)
     muted = store.muted_artists()
     scored = []
     family_weights = {}
-    for r in kept:
+    for r in rows:
         k = r["identity_key"]
         if k in suppressed or r.get("artist") in muted:
             continue
@@ -380,18 +377,20 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
         fw = family_weights[fam]
         if fw is None:                                  # muted family: hard-exclude (mirrors #18 discovery)
             continue
-        scored.append((float(scores[idx[k]]) * fw, r))
-    scored.sort(key=lambda t: -t[0])
+        score = scores.get(k)
+        scored.append((score * fw if score is not None else None, r))
+    # Keep unknown tracks after ranked tracks, even when a known taste score is negative.
+    # Stable sorting preserves discovery order within the fallback instead of inventing a fit score.
+    scored.sort(key=lambda t: (t[0] is None, -(t[0] or 0.0)))
     scored = _cap_per_artist(scored, int(rec_params.get_param(store, "fresh_artist_cap")))
     out: list[ForYouItem] = []
     for _, r in (scored[:limit] if limit else scored):
         # The Fresh card label already says these are new, taste-fit tracks, so a generic "fits your
         # taste" per row is pure redundancy: leave it blank. Only the audio-matched tracks get a row
         # note, because "sounds like your recent listening" is genuinely distinguishing info.
-        reason = "Sounds like your recent listening" if r.get("audio") else ""
-        # The discovered row already knows the genre and year (the projection above scores on
-        # them). Carry both onto the item: these tracks are out-of-corpus, so nothing downstream
-        # can look them up in the library, and without them the card can say nothing about itself.
+        reason = "Sounds like your recent listening" if r.get("audio") and r["identity_key"] in scores else ""
+        # Carry any saved genre/year onto the item: these tracks are out-of-corpus, so downstream
+        # consumers cannot look them up in the library.
         out.append(ForYouItem(r.get("title") or "", r.get("artist") or "", r.get("album") or "",
                               r.get("video_id"), r.get("thumbnail"), 0, reason,
                               r["identity_key"], lane="cold", genre=r.get("genre") or "",

@@ -1,0 +1,68 @@
+{% import "_partials/taste_tabs.html" as tt %}
+<div class="taste-experiment taste-controls">
+{{ tt.bar([('starting', 'Starting point'), ('preview', 'Preview & compare')],
+          prefix='taste-experiment', state='experimentTab', action='selectExperiment',
+          label='Experiment tools', extra_class='taste-subtabs') }}
+
+<div {{ tt.panel('starting', prefix='taste-experiment', state='experimentTab', extra_class='taste-experiment-panel') }}>
+<section class="taste-starting-point" aria-labelledby="taste-starting-point-title">
+  <h2 id="taste-starting-point-title">Your starting point</h2>
+  <p class="section-note">Keep a setup you can return to after experimenting. This snapshot saves settings across Taste Model, including Recommendations, Recent &amp; learning, and Generated playlists, plus your genre, era, artist, and mix preferences. Restoring it keeps your listening history, feedback, and trained model. Saving a new starting point replaces the previous snapshot.</p>
+  {% include "_partials/taste_checkpoint.html" %}
+</section>
+
+<section class="taste-settings-section taste-defaults" aria-labelledby="taste-defaults-title">
+  <h2 id="taste-defaults-title">Return to defaults</h2>
+  <p class="section-note">Resets <strong>all Taste Model settings</strong>, including Recent &amp; learning, and removes saved genre, era, artist, and recommendation mix preferences. Your trained model, listening history, and feedback are kept. To recover your own previous setup, use <strong>Restore starting point</strong> instead. Neither option restores playlists already deleted by cleanup.</p>
+  <button class="btn-ghost" hx-post="/taste/reset-all" hx-swap="none"
+          hx-confirm="Reset all Taste Model settings, including Recent & learning, and clear saved genre, era, artist, and recommendation mix preferences? Your trained model, listening history, and feedback will be kept. Your saved starting point stays available.">{{ arrow_icon('reset') }} Reset all settings</button>
+</section>
+</div>
+
+<div {{ tt.panel('preview', prefix='taste-experiment', state='experimentTab', extra_class='taste-experiment-panel') }}>
+<section class="taste-settings-section" id="taste-preview" aria-labelledby="taste-preview-title">
+<header class="taste-preview-intro" hx-get="/taste/preview" hx-trigger="intersect once" hx-target="#sample-body">
+  <h2 id="taste-preview-title">Preview &amp; compare</h2>
+  <p>Compare Home’s familiar-music suggestions as you adjust balance, genres, or shared ranking controls in <strong>Recommendations</strong>; recent-listening influence or memory in <strong>Recent &amp; learning</strong>; or source weights in <strong>Generated playlists</strong>. Capture picks before changing one of these controls, then compare and listen to check whether you prefer the result.</p>
+</header>
+<div class="taste-preview-guide">
+  <div>
+    <h3>The music in this preview</h3>
+    <p>The shortlist behind <strong>Home’s familiar-music mix</strong>: <strong>Taste matches</strong> and overlooked songs by artists you play often (<strong>Deep cuts</strong>). Until taste matching is ready, songs that share playlists with your favorites (<strong>Playlist neighbors</strong>) fill in.</p>
+    <p>This pool is the set of songs the mix can draw from. The final Home mix also applies genre choices, variety limits, and track ordering.</p>
+  </div>
+  <div>
+    <h3>Settings that shape these picks</h3>
+    <p><a href="#recommendations/main" @click.prevent="selectRecommendation('main')">Main controls</a>, <a href="#recommendations/genres" @click.prevent="selectRecommendation('genres')">Genres</a>, and shared ranking settings under <a href="#recommendations/features" @click.prevent="selectRecommendation('features')">Settings by feature</a> apply here. So do recent-listening influence and memory in <a href="#learning" @click.prevent="select('learning')">Recent &amp; learning</a>, and <a href="#generated" @click.prevent="select('generated')">Source weights in Generated playlists</a>.</p>
+    <p>Your library, listening, feedback, and trained model also shape these picks. Check other Home mixes, Discover searches, and cleanup in those features.</p>
+  </div>
+</div>
+<div class="card foryou-sample" id="foryou-sample">
+  <h3 class="taste-subheading">Sample suggestions</h3>
+  <p class="section-note">Up to 8 songs sampled from the shortlist with your saved settings. Refreshing can show different songs even without a settings change. Play a song to hear it on YouTube Music.</p>
+  <div class="sample-head">
+    <button class="btn-ghost btn-sm" hx-get="/taste/preview" hx-target="#sample-body" hx-indicator="#sample-spin" hx-disabled-elt="this">
+      <span id="sample-spin" class="htmx-indicator">{{ arrow_icon('refresh') }}</span> Refresh sample
+    </button>
+    <span class="sample-note" role="status">Refresh after changing a setting to see a new sample.</span>
+  </div>
+  <div id="sample-body"><p class="section-note">Loading…</p></div>
+</div>
+<div class="card taste-comparison">
+  <h3 class="taste-subheading">Before and after</h3>
+  <p class="section-note">Compare the <strong>top 24 picks</strong> from the same shortlist. This uses a fixed ranking so random sample changes don’t obscure the effect of your settings.</p>
+  <ol class="taste-comparison-steps">
+    <li><strong>Capture current picks</strong> to keep the current top 24 as “Before”. Capturing again replaces them.</li>
+    <li><strong>Change one setting</strong> in Recommendations, Recent &amp; learning, or Generated playlists using the links above.</li>
+    <li><strong>Compare changes</strong> to see which songs enter, leave, or move in the ranking.</li>
+  </ol>
+  <div class="sample-head" id="taste-comparison-actions">
+    <button class="btn-ghost btn-sm" hx-post="/taste/comparison/baseline" hx-target="#comparison-body" hx-disabled-elt="#taste-comparison-actions button">Capture current picks</button>
+    <button class="btn-ghost btn-sm" hx-get="/taste/comparison" hx-target="#comparison-body" hx-disabled-elt="#taste-comparison-actions button">Compare changes</button>
+  </div>
+  <p class="section-note">Capturing picks saves a comparison, not a settings backup. Use <strong>Restore starting point</strong> under <a href="#experiment" @click.prevent="selectExperiment('starting')">Starting point</a> to undo your settings changes.</p>
+  <div id="comparison-body" hx-get="/taste/comparison" hx-trigger="intersect once"><p class="section-note">Loading…</p></div>
+</div>
+</section>
+</div>
+</div>

@@ -15,6 +15,7 @@ from yt_playlist.util import net
 from yt_playlist.util.matching import normalize
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
 from yt_playlist.providers.enrich_queue import PriorityGate
+from yt_playlist.providers import genres
 
 logger = logging.getLogger(__name__)
 
@@ -128,13 +129,11 @@ def _earliest_year(recordings):
 
 
 def _top_label(obj):
-    """Highest-voted genre, else highest-voted tag, title-cased for display."""
+    """Highest-voted enabled genre, then recognized tags, using the shared canonical labels."""
     for field in ("genres", "tags"):
-        items = obj.get(field) or []
-        if items:
-            best = max(items, key=lambda x: x.get("count", 0)).get("name")
-            if best:
-                return best.title()
+        items = sorted(obj.get(field) or [], key=lambda x: int(x.get("count") or 0), reverse=True)
+        if genre := genres.pick_genre(item.get("name") for item in items):
+            return genre
     return None
 
 
@@ -152,8 +151,8 @@ def _artist_genre(mbid):
         except Exception as e:  # noqa: BLE001
             logger.debug("MB artist lookup failed for %s: %s", mbid, e)
             return None        # transient failure: don't cache, so a later track retries
-        _artist_genre_cache[mbid] = _top_label(art)   # cache only on success (incl. a legit None)
-    return _artist_genre_cache.get(mbid)
+        _artist_genre_cache[mbid] = art  # Cache metadata so edits to the enabled list take effect.
+    return _top_label(_artist_genre_cache[mbid])
 
 
 _PARENS = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
