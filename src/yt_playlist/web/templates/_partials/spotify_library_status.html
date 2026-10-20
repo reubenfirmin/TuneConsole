@@ -9,7 +9,7 @@
   <span>The complete result will appear here and as a persistent notification on the dashboard.</span>
 </div>
 {% elif job.status == 'done' %}
-<p class="section-note"><a href="/import/spotify-library/report">View latest Spotify import report →</a></p>
+<p class="section-note"><a href="/import/spotify-library/report">View latest Spotify import report {{ arrow_icon('right') }}</a></p>
 {% else %}
 <div class="notice warning">
   <strong>Spotify library import stopped.</strong>

@@ -3,7 +3,7 @@
 {% block body %}
 <div class="page-head">
   <h1>Set up TuneConsole</h1>
-  <p>Pair the browser extension, name your identities, and you're in.</p>
+  <p>Connect the browser extension and choose the YouTube identities to use.</p>
 </div>
 
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
@@ -41,18 +41,12 @@
       <h2 class="section section-flush">Pair the browser extension</h2>
       <details class="advanced advanced-spaced">
         <summary>Why an extension?</summary>
-        <p class="section-note">YouTube Music has no public, official API for managing your library and
-          playlists. Google does offer an OAuth path (the YouTube Data API), and it can create and edit
-          playlists, but it <strong>can't read your listening history</strong>, the "listens" data our
-          recommendation models depend on, so it can't fully drive this app. So instead the app routes
-          requests through a small browser extension (TuneConsole) running in your own signed-in browser
-          session: the extension applies your cookies to each request and sends the response back over a
-          local connection. This is the same underlying approach established tools like
-          <code class="mono">ytmusicapi</code> take, out of necessity, just brokered live through the
-          extension instead of a one-time pasted capture.</p>
-        <p class="section-note">Your session cookies never leave your browser or cross this connection:
-          the app sends only the request (method, URL, body), and the extension adds auth and sends the
-          response back. The extension stores no credentials in the app.</p>
+        <p class="section-note">TuneConsole needs your library and listening history to create
+          recommendations. Google's public playlist API <strong>can't read your listening history</strong>,
+          so TuneConsole connects through an extension in your signed-in browser instead.</p>
+        <p class="section-note">The extension makes YouTube Music requests in your browser and returns
+          the results to TuneConsole over a local connection. Your session cookies stay in the browser;
+          TuneConsole never receives or stores them.</p>
       </details>
       <details class="advanced advanced-spaced">
         <summary>What does this give access to?</summary>
@@ -74,7 +68,7 @@
 
       <div class="btn-row btn-row-spaced" x-show="!connected" x-cloak>
         <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
-           target="_blank" rel="noopener">Get the extension →</a>
+           target="_blank" rel="noopener">Get the extension {{ arrow_icon('external') }}</a>
       </div>
     </div>
   </div>
@@ -83,14 +77,14 @@
   <div class="tab-panel" role="tabpanel" x-show="tab === 'identities'" x-cloak>
     <div class="card">
       <h2 class="section section-flush">Your identities</h2>
-      <p class="section-note">One row per YouTube identity. Exactly one is the <strong>master</strong>:
-        your main account, where cross-identity merges land. A brand identity also needs its
-        <code class="mono">brand_account_id</code>: open
+      <p class="section-note">Add one row for each YouTube identity. Choose a <strong>main identity</strong>
+        to receive playlists merged from multiple identities. For a brand account, enter its
+        <strong>Brand account ID</strong>: open
         <a href="https://myaccount.google.com/brandaccounts" target="_blank" rel="noopener">myaccount.google.com/brandaccounts</a>,
         pick the account, and copy the id from the URL <code class="mono">…/b/&lt;id&gt;/</code>. Leave it blank for your main account.</p>
 
       <table>
-        <thead><tr><th>Label</th><th>brand_account_id</th><th class="col-master">Master</th><th class="col-actions"></th></tr></thead>
+        <thead><tr><th>Label</th><th>Brand account ID</th><th class="col-master">Main identity</th><th class="col-actions"></th></tr></thead>
         <tbody>
           <template x-for="(row, i) in rows" :key="i">
             <tr>
@@ -120,7 +114,7 @@
     <div class="card">
       <h2 class="section section-flush">Playlist dates</h2>
       <p class="section-note">Include playlists created outside TuneConsole in New, using their original YouTube dates.</p>
-      <a class="quiet-link" href="/setup/playlist-dates">Connect playlist dates →</a>
+      <a class="quiet-link" href="/setup/playlist-dates">Connect playlist dates {{ arrow_icon('right') }}</a>
     </div>
   </div>
 

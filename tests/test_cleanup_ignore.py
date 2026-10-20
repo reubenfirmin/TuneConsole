@@ -28,7 +28,7 @@ def test_ignore_empty_playlist_round_trip(store):
 
     c.post("/cleanup/ignore", data={"ytm": "PE", "category": "empty"})
     assert _count_after_reload(c, store) == 0                      # gone from the home count
-    assert "Ignored cleanups" in c.get("/cleanup").text           # surfaced in the dismissed section
+    assert "Skipped cleanup suggestions" in c.get("/cleanup").text
     assert not any(a.kind == "cleanup" for a in recommend.take_action(store, 1001.0, {}))
 
     c.post("/cleanup/unignore", data={"ytm": "PE", "category": "empty"})
@@ -45,7 +45,7 @@ def test_ignore_merge_round_trip(store):
 
     c.post("/cleanup/ignore-merge", data={"members": "PLA,PLB"})
     assert _count_after_reload(c, store) == 0                      # the merge (and its playlists) gone
-    assert "Ignored cleanups" in c.get("/cleanup").text
+    assert "Skipped cleanup suggestions" in c.get("/cleanup").text
 
     c.post("/cleanup/unignore-merge", data={"signature": "PLA|PLB"})
     assert _count_after_reload(c, store) == 2                      # restored

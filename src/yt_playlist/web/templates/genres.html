@@ -1,9 +1,8 @@
 {% extends "base.html" %}{% block title %}Genres · TuneConsole{% endblock %}{% block page_class %}page-workflow page-genres{% endblock %}{% block body %}
 <div class="page-head">
-  <h1>Genre whitelist</h1>
-  <p>Last.fm and Discogs return noisy tags; we pin a genre by matching them against this list, so the
-     result is always something you recognize. Add genres you want recognized, or remove ones you
-     don't. (MusicBrainz returns its own genres and isn't filtered by this list.)</p>
+  <h1>Recognized genres</h1>
+  <p>This list filters tags from Last.fm and Discogs into recognized genres. Add genres you want
+     TuneConsole to use, or remove ones you do not. MusicBrainz genres are used directly without this filter.</p>
 </div>
 
 <div class="card workflow-console">

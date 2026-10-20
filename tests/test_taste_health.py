@@ -17,8 +17,8 @@ def _client(store):
 def test_health_panel_renders_when_empty(store):
     r = _client(store).get("/taste/recall")
     assert r.status_code == 200
-    assert "recall@20" in r.text                       # the placeholder copy for a vectorless model
-    assert "rendered → played" in r.text
+    assert "playlist prediction (build the model first)" in r.text
+    assert "recommendations you played" in r.text
 
 
 def test_health_panel_shows_graduation_counts(store):
@@ -28,4 +28,4 @@ def test_health_panel_shows_graduation_counts(store):
                              source=rec_params.SOURCE_W_VIBE, source_label="vibe")
     r = _client(store).get("/taste/recall")
     assert r.status_code == 200
-    assert "graduations" in r.text and "vibe" in r.text
+    assert "saved preference updates" in r.text and "vibe" in r.text

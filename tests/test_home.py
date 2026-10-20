@@ -176,7 +176,7 @@ def test_home_feed_has_steer_toast_scaffold(store):
     c = _client(store)
     html = c.get("/home/feed").text
     assert 'id="steer-toast"' in html
-    assert "Tune your taste model" in html or "fine-tune" in html.lower()
+    assert "Mixes updated." in html and "Adjust recommendation settings" in html
 
 
 def test_home_status_card_replaces_sync_buttons(store):
@@ -318,7 +318,9 @@ def test_fingerprint_renders_pinned_genre_beyond_top6():
     user added (e.g. 'rock-post', the family post-rock lives under) -- this one has share>0, so the old
     `share == 0.0` filter dropped it ('select rock-post, nothing happens'). Both must show now."""
     from jinja2 import Environment, FileSystemLoader
+    from yt_playlist.web.icons import arrow_icon
     env = Environment(loader=FileSystemLoader("src/yt_playlist/web/templates"))
+    env.globals['arrow_icon'] = arrow_icon
     families = [{"name": f"fam{i}", "share": 1.0 - i * 0.1, "weight": 1.0, "effective": 1.0,
                  "pinned": False} for i in range(7)]                 # 7 played, un-pinned families
     # (b) a low-share PLAYED family the user pinned, ranked past the top 6:

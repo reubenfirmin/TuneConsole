@@ -373,7 +373,7 @@ button.fresh-pool-action:focus-visible { outline: 3px solid var(--accent-2); out
   animation: suggestion-gap-in .22s ease both; }
 .tile-suggest.suggestion-departing::after { content: '♪  Adding…'; }
 .tile-suggest.suggestion-vacancy { pointer-events: none; }
-.tile-suggest.suggestion-vacancy::after { content: '✦  Added to playlist  ↓'; }
+.tile-suggest.suggestion-vacancy::after { content: '✦  Added to playlist'; }
 @keyframes suggestion-gap-in { from { opacity: 0; transform: scale(.96); }
   to { opacity: 1; transform: scale(1); } }
 .tile-suggest .tile-art { position: relative; }
@@ -541,6 +541,8 @@ button.fresh-pool-action:focus-visible { outline: 3px solid var(--accent-2); out
 .knob-reset { margin-left: auto; background: none; border: 1px solid var(--border-2); color: var(--faint);
   border-radius: var(--radius-sm); cursor: pointer; padding: 0 0.45rem; line-height: 1.6; }
 .knob-reset:hover { color: var(--accent-2); border-color: var(--accent); }
+.knob-reset { display: inline-flex; align-items: center; justify-content: center;
+  min-width: 2rem; min-height: 2rem; }
 
 input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 5px;
   background: var(--border); border-radius: 3px; outline: none; }
@@ -581,7 +583,7 @@ details.advanced .knob { margin-bottom: 1.125rem; }
   font-weight: 700; font-size: var(--type-body); letter-spacing: 0.01em; display: inline-flex; align-items: center; gap: 0.45rem; }
 /* Plain header controls: a subtle colour shift, not a filled button treatment. */
 .fp-collapse:hover { color: var(--accent-2); background-image: none; box-shadow: none; }
-.fp-caret { color: var(--faint); font-size: var(--type-sm); width: .8125rem; text-align: center; }
+.fp-caret { display: inline-flex; color: var(--dim); width: 1.125rem; }
 .fp-reset { margin-left: auto; background: none; border: 1px solid var(--border-2); color: var(--dim);
   font-size: var(--type-xs); padding: 0.2rem 0.6rem; border-radius: 999px; cursor: pointer; white-space: nowrap; }
 .fp-reset:hover { border-color: var(--danger); color: var(--danger); background-image: none; box-shadow: none; }
@@ -598,10 +600,13 @@ details.advanced .knob { margin-bottom: 1.125rem; }
 .fp-row-tools { position: absolute; right: 0; top: 50%; transform: translateY(-50%);
   display: inline-flex; align-items: center; gap: 0.15rem; opacity: 0; pointer-events: none;
   transition: opacity 0.12s ease; }
-.fp-name-wrap:hover .fp-row-tools, .fp-row-tools:hover { opacity: 1; pointer-events: auto; }
+.fp-name-wrap:hover .fp-row-tools, .fp-name-wrap:focus-within .fp-row-tools,
+.fp-row-tools:hover { opacity: 1; pointer-events: auto; }
 .fp-icon-btn { background: var(--surface-2); border: 1px solid var(--border); cursor: pointer;
   color: var(--dim); line-height: 1; font-size: var(--type-xs); padding: 0.12rem 0.32rem; border-radius: 5px; }
 .fp-expand-btn:hover { color: var(--light-source); border-color: var(--control-selected-border); background: var(--control-selected-hover); }
+.fp-expand-btn { display: inline-flex; align-items: center; justify-content: center;
+  min-width: 1.75rem; min-height: 1.75rem; padding: .2rem; }
 .fp-remove-btn { font-size: var(--type-ui); }
 .fp-remove-btn:hover { color: var(--light-source); border-color: var(--danger); background: var(--danger); }
 .fp-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1.2rem; }
@@ -614,7 +619,9 @@ details.advanced .knob { margin-bottom: 1.125rem; }
   text-overflow: ellipsis; }
 /* Drill-down subgenres: a quiet group; the NAME is indented (within its fixed width) so the slider
    stays aligned with the family sliders, important so the neutral guide line below lines up too. */
-.fp-expand-btn.on { color: var(--accent-2); transform: rotate(180deg); }
+.fp-expand-btn .ui-arrow { transform: rotate(-90deg); }
+.fp-expand-btn.on { color: var(--accent-2); }
+.fp-expand-btn.on .ui-arrow { transform: none; }
 .fp-subgenres { margin: 0.1rem 0 0.35rem; }
 .fp-subname { padding-left: .9375rem; font-size: var(--type-sm); color: var(--dim); }
 /* Neutral (1.0) guide: a faint dashed line down the midpoint of a bar set, so you can see where a

@@ -1,11 +1,11 @@
-{% extends "base.html" %}{% block title %}{{ album.title if album else 'Album' }} · TuneConsole{% endblock %}{% block page_class %}page-album{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import sort_indicator %}{% block title %}{{ album.title if album else 'Album' }} · TuneConsole{% endblock %}{% block page_class %}page-album{% endblock %}{% block body %}
 {% from "_partials/song_menu_button.html" import song_menu %}
 {% if not album %}
 <div class="page-head">
   <h1>Album unavailable</h1>
   <p>Couldn't load this album.{% if browse_id %}
     <a href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener"
-       data-yt-info>Open it on YouTube Music ↗</a>.{% endif %}
+       data-yt-info>Open it on YouTube Music {{ arrow_icon('external') }}</a>.{% endif %}
     A connected account is required to fetch album details.</p>
 </div>
 {% else %}
@@ -32,7 +32,7 @@
       <span class="stat"><strong>{{ album.tracks|length }}</strong>&nbsp;track{{ '' if album.tracks|length == 1 else 's' }}</span>
     </p>
     <div class="pl-actions">
-      <a class="cta" href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">▶ Play on YouTube Music ↗</a>
+      <a class="cta" href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">▶ Play on YouTube Music {{ arrow_icon('external') }}</a>
       {% if saved %}<span class="tag teal">✓ In your library</span>
       {% elif is_upload %}
       {# Your own upload: it is already in your library, and there is no audio playlist to like, so
@@ -64,7 +64,7 @@
            @click="cpOpen = false" @keydown.escape.window="cpOpen = false">
         <div class="modal" @click.stop x-transition.scale.origin.center>
           <h3>Create a playlist from this album</h3>
-          <p>Make a new playlist seeded with every track on <strong>{{ album.title }}</strong>.</p>
+          <p>Start a new playlist with every track on <strong>{{ album.title }}</strong>.</p>
           <form hx-post="/album/create-playlist" hx-swap="none">
             <input type="hidden" name="browse_id" value="{{ browse_id }}">
             <input class="modal-input" type="text" name="name" value="{{ album.title }}"
@@ -127,12 +127,12 @@
       <th class="num col-thumb">#</th>
       <th class="col-thumb"></th>
       <th class="liked-col col-like"></th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Song<span x-text="ind('title')"></span></th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.space.prevent="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
-      <th class="sorth num col-year" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year<span x-text="ind('year')"></span></th>
-      <th class="sorth col-last" tabindex="0" role="button" @click="sortBy('genre')" @keydown.enter.space.prevent="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
-      <th class="sorth num col-count" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
-      <th class="sorth num col-length" tabindex="0" role="button" @click="sortBy('len')" @keydown.enter.space.prevent="sortBy('len')">Length<span x-text="ind('len')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Song{{ sort_indicator('title') }}</th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.space.prevent="sortBy('artist')">Artist{{ sort_indicator('artist') }}</th>
+      <th class="sorth num col-year" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year{{ sort_indicator('year') }}</th>
+      <th class="sorth col-last" tabindex="0" role="button" @click="sortBy('genre')" @keydown.enter.space.prevent="sortBy('genre')">Genre{{ sort_indicator('genre') }}</th>
+      <th class="sorth num col-count" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays{{ sort_indicator('plays') }}</th>
+      <th class="sorth num col-length" tabindex="0" role="button" @click="sortBy('len')" @keydown.enter.space.prevent="sortBy('len')">Length{{ sort_indicator('len') }}</th>
       <th class="col-action"></th>
     </tr></thead>
     <tbody x-ref="body">
@@ -161,7 +161,7 @@
       </td>
       <td class="t-wrap" title="{{ t.title }}">
         {% if t.video_id %}<a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-           target="_blank" rel="noopener" data-yt-info>{{ t.title }}&nbsp;↗</a>
+           target="_blank" rel="noopener" data-yt-info>{{ t.title }} {{ arrow_icon('external') }}</a>
         {% else %}{{ t.title }}{% endif %}</td>
       <td class="t-wrap" title="{{ t.artist or album.artist }}">{{ t.artist or album.artist }}</td>
       <td class="num mono">{{ t.duration or '' }}</td>

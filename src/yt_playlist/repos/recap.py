@@ -15,7 +15,7 @@ class RecapRepo(Repo):
         quarantine = "(playlist_ytm_id IS NULL OR playlist_ytm_id NOT IN " \
                      "(SELECT ytm FROM playlist_group WHERE name=?))"
         plays = [dict(r) for r in self.conn.execute(
-            "SELECT identity_id, identity_key, video_id, played_at, source FROM play_events "
+            "SELECT identity_id, identity_key, video_id, played_at, source, playlist_ytm_id FROM play_events "
             f"WHERE played_at>=? AND played_at<? AND {quarantine} ORDER BY played_at, id",
             (since, until, GENERATED_GROUP))]
         first = {r[0]: r[1] for r in self.conn.execute(
@@ -46,7 +46,8 @@ class RecapRepo(Repo):
         albums = [{**dict(r), "keys": set(json.loads(r["track_keys"]))}
                   for r in self.conn.execute("SELECT * FROM album_tracklists")]
         playlists = [dict(r) for r in self.conn.execute(
-            "SELECT ytm_playlist_id, MIN(title) title, MIN(created_at) created_at FROM playlists "
+            "SELECT ytm_playlist_id, MIN(title) title, MIN(created_at) created_at, "
+            "MAX(track_count) track_count FROM playlists "
             "WHERE created_at>=? AND created_at<? AND created_at_source IN ('local','youtube') "
             "AND ytm_playlist_id NOT IN (SELECT ytm FROM playlist_group WHERE name=?) "
             "AND ytm_playlist_id NOT IN (SELECT playlist_ytm FROM rec_recipes) "

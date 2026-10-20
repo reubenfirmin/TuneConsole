@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% block title %}{{ pl.title }} · TuneConsole{% endblock %}{% block page_class %}page-playlist{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import sort_indicator %}{% block title %}{{ pl.title }} · TuneConsole{% endblock %}{% block page_class %}page-playlist{% endblock %}{% block body %}
 <div x-data="enrichPanel({{ pl.id }}, {{ 'true' if lastfm_configured else 'false' }}, {{ active_job.id if active_job else 0 }}, '{{ active_job.source if active_job else '' }}', null, {{ conflict_count }})"
      x-init="rejoinIfActive()" @conflicts-count.window="conflictCount = $event.detail.count">
 <div class="artist-head pl-head library-hero release-hero{{ ' has-art' if pl.thumbnail }}">
@@ -19,7 +19,7 @@
     </p>
     <div class="pl-actions">
       <a class="cta" href="https://music.youtube.com/playlist?list={{ pl.ytm_playlist_id }}"
-         target="_blank" rel="noopener">▶ Play on YouTube Music ↗</a>
+         target="_blank" rel="noopener">▶ Play on YouTube Music {{ arrow_icon('external') }}</a>
     </div>
   </div>
   <div class="head-tools" aria-label="Playlist tools">
@@ -66,13 +66,13 @@
       <th class="num col-thumb">#</th>
       <th class="col-thumb"></th>
       <th class="liked-col col-like"></th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Song<span x-text="ind('title')"></span></th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.space.prevent="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album<span x-text="ind('album')"></span></th>
-      <th class="sorth num col-year" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year<span x-text="ind('year')"></span></th>
-      <th class="sorth col-last" tabindex="0" role="button" @click="sortBy('genre')" @keydown.enter.space.prevent="sortBy('genre')">Genre<span x-text="ind('genre')"></span></th>
-      <th class="sorth num col-count" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
-      <th class="sorth num col-length" tabindex="0" role="button" @click="sortBy('len')" @keydown.enter.space.prevent="sortBy('len')">Length<span x-text="ind('len')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Song{{ sort_indicator('title') }}</th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.space.prevent="sortBy('artist')">Artist{{ sort_indicator('artist') }}</th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('album')" @keydown.enter.space.prevent="sortBy('album')">Album{{ sort_indicator('album') }}</th>
+      <th class="sorth num col-year" tabindex="0" role="button" @click="sortBy('year')" @keydown.enter.space.prevent="sortBy('year')">Year{{ sort_indicator('year') }}</th>
+      <th class="sorth col-last" tabindex="0" role="button" @click="sortBy('genre')" @keydown.enter.space.prevent="sortBy('genre')">Genre{{ sort_indicator('genre') }}</th>
+      <th class="sorth num col-count" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays{{ sort_indicator('plays') }}</th>
+      <th class="sorth num col-length" tabindex="0" role="button" @click="sortBy('len')" @keydown.enter.space.prevent="sortBy('len')">Length{{ sort_indicator('len') }}</th>
       <th class="col-action"></th>
     </tr></thead>
     <tbody id="playlist-track-body" x-ref="body">

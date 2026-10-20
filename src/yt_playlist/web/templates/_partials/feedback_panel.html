@@ -19,7 +19,7 @@
     <a class="fb-type-chip" href="/clusters{% if has_cluster_canvas %}?from={{ pl.ytm_playlist_id|urlencode }}{% endif %}"
        title="Open cluster editor" aria-label="Open cluster editor">Cluster</a>
     {% else %}
-    <span class="fb-q">How's this mix landing right now?</span>
+    <span class="fb-q">Want more music like this?</span>
     {% endif %}
     <div class="fb-btns">
       <button type="button" class="mood-btn" :class="{ 'fb-sel': sel === 1 }" @click="sel = 1"
@@ -50,8 +50,7 @@
     </div>
     {% endif %}
     {% if facets and (facets.genres or facets.eras) %}
-    <p class="fb-sub">Tilt your Home picks toward or away from parts of this mix. Like the buttons above,
-      it shapes your current picks and sticks until you change it.</p>
+    <p class="fb-sub">Choose which genres and eras you want more or less of in Home recommendations. Your choices stay active until you change them.</p>
     {% if facets.genres %}
     <div class="fb-group"><span class="fb-grouphead">By genre</span>
       {% for g in facets.genres %}
@@ -81,10 +80,10 @@
     </div>
     {% endif %}
     {% else %}
-    <p class="fb-sub">These tracks aren't tagged with genre or era yet. <strong>Enrich it</strong>
-      (the ✨ icons above) to get per-genre and per-era levers here.</p>
+    <p class="fb-sub">These tracks need genre and release-year information. Use <strong>Enrich it</strong>
+      (✨ above) to enable genre and era feedback.</p>
     {% endif %}
-    <p class="fb-note">Shapes your <strong>current</strong> picks. It sticks until you change it, and only nudges your long-term taste if you keep leaning the same way.</p>
+    <p class="fb-note">Changes current recommendations. Repeated choices also update your saved preferences.</p>
   </div>
 </section>
 <script>

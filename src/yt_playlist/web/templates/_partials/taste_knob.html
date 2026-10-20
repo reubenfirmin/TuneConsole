@@ -15,7 +15,7 @@
     <output id="out-param-{{ p.name }}">{{ p.value }}</output>
     <button class="knob-reset" type="button" title="Reset to default"
             data-target="param-{{ p.name }}" data-default="{{ p.default }}" onclick="resetKnob(this)"
-            hx-post="/taste/reset-param" hx-vals='{"name":"{{ p.name }}"}' hx-swap="none">↺</button>
+            hx-post="/taste/reset-param" hx-vals='{"name":"{{ p.name }}"}' hx-swap="none" aria-label="Reset {{ p.label }} to default">{{ arrow_icon('reset') }}</button>
   </div>
   <input type="range" id="param-{{ p.name }}" name="value" value="{{ p.value }}"
          {% if p.step == 1 %}data-int="1"{% endif %}

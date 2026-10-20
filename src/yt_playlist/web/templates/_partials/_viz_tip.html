@@ -23,16 +23,16 @@ data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows"
 {% macro chain_tip(r, layer, dot='') -%}
 {%- set tone = "pos" if r.transient_mult > 1.0 else ("neg" if r.transient_mult < 1.0 else "") -%}
 {%- set rows = [
-  {"l": "Share of your plays", "v": "%.1f"|format(r.share * 100) ~ "%", "n": "how much of your listening this is - evidence, not a model output"},
-  {"l": "Permanent weight", "v": "×" ~ "%.2f"|format(r.permanent_weight), "n": "durable, graduated slowly from your history", "div": true},
-  {"l": "Standing lean", "v": "×" ~ "%.2f"|format(r.standing_lean), "n": "the slider you're holding on the Controls tab"},
-  {"l": "= Lasting bias", "v": "×" ~ "%.2f"|format(r.lasting), "n": "your permanent taste for this, before today's mood", "t": "strong"},
-  {"l": "Right-now lean", "v": "%+.2f"|format(r.transient_lean), "n": "recent plays, likes, dislikes, mood taps & skips, each fading on its own clock", "div": true},
-  {"l": "= Right-now multiplier", "v": "×" ~ "%.2f"|format(r.transient_mult), "n": "what that lean is worth once damped and clamped", "t": tone},
-  {"l": "= Effective", "v": "×" ~ "%.2f"|format(r.effective), "n": "lasting bias × right-now: the number ranking actually applies", "t": "strong", "div": true},
+  {"l": "Share of your plays", "v": "%.1f"|format(r.share * 100) ~ "%", "n": "share of your actual listening history"},
+  {"l": "Learned weight", "v": "×" ~ "%.2f"|format(r.permanent_weight), "n": "saved preference learned from repeated activity", "div": true},
+  {"l": "Slider adjustment", "v": "×" ~ "%.2f"|format(r.standing_lean), "n": "your active adjustment for this genre, era, or artist"},
+  {"l": "= Saved preference", "v": "×" ~ "%.2f"|format(r.lasting), "n": "learned weight multiplied by your slider adjustment", "t": "strong"},
+  {"l": "Recent activity", "v": "%+.2f"|format(r.transient_lean), "n": "recent plays, likes, dislikes, mood choices, and skips; influence fades over time", "div": true},
+  {"l": "= Recent multiplier", "v": "×" ~ "%.2f"|format(r.transient_mult), "n": "recent activity converted to a bounded score adjustment", "t": tone},
+  {"l": "= Combined multiplier", "v": "×" ~ "%.2f"|format(r.effective), "n": "saved preference multiplied by the recent adjustment; used to rank tracks", "t": "strong", "div": true},
 ] -%}
 {%- if r.graduation.score -%}
-{%- set rows = rows + [{"l": "Graduating", "v": "%+.0f"|format(r.graduation.frac * 100) ~ "%", "n": "sustained, this nudges the permanent weight above", "t": ("pos" if r.graduation.frac > 0 else "neg")}] -%}
+{%- set rows = rows + [{"l": "Learning progress", "v": "%+.0f"|format(r.graduation.frac * 100) ~ "%", "n": "progress toward changing the learned weight above", "t": ("pos" if r.graduation.frac > 0 else "neg")}] -%}
 {%- endif -%}
 {{ _attr(layer ~ " · " ~ r.name, rows, '', dot) }}
 {%- endmacro %}
@@ -55,7 +55,7 @@ data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows"
 {%- set change = "Up" if r.trend == "up" else ("Down" if r.trend == "down" else "Steady") -%}
 {%- set ctone = "pos" if r.trend == "up" else ("neg" if r.trend == "down" else "") -%}
 {%- set accent = ctone -%}
-{%- set rows = rows + [{"l": "Since the start", "v": "%.1f"|format(r.open * 100) ~ "% → " ~ "%.1f"|format(r.close * 100) ~ "%",
+{%- set rows = rows + [{"l": "Since the start", "v": "%.1f"|format(r.open * 100) ~ "% to " ~ "%.1f"|format(r.close * 100) ~ "%",
                          "n": change ~ " from the oldest period to the selected period",
                          "t": ctone, "arrow": true}] -%}
 {%- endif -%}
@@ -64,8 +64,8 @@ data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows"
 {%- elif compare -%}
 {%- set attention = "More attention" if r.ratio >= 1.05 else ("Less attention" if r.ratio <= 0.95 else "About proportional") -%}
 {%- set atone = "pos" if r.ratio >= 1.05 else ("neg" if r.ratio <= 0.95 else "") -%}
-{%- set rows = rows + [{"l": "Collection vs plays", "v": "%.1f"|format(r.corpus_share * 100) ~ "% → " ~ "%.1f"|format(r.close * 100) ~ "%",
-                         "n": attention ~ ": share of your library → share of plays",
+{%- set rows = rows + [{"l": "Library share vs listening share", "v": "%.1f"|format(r.corpus_share * 100) ~ "% to " ~ "%.1f"|format(r.close * 100) ~ "%",
+                         "n": attention ~ ": share of your library compared with share of plays",
                          "t": atone, "div": true, "arrow": true}] -%}
 {%- endif -%}
 {{ _attr(name, rows, accent, '', "Percentages are shares of all plays in each period.") }}
@@ -75,11 +75,11 @@ data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows"
 {% macro tilt_tip(f, halflife_h, play_halflife_d) -%}
 {%- set rows = [] -%}
 {%- if f.session is not none -%}
-{%- set rows = rows + [{"l": "Session", "v": "%+.2f"|format(f.session), "n": "this sitting's direction, " ~ "%.0f"|format(halflife_h) ~ "h half-life", "t": ("pos" if f.session > 0 else "neg")}] -%}
+{%- set rows = rows + [{"l": "Session", "v": "%+.2f"|format(f.session), "n": "this session's sound; influence halves every " ~ "%.0f"|format(halflife_h) ~ "h", "t": ("pos" if f.session > 0 else "neg")}] -%}
 {%- endif -%}
 {%- if f.transient is not none -%}
-{%- set rows = rows + [{"l": "Transient", "v": "%+.2f"|format(f.transient), "n": "the last few weeks' direction, ~" ~ "%.0f"|format(play_halflife_d) ~ "d half-life", "t": ("pos" if f.transient > 0 else "neg")}] -%}
+{%- set rows = rows + [{"l": "Recent", "v": "%+.2f"|format(f.transient), "n": "recent listening sound; play influence halves every " ~ "%.0f"|format(play_halflife_d) ~ " days", "t": ("pos" if f.transient > 0 else "neg")}] -%}
 {%- endif -%}
-{%- set rows = rows + [{"l": "Reading", "v": "cosine, −1 to +1", "n": "alignment of each layer's mood direction with this genre's centroid in the embedding", "div": true}] -%}
+{%- set rows = rows + [{"l": "Sound similarity", "v": "−1 to +1", "n": "+1 strongly favors this genre's sound; −1 strongly moves away from it", "div": true}] -%}
 {{ _attr(f.name, rows) }}
 {%- endmacro %}

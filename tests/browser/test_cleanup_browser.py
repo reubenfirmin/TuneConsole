@@ -52,7 +52,7 @@ def live_cleanup_app():
 
 def test_empty_playlist_delete_removes_row(live_cleanup_app, page):
     page.goto(f"{live_cleanup_app}/cleanup")
-    link = page.get_by_role("link", name="Empty One ↗")
+    link = page.get_by_role("link", name="Empty One", exact=True)
     expect(link).to_be_visible()
     page.get_by_role("row").filter(has_text="Empty One").get_by_role("button", name="Delete").click()
     link.wait_for(state="hidden", timeout=3000)

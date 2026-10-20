@@ -6,10 +6,15 @@
           :aria-expanded="(!collapsed).toString()" aria-haspopup="dialog" aria-controls="fp-dialog"
           title="Tune these mixes{{ ' (adjustments active)' if tuning_active else '' }}"
           aria-label="Tune these mixes" aria-describedby="fp-tuning-status">
-    <span class="fp-mood-mark" aria-hidden="true">≋</span>
+    <svg class="fp-mood-mark" viewBox="0 0 24 24" width="28" height="28" fill="none"
+         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+         aria-hidden="true" focusable="false">
+      <path d="M5 3v4m0 6v8M12 3v9m0 6v3M19 3v2m0 6v10"/>
+      <circle cx="5" cy="10" r="3"/><circle cx="12" cy="15" r="3"/><circle cx="19" cy="8" r="3"/>
+    </svg>
     <span class="fp-tuning-dot" aria-hidden="true"{% if not tuning_active %} hidden{% endif %}></span>
   </button>
-  <span id="fp-tuning-status" hidden>{{ 'Selections or biases are set.' if tuning_active else '' }}</span>
+  <span id="fp-tuning-status" hidden>{{ 'Mix adjustments are active.' if tuning_active else '' }}</span>
   <dialog class="fp-dialog" id="fp-dialog" x-ref="dialog" aria-labelledby="fp-title"
           @cancel.prevent="close()" @keydown.escape.prevent.stop="close()"
           @click="dismissBackdrop($event)" @keydown.tab="trapFocus($event)">
@@ -57,7 +62,7 @@
      below. Breadth is a single dial, not a list, so it belongs here rather than as a third column. #}
   <div class="fp-head">
     <div class="fp-breadth">
-      <span class="fp-label">Breadth</span>
+      <span class="fp-label">Genre variety</span>
       <span class="fp-breadth-end">Focused</span>
       <span class="fp-breadth-track">
         <input type="range" class="fp-breadth-slider" min="-1" max="1" step="0.05"
@@ -65,7 +70,7 @@
                style="--p:{{ '%.0f'|format((fingerprint.breadth_bias + 1) / 2 * 100) }}%"
                hx-post="/home/breadth" hx-target="#home-mode-cards" hx-swap="outerHTML" hx-trigger="change"
                hx-on::after-request="window.dispatchEvent(new CustomEvent('mixes-reranked'))"
-               aria-label="steer the feed from focused to eclectic">
+               aria-label="Adjust genre variety from focused to eclectic">
         {# Tick at the transient model's current measured breadth (0=focused..1=eclectic), so you see
            where you naturally sit vs the thumb (your bias steer). Inset 8px each side for the thumb. #}
         <span class="fp-breadth-tick"
@@ -76,9 +81,9 @@
       {# Measured spread, as plain context for the relative dial (no second bar to compete with it). #}
       <span class="fp-breadth-note">naturally {{ 'eclectic' if fingerprint.breadth > 0.66 else ('focused' if fingerprint.breadth < 0.33 else 'balanced') }}</span>
     </div>
-    <a class="fp-tune" href="/taste">Tune your taste model →</a>
+    <a class="fp-tune" href="/taste">All recommendation settings {{ arrow_icon('right') }}</a>
   </div>
-  <p class="fp-hint section-note">Bias your suggestions toward genres and eras. Knobs include your learned taste.</p>
+  <p class="fp-hint section-note">Drag the weights to adjust how the model creates playlists. Move right for more of a genre or era, left for less. Starting weights reflect your listening.</p>
   <div class="fp-body">
     <div class="fp-col">
       <span class="fp-label">Genres</span>
@@ -91,11 +96,11 @@
       <div class="fp-genre-pick" x-data="genrePicker()" x-init="load()" @click.outside="open = false">
         <div class="cg-box" :class="{ on: query }" @click="open = true; $refs.gq.focus()">
           <span class="cg-icon">⌕</span>
-          <input type="text" x-ref="gq" x-model="query" placeholder="Add a genre bar…"
+          <input type="text" x-ref="gq" x-model="query" placeholder="Add a genre…"
                  @focus="open = true" @input="open = true; sel = -1"
                  @keydown.down.prevent="open = true; move(1)" @keydown.up.prevent="move(-1)"
                  @keydown.enter.prevent="choose()" @keydown.escape="reset()"
-                 autocomplete="off" spellcheck="false" aria-label="search genres to add a taste bar">
+                 autocomplete="off" spellcheck="false" aria-label="Find a genre to adjust">
           <button type="button" class="cg-x" x-show="query" x-cloak @click.stop="reset()"
                   title="Clear">✕</button>
         </div>
@@ -132,12 +137,12 @@
   </div>
   </div>
   <div class="fp-footer">
-    <p class="section-note">Selections and biases reset 4 hours after your last adjustment.</p>
+    <p class="section-note">These mix adjustments expire 4 hours after your last change.</p>
     <button type="button" class="fp-reset"
             hx-post="/home/fingerprint/reset" hx-target="#fingerprint" hx-swap="outerHTML"
             hx-sync="#fingerprint:replace" hx-disabled-elt="this"
             hx-on::after-request="window.dispatchEvent(new CustomEvent('mixes-reranked'))"
-            title="Clear genre choices and adjustments; keep learned taste">Clear selections and biases</button>
+            title="Reset genre choices and weights to your learned preferences">Reset mix adjustments</button>
   </div>
   </div>
   </dialog>

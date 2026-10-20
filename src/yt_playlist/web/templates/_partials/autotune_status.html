@@ -7,8 +7,8 @@
   {% else %}
   <div class="autotune-ctl">
     <button hx-post="/taste/autotune" hx-target="#autotune-status" hx-swap="outerHTML"
-            hx-confirm="Rebuild several embedding configs and keep the best by recall@k? Takes ~10s.">Auto-tune (recall@k)</button>
-    <span class="autotune-note">Saved permanently: the chosen size is reused by every future rebuild (including the automatic one on each sync) until you re-run this.</span>
+            hx-confirm="Test several model sizes and keep the most accurate? This takes about 10 seconds.">Auto-tune model</button>
+    <span class="autotune-note">The chosen model size stays in use for future rebuilds until you run Auto-tune again.</span>
   </div>
   {% include "_partials/autotune_result.html" %}
   {% endif %}

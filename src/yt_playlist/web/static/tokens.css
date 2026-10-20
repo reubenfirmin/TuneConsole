@@ -119,6 +119,7 @@
   --p-green-800:   #1d3a26;
   --p-green-900:   #042b16;
   --p-green-950:   #04160e;
+  --p-lime-400:    #b6ff00;
   --p-sage-300:    #7fd88f;
   --p-sage-400:    #9ece6a;
 
@@ -148,6 +149,7 @@
   --p-pink-400:    #ff6b8b;
   --p-pink-450:    #ff5c8a;
   --p-pink-500:    #ff5096;
+  --p-pink-550:    #ff1493;
   --p-pink-600:    #d6457f;
   --p-magenta-400: #e879f9;
   --p-magenta-600: #b81ad6;
@@ -501,6 +503,10 @@
   --slot-0: var(--accent);      --slot-1: var(--teal);        --slot-2: var(--danger);
   --slot-3: var(--cta-2);       --slot-4: var(--amber);       --slot-5: var(--p-slot-violet);
   --slot-6: var(--ov-3);        --slot-7: var(--p-slot-sky);
+
+  /* ---- mix tuning launcher ---- */
+  --mix-tune-hover:     var(--p-lime-400);
+  --mix-tune-hover-ink: var(--p-pink-550);
 
   /* ---- taste "rose" wheel: categorical identity around the fingerprint ---- */
   --rose-0: var(--accent);      --rose-1: var(--teal);        --rose-2: var(--danger);

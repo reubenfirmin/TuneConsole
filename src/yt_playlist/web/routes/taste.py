@@ -159,7 +159,8 @@ def build(ctx) -> APIRouter:
         # A random slice of the matching pool (not the top-N) so every refresh shows a new set,
         # even when the knobs haven't changed.
         items = recommend.taste_sample(store, ctx.now(), limit=8)
-        return templates.TemplateResponse(request, "_partials/taste_preview.html", {"items": items})
+        return templates.TemplateResponse(request, "_partials/taste_preview.html", {
+            "items": items, "lane_labels": {name: label for name, label, _ in rec_params.LANES}})
 
     def _comparison_context():
         raw = store.get_setting(comparison_setting)
@@ -195,20 +196,21 @@ def build(ctx) -> APIRouter:
             if row["old_lane_weight"] is not None and row["lane_weight"] is not None:
                 delta = row["lane_weight"] - row["old_lane_weight"]
                 if abs(delta) > 1e-9:
-                    row["changes"].append({"label": "Lane allocation weight", "delta": delta,
+                    row["changes"].append({"label": "Recommendation category weight", "delta": delta,
                                            "before": row["old_lane_weight"],
                                            "after": row["lane_weight"], "multiplier": True})
             row["changes"].sort(key=lambda c: -abs(c["delta"]))
             rows.append(row)
-        return {"comparison": rows, "comparison_limit": 24}
+        return {"comparison": rows, "comparison_limit": 24,
+                "lane_labels": {name: label for name, label, _ in rec_params.LANES}}
 
     def _trace_changes(old, current):
-        fields = (("durable", "Durable context fit", False),
-                  ("transient_delta", "Transient direction", False),
-                  ("session_delta", "Session direction", False),
-                  ("audio_delta", "Audio direction", False),
-                  ("rank_base", "Rank-normalized base", False),
-                  ("axis_applied", "Applied facet product", True))
+        fields = (("durable", "Saved taste match", False),
+                  ("transient_delta", "Recent listening adjustment", False),
+                  ("session_delta", "Session adjustment", False),
+                  ("audio_delta", "Sound adjustment", False),
+                  ("rank_base", "Base score after ranking", False),
+                  ("axis_applied", "Combined preference multiplier", True))
         changes = []
         for key, label, multiplier in fields:
             if key not in old or key not in current:

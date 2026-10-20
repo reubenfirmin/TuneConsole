@@ -3,7 +3,7 @@
 {% block page_styles %}<link rel="stylesheet" href="/static/setup.css?v={{ asset_v }}">{% endblock %}
 {% block body %}
 <div class="playlist-dates-page">
-  <a class="quiet-link" href="/playlists">← Playlists</a>
+  <a class="quiet-link" href="/playlists">{{ arrow_icon('left') }} Playlists</a>
   <div class="page-head">
     <h1>Playlist dates</h1>
     <p>Find your newest playlists, wherever you made them.</p>
@@ -46,7 +46,7 @@
       </label>
       {% endif %}
       <div class="btn-row btn-row-spaced">
-        <button class="btn-primary" type="submit">{{ 'Connect another account' if connection.accounts else 'Continue with Google' }} →</button>
+        <button class="btn-primary" type="submit">{{ 'Connect another account' if connection.accounts else 'Continue with Google' }} {{ arrow_icon('external') }}</button>
       </div>
     </form>
   </div>

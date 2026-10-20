@@ -12,13 +12,13 @@
     <a class="redis-memory-art art-album{{ ' no-art' if not lead.thumbnail }}" href="/album?browse={{ lead.browse_id }}">
       {% if lead.thumbnail %}<img src="{{ lead.thumbnail }}" alt="" referrerpolicy="no-referrer"
            onerror="this.closest('.redis-memory-art').classList.add('no-art'); this.remove()">{% endif %}
-      <span class="redis-memory-cue" aria-hidden="true">↗</span>
+      <span class="redis-memory-cue" aria-hidden="true">{{ arrow_icon('right') }}</span>
     </a>
     <div class="redis-memory-copy">
       <p>Bring this one back</p>
       <h3><a href="/album?browse={{ lead.browse_id }}">{{ lead.title }}</a></h3>
       <span>{{ lead.artist }}{% if lead.year %} · {{ lead.year }}{% endif %}</span>
-      <a class="redis-open" href="/album?browse={{ lead.browse_id }}">Open album <span>→</span></a>
+      <a class="redis-open" href="/album?browse={{ lead.browse_id }}">Open album {{ arrow_icon('right') }}</a>
     </div>
   </div>
   {% if rediscover_albums|length > 1 %}
@@ -60,7 +60,7 @@
       <footer class="redis-foot">
         <a class="redis-play" href="https://music.youtube.com/playlist?list={{ p.ytm }}"
            target="_blank" rel="noopener"><span>▶</span> Play</a>
-        <a class="redis-edit" href="/playlist/{{ p.id }}">View playlist →</a>
+        <a class="redis-edit" href="/playlist/{{ p.id }}">View playlist {{ arrow_icon('right') }}</a>
       </footer>
     </div>
     {% endfor %}

@@ -62,7 +62,7 @@ def test_merge_apply_redirects(live_merge_app, page):
 def test_merge_returns_to_the_cleanup_list_before_and_after_applying(live_merge_app, page):
     base = live_merge_app["base"]
     page.goto(f"{base}/cleanup")
-    page.get_by_role("link", name="Review →", exact=True).first.click()
+    page.get_by_role("link", name="Review", exact=True).first.click()
     back = page.get_by_role("link", name="Back to cleanup")
     expect(back).to_be_visible()
     expect(back).to_have_attribute("href", "/cleanup#overlaps")
@@ -70,7 +70,7 @@ def test_merge_returns_to_the_cleanup_list_before_and_after_applying(live_merge_
     expect(page.get_by_text("1 / 2")).to_be_visible()
     back.click()
     page.wait_for_url("**/cleanup#overlaps")
-    page.get_by_role("link", name="Review →", exact=True).first.click()
+    page.get_by_role("link", name="Review", exact=True).first.click()
     page.get_by_role("button", name="Apply", exact=True).click()
     page.wait_for_url("**/cleanup?**#overlaps")
     expect(page.get_by_text("Merged into", exact=False)).to_be_visible()

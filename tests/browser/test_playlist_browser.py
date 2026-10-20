@@ -167,7 +167,7 @@ def test_remove_track_drops_row(live_playlist_app, page):
     page.get_by_role("menuitem", name="Remove from playlist").click()  # opens confirm modal
     page.get_by_role("button", name="Remove", exact=True).click()   # confirm
     expect(page.get_by_role("row").filter(has_text="Song B")).to_have_count(0)
-    expect(page.get_by_role("link", name="Song A ↗")).to_be_visible()           # other row stays
+    expect(page.get_by_role("link", name="Song A", exact=True)).to_be_visible()
 
 
 def test_find_and_add_alternate_version(live_playlist_app, page):
@@ -180,7 +180,7 @@ def test_find_and_add_alternate_version(live_playlist_app, page):
     page.locator('#alt-results input[name="track"]').first.check()
     page.get_by_role("button", name="Add to playlist").click()
     # HX-Refresh reload -> the chosen alternate is now a row in the table
-    expect(page.get_by_role("link", name="Song A (Live) ↗")).to_be_visible()
+    expect(page.get_by_role("link", name="Song A (Live)", exact=True)).to_be_visible()
 
 
 def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):

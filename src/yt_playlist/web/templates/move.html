@@ -18,7 +18,7 @@
           {% for i in identities %}<option value="{{ i.id }}">{{ i.label }}</option>{% endfor %}
         </select>
       </label>
-      <span class="move-arrow">→</span>
+      <span class="move-arrow" aria-hidden="true">{{ arrow_icon('right') }}</span>
       <label class="opt">To
         <select id="move-to" name="target_identity" x-model.number="to" class="inline-control">
           {% for i in identities %}<option value="{{ i.id }}">{{ i.label }}</option>{% endfor %}

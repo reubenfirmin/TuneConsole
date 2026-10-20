@@ -43,8 +43,8 @@
       <td class="num mono">{{ (r.close * 100)|round(1) }}%</td>
       {% if cmp %}<td class="num mono tkratio">
         {%- if r.ratio is none %}<span class="tk-new">new</span>
-        {%- elif r.ratio >= 1.05 %}<span class="tk-over">▲ {{ r.ratio|round(1) }}×</span>
-        {%- elif r.ratio <= 0.95 %}<span class="tk-under">▼ {{ r.ratio|round(1) }}×</span>
+        {%- elif r.ratio >= 1.05 %}<span class="tk-over">{{ arrow_icon('up') }} {{ r.ratio|round(1) }}×</span>
+        {%- elif r.ratio <= 0.95 %}<span class="tk-under">{{ arrow_icon('down') }} {{ r.ratio|round(1) }}×</span>
         {%- else %}<span class="tk-even">◦ ~1×</span>{% endif %}
       </td>{% endif %}
     </tr>
