@@ -14,7 +14,7 @@
   <h1>Build a playlist by exploring your taste</h1>
   <p>Clusters needs your taste model, and it isn't built yet. Sync your library and let the
      recommendation model build (the Home page shows its progress), then come back. You'll be able to
-     seed a cluster and grow it into a playlist.</p>
+     choose starting songs and find similar music to build a playlist.</p>
 </div>
 {% else %}
 <div class="cluster-page" x-data="clusterCanvas()" @cluster-saved.window="reset()">
@@ -36,7 +36,7 @@
         <input type="text" x-ref="seedInput" x-model="query" @input.debounce.250ms="search()" @focus="search()"
                @keydown.down.prevent="seedMove(1)" @keydown.up.prevent="seedMove(-1)"
                @keydown.enter.prevent="seedChoose()" @keydown.escape="results = []"
-               :placeholder="nodes.length ? 'Add artists, playlists, or songs…' : 'Search an artist, playlist, or song to seed a cluster…'"
+               :placeholder="nodes.length ? 'Add artists, playlists, or songs…' : 'Choose an artist, playlist, or song to start…'"
                aria-label="Add artists, playlists, or songs to the central cluster"
                autocomplete="off" spellcheck="false">
         <ul class="cluster-suggest" x-show="results.length" x-cloak @click.outside="results = []">
@@ -81,7 +81,7 @@
               @click="editSeeds()" :aria-expanded="editingSeeds ? 'true' : 'false'" aria-controls="cluster-seed-editor">Edit seeds</button>
       <!-- trim loose rings: prune everything that isn't the trunk you grew or a 🔥-emphasized pick -->
       <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
-              @click="pruneLoose()" title="Trim: prune every track that isn't on the trunk or 🔥-emphasized">✂ Trim</button>
+              @click="pruneLoose()" title="Remove suggestions you have not grown from or emphasized">✂ Trim</button>
       <!-- explicit reset: wipe the canvas back to a blank slate -->
       <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
               @click="reset()" title="Reset: clear the whole canvas">{{ cluster_arrow('restore') }} Reset</button>
@@ -92,17 +92,17 @@
         <strong>Central cluster</strong>
         <button type="button" @click="editingSeeds = false">Done</button>
       </div>
-      <p>Search above to add artists, playlists, or songs. Remove a seed below to update the loose picks.</p>
+      <p>Search above to add artists, playlists, or songs. Remove a starting point below to update the suggestions.</p>
       <div class="cn-seeds">
         <template x-for="(s, i) in centralSeeds()" :key="s.kind + s.label + JSON.stringify(s.keys)">
           <span class="cn-seed cse-seed">
             <span><small x-text="s.kind"></small><span x-text="s.label"></span></span>
             <button type="button" @click="removeSeed(i)" :disabled="seedBusy"
-                    :aria-label="'Remove ' + s.label" title="Remove seed">✕</button>
+                    :aria-label="'Remove ' + s.label" title="Remove starting point">✕</button>
           </span>
         </template>
       </div>
-      <p x-show="!centralSeeds().length">Add a seed to start a new ring.</p>
+      <p x-show="!centralSeeds().length">Add an artist, playlist, or song to get suggestions.</p>
     </section>
   </div>
 
@@ -140,13 +140,13 @@
                   @click="play(hoveredNode())" title="Play on YouTube Music">▶</button>
           <button type="button" class="cn-btn boost" x-show="hoveredNode().kind === 'track' && hoveredNode().state !== 'pruned'"
                   :class="{ on: isBoosted(hoveredNode()) }" @click="toggleBoost(hoveredNode())"
-                  title="Emphasize: steer new picks toward this track">🔥</button>
+                  title="Find more songs like this">🔥</button>
           <button type="button" class="cn-btn grow" x-show="hoveredNode().state !== 'pruned'"
                   @click="grow(hovered)" :disabled="exhaustedIds.includes(hovered)"
-                  :title="exhaustedIds.includes(hovered) ? 'Genre filters are exhausted' : 'Grow: add a ring of nearby tracks'">＋</button>
+                  :title="exhaustedIds.includes(hovered) ? 'No more songs match these genres' : 'Find similar songs around this track'">＋</button>
           <button type="button" class="cn-btn prune" x-show="hoveredNode().kind === 'track'"
                   :class="{ on: hoveredNode().state === 'pruned' }" @click="prune(hovered)"
-                  :title="hoveredNode().state === 'pruned' ? 'Restore this track' : 'Prune: remove and push this branch away'">
+                  :title="hoveredNode().state === 'pruned' ? 'Restore this track' : 'Remove this song and suggest fewer similar songs'">
             <span x-show="hoveredNode().state === 'pruned'">{{ cluster_arrow('restore') }}</span>
             <span x-show="hoveredNode().state !== 'pruned'">✕</span>
           </button>
@@ -169,7 +169,7 @@
             </template>
           </ul>
           <p class="ce-score" x-show="explain.data.match_pct != null">
-            <span class="ce-pct" x-text="explain.data.match_pct + '%'"></span> taste-space match</p>
+            <span class="ce-pct" x-text="explain.data.match_pct + '%'"></span> musical similarity</p>
         </div>
       </template>
     </div>
@@ -186,11 +186,11 @@
     <!-- save the whole cluster, or just the trunk you grew -->
     <div class="cluster-mode">
       <button type="button" :class="{ on: saveMode === 'all' }" @click="saveMode = 'all'; persist()">
-        <strong x-text="keepKeys().length"></strong><span>all non-hidden</span>
+        <strong x-text="keepKeys().length"></strong><span>all visible songs</span>
       </button>
       <button type="button" :class="{ on: saveMode === 'trunk' }" @click="saveMode = 'trunk'; persist()"
-              :disabled="!trunkKeys().length" title="Only the trunk you grew">
-        <strong x-text="trunkKeys().length"></strong><span>trunk only</span>
+              :disabled="!trunkKeys().length" title="Only songs you grew from or emphasized">
+        <strong x-text="trunkKeys().length"></strong><span>your chosen songs</span>
       </button>
     </div>
     <!-- DJ Journey: how the saved mix is ordered -->
@@ -202,7 +202,7 @@
       <div class="cj-panel" x-show="journeyOpen" x-cloak>
         <button type="button" class="cj-item" :class="{ on: journey === 'auto' }"
                 @click="journey = 'auto'; journeyName = 'Pick for me'; journeyOpen = false; persist()">
-          <strong>Pick for me</strong><span>Let the DJ choose the arc</span>
+          <strong>Pick for me</strong><span>Choose the song order for me</span>
         </button>
         {% for j in journeys %}
         <button type="button" class="cj-item" :class="{ on: journey === '{{ j.key }}' }"

@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_macros.html" import library_icon %}{% block title %}Artists · TuneConsole{% endblock %}{% block page_class %}page-artists{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import library_icon, sort_indicator %}{% block title %}Artists · TuneConsole{% endblock %}{% block page_class %}page-artists{% endblock %}{% block body %}
 <div class="page-head library-page-head">
   <div class="library-page-title">{{ library_icon('artists') }}<h1>Artists</h1></div>
   <p>Every artist represented across your playlists, with their songs, albums, and listening activity.</p>
@@ -8,11 +8,11 @@
   <table x-data="rowSort()">
     <thead><tr>
       <th class="col-avatar"></th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.space.prevent="sortBy('artist')">Artist<span x-text="ind('artist')"></span></th>
-      <th class="sorth num" tabindex="0" role="button" @click="sortBy('songs')" @keydown.enter.space.prevent="sortBy('songs')">Songs<span x-text="ind('songs')"></span></th>
-      <th class="sorth num" tabindex="0" role="button" @click="sortBy('albums')" @keydown.enter.space.prevent="sortBy('albums')">Albums<span x-text="ind('albums')"></span></th>
-      <th class="sorth num" tabindex="0" role="button" @click="sortBy('pls')" @keydown.enter.space.prevent="sortBy('pls')">Playlists<span x-text="ind('pls')"></span></th>
-      <th class="sorth num" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays<span x-text="ind('plays')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('artist')" @keydown.enter.space.prevent="sortBy('artist')">Artist{{ sort_indicator('artist') }}</th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('songs')" @keydown.enter.space.prevent="sortBy('songs')">Songs{{ sort_indicator('songs') }}</th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('albums')" @keydown.enter.space.prevent="sortBy('albums')">Albums{{ sort_indicator('albums') }}</th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('pls')" @keydown.enter.space.prevent="sortBy('pls')">Playlists{{ sort_indicator('pls') }}</th>
+      <th class="sorth num" tabindex="0" role="button" @click="sortBy('plays')" @keydown.enter.space.prevent="sortBy('plays')">Plays{{ sort_indicator('plays') }}</th>
     </tr></thead>
     <tbody x-ref="body">
     {% for a in artists %}

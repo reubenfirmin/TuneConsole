@@ -5,7 +5,7 @@
        onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
   <div class="alert-body">
     <span class="alert-title"><strong>Spotify import is running.</strong> You can keep using TuneConsole while it checks your library.</span>
-    <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=import">View status →</a></div>
+    <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=import">View status {{ arrow_icon('right') }}</a></div>
   </div>
 </div>
 {% elif job.status == 'done' %}
@@ -17,7 +17,7 @@
        onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
   <div class="alert-body">
     <span class="alert-title"><strong>Spotify import complete.</strong> Review what was added, skipped, and unmatched.</span>
-    <div class="alert-foot"><a class="btn btn-sm alert-go" href="/import/spotify-library/report">View report →</a></div>
+    <div class="alert-foot"><a class="btn btn-sm alert-go" href="/import/spotify-library/report">View report {{ arrow_icon('right') }}</a></div>
   </div>
 </div>
 {% else %}
@@ -29,7 +29,7 @@
        onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
   <div class="alert-body">
     <span class="alert-title"><strong>Spotify import stopped.</strong> Partial work is safe; review the status before retrying.</span>
-    <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=import">Retry safely →</a></div>
+    <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=import">Retry import {{ arrow_icon('right') }}</a></div>
   </div>
 </div>
 {% endif %}

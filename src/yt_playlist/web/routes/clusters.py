@@ -155,8 +155,8 @@ def build(ctx) -> APIRouter:
             if bm:
                 reasons.append({"kind": "bridge",
                                 "text": f"Linked through “{bm['title']}” by {bm['artist']}, "
-                                        f"a track that sits near both."})
-        headline = reasons[0]["text"] if reasons else "A close match in your taste space."
+                                        f"a song similar to both."})
+        headline = reasons[0]["text"] if reasons else "Similar to the music you chose."
         meta = store.tracks_by_keys([key]).get(key, {})
         score = geo["score"]
         return JSONResponse({

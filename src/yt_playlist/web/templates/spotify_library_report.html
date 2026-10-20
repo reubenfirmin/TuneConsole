@@ -25,7 +25,7 @@
   'saved_by_user': 'You selected and saved this match'
 } %}
 <div class="import-report-shell">
-  <a class="import-report-back" href="/#notices">← Dashboard</a>
+  <a class="import-report-back" href="/#notices">{{ arrow_icon('left') }} Home</a>
 
   {% if spotify_error %}<p class="import-report-error">{{ spotify_error }}</p>{% endif %}
 
@@ -115,7 +115,7 @@
               <td>{{ playlist_reasons.get(item.reason, item.reason) }}{% if item.tracks_unmatched %}
                 <span class="text-dim"> · {{ item.tracks_unmatched }} unmatched</span>{% endif %}</td>
               <td class="text-end">{% if item.ytm_playlist_id %}<a href="https://music.youtube.com/playlist?list={{ item.ytm_playlist_id }}"
-                target="_blank" rel="noopener">Open ↗</a>{% endif %}</td>
+                target="_blank" rel="noopener">Open {{ arrow_icon('external') }}</a>{% endif %}</td>
             </tr>
           {% endfor %}
           </tbody>
@@ -136,7 +136,7 @@
             <tr data-search="{{ (item.title ~ ' ' ~ item.artist ~ ' ' ~ item.album ~ ' ' ~ item.playlist)|lower|e }}"
                 x-show="!q || $el.dataset.search.includes(q.toLowerCase())">
               <td>{% if item.spotify_url %}<a href="{{ item.spotify_url }}" target="_blank"
-                rel="noopener"><strong>{{ item.title }}</strong> ↗</a>{% else %}<strong>{{ item.title }}</strong>{% endif %}
+                rel="noopener"><strong>{{ item.title }}</strong> {{ arrow_icon('external') }}</a>{% else %}<strong>{{ item.title }}</strong>{% endif %}
                 {% if item.spotify_link_is_search %}<span class="import-source-note">Spotify search</span>{% endif %}</td>
               <td>{{ item.artist }}</td>
               <td class="text-dim">{{ item.album or '—' }}</td><td>{{ item.playlist }}</td>
@@ -167,7 +167,7 @@
             {% endif %}
             <div>
               <h3>{% if item.spotify_url %}<a href="{{ item.spotify_url }}" target="_blank"
-                rel="noopener">{{ item.title }} ↗</a>{% else %}{{ item.title }}{% endif %}</h3>
+                rel="noopener">{{ item.title }} {{ arrow_icon('external') }}</a>{% else %}{{ item.title }}{% endif %}</h3>
               <p>{{ item.artist }}</p>
               <span>{{ album_reasons.get(item.reason, item.reason) }}{% if item.spotify_link_is_search %}
                 · link opens a Spotify search because this older report did not retain the URI{% endif %}</span>
@@ -226,11 +226,11 @@
             <tr data-search="{{ (item.title ~ ' ' ~ item.artist ~ ' ' ~ item.status ~ ' ' ~ album_reasons.get(item.reason, item.reason))|lower|e }}"
                 x-show="!q || $el.dataset.search.includes(q.toLowerCase())">
               <td>{% if item.spotify_url %}<a href="{{ item.spotify_url }}" target="_blank"
-                rel="noopener"><strong>{{ item.title }}</strong> ↗</a>{% else %}<strong>{{ item.title }}</strong>{% endif %}</td>
+                rel="noopener"><strong>{{ item.title }}</strong> {{ arrow_icon('external') }}</a>{% else %}<strong>{{ item.title }}</strong>{% endif %}</td>
               <td>{{ item.artist }}</td>
               <td><span class="tag {{ 'teal' if item.status == 'imported' else ('red' if item.status == 'unmatched' else 'amber') }}">{{ item.status }}</span></td>
               <td>{{ album_reasons.get(item.reason, item.reason) }}</td>
-              <td class="text-end">{% if item.browse_id %}<a href="/album?browse={{ item.browse_id }}">Open →</a>{% endif %}</td>
+              <td class="text-end">{% if item.browse_id %}<a href="/album?browse={{ item.browse_id }}">Open {{ arrow_icon('right') }}</a>{% endif %}</td>
             </tr>
           {% endfor %}
           </tbody>

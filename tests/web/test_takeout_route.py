@@ -128,7 +128,7 @@ def test_seeding_is_automatic_above_threshold():
     resp = client.post("/import/takeout",
                        files={"file": ("watch-history.json", _unmatched_payload(), "application/json")})
     assert resp.status_code == 200
-    assert "Seeded" in resp.text
+    assert "to Discovery, so TuneConsole can recommend their music." in resp.text
     pool = store.get_discovered_artists()
     assert len(pool) == 1
     assert pool[0]["artist"] == "Nobody"
@@ -142,7 +142,7 @@ def test_below_threshold_does_not_seed():
                        files={"file": ("watch-history.json", json.dumps(entries).encode(),
                                        "application/json")})
     assert resp.status_code == 200
-    assert "Seeded" not in resp.text
+    assert "to Discovery, so TuneConsole can recommend their music." not in resp.text
     assert store.get_discovered_artists() == []
 
 

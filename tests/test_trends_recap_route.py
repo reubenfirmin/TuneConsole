@@ -30,7 +30,7 @@ _DETAIL_BEATS = [
         {"label": "Albums", "total": 1, "entries": [{"title": "An album with a long title",
           "subtitle": "A newly heard artist", "detail": "7 of 10 tracks played", "href": "/album?browse=MPRE"}]},
         {"label": "Playlists", "total": 1, "entries": [{"title": "September evenings",
-          "detail": "Created this month", "href": "https://music.youtube.com/playlist?list=PL123"}]},
+          "detail": "24 songs · 12 recorded plays", "href": "https://music.youtube.com/playlist?list=PL123"}]},
         {"label": "Artists", "total": 1, "entries": [{"title": "A newly heard artist",
           "detail": "8 plays", "href": "/artist?name=Artist"}]},
     ], "note": "First heard in your recorded history. Album counts are distinct tracks played."},

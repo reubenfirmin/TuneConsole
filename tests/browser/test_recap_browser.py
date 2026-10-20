@@ -82,6 +82,27 @@ def test_recap_keeps_packaged_server_alive_through_download_and_exit(packaged_re
     assert not process.is_alive()
 
 
+def test_detail_links_open_without_advancing_the_recap(live_app, store, page):
+    story = _detailed_story()
+    store.put_proposals("trend_rollups", {"story": story}, 1)
+    page.goto(live_app + "/trends/story/2026-06")
+    index = next(i for i, b in enumerate(story["beats"]) if b["kind"] == "new_this_month")
+    page.get_by_role("button", name=f"Beat {index + 1}", exact=True).click()
+    slide = page.locator(".slide-new_this_month")
+    expect(slide).to_have_css("opacity", "1")
+    # Use a fragment to observe the link's default navigation without leaving the reel.
+    link = slide.get_by_role("link", name="An album with a long title", exact=True)
+    link.evaluate("el => el.href = '#album-preview'")
+    link.click()
+    assert page.url.endswith("#album-preview")
+    expect(slide).to_be_visible()
+    # Keyboard navigation remains available without dedicated Back / Continue buttons.
+    page.keyboard.press("ArrowRight")
+    expect(page.locator(".slide-different")).to_be_visible()
+    page.keyboard.press("ArrowLeft")
+    expect(slide).to_be_visible()
+
+
 @pytest.mark.parametrize("viewport", [{"width": 390, "height": 844}, {"width": 844, "height": 390}])
 def test_optional_screens_fit_and_navigate_on_mobile(live_app, store, page, viewport, tmp_path):
     story = _detailed_story()
@@ -90,6 +111,8 @@ def test_optional_screens_fit_and_navigate_on_mobile(live_app, store, page, view
     page.on("pageerror", lambda error: errors.append(error))
     page.set_viewport_size(viewport)
     page.goto(live_app + "/trends/story/2026-06")
+    expect(page.get_by_role("button", name="Back", exact=True)).to_have_count(0)
+    expect(page.get_by_role("button", name="Continue", exact=True)).to_have_count(0)
     for kind in ("new_this_month", "different", "same"):
         index = next(i for i, b in enumerate(story["beats"]) if b["kind"] == kind)
         page.get_by_role("button", name=f"Beat {index + 1}", exact=True).click()
@@ -97,7 +120,6 @@ def test_optional_screens_fit_and_navigate_on_mobile(live_app, store, page, view
         expect(slide).to_be_visible()
         expect(slide).to_have_css("opacity", "1")
         expect(slide.get_by_role("heading", level=1)).to_be_in_viewport()
-        expect(slide.get_by_role("button", name="Continue", exact=True)).to_be_in_viewport()
         panel = slide.locator(".recap-details")
         bounds = panel.bounding_box()
         assert bounds["height"] >= 90
@@ -106,6 +128,13 @@ def test_optional_screens_fit_and_navigate_on_mobile(live_app, store, page, view
         expect(panel.locator(".recap-note")).to_be_in_viewport()
         panel.evaluate("el => { el.scrollTop = 0; }")
         page.screenshot(path=str(tmp_path / f"recap-{kind}-{viewport['width']}.png"))
-        slide.get_by_role("button", name="Continue", exact=True).click()
+        # Tapping the panel's padding advances just like tapping the background.
+        panel.click(position={"x": bounds["width"] * .75, "y": 5})
         expect(page.locator(f".slide-{story['beats'][index + 1]['kind']}")).to_be_visible()
+        page.mouse.click(10, viewport["height"] * .6)
+        expect(slide).to_be_visible()
+        expect(slide).to_have_css("opacity", "1")
+        # The left side of a panel also follows the normal back-tap convention.
+        panel.click(position={"x": 20, "y": 5})
+        expect(page.locator(f".slide-{story['beats'][index - 1]['kind']}")).to_be_visible()
     assert errors == []

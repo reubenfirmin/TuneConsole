@@ -67,10 +67,15 @@
 </div>
 {%- endmacro %}
 
+{# Sort direction is supplied by the enclosing Alpine table component. #}
+{% macro sort_indicator(key) -%}
+<span class="sort-indicator" :class="ind('{{ key }}')" aria-hidden="true">{{ arrow_icon('down') }}</span>
+{%- endmacro %}
+
 {# A playlist title that links to YouTube Music, with its song count and (when a `kinds`
    map is in the template context) an audio/video/mixed icon. Import "with context" so the
    icon lookup works without threading the kind through every call site. #}
 {% macro pllink(ytm, title, count=None) -%}
 {% set kind = kinds.get(ytm) if kinds is defined and kinds else None -%}
-{{ kindicon(kind) }}<a class="ptitle" href="https://music.youtube.com/playlist?list={{ ytm }}" target="_blank" rel="noopener">{{ title }}&nbsp;↗</a>{% if count is not none %}<span class="pcount">{{ count }} song{{ '' if count == 1 else 's' }}</span>{% endif %}<span class="pid">{{ ytm }}</span>
+{{ kindicon(kind) }}<a class="ptitle" href="https://music.youtube.com/playlist?list={{ ytm }}" target="_blank" rel="noopener">{{ title }} {{ arrow_icon('external') }}</a>{% if count is not none %}<span class="pcount">{{ count }} song{{ '' if count == 1 else 's' }}</span>{% endif %}<span class="pid">{{ ytm }}</span>
 {%- endmacro %}

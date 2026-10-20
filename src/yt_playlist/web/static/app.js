@@ -178,7 +178,7 @@ function rowSort(pid, editBase) {
       // real order. Disable dragging until the view is reloaded back to the default order.
       if (this._sortable) this._sortable.option('disabled', this.key !== '');
     },
-    ind(k) { return this.key === k ? (this.dir === 1 ? ' ▲' : ' ▼') : ''; },
+    ind(k) { return this.key === k ? (this.dir === 1 ? 'is-ascending' : 'is-descending') : ''; },
 
     // Open the modal and let htmx fetch + render the results (server builds the list; we only own the
     // modal open/close + loading flag). The "Add" button hx-includes the checked results.
@@ -268,8 +268,8 @@ function rowSort(pid, editBase) {
         const inp = tr && tr.querySelector(selector);
         const disp = tr && tr.querySelector(dispSel);
         if (inp) {
-          // seed from the link text, stripping the trailing " ↗" the title link carries
-          inp.value = (disp ? disp.textContent : '').replace(/↗/g, '').trim();
+          // Decorative SVG icons contribute no text to the editable title.
+          inp.value = (disp ? disp.textContent : '').trim();
           inp.focus(); inp.select();
         }
       });
@@ -336,7 +336,7 @@ function overlapSort() {
     },
     // the "hide this + all below" pairs, for the confirm modal's htmx post (see cleanup.html)
     pairsJson() { return JSON.stringify(this._below.map(r => [r.dataset.ay, r.dataset.by])); },
-    ind(k) { return this.key === k ? (this.dir === 1 ? ' ▲' : ' ▼') : ''; },
+    ind(k) { return this.key === k ? (this.dir === 1 ? 'is-ascending' : 'is-descending') : ''; },
   };
 }
 function playlistsTab(rows) {
@@ -388,7 +388,7 @@ function playlistsTab(rows) {
       if (this.sortKey === key) { this.sortDir = -this.sortDir; }
       else { this.sortKey = key; this.sortDir = ['count', 'listens', 'last'].includes(key) ? -1 : 1; }
     },
-    ind(key) { return this.sortKey === key ? (this.sortDir === 1 ? ' ▲' : ' ▼') : ''; },
+    ind(key) { return this.sortKey === key ? (this.sortDir === 1 ? 'is-ascending' : 'is-descending') : ''; },
     activity(r) {
       const max = Math.max(0, ...this.rows.map(row => row.listens || 0));
       return r.listens && max ? Math.log1p(r.listens) / Math.log1p(max) : 0;
@@ -702,7 +702,7 @@ function homeStatus() {
     },
     push(ev) {
       const bad = ev.type === 'err' || ev.type === 'auth_expired';
-      const pip = bad ? '✗' : (ev.type === 'done' || ev.type === 'end') ? '✓' : ev.type === 'step' ? '›' : '•';
+      const pip = bad ? '✗' : (ev.type === 'done' || ev.type === 'end') ? '✓' : '•';
       const cls = bad ? 'err' : (ev.type === 'done' || ev.type === 'end') ? 'done' : '';
       this.lines.push({ text: ev.text || '', pip, cls });
       this.$nextTick(() => { const l = this.$refs.log; if (l) l.scrollTop = l.scrollHeight; });
@@ -1056,7 +1056,7 @@ function syncMixTuningIndicator(active = null) {
     !!panel.querySelector('#home-genre-options input:checked');
   panel.querySelector('.fp-tuning-dot').hidden = !set;
   panel.querySelector('.fp-collapse').title = 'Tune these mixes' + (set ? ' (adjustments active)' : '');
-  panel.querySelector('#fp-tuning-status').textContent = set ? 'Selections or biases are set.' : '';
+  panel.querySelector('#fp-tuning-status').textContent = set ? 'Mix adjustments are active.' : '';
 }
 
 function scheduleMixTuningExpiry(seconds) {
@@ -1596,7 +1596,7 @@ function initVizTooltip() {
     if (d.desc) h += '<div class="vt-desc">' + esc(d.desc) + '</div>';
     for (const row of (d.rows || [])) {
       const value = row.arrow
-        ? String(row.v).split(' → ').map(esc).join(' <span class="vt-arrow">→</span> ')
+        ? String(row.v).split(' to ').map(esc).join(' <span class="vt-change">to</span> ')
         : esc(row.v);
       h += '<div class="vt-row' + (row.div ? ' vt-div' : '') + '">'
          + '<span class="vt-l">' + esc(row.l) + '</span>'

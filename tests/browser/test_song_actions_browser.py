@@ -73,7 +73,7 @@ def test_create_from_album_with_readable_input_and_modal_focus(song_app, page, w
     page.screenshot(path=tmp_path / f"song-created-{width}.png", animations="disabled")
     dialog.get_by_role("link", name="Open playlist").click()
     expect(page.get_by_role("heading", name="Evening favorites", exact=True)).to_be_visible()
-    expect(page.get_by_role("link", name=SONG["title"] + " ↗", exact=True)).to_be_visible()
+    expect(page.get_by_role("link", name=SONG["title"], exact=True)).to_be_visible()
     assert len(song_app["main"].created) == 1
     assert song_app["main"].added[0][1] == [SONG["video_id"]]
     assert not errors

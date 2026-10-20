@@ -1100,38 +1100,7 @@ body:has(.page-charts) .viz-tip .vt-v {
   text-align: start;
   white-space: normal;
 }
-body:has(.page-charts) .viz-tip .vt-arrow {
-  position: relative;
-  display: inline-block;
-  width: 1.25rem;
-  height: .6rem;
-  margin-inline: .22rem;
-  color: var(--text);
-  font-size: 0;
-  line-height: 0;
-  vertical-align: middle;
-}
-body:has(.page-charts) .viz-tip .vt-arrow::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: .12rem;
-  top: calc(50% - 1px);
-  height: 2px;
-  border-radius: 2px;
-  background: currentColor;
-}
-body:has(.page-charts) .viz-tip .vt-arrow::after {
-  content: "";
-  position: absolute;
-  right: 0;
-  top: calc(50% - .23rem);
-  width: .4rem;
-  height: .4rem;
-  border-block-start: 2px solid currentColor;
-  border-inline-end: 2px solid currentColor;
-  transform: rotate(45deg);
-}
+.viz-tip .vt-change { color: var(--dim); font-weight: var(--weight-medium); }
 body:has(.page-charts) .viz-tip .vt-n {
   margin: .18rem 0 0 9.9rem;
   color: var(--faint);
@@ -1274,6 +1243,7 @@ body:has(.page-charts) .viz-tip .vt-div {
   color: var(--accent-2);
   font-size: 2rem;
 }
+.page-move .move-arrow .ui-arrow { width: 2rem; height: 2rem; }
 
 /* Enrichment reads as a live instrument panel instead of a card full of smaller cards. */
 .page-enrich .enrich-head {
@@ -1665,7 +1635,7 @@ body:not(:has(.page-clusters)) .modal {
   height: 100%;
   object-fit: cover;
   display: block;
-  transition: transform .25s ease;
+  transition: transform .55s cubic-bezier(.2, .7, .2, 1);
 }
 .page-home .dash-directions .gen-poster-cell:hover img,
 .page-home .dash-directions .gen-poster-cell:focus-visible img {
@@ -1755,12 +1725,13 @@ body:not(:has(.page-clusters)) .modal {
   display: grid;
   grid-template-rows: minmax(0, 4fr) minmax(5.5rem, 1fr);
   grid-template-columns: 1fr;
-  transition: border-color .18s ease, opacity .18s ease, transform .18s ease;
+  transition: border-color .35s ease, opacity .4s ease;
 }
 .page-home .dash-directions .gen-card-body { display: contents; }
 .page-home .dash-directions .gen-card::before { content: none; }
 .page-home .dash-directions .gen-card:hover { border-color: var(--accent-2); }
-.page-home .dash-directions .gen-lanes:not(.has-focus):has(.gen-card:hover) .gen-card:not(:hover) { opacity: .42; transform: scale(.985); }
+/* Keep card edges still as the pointer crosses the seams; fade neighboring artwork in place. */
+.page-home .dash-directions .gen-lanes:not(.has-focus):has(.gen-card:hover) .gen-card:not(:hover) { opacity: .42; }
 .page-home .dash-directions .gen-card.is-muted { display: none; }
 .page-home .dash-directions .gen-lanes.has-focus .gen-card.is-focused {
   grid-area: 1 / 1 / -1 / -1;
@@ -1850,7 +1821,7 @@ body:not(:has(.page-clusters)) .modal {
 .page-home .dash-directions .gen-card.is-focused .gen-refresh { top: 1.25rem; right: .8rem; transform: none; opacity: 1; }
 .page-home .dash-directions .gen-card.is-focused .gen-focus { display: block; }
 .page-home .gen-back { position: absolute; top: .7rem; left: 1.1rem; z-index: 3; display: inline-flex; align-items: center; gap: .4rem; width: auto; height: 2.25rem; padding: 0 .72rem; color: var(--text); background: color-mix(in srgb, var(--surface-sunk) 18%, transparent); border: 1px solid var(--border); border-radius: 2rem; box-shadow: none; font-size: .72rem; font-weight: 650; }
-.page-home .gen-back span { font-size: 1rem; }
+.page-home .gen-back .ui-arrow { width: 1.25rem; height: 1.25rem; }
 .page-home .gen-back:hover { color: var(--text); background: transparent; box-shadow: none; }
 .page-home .dash-directions .gen-focus {
   grid-column: 2;
@@ -1900,7 +1871,8 @@ body:not(:has(.page-clusters)) .modal {
 }
 .page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card {
   z-index: 1;
-  animation: mix-quadrant-in .72s cubic-bezier(.2, .78, .18, 1) both;
+  /* Release opacity after the entrance so hover fades can take over. */
+  animation: mix-quadrant-in .72s cubic-bezier(.2, .78, .18, 1) backwards;
   animation-delay: calc(.07s + (var(--mix-order, 0) * .09s));
 }
 .page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card:nth-child(1) { --mix-order: 0; --mix-x: -1.1rem; --mix-y: -1.1rem; }
@@ -1913,12 +1885,12 @@ body:not(:has(.page-clusters)) .modal {
   z-index: 5;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(112deg, transparent 24%, color-mix(in srgb, var(--light-source) 14%, transparent) 46%, transparent 67%);
-  transform: translateX(-130%);
-  transition: transform .65s cubic-bezier(.2, .7, .2, 1);
+  background: radial-gradient(ellipse at 50% 0, color-mix(in srgb, var(--light-source) 7%, transparent), transparent 70%);
+  opacity: 0;
+  transition: opacity .4s ease;
 }
 .page-home .dash-directions .gen-card:hover::after,
-.page-home .dash-directions .gen-card:focus-within::after { transform: translateX(130%); }
+.page-home .dash-directions .gen-card:focus-within::after { opacity: 1; }
 .page-home .mix-opening-mark {
   position: absolute;
   z-index: 8;
@@ -1973,15 +1945,6 @@ body:not(:has(.page-clusters)) .modal {
   0%, 68% { opacity: 1; visibility: visible; }
   100% { opacity: 0; visibility: hidden; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card,
-  .page-home .mix-opening-mark,
-  .page-home .mix-opening-ring,
-  .page-home .mix-opening-spark { animation: none; }
-  .page-home .mix-opening-mark { display: none; }
-  .page-home .dash-directions .gen-card::after { display: none; }
-}
-
 /* Loading mirrors the four choices that will replace it, so the async wait feels like part of the
    listening experience rather than a generic application pause. */
 .page-home .card-row-loading:has(.mix-loader) { min-height: 34rem; }
@@ -2266,6 +2229,14 @@ body:not(:has(.page-clusters)) .modal {
   border-radius: 50%;
   background: var(--accent-2);
   box-shadow: 0 .5rem 2rem color-mix(in srgb, var(--shadow-ink) 65%, transparent);
+  transition: background .25s ease, border-color .25s ease, box-shadow .3s ease;
+}
+.page-home .dash-directions .fingerprint:has(> .fp-collapse:is(:hover, :focus-visible)) {
+  background: var(--mix-tune-hover);
+  border-color: var(--mix-tune-hover-ink);
+  box-shadow: 0 0 0 2px var(--mix-tune-hover-ink),
+              0 0 1.4rem color-mix(in srgb, var(--mix-tune-hover) 45%, transparent),
+              0 0 2.5rem color-mix(in srgb, var(--mix-tune-hover-ink) 35%, transparent);
 }
 .page-home .dash-directions .fingerprint .fp-collapse {
   position: relative;
@@ -2276,14 +2247,22 @@ body:not(:has(.page-clusters)) .modal {
   height: 100%;
   padding: 0;
   color: var(--surface-sunk);
+  background: transparent;
   border-radius: 50%;
+  transition: color .25s ease;
+}
+.page-home .dash-directions .fingerprint .fp-collapse:is(:hover, :focus-visible) {
+  color: var(--mix-tune-hover-ink);
 }
 .page-home .dash-directions .fingerprint .fp-mood-mark {
-  width: auto;
-  height: auto;
-  color: var(--surface-sunk);
+  width: 1.75rem;
+  height: 1.75rem;
+  color: inherit;
   background: transparent;
-  font-size: 1.55rem;
+  transition: transform .3s cubic-bezier(.2, .85, .2, 1);
+}
+.page-home .dash-directions .fingerprint .fp-collapse:is(:hover, :focus-visible) .fp-mood-mark {
+  transform: rotate(-12deg) scale(1.12);
 }
 .page-home .dash-directions .fp-tuning-dot {
   position: absolute;
@@ -2369,7 +2348,7 @@ body:has(.fp-dialog[open]) { overflow: hidden; }
 .page-home .redis-memory-copy h3 a { color: var(--text); text-decoration: none; }
 .page-home .redis-memory-copy > span { margin-block-start: .65rem; color: var(--dim); }
 .page-home .redis-open { margin-block-start: auto; padding-block-start: 1.5rem; color: var(--text); font-weight: 650; text-decoration: none; }
-.page-home .redis-open span { color: var(--cta); }
+.page-home .redis-open .ui-arrow { color: var(--cta); }
 .page-home .redis-trail { display: flex; flex-direction: column; justify-content: stretch; border-block: 1px solid var(--border-strong); }
 .page-home .redis-trail-item { flex: 1; display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: .85rem; align-items: center; padding: .75rem 0; color: var(--text); text-decoration: none; }
 .page-home .redis-trail-item + .redis-trail-item { border-block-start: 1px solid var(--border); }
@@ -2698,6 +2677,8 @@ body:has(.fp-dialog[open]) { overflow: hidden; }
 /* free-text columns wrap to as many lines as needed (never cropped); fixed layout keeps the
    column widths bounded so the table still fits the card. break long unspaced tokens too. */
 .track-table td.t-wrap { white-space: normal; overflow-wrap: anywhere; }
+/* Natural mobile column widths keep a title and its external-link icon readable together. */
+@media (max-width: 720px) { .track-table { table-layout: auto; } }
 
 /* ===== "Generating…" takeover (was an inline <style> in generating.html) ===================== */
 .gen-page, .gen-page body { height: 100%; }

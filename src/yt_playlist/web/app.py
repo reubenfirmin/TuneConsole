@@ -15,6 +15,8 @@ from fastapi.responses import PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from yt_playlist.web.icons import arrow_icon
+
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core import updatecheck
 from yt_playlist.rec.radio import RadioSession
@@ -86,7 +88,7 @@ _URL_RE = re.compile(r"\(?\s*(https?://[^)\s]+)\s*\)?")
 
 
 def _linkify(text):
-    """Escape text and replace each (possibly parenthesised) URL with a small ↗ link, so bios keep
+    """Escape text and replace each URL with an accessible source link, so bios keep
     their wording but lose the raw URLs (e.g. the Wikipedia/CC-BY-SA attribution stays clickable)."""
     if not text:
         return ""
@@ -94,7 +96,9 @@ def _linkify(text):
     for m in _URL_RE.finditer(s):
         out.append(escape(s[last:m.start()]))
         url = m.group(1)
-        out.append(Markup('<a href="{}" target="_blank" rel="noopener nofollow">↗</a>').format(url))
+        out.append(Markup('<a href="{}" target="_blank" rel="noopener nofollow" '
+                          'aria-label="Open biography source" title="Open biography source">{}</a>')
+                   .format(url, arrow_icon("external")))
         last = m.end()
     out.append(escape(s[last:]))
     return Markup("").join(out)
@@ -208,6 +212,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
             except (OSError, ValueError):
                 return "0"
     templates.env.globals["asset_v"] = _AssetVersion()
+    templates.env.globals["arrow_icon"] = arrow_icon
     templates.env.filters["linkify"] = _linkify
     templates.env.globals["provider_search_url"] = provider_search_url
 

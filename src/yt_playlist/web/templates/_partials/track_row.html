@@ -18,10 +18,10 @@
   <td class="t-wrap" title="{{ t.title }}">
     <span class="tdisplay" x-show="editTitleVid !== '{{ t.video_id }}'">
       <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-         target="_blank" rel="noopener" data-yt-info>{{ t.title }}&nbsp;↗</a>
+         target="_blank" rel="noopener" data-yt-info>{{ t.title }} {{ arrow_icon('external') }}</a>
       {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
       <span class="editpen" @click="startEditTitle('{{ t.video_id }}')" title="Edit title">✎</span>
-      {% if t.title_edited %}<span class="resetpen" @click="resetField('{{ t.video_id }}', 'title')" title="Reset to original">↺</span>{% endif %}
+      {% if t.title_edited %}<button type="button" class="resetpen" @click="resetField('{{ t.video_id }}', 'title')" title="Restore original title" aria-label="Restore original title for {{ t.title }}">{{ arrow_icon('reset') }}</button>{% endif %}
     </span>
     <input class="tinput" type="text" autocomplete="off" x-cloak
            x-show="editTitleVid === '{{ t.video_id }}'"
@@ -33,7 +33,7 @@
     <span class="adisplay" x-show="editArtistVid !== '{{ t.video_id }}'">
       <a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a>
       <span class="editpen" @click="startEditArtist('{{ t.video_id }}')" title="Edit artist">✎</span>
-      {% if t.artist_edited %}<span class="resetpen" @click="resetField('{{ t.video_id }}', 'artist')" title="Reset to original">↺</span>{% endif %}
+      {% if t.artist_edited %}<button type="button" class="resetpen" @click="resetField('{{ t.video_id }}', 'artist')" title="Restore original artist" aria-label="Restore original artist for {{ t.title }}">{{ arrow_icon('reset') }}</button>{% endif %}
     </span>
     <input class="ainput" type="text" autocomplete="off" x-cloak
            x-show="editArtistVid === '{{ t.video_id }}'"

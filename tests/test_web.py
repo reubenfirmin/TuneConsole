@@ -475,7 +475,7 @@ def test_overlap_ignore_excludes_playlist(store):
     # overlaps card spans from its header to the next section header
     overlaps_card = body.split('id="overlaps"')[1].split('<h2 class="section')[0]
     assert "Big Mixtape" not in overlaps_card                     # gone from overlaps table
-    assert "Ignored in overlaps" in body                          # shows in ignored section
+    assert "Playlists excluded from overlap checks" in body
     c.post("/overlaps/unignore", data={"ytm": "PLFAV"}, follow_redirects=False)
     assert "Big Mixtape" in c.get("/cleanup").text                       # back
 
@@ -505,7 +505,7 @@ def test_merge_apply_route(store, monkeypatch, tmp_path, return_to, label):
     client = FakeClient()
     c = _client(store, lambda: {iid: client})
     page = c.get("/merge", params={"ids": f"{a},{b}", "return": return_to})
-    assert f"← {label}" in page.text
+    assert label in page.text and 'class="ui-arrow ui-arrow--left"' in page.text
     assert f'href="{return_to}"' in page.text
     r = c.post(f"/merge/apply?ids={a},{b}")
     assert r.status_code == 200

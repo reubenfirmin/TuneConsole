@@ -209,7 +209,36 @@ def test_repo_excludes_generated_plays_and_requires_real_playlist_dates(store):
     assert [p["ytm_playlist_id"] for p in material["playlists"]] == ["real"]
     beat = build(store, "2026-09")[0]
     assert beat["groups"] == [{"label": "Playlists", "total": 1, "entries": [
-        {"title": "real", "detail": "Created this month", "href": "https://music.youtube.com/playlist?list=real"}]}]
+        {"title": "real", "detail": "0 songs · 1 recorded play",
+         "href": "https://music.youtube.com/playlist?list=real"}]}]
+
+
+def test_new_playlist_counts_do_not_multiply_copies_or_attribute_song_matches(store):
+    since, until = month_bounds("2026-09")
+    for label in ("main", "other"):
+        iid = store.upsert_identity(label, "cred", None, label == "main")
+        store.upsert_playlist(iid, "real", "New mix", 4, "h", since, created_at=since)
+    # The same song can be played from another playlist or with no known playlist.
+    # Only the two events attributed to this list during the recap month count.
+    store.conn.executemany(
+        "INSERT INTO play_events(identity_id,identity_key,played_at,source,playlist_ytm_id) "
+        "VALUES (?, 'song', ?, 'live', ?)",
+        [(1, since - 1, "real"), (1, since + 1, "real"), (2, since + 2, "real"),
+         (1, since + 3, "another"), (1, since + 4, None), (1, until, "real")])
+    store.conn.commit()
+    beat = build(store, "2026-09")[0]
+    playlists = next(g for g in beat["groups"] if g["label"] == "Playlists")
+    assert playlists["total"] == 1
+    assert playlists["entries"][0]["detail"] == "4 songs · 2 recorded plays"
+
+
+@pytest.mark.parametrize("songs,expected", [(1, "1 song"), (None, "Song count unavailable")])
+def test_new_playlist_distinguishes_unknown_size_from_no_recorded_plays(data, songs, expected):
+    since, _ = month_bounds("2026-09")
+    data["playlists"] = [{"title": "New mix", "ytm_playlist_id": "real",
+                          "created_at": since, "track_count": songs}]
+    beat = new_this_month(data, "2026-09")
+    assert beat["groups"][0]["entries"][0]["detail"] == f"{expected} · 0 recorded plays"
 
 
 def test_repo_preserves_true_counts_with_video_variants_and_snapshot_familiarity(store):

@@ -16,7 +16,7 @@ def test_taste_page_renders_status_and_controls(store):
     c = _client(store)
     html = c.get("/taste").text
     assert "Taste Model" in html
-    assert "taste breadth" in html
+    assert "Genre variety" in html
     assert 'name="weight"' in html            # editable blend weights
     assert "/taste/autotune" in html          # auto-tune control present
 
@@ -35,7 +35,7 @@ def test_autotune_route_starts_and_reports(store):
 
 def test_taste_page_shows_transient_and_graduation_controls(store):
     html = _client(store).get("/taste").text
-    assert "Right-now responsiveness" in html
+    assert "Recent listening" in html
     assert "Learning" in html
     assert 'id="param-graduation_enabled"' in html   # the toggle rendered
     assert 'id="param-play_transient_w"' in html
@@ -62,8 +62,8 @@ def test_preference_binding_knob_is_on_the_page_and_round_trips(store):
 
 def test_taste_page_separates_semantic_controls_from_diagnostics(store):
     html = _client(store).get("/taste").text
-    assert "Everyday taste controls" in html
-    assert "Model details &amp; diagnostic controls" in html
+    assert "Main controls" in html
+    assert "Advanced settings and model details" in html
     for name in rec_params.SEMANTIC_PARAMS:
         assert html.count(f'id="param-{name}"') == 1
 
@@ -77,7 +77,7 @@ def test_autotune_done_status_refreshes_model_status(store):
     m = c.get("/taste/model-status")
     assert m.status_code == 200
     assert 'id="model-status"' in m.text
-    assert "track vectors" in m.text
+    assert "tracks modeled" in m.text
     # The page wires the card to listen for autotune-done.
     page = c.get("/taste").text
     assert "autotune-done from:body" in page
@@ -85,7 +85,7 @@ def test_autotune_done_status_refreshes_model_status(store):
 
 def test_taste_page_empty_autotune_state(store):
     html = _client(store).get("/taste").text
-    assert "Auto-tune hasn't run yet" in html      # empty-state note before any run
+    assert "Auto-tune has not run yet" in html
 
 
 def test_taste_page_renders_autotune_result_panel(store):
@@ -98,10 +98,10 @@ def test_taste_page_renders_autotune_result_panel(store):
         store.set_playlist_tracks(store.upsert_playlist(iid, f"PB{j}", "PB", 8, f"hb{j}", 0.0), B[j*5:j*5+8])
     autotune_run.run_and_record(store, now=1000.0)
     html = _client(store).get("/taste").text
-    assert "chosen config" in html                 # the populated result panel rendered
-    assert "recall@20 (winner)" in html
+    assert "selected model and dimensions" in html
+    assert "playlist prediction (top 20) (winner)" in html
     # No history was recorded, so the sweep judged itself in-sample: the panel must say so.
-    assert "Tuned on in-sample recall" in html
+    assert "This test used your existing playlists" in html
 
 
 def _set_autotune_result(store, **overrides):
@@ -124,9 +124,9 @@ def _set_autotune_result(store, **overrides):
 def test_taste_page_autotune_temporal_result_has_no_in_sample_warning(store):
     _set_autotune_result(store)
     html = _client(store).get("/taste").text
-    assert "temporal recall@20" in html             # metric is named, not a bare "recall@20"
-    assert "Tuned on in-sample recall" not in html
-    assert "Sweep failed" not in html
+    assert "future-play prediction" in html
+    assert "This test used your existing playlists" not in html
+    assert "The model comparison failed" not in html
 
 
 def test_taste_page_autotune_sweep_failed_renders_line(store):
@@ -134,7 +134,7 @@ def test_taste_page_autotune_sweep_failed_renders_line(store):
                           winner={"method": "svd", "dim": 48, "recall": 0.2, "metric": "recall_at_k"},
                           previous={"method": "svd", "dim": 48, "recall": 0.2, "metric": "recall_at_k"})
     html = _client(store).get("/taste").text
-    assert "Sweep failed: kept the previous configuration" in html
+    assert "The model comparison failed. Your previous settings are still in use." in html
 
 
 def test_taste_page_uses_sliders_not_number_fields(store):
@@ -147,7 +147,7 @@ def test_taste_page_uses_sliders_not_number_fields(store):
     assert "/taste/param" in html                 # scalar knobs post here
     assert "/taste/reset-all" in html             # global reset at the top
     assert "/taste/preview" in html               # manual-refresh live sample
-    assert "Blend weights" in html and "Genre families" in html
+    assert "Recommendation mix" in html and "Genre families" in html
     assert "Advanced" in html                     # collapsed advanced disclosure
 
 
@@ -177,7 +177,7 @@ def test_taste_recall_fragment(store):
     c = _client(store)
     r = c.get("/taste/recall")
     assert r.status_code == 200   # no vectors -> "build first", still 200
-    assert "holdout: 1d" in r.text   # temporal panel names the actual holdout window used
+    assert "1-day test period" in r.text
 
 
 def test_taste_param_saves_and_marks_sample_stale(store):
@@ -238,7 +238,7 @@ def test_taste_preview_renders_production_score_trace(store, monkeypatch):
     html = _client(store).get("/taste/preview").text
 
     assert "Why this rank" in html
-    assert "Durable context fit" in html and "Session direction" in html
+    assert "Saved taste match" in html and "Session adjustment" in html
     assert "Night drive" in html and "0.960" in html
 
 
@@ -262,9 +262,10 @@ def test_taste_comparison_keeps_fixed_baseline_and_shows_delta(store, monkeypatc
     assert c.post("/taste/comparison/baseline").status_code == 200
     html = c.get("/taste/comparison").text
     assert calls[-1] == ["track|artist"]
-    assert "#1 → #1" in html and "+0.100" in html
-    assert "Durable context fit" in html and "+0.400 → +0.500" in html
-    assert "deterministic production cohorts" in html
+    assert "#1 to #1" in html and "+0.100" in html
+    assert "Saved taste match" in html and "+0.400 to +0.500" in html
+    assert "track selection stays fixed" in html
+    assert "Similar to recent plays" in html
 
 
 def test_taste_comparison_labels_entries_exits_and_exclusions(store, monkeypatch):
@@ -291,8 +292,8 @@ def test_taste_comparison_labels_entries_exits_and_exclusions(store, monkeypatch
     client = _client(store)
     client.post("/taste/comparison/baseline")
     html = client.get("/taste/comparison").text
-    assert "Entered current top 24 at #1" in html
-    assert "ineligible: dismissed or snoozed" in html
+    assert "Added to the top 24 at #1" in html
+    assert "excluded: dismissed or snoozed" in html
     assert "NEW" in html and "OUT" in html
 
 
@@ -312,11 +313,11 @@ def test_taste_page_has_viz_and_controls_tabs(store):
     html = c.get("/taste").text
     assert "Visualizations" in html and "Controls" in html
     assert "tab = 'viz'" in html                  # default viz tab via the setup Alpine pattern
-    assert "What feeds the transient layer" in html   # transient sources panel present
-    assert "Graduation funnel" in html            # transient -> permanent funnel present
+    assert "Recent activity" in html
+    assert "Learning progress" in html
     assert "The four layers" in html              # the layer key replaces the old "Layer stack" card
-    assert "Where each layer acts" in html
-    assert "which Home taste-mode card leads" in html
+    assert "What each layer changes" in html
+    assert "leading listening-style card on Home" in html
     assert "Layer stack" not in html
 
 
@@ -326,7 +327,7 @@ def test_taste_viz_engine_fragment(store):
                    base_url="http://127.0.0.1")
     r = c.get("/taste/viz/engine")
     assert r.status_code == 200
-    assert "track vectors" in r.text
+    assert "tracks modeled" in r.text
 
 
 def test_taste_page_shows_now_reading_with_live_posterior(store, monkeypatch):
@@ -349,18 +350,18 @@ def test_taste_page_shows_now_reading_with_live_posterior(store, monkeypatch):
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                    base_url="http://127.0.0.1")
     html = c.get("/taste").text
-    assert "Taste modes" in html
+    assert "Listening styles" in html
     assert "Warehouse techno" in html   # NOW/SESSION ribbon tooltip title
     assert "last 6h" in html            # NOW row's timescale (now_window_h default)
-    assert "24h" in html and "4h half-life" in html   # SESSION row's timescale
+    assert "24h" in html and "influence halves every 4h" in html
     assert "100%" in html               # single-mode ribbon segment share, in the tooltip
 
 
 def test_taste_page_hides_now_and_session_reading_when_quiet(store):
     # No modes, no recent plays -> below the confidence gate. The card stays, the fast rows go quiet.
     html = _client(store).get("/taste").text
-    assert "Taste modes" in html
-    assert "No taste modes yet" in html
+    assert "Listening styles" in html
+    assert "No listening styles found yet" in html
 
 
 def test_taste_page_draws_the_full_chain_on_a_facet_axis(store):
@@ -372,7 +373,7 @@ def test_taste_page_draws_the_full_chain_on_a_facet_axis(store):
     store.add_history_snapshot(iid, 1.0, ["song|band"])
     html = _client(store).get("/taste").text
     assert "Genre families" in html
-    for cap in ("What you play", "Permanent", "Transient", "Effective"):
+    for cap in ("What you play", "Saved", "Recent", "Combined"):
         assert cap in html
-    assert "Right-now multiplier" in html    # the chain tooltip spells the whole composition out
-    assert "= Effective" in html
+    assert "Recent multiplier" in html
+    assert "= Combined multiplier" in html

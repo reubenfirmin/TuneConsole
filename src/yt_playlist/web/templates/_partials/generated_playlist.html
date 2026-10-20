@@ -21,7 +21,7 @@
   </div>
   <header class="gen-head" @click="focus = {{ p.lane|tojson|forceescape }}; genReveal('gen-{{ p.lane }}')">
     <button type="button" class="gen-back" x-show="focus === {{ p.lane|tojson|forceescape }}" x-cloak
-            @click.stop="focus = null" title="Back to all mixes" aria-label="Back to all mixes"><span aria-hidden="true">←</span> All mixes</button>
+            @click.stop="focus = null" title="Back to all mixes" aria-label="Back to all mixes">{{ arrow_icon('left') }} All mixes</button>
     {% if p.tracks %}
     <button type="button" class="gen-play" x-show="focus === {{ p.lane|tojson|forceescape }}" x-cloak
             title="Play this mix" aria-label="Save and play this mix" @click.stop
@@ -38,13 +38,13 @@
             title="Regenerate this mix" aria-label="Regenerate this mix" @click.stop="regenerateMix($el)"
             hx-trigger="mix-regenerate" hx-post="/home/refresh-cards" hx-target="#gen-body-{{ p.lane }}"
             hx-select="#gen-body-{{ p.lane }}" hx-swap="outerHTML"
-            hx-disabled-elt="this">↻ <span class="gen-refresh-label">Regenerate</span></button>
+            hx-disabled-elt="this">{{ arrow_icon('refresh') }} <span class="gen-refresh-label">Regenerate</span></button>
     {% else %}
     <button type="button" class="gen-refresh" x-show="focus === {{ p.lane|tojson|forceescape }}" x-cloak
             title="Regenerate this mix" aria-label="Regenerate this mix" @click.stop="regenerateMix($el)"
             hx-trigger="mix-regenerate" hx-post="/home/refresh-card/{{ p.lane }}"
             hx-target="#gen-body-{{ p.lane }}" hx-select="#gen-body-{{ p.lane }}"
-            hx-swap="outerHTML" hx-disabled-elt="this">↻ <span class="gen-refresh-label">Regenerate</span></button>
+            hx-swap="outerHTML" hx-disabled-elt="this">{{ arrow_icon('refresh') }} <span class="gen-refresh-label">Regenerate</span></button>
     {% endif %}
   </header>
   {% if p.tracks %}

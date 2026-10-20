@@ -15,17 +15,16 @@
       {# Testing/maintenance: force a mid-track tail top-up so live-queue behavior is observable on
          demand, no waiting for a track boundary. #}
       <button type="button" class="btn btn-ghost btn-sm" x-show="radioActive" x-cloak
-              @click="populateRadio()" title="Recompute and push the upcoming tracks now"
-              aria-label="Populate tail">Populate tail</button>
+              @click="populateRadio()" title="Choose upcoming tracks again using your current settings"
+              aria-label="Refresh upcoming tracks">Refresh upcoming tracks</button>
       <button type="button" class="rl-customize-toggle" @click="customizeOpen = !customizeOpen"
               :aria-expanded="customizeOpen.toString()"
               :title="customizeOpen ? 'Hide customize' : 'Customize this session'">
-        <span class="fp-caret" x-text="customizeOpen ? '▾' : '▸'"></span> Customize
+        <span class="fp-caret" :class="{ 'is-closed': !customizeOpen }">{{ arrow_icon('disclosure') }}</span> Customize
       </button>
     </span>
   </div>
-  <p class="rl-sub" x-show="!radioActive" x-cloak>A dynamic session seeded from your taste model, playable
-    from any track. Adjust it once below, or steer it live once it's playing.</p>
+  <p class="rl-sub" x-show="!radioActive" x-cloak>Radio picks music from your taste model and adapts as you listen. Customize genres and eras before or during playback.</p>
   {# Waiting-state net: the radio window can come up with a blocked deck-play (autoplay/MEI), which
      used to leave the owner staring at a silent tab with no signal at all. radioWaiting rides the
      SAME homeStatus() /bridge/status poll radioActive already uses (see app.js), no new poller. #}

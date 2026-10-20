@@ -29,7 +29,7 @@
          onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
     <div class="alert-body">
       <span class="alert-title"><strong>Your {{ recap.month_name }} is wrapped.</strong> A one-minute recap of how you actually listened.</span>
-      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/trends/story/{{ recap.month }}">Play your {{ recap.month_name }} →</a></div>
+      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/trends/story/{{ recap.month }}">Play your {{ recap.month_name }} {{ arrow_icon('right') }}</a></div>
     </div>
   </div>
   {% endif %}
@@ -61,7 +61,7 @@
         <button type="button" class="btn btn-sm alert-go" @click="reconnect()"
                 x-show="phase === 'reconnect'" x-cloak>Reload tab</button>
         {% elif backend_update.link %}
-        <a class="btn btn-sm alert-go" href="{{ backend_update.link }}" target="_blank" rel="noopener">{{ backend_update.command }} →</a>
+        <a class="btn btn-sm alert-go" href="{{ backend_update.link }}" target="_blank" rel="noopener">{{ backend_update.command }} {{ arrow_icon('external') }}</a>
         {% else %}
         <code class="alert-cmd">{{ backend_update.command }}</code>
         {% endif %}
@@ -91,7 +91,7 @@
       <span class="alert-title">{{ a.title }}</span>
       <div class="alert-foot">
         {% if a.badge %}<span class="alert-badge" title="{{ a.detail }}">{{ a.badge }}</span>{% endif %}
-        {% if a.cta_href %}<a class="btn btn-sm alert-go" href="{{ a.cta_href }}">{{ a.cta_label }} →</a>{% endif %}
+        {% if a.cta_href %}<a class="btn btn-sm alert-go" href="{{ a.cta_href }}">{{ a.cta_label }} {{ arrow_icon('right') }}</a>{% endif %}
       </div>
     </div>
   </div>
@@ -105,7 +105,7 @@
          onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
     <div class="alert-body">
       <span class="alert-title">Add a free Last.fm key to improve genres and song metadata, which helps the models learn.</span>
-      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=enrichment">Add key →</a></div>
+      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=enrichment">Add key {{ arrow_icon('right') }}</a></div>
     </div>
   </div>
   {% endif %}
@@ -118,7 +118,7 @@
          onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
     <div class="alert-body">
       <span class="alert-title">Multiple YouTube identities with music? Merge their catalogs into one.</span>
-      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=identities">Set up →</a></div>
+      <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=identities">Set up {{ arrow_icon('right') }}</a></div>
     </div>
   </div>
   {% endif %}

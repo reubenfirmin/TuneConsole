@@ -50,9 +50,18 @@ def new_this_month(data, month):
                for a, n in sorted(artist_counts.items(), key=lambda pair: (-pair[1], pair[0]))
                if established and n > 3 and artist_first[a] >= since
                and a not in data["familiar_artists"]]
-    playlists = [{"title": p["title"] or "Untitled playlist", "detail": "Created this month",
-                  "href": f"https://music.youtube.com/playlist?list={quote(p['ytm_playlist_id'], safe='')}"}
-                 for p in data["playlists"] if since <= p["created_at"] < until]
+    playlist_plays = Counter(p.get("playlist_ytm_id") for p in events)
+    playlists = []
+    for p in data["playlists"]:
+        if not since <= p["created_at"] < until:
+            continue
+        songs = p["track_count"]
+        plays = playlist_plays[p["ytm_playlist_id"]]
+        size = (f"{songs:,} song{'s' if songs != 1 else ''}" if songs is not None
+                else "Song count unavailable")
+        playlists.append({"title": p["title"] or "Untitled playlist",
+                          "detail": f"{size} · {plays:,} recorded play{'s' if plays != 1 else ''}",
+                          "href": f"https://music.youtube.com/playlist?list={quote(p['ytm_playlist_id'], safe='')}"})
     groups = [{"label": label, "entries": entries[:3], "total": len(entries)}
               for label, entries in (("Albums", albums), ("Playlists", playlists), ("Artists", artists))
               if entries]
@@ -61,7 +70,9 @@ def new_this_month(data, month):
     note = "Artists and albums are first heard in your recorded history." if artists or albums else ""
     if albums:
         note += " Album counts are distinct tracks played."
-    return {"kind": "new_this_month", "title": "New this month", "groups": groups, "note": note}
+    if playlists:
+        note += " Playlist sizes are current; plays are from this month."
+    return {"kind": "new_this_month", "title": "New this month", "groups": groups, "note": note.strip()}
 
 
 def _finding(key, category, title, detail, score, support=frozenset()):

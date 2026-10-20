@@ -44,7 +44,7 @@ def build(ctx) -> APIRouter:
         if action.kind == GC_GENERATED:
             return f"auto-removed unplayed generated playlist “{params.get('title')}”"
         if action.kind == COPY_PLAYLIST:
-            return f"copied “{params.get('source')}” → “{params.get('title')}”"
+            return f"copied “{params.get('source')}” to “{params.get('title')}”"
         if action.kind == COPY_INTO:
             n = params.get("added", 0)
             return f"copied {n} song{'' if n == 1 else 's'} from “{params.get('source')}” into “{params.get('target')}”"
@@ -54,7 +54,7 @@ def build(ctx) -> APIRouter:
         if action.kind == REMOVE_TRACK:
             return f"removed a track from “{params.get('playlist')}”"
         if action.kind == RENAME_PLAYLIST:
-            return f"renamed “{params.get('from')}” → “{params.get('to')}”"
+            return f"renamed “{params.get('from')}” to “{params.get('to')}”"
         if action.kind != PLAN:
             return action.kind
         try:

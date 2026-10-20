@@ -59,7 +59,7 @@ def _chip(page, name):
 
 def test_harness_loads_genres(live_app, page):
     page.goto(f"{live_app}/genres")
-    assert page.get_by_role("heading", name="Genre whitelist").is_visible()
+    assert page.get_by_role("heading", name="Recognized genres").is_visible()
     assert _chip(page, "Rock").is_visible()           # a built-in chip is server-rendered
 
 

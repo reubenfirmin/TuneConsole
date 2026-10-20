@@ -16,21 +16,18 @@
   </div>
 
   <div class="tab-panel" role="tabpanel" x-show="tab === 'controls'" x-cloak>
-<p class="section-note">Your recommender's control room. Every number here is built from your own library. Nothing comes
-   from outside. The <strong>track vectors</strong> below underlie <em>every</em> recommendation surface
-   (For You, Explore, Discover, "more like this"). The <strong>knobs</strong>, however, are narrower;
-   each section says exactly what it touches. Changes apply immediately; the live sample recomputes when
-   you click <em>Refresh</em>. Start over any time with one button:</p>
+<p class="section-note">Adjust how TuneConsole recommends music. The model learns from your library and listening.
+   Each section names the recommendations it affects. Changes apply immediately;
+   click <strong>Refresh sample</strong> to preview the results.</p>
 <div class="pl-actions actions-roomy">
   <button class="btn-ghost" hx-post="/taste/reset-all" hx-swap="none"
-          hx-confirm="Reset every weight and knob on this page back to its default? Your vectors and feedback are left alone.">↺ Reset everything to defaults</button>
+          hx-confirm="Reset all recommendation settings to their defaults? Your trained model and feedback will be kept.">{{ arrow_icon('reset') }} Reset all settings</button>
 </div>
 
-<h2 class="section">Model status <span class="scope-tag">All surfaces</span></h2>
+<h2 class="section">Model status <span class="scope-tag">All recommendations</span></h2>
 {% include "_partials/model_status.html" %}
-<p class="section-note note-roomy"><strong>Auto-tune</strong> tries a few embedding sizes, scores
-   each by how well it predicts tracks you actually played together (<em>recall@k</em>), then rebuilds on the
-   winner. The result panel below shows what it found. Your vectors also rebuild automatically on every sync.</p>
+<p class="section-note note-roomy"><strong>Auto-tune</strong> tests several model sizes and keeps the one that
+   best predicts your listening. The report below shows the results. Your model also rebuilds when your library syncs.</p>
 {% include "_partials/autotune_status.html" %}
 
 <h2 class="section">Live sample · For You</h2>
@@ -38,9 +35,9 @@
   <div id="foryou-sample" class="foryou-sample">
     <div class="sample-head">
       <button class="btn-ghost btn-sm" hx-get="/taste/preview" hx-target="#sample-body" hx-indicator="#sample-spin">
-        <span id="sample-spin" class="htmx-indicator">⟳</span> Refresh sample
+        <span id="sample-spin" class="htmx-indicator">{{ arrow_icon('refresh') }}</span> Refresh sample
       </button>
-      <span class="sample-note">Move a knob, then refresh to see how it changes your top picks.</span>
+      <span class="sample-note">Adjust a slider, then refresh to see your new top picks.</span>
     </div>
     <div id="sample-body" hx-get="/taste/preview" hx-trigger="load">
       <p class="section-note">Loading…</p>
@@ -51,35 +48,35 @@
 <h2 class="section">Control comparison · For You</h2>
 <div class="card">
   <div class="sample-head">
-    <button class="btn-ghost btn-sm" hx-post="/taste/comparison/baseline" hx-target="#comparison-body">Set current baseline</button>
-    <button class="btn-ghost btn-sm" hx-get="/taste/comparison" hx-target="#comparison-body">Compare current controls</button>
-    <span class="sample-note">Uses the same fixed tracks on both sides, so movement is attributable to model changes.</span>
+    <button class="btn-ghost btn-sm" hx-post="/taste/comparison/baseline" hx-target="#comparison-body">Save starting point</button>
+    <button class="btn-ghost btn-sm" hx-get="/taste/comparison" hx-target="#comparison-body">Compare changes</button>
+    <span class="sample-note">Save your current settings, adjust sliders, then compare rankings for the same tracks.</span>
   </div>
   <div id="comparison-body" hx-get="/taste/comparison" hx-trigger="load">
     <p class="section-note">Loading…</p>
   </div>
 </div>
 
-<h2 class="section">Everyday taste controls <span class="scope-tag">Semantic</span></h2>
-<p class="section-note">These are the few controls intended for normal use. Each moves in one documented direction; the model operates automatically at their defaults.</p>
+<h2 class="section">Main controls</h2>
+<p class="section-note">Choose how much variety you hear and how strongly recent listening affects your recommendations. Leave the defaults to let the model adapt automatically.</p>
 <div class="card knob-list semantic-controls">
   {% for p in semantic_params %}{% include "_partials/taste_knob.html" %}{% endfor %}
 </div>
 
 <details class="advanced diagnostic-controls">
-<summary>Model details &amp; diagnostic controls</summary>
+<summary>Advanced settings and model details</summary>
 <div class="diagnostic-controls-body">
-<h2 class="section">Blend weights <span class="scope-tag">For You only</span></h2>
-<p class="section-note">How much each candidate lane contributes to the <strong>For You</strong> feed (and nothing else). 1.0 = neutral; feedback nudges these too, or set them yourself.</p>
+<h2 class="section">Recommendation mix <span class="scope-tag">For You only</span></h2>
+<p class="section-note">Choose how much each type of recommendation contributes to <strong>For You</strong>. Higher weights give it more space; 1.0 is neutral. Your feedback can also change these weights.</p>
 <div class="card knob-list">
   {% for lane in lanes %}
   <div class="knob">
     <div class="knob-head">
       <label>{{ lane.label }}</label>
       <output id="out-lane-{{ lane.name }}">{{ '%.2f'|format(lane.value) }}</output>
-      <button class="knob-reset" type="button" title="Reset to default"
+      <button class="knob-reset" type="button" title="Reset to default" aria-label="Reset {{ lane.label }} to default"
               data-target="lane-{{ lane.name }}" data-default="{{ lane_default }}" onclick="resetKnob(this)"
-              hx-post="/taste/weight" hx-vals='{"axis":"lane:{{ lane.name }}","weight":"{{ lane_default }}"}' hx-swap="none">↺</button>
+              hx-post="/taste/weight" hx-vals='{"axis":"lane:{{ lane.name }}","weight":"{{ lane_default }}"}' hx-swap="none">{{ arrow_icon('reset') }}</button>
     </div>
     <input type="range" id="lane-{{ lane.name }}" name="weight" value="{{ '%.2f'|format(lane.value) }}"
            min="{{ lane_min }}" max="{{ lane_max }}" step="{{ lane_step }}"
@@ -91,16 +88,16 @@
 </div>
 
 <h2 class="section">Genre families <span class="scope-tag">For You only</span></h2>
-<p class="section-note">Each knob multiplies the taste-match score of every track in that family when ranking the <strong>For You</strong> feed (and nothing else): 1.0 = neutral, 0 mutes the family (sinks to the bottom), 2 doubles its scores (floats to the top). The % is that family's share of your listening, shown for context only; it does not set the knob. You set these by hand, but the <strong>Learning</strong> section below can also nudge them on its own over time.</p>
+<p class="section-note">Adjust how highly each genre family ranks in <strong>For You</strong>: 1.0 keeps its scores unchanged, 0 gives it the lowest priority, and 2 doubles its scores. The percentage shows its share of your listening, not its weight. <strong>Learning</strong> can also update these weights over time.</p>
 <div class="card knob-list">
   {% for g in genres[:20] %}
   <div class="knob">
     <div class="knob-head">
       <label>{{ g.family }} <span class="knob-sub">{{ '%.0f'|format(g.share * 100) }}% of your listening</span></label>
       <output id="out-genre-{{ loop.index }}">{{ '%.1f'|format(g.weight) }}</output>
-      <button class="knob-reset" type="button" title="Reset to neutral"
+      <button class="knob-reset" type="button" title="Reset to neutral" aria-label="Reset {{ g.family }} to neutral"
               data-target="genre-{{ loop.index }}" data-default="{{ genre_default }}" onclick="resetKnob(this)"
-              hx-post="/taste/weight" hx-vals='{"axis":"genre:{{ g.family }}","weight":"{{ genre_default }}"}' hx-swap="none">↺</button>
+              hx-post="/taste/weight" hx-vals='{"axis":"genre:{{ g.family }}","weight":"{{ genre_default }}"}' hx-swap="none">{{ arrow_icon('reset') }}</button>
     </div>
     <input type="range" id="genre-{{ loop.index }}" name="weight" value="{{ g.weight }}"
            min="{{ genre_min }}" max="{{ genre_max }}" step="{{ genre_step }}"
@@ -108,14 +105,13 @@
            oninput="updateOut(this)">
   </div>
   {% else %}
-  <p class="section-note">No genre tags yet. Enrich your library to unlock per-genre controls.</p>
+  <p class="section-note">Add genre tags with library enrichment to adjust individual genres.</p>
   {% endfor %}
 </div>
 
-<h2 class="section">Taste modes <span class="scope-tag">Auto-discovered</span></h2>
+<h2 class="section">Listening styles <span class="scope-tag">Found automatically</span></h2>
 <div class="card taste-modes">
-  <p class="muted">The distinct regions of your taste, found automatically from your library
-    (content: genre, era, audio). Read-only for now.</p>
+  <p class="muted">Groups of tracks with similar genres, eras, and sound, found in your library. These groups are shown for reference.</p>
   {% if modes %}
   <ul class="modes-list">
     {% for m in modes %}
@@ -139,14 +135,12 @@
     {% endfor %}
   </ul>
   {% else %}
-  <p class="muted">No taste modes yet; they appear once your library has enough enriched tracks.</p>
+  <p class="muted">Listening styles appear once enough tracks have genre, era, and audio information.</p>
   {% endif %}
 </div>
 
-<h2 class="section">Right-now responsiveness <span class="scope-tag">All surfaces</span></h2>
-<p class="section-note">How hard your <strong>recent</strong> behavior (plays, likes, dislikes, mood)
-   overrides your durable taste, and how quickly "right now" relaxes. These shape the live transient
-   model shown on the Visualizations tab.</p>
+<h2 class="section">Recent listening <span class="scope-tag">All recommendations</span></h2>
+<p class="section-note">Set how strongly recent plays, likes, dislikes, and mood choices affect your recommendations, and how quickly their influence fades. See the results on the Visualizations tab.</p>
 <div class="card knob-list">
   {% for p in groups.transient.main %}{% include "_partials/taste_knob.html" %}{% endfor %}
   <details class="advanced"><summary>Advanced</summary>
@@ -155,19 +149,16 @@
 </div>
 
 <h2 class="section">Learning <span class="scope-tag">Permanent</span></h2>
-<p class="section-note">The graduation funnel: when sustained, your right-now behavior gradually rewrites
-   your <strong>durable</strong> taste weights, including the Genre family and Blend weight knobs above.
-   Every other control here only changes when <em>you</em> move it; this is the only one that edits your
-   saved taste on its own, so turn it off to freeze your permanent weights.</p>
+<p class="section-note">Repeated listening and feedback gradually update your saved preferences, including genre and recommendation mix weights. Turn learning off to keep those weights fixed while recent listening still affects your current picks.</p>
 <div class="card knob-list">
   {% for p in groups.graduation.main %}{% include "_partials/taste_knob.html" %}{% endfor %}
-  <details class="advanced"><summary>Advanced (graduation speed)</summary>
+  <details class="advanced"><summary>Advanced learning rates</summary>
     {% for p in groups.graduation.advanced %}{% include "_partials/taste_knob.html" %}{% endfor %}
   </details>
 </div>
 
 <h2 class="section">Discovery &amp; timing <span class="scope-tag">For You + Explore</span></h2>
-<p class="section-note">When and how candidates are surfaced in the <strong>For You</strong> and <strong>Explore</strong> feeds. (The outward <em>Discover</em> page, for new artists/albums, uses your vectors but ignores these knobs.) Defaults are sensible; nudge to reshape what those two feeds dig up.</p>
+<p class="section-note">Control which tracks appear in <strong>For You</strong> and <strong>Explore</strong>, and when suggestions refresh. These settings do not affect the new artists and albums on <strong>Discover</strong>.</p>
 <div class="card knob-list">
   {% for p in params %}{% include "_partials/taste_knob.html" %}{% endfor %}
   <details class="advanced">
@@ -185,7 +176,7 @@
   <p>{% for kind, c in feedback.items() %}<span class="tag">{{ kind }}: {{ c }}</span> {% endfor %}</p>
   {% else %}<p class="section-note">No feedback recorded yet.</p>{% endif %}
   <button class="btn-ghost btn-sm" hx-post="/taste/clear-feedback" hx-swap="none"
-          hx-confirm="Clear all dismissals, mutes, and impression history?">Clear feedback &amp; impressions</button>
+          hx-confirm="Clear all dismissed suggestions, muted items, and the history of recommendations shown to you?">Clear feedback and recommendation history</button>
 </div>
 
 <!-- Banned tracks are a deliberate hard suppression outside the graduation funnel, stored as sync-surface dislikes. -->

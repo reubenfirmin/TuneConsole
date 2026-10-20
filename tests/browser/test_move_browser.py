@@ -53,7 +53,7 @@ def _pick(page, i1, i2):
 def test_move_copy_keeps_row_and_shows_message(live_move_app, page):
     page.goto(f"{live_move_app['base']}/move")
     _pick(page, live_move_app["i1"], live_move_app["i2"])
-    link = page.get_by_role("link", name="Mix ↗")
+    link = page.get_by_role("link", name="Mix", exact=True)
     expect(link).to_be_visible()
     page.get_by_role("row").filter(has_text="Mix").get_by_role("button", name="Copy").click()
     expect(page.get_by_text("Copied")).to_be_visible()
@@ -64,7 +64,7 @@ def test_move_removes_row(live_move_app, page):
     page.goto(f"{live_move_app['base']}/move")
     _pick(page, live_move_app["i1"], live_move_app["i2"])
     page.get_by_role("row").filter(has_text="Mix").get_by_role("button", name="Move").click()
-    page.get_by_role("link", name="Mix ↗").wait_for(state="hidden", timeout=3000)   # move deletes -> row gone
+    page.get_by_role("link", name="Mix", exact=True).wait_for(state="hidden", timeout=3000)
 
 
 def test_move_disabled_for_same_identity(live_move_app, page):

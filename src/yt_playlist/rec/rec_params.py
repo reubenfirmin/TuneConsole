@@ -35,344 +35,290 @@ class ParamSpec:
 
 # Each default equals the constant it replaced, so behaviour is unchanged until a user moves it.
 PARAMS = [
-    ParamSpec("comfort_min_plays", "Comfort min plays", "discovery",
-              "Comfort Listening surfaces your high-rotation favorites that have gone quiet. This is "
-              "the fewest past plays a track needs to qualify - higher = only your most-worn tracks.",
+    ParamSpec("comfort_min_plays", "Comfort Listening: minimum plays", "discovery",
+              "Minimum past plays for a forgotten favorite to appear in Comfort Listening. "
+              "Raise this to include only tracks you played often.",
               1, 50, 1, 4, integer=True),
     ParamSpec("comfort_recency_full_days", "Comfort recency window (days)", "discovery",
-              "Comfort Listening favors tracks you haven't played in a while. A track reaches its "
-              "full weight once this many days have passed since its last play; more recent plays "
-              "demote it (a track played today barely shows).",
+              "Days since the last play before a track gets full priority in Comfort Listening. "
+              "Tracks played more recently get lower priority.",
               1, 365, 1, 30, integer=True),
-    ParamSpec("erosion_view_cap", "Card rotation cap", "discovery",
-              "How many times you can reload Home before each card rotates to a fresh set of "
-              "suggestions. Lower = the cards turn over faster.",
+    ParamSpec("erosion_view_cap", "Home visits before suggestions refresh", "discovery",
+              "Number of Home visits before cards show a new set of suggestions. Lower refreshes them sooner.",
               1, 10, 1, 3, integer=True),
     ParamSpec("generated_gc_days", "Generated playlist cleanup (days)", "discovery",
-              "A daily worker deletes generated playlists you never play (locally and on YouTube). "
-              "Each gets this many days from when it was created to be played; if fewer than half of "
-              "its tracks show up in your play history by then, it's collected. Deletions are backed "
-              "up and undoable from the Actions page.",
+              "After this many days, a daily cleanup deletes generated playlists if you have played "
+              "fewer than half their tracks. This removes them locally and on YouTube. "
+              "Backups can be restored from the Actions page.",
               1, 365, 1, 7, integer=True),
     ParamSpec("discovery_artist_limit", "Discovery: artists scanned", "discovery",
-              "How many of your most-engaged artists are scanned for new albums. A smaller set keeps the "
-              "discovery pool focused and rotates as your listening shifts.",
+              "Number of your most-listened-to artists checked for albums to recommend. "
+              "Lower keeps discovery closer to your current favorites.",
               10, 1000, 10, 100, integer=True, advanced=True),
     ParamSpec("discovery_albums_per_artist", "Discovery: albums per artist", "discovery",
-              "How many albums from one artist sit in the discovery pool at once. The pool rotates "
-              "through the artist's whole catalogue over time (old albums included), so this just caps "
-              "how many show up together.",
+              "Maximum albums from one artist available for discovery at once. "
+              "The selection rotates through their catalog, including older releases.",
               1, 10, 1, 3, integer=True, advanced=True),
-    ParamSpec("discovery_gc_days", "Discovery pool cleanup (days)", "discovery",
+    ParamSpec("discovery_gc_days", "Unsaved discovery cleanup (days)", "discovery",
               "How long a discovered album, artist, or track stays in the pool after it is first shown "
               "to you. If you have not added it by then, it is removed. A track held in a generated "
               "playlist stays until that playlist is cleaned up.",
               1, 365, 1, 30, integer=True),
-    ParamSpec("palette_absence_penalty", "Out-of-palette penalty", "discovery",
-              "How hard to penalize genres absent from your library (scaled by how eclectic you "
-              "are). Higher = stick closer to genres you already have.",
+    ParamSpec("palette_absence_penalty", "Unfamiliar genre penalty", "discovery",
+              "How much to lower scores for genres missing from your library. "
+              "Higher keeps recommendations closer to familiar genres; your listening variety also affects this.",
               0.0, 2.0, 0.05, 0.5),
-    ParamSpec("candidate_pool_factor", "Candidate pool depth", "discovery",
-              "How many candidates each lane fetches per slot shown. Deeper = more variety for "
-              "erosion to rotate through, at a little more compute.",
+    ParamSpec("candidate_pool_factor", "Suggestions prepared per slot", "discovery",
+              "Tracks prepared for each displayed recommendation. Higher gives rotating suggestions "
+              "more variety and requires more processing.",
               2, 10, 1, 4, integer=True, advanced=True),
     ParamSpec("dislike_suppress_days", "Dislike ban length (days)", "discovery",
               "How long a thumbs-down hides a track before it can resurface.",
               1, 3650, 1, 365, integer=True),
-    ParamSpec("cluster_content_weight", "Cluster content blend", "discovery",
-              "How much the Clusters canvas leans on what tracks SOUND like (genre/era) vs how you've "
-              "filed them in playlists. 0 = pure playlist co-occurrence (old behaviour); higher = more "
-              "musical similarity, so a seed reaches its own genre even when you never playlist it there.",
+    ParamSpec("cluster_content_weight", "Clusters: musical similarity", "discovery",
+              "Balance musical similarity against shared playlist membership on the Clusters canvas. "
+              "0 uses only playlists; higher gives genre and era more influence.",
               0.0, 1.0, 0.05, 0.30),
     # Cluster-ring shaping (defaults mirror embed.CLUSTER_BETA / embed.SEED_FANOUT; both apply at query
     # time, so a change takes effect on the next grow with no rebuild).
-    ParamSpec("cluster_beta", "Cluster prune strength", "discovery",
-              "On the Clusters canvas, how hard pruning a track ('not this') steers a branch away from "
-              "similar music. 0 = a pruned track is just removed; higher = the whole ring leans away "
-              "from its neighbourhood, so one prune reshapes more of what grows next.",
+    ParamSpec("cluster_beta", "Clusters: effect of removing a track", "discovery",
+              "How much removing a track reduces similar suggestions on that branch. "
+              "0 only removes the track; higher also moves future suggestions away from its sound.",
               0.0, 2.0, 0.05, 0.60),
-    ParamSpec("cluster_seed_spread", "Cluster seed spread", "discovery",
-              "When a Clusters node grows from several pinned tracks, how much the ring reaches toward "
-              "each individual seed's neighbourhood vs their blended average. 0 = pure average; higher = "
-              "a minority pick (one odd track among many) still pulls in its own kind, not just the "
-              "centre of mass.",
+    ParamSpec("cluster_seed_spread", "Clusters: variety across starting tracks", "discovery",
+              "How much each starting track shapes new suggestions. 0 uses their average sound; "
+              "higher also finds music similar to each track individually.",
               0.0, 1.0, 0.05, 0.50, advanced=True),
     # --- Artist relationship model (#28). How its blocks combine when relating artists. content_weight
     # is the §B (genre/era/audio) fraction vs the §A co-curation block (collab = 1 - content, the
     # cluster_content_weight convention); edge_weight adds the §C Last.fm-edge bonus on top. ---
-    ParamSpec("artist_content_weight", "Artist content blend", "discovery",
-              "When relating artists, how much to lean on what they SOUND like (genre/era/audio) vs who "
-              "you co-curate them with. 0 = pure co-curation; higher = more genre/audio similarity, which "
-              "also lets artists with thin co-curation (or none) still be placed.",
+    ParamSpec("artist_content_weight", "Related artists: musical similarity", "discovery",
+              "Balance genre, era, and audio similarity against shared playlist membership. "
+              "0 uses only playlists; higher can also connect artists you have not put together.",
               0.0, 1.0, 0.05, 0.30, advanced=True),
-    ParamSpec("artist_edge_weight", "Artist Last.fm-edge weight", "discovery",
-              "How much a Last.fm similar-artist edge adds when relating artists, on top of co-curation "
-              "and content. Reaches out-of-corpus artists the user hasn't curated together yet.",
+    ParamSpec("artist_edge_weight", "Related artists: Last.fm influence", "discovery",
+              "How much Last.fm's similar-artist links contribute alongside playlist and musical similarity. "
+              "This can connect artists outside your library.",
               0.0, 1.0, 0.05, 0.10, advanced=True),
     # --- Breadth steering (#7). The interactive Breadth bar on the Home fingerprint binds to
     # breadth_bias; breadth_gain is its (advanced) sensitivity. Default 0 == today's behaviour. ---
-    ParamSpec("breadth_bias", "Breadth", "discovery",
-              "Tilts the feed toward your focused core (left) or your eclectic edges (right). The "
-              "center follows your natural breadth and changes nothing; drag right to surface your "
-              "under-played genres more, left to concentrate on your dominant ones. Redistributes "
-              "across genres you already have - it doesn't pull in brand-new ones.",
+    ParamSpec("breadth_bias", "Genre variety", "discovery",
+              "Move left for more of your most-played genres, right for more of your less-played genres. "
+              "The center follows your usual listening balance. This uses genres already in your library.",
               -1.0, 1.0, 0.05, 0.0),
-    ParamSpec("breadth_gain", "Breadth sensitivity", "discovery",
-              "How hard a full Breadth drag bites. At 1.0, a full drag roughly doubles a family that "
-              "sits at half (or twice) your average share.",
+    ParamSpec("breadth_gain", "Genre variety sensitivity", "discovery",
+              "How strongly the Genre variety slider changes recommendations. Higher makes each adjustment stronger.",
               0.2, 3.0, 0.05, 1.0, advanced=True),
     # --- Right-now responsiveness (transient model). Defaults == the constants below. ---
-    ParamSpec("play_transient_w", "Recent-play push", "transient",
-              "How hard a recent play tilts the feed toward similar music. 0 = recent plays don't "
-              "steer; higher = your last plays dominate.", 0.0, 2.0, 0.05, 0.30),
-    ParamSpec("like_transient_w", "Recent-like push", "transient",
-              "How hard a recent thumbs-up tilts the feed (stronger than a passive play by default).",
+    ParamSpec("play_transient_w", "Recent plays: influence", "transient",
+              "How much recent plays favor similar music. 0 ignores them; higher gives them more influence.", 0.0, 2.0, 0.05, 0.30),
+    ParamSpec("like_transient_w", "Recent likes: influence", "transient",
+              "How much recent likes favor similar music. By default, a like counts more than a play.",
               0.0, 2.0, 0.05, 0.45),
-    ParamSpec("dislike_transient_w", "Recent-dislike push", "transient",
-              "How hard a recent thumbs-down pushes the feed away from similar music.",
+    ParamSpec("dislike_transient_w", "Recent dislikes: influence", "transient",
+              "How much recent dislikes reduce recommendations for similar music.",
               0.0, 3.0, 0.05, 1.50),
-    ParamSpec("audio_transient_w", "Recent-sound push", "transient",
-              "How hard recent listening tilts the feed toward similar SOUND (tempo, energy, mood), "
-              "not just genre/era. 0 = the sound of recent plays doesn't steer.", 0.0, 2.0, 0.05, 0.30),
+    ParamSpec("audio_transient_w", "Recent sound: influence", "transient",
+              "How much recent listening favors similar tempo, energy, and mood. "
+              "0 ignores these audio similarities.", 0.0, 2.0, 0.05, 0.30),
     ParamSpec("axis_weight_cap", "Preference strength", "discovery",
-              "Your genre/era/artist preferences multiply a track's taste score. That score is a "
-              "percentile (0-1) but the multiplier can reach 16, so a favored track can outrank a "
-              "better-fitting one outright - and only a track with a KNOWN genre can earn a "
-              "multiplier at all, so a part-tagged library hides its untagged half. This caps the "
-              "multiplier. The default 1.4 is a strong bounded tilt that still lets a great-fitting "
-              "track through. Muted genres stay excluded at any setting.",
+              "Maximum combined boost from your genre, era, and artist preferences. Higher lets these "
+              "preferences outweigh the model's similarity score more strongly. "
+              "Tracks need matching tags to receive a boost. Muted genres remain excluded.",
               1.0, 16.0, 0.1, 1.4, advanced=True),
-    ParamSpec("facet_gain", "Facet responsiveness", "transient",
-              "How strongly a genre/era/artist lean re-ranks the feed. Higher = right-now leans bite "
-              "harder.", 0.0, 1.0, 0.05, 0.35),
+    ParamSpec("facet_gain", "Recent genre, era, and artist influence", "transient",
+              "How strongly recent genre, era, and artist preferences change recommendation rankings.", 0.0, 1.0, 0.05, 0.35),
     ParamSpec("play_halflife_d", "Play memory half-life (days)", "transient",
-              "How long a play's influence lasts in the transient model. Shorter = recent plays "
-              "dominate for a brief window; longer = they influence the feed for days.",
+              "Days until a play has half its original influence. Lower makes recent plays fade sooner.",
               0.5, 30, 0.5, 3),
     ParamSpec("mood_halflife_d", "Mood memory half-life (days)", "transient",
-              "How long a mood event's influence lasts. Shorter = mood gestures fade quickly; longer = "
-              "they steer the feed for days.", 1, 60, 1, 7, integer=True),
+              "Days until a mood choice has half its original influence. Lower makes mood choices fade sooner.", 1, 60, 1, 7, integer=True),
     ParamSpec("like_halflife_d", "Like memory half-life (days)", "transient",
-              "How long a thumbs-up's influence lasts. Shorter = likes fade quickly; longer = they "
-              "steer for days.", 1, 90, 1, 21, integer=True),
+              "Days until a like has half its original influence on current recommendations.", 1, 90, 1, 21, integer=True),
     ParamSpec("dislike_halflife_d", "Dislike fade half-life (days)", "transient",
-              "How long a thumbs-down's negative influence lasts in the transient model. Shorter = "
-              "dislikes fade quickly; longer = they suppress similar music for days.",
+              "Days until a dislike has half its original effect on similar music. "
+              "The separate dislike ban still controls when the disliked track itself can return.",
               5, 180, 5, 45, integer=True),
-    ParamSpec("mood_alpha", "Mood tilt", "transient",
-              "How hard a mood gesture tilts the lanes, relative to the underlying taste score.",
+    ParamSpec("mood_alpha", "Mood choice influence", "transient",
+              "How strongly a mood choice changes recommendations relative to your saved taste.",
               0.0, 1.0, 0.05, 0.35),
-    ParamSpec("weight_revert_halflife_d", "Learned-weight revert half-life (days)", "transient",
-              "How long learned weight changes persist before reverting toward your durable taste. "
-              "Longer = learned tweaks stick around longer.", 7, 365, 7, 60, integer=True, advanced=True),
-    ParamSpec("recent_play_limit", "Recent window (tracks)", "transient",
-              "How many recent plays/likes feed the right-now model.", 5, 200, 5, 50, integer=True),
-    ParamSpec("facet_mult_min", "Facet floor", "transient",
-              "Even the strongest negative lean keeps a facet at least this present (never fully muted).",
+    ParamSpec("weight_revert_halflife_d", "Learned adjustment fade time (days)", "transient",
+              "Days for learned weight adjustments to move halfway back toward your saved taste. "
+              "Higher keeps adjustments longer.", 7, 365, 7, 60, integer=True, advanced=True),
+    ParamSpec("recent_play_limit", "Recent plays and likes to consider", "transient",
+              "Number of recent plays and likes used to adjust current recommendations.", 5, 200, 5, 50, integer=True),
+    ParamSpec("facet_mult_min", "Minimum recent-preference multiplier", "transient",
+              "Lowest score multiplier recent negative feedback can apply to a genre, era, or artist.",
               0.0, 1.0, 0.05, 0.35, advanced=True),
-    ParamSpec("facet_mult_max", "Facet ceiling", "transient",
-              "Cap on how much a positive lean can boost a facet.", 1.0, 4.0, 0.1, 2.5, advanced=True),
+    ParamSpec("facet_mult_max", "Maximum recent-preference multiplier", "transient",
+              "Highest score multiplier recent positive feedback can apply to a genre, era, or artist.", 1.0, 4.0, 0.1, 2.5, advanced=True),
     # --- NOW/session layers (#88 layered taste model): a confidence-gated posterior over taste modes
     # read from the last few hours of real plays (NOW), plus a slower same-sitting carry-over
     # (session). Defaults tuned so a normal listening session clears the NOW gate within a couple of
     # tracks; a quiet stretch (or one lone play) returns no read rather than guessing. ---
-    ParamSpec("now_window_h", "NOW layer window (hours)", "transient",
-              "How far back the moment-to-moment taste read looks for recent plays. Shorter reacts "
-              "only to what's playing right now; longer smooths over a whole sitting.",
+    ParamSpec("now_window_h", "Current listening window (hours)", "transient",
+              "Hours of recent plays used to choose your current listening style. "
+              "Lower reacts faster; higher includes more of the session.",
               1, 24, 1, 6, integer=True),
-    ParamSpec("now_min_events", "NOW layer: minimum plays", "transient",
-              "Fewest distinct recent plays (with a known sound) needed before the moment-to-moment "
-              "read speaks up. Below this, thin evidence stays silent instead of guessing.",
+    ParamSpec("now_min_events", "Current listening: minimum plays", "transient",
+              "Distinct recent plays with enough track information required before choosing a current listening style.",
               2, 10, 1, 3, integer=True, advanced=True),
-    ParamSpec("now_gain", "NOW layer responsiveness", "transient",
-              "How hard the moment-to-moment taste read steers the feed once it has enough evidence.",
+    ParamSpec("now_gain", "Current listening: influence", "transient",
+              "How strongly your current listening style affects Home once enough plays are available.",
               0.0, 2.0, 0.05, 0.6),
     ParamSpec("session_halflife_h", "Session memory half-life (hours)", "transient",
-              "How long this listening session's influence lasts. Shorter forgets a session quickly "
-              "once you stop; longer lets it carry across a break.", 0.5, 24, 0.5, 4),
-    ParamSpec("session_alpha", "Session tilt", "transient",
-              "How strongly this session's read blends into the feed relative to your durable taste.",
+              "Hours until this session's influence halves. Higher keeps it active across longer breaks.", 0.5, 24, 0.5, 4),
+    ParamSpec("session_alpha", "Session influence", "transient",
+              "How strongly this listening session affects recommendations relative to your saved taste.",
               0.0, 1.0, 0.05, 0.25),
     # --- Skips (#84 read-time classification of track_exit/bye rows). Defaults mirror the
     # play/like/dislike transient channels: a moderate push with a two-week memory. ---
-    ParamSpec("skip_transient_w", "Recent-skip push", "transient",
-              "How hard a recent skip pushes the feed away from similar music. 0 = skips don't "
-              "steer; higher = your last skips dominate.", 0.0, 2.0, 0.05, 0.6),
+    ParamSpec("skip_transient_w", "Recent skips: influence", "transient",
+              "How much recent skips reduce recommendations for similar music. 0 ignores skips.", 0.0, 2.0, 0.05, 0.6),
     ParamSpec("skip_halflife_d", "Skip memory half-life (days)", "transient",
-              "How long a skip's influence lasts in the transient model. Shorter = recent skips "
-              "dominate for a brief window; longer = they influence the feed for days.",
+              "Days until a skip has half its original influence on recommendations.",
               1, 60, 1, 14, integer=True),
     # --- Learning (graduation: right-now -> permanent). Defaults == the constants below. ---
     ParamSpec("graduation_enabled", "Learning enabled", "graduation",
-              "When on, sustained right-now behavior gradually rewrites your durable taste weights. "
-              "Turn off to freeze your permanent taste and let right-now effects stay temporary.",
+              "Repeated listening and feedback update your saved preferences. "
+              "Turn off to keep saved weights fixed while recent activity still affects current picks.",
               0, 1, 1, True, boolean=True),
-    ParamSpec("theme_threshold", "Graduation threshold", "graduation",
-              "How much sustained signal a genre/era/artist must accumulate before it nudges your "
-              "permanent taste. Higher = learning is slower and more deliberate.", 0.2, 5.0, 0.1, 1.2),
-    ParamSpec("graduate_up", "Graduate-up step", "graduation",
-              "Permanent weight multiplier applied when a facet graduates upward.",
+    ParamSpec("theme_threshold", "Learning threshold", "graduation",
+              "Amount of repeated activity needed to change a saved genre, era, or artist preference. "
+              "Higher requires more evidence and learns more slowly.", 0.2, 5.0, 0.1, 1.2),
+    ParamSpec("graduate_up", "Learned preference increase", "graduation",
+              "Multiplier applied to a saved weight after enough positive evidence. Higher makes each increase larger.",
               1.0, 1.5, 0.01, 1.05, advanced=True),
-    ParamSpec("graduate_down", "Graduate-down step", "graduation",
-              "Permanent weight multiplier applied when a facet graduates downward.",
+    ParamSpec("graduate_down", "Learned preference decrease", "graduation",
+              "Multiplier applied to a saved weight after enough negative evidence. Lower makes each decrease larger.",
               0.5, 1.0, 0.01, 0.95, advanced=True),
     ParamSpec("source_w_like", "Speed: likes (in the player)", "graduation",
-              "How fast a thumbs-up you press while listening graduates toward permanent taste. "
-              "These likes are seen the moment you press them, so they also steer the day-to-day "
-              "mood at full strength.", 0.0, 2.0, 0.05, 1.0, advanced=True),
+              "How quickly likes made while listening update saved preferences. "
+              "These likes also affect current recommendations immediately.", 0.0, 2.0, 0.05, 1.0, advanced=True),
     ParamSpec("source_w_like_synced", "Speed: likes (found by sync)", "graduation",
-              "How fast a like the library sync discovers shapes your permanent taste. YouTube "
-              "reports these in bulk with no record of when you actually pressed them, so they "
-              "never steer the day-to-day mood; they only slowly shape the permanent model. At the "
-              "default, roughly three likes in the same genre/era/artist are needed per nudge.",
+              "How quickly likes found during sync update saved preferences. Their original dates "
+              "are unknown, so they do not affect current mood. At the default, about three similar "
+              "likes produce one saved preference update.",
               0.0, 2.0, 0.05, 0.4, advanced=True),
     ParamSpec("source_w_dislike", "Speed: dislikes", "graduation",
-              "How fast an explicit dislike graduates toward permanent taste.", 0.0, 2.0, 0.05, 1.0, advanced=True),
-    ParamSpec("source_w_vibe", "Speed: mood gestures", "graduation",
-              "How fast a mood/vibe gesture graduates toward permanent taste.", 0.0, 2.0, 0.05, 1.0, advanced=True),
+              "How quickly dislikes update saved preferences.", 0.0, 2.0, 0.05, 1.0, advanced=True),
+    ParamSpec("source_w_vibe", "Speed: mood choices", "graduation",
+              "How quickly mood choices update saved preferences.", 0.0, 2.0, 0.05, 1.0, advanced=True),
     ParamSpec("source_w_feedback", "Speed: suggestion feedback", "graduation",
-              "How fast a suggestion dismiss (wrong vibe/era, too mainstream, not this artist) and the "
-              "Home why-chips steer your permanent taste. Routed through the same graduation ledger as "
-              "every other signal.", 0.0, 2.0, 0.05, 1.0, advanced=True),
+              "How quickly dismissed suggestions and Home feedback choices update saved preferences.", 0.0, 2.0, 0.05, 1.0, advanced=True),
     ParamSpec("pop_mainstream_min", "Mainstream threshold", "discovery",
-              "Deezer popularity (rank) at or above which a track counts as 'mainstream', the axis the "
-              "'too mainstream' dismiss steers. Tracks with no popularity value are never mainstream.",
+              "Minimum Deezer popularity score for a track to count as mainstream when you choose "
+              "'too mainstream' feedback. Tracks without a popularity score are excluded from that category.",
               0, 1000000, 50000, 500000, integer=True, advanced=True),
     # The intent-vs-behavior graduation balance: two visible (non-advanced) knobs. Both channels now
     # graduate by the same daily-exposure mechanic, so the weights are directly comparable (per-day vs
     # per-day). The default ratio 0.5 : 0.08 (~6:1) encodes "explicit steering moves long-term taste
     # faster than passive listening" (spec §2).
-    ParamSpec("source_w_slider", "Intent: nudge bars", "graduation",
-              "How fast your explicit steering (the Home nudge bars, while held) graduates into "
-              "permanent taste, per day held. The intent side of the intent-vs-behavior balance.",
+    ParamSpec("source_w_slider", "Learning rate: slider choices", "graduation",
+              "How much each day with an active Home slider adjustment changes saved preferences.",
               0.0, 2.0, 0.05, 0.5),
-    ParamSpec("source_w_play", "Behavior: listens", "graduation",
-              "How fast your listening graduates into permanent taste, per day of sustained plays "
-              "(exposure, the same mechanic as the nudge bars). The behavior side of the balance; kept "
-              "below intent so passive listening doesn't silently rewrite taste.",
+    ParamSpec("source_w_play", "Learning rate: listening", "graduation",
+              "How much each day of repeated listening changes saved preferences. "
+              "The default learns more slowly from plays than from deliberate slider choices.",
               0.0, 1.0, 0.01, 0.08),
-    ParamSpec("modes_k", "Taste modes: cluster count", "discovery",
-              "How many clusters the taste-mode finder starts from before keeping only the dense "
-              "ones. Higher splits your taste into finer regions; lower keeps them broad.",
+    ParamSpec("modes_k", "Listening styles: starting groups", "discovery",
+              "Number of track groups tested when finding listening styles. "
+              "Higher finds more specific styles; lower keeps them broader.",
               4, 40, 1, 14, integer=True, advanced=True),
-    ParamSpec("modes_min_members", "Taste modes: minimum size", "discovery",
-              "Smallest number of tracks a cluster needs to count as a taste mode. Clusters below "
-              "this are treated as noise and dropped.",
+    ParamSpec("modes_min_members", "Listening styles: minimum tracks", "discovery",
+              "Minimum tracks a group needs to count as a listening style. Smaller groups are discarded.",
               10, 200, 5, 40, integer=True, advanced=True),
-    ParamSpec("modes_match_threshold", "Taste modes: identity match", "discovery",
-              "How similar a mode must be between two recomputes to keep its identity. Higher makes "
-              "a mode split into a new one more readily as your library shifts.",
+    ParamSpec("modes_match_threshold", "Listening styles: matching threshold", "discovery",
+              "Similarity required to recognize a listening style after rebuilding. "
+              "Higher is more likely to treat a changed group as a new style.",
               0.0, 1.0, 0.05, 0.60, advanced=True),
-    ParamSpec("modes_pool_limit", "Taste modes: pool breadth", "discovery",
-              "Minimum ranked pool requested when bucketing tracks by taste mode. Library surfaces "
-              "also cover all modeled tracks so smaller genres can fill a mix.",
+    ParamSpec("modes_pool_limit", "Listening styles: tracks considered", "discovery",
+              "Minimum ranked tracks requested when grouping recommendations by listening style. "
+              "Library recommendations also consider every modeled track so smaller genres can fill a mix.",
               50, 2000, 50, 400, integer=True, advanced=True),
-    ParamSpec("modes_cand_per_mode", "Taste modes: candidates per mode", "discovery",
-              "How many tracks are cached per mode per card. This is the rotation depth a mode card "
-              "draws from before it repeats.",
+    ParamSpec("modes_cand_per_mode", "Listening styles: tracks prepared per card", "discovery",
+              "Tracks saved for each listening-style card to rotate through before repeating.",
               12, 200, 4, 40, integer=True, advanced=True),
-    ParamSpec("modes_menu_size", "Taste modes: cards", "discovery",
-              "How many distinct taste modes the Home card row surfaces at once.",
+    ParamSpec("modes_menu_size", "Listening styles: Home cards", "discovery",
+              "Number of different listening-style cards shown on Home at once.",
               2, 6, 1, 4, integer=True, advanced=True),
     ParamSpec("fresh_artist_cap", "Fresh songs: max per artist", "discovery",
-              "The most tracks from one artist the Fresh card will offer. Discovery scans whole "
-              "discographies, so without a cap a taste ranking hands back one artist's back "
-              "catalogue instead of a spread of new music.",
+              "Maximum tracks from one artist on the Fresh card. Lower includes a wider range of artists.",
               1, 12, 1, 2, integer=True, advanced=True),
-    ParamSpec("modes_artist_cap", "Taste modes: max per artist", "discovery",
-              "The most tracks from a single artist allowed in one mode-focused card, so a card can't "
-              "collapse into one artist.",
+    ParamSpec("modes_artist_cap", "Listening styles: tracks per artist", "discovery",
+              "Maximum tracks from one artist on a listening-style card.",
               1, 12, 1, 2, integer=True, advanced=True),
-    ParamSpec("modes_album_cap", "Taste modes: max per album", "discovery",
-              "The most tracks from a single album allowed in one mode-focused card, so a card can't "
-              "collapse into one compilation. Singles (no album) are not capped.",
+    ParamSpec("modes_album_cap", "Listening styles: tracks per album", "discovery",
+              "Maximum tracks from one album on a listening-style card. Tracks without an album are not limited.",
               1, 12, 1, 2, integer=True, advanced=True),
-    ParamSpec("comfort_min_pool", "Comfort credibility floor", "discovery",
-              "Comfort Listening needs play history with worn-then-quiet favorites to be meaningful. It "
-              "only appears once its pool has at least this many tracks; below that, the temporal card "
-              "(Throwback / Time Flies / Recent Picks) takes the 4th slot until enough history accrues.",
+    ParamSpec("comfort_min_pool", "Comfort Listening: minimum suggestions", "discovery",
+              "Minimum forgotten favorites needed to show Comfort Listening. "
+              "Until then, Throwback, Time Flies, or Recent Picks fills the fourth card.",
               0, 500, 4, 36, integer=True, advanced=True),
-    ParamSpec("onboard_coverage_min", "Onboarding: ready coverage", "discovery",
-              "Genre-enrichment coverage at/above which (with at least one taste mode) the model is "
-              "considered ready and the guided onboarding view hands over to your full Home.",
+    ParamSpec("onboard_coverage_min", "Getting started: genre coverage needed", "discovery",
+              "Share of tracks needing genre tags before the full Home view appears. "
+              "At least one listening style must also be found.",
               0.0, 1.0, 0.05, 0.60, advanced=True),
-    ParamSpec("onboard_feedback_min", "Onboarding: ready feedback", "discovery",
-              "Number of likes + dislikes that graduate you out of onboarding even before enrichment "
-              "finishes (so a thin catalog is never stuck).",
+    ParamSpec("onboard_feedback_min", "Getting started: feedback needed", "discovery",
+              "Number of likes and dislikes that unlock the full Home view before enrichment finishes.",
               1, 200, 1, 10, integer=True, advanced=True),
-    ParamSpec("onboard_library_min", "Onboarding: library playlist floor", "discovery",
-              "Fewest owned tracks before the onboarding 'from your library' playlist appears; below "
-              "this, onboarding shows the radio playlist only.",
+    ParamSpec("onboard_library_min", "Getting started: library tracks needed", "discovery",
+              "Minimum library tracks needed to show a 'from your library' playlist during setup. "
+              "Below this, only the radio playlist appears.",
               0, 500, 5, 30, integer=True, advanced=True),
     # --- Per-mode Personalized PageRank ranker (#57). Experimental A/B: PPR walk vs the current
     # in-mode ordering. All advanced (a tuner sweeps them; hand-setting only degrades quality). ---
-    ParamSpec("ppr_alpha", "PPR walk weight", "discovery",
-              "For the experimental random-walk in-mode ranker: how far the walk spreads from a mode's "
-              "seed tracks before restarting. Higher reaches further along your co-listen graph; the "
-              "restart probability is one minus this.",
+    ParamSpec("ppr_alpha", "Experimental ranking: exploration distance", "discovery",
+              "How far the experimental ranking follows shared-listening connections before restarting "
+              "from a style's starting tracks. Higher explores farther.",
               0.5, 0.99, 0.01, 0.85, advanced=True),
-    ParamSpec("ppr_iters", "PPR iteration cap", "discovery",
-              "Maximum power-iteration steps for the random-walk in-mode ranker before it stops. It "
-              "usually converges well before this.",
+    ParamSpec("ppr_iters", "Experimental ranking: calculation limit", "discovery",
+              "Maximum calculation rounds for experimental ranking. It stops sooner if rankings stabilize.",
               10, 200, 5, 50, integer=True, advanced=True),
-    ParamSpec("ppr_tol", "PPR convergence tolerance", "discovery",
-              "The random-walk in-mode ranker stops early once the ranking stops moving by more than "
-              "this. Smaller runs more iterations for a tighter fixed point.",
+    ParamSpec("ppr_tol", "Experimental ranking: stopping tolerance", "discovery",
+              "Stop calculating once rankings change by less than this amount. Lower calculates more precisely.",
               0.0, 0.01, 0.000001, 0.000001, advanced=True),
-    ParamSpec("ppr_rank_depth", "PPR rank depth", "discovery",
-              "How many top tracks of each mode's random-walk ranking the worker caches for the card "
-              "to order from.",
+    ParamSpec("ppr_rank_depth", "Experimental ranking: tracks saved", "discovery",
+              "Top-ranked tracks saved for each listening-style card by experimental ranking.",
               50, 2000, 50, 200, integer=True, advanced=True),
-    ParamSpec("ppr_ab_share", "PPR card share", "discovery",
-              "Share of mode cards whose in-mode order comes from the experimental random-walk ranker "
-              "rather than the current one. 0 = never, 1 = always; the rest keep the current ranker so "
-              "the selection log can compare them.",
+    ParamSpec("ppr_ab_share", "Experimental ranking: share of cards", "discovery",
+              "Share of listening-style cards using experimental ranking. 0 uses standard ranking "
+              "for all cards; 1 uses experimental ranking for all. Mixed results allow comparison.",
               0.0, 1.0, 0.05, 0.5, advanced=True),
     # --- Dynamic radio (#93). Session-scoped reactivity for the primed-handoff radio. All advanced
     # (a tuner sweeps them; hand-setting only shifts feel, never correctness). ---
     ParamSpec("radio_artist_cap", "Radio artist cap", "discovery",
-              "The most tracks by any one artist that dynamic radio will play in a single session, so a "
-              "session does not collapse onto one artist.",
+              "Maximum tracks by one artist during a radio session.",
               1, 10, 1, 3, integer=True, advanced=True),
     ParamSpec("radio_candidate_pool", "Radio candidate pool", "discovery",
-              "How many of your top-scored tracks dynamic radio ranks the next pick from. Deeper reaches "
-              "further into the tail; shallower keeps picks closer to your core taste.",
+              "Top-scoring tracks considered for the next radio pick. Higher includes more variety; "
+              "lower stays closer to your strongest matches.",
               10, 500, 10, 60, integer=True, advanced=True),
     ParamSpec("radio_skip_artist_penalty", "Radio skip artist penalty", "discovery",
-              "How hard skipping a track in radio depresses more tracks by that same artist for the rest "
-              "of the session. Higher backs off a skipped artist faster.",
+              "How much skipping a radio track reduces other picks by that artist during the session.",
               0.0, 2.0, 0.05, 0.5, advanced=True),
-    ParamSpec("radio_skip_mode_penalty", "Radio skip mode penalty", "discovery",
-              "How hard skipping a track in radio depresses that track's taste region (its nearest mode) "
-              "for the rest of the session. Higher steers away from the whole neighborhood, not just the "
-              "artist.",
+    ParamSpec("radio_skip_mode_penalty", "Radio skip style penalty", "discovery",
+              "How much skipping a radio track reduces picks with a similar listening style during the session.",
               0.0, 2.0, 0.05, 0.25, advanced=True),
     ParamSpec("radio_skip_halflife_h", "Radio skip half-life (hours)", "discovery",
-              "How quickly a radio skip penalty fades. At this many hours it is half as strong, so an "
-              "early skip does not haunt the rest of a long session.",
+              "Hours until a radio skip penalty has half its original strength.",
               0.25, 24.0, 0.25, 2.0, advanced=True),
     ParamSpec("radio_volume_floor", "Radio volume floor", "discovery",
-              "Turning the volume to at or below this fraction during radio counts as a soft skip: radio "
-              "eases off that track's neighborhood without changing the song.",
+              "Volume at or below this fraction counts as negative feedback during radio. "
+              "Radio recommends less similar music while the current song keeps playing.",
               0.0, 0.5, 0.01, 0.1, advanced=True),
-    ParamSpec("radio_seed_depth", "Radio seed depth", "discovery",
-              "How many upcoming tracks dynamic radio keeps queued ahead of you, so you always have a "
-              "song or two to skip into. The playlist is topped up to this many unplayed picks. "
-              "Deeper also keeps YouTube's own autoplay suggestions further from the queue panel.",
+    ParamSpec("radio_seed_depth", "Radio queue length", "discovery",
+              "Unplayed tracks radio keeps queued ahead. Higher gives you more upcoming tracks to skip to.",
               1, 10, 1, 6, integer=True, advanced=True),
-    ParamSpec("radio_deck_size", "Radio deck size", "discovery",
-              "How many tracks each dynamic-radio deck (mini playlist) holds before it hands off to the "
-              "other deck. Also the maximum number of tracks your skips and steering take to reach you, "
-              "since reactivity is delivered by the next deck, not the one currently playing.",
+    ParamSpec("radio_deck_size", "Radio update interval (tracks)", "discovery",
+              "Tracks in each radio batch. Your skips and adjustments affect the next batch, "
+              "so lower values make radio respond sooner.",
               2, 6, 1, 3, integer=True, advanced=True),
     ParamSpec("radio_variety", "Radio variety", "discovery",
-              "How adventurous each radio pick is. 0 always plays your strongest match; higher values "
-              "let deeper cuts through more often, so a fresh session does not open on the same tracks "
-              "every time.",
+              "0 always picks your strongest match. Higher gives less familiar tracks more chances to play.",
               0.0, 0.9, 0.05, 0.5, advanced=True),
     ParamSpec("radio_freshness_days", "Radio freshness (days)", "discovery",
-              "How long a track that radio already played sits out of new radio sessions. 0 turns the "
-              "cooldown off, so a restart can immediately replay the same picks.",
+              "Days before radio can repeat a track in a new session. 0 allows immediate repeats.",
               0.0, 14.0, 0.5, 3.0, advanced=True),
 ]
 
@@ -385,10 +331,10 @@ SEMANTIC_PARAMS = ("breadth_bias", "play_transient_w", "like_transient_w", "audi
 
 # Lane weights (rec_weights table, axis `lane:<name>`): labels + help for the page. Clamp [0.2, 3.0].
 LANES = [
-    ("neighbourhood", "Neighbourhood", "Tracks close to what you've been playing recently."),
-    ("rotation", "Rotation", "More of what you play most - your steady rotation."),
+    ("neighbourhood", "Similar to recent plays", "Tracks similar to what you have played recently."),
+    ("rotation", "Regular favorites", "Tracks you play most often."),
     ("deep_cut", "Deep cuts", "Overlooked tracks by artists you already have."),
-    ("explore", "Explore", "New-to-you music that still sits near your taste."),
+    ("explore", "Explore", "Music you have not heard that matches your taste."),
 ]
 LANE_MIN, LANE_MAX, LANE_DEFAULT = 0.2, 3.0, 1.0
 

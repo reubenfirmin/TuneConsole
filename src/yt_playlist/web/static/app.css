@@ -21,6 +21,22 @@ body {
 a { color: var(--accent-2); text-decoration: none; }
 a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
+/* Fixed-size filled arrows stay legible beside both small labels and large titles. */
+.ui-arrow {
+  display: inline-block; flex: none; width: 1.125rem; height: 1.125rem;
+  vertical-align: -.2em; overflow: visible;
+}
+.ui-arrow--disclosure { transition: transform .2s ease; }
+a:has(> .ui-arrow--external) {
+  display: inline-flex; align-items: center; gap: .25em; max-width: 100%;
+  min-width: min-content; overflow-wrap: normal; word-break: normal;
+}
+.pie-arrow { color: var(--glyph-ink); }
+.is-closed > .ui-arrow--disclosure { transform: rotate(-90deg); }
+.sort-indicator { display: none; margin-left: .25rem; vertical-align: middle; }
+.sort-indicator.is-ascending, .sort-indicator.is-descending { display: inline-flex; }
+.sort-indicator.is-ascending .ui-arrow { transform: rotate(180deg); }
+
 .authbar { background: color-mix(in srgb, var(--danger) 18%, var(--bg)); color: var(--text);
   border-bottom: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); padding: 0.6rem 1.375rem;
   font-size: var(--type-ui); text-align: center; }
@@ -84,7 +100,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 }
 .tools-btn:hover { color: var(--text); background: var(--surface-2); box-shadow: none; }
 .tools-btn.active { color: var(--light-source); background: var(--control-primary); border-color: var(--control-selected-border); }
-.tools-btn .caret { font-size: 0.66rem; transition: transform 0.15s ease; }
+.tools-btn .caret { display: inline-flex; transition: transform 0.2s ease; }
 .tools-btn .caret.up { transform: rotate(180deg); }
 .tools-pop {
   position: absolute; right: 0; top: calc(100% + 0.45rem); z-index: 30; min-width: 9.5rem;
@@ -725,6 +741,9 @@ td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
 tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
 .editpen:hover, .resetpen:hover { opacity: 1; }
 .resetpen { opacity: 0.5; }
+.resetpen { display: inline-flex; align-items: center; justify-content: center;
+  min-width: 1.75rem; min-height: 1.75rem; padding: .2rem; border: 0;
+  background: transparent; color: var(--dim); box-shadow: none; }
 .tinput, .ainput { box-sizing: border-box; width: 100%; min-width: 0; padding: 0.12rem 0.3rem;
   font-size: var(--type-sm); line-height: 1.2; background: var(--bg-2); border: 1px solid var(--accent);
   border-radius: 4px; color: var(--text); }
@@ -772,7 +791,7 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
 .modal-input:focus { outline: none; border-color: var(--accent); }
 .section.toggle { cursor: pointer; user-select: none; }
 .section.toggle:hover { color: var(--accent-2); }
-.section .chev { display: inline-block; width: .9375rem; color: var(--faint); font-size: 0.8em; }
+.section .chev { display: inline-flex; width: 1.125rem; color: var(--dim); vertical-align: middle; }
 .w-below { fill: var(--ov-3); }
 .wedge-off { opacity: 0.28; cursor: not-allowed; }   /* "hide below" only applies when sorted by overlap */
 /* modal */
@@ -1064,10 +1083,11 @@ main:not(.page-clusters) .section.toggle:focus-visible { border-radius: var(--ra
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
+  /* The mix board and tuning launcher keep their transitions to avoid snapping. */
   main:not(.page-clusters),
-  main:not(.page-clusters) *,
-  main:not(.page-clusters) *::before,
-  main:not(.page-clusters) *::after {
+  main:not(.page-clusters) *:not(.dash-directions :is(.gen-lanes, .gen-lanes *, .fingerprint, .fp-collapse, .fp-mood-mark)),
+  main:not(.page-clusters) *:not(.dash-directions :is(.gen-lanes, .gen-lanes *, .fingerprint, .fp-collapse, .fp-mood-mark))::before,
+  main:not(.page-clusters) *:not(.dash-directions :is(.gen-lanes, .gen-lanes *, .fingerprint, .fp-collapse, .fp-mood-mark))::after {
     animation-duration: .01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: .01ms !important;

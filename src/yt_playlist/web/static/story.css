@@ -39,7 +39,7 @@
   position: fixed; inset: 0; z-index: 200; overflow: hidden;
   display: grid; place-items: center; text-align: center;
   background: radial-gradient(130% 120% at 50% 0%, var(--reel-halo) 0%, var(--bg) 55%, var(--reel-void) 100%);
-  font-family: var(--font-sans); color: var(--text); user-select: none;
+  font-family: var(--font-sans); color: var(--text); user-select: none; cursor: pointer;
 }
 .reel-progress { position: absolute; top: 0; left: 0; right: 0; display: flex; gap: 5px;
   padding: .8rem clamp(.8rem, 3vw, 2rem); z-index: 3; }
@@ -55,11 +55,6 @@
 .reel-auto { left: 1.1rem; padding: .5rem .85rem; font-weight: 600; }
 .reel-auto.on { background: color-mix(in srgb, var(--accent) 40%, transparent); border-color: var(--accent-2); }
 .reel-close:hover, .reel-auto:hover { background: var(--reel-chrome-hi); }
-/* invisible tap zones: right 65% advances, left 35% goes back (stories convention) */
-.reel-tap { position: absolute; top: 0; bottom: 0; z-index: 0; cursor: pointer; }
-.reel-tap.prev { left: 0; width: 35%; }
-.reel-tap.next { right: 0; width: 65%; }
-
 /* Each beat is its OWN bold colour field (Wrapped-style), not a faint tint on one violet page. A
    vivid two-hue diagonal wash up top falling to near-black at the base keeps big white type readable. */
 .slide { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column;
@@ -107,11 +102,6 @@
 .recap-note, .recap-more { font-size: .75rem; line-height: 1.4; color: var(--reel-ink-65); }
 .recap-note { margin: 1rem 0 0; }
 .recap-more { margin: .6rem 0 0; }
-.recap-nav { flex: 0 0 auto; display: flex; gap: 1rem; margin-top: .3rem; }
-.recap-nav button { color: var(--reel-ink); border: 1px solid var(--reel-rule);
-  background: var(--reel-card-bg); border-radius: 999px; padding: .5rem 1rem;
-  min-height: 44px; cursor: pointer; font: inherit; font-size: .85rem; }
-.recap-nav button:hover { background: var(--reel-chrome-hi); }
 /* type stays legible over any bright corner */
 .slide-h1, .slide-big, .num-grid strong { text-shadow: 0 2px 30px var(--reel-type-shadow); }
 .slide-thesis, .slide-sub, .num-grid span { text-shadow: 0 1px 16px var(--reel-type-shadow-soft); }

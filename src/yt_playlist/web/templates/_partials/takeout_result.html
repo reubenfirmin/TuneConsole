@@ -23,12 +23,12 @@
 {% endif %}
 
 {% if seeded %}
-<p class="section-note">Seeded <strong>{{ seeded }}</strong> of your most-played unmatched artists
-  into discovery, so those plays still inform what gets suggested.</p>
+<p class="section-note">Added <strong>{{ seeded }}</strong> of your most-played artists outside your library
+  to Discovery, so TuneConsole can recommend their music.</p>
 {% endif %}
 {% if report.unparsed_dates %}
 <p class="section-note">Skipped {{ report.unparsed_dates }} {{ 'entry with an unreadable date' if report.unparsed_dates == 1 else 'entries with unreadable dates' }}
-  (never silently: what you see above is everything that was imported).</p>
+  because their listening dates could not be read. The counts above include only imported entries.</p>
 {% endif %}
 
 <p class="section-note">Re-importing the same or a newer export is always safe: plays already

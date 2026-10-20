@@ -2,31 +2,30 @@
    warm-path recall@k, forward-looking temporal recall, cold-path content grounding (with its
    coverage-band breakdown), and graduation counts by source from the §1c log. #}
 {% if recall.recall_at_k is not none %}
-<div><strong>{{ '%.0f'|format(recall.recall_at_k * 100) }}%</strong><span>recall@{{ recall.k }} ({{ '%.0f'|format(recall.lift) }}× random, {{ recall.trials }} playlists)</span></div>
+<div><strong>{{ '%.0f'|format(recall.recall_at_k * 100) }}%</strong><span>playlist prediction (top {{ recall.k }}; {{ '%.0f'|format(recall.lift) }}× random, {{ recall.trials }} playlists)</span></div>
 {% else %}
-<div><strong>-</strong><span>recall@20 (build vectors first)</span></div>
+<div><strong>-</strong><span>playlist prediction (build the model first)</span></div>
 {% endif %}
 
 {% if temporal.recall is not none %}
-<div><strong>{{ '%.0f'|format(temporal.recall * 100) }}%</strong><span>causal temporal recall@{{ temporal.k }} ({{ temporal.viable_windows }}/{{ temporal.requested_windows }} windows, {{ temporal.trials }} held out{% if temporal.generated_excluded %}, {{ temporal.generated_excluded }} self-generated excluded{% endif %})</span></div>
+<div><strong>{{ '%.0f'|format(temporal.recall * 100) }}%</strong><span>future-play prediction (top {{ temporal.k }}; {{ temporal.viable_windows }}/{{ temporal.requested_windows }} test periods, {{ temporal.trials }} test tracks{% if temporal.generated_excluded %}, {{ temporal.generated_excluded }} generated recommendations excluded{% endif %})</span></div>
 {% else %}
-<div><strong>-</strong><span>causal temporal recall (no reconstructable window yet; holdout: {{ holdout_days }}d; current playlist membership is never assumed historical)</span></div>
+<div><strong>-</strong><span>future-play prediction (needs library history from before a {{ holdout_days }}-day test period)</span></div>
 {% endif %}
 
 {% if proj.recall is not none %}
-<div><strong>{{ '%.0f'|format(proj.recall * 100) }}%</strong><span>content grounding ({{ proj.trials }} tracks){% for band, b in proj.breakdown.by_coverage.items() %}{% if b.recall is not none %} · {{ band }} {{ '%.0f'|format(b.recall * 100) }}%{% endif %}{% endfor %}</span></div>
+<div><strong>{{ '%.0f'|format(proj.recall * 100) }}%</strong><span>prediction from track information ({{ proj.trials }} tracks){% for band, b in proj.breakdown.by_coverage.items() %}{% if b.recall is not none %} · {{ band }} {{ '%.0f'|format(b.recall * 100) }}%{% endif %}{% endfor %}</span></div>
 {% else %}
-<div><strong>-</strong><span>content grounding (needs more tags)</span></div>
+<div><strong>-</strong><span>prediction from track information (needs more genre and audio tags)</span></div>
 {% endif %}
 
-<div><strong>{{ grad_counts.values()|sum }}</strong><span>graduations{% if grad_counts %}: {% for src, c in grad_counts.items() %}{{ src }} {{ c }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</span></div>
+<div><strong>{{ grad_counts.values()|sum }}</strong><span>saved preference updates{% if grad_counts %}: {% for src, c in grad_counts.items() %}{{ src }} {{ c }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</span></div>
 
 {% if served.impressions %}
-<div><strong>{{ '%.0f'|format(served.acceptance_rate * 100) }}%</strong><span>rendered → played
-  ({{ served.played }}/{{ served.impressions }}, last 30d; {{ served.organic }} organic,
-  {{ served.generated }} generated-playlist){% if not served.powered %} · collecting evidence,
-  needs {{ served.min_impressions }} impressions before a verdict{% endif %}</span></div>
+<div><strong>{{ '%.0f'|format(served.acceptance_rate * 100) }}%</strong><span>recommendations you played
+  ({{ served.played }}/{{ served.impressions }} shown in the last 30 days; {{ served.organic }} played directly,
+  {{ served.generated }} from generated playlists){% if not served.powered %} · needs
+  {{ served.min_impressions }} shown before the result is reliable{% endif %}</span></div>
 {% else %}
-<div><strong>-</strong><span>rendered → played (measurement starts with the next For You render;
-  no efficacy verdict yet)</span></div>
+<div><strong>-</strong><span>recommendations you played (tracking starts when For You next shows recommendations)</span></div>
 {% endif %}

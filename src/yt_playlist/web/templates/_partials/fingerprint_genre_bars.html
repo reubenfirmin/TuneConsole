@@ -9,7 +9,7 @@
   <span class="fp-row-tools">
     {% if expandable %}
     <button type="button" class="fp-icon-btn fp-expand-btn" :class="{ on: open }" @click="toggle()"
-            title="Show / hide {{ name }} subgenres" aria-label="toggle {{ name }} subgenres">&#9662;</button>
+            title="Show or hide {{ name }} subgenres" aria-label="toggle {{ name }} subgenres" :aria-expanded="open">{{ arrow_icon('disclosure') }}</button>
     {% endif %}
     <button type="button" class="fp-icon-btn fp-remove-btn"
             hx-post="/home/fingerprint/remove" hx-vals='{"axis":"{{ axis }}"}'

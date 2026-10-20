@@ -51,6 +51,6 @@
   <div id="steer-toast" class="steer-toast" x-data="{show:false}" x-show="show" x-cloak x-transition
        @mixes-reranked.window="show=true; setTimeout(()=>show=false, 3500)"
        x-init="$nextTick(() => { if (sessionStorage.getItem('steered')) { sessionStorage.removeItem('steered'); show=true; setTimeout(()=>show=false, 3500); } })">
-    Re-ranked. <a href="/taste">Fine-tune your taste model →</a>
+    Mixes updated. <a href="/taste">Adjust recommendation settings {{ arrow_icon('right') }}</a>
   </div>
 </div>

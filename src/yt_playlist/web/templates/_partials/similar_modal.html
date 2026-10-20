@@ -6,8 +6,8 @@
   <div class="modal modal-similar" @click.stop x-transition.scale.origin.center>
     <h3>Songs like &ldquo;{{ seed.title or 'this track' }}&rdquo;</h3>
     {% if items %}
-    <p class="section-note">Nearest in your taste space, including tracks that share no playlist with it.{% if pid %}
-      Pick any to add just below this track.{% endif %}</p>
+    <p class="section-note">Similar songs from your library, including songs in other playlists.{% if pid %}
+      Choose songs to add immediately after this track.{% endif %}</p>
     <div id="similar-results">
       {% if pid %}<input type="hidden" name="after_video_id" value="{{ seed_vid }}">{% endif %}
       <div class="alt-list">
@@ -23,7 +23,7 @@
           </span>
           <span class="mono alt-dur"></span>
           <a class="alink" href="https://music.youtube.com/watch?v={{ f.video_id }}"
-             target="_blank" rel="noopener" @click.stop title="Play on YouTube Music">Play ↗</a>
+             target="_blank" rel="noopener" @click.stop title="Play on YouTube Music">Play {{ arrow_icon('external') }}</a>
         </label>
         {% endfor %}
       </div>
@@ -31,9 +31,9 @@
     {% elif not have_model %}
     <p class="section-note">No taste model yet. Build it from the Sync button or the Taste Model page.</p>
     {% else %}
-    <p class="section-note">Couldn't place &ldquo;{{ seed.title or 'this track' }}&rdquo; in your taste space yet.
-      It's likely brand new or set aside (a saved-album or generated track not folded in yet).
-      Re-sync to include it (your <a href="/taste">taste model</a> rebuilds automatically on every sync).</p>
+    <p class="section-note">The recommendation model does not include &ldquo;{{ seed.title or 'this track' }}&rdquo; yet.
+      It may be new, from a saved album, or in a generated playlist you have not promoted to your library.
+      Sync your library to update the <a href="/taste">recommendation model</a>.</p>
     {% endif %}
     <div class="modal-actions">
       {% if pid and items %}

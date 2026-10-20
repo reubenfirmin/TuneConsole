@@ -1,3 +1,51 @@
+import pytest
+
+
+@pytest.mark.parametrize("reduced_motion", ["no-preference", "reduce"])
+def test_mix_hover_crossfades_even_with_reduced_motion(live_app, store, page, reduced_motion):
+    from playwright.sync_api import expect
+    from tests.test_home_other_genres import seed_genres
+
+    seed_genres(store)
+    store.set_setting("last_sync_at", "1")
+    store.set_setting("onboard_dismissed", "1")
+    page.emulate_media(reduced_motion=reduced_motion)
+    page.set_viewport_size({"width": 1440, "height": 1000})
+    page.route("https://i.ytimg.com/**", lambda route: route.abort())
+    page.mouse.move(1, 1)
+    page.goto(f"{live_app}/")
+    cards = page.locator("#home-mode-cards > .gen-card")
+    expect(cards).to_have_count(4)
+    cards.first.evaluate("""el => Promise.all(
+        [...el.parentElement.querySelectorAll(':scope > .gen-card')]
+            .flatMap(card => card.getAnimations()).map(animation => animation.finished))""")
+    bounds = [card.bounding_box() for card in cards.all()]
+
+    def mid_fade_opacities():
+        return cards.evaluate_all("""async cards => {
+            await new Promise(resolve => setTimeout(resolve, 65));
+            return cards.map(card => Number(getComputedStyle(card).opacity));
+        }""")
+
+    cards.first.hover()
+    assert .42 < mid_fade_opacities()[1] < 1
+    for card in cards.all()[1:]:
+        expect(card).to_have_css("opacity", "0.42")
+
+    cards.nth(1).hover()
+    fading = mid_fade_opacities()
+    assert .42 < fading[0] < 1  # the previous card dims gradually
+    assert .42 < fading[1] < 1  # the new card brightens gradually
+    expect(cards.first).to_have_css("opacity", "0.42")
+    expect(cards.nth(1)).to_have_css("opacity", "1")
+    assert [card.bounding_box() for card in cards.all()] == bounds
+
+    page.mouse.move(1, 1)
+    assert .42 < mid_fade_opacities()[0] < 1
+    for card in cards.all():
+        expect(card).to_have_css("opacity", "1")
+
+
 def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, store, page, monkeypatch, tmp_path):
     import threading
     from playwright.sync_api import expect
@@ -272,7 +320,7 @@ def test_clear_mix_controls_resets_applied_and_draft_choices_from_either_tab(liv
     panel = page.locator("#fingerprint")
     panel.locator(".fp-collapse").click()
     expect(panel.get_by_role("checkbox", name="jazz", exact=True)).to_be_checked()
-    clear = panel.get_by_role("button", name="Clear selections and biases", exact=True)
+    clear = panel.get_by_role("button", name="Reset mix adjustments", exact=True)
     expect(clear).to_be_visible()
     page.get_by_role("tab", name="Preferences", exact=True).click()
     expect(clear).to_be_visible()
@@ -462,7 +510,7 @@ def test_configurator_modal_blocks_background_and_keeps_focus(live_app, store, p
     expect(page.locator(".gen-card.is-focused")).to_have_count(0)
     launcher.click()
     dialog.get_by_role("tab", name="Preferences", exact=True).click()
-    preference_search = dialog.get_by_role("textbox", name="search genres to add a taste bar")
+    preference_search = dialog.get_by_role("textbox", name="Find a genre to adjust")
     preference_search.fill("jazz")
     assert preference_search.evaluate("""el => {
         const css = getComputedStyle(el);

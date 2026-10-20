@@ -79,7 +79,7 @@
       </div>
       <div class="tools-menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
         <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"
-                @click="open = !open" :aria-expanded="open">Tools <span class="caret" :class="{ up: open }">▾</span></button>
+                @click="open = !open" :aria-expanded="open">Tools <span class="caret" :class="{ up: open }">{{ arrow_icon('disclosure') }}</span></button>
         <div class="tools-pop" x-show="open" x-cloak x-transition.opacity.scale.origin.top.right>
           <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
           <a href="/cleanup" class="{{ 'active' if path.startswith('/cleanup') else '' }}">Cleanup</a>

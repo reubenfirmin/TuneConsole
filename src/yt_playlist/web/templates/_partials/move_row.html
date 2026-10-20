@@ -9,10 +9,10 @@
     <td class="cell-actions">
       <button type="button" class="btn-ghost btn-sm" :disabled="!canMove()"
               hx-post="/move/run" hx-include="#move-to" hx-vals='{"playlist": {{ p.id }}, "copy_only": "1"}'
-              hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Copy →</button>
+              hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Copy {{ arrow_icon('right') }}</button>
       <button type="button" class="btn-sm" :disabled="!canMove()"
               hx-post="/move/run" hx-include="#move-to" hx-vals='{"playlist": {{ p.id }}}'
-              hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Move →</button>
+              hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Move {{ arrow_icon('right') }}</button>
       {% if message %}<span class="muted">{{ message }}</span>{% endif %}
       {% if error %}<span class="notice notice--compact err">{{ error }}</span>{% endif %}
     </td>

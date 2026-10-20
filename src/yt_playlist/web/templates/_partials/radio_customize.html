@@ -5,13 +5,12 @@
    so there is nothing to pin that isn't already listed. #}
 <div id="radio-customize-bars" class="radio-customize">
   <div class="fp-bar">
-    <span class="fp-label">Steer this session</span>
+    <span class="fp-label">Adjust this radio session</span>
     <button type="button" class="fp-reset" hx-post="/radio/steer/reset"
             hx-target="#radio-customize-bars" hx-swap="outerHTML"
-            title="Clear this session's tilts: every bar back to neutral">Reset to default</button>
+            title="Reset all genre and era adjustments for this session">Reset to default</button>
   </div>
-  <p class="fp-hint section-note">Nudge a genre or era for this radio session only. Your taste model on the
-    Taste page is untouched.</p>
+  <p class="fp-hint section-note">Drag right for more of a genre or era, left for less. These changes apply only to this radio session.</p>
   <div class="fp-body">
     <div class="fp-col">
       <span class="fp-label">Genres</span>

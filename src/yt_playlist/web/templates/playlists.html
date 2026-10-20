@@ -1,6 +1,6 @@
-{% extends "base.html" %}{% from "_macros.html" import banner, library_icon %}{% block title %}Playlists · TuneConsole{% endblock %}{% block page_class %}page-playlists{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner, library_icon, sort_indicator %}{% block title %}Playlists · TuneConsole{% endblock %}{% block page_class %}page-playlists{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
-  &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}{% endcall %}{% endif %}
+  &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music {{ arrow_icon('external') }}</a>{% endif %}{% endcall %}{% endif %}
 <div x-data='playlistsTab({{ rows|tojson }})'{% if not has_groups %} class="playlists-no-groups"{% endif %}>
 <div class="page-head library-page-head">
   <div class="library-page-title">{{ library_icon('playlists') }}<h1>Playlists</h1></div>
@@ -17,7 +17,7 @@
       <button type="button" class="playlist-shortcut" x-show="{{ source }}().length && collapsed.{{ name }}"
               x-cloak @click="toggleSection('{{ name }}')" title="Show {{ name|lower }} playlists"
               aria-expanded="false" aria-controls="{{ name|lower }}-playlists">
-        <span>{{ name }} playlists</span><strong x-text="{{ source }}().length"></strong><span aria-hidden="true">▾</span>
+        <span>{{ name }} playlists</span><strong x-text="{{ source }}().length"></strong><span aria-hidden="true">{{ arrow_icon('disclosure') }}</span>
       </button>
       {% endfor %}
     </div>
@@ -79,7 +79,7 @@
     <button type="button" class="gen-grp-head" @click="toggleSection('New')"
             :aria-expanded="!collapsed.New" aria-controls="new-playlists"
             title="Playlists from the past 7 days">
-      <span class="gen-grp-caret" aria-hidden="true" x-text="collapsed.New ? '▸' : '▾'"></span>
+      <span class="gen-grp-caret" aria-hidden="true" :class="{ 'is-closed': collapsed.New }">{{ arrow_icon('disclosure') }}</span>
       <span class="section-label">New playlists</span>
       <span class="gen-grp-count" x-text="newRows().length"></span>
       <span class="gen-grp-toggle" x-text="collapsed.New ? 'Expand' : 'Collapse'"></span>
@@ -96,7 +96,7 @@
     <button type="button" class="gen-grp-head" @click="toggleSection('Generated')"
             :aria-expanded="!collapsed.Generated" aria-controls="generated-playlists"
             :title="collapsed.Generated ? 'Expand generated playlists' : 'Collapse generated playlists'">
-      <span class="gen-grp-caret" aria-hidden="true" x-text="collapsed.Generated ? '▸' : '▾'"></span>
+      <span class="gen-grp-caret" aria-hidden="true" :class="{ 'is-closed': collapsed.Generated }">{{ arrow_icon('disclosure') }}</span>
       <span class="section-label">Generated playlists</span>
       <span class="gen-grp-count" x-text="genRows().length"></span>
       <span class="gen-grp-toggle" x-text="collapsed.Generated ? 'Expand' : 'Collapse'"></span>
@@ -119,13 +119,13 @@
       <thead><tr>
         <th class="col-action"></th>
         <th class="col-thumb"></th>
-        <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Playlist<span x-text="ind('title')"></span></th>
-        {% if has_groups %}<th class="sorth col-group" tabindex="0" role="button" @click="sortBy('group')" @keydown.enter.space.prevent="sortBy('group')">Group<span x-text="ind('group')"></span></th>{% endif %}
-        <th class="sorth num col-count" tabindex="0" role="button" @click="sortBy('count')" @keydown.enter.space.prevent="sortBy('count')">Songs<span x-text="ind('count')"></span></th>
+        <th class="sorth" tabindex="0" role="button" @click="sortBy('title')" @keydown.enter.space.prevent="sortBy('title')">Playlist{{ sort_indicator('title') }}</th>
+        {% if has_groups %}<th class="sorth col-group" tabindex="0" role="button" @click="sortBy('group')" @keydown.enter.space.prevent="sortBy('group')">Group{{ sort_indicator('group') }}</th>{% endif %}
+        <th class="sorth num col-count" tabindex="0" role="button" @click="sortBy('count')" @keydown.enter.space.prevent="sortBy('count')">Songs{{ sort_indicator('count') }}</th>
         <th class="sorth num col-last" tabindex="0" role="button" @click="sortBy('last')" @keydown.enter.space.prevent="sortBy('last')"
-            title="Most recent time a song from this playlist showed up in your play history">Last<span x-text="ind('last')"></span></th>
+            title="Most recent time a song from this playlist showed up in your play history">Last{{ sort_indicator('last') }}</th>
         <th class="sorth col-length" tabindex="0" role="button" @click="sortBy('listens')" @keydown.enter.space.prevent="sortBy('listens')"
-            title="Relative activity based on track plays within each playlist. Hover a meter for the exact total.">Activity<span x-text="ind('listens')"></span></th>
+            title="Relative activity based on track plays within each playlist. Hover a meter for the exact total.">Activity{{ sort_indicator('listens') }}</th>
       </tr></thead>
       <template x-for="sec in sections()" :key="sec.name">
         <tbody>

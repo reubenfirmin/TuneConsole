@@ -39,7 +39,7 @@ def test_clear_resets_genre_selections_and_all_biases_together(store):
     assert store.get_weights(now=clock[0]) == learned
     assert 'data-requested-genres=\'[]\'' in response.text
     assert 'hx-swap-oob="outerHTML"' in response.text  # mixes and controls update in one response
-    assert "Clear selections and biases" in response.text
+    assert "Reset mix adjustments" in response.text
     assert float(response.headers["X-Mix-Tuning-Remaining"]) == 0
 
 

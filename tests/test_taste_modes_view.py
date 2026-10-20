@@ -41,4 +41,4 @@ def test_taste_page_empty_modes_state(store):
     c = _client(store)
     r = c.get("/taste")
     assert r.status_code == 200
-    assert "No taste modes yet" in r.text
+    assert "No listening styles found yet" in r.text

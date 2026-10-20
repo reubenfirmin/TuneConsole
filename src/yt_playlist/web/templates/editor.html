@@ -1,11 +1,11 @@
 {% extends "base.html" %}{% block title %}Merge · TuneConsole{% endblock %}{% block page_class %}page-workflow page-merge{% endblock %}{% block body %}
 <div class="page-head">
-  <a class="quiet-link" href="{{ draft.return_to }}">← {{ return_label }}</a>
+  <a class="quiet-link" href="{{ draft.return_to }}">{{ arrow_icon('left') }} {{ return_label }}</a>
   <h1>Merge {{ members|length }} playlist{{ '' if members|length == 1 else 's' }}</h1>
   <div class="cmp-ids">
     {% for m in members %}
     <div><span class="ab ab-{{ loop.index0 % 8 }}">{{ m.letter }}</span> <strong>{{ m.ident }}</strong> ·
-      <a href="https://music.youtube.com/playlist?list={{ m.ytm }}" target="_blank" rel="noopener">{{ m.title }}&nbsp;↗</a>
+      <a href="https://music.youtube.com/playlist?list={{ m.ytm }}" target="_blank" rel="noopener">{{ m.title }} {{ arrow_icon('external') }}</a>
       <span class="pid">{{ m.ytm }}</span></div>
     {% endfor %}
   </div>

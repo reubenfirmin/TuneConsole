@@ -1,17 +1,17 @@
-{% extends "base.html" %}{% from "_macros.html" import pllink, banner with context %}{% block title %}Cleanup · TuneConsole{% endblock %}{% block page_class %}page-workflow page-cleanup{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import pllink, banner, sort_indicator with context %}{% block title %}Cleanup · TuneConsole{% endblock %}{% block page_class %}page-workflow page-cleanup{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
-  &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music ↗</a>{% endif %}{% endcall %}{% endif %}
+  &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music {{ arrow_icon('external') }}</a>{% endif %}{% endcall %}{% endif %}
 {% if flasherr %}{% call banner('err') %}{{ flasherr }}{% endcall %}{% endif %}
 <div class="page-head">
   <h1>Cleanup</h1>
-  <p>Dedupe, consolidate, and prune playlists across your YouTube identities.</p>
+  <p>Remove duplicate playlists, combine similar ones, and delete playlists you no longer need.</p>
 </div>
 
 <div class="metrics workflow-metrics">
   <div class="metric"><div class="n">{{ n_playlists }}</div><div class="l">Playlists</div></div>
   <a class="metric cool" href="/setup"><div class="n">{{ n_identities }}</div><div class="l">Identities</div></a>
-  <a class="metric warn" href="#dupes"><div class="n">{{ n_groups }}</div><div class="l">Exact-dup groups ↓</div></a>
-  <a class="metric" href="#overlaps"><div class="n">{{ n_overlaps }}</div><div class="l">Overlapping pairs ↓</div></a>
+  <a class="metric warn" href="#dupes"><div class="n">{{ n_groups }}</div><div class="l">Duplicate groups {{ arrow_icon('down') }}</div></a>
+  <a class="metric" href="#overlaps"><div class="n">{{ n_overlaps }}</div><div class="l">Overlapping pairs {{ arrow_icon('down') }}</div></a>
 </div>
 
 {% if n_playlists == 0 %}
@@ -22,8 +22,8 @@
 {% endif %}
 
 <h2 class="section" id="dupes">Exact duplicates <span class="count">{{ n_groups }} group{{ '' if n_groups == 1 else 's' }}</span></h2>
-<p class="section-note">Each group is a set of identical playlists. Pick the one to <strong>keep</strong>. Every
-   other copy is deleted (backup first, remote-verified). One click resolves the whole group.</p>
+<p class="section-note">Each group contains identical playlists. Choose the copy to <strong>keep</strong>;
+   the others are backed up, checked on YouTube, and deleted.</p>
 {% for g in groups %}
   {% set member_ytms = g.playlists | map(attribute='ytm_playlist_id') | join(',') %}
   <div class="card group section-block workflow-case">
@@ -56,9 +56,7 @@
 
 {% if near_groups %}
 <h2 class="section" id="near">Near-duplicates <span class="count">{{ n_near }} group{{ '' if n_near == 1 else 's' }}</span></h2>
-<p class="section-note">Clusters of similar (≥70%, not identical) playlists. <strong>Keep one</strong> and the
-   rest are merged into it (their unique songs added, then deleted; undoable). Or <em>Review</em> a
-   pair for track-by-track control.</p>
+<p class="section-note">These playlists are at least 70% similar. Choose one to keep and add the others' unique songs to it, then delete the other playlists. You can undo the merge, or open the editor to choose tracks individually.</p>
 {% for g in near_groups %}
   {% set member_csv = g.playlists | map(attribute='id') | join(',') %}
   {% set member_ytms = g.playlists | map(attribute='ytm_playlist_id') | join(',') %}
@@ -68,7 +66,7 @@
       <button type="button" class="btn-ghost btn-sm push-end"
               hx-post="/cleanup/ignore-merge" hx-vals='{"members": "{{ member_ytms }}"}'
               title="Keep these separate; stop suggesting this merge">Ignore this merge</button>
-      <a class="cta" href="/merge?ids={{ member_csv }}&amp;return=/cleanup%23near">Open merge editor →</a>
+      <a class="cta" href="/merge?ids={{ member_csv }}&amp;return=/cleanup%23near">Open merge editor {{ arrow_icon('right') }}</a>
     </div>
     <table>
       <tbody>
@@ -102,9 +100,9 @@
 <div class="card workflow-sheet" x-data="overlapSort()" x-init="start()">
   <table x-ref="tbl">
     <thead><tr>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('a')" @keydown.enter.space.prevent="sortBy('a')">Playlist A<span x-text="ind('a')"></span></th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('b')" @keydown.enter.space.prevent="sortBy('b')">Playlist B<span x-text="ind('b')"></span></th>
-      <th class="sorth" tabindex="0" role="button" @click="sortBy('shared')" @keydown.enter.space.prevent="sortBy('shared')">Overlap<span x-text="ind('shared')"></span></th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('a')" @keydown.enter.space.prevent="sortBy('a')">Playlist A{{ sort_indicator('a') }}</th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('b')" @keydown.enter.space.prevent="sortBy('b')">Playlist B{{ sort_indicator('b') }}</th>
+      <th class="sorth" tabindex="0" role="button" @click="sortBy('shared')" @keydown.enter.space.prevent="sortBy('shared')">Overlap{{ sort_indicator('shared') }}</th>
       <th></th>
     </tr></thead>
     {% for o in overlaps %}
@@ -120,7 +118,7 @@
           <span class="pid">{{ o.pct_a() }}% of A<br>{{ o.pct_b() }}% of B</span>
         </td>
         <td class="cell-actions">
-          <a class="cta" href="/dupe/{{ o.playlist_a.id }}/{{ o.playlist_b.id }}">Review →</a>
+          <a class="cta" href="/dupe/{{ o.playlist_a.id }}/{{ o.playlist_b.id }}">Review {{ arrow_icon('right') }}</a>
           <span class="pie-wrap" @click.outside="open = false" @keydown.escape.window="open = false">
             <button type="button" class="kebab" :aria-expanded="open" title="More actions"
                     @click="const w = $el.closest('.pie-wrap').getBoundingClientRect();
@@ -152,8 +150,10 @@
                 <!-- glyphs -->
                 <text class="pie-glyph" x="80" y="31" text-anchor="middle" dominant-baseline="central">✕</text>
                 <text class="pie-glyph" x="108.8" y="119.6" text-anchor="middle" dominant-baseline="central">✦</text>
-                <text class="pie-glyph" x="51.2" y="119.6" text-anchor="middle" dominant-baseline="central"
-                      :class="{ 'wedge-off': key !== 'shared' }">⤓</text>
+                <g class="pie-icon pie-arrow" transform="translate(42.2,110.6)"
+                   :class="{ 'wedge-off': key !== 'shared' }" aria-hidden="true">
+                  {{ arrow_icon('down') }}
+                </g>
                 <!-- A / B = "never show this playlist's overlaps": eye-off icon + letter -->
                 <g class="pie-icon" transform="translate(33.4,64.9)">
                   <path class="pie-eyeoff" d="M-8 0 C-5 -4.5 5 -4.5 8 0 C5 4.5 -5 4.5 -8 0 Z"/>
@@ -201,8 +201,7 @@
 
 {% if tiny %}
 <h2 class="section" id="tiny">Tiny playlists <span class="count">{{ tiny|length }}</span></h2>
-<p class="section-note">Playlists with just 1–3 tracks. Often stragglers worth merging into a bigger
-   playlist or pruning; open one to decide.</p>
+<p class="section-note">Playlists with 1–3 tracks. Open one to decide whether to keep it, combine it with another playlist, or delete it.</p>
 <div class="card workflow-sheet">
   <table>
     <thead><tr><th>Playlist</th><th class="num">Songs</th><th></th></tr></thead>
@@ -228,7 +227,7 @@
 <div x-data="{ open: false }">
   <h2 class="section toggle" tabindex="0" role="button" @click="open = !open"
       @keydown.enter.space.prevent="open = !open" :aria-expanded="open">
-    <span class="chev" x-text="open ? '▾' : '▸'"></span> Ignored in overlaps <span class="count">{{ ignored|length }}</span>
+    <span class="chev" :class="{ 'is-closed': !open }">{{ arrow_icon('disclosure') }}</span> Playlists excluded from overlap checks <span class="count">{{ ignored|length }}</span>
   </h2>
   <div x-show="open" x-cloak>
     <p class="section-note">These playlists are excluded from overlap detection (still checked for exact duplicates).</p>
@@ -255,7 +254,7 @@
 <div x-data="{ open: false }">
   <h2 class="section toggle" tabindex="0" role="button" @click="open = !open"
       @keydown.enter.space.prevent="open = !open" :aria-expanded="open">
-    <span class="chev" x-text="open ? '▾' : '▸'"></span> Ignored cleanups
+    <span class="chev" :class="{ 'is-closed': !open }">{{ arrow_icon('disclosure') }}</span> Skipped cleanup suggestions
     <span class="count">{{ ignored_empty|length + ignored_tiny|length + ignored_merges|length }}</span>
   </h2>
   <div x-show="open" x-cloak>
@@ -302,15 +301,15 @@
 <div x-data="{ open: false }">
   <h2 class="section toggle" tabindex="0" role="button" @click="open = !open"
       @keydown.enter.space.prevent="open = !open" :aria-expanded="open">
-    <span class="chev" x-text="open ? '▾' : '▸'"></span> Hidden overlaps <span class="count">{{ hidden|length }}</span>
+    <span class="chev" :class="{ 'is-closed': !open }">{{ arrow_icon('disclosure') }}</span> Hidden overlaps <span class="count">{{ hidden|length }}</span>
   </h2>
   <div x-show="open" x-cloak>
     <p class="section-note">Overlaps you've suppressed. Unhide any to bring it back.</p>
     <div class="card">
       <table x-data="rowSort()">
         <thead><tr>
-          <th class="sorth" tabindex="0" role="button" @click="sortBy('a')" @keydown.enter.space.prevent="sortBy('a')">Playlist A<span x-text="ind('a')"></span></th>
-          <th class="sorth" tabindex="0" role="button" @click="sortBy('b')" @keydown.enter.space.prevent="sortBy('b')">Playlist B<span x-text="ind('b')"></span></th>
+          <th class="sorth" tabindex="0" role="button" @click="sortBy('a')" @keydown.enter.space.prevent="sortBy('a')">Playlist A{{ sort_indicator('a') }}</th>
+          <th class="sorth" tabindex="0" role="button" @click="sortBy('b')" @keydown.enter.space.prevent="sortBy('b')">Playlist B{{ sort_indicator('b') }}</th>
           <th></th>
         </tr></thead>
         <tbody x-ref="body">
