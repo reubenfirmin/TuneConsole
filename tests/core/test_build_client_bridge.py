@@ -19,7 +19,8 @@ def test_build_client_routes_get_library_playlists_through_bridge(monkeypatch):
 
     async def send(frame):
         sent.append(frame)
-        bridge.resolve(frame["id"], 200, json.dumps({"contents": {}}))
+        bridge.resolve(frame["id"], 200, json.dumps({"contents": {}}),
+                       source_timezone="Pacific/Kiritimati")
 
     import asyncio, threading
     lp = asyncio.new_event_loop()
@@ -35,3 +36,4 @@ def test_build_client_routes_get_library_playlists_through_bridge(monkeypatch):
         pass  # response shell is minimal; we only assert routing here
     assert sent, "no request routed through the bridge"
     assert "/youtubei/v1/" in sent[0]["url"]
+    assert client.history_timezone == "Pacific/Kiritimati"

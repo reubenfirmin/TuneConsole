@@ -42,6 +42,8 @@ const context = {
   } },
   setInterval: fn => intervals.push(fn),
   Date: { now: () => now },
+  Intl: { DateTimeFormat: () => ({resolvedOptions: () => ({timeZone: "America/Costa_Rica"})}) },
+  fetch: async () => ({status: 200, text: async () => "{}"}),
   console: { log() {}, warn() {} },
 };
 vm.runInNewContext(fs.readFileSync("extension/content.js", "utf8"), context);
@@ -58,6 +60,7 @@ assert(messages.every(m => m.paused));
 assert(messages.every(m => m.playlist === "PL1" && m.albumBrowseId === "MPRE_album"));
 video.paused = false;
 main(false);
+assert.equal(messages.at(-1).timeZone, "America/Costa_Rica");
 now = 12000;
 intervals[0]();  // different DOM title for the same playing video
 assert.deepEqual(messages.map(m => m.type), [
@@ -83,6 +86,14 @@ listeners.message({source: window, data: {__tcNow: {
   title: "Autoplay", artist: "Artist", videoId: "v2", paused: false,
 }}});
 assert.equal(messages.at(-1).playlist, "");
+(async () => {
+  const reply = await new Promise(resolve => listeners.runtime({
+    type: "fetch", method: "POST", url: "https://music.youtube.com/youtubei/v1/browse",
+    body: {browseId: "FEmusic_history"},
+  }, {}, resolve));
+  assert.equal(reply.status, 200);
+  assert.equal(reply.timeZone, "America/Costa_Rica");
+})().catch(error => { console.error(error); process.exitCode = 1; });
 """
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run([node, "-e", script], cwd=root, text=True, capture_output=True,

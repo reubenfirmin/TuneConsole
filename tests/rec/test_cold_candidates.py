@@ -1,7 +1,8 @@
 """Fresh uses metadata to rank discoveries, with an unenriched fallback and feedback exclusions."""
 import numpy as np
+import pytest
 
-from yt_playlist.rec import surfaces, scoring, discover
+from yt_playlist.rec import surfaces, scoring, discover, rec_params
 from yt_playlist.rec.scoring import PlaylistTaste
 
 
@@ -36,6 +37,36 @@ def test_ranks_by_taste_fit(monkeypatch, store):
     out = surfaces.cold_candidates(store, 0.0)
     assert out and out[0].key == "t|a"          # techno aligns with the [1,0] taste centroid
     assert out[0].lane == "cold"
+
+
+@pytest.mark.parametrize("offset", [-0.8, -0.2, 0.4], ids=["negative", "zero", "positive"])
+@pytest.mark.parametrize("weight,cap,expected", [
+    (2.0, 1.4, ["b|b", "a|a", "c|c", "d|d", "n|n"]),
+    (0.5, 1.4, ["a|a", "c|c", "b|b", "d|d", "n|n"]),
+    (2.0, 1.0, ["a|a", "b|b", "c|c", "d|d", "n|n"]),
+])
+def test_genre_controls_keep_their_direction_and_bound(monkeypatch, store, offset, weight, cap, expected):
+    fits = {"ambient": offset + 0.3, "techno": offset + 0.2,
+            "jazz": offset + 0.1, "folk": offset}
+
+    class Projection:
+        def predict(self, genre, year=None, audio=None, artist=None):
+            if genre is None:
+                return np.zeros(2)
+            fit = fits[genre]
+            return np.array([fit, np.sqrt(1 - fit ** 2)])
+
+    pool = [_row("n|n", None)] + [_row(key, genre) for key, genre in
+            [("a|a", "ambient"), ("b|b", "techno"), ("c|c", "jazz"), ("d|d", "folk")]]
+    monkeypatch.setattr(store, "get_discovered_tracks", lambda: pool)
+    _patch(monkeypatch, Projection())
+    # Exercise stored genre preferences and the real discovery overlay, including the public cap.
+    monkeypatch.setattr(surfaces, "discovery_facet_weight", scoring.discovery_facet_weight)
+    before = [t.key for t in surfaces.cold_candidates(store, 100.0)]
+    assert before == ["a|a", "b|b", "c|c", "d|d", "n|n"]
+    store.set_weight("genre:techno", weight, lo=0.0, hi=2.0, now=100.0)
+    rec_params.set_param(store, "axis_weight_cap", cap)
+    assert [t.key for t in surfaces.cold_candidates(store, 100.0)] == expected
 
 
 def test_no_metadata_remains_eligible_after_ranked_tracks(monkeypatch, store):

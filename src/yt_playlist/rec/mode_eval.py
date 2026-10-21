@@ -1,7 +1,7 @@
 """Taste-mode selection scoreboard (issue #60, Part C).
 
 Aggregates the non-circular signal: how often each mode was offered (impressions), how often it was
-picked (Save & play), and how much its picked playlists were then listened to (existing listen stats).
+picked (Save & play), and the playlist-attributed plays, skips and completions after each pick.
 Pick and impression counts drive theme selection across the row via Thompson sampling; mode_scoreboard
 also provides display aggregation. Reads only; writes nothing."""
 
@@ -72,16 +72,22 @@ def mode_bandit_stats(store, *, before=None) -> dict:
 
 
 def mode_scoreboard(store, since=None) -> list[dict]:
-    """Per active mode: {mode_id, label, offered, picked, plays, last_play}, ordered by offered desc."""
+    """Per active mode: offers, picks, attributed plays/exit depth and last play.
+
+    `since` selects offers and the cohort of picks made since that time, as in mode_bandit_stats.
+    """
     modes = store.modes.list_modes(active_only=True)
     offered = store.modes.impression_counts(since)
     picks = store.modes.pick_rows(since)
-    stats = store.charts.get_playlist_listen_stats()        # {playlist_id: (last_listen_ts, count)}
-    picked_count, plays, last_play = {}, {}, {}
+    stats = store.modes.playlist_engagement(since)
+    picked_count, totals, last_play = {}, {}, {}
     for playlist_id, mode_id in picks:
         picked_count[mode_id] = picked_count.get(mode_id, 0) + 1
-        last, cnt = stats.get(playlist_id, (None, 0))
-        plays[mode_id] = plays.get(mode_id, 0) + (cnt or 0)
+        engagement = stats.get(playlist_id, {})
+        total = totals.setdefault(mode_id, {"plays": 0, "skips": 0, "completions": 0})
+        for field in total:
+            total[field] += engagement.get(field, 0)
+        last = engagement.get("last_play")
         if last is not None and (last_play.get(mode_id) is None or last > last_play[mode_id]):
             last_play[mode_id] = last
     board = []
@@ -89,7 +95,10 @@ def mode_scoreboard(store, since=None) -> list[dict]:
         mid = m["mode_id"]
         board.append({"mode_id": mid, "label": m["label"],
                       "offered": offered.get(mid, 0), "picked": picked_count.get(mid, 0),
-                      "plays": plays.get(mid, 0), "last_play": last_play.get(mid)})
+                      "plays": totals.get(mid, {}).get("plays", 0),
+                      "skips": totals.get(mid, {}).get("skips", 0),
+                      "completions": totals.get(mid, {}).get("completions", 0),
+                      "last_play": last_play.get(mid)})
     board.sort(key=lambda b: (-b["offered"], b["mode_id"]))
     return board
 
@@ -101,12 +110,16 @@ def ranker_scoreboard(store, since=None) -> list[dict]:
     as 'cosine', the ranker they were served under. Reads only."""
     offered = store.modes.ranker_impression_counts(since)      # {ranker: impressions}
     picks = store.modes.ranker_pick_rows(since)                # [(playlist_id, ranker)]
-    stats = store.charts.get_playlist_listen_stats()           # {playlist_id: (last_listen_ts, count)}
-    picked, plays = {}, {}
+    stats = store.modes.playlist_engagement(since)
+    picked, totals = {}, {}
     for playlist_id, ranker in picks:
         picked[ranker] = picked.get(ranker, 0) + 1
-        _last, cnt = stats.get(playlist_id, (None, 0))
-        plays[ranker] = plays.get(ranker, 0) + (cnt or 0)
+        engagement = stats.get(playlist_id, {})
+        total = totals.setdefault(ranker, {"plays": 0, "skips": 0, "completions": 0})
+        for field in total:
+            total[field] += engagement.get(field, 0)
     rankers = set(offered) | set(picked)
     return [{"ranker": rk, "offered": offered.get(rk, 0), "picked": picked.get(rk, 0),
-             "plays": plays.get(rk, 0)} for rk in sorted(rankers)]
+             "plays": totals.get(rk, {}).get("plays", 0),
+             "skips": totals.get(rk, {}).get("skips", 0),
+             "completions": totals.get(rk, {}).get("completions", 0)} for rk in sorted(rankers)]

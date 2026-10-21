@@ -51,7 +51,7 @@ def handle_play_event(ctx, msg, now) -> bool:
                                   playlist_ytm_id=(msg.get("playlist") or None),
                                   like_status=(status or None))
     if new:
-        store.record_history_plays(ident, now, [key])       # keep the (track, day) model current
+        store.record_history_plays(ident, now, [key], source_timezone=msg.get("timeZone"))
         store.set_setting("last_plays_sync_at", str(now))   # plays-freshness for the sync-status badge
     if status in _STATUSES:
         # provenance='action': observed live while the user is engaged, so the event time is real

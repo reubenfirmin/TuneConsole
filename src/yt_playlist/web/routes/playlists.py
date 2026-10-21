@@ -2,6 +2,7 @@
 import asyncio
 import json
 import re
+from datetime import datetime
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
@@ -11,6 +12,7 @@ from yt_playlist.providers import lastfm
 from yt_playlist.rec import journeys, rec_params, recommend
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.library import executor
+from yt_playlist.library.playlist_positions import pending_insertions
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.live_plays import resolve_identity
 from yt_playlist.web.jobs import start_playlist_enrichment
@@ -97,6 +99,7 @@ def build(ctx) -> APIRouter:
     def playlists_page(request: Request):
         labels = {i.id: i.label for i in store.get_identities()}
         groups = store.get_playlist_groups()                 # ytm -> group name
+        recipe_dates = store.get_recipe_created_ats()
         stats = store.get_playlist_listen_stats()            # pid -> (last_ts, count)
         thumbnails = store.get_playlist_thumbnails()         # cover or first song artwork
         hidden = store.get_hidden_playlists()                # ytm of playlists hidden from this tab
@@ -108,6 +111,18 @@ def build(ctx) -> APIRouter:
                 continue
             last, listens = stats.get(p.id, (None, 0))
             group = groups.get(p.ytm_playlist_id, "")
+            generated_created = p.created_at
+            if group == GENERATED_GROUP and generated_created is None:
+                generated_created = recipe_dates.get(p.ytm_playlist_id)
+                # Another install's generated playlists have no local creation timestamp.
+                # Use their dated title for ordering only; keep actual creation metadata unknown.
+                if generated_created is None:
+                    dated = re.search(r" - ([A-Za-z]+ \d{1,2} \d{4})(?: #\d+)?$", p.title or "")
+                    if dated:
+                        try:
+                            generated_created = datetime.strptime(dated[1], "%B %d %Y").timestamp()
+                        except ValueError:
+                            pass
             rows.append({
                 "id": p.id, "ytm": p.ytm_playlist_id, "title": p.title,
                 "identity": labels.get(p.identity_id, "?"), "thumbnail": thumbnails.get(p.id),
@@ -115,6 +130,7 @@ def build(ctx) -> APIRouter:
                 "group": group,
                 "last": last, "listens": listens,
                 "created": p.created_at,
+                "generated_created": generated_created,
                 "is_new": (group != GENERATED_GROUP and p.ytm_playlist_id not in SYSTEM_PLAYLIST_IDS
                            and p.created_at is not None and cutoff <= p.created_at <= now),
             })
@@ -156,6 +172,7 @@ def build(ctx) -> APIRouter:
             "lastfm_configured": lastfm.api_key(store) is not None,
             "conflict_count": store.conflict_count_for_playlist(pid),  # drives the header conflict icon
             "active_job": ctx.jobs.find_active(pid),     # an in-progress enrichment to rejoin, if any
+            "position_pending": len(pending_insertions(store, pid)),
         })
 
     @router.get("/playlist/{pid}/cells")
@@ -239,6 +256,18 @@ def build(ctx) -> APIRouter:
                     "mood_states": recommend.track_mood_states(store, now_fn()) if gen else {},
                 })
         return _refresh()                             # reload so the new tracks drop into the table
+
+    @router.post("/playlist/{pid}/retry-placement")
+    async def playlist_retry_placement(pid: int, request: Request):
+        try:
+            await asyncio.to_thread(ctx.ops().retry_track_placement, pid)
+        except ValueError as e:
+            return _toast(request, str(e))
+        except Exception:  # noqa: BLE001
+            logger.exception("retrying track placement failed for playlist %s", pid)
+            return _toast(request, "Couldn’t retry placement on YouTube. Try again after reconnecting.")
+        _refresh_ytm_view(ctx, store, pid)
+        return _refresh()
 
     @router.post("/playlist/{pid}/enrich")
     def playlist_enrich(pid: int):

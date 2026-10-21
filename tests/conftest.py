@@ -49,10 +49,14 @@ class FakeClient:
     def add_playlist_items(self, playlistId, videoIds):
         self.added.append((playlistId, list(videoIds)))
         dst = self._tracks.setdefault(playlistId, [])
+        results = []
         for vid in videoIds:
             t = self._catalog.get(vid)
             if t is not None:
                 dst.append(t)
+                if t.get("setVideoId"):
+                    results.append({"videoId": vid, "setVideoId": t["setVideoId"]})
+        return {"status": "STATUS_SUCCEEDED", "playlistEditResults": results}
     def remove_playlist_items(self, playlistId, videos):
         self.removed.append((playlistId, list(videos)))
         gone = {v.get("videoId") for v in videos}
@@ -69,7 +73,16 @@ class FakeClient:
             details["lengthSeconds"] = str(secs)   # real ytmusicapi returns it as a string
         return {"videoDetails": details}
     def edit_playlist(self, playlistId, **kw):
-        self.edited.append((playlistId, kw)); return "STATUS_SUCCEEDED"
+        self.edited.append((playlistId, kw))
+        move = kw.get("moveItem")
+        if move:
+            moved, successor = move if isinstance(move, tuple) else (move, None)
+            tracks = self._tracks.get(playlistId, [])
+            item = next(t for t in tracks if t.get("setVideoId") == moved)
+            tracks.remove(item)
+            index = next((i for i, t in enumerate(tracks) if t.get("setVideoId") == successor), len(tracks))
+            tracks.insert(index, item)
+        return "STATUS_SUCCEEDED"
 
 def _track(vid, title, artist, dur=200, album="Alb", set_video_id=None):
     t = {"videoId": vid, "title": title, "artists": [{"name": artist}],

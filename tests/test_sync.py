@@ -115,6 +115,7 @@ def test_sync_identity_populates_store(store):
         # (musicShelfRenderer TITLE_TEXT), so it is always present. Rows under a "This week" or
         # "Earlier" shelf are undateable and are dropped rather than stamped as played today.
         history=[{**_track("v1", "Song A", "Artist"), "played": "Today"}])
+    client.history_timezone = "UTC"
     sync_identity(store, iid, client, now=1000.0)
 
     pls = store.get_playlists()
@@ -122,6 +123,23 @@ def test_sync_identity_populates_store(store):
     assert store.get_playlist_track_keys(pls[0].id) == {"song a|artist", "song b|artist"}
     assert store.get_recent_history_keys(0.0) == {"song a|artist"}
     assert pls[0].content_hash == content_hash(["song a|artist", "song b|artist"])
+
+
+def test_history_sync_uses_browser_timezone_across_utc_and_local_midnight(store):
+    import datetime
+
+    iid = store.upsert_identity("main", "cred", None, True)
+    client = FakeClient(history=[{**_track("v1", "Song", "Artist"), "played": "Today"}])
+    client.history_timezone = "America/Costa_Rica"
+    first = datetime.datetime(2026, 10, 20, 23, 30, tzinfo=datetime.timezone.utc).timestamp()
+    sync_identity(store, iid, client, now=first)
+    sync_identity(store, iid, client, now=first + 3600)
+    client._history[0]["played"] = "Yesterday"
+    sync_identity(store, iid, client, now=first + 7 * 3600)
+    assert store.recent_play_counts(100) == {"song|artist": 1}
+    client._history[0]["played"] = "Today"
+    sync_identity(store, iid, client, now=first + 7 * 3600)
+    assert store.recent_play_counts(100) == {"song|artist": 2}
 
 def test_sync_identity_no_truncation_beyond_defaults(store):
     """Regression: sync_identity must pass limit=None so >25 playlists and >100 tracks are
@@ -164,6 +182,36 @@ def test_sync_prunes_playlists_gone_from_remote(store):
     ytm_ids = {p.ytm_playlist_id for p in store.get_playlists()}
     assert ytm_ids == {"PL1"}                 # GHOST pruned, PL1 present
     assert store.get_playlist(ghost) is None
+
+
+def test_sync_preserves_generated_playlist_created_during_library_fetch(store):
+    from yt_playlist.library import executor
+
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_playlist(iid, "DELETED", "Deleted playlist", 0, "h", 1)
+    same_title = "Fresh songs - October 20 2026 #1"
+
+    class GeneratingClient(FakeClient):
+        def get_library_playlists(self, limit=25):
+            listing = super().get_library_playlists(limit)
+            self.generated = executor.create_generated_playlist(
+                store, same_title,
+                [{"video_id": "new-song", "title": "New song", "artist": "Artist", "duration": 200}],
+                self, now=101, identity_id=iid)
+            return listing
+
+    client = GeneratingClient(playlists=[{"playlistId": "EXISTING", "title": same_title}])
+    sync_identity(store, iid, client, now=100)
+
+    generated = client.generated
+    saved = store.get_playlist(generated["pid"])
+    assert saved is not None
+    assert saved.ytm_playlist_id == generated["new_ytm"]
+    assert saved.created_at == 101
+    assert [t["video_id"] for t in store.playlist_tracks_detail(saved.id)] == ["new-song"]
+    assert store.playback_source(generated["new_ytm"], "new-song") == {
+        "kind": "playlist", "id": saved.id, "title": same_title}
+    assert {p.ytm_playlist_id for p in store.get_playlists()} == {"EXISTING", generated["new_ytm"]}
 
 
 def test_failed_playlist_logs_context_preserves_tracks_and_reports_partial_sync(store, monkeypatch, caplog):

@@ -50,6 +50,26 @@ def test_merge_backfills_playlist_but_never_clears_it(store):
     assert store.play_events_since(0)[0]["playlist_ytm_id"] == "PL9"
 
 
+def test_merge_backfills_generated_policy_only_with_new_playlist_context(store):
+    iid = store.upsert_identity("me", "c", None, True)
+    store.set_playlist_group("PLGEN", "Generated")
+    store.record_play_event(iid, "a|x", "v1", 1000)
+    store.record_play_event(iid, "a|x", "v1", 1010, playlist_ytm_id="RDAMPLPLGEN")
+    store.set_playlist_group("PLGEN", "")
+    store.record_play_event(iid, "a|x", "v1", 1020, playlist_ytm_id="RDAMPLPLGEN")
+    row = store.conn.execute("SELECT played_at,is_generated FROM play_events").fetchone()
+    assert row["played_at"] == 1000
+    assert row["is_generated"] == 1
+
+
+def test_marking_playlist_generated_does_not_relabel_earlier_organic_play(store):
+    iid = store.upsert_identity("me", "c", None, True)
+    store.record_play_event(iid, "a|x", "v1", 1000, playlist_ytm_id="PLGEN")
+    store.set_playlist_group("PLGEN", "Generated")
+    store.record_play_event(iid, "a|x", "v1", 1010, playlist_ytm_id="PLGEN", like_status="LIKE")
+    assert store.conn.execute("SELECT is_generated FROM play_events").fetchone()[0] == 0
+
+
 def test_since_filter_and_ordering(store):
     iid = store.upsert_identity("me", "c", None, True)
     store.record_play_event(iid, "a|x", "v1", 1000.0)

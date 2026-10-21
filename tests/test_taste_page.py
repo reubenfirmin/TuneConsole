@@ -1,5 +1,6 @@
 import json
 import numpy as np
+import pytest
 from html.parser import HTMLParser
 from fastapi.testclient import TestClient
 
@@ -145,6 +146,27 @@ def test_taste_page_separates_semantic_controls_from_topic_settings(store):
     assert "/taste/reset-all" not in html
     for name in rec_params.SEMANTIC_PARAMS:
         assert html.count(f'id="param-{name}"') == 1
+
+
+def test_maximum_track_length_setting_controls_generated_playlists(store):
+    from yt_playlist.library.executor import create_generated_playlist
+
+    client = _client(store)
+    html = client.get("/taste/panels/recommendations").text
+    panel = html.split('id="taste-feature-home"', 1)[1].split('</section>', 1)[0]
+    assert 'id="param-max_track_minutes"' in panel
+    assert "Maximum track length (minutes)" in panel
+    assert 'Default 20' in panel
+    assert client.post("/taste/param", data={"name": "max_track_minutes", "value": "120"}).status_code == 200
+
+    remote = FakeClient(song_durations={"concert": 7200})
+    result = create_generated_playlist(store, "Gen", [{"video_id": "concert"}], remote, 1)
+    assert result["added"] == 1
+    assert client.post("/taste/reset-param", data={"name": "max_track_minutes"}).status_code == 200
+    assert rec_params.get_param(store, "max_track_minutes") == 20
+    with pytest.raises(ValueError, match="maximum track length"):
+        create_generated_playlist(store, "Gen", [{"video_id": "concert"}], remote, 2)
+    assert len(remote.created) == 1
 
 
 def test_autotune_done_status_refreshes_model_status(store):

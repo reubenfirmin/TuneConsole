@@ -870,7 +870,7 @@ async function handleFrame(frame) {
       };
     }
   }
-  return { id: frame.id, status: res.status, body: res.body };
+  return { id: frame.id, status: res.status, body: res.body, timeZone: res.timeZone };
 }
 
 // The public site gets only the local connection status, never playback or library data.
@@ -1070,7 +1070,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     ws.send(JSON.stringify({ type: "play", title: msg.title, artist: msg.artist,
       thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
       playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "",
-      brandId: msg.brandId || "", paused: !!msg.paused, deck }));
+      brandId: msg.brandId || "", paused: !!msg.paused, timeZone: msg.timeZone, deck }));
   } else if (msg.type === "now-heartbeat") {
     // Metadata makes the non-persisting heartbeat able to restore a card that aged out while Chrome
     // throttled the YTM page (commonly during an audio-device switch).

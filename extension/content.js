@@ -30,6 +30,22 @@ if (!window.__tcBridgeLoaded) {
     }
   };
 
+  let pendingPlaylistRefresh = null;
+  const reconcilePlaylistRefresh = () => {
+    if (!pendingPlaylistRefresh) return;
+    try {
+      if (!playlistMatches(pendingPlaylistRefresh)) {
+        // A different SPA view must not be reloaded by an edit to the previous playlist.
+        pendingPlaylistRefresh = null;
+        return;
+      }
+      const video = document.querySelector("video");
+      if (video && !video.paused && !video.ended) return;
+      location.reload();
+      pendingPlaylistRefresh = null;
+    } catch (e) {} // Keep the request if a transient failure prevented the reload.
+  };
+
   // Read/drive YouTube Music's own like/dislike control in the player bar, so rating the current
   // track goes through YTM exactly as a manual click would (no videoId juggling).
   const likeRenderer = () => document.querySelector("ytmusic-player-bar ytmusic-like-button-renderer");
@@ -216,17 +232,11 @@ if (!window.__tcBridgeLoaded) {
       return;
     }
     if (msg.type === "refresh-view") {
-      // Backend edits (rename, art, tracklist) should show up promptly, but the user's verification
-      // glance must never cost them their playback. Only reload if this tab is actually looking at
-      // the edited playlist, and only when nothing is audibly playing.
-      try {
-        if (!playlistMatches(msg.playlist)) return;
-        const video = document.querySelector("video");
-        // Absolute guard: never reload a tab with an in-progress playback. A stale view is fine; a
-        // dropped song is not.
-        if (video && !video.paused) return;
-        location.reload();
-      } catch (e) {}
+      // Coalesce edits to this playlist until a reload can reconcile the view/queue without
+      // interrupting music. The periodic sensor retries the original request after playback stops.
+      if (!playlistMatches(msg.playlist)) return;
+      pendingPlaylistRefresh = msg.playlist;
+      reconcilePlaylistRefresh();
       return;
     }
     if (msg.type !== "fetch") return;
@@ -247,7 +257,8 @@ if (!window.__tcBridgeLoaded) {
           },
           body: msg.method === "POST" ? JSON.stringify(msg.body || {}) : undefined,
         });
-        sendResponse({ status: resp.status, body: await resp.text() });
+        sendResponse({ status: resp.status, body: await resp.text(),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
       } catch (e) {
         sendResponse({ status: 0, body: JSON.stringify({ error: String(e) }) });
       }
@@ -309,7 +320,7 @@ if (!window.__tcBridgeLoaded) {
     chrome.runtime.sendMessage({
       type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
       likeStatus: np.likeStatus, videoId: vid, playlist: lst, albumBrowseId, brandId: np.brandId || "",
-      paused: !!np.paused,
+      paused: !!np.paused, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
   };
   let lastMainAt = 0;
@@ -392,6 +403,8 @@ if (!window.__tcBridgeLoaded) {
     return null;
   };
   setInterval(() => {
+    // Deferred playlist edits must progress even while the primary now-playing sensor is healthy.
+    reconcilePlaylistRefresh();
     // The MAIN-world MediaSession is the primary source. Only fall back to the DOM when it has gone
     // quiet, so the two never both report (their titles differ slightly, which was double-logging).
     if (Date.now() - lastMainAt < 5000) return;

@@ -15,16 +15,18 @@ from yt_playlist.library.spotify_library import (SpotifyLibraryFormatError,
                                                   find_album_candidates,
                                                   import_spotify_library,
                                                   load_spotify_library,
+                                                  prepare_spotify_library,
                                                   save_selected_album)
 from yt_playlist.providers import enrichment, lastfm, spotify
 from yt_playlist.web.identity_checks import check_identities
-from yt_playlist.web.spotify_import import (ACTIVE_STATUSES, JOB_KEY, current_job,
+from yt_playlist.web.spotify_import import (ACTIVE_STATUSES, JOB_KEY, TransferPreviews, current_job,
                                             estimate, save_job)
 
 
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates, setup = ctx.store, ctx.templates, ctx.setup
+    previews = TransferPreviews()
 
     def _saved_identities():
         return [{"id": i.id, "label": i.label, "brand": i.brand_account_id or "",
@@ -176,6 +178,7 @@ def build(ctx) -> APIRouter:
     @router.post("/import/spotify-library/v2")
     @router.post("/import/spotify-library/v3")
     @router.post("/import/spotify-library/v4")
+    @router.post("/import/spotify-library/v5")
     async def import_spotify_library_route(request: Request):
         form = await request.form()
         up = form.get("file")
@@ -187,60 +190,146 @@ def build(ctx) -> APIRouter:
                 request, "_partials/spotify_library_status.html", {"job": existing},
                 headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
         identities = store.get_identities()
-        identity = next((i for i in identities if i.is_master), identities[0] if identities else None)
-        client = (ctx.client_provider() or {}).get(identity.id) if identity else None
-        if identity is None or client is None:
+        if not identities:
             return HTMLResponse(
                 '<p class="section-note">Connect the extension and configure an identity first.</p>')
         try:
-            raw = await up.read()
-            parsed = load_spotify_library(raw)
+            parsed = load_spotify_library(await up.read())
         except SpotifyLibraryFormatError:
             return HTMLResponse(
                 '<p class="section-note">Could not find Spotify playlists or saved albums. '
                 'Choose the <strong>Account Data</strong> zip containing Playlist JSON and '
                 'YourLibrary JSON files—not Extended Streaming History or Technical Log Information.</p>')
-        if not ctx.spotify_import_lock.acquire(blocking=False):
-            job = current_job(ctx)
-            return templates.TemplateResponse(
-                request, "_partials/spotify_library_status.html", {"job": job},
-                headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
+        return templates.TemplateResponse(
+            request, "_partials/spotify_library_select.html", {
+                "parsed": parsed, "identities": identities,
+                "selection_token": previews.put({"stage": "selection", "parsed": parsed}, ctx.now_fn()),
+            }, headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
 
-        job = {"status": "running", "started_at": ctx.now_fn(),
-               "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(parsed)}
+    def _destination(value):
+        try:
+            identity_id = int(value)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Choose a destination identity") from None
+        identity = next((i for i in store.get_identities() if i.id == identity_id), None)
+        client = (ctx.client_provider() or {}).get(identity_id) if identity else None
+        if client is None:
+            raise HTTPException(status_code=409, detail="Connect the selected YouTube Music identity")
+        return identity, client
+
+    def _snapshot(token, stage, *, consume=False):
+        value = previews.get(token, ctx.now_fn(), consume=consume)
+        if value is None or value["stage"] != stage:
+            raise HTTPException(status_code=410, detail="Preview expired or already used. Upload the ZIP again.")
+        return value
+
+    @router.post("/import/spotify-library/prepare")
+    async def spotify_library_prepare(request: Request):
+        form = await request.form()
+        snapshot = _snapshot(form.get("selection_token"), "selection")
+        identity, client = _destination(form.get("identity_id"))
+        parsed = snapshot["parsed"]
+        try:
+            indices = sorted({int(value) for value in form.getlist("playlist_index")})
+            if any(index < 0 or index >= len(parsed["playlists"]) for index in indices):
+                raise ValueError
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid playlist selection") from None
+        selected = {"playlists": [parsed["playlists"][index] for index in indices],
+                    "albums": parsed["albums"] if form.get("include_albums") == "on" else []}
+        if not selected["playlists"] and not selected["albums"]:
+            raise HTTPException(status_code=400, detail="Select at least one playlist or saved albums")
+        if not ctx.spotify_import_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Another Spotify import is running")
+        try:
+            _snapshot(form.get("selection_token"), "selection", consume=True)
+        except HTTPException:
+            ctx.spotify_import_lock.release()
+            raise
+        job = {"status": "running", "phase": "preview", "started_at": ctx.now_fn(),
+               "identity_id": identity.id, "identity_label": identity.label,
+               "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(selected)}
+        save_job(store, job)
+
+        def prepare():
+            try:
+                prepared = prepare_spotify_library(selected, client)
+                token = previews.put({"stage": "ready", "prepared": prepared,
+                                      "identity_id": identity.id}, ctx.now_fn())
+                save_job(store, {**job, "status": "preview", "preview_token": token})
+            except Exception:
+                ctx.logger.exception("Spotify import preview failed")
+                save_job(store, {**job, "status": "error", "error": "Could not prepare the preview. Upload the ZIP again."})
+            finally:
+                ctx.spotify_import_lock.release()
+
+        threading.Thread(target=prepare, name="spotify-library-preview", daemon=True).start()
+        return templates.TemplateResponse(
+            request, "_partials/spotify_library_status.html", {"job": current_job(ctx)},
+            headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
+
+    @router.get("/import/spotify-library/preview/{token}")
+    def spotify_library_preview(request: Request, token: str):
+        snapshot = _snapshot(token, "ready")
+        identity, _ = _destination(snapshot["identity_id"])
+        return templates.TemplateResponse(request, "spotify_library_preview.html", {
+            "prepared": snapshot["prepared"], "identity": identity, "preview_token": token})
+
+    @router.post("/import/spotify-library/confirm")
+    async def spotify_library_confirm(request: Request):
+        form = await request.form()
+        token = form.get("preview_token")
+        snapshot = _snapshot(token, "ready")
+        identity, client = _destination(snapshot["identity_id"])
+        if not ctx.spotify_import_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Another Spotify import is running")
+        try:
+            snapshot = _snapshot(token, "ready", consume=True)
+        except HTTPException:
+            ctx.spotify_import_lock.release()
+            raise
+        job = {"status": "running", "phase": "import", "started_at": ctx.now_fn(),
+               "identity_id": identity.id, "identity_label": identity.label,
+               "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(snapshot["prepared"])}
         save_job(store, job)
 
         def run_import():
             try:
-                report = import_spotify_library(
-                    store, raw, client, identity.id, ctx.now_fn())
-                if report["playlists_imported"] or report["albums_imported"]:
+                report = import_spotify_library(store, None, client, identity.id, ctx.now_fn(),
+                                                 prepared=snapshot["prepared"])
+                if report["tracks_imported"] or report["albums_imported"]:
                     store.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
-                save_job(store, {**job, "status": "done", "finished_at": ctx.now_fn(),
-                                 "report": report})
-            except Exception:  # noqa: BLE001 - partial progress is recorded for a safe retry
+                save_job(store, {**job, "status": "done", "finished_at": ctx.now_fn(), "report": report})
+            except Exception:
                 ctx.logger.exception("Spotify library import failed")
                 save_job(store, {**job, "status": "error", "finished_at": ctx.now_fn(),
-                                 "error": "The Spotify library import stopped. Anything already "
-                                          "created was recorded, so it is safe to retry."})
+                                 "error": "The import stopped. Upload the same ZIP to resume recorded transfers."})
             finally:
                 ctx.spotify_import_lock.release()
 
         threading.Thread(target=run_import, name="spotify-library-import", daemon=True).start()
-        current = current_job(ctx)
-        return templates.TemplateResponse(
-            request, "_partials/spotify_library_status.html", {"job": current},
-            headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML",
-                     **({"HX-Redirect": "/#notices"} if current.get("status") == "done" else {})})
+        return RedirectResponse("/#notices", status_code=303)
+
+    @router.post("/import/spotify-library/cancel")
+    async def spotify_library_cancel(request: Request):
+        form = await request.form()
+        token = form.get("preview_token")
+        _snapshot(token, "ready", consume=True)
+        job = current_job(ctx)
+        if job and job.get("preview_token") == token:
+            store.delete_setting(JOB_KEY)
+        return RedirectResponse("/setup?tab=import", status_code=303)
 
     @router.get("/import/spotify-library/status")
     def spotify_library_status(request: Request):
         job = current_job(ctx)
         if not job:
             return Response(status_code=204)
+        redirect = (f"/import/spotify-library/preview/{job['preview_token']}" if job["status"] == "preview"
+                    else "/#notices" if job["status"] == "done" else None)
         return templates.TemplateResponse(
             request, "_partials/spotify_library_status.html", {"job": job},
-            headers={"HX-Redirect": "/#notices"} if job.get("status") == "done" else None)
+            headers={"HX-Redirect": redirect} if redirect else None)
 
     @router.get("/import/spotify-library/notice")
     def spotify_library_notice(request: Request):
@@ -286,6 +375,9 @@ def build(ctx) -> APIRouter:
         return item
 
     def _spotify_client():
+        job = current_job(ctx)
+        if job and job.get("identity_id") is not None:
+            return _destination(job["identity_id"])[1]
         identities = store.get_identities()
         identity = next((i for i in identities if i.is_master), identities[0] if identities else None)
         client = (ctx.client_provider() or {}).get(identity.id) if identity else None

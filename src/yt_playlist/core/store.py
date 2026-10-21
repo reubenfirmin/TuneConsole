@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS play_events (
   played_at REAL NOT NULL,                 -- the coarse view every existing consumer reads)
   playlist_ytm_id TEXT,                    -- provenance: the list= id when played from a playlist
   like_status TEXT,                        -- LIKE | DISLIKE | INDIFFERENT at report time
+  is_generated INTEGER CHECK(is_generated IN (0,1)), -- play-time policy; NULL = unknown historical provenance
   -- Where this row came from. 'takeout' is account-wide (every device) and is therefore AUTHORITATIVE
   -- for the span it covers: a history row it does not corroborate never happened. 'live' comes from
   -- the browser extension and sees only browser plays, so its silence proves nothing. '' is legacy.
@@ -520,6 +521,11 @@ class Store:
                                   (live_first,))
                 self.conn.execute("UPDATE play_events SET source='live' WHERE source='' AND played_at >= ?",
                                   (live_first,))
+        if "is_generated" not in ecols:
+            # Current playlist groups cannot reconstruct play-time policy for old rows. Preserve
+            # unknown provenance instead of retroactively claiming these were organic successes.
+            self.conn.execute("ALTER TABLE play_events ADD COLUMN is_generated INTEGER "
+                              "CHECK(is_generated IN (0,1))")
         mcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(taste_modes)")}
         if "space" not in mcols:
             # Existing centroids were built in an unknown content space. '' matches no live space,

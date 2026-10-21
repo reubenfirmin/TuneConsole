@@ -1,5 +1,5 @@
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, recommend
+from yt_playlist.rec import embed, rec_params, recommend
 from yt_playlist.core.store import Store
 
 
@@ -546,7 +546,7 @@ def test_repeated_evidence_graduates(store):
 
 
 def test_generators_exclude_dj_mixes(store):
-    """#44: a DJ mix / concert (> _MAX_TRACK_DURATION_S = 20 min) must not surface in generated-
+    """#44: a DJ mix / concert (> default maximum track length of 20 min) must not surface in generated-
     playlist candidate pools, even when well-played. Short songs still come through; NULL-duration
     tracks (the common case) are kept."""
     iid = store.upsert_identity("main", "cred", None, True)
@@ -562,3 +562,24 @@ def test_generators_exclude_dj_mixes(store):
     assert "short song|x" in keys
     assert "untimed|x" in keys
     assert "live set|x" not in keys              # the 60-min mix is excluded from generated playlists
+
+
+def test_library_candidate_pools_follow_the_saved_duration_limit(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    titles = [("short", 200), ("boundary", 300), ("long", 301), ("unknown", None)]
+    tids = [store.upsert_track(title, title, "Artist", None, duration) for title, duration in titles]
+    pid = store.upsert_playlist(iid, "PL", "Songs", 4, "h", 1)
+    store.set_playlist_tracks(pid, tids)
+    now = 1000 * 86400
+    for day in range(4):
+        store.add_history_snapshot(iid, now - (40 + day) * 86400,
+                                   [title + "|artist" for title, _ in titles])
+    assert len(store.library_songs()) == 4
+    rec_params.set_param(store, "max_track_minutes", 5)
+    expected = {"short|artist", "boundary|artist", "unknown|artist"}
+    assert {t["key"] for t in store.library_songs()} == expected
+    assert {t["key"] for t in store.comfort_candidates(now)} == expected
+    assert {key for basket in store.rec_baskets() for key in basket} == expected
+    rec_params.reset_param(store, "max_track_minutes")
+    assert len(store.library_songs()) == 4
+    assert len(store.comfort_candidates(now)) == 4

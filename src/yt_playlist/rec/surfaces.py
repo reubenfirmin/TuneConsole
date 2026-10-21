@@ -13,7 +13,7 @@ from yt_playlist.util.duration import ago as _ago
 from yt_playlist.util.matching import normalize
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.rec.rec_dao import RecDao
-from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood,
+from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood, axis_adjusted_scores,
                                      content_taste, discovery_facet_weight, playlist_taste,
                                      score_with_traces)
 from yt_playlist.repos.base import GENERATED_GROUP
@@ -336,9 +336,10 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
 
     Projects each pool track into the collaborative embedding via ContentProjection (so per-playlist
     taste fit and the collaborative mood tilt apply), folds in the audio tilt over the discovered
-    content vectors (#45 cold), and scales by the #18 discovery facet overlay (a muted family is
-    hard-excluded, consistent with discovered albums/artists). Tracks without a usable vector follow
-    the ranked candidates in discovery order. If the projection or taste model isn't ready, the
+    content vectors (#45 cold), and applies the #18 discovery facet overlay on a positive percentile
+    scale, bounded by axis_weight_cap. A muted family is hard-excluded, consistent with discovered
+    albums/artists. Tracks without a usable vector follow the ranked candidates in discovery order.
+    If the projection or taste model isn't ready, the
     discovery pool still supplies Fresh. Enrichment improves ordering, never gates eligibility.
     """
     from yt_playlist.rec.discover import ContentProjection   # lazy: avoid the surfaces<->discover cycle
@@ -359,14 +360,21 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
     if keys:
         V = np.vstack(vecs)
         idx = {k: i for i, k in enumerate(keys)}
-        # Same scoring pipeline as warm tracks, with the discovered content vectors for audio tilt.
+        # Library plays/mood must remain visible even though none of those keys is a candidate.
+        # Keep projected discoveries too, so explicit feedback on a cold track still contributes.
+        evidence_V, evidence_idx = V, idx
+        _, warm_V, warm_idx = embed.load_vectors(store)
+        if warm_V is not None:
+            evidence_V = np.vstack((warm_V, V))
+            evidence_idx = {k: len(warm_V) + i for k, i in idx.items()}
+            evidence_idx.update(warm_idx)  # prefer the actual library vector for overlapping keys
         values = _apply_mood(pt.score_all(V), store, now, V, idx,
-                             content_vecs=embed.load_discovered_content_vectors(store))
+                             content_vecs=embed.load_discovered_content_vectors(store),
+                             evidence_vecs=(evidence_V, evidence_idx))
         scores = {k: float(values[i]) for i, k in enumerate(keys)}
     suppressed = store.suppressed_keys("for_you", now)
     muted = store.muted_artists()
-    scored = []
-    family_weights = {}
+    candidates, facet_weights, family_weights = [], {}, {}
     for r in rows:
         k = r["identity_key"]
         if k in suppressed or r.get("artist") in muted:
@@ -377,8 +385,14 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
         fw = family_weights[fam]
         if fw is None:                                  # muted family: hard-exclude (mirrors #18 discovery)
             continue
-        score = scores.get(k)
-        scored.append((score * fw if score is not None else None, r))
+        candidates.append(r)
+        facet_weights[k] = fw
+    # #114/#86: multiplying signed cosine scores reverses boosts below zero. Use the same positive
+    # rank base as warm candidates, after exclusions so muted tracks cannot distort percentiles.
+    scores = axis_adjusted_scores(
+        {r["identity_key"]: scores[r["identity_key"]] for r in candidates if r["identity_key"] in scores},
+        facet_weights, cap=rec_params.get_param(store, "axis_weight_cap"))
+    scored = [(scores.get(r["identity_key"]), r) for r in candidates]
     # Keep unknown tracks after ranked tracks, even when a known taste score is negative.
     # Stable sorting preserves discovery order within the fallback instead of inventing a fit score.
     scored.sort(key=lambda t: (t[0] is None, -(t[0] or 0.0)))

@@ -125,17 +125,19 @@ def prepare_bundles(store, now) -> dict:
         # a user's smaller genre families, even when they have plenty of eligible library tracks.
         payload.setdefault("all", {})[surf] = [_item_dict(it) for it in pool
                                                if getattr(it, "key", "")]
-    # Temporal surface (#63): each mode's own library member tracks, carrying release year, for the
-    # date-banded 4th card (Throwback / Time Flies / Recent Picks). Built from content-vector
-    # membership, not a scorer pool, so it must apply the same hard suppression the scorers do
-    # (YouTube dislikes + dismiss/mute/snooze) or a thumbs-down track leaks back into the card.
-    _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap,
-                    store.suppressed_keys("for_you", now))
-    # Meta: Comfort's credibility signal (its pool size) + the user's release-year band cuts (terciles).
+    # Compute the library-relative bands before capping temporal candidates: a mode's top matches
+    # can all be old releases even when its middle and newer bands have plenty of eligible tracks.
     years = store.modes.years_for(lkeys) if lkeys else {}
     yvals = sorted(y for y in years.values() if y)
     cuts = ([int(np.percentile(yvals, 33)), int(np.percentile(yvals, 66))]
             if len(yvals) >= 30 else None)
+    # Temporal surface (#63): each mode's own library member tracks, carrying release year, for the
+    # date-banded 4th card (Throwback / Time Flies / Recent Picks). Built from content-vector
+    # membership, not a scorer pool, so it must apply the same hard suppression the scorers do
+    # (YouTube dislikes + dismiss/mute/snooze) or a thumbs-down track leaks back into the card.
+    _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, years=years, year_cuts=cuts,
+                    suppressed=store.suppressed_keys("for_you", now))
+    # Meta: Comfort's credibility signal (its pool size) + the user's release-year band cuts (terciles).
     payload["_meta"] = {"comfort_pool": len(pools["comfort"]), "year_cuts": cuts,
                         "full_pools": True}
     # #57 per-mode PPR ordering, precomputed for the A/B in-mode ranker. Best-effort: a failure leaves
@@ -161,9 +163,10 @@ def _temporal_item(key, meta, genres, years) -> dict:
             "genre": genres.get(key) or "", "year": years.get(key)}
 
 
-def _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, suppressed=frozenset()) -> None:
-    """Per mode, its library member tracks (nearest the mode centroid, top `cap`), each carrying its
-    release year, under payload[mode]['temporal'] + a general 'all' temporal pool. `suppressed` keys
+def _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, *, years, year_cuts,
+                    suppressed=frozenset()) -> None:
+    """Per mode, its library member tracks (nearest the mode centroid, top `cap` per release-year
+    band), under payload[mode]['temporal'] + a general 'all' temporal pool. `suppressed` keys
     (YouTube dislikes, dismiss/mute/snooze) are dropped so this membership surface honours feedback
     the same way the scorer pools do."""
     if LV is None or not lkeys:
@@ -176,14 +179,20 @@ def _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, suppressed=froz
     near = sims.argmax(axis=1)
     meta = store.tracks_by_keys(lkeys)
     genres = store.modes.genres_for(lkeys)
-    years = store.modes.years_for(lkeys)
     allt = []
     for j, mid in enumerate(mode_ids):
         rows = np.where(near == j)[0]
         rows = rows[np.argsort(-sims[rows, j])]
         rows = [i for i in rows if lkeys[i] not in suppressed]
         items = [_temporal_item(lkeys[i], meta, genres, years) for i in rows]
-        payload[str(mid)]["temporal"] = items[:cap]
+        if year_cuts is None:
+            payload[str(mid)]["temporal"] = items[:cap]
+        else:
+            candidates = []
+            for band in range(3):
+                band_items = [d for d in items if _in_band(d["year"], band, *year_cuts)]
+                candidates.extend(band_items[:cap])
+            payload[str(mid)]["temporal"] = candidates
         allt.extend(items)
     payload.setdefault("all", {})["temporal"] = allt
 

@@ -49,9 +49,12 @@ class RecModelRepo(Repo):
     @synchronized
     def nudge_weight(self, axis, factor, lo=_WEIGHT_MIN, hi=_WEIGHT_MAX, now=None, revert_halflife_d=60.0) -> float:
         """Revert the stored weight for elapsed time since its last nudge, then multiply by factor
-        (clamped), then persist the result with updated_at=now."""
+        (clamped), then persist the result with updated_at=now. Explicit genre mutes remain zero
+        until a manual override unmutes them, regardless of reversion or the caller's floor."""
         now = time.time() if now is None else now
         row = self.conn.execute("SELECT weight, updated_at FROM rec_weights WHERE axis=?", (axis,)).fetchone()
+        if row and axis.startswith("genre:") and row["weight"] == 0.0:
+            return 0.0
         base = _reverted(row["weight"], row["updated_at"], now, revert_halflife_d) if row else 1.0
         w = max(lo, min(hi, base * factor))
         self.conn.execute("INSERT INTO rec_weights(axis, weight, updated_at) VALUES (?, ?, ?) "

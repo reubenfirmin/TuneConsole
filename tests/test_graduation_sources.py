@@ -79,6 +79,25 @@ def test_play_exposure_graduates_over_several_days(legacy_pause):
     assert after > before, "sustained daily listening should graduate the permanent weight up"
 
 
+@pytest.mark.parametrize("source", ["mood", "slider", "play"])
+def test_explicit_genre_mute_survives_every_graduation_source(source):
+    s, now, axis = _store_with_play_history()
+    s.set_weight(axis, 0.0, lo=0.0, hi=2.0, now=now)
+    s.set_lean(axis, 2.0, now)
+    for day in range(1, 9):
+        later = now + day * 86400
+        if source == "mood":
+            recommend.graduate_moods(s, ["song0|band"], 2.0, later)
+        elif source == "slider":
+            recommend.graduate_slider_exposure(s, later)
+        else:
+            recommend.graduate_play_exposure(s, later)
+        assert s.get_weights(now=later)[axis] == 0.0
+        assert recommend.discovery_facet_weight(s, "techno", later) is None
+    # Each funnel actually crossed the threshold; this must not pass just because nothing learned.
+    assert any(row["axis"] == axis and row["source"] == source for row in s.graduation_audit_rows())
+
+
 def test_play_exposure_idempotent_within_a_day():
     # Re-running the same fast sync the same UTC day must NOT re-count (the #46 regression guard).
     s, now, axis = _store_with_play_history("Techno", n=10)

@@ -123,6 +123,7 @@ def build(ctx) -> APIRouter:
              "Choose how often Home changes and how much variety fits on each card. Limits that are too strict can leave fewer suggestions available.", [
                  ("Refresh & preparation", ("erosion_", "candidate_", "modes_pool_", "modes_cand_")),
                  ("Cards & variety", ("modes_menu_", "modes_artist_", "modes_album_", "fresh_")),
+                 ("Track length", ("max_track_",)),
                  ("Comfort listening", ("comfort_",)),
                  ("Getting started", ("onboard_",)),
              ]),

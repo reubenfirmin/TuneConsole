@@ -1,4 +1,31 @@
 # tests/test_store.py
+def test_play_provenance_upgrade_preserves_unknown_history_and_reopens(tmp_path):
+    from yt_playlist.core.store import Store
+
+    path = tmp_path / "state.db"
+    store = Store(path)
+    store.init_schema()
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.set_playlist_group("PLGEN", "Generated")
+    store.record_play_event(iid, "song|artist", "vid", 120, playlist_ytm_id="RDAMPLPLGEN")
+    with store.conn:
+        store.conn.execute("ALTER TABLE play_events DROP COLUMN is_generated")
+    store.conn.close()
+
+    store = Store(path)
+    store.init_schema()
+    assert store.conn.execute("SELECT is_generated FROM play_events").fetchone()[0] is None
+    store.record_play_event(iid, "new|artist", "new", 5000, playlist_ytm_id="PLGEN")
+    store.set_playlist_group("PLGEN", "")
+    store.conn.close()
+
+    store = Store(path)
+    store.init_schema()
+    assert [r[0] for r in store.conn.execute("SELECT is_generated FROM play_events ORDER BY id")] == [None, 1]
+    assert store.conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    store.conn.close()
+
+
 def test_retired_source_weights_are_removed_and_not_restored(store):
     store.set_weight("lane:explore", 1.3, now=1000)
     store.set_weight("lane:deep_cut", 1.7, now=900)

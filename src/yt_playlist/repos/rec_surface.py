@@ -130,40 +130,43 @@ class RecSurfaceRepo(Repo):
         """Attribute subsequent play/exit events to the nearest preceding rendered opportunity.
 
         The impression range is bounded to ``[start, end)``; outcomes may arrive for
-        ``outcome_window_h`` after each impression. Generated-playlist plays are useful response
-        evidence but are reported separately and never counted as organic preference evidence.
+        ``outcome_window_h`` after each impression. Ownership is resolved across all impressions
+        before filtering report totals. Generated-playlist plays are useful response evidence but
+        are reported separately and never counted as organic preference evidence. Historical plays
+        without play-time policy count as responses, with unknown generated/organic provenance.
         """
         impressions = [dict(r) for r in self.conn.execute(
             "SELECT * FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
             "ORDER BY served_at,id", (start, end)).fetchall()]
         horizon = max(0.0, float(outcome_window_h)) * 3600.0
         states = {r["id"]: {"played": False, "organic": False, "generated": False,
-                             "skip": False, "completion": False} for r in impressions}
+                             "unknown_provenance": False, "skip": False,
+                             "completion": False} for r in impressions}
 
-        by_key = {}
-        for imp in impressions:
-            by_key.setdefault(imp["identity_key"], []).append(imp)
+        report_keys = {r["identity_key"] for r in impressions}
 
         def nearest(key, at):
-            eligible = [r for r in by_key.get(key, ())
-                        if r["served_at"] <= at <= r["served_at"] + horizon]
-            return max(eligible, key=lambda r: (r["served_at"], r["id"])) if eligible else None
+            if key not in report_keys:
+                return None
+            owner = self.conn.execute(
+                "SELECT id FROM rec_served_impressions WHERE identity_key=? "
+                "AND served_at>=? AND served_at<=? ORDER BY served_at DESC,id DESC LIMIT 1",
+                (key, at - horizon, at)).fetchone()
+            return owner["id"] if owner else None
 
-        generated = {r["ytm"] for r in self.conn.execute(
-            "SELECT ytm FROM playlist_group WHERE name='Generated'").fetchall()}
-        generated |= {"RDAMPL" + y for y in generated}
         for play in self.conn.execute(
-                "SELECT identity_key,played_at,playlist_ytm_id FROM play_events "
+                "SELECT identity_key,played_at,is_generated FROM play_events "
                 "WHERE played_at>=? AND played_at<=? ORDER BY played_at,id", (start, end + horizon)):
-            imp = nearest(play["identity_key"], play["played_at"])
-            if not imp:
+            state = states.get(nearest(play["identity_key"], play["played_at"]))
+            if state is None:
                 continue
-            state = states[imp["id"]]
             state["played"] = True
-            if play["playlist_ytm_id"] in generated:
+            if play["is_generated"] == 1:
                 state["generated"] = True
-            else:
+            elif play["is_generated"] == 0:
                 state["organic"] = True
+            else:
+                state["unknown_provenance"] = True
 
         exits = self.conn.execute(
             "SELECT pe.video_id,pe.position,pe.duration,pe.at,"
@@ -173,16 +176,16 @@ class RecSurfaceRepo(Repo):
         for event in exits:
             if event["identity_key"] is None:
                 continue
-            imp = nearest(event["identity_key"], event["at"])
-            if not imp:
+            state = states.get(nearest(event["identity_key"], event["at"]))
+            if state is None:
                 continue
             outcome = classify_exit(event["position"], event["duration"])
             if outcome in ("skip", "completion"):
-                states[imp["id"]][outcome] = True
+                state[outcome] = True
 
         n = len(impressions)
         counts = {name: sum(1 for state in states.values() if state[name])
-                  for name in ("played", "organic", "generated", "skip", "completion")}
+                  for name in ("played", "organic", "generated", "unknown_provenance", "skip", "completion")}
 
         def breakdown(field):
             groups = {}

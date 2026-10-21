@@ -4,6 +4,7 @@
 <section class="home-status card card--status is-live global-now-playing" x-data="playerStatus()"
          x-init="init(); $nextTick(() => mountNowPlayingDock())"
          @bridge-status.window="apply($event.detail)"
+         @track-like-requested.window="requestLike($event)"
          x-show="connected && nowPlaying && (nowPlaying.title || nowPlaying.artist)" x-cloak>
   <div class="hs-main">
     <span class="hs-dot" aria-hidden="true"></span>
@@ -17,9 +18,7 @@
           <span class="hs-now-artist" x-show="nowPlaying.artist" x-text="nowPlaying.artist || ''"></span>
         </span>
         <template x-if="sourceLinkVisible()">
-          <a class="hs-source" :href="nowPlaying.source.url" data-yt-info
-             :target="nowPlaying.source.external ? '_blank' : null"
-             :rel="nowPlaying.source.external ? 'noopener' : null"
+          <a class="hs-source" :href="nowPlaying.source.url"
              :title="'Back to ' + nowPlaying.source.kind + ': ' + nowPlaying.source.title"
              :aria-label="'Back to ' + nowPlaying.source.kind + ': ' + nowPlaying.source.title">
             <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">

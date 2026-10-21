@@ -291,10 +291,7 @@ def test_add_tracks_inserts_below_anchor(store):
 
 
 def test_add_tracks_inserts_below_anchor_despite_indexing_lag(store):
-    # Regression for #40. YouTube has indexing lag: a just-added track often isn't visible yet on a
-    # read-back, so the best-effort YouTube reorder can't find its handle and silently gives up. The
-    # store order (what the UI renders on refresh) must STILL place the new track directly below the
-    # anchor, rather than leaving it appended at the end.
+    # #40: retain the requested order during readback lag, but expose the pending remote move.
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
     store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "X", "Alb", 200, 1),
@@ -307,8 +304,20 @@ def test_add_tracks_inserts_below_anchor_despite_indexing_lag(store):
     track = json.dumps({"videoId": "v9", "title": "Song A (Live)", "artist": "X", "duration": 250})
     r = c.post(f"/playlist/{a}/add-tracks", data={"track": track, "after_video_id": "v0"})
     assert _refreshes(r)
-    # the YouTube reorder couldn't run, yet the store still slots v9 below the anchor v0
     assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v9", "v1"]
+    assert store.get_actions()[0].status == "pending"
+    body = c.get(f"/playlist/{a}").text
+    assert "placement after the original song on YouTube is still pending" in body
+    assert "Retry placement" in body
+    assert "placement pending" in c.get("/actions").text
+
+    # Once YouTube exposes the added item, retry only the move, without adding another copy.
+    fc._tracks["PL1"].append({"videoId": "v9", "setVideoId": "sv9"})
+    assert _refreshes(c.post(f"/playlist/{a}/retry-placement"))
+    assert [t["videoId"] for t in fc._tracks["PL1"]] == ["v0", "v9", "v1"]
+    assert fc.added == [("PL1", ["v9"])]
+    assert store.get_actions()[0].status == "executed"
+    assert "Retry placement" not in c.get(f"/playlist/{a}").text
 
 
 def test_add_tracks_empty_returns_toast(store):

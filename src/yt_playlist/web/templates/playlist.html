@@ -57,6 +57,14 @@
 </div>
 
 <div x-data="rowSort({{ pl.id }})" x-init="$nextTick(() => initSortable())">
+{% if position_pending %}
+<div class="notice" role="status">
+  Tracks added. Their placement after the original song on YouTube is still pending.
+  TuneConsole will retry during the next library refresh.
+  <button type="button" class="btn-ghost btn-sm" hx-post="/playlist/{{ pl.id }}/retry-placement"
+          hx-swap="none" hx-disabled-elt="this">Retry placement</button>
+</div>
+{% endif %}
 <div class="card library-table-card">
   <table class="track-table{{ ' is-lm' if pl.ytm_playlist_id == 'LM' }}">
     <thead><tr>

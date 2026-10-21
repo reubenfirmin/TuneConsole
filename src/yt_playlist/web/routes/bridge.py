@@ -9,7 +9,7 @@ import asyncio
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from yt_playlist.library import executor, live_plays, player_events
@@ -74,12 +74,6 @@ def build(ctx) -> APIRouter:
                 url = (f"/playlist/{source['id']}" if source["kind"] == "playlist" else
                        "/album?" + urlencode({"browse": source["browse"]}))
                 source = {"kind": source["kind"], "title": source["title"], "url": url, "external": False}
-            elif playlist and (not playlist.startswith("RD") or playlist.startswith("RDCLAK5uy_")):
-                # Autoplay/radio queues have no playlist to return to. RDCLAK ids are curated
-                # playlists, so preserve their links alongside ordinary playlists and albums.
-                kind = "album" if playlist.startswith("OLAK5uy_") else "playlist"
-                source = {"kind": kind, "title": f"Playing {kind}", "external": True,
-                          "url": "https://music.youtube.com/playlist?list=" + quote(playlist, safe="")}
             now_playing = {**now_playing, "source": source}
         return {"connected": bridge.connected, "now_playing": now_playing,
                 "sensor_health": getattr(bridge, "sensor_health", None),
@@ -853,7 +847,7 @@ def build(ctx) -> APIRouter:
                 except (KeyError, ValueError, TypeError):
                     logger.warning("malformed bridge frame, ignoring: %r", msg)
                     continue
-                bridge.resolve(req_id, status, body)
+                bridge.resolve(req_id, status, body, source_timezone=msg.get("timeZone"))
         except WebSocketDisconnect:
             pass
         finally:

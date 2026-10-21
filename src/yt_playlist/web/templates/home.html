@@ -82,7 +82,7 @@
   </div>
 
   {% if sync.last_synced_ago %}
-  {% set spotify_result_waiting = spotify_library_job and spotify_library_job.status in ('done', 'error') %}
+  {% set spotify_result_waiting = spotify_library_job and spotify_library_job.status in ('done', 'error', 'preview') %}
   {% set dash_default = 'notices' if spotify_result_waiting else ('start' if onboarding else 'directions') %}
   {% set has_notices = show_takeout_nag or actions or show_intro or show_lastfm_nudge or
       show_identities_nudge or show_backend_update or recap or spotify_library_job %}

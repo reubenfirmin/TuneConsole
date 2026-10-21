@@ -69,6 +69,7 @@
         <p class="model-health-reading">{{ '%.0f'|format(served.acceptance_rate * 100) }}%</p>
         <p>{{ served.played }} of {{ served.impressions }} recommendations shown in the last 30 days led to a play within 24 hours.</p>
         <p class="model-health-evidence">{{ served.organic }} played directly; {{ served.generated }} played through generated playlists. A recommendation can count in both groups.</p>
+        {% if served.unknown_provenance %}<p class="model-health-evidence">Playlist context wasn’t recorded for plays of {{ served.unknown_provenance }} recommendation{{ 's' if served.unknown_provenance != 1 else '' }}.</p>{% endif %}
         {% if not served.powered %}<p class="model-health-caution">Early result: at least {{ served.min_impressions }} recommendations need to be shown before there’s enough evidence to judge it.</p>{% endif %}
         {% else %}
         <p class="model-health-unavailable">No recommendations tracked yet</p>

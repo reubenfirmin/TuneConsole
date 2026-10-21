@@ -228,6 +228,27 @@ def test_copy_into_appends_songs_to_existing_playlist(live_pl_app, page):
     expect(page.get_by_role("row").filter(has_text="Beta").get_by_role("cell").nth(3)).to_have_text("2")
 
 
+def test_generated_playlists_sort_by_creation_date_descending(live_app, store, page):
+    from datetime import datetime
+
+    iid = store.get_identities()[0].id
+    for ytm, title, created in [
+        ("older", "Zulu - October 19 2026 #1", None),
+        ("newer", "Beta - October 20 2026 #1", None),
+        ("latest", "Alpha", datetime(2026, 10, 20, 12).timestamp()),
+        ("unknown", "Unknown creation date", None),
+    ]:
+        store.upsert_playlist(iid, ytm, title, 0, "h", 1, created_at=created)
+        store.set_playlist_group(ytm, "Generated")
+    page.goto(f"{live_app}/playlists")
+    page.get_by_role("button", name="Generated playlists", exact=False).click()
+    generated = page.locator("#generated-playlists .ptitle")
+    expected = ["Alpha", "Beta - October 20 2026 #1", "Zulu - October 19 2026 #1", "Unknown creation date"]
+    expect(generated).to_have_text(expected)
+    page.locator(".playlist-table-card").get_by_role("button", name="Playlist", exact=True).click()
+    expect(generated).to_have_text(expected)
+
+
 def test_recent_playlists_are_duplicate_shortcuts_with_shared_selection(recent_pl_app, page):
     page.goto(f"{recent_pl_app}/playlists")
     recent = page.get_by_role("region", name="New playlists")

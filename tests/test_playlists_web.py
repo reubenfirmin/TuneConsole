@@ -276,6 +276,36 @@ def test_playlists_page_carries_generated_created_at(store):
     assert created["PLold"] == 100.0 and created["PLnew"] == 200.0
 
 
+def test_generated_sort_recovers_dates_without_claiming_imports_were_created_at_sync(store):
+    import json
+    import re
+    from datetime import datetime
+
+    iid = store.upsert_identity("main", "cred", None, True)
+    cases = [
+        ("known", "Renamed generated mix", 100, 100),
+        ("recipe", "Cluster mix", None, 200),
+        ("dated", "Fresh songs - October 20 2026 #1", None,
+         datetime(2026, 10, 20).timestamp()),
+        ("invalid", "Fresh songs - October 32 2026 #1", None, None),
+        ("unknown", "Imported mix", None, None),
+    ]
+    for ytm, title, created, _ in cases:
+        store.upsert_playlist(iid, ytm, title, 0, "h", 500, created_at=created)
+        store.set_playlist_group(ytm, "Generated")
+    store.set_recipe("recipe", {}, now=200)
+    store.set_recipe("known", {}, now=300)  # actual creation date takes precedence
+
+    response = _client(store, lambda: {iid: FakeClient()}).get("/playlists")
+    rows = json.loads(re.search(r"playlistsTab\((\[.*?\])\)", response.text).group(1))
+    rows = {r["ytm"]: r for r in rows}
+    for ytm, _, created, expected in cases:
+        assert rows[ytm]["generated_created"] == expected
+        assert rows[ytm]["created"] == created
+        assert rows[ytm]["is_new"] is False
+    assert store.get_playlists()[0].first_seen == 500
+
+
 def test_new_playlists_use_seven_day_creation_window_not_recent_edits(store):
     import json
     import re

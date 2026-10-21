@@ -376,7 +376,7 @@ mood_tilt = transient.centroid_tilt   # back-compat: tests/callers use recommend
 
 
 def _audio_tilt_boost(store, now, idx, content_vecs=None):
-    """Per-row cosine of each candidate's CONTENT vector to the recent-listening audio direction
+    """Per-row alignment to the recent-listening audio tilt, including its fading magnitude
     (#45), aligned to V rows via `idx` (key -> row). None when there is no audio tilt or no content
     vectors built. A candidate without a content vector contributes 0, so the term degrades gracefully
     as audio coverage rises rather than being all-or-nothing.
@@ -398,17 +398,22 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None):
     return boost
 
 
-def _mood_components(scores, store, now, V, idx, content_vecs=None):
-    """Return the exact additive vector-score components used by `_apply_mood`."""
+def _mood_components(scores, store, now, V, idx, content_vecs=None, evidence_vecs=None):
+    """Return the exact additive vector-score components used by `_apply_mood`.
+
+    `evidence_vecs` optionally supplies (V, idx) for producing collaborative/session tilts,
+    independently of the candidates being scored. Both must use the same embedding space.
+    """
     base = np.asarray(scores, dtype=np.float64)
     components = {"durable": base.copy(), "transient": np.zeros(len(base)),
                   "session": np.zeros(len(base)), "audio": np.zeros(len(base))}
     Vn = None
-    tilt = transient.centroid_tilt(store, now, V, idx)
+    evidence_V, evidence_idx = (V, idx) if evidence_vecs is None else evidence_vecs
+    tilt = transient.centroid_tilt(store, now, evidence_V, evidence_idx)
     if tilt is not None:
         Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
         components["transient"] = MOOD_ALPHA * (Vn @ tilt)
-    st = layers.session_tilt(store, now, V, idx)
+    st = layers.session_tilt(store, now, evidence_V, evidence_idx)
     if st is not None:
         if Vn is None:
             Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
@@ -425,7 +430,7 @@ def _mood_components(scores, store, now, V, idx, content_vecs=None):
     return components
 
 
-def _apply_mood(scores, store, now, V, idx, content_vecs=None):
+def _apply_mood(scores, store, now, V, idx, content_vecs=None, evidence_vecs=None):
     """Blend the transient tilts into per-track scores. #85: each tilt decays internally, per event, on
     its own wall clock (see transient.decay_weight); there is no separate external staleness relax here
     any more, so this just adds the (already-decayed) tilts straight in.
@@ -440,8 +445,10 @@ def _apply_mood(scores, store, now, V, idx, content_vecs=None):
     collaborative one.
 
     `content_vecs` selects the audio tilt's content-vector source: warm callers leave it None (library
-    vectors); the cold path passes the discovered-content vectors so out-of-corpus tracks get the tilt."""
-    return _mood_components(scores, store, now, V, idx, content_vecs)["combined"]
+    vectors); the cold path passes the discovered-content vectors so out-of-corpus tracks get the tilt.
+    `evidence_vecs` supplies the collaborative evidence corpus when it differs from the candidates.
+    """
+    return _mood_components(scores, store, now, V, idx, content_vecs, evidence_vecs)["combined"]
 
 
 def score_with_traces(store, taste, keys, V, idx, now):

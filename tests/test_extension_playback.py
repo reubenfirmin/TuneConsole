@@ -78,6 +78,8 @@ const report = (id, msg) => {
 };
 const next = 'https://music.youtube.com/watch?list=PL_new';
 (async () => {
+  report(2, {type: 'play', title: 'Song', paused: false, timeZone: 'Pacific/Kiritimati'});
+  assert.equal(frames.at(-1).timeZone, 'Pacific/Kiritimati', 'preserve the content sensor timezone');
   if (scenario === 'heartbeat') {
     report(2, {type: 'now-heartbeat', title: 'Autoplay', paused: false});
     const count = frames.length;

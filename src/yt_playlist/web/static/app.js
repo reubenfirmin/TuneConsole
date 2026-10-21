@@ -488,7 +488,8 @@ function playlistsTab(rows) {
     // Always newest-first by creation time (independent of the main table's column sort).
     genRows() {
       return this.rows.filter(r => r.group === 'Generated')
-        .sort((a, b) => (b.created || 0) - (a.created || 0));
+        .sort((a, b) => (b.generated_created ?? b.created ?? 0) - (a.generated_created ?? a.created ?? 0)
+          || b.id - a.id);
     },
     promote(r) {
       // graduate a Generated playlist into the library (out of the quarantine group), then reload
@@ -924,13 +925,15 @@ function playerStatus() {
   return {
     connected: false,
     nowPlaying: null,
+    pendingRating: null,
+    ratingSequence: 0,
     sourceLinkVisible() {
       const source = this.nowPlaying && this.nowPlaying.source;
-      if (!source) return false;
+      if (!source || source.external || !source.url) return false;
       const target = new URL(source.url, location.href);
       const current = new URL(location.href);
-      if (target.origin !== current.origin ||
-          target.pathname.replace(/\/+$/, '') !== current.pathname.replace(/\/+$/, '')) return true;
+      if (target.origin !== current.origin) return false;
+      if (target.pathname.replace(/\/+$/, '') !== current.pathname.replace(/\/+$/, '')) return true;
       return source.kind === 'album' &&
         target.searchParams.get('browse') !== current.searchParams.get('browse');
     },
@@ -951,16 +954,51 @@ function playerStatus() {
     },
     apply(d) {
       this.connected = !!d.connected;
-      this.nowPlaying = d.now_playing || null;
+      const next = d.now_playing ? { ...d.now_playing } : null;
+      const pending = this.pendingRating;
+      if (pending) {
+        if (!this.connected || !next || next.video_id !== pending.videoId ||
+            next.likeStatus === pending.likeStatus || Date.now() >= pending.expires) {
+          this.pendingRating = null;
+        } else {
+          // The player sensor can still report the old rating while YTM handles our click.
+          // Keep both hearts on the requested state until it confirms, with a bounded wait.
+          next.likeStatus = pending.likeStatus;
+        }
+      }
+      this.nowPlaying = next;
       this.publishLike();
+    },
+    requestLike(event) {
+      const { videoId, liked } = event.detail;
+      if (!this.connected || !this.nowPlaying || this.nowPlaying.video_id !== videoId) return;
+      // A table heart on the playing song must drive YTM's player control too. An API-only
+      // write leaves that control stale, and every status poll would undo the table's update.
+      event.preventDefault();
+      if ((this.nowPlaying.likeStatus === 'LIKE') !== liked) this.rate('like');
+      else this.publishLike();
     },
     rate(action) {
       if (!this.nowPlaying) return;
       const want = action === 'like' ? 'LIKE' : 'DISLIKE';
-      this.nowPlaying.likeStatus = this.nowPlaying.likeStatus === want ? 'INDIFFERENT' : want;
+      const previous = this.nowPlaying.likeStatus;
+      const videoId = this.nowPlaying.video_id;
+      const sequence = ++this.ratingSequence;
+      this.nowPlaying.likeStatus = previous === want ? 'INDIFFERENT' : want;
+      this.pendingRating = { sequence, videoId, likeStatus: this.nowPlaying.likeStatus,
+                             expires: Date.now() + 10000 };
       this.publishLike();
+      const revert = () => {
+        if (this.pendingRating?.sequence !== sequence) return;
+        this.pendingRating = null;
+        if (this.nowPlaying?.video_id === videoId) {
+          this.nowPlaying.likeStatus = previous;
+          this.publishLike();
+        }
+      };
       fetch('/now-playing/rate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action }) }).catch(() => {});
+        body: JSON.stringify({ action }) })
+        .then(r => r.json()).then(d => { if (!d.ok) revert(); }).catch(revert);
     },
     toggle() {
       if (!this.nowPlaying) return;
@@ -968,6 +1006,18 @@ function playerStatus() {
       fetch('/now-playing/toggle', { method: 'POST' }).catch(() => {});
     },
   };
+}
+
+function toggleTrackLike(source, videoId, liked) {
+  const request = new CustomEvent('track-like-requested', {
+    detail: { videoId, liked }, cancelable: true,
+  });
+  // The global player handles its current song; every other song uses the library API.
+  if (window.dispatchEvent(request)) {
+    htmx.ajax('POST', '/track/like', {
+      source, values: { video_id: videoId, on: liked ? '1' : '' }, swap: 'none',
+    });
+  }
 }
 window.mountNowPlayingDock = mountNowPlayingDock;
 

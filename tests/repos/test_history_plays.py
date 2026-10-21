@@ -1,11 +1,27 @@
 """#49/#58 capture-time play counting: plays are keyed by (identity_key, played-DATE), so a re-fetched
 window (even relabeled Today->Yesterday) never inflates, and same-date repeats merge."""
 import datetime
+import time
+
+import pytest
 
 from yt_playlist.core.store import Store
 from yt_playlist.repos.history import _parse_played_date
 
 DAY = 86400
+
+
+@pytest.fixture(autouse=True)
+def utc_machine_timezone(monkeypatch):
+    """Exercise browser timezones independently of the server's timezone."""
+    with monkeypatch.context() as env:
+        env.setenv("TZ", "UTC")
+        time.tzset()
+        try:
+            yield
+        finally:
+            env.undo()
+            time.tzset()
 
 
 def _ts(day):
@@ -53,6 +69,60 @@ def test_parse_unparseable_is_undateable_not_today():
     assert _parse_played_date("hoy (localized)", _ts(100)) is None
     assert _parse_played_date("vor 2 Tagen", _ts(100)) is None
     assert _parse_played_date("25 de junio", _ts(100)) is None
+
+
+@pytest.mark.parametrize("zone,first,second,first_label,second_label,new_plays", [
+    # UTC midnight is still the same local day, including Yesterday's lingering window.
+    ("America/Costa_Rica", "2026-10-20T23:30", "2026-10-21T00:30", "Today", "Today", 0),
+    ("America/Costa_Rica", "2026-10-20T23:30", "2026-10-21T00:30", "Yesterday", "Yesterday", 0),
+    # Local midnight starts a new day; relabeling yesterday's play must still merge.
+    ("America/Costa_Rica", "2026-10-21T05:30", "2026-10-21T06:30", "Today", "Today", 1),
+    ("America/Costa_Rica", "2026-10-21T05:30", "2026-10-21T06:30", "Today", "Yesterday", 0),
+    ("Pacific/Kiritimati", "2026-10-20T23:30", "2026-10-21T00:30", "Today", "Today", 0),
+    ("Pacific/Kiritimati", "2026-10-20T09:30", "2026-10-20T10:30", "Today", "Today", 1),
+    ("Pacific/Kiritimati", "2026-10-20T09:30", "2026-10-20T10:30", "Today", "Yesterday", 0),
+    # Both sides of DST changes remain on the same local calendar date.
+    ("America/New_York", "2026-11-01T05:30", "2026-11-01T06:30", "Today", "Today", 0),
+    ("America/New_York", "2026-03-08T06:30", "2026-03-08T07:30", "Today", "Today", 0),
+])
+def test_browser_calendar_day_dedup(zone, first, second, first_label, second_label, new_plays):
+    s = _store(); iid = s.upsert_identity("m", "c", None, True)
+    first_ts = datetime.datetime.fromisoformat(first + "+00:00").timestamp()
+    second_ts = datetime.datetime.fromisoformat(second + "+00:00").timestamp()
+    assert s.record_history_plays(iid, first_ts, [("song|artist", first_label)],
+                                  source_timezone=zone) == 1
+    assert s.record_history_plays(iid, second_ts, [("song|artist", second_label)],
+                                  source_timezone=zone) == new_plays
+    assert _counts(s) == {"song|artist": 1 + new_plays}
+
+
+@pytest.mark.parametrize("zone,capture,expected", [
+    ("America/Costa_Rica", "2026-01-01T00:30", "2025-01-01T12:00"),
+    ("Pacific/Kiritimati", "2025-12-31T12:30", "2026-01-01T12:00"),
+])
+def test_yearless_date_uses_browser_year(zone, capture, expected):
+    taken_at = datetime.datetime.fromisoformat(capture + "+00:00").timestamp()
+    want = datetime.datetime.fromisoformat(expected + "+00:00").timestamp()
+    assert _parse_played_date("Jan 1", taken_at, zone) == want
+
+
+def test_legacy_clients_use_machine_local_date(monkeypatch):
+    with monkeypatch.context() as env:
+        env.setenv("TZ", "America/Costa_Rica")
+        time.tzset()
+        first = datetime.datetime(2026, 10, 20, 23, 30, tzinfo=datetime.timezone.utc).timestamp()
+        assert _parse_played_date("Today", first) == _parse_played_date("Today", first + 3600)
+
+
+def test_live_key_and_history_bucket_share_browser_date():
+    s = _store(); iid = s.upsert_identity("m", "c", None, True)
+    taken_at = datetime.datetime(2026, 10, 21, 0, 30, tzinfo=datetime.timezone.utc).timestamp()
+    assert s.record_history_plays(iid, taken_at, ["song|artist"],
+                                  source_timezone="America/Costa_Rica") == 1
+    assert s.record_history_plays(iid, taken_at + 3600, [("song|artist", "Today")],
+                                  source_timezone="America/Costa_Rica") == 0
+    want = datetime.datetime(2026, 10, 20, 12, tzinfo=datetime.timezone.utc).timestamp()
+    assert s.recent_plays_with_ts() == [("song|artist", want)]
 
 
 # --- record_history_plays ---

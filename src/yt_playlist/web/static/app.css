@@ -812,6 +812,11 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
    scrollbar (#106). */
 .modal.modal-similar #similar-results { flex: 1; min-height: 0; overflow-y: auto; padding-inline: 0.4rem; }
 .modal.modal-similar .alt-list { max-height: none; overflow: visible; margin: 0.2rem -0.4rem 0; }
+/* These rows have optional checkboxes and artwork. Let metadata take the remaining width without
+   shifting it into a fixed grid column when either is absent (#106). */
+.modal.modal-similar .alt-row { display: flex; }
+.modal.modal-similar .alt-meta { flex: 1; }
+.modal.modal-similar .alt-row > :not(.alt-meta) { flex: none; }
 
 /* Shared song menu: native popover escapes table/card clipping. */
 .rowmenu { position: relative; text-align: right; overflow: visible; }

@@ -1,0 +1,23 @@
+<h3>Choose what to import</h3>
+<p class="section-note">Source: Spotify Account Data export. Its song metadata stays in memory for this
+  transfer and is discarded afterward. YouTube Music is searched to find matching recordings.</p>
+<form hx-post="/import/spotify-library/prepare" hx-target="#spotify-library-import-block"
+      hx-swap="innerHTML" hx-disabled-elt="find button">
+  <input type="hidden" name="selection_token" value="{{ selection_token }}">
+  <label for="spotify-destination">YouTube Music destination</label>
+  <select id="spotify-destination" name="identity_id" required>
+    {% for identity in identities %}
+    <option value="{{ identity.id }}" {% if identity.is_master %}selected{% endif %}>{{ identity.label }}</option>
+    {% endfor %}
+  </select>
+  {% for playlist in parsed.playlists %}
+  <p><label><input type="checkbox" name="playlist_index" value="{{ loop.index0 }}" checked>
+    {{ playlist.name }} · {{ playlist.tracks|length }} tracks</label></p>
+  {% endfor %}
+  {% if parsed.albums %}
+  <p><label><input type="checkbox" name="include_albums" checked>
+    Also import {{ parsed.albums|length }} saved albums</label></p>
+  {% endif %}
+  <p class="section-note">The next step previews song matches. Nothing is added to YouTube Music until you confirm.</p>
+  <button type="submit" class="btn-primary btn-sm">Prepare preview</button>
+</form>
