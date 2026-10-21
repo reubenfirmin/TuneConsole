@@ -105,12 +105,45 @@ queue retains full provider responses, identifiers, and scoped findings for eith
 membership. Discovery expiry removes candidate membership while preserving catalog
 and enrichment evidence. Legacy numeric URLs/actions resolve through
 `legacy_track_refs`; raw interaction keys and ambiguous evidence remain retained.
+Failed lookups retain per-recording/provider progress and exponential retry delays (30 seconds to
+one hour). Provider outages and throttling persist cooldowns and honor longer `Retry-After` values.
+Untouched work precedes retries; successful answers are reused until that pass completes. The
+enrichment status panel shows saved retry deadlines and errors, including after a restart.
+Provider enablement, availability and effective credential changes schedule targeted coverage passes
+for existing recordings, including those with complete metadata. Other providers' answers and user
+selections remain intact. Disabled/unavailable providers remain distinct from successful, no-match,
+pending and retry outcomes; pending provider coverage contributes to the visible queue count.
+Artwork outcomes are saved separately as found, confirmed absent, or retryable. Optional archive
+retries retain release IDs and respect response-cache deadlines, use bounded backoff, and survive
+restarts. Each worker drain handles at most one due artwork retry alongside metadata work. Useful
+covers are preserved, and artwork failures do not reopen a completed metadata pass.
 Derived vectors are rebuilt in identity version 2, and incompatible model rollback
 artifacts remain available for inspection rather than being loaded into that space.
+
+Live catalog fields and exact source-entry IDs belong to `core.catalog_identity`; saved-key
+rewrites belong to `core.catalog_state`. Numbered migrations retain their own frozen definitions.
+Unmarked saved JSON uses runtime format 1; rewritten dictionaries carry `catalog_state_version`.
+New serialized formats need a versioned reader/rewriter and stamped writers. Unknown future formats
+are preserved during live rekeying. Schema changes use a new migration without changing old upgrades.
 
 ### The stack
 
 TuneConsole is a single local process.
+
+ASGI lifespan owns periodic sync, recommendation/enrichment workers, the idle monitor, and the serial
+radio executor. Restart, native quit, and idle shutdown close the same work-admission gate before
+checking activity. Admitted builds and mutations remain tracked through completion, including after
+request cancellation; queued radio applies are cancelled during shutdown. Lifespan requests cooperative
+worker stops and allows 30 seconds to drain, reporting a shutdown failure if work remains. App factories
+and tests can explicitly disable periodic work with `create_app(..., background_work=False)`.
+
+The radio controller serializes playlist changes outside the bridge response pump. Ordered remote
+readback distinguishes complete, partial, and failed writes; only confirmed uploads enter applied
+state. Partial queues remain retryable and appear in the radio card and `/bridge/status` diagnostics.
+
+Takeout and Spotify history imports run as tracked jobs outside the ASGI loop, sharing the library
+sync lock. The import form polls phase and terminal status; disconnecting a request leaves its job
+owned until processing finishes, so shutdown waits for history writes, repair, and discovery seeding.
 
 - **Python / FastAPI**: an ASGI app served by uvicorn (`--reload` supported). Routes return
   server-rendered HTML, not JSON.
@@ -214,6 +247,8 @@ is unavailable. The cold rankability diagnostic reports scored and fallback coun
 Genre tilts use the same missing-metadata neutrality rule for cold and owned candidates: when genre
 coverage is mixed, known positive weights are geometrically centered and missing genre stays neutral.
 Hard mutes remain exclusions.
+Genre mutes apply when recommendations are served, including cached Home mixes and warm tracks;
+automatic learning leaves them in place until a manual unmute or reset.
 
 The 90-day served ledger records final track recommendations from Home mixes, playlist completion,
 Songs like, Clusters, and Road Trip drafts. Each impression preserves its final rank, lane/mode, available candidate score,
@@ -235,10 +270,36 @@ playlist does not count as conversion. Nothing in this measurement ledger trains
 
 Outcomes belong to the nearest preceding impression across all surfaces, within an inclusive 24-hour
 window; report cohorts use `[start, end)`. Repeated events can credit an impression only once per
-outcome. Historical impressions without coverage/provenance remain unknown. Reports expose sample
+outcome. Saved video identities preserve skip/completion attribution after discovery cleanup.
+Historical impressions without coverage/provenance remain unknown. Reports expose sample
 sizes per slice, mark fewer than 100 impressions as collecting evidence, and never infer a comparative
 verdict from observational data. Recall/projection metrics remain component diagnostics.
+
+Projection recall uses five deterministic folds grouped by track identity. Each target is excluded
+from its fold's ridge fit, content vocabulary, and audio normalization. Artists may cross folds;
+precomputed artist features are disabled to avoid sharing their fitting history. The collaborative
+embedding remains a fixed reference, so this measures metadata projection generalization rather than
+end-to-end cold-start or unseen-artist performance. Reports retain eligible, scored, unencodable, and
+insufficient-training counts, plus genre, era, and coverage slices. Each fit requires 20 usable tracks.
 
 The Taste model health panel shows response and coverage summaries. `GET /taste/scorecard` returns
 the full scorecard (optional Unix-second `start` and `end`, at most 90 days);
 `GET /taste/served/{id}` returns an impression and its stored policy for inspection.
+
+PPR defaults to a **live** 50/50 experiment with standard cosine ordering. Each final Home card and
+its alternative ordering share a comparison ID, stable candidate fingerprint and actual cached PPR
+solver configuration. The local, 90-day ledger records policy-assignment propensity (conditional on
+the selected mode, not per-track inclusion probability), score inputs, rank and final DJ position.
+Counterfactual rows never receive plays, actions or exit outcomes. Generated-playlist responses remain
+separate from organic taste evidence. The old PPR JSONL writer and lane-only log are retired; existing
+JSONL files are historical snapshots and are no longer consumed or appended.
+
+`GET /taste/experiments` reports mature live exposure, acceptance, sustained listening and skips by
+policy cohort, plus counterfactual counts. Wilson 95% intervals use epoch/mode clusters, pooling repeat
+views; outcomes mature for 24 hours. `POST /taste/experiments/decision` accepts form fields `decision`
+(`promote` or `retire`), `cohort` and `reason`. Promotion requires 100 mature clusters per live arm,
+disjoint acceptance intervals, and conservative sustained-listening and skip guardrails. Shadow
+evidence cannot authorize promotion. Retirement may stop an underpowered experiment, with that limit
+recorded explicitly. Decisions retain the last 200 records locally. Share 0 means shadow, share 1
+means retained PPR; an explicit retirement at share 0 also disables replay. These are conservative
+observational comparisons of deterministic cohort assignment, not a claim of causal improvement.

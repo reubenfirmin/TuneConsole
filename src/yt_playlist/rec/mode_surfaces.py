@@ -4,13 +4,15 @@ The worker buckets every surface's candidate pool by nearest taste mode (prepare
 request cheaply selects 4 distinct modes by acceptance-weighted Thompson sampling and live mood
 (#87), assigns one per card, and tilts/orders/caps within the prepared bucket (assemble_cards). No
 pool ranking happens on the request once full-depth bundles have been prepared."""
+import hashlib
+import json
 import random
 from collections import Counter
 from itertools import permutations
 
 import numpy as np
 
-from yt_playlist.rec import (embed, home_themes, home_vibe, layers, mode_eval, rec_params, recommend, surfaces,
+from yt_playlist.rec import (embed, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, recommend, surfaces,
                              taste_modes, transient, measurement)
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
@@ -70,12 +72,13 @@ def _bucket_pool(pool, mode_ids, C, lidx, LV, didx, DV, cap):
 
 def refresh_fresh(store, pool, now):
     """Rebucket newly ranked discoveries after enrichment without rebuilding library surfaces."""
-    modes = taste_modes.live_modes(store)
+    snapshot = store.content_generation()
+    modes = taste_modes.live_modes(store, snapshot=snapshot)
     mode_ids = [m["mode_id"] for m in modes]
     buckets = {}
     if modes:
         C = np.stack([m["centroid"].astype(np.float64) for m in modes])
-        _, DV, didx = embed.load_discovered_content_vectors(store)
+        _, DV, didx = embed.load_discovered_content_vectors(store, snapshot=snapshot)
         cap = int(rec_params.get_param(store, "modes_cand_per_mode"))
         buckets = _bucket_pool(pool, mode_ids, C, {}, None, didx, DV, cap)
     # Merge into the latest payload so a concurrent library rebuild cannot lose its surfaces.
@@ -101,7 +104,8 @@ def refresh_fresh(store, pool, now):
 def prepare_bundles(store, now) -> dict:
     """Bucket each surface's pool by nearest mode; cache under rec_proposals['mode_bundles']. Payload
     {str(mode_id): {surface: [item_dict, ...]}}. Empty dict when there are no modes."""
-    modes = taste_modes.live_modes(store)
+    snapshot = store.content_generation()
+    modes = taste_modes.live_modes(store, snapshot=snapshot)
     if not modes:
         store.put_proposals("mode_bundles", {}, now)
         # Fresh also works before metadata coverage is sufficient to form taste modes.
@@ -110,8 +114,8 @@ def prepare_bundles(store, now) -> dict:
         return {}
     mode_ids = [m["mode_id"] for m in modes]
     C = np.stack([m["centroid"].astype(np.float64) for m in modes])
-    lkeys, LV, lidx = embed.load_content_vectors(store)
-    dkeys, DV, didx = embed.load_discovered_content_vectors(store)
+    lkeys, LV, lidx = embed.load_content_vectors(store, snapshot=snapshot)
+    dkeys, DV, didx = embed.load_discovered_content_vectors(store, snapshot=snapshot)
     cap = int(rec_params.get_param(store, "modes_cand_per_mode"))
     # Rank through the library before bucketing. A global top-400 cutoff can leave a substantial
     # genre with only six candidates even when the library contains hundreds of matching songs.
@@ -162,6 +166,12 @@ def prepare_bundles(store, now) -> dict:
         from yt_playlist.rec import ppr
         rankings = ppr.mode_rankings(store)
         payload["_ppr"] = {str(mid): rankings.get(mid, []) for mid in mode_ids}
+        payload["_meta"]["ppr_policy"] = {
+            "algorithm": "basket-ppr-v1", "built_at": now,
+            "params": {name: rec_params.get_param(store, name) for name in
+                       ("ppr_alpha", "ppr_iters", "ppr_tol", "ppr_rank_depth")},
+            "ranking_fingerprint": hashlib.sha256(json.dumps(payload["_ppr"], sort_keys=True)
+                                                   .encode()).hexdigest()}
     except Exception:  # noqa: BLE001 - PPR precompute must never break bundle prep
         payload["_ppr"] = {}
     store.put_proposals("mode_bundles", payload, now)
@@ -488,6 +498,7 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
         bucket = _bucket(mid, surf)
         items = [d for d in bucket if d.get("key") and d["key"] not in seen
                  and d.get("artist") not in muted]
+        candidate_keys = {d["key"] for d in items}
         items.sort(key=_order_key(ranker, ppr_pos, leans))
         items = vibe_rank(items)
         items = _diversify(items, cap_a, cap_al)
@@ -508,6 +519,7 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
             else:
                 extra = home_themes.matching_genres(store, extra, include=include_genres)
                 extra.sort(key=order)
+            candidate_keys.update(d["key"] for d in extra)
             extra = vibe_rank(extra)
             items = _diversify(items + extra, cap_a, cap_al)
         items = items[:PROTO_SIZE]
@@ -521,9 +533,31 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
                   "facet_tilt": _tilt_key(item, leans), "vibe": vibe_rank.preset,
                   "vibe_affinity": vibe_rank.affinity(item)}} for item in items]
         return {"lane": surf, "label": label, "mode_id": mid, "ranker": ranker,
-                "tracks": items}, bucket
+                "tracks": items, "_candidate_keys": candidate_keys}, bucket
 
     def _commit(card, bucket):
+        # Replay the other ordering against this opportunity before the live card changes `seen`.
+        # Nothing is persisted by previews; only the route's final rendered card becomes exposure.
+        mid, surf = card["mode_id"], card["lane"]
+        positions = {k: i for i, k in enumerate(ppr_map.get(str(mid), []))}
+        decision = experiments.last_decision(store)
+        if positions and not (ab_share == 0 and decision.get("decision") == "retire"):
+            other = "cosine" if card["ranker"] == "ppr" else "ppr"
+            replay, _ = _card_for(surf, mid, other, positions)
+            if replay:
+                candidates = sorted(card["_candidate_keys"] | replay["_candidate_keys"])
+                policy = meta.get("ppr_policy", {"algorithm": "unknown-legacy-cache"})
+                cohort_policy = {k: v for k, v in policy.items() if k != "built_at"}
+                cohort = hashlib.sha256(json.dumps({"policy": cohort_policy, "share": ab_share,
+                    "caps": [cap_a, cap_al], "vibe": vibe_rank.preset,
+                    "leans": leans}, sort_keys=True).encode()).hexdigest()[:16]
+                card["experiment"] = {
+                    "schema": 1, "name": "ppr-cosine-v1", "cohort": cohort,
+                    "cluster": f"{epoch}:{mid}", "share": ab_share,
+                    "state": "shadow" if ab_share == 0 else "retained" if ab_share == 1 else "live",
+                    "candidate_fingerprint": hashlib.sha256(json.dumps(candidates).encode()).hexdigest(),
+                    "candidate_count": len(candidates), "ppr_policy": policy}
+                card["counterfactual"] = {"ranker": other, "tracks": replay["tracks"]}
         # Block the ENTIRE considered bucket (rendered + diversity-dropped), not just the rendered rows,
         # so a track this card dropped can't reappear via a later card's backfill pool.
         seen.update(d["key"] for d in bucket if d.get("key"))

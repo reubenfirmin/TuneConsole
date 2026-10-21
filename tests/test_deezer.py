@@ -7,7 +7,8 @@ def test_enrich_returns_metadata_dict(monkeypatch):
         if "/search/track" in url:
             return {"data": [{"id": 42, "title": "Song", "artist": {"name": "Artist"}}]}
         if "/track/42" in url:
-            return {"id": 42, "bpm": 128.0, "gain": -7.0, "rank": 856376,
+            return {"id": 42, "title": "Song", "artist": {"name": "Artist"},
+                    "bpm": 128.0, "gain": -7.0, "rank": 856376,
                     "album": {"id": 99}}
         if "/album/99" in url:
             return {"id": 99, "label": "Because Music"}
@@ -23,8 +24,8 @@ def test_enrich_returns_metadata_dict(monkeypatch):
 def test_enrich_treats_zero_bpm_as_unknown(monkeypatch):
     def fake_get_json(url):
         if "/search/track" in url:
-            return {"data": [{"id": 1}]}
-        return {"id": 1, "bpm": 0}
+            return {"data": [{"id": 1, "title": "Song"}]}
+        return {"id": 1, "title": "Song", "artist": {"name": "Artist"}, "bpm": 0}
     monkeypatch.setattr(deezer, "_get_json", fake_get_json)
     assert deezer.enrich("Song", "Artist")["bpm"] is None
 

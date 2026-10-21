@@ -370,15 +370,17 @@ async function sendFetch(tabId, frame, auth) {
 }
 
 // Ask the content script to like/dislike the current track by driving YTM's own player-bar control.
-async function rateInYtmTab(action) {
+async function rateInYtmTab(action, videoId) {
+  if (!videoId) return {ok: false, error: "Displayed song is missing"};
   const tab = await pickYtmTab();
-  if (!tab) return;
+  if (!tab) return {ok: false, error: "No music player is available"};
   try {
-    await chrome.tabs.sendMessage(tab.id, { type: "rate", action });
+    return await chrome.tabs.sendMessage(tab.id, { type: "rate", action, videoId }) || {ok: false};
   } catch (e) {
-    if (!isMissingReceiver(e)) return; // the click may already have toggled the rating
+    if (!isMissingReceiver(e)) return {ok: false, error: String(e)}; // never retry a possible click
     await inject(tab.id);
-    try { await chrome.tabs.sendMessage(tab.id, { type: "rate", action }); } catch (e2) {}
+    try { return await chrome.tabs.sendMessage(tab.id, { type: "rate", action, videoId }) || {ok: false}; }
+    catch (e2) { return {ok: false, error: String(e2)}; }
   }
 }
 
@@ -1009,7 +1011,13 @@ function connect() {
     const frame = JSON.parse(ev.data);
     if (frame && frame.ping) return; // keepalive from the backend; receiving it keeps this SW awake
     if (frame && frame.type === "navigate") { navigateYtmTab(frame.url); return; }
-    if (frame && frame.type === "rate") { rateInYtmTab(frame.action); return; }
+    if (frame && frame.type === "rate") {
+      let result;
+      try { result = await rateInYtmTab(frame.action, frame.videoId); }
+      catch (e) { result = {ok: false, error: String(e)}; }
+      try { sock.send(JSON.stringify({id: frame.id, status: 200, body: JSON.stringify(result)})); } catch (e) {}
+      return;
+    }
     if (frame && frame.type === "playpause") { playPauseInYtmTab(); return; }
     if (frame && frame.type === "refresh-view") { refreshViewInYtmTab(frame.playlist); return; }
     if (!RADIO_ENABLED && frame && RADIO_CONTROL_TYPES.has(frame.type)) return;
@@ -1097,6 +1105,7 @@ async function relayPlaybackMessage(msg, sender) {
   // happens when the background swap genuinely failed to start.
   const srcTabId = sender && sender.tab && sender.tab.id;
   if ((msg.type === "play" || msg.type === "now-heartbeat") && srcTabId != null && deck !== "standby") {
+    msg = Object.assign({}, msg, {muted: !!msg.muted || msg.volume === 0});
     if (msg.type === "play") pendingPlays.set(srcTabId, msg);
     if (msg.muted) mediaMutedTabs.add(srcTabId);
     else mediaMutedTabs.delete(srcTabId);
@@ -1110,6 +1119,10 @@ async function relayPlaybackMessage(msg, sender) {
     const owner = await pickYtmTab();
     playbackTabId = owner ? owner.id : null;
     if (srcTabId !== playbackTabId) return;
+    // A selected owner can still be silent (including the sole music tab). Keep presence and
+    // the pending play, but only promote it when both Chrome and the media element are audible.
+    msg = Object.assign({}, msg, {tabMuted: !!owner.mutedInfo?.muted,
+      muted: !!msg.muted || msg.volume === 0});
     // Chrome's audible flag can lag a pause/track handoff. Keep a rejected play until this tab
     // actually owns playback, rather than losing it forever to the content sensor's dedup key.
     const pending = pendingPlays.get(srcTabId);
@@ -1120,6 +1133,9 @@ async function relayPlaybackMessage(msg, sender) {
     }
     if (!msg.paused && !msg.muted && !owner.mutedInfo?.muted &&
         rescue && rescue.tabId === srcTabId && !rescue.foregrounded) cancelPlaybackRescue();
+    if (msg.type === "play" && (msg.muted || msg.tabMuted || msg.paused)) {
+      msg = Object.assign({}, msg, {type: "now-heartbeat"});
+    }
   }
   if (msg.type === "pevent" && ["state", "bye"].includes(msg.kind) && deck !== "standby") {
     const owner = await pickYtmTab();
@@ -1129,16 +1145,20 @@ async function relayPlaybackMessage(msg, sender) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (msg.type === "play") {
     ws.send(JSON.stringify({ type: "play", title: msg.title, artist: msg.artist,
+      metadataVerified: msg.metadataVerified !== false,
       thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
       playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "",
-      brandId: msg.brandId || "", paused: !!msg.paused, timeZone: msg.timeZone, deck }));
+      brandId: msg.brandId || "", paused: !!msg.paused, muted: !!msg.muted,
+      tabMuted: !!msg.tabMuted, timeZone: msg.timeZone, deck }));
     pendingPlays.delete(srcTabId);
   } else if (msg.type === "now-heartbeat") {
     // Metadata makes the non-persisting heartbeat able to restore a card that aged out while Chrome
     // throttled the YTM page (commonly during an audio-device switch).
     ws.send(JSON.stringify({ type: "now-heartbeat", deck, title: msg.title, artist: msg.artist,
+      metadataVerified: msg.metadataVerified !== false,
       thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
-      playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "", paused: !!msg.paused }));
+      playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "", paused: !!msg.paused,
+      muted: !!msg.muted, tabMuted: !!msg.tabMuted }));
   } else if (msg.type === "pevent") {
     ws.send(JSON.stringify(Object.assign({}, msg, { deck })));   // #91 already a flat, self-describing frame
   }

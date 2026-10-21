@@ -68,7 +68,7 @@ const main = (paused, playlist = "PL1") => listeners.message({
   source: window,
   data: { __tcSensorVersion: 4,
     __tcNow: { title: "Exoskeleton", artist: "GAUPA", videoId: "v1", playlist, paused,
-      brandKnown: true, brandId: "brand-A" } },
+      brandKnown: true, brandId: "brand-A", metadataVerified: true } },
 });
 main(true);
 now = 6000;
@@ -98,12 +98,14 @@ assert.equal(messages.at(-1).playlist, "");
 context.location.href = "https://music.youtube.com/watch?v=v1&list=PL_old";
 listeners.message({source: window, data: {__tcSensorVersion: 4, __tcNow: {
   title: "Exoskeleton", artist: "GAUPA", videoId: "v1", playlist: "", paused: false,
+  metadataVerified: true,
   brandKnown: true, brandId: "brand-A",
 }}});
 assert.equal(messages.at(-1).playlist, "");
 // Reports without context cannot borrow the queue of a different video.
 listeners.message({source: window, data: {__tcSensorVersion: 4, __tcNow: {
   title: "Autoplay", artist: "Artist", videoId: "v2", paused: false,
+  metadataVerified: true,
   brandKnown: true, brandId: "brand-A",
 }}});
 assert.equal(messages.at(-1).playlist, "");
@@ -128,11 +130,12 @@ listeners.message({source: window, data: {__tcNow: {
   title: "Wrong song", artist: "Artist", videoId: "other", paused: false,
 }}});
 assert.equal(messages.length, count);
-// A new DOM song during MAIN throttling keeps the verified account independently of track ID.
+// A new DOM song during MAIN throttling restores presence with the last verified account.
 thumbnail = "https://i.ytimg.com/vi/v3/hqdefault.jpg";
 now = 30000;
 intervals[0]();
-assert.equal(messages.at(-1).type, "play");
+assert.equal(messages.at(-1).type, "now-heartbeat");
+assert.equal(messages.at(-1).metadataVerified, false);
 assert.equal(messages.at(-1).videoId, "v3");
 assert.equal(messages.at(-1).brandId, "brand-A");
 // Regular but incomplete MAIN snapshots must allow DOM fallback, even at a 2s cadence.
@@ -143,10 +146,12 @@ for (const id of ["v4", "v5"]) {
     title: "Stale MediaSession title", videoId: "", brandKnown: true, brandId: "brand-A",
   }}});
   intervals[0]();
-  const play = messages.filter(m => m.type === "play").at(-1);
-  assert.equal(play.videoId, id);
-  assert.equal(play.title, "Exoskeleton (Official)");
-  assert.equal(play.brandId, "brand-A");
+  const presence = messages.at(-1);
+  assert.equal(presence.type, "now-heartbeat");
+  assert.equal(presence.metadataVerified, false);
+  assert.equal(presence.videoId, id);
+  assert.equal(presence.title, "Exoskeleton (Official)");
+  assert.equal(presence.brandId, "brand-A");
 }
 const accountReport = (brandKnown, brandId) => listeners.message({source: window,
   data: {__tcSensorVersion: 4, __tcNow: {title: "", videoId: "", brandKnown, brandId}}});
@@ -161,13 +166,21 @@ listeners.message({source: window, data: {__tcSensorVersion: 4,
   __tcPlayer: {kind: "tick", videoId: "v6", brandKnown: false, brandId: ""}}});
 assert.equal(messages.length, beforeUnknownEvent);
 accountReport(true, "brand-B");
+assert.equal(messages.at(-1).type, "now-heartbeat");
+const verifiedAccountPlay = brandId => listeners.message({source: window, data: {
+  __tcSensorVersion: 4, __tcNow: {title:"Song", artist:"Artist", videoId:"v6",
+    brandKnown:true, brandId, metadataVerified:true, paused:false}}});
+verifiedAccountPlay("brand-B");
 assert.equal(messages.at(-1).type, "play");
 assert.equal(messages.at(-1).brandId, "brand-B");
 // The same video on a different account must be recorded for that account too.
 accountReport(true, "");
+assert.equal(messages.at(-1).type, "now-heartbeat");
+verifiedAccountPlay("");
 assert.equal(messages.at(-1).type, "play");
 assert.equal(messages.at(-1).brandId, "");
 video.muted = true;
+now += 6000;
 intervals[0]();
 assert.equal(messages.at(-1).muted, true);
 // A new playing ID must not inherit the previous bar's explicit rating or album.

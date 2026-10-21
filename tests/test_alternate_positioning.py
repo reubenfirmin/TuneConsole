@@ -22,7 +22,7 @@ class LaggingClient(FakeClient):
 
     def add_playlist_items(self, playlistId, videoIds):
         result = super().add_playlist_items(playlistId, videoIds)
-        return result if self.return_handles else None
+        return result if self.return_handles else "STATUS_SUCCEEDED"
 
     def edit_playlist(self, playlistId, **kw):
         if self.fail_moves:

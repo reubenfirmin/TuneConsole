@@ -212,10 +212,10 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def track_content(self) -> dict:
-        """{identity_key: (genre, year4)} for tagged tracks, features for the content→embedding map."""
+        """{identity_key: (genre, year4)} for tracks with either categorical input."""
         rows = self.conn.execute(
             "SELECT identity_key k, MIN(genre) g, MIN(mb_year) y FROM tracks "
-            "WHERE genre<>'' GROUP BY identity_key").fetchall()
+            "WHERE genre<>'' OR mb_year<>'' GROUP BY identity_key").fetchall()
         out = {}
         for r in rows:
             y = r["y"][:4] if (r["y"] and r["y"][:4].isdigit()) else None

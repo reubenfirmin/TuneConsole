@@ -69,7 +69,7 @@ def test_startup_repairs_groups_without_sync_or_extension(store, library, monkey
             finished.set()
 
     monkeypatch.setattr(rec_worker.RecWorker, "_do_mode_refresh", refresh)
-    app = create_app(store, forbidden, now_fn=lambda: 2000.0)
+    app = create_app(store, forbidden, now_fn=lambda: 2000.0, background_work=True)
     app.state.ctx.rec_worker.debounce_s = 0
     with TestClient(app, base_url="http://127.0.0.1") as client:
         try:
@@ -126,7 +126,7 @@ def scheduled(store, monkeypatch):
             targets.append(self.target)
 
     monkeypatch.setattr(rec_worker, "threading", SimpleNamespace(
-        Lock=threading.Lock, Thread=QueuedThread))
+        Lock=threading.Lock, Event=threading.Event, Thread=QueuedThread))
     return _worker(store), targets
 
 

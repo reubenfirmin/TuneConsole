@@ -9,6 +9,7 @@
     {% if state == 'running' %}Enriching{% elif state == 'paused' %}Paused
     {% elif state == 'queued' %}Queued{% elif state == 'waiting' %}Waiting for another lookup
     {% elif state == 'blocked' %}Needs setup{% elif state == 'error' %}Retrying after an error
+    {% elif state == 'retry' %}Waiting to retry
     {% else %}Caught up{% endif %}
   </span>
   </div>
@@ -23,12 +24,17 @@
   {% elif state in ['running', 'waiting', 'blocked', 'error'] %}
   <p>{{ activity.text }}{% if state == 'running' %} <span class="section-note">Updated {{ activity_age }}.</span>{% endif %}</p>
   {% if activity.scope == 'refresh' %}<p class="section-note">Refreshing older tracks with missing metadata.</p>{% endif %}
+  {% elif state == 'retry' %}
+  <p>{{ retry.count }} provider lookup(s) await retry. Next attempt in {{ retry_seconds }} seconds.</p>
+  {% if retry.error %}<p class="enrich-warning">{{ retry.error }}</p>{% endif %}
   {% elif state == 'queued' %}
   <p>Waiting for the worker to start its next lookup.</p>
   {% else %}
   <p>Every track has had a provider pass. Missing metadata is retried periodically.</p>
   {% endif %}
   {% if activity.warning and enabled %}<p class="enrich-warning">{{ activity.warning }}</p>{% endif %}
+  {% if art_retry.count %}<p class="section-note">Artwork retries: {{ art_retry.count }}.
+    Next attempt in {{ art_retry_seconds }} seconds. Artwork retries run separately from metadata.</p>{% endif %}
   <p class="section-note">
     {% if progress.latest is not none %}Last track completed {{ age(progress.latest) }}.{% else %}No tracks completed yet.{% endif %}
     {{ '{:,}'.format(progress.recent) }} tracks checked in the past 15 minutes.

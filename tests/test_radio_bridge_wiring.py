@@ -1,18 +1,23 @@
 import inspect
 import queue
 import threading
+import json
+from types import SimpleNamespace
 
 from yt_playlist.web.routes import bridge
+from yt_playlist.web import radio_controller
+from yt_playlist.library import playlist_mutation
+from yt_playlist.library.playlist_mutation import PlaylistResult
 
 
 def test_ws_loop_wires_radio_v2():
     src = inspect.getsource(bridge)
     assert "RADIO_PROVENANCE" not in src                 # TC-RADIO stamp retired
     assert "dispatched_vids" not in src
-    assert "radio_mod.on_play" in src                    # play branch drives the queue
-    assert "radio_mod.react" in src                      # pevent branch feeds the model
-    assert "executor._reconcile" in src                  # playlist mutation reuses the executor
-    assert "playlist_watch_url" in src                   # every radio URL carries &list=
+    assert "controller.played" in src
+    assert "controller.reacted" in src
+    assert "executor._reconcile" not in src
+    assert "playlist_mutation.reconcile_playlist" in inspect.getsource(radio_controller)
 
 
 # --- live end-to-end: real Bridge, real WS, real store (review follow-up: the source-inspection
@@ -52,6 +57,44 @@ class _FramePump:
             if pred(val):
                 return val
         raise AssertionError(f"expected frame not received within {tries} bounded reads")
+
+
+def test_radio_apply_keeps_pumping_its_own_remote_read_responses(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from yt_playlist.core.bridge import Bridge
+    from yt_playlist.core.store import Store
+    from yt_playlist.rec import radio as radio_mod
+
+    connection = Bridge()
+    session = radio_mod.RadioSession()
+    session.active = True
+    session.playlist_ytm = "PLRADIO"
+    store = Store(":memory:")
+    store.init_schema()
+
+    class SocketClient:
+        def get_playlist(self, playlist, limit=None):
+            status, body = connection.execute("GET", playlist, None, timeout=2)
+            assert status == 200
+            return json.loads(body)
+
+    ctx = SimpleNamespace(bridge=connection, store=store, radio=session,
+                          client_provider=lambda: {1: SocketClient()}, now_fn=lambda: 1234)
+    monkeypatch.setattr(radio_mod, "on_play", lambda *args: {
+        "desired_vids": ["v"], "prime": {"video_id": "v"}})
+    app = FastAPI()
+    app.include_router(bridge.build(ctx))
+    with TestClient(app).websocket_connect("/bridge/ws", headers={"origin": bridge.EXTENSION_ORIGIN}) as ws:
+        pump = _FramePump(ws)
+        ws.send_json({"type": "play", "videoId": "v"})
+        for _ in range(3):
+            frame = pump.wait_for(lambda f: "id" in f, per_call_timeout=3)
+            ws.send_json({"id": frame["id"], "status": 200,
+                          "body": json.dumps({"tracks": [{"videoId": "v", "setVideoId": "set-v"}]})})
+        prime = pump.wait_for(lambda f: f.get("type") == "radio-prime", per_call_timeout=3)
+        assert prime["videoId"] == "v"
+        assert session.applied_vids == ["v"]
 
 
 def test_ws_play_frame_advances_radio_queue_and_reconciles_playlist(monkeypatch):
@@ -115,8 +158,8 @@ def test_ws_play_frame_advances_radio_queue_and_reconciles_playlist(monkeypatch)
                         lambda *a, **k: {"new_ytm": "PLRADIO", "pid": 1})
     reconciled = []
     monkeypatch.setattr(
-        executor, "_reconcile",
-        lambda client, ytm, vids: (reconciled.append(list(vids)), (0, 0, [], []))[1])
+        playlist_mutation, "reconcile_playlist",
+        lambda client, ytm, vids: (reconciled.append(list(vids)), PlaylistResult("complete", tuple(vids)))[1])
 
     client = TestClient(app)
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
@@ -191,8 +234,8 @@ def test_radio_apply_defers_commit_until_reconcile_succeeds(monkeypatch):
         if calls["n"] == 1:
             raise RuntimeError("network hiccup")
         reconciled.append(list(vids))
-        return (0, 0, [], [])
-    monkeypatch.setattr(executor, "_reconcile", _flaky_reconcile)
+        return PlaylistResult("complete", tuple(vids))
+    monkeypatch.setattr(playlist_mutation, "reconcile_playlist", _flaky_reconcile)
 
     client = TestClient(app)
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:

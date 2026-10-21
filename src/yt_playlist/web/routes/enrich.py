@@ -3,7 +3,7 @@ enrichment stats. The page polls /enrich/stats so the bars advance live as the w
 import asyncio
 import json
 import math
-import threading
+from yt_playlist.core.activity import activity_for
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
@@ -44,6 +44,8 @@ def build(ctx) -> APIRouter:
         enabled = store.get_setting("enrich_worker_enabled", "1") == "1"
         busy = bool(ctx.enrich_worker and ctx.enrich_worker.busy)
         activity = ctx.enrich_worker.activity if ctx.enrich_worker else {}
+        retry = store.enrichment_retry_status()
+        art_retry = store.enrichment.artwork_retry_status()
         if not enabled:
             state = "paused"
         elif activity.get("state") in ("blocked", "error"):
@@ -52,6 +54,8 @@ def build(ctx) -> APIRouter:
             state = "waiting"
         elif busy:
             state = "running"
+        elif retry["count"]:
+            state = "retry"
         elif remaining:
             state = "queued"
         else:
@@ -63,6 +67,9 @@ def build(ctx) -> APIRouter:
             "remaining": remaining, "conflicts": store.outstanding_conflicts(),
             "enabled": enabled, "state": state,
             "activity": activity, "activity_age": age(activity.get("updated_at")),
+            "retry": retry, "retry_seconds": max(0, math.ceil((retry["retry_at"] or now) - now)),
+            "art_retry": art_retry,
+            "art_retry_seconds": max(0, math.ceil((art_retry["retry_at"] or now) - now)),
             "progress": progress, "age": age,
             "spark": viz.area_spark(store.processed_timeline()),
         }
@@ -158,7 +165,7 @@ def build(ctx) -> APIRouter:
             finally:
                 job.done = True
 
-        threading.Thread(target=run, daemon=True).start()
+        activity_for(ctx).start_thread(run)
         return JSONResponse({"job_id": job.id})
 
     @router.get("/track/genre-lookup/events/{job_id}")
@@ -192,6 +199,7 @@ def build(ctx) -> APIRouter:
         if not value or len(value) > 80:
             return Response(status_code=400)
         store.set_track_genre(track_id, value)
+        ctx.rec_worker.trigger_mode_refresh()
         # The same track can occur on several visible rows. A reload updates all of them and their
         # sort data consistently; candidate choice is rare enough that a partial multi-row swap is
         # needless complexity.

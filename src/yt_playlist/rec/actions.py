@@ -28,6 +28,10 @@ def sync_status(store, now) -> SyncStatus:
     # you actually did. Staleness rides the same most-recent stamp: recent plays = not stale.
     stamps = [float(s) for s in (store.get_setting("last_sync_at"),
                                  store.get_setting("last_plays_sync_at")) if s is not None]
+    outcome = store.get_setting("last_sync_outcome")
+    if outcome in ("partial", "skipped", "failed"):
+        ago = _ago(now - max(stamps)) if stamps else None
+        return SyncStatus(ago, True, f"Library sync {outcome}. Reconnect or sign in, then sync again.")
     if not stamps:
         return SyncStatus(None, True, "Sync to pull in your library and recommendations.")
     age = now - max(stamps)

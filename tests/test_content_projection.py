@@ -1,12 +1,13 @@
 import numpy as np
+import pytest
 
 from yt_playlist.rec import discover, embed, eval_recs
 
 
 def test_content_projection_lands_in_right_cluster(store):
     iid = store.upsert_identity("main", "cred", None, True)
-    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(10)]
-    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(10)]
+    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(15)]
+    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(15)]
     for t in A:
         store.set_track_genre(t, "Techno")
     for t in B:
@@ -25,12 +26,83 @@ def test_content_projection_lands_in_right_cluster(store):
     assert avg("|ab") > avg("|bb")              # a Techno candidate predicts into the techno cluster
 
     r = eval_recs.projection_recall(store, k=10)
-    assert r["recall"] is not None and r["trials"] == 20
+    assert r["recall"] is not None and r["trials"] == 30
+    assert r["split"] == "track_identity_5fold" and not r["in_sample"]
 
 
 def test_projection_none_without_enough_tags(store):
     store.upsert_identity("main", "cred", None, True)
     assert discover.ContentProjection.fit(store) is None
+
+
+def test_evaluation_excludes_targets_and_feature_fitting_inputs(store, monkeypatch):
+    keys = []
+    for i in range(30):
+        tid = store.upsert_track(f"v{i}", f"Track {i}", "Artist", None, None)
+        store.set_track_genre(tid, "Techno")
+        store.set_track_year(tid, str(1990 + i))
+        store.set_track_audio(tid, bpm=100.0 + i)
+        keys.append(f"track {i}|artist")
+    vectors = np.eye(30, dtype=np.float32)
+    monkeypatch.setattr(embed, "load_vectors", lambda s: (keys, vectors, {k: i for i, k in enumerate(keys)}))
+    original_fit = discover.ContentProjection.fit
+    original_model = embed.build_content_model
+    original_solve = np.linalg.solve
+    active_training = set()
+    tested = []
+
+    def model(content, audio):
+        assert set(content) == active_training
+        assert set(audio) == active_training
+        return original_model(content, audio)
+
+    def solve(lhs, rhs):
+        # Orthogonal reference targets make any held-out row entering Y observable here.
+        for i, key in enumerate(keys):
+            if key not in active_training:
+                assert np.all(rhs[:, i] == 0)
+        return original_solve(lhs, rhs)
+
+    def fit(cls, s, *, training_keys, include_artist):
+        nonlocal active_training
+        assert not include_artist
+        active_training = set(training_keys)
+        assert len(active_training) == 24
+        projection = original_fit(s, training_keys=training_keys, include_artist=include_artist)
+        predict = projection.predict
+
+        def held_out(genre, year, audio):
+            key = f"track {int(year) - 1990}|artist"
+            assert key not in active_training
+            tested.append(key)
+            return predict(genre, year, audio)
+
+        projection.predict = held_out
+        return projection
+
+    monkeypatch.setattr(embed, "build_content_model", model)
+    monkeypatch.setattr(np.linalg, "solve", solve)
+    monkeypatch.setattr(discover.artist_model, "load_artist_vectors",
+                        lambda s: pytest.fail("evaluation must not use shared artist features"))
+    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(fit))
+    result = eval_recs.projection_recall(store, k=5)
+    assert sorted(tested) == sorted(keys)
+    assert result["eligible"] == result["trials"] == 30
+    assert result["insufficient"] == result["unscored"] == 0
+
+
+def test_projection_reports_insufficient_fold_evidence(store, monkeypatch):
+    keys = []
+    for i in range(20):
+        tid = store.upsert_track(f"v{i}", f"Track {i}", "Artist", None, None)
+        store.set_track_genre(tid, "Techno")
+        keys.append(f"track {i}|artist")
+    monkeypatch.setattr(embed, "load_vectors",
+                        lambda s: (keys, np.eye(20), {k: i for i, k in enumerate(keys)}))
+    result = eval_recs.projection_recall(store)
+    assert result["recall"] is None and result["trials"] == 0
+    assert result["insufficient"] == result["eligible"] == 20
+    assert result["reason"]
 
 
 # --- §2: enriched feature basis (audio + subgenre) and graceful degradation ---

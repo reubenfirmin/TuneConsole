@@ -78,7 +78,8 @@ def serving_policy(store, now, ranker="lane"):
 
 @synchronized
 def record_recommendations(store, surface, items, now, *, lane="", mode_id=None,
-                           ranker="lane", provenance=None, request_id=None):
+                           ranker="lane", provenance=None, request_id=None, experiment=None,
+                           policy_kind="live", propensity=1.0):
     """Record final order with immutable candidate coverage, ownership, scores and policy."""
     items = [dict(it) if isinstance(it, dict) else vars(it).copy() for it in items]
     if not items:
@@ -86,6 +87,9 @@ def record_recommendations(store, surface, items, now, *, lane="", mode_id=None,
     # Instrumentation must never turn a successful recommendation response into an error.
     try:
         version, config = serving_policy(store, now, ranker)
+        if experiment:
+            config = {**config, "experiment": experiment, "schema": 3}
+            version = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
         store.record_serving_policy(version, config, now)
         keys = [it.get("key") or it.get("identity_key") for it in items]
         meta = store.tracks_by_keys([k for k in keys if k])
@@ -117,6 +121,8 @@ def record_recommendations(store, surface, items, now, *, lane="", mode_id=None,
                          "score": item.get("score"), "model_version": version,
                          "provenance": {"ranker": ranker, **(provenance or {}),
                                         **item.get("serving_context", {}), "candidate": candidate,
+                                        "policy_kind": policy_kind, "propensity": propensity,
+                                        "experiment": experiment,
                                         "pool_policy": item.get("pool_policy"),
                                         "score_available": item.get("score") is not None}})
         store.record_served_impressions(request_id or uuid.uuid4().hex, surface, rows, now,

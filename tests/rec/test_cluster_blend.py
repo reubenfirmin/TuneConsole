@@ -15,6 +15,9 @@ class VStore:
     def get_rec_content_vectors(self):
         return [(k, v.astype(np.float32).tobytes()) for k, v in self._content.items()]
 
+    def content_generation(self):
+        return {"library": self.get_rec_content_vectors(), "discovered": []}
+
     def get_setting(self, key, default=None):
         return self._settings.get(key, default)
 

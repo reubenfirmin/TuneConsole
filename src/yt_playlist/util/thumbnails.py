@@ -13,8 +13,7 @@ _PLACEHOLDER_MARKERS = ("cover_track_default", "cover_album_default")
 
 
 def is_placeholder_art(url) -> bool:
-    """Is this YouTube's stand-in image rather than a real cover? Such art must not block a provider
-    from filling in the real thing, but real art must never be overwritten."""
+    """Identify YouTube's stand-in image, which cannot displace or block a useful cover."""
     return any(m in url for m in _PLACEHOLDER_MARKERS) if url else False
 
 

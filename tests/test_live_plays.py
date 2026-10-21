@@ -3,6 +3,7 @@
 from yt_playlist.core.store import Store
 from yt_playlist.library import live_plays
 from yt_playlist.util.matching import identity_key
+import pytest
 
 
 def _store(with_brand=False):
@@ -34,6 +35,28 @@ def test_play_persists_event_day_model_and_freshness():
     n = s.conn.execute("SELECT COUNT(*) FROM history_items WHERE identity_key=?", (key,)).fetchone()[0]
     assert n == 1
     assert s.get_setting("last_plays_sync_at") == "1000.0"
+
+
+def test_unverified_metadata_does_not_write_track_history_or_rating():
+    s = _store()
+    assert live_plays.handle_play_event(_ctx(s), _msg(metadataVerified=False, likeStatus="LIKE"), 1000) is False
+    assert s.play_events_since(0) == []
+    assert s.conn.execute("SELECT COUNT(*) FROM history_items").fetchone()[0] == 0
+    assert s.identity_key_for_video("v1") is None
+    assert s.get_setting("last_plays_sync_at") is None
+    assert live_plays.handle_play_event(_ctx(s), _msg(metadataVerified=True), 1001) is True
+
+
+@pytest.mark.parametrize("silent", [{"muted": True}, {"tabMuted": True}, {"volume": 0}, {"paused": True}])
+def test_silent_play_does_not_write_but_unmute_records_once(silent):
+    s = _store()
+    assert not live_plays.handle_play_event(_ctx(s), _msg(likeStatus="LIKE", **silent), 1000)
+    assert s.play_events_since(0) == []
+    assert s.identity_key_for_video("v1") is None
+    assert not s.recent_liked_keys()
+    assert live_plays.handle_play_event(_ctx(s), _msg(), 1001)
+    assert not live_plays.handle_play_event(_ctx(s), _msg(), 1002)
+    assert len(s.play_events_since(0)) == 1
 
 
 def test_rereport_does_not_double_count_or_restamp():

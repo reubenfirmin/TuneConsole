@@ -13,6 +13,7 @@ class IdentityConfig:
     credential_ref: str
     brand_account_id: str | None
     is_master: bool
+    identity_id: int | None = None
 
 def credential_path(base_dir, credential_ref) -> Path:
     """Resolve an identity's credential file, refusing references that escape base_dir.
@@ -32,7 +33,11 @@ def load_identities(path) -> list[IdentityConfig]:
     out = [IdentityConfig(
         label=e["label"], credential_ref=e["credential_ref"],
         brand_account_id=e.get("brand_account_id"),
-        is_master=bool(e.get("is_master", False))) for e in entries]
+        is_master=bool(e.get("is_master", False)), identity_id=e.get("id")) for e in entries]
+    from yt_playlist.core.setup import validate_identities
+    validate_identities([{"label": c.label, "credential_ref": c.credential_ref,
+                          "brand_account_id": c.brand_account_id, "is_master": c.is_master,
+                          "id": c.identity_id} for c in out])
     masters = sum(i.is_master for i in out)
     if masters != 1:
         raise ValueError(f"exactly one identity must have is_master=true, found {masters}")

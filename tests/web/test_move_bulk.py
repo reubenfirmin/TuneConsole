@@ -143,7 +143,43 @@ def test_delete_failure_reports_kept_source_without_losing_copy(transfers, monke
     monkeypatch.setattr(t.src_client, "delete_playlist", refuse_delete)
     response = _transfer(t, t.playlists[:1])
     assert "Copied 1 playlist." in response.text
-    assert "Source kept: YouTube couldn’t delete the original." in response.text
+    assert "Source kept: YouTube refused" in response.text
     assert t.store.get_playlist(t.playlists[0]) is not None
     assert len(t.tgt_client.created) == 1
     assert not t.refreshes
+
+
+@pytest.mark.parametrize("failure", ["rejected", "partial_delivery", "unreadable_destination"])
+def test_incomplete_delivery_keeps_source_and_explains_why(transfers, monkeypatch, failure):
+    t = transfers
+    add = t.tgt_client.add_playlist_items
+    get = t.tgt_client.get_playlist
+
+    def fail_add(playlist, videos):
+        if failure == "rejected":
+            return {"status": "STATUS_FAILED"}
+        if failure == "partial_delivery":
+            return {"status": "STATUS_SUCCEEDED"}
+        return add(playlist, videos)
+
+    def read(playlist, limit=None):
+        if failure == "unreadable_destination":
+            return {}  # a malformed response cannot confirm delivery, even after a successful add
+        return get(playlist, limit)
+
+    monkeypatch.setattr(t.tgt_client, "add_playlist_items", fail_add)
+    monkeypatch.setattr(t.tgt_client, "get_playlist", read)
+    response = _transfer(t, t.playlists[:1])
+
+    assert "Source kept" in response.text
+    assert '<details open>' in response.text
+    if failure == "rejected":
+        assert "1 couldn’t be added" in response.text
+        assert "Copied 0 tracks" in response.text
+    else:
+        assert "Refusing to delete" in response.text
+        assert "Copied 1 track." not in response.text
+    assert t.store.get_playlist(t.playlists[0]) is not None
+    assert not t.src_client.deleted
+    assert not t.refreshes
+    assert any(p.ytm_playlist_id == "PL_NEW_0" for p in t.store.get_playlists())

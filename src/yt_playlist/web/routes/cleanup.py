@@ -5,7 +5,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import Response
 
 from yt_playlist.library import analysis
-from yt_playlist.rec import recommend
+from yt_playlist.rec.actions import refresh_cleanup
 
 
 def build(ctx) -> APIRouter:
@@ -57,7 +57,7 @@ def build(ctx) -> APIRouter:
         ignored_merges = [m for m in ignored_merges if len(m["titles"]) > 1]   # need 2+ live members
         # Every cleanup edit HX-Refreshes back through here, so this is where the home card's cached
         # summary goes stale. Refresh it now so the home "Playlist cleanups" count stays honest.
-        recommend.refresh_cleanup(store, now_fn())
+        refresh_cleanup(store, now_fn())
         return templates.TemplateResponse(request, "cleanup.html", {
             "groups": groups, "near_pairs": near_pairs, "overlaps": overlaps,
             "empties": empties, "tiny": tiny, "kinds": kinds,

@@ -212,34 +212,8 @@ def compute_months(day_counts, meta, artist_first, catalog_artists=frozenset()) 
 
 
 def _build_first_play_index(store):
-    """Incremental fold of the first-play index. Snapshots normally only accrue forward, so an existing
-    first_day can only be lowered by a Takeout backfill; that case clears + full-rescans."""
-    ti = store.get_setting("takeout_imported_at")
-    if ti is not None and ti != store.get_setting("trend_first_play_takeout_seen"):
-        store.trends.clear_first_play()
-        store.set_setting("trend_first_play_watermark", "0")
-        store.set_setting("trend_first_play_takeout_seen", str(ti))
-    wm = int(store.get_setting("trend_first_play_watermark") or 0)
-    plays = store.trends.play_event_track_first()
-    # The history day model is evidence of a first play ONLY when there is no ledger. Where a ledger
-    # exists it is complete (Takeout backfills the past, the extension records the present), and the
-    # history rows are a lingering recently-played window that would drag first-seen days earlier and
-    # fabricate a discovery spike on whatever day the sync happened to run. On the reference database
-    # that put 131 tracks and 32 artists on 2026-06-20 alone.
-    hist = {} if store.trends.has_play_ledger() else store.trends.history_track_first(wm)
-    rows = []
-    for key in set(hist) | set(plays):
-        cands = []
-        if key in hist:
-            cands.append((hist[key][1], hist[key][0], "history"))
-        if key in plays:
-            cands.append((plays[key][1], plays[key][0], "play_event"))
-        ts, day, src = min(cands)
-        rows.append(("track", key, day, ts, src))
-    if rows:
-        store.trends.upsert_first_play_min(rows)
-    store.trends.rebuild_artist_first_play()
-    store.set_setting("trend_first_play_watermark", str(store.trends.max_snapshot_id()))
+    """Exact play events take precedence over coarse history; publish the fold atomically."""
+    store.trends.refresh_first_play()
 
 
 def month_day_counts(day_counts, month) -> list:

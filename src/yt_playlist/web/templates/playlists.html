@@ -1,6 +1,7 @@
 {% extends "base.html" %}{% from "_macros.html" import banner, library_icon, sort_indicator %}{% block title %}Playlists · TuneConsole{% endblock %}{% block page_class %}page-playlists{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
   &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music {{ arrow_icon('external') }}</a>{% endif %}{% endcall %}{% endif %}
+{% if action_result %}{% include "_partials/playlist_action_result.html" %}{% endif %}
 <div x-data='playlistsTab({{ rows|tojson }})'{% if not has_groups %} class="playlists-no-groups"{% endif %}>
 <div class="page-head library-page-head">
   <div class="library-page-title">{{ library_icon('playlists') }}<h1>Playlists</h1></div>

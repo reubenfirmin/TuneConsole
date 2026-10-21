@@ -70,8 +70,9 @@ def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED) -> l
         k = rec_params.get_param(store, "modes_k")
     if min_members is None:
         min_members = rec_params.get_param(store, "modes_min_members")
-    space = embed.content_space_id(store)
-    keys, V, _idx = embed.load_content_vectors(store)
+    snapshot = store.content_generation()
+    space = embed.content_space_id(store, snapshot=snapshot)
+    keys, V, _idx = embed.load_content_vectors(store, snapshot=snapshot)
     if V is None or len(keys) < max(int(min_members), _MIN_CORPUS):
         return []
     Vf = V.astype(np.float64)
@@ -111,7 +112,7 @@ def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED) -> l
     return modes
 
 
-def live_modes(store):
+def live_modes(store, *, snapshot=None):
     """Active modes whose centroids live in the CURRENT content space.
 
     The one safe way to read persisted centroids. `enrich_worker` can rebuild the content space
@@ -120,7 +121,7 @@ def live_modes(store):
     against live content vectors must go through here, not `store.modes.list_modes`, or they are one
     enrichment batch away from either a shape error or a silently wrong cosine.
     """
-    space = embed.content_space_id(store)
+    space = embed.content_space_id(store, snapshot=snapshot)
     return [m for m in store.modes.list_modes(active_only=True) if (m.get("space") or "") == space]
 
 

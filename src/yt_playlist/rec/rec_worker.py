@@ -10,10 +10,12 @@ import time
 
 from yt_playlist.rec import artist_model, embed, model_selection, recommend, surfaces
 from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.core.activity import activity_for, WorkClosing
 
 
 class RecWorker:
-    def __init__(self, ctx, debounce_s=2.0, discovery_tick_s=1800, gc_tick_s=86400, gc_initial_s=60):
+    def __init__(self, ctx, debounce_s=2.0, discovery_tick_s=1800, gc_tick_s=86400, gc_initial_s=60,
+                 *, enabled=True):
         self.ctx = ctx
         self.debounce_s = debounce_s
         self.discovery_tick_s = discovery_tick_s   # background discovery scan cadence (~30 min)
@@ -25,24 +27,46 @@ class RecWorker:
         self._modes_force = False
         self._running = False
         self._ticker_started = False
+        self.enabled = enabled
+        self._stop = threading.Event()
+        self._threads = []
+        self.work = activity_for(ctx)
         model_selection.recover_interrupted(ctx.store)
 
     def start_ticker(self):
         """Start the periodic background daemons (idempotent): the budgeted discovery scan (so the
         album/artist pools keep filling between syncs) and the daily generated-playlist GC sweep."""
         with self._lock:
-            if self._ticker_started:
+            if self._ticker_started or not self.enabled:
                 return
+            self._stop.clear()
             self._ticker_started = True
-        threading.Thread(target=self._tick_loop, daemon=True).start()
-        threading.Thread(target=self._gc_loop, daemon=True).start()
+        for target in (self._tick_loop, self._gc_loop):
+            thread = threading.Thread(target=target, daemon=True)
+            self._threads.append(thread)
+            thread.start()
+
+    def shutdown(self):
+        self._stop.set()
+        with self._lock:
+            self._pending = self._modes_pending = self._modes_force = False
+
+    def join(self, timeout):
+        deadline = time.monotonic() + timeout
+        for thread in self._threads:
+            thread.join(max(0, deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in self._threads):
+            raise RuntimeError("Recommendation worker did not stop")
+        self._threads.clear()
+        self._ticker_started = False
 
     def _tick_loop(self):
         from yt_playlist.rec import discover
-        while True:
-            time.sleep(self.discovery_tick_s)
+        while not self._stop.wait(self.discovery_tick_s):
             try:
-                discover.run_discovery(self.ctx, self.ctx.now_fn())
+                self.work.wrap("discovery", discover.run_discovery, self.ctx, self.ctx.now_fn())()
+            except WorkClosing:
+                return
             except Exception:  # noqa: BLE001 - a scan failure must never crash the ticker
                 self.ctx.logger.warning("discovery tick failed", exc_info=True)
 
@@ -51,24 +75,32 @@ class RecWorker:
         after start so a daily-restarted app still collects them, then once per gc_tick_s."""
         from yt_playlist.library import executor
         from yt_playlist.rec import discover
-        time.sleep(self.gc_initial_s)
-        while True:
+        if self._stop.wait(self.gc_initial_s):
+            return
+        while not self._stop.is_set():
             try:
                 clients = self.ctx.client_provider() or {}
                 if clients:        # no clients configured (e.g. pre-setup) -> nothing to delete remotely
-                    collected = executor.gc_generated_playlists(self.ctx.store, clients, self.ctx.now_fn())
+                    collected = self.work.wrap("generated-playlist collection",
+                        executor.gc_generated_playlists, self.ctx.store, clients, self.ctx.now_fn())()
                     if collected:
                         self.ctx.logger.info("GC: collected %d unplayed generated playlist(s): %s",
                                              len(collected), ", ".join(c["title"] for c in collected))
+            except WorkClosing:
+                return
             except Exception:  # noqa: BLE001 - a GC failure must never crash the daemon
                 self.ctx.logger.warning("generated-playlist GC tick failed", exc_info=True)
             try:                   # #52: time-based discovery-pool GC (independent of remote clients)
-                gc = discover.gc_discovery(self.ctx, self.ctx.now_fn())
+                gc = self.work.wrap("discovery collection", discover.gc_discovery,
+                                    self.ctx, self.ctx.now_fn())()
                 if any(gc.values()):
                     self.ctx.logger.info("GC: discovery pool removed %s", gc)
+            except WorkClosing:
+                return
             except Exception:  # noqa: BLE001 - discovery GC must never crash the daemon
                 self.ctx.logger.warning("discovery-pool GC tick failed", exc_info=True)
-            time.sleep(self.gc_tick_s)
+            if self._stop.wait(self.gc_tick_s):
+                return
 
     @property
     def busy(self):
@@ -89,17 +121,33 @@ class RecWorker:
 
     def _schedule(self, *, full, force=False):
         with self._lock:
+            if not self.enabled or self._stop.is_set() or not self.work.accepting:
+                return
             self._pending |= full
             self._modes_pending |= not full
             self._modes_force |= force
             if self._running:
                 return
             self._running = True
-        threading.Thread(target=self._loop, daemon=True).start()
+        self._start_loop()
+
+    def _start_loop(self):
+        try:
+            run = self.work.wrap("recommendation rebuild", self._loop)
+        except WorkClosing:
+            self._running = False
+            return
+        thread = threading.Thread(target=run, daemon=True)
+        self._threads.append(thread)
+        try:
+            thread.start()
+        except BaseException:
+            run.release()
+            self._running = False
+            raise
 
     def _loop(self):
-        while True:
-            time.sleep(self.debounce_s)          # let a burst of triggers settle
+        while not self._stop.wait(self.debounce_s):
             with self._lock:
                 if not (self._pending or self._modes_pending):
                     self._running = False
@@ -117,6 +165,7 @@ class RecWorker:
                 self.ctx.logger.warning("rec worker rebuild failed", exc_info=True)
                 if full and modes:              # a failed full rebuild must not swallow local repair
                     self.trigger_mode_refresh(force=force)
+        self._running = False
 
     def rebuild(self):
         """Synchronous rebuild for the Taste-model 'rebuild' button. Guarded against the background
@@ -128,13 +177,13 @@ class RecWorker:
                 return
             self._running = True
         try:
-            self._do_rebuild()
+            self.work.wrap("recommendation rebuild", self._do_rebuild)()
         finally:
             with self._lock:
                 again = self._pending or self._modes_pending
                 self._running = again
             if again:
-                threading.Thread(target=self._loop, daemon=True).start()
+                self._start_loop()
 
     def _do_mode_refresh(self, *, force=False):
         """Catch up persisted genre groups after startup, catalog updates or enrichment."""
@@ -143,6 +192,8 @@ class RecWorker:
         if model_selection.readiness(store, self.ctx.now_fn())["state"] == "ready":
             self.trigger()
         rebuilt = embed.maybe_rebuild_content_vectors(store)
+        if force and not rebuilt:
+            embed.build_discovered_content_vectors(store)
         if not (force or rebuilt or taste_modes.needs_refresh(store)):
             return
         now = self.ctx.now_fn()
@@ -212,14 +263,6 @@ class RecWorker:
             log.info("rec rebuild: trend rollups built")
         except Exception:  # noqa: BLE001 - trend rollups are best-effort; don't fail the rebuild
             log.warning("rec rebuild: trend-rollup build failed", exc_info=True)
-        # #57 SHADOW: per-mode PPR (random walk) computed in parallel and appended to a persistent log
-        # alongside the cosine ranking, for a non-circular comparison in ~2 weeks. Serves nothing.
-        try:
-            from yt_playlist.rec import ppr
-            nm = ppr.shadow_log(store, now)
-            log.info("rec rebuild: PPR shadow logged %d modes", nm)
-        except Exception:  # noqa: BLE001 - shadow experiment must never break the rebuild
-            log.warning("rec rebuild: PPR shadow log failed", exc_info=True)
         # #28 artist-relationship model, built alongside the track embedding. Guarded: an artist-model
         # failure must never break the track rebuild (the model is consumed by nothing critical yet).
         try:

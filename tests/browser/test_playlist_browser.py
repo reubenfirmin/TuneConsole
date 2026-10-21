@@ -183,6 +183,13 @@ def test_playing_track_table_heart_survives_status_polls(live_playlist_app, page
         with page.expect_response(lambda r: r.url.endswith(("/now-playing/rate", "/track/like")),
                                   timeout=5000):
             heart.click()
+            frame = json.loads(extension.recv(timeout=5))
+            while frame == {"ping": 1}:
+                frame = json.loads(extension.recv(timeout=5))
+            assert {k: frame[k] for k in ("type", "action", "videoId")} == {
+                "type": "rate", "action": "like", "videoId": "v0"}
+            extension.send(json.dumps({"id": frame["id"], "status": 200,
+                                       "body": json.dumps({"ok": True})}))
         expect(heart).to_have_attribute("aria-pressed", pressed)
         # A poll can arrive before the player applies the click. It must not undo the user's choice.
         page.evaluate("""() => {
@@ -198,11 +205,6 @@ def test_playing_track_table_heart_survives_status_polls(live_playlist_app, page
             expect(widget.locator(".hs-heart")).to_have_class(re.compile(r"\bon\b"))
         else:
             expect(widget.locator(".hs-heart")).not_to_have_class(re.compile(r"\bon\b"))
-
-        frame = json.loads(extension.recv(timeout=5))
-        while frame == {"ping": 1}:
-            frame = json.loads(extension.recv(timeout=5))
-        assert frame == {"type": "rate", "action": "like"}
 
         extension.send(json.dumps({**snapshot, "likeStatus": desired_status}))
         with page.expect_response(lambda r: r.url.endswith("/bridge/status")

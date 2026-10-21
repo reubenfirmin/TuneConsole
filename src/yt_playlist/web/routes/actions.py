@@ -29,12 +29,23 @@ def build(ctx) -> APIRouter:
             kept = params.get("kept")
             deleted = params.get("deleted") or []
             members = params.get("members") or []
+            if params.get("partial"):
+                desc = f"partial merge into “{kept}”"
+                if deleted:
+                    desc += ", deleted " + ", ".join(f"“{t}”" for t in deleted)
+                if params.get("error"):
+                    desc += f". {params['error']}"
+                return desc
             if deleted:
                 return f"merged into “{kept}”, deleted " + ", ".join(f"“{t}”" for t in deleted)
             if members:
                 return "merged " + ", ".join(f"“{m}”" for m in members) + " (kept all)"
             return f"merge edit on “{kept}”" if kept else "merge edit (updated both)"
         if action.kind == MOVE_IDENTITY:
+            if params.get("delete_error"):
+                return f"copy of “{params.get('title')}”; source kept: {params['delete_error']}"
+            if params.get("skipped") or params.get("unresolved"):
+                return f"partial copy of “{params.get('title')}”; source kept"
             verb = "moved" if params.get("deleted") else "copied"
             return f"{verb} “{params.get('title')}” to another identity"
         if action.kind == DELETE_EMPTY:
@@ -81,8 +92,19 @@ def build(ctx) -> APIRouter:
     @router.get("/actions")
     def actions(request: Request):
         # Drafts save merge-editor selections; they haven't changed any playlists.
-        rows = [{"a": a, "desc": _action_desc(a), "undoable": is_undoable(a.kind),
-                 "when": _when(a.created_at)} for a in store.get_actions() if a.status != "draft"]
+        rows = []
+        for a in store.get_actions():
+            if a.status == "draft":
+                continue
+            try:
+                recovery = json.loads(a.undo_json or "{}").get("recovery", {})
+            except (ValueError, TypeError, AttributeError):
+                recovery = {}
+            steps = recovery.get("steps", [])
+            rows.append({"a": a, "desc": _action_desc(a), "undoable": is_undoable(a.kind),
+                         "when": _when(a.created_at), "recovery_error": recovery.get("error"),
+                         "recovery_progress": f"{sum(s.get('phase') == 'complete' for s in steps)}/{len(steps)}",
+                         "recovered": [s["created_id"] for s in steps if s.get("created_id")]})
         return templates.TemplateResponse(request, "actions.html", {
             "rows": rows, "flash": request.query_params.get("flash"),
             "flasherr": request.query_params.get("flasherr")})

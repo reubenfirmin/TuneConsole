@@ -44,6 +44,7 @@
     </template>
   </div>
   <span class="hs-sync rl-reason" x-show="radioReason" x-cloak x-text="radioReason"></span>
+  <p class="rl-sub" role="status" x-show="radioApplyError" x-cloak x-text="radioApplyError"></p>
   {# Off: the panel renders right here, collapsed by default. #}
   <template x-if="!radioActive">
     <div class="rl-customize-inline" x-show="customizeOpen" x-cloak>

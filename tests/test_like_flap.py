@@ -6,6 +6,8 @@
 #   3. graduation is once-EVER per key (the stamp survives clear/re-record cycles)
 import json
 
+import pytest
+
 from yt_playlist.library import live_plays, player_events, sync
 from yt_playlist.rec import rec_params, recommend
 from yt_playlist.util.matching import identity_key
@@ -72,6 +74,87 @@ def test_dislike_still_beats_like_within_a_run(store):
     assert KEY not in store.recent_liked_keys()
 
 
+def _item_rating(store, iid):
+    return tuple(store.conn.execute(
+        "SELECT status,observed_at FROM item_ratings WHERE identity_id=? AND video_id='v1'",
+        (iid,)).fetchone())
+
+
+@pytest.mark.parametrize("status", ["LIKE", "DISLIKE"])
+@pytest.mark.parametrize("order", ["indifferent_last", "like_last"])
+def test_missing_rating_context_preserves_feedback_until_complete_sync(store, monkeypatch, status, order):
+    iid = store.upsert_identity("main", "cred", None, True)
+    client = _client(order)
+    client._tracks["A"] = [_t(status)]
+    sync.sync_identity(store, iid, client, now=1000.0)
+    cached = next(p for p in store.get_playlists() if p.ytm_playlist_id == "A")
+    cached_tracks = store.get_playlist_tracks_with_meta(cached.id)
+    fetch = client.get_playlist
+
+    def unavailable(pid, limit=None):
+        if pid == "A":
+            raise RuntimeError("liked context unavailable")
+        return fetch(pid, limit=limit)
+
+    monkeypatch.setattr(sync, "with_retry", lambda fn, **kw: fn())
+    monkeypatch.setattr(client, "get_playlist", unavailable)
+    sync.sync_identity(store, iid, client, now=2000.0)
+    assert _item_rating(store, iid) == (status, 1000.0)
+    assert (KEY in store.recent_liked_keys()) == (status == "LIKE")
+    assert (KEY in store.disliked_identity_keys()) == (status == "DISLIKE")
+    assert store.get_playlist_tracks_with_meta(cached.id) == cached_tracks
+
+    # A later successful read restores authority, without re-graduating the rating.
+    theme = store.get_theme("artist:Band")
+    monkeypatch.setattr(client, "get_playlist", fetch)
+    sync.sync_identity(store, iid, client, now=3000.0)
+    assert _item_rating(store, iid) == (status, 3000.0)
+    assert store.get_theme("artist:Band") == theme
+    client._tracks["A"] = [_t("INDIFFERENT")]
+    sync.sync_identity(store, iid, client, now=4000.0)
+    assert _item_rating(store, iid) == ("INDIFFERENT", 4000.0)
+    assert KEY not in store.recent_liked_keys()
+    assert KEY not in store.disliked_identity_keys()
+
+
+@pytest.mark.parametrize("status", ["LIKE", "DISLIKE"])
+def test_partial_sync_still_accepts_explicit_ratings(store, monkeypatch, status):
+    iid = store.upsert_identity("main", "cred", None, True)
+    client = _client("indifferent_last")
+    monkeypatch.setattr(sync, "with_retry", lambda fn, **kw: fn())
+
+    def partial(pid, limit=None):
+        if pid == "A":
+            raise RuntimeError("other context unavailable")
+        return {"tracks": [_t(status)]}
+
+    monkeypatch.setattr(client, "get_playlist", partial)
+    sync.sync_identity(store, iid, client, now=1000.0)
+    assert _item_rating(store, iid) == (status, 1000.0)
+    assert (KEY in store.recent_liked_keys()) == (status == "LIKE")
+    assert (KEY in store.disliked_identity_keys()) == (status == "DISLIKE")
+
+
+@pytest.mark.parametrize("detail", [
+    {"tracks": [], "trackCount": 1},
+    {"tracks": [], "continuation": "next-page"},
+    {"tracks": [_t(None)]},
+    {},
+    {"error": "unavailable", "tracks": []},
+    {"status": "STATUS_FAILED", "tracks": []},
+])
+def test_incomplete_rating_context_is_unknown(store, monkeypatch, detail):
+    iid = store.upsert_identity("main", "cred", None, True)
+    client = _client("indifferent_last")
+    sync.sync_identity(store, iid, client, now=1000.0)
+    fetch = client.get_playlist
+    monkeypatch.setattr(client, "get_playlist",
+                        lambda pid, limit=None: detail if pid == "A" else fetch(pid, limit=limit))
+    sync.sync_identity(store, iid, client, now=2000.0)
+    assert _item_rating(store, iid) == ("LIKE", 1000.0)
+    assert KEY in store.recent_liked_keys()
+
+
 def _ctx(s):
     return type("C", (), {"store": s})()
 
@@ -113,6 +196,7 @@ def test_rate_like_pevent_acts_with_action_provenance(store):
     store.upsert_track("v1", "Song", "Band", "", None)
     body = json.dumps({"target": {"videoId": "v1"}})
     msg = {"kind": "rate", "url": ".../youtubei/v1/like/like", "body": body, "brandId": ""}
+    msg.update(phase="settled", success=True, httpStatus=200)
     player_events.handle_player_event(_ctx(store), msg, 1000.0)
     assert store.like_provenance(KEY) == "action"
 

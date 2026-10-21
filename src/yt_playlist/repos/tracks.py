@@ -1,7 +1,6 @@
 """TrackRepo: track rows and their genre/year enrichment."""
 from yt_playlist.util.matching import identity_key, normalize, recording_title
 from yt_playlist.core import catalog
-from yt_playlist.util.thumbnails import is_placeholder_art
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -119,7 +118,7 @@ class TrackRepo(Repo):
         track_id = catalog.resolve_entry(self.conn, track_id)
         """One track for an explicit user-requested lookup, even if other metadata is complete."""
         row = self.conn.execute(
-            "SELECT id, recording_id, identity_key, video_id, title, artist, mb_recording_id, thumbnail FROM catalog_tracks WHERE id=?",
+            "SELECT id, recording_id, identity_key, video_id, title, artist, mb_recording_id, thumbnail, duration_s FROM catalog_tracks WHERE id=?",
             (track_id,)).fetchone()
         return dict(row) if row is not None else None
 
@@ -135,17 +134,9 @@ class TrackRepo(Repo):
 
     @synchronized
     def set_track_art(self, track_id, url) -> None:
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        """Fill-only cover art from a provider. YouTube's own cover is authoritative and is never
-        overwritten, but its generic grey disc (served whenever it has no art, which for an upload is
-        always) counts as no art, so a real cover may replace it."""
-        if not url:
-            return
-        row = self.conn.execute("SELECT thumbnail FROM catalog_tracks WHERE id=?", (track_id,)).fetchone()
-        if row is None or (row["thumbnail"] and not is_placeholder_art(row["thumbnail"])):
-            return
-        self.conn.execute("UPDATE catalog_tracks SET thumbnail=? WHERE id=?", (url, track_id))
-        self.conn.commit()
+        """Persist provider fallback using the same artwork precedence as ingestion."""
+        with self.conn:
+            catalog.update_artwork(self.conn, track_id, url, source='provider')
 
     @synchronized
     def set_track_genre(self, track_id, genre) -> None:

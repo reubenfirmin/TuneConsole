@@ -49,7 +49,7 @@ def test_sync_identity_soft_skips_on_bridge_disconnect(store):
 def test_sync_all_records_last_sync_at(store):
     iid = store.upsert_identity("main", "cred", None, True)
     client = FakeClient(playlists=[{"playlistId": "PL1", "title": "Mix", "count": 1}],
-                        tracks={"PL1": [_track("v1", "A", "X")]})
+                        tracks={"PL1": [{**_track("v1", "A", "X"), "likeStatus": "INDIFFERENT"}]})
     sync_all(store, {iid: client}, now=1234.0)
     assert store.get_setting("last_sync_at") == "1234.0"
 
@@ -252,4 +252,4 @@ def test_failed_playlist_logs_context_preserves_tracks_and_reports_partial_sync(
     assert "https://music.youtube.com/playlist?list=PL_BAD" in caplog.text
     assert "RAW_RESPONSE_MARKER" not in caplog.text
     assert "2 playlists listed, 1 refreshed, 1 skipped" in caplog.text
-    assert events[-1]["text"] == "Music brand: done (1 playlists refreshed, 1 skipped)"
+    assert events[-1]["text"] == "Music brand: partial (1 playlists refreshed, 1 skipped)"

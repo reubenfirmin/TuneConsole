@@ -29,8 +29,8 @@ def test_prepare_buckets_by_nearest_mode(monkeypatch, store):
     V = np.array([[1.0, 0.05], [0.05, 1.0]], dtype=np.float32)
     V = V / np.linalg.norm(V, axis=1, keepdims=True)
     idx = {"k1": 0, "k2": 1}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (keys, V, idx))
-    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s: ([], None, {}))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
+    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s, **kw: ([], None, {}))
     pool = [_Item("k1", 0.9), _Item("k2", 0.8)]
     for fn in ("for_you", "explore_for_you", "comfort_listening"):
         monkeypatch.setattr(recommend, fn, lambda s, n, limit=0, _p=pool: list(_p))
@@ -64,8 +64,8 @@ def test_temporal_excludes_disliked_library_tracks(monkeypatch, store):
     V = np.array([[1.0, 0.0], [0.95, 0.05]], dtype=np.float32)
     V = V / np.linalg.norm(V, axis=1, keepdims=True)
     idx = {"keep": 0, "hated": 1}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (keys, V, idx))
-    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s: ([], None, {}))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
+    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s, **kw: ([], None, {}))
     for fn in ("for_you", "explore_for_you", "comfort_listening"):
         monkeypatch.setattr(recommend, fn, lambda s, n, limit=0: [])
     monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [])
@@ -114,8 +114,8 @@ def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(monkeypatch, st
     keys = [f"k{i}" for i in range(500)]
     vectors = np.array([[1., 0.]] * 450 + [[0., 1.]] * 50, dtype=np.float32)
     monkeypatch.setattr(embed, "load_content_vectors",
-                        lambda s: (keys, vectors, {key: i for i, key in enumerate(keys)}))
-    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s: ([], None, {}))
+                        lambda s, **kw: (keys, vectors, {key: i for i, key in enumerate(keys)}))
+    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s, **kw: ([], None, {}))
     pool = [_Item(key, 1.0) for key in keys]
     for fn in ("for_you", "explore_for_you", "comfort_listening"):
         monkeypatch.setattr(recommend, fn, lambda s, n, limit: pool[:limit])

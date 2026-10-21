@@ -39,7 +39,8 @@ def handle_play_event(ctx, msg, now) -> bool:
     same-track re-report, e.g. a likeStatus change, merges into the previous event instead)."""
     title = (msg.get("title") or "").strip()
     artist = (msg.get("artist") or "").strip()
-    if not title:
+    if (not title or msg.get("metadataVerified") is False or msg.get("paused")
+            or msg.get("muted") or msg.get("tabMuted") or msg.get("volume") == 0):
         return False
     store = ctx.store
     ident = resolve_identity(store, (msg.get("brandId") or "").strip())

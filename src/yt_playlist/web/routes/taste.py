@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
-from yt_playlist.rec import autotune_run, eval_recs, model_selection, rec_params, recommend, rose, taste_viz
+from yt_playlist.rec import autotune_run, eval_recs, experiments, model_selection, rec_params, recommend, rose, taste_viz
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.web.context import form_float
 
@@ -355,6 +355,25 @@ def build(ctx) -> APIRouter:
         if trace is None:
             raise HTTPException(404, "Recommendation impression not found.")
         return trace
+
+    @router.get("/taste/experiments")
+    def experiment_report(start: float | None = None, end: float | None = None):
+        now = ctx.now()
+        end = now if end is None else end
+        start = max(0, end - 30 * 86400) if start is None else start
+        if not (0 <= start < end <= now and end - start <= 90 * 86400):
+            raise HTTPException(422, "Choose a past date range of at most 90 days.")
+        return {**store.experiment_report(start, end, now), **experiments.lifecycle(store),
+                "decisions": experiments.decisions(store)}
+
+    @router.post("/taste/experiments/decision")
+    async def experiment_decision(request: Request):
+        form = await request.form()
+        try:
+            return experiments.decide(store, form.get("decision"), form.get("cohort", ""),
+                                      form.get("reason", ""), ctx.now())
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     def _comparison_context():
         raw = store.get_setting(comparison_setting)

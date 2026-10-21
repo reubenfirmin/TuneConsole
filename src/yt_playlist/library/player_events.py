@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 from yt_playlist.library.live_plays import resolve_identity
 from yt_playlist.rec import graduation
+from yt_playlist.util.curation import confirmed_rate
 
 PLAYBACK_KINDS = {"track_exit", "ended", "state", "tick", "volume", "bye"}
 CURATION_KINDS = {"rate", "playlist_edit", "feedback", "subscription", "share_intent"}
@@ -82,9 +83,10 @@ def handle_player_event(ctx, msg, now) -> bool:
                    "href": msg.get("href")}
         if action:
             payload["action"] = action
+        payload.update({k: msg[k] for k in ("phase", "success", "httpStatus", "error") if k in msg})
     store.record_player_event(ident, kind, video_id, position, duration, playlist,
                               json.dumps(payload) if payload else None, now)
-    if kind == "rate" and video_id and action in _RATE_STATUS:
+    if kind == "rate" and confirmed_rate(msg) and video_id and action in _RATE_STATUS:
         store.record_item_rating(ident,video_id,_RATE_STATUS[action],source='action',now=now)
         key = store.identity_key_for_video(video_id)
         if key:

@@ -74,7 +74,7 @@ def _parse_played_date(played, taken_at, source_timezone=None):
 
 class HistoryRepo(Repo):
     @synchronized
-    def add_history_snapshot(self, identity_id, taken_at, item_keys) -> int:
+    def add_history_snapshot(self, identity_id, taken_at, item_keys, *, source="unknown") -> int:
         """Record a raw snapshot: every key becomes a history_item. The plays model uses
         record_history_plays (which dedups); this stays raw for tests and explicit callers."""
         cur = self.conn.execute(
@@ -82,8 +82,8 @@ class HistoryRepo(Repo):
             (identity_id, taken_at))
         sid = cur.lastrowid
         self.conn.executemany(
-            "INSERT INTO history_items(snapshot_id,identity_key) VALUES (?,?)",
-            [(sid, k) for k in item_keys])
+            "INSERT INTO history_items(snapshot_id,identity_key,source) VALUES (?,?,?)",
+            [(sid, k, source) for k in item_keys])
         self.conn.commit()
         return sid
 
@@ -108,6 +108,7 @@ class HistoryRepo(Repo):
         day.
         """
         by_date: dict = {}
+        independent: dict = {}
         for item in items:
             bare = isinstance(item, str)
             key, played = (item, None) if bare else item
@@ -120,16 +121,26 @@ class HistoryRepo(Repo):
                 if play_ts is None:                                 # undateable window row: not a play today
                     continue
             by_date.setdefault(play_ts, set()).add(key)
+            if bare:
+                independent.setdefault(play_ts, set()).add(key)
         recorded = 0
         for play_ts, keys in by_date.items():
             sid = self._snapshot_for_date(identity_id, play_ts)
             new = self._new_history_keys(sid,keys)
             if new:
-                self.conn.executemany("INSERT INTO history_items(snapshot_id, identity_key) VALUES (?,?)",
-                                      [(sid, k) for k in new])
+                self.conn.executemany(
+                    "INSERT INTO history_items(snapshot_id, identity_key, source) VALUES (?,?,'ytm_history')",
+                    [(sid, k) for k in new])
                 recorded += len(new)
+            self._protect_history_keys(sid, independent.get(play_ts, ()))
         self.conn.commit()
         return recorded
+
+    def _protect_history_keys(self, snapshot_id, keys):
+        # A later independent observation still counts when the daily row already exists.
+        self.conn.executemany(
+            "UPDATE history_items SET source='independent' WHERE snapshot_id=? AND identity_key=?",
+            [(snapshot_id, catalog.resolve_key(self.conn, k) or k) for k in keys])
 
     def _new_history_keys(self, snapshot_id, keys):
         existing = {r['identity_key'] for r in self.conn.execute(
@@ -363,8 +374,25 @@ class HistoryRepo(Repo):
                     "INSERT INTO history_items(snapshot_id, identity_key) VALUES (?,?)",
                     [(sid, k) for k in new])
                 added += len(new)
+            self._protect_history_keys(sid, keys)
         self.conn.commit()
         return added
+
+    @synchronized
+    def record_takeout_import(self, fingerprint, identity_id, imported_at, parsed, unparsed_dates) -> int:
+        """Record each upload's observed extent without claiming verified account-wide coverage.
+
+        Watch-history files contain neither account proof nor an authoritative export interval.
+        Even a fully parsed file may be filtered or partial; only a separately verified import
+        may acquire coverage_start/end, account_verified and complete in a future verification flow.
+        """
+        cur = self.conn.execute(
+            "INSERT INTO takeout_imports(identity_id,fingerprint,imported_at,observed_start,"
+            "observed_end,unparsed_dates) VALUES (?,?,?,?,?,?)",
+            (identity_id, fingerprint, imported_at, parsed[0]['ts'] if parsed else None,
+             parsed[-1]['ts'] if parsed else None, unparsed_dates))
+        self.conn.commit()
+        return cur.lastrowid
 
     @synchronized
     def import_play_events(self, identity_id, rows, source="takeout") -> int:

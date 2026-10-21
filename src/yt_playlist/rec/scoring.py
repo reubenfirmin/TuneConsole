@@ -339,7 +339,7 @@ def discovery_facet_weight(store, family, now):
 
     Returns a positive multiplier to scale a candidate's surfacing score by, or None to HARD-EXCLUDE
     it (when the family's permanent `genre:` weight is exactly 0: muting techno on the Taste tab
-    yields zero techno discovery, stronger than the in-library de-rank). The multiplier is
+    yields zero techno discovery, matching the library's genre exclusions). The multiplier is
     permanent_weight × standing_lean × a DAMPED transient multiplier, so 'mute' bends hard while
     'less house lately' only nudges. An untagged candidate (family falsy) is neutral (1.0) and never
     excluded. We don't banish what we can't classify."""
@@ -383,7 +383,7 @@ MOOD_ALPHA = 0.35   # how hard a mood event tilts the lanes, relative to the tas
 mood_tilt = transient.centroid_tilt   # back-compat: tests/callers use recommend.mood_tilt(store, now, V, idx)
 
 
-def _audio_tilt_boost(store, now, idx, content_vecs=None):
+def _audio_tilt_boost(store, now, idx, content_vecs=None, content_snapshot=None):
     """Per-row alignment to the recent-listening audio tilt, including its fading magnitude
     (#45), aligned to V rows via `idx` (key -> row). None when there is no audio tilt or no content
     vectors built. A candidate without a content vector contributes 0, so the term degrades gracefully
@@ -392,10 +392,16 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None):
     `content_vecs` (a (keys, CV, cidx) triple) overrides the source: warm callers leave it None and get
     the library content vectors; the cold path passes the discovered-content vectors, whose keys are
     out-of-corpus and so absent from the library store."""
-    atilt = transient.audio_centroid_tilt(store, now)
+    if content_vecs is None or content_snapshot is not None:
+        snapshot = content_snapshot if content_snapshot is not None else store.content_generation()
+        library = embed.load_content_vectors(store, snapshot=snapshot)
+        atilt = transient.audio_centroid_tilt(store, now, content_vecs=library)
+        content_vecs = library if content_vecs is None else content_vecs
+    else:
+        atilt = transient.audio_centroid_tilt(store, now)
     if atilt is None:
         return None
-    _keys, CV, cidx = embed.load_content_vectors(store) if content_vecs is None else content_vecs
+    _keys, CV, cidx = content_vecs
     if CV is None:
         return None
     boost = np.zeros(len(idx))
@@ -406,7 +412,8 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None):
     return boost
 
 
-def _mood_components(scores, store, now, V, idx, content_vecs=None, evidence_vecs=None):
+def _mood_components(scores, store, now, V, idx, content_vecs=None, evidence_vecs=None,
+                     content_snapshot=None):
     """Return the exact additive vector-score components used by `_apply_mood`.
 
     `evidence_vecs` optionally supplies (V, idx) for producing collaborative/session tilts,
@@ -431,14 +438,16 @@ def _mood_components(scores, store, now, V, idx, content_vecs=None, evidence_vec
     # influence strength, not a share of picks; any range cleanup must migrate saved values.
     w = rec_params.get_param(store, "audio_transient_w")
     if w > 0:
-        boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs)
+        boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs,
+                                  content_snapshot=content_snapshot)
         if boost is not None:
             components["audio"] = w * boost
     components["combined"] = sum(components[name] for name in ("durable", "transient", "session", "audio"))
     return components
 
 
-def _apply_mood(scores, store, now, V, idx, content_vecs=None, evidence_vecs=None):
+def _apply_mood(scores, store, now, V, idx, content_vecs=None, evidence_vecs=None,
+                content_snapshot=None):
     """Blend the transient tilts into per-track scores. #85: each tilt decays internally, per event, on
     its own wall clock (see transient.decay_weight); there is no separate external staleness relax here
     any more, so this just adds the (already-decayed) tilts straight in.
@@ -456,7 +465,8 @@ def _apply_mood(scores, store, now, V, idx, content_vecs=None, evidence_vecs=Non
     vectors); the cold path passes the discovered-content vectors so out-of-corpus tracks get the tilt.
     `evidence_vecs` supplies the collaborative evidence corpus when it differs from the candidates.
     """
-    return _mood_components(scores, store, now, V, idx, content_vecs, evidence_vecs)["combined"]
+    return _mood_components(scores, store, now, V, idx, content_vecs, evidence_vecs,
+                            content_snapshot)["combined"]
 
 
 def score_with_traces(store, taste, keys, V, idx, now):

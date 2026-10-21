@@ -7,6 +7,9 @@ class FakeDao:
         self._c = content
         self._a = audio or {}
 
+    def library_keys(self):
+        return set(self._c) | set(self._a)
+
     def track_content(self):
         return self._c
 

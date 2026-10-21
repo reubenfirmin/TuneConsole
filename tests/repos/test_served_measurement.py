@@ -209,6 +209,26 @@ def test_cold_exit_depth_and_staleness_have_samples_per_surface(store):
     assert score["by_surface"]["similar"]["verdict"] is None
 
 
+@pytest.mark.parametrize("position,outcome", [(20, "skip"), (190, "completion")])
+def test_cold_exit_attribution_survives_discovery_removal_and_report_boundaries(store, position, outcome):
+    iid = store.upsert_identity("main", "cred", None, True)
+    key = "cold|artist"
+    store.upsert_discovered_track(key, "cold", "Cold", "Artist", "", None,
+                                  "Techno", None, "source", 0)
+    measurement.record_recommendations(store, "home", [{"key": key}], 100)
+    measurement.record_recommendations(store, "similar", [{"key": key}], 150)
+    store.record_player_event(iid, "track_exit", "cold", position, 200, None, None, 170)
+    before = store.recommendation_scorecard(90, 160)
+    assert before[outcome] == 1 and before["by_surface"]["similar"][outcome] == 1
+
+    with store.conn:
+        store.conn.execute("DELETE FROM discovered_tracks WHERE identity_key=?", (key,))
+    assert store.get_discovered_tracks() == []
+    assert store.recommendation_scorecard(90, 160) == before
+    assert store.recommendation_scorecard(90, 110)[outcome] == 0
+    assert store.recommendation_scorecard(150, 160)[outcome] == 1
+
+
 def test_retention_prunes_responses_and_only_orphaned_old_policies(store):
     measurement.record_recommendations(store, "similar", [{"key": "a|artist"}], 10)
     store.record_recommendation_outcomes("old", "open", ["a|artist"], 20)

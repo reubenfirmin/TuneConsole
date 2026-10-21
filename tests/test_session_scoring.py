@@ -13,7 +13,7 @@ def _silence_other_terms(monkeypatch):
     """Neutralize the mood (collaborative) tilt and the audio tilt so a test can isolate the
     session term's contribution."""
     monkeypatch.setattr(scoring.transient, "centroid_tilt", lambda s, now, V, idx: None)
-    monkeypatch.setattr(scoring, "_audio_tilt_boost", lambda s, now, idx, content_vecs=None: None)
+    monkeypatch.setattr(scoring, "_audio_tilt_boost", lambda s, now, idx, **kwargs: None)
 
 
 def test_session_tilt_raises_targeted_candidate_by_alpha_times_cosine(monkeypatch, store):
@@ -57,7 +57,7 @@ def test_none_session_tilt_is_a_no_op(monkeypatch, store):
     monkeypatch.setattr(scoring.transient, "centroid_tilt", lambda s, now, V, idx: mood_tilt)
     audio_boost = np.array([0.2, -0.1], dtype=np.float64)
     monkeypatch.setattr(scoring, "_audio_tilt_boost",
-                        lambda s, now, idx, content_vecs=None: audio_boost)
+                        lambda s, now, idx, **kwargs: audio_boost)
 
     V = np.array([[1.0, 2.0], [2.0, 1.0]], dtype=np.float64)
     idx = {"x": 0, "y": 1}
@@ -76,7 +76,7 @@ def test_none_session_tilt_is_a_no_op(monkeypatch, store):
 def test_session_term_composes_with_mood_tilt(monkeypatch, store):
     """Both the mood (collaborative) tilt and the session tilt present at once: their deltas add,
     each computed independently against the same L2-normalised V rows."""
-    monkeypatch.setattr(scoring, "_audio_tilt_boost", lambda s, now, idx, content_vecs=None: None)
+    monkeypatch.setattr(scoring, "_audio_tilt_boost", lambda s, now, idx, **kwargs: None)
 
     mood_tilt = np.array([0.0, 1.0], dtype=np.float64)
     session_tilt = np.array([1.0, 0.0], dtype=np.float64)

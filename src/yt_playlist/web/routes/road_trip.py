@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from yt_playlist.library import executor
 from yt_playlist.rec import measurement, road_trip as road_trip_rec
 from yt_playlist.util.matching import identity_key
+from yt_playlist.core.activity import activity_for
 
 MIN_TARGET_MINUTES = 15
 MAX_TARGET_MINUTES = 12 * 60
@@ -32,21 +33,6 @@ MAX_TARGET_MINUTES = 12 * 60
 def _spawn(fn):
     """Run a build worker off the request thread. Module-level so tests can run it inline."""
     threading.Thread(target=fn, daemon=True).start()
-
-
-# Recipe ids with a build worker alive in THIS process, and the lock that keeps two workers (a
-# double-clicked Build) off the same draft. A draft that says it is building but isn't in here has
-# been orphaned - the process restarted, or the worker died - and is closed out on the next render
-# rather than polling forever.
-_BUILDING: set = set()
-_BUILD_LOCK = threading.Lock()
-_WORKER_LOCKS: dict = {}
-
-
-def _draft_worker_lock(recipe_id):
-    """The per-recipe lock a build worker holds while it walks that draft's pending inputs."""
-    with _BUILD_LOCK:
-        return _WORKER_LOCKS.setdefault(recipe_id, threading.Lock())
 
 
 def _clean_list(raw):
@@ -67,6 +53,14 @@ def _pct(raw, default):
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates, now_fn = ctx.store, ctx.templates, ctx.now_fn
+    # Per-application ownership: another app using the same recipe ids is independent.
+    _BUILDING = set()
+    _BUILD_LOCK = threading.Lock()
+    _WORKER_LOCKS = {}
+
+    def _draft_worker_lock(recipe_id):
+        with _BUILD_LOCK:
+            return _WORKER_LOCKS.setdefault(recipe_id, threading.Lock())
 
     def _draft_ctx(recipe_id=None):
         """The draft to show: a named recipe's, else whichever was touched most recently."""
@@ -182,7 +176,7 @@ def build(ctx) -> APIRouter:
             if state["pending"] and client is not None:
                 with _BUILD_LOCK:
                     _BUILDING.add(recipe_id)
-                _spawn(lambda: _fill_in_their_half(recipe_id, client))
+                _spawn(activity_for(ctx).wrap("Road Trip build", _fill_in_their_half, recipe_id, client))
         return _body(request, recipe_id)
 
     @router.delete("/road_trip/recipes/{recipe_id}")
@@ -211,7 +205,7 @@ def build(ctx) -> APIRouter:
         if state["building"]:
             with _BUILD_LOCK:            # registered here, not in the worker: a poll can land first
                 _BUILDING.add(recipe_id)
-            _spawn(lambda: _fill_in_their_half(recipe_id, client))
+            _spawn(activity_for(ctx).wrap("Road Trip build", _fill_in_their_half, recipe_id, client))
         elif not state["picks"]:
             return _body(request, recipe_id,
                          error=f"Couldn't build \"{recipe['name']}\" - no tracks found.")
@@ -273,7 +267,7 @@ def build(ctx) -> APIRouter:
         if state.get("pending") and client is not None:
             with _BUILD_LOCK:
                 _BUILDING.add(recipe_id)
-            _spawn(lambda: _fill_in_their_half(recipe_id, client))
+            _spawn(activity_for(ctx).wrap("Road Trip build", _fill_in_their_half, recipe_id, client))
         return _body(request, recipe_id)
 
     @router.post("/road_trip/draft/{recipe_id}/tilt")
@@ -361,7 +355,7 @@ def build(ctx) -> APIRouter:
             return response("Couldn't save it - connect an account and keep at least one track.")
         stats = state["stats"]
         try:
-            saved = await asyncio.to_thread(
+            saved = await activity_for(ctx).to_thread(
                 executor.create_generated_playlist, store, result["name"], tracks,
                 client, now_fn(), identity_id,
                 recipe={"model": "road_trip", "road_trip_recipe_id": recipe_id, "journey": "road_trip",
@@ -379,8 +373,8 @@ def build(ctx) -> APIRouter:
             bridge = getattr(ctx, "bridge", None)
             if bridge is not None and getattr(bridge, "connected", False):
                 watch_url = f"https://music.youtube.com/watch?list={saved['new_ytm']}"
-                threading.Thread(target=executor.navigate_when_ready,
-                                 args=(client, bridge, saved["new_ytm"], watch_url), daemon=True).start()
+                activity_for(ctx).start_thread(executor.navigate_when_ready,
+                                 args=(client, bridge, saved["new_ytm"], watch_url))
         except Exception:  # noqa: BLE001 - close the loading screen and leave the draft available
             ctx.logger.exception("save road trip %s failed", recipe_id)
             return response("YouTube returned an unexpected response.")

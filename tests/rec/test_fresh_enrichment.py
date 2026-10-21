@@ -118,7 +118,7 @@ def test_enrichment_updates_fresh_ranking_modes_and_generated_playlist(store, mo
     fresh_pool.prepare(store, 200)
     assert [t["key"] for t in fresh_pool.pick(store, 200, size=4)] == reference
 
-    def waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None):
+    def waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None, **kwargs):
         for track in batch:
             sink = sink_for(track)
             sink.set_enrichment(a["genre"], a["year"])

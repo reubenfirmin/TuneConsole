@@ -1,9 +1,57 @@
 """ActionRepo: the undoable action log (merges, moves, dupe-deletes, undos)."""
+import hashlib
+import json
+from pathlib import Path
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.models import Action
 
 
 class ActionRepo(Repo):
+    @synchronized
+    def undo_lock_key(self, action_id):
+        database = next(r[2] for r in self.conn.execute("PRAGMA database_list") if r[1] == "main")
+        database = str(Path(database).resolve()) if database else f"memory-{id(self.conn)}"
+        return hashlib.sha256(f"{database}:{action_id}".encode()).hexdigest()
+
+    @synchronized
+    def claim_undo(self, action_id, now):
+        """Claim under the matching OS lock, including a claim abandoned by a crashed process."""
+        action = self.get_action(action_id)
+        if action is None:
+            raise ValueError(f"no such action {action_id}")
+        from yt_playlist.util.action_kinds import is_undoable
+        if not is_undoable(action.kind) or action.status not in ("executed", "undo_failed", "undoing"):
+            raise ValueError(f"action {action_id} ({action.kind}/{action.status}) is not undoable")
+        with self.conn:
+            changed = self.conn.execute(
+                "UPDATE actions SET status='undoing',executed_at=? WHERE id=? AND status=?",
+                (now, action_id, action.status)).rowcount
+        if changed != 1:
+            raise ValueError("Undo was claimed by another request. Reload the Action Log.")
+        return action
+
+    @synchronized
+    def save_undo_progress(self, action_id, undo, now, *, failed=False):
+        with self.conn:
+            changed = self.conn.execute(
+                "UPDATE actions SET undo_json=?,status=?,executed_at=? WHERE id=? AND status='undoing'",
+                (json.dumps(undo), "undo_failed" if failed else "undoing", now, action_id)).rowcount
+        if changed != 1:
+            raise ValueError("Undo no longer owns this action. Reload the Action Log.")
+
+    @synchronized
+    def finish_undo(self, action_id, undo, now):
+        from yt_playlist.util.action_kinds import UNDO
+        with self.conn:
+            changed = self.conn.execute(
+                "UPDATE actions SET status='undone',undo_json=?,executed_at=? "
+                "WHERE id=? AND status='undoing'", (json.dumps(undo), now, action_id)).rowcount
+            if changed != 1:
+                raise ValueError("Undo no longer owns this action. Reload the Action Log.")
+            self.conn.execute(
+                "INSERT INTO actions(kind,params_json,plan_json,undo_json,status,created_at) "
+                "VALUES (?,?,?,?,?,?)", (UNDO, json.dumps({"undid": action_id}), "{}", "{}", "executed", now))
+
     @synchronized
     def record_action(self, kind, params_json, plan_json, status, undo_json, created_at) -> int:
         cur = self.conn.execute(

@@ -22,7 +22,8 @@ def _client(store, provider):
 
 
 def _refreshes(r):
-    return r.status_code == 200 and r.headers.get("hx-refresh") == "true"
+    return r.status_code == 200 and (r.headers.get("hx-refresh") == "true" or
+                                    r.headers.get("hx-redirect", "").startswith("/playlists?result="))
 
 
 def test_group_assigns_and_refreshes(store):

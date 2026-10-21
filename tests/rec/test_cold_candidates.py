@@ -18,10 +18,10 @@ def _patch(monkeypatch, proj=None):
     monkeypatch.setattr(surfaces, "playlist_taste",
                         lambda s: PlaylistTaste(["p"], np.array([[1.0, 0.0]]), np.array([1.0])))
     monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, s: proj))
-    monkeypatch.setattr(surfaces.embed, "load_discovered_content_vectors", lambda s: ([], None, {}))
+    monkeypatch.setattr(surfaces.embed, "load_discovered_content_vectors", lambda s, **kw: ([], None, {}))
     # #85 staleness_factor is gone; isolate taste-only ranking by zeroing both tilt producers directly.
     monkeypatch.setattr(scoring.transient, "centroid_tilt", lambda s, now, V, idx: None)
-    monkeypatch.setattr(scoring.transient, "audio_centroid_tilt", lambda s, now: None)
+    monkeypatch.setattr(scoring.transient, "audio_centroid_tilt", lambda s, now, **kwargs: None)
     monkeypatch.setattr(surfaces, "discovery_facet_weight", lambda s, fam, now: 1.0)
 
 

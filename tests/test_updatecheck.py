@@ -165,7 +165,7 @@ def test_check_latest_skips_when_checked_recently(monkeypatch):
     calls = []
     monkeypatch.setattr(uc, "_fetch_latest_release", lambda: calls.append(1) or "0.9.9")
     store = FakeStore({"latest_version_checked_at": "1000.0", "latest_version_seen": "0.2.0"})
-    uc.check_latest(store, now=1000.0 + 3600, interval_s=86400)   # only 1h later
+    uc.check_latest(store, now=1000.0 + 3600)                    # only 1h later
     assert calls == []                                            # not fetched
     assert store.get_setting("latest_version_seen") == "0.2.0"    # unchanged
 
@@ -173,7 +173,7 @@ def test_check_latest_skips_when_checked_recently(monkeypatch):
 def test_check_latest_refetches_after_interval(monkeypatch):
     monkeypatch.setattr(uc, "_fetch_latest_release", lambda: "0.3.0")
     store = FakeStore({"latest_version_checked_at": "1000.0", "latest_version_seen": "0.2.0"})
-    uc.check_latest(store, now=1000.0 + 86400 + 1, interval_s=86400)
+    uc.check_latest(store, now=1000.0 + 4 * 3600)                # exactly 4h later
     assert store.get_setting("latest_version_seen") == "0.3.0"
 
 

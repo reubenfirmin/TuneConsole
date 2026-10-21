@@ -1,4 +1,6 @@
 """Albums and Artists tabs (playlists and saved albums) + save/unsave album."""
+from yt_playlist.core.activity import activity_for
+
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
@@ -43,19 +45,27 @@ def build(ctx) -> APIRouter:
             raise ValueError("album has no playlist")
         return client, album
 
+    def _save_album(browse_id):
+        client, album = _album_and_client(browse_id)
+        client.rate_playlist(album["audioPlaylistId"], "LIKE")
+        store.add_saved_album({
+            "browse": browse_id, "title": album.get("title"), "type": album.get("type"),
+            "artist": ", ".join(x.get("name", "") for x in (album.get("artists") or [])),
+            "year": album.get("year"), "thumbnail": best_thumb(album.get("thumbnails"))})
+
+    def _unsave_album(browse_id):
+        client, album = _album_and_client(browse_id)
+        client.rate_playlist(album["audioPlaylistId"], "INDIFFERENT")
+        store.remove_saved_album(browse_id)
+
     @router.post("/collection/save-album")
     async def save_album(request: Request):
-        # Save a YouTube album to your library: get_album -> like its audio playlist; mirror locally.
         browse_id = ((await request.form()).get("browse_id") or "").strip()
         if not browse_id:
             return _toast(request, "no album id")
         try:
-            client, album = _album_and_client(browse_id)
-            client.rate_playlist(album["audioPlaylistId"], "LIKE")
-            store.add_saved_album({
-                "browse": browse_id, "title": album.get("title"), "type": album.get("type"),
-                "artist": ", ".join(x.get("name", "") for x in (album.get("artists") or [])),
-                "year": album.get("year"), "thumbnail": best_thumb(album.get("thumbnails"))})
+            # Lookup and rating both wait on replies delivered by the ASGI WebSocket loop.
+            await activity_for(ctx).to_thread(_save_album, browse_id)
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
@@ -69,9 +79,7 @@ def build(ctx) -> APIRouter:
         if not browse_id:
             return _toast(request, "no album id")
         try:
-            client, album = _album_and_client(browse_id)
-            client.rate_playlist(album["audioPlaylistId"], "INDIFFERENT")
-            store.remove_saved_album(browse_id)
+            await activity_for(ctx).to_thread(_unsave_album, browse_id)
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001

@@ -198,7 +198,14 @@ def test_build_returns_your_half_immediately_then_fills_in_theirs(store, monkeyp
     assert "Adding their tracks" in r.text               # and the page says so, and polls
     assert "/progress" in r.text
 
+    from yt_playlist.core.update_lifecycle import acquire_restart_locks
+    ctx = c.app.state.ctx
+    assert acquire_restart_locks(ctx)[0] is None
+    assert "Road Trip build" in ctx.work.active
+
     workers[0]()                                         # let the background worker run
+    assert ctx.work.wait(0)
+    ctx.work.open()
 
     done = store.get_road_trip_draft(rid)
     assert done["building"] is False and done["pending"] == []

@@ -12,6 +12,7 @@ from yt_playlist.util import genre_map
 from yt_playlist.util.duration import ago as _ago
 from yt_playlist.util.matching import normalize
 from yt_playlist.rec import embed, rec_params
+from yt_playlist.rec.discover import ContentProjection
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood, axis_adjusted_scores,
                                      center_known_weights, content_taste, discovery_facet_weight, playlist_taste,
@@ -282,13 +283,18 @@ def taste_comparison(store, now, keys=None, limit=24) -> list[dict]:
     muted = store.muted_artists()
     weights = store.get_weights(
         now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
+    genres = RecDao(store).track_genres(wanted)
     rows = []
     for key in wanted:
         if key not in traces or key not in meta:
             continue
         rank, item = current.get(key, (None, None))
         artist = meta[key]["artist"]
-        reason = ("dismissed or snoozed" if key in suppressed else
+        genre = genres.get(key)
+        genre_muted = any(weights.get(f"genre:{token}") == 0
+                          for token in (genre_map.family(genre), genre_map.subgenre(genre)) if token)
+        reason = ("genre muted" if genre_muted else
+                  "dismissed or snoozed" if key in suppressed else
                   "already saved from a generated recommendation" if key in generated else
                   "artist muted" if artist in muted else None)
         lane = item.lane if item else ""
@@ -347,7 +353,6 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
     Without metadata or a usable artist projection there is no ranking evidence, so the track waits
     for enrichment instead of being surfaced. A missing model never masquerades as a scored result.
     """
-    from yt_playlist.rec.discover import ContentProjection   # lazy: avoid the surfaces<->discover cycle
     rows = store.get_discovered_tracks()
     if not rows:
         return []
@@ -373,8 +378,10 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
             evidence_V = np.vstack((warm_V, V))
             evidence_idx = {k: len(warm_V) + i for k, i in idx.items()}
             evidence_idx.update(warm_idx)  # prefer the actual library vector for overlapping keys
+        content_snapshot = store.content_generation()
         values = _apply_mood(pt.score_all(V), store, now, V, idx,
-                             content_vecs=embed.load_discovered_content_vectors(store),
+                             content_vecs=embed.load_discovered_content_vectors(store, snapshot=content_snapshot),
+                             content_snapshot=content_snapshot,
                              evidence_vecs=(evidence_V, evidence_idx))
         scores = {k: float(values[i]) for i, k in enumerate(keys)}
     suppressed = store.suppressed_keys("for_you", now)

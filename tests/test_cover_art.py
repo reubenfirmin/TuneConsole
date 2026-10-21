@@ -35,9 +35,9 @@ def _deezer_stub(monkeypatch, track_payload):
     def fake_get(url):
         calls.append(url)
         if "/search/track" in url:
-            return {"data": [{"id": 99}]}
+            return {"data": [{"id": 99, "title": "Don't Give Up"}]}
         if "/track/99" in url:
-            return track_payload
+            return {"id": 99, "title": "Don't Give Up", "artist": {"name": "Chicane"}, **track_payload}
         return {}
 
     monkeypatch.setattr(deezer, "_get_json", fake_get)
@@ -55,9 +55,10 @@ def test_deezer_art_survives_a_failing_album_lookup(monkeypatch):
     to read `label` and is allowed to fail)."""
     def fake_get(url):
         if "/search/track" in url:
-            return {"data": [{"id": 99}]}
+            return {"data": [{"id": 99, "title": "Don't Give Up"}]}
         if "/track/99" in url:
-            return {"bpm": 130, "album": {"id": 7, "cover_xl": _DEEZER}}
+            return {"id": 99, "title": "Don't Give Up", "artist": {"name": "Chicane"},
+                    "bpm": 130, "album": {"id": 7, "cover_xl": _DEEZER}}
         raise OSError("album lookup down")
 
     monkeypatch.setattr(deezer, "_get_json", fake_get)
@@ -68,7 +69,7 @@ def test_deezer_art_survives_a_failing_album_lookup(monkeypatch):
 
 def test_deezer_art_is_none_when_the_album_has_no_cover(monkeypatch):
     _deezer_stub(monkeypatch, {"bpm": 130, "album": {"id": 7}})
-    assert deezer.enrich("x", "y")["art"] is None
+    assert deezer.enrich("Don't Give Up", "Chicane")["art"] is None
 
 
 def test_deezer_art_is_none_on_no_match(monkeypatch):

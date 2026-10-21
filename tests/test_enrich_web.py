@@ -41,6 +41,30 @@ def test_stats_fragment_reflects_state(store):
     assert "Conflicts do not block the queue" in html
 
 
+def test_saved_retry_status_is_visible_without_a_running_worker(store):
+    tid = store.upsert_track("retry", "Retry", "Artist", None, 200)
+    track = store.catalog_subject(tid)
+    store.record_enrichment_attempt(track["identity_key"], "musicbrainz", {}, retry=True,
+        now=990, error="bad <response>", retry_after=1090)
+    html = _client(store).get("/enrich/stats").text
+    assert 'state-retry' in html
+    assert "Next attempt in 90 seconds" in html
+    assert "bad &lt;response&gt;" in html
+    assert "0 of 1 tracks checked" in html
+
+
+def test_optional_artwork_retry_is_visible_without_reopening_metadata_queue(store):
+    from yt_playlist.providers.coverart import CoverResult
+    tid = store.upsert_track("art", "Art", "Artist", None, 200)
+    store.mark_enriched([tid], now=900)
+    store.enrichment.record_artwork_result(tid, ["release"], CoverResult("retry", retry_in=90), 990)
+    html = _client(store).get("/enrich/stats").text
+    assert "Artwork retries: 1" in html
+    assert "Next attempt in 80 seconds" in html
+    assert 'state-idle' in html
+    assert "1 of 1 tracks checked" in html
+
+
 def test_one_queue_counts_and_pages_library_and_discovery_in_shared_order(store):
     store.upsert_track("lib", "Library song", "Artist", None, 200, created_at=39.5)
     for i in range(41):

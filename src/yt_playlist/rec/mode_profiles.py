@@ -72,7 +72,8 @@ def describe_modes(store):
             "genres": _breakdown(Counter(dict(mode["families"])), size, labels),
             "eras": [], "dated": 0, "sound": [],
         }
-    raw = store.get_setting("rec_content_model")
+    snapshot = store.content_generation()
+    raw = snapshot["model"]
     if not raw:
         return profiles
     model = json.loads(raw)
@@ -80,7 +81,7 @@ def describe_modes(store):
     current = [m for m in modes if m.get("space") == space]
     if not current:
         return profiles
-    keys, vectors, _ = embed.load_content_vectors(store)
+    keys, vectors, _ = embed.load_content_vectors(store, snapshot=snapshot)
     dim = model["ncat"] + len(model["cont"])
     if vectors is None or vectors.shape[1] != dim or any(len(m["centroid"]) != dim for m in current):
         return profiles

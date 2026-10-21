@@ -23,3 +23,26 @@ def fetch_album(client, browse_id: str) -> dict:
     if is_upload_album(browse_id):
         return client.get_library_upload_album(browse_id)
     return client.get_album(browse_id)
+
+
+def shareable_album_tracks(album):
+    """A complete ordered response, with a shareable video for every advertised track.
+
+    Neither album endpoint has a supported generic continuation API here. Decline unfinished
+    responses rather than exporting a prefix or silently dropping unsupported/unavailable items.
+    """
+    tracks = album.get("tracks") if isinstance(album, dict) else None
+    if not isinstance(tracks, list) or not tracks or album.get("continuation") or album.get("continuations"):
+        raise ValueError("The full album track list is unavailable. Reconnect to YouTube Music and try sharing again.")
+    count = album.get("trackCount")
+    if count is not None:
+        try:
+            complete = int(str(count).replace(",", "")) == len(tracks)
+        except (TypeError, ValueError):
+            complete = False
+        if not complete:
+            raise ValueError("The album track list is incomplete. Refresh the album and try sharing again.")
+    if any(not isinstance(track, dict) or not isinstance(track.get("videoId"), str)
+           or not track["videoId"].strip() for track in tracks):
+        raise ValueError("Some album tracks have no shareable video link. Try again when all tracks are available.")
+    return tracks

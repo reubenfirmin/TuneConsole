@@ -9,6 +9,7 @@ Ordering constraint is data-driven via each provider's `requires`: a provider mu
 one it requires (AcousticBrainz is keyed by MusicBrainz recording MBIDs, so it follows MusicBrainz).
 """
 import json
+import hashlib
 
 _SETTING_KEY = "enrichment_order"
 
@@ -28,6 +29,23 @@ PROVIDERS = [
 ]
 
 _BY_NAME = {p["name"]: p for p in PROVIDERS}
+
+
+def provider_configuration(store, registry, config=None):
+    """Effective provider availability and settings, without retaining credentials in coverage."""
+    result = {}
+    for p in config if config is not None else load_config(store):
+        mod = registry.get(p["name"])
+        if mod is None:
+            continue
+        status = ("disabled" if not p["enabled"] else
+                  "available" if mod.available(store) else "unavailable")
+        # Order changes do not change the provider's answer. Last.fm resolves environment, saved
+        # and file credentials itself, so changes through any of those paths invalidate coverage.
+        key = mod.api_key(store) if p["name"] == "lastfm" and hasattr(mod, "api_key") else ""
+        fingerprint = hashlib.sha256(json.dumps({"version": 1, "key": key}, sort_keys=True).encode()).hexdigest()
+        result[p["name"]] = {"status": status, "fingerprint": fingerprint}
+    return result
 
 
 def _repair_order(names):

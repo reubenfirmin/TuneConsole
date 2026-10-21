@@ -80,12 +80,12 @@ document.addEventListener('visibilitychange', () => {
   });
 });
 
-// htmx: a 422 carries an OOB error toast. By default htmx won't process a 4xx body,
-// so opt this status in. The server sets `HX-Reswap: none` to keep the primary
+// htmx: a 422 carries an OOB error toast. Process its body while retaining the failed
+// request status so optimistic controls roll back. The server sets `HX-Reswap: none` to keep the primary
 // target untouched while the OOB toast still lands in #toasts. Bind on `document`
 // (not document.body): app.js loads in <head>, before <body> exists.
 document.addEventListener('htmx:beforeSwap', (e) => {
-  if (e.detail.xhr.status === 422) { e.detail.shouldSwap = true; e.detail.isError = false; }
+  if (e.detail.xhr.status === 422) e.detail.shouldSwap = true;
 });
 
 // A suggestion-add response stages its table row in a <template>. Moving it here avoids the browser's
@@ -140,46 +140,86 @@ function genTracks(id) {
   })));
 }
 
+const mixRegenerations = new WeakMap();
+
+function finishMixRegeneration(card, failed = false) {
+  const state = mixRegenerations.get(card);
+  if (!state) return;
+  clearTimeout(state.timer);
+  state.animations.forEach(animation => animation.cancel());
+  delete state.button.dataset.regenerating;
+  state.button.removeAttribute('aria-busy');
+  card.classList.remove('is-regenerating');
+  mixRegenerations.delete(card);
+  if (failed) {
+    const error = document.createElement('p');
+    error.className = 'section-note gen-refresh-error';
+    error.setAttribute('role', 'alert');
+    error.textContent = 'Couldn’t regenerate this mix. Your mix is still here. Try again.';
+    (card.querySelector('.gen-focus') || card.querySelector('.gen-card-body')).prepend(error);
+  }
+}
+
 function regenerateMix(button) {
   if (!button || button.dataset.regenerating === '1') return;
   const card = button.closest('.gen-card');
-  if (!card) return;
+  if (!card || mixRegenerations.has(card)) return;
+  card.querySelector('.gen-refresh-error')?.remove();
+  const state = {button, animations: [], transitioning: false, timer: null};
+  mixRegenerations.set(card, state);
   button.dataset.regenerating = '1';
   button.setAttribute('aria-busy', 'true');
   card.classList.add('is-regenerating');
   Array.from(card.querySelectorAll('.gen-focus .gen-row')).forEach((row, index) => {
-    row.animate([
+    state.animations.push(row.animate([
       { opacity: 1, filter: 'saturate(1)', transform: 'translateX(0)' },
       { opacity: .58, filter: 'saturate(.35)', transform: 'translateX(.22rem)' },
       { opacity: 1, filter: 'saturate(1)', transform: 'translateX(0)' }
-    ], { duration: 1250, delay: index * 55, iterations: Infinity, easing: 'ease-in-out' });
+    ], { duration: 1250, delay: index * 55, iterations: Infinity, easing: 'ease-in-out' }));
   });
-  htmx.trigger(button, 'mix-regenerate');
+  try { htmx.trigger(button, 'mix-regenerate'); }
+  catch (_) { finishMixRegeneration(card, true); }
 }
+
+document.addEventListener('htmx:afterRequest', event => {
+  const card = event.detail.elt?.closest('.gen-card');
+  const state = card && mixRegenerations.get(card);
+  if (!state || state.button !== event.detail.elt) return;
+  // A successful response finishes after the custom transition. Every other completion,
+  // including a network error or a response that never reached beforeSwap, releases the guard.
+  if (!event.detail.successful || !state.transitioning) finishMixRegeneration(card, true);
+});
 
 document.addEventListener('htmx:beforeSwap', (event) => {
   const target = event.detail.target;
   if (!target || !target.matches('.gen-card-body')) return;
   const card = target.closest('.gen-card.is-regenerating');
-  if (!card) return;
+  const state = card && mixRegenerations.get(card);
+  if (!state) return;
+  event.detail.shouldSwap = false;
   const response = new DOMParser().parseFromString(event.detail.serverResponse, 'text/html');
   const replacement = response.getElementById(target.id);
-  if (!replacement) return;
+  if (event.detail.xhr.status < 200 || event.detail.xhr.status >= 300
+      || !replacement?.matches('.gen-card-body') || !replacement.querySelector('.gen-head')) {
+    finishMixRegeneration(card, true);
+    return;
+  }
 
-  event.detail.shouldSwap = false;
+  state.transitioning = true;
+  state.animations.forEach(animation => animation.cancel());
+  state.animations = [];
   const rows = Array.from(target.querySelectorAll('.gen-focus .gen-row'));
   const step = 38;
   const duration = 280;
   rows.forEach((row, index) => {
-    row.getAnimations().forEach((animation) => animation.cancel());
-    row.animate([
+    state.animations.push(row.animate([
       { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0)' },
       { opacity: 0, transform: 'translateX(1.25rem) scale(.97)', filter: 'blur(5px)' }
-    ], { duration, delay: index * step, easing: 'cubic-bezier(.55,0,.8,.35)', fill: 'both' });
+    ], { duration, delay: index * step, easing: 'cubic-bezier(.55,0,.8,.35)', fill: 'both' }));
   });
 
   const sequenceLength = duration + Math.max(0, rows.length - 1) * step;
-  window.setTimeout(() => {
+  state.timer = window.setTimeout(() => {
     const incoming = Array.from(replacement.querySelectorAll('.gen-focus .gen-row'));
     incoming.forEach((row) => { row.style.opacity = '0'; });
     target.replaceChildren(...replacement.childNodes);
@@ -197,7 +237,7 @@ document.addEventListener('htmx:beforeSwap', (event) => {
            easing: 'cubic-bezier(.18,.78,.2,1)', fill: 'both' });
       animation.finished.then(() => row.style.removeProperty('opacity')).catch(() => {});
     });
-    card.classList.remove('is-regenerating');
+    finishMixRegeneration(card);
     // This animated replacement bypasses HTMX's swap/settle events.
     syncHomeThemes();
   }, sequenceLength + 20);
@@ -542,7 +582,7 @@ function playlistsTab(rows) {
     // Modal "save" actions go through htmx.ajax so the server's HX-Refresh reload (success) and
     // 422 OOB error toast (copy-into) behave exactly as the inline hx-post did, but the values
     // come straight from this component's state, not a global Alpine.$data() reach-in.
-    copy() { htmx.ajax('POST', '/playlists/copy', { values: { ids: this.copyIds.join(','), name: this.copyName } }); },
+    copy() { htmx.ajax('POST', '/playlists/copy', { values: { ids: this.copyIds.join(','), name: this.copyName } }).catch(() => {}); },
     copyInto() { htmx.ajax('POST', '/playlists/copy-into', { values: { ids: this.copyIds.join(','), target: this.copyIntoTarget } }); },
     group() { htmx.ajax('POST', '/playlists/group', { values: { ids: this.selected().map(r => r.id).join(','), name: this.groupName } }); },
     // Delete keeps the modal up with a spinner: one remote YouTube call per playlist, so a batch
@@ -697,12 +737,12 @@ function enrichPanel(pid, lastfmConfigured, activeJobId, activeSource, enrichBas
         if (++errs >= 5) { es.close(); this.running = false; this.status = 'Stream interrupted. Reload to check.'; }
       };
     },
-    // The SSE event carries the server-rendered row HTML (same partial as a manual edit), so we just
-    // drop it in. Alpine re-inits the replaced <tr>, and its data-* (which sort reads) come along.
+    // HTMX owns fragment cleanup and initialization even when SSE supplies the HTML. Alpine's
+    // observer handles the removed/inserted trees, as it does for an ordinary HTMX row swap.
     applyRow(ev) {
       if (!ev.row_html) return;
       const tr = document.querySelector(`tr.srow[data-vid="${CSS.escape(ev.video_id)}"]`);
-      if (tr) tr.outerHTML = ev.row_html;
+      if (tr) htmx.swap(tr, ev.row_html, { swapStyle: 'outerHTML', settleDelay: 0 });
     },
   };
 }
@@ -781,6 +821,7 @@ function homeStatus() {
     radioReason: '',       // unobtrusive note when a radio start attempt is rejected
     radioDual: false,          // mode transparency: true = playing in the dedicated radio window
     radioFallbackReason: '',   // set when dual fell back to single-tab mode; '' when healthy/inactive
+    radioApplyError: '',
     radioUpcoming: [],         // "Up next" feedback loop: up to 8 {title, artist} picks after now-playing
     customizeOpen: false,  // #93 Task 9: the radio customize panel is collapsed until toggled, and
                             // stays open/closed across the launch-card <-> now-playing migration
@@ -796,6 +837,9 @@ function homeStatus() {
                      this.radioActive = !!d.radio; this.radioWaiting = !!d.radio_waiting;
                      this.radioDual = !!d.radio_dual;
                      this.radioFallbackReason = d.radio_fallback_reason || '';
+                     const writes = [d.radio_apply, ...Object.values(d.radio_deck_apply || {})];
+                     const incomplete = writes.find(w => w && w.status !== 'complete');
+                     this.radioApplyError = incomplete ? 'Upcoming playlist is incomplete. Refresh upcoming tracks to retry.' : '';
                      this.radioUpcoming = d.radio_upcoming || [];
                      window.dispatchEvent(new CustomEvent('bridge-status', { detail: d })); })
         .catch(() => {});
@@ -824,11 +868,17 @@ function homeStatus() {
         if (ev.type === 'err' || ev.type === 'auth_expired') this.failed = true;
         if (ev.type === 'end') {
           es.close(); this.running = false;
-          if (!ev.error && !this.failed) {
+          if (ev.outcome === 'complete' && !ev.error && !this.failed) {
             this.push({ type: 'done', text: 'library updated — refreshing…' });
             setTimeout(() => location.reload(), 900);
           } else {
-            this.push({ type: 'err', text: 'finished with errors. Reload when ready.' });
+            this.failed = true;
+            const message = ev.outcome === 'partial'
+              ? 'Library partially updated. Some resources need another sync.'
+              : ev.outcome === 'skipped'
+                ? 'Sync skipped. Reconnect YouTube Music and retry.'
+                : 'Sync failed. Reconnect or re-authenticate, then retry.';
+            this.push({ type: 'err', text: message });
           }
           return;
         }
@@ -853,13 +903,17 @@ function homeStatus() {
     rate(action) {
       if (!this.nowPlaying) return;
       const want = action === 'like' ? 'LIKE' : 'DISLIKE';
+      const current = this.nowPlaying;
+      const previous = current.likeStatus;
       // Optimistic toggle (clicking the active one clears it, matching YouTube Music); the next poll
       // reconciles with the real state the extension read back from the player.
       this.nowPlaying.likeStatus = this.nowPlaying.likeStatus === want ? 'INDIFFERENT' : want;
       fetch('/now-playing/rate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action }),
-      }).catch(() => {});
+        body: JSON.stringify({ action, videoId: this.nowPlaying.video_id }),
+      }).then(r => r.json()).then(d => {
+        if (!d.ok && this.nowPlaying === current) current.likeStatus = previous;
+      }).catch(() => { if (this.nowPlaying === current) current.likeStatus = previous; });
     },
     toggle() {
       if (!this.nowPlaying) return;
@@ -992,7 +1046,7 @@ function playerStatus() {
         }
       };
       fetch('/now-playing/rate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action }) })
+        body: JSON.stringify({ action, videoId }) })
         .then(r => r.json()).then(d => { if (!d.ok) revert(); }).catch(revert);
     },
     toggle() {
@@ -1011,7 +1065,7 @@ function toggleTrackLike(source, videoId, liked) {
   if (window.dispatchEvent(request)) {
     htmx.ajax('POST', '/track/like', {
       source, values: { video_id: videoId, on: liked ? '1' : '' }, swap: 'none',
-    });
+    }).catch(() => {}); // the completion event rolls back the heart; the response carries the toast
   }
 }
 window.mountNowPlayingDock = mountNowPlayingDock;

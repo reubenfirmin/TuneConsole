@@ -69,6 +69,7 @@ class RadioSession:
         self.queue: list = []                  # ordered picks in the playlist (played head kept)
         self.pos: int = -1                     # index in queue of the track believed playing
         self.applied_vids: list = []           # vid list last reconciled onto the playlist
+        self.apply_result = None              # verified remote mutation diagnostics
         self.primed = None                     # {key, video_id, url, title, artist} or None
         self.playlist_ytm = None               # this session's "TuneConsole Radio" ytm id
         self.dual_deck = False                 # True only after the extension confirms two decks
@@ -498,10 +499,9 @@ def rebuild_standby(store, session, now) -> dict | None:
                     note_dispatch(session, q)
                 standby["boundary_vid"] = prior_queue[-1]["video_id"]
                 session.standby_dirty = False
-                return None
             session.standby_dirty = False
             vids = [p["video_id"] for p in standby["queue"]]
-            if vids == prior_vids:
+            if vids == prior_vids and vids == standby["applied_vids"]:
                 return None
             first = standby["queue"][0] if standby["queue"] else None
             return {"playlist_key": label, "vids": vids, "first": first,
@@ -679,8 +679,10 @@ def _record_and_mark(store, session, vid, now) -> None:
 
 def _is_dislike(msg) -> bool:
     # A curation 'rate' pevent carries the action in its url path (.../dislike). Best-effort.
-    url = (msg.get("url") or "")
-    return url.rstrip("/").rsplit("/", 1)[-1] == "dislike"
+    from yt_playlist.util.curation import confirmed_rate
+
+    url = (msg.get("url") or "").split("?", 1)[0]
+    return confirmed_rate(msg) and url.rstrip("/").rsplit("/", 1)[-1] == "dislike"
 
 
 def react(store, session, msg, now) -> dict:

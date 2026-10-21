@@ -8,12 +8,24 @@ from yt_playlist.repos.base import Repo, synchronized
 
 class CollectionRepo(Repo):
     @synchronized
-    def cache_album_tracklist(self, browse_id, title, artist, thumbnail, keys):
+    def cache_album_tracklist(self, browse_id, title, artist, thumbnail, keys, *, video_ids=None):
         """Only full album fetches may write this denominator; playlist sync cannot."""
         with self.conn:
             self.conn.execute(
                 "INSERT OR REPLACE INTO album_tracklists VALUES (?,?,?,?,?)",
                 (browse_id, title, artist, thumbnail, json.dumps(keys)))
+            self.conn.execute("DELETE FROM album_share_snapshots WHERE browse_id=?", (browse_id,))
+            if video_ids:
+                self.conn.execute("INSERT INTO album_share_snapshots VALUES (?,?,?)",
+                                  (browse_id, title, json.dumps(video_ids)))
+
+    @synchronized
+    def cached_album_share(self, browse_id):
+        if browse_id not in self.complete_album_tracklist_ids():
+            return None
+        row = self.conn.execute("SELECT title,video_ids_json FROM album_share_snapshots WHERE browse_id=?",
+                                (browse_id,)).fetchone()
+        return {"title": row["title"], "video_ids": json.loads(row["video_ids_json"])} if row else None
 
     @synchronized
     def cached_album_tracklist_ids(self):

@@ -80,3 +80,22 @@ def test_cards_are_unaffected_when_nothing_has_been_generated(store):
     keys = [f"song{i}|artist{i}" for i in range(20)]
     _bundle(store, keys)
     assert _offered(ms.assemble_cards(store, now=10.0, epoch=0)), "no generated playlists: offer freely"
+
+
+def test_cached_cards_honor_current_genre_mutes_without_rebuilding(store):
+    keys = [f"song{i}|artist{i}" for i in range(20)]
+    for i, key in enumerate(keys):
+        title, artist = key.split("|")
+        tid = store.upsert_track(f"v{i}", title, artist, "", 200)
+        store.set_track_genre(tid, "House" if i < 6 else "Techno")
+    _bundle(store, keys)
+    cached = store.get_proposals("mode_bundles")
+    assert _offered(ms.assemble_cards(store, now=10, epoch=0)) & set(keys[:6])
+
+    store.set_weight("genre:house", 0, lo=0, hi=2, now=10)
+    offered = _offered(ms.assemble_cards(store, now=20, epoch=0))
+    assert offered and offered <= set(keys[6:])
+    assert store.get_proposals("mode_bundles") == cached
+
+    store.set_weight("genre:house", 1, lo=0, hi=2, now=20)
+    assert _offered(ms.assemble_cards(store, now=20, epoch=0)) & set(keys[:6])

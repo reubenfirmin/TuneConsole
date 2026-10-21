@@ -50,6 +50,7 @@ def test_rate_dislike_records_penalty(monkeypatch, store):
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
     s = radio.RadioSession(); s.active = True
     out = radio.react(store, s, {"kind": "rate", "videoId": "vr",
+                                 "phase": "settled", "success": True, "httpStatus": 200,
                                  "url": "https://music.youtube.com/dislike"}, now=100.0)
     assert out == {"desired_vids": None, "prime": None}
     assert s.skips == [("Ar", None, 100.0)]
@@ -61,6 +62,16 @@ def test_rate_like_is_noop(store):
                                  "url": "https://music.youtube.com/like"}, now=100.0)
     assert out == {"desired_vids": None, "prime": None}
     assert s.skips == []
+
+
+@pytest.mark.parametrize("outcome", [{}, {"phase": "intent"},
+    {"phase": "settled", "success": False, "httpStatus": 403},
+    {"phase": "settled", "success": False, "httpStatus": 0}])
+def test_unconfirmed_dislike_is_inert(store, outcome):
+    s = radio.RadioSession(); s.active = True
+    radio.react(store, s, {"kind": "rate", "videoId": "vr",
+        "url": "https://music.youtube.com/dislike", **outcome}, now=100.0)
+    assert s.skips == [] and not s.standby_dirty
 
 
 def test_bye_is_inert(store):

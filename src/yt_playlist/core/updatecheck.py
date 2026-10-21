@@ -15,7 +15,7 @@ PACKAGE = "yt-playlist"
 
 _RELEASES_URL = "https://api.github.com/repos/reubenfirmin/TuneConsole/releases/latest"
 _HTTP_TIMEOUT_S = 8
-_CHECK_INTERVAL_S = 86400          # once a day; well under GitHub's 60 req/hr unauth limit
+_CHECK_INTERVAL_S = 4 * 3600       # every four hours
 _USER_AGENT = "yt-playlist-updatecheck"
 
 # (button label, optional link) per install kind. Flatpak and macOS have in-app controls;
@@ -81,7 +81,7 @@ def _fetch_latest_release():
 
 def check_latest(store, now, *, interval_s=_CHECK_INTERVAL_S):
     """At most once per interval_s, refresh the cached latest release. Always stamps the check time
-    (so a persistent failure retries at most daily, never hammering GitHub). Fail-silent."""
+    (so a persistent failure retries at most once per interval, never hammering GitHub). Fail-silent."""
     last = store.get_setting("latest_version_checked_at")
     if last is not None:
         try:

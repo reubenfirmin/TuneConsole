@@ -66,13 +66,22 @@ if (!window.__tcBridgeLoaded) {
     if (dislike && dislike.getAttribute("aria-pressed") === "true") return "DISLIKE";
     return "INDIFFERENT";
   };
-  const clickRate = (action) => {
+  const clickRate = (action, videoId, snapshot) => {
+    const bar = domNowPlaying();
+    if (!["like", "dislike"].includes(action) || !videoId || !snapshot ||
+        !snapshot.brandKnown || snapshot.metadataVerified !== true ||
+        snapshot.videoId !== videoId || !snapshot.playerBar ||
+        snapshot.playerBar.videoId !== videoId || !snapshot.playerBar.likeStatus ||
+        !bar || bar.videoId !== videoId) {
+      return {ok: false, error: "The playing song changed. Refresh and try again."};
+    }
     const r = likeRenderer();
-    if (!r) { console.warn("[TuneConsole] rate: player-bar like control not found"); return; }
+    if (!r) return {ok: false, error: "Player rating control is unavailable"};
     const id = action === "like" ? "#button-shape-like" : "#button-shape-dislike";
     const btn = r.querySelector(id + " button") || r.querySelector(id);
-    if (btn) { btn.click(); console.log("[TuneConsole] rated", action); }
-    else console.warn("[TuneConsole] rate: button not found for", action);
+    if (!btn) return {ok: false, error: "Player rating button is unavailable"};
+    btn.click();
+    return {ok: true};
   };
 
   // Drive YouTube Music's own play/pause control in the player bar, same shape as clickRate.
@@ -193,7 +202,21 @@ if (!window.__tcBridgeLoaded) {
       catch (e) { finish(); }
       return true;
     }
-    if (msg.type === "rate") { clickRate(msg.action); return; }
+    if (msg.type === "rate") {
+      const id = ++sensorProbeSerial;
+      const timer = setTimeout(() => finish(null), 1250);
+      const finish = (snapshot) => {
+        if (!sensorProbes.has(id)) return;
+        sensorProbes.delete(id);
+        clearTimeout(timer);
+        try { sendResponse(clickRate(msg.action, msg.videoId, snapshot)); }
+        catch (e) { sendResponse({ok: false, error: String(e)}); }
+      };
+      sensorProbes.set(id, finish);
+      try { window.postMessage({__tcSensorProbe: {version: SENSOR_VERSION, id}}, "*"); }
+      catch (e) { finish(null); }
+      return true;
+    }
     if (msg.type === "playpause") { clickPlayPause(); return; }
     if (msg.type === "ensure-playing") {
       ensurePlaying().then(sendResponse, () => sendResponse({ playing: false }));
@@ -248,12 +271,13 @@ if (!window.__tcBridgeLoaded) {
       return;
     }
     if (msg.type === "resync-now") {
-      // The bridge (re)connected. The backend cleared now_playing on the previous disconnect, so
-      // force a re-emit of the current track even though it hasn't changed (dedup would otherwise
-      // swallow it until the next track). The MAIN-world poller re-emits within ~2s too.
+      // Reconnect needs a fresh player identity and verification result. The DOM can restore
+      // presence while MAIN answers, but cannot turn stale bar bindings into a persisted play.
       lastNowPlaying = "";
       const np = domNowPlaying();
       if (np) report(np);
+      try { window.postMessage({ __tcSensorProbe: { version: SENSOR_VERSION,
+        id: ++sensorProbeSerial } }, "*"); } catch (e) {}
       return;
     }
     if (msg.type === "refresh-view") {
@@ -316,14 +340,14 @@ if (!window.__tcBridgeLoaded) {
     // The backend ages this card out when the YTM tab disappears. Keep its presence fresh when
     // paused or unchanged, without recording another play. Chrome can throttle both sensors in a
     // background tab, causing them to take turns reporting the same paused track.
-    if (np.paused || !vid || !np.brandKnown || np.metadataVerified === false || key === lastNowPlaying) {
+    if (np.paused || !vid || !np.brandKnown || np.metadataVerified !== true || key === lastNowPlaying) {
       // Carry the current snapshot as well as presence. Chrome can suspend/throttle this page while
       // audio devices change; if that gap exceeds the backend's stale-card timeout, a presence-only
       // heartbeat cannot rebuild Now Playing and the UI stays blank until the next track. This frame
       // is still a heartbeat (never a persisted play), but is now self-healing.
       try { chrome.runtime.sendMessage({
         type: "now-heartbeat", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
-        metadataVerified: np.metadataVerified !== false,
+        metadataVerified: np.metadataVerified === true,
         likeStatus, videoId: vid, playlist: lst, albumBrowseId, paused: !!np.paused,
         muted: !!np.muted, brandKnown: !!np.brandKnown, brandId: np.brandId || "",
       }); } catch (e) {}
@@ -333,7 +357,7 @@ if (!window.__tcBridgeLoaded) {
     console.log("[TuneConsole] now playing:", np.title, "-", np.artist, likeStatus);
     chrome.runtime.sendMessage({
       type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
-      metadataVerified: np.metadataVerified !== false,
+      metadataVerified: np.metadataVerified === true,
       likeStatus, videoId: vid, playlist: lst, albumBrowseId, brandId: np.brandId || "",
       paused: !!np.paused, muted: !!np.muted, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
@@ -380,7 +404,6 @@ if (!window.__tcBridgeLoaded) {
     if (!ev.data.__tcNow) return;
     mainFrameAt = Date.now(); // Incomplete snapshots still prove that MAIN is alive.
     const finishProbe = sensorProbes.get(ev.data.__tcSensorProbeId);
-    if (finishProbe) finishProbe();
     const np = ev.data.__tcNow;
     lastAccount = np.brandKnown ? { brandId: np.brandId || "" } : null;
     if (np.videoId && np.title) {
@@ -394,6 +417,7 @@ if (!window.__tcBridgeLoaded) {
       if (fallback && np.playerBar) fallback.playerBar = np.playerBar;
       report(fallback);
     }
+    if (finishProbe) finishProbe(np);
   });
   window.addEventListener("pagehide", () => {
     // #91 goodbye: close the session and the last track's record when the tab goes away.
@@ -459,6 +483,9 @@ if (!window.__tcBridgeLoaded) {
           lastMain.brandKnown && lastMain.brandId === lastAccount.brandId) playlist = lastMain.playlist || "";
       return {
         title: t.textContent.trim(),
+        // Matching DOM fields describe the bar, not proof that its bindings describe the player.
+        // Only a fresh MAIN sample can verify metadata for a persisted play.
+        metadataVerified: false,
         artist: b ? b.textContent.trim().split("•")[0].trim() : "",
         thumbnail: img ? img.src : "",
         videoId, playlist, likeStatus: videoId ? readLikeStatus() : "", albumBrowseId,

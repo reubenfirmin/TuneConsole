@@ -4,6 +4,7 @@ erosion), materialized last-good proposals, and the Last.fm similar-artist cache
 Tables are created by numbered migrations before repositories are bound.
 """
 import json
+import math
 import statistics
 
 from yt_playlist.library.listen_derive import classify_exit
@@ -12,6 +13,17 @@ from yt_playlist.repos.base import Repo, synchronized
 
 MOOD_EVENT_CAP = 200   # bound the rec_mood table (count, not age); this repo owns that table
 RESPONSE_RETAIN_DAYS = 90
+MIN_EXPERIMENT_CLUSTERS = 100
+
+
+def _wilson(hits, n):
+    if not n:
+        return None
+    z = 1.96
+    p = hits / n
+    center = (p + z * z / (2 * n)) / (1 + z * z / n)
+    radius = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return [max(0, center - radius), min(1, center + radius)]
 
 
 class RecSurfaceRepo(Repo):
@@ -38,8 +50,9 @@ class RecSurfaceRepo(Repo):
         pool_row = self.conn.execute("SELECT configuration FROM rec_serving_policies WHERE model_version=?",
                                      (pool,)).fetchone() if pool else None
         result["pool_configuration"] = json.loads(pool_row[0]) if pool_row else None
-        result["outcomes"] = self.recommendation_scorecard(result["served_at"], result["served_at"] + 1,
-                                                          impression_id=impression_id)
+        result["outcomes"] = (None if result["provenance"].get("policy_kind") == "counterfactual" else
+            self.recommendation_scorecard(result["served_at"], result["served_at"] + 1,
+                                         impression_id=impression_id))
         return result
 
     @synchronized
@@ -55,7 +68,7 @@ class RecSurfaceRepo(Repo):
 
     @synchronized
     def record_served_impressions(self, request_id, surface, items, now, prune_before=None) -> None:
-        """Persist final rendered order, not the larger candidate set.
+        """Persist final live order or an explicitly marked counterfactual replay.
 
         ``items`` are dictionaries containing lane/key/rank plus optional mode_id, score and
         provenance. The request/rank uniqueness key makes an HTMX retry idempotent. Instrumentation
@@ -86,7 +99,7 @@ class RecSurfaceRepo(Repo):
 
     @synchronized
     def recommendation_scorecard(self, start, end, outcome_window_h=24, min_impressions=100,
-                                 impression_id=None) -> dict:
+                                 impression_id=None, experiments_only=False) -> dict:
         """Attribute subsequent play/exit events to the nearest preceding rendered opportunity.
 
         The impression range is bounded to ``[start, end)``; outcomes may arrive for
@@ -97,8 +110,10 @@ class RecSurfaceRepo(Repo):
         """
         impressions = [dict(r) for r in self.conn.execute(
             "SELECT * FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
+            "AND COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live' "
+            "AND (?=0 OR json_extract(provenance,'$.experiment.comparison_id') IS NOT NULL) "
             "AND (? IS NULL OR id=?) ORDER BY served_at,id",
-            (start, end, impression_id, impression_id)).fetchall()]
+            (start, end, experiments_only, impression_id, impression_id)).fetchall()]
         horizon = max(0.0, float(outcome_window_h)) * 3600.0
         states = {r["id"]: {"played": False, "organic": False, "generated": False,
                              "unknown_provenance": False, "skip": False,
@@ -114,6 +129,7 @@ class RecSurfaceRepo(Repo):
                 return None
             owner = self.conn.execute(
                 "SELECT id FROM rec_served_impressions WHERE identity_key=? "
+                "AND COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live' "
                 "AND served_at>=? AND served_at<=? ORDER BY served_at DESC,id DESC LIMIT 1",
                 (key, at - horizon, at)).fetchone()
             return owner["id"] if owner else None
@@ -145,12 +161,20 @@ class RecSurfaceRepo(Repo):
                          or event["kind"] == "save" and not event["is_generated"])):
                 state["conversion"] = True
 
+        # Resolve video-only events from the identity saved when the recommendation was offered.
+        # Discovery GC and later catalog edits must not erase or reassign historical responses.
+        # Older impressions have no snapshot, so retain their catalog lookup as a fallback.
         exits = self.conn.execute(
             "SELECT pe.video_id,pe.position,pe.duration,pe.at,"
-            "COALESCE((SELECT identity_key FROM tracks WHERE video_id=pe.video_id LIMIT 1),"
+            "COALESCE((SELECT identity_key FROM rec_served_impressions "
+            "WHERE served_at>=pe.at-? AND served_at<=pe.at "
+            "AND COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live' "
+            "AND json_extract(provenance,'$.candidate.video_id')=pe.video_id "
+            "ORDER BY served_at DESC,id DESC LIMIT 1),"
+            "(SELECT identity_key FROM tracks WHERE video_id=pe.video_id LIMIT 1),"
             "(SELECT identity_key FROM discovered_tracks WHERE video_id=pe.video_id LIMIT 1)) identity_key "
             "FROM player_events pe WHERE pe.kind IN ('track_exit','bye','ended') "
-            "AND pe.at>=? AND pe.at<=? ORDER BY pe.at,pe.id", (start, end + horizon)).fetchall()
+            "AND pe.at>=? AND pe.at<=? ORDER BY pe.at,pe.id", (horizon, start, end + horizon)).fetchall()
         for event in exits:
             if event["identity_key"] is None:
                 continue
@@ -203,6 +227,25 @@ class RecSurfaceRepo(Repo):
                 bucket["never_played"] = sum(c.get("last_played") is None and "last_played" in c for c in metadata)
                 bucket["powered"] = bucket["impressions"] >= int(min_impressions)
                 bucket["verdict"] = None
+                clusters = {}
+                opportunities = set()
+                for row in rows:
+                    experiment = json.loads(row["provenance"]).get("experiment") or {}
+                    if not experiment:
+                        continue
+                    opportunities.add(experiment["comparison_id"])
+                    cluster = clusters.setdefault(experiment["cluster"],
+                        {"played": False, "completion": False, "skip": False})
+                    for metric in cluster:
+                        cluster[metric] |= states[row["id"]][metric]
+                bucket["opportunities"] = len(opportunities)
+                bucket["clusters"] = len(clusters)
+                bucket["cluster_rates"] = {}
+                bucket["cluster_ci95"] = {}
+                for metric in ("played", "completion", "skip"):
+                    hits = sum(cluster[metric] for cluster in clusters.values())
+                    bucket["cluster_rates"][metric] = hits / len(clusters) if clusters else None
+                    bucket["cluster_ci95"][metric] = _wilson(hits, len(clusters))
             return groups
 
         unique_keys = {r["identity_key"] for r in impressions}
@@ -239,6 +282,10 @@ class RecSurfaceRepo(Repo):
             "by_surface": breakdown(lambda r: r["surface"]),
             "by_lane": breakdown(lambda r: r["lane"]),
             "by_mode": breakdown(lambda r: str(r["mode_id"]) if r["mode_id"] is not None else "unknown"),
+            "by_ranker": breakdown(lambda r: json.loads(r["provenance"]).get("ranker")),
+            "by_experiment": breakdown(lambda r:
+                ((json.loads(r["provenance"]).get("experiment") or {}).get("cohort", "unknown") + ":" +
+                 json.loads(r["provenance"]).get("ranker", "unknown"))),
             "by_ownership": breakdown(lambda r: candidates[r["id"]].get("ownership")),
             "by_metadata": {axis: breakdown(lambda r, axis=axis:
                 ("present" if candidates[r["id"]]["coverage"].get(axis) else "missing")
@@ -248,6 +295,28 @@ class RecSurfaceRepo(Repo):
             # counterfactual. #110's controlled comparison may add a verdict later.
             "verdict": None,
         }
+
+    @synchronized
+    def experiment_report(self, start, end, now):
+        """Mature live cohorts only; a replay is a hypothetical ranking, never outcome evidence."""
+        mature_end = min(end, now - 24 * 3600)
+        report = self.recommendation_scorecard(start, max(start, mature_end), experiments_only=True)
+        for bucket in report["by_experiment"].values():
+            bucket["powered"] = bucket["clusters"] >= MIN_EXPERIMENT_CLUSTERS
+        shadows = self.conn.execute(
+            "SELECT json_extract(provenance,'$.ranker') ranker,COUNT(*) rows,"
+            "COUNT(DISTINCT json_extract(provenance,'$.experiment.comparison_id')) opportunities "
+            "FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
+            "AND json_extract(provenance,'$.policy_kind')='counterfactual' GROUP BY ranker",
+            (start, end)).fetchall()
+        return {"schema": 1, "start": start, "end": end, "mature_before": mature_end,
+                "live": report["by_experiment"], "counterfactual": [dict(r) for r in shadows],
+                "by_lane": report["by_lane"], "by_mode": report["by_mode"],
+                "min_clusters_per_arm": MIN_EXPERIMENT_CLUSTERS,
+                "uncertainty": "Wilson 95% intervals on epoch/mode clusters, repeated views pooled",
+                "promotion_rule": "100 mature clusters per arm; disjoint acceptance intervals; "
+                                  "no worse sustained-listening or skip intervals",
+                "counterfactual_outcomes": None}
 
     # --- recipes: the exact theme/params a generated playlist was made from (legible + re-runnable) ---
     @synchronized
@@ -324,34 +393,13 @@ class RecSurfaceRepo(Repo):
         persistent API. Time-window args are ignored; all stored events are returned newest-first."""
         return self.recent_mood_events()
 
-    # --- #87 lane impressions: pure instrumentation for a future lane bandit (rec_lane_impressions,
-    #     created by the schema baseline since it's a plain append-only log) ---
-    @synchronized
-    def record_lane_impressions(self, items, now, prune_before=None) -> None:
-        """Log which lane served each rendered item: items is [(lane, identity_key), ...]. One
-        executemany insert; when prune_before is set, rows with at < prune_before are deleted in the
-        same transaction. No-op on an empty items list. Read by lane_impression_counts."""
-        items = list(items)
-        if not items:
-            return
-        self.conn.executemany(
-            "INSERT INTO rec_lane_impressions(lane, identity_key, at) VALUES (?,?,?)",
-            [(lane, key, now) for lane, key in items])
-        if prune_before is not None:
-            self.conn.execute("DELETE FROM rec_lane_impressions WHERE at < ?", (prune_before,))
-        self.conn.commit()
-
     @synchronized
     def lane_impression_counts(self, since=None) -> dict:
-        """{lane: count} of logged impressions, optionally restricted to at >= since. The future
-        lane-bandit's read side; also proof the data lands."""
-        if since is None:
-            rows = self.conn.execute(
-                "SELECT lane, COUNT(*) c FROM rec_lane_impressions GROUP BY lane").fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT lane, COUNT(*) c FROM rec_lane_impressions WHERE at >= ? GROUP BY lane",
-                (since,)).fetchall()
+        """Actual exposure counts from the unified ledger, excluding replay rows."""
+        rows = self.conn.execute(
+            "SELECT lane,COUNT(*) c FROM rec_served_impressions WHERE (? IS NULL OR served_at>=?) "
+            "AND COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live' GROUP BY lane",
+            (since, since)).fetchall()
         return {r["lane"]: r["c"] for r in rows}
 
     # --- per-card rotation (the rec_impressions table, surface='card') ---

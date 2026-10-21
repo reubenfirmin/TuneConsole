@@ -18,7 +18,7 @@ def apply_dislikes(store, status_map, now, provenance="sync") -> None:
     action time; likes stay out of the transient model and graduate at the low source_w_like_synced
     weight), 'action' when observed live through the extension (real event time; full transient
     participation, normal source_w_like weight). An INDIFFERENT here must only ever arrive from the
-    sync's whole-run view: the player pipelines filter it out because their readouts show
+    sync's complete whole-run view: the player pipelines filter it out because their readouts show
     INDIFFERENT before YTM hydrates the real rating (see live_plays/player_events).
 
     Graduation is additionally gated by a once-EVER per-key stamp (mark_graduated_once) that

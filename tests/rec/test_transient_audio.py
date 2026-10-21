@@ -11,6 +11,9 @@ class _FakeDao:
     def __init__(self, content, audio):
         self._c, self._a = content, audio
 
+    def library_keys(self):
+        return set(self._c) | set(self._a)
+
     def track_content(self):
         return self._c
 

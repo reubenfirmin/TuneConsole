@@ -399,6 +399,29 @@ def test_now_playing_toggle_returns_ok_false_when_not_connected():
     assert r.json()["ok"] is False
 
 
+@pytest.mark.parametrize("ok", [True, False])
+def test_rate_target_and_result_round_trip_without_blocking_socket(ok):
+    bridge = Bridge()
+    client = TestClient(_app(bridge))
+    with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        result = []
+        worker = threading.Thread(target=lambda: result.append(client.post("/now-playing/rate",
+            json={"action": "like", "videoId": "A"}).json()))
+        worker.start()
+        frame = ws.receive_json()
+        assert {k: frame[k] for k in ("type", "action", "videoId")} == {
+            "type": "rate", "action": "like", "videoId": "A"}
+        ws.send_json({"id": frame["id"], "status": 200,
+                      "body": json.dumps({"ok": ok, "error": "" if ok else "song changed"})})
+        worker.join(timeout=5)
+        assert result == [{"ok": ok, "error": "" if ok else "song changed"}]
+
+
+def test_rate_requires_displayed_target():
+    client = TestClient(_app(Bridge()))
+    assert client.post("/now-playing/rate", json={"action": "like"}).json()["ok"] is False
+
+
 def test_pevent_frame_persists_raw_event():
     # #91 a pevent frame lands in player_events; a stub store still cannot kill the socket
     import time

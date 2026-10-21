@@ -1,8 +1,9 @@
 """Home tab: the default landing page: Sync control, Take-Action triage, and For-You recs."""
 import asyncio
+from yt_playlist.core.activity import activity_for
 import json
-import threading
 import time
+import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Request, Response
@@ -182,44 +183,38 @@ def _carded(store, lane, label, pool, now):
 _CARD_LABELS = {"wheelhouse": "More in your wheelhouse", "explore": "From your catalog",
                 "comfort": "Comfort listening", "fresh": "Fresh songs"}
 
-# #87 retention only needs to outlive the future lane-bandit's evidence window, not forever.
-_LANE_IMPRESSION_RETAIN_D = 30
-
-
-def _record_lane_impressions(store, items, now):
-    """#87 pure instrumentation: log which lane served each item actually rendered on a Home card, for
-    a future lane bandit. Never affects lane selection/weighting. Items are ForYouItem (wheelhouse/
-    explore/comfort) or the Fresh dict shape, both of which carry lane + key."""
-    if not items:
-        return
-    pairs = [((it.get("lane") if isinstance(it, dict) else it.lane),
-              (it.get("key") if isinstance(it, dict) else it.key)) for it in items]
-    store.record_lane_impressions(pairs, now,
-                                  prune_before=now - _LANE_IMPRESSION_RETAIN_D * 86400)
-
-
 def _served_model_version(store, ranker, now=None):
     return measurement.serving_policy(store, time.time() if now is None else now, ranker or "lane")[0]
 
 
 def _record_served_cards(store, protos, now):
     """#113 log only the final twelve-track cards handed to the template."""
-    rows = []
-    rank = 0
     for card_position, proto in enumerate(protos, 1):
+        rows = []
         ranker = proto.get("ranker") or "lane"
+        comparison = uuid.uuid4().hex
+        experiment = proto.get("experiment")
+        if experiment:
+            experiment = {**experiment, "comparison_id": comparison}
         for track_position, track in enumerate(proto["tracks"], 1):
-            rank += 1
             key = track.get("key") if isinstance(track, dict) else getattr(track, "key", None)
             details = dict(track) if isinstance(track, dict) else vars(track).copy()
-            rows.append({**details, "key": key, "rank": rank, "lane": proto["lane"],
+            rows.append({**details, "key": key, "rank": track_position, "lane": proto["lane"],
                          "mode_id": proto.get("mode_id"),
                          "serving_context": {**details.get("serving_context", {}),
                                         "ranker": ranker, "card_position": card_position,
                                         "track_position": track_position,
                                         "recipe": proto.get("recipe", {})}})
-    measurement.record_recommendations(store, "home", rows, now,
-                                       ranker="assembled-cards")
+        share = experiment["share"] if experiment else None
+        propensity = (share if ranker == "ppr" else 1 - share) if share is not None else 1.0
+        measurement.record_recommendations(store, "home", rows, now, ranker=ranker,
+            request_id=comparison + ":live", experiment=experiment, propensity=propensity)
+        if experiment and (shadow := proto.get("counterfactual")):
+            measurement.record_recommendations(store, "home", shadow["tracks"], now,
+                lane=proto["lane"], mode_id=proto.get("mode_id"), ranker=shadow["ranker"],
+                request_id=comparison + ":counterfactual", experiment=experiment,
+                policy_kind="counterfactual", propensity=0.0,
+                provenance={"recipe": proto.get("recipe", {})})
 
 
 def _one_card(store, card, now, *, avoid_genres=(), include_genres=()):
@@ -250,7 +245,6 @@ def _one_card(store, card, now, *, avoid_genres=(), include_genres=()):
     if not pool or ((avoid_genres or include_genres) and len(pool) < 4):
         return None
     p = _carded(store, card, _CARD_LABELS[card], pool, now)
-    _record_lane_impressions(store, p["tracks"], now)   # #87: log what was actually rendered
     return p
 
 
@@ -522,8 +516,13 @@ def build(ctx) -> APIRouter:
                 rolled = recommend.roll_recipe(store, c["lane"], seed=f"{epoch}:{c['mode_id']}", now=now)
                 journey, dj = rolled.get("journey", "shuffle"), rolled.get("dj", {})
                 tracks = _order_by_journey(store, c["tracks"], journey, dj.get("seed", 0))
+                shadow = c.get("counterfactual")
+                if shadow:
+                    shadow = {**shadow, "tracks": _order_by_journey(store, shadow["tracks"], journey,
+                                                                    dj.get("seed", 0))}
                 protos.append(_proto(store, c["lane"], c["label"], tracks, now)
                               | {"mode_id": c["mode_id"], "ranker": c["ranker"],
+                                 "experiment": c.get("experiment"), "counterfactual": shadow,
                                  "recipe": {"model": "mode", "lane": c["lane"], "mode_id": c["mode_id"],
                                             "ranker": c["ranker"],
                                             "journey": journey, "dj": dj}})
@@ -532,11 +531,6 @@ def build(ctx) -> APIRouter:
                     epoch, [(c["lane"], c["mode_id"], c["ranker"]) for c in cards], now)
             except Exception:  # noqa: BLE001 - logging must never break the card render
                 ctx.logger.warning("mode-impression log failed", exc_info=True)
-            # #87 lane impressions for the PRIMARY serving path too (the _one_card hook only covers
-            # per-card refresh and the pre-rebuild fallback); without this, the future lane bandit's
-            # evidence would be skewed toward refresh clicks.
-            for p in protos:
-                _record_lane_impressions(store, p["tracks"], now)
         elif filters and store.get_proposals("mode_bundles") and store.modes.list_modes(active_only=True):
             protos = []  # no qualifying mode; explain and retain the usual menu below
         else:
@@ -567,7 +561,6 @@ def build(ctx) -> APIRouter:
                 p = _built_library(scoped, now, excluded)
                 if p:
                     protos.append(p)
-                    _record_lane_impressions(store, p["tracks"], now)
             job = pool_job if lane == "fresh" else ctx.jobs.latest("library_pool", scoped)
             slots.append({"proto": p, "pool": None if p else _pool_view(scoped, job)})
         if filters:
@@ -657,7 +650,6 @@ def build(ctx) -> APIRouter:
             p = _proto(store, "fresh", _CARD_LABELS["fresh"], tracks, now)
             p["recipe"] = recommend.roll_recipe(store, "fresh", seed=f"fresh:{_epoch(store, 'fresh')}", now=now)
             p["recipe"]["facets"] = {"genres": include}
-            _record_lane_impressions(store, tracks, now)
         else:
             p = _one_card(store, "fresh", now, **({"avoid_genres": avoid} if avoid else {}))
         if p is not None:
@@ -701,7 +693,6 @@ def build(ctx) -> APIRouter:
     def _library_pool_fragment(request, job):
         p = _built_library(job.parameters, now_fn(), job.exclude_keys) if job.done and not job.error else None
         if p:
-            _record_lane_impressions(store, p["tracks"], now_fn())
             store.mark_offered("track", [t["key"] for t in p["tracks"]], now_fn())
             _record_served_cards(store, [p], now_fn())
             _audit_cards(request, [p], now_fn())
@@ -941,7 +932,7 @@ def build(ctx) -> APIRouter:
             result["error"] = "Couldn't create it - connect an account and keep at least one track."
         else:
             try:
-                res = await asyncio.to_thread(
+                res = await activity_for(ctx).to_thread(
                     executor.create_generated_playlist, store, name, tracks, client, now_fn(),
                     identity_id, recipe=recipe)
                 if (res.get("pid") and isinstance(recipe, dict)
@@ -955,9 +946,8 @@ def build(ctx) -> APIRouter:
                 watch_url = f"https://music.youtube.com/watch?list={res['new_ytm']}"
                 bridge = getattr(ctx, "bridge", None)
                 if bridge is not None and getattr(bridge, "connected", False):
-                    threading.Thread(
-                        target=executor.navigate_when_ready,
-                        args=(client, bridge, res["new_ytm"], watch_url), daemon=True).start()
+                    activity_for(ctx).start_thread(executor.navigate_when_ready,
+                        args=(client, bridge, res["new_ytm"], watch_url))
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
                 if res.get("pid") and res.get("added"):
                     measurement.record_action(store, "save", now_fn(), playlist_id=res["pid"],

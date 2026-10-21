@@ -32,6 +32,5 @@ def test_build_transition_empty_store(store):
     assert keys == [] and W is None and idx == {}
 
 
-def test_shadow_log_noop_without_modes(store):
-    # no modes -> nothing logged, no crash
-    assert ppr.shadow_log(store, now=1.0) == 0
+def test_mode_rankings_noop_without_modes(store):
+    assert ppr.mode_rankings(store) == {}

@@ -114,7 +114,7 @@ vm.runInContext(fs.readFileSync('extension/background.js', 'utf8'), context);
     assert.deepEqual(reloads, scenario === 'idle' ? [1] : []);
   } else if (['playpause_lost_reply', 'rating_lost_reply'].includes(scenario)) {
     await vm.runInContext(scenario === 'playpause_lost_reply'
-      ? 'playPauseInYtmTab()' : 'rateInYtmTab("like")', context);
+      ? 'playPauseInYtmTab()' : 'rateInYtmTab("like", "v")', context);
     assert.equal(attempts, 1, 'a lost click reply must not replay the toggle');
     assert.equal(injections.length, 0);
   } else {

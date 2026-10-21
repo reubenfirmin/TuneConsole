@@ -64,6 +64,29 @@ def test_empty_playlist_delete_removes_row(live_cleanup_app, page):
     link.wait_for(state="hidden", timeout=3000)
 
 
+def test_empty_playlist_failed_read_keeps_row_and_allows_retry(live_cleanup_app, page, monkeypatch):
+    from yt_playlist.library import executor
+    monkeypatch.setattr(executor, "with_retry", lambda fn: fn())
+    get_playlist = FakeClient.get_playlist
+
+    def unreadable(self, playlistId, limit=None):
+        if playlistId == "PLE":
+            raise TimeoutError("YouTube read timed out")
+        return get_playlist(self, playlistId, limit)
+
+    monkeypatch.setattr(FakeClient, "get_playlist", unreadable)
+    page.goto(f"{live_cleanup_app}/cleanup")
+    row = page.get_by_role("row").filter(has_text="Empty One")
+    row.get_by_role("button", name="Delete", exact=True).click()
+    expect(page.locator(".toast-err")).to_contain_text("empty on YouTube")
+    expect(row).to_be_visible()
+    expect(row.get_by_role("button", name="Delete", exact=True)).to_be_enabled()
+
+    monkeypatch.setattr(FakeClient, "get_playlist", get_playlist)
+    row.get_by_role("button", name="Delete", exact=True).click()
+    expect(row).to_have_count(0)
+
+
 def test_keep_one_resolves_duplicate_group(live_cleanup_app, page):
     page.goto(f"{live_cleanup_app}/cleanup")
     expect(page.get_by_text("identical copies")).to_be_visible()

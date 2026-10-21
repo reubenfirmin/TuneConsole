@@ -1,8 +1,48 @@
 """In-memory registry of background sync jobs, streamed to the browser over SSE."""
 import itertools
+import logging
 import threading
 
 from yt_playlist.providers import enrichment, waterfall
+from yt_playlist.core.activity import activity_for
+
+
+def run_library_sync(ctx, job):
+    """Run with the caller's sync lock held; publish terminal state only after error handling."""
+    from yt_playlist.library import sync
+    from yt_playlist.library.sync_outcomes import begin_attempt, finish_attempt, resource
+    from yt_playlist.util.retry import error_summary
+
+    now = ctx.now_fn()
+    try:
+        begin_attempt(ctx.store, now)
+        clients = ctx.client_provider() or {}
+        job.result = sync.sync_all(ctx.store, clients, now, on_progress=job.events.append,
+                                   on_auth_expired=ctx.flag_auth_expired,
+                                   on_auth_ok=ctx.clear_auth_expired)
+        job.outcome = job.result["status"]
+        if job.outcome != "complete":
+            job.error = f"Sync {job.outcome}; some library resources could not be refreshed."
+    except Exception as e:  # the provider and unexpected failures follow the same SSE contract
+        detail = error_summary(e)
+        job.error = detail
+        job.outcome = "failed"
+        job.events.append({"type": "err", "text": f"sync failed: {detail}"})
+        accounts = {str(i.id): {"label": i.label, "status": "failed", "resources": {
+            name: resource("failed", detail)
+            for name in ("playlists", "ratings", "history", "saved_albums")}}
+            for i in ctx.store.get_identities()}
+        job.result = finish_attempt(ctx.store, {"status": "failed", "accounts": accounts,
+            "resources": {name: resource("failed", detail)
+                          for name in ("saved_album_mirror", "album_tracks")}}, now)
+    finally:
+        for worker in (ctx.rec_worker, ctx.enrich_worker):
+            if worker:
+                try:
+                    worker.trigger()
+                except Exception:  # rebuilding must not hide the sync's terminal result
+                    logging.getLogger(__name__).warning("post-sync worker trigger failed", exc_info=True)
+        job.done = True
 
 
 def start_playlist_enrichment(ctx, playlist_id):
@@ -25,7 +65,7 @@ def start_playlist_enrichment(ctx, playlist_id):
         finally:
             job.done = True
 
-    threading.Thread(target=run, daemon=True).start()
+    activity_for(ctx).start_thread(run)
     return job
 
 
@@ -49,7 +89,7 @@ def start_fresh_pool(ctx, parameters):
         finally:
             job.done = True
 
-    threading.Thread(target=run, daemon=True).start()
+    activity_for(ctx).start_thread(run)
     return job
 
 
@@ -71,7 +111,7 @@ def start_library_pool(ctx, parameters, exclude_keys):
         finally:
             job.done = True
 
-    threading.Thread(target=run, daemon=True).start()
+    activity_for(ctx).start_thread(run)
     return job
 
 
@@ -82,6 +122,8 @@ class SyncJob:
         self.events = []      # list of event dicts; append-only (safe for one producer thread)
         self.done = False
         self.error = None
+        self.outcome = None
+        self.result = None
         self.playlist_id = None   # set for playlist enrichment jobs, so a refreshed page can rejoin
         self.album_browse = None  # set for album enrichment jobs (browse_id scope) instead
         self.source = None        # enrichment source (musicbrainz / lastfm / discogs)

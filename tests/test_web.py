@@ -302,7 +302,7 @@ def test_sync_streams_progress_events(store):
     iid = store.upsert_identity("main", "cred", None, True)
     client = FakeClient(
         playlists=[{"playlistId": "PL1", "title": "Roadtrip", "count": 1}],
-        tracks={"PL1": [_track("v1", "Song", "Artist")]})
+        tracks={"PL1": [{**_track("v1", "Song", "Artist"), "likeStatus": "INDIFFERENT"}]})
     app = create_app(store, lambda: {iid: client}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     jid = c.post("/sync").json()["job_id"]
@@ -474,6 +474,31 @@ def test_delete_empty_refuses_if_not_empty(store, monkeypatch, tmp_path):
     assert r.status_code == 422 and client.deleted == []          # refused -> error toast, nothing deleted
 
 
+@pytest.mark.parametrize("failure", [TimeoutError("timed out"), KeyError("musicPlaylistShelfRenderer")])
+def test_delete_empty_failed_read_keeps_row_and_cleanup_summary(store, monkeypatch, tmp_path, failure):
+    from yt_playlist.library import executor
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
+    monkeypatch.setattr(executor, "with_retry", lambda fn: fn())
+    iid = store.upsert_identity("main", "cred", None, True)
+    empty = store.upsert_playlist(iid, "PLempty", "Empty at last sync", 0, "h", 1.0)
+    client = FakeClient(tracks={"PLempty": [_track("new", "Added elsewhere", "X")]})
+
+    def unreadable(playlist, limit=None):
+        raise failure
+
+    monkeypatch.setattr(client, "get_playlist", unreadable)
+    recommend.refresh_cleanup(store, 1.0)
+    summary = store.get_proposals(CLEANUP_SURFACE)
+    c = _client(store, lambda: {iid: client})
+    r = c.post("/playlist/delete-empty", data={"playlist": empty})
+    assert r.status_code == 422 and r.headers["hx-reswap"] == "none"
+    assert "empty on YouTube" in r.text and "Nothing was changed" in r.text
+    assert client.deleted == [] and store.get_playlist(empty) is not None
+    assert store.get_proposals(CLEANUP_SURFACE) == summary
+    assert store.get_actions() == []
+    assert not list(tmp_path.glob("backups/*"))
+
+
 def test_overlap_ignore_excludes_playlist(store):
     iid = store.upsert_identity("main", "cred", None, True)
     fav = store.upsert_playlist(iid, "PLFAV", "Big Mixtape", 3, "h", 1.0)
@@ -516,7 +541,8 @@ def test_merge_apply_route(store, monkeypatch, tmp_path, return_to, label):
     t1 = store.upsert_track("v1", "One", "X", None, None, 1)
     t2 = store.upsert_track("v2", "Two", "X", None, None, 1)
     store.set_playlist_tracks(a, [t1]); store.set_playlist_tracks(b, [t2])
-    client = FakeClient()
+    client = FakeClient(tracks={"PLA": [_track("v1", "One", "X")],
+                                "PLB": [_track("v2", "Two", "X")]})
     c = _client(store, lambda: {iid: client})
     page = c.get("/merge", params={"ids": f"{a},{b}", "return": return_to})
     assert label in page.text and 'class="ui-arrow ui-arrow--left"' in page.text
@@ -548,7 +574,8 @@ def test_merge_apply_ignores_stale_ids_in_url(store, monkeypatch, tmp_path):
     b = store.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
     t1 = store.upsert_track("v1", "One", "X", None, None, 1)
     store.set_playlist_tracks(a, [t1]); store.set_playlist_tracks(b, [t1])
-    c = _client(store, lambda: {iid: FakeClient()})
+    client = FakeClient(tracks={pid: [_track("v1", "One", "X")] for pid in ("PLA", "PLB")})
+    c = _client(store, lambda: {iid: client})
     c.get(f"/merge?ids={a},{b},99999")                    # 99999 doesn't exist
     r = c.post(f"/merge/apply?ids={a},{b},99999")
     assert r.status_code == 200 and r.headers.get("hx-redirect")   # applied (not the 422 error toast)
@@ -989,7 +1016,9 @@ def test_move_run_copy_returns_row_with_message(store):
 def test_move_run_move_removes_row(store,monkeypatch,tmp_path):
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path))
     i1, i2, pid = _two_identity_move(store)
-    c = _client(store, lambda: {i1: FakeClient(), i2: FakeClient()})
+    source = FakeClient(tracks={"PL1": [_track("v1", "S", "X")]})
+    target = FakeClient(catalog={"v1": _track("v1", "S", "X")})
+    c = _client(store, lambda: {i1: source, i2: target})
     r = c.post("/move/run", data={"playlist": pid, "target_identity": i2})   # move (no copy_only)
     assert r.status_code == 200
     assert r.text.strip() == ""                          # deleted -> empty -> htmx removes the row

@@ -73,6 +73,21 @@ def validate_catalog(conn, version):
     from . import v008_recordings, v010_play_event_subjects
     validator = v010_play_event_subjects if version >= 10 else v008_recordings
     validator.validate(conn)
+    if version >= 11:
+        from . import v011_takeout_coverage
+        v011_takeout_coverage.validate(conn)
+    if version >= 12:
+        from . import v012_enrichment_retries
+        v012_enrichment_retries.validate(conn)
+    if version >= 13:
+        from . import v013_provider_coverage
+        v013_provider_coverage.validate(conn)
+    if version >= 14:
+        from . import v014_artwork_retries
+        v014_artwork_retries.validate(conn)
+    if version >= 15:
+        from . import v015_album_shares
+        v015_album_shares.validate(conn)
 
 
 def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, clock=time.time):

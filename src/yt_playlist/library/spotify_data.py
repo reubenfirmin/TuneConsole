@@ -88,12 +88,15 @@ def load_streaming_history(raw) -> tuple[list[dict], int]:
     return rows, skipped
 
 
-def import_spotify_data(store, raw) -> dict:
+def import_spotify_data(store, raw, *, on_progress=None) -> dict:
     """Parse, library-match, and idempotently backfill Spotify listening history."""
     ident = resolve_identity(store, "")
     if ident is None:
         return {"error": "no identity configured"}
+    progress = on_progress or (lambda text: None)
+    progress('Reading Spotify history…')
     parsed, skipped = load_streaming_history(raw)
+    progress(f'Matching {len(parsed):,} history entries to your library…')
     owned = set(RecDao(store).library_keys())
     matched, unmatched = [], Counter()
     for row in parsed:
@@ -103,6 +106,7 @@ def import_spotify_data(store, raw) -> dict:
             continue
         # Spotify ids are intentionally not put in the YouTube video_id column.
         matched.append((key, None, row["ts"]))
+    progress(f'Saving {len(matched):,} matched plays…')
     plays_added = store.import_plays(ident, [(key, ts) for key, _vid, ts in matched])
     events_added = store.import_play_events(ident, matched, source="spotify")
     span_days = int((parsed[-1]["ts"] - parsed[0]["ts"]) // 86400) if parsed else 0

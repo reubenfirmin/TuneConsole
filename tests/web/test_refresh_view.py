@@ -5,7 +5,7 @@ response, and a FAILED op must not fire the control at all."""
 from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
-from tests.conftest import FakeClient
+from tests.conftest import FakeClient, _track
 
 
 class _StubBridge:
@@ -118,7 +118,7 @@ def test_delete_posts_refresh_view_for_removed_playlist(store, monkeypatch, tmp_
 
     r = c.post("/playlists/delete", data={"ids": str(a)})
 
-    assert r.headers.get("hx-refresh") == "true"
+    assert r.headers.get("hx-redirect", "").startswith("/playlists?result=")
     assert store.get_playlist(a) is None
     assert bridge.calls == [{"type": "refresh-view", "playlist": "PL1"}]
 
@@ -135,7 +135,7 @@ def test_delete_of_system_playlist_hides_only_and_does_not_fire(store, monkeypat
 
     r = c.post("/playlists/delete", data={"ids": str(lm)})
 
-    assert r.headers.get("hx-refresh") == "true"
+    assert r.headers.get("hx-redirect", "").startswith("/playlists?result=")
     assert bridge.calls == []
 
 
@@ -153,7 +153,9 @@ def test_move_that_deletes_source_posts_refresh_view(store,monkeypatch,tmp_path)
     # reload to show that. The copy destination is brand new, so no refresh fires for it.
     i1, i2, pid = _two_identity_move(store)
     bridge = _StubBridge()
-    c = _client(store, lambda: {i1: FakeClient(), i2: FakeClient()}, bridge)
+    source = FakeClient(tracks={"PL1": [_track("v1", "S", "X")]})
+    target = FakeClient(catalog={"v1": _track("v1", "S", "X")})
+    c = _client(store, lambda: {i1: source, i2: target}, bridge)
 
     r = c.post("/move/run", data={"playlist": pid, "target_identity": i2})
 

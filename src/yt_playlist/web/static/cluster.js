@@ -36,6 +36,7 @@ function clusterCanvas() {
     nodes: [], nextId: 1, rootId: null,
     query: '', results: [], seedSel: -1, genreSel: -1,
     editingSeeds: false, seedBusy: false, randomSeed: Math.floor(Math.random() * 0x100000000),
+    clusterError: '', retryAction: null, _seedChangeToken: null,
     _centerHeight: 90,
     _pendingView: null,
     playlistName: '', saveMode: 'all',
@@ -166,7 +167,8 @@ function clusterCanvas() {
       const settle = () => new Promise(res => setTimeout(res, 700));
       try {
         if (label) this.playlistName = label;  // name the canvas before addSeed so it sticks (badge)
-        if (genre) this.pickFamily(genre);
+        // The linked artist/song is the seed; the optional genre only filters its ring.
+        if (genre) this.allowedFamilies = [genre];
         this.query = seed;
         await this.search();
         const r = this.results[0];
@@ -538,6 +540,7 @@ function clusterCanvas() {
       this.allowedFamilies = []; this.genreQuery = ''; this.genreOpen = false;
       this.query = ''; this.results = []; this.playlistName = ''; this.saveMode = 'all';
       this.editingSeeds = false; this.seedBusy = false;
+      this.clusterError = ''; this.retryAction = null; this._seedChangeToken = null;
       this._autofit = false;
       this._pendingView = null;
       this.randomSeed = Math.floor(Math.random() * 0x100000000);
@@ -596,20 +599,79 @@ function clusterCanvas() {
       this.$nextTick(() => this.$refs.seedInput.focus());
     },
     async removeSeed(index) {
+      await this._changeSeeds({type: 'remove', index});
+    },
+    async addSeed(seed) {
+      await this._changeSeeds({type: 'add', seed});
+    },
+    _curationSignature() {
+      // Simulation positions and camera movement can change while requests are in flight.
+      // A user's edits to the graph must never be overwritten by an older refinement.
+      return JSON.stringify([this.activeId, this.nodes.map(n =>
+        [n.id, n.parentId, n.state, n.fx, n.fy, n.seeds]), this.trunk, this.boosted,
+        this.allowedFamilies, this.playlistName, this.randomSeed]);
+    },
+    async _changeSeeds(action) {
       if (this.seedBusy) return;
+      const signature = this._curationSignature(), token = rawColl({});
+      this._seedChangeToken = token;
+      this.seedBusy = true;
+      this.clusterError = ''; this.retryAction = null;
+      this.query = ''; this.results = [];
+      // Refine an isolated draft. Its intermediate feeds/writes never reach the live graph or
+      // localStorage, including when a later parent's request fails after earlier ones succeeded.
+      try {
+        const draft = Object.assign(clusterCanvas(), JSON.parse(JSON.stringify(this._stateBlob())),
+          {_subHueN: this._subHueN, exhaustedIds: [...this.exhaustedIds]});
+        draft._feed = () => draft._recomputeTopology();
+        draft.persist = () => {};
+        const expandRing = draft.expandRing.bind(draft);
+        draft.expandRing = async (...args) => {
+          const ring = await expandRing(...args);
+          if (this._seedChangeToken !== token) throw new Error('Refinement cancelled');
+          return ring;
+        };
+        if (action.type === 'add') await draft._addSeed(action.seed);
+        else await draft._removeSeed(action.index);
+        if (this._seedChangeToken !== token) return;
+        if (this._curationSignature() !== signature) throw new Error('Canvas changed during refinement');
+        // Keep the current simulation positions and any drag pins for surviving nodes.
+        for (const n of draft.nodes) {
+          const current = this.nodeById(n.id);
+          if (current) for (const key of ['x', 'y', 'vx', 'vy', 'fx', 'fy']) n[key] = current[key];
+        }
+        for (const key of ['nodes', 'nextId', 'rootId', 'trunk', 'subHues', '_subHueN',
+                           'allowedFamilies', 'playlistName', 'exhaustedIds']) this[key] = draft[key];
+        if (this.explain && !this.nodes.some(n => n.id === this.explain.childId)) this.explain = null;
+        this._autofit = true;
+        this._reheat();
+      } catch (e) {
+        if (this._seedChangeToken === token) {
+          this.clusterError = 'Couldn’t update suggestions. Your canvas is still here. Try again.';
+          this.retryAction = action;
+        }
+      } finally {
+        if (this._seedChangeToken === token) { this.seedBusy = false; this._seedChangeToken = null; }
+      }
+    },
+    async retryCluster() {
+      const action = this.retryAction;
+      if (!action || this.seedBusy) return;
+      if (action.type === 'grow') await this.grow(action.nodeId);
+      else await this._changeSeeds(action);
+    },
+    async _removeSeed(index) {
       const root = this.nodeById(this.rootId); if (!root) return;
       const previousName = this.seedName();
       const removed = root.seeds.splice(index, 1)[0];
+      if (!removed) return;
       if (removed.kind === 'genre') this.allowedFamilies = this.allowedFamilies.filter(f => f !== removed.label);
       root.keys = [...new Set(root.seeds.flatMap(s => s.keys))];
       this._syncSeedName(previousName);
-      this._autofit = true;
-      this.seedBusy = true;
-      try { await this.refineTree(); }
-      finally { this.seedBusy = false; }
+      await this._refineTree();
     },
-    async addSeed(r) {
-      if (this.seedBusy || this.centralSeeds().some(s => s.kind === r.kind && s.label === r.label
+    async _addSeed(r) {
+      if (this.centralSeeds().some(s => s.kind === r.kind && s.label === r.label
         && JSON.stringify(s.keys) === JSON.stringify(r.keys))) return;
       const previousName = this.seedName();
       this.query = ''; this.results = [];
@@ -621,31 +683,32 @@ function clusterCanvas() {
         this.rootId = root.id; this.nodes.push(root);
       }
       root.seeds.push({ label: r.label, kind: r.kind, keys: r.keys });
+      if (r.kind === 'genre' && !this.allowedFamilies.includes(r.label)) this.allowedFamilies.push(r.label);
       root.keys = [...new Set(root.seeds.flatMap(s => s.keys))];
       this._syncSeedName(previousName);
-      this._autofit = true;
       this._feed();
-      this.seedBusy = true;
-      try {
-        if (fresh || !this.children(root.id).length) await this.grow(root.id);
-        else await this.refineTree();
-      } finally { this.seedBusy = false; this._kick(); this.persist(); }
+      if (fresh || !this.children(root.id).length) await this._grow(root.id);
+      else await this._refineTree();
     },
 
     // --- tree growth ------------------------------------------------------------------------------
     async expandRing(node, k) {
       const pos = this.posKeys(node);
       const pos_keys = this.boosted.length ? [...pos, ...this.boosted, ...this.boosted] : pos;
-      try {
-        const r = await fetch('/clusters/expand', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pos_keys, neg_keys: this.prunedKeys(),
-            exclude: node.kind === 'central' ? [...this.canvasKeys(), ...this.centralSongKeys()] : this.allKeys(),
-            central_seeds: node.kind === 'central' ? this.centralSeeds() : [], random_seed: this.randomSeed,
-            count_keys: this.keepKeys(), k, allow_genres: this.allowedFamilies, include_new: true }),
-        });
-        return (await r.json()).ring || [];
-      } catch (e) { return []; }
+      const r = await fetch('/clusters/expand', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pos_keys, neg_keys: this.prunedKeys(),
+          exclude: node.kind === 'central' ? [...this.canvasKeys(), ...this.centralSongKeys()] : this.allKeys(),
+          central_seeds: node.kind === 'central' ? this.centralSeeds() : [], random_seed: this.randomSeed,
+          count_keys: this.keepKeys(), k, allow_genres: this.allowedFamilies, include_new: true }),
+      });
+      if (!r.ok) throw new Error('Could not fetch recommendations');
+      const data = await r.json();
+      if (!Array.isArray(data?.ring) || data.ring.some(t => !t || typeof t.key !== 'string'
+          || !t.key || typeof t.title !== 'string' || typeof t.artist !== 'string')) {
+        throw new Error('Invalid recommendation ring');
+      }
+      return data.ring;
     },
     isBoosted(n) { return !!n && !!n.key && this.boosted.includes(n.key); },
     toggleBoost(n) {
@@ -654,6 +717,15 @@ function clusterCanvas() {
       this._kick(); this._animBoost(); this.persist();
     },
     async grow(nodeId) {
+      try {
+        await this._grow(nodeId);
+        this.clusterError = ''; this.retryAction = null;
+      } catch (e) {
+        this.clusterError = 'Couldn’t load suggestions. Try again.';
+        this.retryAction = {type: 'grow', nodeId};
+      }
+    },
+    async _grow(nodeId) {
       const node = this.nodeById(nodeId);
       if (!node || node.state === 'pruned') return;
       const ring = await this.expandRing(node, 6);
@@ -664,7 +736,7 @@ function clusterCanvas() {
       if (node.kind !== 'central' && !this.trunk.includes(nodeId)) this.trunk = [...this.trunk, nodeId];
       this.addChildren(node, ring);
     },
-    async refineTree() {
+    async _refineTree() {
       const parents = this.nodes.filter(n => this.children(n.id).length);
       for (const parent of parents) {
         if (!this.nodeById(parent.id)) continue;
@@ -736,23 +808,17 @@ function clusterCanvas() {
     },
     _genreChanged() { this.exhaustedIds = []; this.applyGenrePrune(); this._kick(); this.persist(); },
     pickFamily(fam) {
+      if (this.rootId == null) { this._seedFromGenre(fam); return; }
       if (!this.allowedFamilies.includes(fam)) this.allowedFamilies = [...this.allowedFamilies, fam];
       this.genreQuery = ''; this.genreSel = -1;
-      if (this.rootId == null) this._seedFromGenre(fam);   // genre alone SEEDS a cluster; seed+genre just filters
-      else this._genreChanged();
+      this._genreChanged();
     },
     // Seed a cluster from a genre (no artist/song): a central node tagged with the genre, then a first
     // ring grown from the genre's own centroid (server seed_only path, expandRing with empty pos_keys +
     // allow_genres=[fam]). Same shape as addSeed so save/persist/refine all work.
     async _seedFromGenre(fam) {
-      this._autofit = true;
-      const root = { id: this.nextId++, parentId: null, kind: 'central', state: 'central', depth: 0,
-        seeds: [{ label: fam, kind: 'genre', keys: [] }], keys: [], key: null, vid: null,
-        x: CENTER, y: CENTER, fx: CENTER, fy: CENTER };
-      this.rootId = root.id; this.nodes.push(root);
-      this._syncSeedName();
-      await this.grow(root.id);
-      this.exhaustedIds = []; this.persist();
+      this.genreQuery = ''; this.genreSel = -1;
+      await this.addSeed({label: fam, kind: 'genre', keys: []});
     },
     genreMove(d) { const n = this.genreSuggest().length; if (n) this.genreSel = (this.genreSel + d + n) % n; },
     genreChoose() { const o = this.genreSuggest()[this.genreSel >= 0 ? this.genreSel : 0]; if (o) this.pickFamily(o.name); },

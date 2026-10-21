@@ -11,6 +11,7 @@ and filled but never conflict-checked (e.g. single-source audio features can't d
 """
 import threading
 import time
+import math
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -61,16 +62,11 @@ class Numeric:
 
     def agree(self, a, b) -> bool:
         try:
-            return abs(float(a) - float(b)) <= self.tol
+            difference = abs(float(a) - float(b))
+            return difference <= self.tol or math.isclose(difference, self.tol,
+                                                         rel_tol=1e-12, abs_tol=1e-12)
         except (TypeError, ValueError):
             return a == b
-
-    def key(self, v):
-        try:
-            return round(float(v) / (self.tol or 1.0))
-        except (TypeError, ValueError):
-            return v
-
 
 # Only fields that >=2 providers can supply ever actually conflict; the rest are harmless to list.
 FIELD_SPECS = {
@@ -95,6 +91,7 @@ def detect_conflicts(results) -> dict:
 
     `candidates` is a list of {"provider", "value"} for all providers that had a value for the field
     (in result order), so the resolver UI can show every option, not just the disagreeing ones.
+    Every pair must agree: a numeric chain whose endpoints exceed tolerance remains a conflict.
     """
     conflicts = {}
     for fname, spec in FIELD_SPECS.items():
@@ -102,8 +99,8 @@ def detect_conflicts(results) -> dict:
                 if fname in r.fields and not _empty(r.fields[fname])]
         if len(seen) < 2:
             continue
-        groups = {spec.key(v) for _, v in seen}
-        if len(groups) >= 2:                       # genuine disagreement
+        if any(not spec.agree(value, other)
+               for index, (_, value) in enumerate(seen) for _, other in seen[index + 1:]):
             conflicts[fname] = [{"provider": p, "value": v} for p, v in seen]
     return conflicts
 

@@ -14,7 +14,8 @@ import numpy as np
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key, normalize
 from yt_playlist.util.thumbnails import best_thumb
-from yt_playlist.rec import artist_model, embed, recommend, rec_params, discovery_pool
+from yt_playlist.rec import artist_model, embed, rec_params, discovery_pool
+from yt_playlist.rec.scoring import playlist_taste, discovery_facet_weight
 from yt_playlist.providers import lastfm
 from yt_playlist.rec.rec_dao import RecDao
 
@@ -100,14 +101,25 @@ class ContentProjection:
         return self._features(genre, year, audio, artist) @ self.W
 
     @classmethod
-    def fit(cls, store, lam=1.0):
+    def fit(cls, store, lam=1.0, *, training_keys=None, include_artist=True):
+        """Fit on the requested target identities only, including feature vocabulary/statistics.
+
+        Evaluation disables the precomputed artist block because its fitting history is shared
+        with the reference embedding. Production keeps that relational feature.
+        """
         keys, V, idx = embed.load_vectors(store)
         if V is None:
             return None
         dao = RecDao(store)
         content, audio = dao.track_content(), dao.track_audio_features()
+        if training_keys is not None:
+            allowed = set(training_keys)
+            idx = {key: row for key, row in idx.items() if key in allowed}
+            content = {key: value for key, value in content.items() if key in idx}
+            audio = {key: value for key, value in audio.items() if key in idx}
         model = embed.build_content_model(content, audio)
-        artists, AV, aidx = artist_model.load_artist_vectors(store)   # #28 §2c relational feature block
+        artists, AV, aidx = (artist_model.load_artist_vectors(store) if include_artist
+                             else ([], None, {}))
         proj = cls(model, None, aidx, AV)
         rows = []
         for k in idx:                                   # only library tracks that ARE in the embedding
@@ -194,7 +206,7 @@ def new_artists(ctx, limit=15, max_anchors=30):
     key = lastfm.api_key(store)
     if not key:
         return []
-    pt = recommend.playlist_taste(store)
+    pt = playlist_taste(store)
     if not pt:
         return []
     keys, V, idx = embed.load_vectors(store)
@@ -424,7 +436,7 @@ def _discovery_facet_w(store, genre, now):
     """#18 facet overlay for a discovered candidate: its genre-family multiplier, or None to exclude
     (muted family). Untagged → neutral 1.0."""
     fam = genre_map.family(genre) if genre else None
-    return recommend.discovery_facet_weight(store, fam, now)
+    return discovery_facet_weight(store, fam, now)
 
 
 def pick_discovered_albums(store, n, now, recent_frac=0.7):

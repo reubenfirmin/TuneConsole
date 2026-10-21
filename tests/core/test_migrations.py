@@ -16,6 +16,22 @@ def connect(path):
     return conn
 
 
+def test_takeout_coverage_upgrade_preserves_legacy_rows_without_inventing_authority():
+    from yt_playlist.core.migrations.registry import MIGRATIONS
+    store = Store(':memory:')
+    migrate(store.conn, registry=MIGRATIONS[:10])
+    store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
+    store.conn.execute('INSERT INTO history_snapshots(id,identity_id,taken_at) VALUES (1,1,100)')
+    store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'legacy')")
+    store.conn.commit()
+    store.init_schema()
+    row = store.conn.execute('SELECT identity_key,source FROM history_items').fetchone()
+    assert tuple(row) == ('legacy', 'unknown')
+    assert store.conn.execute('SELECT COUNT(*) FROM takeout_imports').fetchone()[0] == 0
+    store.init_schema()
+    assert store.conn.execute('SELECT COUNT(*) FROM history_items').fetchone()[0] == 1
+
+
 def test_early_fixture_preserves_ids_and_backup(tmp_path):
     path = tmp_path / 'legacy.db'
     with connect(path) as conn:

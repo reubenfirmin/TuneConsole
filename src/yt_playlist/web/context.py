@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from fastapi.templating import Jinja2Templates
 
 from yt_playlist.library.ops import PlaylistOps
+from yt_playlist.core.activity import Activity
 from yt_playlist.web.jobs import SyncJobs
 
 logger = logging.getLogger("yt_playlist.web")
@@ -42,6 +43,7 @@ class Ctx:
     now_fn: object
     templates: Jinja2Templates
     jobs: SyncJobs
+    work: Activity = field(default_factory=Activity)
     setup: object | None = None
     logger: logging.Logger = field(default=logger)
     # identities whose YouTube session has expired (id -> label), set during sync, cleared on

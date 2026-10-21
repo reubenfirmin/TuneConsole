@@ -53,6 +53,35 @@ def test_reimport_adds_nothing():
     assert report["plays_added"] == 0 and report["events_added"] == 0
 
 
+def test_disjoint_uploads_record_separate_unverified_extents_and_preserve_gap():
+    from yt_playlist.core import repair
+    s = _store()
+    february = 1706745600.0
+    s.history.add_history_snapshot(1, february, ['phone-only'], source='ytm_history')
+    reports = [import_takeout(s, _raw([
+        _e('Suave', 'Danny Wabbit', 'vidA', f'2024-{month}-01T10:00:00Z'),
+        _e('Suave', 'Danny Wabbit', 'vidA', f'2024-{month}-20T10:00:00Z'),
+    ])) for month in ('01', '03')]
+    imports = list(s.conn.execute('SELECT * FROM takeout_imports ORDER BY id'))
+    assert len(imports) == 2 and reports[0]['import_id'] != reports[1]['import_id']
+    assert imports[0]['observed_end'] < february < imports[1]['observed_start']
+    assert all(not r['account_verified'] and not r['complete'] and r['coverage_start'] is None
+               for r in imports)
+    assert repair.purge_phantom_history(s.conn) == 0
+    assert s.conn.execute("SELECT 1 FROM history_items WHERE identity_key='phone-only'").fetchone()
+
+
+def test_json_timestamp_loss_is_recorded_and_cannot_authorize_repair():
+    s = _store()
+    report = import_takeout(s, _raw([
+        _e('Suave', 'Danny Wabbit', 'vidA', '2024-01-01T10:00:00Z'),
+        _e('Pulse', 'Klockworks', 'vidB', 'unreadable'),
+    ]))
+    assert report['matched'] == 1 and report['unparsed_dates'] == 1
+    row = s.conn.execute('SELECT * FROM takeout_imports').fetchone()
+    assert row['unparsed_dates'] == 1 and not row['complete'] and not row['account_verified']
+
+
 def test_import_coexists_with_prior_live_day():
     s = _store()
     # live capture already recorded a play of Suave on 2024-01-01 (different instant: 09:00 UTC,

@@ -1,9 +1,10 @@
 """#114 missing enrichment is neutral rather than an accidental ranking penalty."""
 import math
 
+import numpy as np
 import pytest
 
-from yt_playlist.rec import scoring
+from yt_playlist.rec import scoring, surfaces
 
 
 def _tracks(store):
@@ -47,3 +48,45 @@ def test_known_muted_genre_remains_a_hard_exclusion_beside_missing_genre(store):
 def test_explicit_genre_mute_does_not_mean_revert_into_a_soft_preference(store):
     store.set_weight("genre:techno", 0.0, lo=0.0, hi=2.0, now=1.0)
     assert store.get_weights(now=10_000_000.0)["genre:techno"] == 0.0
+
+
+@pytest.mark.parametrize("scorer", [surfaces.for_you, surfaces.explore_for_you,
+                                   surfaces.comfort_listening])
+def test_genre_mute_excludes_owned_recommendations_until_manual_unmute(store, scorer):
+    iid = store.upsert_identity("main", "cred", None, True)
+    techno, folk, unknown = _tracks(store)
+    tids = [row["id"] for row in store.conn.execute("SELECT id FROM tracks ORDER BY id")]
+    pid = store.upsert_playlist(iid, "PL", "Listening", 3, "h", 0)
+    store.set_playlist_tracks(pid, tids)
+    store.replace_rec_vectors([(key, np.array([1., 0.], dtype=np.float32).tobytes())
+                               for key in (techno, folk, unknown)])
+    for day in range(4):
+        for key in (techno, folk, unknown):
+            store.record_history_plays(iid, day * 86400, [(key, "Today")])
+    now = 100 * 86400
+    before = {item.key for item in scorer(store, now)}
+    assert techno in before and unknown in before
+
+    store.set_weight("genre:techno", 0.0, lo=0, hi=2, now=now)
+    muted = {item.key for item in scorer(store, now + 86400)}
+    assert techno not in muted and unknown in muted
+    inspected = next(row for row in surfaces.taste_comparison(store, now + 86400, keys=[techno])
+                     if row["key"] == techno)
+    assert inspected["eligible"] is False and inspected["eligibility_reason"] == "genre muted"
+
+    store.set_weight("genre:techno", 1.0, lo=0, hi=2, now=now + 86400)
+    assert techno in {item.key for item in scorer(store, now + 86400)}
+
+
+@pytest.mark.parametrize("axis", ["genre:house", "genre:deep house"])
+def test_genre_mutes_suppress_library_and_discovery_keys_without_hiding_unknowns(store, axis):
+    known = store.upsert_track("known", "Known", "Artist", None, None)
+    store.set_track_genre(known, "Deep House")
+    store.upsert_track("unknown", "Unknown", "Artist", None, None)
+    store.upsert_discovered_track("cold|artist", "cold", "Cold", "Artist", "", None,
+                                  "Deep House", "2000", "source", 0)
+    store.set_weight(axis, 0, lo=0, hi=2, now=1)
+    for surface in ("for_you", "suggest"):
+        assert store.suppressed_keys(surface, 100 * 86400) == {"known|artist", "cold|artist"}
+    store.reset_weights()
+    assert store.suppressed_keys("for_you", 100 * 86400) == set()

@@ -1,5 +1,6 @@
 """#91 pevent ingestion: raw persistence per kind, and the single wired consumer (rate -> model)."""
 import json
+import pytest
 
 from yt_playlist.core.store import Store
 from yt_playlist.library import player_events
@@ -38,6 +39,7 @@ def test_rate_on_known_track_feeds_model():
     s.upsert_track("vidX", "Song", "Artist", "", None)
     body = json.dumps({"target": {"videoId": "vidX"}})
     msg = {"kind": "rate", "url": "https://music.youtube.com/youtubei/v1/like/dislike",
+           "phase": "settled", "success": True, "httpStatus": 200,
            "body": body, "href": "https://music.youtube.com/watch?v=vidX", "brandId": ""}
     assert player_events.handle_player_event(_ctx(s), msg, 1000.0) is True
     assert identity_key("Song", "Artist") in s.disliked_identity_keys()
@@ -75,6 +77,7 @@ def test_rate_url_with_querystring_still_parses_action():
     s.upsert_track("vidQ", "Song", "Artist", "", None)
     body = json.dumps({"target": {"videoId": "vidQ"}})
     msg = {"kind": "rate", "url": "https://music.youtube.com/youtubei/v1/like/dislike?key=abc&prettyPrint=false",
+           "phase": "settled", "success": True, "httpStatus": 200,
            "body": body, "brandId": ""}
     assert player_events.handle_player_event(_ctx(s), msg, 1000.0) is True
     assert identity_key("Song", "Artist") in s.disliked_identity_keys()
@@ -83,3 +86,25 @@ def test_rate_url_with_querystring_still_parses_action():
 def test_unconfigured_store_skips():
     empty = Store(":memory:"); empty.init_schema()
     assert player_events.handle_player_event(_ctx(empty), {"kind": "tick", "videoId": "v"}, 1.0) is False
+
+
+@pytest.mark.parametrize("action", ["like", "dislike"])
+@pytest.mark.parametrize("outcome,confirmed", [({}, False), ({"phase": "intent"}, False),
+    ({"phase": "settled", "success": False, "httpStatus": 403}, False),
+    ({"phase": "settled", "success": False, "httpStatus": 500}, False),
+    ({"phase": "settled", "success": False, "httpStatus": 0, "error": "offline"}, False),
+    ({"phase": "settled", "success": True, "httpStatus": 200}, True)])
+def test_rating_requires_confirmation_but_retains_raw_outcomes(monkeypatch, action, outcome, confirmed):
+    s = _store()
+    s.upsert_track("v", "Song", "Artist", "", None)
+    ratings, model = [], []
+    monkeypatch.setattr(s, "record_item_rating", lambda *a, **kw: ratings.append((a, kw)))
+    monkeypatch.setattr(player_events.graduation, "apply_dislikes", lambda *a, **kw: model.append((a, kw)))
+    msg = {"kind": "rate", "url": f"https://music.youtube.com/youtubei/v1/like/{action}",
+           "body": json.dumps({"target": {"videoId": "v"}}), **outcome}
+    assert player_events.handle_player_event(_ctx(s), msg, 1000.0)
+    assert len(ratings) == len(model) == int(confirmed)
+    rows = s.player_events_since(0)
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload"])
+    assert all(payload[k] == v for k, v in outcome.items())

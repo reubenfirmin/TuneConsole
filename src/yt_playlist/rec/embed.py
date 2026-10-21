@@ -236,15 +236,16 @@ def content_features(content):
 
     rows = []
     for k, (genre, year) in content.items():
-        if not genre:
-            continue
-        active = [col(f"fam:{genre_map.family(genre)}")]
-        sub = genre_map.subgenre(genre)
-        if sub:
-            active.append(col(f"sub:{sub}"))
+        active = []
+        if genre:
+            active.append(col(f"fam:{genre_map.family(genre)}"))
+            sub = genre_map.subgenre(genre)
+            if sub:
+                active.append(col(f"sub:{sub}"))
         if year and str(year)[:4].isdigit():
             active.append(col(f"dec:{int(str(year)[:4]) // 10 * 10}"))
-        rows.append((k, active))
+        if active:
+            rows.append((k, active))
     return feats, rows
 
 
@@ -319,10 +320,18 @@ def encode_content(model, genre, year, audio):
     return (vec / n).astype(np.float32) if n > 0 else None
 
 
-def _build_library_content(store):
-    """Return (keys, V, model) for the library's content vectors, all in one freshly-built space."""
+def _content_inputs(store):
     dao = RecDao(store)
-    content, audio = dao.track_content(), dao.track_audio_features()
+    return sorted(dao.library_keys()), dao.track_content(), dao.track_audio_features()
+
+
+def _content_input_fingerprint(inputs):
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+
+def _build_library_content(store, *, inputs=None):
+    """Return (keys, V, model) for the library's content vectors, all in one freshly-built space."""
+    _, content, audio = inputs if inputs is not None else _content_inputs(store)
     model = build_content_model(content, audio)
     keys, vecs = [], []
     for k in sorted(set(content) | set(audio)):
@@ -355,9 +364,9 @@ def content_model_fingerprint(model) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def content_space_id(store) -> str:
+def content_space_id(store, *, snapshot=None) -> str:
     """Fingerprint of the currently-persisted content model, or "" when none is built yet."""
-    raw = store.get_setting("rec_content_model")
+    raw = snapshot["model"] if snapshot is not None else store.get_setting("rec_content_model")
     return content_model_fingerprint(json.loads(raw)) if raw else ""
 
 
@@ -367,71 +376,70 @@ def build_content_vectors(store, dim=None):  # dim kept for signature symmetry; 
     return keys, V
 
 
-def build_content_and_store(store) -> int:
+def build_content_and_store(store, *, inputs=None) -> int:
     """Build library content vectors + the shared model, persist both, and re-encode the out-of-corpus
     pool into the (just-rebuilt) space so the two stay comparable. Returns the library count."""
-    keys, V, model = _build_library_content(store)
-    store.replace_rec_content_vectors([(k, V[i].tobytes()) for i, k in enumerate(keys)])
-    store.set_setting("rec_content_model", json.dumps(model))
-    build_discovered_content_vectors(store, model)
-    store.set_setting("rec_content_genre_revision", genre_catalog.REVISION)
+    previous = store.content_generation()
+    inputs = inputs if inputs is not None else _content_inputs(store)
+    keys, V, model = _build_library_content(store, inputs=inputs)
+    discovered = _encode_discovered(store.get_discovered_tracks(), model)
+    if not store.publish_content_generation(
+            [(k, V[i].tobytes()) for i, k in enumerate(keys)], discovered, json.dumps(model),
+            genre_catalog.REVISION, _content_input_fingerprint(inputs), previous["generation"]):
+        raise RuntimeError("Content generation changed during rebuild; retry the refresh")
     return len(keys)
 
 
-def build_discovered_content_vectors(store, model=None) -> int:
-    """Encode the out-of-corpus discovered-track pool into the shared content space (Phase 2). Uses the
-    persisted model unless one is passed. Returns how many tracks got a vector."""
-    if model is None:
-        raw = store.get_setting("rec_content_model")
-        if not raw:
-            return 0
-        model = json.loads(raw)
+def _encode_discovered(rows, model):
     out = []
-    for r in store.get_discovered_tracks():
+    for r in rows:
         v = encode_content(model, r.get("genre"), r.get("year"), r.get("audio"))
         if v is not None:
             out.append((r["identity_key"], v.tobytes()))
-    store.replace_rec_discovered_content_vectors(out)
-    return len(out)
+    return out
 
 
-def load_content_vectors(store):
+def build_discovered_content_vectors(store) -> int:
+    """Encode the out-of-corpus discovered-track pool into the shared content space (Phase 2). Uses the
+    persisted model. A competing model publication forces a fresh encoding, never a mixed pool."""
+    for _ in range(3):
+        snapshot = store.content_generation()
+        if not snapshot["model"]:
+            return 0
+        out = _encode_discovered(store.get_discovered_tracks(), json.loads(snapshot["model"]))
+        if store.publish_content_generation(snapshot["library"], out, snapshot["model"],
+                snapshot["revision"] or "", snapshot["inputs"], snapshot["generation"]):
+            return len(out)
+    raise RuntimeError("Content generation changed during discovery encoding; retry the refresh")
+
+
+def load_content_vectors(store, *, snapshot=None):
     """Return (keys, V, idx) from persisted content vectors, or ([], None, {}) if none built."""
-    return _load_vector_rows(store.get_rec_content_vectors())
+    return _load_vector_rows(snapshot["library"] if snapshot is not None else store.get_rec_content_vectors())
 
 
-def load_discovered_content_vectors(store):
+def load_discovered_content_vectors(store, *, snapshot=None):
     """Return (keys, V, idx) of out-of-corpus content vectors, or ([], None, {}) if none built."""
-    return _load_vector_rows(store.get_rec_discovered_content_vectors())
+    return _load_vector_rows(snapshot["discovered"] if snapshot is not None else store.get_rec_discovered_content_vectors())
 
 
 def maybe_rebuild_content_vectors(store, step=0.05) -> bool:
-    """Rebuild content vectors when genre coverage crosses into a higher `step` bucket (and on the
-    first call or after a genre catalog update). Coverage = (distinct tracks with a genre) /
-    (distinct tracks). Bounds coverage-triggered rebuilds to
-    ~1/step over the library's enrichment lifetime while keeping the content space current as
-    enrichment fills in. Returns True iff it rebuilt."""
-    dao = RecDao(store)
-    total = len(dao.library_keys())
-    if total == 0:
+    """Refresh changed model inputs, including edits that leave coverage unchanged.
+
+    The recommendation worker coalesces bursts before calling this function. Persist the inputs
+    actually used by the build, so concurrent edits remain dirty for the next refresh. Coverage is
+    retained as a diagnostic only; it never grants validity to stale vectors.
+    """
+    inputs = _content_inputs(store)
+    total = len(inputs[0])
+    if not total and not store.get_setting("rec_content_model"):
         return False
-    coverage = len(dao.track_content()) / total
-    bucket = int(coverage // step)
-    try:
-        prev = int(store.get_setting("rec_content_cov_bucket", "-1"))
-    except (TypeError, ValueError):
-        prev = -1
-    # The bucket gate bounds full rebuilds, but it must NOT short-circuit while the model itself is
-    # missing: a build under older code persisted the vectors + bucket but not rec_content_model, which
-    # left the gate permanently shut (bucket never re-crosses once coverage plateaus) and the discovered
-    # pool unencodable forever, so "reach for new music" surfaced nothing (#48). A missing model always
-    # forces a rebuild, which re-persists it and re-encodes the out-of-corpus pool in the same space.
-    # Family and alias changes also change the encoding of already-tagged tracks. Refresh both
-    # pools once per catalog revision even when coverage has stopped growing.
     current_genres = store.get_setting("rec_content_genre_revision") == genre_catalog.REVISION
-    if bucket <= prev and store.get_setting("rec_content_model") and current_genres:
+    if (store.get_setting("rec_content_inputs") == _content_input_fingerprint(inputs)
+            and store.get_setting("rec_content_model") and current_genres):
         return False
-    build_content_and_store(store)
+    build_content_and_store(store, inputs=inputs)
+    bucket = int((len(inputs[1]) / total) // step) if total else 0
     store.set_setting("rec_content_cov_bucket", str(bucket))
     return True
 
@@ -620,9 +628,10 @@ def _content_space(store, include_new):
     """Load the content (genre/era) vector space for cluster_expand. When include_new (Phase 2),
     widen it with the OUT-OF-CORPUS discovered-track pool, but only when they share the same model
     space (same column count). Returns (keys, V, idx)."""
-    ckeys, CV, cidx = load_content_vectors(store)
+    snapshot = store.content_generation()
+    ckeys, CV, cidx = load_content_vectors(store, snapshot=snapshot)
     if include_new:
-        dkeys, DV, _ = load_discovered_content_vectors(store)
+        dkeys, DV, _ = load_discovered_content_vectors(store, snapshot=snapshot)
         if DV is not None:
             if CV is None:
                 ckeys, CV = list(dkeys), DV

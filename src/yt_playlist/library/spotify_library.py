@@ -9,6 +9,7 @@ import re
 import zipfile
 
 from yt_playlist.library.sync import content_hash
+from yt_playlist.library.playlist_mutation import _read as _read_playlist
 from yt_playlist.util.matching import fuzzy_ratio, identity_key, normalize, track_artist
 from yt_playlist.util.retry import with_retry
 from yt_playlist.util.thumbnails import best_thumb
@@ -253,7 +254,48 @@ def _remember_playlist(store, identity_id, remote_id, title, tracks, now):
     store.ensure_playlist_thumbnail(local_id)
 
 
-def _transfer_playlist(store, client, identity_id, playlist, matches, fingerprint, now):
+def _order_imported_tracks(client, remote_id, source_videos):
+    """Fill the imported songs' existing slots in source order, retaining all other occurrences.
+
+    Destination additions keep their slots and relative order. Only imported occurrences move;
+    no removals or playlist replacement are used. A concurrent edit defers completion to a retry.
+    """
+    tracks = _read_playlist(client, remote_id)
+    occurrences = {}
+    for index, track in enumerate(tracks):
+        occurrences.setdefault(track["videoId"], index)
+    if any(video not in occurrences for video in source_videos):
+        raise ValueError("Imported songs are not all visible on YouTube yet")
+    managed = {occurrences[video] for video in source_videos}
+    ordered = iter(occurrences[video] for video in source_videos)
+    target = [next(ordered) if index in managed else index for index in range(len(tracks))]
+    order = list(range(len(tracks)))
+    for index in range(len(target) - 1, -1, -1):
+        item = target[index]
+        if item not in managed:
+            continue
+        successor = target[index + 1] if index + 1 < len(target) else None
+        position = order.index(item)
+        if (successor is None and position == len(order) - 1) or (
+                successor is not None and position + 1 < len(order) and order[position + 1] == successor):
+            continue
+        handle = tracks[item].get("setVideoId")
+        following = tracks[successor].get("setVideoId") if successor is not None else None
+        if not handle or (successor is not None and not following):
+            raise ValueError("YouTube has not exposed the playlist ordering handles yet; retry the import")
+        result = client.edit_playlist(remote_id, moveItem=(handle, following) if following else handle)
+        status = result.get("status") if isinstance(result, dict) else result
+        if status != "STATUS_SUCCEEDED":
+            raise ValueError("YouTube did not confirm the imported playlist order")
+        order.remove(item)
+        order.insert(order.index(successor) if successor is not None else len(order), item)
+    confirmed = _read_playlist(client, remote_id)
+    if [t["videoId"] for t in confirmed] != [tracks[index]["videoId"] for index in target]:
+        raise ValueError("Imported playlist order is still unresolved; retry the import")
+    return confirmed
+
+
+def _transfer_playlist(store, client, identity_id, playlist, fingerprint, now):
     state_key, transfers = _playlist_transfers(store, identity_id)
     transfer = transfers.get(fingerprint)
     resumed = transfer is not None
@@ -269,25 +311,35 @@ def _transfer_playlist(store, client, identity_id, playlist, matches, fingerprin
         remote_id = transfer["ytm_playlist_id"]
         transfer["last_run_added"] = 0
         store.set_setting(state_key, json.dumps(transfers))
-        remote = with_retry(lambda: client.get_playlist(remote_id, limit=None))
-        tracks = remote["tracks"]  # a failed/incomplete read must never be treated as an empty playlist
+        tracks = _read_playlist(client, remote_id)
+    # Retain the source slot for every accepted match, including across failed lookups on a retry.
+    positions = transfer.setdefault("source_video_ids", [None] * len(playlist["resolution"]))
+    for index, row in enumerate(playlist["resolution"]):
+        if row["match"] and positions[index] is None:
+            positions[index] = row["match"]["videoId"]
+    intended = list(dict.fromkeys(video for video in positions if video))
+    transfer.update(complete=False, order_verified=False)
+    store.set_setting(state_key, json.dumps(transfers))
     _remember_playlist(store, identity_id, remote_id, playlist["name"], tracks, now)
     present = {t.get("videoId") for t in tracks}
-    missing = {match["videoId"]: match for match in matches if match["videoId"] not in present}
-    pending = list(missing)
+    pending = [video for video in intended if video not in present]
     added = 0
     for start in range(0, len(pending), 100):
         batch = pending[start:start + 100]
         result = client.add_playlist_items(remote_id, batch)
-        if isinstance(result, dict) and result.get("status", "STATUS_SUCCEEDED") != "STATUS_SUCCEEDED":
+        if not isinstance(result, dict) or result.get("status") != "STATUS_SUCCEEDED":
             raise RuntimeError("YouTube Music rejected a playlist batch")
-        tracks.extend(missing[video] for video in batch)
+        tracks = _read_playlist(client, remote_id)
+        if not set(batch) <= {t["videoId"] for t in tracks}:
+            raise ValueError("YouTube has not confirmed the imported playlist batch")
         _remember_playlist(store, identity_id, remote_id, playlist["name"], tracks, now)
         added += len(batch)
         transfer["last_run_added"] = added
         store.set_setting(state_key, json.dumps(transfers))
+    tracks = _order_imported_tracks(client, remote_id, intended)
+    _remember_playlist(store, identity_id, remote_id, playlist["name"], tracks, now)
     transfer.update(complete=not any(row["status"] == "lookup_failed"
-                                     for row in playlist["resolution"]), updated_at=now)
+                                     for row in playlist["resolution"]), order_verified=True, updated_at=now)
     store.set_setting(state_key, json.dumps(transfers))
     return remote_id, added, resumed
 
@@ -327,7 +379,7 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
             identity_key(t["title"], t["artist"]) for t in playlist["tracks"]))
         source_signature = (normalize(playlist["name"]), frozenset(track_keys))
         transfer = playlist_state.get(fingerprint)
-        if transfer and transfer["complete"]:
+        if transfer and transfer["complete"] and transfer.get("order_verified"):
             report["playlists_skipped"] += 1
             report["details"]["playlists"].append({
                 "name": playlist["name"], "status": "skipped", "reason": "previously_imported",
@@ -390,7 +442,7 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
             continue
         try:
             new_id, added, resumed = _transfer_playlist(
-                store, client, identity_id, playlist, [match for _, match in resolved], fingerprint, now)
+                store, client, identity_id, playlist, fingerprint, now)
         except Exception:
             logger.exception("Spotify playlist transfer failed")
             _, current = _playlist_transfers(store, identity_id)

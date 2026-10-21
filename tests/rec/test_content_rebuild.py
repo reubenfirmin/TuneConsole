@@ -34,6 +34,16 @@ class CovStore:
     def replace_rec_discovered_content_vectors(self, rows):
         pass
 
+    def content_generation(self):
+        return {"generation": ""}
+
+    def publish_content_generation(self, library, discovered, model, revision, inputs, expected_generation):
+        self.replace_rec_content_vectors(library)
+        self.set_setting("rec_content_model", model)
+        self.set_setting("rec_content_genre_revision", revision)
+        self.set_setting("rec_content_inputs", inputs)
+        return True
+
 
 def _patch(monkeypatch, store):
     monkeypatch.setattr(embed, "RecDao", lambda s: store)
@@ -47,13 +57,14 @@ def test_first_call_builds(monkeypatch):
     assert s.get_setting("rec_content_cov_bucket") == "2"   # floor(0.10/0.05)
 
 
-def test_within_bucket_no_rebuild(monkeypatch):
+def test_within_bucket_input_changes_rebuild_once(monkeypatch):
     s = CovStore(tagged=10, total=100)
     _patch(monkeypatch, s)
     embed.maybe_rebuild_content_vectors(s)                   # bucket 2
     s._tagged = 12                                           # 12%, still bucket 2
+    assert embed.maybe_rebuild_content_vectors(s) is True
+    assert s.builds == 2
     assert embed.maybe_rebuild_content_vectors(s) is False
-    assert s.builds == 1
 
 
 def test_crossing_boundary_rebuilds_once(monkeypatch):
@@ -114,3 +125,35 @@ def test_multi_boundary_jump_rebuilds_once_and_snaps(monkeypatch):
     assert embed.maybe_rebuild_content_vectors(s) is True
     assert s.builds == 2
     assert s.get_setting("rec_content_cov_bucket") == "11"
+
+
+def test_metadata_and_membership_changes_refresh_at_unchanged_coverage(store):
+    first = store.upsert_track("one", "One", "Artist", None, None)
+    store.set_track_genre(first, "Techno")
+    assert embed.maybe_rebuild_content_vectors(store)
+    assert not embed.maybe_rebuild_content_vectors(store)
+    for change in (
+        lambda: store.set_track_genre(first, "Folk"),
+        lambda: store.set_track_year(first, "1995"),
+        lambda: store.set_track_audio(first, bpm=120),
+        lambda: store.upsert_track("two", "Two", "Artist", None, None),
+        lambda: store.set_track_genre(first, ""),
+        lambda: store.set_track_genre(first, "Folk"),
+    ):
+        old = store.get_setting("rec_content_inputs")
+        change()
+        assert embed.maybe_rebuild_content_vectors(store)
+        assert store.get_setting("rec_content_inputs") != old
+        assert not embed.maybe_rebuild_content_vectors(store)
+
+
+def test_year_only_edit_and_empty_library_invalidate_content(store):
+    tid = store.upsert_track("one", "One", "Artist", None, None)
+    embed.maybe_rebuild_content_vectors(store)
+    store.set_track_year(tid, "1995")
+    assert embed.maybe_rebuild_content_vectors(store)
+    assert embed.load_content_vectors(store)[0] == ["one|artist"]
+    with store.conn:
+        store.conn.execute("DELETE FROM library_memberships")
+    assert embed.maybe_rebuild_content_vectors(store)
+    assert embed.load_content_vectors(store)[0] == []

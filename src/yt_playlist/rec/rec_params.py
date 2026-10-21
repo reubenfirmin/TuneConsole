@@ -291,7 +291,8 @@ PARAMS = [
               50, 2000, 50, 200, integer=True, advanced=True),
     ParamSpec("ppr_ab_share", "Experimental ranking: share of cards", "discovery",
               "Share of listening-style cards using experimental ranking. 0 uses standard ranking "
-              "for all cards; 1 uses experimental ranking for all. Mixed results allow comparison.",
+              "for all cards with shadow replay; 1 retains experimental ranking for all. The default "
+              "0.5 is a live experiment. Recorded retirement disables shadow replay at 0.",
               0.0, 1.0, 0.05, 0.5, advanced=True),
     # --- Dynamic radio (#93). Session-scoped reactivity for the primed-handoff radio. All advanced
     # (a tuner sweeps them; hand-setting only shifts feel, never correctness). ---

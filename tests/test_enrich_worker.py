@@ -14,7 +14,7 @@ from yt_playlist.providers.waterfall import run_waterfall
 def make_worker(store, now=1000.0, fill=None):
     calls = []
 
-    def fake_wf(s, tracks, config, on_progress, should_stop=None, sink_for=None):
+    def fake_wf(s, tracks, config, on_progress, should_stop=None, sink_for=None, **kwargs):
         calls.append([t["id"] for t in tracks])
         for t in tracks:
             if fill:
@@ -79,15 +79,16 @@ def test_enrichment_fills_via_waterfall_are_persisted(store):
     assert store.coverage_stats()["genre"] == 1
 
 
-@pytest.mark.parametrize("rebuilt", [False, True])
-def test_library_enrichment_schedules_genre_group_catchup(store, monkeypatch, rebuilt):
+def test_library_enrichment_schedules_genre_group_catchup(store, monkeypatch):
     from yt_playlist.rec import embed
     _unprocessed(store)
     worker = make_worker(store)
     worker.ctx.rec_worker = SimpleNamespace(trigger_mode_refresh=Mock())
-    monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", lambda s: rebuilt)
+    rebuild = Mock()
+    monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", rebuild)
     assert worker.drain_once() == 1
-    worker.ctx.rec_worker.trigger_mode_refresh.assert_called_once_with(force=rebuilt)
+    worker.ctx.rec_worker.trigger_mode_refresh.assert_called_once_with()
+    rebuild.assert_not_called()
 
 
 def test_tracks_skipped_by_waterfall_remain_in_primary_queue(store):
@@ -129,9 +130,8 @@ def test_real_waterfall_commits_each_track_before_next_lookup(store, interrupt):
 
     worker.waterfall_fn = partial(run_waterfall, registry={"musicbrainz": Provider()})
     if interrupt == "error":
-        with pytest.raises(RuntimeError, match="provider unavailable"):
-            worker.drain_once()
-        assert worker.activity["state"] == "error"
+        assert worker.drain_once() == 1
+        assert "provider unavailable" in worker.activity["warning"]
     else:
         assert worker.drain_once() == (1 if interrupt == "pause" else 2)
     assert not worker.busy

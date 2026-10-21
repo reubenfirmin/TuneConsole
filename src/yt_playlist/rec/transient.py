@@ -236,7 +236,7 @@ def centroid_tilt(store, now, V, idx):
     return tilt / weight if weight > 0 and np.any(tilt) else None
 
 
-def audio_centroid_tilt(store, now):
+def audio_centroid_tilt(store, now, *, content_vecs=None):
     """Bounded tilt in the audio-aware CONTENT vector space toward recent listening, so ranking can
     lean to the SOUND of what you have been playing (tempo / energy / mood), not just its genre/era/
     artist facets or its co-occurrence neighbours. The content-space sibling of `centroid_tilt`: same
@@ -254,7 +254,7 @@ def audio_centroid_tilt(store, now):
     This is the producer only. The scorer applies it (a content-space alignment term parallel to the
     collaborative `_apply_mood`); see the wiring note that ships with this change.
     """
-    _ckeys, CV, cidx = embed.load_content_vectors(store)
+    _ckeys, CV, cidx = embed.load_content_vectors(store) if content_vecs is None else content_vecs
     if CV is None:
         return None
     return centroid_tilt(store, now, CV, cidx)

@@ -173,6 +173,10 @@ class TrendsRepo(Repo):
     def upsert_first_play_min(self, rows) -> None:
         """rows = [(kind, id_key, first_day, first_ts, source)]; keeps the LOWER first_ts on conflict
         (so a Takeout backfill or a play_event can only pull first-seen earlier, never later)."""
+        self._upsert_first_play_min(rows)
+        self.conn.commit()
+
+    def _upsert_first_play_min(self, rows):
         self.conn.executemany(
             "INSERT INTO trend_first_play(kind, id_key, first_day, first_ts, source) VALUES (?,?,?,?,?) "
             "ON CONFLICT(kind, id_key) DO UPDATE SET "
@@ -182,12 +186,15 @@ class TrendsRepo(Repo):
             "  source    = CASE WHEN excluded.first_ts < trend_first_play.first_ts "
             "                   THEN excluded.source ELSE trend_first_play.source END",
             list(rows))
-        self.conn.commit()
 
     @synchronized
     def rebuild_artist_first_play(self) -> None:
         """Derive kind='artist' rows from the current kind='track' rows: an artist's first day is the
         MIN over its tracks. source = the model that gave the winning (lowest-ts) track."""
+        self._rebuild_artist_first_play()
+        self.conn.commit()
+
+    def _rebuild_artist_first_play(self):
         self.conn.execute("DELETE FROM trend_first_play WHERE kind = 'artist'")
         self.conn.execute(
             "INSERT INTO trend_first_play(kind, id_key, first_day, first_ts, source) "
@@ -196,12 +203,51 @@ class TrendsRepo(Repo):
             "   WHERE fp2.kind = 'track' AND t2.artist = t.artist ORDER BY fp2.first_ts LIMIT 1) "
             "FROM trend_first_play fp JOIN tracks t ON t.identity_key = fp.id_key "
             "WHERE fp.kind = 'track' AND t.artist <> '' GROUP BY t.artist")
-        self.conn.commit()
 
     @synchronized
     def clear_first_play(self) -> None:
-        self.conn.execute("DELETE FROM trend_first_play")
-        self.conn.commit()
+        from yt_playlist.core.first_play import invalidate
+
+        with self.conn:
+            invalidate(self.conn)
+
+    @synchronized
+    def refresh_first_play(self):
+        """Fold observations and publish track/artist indexes plus checkpoints in one transaction.
+
+        Exact events remain authoritative whenever a ledger exists. A changed source/import or
+        invalidated catalog requires a complete rescan rather than reusing a history checkpoint.
+        """
+        def setting(key):
+            row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            return row[0] if row else None
+
+        self.conn.execute("SAVEPOINT first_play_refresh")
+        try:
+            imported = setting("takeout_imported_at")
+            source = "play_event" if self.has_play_ledger() else "history"
+            reset = (source != setting("trend_first_play_source") or
+                     imported != setting("trend_first_play_takeout_seen"))
+            watermark = 0 if reset else int(setting("trend_first_play_watermark") or 0)
+            if reset:
+                self.conn.execute("DELETE FROM trend_first_play")
+            first = self.play_event_track_first() if source == "play_event" else self.history_track_first(watermark)
+            self._upsert_first_play_min(("track", key, day, ts, source) for key, (day, ts) in first.items())
+            self._rebuild_artist_first_play()
+            self.conn.executemany("INSERT INTO settings(key,value) VALUES (?,?) "
+                                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", [
+                ("trend_first_play_watermark", str(self.max_snapshot_id())),
+                ("trend_first_play_source", source)])
+            if imported is None:
+                self.conn.execute("DELETE FROM settings WHERE key='trend_first_play_takeout_seen'")
+            else:
+                self.conn.execute("INSERT INTO settings(key,value) VALUES ('trend_first_play_takeout_seen',?) "
+                                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (imported,))
+            self.conn.execute("RELEASE first_play_refresh")
+        except BaseException:
+            self.conn.execute("ROLLBACK TO first_play_refresh")
+            self.conn.execute("RELEASE first_play_refresh")
+            raise
 
     @synchronized
     def first_play_map(self, kind) -> dict:

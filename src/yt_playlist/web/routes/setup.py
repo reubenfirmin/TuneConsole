@@ -1,15 +1,14 @@
 """Setup wizard: identities, provider configuration, and local import connections."""
-import asyncio
-import threading
+from yt_playlist.core.activity import activity_for
 from urllib.parse import quote
+from html import escape
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from yt_playlist.core.setup import BROWSER_CREDENTIAL_FILENAME
-from yt_playlist.library.takeout import (TakeoutFormatError, import_takeout,
-                                         seed_discovery_from_unmatched)
-from yt_playlist.library.spotify_data import SpotifyDataFormatError, import_spotify_data
+from yt_playlist.library.takeout import TakeoutFormatError
+from yt_playlist.library.spotify_data import SpotifyDataFormatError
 from yt_playlist.library.spotify_library import (SpotifyLibraryFormatError,
                                                   SPOTIFY_REPORT_SCHEMA,
                                                   find_album_candidates,
@@ -19,6 +18,7 @@ from yt_playlist.library.spotify_library import (SpotifyLibraryFormatError,
                                                   save_selected_album)
 from yt_playlist.providers import enrichment, lastfm, spotify
 from yt_playlist.web.identity_checks import check_identities
+from yt_playlist.web.history_imports import HistoryImports
 from yt_playlist.web.spotify_import import (ACTIVE_STATUSES, JOB_KEY, TransferPreviews, current_job,
                                             estimate, save_job)
 
@@ -27,6 +27,7 @@ def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates, setup = ctx.store, ctx.templates, ctx.setup
     previews = TransferPreviews()
+    history_imports = HistoryImports(ctx)
 
     def _saved_identities():
         return [{"id": i.id, "label": i.label, "brand": i.brand_account_id or "",
@@ -72,7 +73,7 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=409, detail="Keep at least one identity.")
         main = next((i for i in remaining if i.is_master), remaining[0])
         try:
-            setup.apply_setup([{"label": i.label, "credential_ref": i.credential_ref,
+            setup.apply_setup([{"id": i.id, "label": i.label, "credential_ref": i.credential_ref,
                                 "brand_account_id": i.brand_account_id, "is_master": i.id == main.id}
                                for i in remaining])
         except ValueError as exc:
@@ -98,6 +99,9 @@ def build(ctx) -> APIRouter:
             enrichment.save_config(store, [{"name": n, "enabled": n in on} for n in order])
         except ValueError:
             pass
+        else:
+            if ctx.enrich_worker:
+                ctx.enrich_worker.trigger()
         return _enrichment_panel(request)
 
     @router.post("/setup")
@@ -115,11 +119,14 @@ def build(ctx) -> APIRouter:
             if not (label or "").strip() and not (brand or "").strip():
                 continue
             identities.append({
+                "id": identity_ids[idx] if idx < len(identity_ids) else "",
                 "label": label.strip(),
                 "brand_account_id": (brand or "").strip() or None,
                 "is_master": str(idx) == master,
                 "credential_ref": BROWSER_CREDENTIAL_FILENAME})
         try:
+            for row in identities:
+                row["id"] = int(row["id"]) if row["id"] else None
             # The credential is the live extension pairing now, so no capture is passed here.
             setup.apply_setup(identities)
         except ValueError as e:
@@ -151,24 +158,28 @@ def build(ctx) -> APIRouter:
         if up is None or not hasattr(up, "read"):
             return HTMLResponse('<p class="section-note">No file selected.</p>', status_code=400)
         try:
-            report = import_spotify_data(store, await up.read())
+            result = await history_imports.run('spotify', await up.read())
+            report, seeded = result['report'], result['seeded']
         except SpotifyDataFormatError:
             return HTMLResponse(
                 '<p class="section-note">Could not find Spotify Extended Streaming History. '
                 'Upload the downloaded zip as-is, or one Streaming_History_Audio JSON file.</p>')
+        except Exception:
+            return HTMLResponse('<p class="section-note" role="alert">History import failed. Try again.</p>')
         if "error" in report:
-            return HTMLResponse(f'<p class="section-note">{report["error"]}</p>')
-        if report["plays_added"] or report["events_added"]:
-            if ctx.rec_worker:
-                ctx.rec_worker.trigger()
-        if report["matched"]:
-            store.set_setting("spotify_imported_at", str(ctx.now_fn()))
-        min_plays = max(3, round(report["span_days"] / 365))
-        seeded = seed_discovery_from_unmatched(
-            store, report["unmatched_artists"], ctx.now_fn(), min_plays=min_plays)
+            return HTMLResponse(f'<p class="section-note">{escape(report["error"])}</p>')
         return templates.TemplateResponse(
             request, "_partials/spotify_result.html", {"report": report, "seeded": seeded},
             headers={"HX-Retarget": "#spotify-import-block", "HX-Reswap": "innerHTML"})
+
+    @router.get('/import/history/status')
+    async def history_import_status(request: Request, source: str):
+        if source not in ('takeout', 'spotify'):
+            raise HTTPException(status_code=400, detail='Unknown history source')
+        status = history_imports.status(source)
+        if 'application/json' in request.headers.get('accept', ''):
+            return JSONResponse(status)
+        return HTMLResponse(f'<p class="section-note">{escape(status["message"])}</p>')
 
     # The versioned URL is intentional: setup.html is read from disk on every request, while
     # Python modules remain loaded for the lifetime of the server. If TuneConsole is updated while
@@ -263,7 +274,7 @@ def build(ctx) -> APIRouter:
             finally:
                 ctx.spotify_import_lock.release()
 
-        threading.Thread(target=prepare, name="spotify-library-preview", daemon=True).start()
+        activity_for(ctx).start_thread(prepare, name="spotify-library-preview")
         return templates.TemplateResponse(
             request, "_partials/spotify_library_status.html", {"job": current_job(ctx)},
             headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
@@ -307,7 +318,7 @@ def build(ctx) -> APIRouter:
             finally:
                 ctx.spotify_import_lock.release()
 
-        threading.Thread(target=run_import, name="spotify-library-import", daemon=True).start()
+        activity_for(ctx).start_thread(run_import, name="spotify-library-import")
         return RedirectResponse("/#notices", status_code=303)
 
     @router.post("/import/spotify-library/cancel")
@@ -395,7 +406,7 @@ def build(ctx) -> APIRouter:
         try:
             # Bridge-backed YTMusic calls wait for replies delivered by this app's
             # WebSocket handler. Running them on the event loop deadlocks that reply.
-            item["candidates"] = await asyncio.to_thread(
+            item["candidates"] = await activity_for(ctx).to_thread(
                 find_album_candidates, _spotify_client(), item)
             save_job(store, job)
         except Exception:  # noqa: BLE001 - a failed lookup leaves the report intact
@@ -413,7 +424,7 @@ def build(ctx) -> APIRouter:
         form = await request.form()
         item = _report_album(job, form.get("album_index"))
         try:
-            outcome = await asyncio.to_thread(
+            outcome = await activity_for(ctx).to_thread(
                 save_selected_album, store, _spotify_client(), item,
                 (form.get("browse_id") or "").strip())
         except (ValueError, HTTPException) as exc:
@@ -462,7 +473,8 @@ def build(ctx) -> APIRouter:
             return HTMLResponse("<p class=\"section-note\">No file selected.</p>", status_code=400)
         raw = await up.read()
         try:
-            report = import_takeout(store, raw)
+            result = await history_imports.run('takeout', raw)
+            report, n = result['report'], result['seeded']
         except TakeoutFormatError:
             # load_watch_history (called by import_takeout) now parses both the JSON and the
             # default HTML export, so this only fires for genuinely unusable input (a zip with
@@ -472,25 +484,10 @@ def build(ctx) -> APIRouter:
                 "<p class=\"section-note\">Could not read this as a Takeout watch history export. "
                 "JSON is recommended (it has the most complete timestamps), but the HTML export "
                 "works too.</p>")
+        except Exception:
+            return HTMLResponse('<p class="section-note" role="alert">History import failed. Try again.</p>')
         if "error" in report:
-            return HTMLResponse(f"<p class=\"section-note\">{report['error']}</p>")
-        if report["plays_added"] or report["events_added"]:
-            if ctx.rec_worker:
-                ctx.rec_worker.trigger()
-        if report["matched"] > 0:
-            store.set_setting("takeout_imported_at", str(ctx.now_fn()))
-            # Takeout is account-wide, so it can now prove which history rows never happened. Run the
-            # phantom purge against the window this import just established (core/repair.py).
-            from yt_playlist.core import repair
-            repair.run_once(store)
-        else:
-            # A zero-match import (usually: library not synced yet) should not re-nag on the very
-            # next Home render: snooze the nag 90 days; it returns as the re-import reminder.
-            store.set_setting("takeout_nag_dismissed_at", str(ctx.now_fn()))
-        # Seeding bar scales with export span: 3 plays in a decade is noise, 3 in a season is taste.
-        min_plays = max(3, round(report["span_days"] / 365))
-        n = seed_discovery_from_unmatched(store, report["unmatched_artists"], ctx.now_fn(),
-                                          min_plays=min_plays)
+            return HTMLResponse(f"<p class=\"section-note\">{escape(report['error'])}</p>")
         # Success replaces the whole import block (instructions + form) with a labeled result
         # card: HX-Retarget widens the swap target beyond the form's own error slot. Error
         # responses above keep the default #takeout-import-result target so the form stays

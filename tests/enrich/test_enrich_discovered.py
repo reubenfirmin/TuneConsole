@@ -14,7 +14,7 @@ def test_drain_processes_discovered(store):
     store.upsert_discovered_track("a|x", "v1", "A", "X", None, None, None, None, "radio:s", 100.0)
     seen = {}
 
-    def fake_waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None):
+    def fake_waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None, **kwargs):
         seen["keys"] = [t["identity_key"] for t in batch]
         for t in batch:                                  # simulate a provider writing genre via the sink
             sink_for(t).set_enrichment("techno", "2020")
@@ -43,7 +43,7 @@ def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store
     monkeypatch.setattr(fresh_pool, "prepare", lambda s, now: prepared.append(
         s.discovered_tracks_by_keys(["new|artist"])["new|artist"]))
 
-    def waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None):
+    def waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None, **kwargs):
         seen.append([track["title"] for track in batch])
         for track in batch:
             sink_for(track).set_enrichment("techno", "2024")
@@ -98,8 +98,8 @@ def test_mixed_waterfall_commits_each_track_and_keeps_unfinished_work(store, mon
 
     worker.waterfall_fn = partial(run_waterfall, registry={"musicbrainz": Provider()})
     if interrupt == "error":
-        with pytest.raises(RuntimeError, match="provider unavailable"):
-            worker.drain_once()
+        assert worker.drain_once() == 1
+        assert "provider unavailable" in worker.activity["warning"]
     else:
         assert worker.drain_once() == (0 if interrupt == "breaker" else (1 if interrupt else 2))
     assert store.queue_remaining() == (2 if interrupt == "breaker" else (1 if interrupt else 0))

@@ -170,6 +170,7 @@
         </div>
       </form>
       <div id="spotify-import-result"></div>
+      <div hx-get="/import/history/status?source=spotify" hx-trigger="every 1s" aria-live="polite"></div>
       </div>
     </div>
     <div class="card">
@@ -216,6 +217,7 @@
         </div>
       </form>
       <div id="takeout-import-result"></div>
+      <div hx-get="/import/history/status?source=takeout" hx-trigger="every 1s" aria-live="polite"></div>
       </div>
     </div>
   </div>

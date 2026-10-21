@@ -1,5 +1,6 @@
 """Playlists tab: browse every playlist, sort, assign user groups, and run bulk actions."""
 import asyncio
+from yt_playlist.core.activity import activity_for
 import json
 import re
 from datetime import datetime
@@ -34,6 +35,26 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(
             request, "_partials/error_toast.html", {"message": message},
             status_code=422, headers={"HX-Reswap": "none"})
+
+    def _action_result(result):
+        # Keep the result with the existing job registry so the refreshed URL can display it
+        # repeatedly without losing an error or replaying an already completed mutation.
+        job = ctx.jobs.create(kind="playlist_action_result")
+        job.result, job.outcome, job.done = result, result["status"], True
+        return JSONResponse(result, status_code=422 if job.outcome == "failed" else 200,
+                            headers={"HX-Redirect": f"/playlists?result={job.id}",
+                                     "X-Action-Outcome": job.outcome})
+
+    def _copy_result(result, *, new=True):
+        skipped = result.get("skipped", 0)
+        status = "partial" if skipped else "complete"
+        return _action_result({"status": status, "operation": "copy",
+            "message": f"Copied {result['added']} track(s) to {result['title']}; {skipped} track(s) skipped.",
+            "copy": result, "items": [],
+            "guidance": (("Inspect the destination and copy only the missing songs. "
+                          "Repeating Copy creates another playlist." if new else
+                          "Inspect the destination and retry Copy into for missing songs; songs already present are skipped.")
+                         if skipped else "")})
 
     def _is_generated(pid):
         pl = store.get_playlist(pid)
@@ -138,11 +159,15 @@ def build(ctx) -> APIRouter:
         # Generated playlists are pinned in their own card, so they do not make the
         # main table's grouping controls or Group column useful on their own.
         has_groups = any(r["group"] and r["group"] != GENERATED_GROUP for r in rows)
+        result_id = request.query_params.get("result", "")
+        result_job = ctx.jobs.get(int(result_id)) if result_id.isdigit() else None
+        action_result = (result_job.result if result_job and result_job.kind == "playlist_action_result" else None)
         return templates.TemplateResponse(request, "playlists.html", {
             "rows": rows, "has_groups": has_groups, "group_names": group_names,
             "gc_days": rec_params.get_param(store, "generated_gc_days"),
             "flash": request.query_params.get("flash"),
             "flash_pl": request.query_params.get("flash_pl"),
+            "action_result": action_result,
         })
 
     @router.get("/playlist/{pid}")
@@ -235,7 +260,7 @@ def build(ctx) -> APIRouter:
         from_suggestion = form.get("suggestion") == "1" and len(tracks) == 1 and not after_video_id
         before = {t["video_id"] for t in store.playlist_tracks_detail(pid)}
         try:
-            await asyncio.to_thread(ctx.ops().add_tracks, pid, tracks, after_video_id)
+            await activity_for(ctx).to_thread(ctx.ops().add_tracks, pid, tracks, after_video_id)
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
@@ -270,7 +295,7 @@ def build(ctx) -> APIRouter:
     @router.post("/playlist/{pid}/retry-placement")
     async def playlist_retry_placement(pid: int, request: Request):
         try:
-            await asyncio.to_thread(ctx.ops().retry_track_placement, pid)
+            await activity_for(ctx).to_thread(ctx.ops().retry_track_placement, pid)
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
@@ -321,33 +346,27 @@ def build(ctx) -> APIRouter:
         if job is None:
             raise HTTPException(status_code=404, detail="no such enrichment job")
 
-        # Render each track's <tr> server-side so the live enrich update and a manual edit produce
-        # identical cells (the page's applyRow just drops in row_html, no client HTML building).
-        # Album jobs render the album row partial from the album's folded-in tracks instead.
+        # Events are invalidations, including replay after reconnect. Render the complete row
+        # from current state at delivery, so old events cannot undo later edits or user choices.
         if job.album_browse is not None:
             row_tmpl = templates.env.get_template("_partials/album_track_row.html")
-            rows = store.album_tracks_detail(job.album_browse)
         else:
             row_tmpl = templates.env.get_template("_partials/track_row.html")
-            rows = store.playlist_tracks_detail(job.playlist_id) if job.playlist_id is not None else []
-        gen_flag = _is_generated(job.playlist_id) if job.playlist_id is not None else False
-        mood_states = recommend.track_mood_states(store, now_fn()) if gen_flag else {}
-        base, idx_of = {}, {}
-        for i, t in enumerate(rows, start=1):
-            base[t["video_id"]] = t
-            idx_of[t["video_id"]] = i
 
         def _with_row(ev):
             vid = ev.get("video_id")
-            if ev.get("type") != "track" or vid not in base:
+            if ev.get("type") != "track":
                 return ev
-            t = dict(base[vid])
-            if "genre" in ev:
-                t["genre"] = ev["genre"]
-            if "year" in ev:
-                t["year"] = ev["year"]
-            return {**ev, "row_html": row_tmpl.render(t=t, idx=idx_of[vid], is_generated=gen_flag,
-                                                       mood_states=mood_states)}
+            rows = (store.album_tracks_detail(job.album_browse) if job.album_browse is not None else
+                    store.playlist_tracks_detail(job.playlist_id) if job.playlist_id is not None else [])
+            gen_flag = _is_generated(job.playlist_id) if job.playlist_id is not None else False
+            for index, track in enumerate(rows, start=1):
+                if track["video_id"] == vid:
+                    mood_states = recommend.track_mood_states(store, now_fn()) if gen_flag else {}
+                    return {**ev, "genre": track["genre"], "year": track["year"],
+                            "row_html": row_tmpl.render(t=track, idx=index, is_generated=gen_flag,
+                                                        mood_states=mood_states)}
+            return {k: v for k, v in ev.items() if k != "row_html"}  # removed tracks stay removed
 
         async def gen():
             sent = 0
@@ -370,7 +389,7 @@ def build(ctx) -> APIRouter:
         if not title:
             return _toast(request, "name can't be empty")
         try:
-            await asyncio.to_thread(ctx.ops().rename, pid, title)
+            await activity_for(ctx).to_thread(ctx.ops().rename, pid, title)
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
@@ -383,6 +402,8 @@ def build(ctx) -> APIRouter:
     @router.post("/settings/lastfm-key")
     async def set_lastfm_key(request: Request):
         store.set_setting("lastfm_api_key", ((await request.form()).get("key") or "").strip())
+        if ctx.enrich_worker:
+            ctx.enrich_worker.trigger()
         return Response(status_code=204)
 
     @router.post("/playlist/{pid}/track-genre")
@@ -396,6 +417,7 @@ def build(ctx) -> APIRouter:
         if tid is None:
             return _toast(request, "track not found")
         store.set_track_genre(tid, genre)
+        ctx.rec_worker.trigger_mode_refresh()
         return _track_row(request, pid, vid)
 
     @router.post("/playlist/{pid}/track-year")
@@ -409,6 +431,7 @@ def build(ctx) -> APIRouter:
         if tid is None:
             return _toast(request, "track not found")
         store.set_track_year(tid, year)
+        ctx.rec_worker.trigger_mode_refresh()
         return _track_row(request, pid, vid)
 
     @router.post("/playlist/{pid}/track-title")
@@ -461,7 +484,7 @@ def build(ctx) -> APIRouter:
         if not vid:
             return _toast(request, "no track given")
         try:
-            await asyncio.to_thread(ctx.ops().remove_track, pid, vid)
+            await activity_for(ctx).to_thread(ctx.ops().remove_track, pid, vid)
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
@@ -478,7 +501,7 @@ def build(ctx) -> APIRouter:
         if not vid:
             return _toast(request, "no track given")
         try:
-            await asyncio.to_thread(ctx.ops().reorder_track, pid, vid, before)
+            await activity_for(ctx).to_thread(ctx.ops().reorder_track, pid, vid, before)
         except Exception:  # noqa: BLE001  (the DOM already moved; reload to resync the true order)
             logger.exception("reorder failed for playlist %s", pid)
             return _refresh()
@@ -528,12 +551,16 @@ def build(ctx) -> APIRouter:
     async def playlists_copy(request: Request):
         form = await request.form()
         ids = _ids(form)
-        if ids:
-            try:
-                await asyncio.to_thread(ctx.ops().copy, ids, form.get("name", ""))
-            except Exception:  # noqa: BLE001  (errors surface on the reloaded page, as before)
-                logger.exception("copy of %s failed", ids)
-        return _refresh()
+        try:
+            result = await activity_for(ctx).to_thread(ctx.ops().copy, ids, form.get("name", ""))
+        except Exception as exc:
+            logger.exception("copy of %s failed", ids)
+            return _action_result({"status": "failed", "operation": "copy",
+                "message": "Copy could not be completed.", "items": [{"id": pid,
+                    "title": pl.title if (pl := store.get_playlist(pid)) else f"Playlist #{pid}",
+                    "status": "failed", "detail": str(exc) or type(exc).__name__} for pid in ids],
+                "guidance": "Check YouTube for a newly created playlist before retrying; the response may have been lost."})
+        return _copy_result(result)
 
     @router.post("/playlists/copy-into")
     async def playlists_copy_into(request: Request):
@@ -546,38 +573,54 @@ def build(ctx) -> APIRouter:
         if not ids or not target:
             return _toast(request, "Pick a destination playlist.")
         try:
-            await asyncio.to_thread(ctx.ops().copy_into, ids, target)
+            result = await activity_for(ctx).to_thread(ctx.ops().copy_into, ids, target)
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001  (errors surface on the reloaded page, as before)
             logger.exception("copy-into %s -> %s failed", ids, target)
             return _toast(request, "Copy failed. See the log.")
         _refresh_ytm_view(ctx, store, target)   # #95: the TARGET playlist changed on YouTube
-        return _refresh()
+        return _copy_result({**result, "new_ytm": result["target_ytm"]}, new=False)
 
     @router.post("/playlists/delete")
     async def playlists_delete(request: Request):
         ops = ctx.ops()
         form = await request.form()
-        for pid in _ids(form):
+        items = []
+        for pid in dict.fromkeys(_ids(form)):
             pl = store.get_playlist(pid)
             if pl is None:
+                items.append({"id": pid, "title": f"Playlist #{pid}", "status": "absent",
+                              "detail": "Already absent from the local library; no delete sent."})
                 continue
             if pl.ytm_playlist_id in SYSTEM_PLAYLIST_IDS:
                 # undeletable system playlists (Liked Music, Episodes for Later) -> just hide locally
                 store.hide_playlist(pl.ytm_playlist_id)
+                items.append({"id": pid, "title": pl.title, "status": "hidden",
+                              "detail": "Hidden from TuneConsole; system playlist kept on YouTube."})
                 continue
             try:
-                await asyncio.to_thread(ops.delete, pid)
-            except Exception:  # noqa: BLE001  (errors surface on the reloaded page, as before)
+                await activity_for(ctx).to_thread(ops.delete, pid)
+            except Exception as exc:
                 logger.exception("playlists delete of %s failed", pl.ytm_playlist_id)
+                items.append({"id": pid, "title": pl.title, "status": "failed",
+                              "detail": str(exc) or type(exc).__name__})
             else:
+                items.append({"id": pid, "title": pl.title, "status": "deleted", "detail": "Deleted."})
                 # #95: a YTM tab sitting on the deleted playlist should show it's gone, not a stale
                 # tracklist. The local row is removed by the delete, hence the id-taking variant.
                 _refresh_ytm_view_id(ctx, pl.ytm_playlist_id)
         # The home card's pending-cleanup count/icons come from a cached summary; recompute it now
         # so deleted playlists stop showing as pending cleanups until the next worker rebuild (#73).
-        await asyncio.to_thread(recommend.refresh_cleanup, store, now_fn())
-        return _refresh()
+        try:
+            await activity_for(ctx).to_thread(recommend.refresh_cleanup, store, now_fn())
+        except Exception:
+            logger.exception("cleanup refresh after playlist deletion failed")
+        failed = sum(item["status"] == "failed" for item in items)
+        status = "partial" if failed and failed < len(items) else "failed" if failed or not items else "complete"
+        return _action_result({"status": status, "operation": "delete", "items": items,
+            "message": f"Playlist deletion: {len(items) - failed} completed or already absent; {failed} failed.",
+            "guidance": ("Check YouTube before retrying failed items; a request may have completed remotely. "
+                         "Completed items are listed separately and are no longer selected." if failed else "")})
 
     return router

@@ -5,9 +5,11 @@ Split out of the former monolithic RecRepo so each rec concern is its own focuse
 """
 import json
 import time
+import uuid
 
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.core import catalog
+from yt_playlist.util import genre_map
 
 # Learned blend weights live in [_WEIGHT_MIN, _WEIGHT_MAX] around the 1.0 prior: the floor stops a run
 # of negative feedback from disabling an axis outright (a 0 weight would never win the for_you fair
@@ -130,14 +132,28 @@ class RecModelRepo(Repo):
     @synchronized
     def suppressed_keys(self, surface, now, scope="") -> set:
         """Keys to hide on a surface: dismissed/muted/snoozed (surface-scoped) PLUS YouTube dislikes
-        (global, every surface). All honor any 'until' expiry."""
+        and explicit genre mutes (global, every surface). Feedback honors any 'until' expiry.
+
+        A zero preference is an eligibility rule, including for unscored and cached candidates;
+        lowering a score alone would still let muted tracks fill an otherwise sparse card.
+        """
         rows = self.conn.execute(
             "SELECT item_key FROM rec_feedback WHERE "
             "( (surface=? AND (scope='' OR scope=?) AND kind IN ('dismiss','mute','not_now')) "
             "  OR kind='dislike' ) "
             "AND (until IS NULL OR until>?)",
             (surface, scope or "", now)).fetchall()
-        return {r["item_key"] for r in rows}
+        blocked = {r["item_key"] for r in rows}
+        muted_genres = {r["axis"][6:] for r in self.conn.execute(
+            "SELECT axis FROM rec_weights WHERE axis LIKE 'genre:%' AND weight=0")}
+        if muted_genres:
+            for row in self.conn.execute(
+                    "SELECT identity_key,genre FROM tracks WHERE genre<>'' "
+                    "UNION SELECT identity_key,genre FROM discovered_tracks WHERE genre<>''"):
+                if (genre_map.family(row["genre"]) in muted_genres
+                        or genre_map.subgenre(row["genre"]) in muted_genres):
+                    blocked.add(row["identity_key"])
+        return blocked
 
     def _record_once(self, surface, item_key, kind, until, now) -> bool:
         """Insert a first-seen feedback row (scope=''), idempotently. Returns True iff newly created,
@@ -458,6 +474,54 @@ class RecModelRepo(Repo):
         return self.conn.execute("SELECT COUNT(*) c FROM rec_vectors").fetchone()["c"]
 
     # --- content (genre/era) vectors: parallel space for the cluster blend ---
+    @synchronized
+    def content_generation(self):
+        """Read the encoding model and both vector pools from one SQLite snapshot."""
+        self.conn.execute("SAVEPOINT content_snapshot")
+        try:
+            settings = dict(self.conn.execute(
+                "SELECT key,value FROM settings WHERE key IN "
+                "('rec_content_model','rec_content_genre_revision','rec_content_inputs','rec_content_generation')"))
+            result = {
+                "generation": settings.get("rec_content_generation", ""),
+                "model": settings.get("rec_content_model"),
+                "revision": settings.get("rec_content_genre_revision"),
+                "inputs": settings.get("rec_content_inputs"),
+                "library": self.get_rec_content_vectors(),
+                "discovered": self.get_rec_discovered_content_vectors(),
+            }
+        except BaseException:
+            self.conn.execute("ROLLBACK TO content_snapshot")
+            raise
+        finally:
+            self.conn.execute("RELEASE content_snapshot")
+        return result
+
+    @synchronized
+    def publish_content_generation(self, library, discovered, model, revision, inputs, expected_generation):
+        """Publish a complete generation or leave the previous one intact.
+
+        Compare the generation under the write lock so a slow discovery encoder cannot overwrite
+        a newer library model. All computation and serialization happen before the first DELETE.
+        """
+        library, discovered = list(library), list(discovered)
+        generation = uuid.uuid4().hex
+        with self.conn:
+            # Acquire SQLite's writer lock before the generation check, including across connections.
+            self.conn.execute("UPDATE settings SET value=value WHERE key='rec_content_generation'")
+            current = self.conn.execute(
+                "SELECT value FROM settings WHERE key='rec_content_generation'").fetchone()
+            if (current[0] if current else "") != expected_generation:
+                return False
+            for table, rows in (("rec_content_vectors", library),
+                                ("rec_discovered_content_vectors", discovered)):
+                self.conn.execute(f"DELETE FROM {table}")
+                self.conn.executemany(f"INSERT INTO {table}(identity_key,vec) VALUES (?,?)", rows)
+            self.conn.executemany("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)", [
+                ("rec_content_model", model), ("rec_content_genre_revision", revision),
+                ("rec_content_inputs", inputs or ""), ("rec_content_generation", generation)])
+        return True
+
     @synchronized
     def replace_rec_content_vectors(self, rows) -> None:
         """Atomically replace all content vectors. rows = iterable of (identity_key, bytes)."""

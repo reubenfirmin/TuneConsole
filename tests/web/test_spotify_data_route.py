@@ -110,7 +110,8 @@ def test_unreadable_upload_keeps_form_for_retry(store):
 
 def test_account_data_requires_selection_preview_and_confirmation_before_writes(store):
     identity = store.upsert_identity("main", "bridge", None, True)
-    client = FakeClient(search_results=[_track("yt-song", "Song", "Artist")])
+    client = FakeClient(search_results=[_track("yt-song", "Song", "Artist")],
+                        catalog={"yt-song": _track("yt-song", "Song", "Artist")})
     web = TestClient(create_app(store, lambda: {identity: client}, now_fn=lambda: 1000.0),
                      base_url="http://127.0.0.1:8123")
 
@@ -305,7 +306,8 @@ def test_failed_playlist_result_remains_reviewable_with_successes(store):
             return super().create_playlist(title, description)
 
     identity = store.upsert_identity("main", "bridge", None, True)
-    client = BrokenFirst(search_results=[_track("yt", "Song", "Artist")])
+    client = BrokenFirst(search_results=[_track("yt", "Song", "Artist")],
+                         catalog={"yt": _track("yt", "Song", "Artist")})
     web = TestClient(create_app(store, lambda: {identity: client}, now_fn=lambda: 1000),
                      base_url="http://127.0.0.1:8123")
     payload = io.BytesIO()

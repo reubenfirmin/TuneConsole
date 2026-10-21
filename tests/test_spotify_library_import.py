@@ -48,8 +48,10 @@ class LibraryClient(FakeClient):
 
     def search(self, query, filter="songs"):
         if filter == "songs" and query == "Song Artist":
-            return [{**_track("yt1", "Song", "Artist", album="Record"),
-                     "thumbnails": [{"url": "https://example.com/song.jpg"}]}]
+            track = {**_track("yt1", "Song", "Artist", album="Record"),
+                     "thumbnails": [{"url": "https://example.com/song.jpg"}]}
+            self._catalog[track["videoId"]] = track
+            return [track]
         if filter == "albums":
             return [{"browseId": "MPRE1", "title": "Saved Record",
                      "artists": [{"name": "Album Artist"}]}]
@@ -207,6 +209,7 @@ def test_resume_reconciles_lost_batch_response_after_restart(tmp_path):
         assert report["details"]["playlists"][0]["reason"] == "resumed"
         assert len(client.created) == len(client.added) == 1
         assert store.get_playlists()[0].track_count == 2
+        assert [t["videoId"] for t in client._tracks[client.created[0][0]]] == ["yt-One", "yt-Two"]
     finally:
         store.conn.close()
 

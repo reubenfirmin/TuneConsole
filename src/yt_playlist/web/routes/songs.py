@@ -1,5 +1,5 @@
 """Playlist actions used by the single, shared song menu on every regular song surface."""
-import asyncio
+from yt_playlist.core.activity import activity_for
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -54,7 +54,7 @@ def build(ctx):
     @router.post("/songs/create-playlist")
     async def create_playlist(body: CreatePlaylist):
         try:
-            result = await asyncio.to_thread(ctx.ops().create_playlist_from_song,
+            result = await activity_for(ctx).to_thread(ctx.ops().create_playlist_from_song,
                                              body.name, body.song.track())
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -71,7 +71,7 @@ def build(ctx):
     @router.post("/songs/add-to-playlist")
     async def add_song(body: AddSong):
         try:
-            result = await asyncio.to_thread(ctx.ops().add_song_to_playlist,
+            result = await activity_for(ctx).to_thread(ctx.ops().add_song_to_playlist,
                                              body.playlist_id, body.song.track())
             if not result.get("already_present") and not result["added"]:
                 raise ValueError("YouTube couldn't add this song. Please try another song or playlist.")

@@ -49,3 +49,27 @@ def test_write_config_rejects_no_master(tmp_path):
         setup_mod.write_config(
             [{"label": "a", "credential_ref": "browser.json", "brand_account_id": None, "is_master": False}],
             tmp_path / "config.toml")
+
+
+@pytest.mark.parametrize("value", ['line\nnext', 'tab\tstop', 'carriage\rreturn',
+    'null\x00byte', 'bell\x07byte', 'delete\x7fbyte', 'quote"slash\\', 'music 🎵'])
+def test_accepted_text_roundtrips_all_toml_controls(tmp_path, value):
+    path = tmp_path / "config.toml"
+    setup_mod.write_config([{"label": value, "credential_ref": value,
+                            "brand_account_id": value, "is_master": True}], path)
+    cfg = load_identities(path)[0]
+    assert cfg.label == cfg.credential_ref == cfg.brand_account_id == value
+
+
+def test_failed_flush_preserves_complete_previous_file(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    rows = [{"label": "main", "credential_ref": "browser.json", "is_master": True}]
+    setup_mod.write_config(rows, path)
+    previous = path.read_bytes()
+    def fail(fd):
+        raise OSError("disk write failed")
+    monkeypatch.setattr(setup_mod.os, "fsync", fail)
+    with pytest.raises(OSError, match="disk write"):
+        setup_mod.write_config([{**rows[0], "label": "new"}], path)
+    assert path.read_bytes() == previous
+    assert list(tmp_path.iterdir()) == [path]

@@ -49,7 +49,7 @@ def test_backup_filename_sanitizes_remote_playlist_id(store, monkeypatch, tmp_pa
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     iid = store.upsert_identity("main", "cred", None, True)
     pid = store.upsert_playlist(iid, "../../../../etc/pwned", "Evil", 0, "h", 1.0)
-    path = backup_playlist(store, pid, 123.0)
+    path = backup_playlist(store, pid, 123.0, FakeClient())
     from yt_playlist.core import paths
     backups = paths.backups_dir().resolve()
     assert Path(path).resolve().parent == backups        # stayed inside backups dir
@@ -65,7 +65,7 @@ def test_execute_planned_delete_removes_identical_copy(store, monkeypatch, tmp_p
     keep = store.upsert_playlist(iid, "KEEP", "Keep", 1, "h", 1.0); store.set_playlist_tracks(keep, [t])
     dele = store.upsert_playlist(iid, "DEL", "Dupe", 1, "h", 1.0); store.set_playlist_tracks(dele, [t])
     # remote KEEP already contains the track, so deletion is allowed
-    client = FakeClient(tracks={"KEEP": [_track("v1", "Song", "Artist")]})
+    client = FakeClient(tracks={pid: [_track("v1", "Song", "Artist")] for pid in ("KEEP", "DEL")})
     plan = MergePlan(dele, keep, [], [])
     aid = store_plan(store, plan, "delete", "DEL", now=1.0)
     execute_planned(store, aid, {iid: client}, now=2.0)
@@ -100,7 +100,7 @@ def test_delete_prunes_row_and_undo_recreates_via_backup(store, monkeypatch, tmp
     t = store.upsert_track("v1", "Song", "Artist", None, 200)
     keep = store.upsert_playlist(iid, "KEEP", "Keep", 1, "h", 1.0); store.set_playlist_tracks(keep, [t])
     dele = store.upsert_playlist(iid, "DEL", "Dupe", 1, "h", 1.0); store.set_playlist_tracks(dele, [t])
-    client = FakeClient(tracks={"KEEP": [_track("v1", "Song", "Artist")]}, catalog={"v1": _track("v1", "Song", "Artist")})
+    client = FakeClient(tracks={pid: [_track("v1", "Song", "Artist")] for pid in ("KEEP", "DEL")})
     aid = store_plan(store, MergePlan(dele, keep, [], []), "delete", "DEL", now=1.0)
     execute_planned(store, aid, {iid: client}, now=2.0)
     assert store.get_playlist(dele) is None                 # pruned from the dashboard

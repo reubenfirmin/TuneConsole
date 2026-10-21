@@ -1,6 +1,4 @@
-"""When an enrichment host goes unreachable, the playlist loop stops instead of plowing through
-every remaining track (one wasted pace-interval each). A server response, even an error, or any
-success clears the streak, so a real outage trips it but a per-track miss never does."""
+"""Transport failures, throttling and server outages trip a provider; valid misses do not."""
 import urllib.error
 
 import pytest
@@ -22,12 +20,22 @@ def test_breaker_trips_only_after_threshold_consecutive_failures():
 def test_server_response_or_success_resets_the_streak():
     b = net.CircuitBreaker(threshold=2)
     dns = urllib.error.URLError("down")
-    http = urllib.error.HTTPError("u", 503, "busy", {}, None)
+    http = urllib.error.HTTPError("u", 404, "missing", {}, None)
     b.record(dns)
-    b.record(http)                 # server answered (a 503), host reachable, streak cleared
+    b.record(http)                 # a valid miss clears the streak
     assert b.consecutive == 0
     b.record(dns)
     b.record()                     # success, streak cleared
+    assert b.consecutive == 0
+
+
+def test_throttle_and_server_errors_do_not_clear_outage_streak():
+    b = net.CircuitBreaker(threshold=3)
+    b.record(TimeoutError())
+    b.record(urllib.error.HTTPError("u", 429, "throttled", {}, None))
+    b.record(urllib.error.HTTPError("u", 503, "busy", {}, None))
+    assert b.tripped()
+    b.record()
     assert b.consecutive == 0
 
 

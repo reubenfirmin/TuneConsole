@@ -57,9 +57,10 @@ Player-bar metadata is used when its track ID matches the playing video, preserv
 and artist credits even when the artwork URL has no video ID. MediaSession metadata is used when
 its artwork confirms that video. Ratings and album links are captured with the bar's track ID;
 stale fields cannot be attached to a different song. Unverified player-only metadata updates
-presence until matching metadata is available. Incomplete MAIN-world reports allow the player-bar
-fallback to continue. Playback history waits for a verified account; DOM fallback retains that
-account across track changes instead of treating an unknown account as the main account.
+presence until matching metadata is available. Reconnect requests a fresh MAIN sample and preserves
+its verification result. The player-bar fallback restores presence while MAIN is incomplete or
+throttled; only explicitly verified MAIN metadata can record a play. Playback history also waits
+for a verified account; fallback presence retains the last verified account.
 
 Now Playing and playback controls select the same music tab, preferring audible, unmuted playback.
 Muted or paused secondary tabs cannot replace an audible tab's card. Playback launches and library

@@ -78,13 +78,15 @@ def build(ctx) -> APIRouter:
             _refresh_deleted_source(src.ytm_playlist_id)
             return {**result, "state": "moved", "message": f"Moved {tracks}."}
         extra = f"; {res['unresolved']} couldn’t be matched" if res["unresolved"] else ""
+        if res.get("skipped"):
+            extra += f"; {res['skipped']} couldn’t be added"
         msg = f"Copied {tracks}{extra}."
-        if res.get("delete_error"):  # copy succeeded but the original couldn't be deleted
-            msg += " Source kept: YouTube couldn’t delete the original."
+        if res.get("delete_error"):
+            msg = f"Copy created. Source kept: {res['delete_error']}"
         elif not copy_only:  # move requested but some tracks couldn't be recreated -> kept the source
             msg += " Source kept because some tracks couldn’t be recreated."
         return {**result, "state": "copied", "message": msg,
-                "warning": bool(res["unresolved"] or res.get("delete_error"))}
+                "warning": bool(res["unresolved"] or res.get("skipped") or res.get("delete_error"))}
 
     @router.post("/move/run")
     def move_run(request: Request, playlist: int = Form(...), target_identity: int = Form(...),

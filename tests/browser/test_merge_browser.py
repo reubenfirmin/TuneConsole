@@ -10,7 +10,7 @@ from playwright.sync_api import expect
 
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
-from tests.conftest import FakeClient
+from tests.conftest import FakeClient, _track
 
 pytestmark = pytest.mark.browser
 
@@ -34,14 +34,16 @@ def live_merge_app(monkeypatch, tmp_path):
     t1 = s.upsert_track("v1", "Alpha Song", "X", None, None, 1)
     t2 = s.upsert_track("v2", "Beta Song", "X", None, None, 1)
     s.set_playlist_tracks(a, [t1, t2]); s.set_playlist_tracks(b, [t1])
-    app = create_app(s, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
+    client = FakeClient(tracks={"PLA": [_track("v1", "Alpha Song", "X"), _track("v2", "Beta Song", "X")],
+                                "PLB": [_track("v1", "Alpha Song", "X")]})
+    app = create_app(s, lambda: {iid: client}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     while not server.started:
         time.sleep(0.02)
-    yield {"base": f"http://127.0.0.1:{port}", "ids": f"{a},{b}"}
+    yield {"base": f"http://127.0.0.1:{port}", "ids": f"{a},{b}", "store": s, "client": client}
     server.should_exit = True
     thread.join(timeout=5)
 
@@ -57,6 +59,22 @@ def test_merge_apply_redirects(live_merge_app, page):
     page.goto(f"{live_merge_app['base']}/merge?ids={live_merge_app['ids']}")
     page.get_by_role("button", name="Apply").click()
     page.wait_for_url("**/cleanup**", timeout=5000)            # HX-Redirect after the merge runs
+
+
+def test_failed_delivery_keeps_editor_and_source(live_merge_app, page, monkeypatch):
+    client = live_merge_app["client"]
+    client._tracks["PLA"] = [_track("v1", "Alpha Song", "X")]
+    client._tracks["PLB"] = [_track("v1", "Alpha Song", "X"), _track("v2", "Beta Song", "X")]
+    monkeypatch.setattr(client, "add_playlist_items", lambda *a: {"status": "STATUS_FAILED"})
+    url = f"{live_merge_app['base']}/merge?ids={live_merge_app['ids']}"
+    page.goto(url)
+    page.get_by_role("button", name="Apply", exact=True).click()
+    expect(page.get_by_text("Refusing to delete", exact=False)).to_be_visible()
+    expect(page).to_have_url(url)
+    expect(page.locator("#merge-body")).to_be_visible()
+    assert client.deleted == []
+    assert live_merge_app["store"].get_draft(live_merge_app["ids"]) is not None
+    assert live_merge_app["store"].get_playlist(int(live_merge_app["ids"].split(",")[1])) is not None
 
 
 def test_merge_returns_to_the_cleanup_list_before_and_after_applying(live_merge_app, page):

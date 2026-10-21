@@ -18,7 +18,8 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core.store import Store
-from yt_playlist.library import executor
+from yt_playlist.library import executor, playlist_mutation
+from yt_playlist.library.playlist_mutation import PlaylistResult
 from yt_playlist.rec import radio as radio_mod, rec_params
 from yt_playlist.rec.radio import RadioSession
 from yt_playlist.web.routes import bridge as bridge_mod
@@ -79,18 +80,8 @@ def _build(store, radio, now=1_000_000.0):
         "client_provider": staticmethod(lambda: {1: _FakeClient()}),
     })()
     app = FastAPI()
-    # Capture the apply pool by monkey-patching ThreadPoolExecutor to store instances on bridge_mod.
-    from concurrent.futures import ThreadPoolExecutor
-    original_init = ThreadPoolExecutor.__init__
-    def capturing_init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        if kwargs.get("thread_name_prefix") == "radio-apply":
-            bridge_mod._radio_apply_pool = self
-    ThreadPoolExecutor.__init__ = capturing_init
-    try:
-        app.include_router(build_bridge_route(ctx))
-    finally:
-        ThreadPoolExecutor.__init__ = original_init
+    app.include_router(build_bridge_route(ctx))
+    bridge_mod._radio_apply_pool = ctx.work
     return TestClient(app), bridge_obj
 
 
@@ -146,7 +137,7 @@ def test_stale_epoch_plan_is_dropped_no_reconcile_no_navigate(monkeypatch):
         "playlist_key": "B", "vids": ["vSTALE"], "first": {"video_id": "vSTALE"},
         "boundary": "vSTALE", "epoch": 0})
     reconciled = []
-    monkeypatch.setattr(executor, "_reconcile", lambda *a, **k: (reconciled.append(a), (0, 0, [], []))[1])
+    monkeypatch.setattr(playlist_mutation, "reconcile_playlist", lambda *a: (reconciled.append(a), PlaylistResult("complete", tuple(a[2])))[1])
 
     client, bridge_obj = _build(store, radio)
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
@@ -178,8 +169,8 @@ def test_fresh_rebuild_plan_reconciles_and_sends_navigate_and_boundary(monkeypat
         "boundary": "v11", "epoch": 0})
     reconciled = []
     monkeypatch.setattr(
-        executor, "_reconcile",
-        lambda client, ytm, vids: (reconciled.append((ytm, list(vids))), (0, 0, [], []))[1])
+        playlist_mutation, "reconcile_playlist",
+        lambda client, ytm, vids: (reconciled.append((ytm, list(vids))), PlaylistResult("complete", tuple(vids)))[1])
 
     client, bridge_obj = _build(store, radio)
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
@@ -286,8 +277,8 @@ def test_toggle_during_reconcile_drops_navigate_and_boundary_sends(monkeypatch):
 
     def _reconcile_triggers_toggle(client, ytm, vids):
         radio_mod.toggle_decks(radio)     # a confirmed swap lands mid-reconcile
-        return (0, 0, [], [])
-    monkeypatch.setattr(executor, "_reconcile", _reconcile_triggers_toggle)
+        return PlaylistResult("complete", tuple(vids))
+    monkeypatch.setattr(playlist_mutation, "reconcile_playlist", _reconcile_triggers_toggle)
 
     client, bridge_obj = _build(store, radio)
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
@@ -490,7 +481,7 @@ def test_deck_ready_fallback_true_starts_v2_session_on_pool(monkeypatch):
     monkeypatch.setattr(radio_mod, "pick_next", lambda st, se, now: next(picks, None))
     monkeypatch.setattr(executor, "create_generated_playlist",
                         lambda *a, **k: {"new_ytm": "PLRADIO", "pid": 1})
-    monkeypatch.setattr(executor, "_reconcile", lambda *a, **k: (0, 0, [], []))
+    monkeypatch.setattr(playlist_mutation, "reconcile_playlist", lambda c, p, vids: PlaylistResult("complete", tuple(vids)))
 
     client, bridge_obj = _build(store, radio)
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:

@@ -44,6 +44,10 @@ main.page-clusters { max-width: none; margin: 0; padding: 0; animation: none; }
 }
 .cluster-exit span { color: var(--faint); font-size: 0.58rem; }
 .cluster-exit:hover { color: var(--cta); border-color: var(--cta); text-decoration: none; }
+.cluster-error { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem;
+  margin-top: .6rem; padding: .6rem .8rem; color: var(--text);
+  background: var(--surface-card); border: 1px solid var(--danger); border-radius: var(--radius-sm); }
+.cluster-error button { flex-shrink: 0; }
 /* ===== Clusters tab ===================================================== */
 /* Clusters owns the viewport, including on compact screens. */
 .cluster-page {

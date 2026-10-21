@@ -1,17 +1,17 @@
 """Library sync: kick off a background sync and stream its progress over SSE."""
 import asyncio
 import json
-import threading
+from yt_playlist.core.activity import activity_for
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from yt_playlist.library import sync as sync_mod
+from yt_playlist.web.jobs import run_library_sync
 
 
 def build(ctx) -> APIRouter:
     router = APIRouter()
-    store, now_fn, jobs = ctx.store, ctx.now_fn, ctx.jobs
+    jobs = ctx.jobs
 
     @router.get("/sync/active")
     def sync_active():
@@ -23,27 +23,13 @@ def build(ctx) -> APIRouter:
     @router.post("/sync")
     def do_sync():
         # Run the (slow, network-bound) sync in a background thread and stream progress over SSE.
-        clients = ctx.client_provider()
         job = jobs.create(kind="library")
 
         def run():
-            try:
-                with ctx.sync_lock:               # never overlap the background sync daemon
-                    sync_mod.sync_all(store, clients, now_fn(), on_progress=job.events.append,
-                                      on_auth_expired=ctx.flag_auth_expired,
-                                      on_auth_ok=ctx.clear_auth_expired)
-            except Exception as e:  # noqa: BLE001 - report any failure to the stream
-                detail = str(e) or type(e).__name__
-                job.error = detail
-                job.events.append({"type": "err", "text": f"sync failed: {detail}"})
-            finally:
-                job.done = True
-                if ctx.rec_worker:                  # rebuild recs off the sync path (debounced)
-                    ctx.rec_worker.trigger()
-                if ctx.enrich_worker:               # new tracks arrived. Drain them (queue-jumped)
-                    ctx.enrich_worker.trigger()
+            with ctx.sync_lock:               # never overlap the background sync daemon
+                run_library_sync(ctx, job)
 
-        threading.Thread(target=run, daemon=True).start()
+        activity_for(ctx).start_thread(run)
         return JSONResponse({"job_id": job.id})
 
     @router.get("/sync/events/{job_id}")
@@ -59,7 +45,9 @@ def build(ctx) -> APIRouter:
                     yield f"data: {json.dumps(job.events[sent])}\n\n"
                     sent += 1
                 if job.done:
-                    yield f"data: {json.dumps({'type': 'end', 'error': job.error})}\n\n"
+                    terminal = {"type": "end", "error": job.error, "outcome": job.outcome,
+                                "result": job.result}
+                    yield f"data: {json.dumps(terminal)}\n\n"
                     return
                 if await request.is_disconnected():   # browser navigated away. Stop streaming
                     return

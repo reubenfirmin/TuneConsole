@@ -142,8 +142,8 @@ def test_projection_recall_breakdown_by_family_and_coverage(store):
     # The scalar projection_recall hides where grounding fails. The breakdown must partition trials by
     # genre family, era, and coverage band so the failure modes are locatable.
     iid = store.upsert_identity("main", "cred", None, True)
-    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(10)]
-    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(10)]
+    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(15)]
+    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(15)]
     for t in A:
         store.set_track_genre(t, "Techno")
         store.set_track_year(t, "2015")       # cluster A has a year (coverage band: genre+year)
@@ -159,8 +159,8 @@ def test_projection_recall_breakdown_by_family_and_coverage(store):
     assert genre_map.family("Folk") in bd["by_family"]
     assert sum(b["trials"] for b in bd["by_family"].values()) == r["trials"]   # a partition of trials
     assert set(bd["by_coverage"]) == {"genre+year", "genre"}   # §2 widened the band taxonomy (+audio)
-    assert bd["by_coverage"]["genre+year"]["trials"] == 10
-    assert bd["by_coverage"]["genre"]["trials"] == 10
+    assert bd["by_coverage"]["genre+year"]["trials"] == 15
+    assert bd["by_coverage"]["genre"]["trials"] == 15
 
 
 def test_autotune_returns_grid_and_picks_best(store):

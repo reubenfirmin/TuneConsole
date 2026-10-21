@@ -25,7 +25,7 @@ def _vectors(blocks, n_per=50, d=6):
 
 
 def _wire(monkeypatch, store, keys, V, idx):
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (keys, V, idx))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
     monkeypatch.setattr(store.modes, "genres_for", lambda ks: {k: k.split("|")[0] for k in ks})
     monkeypatch.setattr(tm.genre_map, "family", lambda g: g)
 
@@ -65,7 +65,7 @@ def test_recompute_preserves_ids_then_retires(monkeypatch, store):
 
 def test_recompute_cold_start_no_crash(monkeypatch, store):
     monkeypatch.setattr(embed, "load_content_vectors",
-                        lambda s: (["a|1"], np.ones((1, 4), dtype=np.float32), {"a|1": 0}))
+                        lambda s, **kw: (["a|1"], np.ones((1, 4), dtype=np.float32), {"a|1": 0}))
     assert tm.recompute(store, now=1000.0) == 0
     assert store.modes.list_modes() == []
 

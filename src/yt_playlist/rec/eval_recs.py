@@ -221,11 +221,11 @@ def _era_band(y):
     return f"{int(y) // 10 * 10}s" if y else "unknown"
 
 
-def _coverage_band(y, has_audio=False):
+def _coverage_band(y, has_audio=False, has_genre=True):
     """The content basis available for a (necessarily genre-tagged) track: which feature blocks it
     carries. §2 widened this with audio, so a track reads as genre / genre+year / genre+audio /
     genre+year+audio; it sharpens toward the richest band as enrichment fills audio coverage in."""
-    parts = ["genre"]
+    parts = ["genre"] if has_genre else []
     if y:
         parts.append("year")
     if has_audio:
@@ -234,58 +234,78 @@ def _coverage_band(y, has_audio=False):
 
 
 def projection_recall(store, k=20) -> dict:
-    """How well content predicts the embedding (the ACARec-flavored learned grounding's quality):
-    hold out each tagged track, predict its vector from genre/year, and check whether the true track
-    lands in the top-k by cosine. This is the 'groundability' of cold items: high means the learned
-    projection is a viable cold-start grounding to compare against the bridge heuristic.
+    """Five-fold projection recall, grouped by track identity, against a fixed reference embedding.
 
-    Also returns a `breakdown` partitioning trials by genre family, era, and coverage band, so a weak
-    overall scalar can be traced to its failure modes (coarse genre vs low coverage vs feature basis)
-    rather than read as one number (the §1b diagnosis lever)."""
+    Every evaluated target is excluded from its fold's ridge targets, content vocabulary and audio
+    statistics. Artists may cross folds; the precomputed artist feature block is disabled. This
+    evaluates metadata projection generalization, not a fully held-out collaborative model or
+    unseen-artist performance. Unscorable targets and insufficient training folds remain explicit.
+    """
     from yt_playlist.rec.discover import ContentProjection
     from yt_playlist.rec.rec_dao import RecDao
     keys, V, idx = embed.load_vectors(store)
     empty_bd = {"by_family": {}, "by_era": {}, "by_coverage": {}}
+    result = {"recall": None, "trials": 0, "eligible": 0, "unscored": 0,
+              "insufficient": 0, "k": k, "folds": 5, "split": "track_identity_5fold",
+              "in_sample": False, "artist_features": False, "breakdown": empty_bd}
     if V is None:
-        return {"recall": None, "trials": 0, "breakdown": empty_bd}
-    proj = ContentProjection.fit(store)
-    if proj is None:
-        return {"recall": None, "trials": 0, "breakdown": empty_bd}
+        result["reason"] = "No reference embedding"
+        return result
+    dao = RecDao(store)
+    content, audio = dao.track_content(), dao.track_audio_features()
+    eligible = sorted((set(content) | set(audio)) & set(idx))
+    result["eligible"] = len(eligible)
+    shuffled = np.random.default_rng(0).permutation(eligible).tolist()
     Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
     hits = trials = 0
     by_family, by_era, by_coverage = {}, {}, {}
 
     def _bump(d, key, hit):
-        b = d.setdefault(key, {"hits": 0, "trials": 0})
-        b["hits"] += int(hit)
-        b["trials"] += 1
+        b = d.setdefault(key, {"hits": 0, "trials": 0, "eligible": 0})
+        b["eligible"] += 1
+        if hit is not None:
+            b["hits"] += int(hit)
+            b["trials"] += 1
 
-    dao = RecDao(store)
-    content, audio = dao.track_content(), dao.track_audio_features()
-    for key, (g, y) in content.items():
-        if key not in idx:
+    for fold in range(5):
+        held_out = shuffled[fold::5]
+        if not held_out:
             continue
-        a = audio.get(key)
-        p = proj.predict(g, y, a, artist=key.rsplit("|", 1)[-1])   # #28: fold in the artist signal
-        n = np.linalg.norm(p)
-        if n == 0:
-            continue
-        sims = Vn @ (p / n)
-        rank = int((sims > sims[idx[key]]).sum())   # how many tracks score above the true one
-        hit = rank < k
-        hits += hit
-        trials += 1
-        _bump(by_family, genre_map.family(g), hit)
-        _bump(by_era, _era_band(y), hit)
-        _bump(by_coverage, _coverage_band(y, a is not None), hit)
+        training = set(idx) - set(held_out)
+        proj = ContentProjection.fit(store, training_keys=training, include_artist=False)
+        for key in held_out:
+            g, y = content.get(key, (None, None))
+            a = audio.get(key)
+            hit = None
+            if proj is None:
+                result["insufficient"] += 1
+            else:
+                p = proj.predict(g, y, a)
+                n = np.linalg.norm(p)
+                if n > 0 and np.isfinite(n):
+                    sims = Vn @ (p / n)
+                    # Count ties conservatively: a feature-identical group is not perfect retrieval.
+                    rank = int((sims >= sims[idx[key]] - 1e-9).sum())
+                    hit = rank <= k
+                    hits += int(hit)
+                    trials += 1
+                else:
+                    result["unscored"] += 1
+            _bump(by_family, genre_map.family(g) if g else "unknown", hit)
+            _bump(by_era, _era_band(y), hit)
+            _bump(by_coverage, _coverage_band(y, bool(a), bool(g)), hit)
 
     def _finalize(d):
-        return {key: {"recall": b["hits"] / b["trials"] if b["trials"] else None, "trials": b["trials"]}
+        return {key: {"recall": b["hits"] / b["trials"] if b["trials"] else None,
+                      "trials": b["trials"], "eligible": b["eligible"]}
                 for key, b in sorted(d.items(), key=lambda kv: -kv[1]["trials"])}
 
-    return {"recall": hits / trials if trials else None, "k": k, "trials": trials,
-            "breakdown": {"by_family": _finalize(by_family), "by_era": _finalize(by_era),
-                          "by_coverage": _finalize(by_coverage)}}
+    result.update(recall=hits / trials if trials else None, trials=trials,
+                  breakdown={"by_family": _finalize(by_family), "by_era": _finalize(by_era),
+                             "by_coverage": _finalize(by_coverage)})
+    if not trials:
+        result["reason"] = "Insufficient fitting evidence or no encodable held-out targets"
+    return result
 
 
 def cold_rankable(store, now) -> dict:

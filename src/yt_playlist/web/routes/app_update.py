@@ -63,6 +63,7 @@ def build(ctx):
         except Exception:
             for held in acquired:
                 held.release()
+            ctx.work.open()
             ctx.logger.warning("could not launch updated TuneConsole", exc_info=True)
             return response({**updater.snapshot(),
                              "message": "Couldn't restart TuneConsole. Please try again."}, 503)

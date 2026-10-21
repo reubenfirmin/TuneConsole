@@ -3,7 +3,8 @@ from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 from fastapi.testclient import TestClient
 from yt_playlist.core.store import Store
-from yt_playlist.library import executor
+from yt_playlist.library import executor, playlist_mutation
+from yt_playlist.library.playlist_mutation import PlaylistResult
 from yt_playlist.rec import radio as radio_mod
 from yt_playlist.rec.radio import RadioSession
 from yt_playlist.web.routes import bridge as bridge_route
@@ -67,7 +68,7 @@ def client(monkeypatch):
     # Stub the remote create + reconcile (no real extension/account).
     monkeypatch.setattr(executor, "create_generated_playlist",
                         lambda *a, **k: {"new_ytm": "PLRADIO", "pid": 1})
-    monkeypatch.setattr(executor, "_reconcile", lambda *a, **k: (0, 0, [], []))
+    monkeypatch.setattr(playlist_mutation, "reconcile_playlist", lambda c, p, vids: PlaylistResult("complete", tuple(vids)))
     app = FastAPI(); app.include_router(bridge_route.build(ctx))
     return TestClient(app), ctx, bridge
 
@@ -90,6 +91,21 @@ def test_start_not_available_when_no_client(client):
     ctx.client_provider = lambda: {}
     assert tc.post("/radio/start").json()["ok"] is False
     assert ctx.radio.active is False
+
+
+def test_single_tab_start_stopped_during_remote_setup_does_not_revive(client, monkeypatch):
+    tc, ctx, bridge = client
+
+    def create_then_stop(*args, **kwargs):
+        ctx.radio.reset()
+        ctx.store.set_setting("radio_active", "0")
+        return {"new_ytm": "PLRADIO", "pid": 1}
+
+    monkeypatch.setattr(executor, "create_generated_playlist", create_then_stop)
+    assert tc.post("/radio/start").json()["ok"] is False
+    assert not ctx.radio.active
+    assert ctx.store.get_setting("radio_active") == "0"
+    assert not any(frame["type"] == "navigate" for frame in bridge.sent)
 
 
 def test_start_not_available_when_disconnected(client):
@@ -116,7 +132,7 @@ def test_start_reuses_existing_playlist(client, monkeypatch):
     monkeypatch.setattr(ctx.store, "get_playlists", lambda: [
         type("P", (), {"ytm_playlist_id": "PLOLD"})()])
     calls = []
-    monkeypatch.setattr(executor, "_reconcile", lambda *a, **k: calls.append(a) or (0, 0, [], []))
+    monkeypatch.setattr(playlist_mutation, "reconcile_playlist", lambda *a: calls.append(a) or PlaylistResult("complete", tuple(a[2])))
     assert tc.post("/radio/start").json() == {"ok": True}
     assert ctx.store.get_setting("radio_playlist_ytm") == "PLOLD"
     assert calls   # _reconcile was used instead of create_generated_playlist
@@ -325,7 +341,7 @@ def test_populate_dual_rebuild_standby_none_is_still_ok_and_unchanged(client, mo
     standby_before = [q["video_id"] for q in ctx.radio.decks[standby_label]["queue"]]
     bridge.sent.clear()
     reconciled = []
-    monkeypatch.setattr(executor, "_reconcile", lambda *a, **k: (reconciled.append(a), (0, 0, [], []))[1])
+    monkeypatch.setattr(playlist_mutation, "reconcile_playlist", lambda *a: (reconciled.append(a), PlaylistResult("complete", tuple(a[2])))[1])
     monkeypatch.setattr(radio_mod, "rebuild_standby", lambda st, se, now: None)
 
     r = tc.post("/radio/populate").json()
@@ -491,25 +507,9 @@ def test_steer_reset_clears_tilts(client):
 # next hand-off instead of sitting inert until an unrelated skip/toggle happens to rebuild it. ---
 
 def _capture_pool(monkeypatch, ctx):
-    # `_radio_apply_pool` is a ThreadPoolExecutor built as a LOCAL inside bridge_route.build(ctx), so
-    # it is otherwise unreachable from a test. Mirrors tests/test_radio_deck_bridge.py's `_build`
-    # helper: monkeypatch ThreadPoolExecutor.__init__ for the duration of the build() call only, and
-    # grab the instance the route created (identified by its thread_name_prefix) so the test can
-    # submit a synchronizing sentinel job onto the SAME single-worker FIFO pool the route uses.
-    from concurrent.futures import ThreadPoolExecutor
-    captured = {}
-    original_init = ThreadPoolExecutor.__init__
-
-    def capturing_init(self, *a, **k):
-        original_init(self, *a, **k)
-        if k.get("thread_name_prefix") == "radio-apply":
-            captured["pool"] = self
-    monkeypatch.setattr(ThreadPoolExecutor, "__init__", capturing_init)
-    try:
-        router = bridge_route.build(ctx)
-    finally:
-        monkeypatch.setattr(ThreadPoolExecutor, "__init__", original_init)
-    return router, captured["pool"]
+    # The application activity registry owns the same serial apply executor as the route.
+    router = bridge_route.build(ctx)
+    return router, ctx.work
 
 
 def _drain(pool):
@@ -532,7 +532,7 @@ def dual_client(monkeypatch):
     radio.decks["B"]["playlist_ytm"] = "PLB"
     ctx = _Ctx(store, bridge, radio, _FakeClient())
     router, pool = _capture_pool(monkeypatch, ctx)
-    monkeypatch.setattr(executor, "_reconcile", lambda *a, **k: (0, 0, [], []))
+    monkeypatch.setattr(playlist_mutation, "reconcile_playlist", lambda c, p, vids: PlaylistResult("complete", tuple(vids)))
     app = FastAPI(); app.include_router(router)
     return TestClient(app), ctx, bridge, pool
 
@@ -612,7 +612,7 @@ def _v2_steer_client(monkeypatch):
     radio.playlist_ytm = "PLRADIO"
     ctx = _Ctx(store, bridge, radio, _FakeClient())
     router, pool = _capture_pool(monkeypatch, ctx)
-    monkeypatch.setattr(executor, "_reconcile", lambda *a, **k: (0, 0, [], []))
+    monkeypatch.setattr(playlist_mutation, "reconcile_playlist", lambda c, p, vids: PlaylistResult("complete", tuple(vids)))
     app = FastAPI(); app.include_router(router)
     return TestClient(app), ctx, bridge, pool
 

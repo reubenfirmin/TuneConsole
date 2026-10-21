@@ -2,10 +2,9 @@
 and grow a tree outward. Each node's next ring = library tracks nearest its PINNED-path centroid,
 tilted away from the PRUNED set (the per-cluster "negative model"). Saving reuses POST /home/generate
 (materialize a Generated playlist + open it on YouTube); the client decides which tracks to send."""
-import asyncio
+from yt_playlist.core.activity import activity_for
 import json
 import random
-import threading
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -200,7 +199,7 @@ def build(ctx) -> APIRouter:
             result["error"] = "Couldn't create it. Connect an account and keep at least one track."
         else:
             try:
-                res = await asyncio.to_thread(
+                res = await activity_for(ctx).to_thread(
                     executor.create_generated_playlist, store, name, tracks, client, now_fn(),
                     identity_id, recipe=recipe)
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
@@ -213,9 +212,8 @@ def build(ctx) -> APIRouter:
                 bridge = getattr(ctx, "bridge", None)
                 if bridge is not None and getattr(bridge, "connected", False):
                     watch_url = f"https://music.youtube.com/watch?list={res['new_ytm']}"
-                    threading.Thread(
-                        target=executor.navigate_when_ready,
-                        args=(client, bridge, res["new_ytm"], watch_url), daemon=True).start()
+                    activity_for(ctx).start_thread(executor.navigate_when_ready,
+                        args=(client, bridge, res["new_ytm"], watch_url))
                 # #48: stash the full canvas so this playlist can be reopened in Clusters and regrown a
                 # different way. Stored verbatim (validated as JSON); absent for older clients / failures.
                 state = form.get("state")

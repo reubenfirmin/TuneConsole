@@ -1,23 +1,15 @@
 """Per-mode Personalized PageRank / random-walk-with-restart over the co-occurrence graph (#57).
 
-Run in SHADOW: computed each rebuild and logged alongside the centroid-cosine ranking for a later
-NON-CIRCULAR comparison (does PPR surface better per-mode tracks than content-cosine?). It serves no
-live surface and changes nothing the user sees - it only appends a snapshot to a persistent JSONL log
-so we can revisit in a couple of weeks. Mode selection now rides on the #60C pick/impression signal
-(#87); this shadow log will inform the eventual PPR verdict for live interleaving.
+Computed once per bundle rebuild with the configured solver. Home defaults to a live 50/50
+PPR/cosine experiment. Final displayed cards and the other policy's counterfactual are recorded
+in the local recommendation ledger. Only displayed cards receive observed outcomes.
 """
-import json
-
 import numpy as np
 
-from yt_playlist.core import paths
 from yt_playlist.rec import embed, rec_params, taste_modes
 
 _ALPHA = 0.85          # walk weight; restart probability is (1 - alpha)
 _ITERS = 50            # power-iteration steps (converges well before this on a stochastic matrix)
-_TOPN = 25             # how many tracks of each ranking to log per mode
-_MAX_SNAPSHOTS = 400   # cap the shadow log: keep the most recent N rebuild snapshots
-_LOG_NAME = "ppr_shadow_log.jsonl"
 
 
 def build_transition(store):
@@ -97,55 +89,3 @@ def mode_rankings(store, alpha=None, iters=None, tol=None, depth=None) -> dict:
         r = ppr_rank(W, seed, alpha=alpha, iters=iters, tol=tol)
         out[m["mode_id"]] = [keys[i] for i in np.argsort(-r)[:depth]]
     return out
-
-
-def shadow_log(store, now) -> int:
-    """For each active taste mode, compute the PPR top-N (walk from the mode's members over the
-    co-listen graph) and the centroid-cosine top-N (the mode's content-nearest members), and append one
-    timestamped snapshot to the persistent shadow log. Returns the number of modes logged. Best-effort:
-    returns 0 when prerequisites are missing; the caller guards against exceptions."""
-    modes = taste_modes.live_modes(store)
-    if not modes:
-        return 0
-    keys, W, idx = build_transition(store)
-    lkeys, LV, lidx = embed.load_content_vectors(store)
-    if W is None or LV is None or not lkeys:
-        return 0
-    C = np.stack([m["centroid"].astype(np.float64) for m in modes])
-    if C.shape[1] != LV.shape[1]:
-        return 0                    # stale modes (content space rebuilt at a new dim): skip quietly
-    near = (LV.astype(np.float64) @ C.T).argmax(axis=1)            # each library track -> nearest mode
-    meta = store.modes.meta_for(lkeys)
-
-    def title(k):
-        d = meta.get(k, {})
-        return f"{(d.get('title') or '?')[:30]} - {(d.get('artist') or '?')[:18]}"
-
-    snaps = []
-    for j, m in enumerate(modes):
-        members = [lkeys[i] for i in np.where(near == j)[0]]
-        if not members:
-            continue
-        msims = LV[[lidx[k] for k in members]].astype(np.float64) @ C[j]
-        cos_top = [members[i] for i in np.argsort(-msims)[:_TOPN]]
-        seed = [idx[k] for k in members if k in idx]              # members present in the co-listen vocab
-        if seed:
-            r = ppr_rank(W, seed)
-            ppr_top = [keys[i] for i in np.argsort(-r)[:_TOPN]]
-        else:
-            ppr_top = []
-        snaps.append({"mode_id": m["mode_id"], "label": m["label"],
-                      "members": len(members), "seed_in_graph": len(seed),
-                      "cosine_top": [title(k) for k in cos_top],
-                      "ppr_top": [title(k) for k in ppr_top]})
-    rec = {"ts": float(now), "alpha": _ALPHA, "iters": _ITERS, "modes": snaps}
-    log = paths.data_dir() / _LOG_NAME
-    log.parent.mkdir(parents=True, exist_ok=True)
-    # Bounded append: keep only the most recent _MAX_SNAPSHOTS so the shadow log can't grow without end.
-    prior = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
-    keep = prior[-(_MAX_SNAPSHOTS - 1):] if _MAX_SNAPSHOTS > 1 else []
-    with open(log, "w", encoding="utf-8") as f:
-        for line in keep:
-            f.write(line + "\n")
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    return len(snaps)

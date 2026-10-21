@@ -1,5 +1,6 @@
 """Keep full fetched album track lists for measured listening coverage."""
 from yt_playlist.util.thumbnails import best_thumb
+from yt_playlist.library.album_fetch import shareable_album_tracks
 
 
 def remember_album(store, browse_id, album, fallback=None):
@@ -20,5 +21,10 @@ def remember_album(store, browse_id, album, fallback=None):
         return
     keys = sorted({store.observe_track(t.get("videoId"), t["title"], artists(t) or artist,
                                       album=title,album_browse_id=browse_id) for t in tracks})
+    try:
+        video_ids = [track["videoId"] for track in shareable_album_tracks(album)]
+    except ValueError:
+        video_ids = None
     store.collection.cache_album_tracklist(
-        browse_id, title, artist, best_thumb(album.get("thumbnails")) or fallback.get("thumbnail"), keys)
+        browse_id, title, artist, best_thumb(album.get("thumbnails")) or fallback.get("thumbnail"), keys,
+        video_ids=video_ids)

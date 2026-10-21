@@ -8,10 +8,9 @@ import json
 import time
 
 from yt_playlist.util.matching import identity_key, normalize
-
-ITEM_FIELDS = ('title','artist','orig_title','orig_artist','album','duration_s','available',
-               'video_type','artist_browse_id','album_browse_id','thumbnail','mb_year',
-               'loudness','dynamic_complexity','popularity','gain','label')
+from yt_playlist.core.catalog_identity import ITEM_FIELDS, RECORDING_FIELDS, unresolved_ref
+from yt_playlist.core.catalog_state import rekey_state as rekey_serialized_state
+from yt_playlist.util.thumbnails import is_placeholder_art
 
 
 def resolve_entry(conn, entry_id):
@@ -49,6 +48,30 @@ def choose_field(conn, entry_id, field, value, source='user'):
     conn.execute('INSERT INTO entry_field_choices VALUES (?,?,?,?) ON CONFLICT(entry_id,field) DO UPDATE SET value_json=excluded.value_json,source=excluded.source', (entry_id,field,json.dumps(value),source))
 
 
+def update_artwork(conn, entry_id, url, *, source):
+    """Explicit choices win; real YouTube art refreshes, and provider art only fills missing covers.
+
+    Missing/placeholder observations never displace useful artwork, including provider recovery.
+    This applies to both discovery and library ingestion because artwork belongs to the item.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return
+    entry_id = resolve_entry(conn, entry_id)
+    if conn.execute("SELECT 1 FROM entry_field_choices WHERE entry_id=? AND field='thumbnail'",
+                    (entry_id,)).fetchone():
+        return
+    row = conn.execute('SELECT thumbnail FROM catalog_tracks WHERE id=?', (entry_id,)).fetchone()
+    if row is None:
+        return
+    current = row['thumbnail']
+    useful = current and current.strip() and not is_placeholder_art(current)
+    if is_placeholder_art(url) and (source == 'provider' or current):
+        return
+    if source == 'provider' and useful:
+        return
+    conn.execute('UPDATE catalog_tracks SET thumbnail=? WHERE id=?', (url.strip(), entry_id))
+
+
 def play_key(conn, key, video_id):
     resolved = resolve_key(conn,key,video_id)
     if resolved:
@@ -60,7 +83,6 @@ def play_key(conn, key, video_id):
 
 def replace_hints(conn, entry_id, fields):
     """Direct findings can replace retained import hints once; selected values stay protected."""
-    from yt_playlist.core.migrations.v008_recordings import RECORDING_FIELDS, ITEM_FIELDS
     entry_id = resolve_entry(conn,entry_id)
     row = conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry_id,)).fetchone()
     if row is None:
@@ -81,6 +103,9 @@ def replace_hints(conn, entry_id, fields):
 
 
 def invalidate_derived(conn):
+    from yt_playlist.core.first_play import invalidate
+
+    invalidate(conn)
     for table in ('rec_vectors','rec_content_vectors','rec_discovered_content_vectors',
                   'rec_artist_vectors','rec_artist_content_vectors','rec_proposals'):
         conn.execute(f'DELETE FROM {table}')
@@ -109,11 +134,10 @@ def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=N
                 conn.execute('UPDATE rec_mood SET keys=? WHERE rowid=?', (json.dumps(list(dict.fromkeys(new_key if k==old_key else k for k in keys))),row['migration_rowid']))
         except (ValueError,TypeError):
             pass
-    from yt_playlist.core.migrations.v008_recordings import convert_state
     for table,idcol,column in [('album_tracklists','browse_id','track_keys'),('taste_modes','mode_id','rep_keys'),('cluster_canvas','playlist_ytm','state'),('road_trip_drafts','recipe_id','state'),('rec_recipes','playlist_ytm','recipe')]:
         for row in conn.execute(f'SELECT * FROM {table}').fetchall():
             try:
-                value = convert_state(json.loads(row[column]),{old_key:new_key})
+                value = rekey_serialized_state(json.loads(row[column]),{old_key:new_key})
                 conn.execute(f'UPDATE {table} SET {column}=? WHERE {idcol}=?', (json.dumps(value),row[idcol]))
             except (ValueError,TypeError):
                 pass
@@ -139,7 +163,6 @@ def associate_item(conn, video_id, recording_id, *, source, evidence, now):
     conn.execute('UPDATE album_track_links SET recording_id=? WHERE video_id=?', (recording_id,video_id))
     conn.execute('UPDATE legacy_track_refs SET recording_id=? WHERE video_id=?', (recording_id,video_id))
     # Verified musical identity permits reuse of recording facts, never item/release fields.
-    from yt_playlist.core.migrations.v008_recordings import RECORDING_FIELDS
     for field in RECORDING_FIELDS:
         conn.execute(f'UPDATE recordings SET {field}=(SELECT {field} FROM recordings WHERE id=?) '
                      f"WHERE id=? AND ({field} IS NULL OR {field}='')", (previous,recording_id))
@@ -185,7 +208,6 @@ def add_alias(conn, alias, recording_id, source):
 def upsert(conn, video_id, title, artist, album=None, duration_s=None, available=None,
            video_type=None, artist_browse_id=None, album_browse_id=None, thumbnail=None,
            created_at=None, *, library=False, source_ref=None, preferred_key=None):
-    from yt_playlist.core.migrations.v008_recordings import unresolved_ref
     video_id = video_id if video_id and video_id.strip() else None
     source_ref = None if video_id else (source_ref or unresolved_ref(album_browse_id or album,title,artist))
     row = conn.execute('SELECT * FROM catalog_entries WHERE video_id=?' if video_id else 'SELECT * FROM catalog_entries WHERE source_ref=?', (video_id or source_ref,)).fetchone()
@@ -215,11 +237,12 @@ def upsert(conn, video_id, title, artist, album=None, duration_s=None, available
         add_alias(conn,identity_key(title,artist),rid,'youtube' if video_id else 'source_entry')
     # Metadata refresh never overwrites an effective title/credit correction or its reset value.
     values = dict(album=album,duration_s=duration_s,available=None if available is None else int(available),
-                  video_type=video_type,artist_browse_id=artist_browse_id,album_browse_id=album_browse_id,thumbnail=thumbnail)
+                  video_type=video_type,artist_browse_id=artist_browse_id,album_browse_id=album_browse_id)
     for field,value in values.items():
         if value is not None:
             table, column, subject = ('youtube_items','video_id',video_id) if video_id else ('unresolved_items','entry_id',entry_id)
             conn.execute(f'UPDATE {table} SET {field}=? WHERE {column}=?', (value,subject))
+    update_artwork(conn, entry_id, thumbnail, source='youtube')
     if library:
         conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'observed',?)", (entry_id,now))
     if album_browse_id:

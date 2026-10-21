@@ -1,14 +1,13 @@
 """Album landing page: cover, track table, save/open, "create a playlist from this album", and
 (for saved albums folded into the library) genre/year enrichment with the same live flow as playlists."""
-import asyncio
 import re
-import threading
+from yt_playlist.core.activity import activity_for
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from yt_playlist.library.album_fetch import fetch_album, is_upload_album
+from yt_playlist.library.album_fetch import fetch_album, is_upload_album, shareable_album_tracks
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.providers import enrichment, lastfm, waterfall
 from yt_playlist.rec.rec_dao import RecDao
@@ -107,27 +106,26 @@ def build(ctx) -> APIRouter:
 
     @router.get("/album/{browse}/share.txt")
     def album_share(browse: str):
-        """Download the album as a plain .txt (one song URL per line) for easy sharing. Uses the
-        folded-in library tracks when saved, else the live album fetch (so unsaved albums share too)."""
+        """Download a verified complete, ordered album, including offline cached snapshots."""
         title, vids = None, []
-        # Only trust the library track list for SAVED albums (whose full track list is materialized).
-        # For an unsaved album, album_tracks_detail may hold a single incidental track stamped with
-        # this browse_id by playlist sync. Sharing that would drop the rest of the album, so fetch live.
-        if browse in RecDao(store).saved_album_ids():
-            tracks = store.album_tracks_detail(browse)
-            vids = [t["video_id"] for t in tracks if t.get("video_id")]
-            meta = next((a for a in store.get_saved_albums() if a["browse"] == browse), {})
-            title = meta.get("title") or (tracks[0]["album"] if tracks else None)
+        cached = store.collection.cached_album_share(browse)
+        if cached:
+            title, vids = cached["title"], cached["video_ids"]
         if not vids:
+            problem = "The full album could not be fetched. Reconnect to YouTube Music and try sharing again."
             try:
                 client = next(iter((ctx.client_provider() or {}).values()), None)
                 a = fetch_album(client, browse) if client else {}
-                title = title or a.get("title")
-                vids = [t.get("videoId") for t in (a.get("tracks") or []) if t.get("videoId")]
-            except Exception:  # noqa: BLE001 - no client / network all degrade to a 404
+                tracks = shareable_album_tracks(a)
+                title = a.get("title")
+                vids = [track["videoId"] for track in tracks]
+                remember_album(store, browse, a)
+            except ValueError as exc:
+                problem = str(exc)
+            except Exception:
                 ctx.logger.info("album share fetch failed for %r (non-fatal)", browse)
-        if not vids:
-            raise HTTPException(status_code=404, detail="album not found")
+            if not vids:
+                raise HTTPException(status_code=503, detail=problem)
         lines = [f"https://music.youtube.com/watch?v={v}" for v in vids]
         safe = re.sub(r'[\\/:*?"<>|]', "_", title or "album").strip() or "album"
         ascii_name = safe.encode("ascii", "ignore").decode() or "album"
@@ -151,6 +149,7 @@ def build(ctx) -> APIRouter:
         if tid is None:
             return _toast(request, "track not found")
         store.set_track_genre(tid, genre)
+        ctx.rec_worker.trigger_mode_refresh()
         return _album_row(request, browse, vid)
 
     @router.post("/album/{browse}/track-year")
@@ -163,6 +162,7 @@ def build(ctx) -> APIRouter:
         if tid is None:
             return _toast(request, "track not found")
         store.set_track_year(tid, year)
+        ctx.rec_worker.trigger_mode_refresh()
         return _album_row(request, browse, vid)
 
     @router.post("/album/create-playlist")
@@ -173,7 +173,7 @@ def build(ctx) -> APIRouter:
         if not browse_id:
             return _toast(request, "No album to create from.")
         try:
-            res = await asyncio.to_thread(ctx.ops().create_playlist_from_album, browse_id, name)
+            res = await activity_for(ctx).to_thread(ctx.ops().create_playlist_from_album, browse_id, name)
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
@@ -201,7 +201,7 @@ def build(ctx) -> APIRouter:
             finally:
                 job.done = True
 
-        threading.Thread(target=run, daemon=True).start()
+        activity_for(ctx).start_thread(run)
         return JSONResponse({"job_id": job.id})
 
     @router.get("/album/{browse}/conflicts")
