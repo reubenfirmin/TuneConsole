@@ -1,13 +1,12 @@
 from fastapi.testclient import TestClient
 
-from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
 
 def test_new_artists_fragment_serves_cached(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_discovered_artist("Donato Dozzy", 1.0, ["Recondite", "Rrose"], ["Deep Focus"], None, now=1.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.discovery.upsert_discovered_artist("Donato Dozzy", 1.0, ["Recondite", "Rrose"], ["Deep Focus"], None, now=1.0)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     html = c.get("/home/new-artists").text
@@ -17,7 +16,7 @@ def test_new_artists_fragment_serves_cached(store):
 
 
 def test_new_artists_building_polls(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     app.state.ctx.rec_worker._running = True
     c = TestClient(app, base_url="http://127.0.0.1")

@@ -17,7 +17,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = FakeClient(albums={"MPREb_x": {"title": "A", "artists": [{"name": "B"}],
                                         "thumbnails": [], "tracks": []}})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
@@ -32,7 +32,7 @@ def _outside_main(html: str, needle: str) -> bool:
 
 
 def test_similar_modal_container_is_outside_main_on_a_playlist_page(store):
-    pid = store.upsert_playlist(store.upsert_identity("x", "c", None, False), "PL1", "Mix", 1, "h", 1.0)
+    pid = store.playlists.upsert_playlist(store.identities.upsert_identity("x", "c", None, False), "PL1", "Mix", 1, "h", 1.0)
     html = _client(store).get(f"/playlist/{pid}").text
     assert _outside_main(html, 'id="similar-modal"')
 

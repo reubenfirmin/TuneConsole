@@ -7,20 +7,20 @@ from yt_playlist.web.routes.charts import _ticker_periods
 
 
 def _seed(store):
-    iid = store.upsert_identity("me", "c", None, True)
-    a = store.upsert_track("v1", "Alpha", "Artist A", "Album A", 200)
-    b = store.upsert_track("v2", "Beta", "Artist B", "Album B", 200)
-    store.set_track_enrichment(a, "techno", "1995")
-    store.set_track_enrichment(b, "house", "2005")
-    p = store.upsert_playlist(iid, "P1", "Mix", 0, "h", 0.0)
-    store.set_playlist_tracks(p, [a, b])
+    iid = store.identities.upsert_identity("me", "c", None, True)
+    a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200)
+    b = store.tracks.upsert_track("v2", "Beta", "Artist B", "Album B", 200)
+    store.tracks.set_track_enrichment(a, "techno", "1995")
+    store.tracks.set_track_enrichment(b, "house", "2005")
+    p = store.playlists.upsert_playlist(iid, "P1", "Mix", 0, "h", 0.0)
+    store.playlists.set_playlist_tracks(p, [a, b])
 
     def key(tid):
         return store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (tid,)).fetchone()["k"]
 
     # Two snapshots ~30d apart so the ticker has a real history span to slice into periods.
-    store.add_history_snapshot(iid, NOW - 30 * 86400, [key(a), key(b)])
-    store.add_history_snapshot(iid, NOW, [key(a), key(a), key(b)])
+    store.history.add_history_snapshot(iid, NOW - 30 * 86400, [key(a), key(b)])
+    store.history.add_history_snapshot(iid, NOW, [key(a), key(a), key(b)])
     return iid
 
 
@@ -65,7 +65,7 @@ def test_charts_ticker_tabs_render(store):
 
 
 def test_charts_ticker_handles_no_history(store):
-    store.upsert_identity("me", "c", None, True)
+    store.identities.upsert_identity("me", "c", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.get("/charts")

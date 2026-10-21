@@ -105,6 +105,6 @@ def test_unread_candidate_cannot_establish_uniqueness(monkeypatch):
 
 
 def test_waterfall_uses_known_duration_before_persisting_any_fact(monkeypatch, store):
-    entry = store.upsert_track("video", "Song", "Artist", None, 300)
+    entry = store.tracks.upsert_track("video", "Song", "Artist", None, 300)
     _stub(monkeypatch, [_track()])
-    assert deezer.probe(store.catalog_subject(entry), store).fields == {}
+    assert deezer.probe(store.tracks.catalog_subject(entry), store).fields == {}

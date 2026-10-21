@@ -19,6 +19,6 @@ def test_saved_playlist_report_discards_source_song_metadata(store):
         "playlists": [{"name": "Source playlist", "ytm_playlist_id": "PL1"}],
         "unmatched_tracks": [{"title": "Private source song", "spotify_url": "spotify:track:secret"}],
         "albums": []}}})
-    saved = store.get_setting("spotify_library_import_job")
+    saved = store.settings.get_setting("spotify_library_import_job")
     assert "Private source song" not in saved and "spotify:track:secret" not in saved
     assert json.loads(saved)["report"]["details"]["playlists"][0]["ytm_playlist_id"] == "PL1"

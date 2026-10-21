@@ -24,35 +24,35 @@ METHODS = {"svd": "Playlist patterns (SVD)", "item2vec": "Track co-occurrence (I
 
 
 def current_setup(store):
-    return {"method": store.get_setting("rec_embed_method") or "svd",
-            "dim": int(store.get_setting("rec_dim") or embed.DIM)}
+    return {"method": store.settings.get_setting("rec_embed_method") or "svd",
+            "dim": int(store.settings.get_setting("rec_dim") or embed.DIM)}
 
 
 def _tracked_run(store, latest):
-    active = store.get_setting("rec_selection_active_run")
+    active = store.settings.get_setting("rec_selection_active_run")
     if active:
-        return store.rec.model.selection_run(active)
-    restored = store.get_setting("rec_selection_display_run")
-    restored = store.rec.model.selection_run(restored) if restored else None
+        return store.model_selection.selection_run(active)
+    restored = store.settings.get_setting("rec_selection_display_run")
+    restored = store.model_selection.selection_run(restored) if restored else None
     if restored and (not latest or latest["ran_at"] <= restored.get("restored_at", 0)):
         return restored
     return latest
 
 
 def readiness(store, now):
-    runs = store.rec.model.selection_runs(limit=1)
+    runs = store.model_selection.selection_runs(limit=1)
     last = runs[0] if runs else None
-    lo, hi = store.history_bounds()
+    lo, hi = store.charts.history_bounds()
     days = max(0, (min(hi, now) - lo) / DAY) if lo is not None and hi is not None else 0
-    tracks = store.rec_vectors_count()
+    tracks = store.rec_model.rec_vectors_count()
     checks = [{"label": "Listening history", "value": min(int(days), MIN_HISTORY_DAYS), "total": MIN_HISTORY_DAYS,
                "unit": "days"},
               {"label": "Modeled tracks", "value": min(tracks, MIN_TRACKS), "total": MIN_TRACKS, "unit": "tracks"}]
     if last and last["status"] == "running":
         return {"state": "running", "reason": last.get("progress", "Comparing model setups."), "checks": checks}
-    if store.get_setting("rec_selection_restore"):
+    if store.settings.get_setting("rec_selection_restore"):
         return {"state": "restoring", "reason": "Restoring the previous model after the current update finishes.", "checks": checks}
-    if store.get_setting("rec_selection_paused") == "1":
+    if store.settings.get_setting("rec_selection_paused") == "1":
         return {"state": "paused", "reason": "Automatic selection is paused after restoring your previous model.", "checks": checks}
     if days < MIN_HISTORY_DAYS or tracks < MIN_TRACKS:
         return {"state": "waiting", "reason": "Another comparison needs at least 14 days of history and 100 modeled tracks." if last else "Waiting for enough listening history and modeled tracks to make a useful comparison.",
@@ -68,7 +68,7 @@ def readiness(store, now):
         if last["status"] == "failed":
             return {"state": "ready", "reason": "Ready to retry automatically on the next model update.", "checks": checks}
         since = max(last.get("evidence_end", last["ran_at"]), restored_at)
-        fresh = len(store.history_keys_between(since, now) - store.generated_only_keys_between(since, now))
+        fresh = len(store.history.history_keys_between(since, now) - store.rec_query.generated_only_keys_between(since, now))
         checks.append({"label": "Fresh listening since the last comparison", "value": min(fresh, MIN_FRESH_TRACKS),
                        "total": MIN_FRESH_TRACKS, "unit": "distinct tracks"})
         if fresh < MIN_FRESH_TRACKS:
@@ -79,19 +79,19 @@ def readiness(store, now):
 
 def _windows(store, now):
     """Freeze the input data once, before any candidate is fitted."""
-    _, hi = store.history_bounds()
+    _, hi = store.charts.history_bounds()
     hi = min(hi, now)
     span = eval_recs.best_holdout(store) * DAY
-    weighted = store.get_setting("rec_cooc_weighting") == "1"
+    weighted = store.settings.get_setting("rec_cooc_weighting") == "1"
     out = []
     for i in range(3):
         end = hi - i * span + 1e-6
         cutoff = end - span
-        baskets, _ = store.rec_baskets_as_of(cutoff)
-        before = store.history_keys_before(cutoff)
-        held = store.history_keys_between(cutoff, end) - before
-        generated = store.generated_only_keys_between(cutoff, end)
-        weights = {k: 1 + math.log1p(v) for k, v in store.play_counts_before(cutoff).items()} if weighted else None
+        baskets, _ = store.rec_query.rec_baskets_as_of(cutoff)
+        before = store.history.history_keys_before(cutoff)
+        held = store.history.history_keys_between(cutoff, end) - before
+        generated = store.rec_query.generated_only_keys_between(cutoff, end)
+        weights = {k: 1 + math.log1p(v) for k, v in store.history.play_counts_before(cutoff).items()} if weighted else None
         out.append({"baskets": baskets, "before": before, "held": held - generated,
                     "cutoff": cutoff, "end": end, "weights": weights})
     return out, hi
@@ -162,16 +162,16 @@ def _paired(previous, candidate, alternatives):
 
 def _build(store, setup):
     return embed.build_vectors_from_baskets(
-        store.rec_baskets(), dim=setup["dim"], method=setup["method"],
-        weights=embed._cooc_weights(store) if store.get_setting("rec_cooc_weighting") == "1" else None)
+        store.rec_query.rec_baskets(), dim=setup["dim"], method=setup["method"],
+        weights=embed._cooc_weights(store) if store.settings.get_setting("rec_cooc_weighting") == "1" else None)
 
 
 def _forecast(store, previous, selected, now):
     """Save both top-20 predictions on the same candidate universe, before observing outcomes."""
     with store._lock:
-        baskets = store.rec_baskets()
-        weights = embed._cooc_weights(store) if store.get_setting("rec_cooc_weighting") == "1" else None
-        context = store.history_keys_before(now) | store.rec.model.selection_play_keys(0, now)
+        baskets = store.rec_query.rec_baskets()
+        weights = embed._cooc_weights(store) if store.settings.get_setting("rec_cooc_weighting") == "1" else None
+        context = store.history.history_keys_before(now) | store.model_selection.selection_play_keys(0, now)
     old_keys, old_vectors = embed.build_vectors_from_baskets(baskets, dim=previous["dim"], method=previous["method"], weights=weights)
     if previous == selected:
         keys, vectors = old_keys, old_vectors
@@ -185,11 +185,11 @@ def _forecast(store, previous, selected, now):
 
 
 def update_followup(store, now, *, now_fn=None):
-    runs = store.rec.model.selection_runs(limit=1)
+    runs = store.model_selection.selection_runs(limit=1)
     run = _tracked_run(store, runs[0] if runs else None)
     if not run or run["status"] not in ("applied", "retained", "restored"):
         return
-    forecasts = store.rec.model.model_forecasts(run["id"])
+    forecasts = store.model_selection.model_forecasts(run["id"])
     end = min(now, run.get("restored_at", now), run.get("ended_at", now))
     total = old_hits = new_hits = excluded = 0
     points = []
@@ -201,11 +201,11 @@ def update_followup(store, now, *, now_fn=None):
         start = forecast["made_at"]
         if stop <= start:
             continue
-        held = (store.rec.model.selection_play_keys(start, stop) & set(forecast["eligible"])) - seen
+        held = (store.model_selection.selection_play_keys(start, stop) & set(forecast["eligible"])) - seen
         # Late imports may establish that a track was already played before the forecast.
         # Revise eligibility instead of calling that repeat a successful new prediction.
-        held -= store.history_keys_before(start) | store.rec.model.selection_play_keys(0, start)
-        generated = store.generated_only_keys_between(start, stop)
+        held -= store.history.history_keys_before(start) | store.model_selection.selection_play_keys(0, start)
+        generated = store.rec_query.generated_only_keys_between(start, stop)
         excluded += len(held & generated)
         held -= generated
         seen |= held
@@ -219,21 +219,21 @@ def update_followup(store, now, *, now_fn=None):
                        "previous_score": old_hits / total if total else None,
                        "score": new_hits / total if total else None, "updated_at": now,
                        "generated_excluded": excluded, "points": points, "forecasts": len(forecasts)}
-    store.rec.model.save_selection(run["id"], run)
-    if (run["status"] != "restored" and not run.get("ended_at") and store.get_setting("rec_selection_paused") != "1"
+    store.model_selection.save_selection(run["id"], run)
+    if (run["status"] != "restored" and not run.get("ended_at") and store.settings.get_setting("rec_selection_paused") != "1"
             and (not forecasts or now - forecasts[-1]["made_at"] >= DAY)):
         forecast = _forecast(store, run["previous"], run["selected"], now)
         if forecast:
-            store.rec.model.save_model_forecast(run["id"], now_fn() if now_fn else now, forecast)
+            store.model_selection.save_model_forecast(run["id"], now_fn() if now_fn else now, forecast)
             run["followup"]["forecasts"] = len(forecasts) + 1
-            store.rec.model.save_selection(run["id"], run)
+            store.model_selection.save_selection(run["id"], run)
 
 
 def run(store, now, *, now_fn=None):
     previous = current_setup(store)
     result = {"ran_at": now, "status": "running", "previous": previous, "selected": previous,
               "progress": "Preparing historical listening tests.", "grid": []}
-    run_id = store.rec.model.start_selection(now, result)
+    run_id = store.model_selection.start_selection(now, result)
     completed = False
     try:
         with store._lock:
@@ -247,7 +247,7 @@ def run(store, now, *, now_fn=None):
         else:
             for i, setup in enumerate(candidates):
                 result["progress"] = f"Comparing setup {i + 1} of {len(candidates)}. Your current model stays in use."
-                store.rec.model.save_selection(run_id, result)
+                store.model_selection.save_selection(run_id, result)
                 try:
                     measured = _paired(baseline, _evaluate(setup, windows), len(candidates))
                     result["grid"].append({**setup, **measured})
@@ -255,7 +255,7 @@ def run(store, now, *, now_fn=None):
                     result["grid"].append({**setup, "eligible": False, "reason": "Could not fit this setup"})
             contenders = [g for g in result["grid"] if g.get("promote")]
             best = max(contenders, key=lambda g: g["score"]) if contenders else None
-            if best and store.get_setting("rec_selection_paused") != "1":
+            if best and store.settings.get_setting("rec_selection_paused") != "1":
                 selected = {k: best[k] for k in ("method", "dim")}
                 # Fit in memory, then publish exactly once. A failed fit leaves the live model alone.
                 keys, vectors = _build(store, selected)
@@ -263,12 +263,12 @@ def run(store, now, *, now_fn=None):
                     raise ValueError("Selected setup could not build a serving model")
                 published = {**result, "status": "applied", "selected": selected, "comparison": best,
                              "reason": "Improved predictions across multiple test periods."}
-                store.rec.model.save_selection(run_id, published, rows=[(k, vectors[i].tobytes()) for i, k in enumerate(keys)])
+                store.model_selection.save_selection(run_id, published, rows=[(k, vectors[i].tobytes()) for i, k in enumerate(keys)])
                 result = published
             else:
                 result.update(status="retained", comparison=baseline_check,
                               reason="No alternative showed a reliable improvement. Your current setup was kept.")
-        store.rec.model.save_selection(run_id, result)
+        store.model_selection.save_selection(run_id, result)
         completed = True
         update_followup(store, now_fn() if now_fn else now, now_fn=now_fn)
     except Exception:
@@ -276,7 +276,7 @@ def run(store, now, *, now_fn=None):
         # because the best-effort prospective forecast failed afterward.
         if not completed:
             result.update(status="failed", reason="The comparison could not finish. Your current model was kept.")
-            store.rec.model.save_selection(run_id, result)
+            store.model_selection.save_selection(run_id, result)
         raise
     return result
 
@@ -288,21 +288,21 @@ def maintain(store, now, *, now_fn=None):
 
 
 def recover_interrupted(store):
-    for run in store.rec.model.selection_runs(limit=1):
+    for run in store.model_selection.selection_runs(limit=1):
         if run["status"] == "running":
             run.update(status="failed", reason="The app stopped during the comparison. Your current model was kept.")
-            store.rec.model.save_selection(run["id"], run)
+            store.model_selection.save_selection(run["id"], run)
 
 
 def view(store, now, *, limit=6):
     state = readiness(store, now)
-    runs = store.rec.model.selection_runs(limit=limit)
+    runs = store.model_selection.selection_runs(limit=limit)
     latest = runs[0] if runs else None
     tracked = _tracked_run(store, latest)
     display_id = str(tracked["id"]) if tracked else None
     displayed = next((r for r in runs if str(r["id"]) == display_id), None)
     if display_id and not displayed:
-        displayed = store.rec.model.selection_run(display_id)
+        displayed = store.model_selection.selection_run(display_id)
         if displayed:
             runs.append(displayed)
     def date(ts):
@@ -333,5 +333,5 @@ def view(store, now, *, limit=6):
         state["next_date"] = date(state["next_at"])
     return {**state, "runs": runs, "last": displayed or latest, "latest": latest,
             "current": current_setup(store), "min_trials": MIN_TRIALS, "min_windows": MIN_WINDOWS,
-            "restore_id": store.get_setting("rec_selection_active_run"),
-            "version": f"{latest['id'] if latest else 0}:{latest['status'] if latest else 'waiting'}:{store.rec_vectors_count()}:{current_setup(store)['dim']}:{state['state']}"}
+            "restore_id": store.settings.get_setting("rec_selection_active_run"),
+            "version": f"{latest['id'] if latest else 0}:{latest['status'] if latest else 'waiting'}:{store.rec_model.rec_vectors_count()}:{current_setup(store)['dim']}:{state['state']}"}

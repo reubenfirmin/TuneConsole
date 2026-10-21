@@ -6,9 +6,9 @@ from playwright.sync_api import expect
 @pytest.mark.parametrize("kind", ["playlist", "album"])
 @pytest.mark.parametrize("width", [1280, 390])
 def test_now_playing_returns_to_source(live_app, store, page, kind, width):
-    playlist = store.get_playlists()[0]
-    store.add_saved_album({"browse": "MPRE_album", "title": "Playing release", "artist": "Artist"})
-    store.upsert_track("v1", "Song", "Artist", "Playing release", 200, album_browse_id="MPRE_album")
+    playlist = store.playlists.get_playlists()[0]
+    store.collection.add_saved_album({"browse": "MPRE_album", "title": "Playing release", "artist": "Artist"})
+    store.tracks.upsert_track("v1", "Song", "Artist", "Playing release", 200, album_browse_id="MPRE_album")
     url = f"/playlist/{playlist.id}" if kind == "playlist" else "/album?browse=MPRE_album"
     title = playlist.title if kind == "playlist" else "Playing release"
     page.route("**/bridge/status", lambda route: route.fulfill(json={
@@ -40,7 +40,7 @@ def test_now_playing_returns_to_source(live_app, store, page, kind, width):
     expect(widget.locator(".hs-source")).to_have_count(0)
     # Another playlist, or another album sharing the /album route, still needs the link.
     if kind == "playlist":
-        other = store.upsert_playlist(playlist.identity_id, "PL_other", "Another mix", 0, "h", 0)
+        other = store.playlists.upsert_playlist(playlist.identity_id, "PL_other", "Another mix", 0, "h", 0)
         page.goto(f"{live_app}/playlist/{other}")
     else:
         page.goto(f"{live_app}/album?browse=MPRE_other")
@@ -81,7 +81,7 @@ def test_failed_playback_does_not_open_an_uncontrolled_music_tab(live_app, store
             route.fulfill(json={"ok": False, "error": "no extension connected"})
 
     page.route("**/play", play)
-    playlist = store.get_playlists()[0]
+    playlist = store.playlists.get_playlists()[0]
     page.goto(f"{live_app}/playlist/{playlist.id}")
     control = page.get_by_role("link", name="Play on YouTube Music")
     control.click()

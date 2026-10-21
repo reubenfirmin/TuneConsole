@@ -19,7 +19,7 @@ def remember_album(store, browse_id, album, fallback=None):
     title = album.get("title") or fallback.get("title")
     if not title or not artist or any(not t.get("title") for t in tracks):
         return
-    keys = sorted({store.observe_track(t.get("videoId"), t["title"], artists(t) or artist,
+    keys = sorted({store.tracks.observe_track(t.get("videoId"), t["title"], artists(t) or artist,
                                       album=title,album_browse_id=browse_id) for t in tracks})
     try:
         video_ids = [track["videoId"] for track in shareable_album_tracks(album)]

@@ -332,7 +332,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
     ctx.enrich_worker = EnrichWorker(ctx)                      # drains the corpus through the waterfall
     templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync
     templates.env.globals["has_multiple_identities"] = (
-        lambda: len(store.get_identities()) > 1
+        lambda: len(store.identities.get_identities()) > 1
     )
     # Background library-sync daemon: runs the full sync (setup + periodic) with no manual card, so
     # the initial post-setup sync fires as soon as the extension connects and the library then

@@ -522,7 +522,7 @@ function playlistsTab(rows) {
     // "Generated" is pinned into its own card above the table (see template), never in the sections.
     // Always newest-first by creation time (independent of the main table's column sort).
     genRows() {
-      return this.rows.filter(r => r.group === 'Generated')
+      return this.rows.filter(r => r.is_generated)
         .sort((a, b) => (b.generated_created ?? b.created ?? 0) - (a.generated_created ?? a.created ?? 0)
           || b.id - a.id);
     },
@@ -533,7 +533,7 @@ function playlistsTab(rows) {
     },
     sections() {
       // the main table holds everything EXCEPT Generated; split partitions by group (Ungrouped last)
-      const rest = this.sorted().filter(r => r.group !== 'Generated');
+      const rest = this.sorted().filter(r => !r.is_generated);
       if (!this.split) return [{ name: '', rows: rest }];
       const m = {};
       rest.forEach(r => { const g = r.group || 'Ungrouped'; (m[g] = m[g] || []).push(r); });

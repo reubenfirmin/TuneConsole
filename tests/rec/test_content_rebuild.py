@@ -1,4 +1,5 @@
 from yt_playlist.rec import embed
+from types import SimpleNamespace
 
 
 class CovStore:
@@ -8,8 +9,14 @@ class CovStore:
         self._settings = {}
         self.builds = 0
         self._vecs = []
+        self.settings = SimpleNamespace(get_setting=self.get_setting, set_setting=self.set_setting)
+        self.rec_query = SimpleNamespace(track_content=self.track_content,
+                                         track_audio_features=self.track_audio_features,
+                                         library_keys=self.library_keys)
+        self.discovery = SimpleNamespace(get_discovered_tracks=self.get_discovered_tracks)
+        self.rec_model = SimpleNamespace(content_generation=self.content_generation,
+                                         publish_content_generation=self.publish_content_generation)
 
-    # RecDao(store) is monkeypatched to read these:
     def track_content(self):
         return {f"k{i}|a": ("Techno", "1990") for i in range(self._tagged)}
 
@@ -45,21 +52,15 @@ class CovStore:
         return True
 
 
-def _patch(monkeypatch, store):
-    monkeypatch.setattr(embed, "RecDao", lambda s: store)
-
-
 def test_first_call_builds(monkeypatch):
     s = CovStore(tagged=10, total=100)      # 10% coverage
-    _patch(monkeypatch, s)
     assert embed.maybe_rebuild_content_vectors(s) is True
     assert s.builds == 1
-    assert s.get_setting("rec_content_cov_bucket") == "2"   # floor(0.10/0.05)
+    assert s.settings.get_setting("rec_content_cov_bucket") == "2"   # floor(0.10/0.05)
 
 
 def test_within_bucket_input_changes_rebuild_once(monkeypatch):
     s = CovStore(tagged=10, total=100)
-    _patch(monkeypatch, s)
     embed.maybe_rebuild_content_vectors(s)                   # bucket 2
     s._tagged = 12                                           # 12%, still bucket 2
     assert embed.maybe_rebuild_content_vectors(s) is True
@@ -69,12 +70,11 @@ def test_within_bucket_input_changes_rebuild_once(monkeypatch):
 
 def test_crossing_boundary_rebuilds_once(monkeypatch):
     s = CovStore(tagged=10, total=100)
-    _patch(monkeypatch, s)
     embed.maybe_rebuild_content_vectors(s)                   # bucket 2
     s._tagged = 16                                           # 16%, bucket 3
     assert embed.maybe_rebuild_content_vectors(s) is True
     assert s.builds == 2
-    assert s.get_setting("rec_content_cov_bucket") == "3"
+    assert s.settings.get_setting("rec_content_cov_bucket") == "3"
 
 
 def test_missing_model_forces_rebuild(monkeypatch):
@@ -82,33 +82,30 @@ def test_missing_model_forces_rebuild(monkeypatch):
     bucket gate must not stay shut on that state, else the model never returns and the out-of-corpus
     'new music' pool can never be encoded. A missing model forces a rebuild even within the bucket."""
     s = CovStore(tagged=10, total=100)
-    _patch(monkeypatch, s)
     embed.maybe_rebuild_content_vectors(s)                   # builds, sets bucket 2 + model
-    assert s.builds == 1 and s.get_setting("rec_content_model")
+    assert s.builds == 1 and s.settings.get_setting("rec_content_model")
     s._settings.pop("rec_content_model")                     # simulate the legacy vectors-without-model state
     s._tagged = 11                                           # still bucket 2: would normally short-circuit
     assert embed.maybe_rebuild_content_vectors(s) is True    # forced because the model is missing
     assert s.builds == 2
-    assert s.get_setting("rec_content_model")                # re-persisted, so discovered encoding can run
+    assert s.settings.get_setting("rec_content_model")                # re-persisted, so discovered encoding can run
 
 
 def test_genre_revision_refreshes_existing_vectors_once(monkeypatch):
     s = CovStore(tagged=10, total=100)
-    _patch(monkeypatch, s)
     embed.maybe_rebuild_content_vectors(s)
-    original_model = s.get_setting("rec_content_model")
+    original_model = s.settings.get_setting("rec_content_model")
     monkeypatch.setattr(embed.genre_catalog, "REVISION", "next-catalog")
 
     assert embed.maybe_rebuild_content_vectors(s) is True
     assert s.builds == 2
-    assert s.get_setting("rec_content_genre_revision") == "next-catalog"
-    assert s.get_setting("rec_content_model") == original_model
+    assert s.settings.get_setting("rec_content_genre_revision") == "next-catalog"
+    assert s.settings.get_setting("rec_content_model") == original_model
     assert embed.maybe_rebuild_content_vectors(s) is False
 
 
 def test_legacy_vectors_without_genre_revision_refresh_once(monkeypatch):
     s = CovStore(tagged=10, total=100)
-    _patch(monkeypatch, s)
     embed.maybe_rebuild_content_vectors(s)
     s._settings.pop("rec_content_genre_revision")
 
@@ -119,38 +116,37 @@ def test_legacy_vectors_without_genre_revision_refresh_once(monkeypatch):
 
 def test_multi_boundary_jump_rebuilds_once_and_snaps(monkeypatch):
     s = CovStore(tagged=5, total=100)                        # 5% → bucket 1
-    _patch(monkeypatch, s)
     embed.maybe_rebuild_content_vectors(s)
     s._tagged = 57                                           # 57% → bucket 11
     assert embed.maybe_rebuild_content_vectors(s) is True
     assert s.builds == 2
-    assert s.get_setting("rec_content_cov_bucket") == "11"
+    assert s.settings.get_setting("rec_content_cov_bucket") == "11"
 
 
 def test_metadata_and_membership_changes_refresh_at_unchanged_coverage(store):
-    first = store.upsert_track("one", "One", "Artist", None, None)
-    store.set_track_genre(first, "Techno")
+    first = store.tracks.upsert_track("one", "One", "Artist", None, None)
+    store.tracks.set_track_genre(first, "Techno")
     assert embed.maybe_rebuild_content_vectors(store)
     assert not embed.maybe_rebuild_content_vectors(store)
     for change in (
-        lambda: store.set_track_genre(first, "Folk"),
-        lambda: store.set_track_year(first, "1995"),
-        lambda: store.set_track_audio(first, bpm=120),
-        lambda: store.upsert_track("two", "Two", "Artist", None, None),
-        lambda: store.set_track_genre(first, ""),
-        lambda: store.set_track_genre(first, "Folk"),
+        lambda: store.tracks.set_track_genre(first, "Folk"),
+        lambda: store.tracks.set_track_year(first, "1995"),
+        lambda: store.tracks.set_track_audio(first, bpm=120),
+        lambda: store.tracks.upsert_track("two", "Two", "Artist", None, None),
+        lambda: store.tracks.set_track_genre(first, ""),
+        lambda: store.tracks.set_track_genre(first, "Folk"),
     ):
-        old = store.get_setting("rec_content_inputs")
+        old = store.settings.get_setting("rec_content_inputs")
         change()
         assert embed.maybe_rebuild_content_vectors(store)
-        assert store.get_setting("rec_content_inputs") != old
+        assert store.settings.get_setting("rec_content_inputs") != old
         assert not embed.maybe_rebuild_content_vectors(store)
 
 
 def test_year_only_edit_and_empty_library_invalidate_content(store):
-    tid = store.upsert_track("one", "One", "Artist", None, None)
+    tid = store.tracks.upsert_track("one", "One", "Artist", None, None)
     embed.maybe_rebuild_content_vectors(store)
-    store.set_track_year(tid, "1995")
+    store.tracks.set_track_year(tid, "1995")
     assert embed.maybe_rebuild_content_vectors(store)
     assert embed.load_content_vectors(store)[0] == ["one|artist"]
     with store.conn:

@@ -39,7 +39,7 @@ def test_early_fixture_preserves_ids_and_backup(tmp_path):
     store = Store(path)
     assert not hasattr(store, 'tracks')
     store.init_schema()
-    assert store.get_setting('user-setting') == 'keep me'
+    assert store.settings.get_setting('user-setting') == 'keep me'
     assert tuple(store.conn.execute('SELECT id,orig_title,orig_artist FROM tracks').fetchone()) == (17, 'Original title', 'Artist')
     assert tuple(store.conn.execute('SELECT * FROM playlist_tracks').fetchone()) == (8,17,0)
     before = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations')))
@@ -135,13 +135,13 @@ def test_frozen_like_repair_matches_existing_dry_run_and_preserves_stamp(legacy_
     expected = plan_like_ratchet_repair(s,now)
     migrate(s.conn,registry=MIGRATIONS[:7],clock=lambda:now)
     for adjustment in expected['adjustments']:
-        assert s.get_weights(now=now)[adjustment['axis']] == pytest.approx(adjustment['weight_after'])
-    stamp = s.get_setting('like_ratchet_repaired')
+        assert s.rec_model.get_weights(now=now)[adjustment['axis']] == pytest.approx(adjustment['weight_after'])
+    stamp = s.settings.get_setting('like_ratchet_repaired')
     assert '3 once-ever graduation stamp(s)' in stamp
-    before = s.weight_records()
+    before = s.rec_model.weight_records()
     s.init_schema();s.init_schema()
-    assert s.get_setting('like_ratchet_repaired') == stamp
-    assert s.weight_records() == before
+    assert s.settings.get_setting('like_ratchet_repaired') == stamp
+    assert s.rec_model.weight_records() == before
 
 
 @pytest.mark.parametrize('sql', [

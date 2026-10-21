@@ -45,12 +45,12 @@ def test_transient_art_failure_recovers_after_restart_without_repeating_complete
     monkeypatch.setattr(coverart, "_get_json", fetch)
     path = tmp_path / "art.db"
     store = Store(path); store.init_schema()
-    tid = store.upsert_track("v", "Song", "Artist", None, 200)
+    tid = store.tracks.upsert_track("v", "Song", "Artist", None, 200)
     provider = Provider()
     w = worker(store, clock, provider)
     assert w.drain_once() == 1
-    assert store.coverage_stats()["processed"] == 1
-    assert store.queue_remaining() == 0
+    assert store.enrichment.coverage_stats()["processed"] == 1
+    assert store.enrichment.queue_remaining() == 0
     assert store.enrichment.artwork_retry_status() == {"count":1,"retry_at":1060}
     assert len(calls) == 1
     store.conn.close()
@@ -64,7 +64,7 @@ def test_transient_art_failure_recovers_after_restart_without_repeating_complete
     recovered[0] = True
     clock[0], mono[0] = 1060, 160
     assert w.drain_once() == 1
-    assert store.catalog_subject(tid)["thumbnail"] == "https://cover.example/real.jpg"
+    assert store.tracks.catalog_subject(tid)["thumbnail"] == "https://cover.example/real.jpg"
     assert provider.calls == [tid]
     assert store.enrichment.artwork_retry_status()["count"] == 0
     assert store.conn.execute("SELECT status FROM enrichment_artwork").fetchone()[0] == "found"
@@ -82,17 +82,17 @@ def test_cached_failures_retain_retry_outcome_and_due_job_waits_for_cache_expiry
         raise urllib.error.HTTPError(url, 503, "busy", {"Retry-After":"120"}, None)
     monkeypatch.setattr(coverart, "_get_json", fetch)
     provider = Provider()
-    store.upsert_track("v1", "One", "Artist", None, 200)
+    store.tracks.upsert_track("v1", "One", "Artist", None, 200)
     w = worker(store, clock, provider)
     assert w.drain_once() == 1
     assert store.enrichment.artwork_retry_status()["retry_at"] >= 1120
     clock[0], mono[0] = 1010, 110
-    store.upsert_track("v2", "Two", "Artist", None, 200)
+    store.tracks.upsert_track("v2", "Two", "Artist", None, 200)
     assert w.drain_once() == 1
     assert len(calls) == 1                        # second track sees cached failure, not absence
     assert store.enrichment.artwork_retry_status()["count"] == 2
-    assert store.coverage_stats()["processed"] == 2
-    assert store.queue_remaining() == 0
+    assert store.enrichment.coverage_stats()["processed"] == 2
+    assert store.enrichment.queue_remaining() == 0
 
 
 @pytest.mark.parametrize("status", [400,404])
@@ -101,7 +101,7 @@ def test_confirmed_absence_has_no_retry_job(store, monkeypatch, status):
     def missing(url):
         raise urllib.error.HTTPError(url, status, "no cover", {}, None)
     monkeypatch.setattr(coverart, "_get_json", missing)
-    tid = store.upsert_track("v", "Song", "Artist", None, 200)
+    tid = store.tracks.upsert_track("v", "Song", "Artist", None, 200)
     assert worker(store, [1000], Provider()).drain_once() == 1
     assert store.conn.execute("SELECT status FROM enrichment_artwork WHERE entry_id=?", (tid,)).fetchone()[0] == "absent"
     assert store.enrichment.artwork_retry_status()["count"] == 0
@@ -109,12 +109,12 @@ def test_confirmed_absence_has_no_retry_job(store, monkeypatch, status):
 
 def test_retry_preserves_useful_cover_added_after_failure(store, monkeypatch):
     from yt_playlist.enrich.artwork import retry_due
-    tid = store.upsert_track("v", "Song", "Artist", None, 200)
+    tid = store.tracks.upsert_track("v", "Song", "Artist", None, 200)
     store.enrichment.record_artwork_result(tid, ["release"], coverart.CoverResult("retry", retry_in=60), 1000)
-    store.set_track_art(tid, "https://cover.example/user.jpg")
+    store.tracks.set_track_art(tid, "https://cover.example/user.jpg")
     def unexpected(*args):
         raise AssertionError("useful cover must prevent another archive call")
     monkeypatch.setattr(coverart, "front_cover", unexpected)
     assert retry_due(store, lambda:1060) == 1
-    assert store.catalog_subject(tid)["thumbnail"] == "https://cover.example/user.jpg"
+    assert store.tracks.catalog_subject(tid)["thumbnail"] == "https://cover.example/user.jpg"
     assert store.enrichment.artwork_retry_status()["count"] == 0

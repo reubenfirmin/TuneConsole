@@ -3,11 +3,10 @@ taste model is too thin to drive the normal feed, and graduate automatically onc
 import random
 
 from yt_playlist.rec import rec_params
-from yt_playlist.rec.rec_dao import RecDao
 
 
 def _genre_coverage(store) -> float:
-    cov = store.coverage_stats()
+    cov = store.enrichment.coverage_stats()
     processed = cov.get("processed", 0)
     return (cov.get("genre", 0) / processed) if processed else 0.0
 
@@ -22,24 +21,24 @@ def warmup_progress(store) -> int:
 
 def feedback_count(store) -> int:
     """Likes + dislikes recorded so far (the explicit taste signal onboarding collects)."""
-    return len(store.recent_liked_keys()) + len(store.list_dislikes())
+    return len(store.rec_model.recent_liked_keys()) + len(store.rec_model.list_dislikes())
 
 
 def library_size(store) -> int:
-    return RecDao(store).tracks_total()
+    return store.rec_query.tracks_total()
 
 
 def cleanup_count(store) -> int:
     """The CACHED playlist-cleanup count (the worker / cleanup page run the O(n^2) scan and cache it;
     home only ever reads the cached number, never the scan)."""
     from yt_playlist.rec.actions import CLEANUP_SURFACE
-    return (store.get_proposals(CLEANUP_SURFACE) or {}).get("count", 0)
+    return (store.rec_surface.get_proposals(CLEANUP_SURFACE) or {}).get("count", 0)
 
 
 def _has_synced(store) -> bool:
-    # A sync of EITHER kind has run (matches recommend.sync_status). NOT enrichment-processed: an empty
+    # A sync of EITHER kind has run (matches actions.sync_status). NOT enrichment-processed: an empty
     # account has nothing to enrich, but is still synced and must see onboarding (radio).
-    return any(store.get_setting(k) is not None for k in ("last_sync_at", "last_plays_sync_at"))
+    return any(store.settings.get_setting(k) is not None for k in ("last_sync_at", "last_plays_sync_at"))
 
 
 def _taste_ready(store) -> bool:
@@ -53,7 +52,7 @@ def _taste_ready(store) -> bool:
 def onboarding_active(store, now) -> bool:
     """True while a synced account is still thin and has not graduated (ready / enough feedback /
     dismissed). The inverse of the graduation condition."""
-    if store.get_setting("onboard_dismissed") == "1":
+    if store.settings.get_setting("onboard_dismissed") == "1":
         return False
     if not _has_synced(store):
         return False

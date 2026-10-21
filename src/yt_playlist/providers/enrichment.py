@@ -31,6 +31,12 @@ PROVIDERS = [
 _BY_NAME = {p["name"]: p for p in PROVIDERS}
 
 
+def apply_findings(store, track_id, provider, fields):
+    """Legacy single-provider entry points share the waterfall's metadata selection policy."""
+    names = [p['name'] for p in load_config(store) if p['enabled']]
+    store.enrichment.apply_provider_fields(track_id,provider,fields,providers=names)
+
+
 def provider_configuration(store, registry, config=None):
     """Effective provider availability and settings, without retaining credentials in coverage."""
     result = {}
@@ -72,7 +78,7 @@ def load_config(store):
     each `{name, label, blurb, key, requires, enabled}`. Unknown saved names are dropped; providers
     absent from saved state are appended (enabled); ordering is repaired to respect `requires`."""
     try:
-        saved = json.loads(store.get_setting(_SETTING_KEY) or "[]")
+        saved = json.loads(store.settings.get_setting(_SETTING_KEY) or "[]")
     except (ValueError, TypeError):
         saved = []
     enabled = {}
@@ -108,4 +114,4 @@ def save_config(store, items):
         req = _BY_NAME[name]["requires"]
         if req is not None and req in names and names.index(req) > i:
             raise ValueError(f"{name!r} must come after {req!r}")
-    store.set_setting(_SETTING_KEY, json.dumps(cleaned))
+    store.settings.set_setting(_SETTING_KEY, json.dumps(cleaned))

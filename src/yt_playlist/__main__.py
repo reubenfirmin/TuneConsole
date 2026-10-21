@@ -16,7 +16,7 @@ from yt_playlist.web.app import create_app
 
 def sync_identities_into_store(store, identity_configs):
     """Ensure each configured identity exists in the store; return {label: id}."""
-    return {cfg.label: store.upsert_identity(cfg.label, cfg.credential_ref, cfg.brand_account_id, cfg.is_master)
+    return {cfg.label: store.identities.upsert_identity(cfg.label, cfg.credential_ref, cfg.brand_account_id, cfg.is_master)
             for cfg in identity_configs}
 
 def validate_credentials(identity_configs, base_dir=None):

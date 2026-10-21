@@ -20,12 +20,12 @@ def cluster_library(store, live_app):
     for a, artist in enumerate(ARTISTS + ["Related Artist"]):
         for i in range(12):
             title = SONG if a == 0 and i == 0 else f"Song {a}-{i}"
-            store.upsert_track(f"v{a}-{i}", title, artist, f"Album {a}-{i // 2}", 180,
+            store.tracks.upsert_track(f"v{a}-{i}", title, artist, f"Album {a}-{i // 2}", 180,
                                thumbnail="/static/nag/intro.png")
             key = identity_key(title, artist)
             angle = math.radians(a * 65 + i)
             rows.append((key, np.array([math.cos(angle), math.sin(angle)], dtype=np.float32).tobytes()))
-    store.replace_rec_vectors(rows)
+    store.rec_model.replace_rec_vectors(rows)
     return live_app
 
 

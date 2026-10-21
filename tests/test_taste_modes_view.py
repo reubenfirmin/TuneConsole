@@ -14,7 +14,7 @@ def store():
 
 
 def _client(store, now=10_000.0):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fake = FakeClient()
     return TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: now),
                       base_url="http://127.0.0.1")

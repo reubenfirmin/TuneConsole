@@ -90,7 +90,7 @@ def test_rebuild_wires_recompute_under_a_guard():
 
 def _set_model(store, cat_tokens, cont=()):
     import json
-    store.set_setting("rec_content_model", json.dumps(
+    store.settings.set_setting("rec_content_model", json.dumps(
         {"cat": {t: i for i, t in enumerate(cat_tokens)}, "ncat": len(cat_tokens),
          "cont": [[c, 0.0, 1.0] for c in cont]}))
 

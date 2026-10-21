@@ -14,15 +14,15 @@ from yt_playlist.util.retry import with_retry
 def empty_playlist(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(executor, "with_retry", lambda fn: with_retry(fn, sleep=lambda _: None))
-    iid = store.upsert_identity("Main", "bridge", None, True)
-    pid = store.upsert_playlist(iid, "EMPTY", "Empty at last sync", 0, "", 1)
+    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    pid = store.playlists.upsert_playlist(iid, "EMPTY", "Empty at last sync", 0, "", 1)
     return SimpleNamespace(store=store, pid=pid, client=FakeClient(), home=tmp_path)
 
 
 def _assert_preserved(t):
     assert t.client.deleted == []
-    assert t.store.get_playlist(t.pid) is not None
-    assert t.store.get_actions() == []
+    assert t.store.playlists.get_playlist(t.pid) is not None
+    assert t.store.actions.get_actions() == []
     assert not list(t.home.glob("backups/*"))
 
 
@@ -77,8 +77,8 @@ def test_confirmed_empty_response_still_backs_up_deletes_and_records_action(empt
     backup = executor.delete_empty_playlist(t.store, t.pid, t.client, 2)
     assert json.loads(Path(backup).read_text())["tracks"] == []
     assert t.client.deleted == ["EMPTY"]
-    assert t.store.get_playlist(t.pid) is None
-    action, = t.store.get_actions()
+    assert t.store.playlists.get_playlist(t.pid) is None
+    action, = t.store.actions.get_actions()
     assert action.kind == "delete_empty" and action.status == "executed"
     assert json.loads(action.undo_json)["backup"] == backup
 

@@ -15,7 +15,7 @@ from tests.conftest import FakeClient
 
 
 def _app(store, client=None, monkeypatch=None):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     if monkeypatch is not None:
         # Run the "fill in their half" worker inline, so a build is complete when the POST returns.
         # Its own staging is covered by test_build_returns_your_half_immediately below.
@@ -31,8 +31,8 @@ def _stub_pools(monkeypatch, store=None, own_count=20, other_count=20):
               "artist": f"Mine Artist {i}", "album": "", "thumbnail": None, "duration": 300,
               "genre": "Rock", "year": 1990, "liked": False} for i in range(own_count)]
     if store is not None:
-        monkeypatch.setattr(store, "library_songs", lambda: songs)
-        monkeypatch.setattr(store, "play_counts", lambda: {f"k{i}": i for i in range(own_count)})
+        monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
+        monkeypatch.setattr(store.rec_query, "play_counts", lambda: {f"k{i}": i for i in range(own_count)})
 
     def songs_fn(client, kind, name, cap, store=None, decade=None):
         rows = [{"video_id": f"t{i}", "title": f"Theirs {i}", "artist": f"Their Artist {i}",
@@ -47,11 +47,11 @@ def _stub_pools(monkeypatch, store=None, own_count=20, other_count=20):
 
 
 def _recipe(store, **kw):
-    store.save_road_trip_recipe(None, kw.get("name", "Beach Run"), kw.get("own_pct", 50),
+    store.road_trip.save_road_trip_recipe(None, kw.get("name", "Beach Run"), kw.get("own_pct", 50),
                                 kw.get("artists", ["Tame Impala"]), kw.get("genres", []),
                                 kw.get("target_minutes", 30),
                                 1000.0, familiarity_pct=kw.get("familiarity_pct", 50))
-    return store.list_road_trip_recipes()[0]["id"]
+    return store.road_trip.list_road_trip_recipes()[0]["id"]
 
 
 def test_road_trip_page_renders(store):
@@ -66,17 +66,17 @@ def test_draft_serving_and_generated_save_are_measured_without_counting_progress
     _stub_pools(monkeypatch, store)
     rid = _recipe(store)
     assert c.post(f"/road_trip/recipes/{rid}/build").status_code == 200
-    draft = store.get_road_trip_draft(rid)
+    draft = store.road_trip.get_road_trip_draft(rid)
     rows = store.conn.execute("SELECT * FROM rec_served_impressions WHERE surface='road_trip' ORDER BY rank").fetchall()
     assert [r["identity_key"] for r in rows] == [identity_key(t["title"], t["artist"])
                                                for t in road_trip_rec.draft_tracks(draft)]
     assert rows
-    before = store.recommendation_scorecard(999, 1001)["impressions"]
+    before = store.rec_surface.recommendation_scorecard(999, 1001)["impressions"]
     for _ in range(3):
         assert c.get(f"/road_trip/draft/{rid}/progress").status_code == 200
-    assert store.recommendation_scorecard(999, 1001)["impressions"] == before
+    assert store.rec_surface.recommendation_scorecard(999, 1001)["impressions"] == before
     assert c.post(f"/road_trip/draft/{rid}/save").status_code == 200
-    score = store.recommendation_scorecard(999, 1001)
+    score = store.rec_surface.recommendation_scorecard(999, 1001)
     assert score["save"] == len(rows) and score["conversion"] == 0
     assert score["by_ownership"]["cold"]["impressions"] > 0
 
@@ -86,7 +86,7 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
     client = FakeClient()
     c, _ = _app(store, client)
     rid = _recipe(store, own_pct=0, artists=seeds, target_minutes=15)
-    state = road_trip_rec.start_draft(store, store.get_road_trip_recipe(rid), 1000, seed=7)
+    state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
     state.update(building=False, pending=[], artist_contexts={})
     for name, genre in zip(seeds, ["Alternative Rock", "Indie Rock", "Alternative Rock"]):
         state["artist_contexts"][name] = {"genre": genre, "year": None, "related": []}
@@ -102,7 +102,7 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
     state["axes"]["theirs"] = [{"key": "genre:" + genre, "kind": "genre", "name": genre,
                                 "share": .33, "target": None, "artists": seeds}
                                for genre in ("Alternative Rock", "Indie Rock", "Singer-Songwriter")]
-    store.save_road_trip_draft(rid, state, 1000)
+    store.road_trip.save_road_trip_draft(rid, state, 1000)
 
     html = c.get("/road_trip").text
 
@@ -112,7 +112,7 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
     assert "Passenger genre balance" in html
     assert "Old singer song" not in html
     assert c.post(f"/road_trip/draft/{rid}/save").status_code == 200
-    saved = store.get_road_trip_draft(rid)
+    saved = store.road_trip.get_road_trip_draft(rid)
     assert set(saved["picks"]) == set(seeds)
     assert client.added == [(saved["saved_playlist_id"], saved["picks"])]
 
@@ -120,7 +120,7 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
 def test_new_route_is_a_library_action_and_hides_the_active_draft(store):
     c, _ = _app(store)
     rid = _recipe(store)
-    store.save_road_trip_draft(rid, {"name": "Old draft", "stats": {}, "picked": []}, 1000.0)
+    store.road_trip.save_road_trip_draft(rid, {"name": "Old draft", "stats": {}, "picked": []}, 1000.0)
 
     html = c.post("/road_trip/new").text
 
@@ -137,7 +137,7 @@ def test_save_list_and_delete_recipe(store):
         "blacklist_genres": json.dumps(["Metal"])})
     assert r.status_code == 200
     assert "Beach Run" in r.text
-    recipes = store.list_road_trip_recipes()
+    recipes = store.road_trip.list_road_trip_recipes()
     assert len(recipes) == 1
     assert recipes[0]["own_pct"] == 60 and recipes[0]["familiarity_pct"] == 80
     assert recipes[0]["blacklist_genres"] == ["Metal"]
@@ -145,7 +145,7 @@ def test_save_list_and_delete_recipe(store):
 
     r = c.delete(f"/road_trip/recipes/{rid}")
     assert r.status_code == 200
-    assert store.list_road_trip_recipes() == []
+    assert store.road_trip.list_road_trip_recipes() == []
 
 
 def test_build_makes_an_on_screen_draft_and_touches_no_playlist(store, monkeypatch):
@@ -159,7 +159,7 @@ def test_build_makes_an_on_screen_draft_and_touches_no_playlist(store, monkeypat
     assert r.status_code == 200
     assert "Save to YouTube" in r.text                 # the playlist is on the page, not on YouTube
     assert client.created == []
-    state = store.get_road_trip_draft(rid)
+    state = store.road_trip.get_road_trip_draft(rid)
     assert state["stats"]["own_count"] == state["stats"]["their_count"] == 3   # 30 min, 50/50
     assert "Mine 0" in r.text or any("Mine" in t["title"] for t in road_trip_rec.draft_tracks(state))
 
@@ -173,7 +173,7 @@ def test_a_thin_blend_pool_explains_the_missing_song_share(store, monkeypatch):
 
     assert response.status_code == 200
     assert "Blend has 2 of the 4 songs needed for its requested share" in " ".join(response.text.split())
-    state = store.get_road_trip_draft(rid)
+    state = store.road_trip.get_road_trip_draft(rid)
     assert state["stats"]["blend_count"] == 2
     assert len(state["picked"]) == 12
 
@@ -190,7 +190,7 @@ def test_build_returns_your_half_immediately_then_fills_in_theirs(store, monkeyp
     r = c.post(f"/road_trip/recipes/{rid}/build")
 
     assert "Mine 0" in r.text or "rt-row" in r.text
-    mid_build = store.get_road_trip_draft(rid)
+    mid_build = store.road_trip.get_road_trip_draft(rid)
     assert mid_build["building"] is True
     assert mid_build["stats"]["own_count"] > 0          # your side is already on screen
     assert mid_build["stats"]["their_count"] == 0        # theirs hasn't been fetched yet
@@ -207,7 +207,7 @@ def test_build_returns_your_half_immediately_then_fills_in_theirs(store, monkeyp
     assert ctx.work.wait(0)
     ctx.work.open()
 
-    done = store.get_road_trip_draft(rid)
+    done = store.road_trip.get_road_trip_draft(rid)
     assert done["building"] is False and done["pending"] == []
     assert done["stats"]["their_count"] > 0
     assert "Save to YouTube" in c.get(f"/road_trip/draft/{rid}/progress").text
@@ -221,7 +221,7 @@ def test_rebuilding_gives_a_different_playlist(store, monkeypatch):
     runs = []
     for _ in range(4):
         c.post(f"/road_trip/recipes/{rid}/build")
-        runs.append(tuple(store.get_road_trip_draft(rid)["picks"]))
+        runs.append(tuple(store.road_trip.get_road_trip_draft(rid)["picks"]))
 
     assert len(set(runs)) == 4
 
@@ -235,7 +235,7 @@ def test_build_without_an_account_explains_itself(store, monkeypatch):
     r = c.post(f"/road_trip/recipes/{rid}/build")
 
     assert "Connect an account" in r.text
-    assert store.get_road_trip_draft(rid) is None
+    assert store.road_trip.get_road_trip_draft(rid) is None
 
 
 def test_build_missing_recipe_404s(store):
@@ -252,10 +252,10 @@ def test_mix_slider_repicks_without_rebuilding(store, monkeypatch):
     r = c.post(f"/road_trip/draft/{rid}/mix", data={"own_pct": "100"})
 
     assert r.status_code == 200
-    state = store.get_road_trip_draft(rid)
+    state = store.road_trip.get_road_trip_draft(rid)
     assert state["own_pct"] == 100
     assert state["stats"]["their_count"] == 0
-    assert store.get_road_trip_recipe(rid)["own_pct"] == 50    # the saved recipe is left alone
+    assert store.road_trip.get_road_trip_recipe(rid)["own_pct"] == 50    # the saved recipe is left alone
 
 
 def test_mix_slider_drags_toward_mine_on_the_left(store, monkeypatch):
@@ -267,12 +267,12 @@ def test_mix_slider_drags_toward_mine_on_the_left(store, monkeypatch):
 
     c.post(f"/road_trip/draft/{rid}/mix", data={"their_pct": "0"})
 
-    state = store.get_road_trip_draft(rid)
+    state = store.road_trip.get_road_trip_draft(rid)
     assert state["own_pct"] == 100
     assert state["stats"]["their_count"] == 0
 
     c.post(f"/road_trip/draft/{rid}/mix", data={"their_pct": "100"})
-    assert store.get_road_trip_draft(rid)["stats"]["own_count"] == 0
+    assert store.road_trip.get_road_trip_draft(rid)["stats"]["own_count"] == 0
 
 
 def test_editing_the_recipe_steers_the_draft_in_place(store, monkeypatch):
@@ -282,7 +282,7 @@ def test_editing_the_recipe_steers_the_draft_in_place(store, monkeypatch):
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store, artists=["Tame Impala"], target_minutes=30)
     c.post(f"/road_trip/recipes/{rid}/build")
-    before = store.get_road_trip_draft(rid)
+    before = store.road_trip.get_road_trip_draft(rid)
     assert before["stats"]["minutes"] <= 35
 
     r = c.post("/road_trip/recipes", data={
@@ -290,18 +290,18 @@ def test_editing_the_recipe_steers_the_draft_in_place(store, monkeypatch):
         "target_minutes": "60", "artists": json.dumps(["Tame Impala"]), "genres": json.dumps([])})
 
     assert r.status_code == 200
-    after = store.get_road_trip_draft(rid)
+    after = store.road_trip.get_road_trip_draft(rid)
     assert after["target_minutes"] == 60                 # the same draft, re-steered
     assert after["stats"]["minutes"] > before["stats"]["minutes"]
     assert after["seed"] == before["seed"]                # not a rebuild
-    assert len(store.list_road_trip_recipes()) == 1        # and not a second recipe
+    assert len(store.road_trip.list_road_trip_recipes()) == 1        # and not a second recipe
 
 
 def test_added_genre_is_balanced_before_discovery_and_can_grow_a_full_pool(store, monkeypatch):
     c, _ = _app(store)
     genres = ["Rock", "Pop", "Jazz"]
     rid = _recipe(store, own_pct=0, artists=[], genres=genres, target_minutes=100)
-    state = road_trip_rec.start_draft(store, store.get_road_trip_recipe(rid), 1000, seed=7)
+    state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
     state["pool"] = [road_trip_rec._candidate(
         f"old-{i}", f"Old {i}", f"Old Artist {i}", "", None, 300, "theirs", genres[i % 3], 1995)
         for i in range(state["other_limit"])]
@@ -310,7 +310,7 @@ def test_added_genre_is_balanced_before_discovery_and_can_grow_a_full_pool(store
     state["targets"]["theirs"] = {"genre:" + g: p for g, p in zip(genres, [.6, .3, .1])}
     state["done_inputs"] = genres.copy()
     road_trip_rec.finish_draft(state, store, 1000)
-    store.save_road_trip_draft(rid, state, 1000)
+    store.road_trip.save_road_trip_draft(rid, state, 1000)
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
     monkeypatch.setattr(road_trip_rec, "artist_genre", lambda *args: None)
@@ -322,7 +322,7 @@ def test_added_genre_is_balanced_before_discovery_and_can_grow_a_full_pool(store
             "artists": "[]", "genres": json.dumps(genres + ["Funk"])}
     try:
         html = c.post("/road_trip/recipes", data=data).text
-        waiting = store.get_road_trip_draft(rid)
+        waiting = store.road_trip.get_road_trip_draft(rid)
         expected = {"genre:Rock": .45, "genre:Pop": .23, "genre:Jazz": .07, "genre:Funk": .25}
         assert waiting["targets"]["theirs"] == expected
         assert waiting["building"] and held
@@ -333,12 +333,12 @@ def test_added_genre_is_balanced_before_discovery_and_can_grow_a_full_pool(store
     finally:
         for worker in held:
             worker()
-    done = store.get_road_trip_draft(rid)
+    done = store.road_trip.get_road_trip_draft(rid)
     assert done["targets"]["theirs"] == expected
     assert any(row["genre"] == "Funk" for row in done["picked"])
     data["genres"] = json.dumps(genres)
     c.post("/road_trip/recipes", data=data)
-    removed = store.get_road_trip_draft(rid)
+    removed = store.road_trip.get_road_trip_draft(rid)
     assert "genre:Funk" not in removed["targets"]["theirs"]
     assert not any(row["genre"] == "Funk" for row in removed["pool"])
 
@@ -356,13 +356,13 @@ def test_adding_an_artist_automatically_adds_and_balances_its_genre(store, monke
             "artists": json.dumps(["Tame Impala", "Weezer"]), "genres": "[]"}
     try:
         html = c.post("/road_trip/recipes", data=data).text
-        assert store.get_road_trip_recipe(rid)["genres"] == ["Alternative Rock"]
-        waiting = store.get_road_trip_draft(rid)
+        assert store.road_trip.get_road_trip_recipe(rid)["genres"] == ["Alternative Rock"]
+        waiting = store.road_trip.get_road_trip_draft(rid)
         assert waiting["targets"]["theirs"]["genre:Alternative Rock"] == .5
         assert 'aria-label="Alternative Rock"' in html
         # A deliberate removal on a later edit must not be undone by the existing artist.
         c.post("/road_trip/recipes", data=data)
-        assert store.get_road_trip_recipe(rid)["genres"] == []
+        assert store.road_trip.get_road_trip_recipe(rid)["genres"] == []
     finally:
         for worker in held:
             worker()
@@ -373,13 +373,13 @@ def test_removing_an_artist_takes_their_tracks_out_of_the_draft(store, monkeypat
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store, artists=["Tame Impala"])
     c.post(f"/road_trip/recipes/{rid}/build")
-    assert store.get_road_trip_draft(rid)["stats"]["their_count"] > 0
+    assert store.road_trip.get_road_trip_draft(rid)["stats"]["their_count"] > 0
 
     c.post("/road_trip/recipes", data={
         "id": str(rid), "name": "Beach Run", "own_pct": "50", "familiarity_pct": "50",
         "target_minutes": "30", "artists": json.dumps([]), "genres": json.dumps([])})
 
-    state = store.get_road_trip_draft(rid)
+    state = store.road_trip.get_road_trip_draft(rid)
     assert [c_ for c_ in state["pool"] if c_["source"] == "theirs"] == []
     assert state["stats"]["their_count"] == 0
 
@@ -400,18 +400,18 @@ def test_tilting_a_genre_to_zero_drops_it_from_the_playlist(store, monkeypatch):
     c.post(f"/road_trip/recipes/{rid}/build")
     # Sliders are labelled by genre FAMILY (synthpop lives under one), so read the axis off the draft
     # rather than assuming the sub-genre name.
-    axis = next(a["key"] for a in store.get_road_trip_draft(rid)["axes"]["theirs"]
+    axis = next(a["key"] for a in store.road_trip.get_road_trip_draft(rid)["axes"]["theirs"]
                 if a["kind"] == "genre")
 
     r = c.post(f"/road_trip/draft/{rid}/tilt", data={"party": "theirs", "axis": axis, "share": "0"})
 
     assert r.status_code == 200
-    state = store.get_road_trip_draft(rid)
+    state = store.road_trip.get_road_trip_draft(rid)
     assert state["stats"]["their_count"] == 0
     assert axis in {a["key"] for a in state["axes"]["theirs"]}   # slider stays put
 
     c.post(f"/road_trip/draft/{rid}/unpin", data={"party": "theirs", "axis": axis})
-    assert store.get_road_trip_draft(rid)["stats"]["their_count"] > 0
+    assert store.road_trip.get_road_trip_draft(rid)["stats"]["their_count"] > 0
 
 
 def test_a_slider_past_the_pool_kicks_off_a_search(store, monkeypatch):
@@ -423,14 +423,14 @@ def test_a_slider_past_the_pool_kicks_off_a_search(store, monkeypatch):
     rid = _recipe(store)
     monkeypatch.setattr(road_trip_route, "_spawn", lambda fn: fn())     # build inline
     c.post(f"/road_trip/recipes/{rid}/build")
-    axis = next(a["key"] for a in store.get_road_trip_draft(rid)["axes"]["theirs"]
+    axis = next(a["key"] for a in store.road_trip.get_road_trip_draft(rid)["axes"]["theirs"]
                 if a["kind"] == "genre")
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)          # hold the widening worker
 
     r = c.post(f"/road_trip/draft/{rid}/tilt", data={"party": "theirs", "axis": axis, "share": "100"})
 
     assert r.status_code == 200
-    state = store.get_road_trip_draft(rid)
+    state = store.road_trip.get_road_trip_draft(rid)
     assert state["pending"] and all(p["want"] == axis for p in state["pending"])
     assert held, "the search should have been handed to the background worker"
     assert "Adding their tracks" in r.text
@@ -445,15 +445,15 @@ def test_crossing_out_a_slot_refills_it(store, monkeypatch):
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)
     c.post(f"/road_trip/recipes/{rid}/build")
-    before = list(store.get_road_trip_draft(rid)["picks"])
+    before = list(store.road_trip.get_road_trip_draft(rid)["picks"])
 
     r = c.post(f"/road_trip/draft/{rid}/slot/1")
 
     assert r.status_code == 200
-    after = store.get_road_trip_draft(rid)["picks"]
+    after = store.road_trip.get_road_trip_draft(rid)["picks"]
     assert len(after) == len(before)
     assert after[1] != before[1] and after[0] == before[0]
-    assert before[1] in store.get_road_trip_draft(rid)["banned"]
+    assert before[1] in store.road_trip.get_road_trip_draft(rid)["banned"]
 
 
 def test_shuffle_redraws_from_the_same_pool(store, monkeypatch):
@@ -461,11 +461,11 @@ def test_shuffle_redraws_from_the_same_pool(store, monkeypatch):
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)
     c.post(f"/road_trip/recipes/{rid}/build")
-    before = store.get_road_trip_draft(rid)
+    before = store.road_trip.get_road_trip_draft(rid)
 
     c.post(f"/road_trip/draft/{rid}/shuffle")
 
-    after = store.get_road_trip_draft(rid)
+    after = store.road_trip.get_road_trip_draft(rid)
     assert after["picks"] != before["picks"]
     assert [c["video_id"] for c in after["pool"]] == [c["video_id"] for c in before["pool"]]
 
@@ -476,18 +476,18 @@ def test_saving_the_draft_creates_the_generated_playlist(store, monkeypatch):
     c, _ = _app(store, client, monkeypatch)
     rid = _recipe(store)
     c.post(f"/road_trip/recipes/{rid}/build")
-    picks = store.get_road_trip_draft(rid)["picks"]
+    picks = store.road_trip.get_road_trip_draft(rid)["picks"]
 
     r = c.post(f"/road_trip/draft/{rid}/save")
 
     assert r.status_code == 200
-    recipe = store.get_road_trip_recipe(rid)
+    recipe = store.road_trip.get_road_trip_recipe(rid)
     assert recipe["last_playlist_id"] is not None
-    assert store.get_playlist_groups()[recipe["last_playlist_id"]] == GENERATED_GROUP
+    assert store.playlists.get_playlist_groups()[recipe["last_playlist_id"]] == GENERATED_GROUP
     # what was on screen is exactly what was sent, in order
     assert client.added == [(recipe["last_playlist_id"], picks)]
-    assert store.get_road_trip_draft(rid)["saved_playlist_id"] == recipe["last_playlist_id"]
-    playlist = next(p for p in store.get_playlists() if p.ytm_playlist_id == recipe["last_playlist_id"])
+    assert store.road_trip.get_road_trip_draft(rid)["saved_playlist_id"] == recipe["last_playlist_id"]
+    playlist = next(p for p in store.playlists.get_playlists() if p.ytm_playlist_id == recipe["last_playlist_id"])
     assert f'window.location.assign("/playlist/{playlist.id}")' in r.text
     assert "music.youtube.com/watch?list=" + recipe["last_playlist_id"] in r.text
     assert "__ytTab" in r.text
@@ -510,7 +510,7 @@ def test_saving_plays_in_the_connected_youtube_tab_when_ready(store, monkeypatch
     response = c.post(f"/road_trip/draft/{rid}/save")
     assert response.status_code == 200
     assert navigated.wait(2)
-    ytm = store.get_road_trip_recipe(rid)["last_playlist_id"]
+    ytm = store.road_trip.get_road_trip_recipe(rid)["last_playlist_id"]
     assert calls == [(client, bridge, ytm, f"https://music.youtube.com/watch?list={ytm}")]
 
 
@@ -527,7 +527,7 @@ def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(store, 
     elif failure == "account":
         c.app.state.ctx.client_provider = lambda: {}
     else:
-        store.delete_road_trip_draft(rid)
+        store.road_trip.delete_road_trip_draft(rid)
 
     response = c.post(f"/road_trip/draft/{rid}/save")
 
@@ -536,7 +536,7 @@ def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(store, 
     assert "__ytTab" in response.text
     assert "private provider details" not in response.text
     assert "window.location.assign" not in response.text
-    assert store.get_road_trip_recipe(rid)["last_playlist_id"] is None
+    assert store.road_trip.get_road_trip_recipe(rid)["last_playlist_id"] is None
 
 
 def test_draft_survives_a_reload_and_is_discardable(store, monkeypatch):
@@ -549,7 +549,7 @@ def test_draft_survives_a_reload_and_is_discardable(store, monkeypatch):
 
     c.request("DELETE", f"/road_trip/draft/{rid}")
 
-    assert store.get_road_trip_draft(rid) is None
+    assert store.road_trip.get_road_trip_draft(rid) is None
     assert "Save to YouTube" not in c.get("/road_trip").text
 
 
@@ -587,9 +587,9 @@ def test_autocomplete_artists_empty_query(store):
 
 
 def test_road_trip_page_shows_saved_recipe_and_last_playlist_link(store):
-    store.save_road_trip_recipe(None, "Beach Run", 60, ["Tame Impala"], ["synthpop"], 240, 1000.0)
-    rid = store.list_road_trip_recipes()[0]["id"]
-    store.set_road_trip_last_playlist(rid, "PL_ABC")
+    store.road_trip.save_road_trip_recipe(None, "Beach Run", 60, ["Tame Impala"], ["synthpop"], 240, 1000.0)
+    rid = store.road_trip.list_road_trip_recipes()[0]["id"]
+    store.road_trip.set_road_trip_last_playlist(rid, "PL_ABC")
 
     c, _ = _app(store)
     html = c.get("/road_trip").text

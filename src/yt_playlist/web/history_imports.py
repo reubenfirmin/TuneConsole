@@ -39,13 +39,13 @@ class HistoryImports:
                     job.result = {'report': report, 'seeded': 0}
                     return job.result
                 if report['matched']:
-                    store.set_setting(source + '_imported_at', str(self.ctx.now_fn()))
+                    store.settings.set_setting(source + '_imported_at', str(self.ctx.now_fn()))
                     if source == 'takeout':
                         progress('Checking imported history…')
                         from yt_playlist.core import repair
                         repair.run_once(store)
                 elif source == 'takeout':
-                    store.set_setting('takeout_nag_dismissed_at', str(self.ctx.now_fn()))
+                    store.settings.set_setting('takeout_nag_dismissed_at', str(self.ctx.now_fn()))
                 progress('Adding unmatched artists to Discovery…')
                 seeded = takeout.seed_discovery_from_unmatched(
                     store, report['unmatched_artists'], self.ctx.now_fn(),

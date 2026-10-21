@@ -304,7 +304,7 @@ class HistoryRepo(Repo):
         instead of logging a second play. Snapshot generated policy with the playlist context so
         promotion cannot rewrite a play's provenance. Returns True when a NEW play was recorded."""
         is_generated = self.conn.execute(
-            "SELECT EXISTS(SELECT 1 FROM playlist_group WHERE name=? "
+            "SELECT EXISTS(SELECT 1 FROM quarantined_playlists WHERE name=? "
             "AND (ytm=? OR 'RDAMPL' || ytm=?))",
             (GENERATED_GROUP, playlist_ytm_id, playlist_ytm_id)).fetchone()[0]
         row = self.conn.execute(

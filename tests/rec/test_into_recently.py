@@ -1,4 +1,5 @@
 from yt_playlist.rec import into_recently
+from types import SimpleNamespace
 from yt_playlist.web import theme
 
 
@@ -26,6 +27,8 @@ class FakeStore:
         self._favorites = favorites      # [artist names], all-time order
         self._corpus = corpus            # {genre: count}
         self.wiki = wiki
+        self.charts = SimpleNamespace(top_artists=self.top_artists,
+                                      corpus_distribution=self.corpus_distribution)
 
     def top_artists(self, limit=100, since=None):
         return [{"artist": a, "plays": 0, "thumbnail": None} for a in self._favorites[:limit]]

@@ -41,9 +41,9 @@ def build(ctx):
     @router.get("/songs/playlists")
     def destinations(video_id: str):
         clients = ctx.clients() or {}
-        identities = {i.id: i.label for i in store.get_identities()}
-        containing = store.playlist_ids_for_video(video_id)
-        playlists = [p for p in store.get_playlists()
+        identities = {i.id: i.label for i in store.identities.get_identities()}
+        containing = store.playlists.playlist_ids_for_video(video_id)
+        playlists = [p for p in store.playlists.get_playlists()
                      if p.ytm_playlist_id not in SYSTEM_PLAYLIST_IDS and p.identity_id in clients]
         return {"playlists": [{"id": p.id, "title": p.title,
                                "identity": identities.get(p.identity_id, ""),
@@ -80,10 +80,10 @@ def build(ctx):
         except Exception as exc:
             ctx.logger.exception("add song to playlist failed")
             raise HTTPException(502, "Couldn't add the song. Please try again.") from exc
-        playlist = store.get_playlist(body.playlist_id)
+        playlist = store.playlists.get_playlist(body.playlist_id)
         if result["added"] and not result.get("already_present"):
             measurement.record_action(store, "save", ctx.now_fn(), video_id=body.song.video_id,
-                                      generated=store.get_playlist_groups().get(playlist.ytm_playlist_id) == "Generated")
+                                      generated=store.playlists.is_quarantined_playlist(playlist.ytm_playlist_id))
         try:
             ctx.bridge.send_control({"type": "refresh-view", "playlist": playlist.ytm_playlist_id})
         except Exception:  # noqa: BLE001 - a disconnected player must not undo a successful add

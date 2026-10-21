@@ -30,7 +30,7 @@ def _free_port():
 def live_album_app():
     s = Store(":memory:")
     s.init_schema()
-    iid = s.upsert_identity("Main", "cred", None, True)
+    iid = s.identities.upsert_identity("Main", "cred", None, True)
     album = {"title": "The Album", "year": "2001", "artists": [{"name": "Artist X"}], "thumbnails": [],
              "tracks": [{"title": "One", "videoId": "v1", "duration": "3:01",
                          "artists": [{"name": "Artist X"}]}]}

@@ -3,13 +3,13 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
-from yt_playlist.rec import recommend
+from yt_playlist.rec import actions
 from yt_playlist.rec.actions import CLEANUP_SURFACE
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 
 def test_dashboard_and_sync(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     client = FakeClient(
         playlists=[{"playlistId": "PL1", "title": "Mix", "count": 1}],
         tracks={"PL1": [_track("v1", "A", "X")]})
@@ -24,10 +24,10 @@ def test_dashboard_and_sync(store):
     with c.stream("GET", f"/sync/events/{jid}") as s:   # reading to EOF waits for the job to finish
         body = "".join(s.iter_text())
     assert '"type": "end"' in body
-    assert len(store.get_playlists()) == 1
+    assert len(store.playlists.get_playlists()) == 1
 
 def test_home_renders_toast_from_query_param(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     html = c.get("/?toast=You%E2%80%99re+authenticated+again.").text
@@ -38,7 +38,7 @@ def test_auth_expired_shows_reauth_banner(store):
     class Expired:   # a client whose session has lapsed
         def get_library_playlists(self, limit=None):
             raise RuntimeError("Server returned HTTP 401: Unauthorized")
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: Expired()}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     assert app.state.ctx.auth_expired == {}          # nothing wrong before a sync
@@ -50,11 +50,11 @@ def test_auth_expired_shows_reauth_banner(store):
     assert 'authBanner(["main"])' in c.get("/").text          # banner seeded with the label
 
 def test_dupe_detail_renders(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
-    t = store.upsert_track("v1", "Shared", "X", None, None)
-    store.set_playlist_tracks(a, [t]); store.set_playlist_tracks(b, [t])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
+    t = store.tracks.upsert_track("v1", "Shared", "X", None, None)
+    store.playlists.set_playlist_tracks(a, [t]); store.playlists.set_playlist_tracks(b, [t])
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app)
     r = c.get(f"/dupe/{a}/{b}")
@@ -62,14 +62,14 @@ def test_dupe_detail_renders(store):
     assert "shared|x" in r.text.lower() or "shared" in r.text.lower()
 
 def test_dupe_detail_unknown_id_404(store):
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app)
     assert c.get("/dupe/999/998").status_code == 404
 
 def test_actions_route_renders(store):
-    store.upsert_identity("main", "cred", None, True)
-    store.record_action("merge", "{}", "[]", "executed", "{}", 1.0)
+    store.identities.upsert_identity("main", "cred", None, True)
+    store.actions.record_action("merge", "{}", "[]", "executed", "{}", 1.0)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app)
     r = c.get("/actions")
@@ -86,13 +86,13 @@ def _client(store, provider):
     return TestClient(create_app(store, provider, now_fn=lambda: 1.0), base_url="http://127.0.0.1")
 
 def test_post_with_foreign_host_rejected(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://evil.example")   # DNS-rebound attacker host
     assert c.post("/sync").status_code == 400
 
 def test_post_with_foreign_origin_rejected(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     # Host is local but the request was forged from another site -> blocked.
@@ -100,7 +100,7 @@ def test_post_with_foreign_origin_rejected(store):
     assert r.status_code == 403
 
 def test_post_with_local_origin_allowed(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = FakeClient(playlists=[], tracks={})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
@@ -109,7 +109,7 @@ def test_post_with_local_origin_allowed(store):
 
 def test_get_with_foreign_host_still_allowed(store):
     # Reads are exempt: the guard only protects state-changing methods.
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://evil.example")
     assert c.get("/").status_code == 200
@@ -180,7 +180,7 @@ def test_setup_first_time_flashes_saved(store):
     assert query["flash"] == ["Saved 1 identity."]
 
 def test_setup_existing_library_does_not_claim_reauthentication(store):
-    store.set_setting("last_sync_at", "1.0")
+    store.settings.set_setting("last_sync_at", "1.0")
     query = _setup_redirect(store, _FakeRuntime(store, configured=True))
     assert query["tab"] == ["identities"]
     assert "toast" not in query
@@ -253,7 +253,7 @@ def test_vendored_assets_served_locally(store):
         assert r.status_code == 200 and len(r.content) > 1000
 
 def test_no_external_cdn_in_pages(store):
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app)
     body = c.get("/cleanup").text
@@ -262,13 +262,13 @@ def test_no_external_cdn_in_pages(store):
 
 
 def test_tools_menu_only_shows_move_for_multiple_identities(store):
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app)
 
     assert '<a href="/move"' not in c.get("/").text
 
-    store.upsert_identity("other", "cred-2", "brand-2", False)
+    store.identities.upsert_identity("other", "cred-2", "brand-2", False)
     assert '<a href="/move"' in c.get("/").text
 
 
@@ -299,7 +299,7 @@ def test_setup_page_alpine_attr_well_formed(store):
 # --- streaming sync (background job + SSE) ---
 
 def test_sync_streams_progress_events(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     client = FakeClient(
         playlists=[{"playlistId": "PL1", "title": "Roadtrip", "count": 1}],
         tracks={"PL1": [{**_track("v1", "Song", "Artist"), "likeStatus": "INDIFFERENT"}]})
@@ -311,7 +311,7 @@ def test_sync_streams_progress_events(store):
     assert "Roadtrip" in body            # per-playlist progress line streamed
     assert "sync complete" in body       # final done event
     assert '"type": "end"' in body       # stream terminator
-    assert len(store.get_playlists()) == 1
+    assert len(store.playlists.get_playlists()) == 1
 
 def test_sync_events_unknown_job_404(store):
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
@@ -319,7 +319,7 @@ def test_sync_events_unknown_job_404(store):
     assert c.get("/sync/events/99999").status_code == 404
 
 def test_sync_reports_failure_in_stream(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     class Boom:
         def get_library_playlists(self, limit=None): raise RuntimeError("api down")
     app = create_app(store, lambda: {iid: Boom()}, now_fn=lambda: 1.0)
@@ -331,22 +331,22 @@ def test_sync_reports_failure_in_stream(store):
 
 
 def test_identical_pair_opens_editor(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Mix A", 1, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Mix B", 1, "h", 1.0)
-    t = store.upsert_track("v1", "Song", "X", None, None)
-    store.set_playlist_tracks(a, [t]); store.set_playlist_tracks(b, [t])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Mix A", 1, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "Mix B", 1, "h", 1.0)
+    t = store.tracks.upsert_track("v1", "Song", "X", None, None)
+    store.playlists.set_playlist_tracks(a, [t]); store.playlists.set_playlist_tracks(b, [t])
     c = _client(store, lambda: {iid: FakeClient()})
     body = c.get(f"/dupe/{a}/{b}").text   # redirects into the N-way editor
     assert "Where should the result go" in body and "Keep" in body
 
 
 def test_overlap_suppress_and_unsuppress(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    fav = store.upsert_playlist(iid, "PLFAV", "Favorite Songs", 2, "h", 1.0)
-    sml = store.upsert_playlist(iid, "PLSML", "Little Mix", 1, "h", 1.0)
-    t1 = store.upsert_track("v1", "A", "X", None, 1); t2 = store.upsert_track("v2", "B", "X", None, 1)
-    store.set_playlist_tracks(fav, [t1, t2]); store.set_playlist_tracks(sml, [t1])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    fav = store.playlists.upsert_playlist(iid, "PLFAV", "Favorite Songs", 2, "h", 1.0)
+    sml = store.playlists.upsert_playlist(iid, "PLSML", "Little Mix", 1, "h", 1.0)
+    t1 = store.tracks.upsert_track("v1", "A", "X", None, 1); t2 = store.tracks.upsert_track("v2", "B", "X", None, 1)
+    store.playlists.set_playlist_tracks(fav, [t1, t2]); store.playlists.set_playlist_tracks(sml, [t1])
     c = _client(store, lambda: {iid: FakeClient()})
     assert "Little Mix" in c.get("/cleanup").text
     r = c.post("/overlaps/suppress", data={"a": "PLFAV", "b": "PLSML"})
@@ -359,14 +359,14 @@ def test_overlap_suppress_and_unsuppress(store):
 
 def test_overlaps_suppress_many(store):
     import json
-    iid = store.upsert_identity("main", "cred", None, True)
-    fav = store.upsert_playlist(iid, "PLFAV", "Favorite Songs", 3, "h", 1.0)
-    p1 = store.upsert_playlist(iid, "PL1", "One", 2, "h", 1.0)
-    p2 = store.upsert_playlist(iid, "PL2", "Two", 1, "h", 1.0)
-    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
-    store.set_playlist_tracks(fav, t)
-    store.set_playlist_tracks(p1, [t[0], t[1]])
-    store.set_playlist_tracks(p2, [t[0]])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    fav = store.playlists.upsert_playlist(iid, "PLFAV", "Favorite Songs", 3, "h", 1.0)
+    p1 = store.playlists.upsert_playlist(iid, "PL1", "One", 2, "h", 1.0)
+    p2 = store.playlists.upsert_playlist(iid, "PL2", "Two", 1, "h", 1.0)
+    t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
+    store.playlists.set_playlist_tracks(fav, t)
+    store.playlists.set_playlist_tracks(p1, [t[0], t[1]])
+    store.playlists.set_playlist_tracks(p2, [t[0]])
     c = _client(store, lambda: {iid: FakeClient()})
     r = c.post("/overlaps/suppress-many",
                data={"pairs": json.dumps([["PLFAV", "PL2"], ["PLFAV", "PL1"]])})
@@ -379,95 +379,95 @@ def test_overlaps_suppress_many(store):
 
 def test_inline_dupe_delete_ok(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    t = store.upsert_track("v1", "Song", "X", None, 1)
-    keep = store.upsert_playlist(iid, "KEEP", "Storm", 1, "h", 1.0); store.set_playlist_tracks(keep, [t])
-    dele = store.upsert_playlist(iid, "DEL", "Storm", 1, "h", 1.0); store.set_playlist_tracks(dele, [t])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    t = store.tracks.upsert_track("v1", "Song", "X", None, 1)
+    keep = store.playlists.upsert_playlist(iid, "KEEP", "Storm", 1, "h", 1.0); store.playlists.set_playlist_tracks(keep, [t])
+    dele = store.playlists.upsert_playlist(iid, "DEL", "Storm", 1, "h", 1.0); store.playlists.set_playlist_tracks(dele, [t])
     client = FakeClient(tracks={"KEEP": [_track("v1", "Song", "X")], "DEL": [_track("v1", "Song", "X")]})
     c = _client(store, lambda: {iid: client})
     r = c.post("/dupe/delete", data={"source": dele, "target": keep})
     assert r.status_code == 200 and r.json()["ok"] is True
-    assert client.deleted == ["DEL"] and store.get_playlist(dele) is None
+    assert client.deleted == ["DEL"] and store.playlists.get_playlist(dele) is None
 
 def test_inline_dupe_delete_refuses_survivor(store, monkeypatch, tmp_path):
     # Foot-gun guard: after one copy is gone, deleting the other must be refused (kept copy missing).
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    t = store.upsert_track("v1", "Song", "X", None, 1)
-    survivor = store.upsert_playlist(iid, "SURV", "Storm", 1, "h", 1.0); store.set_playlist_tracks(survivor, [t])
-    gone = store.upsert_playlist(iid, "GONE", "Storm", 1, "h", 1.0); store.set_playlist_tracks(gone, [t])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    t = store.tracks.upsert_track("v1", "Song", "X", None, 1)
+    survivor = store.playlists.upsert_playlist(iid, "SURV", "Storm", 1, "h", 1.0); store.playlists.set_playlist_tracks(survivor, [t])
+    gone = store.playlists.upsert_playlist(iid, "GONE", "Storm", 1, "h", 1.0); store.playlists.set_playlist_tracks(gone, [t])
     # remote: SURV has the track, GONE no longer exists (deleted) -> cannot serve as the kept copy
     client = FakeClient(tracks={"SURV": [_track("v1", "Song", "X")]})
     c = _client(store, lambda: {iid: client})
     r = c.post("/dupe/delete", data={"source": survivor, "target": gone})  # delete survivor, "keep" the gone one
     assert r.status_code == 200 and r.json()["ok"] is False
-    assert client.deleted == [] and store.get_playlist(survivor) is not None  # survivor untouched
+    assert client.deleted == [] and store.playlists.get_playlist(survivor) is not None  # survivor untouched
 
 
 def test_dupe_keep_one_deletes_whole_cluster(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    t = store.upsert_track("v1", "Song", "X", None, 1)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    t = store.tracks.upsert_track("v1", "Song", "X", None, 1)
     # three identical copies
     ids = []
     for ytm in ("PLa", "PLb", "PLc"):
-        p = store.upsert_playlist(iid, ytm, "Afternoon mix", 1, "h", 1.0); store.set_playlist_tracks(p, [t])
+        p = store.playlists.upsert_playlist(iid, ytm, "Afternoon mix", 1, "h", 1.0); store.playlists.set_playlist_tracks(p, [t])
         ids.append((p, ytm))
     keep_id, _ = ids[0]
     client = FakeClient(tracks={ytm: [_track("v1", "Song", "X")] for _, ytm in ids})
     c = _client(store, lambda: {iid: client})
     r = c.post("/dupe/keep-one", data={"keep": keep_id})
     assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"   # success -> recompute page
-    remaining = {p.ytm_playlist_id for p in store.get_playlists()}
+    remaining = {p.ytm_playlist_id for p in store.playlists.get_playlists()}
     assert remaining == {"PLa"}                      # only the kept copy survives
     assert sorted(client.deleted) == ["PLb", "PLc"]
 
 
 def test_delete_empty_playlist(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    empty = store.upsert_playlist(iid, "PLempty", "jazz 2", 0, "h", 1.0)      # no tracks set
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    empty = store.playlists.upsert_playlist(iid, "PLempty", "jazz 2", 0, "h", 1.0)      # no tracks set
     client = FakeClient()                                                     # get_playlist -> {tracks: []}
     c = _client(store, lambda: {iid: client})
     r = c.post("/playlist/delete-empty", data={"playlist": empty})
     assert r.status_code == 200 and r.text.strip() == ""          # empty -> htmx removes the row
-    assert client.deleted == ["PLempty"] and store.get_playlist(empty) is None
+    assert client.deleted == ["PLempty"] and store.playlists.get_playlist(empty) is None
 
 def test_inline_dupe_delete_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_path):
     # /dupe/delete returns JSON without a page reload, so it must refresh the cached cleanup
     # summary itself or the home card keeps showing the deleted playlist as pending (issue #73).
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(4)]
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(4)]
     tr = [_track(f"v{i}", f"S{i}", "X") for i in range(4)]
-    keep = store.upsert_playlist(iid, "KEEP", "Storm", 4, "h", 1.0); store.set_playlist_tracks(keep, t)
-    dele = store.upsert_playlist(iid, "DEL", "Storm", 4, "h", 1.0); store.set_playlist_tracks(dele, t)
-    recommend.refresh_cleanup(store, 1.0)
-    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 2
+    keep = store.playlists.upsert_playlist(iid, "KEEP", "Storm", 4, "h", 1.0); store.playlists.set_playlist_tracks(keep, t)
+    dele = store.playlists.upsert_playlist(iid, "DEL", "Storm", 4, "h", 1.0); store.playlists.set_playlist_tracks(dele, t)
+    actions.refresh_cleanup(store, 1.0)
+    assert store.rec_surface.get_proposals(CLEANUP_SURFACE)["count"] == 2
     client = FakeClient(tracks={"KEEP": tr, "DEL": tr})
     c = _client(store, lambda: {iid: client})
     r = c.post("/dupe/delete", data={"source": dele, "target": keep})
     assert r.status_code == 200 and r.json()["ok"] is True
-    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 0      # survivor is no longer a dupe
+    assert store.rec_surface.get_proposals(CLEANUP_SURFACE)["count"] == 0      # survivor is no longer a dupe
 
 
 def test_delete_empty_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_path):
     # /playlist/delete-empty just removes the row (no reload), so it must refresh the cache too.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    empty = store.upsert_playlist(iid, "PLempty", "jazz 2", 0, "h", 1.0)
-    recommend.refresh_cleanup(store, 1.0)
-    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 1      # the empty playlist
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    empty = store.playlists.upsert_playlist(iid, "PLempty", "jazz 2", 0, "h", 1.0)
+    actions.refresh_cleanup(store, 1.0)
+    assert store.rec_surface.get_proposals(CLEANUP_SURFACE)["count"] == 1      # the empty playlist
     c = _client(store, lambda: {iid: FakeClient()})
     r = c.post("/playlist/delete-empty", data={"playlist": empty})
     assert r.status_code == 200
-    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 0
+    assert store.rec_surface.get_proposals(CLEANUP_SURFACE)["count"] == 0
 
 
 def test_delete_empty_refuses_if_not_empty(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    pl = store.upsert_playlist(iid, "PLfull", "actually full", 1, "h", 1.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    pl = store.playlists.upsert_playlist(iid, "PLfull", "actually full", 1, "h", 1.0)
     client = FakeClient(tracks={"PLfull": [_track("v1", "S", "X")]})          # has a track remotely
     c = _client(store, lambda: {iid: client})
     r = c.post("/playlist/delete-empty", data={"playlist": pl})
@@ -479,33 +479,33 @@ def test_delete_empty_failed_read_keeps_row_and_cleanup_summary(store, monkeypat
     from yt_playlist.library import executor
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(executor, "with_retry", lambda fn: fn())
-    iid = store.upsert_identity("main", "cred", None, True)
-    empty = store.upsert_playlist(iid, "PLempty", "Empty at last sync", 0, "h", 1.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    empty = store.playlists.upsert_playlist(iid, "PLempty", "Empty at last sync", 0, "h", 1.0)
     client = FakeClient(tracks={"PLempty": [_track("new", "Added elsewhere", "X")]})
 
     def unreadable(playlist, limit=None):
         raise failure
 
     monkeypatch.setattr(client, "get_playlist", unreadable)
-    recommend.refresh_cleanup(store, 1.0)
-    summary = store.get_proposals(CLEANUP_SURFACE)
+    actions.refresh_cleanup(store, 1.0)
+    summary = store.rec_surface.get_proposals(CLEANUP_SURFACE)
     c = _client(store, lambda: {iid: client})
     r = c.post("/playlist/delete-empty", data={"playlist": empty})
     assert r.status_code == 422 and r.headers["hx-reswap"] == "none"
     assert "empty on YouTube" in r.text and "Nothing was changed" in r.text
-    assert client.deleted == [] and store.get_playlist(empty) is not None
-    assert store.get_proposals(CLEANUP_SURFACE) == summary
-    assert store.get_actions() == []
+    assert client.deleted == [] and store.playlists.get_playlist(empty) is not None
+    assert store.rec_surface.get_proposals(CLEANUP_SURFACE) == summary
+    assert store.actions.get_actions() == []
     assert not list(tmp_path.glob("backups/*"))
 
 
 def test_overlap_ignore_excludes_playlist(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    fav = store.upsert_playlist(iid, "PLFAV", "Big Mixtape", 3, "h", 1.0)
-    a = store.upsert_playlist(iid, "PLa", "A", 1, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLb", "B", 1, "h", 1.0)
-    t1 = store.upsert_track("v1", "S1", "X", None, 1); t2 = store.upsert_track("v2", "S2", "X", None, 1)
-    store.set_playlist_tracks(fav, [t1, t2]); store.set_playlist_tracks(a, [t1]); store.set_playlist_tracks(b, [t2])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    fav = store.playlists.upsert_playlist(iid, "PLFAV", "Big Mixtape", 3, "h", 1.0)
+    a = store.playlists.upsert_playlist(iid, "PLa", "A", 1, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLb", "B", 1, "h", 1.0)
+    t1 = store.tracks.upsert_track("v1", "S1", "X", None, 1); t2 = store.tracks.upsert_track("v2", "S2", "X", None, 1)
+    store.playlists.set_playlist_tracks(fav, [t1, t2]); store.playlists.set_playlist_tracks(a, [t1]); store.playlists.set_playlist_tracks(b, [t2])
     c = _client(store, lambda: {iid: FakeClient()})
     assert "Big Mixtape" in c.get("/cleanup").text                       # overlaps present
     r = c.post("/overlaps/ignore", data={"ytm": "PLFAV"})
@@ -520,11 +520,11 @@ def test_overlap_ignore_excludes_playlist(store):
 
 def test_system_playlist_excluded_from_overlaps(store):
     from yt_playlist.library.analysis import find_overlaps
-    iid = store.upsert_identity("main", "cred", None, True)
-    lm = store.upsert_playlist(iid, "LM", "Liked Music", 2, "h", 1.0)   # system
-    a = store.upsert_playlist(iid, "PLa", "A", 1, "h", 1.0)
-    t1 = store.upsert_track("v1", "S1", "X", None, 1); t2 = store.upsert_track("v2", "S2", "X", None, 1)
-    store.set_playlist_tracks(lm, [t1, t2]); store.set_playlist_tracks(a, [t1])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 2, "h", 1.0)   # system
+    a = store.playlists.upsert_playlist(iid, "PLa", "A", 1, "h", 1.0)
+    t1 = store.tracks.upsert_track("v1", "S1", "X", None, 1); t2 = store.tracks.upsert_track("v2", "S2", "X", None, 1)
+    store.playlists.set_playlist_tracks(lm, [t1, t2]); store.playlists.set_playlist_tracks(a, [t1])
     assert find_overlaps(store) == []   # Liked Music never generates overlaps
 
 
@@ -535,12 +535,12 @@ def test_system_playlist_excluded_from_overlaps(store):
 ])
 def test_merge_apply_route(store, monkeypatch, tmp_path, return_to, label):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
-    t1 = store.upsert_track("v1", "One", "X", None, None, 1)
-    t2 = store.upsert_track("v2", "Two", "X", None, None, 1)
-    store.set_playlist_tracks(a, [t1]); store.set_playlist_tracks(b, [t2])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
+    t1 = store.tracks.upsert_track("v1", "One", "X", None, None, 1)
+    t2 = store.tracks.upsert_track("v2", "Two", "X", None, None, 1)
+    store.playlists.set_playlist_tracks(a, [t1]); store.playlists.set_playlist_tracks(b, [t2])
     client = FakeClient(tracks={"PLA": [_track("v1", "One", "X")],
                                 "PLB": [_track("v2", "Two", "X")]})
     c = _client(store, lambda: {iid: client})
@@ -558,7 +558,7 @@ def test_merge_apply_route(store, monkeypatch, tmp_path, return_to, label):
     assert query["flash_pl"] == ["PLA"]
     if expected.query:
         assert query["sort"] == ["name"]
-    assert client.deleted == ["PLB"] and store.get_playlist(b) is None
+    assert client.deleted == ["PLB"] and store.playlists.get_playlist(b) is None
     log = c.get("/actions").text
     assert "merged into “A”, deleted “B”" in log
     assert "merge_draft" not in log
@@ -569,24 +569,24 @@ def test_merge_apply_ignores_stale_ids_in_url(store, monkeypatch, tmp_path):
     # a non-existent id in ?ids (e.g. a playlist deleted after the link was made) must not break Apply:
     # the editor renders the existing playlists, and Apply operates on that filtered member set.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
-    t1 = store.upsert_track("v1", "One", "X", None, None, 1)
-    store.set_playlist_tracks(a, [t1]); store.set_playlist_tracks(b, [t1])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
+    t1 = store.tracks.upsert_track("v1", "One", "X", None, None, 1)
+    store.playlists.set_playlist_tracks(a, [t1]); store.playlists.set_playlist_tracks(b, [t1])
     client = FakeClient(tracks={pid: [_track("v1", "One", "X")] for pid in ("PLA", "PLB")})
     c = _client(store, lambda: {iid: client})
     c.get(f"/merge?ids={a},{b},99999")                    # 99999 doesn't exist
     r = c.post(f"/merge/apply?ids={a},{b},99999")
     assert r.status_code == 200 and r.headers.get("hx-redirect")   # applied (not the 422 error toast)
-    assert store.get_playlist(b) is None                  # kept A, deleted B -> merge ran
+    assert store.playlists.get_playlist(b) is None                  # kept A, deleted B -> merge ran
 
 def test_merge_editor_renders_nway(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Mix", 2, "h", 1.0)
-    t1 = store.upsert_track("v1", "One", "X", None, 1); t2 = store.upsert_track("v2", "Two", "X", None, 1)
-    store.set_playlist_tracks(a, [t1, t2]); store.set_playlist_tracks(b, [t1])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "Mix", 2, "h", 1.0)
+    t1 = store.tracks.upsert_track("v1", "One", "X", None, 1); t2 = store.tracks.upsert_track("v2", "Two", "X", None, 1)
+    store.playlists.set_playlist_tracks(a, [t1, t2]); store.playlists.set_playlist_tracks(b, [t1])
     c = _client(store, lambda: {iid: FakeClient()})
     body = c.get(f"/merge?ids={a},{b}").text
     assert "Where should the result go" in body and "One" in body and "Two" in body
@@ -595,12 +595,12 @@ def test_merge_editor_renders_nway(store):
 
 
 def test_merge_update_toggle_and_setall_persist(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Mix2", 2, "h", 1.0)
-    t1 = store.upsert_track("v1", "One", "X", None, None, 1)
-    t2 = store.upsert_track("v2", "Two", "X", None, None, 1)
-    store.set_playlist_tracks(a, [t1, t2]); store.set_playlist_tracks(b, [t1])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "Mix2", 2, "h", 1.0)
+    t1 = store.tracks.upsert_track("v1", "One", "X", None, None, 1)
+    t2 = store.tracks.upsert_track("v2", "Two", "X", None, None, 1)
+    store.playlists.set_playlist_tracks(a, [t1, t2]); store.playlists.set_playlist_tracks(b, [t1])
     c = _client(store, lambda: {iid: FakeClient()})
     c.get(f"/merge?ids={a},{b}")                          # all included -> count 2 / 2
     upd = f"/merge/update?ids={a},{b}"
@@ -608,7 +608,7 @@ def test_merge_update_toggle_and_setall_persist(store):
     assert r.status_code == 200 and "1 / 2" in r.text     # one excluded now
     log = c.get("/actions").text
     assert "merge_draft" not in log and "No actions yet." in log
-    assert store.get_draft(f"{a},{b}") is not None
+    assert store.actions.get_draft(f"{a},{b}") is not None
     # the draft survives a "refresh" (re-GET), v1 still excluded
     assert "1 / 2" in c.get(f"/merge?ids={a},{b}").text
     assert "0 / 2" in c.post(upd, data={"field": "setall", "value": "0"}).text   # none
@@ -616,12 +616,12 @@ def test_merge_update_toggle_and_setall_persist(store):
 
 
 def test_merge_update_sort_mode_keep_pick(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Mix2", 1, "h", 1.0)
-    t1 = store.upsert_track("v1", "Beta", "X", None, None, 1)
-    t2 = store.upsert_track("v2", "Alpha", "X", None, None, 1)
-    store.set_playlist_tracks(a, [t1, t2]); store.set_playlist_tracks(b, [t1])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Mix", 2, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "Mix2", 1, "h", 1.0)
+    t1 = store.tracks.upsert_track("v1", "Beta", "X", None, None, 1)
+    t2 = store.tracks.upsert_track("v2", "Alpha", "X", None, None, 1)
+    store.playlists.set_playlist_tracks(a, [t1, t2]); store.playlists.set_playlist_tracks(b, [t1])
     c = _client(store, lambda: {iid: FakeClient()})
     c.get(f"/merge?ids={a},{b}")
     upd = f"/merge/update?ids={a},{b}"
@@ -635,29 +635,29 @@ def test_merge_update_sort_mode_keep_pick(store):
 
 def test_undo_via_dupe_delete(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    t = store.upsert_track("v1", "Song", "X", None, 1)
-    keep = store.upsert_playlist(iid, "KEEP", "Mix", 1, "h", 1.0); store.set_playlist_tracks(keep, [t])
-    dele = store.upsert_playlist(iid, "DEL", "Mix", 1, "h", 1.0); store.set_playlist_tracks(dele, [t])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    t = store.tracks.upsert_track("v1", "Song", "X", None, 1)
+    keep = store.playlists.upsert_playlist(iid, "KEEP", "Mix", 1, "h", 1.0); store.playlists.set_playlist_tracks(keep, [t])
+    dele = store.playlists.upsert_playlist(iid, "DEL", "Mix", 1, "h", 1.0); store.playlists.set_playlist_tracks(dele, [t])
     client = FakeClient(tracks={"KEEP": [_track("v1", "Song", "X")], "DEL": [_track("v1", "Song", "X")]},
                         catalog={"v1": _track("v1", "Song", "X")})
     c = _client(store, lambda: {iid: client})
     assert c.post("/dupe/delete", data={"source": dele, "target": keep}).json()["ok"] is True
-    aid = store.get_actions()[0].id
+    aid = store.actions.get_actions()[0].id
     assert "/undo/" in c.get("/actions").text                       # undo offered for the executed delete
     r = c.post(f"/undo/{aid}", follow_redirects=False)
     assert r.status_code == 303
-    assert store.get_action(aid).status == "undone" and client.created  # DEL recreated from backup
+    assert store.actions.get_action(aid).status == "undone" and client.created  # DEL recreated from backup
 
 
 def test_overlap_keep_only_mutes_others(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    fav = store.upsert_playlist(iid, "PLFAV", "Favorite Songs", 3, "h", 1.0)
-    other = store.upsert_playlist(iid, "PLB", "Favorite Songs 2", 2, "h", 1.0)
-    noise = store.upsert_playlist(iid, "PLn", "Little Mix", 1, "h", 1.0)
-    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(3)]
-    store.set_playlist_tracks(fav, [t[0], t[1], t[2]]); store.set_playlist_tracks(other, [t[0], t[1]])
-    store.set_playlist_tracks(noise, [t[2]])   # shares only with PLFAV (t2), not PLB
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    fav = store.playlists.upsert_playlist(iid, "PLFAV", "Favorite Songs", 3, "h", 1.0)
+    other = store.playlists.upsert_playlist(iid, "PLB", "Favorite Songs 2", 2, "h", 1.0)
+    noise = store.playlists.upsert_playlist(iid, "PLn", "Little Mix", 1, "h", 1.0)
+    t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(3)]
+    store.playlists.set_playlist_tracks(fav, [t[0], t[1], t[2]]); store.playlists.set_playlist_tracks(other, [t[0], t[1]])
+    store.playlists.set_playlist_tracks(noise, [t[2]])   # shares only with PLFAV (t2), not PLB
     c = _client(store, lambda: {iid: FakeClient()})
     # mute PLFAV's other overlaps but keep the PLFAV–PLB pair
     r = c.post("/overlaps/mute-others", data={"a": "PLFAV", "b": "PLB"})
@@ -669,8 +669,8 @@ def test_overlap_keep_only_mutes_others(store):
 
 
 def test_playlists_tab_renders(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
     page = c.get("/playlists").text                                # Playlists moved off / to /playlists
     assert "Playlists" in page and "playlistsTab(" in page
@@ -687,15 +687,15 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     monkeypatch.setattr(mb, "enrich_full",
                         lambda title, artist, **kwargs: {"S0": ("rock", "1998", None, []),
                                                "S1": ("jazz", "2003", None, [])}.get(title, (None, None, None, [])))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", "Al", 200, 1),
-                                  store.upsert_track("v1", "S1", "Y", "Al", 200, 1),
-                                  store.upsert_track("v2", "Sx", "Z", "Al", 200, 1)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
+    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S0", "X", "Al", 200, 1),
+                                  store.tracks.upsert_track("v1", "S1", "Y", "Al", 200, 1),
+                                  store.tracks.upsert_track("v2", "Sx", "Z", "Al", 200, 1)])
     only_provider(store, "musicbrainz")          # the waterfall runs MusicBrainz only
     c = _client(store, lambda: {iid: FakeClient()})
 
-    assert len(store.tracks_to_enrich(a)) == 3
+    assert len(store.tracks.tracks_to_enrich(a)) == 3
     jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
@@ -704,11 +704,11 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     assert types == ["info", "track", "track", "track", "done", "end"]
     assert [e["title"] for e in events if e.get("provider") == "musicbrainz"] == ["S0", "S1", "Sx"]
 
-    detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.playlist_tracks_detail(a)}
+    detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.charts.playlist_tracks_detail(a)}
     assert detail["v0"] == ("rock", "1998") and detail["v1"] == ("jazz", "2003")
     assert detail["v2"] == ("", "")                      # no match this run
     # fully-resolved tracks are done; the no-match one stays eligible for a re-run
-    assert [t["video_id"] for t in store.tracks_to_enrich(a)] == ["v2"]
+    assert [t["video_id"] for t in store.tracks.tracks_to_enrich(a)] == ["v2"]
 
     # re-run after MusicBrainz gains a genre for v2. It fills the gap and v2 is now complete
     monkeypatch.setattr(mb, "enrich_full",
@@ -717,27 +717,27 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     jid2 = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid2}") as st:
         "".join(st.iter_text())
-    v2 = next(t for t in store.playlist_tracks_detail(a) if t["video_id"] == "v2")
+    v2 = next(t for t in store.charts.playlist_tracks_detail(a) if t["video_id"] == "v2")
     assert (v2["genre"], v2["year"]) == ("ambient", "2010")
-    assert store.tracks_to_enrich(a) == []
+    assert store.tracks.tracks_to_enrich(a) == []
 
     # a blank result must never clobber values we already have
-    store.set_track_enrichment(store.track_ids_for_videos(["v0"])["v0"], "", "")
-    v0 = next(t for t in store.playlist_tracks_detail(a) if t["video_id"] == "v0")
+    store.tracks.set_track_enrichment(store.tracks.track_ids_for_videos(["v0"])["v0"], "", "")
+    v0 = next(t for t in store.charts.playlist_tracks_detail(a) if t["video_id"] == "v0")
     assert (v0["genre"], v0["year"]) == ("rock", "1998")
 
 
 def test_liked_songs_get_a_heart(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    mix = store.upsert_playlist(iid, "PLM", "Mix", 2, "h", 1.0)
-    lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)   # the YouTube liked playlist
-    loved = store.upsert_track("v1", "Loved", "A", "Al", 200, 1)
-    store.set_playlist_tracks(mix, [loved, store.upsert_track("v2", "Plain", "B", "Al", 200, 1)])
-    store.set_playlist_tracks(lm, [loved])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    mix = store.playlists.upsert_playlist(iid, "PLM", "Mix", 2, "h", 1.0)
+    lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)   # the YouTube liked playlist
+    loved = store.tracks.upsert_track("v1", "Loved", "A", "Al", 200, 1)
+    store.playlists.set_playlist_tracks(mix, [loved, store.tracks.upsert_track("v2", "Plain", "B", "Al", 200, 1)])
+    store.playlists.set_playlist_tracks(lm, [loved])
 
-    liked = {t["video_id"]: t["liked"] for t in store.playlist_tracks_detail(mix)}
+    liked = {t["video_id"]: t["liked"] for t in store.charts.playlist_tracks_detail(mix)}
     assert liked == {"v1": True, "v2": False}                       # song in LM is liked
-    assert store.artist_songs("A")[0]["liked"] is True             # and wherever the song appears
+    assert store.charts.artist_songs("A")[0]["liked"] is True             # and wherever the song appears
     c = _client(store, lambda: {iid: FakeClient()})
     assert "like-btn on" in c.get(f"/playlist/{mix}").text          # the liked song shows a filled heart
 
@@ -745,52 +745,52 @@ def test_liked_songs_get_a_heart(store):
 def test_remove_playlist_preserves_group(store):
     # Groups are user curation (not on YouTube). A removed/pruned playlist must keep its group so it
     # reattaches if the playlist comes back. Regression for the prune that wiped groups too.
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLG", "Grouped", 1, "h", 1.0)
-    store.set_playlist_group("PLG", "Workout")
-    store.remove_playlist(a)
-    assert store.get_playlist_groups() == {"PLG": "Workout"}      # survives removal
-    store.upsert_playlist(iid, "PLG", "Grouped", 1, "h", 2.0)     # re-added on a later sync
-    assert store.get_playlist_groups().get("PLG") == "Workout"    # grouping reattaches
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLG", "Grouped", 1, "h", 1.0)
+    store.playlists.set_playlist_group("PLG", "Workout")
+    store.playlists.remove_playlist(a)
+    assert store.playlists.get_playlist_groups() == {"PLG": "Workout"}      # survives removal
+    store.playlists.upsert_playlist(iid, "PLG", "Grouped", 1, "h", 2.0)     # re-added on a later sync
+    assert store.playlists.get_playlist_groups().get("PLG") == "Workout"    # grouping reattaches
 
 
 def test_sync_keeps_playlists_when_library_comes_back_empty(store):
     # Regression: an empty get_library_playlists (session glitch, not a 401) must NOT prune the store.
     from yt_playlist.library import sync as sync_mod
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Keep Me", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "S", "X", None, None, 1)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PL1", "Keep Me", 1, "h", 1.0)
+    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S", "X", None, None, 1)])
     sync_mod.sync_identity(store, iid, FakeClient(playlists=[], tracks={}, history=[]), now=2.0)
-    assert [p.title for p in store.get_playlists()] == ["Keep Me"]      # preserved, not wiped
+    assert [p.title for p in store.playlists.get_playlists()] == ["Keep Me"]      # preserved, not wiped
 
 
 def test_sync_flags_reauth_when_known_identity_returns_empty(store):
     # An identity that HAD playlists but now returns empty is flagged for re-auth (not silently empty).
     from yt_playlist.library import sync as sync_mod
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PL1", "Keep Me", 1, "h", 1.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.upsert_playlist(iid, "PL1", "Keep Me", 1, "h", 1.0)
     expired = {}
     sync_mod.sync_identity(store, iid, FakeClient(playlists=[], tracks={}, history=[]), now=2.0,
                            label="main", on_auth_expired=lambda i, label: expired.__setitem__(i, label))
     assert expired == {iid: "main"}                    # flagged for re-authentication
-    assert [p.title for p in store.get_playlists()] == ["Keep Me"]   # still preserved
+    assert [p.title for p in store.playlists.get_playlists()] == ["Keep Me"]   # still preserved
 
 
 def test_sync_prunes_when_library_is_real(store):
     # A genuine, non-empty library still prunes playlists that are actually gone.
     from yt_playlist.library import sync as sync_mod
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "GONE", "Deleted Remotely", 0, "h", 1.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.upsert_playlist(iid, "GONE", "Deleted Remotely", 0, "h", 1.0)
     client = FakeClient(playlists=[{"playlistId": "PL2", "title": "New", "count": 1}],
                         tracks={"PL2": [_track("v1", "A", "X")]}, history=[])
     sync_mod.sync_identity(store, iid, client, now=2.0)
-    assert sorted(p.title for p in store.get_playlists()) == ["New"]    # GONE pruned, New added
+    assert sorted(p.title for p in store.playlists.get_playlists()) == ["New"]    # GONE pruned, New added
 
 
 def test_saving_identity_definitions_does_not_clear_expired_session(store):
     rt = _FakeRuntime(store, configured=True)
-    iid = store.upsert_identity("main", "browser.json", None, True)
-    store.set_setting("last_sync_at", "1.0")
+    iid = store.identities.upsert_identity("main", "browser.json", None, True)
+    store.settings.set_setting("last_sync_at", "1.0")
     app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
     app.state.ctx.flag_auth_expired(iid, "Main")
     c = TestClient(app, base_url="http://127.0.0.1")
@@ -816,9 +816,9 @@ def test_jobs_find_active():
 
 
 def test_page_rejoins_active_enrichment(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "S", "X", "Al", 200, 1)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S", "X", "Al", 200, 1)])
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
 
@@ -840,10 +840,10 @@ def test_discogs_fills_genre_and_year(store, monkeypatch):
         {"title": "Underworld - Born Slippy", "year": "1995", "genre": ["Electronic"], "style": ["Techno"]},
         {"title": "Unrelated Artist - Different Song", "year": "1952", "genre": ["Classical"]},
     ] if "Born Slippy" in q else [])
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "Born Slippy", "Underworld", "Al", 200, 1),
-                                  store.upsert_track("v1", "Unknown", "Nobody", "Al", 200, 1)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
+    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Born Slippy", "Underworld", "Al", 200, 1),
+                                  store.tracks.upsert_track("v1", "Unknown", "Nobody", "Al", 200, 1)])
     from tests.conftest import only_provider
     only_provider(store, "discogs")
     c = _client(store, lambda: {iid: FakeClient()})
@@ -855,7 +855,7 @@ def test_discogs_fills_genre_and_year(store, monkeypatch):
     types = [e["type"] for e in events if e["type"] != "activity"]
     assert types == ["info", "track", "track", "done", "end"]
     assert [e["title"] for e in events if e.get("provider") == "discogs"] == ["Born Slippy", "Unknown"]
-    detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.playlist_tracks_detail(a)}
+    detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.charts.playlist_tracks_detail(a)}
     assert detail["v0"] == ("Techno", "1995")        # style->genre, earliest year
     assert detail["v1"] == ("", "")
 
@@ -867,12 +867,12 @@ def test_lastfm_fills_missing_genre_and_year(store, monkeypatch):
     # stub the Last.fm lookup: (genre, year) per track; one fully unknown
     monkeypatch.setattr(lf, "enrich", lambda title, artist, key:
                         {"S0": ("Trip Hop", None), "S1": ("House", "2010")}.get(title, (None, None)))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
-    t0 = store.upsert_track("v0", "S0", "X", "Al", 200, 1)
-    store.set_playlist_tracks(a, [t0, store.upsert_track("v1", "S1", "Y", "Al", 200, 1),
-                                  store.upsert_track("v2", "S?", "Z", "Al", 200, 1)])
-    store.set_track_year(t0, "1998")                 # fill-only must not clobber this
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
+    t0 = store.tracks.upsert_track("v0", "S0", "X", "Al", 200, 1)
+    store.playlists.set_playlist_tracks(a, [t0, store.tracks.upsert_track("v1", "S1", "Y", "Al", 200, 1),
+                                  store.tracks.upsert_track("v2", "S?", "Z", "Al", 200, 1)])
+    store.tracks.set_track_year(t0, "1998")                 # fill-only must not clobber this
     from tests.conftest import only_provider
     only_provider(store, "lastfm")
     c = _client(store, lambda: {iid: FakeClient()})
@@ -885,7 +885,7 @@ def test_lastfm_fills_missing_genre_and_year(store, monkeypatch):
     # events report the effective stored values (so the UI matches the DB), both fields present
     assert track_evs and all("genre" in e and "year" in e for e in track_evs)
 
-    detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.playlist_tracks_detail(a)}
+    detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.charts.playlist_tracks_detail(a)}
     assert detail["v0"] == ("Trip Hop", "1998")      # genre filled, existing year preserved
     assert detail["v1"] == ("House", "2010")         # both filled from Last.fm
     assert detail["v2"] == ("", "")                  # nothing found -> still missing
@@ -968,9 +968,9 @@ def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
     monkeypatch.delenv("LASTFM_API_KEY", raising=False)
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))   # empty config -> no key
     import json as _json
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", "Al", 200, 1)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S0", "X", "Al", 200, 1)])
     from tests.conftest import only_provider
     only_provider(store, "lastfm")
     c = _client(store, lambda: {iid: FakeClient()})
@@ -981,7 +981,7 @@ def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
 
 
 def test_toasts_region_present_on_every_page(store):
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     assert 'id="toasts"' in c.get("/").text
@@ -996,11 +996,11 @@ def test_error_toast_partial_renders(store):
 
 
 def _two_identity_move(store):
-    i1 = store.upsert_identity("Main", "c1", None, True)
-    i2 = store.upsert_identity("Alt", "c2", None, False)
-    pid = store.upsert_playlist(i1, "PL1", "Mix", 1, "h", 1.0)
-    t = store.upsert_track("v1", "S", "X", None, None, 1)
-    store.set_playlist_tracks(pid, [t])
+    i1 = store.identities.upsert_identity("Main", "c1", None, True)
+    i2 = store.identities.upsert_identity("Alt", "c2", None, False)
+    pid = store.playlists.upsert_playlist(i1, "PL1", "Mix", 1, "h", 1.0)
+    t = store.tracks.upsert_track("v1", "S", "X", None, None, 1)
+    store.playlists.set_playlist_tracks(pid, [t])
     return i1, i2, pid
 
 
@@ -1010,7 +1010,7 @@ def test_move_run_copy_returns_row_with_message(store):
     r = c.post("/move/run", data={"playlist": pid, "target_identity": i2, "copy_only": "1"})
     assert r.status_code == 200
     assert "Copied" in r.text and "Mix" in r.text       # row re-rendered, still present
-    assert store.get_playlist(pid) is not None
+    assert store.playlists.get_playlist(pid) is not None
 
 
 def test_move_run_move_removes_row(store,monkeypatch,tmp_path):
@@ -1022,7 +1022,7 @@ def test_move_run_move_removes_row(store,monkeypatch,tmp_path):
     r = c.post("/move/run", data={"playlist": pid, "target_identity": i2})   # move (no copy_only)
     assert r.status_code == 200
     assert r.text.strip() == ""                          # deleted -> empty -> htmx removes the row
-    assert store.get_playlist(pid) is None
+    assert store.playlists.get_playlist(pid) is None
 
 
 def test_move_run_same_identity_shows_inline_error(store):
@@ -1044,25 +1044,25 @@ def test_move_run_gone_playlist_drops_row(store):
 
 def test_delete_empty_removes_row(store,monkeypatch,tmp_path):
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    pid = store.upsert_playlist(iid, "PLE", "Empty One", 0, "h", 1.0)   # no tracks
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    pid = store.playlists.upsert_playlist(iid, "PLE", "Empty One", 0, "h", 1.0)   # no tracks
     c = _client(store, lambda: {iid: FakeClient()})
     assert c.get("/cleanup").text.count('class="empty-row"') == 1
     r = c.post("/playlist/delete-empty", data={"playlist": pid})
     assert r.status_code == 200 and r.text.strip() == ""       # empty -> htmx removes the row
-    assert store.get_playlist(pid) is None
+    assert store.playlists.get_playlist(pid) is None
 
 
 def test_unhide_overlap_restores_to_overlaps_section(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Beta", 3, "h", 1.0)
-    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(4)]
-    store.set_playlist_tracks(a, [t[0], t[1], t[2]])           # {0,1,2}
-    store.set_playlist_tracks(b, [t[1], t[2], t[3]])           # {1,2,3}: shared {1,2}, jaccard .5 -> overlap
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "Beta", 3, "h", 1.0)
+    t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(4)]
+    store.playlists.set_playlist_tracks(a, [t[0], t[1], t[2]])           # {0,1,2}
+    store.playlists.set_playlist_tracks(b, [t[1], t[2], t[3]])           # {1,2,3}: shared {1,2}, jaccard .5 -> overlap
     c = _client(store, lambda: {iid: FakeClient()})
 
-    store.suppress_overlap("PLA", "PLB", 1.0)                  # hide the pair
+    store.overlaps.suppress_overlap("PLA", "PLB", 1.0)                  # hide the pair
     assert c.get("/cleanup").text.count('class="ov-row"') == 0  # gone from Overlaps, now Hidden
 
     r = c.post("/overlaps/unsuppress", data={"a": "PLA", "b": "PLB"})
@@ -1072,23 +1072,23 @@ def test_unhide_overlap_restores_to_overlaps_section(store):
 
 def test_keep_one_refreshes_and_deletes_other_copies(store,monkeypatch,tmp_path):
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Dup A", 2, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Dup B", 2, "h", 1.0)
-    t = [store.upsert_track(f"d{i}", f"D{i}", "X", None, None, 1) for i in range(2)]
-    store.set_playlist_tracks(a, t); store.set_playlist_tracks(b, t)   # identical -> a dup group
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Dup A", 2, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "Dup B", 2, "h", 1.0)
+    t = [store.tracks.upsert_track(f"d{i}", f"D{i}", "X", None, None, 1) for i in range(2)]
+    store.playlists.set_playlist_tracks(a, t); store.playlists.set_playlist_tracks(b, t)   # identical -> a dup group
     c = _client(store, lambda: {iid: FakeClient()})
     r = c.post("/dupe/keep-one", data={"keep": a})
     assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
-    assert store.get_playlist(a) is not None and store.get_playlist(b) is None   # other copy deleted
+    assert store.playlists.get_playlist(a) is not None and store.playlists.get_playlist(b) is None   # other copy deleted
 
 
 def _seed_search(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    r1 = store.upsert_track("r1", "Spektrum", "Ritmo", "Ritmo LP", None,
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    r1 = store.tracks.upsert_track("r1", "Spektrum", "Ritmo", "Ritmo LP", None,
                             album_browse_id="MPREb_ritmolp")
-    pl = store.upsert_playlist(iid, "PL1", "Late Night Drive", 1, "h", 0.0)
-    store.set_playlist_tracks(pl, [r1])
+    pl = store.playlists.upsert_playlist(iid, "PL1", "Late Night Drive", 1, "h", 0.0)
+    store.playlists.set_playlist_tracks(pl, [r1])
     return iid
 
 

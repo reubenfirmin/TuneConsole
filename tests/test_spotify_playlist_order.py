@@ -42,7 +42,7 @@ class RecoveringClient(SongClient):
 @pytest.fixture
 def transfer(store, monkeypatch):
     monkeypatch.setattr("yt_playlist.library.spotify_library.with_retry", lambda fn: fn())
-    identity = store.upsert_identity("Main", "bridge", None, True)
+    identity = store.identities.upsert_identity("Main", "bridge", None, True)
     raw = _playlists_zip(("Source", ["One", "Two", "Three"]))
     client = RecoveringClient()
     return store, identity, raw, client
@@ -59,7 +59,7 @@ def _order(t):
 
 def _state(t):
     store, identity, _, _ = t
-    return next(iter(json.loads(store.get_setting(f"spotify_library_imported_playlists:{identity}")).values()))
+    return next(iter(json.loads(store.settings.get_setting(f"spotify_library_imported_playlists:{identity}")).values()))
 
 
 @pytest.mark.parametrize("failed_title", ["One", "Two"])
@@ -138,12 +138,12 @@ def test_older_completion_marker_is_rechecked_for_order(transfer):
     # Older versions appended recovered songs and marked them complete without verifying order.
     client.add_playlist_items(client.created[0][0], [client.search("One Artist")[0]["videoId"]])
     key = f"spotify_library_imported_playlists:{t[1]}"
-    states = json.loads(t[0].get_setting(key))
+    states = json.loads(t[0].settings.get_setting(key))
     old = next(iter(states.values()))
     old["complete"] = True
     old.pop("order_verified")
     old.pop("source_video_ids")
-    t[0].set_setting(key, json.dumps(states))
+    t[0].settings.set_setting(key, json.dumps(states))
     assert _run(t, 101)["playlists_imported"] == 1
     assert _order(t) == ["yt-One", "yt-Two", "yt-Three"]
     assert len(client.created) == 1

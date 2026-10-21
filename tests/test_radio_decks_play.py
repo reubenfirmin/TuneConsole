@@ -63,8 +63,8 @@ def test_on_play_foreign_vid_mid_deck_is_inert(monkeypatch, store):
 
 
 def test_react_marks_standby_dirty_on_skip(monkeypatch, store):
-    monkeypatch.setattr(store, "identity_key_for_video", lambda vid: "kold")
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: {"kold": {"artist": "Aold"}})
+    monkeypatch.setattr(store.tracks, "identity_key_for_video", lambda vid: "kold")
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: {"kold": {"artist": "Aold"}})
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
     s = _started(monkeypatch, store)
     s.standby_dirty = False

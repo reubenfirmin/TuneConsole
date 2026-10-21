@@ -49,11 +49,11 @@ def _free_port():
 def live_artist_app():
     s = Store(":memory:")
     s.init_schema()
-    iid = s.upsert_identity("Main", "cred", None, True)
-    pid = s.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    iid = s.identities.upsert_identity("Main", "cred", None, True)
+    pid = s.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     # a track with an album browse id -> the collection table renders a Save button for that album
-    t = s.upsert_track("v1", "SongA", "Artist X", "The Album", 200, 1, album_browse_id="MPREb_x")
-    s.set_playlist_tracks(pid, [t])
+    t = s.tracks.upsert_track("v1", "SongA", "Artist X", "The Album", 200, 1, album_browse_id="MPREb_x")
+    s.playlists.set_playlist_tracks(pid, [t])
     client = AlbumClient()
     app = create_app(s, lambda: {iid: client}, now_fn=lambda: 1.0)
     port = _free_port()

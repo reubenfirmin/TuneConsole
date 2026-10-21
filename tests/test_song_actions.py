@@ -12,15 +12,15 @@ SONG = {"video_id": "new-song", "title": "A song's <title>", "artist": "Artist &
 
 
 def seed_song_actions(store):
-    main_id = store.upsert_identity("Main", "main-cred", None, True)
-    other_id = store.upsert_identity("Other account", "other-cred", None, False)
-    offline_id = store.upsert_identity("Offline", "offline-cred", None, False)
-    source = store.upsert_playlist(main_id, "SOURCE", "Source mix", 1, "h", 1)
-    destination = store.upsert_playlist(other_id, "DEST", "Evening mix", 0, "", 1)
-    system = store.upsert_playlist(main_id, "LM", "Liked Music", 0, "", 1)
-    offline = store.upsert_playlist(offline_id, "OFFLINE", "Offline mix", 0, "", 1)
-    track = store.upsert_track("owned-song", "Owned Song", "Artist & Friends", "Album", 180)
-    store.set_playlist_tracks(source, [track])
+    main_id = store.identities.upsert_identity("Main", "main-cred", None, True)
+    other_id = store.identities.upsert_identity("Other account", "other-cred", None, False)
+    offline_id = store.identities.upsert_identity("Offline", "offline-cred", None, False)
+    source = store.playlists.upsert_playlist(main_id, "SOURCE", "Source mix", 1, "h", 1)
+    destination = store.playlists.upsert_playlist(other_id, "DEST", "Evening mix", 0, "", 1)
+    system = store.playlists.upsert_playlist(main_id, "LM", "Liked Music", 0, "", 1)
+    offline = store.playlists.upsert_playlist(offline_id, "OFFLINE", "Offline mix", 0, "", 1)
+    track = store.tracks.upsert_track("owned-song", "Owned Song", "Artist & Friends", "Album", 180)
+    store.playlists.set_playlist_tracks(source, [track])
     main = FakeClient(albums={"MPRE_new": {
         "title": "New Album", "artists": [{"name": "Artist & Friends"}],
         "tracks": [{"videoId": SONG["video_id"], "title": SONG["title"], "duration": "3:45"}],
@@ -68,14 +68,14 @@ def test_create_seeds_an_ordinary_playlist_on_main_account(songs):
 
 def test_add_uses_destination_account_and_preserves_existing_order(songs):
     http, store, destination = songs["http"], songs["store"], songs["destination"]
-    store.set_playlist_tracks(destination, store.get_playlist_track_ids(songs["source"]))
+    store.playlists.set_playlist_tracks(destination, store.playlists.get_playlist_track_ids(songs["source"]))
     response = http.post("/songs/add-to-playlist", json={"playlist_id": destination, "song": SONG})
     assert response.status_code == 200 and response.json()["message"] == "Song added."
     assert songs["other"].added == [("DEST", [SONG["video_id"]])]
     assert not songs["main"].added
-    assert [t["video_id"] for t in store.playlist_tracks_detail(destination)] == ["owned-song", SONG["video_id"]]
-    assert store.get_playlist(destination).track_count == 2
-    assert store.get_playlist(destination).thumbnail == SONG["thumbnail"]
+    assert [t["video_id"] for t in store.charts.playlist_tracks_detail(destination)] == ["owned-song", SONG["video_id"]]
+    assert store.playlists.get_playlist(destination).track_count == 2
+    assert store.playlists.get_playlist(destination).thumbnail == SONG["thumbnail"]
     again = http.post("/songs/add-to-playlist", json={"playlist_id": destination, "song": SONG})
     assert "already" in again.json()["message"]
     assert len(songs["other"].added) == 1

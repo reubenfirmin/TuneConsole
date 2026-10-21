@@ -7,7 +7,7 @@ def album():
 
 
 def test_complete_tracklist_is_separate_from_incidental_tracks(store):
-    store.upsert_track("v", "Track 0", "Artist", "Release", 100, album_browse_id="MPRE")
+    store.tracks.upsert_track("v", "Track 0", "Artist", "Release", 100, album_browse_id="MPRE")
     assert store.collection.cached_album_tracklist_ids() == set()
     remember_album(store, "MPRE", album())
     assert store.collection.cached_album_tracklist_ids() == {"MPRE"}
@@ -30,5 +30,5 @@ def test_metadata_only_album_entries_keep_source_links_without_ownership(store):
     remember_album(store,'release-b',album())
     assert store.conn.execute('SELECT COUNT(*) FROM unresolved_items').fetchone()[0] == 8
     assert store.conn.execute('SELECT COUNT(*) FROM album_track_links').fetchone()[0] == 8
-    assert not store.library_keys()
+    assert not store.rec_query.library_keys()
     assert not store.conn.execute('SELECT 1 FROM youtube_items').fetchone()

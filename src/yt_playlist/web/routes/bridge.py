@@ -13,7 +13,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from yt_playlist.core.activity import activity_for
 from yt_playlist.library import live_plays, player_events
-from yt_playlist.rec import measurement, radio as radio_mod, rec_params, recommend
+from yt_playlist.rec import measurement, radio as radio_mod, rec_params, taste_analysis
 from yt_playlist.web.context import form_float
 from yt_playlist.web.radio_controller import RadioController
 
@@ -60,7 +60,8 @@ def build(ctx) -> APIRouter:
             bridge.now_playing = now_playing = None
             bridge.now_playing_seen_at = None
         if now_playing is not None:
-            resolve = getattr(getattr(ctx, "store", None), "playback_source", None)
+            collection = getattr(getattr(ctx, "store", None), "collection", None)
+            resolve = getattr(collection, "playback_source", None)
             source = resolve(now_playing.get("playlist_ytm_id"), now_playing.get("video_id"),
                              now_playing.get("album_browse_id")) if resolve else None
             if source:
@@ -89,7 +90,7 @@ def build(ctx) -> APIRouter:
 
     def _radio_customize_ctx():
         store = getattr(ctx, "store", None)
-        fingerprint = recommend.taste_fingerprint(store, controller.now()) if store is not None else {"families": [], "eras": []}
+        fingerprint = taste_analysis.taste_fingerprint(store, controller.now()) if store is not None else {"families": [], "eras": []}
         radio = getattr(ctx, "radio", None)
         return {"fingerprint": fingerprint, "tilts": (getattr(radio, "tilts", None) or {})}
 
@@ -129,7 +130,7 @@ def build(ctx) -> APIRouter:
                 measurement.record_action(ctx.store, "start", ctx.now_fn(), video_id=video_id)
             elif query.get("list"):
                 playlist = query["list"][0].removeprefix("RDAMPL")
-                for pl in ctx.store.get_playlists():
+                for pl in ctx.store.playlists.get_playlists():
                     if pl.ytm_playlist_id == playlist:
                         measurement.record_action(ctx.store, "start", ctx.now_fn(), playlist_id=pl.id)
                         break
@@ -191,7 +192,7 @@ def build(ctx) -> APIRouter:
         ping_task = asyncio.create_task(keepalive())
         store = getattr(ctx, "store", None)
         if store is not None:
-            store.set_setting("bridge_paired", "1")
+            store.settings.set_setting("bridge_paired", "1")
         clear = getattr(ctx, "clear_all_auth_expired", None)
         if callable(clear):
             clear()

@@ -4,7 +4,7 @@ The cookie-era fast plays sync (30-minute get_history polls) was removed with th
 migration; this is its replacement. Each report becomes a timestamped play_events row (the
 fine-grained source of truth), also feeds the existing (track, day) history model so every
 downstream consumer (charts, transient model, graduation) keeps working unchanged, stamps
-last_plays_sync_at (#85: feeds the sync-status display badge, recommend.sync_status; the
+last_plays_sync_at (#85: feeds the sync-status display badge, actions.sync_status; the
 transient model no longer damps on sync staleness, each event decays on its own wall clock),
 and folds likeStatus into the like/dislike model. The daily full sync's get_history() stays as
 backfill for plays that happen while the app is not running; record_history_plays dedups per
@@ -23,7 +23,7 @@ def resolve_identity(store, brand_id):
     """Map a report's brand id (ytcfg DELEGATED_SESSION_ID; empty on the main account) to an
     identity id: exact brand_account_id match, else the master identity, else the first configured
     identity. None when no identities exist yet (pre-setup: nothing to attribute the play to)."""
-    idents = store.get_identities()
+    idents = store.identities.get_identities()
     if not idents:
         return None
     if brand_id:
@@ -48,17 +48,17 @@ def handle_play_event(ctx, msg, now) -> bool:
         return False
     key = make_key(title, artist)
     if msg.get('videoId'):
-        key = store.observe_track(msg['videoId'],title,artist,now=now)
+        key = store.tracks.observe_track(msg['videoId'],title,artist,now=now)
     status = (msg.get("likeStatus") or "").strip()
-    new = store.record_play_event(ident, key, (msg.get("videoId") or None), now,
+    new = store.history.record_play_event(ident, key, (msg.get("videoId") or None), now,
                                   playlist_ytm_id=(msg.get("playlist") or None),
                                   like_status=(status or None))
     if new:
-        store.record_history_plays(ident, now, [key], source_timezone=msg.get("timeZone"))
-        store.set_setting("last_plays_sync_at", str(now))   # plays-freshness for the sync-status badge
+        store.history.record_history_plays(ident, now, [key], source_timezone=msg.get("timeZone"))
+        store.settings.set_setting("last_plays_sync_at", str(now))   # plays-freshness for the sync-status badge
     if status in _STATUSES:
         if msg.get('videoId'):
-            store.record_item_rating(ident,msg['videoId'],status,source='action',now=now)
+            store.tracks.record_item_rating(ident,msg['videoId'],status,source='action',now=now)
         # provenance='action': observed live while the user is engaged, so the event time is real
         # and the like keeps full transient participation.
         graduation.apply_dislikes(store, {key: status}, now, provenance="action")  # idempotent by design

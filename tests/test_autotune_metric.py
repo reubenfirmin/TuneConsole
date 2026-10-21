@@ -22,7 +22,7 @@ def _stub_build_and_store_tracking_dim(monkeypatch):
     def _build(store, dim=None):
         builds["n"] += 1
         if dim is not None:
-            store.set_setting("rec_dim", str(dim))
+            store.settings.set_setting("rec_dim", str(dim))
         return 0
 
     monkeypatch.setattr(eval_recs.embed, "build_and_store", _build)
@@ -70,8 +70,8 @@ def test_temporal_none_mid_sweep_scores_zero_failed_and_keeps_metric(store, monk
     def _temporal(store, holdout_days=30, k=20, **kwargs):
         if builds["n"] == 0:
             return {"recall": 0.9}   # pre-sweep: metric pick + previous-score calls, nothing built yet
-        method = store.get_setting("rec_embed_method") or "svd"
-        dim = int(store.get_setting("rec_dim") or 48)
+        method = store.settings.get_setting("rec_embed_method") or "svd"
+        dim = int(store.settings.get_setting("rec_dim") or 48)
         return {"recall": scores.get(method, {}).get(dim)}
 
     monkeypatch.setattr(eval_recs, "rolling_temporal_recall", _temporal)
@@ -99,8 +99,8 @@ def test_all_configs_fail_restores_previous_config_with_sweep_failed(store, monk
                          lambda store, k=20, min_size=5, seed=0: {"recall_at_k": None})
 
     # Set a known previous config: svd with dim 96
-    store.set_setting("rec_embed_method", "svd")
-    store.set_setting("rec_dim", "96")
+    store.settings.set_setting("rec_embed_method", "svd")
+    store.settings.set_setting("rec_dim", "96")
 
     # Every config in the sweep fails (returns None)
     def _temporal(store, holdout_days=30, k=20, **kwargs):
@@ -124,5 +124,5 @@ def test_all_configs_fail_restores_previous_config_with_sweep_failed(store, monk
     assert res["winner"] == res["previous"]
 
     # Settings must be restored to the previous config
-    assert store.get_setting("rec_embed_method") == "svd"
-    assert store.get_setting("rec_dim") == "96"
+    assert store.settings.get_setting("rec_embed_method") == "svd"
+    assert store.settings.get_setting("rec_dim") == "96"

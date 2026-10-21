@@ -19,8 +19,8 @@ pytestmark = pytest.mark.browser
 
 @pytest.fixture
 def spotify_app(store):
-    first = store.upsert_identity("First account", "first", None, True)
-    second = store.upsert_identity("Destination account", "second", None, False)
+    first = store.identities.upsert_identity("First account", "first", None, True)
+    second = store.identities.upsert_identity("Destination account", "second", None, False)
     first_client = FakeClient(search_results=[_track("first-song", "Song", "Artist")])
     second_client = FakeClient(search_results=[_track("chosen-song", "Song", "Artist")])
     app = create_app(store, lambda: {first: first_client, second: second_client}, now_fn=lambda: 1000)
@@ -71,4 +71,4 @@ def test_zip_import_waits_for_confirmation_and_uses_selected_destination(spotify
     expect(page.get_by_text("Spotify import complete.", exact=True)).to_be_visible(timeout=15000)
     assert spotify_app.first.created == []
     assert spotify_app.second.added == [(spotify_app.second.created[0][0], ["chosen-song"])]
-    assert spotify_app.store.get_playlists()[0].identity_id == spotify_app.destination
+    assert spotify_app.store.playlists.get_playlists()[0].identity_id == spotify_app.destination

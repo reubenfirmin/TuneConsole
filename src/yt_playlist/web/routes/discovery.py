@@ -63,19 +63,19 @@ def build(ctx) -> APIRouter:
     def discovery(request: Request):
         days = rec_params.get_param(store, "discovery_gc_days")
         now = ctx.now_fn()
-        tracks = store.discovery_track_view(now, days)
+        tracks = store.discovery.discovery_track_view(now, days)
         return templates.TemplateResponse(request, "discovery.html", {
             "gc_days": days,
             "tracks": tracks,
             "track_summary": track_pool_summary(tracks),
-            "albums": store.discovery_album_view(now, days),
-            "artists": store.discovery_artist_view(now, days),
+            "albums": store.discovery.discovery_album_view(now, days),
+            "artists": store.discovery.discovery_artist_view(now, days),
             "now": now,
         })
 
     @router.post("/discovery/impressions", status_code=204)
     def discovery_impressions(visible: VisibleImpressions):
-        store.record_discovery_impressions(visible.kind, visible.ids, str(visible.view_id), ctx.now_fn())
+        store.discovery.record_discovery_impressions(visible.kind, visible.ids, str(visible.view_id), ctx.now_fn())
         return Response(status_code=204)
 
     @router.post("/discovery/add")
@@ -87,7 +87,7 @@ def build(ctx) -> APIRouter:
         if client is None:
             return Response(status_code=503)
         if kind == "track":
-            row = store.discovered_tracks_by_keys([id]).get(id)
+            row = store.discovery.discovered_tracks_by_keys([id]).get(id)
             vid = row.get("video_id") if row else None
             if vid:
                 try:

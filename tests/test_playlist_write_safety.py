@@ -14,14 +14,14 @@ def transfer(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     # Keep failing-read scenarios focused on the deletion decision, without retry delays.
     monkeypatch.setattr(executor, "with_retry", lambda fn: fn())
-    source_identity = store.upsert_identity("Source", "bridge", None, True)
-    target_identity = store.upsert_identity("Target", "bridge", None, False)
+    source_identity = store.identities.upsert_identity("Source", "bridge", None, True)
+    target_identity = store.identities.upsert_identity("Target", "bridge", None, False)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
-    tids = [store.upsert_track(t["videoId"], t["title"], "Artist", None, 200) for t in tracks]
-    source = store.upsert_playlist(source_identity, "SOURCE", "Original", 2, "", 1)
-    keeper = store.upsert_playlist(target_identity, "KEEP", "Keeper", 1, "", 1)
-    store.set_playlist_tracks(source, tids)
-    store.set_playlist_tracks(keeper, tids[:1])
+    tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200) for t in tracks]
+    source = store.playlists.upsert_playlist(source_identity, "SOURCE", "Original", 2, "", 1)
+    keeper = store.playlists.upsert_playlist(target_identity, "KEEP", "Keeper", 1, "", 1)
+    store.playlists.set_playlist_tracks(source, tids)
+    store.playlists.set_playlist_tracks(keeper, tids[:1])
     source_client = FakeClient(tracks={"SOURCE": tracks})
     target_client = FakeClient(tracks={"KEEP": tracks[:1]}, catalog={t["videoId"]: t for t in tracks})
     return SimpleNamespace(store=store, source=source, keeper=keeper, source_identity=source_identity,
@@ -67,18 +67,18 @@ def test_failed_delivery_never_deletes_source(transfer, monkeypatch, operation, 
     if operation == "merge":
         with pytest.raises(ValueError, match="Refusing to delete"):
             _run(t, operation)
-        action = t.store.get_actions()[0]
+        action = t.store.actions.get_actions()[0]
         assert json.loads(action.params_json)["partial"]
         assert json.loads(action.undo_json)["restored"][0]["prev"] == ["v1"]
     else:
         result = _run(t, operation)
         assert not result["deleted"]
         assert result["skipped"] or result["delete_error"]
-        action = t.store.get_actions()[0]
+        action = t.store.actions.get_actions()[0]
         assert json.loads(action.undo_json)["new_ytm"] == "PL_NEW_0"
-        assert any(p.ytm_playlist_id == "PL_NEW_0" for p in t.store.get_playlists())
+        assert any(p.ytm_playlist_id == "PL_NEW_0" for p in t.store.playlists.get_playlists())
     assert t.source_client.deleted == []
-    assert t.store.get_playlist(t.source) is not None
+    assert t.store.playlists.get_playlist(t.source) is not None
 
 
 @pytest.mark.parametrize("operation", ["merge", "move", "delete_duplicate"])
@@ -109,12 +109,12 @@ def test_uncertain_destination_never_authorizes_deletion(transfer, monkeypatch, 
         result = _run(t, operation)
         assert not result["deleted"]
         assert "Refusing to delete" in result["delete_error"]
-        assert t.store.get_actions()[0].kind == "move_identity"
+        assert t.store.actions.get_actions()[0].kind == "move_identity"
     else:
         with pytest.raises(ValueError, match="Refusing to delete"):
             _run(t, operation)
     assert not t.source_client.deleted
-    assert t.store.get_playlist(t.source) is not None
+    assert t.store.playlists.get_playlist(t.source) is not None
 
 
 @pytest.mark.parametrize("operation", ["merge", "move", "delete_duplicate"])
@@ -133,7 +133,7 @@ def test_uncertain_source_does_not_fall_back_to_cached_contents(transfer, monkey
         with pytest.raises(ValueError, match="source playlist"):
             _run(t, operation)
     assert not t.source_client.deleted
-    assert t.store.get_playlist(t.source) is not None
+    assert t.store.playlists.get_playlist(t.source) is not None
 
 
 @pytest.mark.parametrize("operation", ["merge", "move"])
@@ -155,14 +155,14 @@ def test_merge_honors_explicit_track_exclusions(transfer, selected):
     result = executor.apply_result(t.store, t.clients, [t.keeper, t.source], selected, t.keeper, 10)
     assert result["deleted"] == ["Original"]
     assert [track["videoId"] for track in t.target_client._tracks["KEEP"]] == selected
-    backup = json.loads(t.store.get_actions()[0].undo_json)["backups"][0]
+    backup = json.loads(t.store.actions.get_actions()[0].undo_json)["backups"][0]
     assert [track["video_id"] for track in json.loads(Path(backup).read_text())["tracks"]] == ["v1", "v2"]
 
 
 def test_n_way_merge_rechecks_destination_before_each_deletion(transfer, monkeypatch):
     t = transfer
-    other = t.store.upsert_playlist(t.source_identity, "OTHER", "Other", 2, "", 1)
-    t.store.set_playlist_tracks(other, t.tids)
+    other = t.store.playlists.upsert_playlist(t.source_identity, "OTHER", "Other", 2, "", 1)
+    t.store.playlists.set_playlist_tracks(other, t.tids)
     t.source_client._tracks["OTHER"] = list(t.tracks)
     delete = t.source_client.delete_playlist
 
@@ -175,9 +175,9 @@ def test_n_way_merge_rechecks_destination_before_each_deletion(transfer, monkeyp
         executor.apply_result(t.store, t.clients, [t.keeper, t.source, other],
                               ["v1", "v2"], t.keeper, 10)
     assert t.source_client.deleted == ["SOURCE"]
-    assert t.store.get_playlist(t.source) is None
-    assert t.store.get_playlist(other) is not None
-    action = t.store.get_actions()[0]
+    assert t.store.playlists.get_playlist(t.source) is None
+    assert t.store.playlists.get_playlist(other) is not None
+    action = t.store.actions.get_actions()[0]
     assert json.loads(action.params_json)["deleted"] == ["Original"]
     assert Path(json.loads(action.undo_json)["backups"][0]).is_file()
 
@@ -194,11 +194,11 @@ def test_lost_delete_response_preserves_backup_evidence(transfer, monkeypatch, o
     if operation == "merge":
         with pytest.raises(TimeoutError):
             _run(t, operation)
-        backup = json.loads(t.store.get_actions()[0].undo_json)["backups"][0]
+        backup = json.loads(t.store.actions.get_actions()[0].undo_json)["backups"][0]
     else:
         result = _run(t, operation)
         assert not result["deleted"] and "Delete response lost" in result["delete_error"]
-        backup = json.loads(t.store.get_actions()[0].params_json)["source_backup"]
+        backup = json.loads(t.store.actions.get_actions()[0].params_json)["source_backup"]
     assert Path(backup).is_file()
     assert len(json.loads(Path(backup).read_text())["tracks"]) == 2
     assert t.source_client.deleted == ["SOURCE"]  # non-idempotent deletes are never replayed
@@ -218,12 +218,12 @@ def test_failed_merge_route_preserves_draft_and_reports_partial_action(transfer,
     assert response.status_code == 422
     assert "Refusing to delete" in response.text
     assert "hx-redirect" not in response.headers
-    assert t.store.get_draft(f"{t.keeper},{t.source}") is not None
-    action = next(a for a in t.store.get_actions() if a.kind == "apply_merge")
+    assert t.store.actions.get_draft(f"{t.keeper},{t.source}") is not None
+    action = next(a for a in t.store.actions.get_actions() if a.kind == "apply_merge")
     params = json.loads(action.params_json)
     assert params["partial"] and params["skipped"] == 1
     assert "missing 1 required" in params["error"]
-    assert t.store.get_playlist(t.source) is not None
+    assert t.store.playlists.get_playlist(t.source) is not None
     assert not t.source_client.deleted
     log = client.get("/actions").text
     assert "partial merge into" in log

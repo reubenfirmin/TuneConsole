@@ -8,13 +8,14 @@ import json
 
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.core import catalog
+from yt_playlist.core.discovery_sources import retain as retain_source
 
 # Audio/content columns persisted per discovered track (mirrors the library `tracks` audio set).
 _DTRACK_AUDIO = ("bpm", "energy", "danceability", "mood_happy", "mood_sad", "mood_relaxed",
                  "mood_acoustic", "instrumental", "loudness", "dynamic_complexity",
                  "music_key", "music_scale")
 
-_GENERATED_PL = "(SELECT ytm FROM playlist_group WHERE name='Generated')"   # exclude app-made playlists
+_GENERATED_PL = "(SELECT ytm FROM quarantined_playlists)"
 
 
 class DiscoveryRepo(Repo):
@@ -86,8 +87,8 @@ class DiscoveryRepo(Repo):
             "SELECT r.identity_key FROM discovery_memberships d JOIN recordings r ON r.id=d.recording_id "
             "WHERE EXISTS(SELECT 1 FROM discovery_sources s WHERE s.recording_id=d.recording_id) "
             "AND NOT EXISTS(SELECT 1 FROM discovery_sources s WHERE s.recording_id=d.recording_id "
-            "AND (s.source_token LIKE 'radio:%' OR s.source_token LIKE 'genre:%' "
-            "OR s.source_token IN (SELECT browse_id FROM discovered_albums)))").fetchall()
+            "AND (s.source_type<>'album' "
+            "OR s.source_id IN (SELECT browse_id FROM discovered_albums)))").fetchall()
         held = set(held_keys)
         gone = [(r["identity_key"],) for r in rows if r["identity_key"] not in held]
         self.conn.executemany("DELETE FROM discovered_tracks WHERE identity_key=?", gone)
@@ -154,9 +155,7 @@ class DiscoveryRepo(Repo):
                 "INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?) "
                 "ON CONFLICT(recording_id) DO NOTHING", (rid,entry_id,now))
             if source_browse_id:
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO discovery_sources VALUES (?,?,?,?)",
-                    (rid,source_browse_id,video_id or None,now))
+                retain_source(self.conn, rid, source_browse_id, video_id or None, now)
                 if self.conn.execute("SELECT 1 FROM discovered_albums WHERE browse_id=?", (source_browse_id,)).fetchone():
                     self.conn.execute(
                         "INSERT OR IGNORE INTO album_track_links(browse_id,recording_id,entry_id,video_id,source) "
@@ -173,6 +172,54 @@ class DiscoveryRepo(Repo):
                         'INSERT OR IGNORE INTO catalog_field_hints(entry_id,field,source,value_json) VALUES (?,?,?,?)',
                         (entry_id,field,source_browse_id or 'discovery',json.dumps(value)))
             return self.conn.execute("SELECT identity_key FROM recordings WHERE id=?", (rid,)).fetchone()[0]
+
+    @synchronized
+    def discovery_sources_for_track(self, key) -> list:
+        return [dict(row) for row in self.conn.execute(
+            "SELECT s.* FROM discovery_sources s JOIN recordings r ON r.id=s.recording_id "
+            "WHERE r.identity_key=? ORDER BY s.found_at,s.source_token", (key,))]
+
+    @synchronized
+    def discovered_source_tokens(self, source_type=None) -> set:
+        return {row[0] for row in self.conn.execute(
+            "SELECT DISTINCT source_token FROM discovery_sources"
+            + (" WHERE source_type=?" if source_type else ""),
+            (source_type,) if source_type else ())}
+
+    @synchronized
+    def remove_discovery_source(self, key, source_token, held_keys=()) -> bool:
+        """Remove one contribution; only the last source can remove a candidate."""
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM discovery_sources WHERE source_token=? AND recording_id="
+                "(SELECT id FROM recordings WHERE identity_key=?)", (source_token, key))
+            if key in set(held_keys):
+                return False
+            row = self.conn.execute(
+                "SELECT d.recording_id FROM discovery_memberships d JOIN recordings r ON r.id=d.recording_id "
+                "WHERE r.identity_key=? AND NOT EXISTS(SELECT 1 FROM discovery_sources s "
+                "WHERE s.recording_id=d.recording_id)", (key,)).fetchone()
+            if row is None:
+                return False
+            self.conn.execute("DELETE FROM discovery_memberships WHERE recording_id=?", (row[0],))
+            self._prune_cached_tracks({key})
+            return True
+
+    def _prune_cached_tracks(self, gone_keys):
+        def prune(value):
+            if isinstance(value, list):
+                return [prune(item) for item in value if not isinstance(item, dict)
+                        or item.get('key', item.get('identity_key')) not in gone_keys]
+            if isinstance(value, dict):
+                return {key: prune(item) for key, item in value.items()}
+            return value
+
+        for row in self.conn.execute('SELECT surface,payload FROM rec_proposals').fetchall():
+            payload = json.loads(row['payload'])
+            cleaned = prune(payload)
+            if cleaned != payload:
+                self.conn.execute('UPDATE rec_proposals SET payload=? WHERE surface=?',
+                                  (json.dumps(cleaned), row['surface']))
 
     @staticmethod
     def _dtrack_row(r) -> dict:
@@ -324,8 +371,10 @@ class DiscoveryRepo(Repo):
         held = set(held_track_keys or ())
         rows = self.conn.execute(
             "SELECT identity_key,recording_id FROM discovered_tracks "
-            "WHERE COALESCE(first_shown, found_at) < ?",
-            (cutoff,)).fetchall()
+            "WHERE COALESCE(first_shown, found_at) < ? "
+            "AND NOT EXISTS(SELECT 1 FROM discovery_sources s WHERE "
+            "s.recording_id=discovered_tracks.recording_id AND s.last_found_at>=?)",
+            (cutoff,cutoff)).fetchall()
         gone = [r["identity_key"] for r in rows if r["identity_key"] not in held]
         if gone:
             # Keep successful album-fetch markers after expiry, so the next discovery tick cannot
@@ -340,22 +389,7 @@ class DiscoveryRepo(Repo):
             self.conn.executemany("DELETE FROM settings WHERE key=?",
                                   [("enrich_attempts:" + k,) for k in gone
                                    if not self.conn.execute("SELECT 1 FROM tracks WHERE identity_key=?", (k,)).fetchone()])
-            gone_keys = set(gone)
-
-            def prune(value):
-                if isinstance(value, list):
-                    return [prune(item) for item in value if not isinstance(item, dict)
-                            or item.get("key", item.get("identity_key")) not in gone_keys]
-                if isinstance(value, dict):
-                    return {key: prune(item) for key, item in value.items()}
-                return value
-
-            for row in self.conn.execute("SELECT surface, payload FROM rec_proposals").fetchall():
-                payload = json.loads(row["payload"])
-                cleaned = prune(payload)
-                if cleaned != payload:
-                    self.conn.execute("UPDATE rec_proposals SET payload=? WHERE surface=?",
-                                      (json.dumps(cleaned), row["surface"]))
+            self._prune_cached_tracks(set(gone))
         out["tracks"] = len(gone)
         self.conn.execute("DELETE FROM discovery_visible_impressions WHERE shown_at < ?",
                           (now - 90 * 86400,))

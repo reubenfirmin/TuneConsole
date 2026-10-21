@@ -43,24 +43,14 @@ def _complete_rating_context(detail):
 
 
 def _sync_generated_group(store, ytm, description, groups):
-    """Reconcile one playlist's quarantine against the marker in its YouTube description.
-
-    The description is the only place this survives across machines: which group a playlist is in
-    lives in the local DB, so a second install (or a reinstall) sees the app's own generated
-    playlists as ordinary library playlists and starts treating its own suggestions as your taste.
-    The account is what every install shares, so it decides - in both directions:
-
-      · marked, and ungrouped here      -> quarantine it (this machine hadn't been told)
-      · unmarked, but quarantined here  -> release it (promoted on another machine)
-
-    A playlist you filed in a group of your own is never touched: only the Generated group is
-    managed from the marker."""
+    """Reconcile explicit remote policy while preserving the user's display group."""
+    store.playlists.reconcile_playlist_provenance(ytm, description)
     marked = is_generated_description(description)
     current = groups.get(ytm)
     if marked and current is None:
-        store.set_playlist_group(ytm, GENERATED_GROUP)
-    elif not marked and current == GENERATED_GROUP:
-        store.set_playlist_group(ytm, "")
+        store.playlists.set_playlist_group(ytm, GENERATED_GROUP)
+    elif (not store.playlists.is_quarantined_playlist(ytm)) and current == GENERATED_GROUP:
+        store.playlists.set_playlist_group(ytm, "")
 
 
 def _emit(on_progress, type, text, **extra):
@@ -94,7 +84,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     logger.info("syncing identity %s", identity_id)
     # Only these rows can be disproved by this library snapshot. A playlist created while
     # the remote fetch is in flight may not appear in it yet, even while it is playing.
-    existing_playlists = [p for p in store.get_playlists() if p.identity_id == identity_id]
+    existing_playlists = [p for p in store.playlists.get_playlists() if p.identity_id == identity_id]
     _emit(on_progress, "info", f"{label}: fetching playlists…")
     try:
         playlists = with_retry(lambda: client.get_library_playlists(limit=None),
@@ -121,7 +111,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     _emit(on_progress, "info", f"{label}: {len(playlists)} playlists", count=len(playlists))
     total = len(playlists)
     seen_ytm = set()
-    groups = store.get_playlist_groups()        # for the generated-quarantine reconciliation below
+    groups = store.playlists.get_playlist_groups()        # for the generated-quarantine reconciliation below
     rated: dict[str, str] = {}                  # videoId -> likeStatus; see _STATUS_PRIORITY
     ratings_complete = True
     refreshed = skipped = incomplete = 0
@@ -155,7 +145,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
             incomplete += 1
         track_ids, keys = [], []
         for t in detail.get("tracks", []):
-            tid = store.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
+            tid = store.tracks.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
                                      _album(t), t.get("duration_seconds"), t.get("isAvailable"),
                                      t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")))
             track_ids.append(tid)
@@ -165,14 +155,14 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
                 if rk not in rated or _STATUS_PRIORITY[status] > _STATUS_PRIORITY[rated[rk]]:
                     rated[rk] = status
         track_ids = list(dict.fromkeys(track_ids))   # de-dupe (YouTube can repeat a video; see set_playlist_tracks)
-        keys = [store.catalog_subject(tid)["identity_key"] for tid in track_ids]
+        keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in track_ids]
         chash = content_hash(keys)
-        db_pid = store.upsert_playlist(identity_id, pid, pl.get("title", ""),
+        db_pid = store.playlists.upsert_playlist(identity_id, pid, pl.get("title", ""),
                                        len(track_ids), chash, now,
                                        best_thumb(pl.get("thumbnails")) or best_thumb(detail.get("thumbnails")))
-        store.set_playlist_tracks(db_pid, track_ids)
+        store.playlists.set_playlist_tracks(db_pid, track_ids)
         retry_insertions(store, db_pid, client, now, attempts=1)
-        store.ensure_playlist_thumbnail(db_pid)
+        store.playlists.ensure_playlist_thumbnail(db_pid)
         _sync_generated_group(store, pid, detail.get("description"), groups)
         refreshed += 1
         _emit(on_progress, "step", f"{label} › {pl.get('title', '')} ({len(track_ids)} tracks)",
@@ -186,7 +176,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     if playlists:
         stale = [p for p in existing_playlists if p.ytm_playlist_id not in seen_ytm]
         for p in stale:
-            store.remove_playlist(p.id)
+            store.playlists.remove_playlist(p.id)
         if stale:
             _emit(on_progress, "info", f"{label}: removed {len(stale)} playlist(s) no longer present")
     else:
@@ -219,8 +209,8 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     # provenance='sync': bulk-discovered statuses carry no real action time, so their likes stay out
     # of the transient model and graduate at the low sync-like weight (see graduation.apply_dislikes).
     for video_id, status in rated.items():
-        store.record_item_rating(identity_id, video_id, status, source="sync", now=now)
-    apply_dislikes(store, {store.identity_key_for_video(v): s for v,s in rated.items()},
+        store.tracks.record_item_rating(identity_id, video_id, status, source="sync", now=now)
+    apply_dislikes(store, {store.tracks.identity_key_for_video(v): s for v,s in rated.items()},
                    now, provenance="sync")
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
@@ -228,16 +218,16 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
                              operation=f"fetch history for {label!r} (identity {identity_id})")
         if not isinstance(history, list) or any(not isinstance(t, dict) for t in history):
             raise ValueError("history snapshot is unavailable")
-        hist = [(store.observe_track(t["videoId"], t.get("title", ""), _artist(t), now=now)
+        hist = [(store.tracks.observe_track(t["videoId"], t.get("title", ""), _artist(t), now=now)
                  if t.get("videoId") else
-                 (store.resolve_identity_key(identity_key(t.get("title", ""), _artist(t)))
+                 (store.tracks.resolve_identity_key(identity_key(t.get("title", ""), _artist(t)))
                   or identity_key(t.get("title", ""), _artist(t))), t.get("played")) for t in history]
         # Record plays keyed by (track, played-date): YouTube re-sends the same recently-played window
         # each fetch (~91% overlap), so record_history_plays dedups on the absolute play-date (the
         # relative `played` bucket resolved via `now`). #75: this daily fetch is now BACKFILL for plays
         # that happened while the app was not running; live plays arrive via the extension's play
         # events (library/live_plays.py) and dedup against the same (track, date) model.
-        store.record_history_plays(identity_id, now, hist,
+        store.history.record_history_plays(identity_id, now, hist,
                                    source_timezone=getattr(client, "history_timezone", None))
         resources["history"] = resource("complete", refreshed=len(hist))
     except Exception as e:  # noqa: BLE001
@@ -267,22 +257,24 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now, *,
         detail = validate_playlist(snapshot)
     track_ids, keys = [], []
     for t in detail.get("tracks", []):
-        tid = store.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
+        tid = store.tracks.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
                                  _album(t), t.get("duration_seconds"), t.get("isAvailable"),
                                  t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")))
         track_ids.append(tid)
     track_ids = list(dict.fromkeys(track_ids))   # de-dupe repeated videos
-    keys = [store.catalog_subject(tid)["identity_key"] for tid in track_ids]
-    db_pid = store.upsert_playlist(identity_id, ytm_playlist_id, title,
+    keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in track_ids]
+    db_pid = store.playlists.upsert_playlist(identity_id, ytm_playlist_id, title,
                                    len(track_ids), content_hash(keys), now, best_thumb(detail.get("thumbnails")))
-    store.set_playlist_tracks(db_pid, track_ids)
+    store.playlists.set_playlist_tracks(db_pid, track_ids)
     retry_insertions(store, db_pid, client, now, attempts=1)
-    store.ensure_playlist_thumbnail(db_pid)
+    store.playlists.ensure_playlist_thumbnail(db_pid)
+    _sync_generated_group(store, ytm_playlist_id, detail.get('description'),
+                          store.playlists.get_playlist_groups())
 
 def _sync_saved_albums(store, clients, on_progress):
     """Replace the shared mirror only when every account supplies a complete snapshot."""
     saved = {}
-    configured = {identity.id for identity in store.get_identities()}
+    configured = {identity.id for identity in store.identities.get_identities()}
     complete = bool(clients) and configured <= clients.keys()
     outcomes = {str(i): resource("skipped", "Account unavailable") for i in configured - clients.keys()}
     for identity_id, client in clients.items():
@@ -308,7 +300,7 @@ def _sync_saved_albums(store, clients, on_progress):
         _emit(on_progress, "info", "saved albums unchanged: complete snapshots unavailable for some accounts")
         return outcomes, resource("skipped", "Complete account snapshots unavailable"), resource(
             "skipped", "Saved-album mirror unchanged")
-    store.replace_saved_albums(list(saved.values()))
+    store.collection.replace_saved_albums(list(saved.values()))
     _emit(on_progress, "info", f"saved albums: {len(saved)}")
     tracks = _materialize_album_tracks(store, clients, saved, on_progress)
     return outcomes, resource("complete", refreshed=len(saved)), tracks
@@ -346,7 +338,7 @@ def _materialize_album_tracks(store, clients, saved, on_progress):
             if not t.get("title"):
                 continue
             artist = ", ".join(x.get("name", "") for x in (t.get("artists") or [])) or meta["artist"]
-            store.upsert_track(t.get("videoId"), t.get("title"), artist, meta["title"], None,
+            store.tracks.upsert_track(t.get("videoId"), t.get("title"), artist, meta["title"], None,
                                album_browse_id=bid, thumbnail=meta["thumbnail"])
             added += 1
         remember_album(store, bid, album, meta)
@@ -360,7 +352,7 @@ def _materialize_album_tracks(store, clients, saved, on_progress):
 
 def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None):
     begin_attempt(store, now)
-    labels = {idn.id: idn.label for idn in store.get_identities()}
+    labels = {idn.id: idn.label for idn in store.identities.get_identities()}
     accounts = {str(i): {"label": label, "status": "skipped", "resources": {
         name: resource("skipped", "Account unavailable") for name in ("playlists", "ratings", "history")}}
         for i, label in labels.items() if i not in clients}

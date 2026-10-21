@@ -12,20 +12,20 @@ from yt_playlist.web.app import create_app
 
 @pytest.fixture
 def library(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     tracks = []
     for genre in ("Techno", "Jazz", "Rock"):
         for i in range(60):
             title = f"{genre} {i}"
             video = f"{genre}-{i}"
-            tid = store.upsert_track(video, title, "Artist", None, None)
-            store.set_track_genre(tid, genre)
+            tid = store.tracks.upsert_track(video, title, "Artist", None, None)
+            store.tracks.set_track_genre(tid, genre)
             tracks.append(tid)
     rec_params.set_param(store, "modes_k", 3)
     rec_params.set_param(store, "modes_min_members", 20)
     assert embed.maybe_rebuild_content_vectors(store)
     assert taste_modes.recompute(store, 1000.0) == 3
-    store.import_play_events(iid, [(f"techno {i}|artist", f"Techno-{i}", 2000.0)
+    store.history.import_play_events(iid, [(f"techno {i}|artist", f"Techno-{i}", 2000.0)
                                    for i in range(4)])
     return tracks
 
@@ -44,13 +44,13 @@ def test_startup_repairs_groups_without_sync_or_extension(store, library, monkey
     else:
         # New release metadata adds a column while coverage stays in the same bucket.
         for tid in library[60:120]:
-            store.set_track_enrichment(tid, "Jazz", "2001")
+            store.tracks.set_track_enrichment(tid, "Jazz", "2001")
         if reason == "stale":
             embed.build_content_and_store(store)
             assert not taste_viz.overview(store, 2000.0)["recent"]["styles_current"]
         else:
-            store.set_setting("rec_content_genre_revision", "older-catalog")
-    store.set_setting("enrich_worker_enabled", "0")
+            store.settings.set_setting("rec_content_genre_revision", "older-catalog")
+    store.settings.set_setting("enrich_worker_enabled", "0")
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Local repair must not need a full rebuild or provider connection")
@@ -94,13 +94,13 @@ def test_startup_repairs_groups_without_sync_or_extension(store, library, monkey
         html = client.get("/taste/panels/overview").text
         assert "genre groups need to be updated" not in html
         assert 'hx-trigger="every 3s"' not in html
-        assert store.get_proposals("mode_bundles") is not None
+        assert store.rec_surface.get_proposals("mode_bundles") is not None
 
 
 def test_same_space_content_refresh_updates_group_membership(store, library):
     space = embed.content_space_id(store)
-    tid = store.upsert_track("extra", "Zz extra", "Artist", None, None)
-    store.set_track_genre(tid, "Techno")
+    tid = store.tracks.upsert_track("extra", "Zz extra", "Artist", None, None)
+    store.tracks.set_track_genre(tid, "Techno")
     embed.build_content_and_store(store)
     assert embed.content_space_id(store) == space
     assert not taste_modes.needs_refresh(store)
@@ -111,7 +111,7 @@ def test_same_space_content_refresh_updates_group_membership(store, library):
 def test_current_groups_are_not_recomputed_at_every_startup(store, library):
     _worker(store)._do_mode_refresh()
     assert all(m["last_seen"] == 1000.0 for m in taste_modes.live_modes(store))
-    assert store.get_proposals("mode_bundles") is None
+    assert store.rec_surface.get_proposals("mode_bundles") is None
 
 
 @pytest.fixture

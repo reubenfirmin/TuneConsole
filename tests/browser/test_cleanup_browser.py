@@ -28,22 +28,22 @@ def live_cleanup_app(monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     s = Store(":memory:")
     s.init_schema()
-    iid = s.upsert_identity("Main", "c1", None, True)
-    s.upsert_playlist(iid, "PLE", "Empty One", 0, "h", 1.0)   # no tracks -> an empty playlist
+    iid = s.identities.upsert_identity("Main", "c1", None, True)
+    s.playlists.upsert_playlist(iid, "PLE", "Empty One", 0, "h", 1.0)   # no tracks -> an empty playlist
     # two identical playlists -> an exact-duplicate group
-    dup_tracks = [s.upsert_track(f"d{i}", f"D{i}", "X", None, None, 1) for i in range(2)]
+    dup_tracks = [s.tracks.upsert_track(f"d{i}", f"D{i}", "X", None, None, 1) for i in range(2)]
     for ytm, title in (("PLD1", "Dup A"), ("PLD2", "Dup B")):
-        pid = s.upsert_playlist(iid, ytm, title, 2, "h", 1.0)
-        s.set_playlist_tracks(pid, dup_tracks)
+        pid = s.playlists.upsert_playlist(iid, ytm, title, 2, "h", 1.0)
+        s.playlists.set_playlist_tracks(pid, dup_tracks)
     # two playlists that share tracks but aren't identical -> an overlap pair
-    ov = [s.upsert_track(f"o{i}", f"O{i}", "X", None, None, 1) for i in range(4)]
-    oa = s.upsert_playlist(iid, "POVA", "Ov A", 3, "h", 1.0); s.set_playlist_tracks(oa, ov[0:3])
-    ob = s.upsert_playlist(iid, "POVB", "Ov B", 3, "h", 1.0); s.set_playlist_tracks(ob, ov[1:4])
+    ov = [s.tracks.upsert_track(f"o{i}", f"O{i}", "X", None, None, 1) for i in range(4)]
+    oa = s.playlists.upsert_playlist(iid, "POVA", "Ov A", 3, "h", 1.0); s.playlists.set_playlist_tracks(oa, ov[0:3])
+    ob = s.playlists.upsert_playlist(iid, "POVB", "Ov B", 3, "h", 1.0); s.playlists.set_playlist_tracks(ob, ov[1:4])
     # Three near-duplicates share seven tracks and each have a different eighth track.
-    near = [s.upsert_track(f"n{i}", f"N{i}", "X", None, None, 1) for i in range(10)]
+    near = [s.tracks.upsert_track(f"n{i}", f"N{i}", "X", None, None, 1) for i in range(10)]
     for n, ytm in enumerate(("PNEARA", "PNEARB", "PNEARC")):
-        pid = s.upsert_playlist(iid, ytm, f"Near {chr(65 + n)}", 8, "h", 1.0)
-        s.set_playlist_tracks(pid, near[:7] + [near[7 + n]])
+        pid = s.playlists.upsert_playlist(iid, ytm, f"Near {chr(65 + n)}", 8, "h", 1.0)
+        s.playlists.set_playlist_tracks(pid, near[:7] + [near[7 + n]])
     app = create_app(s, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))

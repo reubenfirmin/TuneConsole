@@ -18,7 +18,7 @@ def store():
 
 
 def _identity(store):
-    return store.upsert_identity("main", "cred", None, True)
+    return store.identities.upsert_identity("main", "cred", None, True)
 
 
 def _install_modes(store):
@@ -52,7 +52,7 @@ def test_decay_weighted_shares_hand_verified(store, monkeypatch):
     _install_content_vectors(store, monkeypatch, keys, V)
     iid = _identity(store)
     now = 100_000.0
-    store.import_play_events(iid, [
+    store.history.import_play_events(iid, [
         ("a1", "va1", now),               # age 0h -> mode 1
         ("b1", "vb1", now - 12 * 3600.0),  # age 12h -> mode 2
     ])
@@ -75,7 +75,7 @@ def test_below_min_events_returns_none(store, monkeypatch):
     _install_content_vectors(store, monkeypatch, keys, V)
     iid = _identity(store)
     now = 100_000.0
-    store.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
+    store.history.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
     rec_params.set_param(store, "now_min_events", 3)
 
     shares, n, modes = layers.session_mode_mix(store, now)
@@ -92,7 +92,7 @@ def test_30h_old_play_excluded_by_24h_window(store, monkeypatch):
     _install_content_vectors(store, monkeypatch, keys, V)
     iid = _identity(store)
     now = 100_000.0
-    store.import_play_events(iid, [
+    store.history.import_play_events(iid, [
         ("a1", "va1", now - 3600.0),
         ("a2", "va2", now - 7200.0),
         ("a3", "va3", now - 30 * 3600.0),  # 30h old -> outside the fixed 24h session window
@@ -114,7 +114,7 @@ def test_dedup_latest_per_key(store, monkeypatch):
     iid = _identity(store)
     now = 100_000.0
     # rows must arrive oldest-first for the dedup-latest-wins convention (mirrors test_now_layer.py).
-    store.import_play_events(iid, [
+    store.history.import_play_events(iid, [
         ("a1", "va1", now - 20 * 3600.0),  # a1 played long ago...
         ("a1", "va1", now),                # ...and again just now (this timestamp should win)
         ("b1", "vb1", now - 3600.0),
@@ -135,7 +135,7 @@ def test_no_active_modes_returns_none(store, monkeypatch):
     _install_content_vectors(store, monkeypatch, keys, V)
     iid = _identity(store)
     now = 100_000.0
-    store.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
+    store.history.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
 
     shares, n, modes = layers.session_mode_mix(store, now)
     assert shares is None
@@ -149,7 +149,7 @@ def test_no_content_vectors_returns_none(store, monkeypatch):
     iid = _identity(store)
     now = 100_000.0
     keys = ["a1", "a2", "a3"]
-    store.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
+    store.history.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
 
     shares, n, modes = layers.session_mode_mix(store, now)
     assert shares is None
@@ -158,20 +158,20 @@ def test_no_content_vectors_returns_none(store, monkeypatch):
 
 def test_session_mode_mix_passes_radio_exclusion_to_play_events_since(store, monkeypatch):
     """#93v2 pin: session_mode_mix must resolve the radio playlist ids (layers._radio_list_ids) and
-    pass them as exclude_list_ids to store.play_events_since. Behavior is covered end-to-end by
+    pass them as exclude_list_ids to store.history.play_events_since. Behavior is covered end-to-end by
     test_now_layer.py's equivalent test for the NOW layer (same underlying mechanism); this pins the
     parameter-passing contract for THIS call site specifically."""
     _install_modes(store)
     _install_content_vectors(store, monkeypatch, ["a1"], np.array([[1.0, 0.0]], dtype=np.float32))
-    store.set_setting("radio_playlist_ytm", "PLRADIO")
-    store.set_setting("radio_playlist_b_ytm", "PLRADIO_B")
+    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
+    store.settings.set_setting("radio_playlist_b_ytm", "PLRADIO_B")
     captured = {}
-    orig = store.play_events_since
+    orig = store.history.play_events_since
 
     def fake(since_ts, exclude_list_ids=None):
         captured["exclude_list_ids"] = exclude_list_ids
         return orig(since_ts, exclude_list_ids=exclude_list_ids)
-    monkeypatch.setattr(store, "play_events_since", fake)
+    monkeypatch.setattr(store.history, "play_events_since", fake)
 
     layers.session_mode_mix(store, 1000.0)
 
@@ -187,7 +187,7 @@ def test_stale_mode_centroids_dim_mismatch_reads_as_quiet(store, monkeypatch):
     _install_content_vectors(store, monkeypatch, keys, V)
     iid = _identity(store)
     now = 100_000.0
-    store.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
+    store.history.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
 
     shares, _n, modes = layers.session_mode_mix(store, now)
     assert shares is None and len(modes) == 2

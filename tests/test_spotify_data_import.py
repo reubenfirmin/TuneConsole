@@ -47,8 +47,8 @@ def test_plain_audio_json_is_supported_and_bad_upload_is_rejected():
 
 def test_import_matches_library_is_idempotent_and_marks_event_source():
     store = Store(":memory:"); store.init_schema()
-    store.upsert_identity("main", "bridge", None, True)
-    store.upsert_track("yt-song", "Song", "Artist", None, 180)
+    store.identities.upsert_identity("main", "bridge", None, True)
+    store.tracks.upsert_track("yt-song", "Song", "Artist", None, 180)
     raw = json.dumps([_row(), _row("Unknown", "Elsewhere", "2024-01-02T10:00:00Z")])
     report = import_spotify_data(store, raw)
     assert report["matched"] == 1 and report["unmatched"] == 1

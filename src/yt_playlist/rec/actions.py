@@ -26,9 +26,9 @@ def sync_status(store, now) -> SyncStatus:
     # "Last synced" reflects the most recent sync of EITHER kind: a quick plays/auto sync keeps your
     # plays current just as a full sync does, so the badge must not claim you synced longer ago than
     # you actually did. Staleness rides the same most-recent stamp: recent plays = not stale.
-    stamps = [float(s) for s in (store.get_setting("last_sync_at"),
-                                 store.get_setting("last_plays_sync_at")) if s is not None]
-    outcome = store.get_setting("last_sync_outcome")
+    stamps = [float(s) for s in (store.settings.get_setting("last_sync_at"),
+                                 store.settings.get_setting("last_plays_sync_at")) if s is not None]
+    outcome = store.settings.get_setting("last_sync_outcome")
     if outcome in ("partial", "skipped", "failed"):
         ago = _ago(now - max(stamps)) if stamps else None
         return SyncStatus(ago, True, f"Library sync {outcome}. Reconnect or sign in, then sync again.")
@@ -70,7 +70,7 @@ def refresh_cleanup(store, now=None) -> dict:
     calls it after every edit (its mutations HX-Refresh back through the GET). take_action then just
     reads the cached number. The home page never pays for the scan."""
     payload = analysis.cleanup_summary(store).as_payload()
-    store.put_proposals(CLEANUP_SURFACE, payload, now)
+    store.rec_surface.put_proposals(CLEANUP_SURFACE, payload, now)
     return payload
 
 
@@ -79,7 +79,7 @@ def take_action(store, now, auth_expired) -> list[ActionItem]:
 
     Honors per-card snooze: an alert dismissed by the user stays hidden until its cooldown.
     """
-    snoozed = store.suppressed_keys("alert", now)
+    snoozed = store.rec_model.suppressed_keys("alert", now)
     items: list[ActionItem] = []
     for label in auth_expired.values():
         items.append(ActionItem(
@@ -90,7 +90,7 @@ def take_action(store, now, auth_expired) -> list[ActionItem]:
             note="Signed out - sync is paused", badge="!"))
 
     # Read the cached summary the rec worker / cleanup page materialize. Never scan on home load.
-    cleanup = store.get_proposals(CLEANUP_SURFACE) or {}
+    cleanup = store.rec_surface.get_proposals(CLEANUP_SURFACE) or {}
     n = cleanup.get("count", 0)
     if n:
         items.append(ActionItem(

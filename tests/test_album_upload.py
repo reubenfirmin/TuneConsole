@@ -78,7 +78,7 @@ class _StrictClient(FakeClient):
 
 
 def _upload_client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = _StrictClient(uploads={UPLOAD_ID: _UPLOAD_ALBUM})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), fc
@@ -124,12 +124,12 @@ def test_upload_album_folds_all_live_tracks_into_the_library(store):
     """The fold-in must complete a PARTIAL local subset. Playlist sync stamps only the upload tracks
     that appear in a playlist (3 of 17 for a real album here), and the old `not tracks` guard skipped
     the fold entirely whenever even one row already existed, showing 3 of 17."""
-    store.upsert_track("u1", "Opener", "Gatecrasher", "Disco-tech (disc 1)", None,
+    store.tracks.upsert_track("u1", "Opener", "Gatecrasher", "Disco-tech (disc 1)", None,
                        album_browse_id=UPLOAD_ID)          # one incidental row, as sync would leave
     c, _fc = _upload_client(store)
     html = c.get(f"/album?browse={UPLOAD_ID}").text
     assert "Opener" in html and "Closer" in html            # BOTH, not just the incidental one
-    assert len(store.album_tracks_detail(UPLOAD_ID)) == 2   # the missing track got folded in
+    assert len(store.charts.album_tracks_detail(UPLOAD_ID)) == 2   # the missing track got folded in
 
 
 def test_upload_album_enrich_button_is_enabled(store):
@@ -157,7 +157,7 @@ def test_enrich_tooltip_renders_a_real_ampersand(store):
 def test_album_hides_the_artist_tag_when_there_is_no_album_artist(store):
     """A compilation upload has no single album artist, so YouTube returns none. Rendering the amber
     tag anyway leaves an empty pill in the header."""
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     no_artist = dict(_UPLOAD_ALBUM, artists=[])
     fc = _StrictClient(uploads={UPLOAD_ID: no_artist})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
@@ -173,9 +173,9 @@ def test_album_with_no_cover_shows_a_mosaic_of_its_track_art(store):
     once enriched. A mosaic is honest about it being a collection, where picking one track's art to
     stand for 17 different artists would not be."""
     for vid, title, art in (("u1", "Opener", "http://art/1.jpg"), ("u2", "Closer", "http://art/2.jpg")):
-        store.upsert_track(vid, title, "Gatecrasher", "Disco-tech (disc 1)", 100,
+        store.tracks.upsert_track(vid, title, "Gatecrasher", "Disco-tech (disc 1)", 100,
                            album_browse_id=UPLOAD_ID, thumbnail=art)
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = _StrictClient(uploads={UPLOAD_ID: dict(_UPLOAD_ALBUM, thumbnails=[{"url": _PH}])})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     html = TestClient(app, base_url="http://127.0.0.1").get(f"/album?browse={UPLOAD_ID}").text
@@ -187,7 +187,7 @@ def test_album_with_no_cover_shows_a_mosaic_of_its_track_art(store):
 def test_album_with_real_cover_keeps_the_single_cover(store):
     """No regression: an ordinary album with its own art shows it, not a mosaic."""
     real = "https://lh3.googleusercontent.com/real=w544"
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = FakeClient(albums={"MPREb_x": {"title": "A", "artists": [{"name": "B"}],
                                         "thumbnails": [{"url": real}], "tracks": []}})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
@@ -209,7 +209,7 @@ def test_song_title_links_are_informational_but_play_buttons_are_not(store):
 
 def test_catalog_album_still_shows_save_button(store):
     # No regression: an ordinary unsaved album keeps its save button.
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = FakeClient(albums={"MPREb_x": {"title": "The Album", "artists": [{"name": "A"}],
                                         "thumbnails": [], "tracks": []}})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)

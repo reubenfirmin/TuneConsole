@@ -12,7 +12,6 @@ import json
 import numpy as np
 
 from yt_playlist.rec import embed, rec_params
-from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import normalize
 
@@ -30,7 +29,7 @@ def artist_baskets(store):
     Baskets that collapse to a single artist (the per-artist basket, or a one-artist playlist) are
     dropped: they would only self-relate an artist. Returns a list of distinct normalized-artist lists."""
     out = []
-    for basket in RecDao(store).rec_baskets():
+    for basket in store.rec_query.rec_baskets():
         artists = {_artist_of(k) for k in basket if k}
         artists.discard("")
         if len(artists) >= 2:
@@ -52,13 +51,13 @@ def build_collab_artist_vectors(store, dim=embed.DIM):
 def build_collab_and_store(store, dim=embed.DIM) -> int:
     """Build and persist the collaborative artist vectors. Returns the number of artists embedded."""
     artists, V = build_collab_artist_vectors(store, dim)
-    store.replace_rec_artist_vectors([(a, V[i].tobytes()) for i, a in enumerate(artists)])
+    store.rec_model.replace_rec_artist_vectors([(a, V[i].tobytes()) for i, a in enumerate(artists)])
     return len(artists)
 
 
 def load_artist_vectors(store):
     """(artists, V, idx) from persisted collaborative artist vectors, or ([], None, {}) if none built."""
-    return embed._load_vector_rows(store.get_rec_artist_vectors())
+    return embed._load_vector_rows(store.rec_model.get_rec_artist_vectors())
 
 
 # --- §B content block: relate artists by what they ARE (genre family / subgenre / decade / audio) ---
@@ -66,7 +65,7 @@ def artist_content_profiles(store):
     """{normalized_artist: profile} aggregated over the artist's library tracks. profile =
     {'families': set, 'subs': set, 'decades': set, 'audio': {feat: mean}}. Grouped by the identity_key
     artist (already normalized), so it shares the §A vocabulary. The artist analogue of track_content."""
-    dao = RecDao(store)
+    dao = store.rec_query
     prof: dict = {}
 
     def _p(artist):
@@ -147,7 +146,7 @@ def _discovered_artist_profiles(store):
     """Genre-only content profiles for the out-of-corpus discovered-artist pool (from each entry's
     `genre` field), so OOC artists encode into the SAME artist-content space and become placeable."""
     out = {}
-    for a in store.get_discovered_artists():
+    for a in store.discovery.get_discovered_artists():
         artist, genre = normalize(a.get("artist") or ""), a.get("genre")
         if artist and genre:
             out[artist] = {"families": {genre_map.family(genre)}, "subs": set(), "decades": set(), "audio": {}}
@@ -167,14 +166,14 @@ def build_content_and_store(store) -> int:
         v = encode_artist_content(model, profiles[artist])
         if v is not None:
             rows.append((artist, v.tobytes()))
-    store.replace_rec_artist_content_vectors(rows)
-    store.set_setting(_ARTIST_CONTENT_MODEL_SETTING, json.dumps(model))
+    store.rec_model.replace_rec_artist_content_vectors(rows)
+    store.settings.set_setting(_ARTIST_CONTENT_MODEL_SETTING, json.dumps(model))
     return len(rows)
 
 
 def load_artist_content_vectors(store):
     """(artists, V, idx) from persisted artist content vectors, or ([], None, {}) if none built."""
-    return embed._load_vector_rows(store.get_rec_artist_content_vectors())
+    return embed._load_vector_rows(store.rec_model.get_rec_artist_content_vectors())
 
 
 def _blended_set_scores(store, seeds):
@@ -209,7 +208,7 @@ def _blended_set_scores(store, seeds):
     w_edge = float(rec_params.get_param(store, "artist_edge_weight"))
     if w_edge > 0.0:
         for seed in seeds:
-            for name, match in store.artist_similar_edges(seed):
+            for name, match in store.rec_surface.artist_similar_edges(seed):
                 cand = normalize(name)
                 if cand and cand not in seeds:
                     blended[cand] = blended.get(cand, 0.0) + w_edge * float(match)
@@ -243,7 +242,7 @@ def related_artists(store, seed_artists, topn=12, exclude_owned=True):
     seeds = {normalize(a) for a in seed_artists if a}
     excl = set(seeds)
     if exclude_owned:
-        excl |= RecDao(store).library_artists()
+        excl |= store.rec_query.library_artists()
     return _ranked(_blended_set_scores(store, seeds), excl, topn)
 
 
@@ -257,11 +256,11 @@ def artist_track_candidates(store, seed_artists, topn=24, include_out_of_corpus=
     scores = dict(ranked)
     if not scores:
         return []
-    out = list(RecDao(store).tracks_by_artists(scores))
+    out = list(store.rec_query.tracks_by_artists(scores))
     for row in out:
         row["artist_score"] = scores.get(normalize(row.get("artist") or ""), 0.0)
     if include_out_of_corpus:
-        for r in store.get_discovered_tracks():
+        for r in store.discovery.get_discovered_tracks():
             artist = normalize(r.get("artist") or "")
             if artist in scores:
                 out.append({"key": r.get("identity_key"), "title": r.get("title"),

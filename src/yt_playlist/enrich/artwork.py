@@ -8,13 +8,13 @@ def retry_due(store, now_fn, *, should_stop=lambda: False, on_progress=lambda ev
     for job in store.enrichment.due_artwork_retries(now_fn(), limit=1):
         if should_stop():
             break
-        track = store.catalog_subject(job["entry_id"])
+        track = store.tracks.catalog_subject(job["entry_id"])
         if not track:
             continue
         if needs_art(track):
             outcome = coverart.lookup(job["release_ids"])
             if outcome.url:
-                store.set_track_art(track["id"], outcome.url)
+                store.tracks.set_track_art(track["id"], outcome.url)
         else:
             outcome = coverart.CoverResult("found", track.get("thumbnail"))
         store.enrichment.record_artwork_result(track["id"], job["release_ids"], outcome, now_fn())

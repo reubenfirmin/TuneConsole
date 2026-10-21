@@ -495,7 +495,7 @@ def test_deck_ready_fallback_true_starts_v2_session_on_pool(monkeypatch):
         assert radio.active is True and radio.dual_deck is False
         assert [q["video_id"] for q in radio.queue] == ["v1", "v2"]
         assert radio.playlist_ytm == "PLRADIO"
-        assert store.get_setting("radio_active") != "0"
+        assert store.settings.get_setting("radio_active") != "0"
     assert "v1" in nav["url"] and "list=PLRADIO" in nav["url"]
     assert prime["videoId"] == "v2" and "list=PLRADIO" in prime["url"]
 
@@ -515,7 +515,7 @@ def test_deck_ready_fallback_true_with_nothing_pickable_stops_honestly(monkeypat
         ws.send_json({"type": "deck-ready", "fallback": True, "gen": radio.start_gen})
         _barrier(client, cond=lambda: radio.active is False)
         assert radio.active is False
-        assert store.get_setting("radio_active") == "0"
+        assert store.settings.get_setting("radio_active") == "0"
 
 
 def test_deck_waiting_pevent_tagged_standby_still_sets_waiting():

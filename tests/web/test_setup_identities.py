@@ -51,14 +51,14 @@ def _add_brand(t, brand="123456789012345678901"):
 def test_add_identity_returns_to_identities_and_checks_actual_access(identity_setup, has_synced):
     t = identity_setup
     if has_synced:
-        t.store.set_setting("last_sync_at", "1.0")
+        t.store.settings.set_setting("last_sync_at", "1.0")
     saved = _add_brand(t)
     assert saved.status_code == 303
     location = urlsplit(saved.headers["location"])
     assert location.path == "/setup"
     assert parse_qs(location.query)["tab"] == ["identities"]
     assert "authenticated" not in saved.headers["location"]
-    ids = {i.label: i.id for i in t.store.get_identities()}
+    ids = {i.label: i.id for i in t.store.identities.get_identities()}
     assert t.client.get(saved.headers["location"]).context["rows"] == [
         {"id": ids["main"], "label": "main", "brand": ""},
         {"id": ids["Brand"], "label": "Brand", "brand": "123456789012345678901"}]
@@ -68,7 +68,7 @@ def test_add_identity_returns_to_identities_and_checks_actual_access(identity_se
     assert {r["heading"] for r in checked.json()["checks"]} == {"Authenticated"}
     assert t.clients["Brand"].checks == t.clients["main"].checks == 1
     # A valid identity can have no playlists yet; a check never imports or prunes library data.
-    assert t.store.get_playlists() == []
+    assert t.store.playlists.get_playlists() == []
 
 
 def test_denied_brand_has_help_and_does_not_hide_successful_main(identity_setup):
@@ -95,7 +95,7 @@ def test_common_brand_id_mistakes_are_explained(identity_setup, brand):
 
 def test_disconnected_extension_is_unverified_and_does_not_clear_expired_state(identity_setup):
     t = identity_setup
-    iid = t.store.get_identities()[0].id
+    iid = t.store.identities.get_identities()[0].id
     t.app.state.ctx.flag_auth_expired(iid, "main")
     t.clients["main"].error = BridgeError("no extension connected")
     checked = t.client.get("/setup/identities/check")
@@ -105,13 +105,13 @@ def test_disconnected_extension_is_unverified_and_does_not_clear_expired_state(i
     assert "Open Pairing" not in checked.text
     assert "automatically" in checked.text
     assert t.app.state.ctx.auth_expired == {iid: "main"}
-    assert json.loads(t.store.get_setting(AUTH_EXPIRED_KEY)) == {str(iid): "main"}
+    assert json.loads(t.store.settings.get_setting(AUTH_EXPIRED_KEY)) == {str(iid): "main"}
 
 
 def test_only_live_success_clears_its_expired_flag(identity_setup):
     t = identity_setup
     _add_brand(t)
-    ids = {i.label: i.id for i in t.store.get_identities()}
+    ids = {i.label: i.id for i in t.store.identities.get_identities()}
     for label, iid in ids.items():
         t.app.state.ctx.flag_auth_expired(iid, label)
     t.clients["Brand"].library_error = RuntimeError("Server returned HTTP 403: Forbidden")
@@ -121,7 +121,7 @@ def test_only_live_success_clears_its_expired_flag(identity_setup):
     t.clients["Brand"].library_error = None
     checked = t.client.get("/setup/identities/check")
     assert t.app.state.ctx.auth_expired == {}
-    assert t.store.get_setting(AUTH_EXPIRED_KEY) is None
+    assert t.store.settings.get_setting(AUTH_EXPIRED_KEY) is None
     assert checked.json()["auth_labels"] == []
 
 
@@ -150,13 +150,13 @@ def test_blank_label_with_brand_is_not_silently_discarded(identity_setup):
     assert "every identity needs a label" in response.text
     assert response.context["rows"] == [{"id": None, "label": "main", "brand": ""},
                                          {"id": None, "label": "", "brand": "123456"}]
-    assert len(t.store.get_identities()) == 1
+    assert len(t.store.identities.get_identities()) == 1
 
 
 def test_recheck_targets_only_the_selected_identity(identity_setup):
     t = identity_setup
     _add_brand(t)
-    brand = next(i for i in t.store.get_identities() if i.label == "Brand")
+    brand = next(i for i in t.store.identities.get_identities() if i.label == "Brand")
     checked = t.client.get("/setup/identities/check", params={"identity_id": brand.id})
     assert [r["identity_id"] for r in checked.json()["checks"]] == [brand.id]
     assert t.clients["Brand"].checks == 1 and t.clients["main"].checks == 0
@@ -173,7 +173,7 @@ def test_autosave_returns_saved_rows_without_redirect_or_auth_claim(identity_set
     assert response.json()["auth_labels"] == []
     assert t.clients["Brand"].checks == t.clients["main"].checks == 0
     t.runtime.load()
-    assert [i.label for i in t.store.get_identities()] == ["main", "Brand"]
+    assert [i.label for i in t.store.identities.get_identities()] == ["main", "Brand"]
 
 
 def test_invalid_autosave_returns_error_and_preserves_saved_identities(identity_setup):
@@ -182,21 +182,21 @@ def test_invalid_autosave_returns_error_and_preserves_saved_identities(identity_
         "label": ["main", "main"], "brand_account_id": ["", "123456"], "master": "0"})
     assert response.status_code == 400
     assert response.json() == {"error": "identity labels must be unique"}
-    assert [i.label for i in t.store.get_identities()] == ["main"]
+    assert [i.label for i in t.store.identities.get_identities()] == ["main"]
 
 
 def test_remove_persists_without_checks_or_unrelated_form_changes(identity_setup):
     t = identity_setup
     _add_brand(t)
-    ids = {i.label: i.id for i in t.store.get_identities()}
+    ids = {i.label: i.id for i in t.store.identities.get_identities()}
     for label, iid in ids.items():
         t.app.state.ctx.flag_auth_expired(iid, label)
-    snapshot = t.store.add_history_snapshot(ids["Brand"], 1.0, ["song|artist"])
+    snapshot = t.store.history.add_history_snapshot(ids["Brand"], 1.0, ["song|artist"])
     response = t.client.post(f'/setup/identities/{ids["Brand"]}/remove', data={"label": "unsaved edit"})
     assert response.status_code == 200
     assert response.json() == {"message": 'Removed identity "Brand".', "main_identity_id": ids["main"],
                                "identity_count": 1, "auth_labels": ["main"]}
-    assert [i.label for i in t.store.get_identities()] == ["main"]
+    assert [i.label for i in t.store.identities.get_identities()] == ["main"]
     assert t.app.state.ctx.auth_expired == {ids["main"]: "main"}
     assert t.clients["Brand"].checks == t.clients["main"].checks == 0
     assert t.store.conn.execute("SELECT identity_id FROM history_snapshots WHERE id=?",
@@ -208,23 +208,23 @@ def test_remove_persists_without_checks_or_unrelated_form_changes(identity_setup
 def test_remove_main_promotes_a_remaining_identity(identity_setup):
     t = identity_setup
     _add_brand(t)
-    ids = {i.label: i.id for i in t.store.get_identities()}
+    ids = {i.label: i.id for i in t.store.identities.get_identities()}
     response = t.client.post(f'/setup/identities/{ids["main"]}/remove')
     assert response.status_code == 200
     assert response.json()["main_identity_id"] == ids["Brand"]
-    assert [(i.label, i.is_master) for i in t.store.get_identities()] == [("Brand", True)]
+    assert [(i.label, i.is_master) for i in t.store.identities.get_identities()] == [("Brand", True)]
     t.runtime.load()
-    assert t.store.get_master_identity().id == ids["Brand"]
+    assert t.store.identities.get_master_identity().id == ids["Brand"]
 
 
 def test_remove_unknown_or_only_identity_leaves_config_unchanged(identity_setup):
     t = identity_setup
     original = t.runtime.config_path.read_text()
-    only = t.store.get_identities()[0]
+    only = t.store.identities.get_identities()[0]
     assert t.client.post("/setup/identities/999999/remove").status_code == 404
     assert t.client.post(f"/setup/identities/{only.id}/remove").status_code == 409
     assert t.runtime.config_path.read_text() == original
-    assert t.store.get_identities() == [only]
+    assert t.store.identities.get_identities() == [only]
 
 
 @pytest.mark.parametrize("brand_accessible", [True, False])
@@ -276,8 +276,8 @@ def test_removing_identity_updates_setup_menu_and_move_choices(store, tmp_path):
         {"label": "Second identity", "credential_ref": "browser.json", "brand_account_id": "UC9"},
         {"label": "Third identity", "credential_ref": "browser.json", "brand_account_id": "UC10"},
     ])
-    ids = {i.label: i.id for i in store.get_identities()}
-    store.upsert_playlist(ids["Second identity"], "PL2", "Removed identity mix", 0, "h", 1.0)
+    ids = {i.label: i.id for i in store.identities.get_identities()}
+    store.playlists.upsert_playlist(ids["Second identity"], "PL2", "Removed identity mix", 0, "h", 1.0)
     app = create_app(store, runtime.clients, now_fn=lambda: 1.0, setup=runtime)
     client = TestClient(app, base_url="http://127.0.0.1")
     assert '<a href="/move"' in client.get("/setup").text

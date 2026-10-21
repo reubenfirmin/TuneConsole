@@ -9,7 +9,7 @@ def test_sync_identities_into_store_inserts_once(store):
     assert len(ids) == 2
     # idempotent: calling again does not duplicate
     ids2 = sync_identities_into_store(store, cfgs)
-    assert len(store.get_identities()) == 2
+    assert len(store.identities.get_identities()) == 2
     assert ids == ids2
 
 def test_validate_credentials_missing_raises(tmp_path):

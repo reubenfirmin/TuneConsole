@@ -18,7 +18,7 @@ def store():
 
 
 def _client(store, now=1000.0):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                       base_url="http://127.0.0.1")
 
@@ -39,7 +39,7 @@ def _seed_bundles(store):
     for surf in ms.CARD_SURFACES:
         payload["1"][surf] = items(f"{surf}h", "house")
         payload["2"][surf] = items(f"{surf}t", "techno")
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
 
 
 def test_cards_route_renders_mode_cards(store):
@@ -72,7 +72,7 @@ def test_fresh_mode_card_recipe_retains_lane(store, monkeypatch):
     from yt_playlist.rec import mode_surfaces
 
     _seed_bundles(store)
-    tracks = store.get_proposals("mode_bundles")["1"]["fresh"]
+    tracks = store.rec_surface.get_proposals("mode_bundles")["1"]["fresh"]
     monkeypatch.setattr(mode_surfaces, "assemble_cards", lambda *args, **kwargs: [
         {"lane": "fresh", "label": "Fresh songs", "mode_id": 1, "ranker": "lane", "tracks": tracks}])
     response = _client(store).get("/home/cards")

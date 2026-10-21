@@ -102,7 +102,7 @@ class SearchRepo(Repo):
             "SELECT p.id pid, p.title title, p.thumbnail thumb "
             "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
             "JOIN tracks t ON t.id=pt.track_id "
-            "LEFT JOIN playlist_group g ON g.ytm=p.ytm_playlist_id "
+            "LEFT JOIN quarantined_playlists g ON g.ytm=p.ytm_playlist_id "
             "WHERE t.artist=? AND (g.name IS NULL OR g.name<>?) "
             "GROUP BY p.id LIMIT ?", (name, GENERATED_GROUP, CANDIDATE_CAP)).fetchall()
         picked = _sample(prows, q, per_section)
@@ -135,7 +135,7 @@ class SearchRepo(Repo):
     def _playlists_section(self, like, q, per_section, shown_pids, sections):
         rows = self.conn.execute(
             "SELECT p.id pid, p.title title, p.thumbnail thumb "
-            "FROM playlists p LEFT JOIN playlist_group g ON g.ytm=p.ytm_playlist_id "
+            "FROM playlists p LEFT JOIN quarantined_playlists g ON g.ytm=p.ytm_playlist_id "
             "WHERE p.title LIKE ? ESCAPE '\\' AND (g.name IS NULL OR g.name<>?) "
             "GROUP BY p.id LIMIT ?", (like, GENERATED_GROUP, CANDIDATE_CAP)).fetchall()
         rows = [r for r in rows if r["pid"] not in shown_pids]

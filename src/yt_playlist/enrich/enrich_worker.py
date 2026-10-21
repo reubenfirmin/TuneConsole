@@ -31,17 +31,17 @@ class EnrichWorker:
 
     # --- settings (re-read each cycle so changes take effect on the next batch) ------------------
     def _enabled(self) -> bool:
-        return self.ctx.store.get_setting("enrich_worker_enabled", "1") == "1"
+        return self.ctx.store.settings.get_setting("enrich_worker_enabled", "1") == "1"
 
     def _batch_size(self) -> int:
         try:
-            return max(1, int(self.ctx.store.get_setting("enrich_batch_size", "40")))
+            return max(1, int(self.ctx.store.settings.get_setting("enrich_batch_size", "40")))
         except (TypeError, ValueError):
             return 40
 
     def _resweep_days(self) -> float:
         try:
-            return float(self.ctx.store.get_setting("enrich_resweep_days", "30"))
+            return float(self.ctx.store.settings.get_setting("enrich_resweep_days", "30"))
         except (TypeError, ValueError):
             return 30.0
 
@@ -73,8 +73,8 @@ class EnrichWorker:
             self._started = True
             self._shutdown = False
             self._wake.clear()
-        if not self.ctx.store.get_setting("enrich_caught_up_at"):
-            self.ctx.store.set_setting("enrich_caught_up_at", str(self.ctx.now_fn()))
+        if not self.ctx.store.settings.get_setting("enrich_caught_up_at"):
+            self.ctx.store.settings.set_setting("enrich_caught_up_at", str(self.ctx.now_fn()))
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -128,33 +128,33 @@ class EnrichWorker:
         config = enrichment.load_config(store)
         registry = getattr(self.waterfall_fn, "keywords", {}).get("registry", REGISTRY)
         configuration = enrichment.provider_configuration(store, registry, config)
-        store.reconcile_provider_configuration(configuration)
+        store.enrichment.reconcile_provider_configuration(configuration)
         providers = [name for name, p in configuration.items() if p["status"] == "available"]
-        batch = store.next_enrich_batch(limit, providers=providers, now=self.ctx.now_fn())
+        batch = store.enrichment.next_enrich_batch(limit, providers=providers, now=self.ctx.now_fn())
         if batch:
             self._had_work = True
         else:
-            if self._had_work and not store.queue_remaining():
-                store.set_setting("enrich_caught_up_at", str(self.ctx.now_fn()))
+            if self._had_work and not store.enrichment.queue_remaining():
+                store.settings.set_setting("enrich_caught_up_at", str(self.ctx.now_fn()))
                 self._had_work = False
             stale_before = self.ctx.now_fn() - self._resweep_days() * 86400
-            batch = store.resweep_batch(limit, stale_before, providers=providers, now=self.ctx.now_fn())
+            batch = store.enrichment.resweep_batch(limit, stale_before, providers=providers, now=self.ctx.now_fn())
             scope = "refresh"
         if not batch:
             with self._lock:
                 self._activity = ({**self._activity, "state": "waiting",
                                    "text": "Pending provider retries are deferred; other eligible work continues."}
-                                  if store.queue_remaining() else {})
+                                  if store.enrichment.queue_remaining() else {})
             return art_completed
         if scope == "queue":
             for track in batch:
                 if track.get("last_enriched_at") is not None:
-                    track["provider_jobs"] = store.enrichment_provider_jobs(track["recording_id"])
+                    track["provider_jobs"] = store.enrichment.enrichment_provider_jobs(track["recording_id"])
         completed = self._run_batch(batch, scope)
         if completed:
             try:                                  # never let a rebuild crash the drain
                 from yt_playlist.rec import embed, fresh_pool
-                memberships = store.enrichment_memberships(completed)
+                memberships = store.enrichment.enrichment_memberships(completed)
                 if 'library' in memberships:
                     rec_worker = getattr(self.ctx, "rec_worker", None)
                     if rec_worker is not None:
@@ -182,7 +182,7 @@ class EnrichWorker:
         batch_keys = {t['job_id'] for t in batch}
 
         def mark(keys):
-            self.ctx.store.mark_recordings_enriched(keys, self.ctx.now_fn())
+            self.ctx.store.enrichment.mark_recordings_enriched(keys, self.ctx.now_fn())
 
         def sink_for(track):
             return TrackSink(self.ctx.store, track)

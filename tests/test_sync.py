@@ -1,4 +1,5 @@
-from yt_playlist.library.sync import sync_identity, sync_all, content_hash
+from yt_playlist.library.sync import sync_identity, sync_all
+from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library import sync as sync_mod
 from tests.conftest import FakeClient, _track
 
@@ -33,7 +34,7 @@ def test_sync_identity_soft_skips_on_bridge_disconnect(store):
     """A BridgeError (extension disconnected / no signed-in tab) is a CONNECTION problem, not a dead
     session: sync_identity must skip quietly, NOT flag re-auth, and NOT raise."""
     from yt_playlist.core.bridge import BridgeError
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
 
     class _DisconnectedClient(FakeClient):
         def get_library_playlists(self, limit=25):
@@ -43,24 +44,24 @@ def test_sync_identity_soft_skips_on_bridge_disconnect(store):
     sync_identity(store, iid, _DisconnectedClient(), now=1500.0,
                   on_auth_expired=lambda i, label: expired.__setitem__(i, label or str(i)))
     assert expired == {}                       # NOT flagged for re-auth
-    assert store.get_playlists() == []         # nothing pruned/changed
+    assert store.playlists.get_playlists() == []         # nothing pruned/changed
 
 
 def test_sync_all_records_last_sync_at(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     client = FakeClient(playlists=[{"playlistId": "PL1", "title": "Mix", "count": 1}],
                         tracks={"PL1": [{**_track("v1", "A", "X"), "likeStatus": "INDIFFERENT"}]})
     sync_all(store, {iid: client}, now=1234.0)
-    assert store.get_setting("last_sync_at") == "1234.0"
+    assert store.settings.get_setting("last_sync_at") == "1234.0"
 
 
 def test_sync_status_uses_most_recent_of_either_sync(store):
     """The 'Last synced' badge reflects the most recent sync of either kind: a recent plays/auto sync
     must not be eclipsed by an older full sync (and resets staleness too)."""
-    from yt_playlist.rec.recommend import sync_status
+    from yt_playlist.rec.actions import sync_status
     now = 100_000.0
-    store.set_setting("last_sync_at", str(now - 17 * 3600))        # full sync 17h ago
-    store.set_setting("last_plays_sync_at", str(now - 2 * 3600))   # plays synced 2h ago
+    store.settings.set_setting("last_sync_at", str(now - 17 * 3600))        # full sync 17h ago
+    store.settings.set_setting("last_plays_sync_at", str(now - 2 * 3600))   # plays synced 2h ago
     st = sync_status(store, now)
     assert st.last_synced_ago == "2 hours ago"   # not "17 hours ago"
     assert st.stale is False and st.message is None
@@ -72,7 +73,7 @@ def test_content_hash_is_order_independent():
 
 
 def test_sync_saves_cover_from_playlist_detail_when_library_listing_omits_it(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
 
     class CoverClient(FakeClient):
         def get_playlist(self, playlistId, limit=100):
@@ -82,11 +83,11 @@ def test_sync_saves_cover_from_playlist_detail_when_library_listing_omits_it(sto
     client = CoverClient(playlists=[{"playlistId": "PL1", "title": "Mix"}],
                          tracks={"PL1": [_track("v1", "Song", "Artist")]})
     sync_identity(store, iid, client, now=1000)
-    assert store.get_playlists()[0].thumbnail == "https://example.com/playlist.jpg"
+    assert store.playlists.get_playlists()[0].thumbnail == "https://example.com/playlist.jpg"
 
 
 def test_refresh_saves_initial_artwork_then_replaces_it_with_youtube_cover(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
 
     class CoverClient(FakeClient):
         cover = None
@@ -97,17 +98,17 @@ def test_refresh_saves_initial_artwork_then_replaces_it_with_youtube_cover(store
     client = CoverClient(tracks={"PL1": [{**_track("v1", "Song", "Artist"),
                                          "thumbnails": [{"url": "https://example.com/song.jpg"}]}]})
     sync_mod.refresh_playlist(store, iid, client, "PL1", "Mix", 1000)
-    assert store.get_playlists()[0].thumbnail == "https://example.com/song.jpg"
+    assert store.playlists.get_playlists()[0].thumbnail == "https://example.com/song.jpg"
     client.cover = "https://example.com/playlist.jpg"
     sync_mod.refresh_playlist(store, iid, client, "PL1", "Mix", 2000)
-    assert store.get_playlists()[0].thumbnail == client.cover
+    assert store.playlists.get_playlists()[0].thumbnail == client.cover
     client.cover = ""
     sync_mod.refresh_playlist(store, iid, client, "PL1", "Mix", 3000)
-    assert store.get_playlists()[0].thumbnail == "https://example.com/playlist.jpg"
+    assert store.playlists.get_playlists()[0].thumbnail == "https://example.com/playlist.jpg"
 
 
 def test_sync_identity_populates_store(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     client = FakeClient(
         playlists=[{"playlistId": "PL1", "title": "Mix", "count": 2}],
         tracks={"PL1": [_track("v1", "Song A", "Artist"), _track("v2", "Song B", "Artist")]},
@@ -118,17 +119,17 @@ def test_sync_identity_populates_store(store):
     client.history_timezone = "UTC"
     sync_identity(store, iid, client, now=1000.0)
 
-    pls = store.get_playlists()
+    pls = store.playlists.get_playlists()
     assert len(pls) == 1
-    assert store.get_playlist_track_keys(pls[0].id) == {"song a|artist", "song b|artist"}
-    assert store.get_recent_history_keys(0.0) == {"song a|artist"}
+    assert store.playlists.get_playlist_track_keys(pls[0].id) == {"song a|artist", "song b|artist"}
+    assert store.history.get_recent_history_keys(0.0) == {"song a|artist"}
     assert pls[0].content_hash == content_hash(["song a|artist", "song b|artist"])
 
 
 def test_history_sync_uses_browser_timezone_across_utc_and_local_midnight(store):
     import datetime
 
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     client = FakeClient(history=[{**_track("v1", "Song", "Artist"), "played": "Today"}])
     client.history_timezone = "America/Costa_Rica"
     first = datetime.datetime(2026, 10, 20, 23, 30, tzinfo=datetime.timezone.utc).timestamp()
@@ -136,15 +137,15 @@ def test_history_sync_uses_browser_timezone_across_utc_and_local_midnight(store)
     sync_identity(store, iid, client, now=first + 3600)
     client._history[0]["played"] = "Yesterday"
     sync_identity(store, iid, client, now=first + 7 * 3600)
-    assert store.recent_play_counts(100) == {"song|artist": 1}
+    assert store.history.recent_play_counts(100) == {"song|artist": 1}
     client._history[0]["played"] = "Today"
     sync_identity(store, iid, client, now=first + 7 * 3600)
-    assert store.recent_play_counts(100) == {"song|artist": 2}
+    assert store.history.recent_play_counts(100) == {"song|artist": 2}
 
 def test_sync_identity_no_truncation_beyond_defaults(store):
     """Regression: sync_identity must pass limit=None so >25 playlists and >100 tracks are
     not silently truncated by ytmusicapi's defaults."""
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
 
     # 30 playlists, exceeds the get_library_playlists default of 25
     playlists = [{"playlistId": f"PL{i}", "title": f"Playlist {i}", "count": 150}
@@ -159,10 +160,10 @@ def test_sync_identity_no_truncation_beyond_defaults(store):
     client = FakeClient(playlists=playlists, tracks=tracks_per_pl, history=[])
     sync_identity(store, iid, client, now=2000.0)
 
-    pls = store.get_playlists()
+    pls = store.playlists.get_playlists()
     assert len(pls) == 30, f"Expected 30 playlists but got {len(pls)} (truncation bug?)"
     for pl in pls:
-        keys = store.get_playlist_track_keys(pl.id)
+        keys = store.playlists.get_playlist_track_keys(pl.id)
         assert len(keys) == 150, (
             f"Playlist {pl.remote_id} has {len(keys)} track keys, expected 150 (truncation bug?)"
         )
@@ -171,24 +172,24 @@ def test_sync_identity_no_truncation_beyond_defaults(store):
 def test_sync_prunes_playlists_gone_from_remote(store):
     import yt_playlist.library.sync as sync
     from tests.conftest import FakeClient, _track
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     # stale row in the store that the remote library no longer lists
-    ghost = store.upsert_playlist(iid, "GHOST", "Deleted Already", 1, "h", 1.0)
-    store.set_playlist_tracks(ghost, [store.upsert_track("vx", "Old", "X", None, 1)])
+    ghost = store.playlists.upsert_playlist(iid, "GHOST", "Deleted Already", 1, "h", 1.0)
+    store.playlists.set_playlist_tracks(ghost, [store.tracks.upsert_track("vx", "Old", "X", None, 1)])
     client = FakeClient(
         playlists=[{"playlistId": "PL1", "title": "Live", "count": 1}],
         tracks={"PL1": [_track("v1", "A", "X")]})
     sync.sync_identity(store, iid, client, now=1.0)
-    ytm_ids = {p.ytm_playlist_id for p in store.get_playlists()}
+    ytm_ids = {p.ytm_playlist_id for p in store.playlists.get_playlists()}
     assert ytm_ids == {"PL1"}                 # GHOST pruned, PL1 present
-    assert store.get_playlist(ghost) is None
+    assert store.playlists.get_playlist(ghost) is None
 
 
 def test_sync_preserves_generated_playlist_created_during_library_fetch(store):
     from yt_playlist.library import executor
 
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "DELETED", "Deleted playlist", 0, "h", 1)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.upsert_playlist(iid, "DELETED", "Deleted playlist", 0, "h", 1)
     same_title = "Fresh songs - October 20 2026 #1"
 
     class GeneratingClient(FakeClient):
@@ -204,14 +205,14 @@ def test_sync_preserves_generated_playlist_created_during_library_fetch(store):
     sync_identity(store, iid, client, now=100)
 
     generated = client.generated
-    saved = store.get_playlist(generated["pid"])
+    saved = store.playlists.get_playlist(generated["pid"])
     assert saved is not None
     assert saved.ytm_playlist_id == generated["new_ytm"]
     assert saved.created_at == 101
-    assert [t["video_id"] for t in store.playlist_tracks_detail(saved.id)] == ["new-song"]
-    assert store.playback_source(generated["new_ytm"], "new-song") == {
+    assert [t["video_id"] for t in store.charts.playlist_tracks_detail(saved.id)] == ["new-song"]
+    assert store.collection.playback_source(generated["new_ytm"], "new-song") == {
         "kind": "playlist", "id": saved.id, "title": same_title}
-    assert {p.ytm_playlist_id for p in store.get_playlists()} == {"EXISTING", generated["new_ytm"]}
+    assert {p.ytm_playlist_id for p in store.playlists.get_playlists()} == {"EXISTING", generated["new_ytm"]}
 
 
 def test_failed_playlist_logs_context_preserves_tracks_and_reports_partial_sync(store, monkeypatch, caplog):
@@ -220,10 +221,10 @@ def test_failed_playlist_logs_context_preserves_tracks_and_reports_partial_sync(
     # Exercise all retry attempts without waiting for backoff in this test.
     monkeypatch.setattr(sync_mod, "with_retry", lambda fn, **kwargs:
                         with_retry(fn, sleep=lambda _: None, **kwargs))
-    iid = store.upsert_identity("brand", "cred", "brand-id", True)
-    cached = store.upsert_playlist(iid, "PL_BAD", "Unavailable", 1, "old-hash", 100)
-    old_track = store.upsert_track("old-video", "Old song", "Artist", None, 120)
-    store.set_playlist_tracks(cached, [old_track])
+    iid = store.identities.upsert_identity("brand", "cred", "brand-id", True)
+    cached = store.playlists.upsert_playlist(iid, "PL_BAD", "Unavailable", 1, "old-hash", 100)
+    old_track = store.tracks.upsert_track("old-video", "Old song", "Artist", None, 120)
+    store.playlists.set_playlist_tracks(cached, [old_track])
 
     class PartialClient(FakeClient):
         failed_calls = 0
@@ -243,9 +244,9 @@ def test_failed_playlist_logs_context_preserves_tracks_and_reports_partial_sync(
         sync_identity(store, iid, client, now=200, label="Music brand", on_progress=events.append)
 
     assert client.failed_calls == 3
-    assert store.get_playlist_track_ids(cached) == [old_track]
-    assert store.get_playlist(cached).last_seen == 100
-    assert {p.ytm_playlist_id for p in store.get_playlists()} == {"PL_BAD", "PL_GOOD"}
+    assert store.playlists.get_playlist_track_ids(cached) == [old_track]
+    assert store.playlists.get_playlist(cached).last_seen == 100
+    assert {p.ytm_playlist_id for p in store.playlists.get_playlists()} == {"PL_BAD", "PL_GOOD"}
     assert "playlist 'Unavailable' (PL_BAD), account 'Music brand'" in caplog.text
     assert f"identity {iid}" in caplog.text
     assert "keeping any cached playlist/tracks" in caplog.text

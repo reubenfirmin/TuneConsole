@@ -16,7 +16,8 @@ from yt_playlist.library.executor import (
     MergePlan, add_tracks_to_playlist, apply_result, copy_into_playlist, copy_or_move_playlist,
     copy_playlist, create_playlist_from_album, create_playlist_from_song, delete_empty_playlist, delete_playlist,
     deserialize_plan, execute_planned, remove_track, rename_playlist,
-    reorder_track, search_versions, store_plan, undo_action)
+    reorder_track, search_versions, store_plan)
+from yt_playlist.library.playlist_undo import undo_action
 from yt_playlist.library.liked_music import LikedMusic
 from yt_playlist.library.playlist_positions import retry_insertions
 
@@ -43,7 +44,7 @@ class PlaylistOps:
         """Plan + remote-verified delete of `source` (keeping `target`). Returns the deleted title."""
         if source == target:
             raise ValueError("source and target must differ")
-        src, tgt = self.store.get_playlist(source), self.store.get_playlist(target)
+        src, tgt = self.store.playlists.get_playlist(source), self.store.playlists.get_playlist(target)
         if src is None or tgt is None:
             raise ValueError("playlist no longer exists (already deleted?)")
         aid = store_plan(self.store, MergePlan(source, target, [], []), "delete",
@@ -53,13 +54,13 @@ class PlaylistOps:
 
     def keep_one(self, keep) -> tuple:
         """Delete every non-system sibling with the same track set as `keep`. Returns (deleted, errors)."""
-        kept = self.store.get_playlist(keep)
+        kept = self.store.playlists.get_playlist(keep)
         if kept is None:
             raise ValueError("kept playlist no longer exists")
-        keep_keys = self.store.get_playlist_track_keys(keep)
-        siblings = [p for p in self.store.get_playlists()
+        keep_keys = self.store.playlists.get_playlist_track_keys(keep)
+        siblings = [p for p in self.store.playlists.get_playlists()
                     if p.id != keep and p.ytm_playlist_id not in analysis.SYSTEM_PLAYLIST_IDS
-                    and self.store.get_playlist_track_keys(p.id) == keep_keys]
+                    and self.store.playlists.get_playlist_track_keys(p.id) == keep_keys]
         deleted, errors = 0, []
         for sib in siblings:
             try:
@@ -99,7 +100,7 @@ class PlaylistOps:
         """Create a new playlist from an album's tracks, under the master account."""
         if not browse_id:
             raise ValueError("no album given")
-        identity = self.store.get_master_identity()
+        identity = self.store.identities.get_master_identity()
         client = self._clients().get(identity.id)
         if client is None:
             raise ValueError("the master account isn't connected")
@@ -107,19 +108,19 @@ class PlaylistOps:
 
     # --- shared song actions ------------------------------------------------
     def create_playlist_from_song(self, name, track) -> dict:
-        identity = self.store.get_master_identity()
+        identity = self.store.identities.get_master_identity()
         client = self._clients().get(identity.id)
         if client is None:
             raise ValueError("Your main account isn't connected.")
         return create_playlist_from_song(self.store, name, track, client, self.now_fn(), identity.id)
 
     def add_song_to_playlist(self, playlist_id, track) -> dict:
-        pl = self.store.get_playlist(playlist_id)
+        pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
             raise ValueError("That playlist no longer exists.")
         if pl.ytm_playlist_id in analysis.SYSTEM_PLAYLIST_IDS:
             raise ValueError("Choose a regular playlist.")
-        if playlist_id in self.store.playlist_ids_for_video(track["videoId"]):
+        if playlist_id in self.store.playlists.playlist_ids_for_video(track["videoId"]):
             return {"added": 0, "already_present": True}
         if self._client_for(pl) is None:
             raise ValueError("That playlist's account isn't connected.")
@@ -128,7 +129,7 @@ class PlaylistOps:
     # --- alternate versions -------------------------------------------------
     def find_alternates(self, playlist_id, video_id) -> list:
         """Search YouTube for alternate versions of a track already in the playlist."""
-        track = next((t for t in self.store.playlist_tracks_detail(playlist_id)
+        track = next((t for t in self.store.charts.playlist_tracks_detail(playlist_id)
                       if t["video_id"] == video_id), None)
         if track is None:
             raise ValueError("track is not in this playlist")
@@ -136,7 +137,7 @@ class PlaylistOps:
         return search_versions(client, track["title"], track["artist"], exclude=video_id)
 
     def add_tracks(self, playlist_id, tracks, after_video_id=None) -> dict:
-        pl = self.store.get_playlist(playlist_id)
+        pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
             raise ValueError("playlist no longer exists")
         client = self._client_for(pl)
@@ -152,7 +153,7 @@ class PlaylistOps:
                                       after_video_id)
 
     def remove_track(self, playlist_id, video_id) -> dict:
-        pl = self.store.get_playlist(playlist_id)
+        pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
             raise ValueError("playlist no longer exists")
         client = self._client_for(pl)
@@ -179,7 +180,7 @@ class PlaylistOps:
         # The like-button path: like/unlike a song in your main account's Liked Music (LM is
         # per-account; we target master). Resolve the master client here, then hand the rate+mirror
         # to LikedMusic so all LM membership changes go through one primitive.
-        master = next((i for i in self.store.get_identities() if i.is_master), None)
+        master = next((i for i in self.store.identities.get_identities() if i.is_master), None)
         if master is None:
             raise ValueError("no main account configured")
         client = self._clients().get(master.id)
@@ -189,7 +190,7 @@ class PlaylistOps:
         return {"liked": bool(on)}
 
     def _require_client(self, playlist_id):
-        pl = self.store.get_playlist(playlist_id)
+        pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
             raise ValueError("playlist no longer exists")
         client = self._client_for(pl)
@@ -200,7 +201,7 @@ class PlaylistOps:
     # --- move between identities --------------------------------------------
     def move(self, playlist_id, target_identity, *, copy_only) -> dict:
         clients = self._clients()
-        pl = self.store.get_playlist(playlist_id)
+        pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
             raise ValueError("playlist no longer exists")
         src_client, tgt_client = clients.get(pl.identity_id), clients.get(target_identity)
@@ -216,8 +217,8 @@ class PlaylistOps:
         # best-effort targeted refresh of the undo target (only meaningful for planned deletes);
         # avoids a slow full re-sync. Non-plan kinds make deserialize_plan raise -> harmless skip.
         try:
-            tgt = self.store.get_playlist(
-                deserialize_plan(self.store.get_action(action_id)).plan.target_playlist_id)
+            tgt = self.store.playlists.get_playlist(
+                deserialize_plan(self.store.actions.get_action(action_id)).plan.target_playlist_id)
             if tgt is not None and tgt.identity_id in clients:
                 sync_mod.refresh_playlist(self.store, tgt.identity_id, clients[tgt.identity_id],
                                           tgt.ytm_playlist_id, tgt.title, self.now_fn())

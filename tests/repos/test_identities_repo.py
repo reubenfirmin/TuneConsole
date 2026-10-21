@@ -22,20 +22,20 @@ def test_get_master_identity_missing_raises(store):
         store.identities.get_master_identity()
 
 
-def test_facade_delegates(store):
-    store.upsert_identity("me", "c", None, True)                        # legacy store.x() call site
-    assert store.get_master_identity().label == "me"
-    assert [i.label for i in store.get_identities()] == ["me"]
+def test_store_binding(store):
+    store.identities.upsert_identity("me", "c", None, True)
+    assert store.identities.get_master_identity().label == "me"
+    assert [i.label for i in store.identities.get_identities()] == ["me"]
 
 
 def test_migration_preserves_existing_identities(legacy_store):
     store = legacy_store
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     with store.conn:
         store.conn.execute("ALTER TABLE identities DROP COLUMN active")
         store.conn.execute("DROP TABLE schema_migrations")
 
     store.init_schema()
 
-    assert [(i.id, i.label) for i in store.get_identities()] == [(iid, "main")]
-    assert store.get_master_identity().id == iid
+    assert [(i.id, i.label) for i in store.identities.get_identities()] == [(iid, "main")]
+    assert store.identities.get_master_identity().id == iid

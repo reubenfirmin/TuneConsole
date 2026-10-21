@@ -31,7 +31,7 @@ def run_library_sync(ctx, job):
         accounts = {str(i.id): {"label": i.label, "status": "failed", "resources": {
             name: resource("failed", detail)
             for name in ("playlists", "ratings", "history", "saved_albums")}}
-            for i in ctx.store.get_identities()}
+            for i in ctx.store.identities.get_identities()}
         job.result = finish_attempt(ctx.store, {"status": "failed", "accounts": accounts,
             "resources": {name: resource("failed", detail)
                           for name in ("saved_album_mirror", "album_tracks")}}, now)
@@ -56,7 +56,7 @@ def start_playlist_enrichment(ctx, playlist_id):
 
     def run():
         try:
-            waterfall.run_waterfall(ctx.store, ctx.store.tracks_for_waterfall(playlist_id),
+            waterfall.run_waterfall(ctx.store, ctx.store.tracks.tracks_for_waterfall(playlist_id),
                                     enrichment.load_config(ctx.store), on_progress=job.events.append)
         except Exception as e:  # noqa: BLE001
             detail = str(e) or type(e).__name__

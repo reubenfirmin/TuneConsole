@@ -228,7 +228,7 @@ def test_run_once_does_nothing_without_a_takeout_import(store, monkeypatch, tmp_
     _hist(store, 1, 15, ["phantom"])
     repair.run_once(store)                              # takeout_imported_at is unset
     assert "phantom" in _keys(store)
-    assert store.get_setting(repair.PHANTOM_PURGE_SEEN) is None
+    assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) is None
 
 
 def test_run_once_fires_after_a_takeout_import_and_then_stops(store, monkeypatch, tmp_path):
@@ -237,16 +237,16 @@ def test_run_once_fires_after_a_takeout_import_and_then_stops(store, monkeypatch
     _ev(store, 1, "real", 10)
     _ev(store, 1, "real", 20)
     _hist(store, 1, 15, ["phantom"])
-    store.set_setting("takeout_imported_at", "1000.0")
+    store.settings.set_setting("takeout_imported_at", "1000.0")
     repair.run_once(store)
     assert "phantom" not in _keys(store)
-    watermark = store.get_setting(repair.PHANTOM_PURGE_SEEN)
+    watermark = store.settings.get_setting(repair.PHANTOM_PURGE_SEEN)
     assert watermark
 
     _hist(store, 1, 16, ["phantom2"])                   # a fresh phantom after the repair ran
     repair.run_once(store)                              # same import: must not run again
     assert "phantom2" in _keys(store)
-    assert store.get_setting(repair.PHANTOM_PURGE_SEEN) == watermark
+    assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) == watermark
 
 
 def test_run_once_fires_again_after_a_NEW_takeout_import(store, monkeypatch, tmp_path):
@@ -255,16 +255,16 @@ def test_run_once_fires_again_after_a_NEW_takeout_import(store, monkeypatch, tmp
     _coverage(store)
     _ev(store, 1, "real", 10)
     _ev(store, 1, "real", 20)
-    store.set_setting("takeout_imported_at", "1000.0")
+    store.settings.set_setting("takeout_imported_at", "1000.0")
     repair.run_once(store)
-    first_watermark = store.get_setting(repair.PHANTOM_PURGE_SEEN)
+    first_watermark = store.settings.get_setting(repair.PHANTOM_PURGE_SEEN)
 
     _hist(store, 1, 16, ["phantom2"])
     _coverage(store)
-    store.set_setting("takeout_imported_at", "2000.0")  # a fresh import
+    store.settings.set_setting("takeout_imported_at", "2000.0")  # a fresh import
     repair.run_once(store)
     assert "phantom2" not in _keys(store)
-    assert store.get_setting(repair.PHANTOM_PURGE_SEEN) != first_watermark
+    assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) != first_watermark
 
 
 def test_run_once_notices_an_older_import_verified_later(store, monkeypatch, tmp_path):
@@ -335,9 +335,9 @@ def test_independent_observation_protects_an_existing_daily_row(store, writer):
     store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key,source) VALUES (?,'song','ytm_history')", (sid,))
     store.conn.commit()
     if writer == 'live':
-        store.record_history_plays(1, 15 * DAY + 43200, ['song'], source_timezone='UTC')
+        store.history.record_history_plays(1, 15 * DAY + 43200, ['song'], source_timezone='UTC')
     else:
-        store.import_plays(1, [('song', 15 * DAY + 100)])
+        store.history.import_plays(1, [('song', 15 * DAY + 100)])
     assert repair.purge_phantom_history(store.conn) == 0
     assert _keys(store) == ['song']
 
@@ -347,7 +347,7 @@ def test_missing_backup_refuses_without_leaking_deletions_to_a_later_commit(stor
     _hist(store, 1, 15, ['observed'])
     with pytest.raises(ValueError, match='recovery backup'):
         repair.purge_phantom_history(store.conn)
-    store.set_setting('unrelated', 'commit')
+    store.settings.set_setting('unrelated', 'commit')
     assert _keys(store) == ['observed'] and not store.conn.in_transaction
 
 
@@ -387,7 +387,7 @@ def test_backup_failure_preserves_history_and_cleans_partial_file(store, monkeyp
         monkeypatch.setattr(repair.os, 'fsync' if failure == 'fsync' else 'link', fail)
     with pytest.raises(OSError, match='injected backup failure'):
         repair.purge_phantom_history(store.conn, tmp_path / 'backup.jsonl')
-    store.set_setting('unrelated', 'commit')
+    store.settings.set_setting('unrelated', 'commit')
     assert _keys(store) == ['a', 'b'] and not store.conn.in_transaction
     assert list(tmp_path.iterdir()) == []
 
@@ -399,7 +399,7 @@ def test_existing_backup_is_never_overwritten_and_no_deletion_is_committed(store
     backup.write_text('prior recovery evidence\n')
     with pytest.raises(FileExistsError):
         repair.purge_phantom_history(store.conn, backup)
-    store.set_setting('unrelated', 'commit')
+    store.settings.set_setting('unrelated', 'commit')
     assert _keys(store) == ['observed']
     assert backup.read_text() == 'prior recovery evidence\n'
     assert list(tmp_path.iterdir()) == [backup]
@@ -414,7 +414,7 @@ def test_failed_delete_rolls_back_prior_deletions_and_leaves_complete_backup(sto
     backup = tmp_path / 'backup.jsonl'
     with pytest.raises(sqlite3.IntegrityError, match='injected deletion failure'):
         repair.purge_phantom_history(store.conn, backup)
-    store.set_setting('unrelated', 'commit')
+    store.settings.set_setting('unrelated', 'commit')
     assert _keys(store) == ['a', 'b'] and not store.conn.in_transaction
     assert {json.loads(line)['identity_key'] for line in backup.read_text().splitlines()} == {'a', 'b'}
 
@@ -428,9 +428,9 @@ def test_run_once_backup_directory_failure_preserves_history_and_watermark(store
 
     monkeypatch.setattr('yt_playlist.core.paths.backups_dir', unavailable)
     repair.run_once(store)
-    store.set_setting('unrelated', 'commit')
+    store.settings.set_setting('unrelated', 'commit')
     assert _keys(store) == ['observed']
-    assert store.get_setting(repair.PHANTOM_PURGE_SEEN) is None
+    assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) is None
     assert 'history preserved' in caplog.text and 'recoverable from' not in caplog.text
 
 
@@ -442,4 +442,4 @@ def test_purge_refuses_a_caller_transaction_without_committing_it(store, tmp_pat
         repair.purge_phantom_history(store.conn, tmp_path / 'backup.jsonl')
     assert store.conn.in_transaction and _keys(store) == ['observed']
     store.conn.rollback()
-    assert store.get_setting('pending') is None
+    assert store.settings.get_setting('pending') is None

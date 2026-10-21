@@ -12,8 +12,7 @@ from fastapi.responses import JSONResponse
 from yt_playlist.core import updatecheck
 from yt_playlist.library import executor
 from yt_playlist.util import genre_map
-from yt_playlist.rec import arc_energy, embed, home_audit, home_themes, home_vibe, journeys, mix_tuning, onboarding, rec_params, recipes, recommend, into_recently
-from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.rec import actions, arc_energy, embed, graduation, home_audit, home_themes, home_vibe, journeys, mix_tuning, onboarding, ordering, rec_params, recipes, surfaces, taste_analysis, into_recently
 from yt_playlist.rec import measurement
 from yt_playlist.rec.trend_rollups import last_complete_month
 from yt_playlist.providers import wikipedia, lastfm
@@ -55,7 +54,7 @@ def lastfm_nudge_due(store, now=None) -> bool:
     (records a timestamp) so a long-lived install is reminded again instead of never seeing it."""
     if lastfm.available(store):
         return False
-    dismissed_at = store.get_setting("lastfm_nudge_dismissed_at")
+    dismissed_at = store.settings.get_setting("lastfm_nudge_dismissed_at")
     if dismissed_at is not None:
         try:
             if (now if now is not None else time.time()) - float(dismissed_at) < LASTFM_NUDGE_SNOOZE_S:
@@ -73,9 +72,9 @@ def takeout_nag_due(store, now=None) -> bool:
     Terminal (never due again) once takeout_imported_at is set. No last_sync gate: importing early
     is exactly the point, so this can be due on a fresh install. Dismissing snoozes it for 90 days
     (records a timestamp) so a long-lived install that never imports is reminded again."""
-    if store.get_setting("takeout_imported_at") is not None:
+    if store.settings.get_setting("takeout_imported_at") is not None:
         return False
-    dismissed_at = store.get_setting("takeout_nag_dismissed_at")
+    dismissed_at = store.settings.get_setting("takeout_nag_dismissed_at")
     if dismissed_at is not None:
         try:
             if (now if now is not None else time.time()) - float(dismissed_at) < TAKEOUT_NAG_SNOOZE_S:
@@ -95,7 +94,7 @@ def _proto(store, lane, label, items, now):
     tracks = items[:PROTO_SIZE]
     genres, _ = recipes.theme_counts(store, tracks)
     return {"lane": lane, "label": label, "name": f"{label} - {when}",
-            "note": recommend.theme_sentence(store, lane, tracks), "tracks": tracks,
+            "note": recipes.theme_sentence(store, lane, tracks), "tracks": tracks,
             "genres": list(genres),
             # #50: only the Fresh (out-of-corpus discovery) card carries persistent per-row feedback.
             # Owned-track proto cards stay curate-before-listen (client-side remove only).
@@ -107,11 +106,11 @@ def _order_by_journey(store, items, journey, seed):
     rolled DJ JOURNEY, attaching the per-track features journey_order needs (genre, real-audio energy,
     decade, plays, recency). Ordering happens here, not at save, so the preview IS the playlist
     (WYSIWYG): a Save keeps the rows you didn't prune, in the order you see."""
-    items = recommend.attach_genres(store, items)
-    _f = recommend._field
+    items = ordering.attach_genres(store, items)
+    _f = ordering._field
     keys = [_f(it, "key") or "" for it in items]
-    dao = RecDao(store)
-    decades, lastp, plays = dao.track_decades(keys), dao.track_last_played(keys), store.play_counts()
+    dao = store.rec_query
+    decades, lastp, plays = dao.track_decades(keys), dao.track_last_played(keys), store.rec_query.play_counts()
     genres = {(_f(it, "key") or ""): (_f(it, "genre") or "") for it in items}
     arc = arc_energy.arc_energies(keys, genres, dao.track_audio_features())   # real-audio energy (#37)
 
@@ -137,17 +136,17 @@ def _rolled_theme(store, lane, pool, now):
     earlier lanes, which is deterministic, so a single-card refresh lands the same theme it would
     have had in a full render. Siblings are rolled against the library distribution (their own pools
     aren't in hand here) purely to know what to steer clear of."""
-    dists = recommend.pool_facets(store, pool)
+    dists = recipes.pool_facets(store, pool)
     avoid = {"genres": set(), "eras": set()}
     for other in _ROW_LANES:
         this_one = other == lane
-        recipe = recommend.roll_recipe(store, other, seed=f"{other}:{_epoch(store, other)}",
+        recipe = recipes.roll_recipe(store, other, seed=f"{other}:{_epoch(store, other)}",
                                        now=now, avoid=avoid, dists=dists if this_one else None)
         if this_one:
             return recipe
         avoid["genres"] |= set(recipe.get("facets", {}).get("genres", []))
         avoid["eras"] |= set(recipe.get("facets", {}).get("eras", []))
-    return recommend.roll_recipe(store, lane, seed=f"{lane}:{_epoch(store, lane)}", now=now,
+    return recipes.roll_recipe(store, lane, seed=f"{lane}:{_epoch(store, lane)}", now=now,
                                  dists=dists)
 
 
@@ -160,14 +159,14 @@ def _carded(store, lane, label, pool, now):
     The slice is taken AFTER the theme, not before. Rotating first and theming the twelve tracks that
     came out let the theme reorder a card it could not change - so every refresh returned the pool's
     dominant genre no matter what rolled."""
-    pool = recommend.attach_genres(store, list(pool))     # the theme is rolled from these genres
+    pool = ordering.attach_genres(store, list(pool))     # the theme is rolled from these genres
     recipe = _rolled_theme(store, lane, pool, now)
-    focused = recommend.theme_filter(store, pool, recipe.get("facets", {}))
+    focused = recipes.theme_filter(store, pool, recipe.get("facets", {}))
     # Rotate within the themed head of the pool: still a fresh slice each epoch, but one drawn from
     # the tracks that match, rather than from the whole pool.
     focused = home_vibe.rank(store, now, focused)
     items = (focused[:PROTO_SIZE] if home_vibe.current(store, now) else
-             recommend.rotate_sample(focused[:PROTO_SIZE * 2], PROTO_SIZE, _epoch(store, lane)))
+             surfaces.rotate_sample(focused[:PROTO_SIZE * 2], PROTO_SIZE, _epoch(store, lane)))
     # roll_recipe forces Fresh to journey="shuffle" (unowned proposals have no plays/recency signal),
     # so the stored recipe and this preview ordering agree. Owned lanes order by their rolled journey.
     items = _order_by_journey(store, items, recipe.get("journey", "shuffle"),
@@ -225,12 +224,12 @@ def _one_card(store, card, now, *, avoid_genres=(), include_genres=()):
     focusing on that theme. Slicing here first (as this used to) left the theme nothing to choose
     from - it could only reorder twelve tracks that were picked before it was known."""
     if card == "wheelhouse":
-        pool = list(recommend.for_you(store, now, limit=ROTATION_POOL))
+        pool = list(surfaces.for_you(store, now, limit=ROTATION_POOL))
     elif card == "explore":
-        fy = {i.key for i in recommend.for_you(store, now, limit=ROTATION_POOL)}
-        pool = [i for i in recommend.explore_for_you(store, now, limit=ROTATION_POOL) if i.key not in fy]
+        fy = {i.key for i in surfaces.for_you(store, now, limit=ROTATION_POOL)}
+        pool = [i for i in surfaces.explore_for_you(store, now, limit=ROTATION_POOL) if i.key not in fy]
     elif card == "comfort":
-        pool = list(recommend.comfort_listening(store, now, limit=ROTATION_POOL))
+        pool = list(surfaces.comfort_listening(store, now, limit=ROTATION_POOL))
     elif card == "fresh":
         from yt_playlist.rec import fresh_pool
         # Use the worker/job's prepared ranking. A missing pool renders a clickable skeleton;
@@ -252,7 +251,7 @@ def _epoch(store, card):
     """The card's current rotation epoch: it holds content for erosion_view_cap views, then advances.
     Read-only. The view tick happens in GET / so previews/re-renders don't churn the cards."""
     cap = max(1, rec_params.get_param(store, "erosion_view_cap"))
-    return max(0, RecDao(store).card_views(card) - 1) // cap
+    return max(0, store.rec_surface.card_views(card) - 1) // cap
 
 
 def build(ctx) -> APIRouter:
@@ -260,9 +259,9 @@ def build(ctx) -> APIRouter:
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
 
     def _tuning_active():
-        genres = store.get_proposals("home_genre_request") or {}
-        return (bool(store.get_leans()) or bool(store.hidden_facets())
-                or bool(store.get_setting(home_vibe.SETTING))
+        genres = store.rec_surface.get_proposals("home_genre_request") or {}
+        return (bool(store.rec_model.get_leans()) or bool(store.rec_model.hidden_facets())
+                or bool(store.settings.get_setting(home_vibe.SETTING))
                 or rec_params.get_param(store, "breadth_bias") != 0
                 or (genres.get("epoch") == _epoch(store, "cards")
                     and bool(genres.get("include_genres") or genres.get("avoid_genres"))))
@@ -283,9 +282,9 @@ def build(ctx) -> APIRouter:
     def _feed_context(now):
         # Bake held slider exposure + sustained listening into the graduation ledger (idempotent per
         # UTC day). The cards themselves now load lazily via /home/cards from the worker's bundles.
-        recommend.graduate_slider_exposure(store, now)
-        recommend.graduate_play_exposure(store, now)
-        return {"fingerprint": recommend.taste_fingerprint(store, now),
+        graduation.graduate_slider_exposure(store, now)
+        graduation.graduate_play_exposure(store, now)
+        return {"fingerprint": taste_analysis.taste_fingerprint(store, now),
                 "tuning_active": _tuning_active(),
                 "vibe_presets": home_vibe.PRESETS, "vibe": home_vibe.current(store, now),
                 "has_modes": bool(store.modes.list_modes(active_only=True))}
@@ -293,7 +292,7 @@ def build(ctx) -> APIRouter:
     @router.get("/")
     def home_page(request: Request):
         now = now_fn()
-        dao = RecDao(store)
+        dao = store.rec_surface
         for card in ROTATING_CARDS:   # one tick per genuine Home visit -> per-card rotation advances
             if card == "cards":
                 started = store.modes.epoch_started_at(_epoch(store, card))
@@ -306,24 +305,24 @@ def build(ctx) -> APIRouter:
         # a nag card (gated on a completed first sync) that links into the full-screen reel. Shown
         # until viewed or dismissed for that month; next month's recap re-shows. Expire a cached story
         # at the next rollover even if the worker has not rebuilt yet, or recent listening data is missing.
-        _story = (store.get_proposals("trend_rollups") or {}).get("story")
+        _story = (store.rec_surface.get_proposals("trend_rollups") or {}).get("story")
         recap = ({"month": _story["month"], "month_name": _story["month_name"]}
                  if (_story and _story.get("month") == last_complete_month(now)
-                     and store.get_setting("last_sync_at") is not None
-                     and store.get_setting("recap_viewed_month") != _story.get("month")
-                     and store.get_setting("recap_dismissed_month") != _story.get("month"))
+                     and store.settings.get_setting("last_sync_at") is not None
+                     and store.settings.get_setting("recap_viewed_month") != _story.get("month")
+                     and store.settings.get_setting("recap_dismissed_month") != _story.get("month"))
                  else None)
         spotify_library_job = current_spotify_import_job(ctx)
         if spotify_library_job and spotify_library_job.get("dismissed"):
             spotify_library_job = None
         return templates.TemplateResponse(request, "home.html", {
-            "actions": recommend.take_action(store, now, ctx.auth_expired),
-            "sync": recommend.sync_status(store, now),
-            "muted_count": len(store.muted_artists()),   # transparency: what's being hidden
-            "rediscover": recommend.rediscover_playlists(store, now, epoch=_epoch(store, "rediscover")),
+            "actions": actions.take_action(store, now, ctx.auth_expired),
+            "sync": actions.sync_status(store, now),
+            "muted_count": len(store.rec_model.muted_artists()),   # transparency: what's being hidden
+            "rediscover": surfaces.rediscover_playlists(store, now, epoch=_epoch(store, "rediscover")),
             # Saved albums you haven't played lately, rendered above the playlists in the same
             # section, rotating on the same "rediscover" epoch so the whole block advances together.
-            "rediscover_albums": recommend.rediscover_albums(store, now, epoch=_epoch(store, "rediscover")),
+            "rediscover_albums": surfaces.rediscover_albums(store, now, epoch=_epoch(store, "rediscover")),
             "flash": request.query_params.get("flash"),
             "toast": request.query_params.get("toast"),   # transient success (e.g. re-auth w/ auto-sync)
             # Sparsity nudge: when metadata is genre-thin and no Last.fm key is set, point the user
@@ -331,8 +330,8 @@ def build(ctx) -> APIRouter:
             # there is no manual-enrichment nag anymore.
             # Welcome nag shown once the first sync lands (dismissable, persists): sets expectations
             # that the model keeps learning over the next week.
-            "show_intro": (store.get_setting("last_sync_at") is not None
-                           and store.get_setting("intro_dismissed") != "1"),
+            "show_intro": (store.settings.get_setting("last_sync_at") is not None
+                           and store.settings.get_setting("intro_dismissed") != "1"),
             "show_lastfm_nudge": lastfm_nudge_due(store, now),
             # Takeout import nag: no last_sync gate (importing early is exactly the point), terminal
             # once takeout_imported_at is set by a successful import.
@@ -341,9 +340,9 @@ def build(ctx) -> APIRouter:
             "show_backend_update": backend_update is not None,
             # Once the library has synced and the user still has only the default identity, offer the
             # multi-identity merge (dismissable, persists). Skipped as soon as they add a second one.
-            "show_identities_nudge": (store.get_setting("last_sync_at") is not None
-                                      and len(store.get_identities()) <= 1
-                                      and store.get_setting("identities_nudge_dismissed") != "1"),
+            "show_identities_nudge": (store.settings.get_setting("last_sync_at") is not None
+                                      and len(store.identities.get_identities()) <= 1
+                                      and store.settings.get_setting("identities_nudge_dismissed") != "1"),
             "onboarding": onboarding.onboarding_active(store, now),
             "onboard_library": onboarding.library_size(store) >= rec_params.get_param(store, "onboard_library_min"),
             "cleanup_count": onboarding.cleanup_count(store),   # CACHED read, never the O(n^2) scan
@@ -365,26 +364,26 @@ def build(ctx) -> APIRouter:
     def dismiss_lastfm_nudge():
         """Snooze the Home Last.fm-key nudge for 30 days (records the dismissal time). Empty 200 so
         HTMX swaps it out."""
-        store.set_setting("lastfm_nudge_dismissed_at", str(now_fn()))
+        store.settings.set_setting("lastfm_nudge_dismissed_at", str(now_fn()))
         return Response(status_code=200)
 
     @router.post("/onboard/takeout/dismiss")
     def dismiss_takeout_nag():
         """Snooze the Home Takeout-import nag for 90 days (records the dismissal time). Empty 200 so
         HTMX swaps it out."""
-        store.set_setting("takeout_nag_dismissed_at", str(now_fn()))
+        store.settings.set_setting("takeout_nag_dismissed_at", str(now_fn()))
         return Response(status_code=200)
 
     @router.post("/onboard/identities/dismiss")
     def dismiss_identities_nudge():
         """Permanently dismiss the multi-identity merge nudge. Empty 200 so HTMX swaps it out."""
-        store.set_setting("identities_nudge_dismissed", "1")
+        store.settings.set_setting("identities_nudge_dismissed", "1")
         return Response(status_code=200)
 
     @router.post("/onboard/intro/dismiss")
     def dismiss_intro_nudge():
         """Permanently dismiss the post-first-sync welcome nag. Empty 200 so HTMX swaps it out."""
-        store.set_setting("intro_dismissed", "1")
+        store.settings.set_setting("intro_dismissed", "1")
         return Response(status_code=200)
 
     @router.post("/onboard/recap/dismiss")
@@ -392,16 +391,16 @@ def build(ctx) -> APIRouter:
         """Dismiss the monthly-recap nag for the given month; next month's recap re-shows. Empty 200 so
         HTMX swaps it out."""
         if month:
-            store.set_setting("recap_dismissed_month", month)
+            store.settings.set_setting("recap_dismissed_month", month)
         return Response(status_code=200)
 
     @router.post("/onboard/update/dismiss")
     def dismiss_update_nudge(v: str = ""):
         """Dismiss the backend-update nag for the version the user saw (passed as ?v=). Falls back to
         the currently-cached latest. A newer release re-shows it. Empty 200 so HTMX swaps it out."""
-        dismissed = v or store.get_setting("latest_version_seen")
+        dismissed = v or store.settings.get_setting("latest_version_seen")
         if dismissed:
-            store.set_setting("backend_update_dismissed_version", dismissed)
+            store.settings.set_setting("backend_update_dismissed_version", dismissed)
         return Response(status_code=200)
 
     @router.get("/home/onboard/radio")
@@ -421,7 +420,7 @@ def build(ctx) -> APIRouter:
 
     @router.post("/onboard/done")
     def onboard_done():
-        store.set_setting("onboard_dismissed", "1")
+        store.settings.set_setting("onboard_dismissed", "1")
         return Response(status_code=200, headers={"HX-Refresh": "true"})
 
     @router.get("/privacy")
@@ -477,12 +476,12 @@ def build(ctx) -> APIRouter:
         if card not in _CARD_LABELS:
             return Response(status_code=404)
         now = now_fn()
-        RecDao(store).refresh_card(card, max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+        store.rec_surface.refresh_card(card, max(1, rec_params.get_param(store, "erosion_view_cap")), now)
         p = _one_card(store, card, now)
         if p is None:
             return Response(status_code=204)
         keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None)) for t in p["tracks"]]
-        store.mark_offered("track", [k for k in keys if k], now)   # #53: this route is the sole counter here
+        store.discovery.mark_offered("track", [k for k in keys if k], now)   # #53: this route is the sole counter here
         response = templates.TemplateResponse(request, "_partials/generated_playlist.html",
                                                {"p": p, "regenerating": True})
         _audit_cards(request, [p], now)
@@ -493,7 +492,7 @@ def build(ctx) -> APIRouter:
         from yt_playlist.rec import mode_surfaces
         mix_tuning.expire(store, now)
         epoch = _epoch(store, "cards")
-        genre_request = store.get_proposals("home_genre_request") or {}
+        genre_request = store.rec_surface.get_proposals("home_genre_request") or {}
         avoid = (set(genre_request.get("avoid_genres", []))
                  if use_genre_request and genre_request.get("epoch") == epoch else set())
         include = (set(genre_request.get("include_genres", []))
@@ -513,7 +512,7 @@ def build(ctx) -> APIRouter:
                 # per-lane _carded cards). Seed per (epoch, mode) so each of the 4 cards rolls its OWN
                 # journey, stable across re-renders of the same epoch. We keep only the rolled journey
                 # + dj seed: the mode already defines the theme, so its facets/weights are not re-rolled.
-                rolled = recommend.roll_recipe(store, c["lane"], seed=f"{epoch}:{c['mode_id']}", now=now)
+                rolled = recipes.roll_recipe(store, c["lane"], seed=f"{epoch}:{c['mode_id']}", now=now)
                 journey, dj = rolled.get("journey", "shuffle"), rolled.get("dj", {})
                 tracks = _order_by_journey(store, c["tracks"], journey, dj.get("seed", 0))
                 shadow = c.get("counterfactual")
@@ -531,7 +530,7 @@ def build(ctx) -> APIRouter:
                     epoch, [(c["lane"], c["mode_id"], c["ranker"]) for c in cards], now)
             except Exception:  # noqa: BLE001 - logging must never break the card render
                 ctx.logger.warning("mode-impression log failed", exc_info=True)
-        elif filters and store.get_proposals("mode_bundles") and store.modes.list_modes(active_only=True):
+        elif filters and store.rec_surface.get_proposals("mode_bundles") and store.modes.list_modes(active_only=True):
             protos = []  # no qualifying mode; explain and retain the usual menu below
         else:
             # Fallback before the first rebuild: the pre-B per-card builders, so the row is never empty.
@@ -548,7 +547,7 @@ def build(ctx) -> APIRouter:
             fresh = _built_fresh(parameters, now)
             if fresh:
                 protos.append(fresh)
-        meta = (store.get_proposals("mode_bundles") or {}).get("_meta", {})
+        meta = (store.rec_surface.get_proposals("mode_bundles") or {}).get("_meta", {})
         fourth = ("comfort" if meta.get("comfort_pool", 0) >= rec_params.get_param(store, "comfort_min_pool")
                   or not meta.get("year_cuts") else "temporal")
         fourth = next((p["lane"] for p in protos if p["lane"] in ("comfort", "temporal")), fourth)
@@ -557,7 +556,7 @@ def build(ctx) -> APIRouter:
             p = next((p for p in protos if p["lane"] == lane), None)
             scoped = parameters if lane == "fresh" else {**parameters, "lane": lane, "epoch": epoch}
             if p is None and lane != "fresh":
-                excluded = [recommend._field(t, "key") for proto in protos for t in proto["tracks"]]
+                excluded = [ordering._field(t, "key") for proto in protos for t in proto["tracks"]]
                 p = _built_library(scoped, now, excluded)
                 if p:
                     protos.append(p)
@@ -580,7 +579,7 @@ def build(ctx) -> APIRouter:
             # so read the key from either shape (a bare t.get here 500s the whole card row).
             keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None))
                     for t in p["tracks"]]
-            store.mark_offered("track", [k for k in keys if k], now)
+            store.discovery.mark_offered("track", [k for k in keys if k], now)
         try:
             _record_served_cards(store, protos, now)
         except Exception:  # noqa: BLE001 - measurement must never break recommendation serving
@@ -648,7 +647,7 @@ def build(ctx) -> APIRouter:
             if not tracks:
                 return None
             p = _proto(store, "fresh", _CARD_LABELS["fresh"], tracks, now)
-            p["recipe"] = recommend.roll_recipe(store, "fresh", seed=f"fresh:{_epoch(store, 'fresh')}", now=now)
+            p["recipe"] = recipes.roll_recipe(store, "fresh", seed=f"fresh:{_epoch(store, 'fresh')}", now=now)
             p["recipe"]["facets"] = {"genres": include}
         else:
             p = _one_card(store, "fresh", now, **({"avoid_genres": avoid} if avoid else {}))
@@ -666,7 +665,7 @@ def build(ctx) -> APIRouter:
     def _pool_fragment(request, job):
         p = _built_fresh(job.parameters, now_fn()) if job.done and not job.error else None
         if p:
-            store.mark_offered("track", [t["key"] for t in p["tracks"] if t.get("key")], now_fn())
+            store.discovery.mark_offered("track", [t["key"] for t in p["tracks"] if t.get("key")], now_fn())
             _record_served_cards(store, [p], now_fn())
             _audit_cards(request, [p], now_fn())
             return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": p})
@@ -693,7 +692,7 @@ def build(ctx) -> APIRouter:
     def _library_pool_fragment(request, job):
         p = _built_library(job.parameters, now_fn(), job.exclude_keys) if job.done and not job.error else None
         if p:
-            store.mark_offered("track", [t["key"] for t in p["tracks"]], now_fn())
+            store.discovery.mark_offered("track", [t["key"] for t in p["tracks"]], now_fn())
             _record_served_cards(store, [p], now_fn())
             _audit_cards(request, [p], now_fn())
             return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": p})
@@ -747,7 +746,7 @@ def build(ctx) -> APIRouter:
     def home_refresh_cards(request: Request):
         """Re-roll the whole mode-card row (advance its shared rotation epoch)."""
         now = now_fn()
-        RecDao(store).refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+        store.rec_surface.refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
         try:
             return _cards_fragment(request, now, regenerating=True)
         except Exception:  # noqa: BLE001 - preserve the same safe-fragment contract as the GET
@@ -767,8 +766,8 @@ def build(ctx) -> APIRouter:
             return Response(status_code=400)
         now = now_fn()
         with mix_tuning.adjusting(store, now):
-            RecDao(store).refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
-            store.put_proposals("home_genre_request", {
+            store.rec_surface.refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+            store.rec_surface.put_proposals("home_genre_request", {
                 "epoch": _epoch(store, "cards"),
                 "avoid_genres": sorted({genre_map.family(g) for g in genres}),
             }, now)
@@ -783,8 +782,8 @@ def build(ctx) -> APIRouter:
             return Response(status_code=400)
         now = now_fn()
         with mix_tuning.adjusting(store, now):
-            RecDao(store).refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
-            store.put_proposals("home_genre_request", {
+            store.rec_surface.refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+            store.rec_surface.put_proposals("home_genre_request", {
                 "epoch": _epoch(store, "cards"), "include_genres": sorted(set(genres)),
             }, now)
         return await asyncio.to_thread(_cards_safe, request, now)
@@ -797,9 +796,9 @@ def build(ctx) -> APIRouter:
         now = now_fn()
         with mix_tuning.adjusting(store, now):
             if vibe:
-                store.set_setting(home_vibe.SETTING, vibe)
+                store.settings.set_setting(home_vibe.SETTING, vibe)
             else:
-                store.delete_setting(home_vibe.SETTING)
+                store.settings.delete_setting(home_vibe.SETTING)
         return await asyncio.to_thread(_cards_safe, request, now)
 
     @router.post("/home/breadth")
@@ -826,11 +825,11 @@ def build(ctx) -> APIRouter:
         if axis and target is not None and axis.split(":", 1)[0] in ("genre", "era", "artist"):
             now = now_fn()
             with mix_tuning.adjusting(store, now):
-                perm = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(axis, 1.0)
+                perm = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(axis, 1.0)
                 lean = target / perm if perm > 0 else target
                 lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
                 lean = max(lo, min(hi, lean))
-                store.set_lean(axis, lean, now)
+                store.rec_model.set_lean(axis, lean, now)
         return await asyncio.to_thread(_cards_safe, request, now_fn())
 
     @router.post("/home/fingerprint/add")
@@ -845,13 +844,13 @@ def build(ctx) -> APIRouter:
         now = now_fn()
         if axis and axis.split(":", 1)[0] in ("genre", "era", "artist"):
             with mix_tuning.adjusting(store, now):
-                store.unhide_facet(axis)              # re-adding an axis un-hides it
+                store.rec_model.unhide_facet(axis)              # re-adding an axis un-hides it
                 # Only write if not already present. Don't overwrite a user-set lean.
-                if store.get_lean(axis) == 1.0 and axis not in store.get_leans():
-                    store.set_lean(axis, 1.0, now)
+                if store.rec_model.get_lean(axis) == 1.0 and axis not in store.rec_model.get_leans():
+                    store.rec_model.set_lean(axis, 1.0, now)
         return _tuning_response(templates.TemplateResponse(
             request, "_partials/fingerprint_genre_bars.html",
-            {"fingerprint": recommend.taste_fingerprint(store, now)}), now)
+            {"fingerprint": taste_analysis.taste_fingerprint(store, now)}), now)
 
     @router.post("/home/fingerprint/remove")
     async def fingerprint_remove(request: Request):
@@ -863,16 +862,16 @@ def build(ctx) -> APIRouter:
         now = now_fn()
         if axis:
             with mix_tuning.adjusting(store, now):
-                store.hide_facet(axis)
-                store.clear_lean(axis)
+                store.rec_model.hide_facet(axis)
+                store.rec_model.clear_lean(axis)
         return _tuning_response(templates.TemplateResponse(
             request, "_partials/fingerprint_genre_bars.html",
-            {"fingerprint": recommend.taste_fingerprint(store, now)}), now)
+            {"fingerprint": taste_analysis.taste_fingerprint(store, now)}), now)
 
     def _tuning_fragment(request, now):
         controls = templates.TemplateResponse(
             request, "_partials/taste_fingerprint.html",
-            {"fingerprint": recommend.taste_fingerprint(store, now), "tuning_active": _tuning_active(),
+            {"fingerprint": taste_analysis.taste_fingerprint(store, now), "tuning_active": _tuning_active(),
              "vibe_presets": home_vibe.PRESETS, "vibe": home_vibe.current(store, now)})
         cards = _cards_safe(request, now, swap_oob=True)
         return _tuning_response(Response(controls.body + cards.body, media_type="text/html"), now)
@@ -903,7 +902,7 @@ def build(ctx) -> APIRouter:
         seen = set(fams)
         options = [{"name": f, "kind": "family"} for f in fams]
         options += [{"name": g, "kind": "genre"} for g in genre_map.all_genres() if g not in seen]
-        plays = {g.lower(): count for g, count in RecDao(store).genre_play_distribution().items()}
+        plays = {g.lower(): count for g, count in store.rec_query.genre_play_distribution().items()}
         family_plays = {}
         for genre, count in plays.items():
             family = genre_map.family(genre)

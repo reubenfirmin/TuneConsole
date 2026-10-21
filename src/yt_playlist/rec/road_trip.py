@@ -30,7 +30,6 @@ from itertools import zip_longest
 from yt_playlist.providers import deezer, lastfm, musicbrainz
 from yt_playlist.providers import genres as genre_names
 from yt_playlist.rec.journeys import journey_order
-from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
 from yt_playlist.util.thumbnails import best_thumb
 
@@ -117,14 +116,14 @@ def own_candidates(store, now, state=None):
 
     Still filtered by the taste model's own exclusions: songs you dismissed or muted, and anything
     already bundled into a generated playlist, stay out."""
-    songs = store.library_songs()
-    plays = store.play_counts()
-    hard = store.suppressed_keys("for_you", now) | RecDao(store).generated_track_keys()
+    songs = store.rec_query.library_songs()
+    plays = store.rec_query.play_counts()
+    hard = store.rec_model.suppressed_keys("for_you", now) | store.rec_query.generated_track_keys()
     blocked_genres = (state or {}).get("blacklist_genres") or []
     if blocked_genres:
-        hard |= store.keys_in_genre_selection(blocked_genres)
-    muted = store.muted_artists()
-    by_artist = store.artist_genre_years()
+        hard |= store.rec_query.keys_in_genre_selection(blocked_genres)
+    muted = store.rec_model.muted_artists()
+    by_artist = store.rec_query.artist_genre_years()
     learned = (state or {}).get("own_facts") or {}
     out = []
     for s in songs:
@@ -591,7 +590,7 @@ def _resolve_durations(store, client, pool, cap=DURATION_LOOKUPS):
     for c in pool:
         if c["duration"] is not None:
             continue
-        c["duration"] = store.known_duration(c["title"], c["artist"])
+        c["duration"] = store.tracks.known_duration(c["title"], c["artist"])
         if c["duration"] is not None or spent >= cap or client is None:
             continue
         spent += 1

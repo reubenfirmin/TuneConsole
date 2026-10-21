@@ -16,7 +16,7 @@ def _album(browse="MPREb_x"):
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = FakeClient(albums=_album())
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), fc, iid
@@ -36,11 +36,11 @@ def test_create_playlist_from_album_redirects_to_new_playlist(store, monkeypatch
     c, fc, iid = _client(store)
     r = c.post("/album/create-playlist", data={"browse_id": "MPREb_x", "name": "My Album Mix"})
     assert r.status_code == 200
-    new_pl = next(p for p in store.get_playlists() if p.title == "My Album Mix")
+    new_pl = next(p for p in store.playlists.get_playlists() if p.title == "My Album Mix")
     assert new_pl.created_at == 1.0
     assert new_pl.thumbnail == "http://t/1.jpg"
     assert r.headers["hx-redirect"] == f"/playlist/{new_pl.id}"
-    assert store.get_playlist_track_ids(new_pl.id)             # tracks were added
+    assert store.playlists.get_playlist_track_ids(new_pl.id)             # tracks were added
     assert fc.created and fc.added[0][1] == ["v1", "v2"]       # created on YouTube with the album's tracks
 
 
@@ -50,7 +50,7 @@ def test_unsaved_album_shows_full_live_tracks_not_incidental_library_subset(stor
     album_browse_id, so an unsaved album can have a single incidental library row. That must not
     shadow the real 8-track album."""
     # one incidental library track tagged with this album's browse_id (as playlist sync would)
-    store.upsert_track("v1", "One", "Artist X", "The Album", None, album_browse_id="MPREb_x")
+    store.tracks.upsert_track("v1", "One", "Artist X", "The Album", None, album_browse_id="MPREb_x")
     c, _fc, _iid = _client(store)
     r = c.get("/album?browse=MPREb_x")
     assert r.status_code == 200
@@ -78,7 +78,7 @@ def test_album_share_txt_lists_live_track_urls(store):
 def test_album_share_uses_full_live_album_not_incidental_library_track(store):
     """An unsaved album with one incidental library track (stamped by playlist sync) must still share
     the FULL live album, not just that one track."""
-    store.upsert_track("v1", "One", "Artist X", "The Album", None, album_browse_id="MPREb_x")
+    store.tracks.upsert_track("v1", "One", "Artist X", "The Album", None, album_browse_id="MPREb_x")
     c, _fc, _iid = _client(store)
     r = c.get("/album/MPREb_x/share.txt")
     assert r.status_code == 200
@@ -96,7 +96,7 @@ def test_saved_album_folds_in_durations_and_renders_liked_and_plays(store):
     """Saving an album folds its live tracks into the library WITH durations parsed from the YTM
     'M:SS' strings (issue: Length not populated), and the saved table renders the liked heart and
     the Plays column, parity with the playlist view."""
-    store.add_saved_album({"browse": "MPREb_x", "title": "The Album", "artist": "Artist X"})
+    store.collection.add_saved_album({"browse": "MPREb_x", "title": "The Album", "artist": "Artist X"})
     c, _fc, _iid = _client(store)
     r = c.get("/album?browse=MPREb_x")
     assert r.status_code == 200
@@ -104,5 +104,5 @@ def test_saved_album_folds_in_durations_and_renders_liked_and_plays(store):
     assert "like-btn" in r.text                            # the liked heart toggle
     assert ">Plays<" in r.text                             # the Plays column header
     # the folded-in tracks actually carry the parsed duration (seconds), not None
-    assert {t["title"]: t["duration"] for t in store.album_tracks_detail("MPREb_x")} \
+    assert {t["title"]: t["duration"] for t in store.charts.album_tracks_detail("MPREb_x")} \
         == {"One": 181, "Two": 160}

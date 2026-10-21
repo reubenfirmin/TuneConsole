@@ -38,17 +38,18 @@ def _bundle(store, keys):
              for i, k in enumerate(keys)]
     payload = {"1": {s: list(items) for s in ms.CARD_SURFACES}}
     payload["_meta"] = {"comfort_pool": 100, "year_cuts": None}
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
 
 
 def _generated_playlist(store, keys):
     """Put `keys` into a playlist tagged as generated, the way create_generated_playlist does."""
-    iid = store.upsert_identity("main", "cred", None, True)
-    pid = store.upsert_playlist(iid, "PLGEN", "More in your wheelhouse - #1", len(keys), "h", 1.0)
-    tids = [store.upsert_track(f"gv{i}", k.split("|")[0], k.split("|")[1], "Alb", 200)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    pid = store.playlists.upsert_playlist(iid, "PLGEN", "More in your wheelhouse - #1", len(keys), "h", 1.0)
+    tids = [store.tracks.upsert_track(f"gv{i}", k.split("|")[0], k.split("|")[1], "Alb", 200)
             for i, k in enumerate(keys)]
-    store.set_playlist_tracks(pid, tids)
-    store.set_playlist_group("PLGEN", GENERATED_GROUP)
+    store.playlists.set_playlist_tracks(pid, tids)
+    store.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)
+    store.playlists.mark_generated_playlist('PLGEN')
     return pid
 
 
@@ -86,16 +87,16 @@ def test_cached_cards_honor_current_genre_mutes_without_rebuilding(store):
     keys = [f"song{i}|artist{i}" for i in range(20)]
     for i, key in enumerate(keys):
         title, artist = key.split("|")
-        tid = store.upsert_track(f"v{i}", title, artist, "", 200)
-        store.set_track_genre(tid, "House" if i < 6 else "Techno")
+        tid = store.tracks.upsert_track(f"v{i}", title, artist, "", 200)
+        store.tracks.set_track_genre(tid, "House" if i < 6 else "Techno")
     _bundle(store, keys)
-    cached = store.get_proposals("mode_bundles")
+    cached = store.rec_surface.get_proposals("mode_bundles")
     assert _offered(ms.assemble_cards(store, now=10, epoch=0)) & set(keys[:6])
 
-    store.set_weight("genre:house", 0, lo=0, hi=2, now=10)
+    store.rec_model.set_weight("genre:house", 0, lo=0, hi=2, now=10)
     offered = _offered(ms.assemble_cards(store, now=20, epoch=0))
     assert offered and offered <= set(keys[6:])
-    assert store.get_proposals("mode_bundles") == cached
+    assert store.rec_surface.get_proposals("mode_bundles") == cached
 
-    store.set_weight("genre:house", 1, lo=0, hi=2, now=20)
+    store.rec_model.set_weight("genre:house", 1, lo=0, hi=2, now=20)
     assert _offered(ms.assemble_cards(store, now=20, epoch=0)) & set(keys[:6])

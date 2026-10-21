@@ -17,6 +17,7 @@ from yt_playlist.util import net
 from yt_playlist.util.matching import normalize, recording_title
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
 from yt_playlist.providers.enrich_queue import PriorityGate
+from yt_playlist.providers.enrichment import apply_findings
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +231,7 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
     """Fill missing BPM for a track set from Deezer (fill-only). Scope is a playlist or an explicit
     `pending` list. on_progress(event_dict) feeds the SSE stream."""
     enrich_fn = enrich_fn or enrich
-    pending = store.tracks_missing_audio(playlist_id) if pending is None else pending
+    pending = store.tracks.tracks_missing_audio(playlist_id) if pending is None else pending
 
     def _per_item(i, total, t):
         feat = enrich_fn(t["title"], t["artist"])
@@ -241,8 +242,8 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
         # Art is not an audio feature: it has its own fill-only rule, so it never reaches
         # set_track_audio (whose kwargs are the audio columns).
         art = feat.pop("art", None)
-        store.set_track_audio(t["id"], **feat)
-        store.set_track_art(t["id"], art)
+        apply_findings(store,t['id'],name,feat)
+        store.tracks.set_track_art(t["id"], art,source=name)
         shown = f"{feat['bpm']:.0f} BPM" if feat["bpm"] else "no BPM"
         if feat["popularity"]:
             shown += f" · pop {feat['popularity']}"

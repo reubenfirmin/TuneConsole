@@ -59,19 +59,19 @@ def test_full_musicbrainz_snapshot_and_sourced_database_joins(store):
 
 
 def test_legacy_upgrade_preserves_additions_removals_and_splits_disabled_aliases(store):
-    store.set_genres([n for n in catalog.legacy_names() if n not in ("Rock", "Electronic")]
+    store.genres.set_genres([n for n in catalog.legacy_names() if n not in ("Rock", "Electronic")]
                      + ["Whack-a-doodle", "hip-hop"])
-    store.set_setting("genres_seeded", "1")
-    track = store.upsert_track("v", "song", "artist", None, None)
-    store.set_track_genre(track, "hip-hop")
+    store.settings.set_setting("genres_seeded", "1")
+    track = store.tracks.upsert_track("v", "song", "artist", None, None)
+    store.tracks.set_track_genre(track, "hip-hop")
     genres.configure(store)
-    names = store.get_genre_whitelist()
+    names = store.genres.get_genre_whitelist()
     assert "Rock" not in names and "Electronic" not in names
     assert "Electro" not in names and "Electronica" not in names
     assert "Phonk" in names and "Whack-a-doodle" in names
     assert names.count("Hip Hop") == 1 and "hip-hop" not in names
     assert store.conn.execute("SELECT genre FROM tracks WHERE id=?", (track,)).fetchone()[0] == "hip-hop"
-    store.remove_genre("Phonk")
+    store.genres.remove_genre("Phonk")
     genres.configure(store)
     assert genres.match_tag("phonk") is None
     genres.reset(store)
@@ -81,36 +81,36 @@ def test_legacy_upgrade_preserves_additions_removals_and_splits_disabled_aliases
 
 
 def test_explicitly_empty_legacy_list_stays_empty(store):
-    store.set_setting("genres_seeded", "1")
+    store.settings.set_setting("genres_seeded", "1")
     genres.configure(store)
-    assert store.get_genre_whitelist() == []
+    assert store.genres.get_genre_whitelist() == []
     assert genres.match_tag("rock") is None
 
 
 def test_later_snapshot_adds_only_new_defaults(store):
     genres.configure(store)
-    store.remove_genre("Rock")
+    store.genres.remove_genre("Rock")
     # Simulate an older baseline that did not include Phonk, with a user who removed Jazz.
-    store.remove_genre("Phonk")
-    store.remove_genre("Jazz")
+    store.genres.remove_genre("Phonk")
+    store.genres.remove_genre("Jazz")
     baseline = [n for n in catalog.builtin_names() if n != "Phonk"]
-    store.set_setting("genre_defaults", json.dumps(baseline))
-    store.set_setting("genre_catalog_revision", "older")
+    store.settings.set_setting("genre_defaults", json.dumps(baseline))
+    store.settings.set_setting("genre_catalog_revision", "older")
     genres.configure(store)
-    assert "Phonk" in store.get_genre_whitelist()
-    assert "Rock" not in store.get_genre_whitelist()
-    assert "Jazz" not in store.get_genre_whitelist()
+    assert "Phonk" in store.genres.get_genre_whitelist()
+    assert "Rock" not in store.genres.get_genre_whitelist()
+    assert "Jazz" not in store.genres.get_genre_whitelist()
 
 
 def test_failed_upgrade_rolls_back_catalog_enabled_list_and_revision(store):
-    store.set_genres(["Jazz", "Whack-a-doodle"])
-    store.set_setting("genres_seeded", "1")
+    store.genres.set_genres(["Jazz", "Whack-a-doodle"])
+    store.settings.set_setting("genres_seeded", "1")
     store.conn.execute("CREATE TRIGGER reject_catalog BEFORE INSERT ON genre_alias "
                        "BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match="injected failure"):
         genres.configure(store)
-    assert store.get_genre_whitelist() == ["Jazz", "Whack-a-doodle"]
-    assert store.get_setting("genre_catalog_revision") is None
+    assert store.genres.get_genre_whitelist() == ["Jazz", "Whack-a-doodle"]
+    assert store.settings.get_setting("genre_catalog_revision") is None
     assert store.conn.execute("SELECT count(*) FROM genre_catalog").fetchone()[0] == 0
 
 

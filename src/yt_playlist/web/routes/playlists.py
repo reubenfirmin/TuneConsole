@@ -10,9 +10,10 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from yt_playlist.providers import lastfm
-from yt_playlist.rec import journeys, rec_params, recommend
+from yt_playlist.rec import actions, journeys, rec_params, taste_analysis
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.library import executor
+from yt_playlist.library.playlist_metadata import PROMOTED_DESCRIPTION
 from yt_playlist.library.playlist_positions import pending_insertions
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.live_plays import resolve_identity
@@ -57,8 +58,8 @@ def build(ctx) -> APIRouter:
                          if skipped else "")})
 
     def _is_generated(pid):
-        pl = store.get_playlist(pid)
-        return pl is not None and store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP
+        pl = store.playlists.get_playlist(pid)
+        return pl is not None and store.playlists.is_quarantined_playlist(pl.ytm_playlist_id)
 
     def _record_alt_version_events(pid, old_video_id, tracks):
         # #95: choosing an alternate version off the alternates modal is the user saying "these two
@@ -71,7 +72,7 @@ def build(ctx) -> APIRouter:
             ident = resolve_identity(store, "")
             if ident is None:
                 return
-            pl = store.get_playlist(pid)
+            pl = store.playlists.get_playlist(pid)
             if pl is None:
                 return
             now = now_fn()
@@ -80,7 +81,7 @@ def build(ctx) -> APIRouter:
                 if not new_video_id:
                     continue
                 payload = json.dumps({"old": old_video_id, "new": new_video_id})
-                store.record_player_event(ident, "alt_version", new_video_id, None, None,
+                store.player_events.record_player_event(ident, "alt_version", new_video_id, None, None,
                                           pl.ytm_playlist_id, payload, now)
         except Exception:  # noqa: BLE001  (analytics must never 500 a route whose add succeeded)
             logger.debug("alt_version event not recorded for playlist %s", pid, exc_info=True)
@@ -100,7 +101,7 @@ def build(ctx) -> APIRouter:
         # Best-effort only: no extension connected raises, and that must never affect the route's
         # own response.
         try:
-            pl = store.get_playlist(pid)
+            pl = store.playlists.get_playlist(pid)
         except Exception:  # noqa: BLE001
             return
         if pl is not None:
@@ -109,31 +110,32 @@ def build(ctx) -> APIRouter:
     def _track_row(request, pid, video_id):
         # Re-render one track's <tr> (the shared swap unit for manual edits and enrich).
         gen = _is_generated(pid)
-        for i, t in enumerate(store.playlist_tracks_detail(pid), start=1):
+        for i, t in enumerate(store.charts.playlist_tracks_detail(pid), start=1):
             if t["video_id"] == video_id:
                 return templates.TemplateResponse(request, "_partials/track_row.html",
                     {"t": t, "idx": i, "is_generated": gen,
-                     "mood_states": recommend.track_mood_states(store, now_fn()) if gen else {}})
+                     "mood_states": taste_analysis.track_mood_states(store, now_fn()) if gen else {}})
         return Response(status_code=204)         # row no longer present, nothing to swap
 
     @router.get("/playlists")
     def playlists_page(request: Request):
-        labels = {i.id: i.label for i in store.get_identities()}
-        groups = store.get_playlist_groups()                 # ytm -> group name
-        recipe_dates = store.get_recipe_created_ats()
-        stats = store.get_playlist_listen_stats()            # pid -> (last_ts, count)
-        thumbnails = store.get_playlist_thumbnails()         # cover or first song artwork
-        hidden = store.get_hidden_playlists()                # ytm of playlists hidden from this tab
+        labels = {i.id: i.label for i in store.identities.get_identities()}
+        groups = store.playlists.get_playlist_groups()                 # ytm -> group name
+        recipe_dates = store.rec_surface.get_recipe_created_ats()
+        stats = store.charts.get_playlist_listen_stats()            # pid -> (last_ts, count)
+        thumbnails = store.playlists.get_playlist_thumbnails()         # cover or first song artwork
+        hidden = store.playlists.get_hidden_playlists()                # ytm of playlists hidden from this tab
         now = now_fn()
         cutoff = now - 7 * 86400
         rows = []
-        for p in store.get_playlists():
+        for p in store.playlists.get_playlists():
             if p.ytm_playlist_id in hidden:
                 continue
             last, listens = stats.get(p.id, (None, 0))
             group = groups.get(p.ytm_playlist_id, "")
+            quarantined = store.playlists.is_quarantined_playlist(p.ytm_playlist_id)
             generated_created = p.created_at
-            if group == GENERATED_GROUP and generated_created is None:
+            if quarantined and generated_created is None:
                 generated_created = recipe_dates.get(p.ytm_playlist_id)
                 # Another install's generated playlists have no local creation timestamp.
                 # Use their dated title for ordering only; keep actual creation metadata unknown.
@@ -147,12 +149,13 @@ def build(ctx) -> APIRouter:
             rows.append({
                 "id": p.id, "ytm": p.ytm_playlist_id, "title": p.title,
                 "identity": labels.get(p.identity_id, "?"), "thumbnail": thumbnails.get(p.id),
-                "count": p.track_count, "kind": store.playlist_kind(p.id),
+                "count": p.track_count, "kind": store.playlists.playlist_kind(p.id),
                 "group": group,
+                "is_generated": quarantined,
                 "last": last, "listens": listens,
                 "created": p.created_at,
                 "generated_created": generated_created,
-                "is_new": (group != GENERATED_GROUP and p.ytm_playlist_id not in SYSTEM_PLAYLIST_IDS
+                "is_new": (not quarantined and p.ytm_playlist_id not in SYSTEM_PLAYLIST_IDS
                            and p.created_at is not None and cutoff <= p.created_at <= now),
             })
         group_names = sorted({g for g in groups.values() if g}, key=str.lower)
@@ -172,32 +175,32 @@ def build(ctx) -> APIRouter:
 
     @router.get("/playlist/{pid}")
     def playlist_detail(request: Request, pid: int):
-        pl = store.get_playlist(pid)
+        pl = store.playlists.get_playlist(pid)
         if pl is None:
             raise HTTPException(status_code=404, detail="playlist not found")
-        labels = {i.id: i.label for i in store.get_identities()}
-        tracks = store.playlist_tracks_detail(pid)
+        labels = {i.id: i.label for i in store.identities.get_identities()}
+        tracks = store.charts.playlist_tracks_detail(pid)
         from yt_playlist.rec import measurement
         measurement.record_action(store, "open", now_fn(), playlist_id=pid)
-        is_generated = store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP
-        recipe = store.get_recipe(pl.ytm_playlist_id) if is_generated else None
+        is_generated = store.playlists.is_quarantined_playlist(pl.ytm_playlist_id)
+        recipe = store.rec_surface.get_recipe(pl.ytm_playlist_id) if is_generated else None
         return templates.TemplateResponse(request, "playlist.html", {
             "pl": pl, "tracks": tracks, "identity": labels.get(pl.identity_id, "?"),
             "show_identity": len(labels) > 1,
             "is_generated": is_generated,
-            "facets": recommend.playlist_facets(store, pid) if is_generated else None,
-            "mood_state": recommend.playlist_mood_state(store, pid, now_fn()) if is_generated else 0,
-            "mood_states": recommend.track_mood_states(store, now_fn()) if is_generated else {},
+            "facets": taste_analysis.playlist_facets(store, pid) if is_generated else None,
+            "mood_state": taste_analysis.playlist_mood_state(store, pid, now_fn()) if is_generated else 0,
+            "mood_states": taste_analysis.track_mood_states(store, now_fn()) if is_generated else {},
             "recipe": recipe,
             # #48: a cluster-derived playlist whose canvas we saved can be reopened and regrown
-            "has_cluster_canvas": bool(store.get_cluster_canvas(pl.ytm_playlist_id)) if is_generated else False,
+            "has_cluster_canvas": bool(store.rec_surface.get_cluster_canvas(pl.ytm_playlist_id)) if is_generated else False,
             "journey_label": journeys.JOURNEY_LABELS.get((recipe or {}).get("journey")) if is_generated else None,
             "journey_desc": journeys.JOURNEY_DESCRIPTIONS.get((recipe or {}).get("journey")) if is_generated else None,
-            "kind": store.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),
+            "kind": store.playlists.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),
             # autosuggest = the editable whitelist plus whatever genres already exist in the library
-            "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
+            "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
-            "conflict_count": store.conflict_count_for_playlist(pid),  # drives the header conflict icon
+            "conflict_count": store.enrichment.conflict_count_for_playlist(pid),  # drives the header conflict icon
             "active_job": ctx.jobs.find_active(pid),     # an in-progress enrichment to rejoin, if any
             "position_pending": len(pending_insertions(store, pid)),
         })
@@ -206,9 +209,9 @@ def build(ctx) -> APIRouter:
     def playlist_cells(pid: int):
         # Lightweight genre/year snapshot so the open playlist page can fill in cells as the background
         # enrichment worker resolves them (polled on the same loop that highlights the now-playing row).
-        if store.get_playlist(pid) is None:
+        if store.playlists.get_playlist(pid) is None:
             raise HTTPException(status_code=404, detail="playlist not found")
-        tracks = store.playlist_tracks_detail(pid)
+        tracks = store.charts.playlist_tracks_detail(pid)
         cells = [{"video_id": t["video_id"], "genre": t.get("genre") or "", "year": t.get("year") or ""}
                  for t in tracks]
         pending = sum(1 for t in tracks if not (t.get("genre") and t.get("year")))
@@ -217,11 +220,11 @@ def build(ctx) -> APIRouter:
     @router.get("/playlist/{pid}/share.txt")
     def playlist_share(pid: int):
         """Download the playlist as a plain .txt (one song URL per line) for easy sharing."""
-        pl = store.get_playlist(pid)
+        pl = store.playlists.get_playlist(pid)
         if pl is None:
             raise HTTPException(status_code=404, detail="playlist not found")
         lines = [f"https://music.youtube.com/watch?v={t['video_id']}"
-                 for t in store.playlist_tracks_detail(pid) if t.get("video_id")]
+                 for t in store.charts.playlist_tracks_detail(pid) if t.get("video_id")]
         # ascii-safe filename for the legacy param, plus RFC 5987 filename* for the real title
         safe = re.sub(r'[\\/:*?"<>|]', "_", pl.title).strip() or "playlist"
         ascii_name = safe.encode("ascii", "ignore").decode() or "playlist"
@@ -258,7 +261,7 @@ def build(ctx) -> APIRouter:
             return _toast(request, "select at least one version to add")
         after_video_id = form.get("after_video_id") or None
         from_suggestion = form.get("suggestion") == "1" and len(tracks) == 1 and not after_video_id
-        before = {t["video_id"] for t in store.playlist_tracks_detail(pid)}
+        before = {t["video_id"] for t in store.charts.playlist_tracks_detail(pid)}
         try:
             await activity_for(ctx).to_thread(ctx.ops().add_tracks, pid, tracks, after_video_id)
         except ValueError as e:
@@ -270,7 +273,7 @@ def build(ctx) -> APIRouter:
         if after_video_id:
             _record_alt_version_events(pid, after_video_id, tracks)
         from yt_playlist.rec import measurement
-        present = {t["video_id"] for t in store.playlist_tracks_detail(pid)}
+        present = {t["video_id"] for t in store.charts.playlist_tracks_detail(pid)}
         for track in tracks:
             video_id = track.get("videoId")
             if video_id in present and video_id not in before:
@@ -278,17 +281,17 @@ def build(ctx) -> APIRouter:
                                           generated=_is_generated(pid))
         if from_suggestion:
             video_id = tracks[0].get("videoId")
-            details = store.playlist_tracks_detail(pid)
+            details = store.charts.playlist_tracks_detail(pid)
             added = next((t for t in reversed(details) if t["video_id"] == video_id), None)
             if added is not None:
                 if not added.get("genre"):
-                    store.requeue_enrichment([added["track_id"]])
+                    store.enrichment.requeue_enrichment([added["track_id"]])
                     if ctx.enrich_worker:
                         ctx.enrich_worker.trigger()
                 gen = _is_generated(pid)
                 return templates.TemplateResponse(request, "_partials/suggestion_added.html", {
                     "t": added, "idx": len(details), "is_generated": gen,
-                    "mood_states": recommend.track_mood_states(store, now_fn()) if gen else {},
+                    "mood_states": taste_analysis.track_mood_states(store, now_fn()) if gen else {},
                 })
         return _refresh()                             # reload so the new tracks drop into the table
 
@@ -308,7 +311,7 @@ def build(ctx) -> APIRouter:
     def playlist_enrich(pid: int):
         """Kick off the enrichment waterfall: every enabled provider, in configured order, over this
         playlist's not-yet-complete tracks. Logs each provider response and records disagreements."""
-        if store.get_playlist(pid) is None:
+        if store.playlists.get_playlist(pid) is None:
             raise HTTPException(status_code=404, detail="playlist not found")
         job = start_playlist_enrichment(ctx, pid)
         return JSONResponse({"job_id": job.id})
@@ -317,9 +320,9 @@ def build(ctx) -> APIRouter:
     def playlist_conflicts(request: Request, pid: int):
         """The conflict-resolver modal: unresolved provider disagreements for this playlist's tracks."""
         return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
-            "conflicts": store.unresolved_conflicts_for_playlist(pid),
+            "conflicts": store.enrichment.unresolved_conflicts_for_playlist(pid),
             "resolve_url": f"/playlist/{pid}/conflicts/resolve",
-            "count_left": store.conflict_count_for_playlist(pid)})
+            "count_left": store.enrichment.conflict_count_for_playlist(pid)})
 
     @router.post("/playlist/{pid}/conflicts/resolve")
     async def playlist_resolve_conflicts(request: Request, pid: int):
@@ -332,13 +335,13 @@ def build(ctx) -> APIRouter:
             tid, _, field = key.partition(":")
             if tid.isdigit():
                 try:
-                    store.resolve_conflict(int(tid), field, value)
+                    store.enrichment.resolve_conflict(int(tid), field, value)
                 except ValueError:
                     pass
         return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
-            "conflicts": store.unresolved_conflicts_for_playlist(pid),
+            "conflicts": store.enrichment.unresolved_conflicts_for_playlist(pid),
             "resolve_url": f"/playlist/{pid}/conflicts/resolve",
-            "count_left": store.conflict_count_for_playlist(pid)})
+            "count_left": store.enrichment.conflict_count_for_playlist(pid)})
 
     @router.get("/playlist/enrich/events/{job_id}")
     async def playlist_enrich_events(request: Request, job_id: int):
@@ -357,12 +360,12 @@ def build(ctx) -> APIRouter:
             vid = ev.get("video_id")
             if ev.get("type") != "track":
                 return ev
-            rows = (store.album_tracks_detail(job.album_browse) if job.album_browse is not None else
-                    store.playlist_tracks_detail(job.playlist_id) if job.playlist_id is not None else [])
+            rows = (store.charts.album_tracks_detail(job.album_browse) if job.album_browse is not None else
+                    store.charts.playlist_tracks_detail(job.playlist_id) if job.playlist_id is not None else [])
             gen_flag = _is_generated(job.playlist_id) if job.playlist_id is not None else False
             for index, track in enumerate(rows, start=1):
                 if track["video_id"] == vid:
-                    mood_states = recommend.track_mood_states(store, now_fn()) if gen_flag else {}
+                    mood_states = taste_analysis.track_mood_states(store, now_fn()) if gen_flag else {}
                     return {**ev, "genre": track["genre"], "year": track["year"],
                             "row_html": row_tmpl.render(t=track, idx=index, is_generated=gen_flag,
                                                         mood_states=mood_states)}
@@ -397,11 +400,11 @@ def build(ctx) -> APIRouter:
             return _toast(request, "YouTube returned an unexpected response")
         _refresh_ytm_view(ctx, store, pid)
         return templates.TemplateResponse(request, "_partials/playlist_head.html",
-                                          {"pl": store.get_playlist(pid)})
+                                          {"pl": store.playlists.get_playlist(pid)})
 
     @router.post("/settings/lastfm-key")
     async def set_lastfm_key(request: Request):
-        store.set_setting("lastfm_api_key", ((await request.form()).get("key") or "").strip())
+        store.settings.set_setting("lastfm_api_key", ((await request.form()).get("key") or "").strip())
         if ctx.enrich_worker:
             ctx.enrich_worker.trigger()
         return Response(status_code=204)
@@ -413,10 +416,10 @@ def build(ctx) -> APIRouter:
         genre = (form.get("genre") or "").strip()
         if not vid:
             return _toast(request, "no track given")
-        tid = store.track_ids_for_videos([vid]).get(vid)
+        tid = store.tracks.track_ids_for_videos([vid]).get(vid)
         if tid is None:
             return _toast(request, "track not found")
-        store.set_track_genre(tid, genre)
+        store.tracks.set_track_genre(tid, genre)
         ctx.rec_worker.trigger_mode_refresh()
         return _track_row(request, pid, vid)
 
@@ -427,10 +430,10 @@ def build(ctx) -> APIRouter:
         year = (form.get("year") or "").strip()
         if not vid:
             return _toast(request, "no track given")
-        tid = store.track_ids_for_videos([vid]).get(vid)
+        tid = store.tracks.track_ids_for_videos([vid]).get(vid)
         if tid is None:
             return _toast(request, "track not found")
-        store.set_track_year(tid, year)
+        store.tracks.set_track_year(tid, year)
         ctx.rec_worker.trigger_mode_refresh()
         return _track_row(request, pid, vid)
 
@@ -441,10 +444,10 @@ def build(ctx) -> APIRouter:
         title = (form.get("title") or "").strip()
         if not vid:
             return _toast(request, "no track given")
-        tid = store.track_ids_for_videos([vid]).get(vid)
+        tid = store.tracks.track_ids_for_videos([vid]).get(vid)
         if tid is None:
             return _toast(request, "track not found")
-        store.set_track_title(tid, title)
+        store.tracks.set_track_title(tid, title)
         return _track_row(request, pid, vid)
 
     @router.post("/playlist/{pid}/track-artist")
@@ -454,10 +457,10 @@ def build(ctx) -> APIRouter:
         artist = (form.get("artist") or "").strip()
         if not vid:
             return _toast(request, "no track given")
-        tid = store.track_ids_for_videos([vid]).get(vid)
+        tid = store.tracks.track_ids_for_videos([vid]).get(vid)
         if tid is None:
             return _toast(request, "track not found")
-        store.set_track_artist(tid, artist)
+        store.tracks.set_track_artist(tid, artist)
         return _track_row(request, pid, vid)
 
     @router.post("/playlist/{pid}/track-reset")
@@ -469,13 +472,13 @@ def build(ctx) -> APIRouter:
             return _toast(request, "no track given")
         if field not in ("title", "artist"):
             return _toast(request, "bad field")
-        tid = store.track_ids_for_videos([vid]).get(vid)
+        tid = store.tracks.track_ids_for_videos([vid]).get(vid)
         if tid is None:
             return _toast(request, "track not found")
         if field == "title":
-            store.reset_track_title(tid)
+            store.tracks.reset_track_title(tid)
         else:
-            store.reset_track_artist(tid)
+            store.tracks.reset_track_artist(tid)
         return _track_row(request, pid, vid)
 
     @router.post("/playlist/{pid}/remove-track")
@@ -518,11 +521,13 @@ def build(ctx) -> APIRouter:
         machine releases the playlist and every other one keeps quarantining it, and even this one
         re-quarantines it on the next sync (clearing a group deletes the row, leaving no local trace
         of the decision). Best-effort: if the write fails, the local promotion still stands."""
-        pl = store.get_playlist(pid)
+        pl = store.playlists.get_playlist(pid)
         if pl is None:
             return _refresh()
-        was_generated = store.get_playlist_groups().get(pl.ytm_playlist_id) == "Generated"
-        store.set_playlist_group(pl.ytm_playlist_id, "")
+        was_generated = store.playlists.is_quarantined_playlist(pl.ytm_playlist_id)
+        store.playlists.adopt_generated_playlist(pl.ytm_playlist_id)
+        if store.playlists.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP:
+            store.playlists.set_playlist_group(pl.ytm_playlist_id, "")
         if was_generated:
             from yt_playlist.rec import measurement
             measurement.record_action(store, "promotion", now_fn(), playlist_id=pid,
@@ -531,7 +536,7 @@ def build(ctx) -> APIRouter:
         if client is not None:
             try:
                 client.edit_playlist(pl.ytm_playlist_id,
-                                     description=executor.PROMOTED_DESCRIPTION)
+                                     description=PROMOTED_DESCRIPTION)
             except Exception as e:  # noqa: BLE001 - the promotion is local truth either way
                 logger.warning("couldn't clear the generated marker on %s: %s",
                                pl.ytm_playlist_id, e)
@@ -542,9 +547,9 @@ def build(ctx) -> APIRouter:
         form = await request.form()
         name = form.get("name", "")
         for pid in _ids(form):
-            pl = store.get_playlist(pid)
+            pl = store.playlists.get_playlist(pid)
             if pl is not None:
-                store.set_playlist_group(pl.ytm_playlist_id, name)
+                store.playlists.set_playlist_group(pl.ytm_playlist_id, name)
         return _refresh()
 
     @router.post("/playlists/copy")
@@ -557,7 +562,7 @@ def build(ctx) -> APIRouter:
             logger.exception("copy of %s failed", ids)
             return _action_result({"status": "failed", "operation": "copy",
                 "message": "Copy could not be completed.", "items": [{"id": pid,
-                    "title": pl.title if (pl := store.get_playlist(pid)) else f"Playlist #{pid}",
+                    "title": pl.title if (pl := store.playlists.get_playlist(pid)) else f"Playlist #{pid}",
                     "status": "failed", "detail": str(exc) or type(exc).__name__} for pid in ids],
                 "guidance": "Check YouTube for a newly created playlist before retrying; the response may have been lost."})
         return _copy_result(result)
@@ -588,14 +593,14 @@ def build(ctx) -> APIRouter:
         form = await request.form()
         items = []
         for pid in dict.fromkeys(_ids(form)):
-            pl = store.get_playlist(pid)
+            pl = store.playlists.get_playlist(pid)
             if pl is None:
                 items.append({"id": pid, "title": f"Playlist #{pid}", "status": "absent",
                               "detail": "Already absent from the local library; no delete sent."})
                 continue
             if pl.ytm_playlist_id in SYSTEM_PLAYLIST_IDS:
                 # undeletable system playlists (Liked Music, Episodes for Later) -> just hide locally
-                store.hide_playlist(pl.ytm_playlist_id)
+                store.playlists.hide_playlist(pl.ytm_playlist_id)
                 items.append({"id": pid, "title": pl.title, "status": "hidden",
                               "detail": "Hidden from TuneConsole; system playlist kept on YouTube."})
                 continue
@@ -613,7 +618,7 @@ def build(ctx) -> APIRouter:
         # The home card's pending-cleanup count/icons come from a cached summary; recompute it now
         # so deleted playlists stop showing as pending cleanups until the next worker rebuild (#73).
         try:
-            await activity_for(ctx).to_thread(recommend.refresh_cleanup, store, now_fn())
+            await activity_for(ctx).to_thread(actions.refresh_cleanup, store, now_fn())
         except Exception:
             logger.exception("cleanup refresh after playlist deletion failed")
         failed = sum(item["status"] == "failed" for item in items)

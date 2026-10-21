@@ -31,20 +31,20 @@ def build(ctx) -> APIRouter:
         return f"{seconds // 86400}d ago"
 
     def _ctx():
-        cov = store.coverage_stats(include_discovery=True)
+        cov = store.enrichment.coverage_stats(include_discovery=True)
         total = cov["total"]
         def pct(k):
             if k == "processed" and total:
                 # Never claim 100% while a few tracks still await their first pass.
                 return math.floor(1000 * cov[k] / total) / 10
             return round(100 * cov[k] / total) if total else 0
-        remaining = store.queue_remaining()
+        remaining = store.enrichment.queue_remaining()
         now = ctx.now_fn()
-        progress = store.enrichment_activity_stats(now)
-        enabled = store.get_setting("enrich_worker_enabled", "1") == "1"
+        progress = store.enrichment.enrichment_activity_stats(now)
+        enabled = store.settings.get_setting("enrich_worker_enabled", "1") == "1"
         busy = bool(ctx.enrich_worker and ctx.enrich_worker.busy)
         activity = ctx.enrich_worker.activity if ctx.enrich_worker else {}
-        retry = store.enrichment_retry_status()
+        retry = store.enrichment.enrichment_retry_status()
         art_retry = store.enrichment.artwork_retry_status()
         if not enabled:
             state = "paused"
@@ -64,14 +64,14 @@ def build(ctx) -> APIRouter:
             "cov": cov,
             "pct": {k: pct(k) for k in
                     ("processed", "genre", "year", "bpm", "energy", "danceability")},
-            "remaining": remaining, "conflicts": store.outstanding_conflicts(),
+            "remaining": remaining, "conflicts": store.enrichment.outstanding_conflicts(),
             "enabled": enabled, "state": state,
             "activity": activity, "activity_age": age(activity.get("updated_at")),
             "retry": retry, "retry_seconds": max(0, math.ceil((retry["retry_at"] or now) - now)),
             "art_retry": art_retry,
             "art_retry_seconds": max(0, math.ceil((art_retry["retry_at"] or now) - now)),
             "progress": progress, "age": age,
-            "spark": viz.area_spark(store.processed_timeline()),
+            "spark": viz.area_spark(store.enrichment.processed_timeline()),
         }
 
     @router.get("/enrich")
@@ -87,15 +87,15 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "_partials/enrich_stats.html", _ctx())
 
     def detail(request, view, page):
-        total = (store.queue_remaining() if view == "queue" else
-                 store.coverage_stats(include_discovery=True)["processed"] if view == "processed" else
-                 store.outstanding_conflicts())
+        total = (store.enrichment.queue_remaining() if view == "queue" else
+                 store.enrichment.coverage_stats(include_discovery=True)["processed"] if view == "processed" else
+                 store.enrichment.outstanding_conflicts())
         size = 20 if view == "conflicts" else 40
         pages = max(1, (total + size - 1) // size)
         page = min(page, pages)
         offset = (page - 1) * size
-        fetch = {"queue": store.next_enrich_batch, "processed": store.enriched_tracks,
-                 "conflicts": store.unresolved_enrichment_conflicts}[view]
+        fetch = {"queue": store.enrichment.next_enrich_batch, "processed": store.enrichment.enriched_tracks,
+                 "conflicts": store.enrichment.unresolved_enrichment_conflicts}[view]
         return templates.TemplateResponse(request, "enrich_detail.html", {
             "view": view, "rows": fetch(size, offset), "total": total, "page": page,
             "pages": pages, "start": offset + 1 if total else 0,
@@ -119,26 +119,26 @@ def build(ctx) -> APIRouter:
     async def resolve_enrich_conflict(request: Request, track_id: int, field: str,
                                      page: int = Query(1, ge=1)):
         value = (await request.form()).get("value")
-        if not isinstance(value, str) or not store.resolve_enrichment_candidate(
+        if not isinstance(value, str) or not store.enrichment.resolve_enrichment_candidate(
                 track_id, field, value, now=ctx.now_fn()):
             raise HTTPException(status_code=400, detail="Choose a current provider candidate.")
         if request.headers.get("HX-Request") == "true":
             return templates.TemplateResponse(request, "_partials/enrich_conflict.html", {
-                "c": store.enrichment_conflict_detail(track_id, field), "saved": True,
+                "c": store.enrichment.enrichment_conflict_detail(track_id, field), "saved": True,
                 "provider_labels": provider_labels, "page": page,
             })
         return RedirectResponse(f"/enrich/conflicts?page={page}", status_code=303)
 
     @router.post("/enrich/toggle")
     def enrich_toggle(request: Request):
-        was_on = store.get_setting("enrich_worker_enabled", "1") == "1"
-        store.set_setting("enrich_worker_enabled", "0" if was_on else "1")
+        was_on = store.settings.get_setting("enrich_worker_enabled", "1") == "1"
+        store.settings.set_setting("enrich_worker_enabled", "0" if was_on else "1")
         if was_on is False and ctx.enrich_worker:     # just turned ON -> wake the drain loop
             ctx.enrich_worker.trigger()
         return templates.TemplateResponse(request, "_partials/enrich_stats.html", _ctx())
 
     def _genre_candidates(request, track_id):
-        track = store.genre_provenance(track_id)
+        track = store.enrichment.genre_provenance(track_id)
         if track is None:
             return Response(status_code=404)
         return templates.TemplateResponse(request, "_partials/genre_candidates.html", {"track": track})
@@ -150,7 +150,7 @@ def build(ctx) -> APIRouter:
     @router.post("/track/{track_id}/genre-lookup")
     def genre_lookup(track_id: int):
         """Start the normal provider waterfall for one track; progress streams over SSE."""
-        track = store.track_for_waterfall(track_id)
+        track = store.tracks.track_for_waterfall(track_id)
         if track is None:
             return Response(status_code=404)
         job = ctx.jobs.create()
@@ -191,14 +191,14 @@ def build(ctx) -> APIRouter:
 
     @router.post("/track/{track_id}/genre-candidates")
     async def choose_genre_candidate(request: Request, track_id: int):
-        track = store.genre_provenance(track_id)
+        track = store.enrichment.genre_provenance(track_id)
         if track is None:
             return Response(status_code=404)
         value = ((await request.form()).get("genre") or "").strip()
         # Provider candidates and custom user labels deliberately share one write path.
         if not value or len(value) > 80:
             return Response(status_code=400)
-        store.set_track_genre(track_id, value)
+        store.tracks.set_track_genre(track_id, value)
         ctx.rec_worker.trigger_mode_refresh()
         # The same track can occur on several visible rows. A reload updates all of them and their
         # sort data consistently; candidate choice is rare enough that a partial multi-row swap is

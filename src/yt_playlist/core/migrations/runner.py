@@ -71,7 +71,11 @@ def verified_backup(conn, source_version, target_version, backup_dir=None):
 
 def validate_catalog(conn, version):
     from . import v008_recordings, v010_play_event_subjects
-    validator = v010_play_event_subjects if version >= 10 else v008_recordings
+    if version >= 18:
+        from . import v018_discovery_sources
+        validator = v018_discovery_sources
+    else:
+        validator = v010_play_event_subjects if version >= 10 else v008_recordings
     validator.validate(conn)
     if version >= 11:
         from . import v011_takeout_coverage
@@ -88,6 +92,12 @@ def validate_catalog(conn, version):
     if version >= 15:
         from . import v015_album_shares
         v015_album_shares.validate(conn)
+    if version >= 19:
+        from . import v019_playlist_provenance
+        v019_playlist_provenance.validate(conn)
+    if version >= 20:
+        from . import v020_metadata_selections
+        v020_metadata_selections.validate(conn)
 
 
 def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, clock=time.time):

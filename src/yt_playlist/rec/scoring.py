@@ -1,7 +1,7 @@
 """Taste-model scoring: build the per-playlist taste model and turn it into per-track scores,
 re-weighted by genre/era/artist preferences, the breadth steer, and the transient mood/facet overlay.
 
-Split out of the former monolithic recommend.py; recommend re-exports these for existing callers."""
+Consumers import scoring directly; surface assembly depends on this layer."""
 import math
 import time
 
@@ -9,7 +9,6 @@ import numpy as np
 
 from yt_playlist.util import genre_map
 from yt_playlist.rec import embed, layers, mix_tuning, rec_params, transient
-from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.rec.taste_analysis import taste_breadth
 
 
@@ -57,14 +56,14 @@ def _playlist_centroids(store, M, idx) -> PlaylistTaste:
     """Per-playlist taste model over a vector space: each non-excluded playlist's normalized centroid in
     `M` (rows indexed by `idx` = {key: row}), play-weighted. Shared by playlist_taste (co-occurrence
     space) and content_taste (#38, content space). Generated + grab-bag catch-all playlists are skipped."""
-    stats = store.get_playlist_listen_stats()                # {pid: (last_ts, listen_count)}
-    excluded = RecDao(store).excluded_playlist_ids()         # generated playlists don't shape taste
-    catchall = store.catchall_playlist_ids()                 # #38: large + genre-incoherent grab-bags only
+    stats = store.charts.get_playlist_listen_stats()                # {pid: (last_ts, listen_count)}
+    excluded = store.rec_query.excluded_playlist_ids()         # generated playlists don't shape taste
+    catchall = store.rec_query.catchall_playlist_ids()                 # #38: large + genre-incoherent grab-bags only
     titles, cents, ws, pids = [], [], [], []
-    for p in store.get_playlists():
+    for p in store.playlists.get_playlists():
         if p.id in excluded or p.id in catchall:             # skip generated + grab-bags (coherent large OK)
             continue
-        rows = [idx[k] for k in store.get_playlist_track_keys(p.id) if k in idx]
+        rows = [idx[k] for k in store.playlists.get_playlist_track_keys(p.id) if k in idx]
         if not rows:
             continue
         c = M[rows].mean(0)
@@ -97,7 +96,7 @@ def _behavior_centroid(store, M, idx):
     """Unit centroid of the tracks you've actually played, in vector space M (the behavior taste signal,
     #38). Flat membership: the A/B found play-count/like/save weighting added nothing over plain played-
     membership, so this stays simple. None when nothing you've played is modeled."""
-    rows = [idx[k] for k in store.play_counts() if k in idx]
+    rows = [idx[k] for k in store.rec_query.play_counts() if k in idx]
     if not rows:
         return None
     c = M[rows].mean(0)
@@ -259,13 +258,13 @@ def _axis_weights_for(store, keys, now=None, with_details=False):
     """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
     the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
     mix_tuning.expire(store, time.time() if now is None else now)
-    w = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
+    w = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     gw = {a[len("genre:"):]: v for a, v in w.items() if a.startswith("genre:")}
     ew = {a[len("era:"):]: v for a, v in w.items() if a.startswith("era:")}
     aw = {a[len("artist:"):]: v for a, v in w.items() if a.startswith("artist:")}
     pw = {a[len("pop:"):]: v for a, v in w.items() if a.startswith("pop:")}
     leans = transient.facet_leans(store, now) if now is not None else {}
-    standing = store.get_leans()
+    standing = store.rec_model.get_leans()
     # Breadth steer (#7): a per-family tilt derived from your current genre spread. Only computed when
     # the bias is off-center (the taste_breadth query isn't worth running at the neutral default), and
     # it must keep the overlay alive below even when every genre/era/artist weight is neutral.
@@ -277,7 +276,7 @@ def _axis_weights_for(store, keys, now=None, with_details=False):
     if perm_neutral and not leans and not standing and not bfac:
         return None
     keys = list(keys)
-    dao = RecDao(store)
+    dao = store.rec_query
     genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
     pops = dao.track_popularity(keys)
     pop_min = rec_params.get_param(store, "pop_mainstream_min")
@@ -346,10 +345,10 @@ def discovery_facet_weight(store, family, now):
     mix_tuning.expire(store, now)
     if not family:
         return 1.0
-    perm = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(f"genre:{family}", 1.0)
+    perm = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(f"genre:{family}", 1.0)
     if perm == 0:
         return None
-    standing = store.get_lean(f"genre:{family}")
+    standing = store.rec_model.get_lean(f"genre:{family}")
     lean = transient.facet_leans(store, now).get(f"genre:{family}", 0.0)
     tmult = transient.facet_multiplier(lean * rec_params.DISCOVERY_TRANSIENT_DAMP,
                                        rec_params.FACET_GAIN, rec_params.FACET_MULT_MIN,
@@ -362,7 +361,7 @@ def genre_distance_fn(store, alpha=0.5):
     co-occurrence: genres you repeatedly playlist together are pulled closer. alpha = static
     weight. Falls back to the static map for pairs you've never grouped. Spec §2.1/§5.3.
     """
-    co = store.genre_cooccurrence()
+    co = store.rec_query.genre_cooccurrence()
     pairs, occ = co["pairs"], co["occ"]
 
     def dist(g1, g2):
@@ -380,9 +379,6 @@ def genre_distance_fn(store, alpha=0.5):
 MOOD_ALPHA = 0.35   # how hard a mood event tilts the lanes, relative to the taste score
 
 
-mood_tilt = transient.centroid_tilt   # back-compat: tests/callers use recommend.mood_tilt(store, now, V, idx)
-
-
 def _audio_tilt_boost(store, now, idx, content_vecs=None, content_snapshot=None):
     """Per-row alignment to the recent-listening audio tilt, including its fading magnitude
     (#45), aligned to V rows via `idx` (key -> row). None when there is no audio tilt or no content
@@ -393,7 +389,7 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None, content_snapshot=None)
     the library content vectors; the cold path passes the discovered-content vectors, whose keys are
     out-of-corpus and so absent from the library store."""
     if content_vecs is None or content_snapshot is not None:
-        snapshot = content_snapshot if content_snapshot is not None else store.content_generation()
+        snapshot = content_snapshot if content_snapshot is not None else store.rec_model.content_generation()
         library = embed.load_content_vectors(store, snapshot=snapshot)
         atilt = transient.audio_centroid_tilt(store, now, content_vecs=library)
         content_vecs = library if content_vecs is None else content_vecs
@@ -487,7 +483,7 @@ def score_with_traces(store, taste, keys, V, idx, now):
         cap = rec_params.get_param(store, "axis_weight_cap")
         final = {k: ranked_base[k] * min(cap, mult.get(k, 1.0)) for k in combined}
     traces = {}
-    audio_keys = set(RecDao(store).track_audio_features())
+    audio_keys = set(store.rec_query.track_audio_features())
     cap = rec_params.get_param(store, "axis_weight_cap")
     for i, key in enumerate(keys):
         axis = axis_details.get(key, {"axes": {}, "raw_product": 1.0, "breadth": 1.0})

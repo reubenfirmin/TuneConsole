@@ -9,11 +9,12 @@ import json
 import time
 
 from yt_playlist.repos.base import Repo, synchronized
-from yt_playlist.core import catalog
+from yt_playlist.core import catalog, metadata
 
 # field concept name -> (tracks column, caster). The whitelist that makes a user-chosen resolution
 # safe to write straight into the canonical column.
 _FIELD_COLUMN = {
+    "title": ("title", str), "artist": ("artist", str),
     "genre": ("genre", str), "year": ("mb_year", str), "label": ("label", str),
     "music_key": ("music_key", str), "music_scale": ("music_scale", str),
     "bpm": ("bpm", float), "energy": ("energy", float), "danceability": ("danceability", float),
@@ -22,6 +23,32 @@ _FIELD_COLUMN = {
 
 
 class EnrichmentRepo(Repo):
+    @synchronized
+    def apply_provider_fields(self, track_id, provider, fields, *, providers=()):
+        """Select typed provider findings below explicit user overrides."""
+        track_id = catalog.resolve_entry(self.conn,track_id)
+        with self.conn:
+            metadata.apply_provider(self.conn,track_id,provider,fields,providers)
+
+    @synchronized
+    def metadata_provenance(self, track_id):
+        track_id = catalog.resolve_entry(self.conn,track_id)
+        track = self.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (track_id,)).fetchone()
+        if track is None:
+            return None
+        choices = {r['field']:dict(r) for r in self.conn.execute(
+            'SELECT * FROM entry_field_choices WHERE entry_id=?', (track_id,))}
+        fields = {}
+        for field in (*catalog.ITEM_FIELDS,*catalog.RECORDING_FIELDS):
+            choice = choices.get(field)
+            fields[field] = {'value':track[field], 'override':choice is not None,
+                             'source':choice['source'] if choice else
+                             metadata.selected_source(self.conn,track_id,field) or
+                             ('missing' if track[field] is None else 'unknown')}
+        decisions = [dict(r) for r in self.conn.execute(
+            'SELECT * FROM metadata_decisions WHERE entry_id=? ORDER BY chosen_at,id', (track_id,))]
+        return {'fields':fields,'decisions':decisions}
+
     @synchronized
     def replace_catalog_hints(self, track_id, fields):
         """A direct provider answer can supersede an imported album/radio hint.
@@ -350,7 +377,7 @@ class EnrichmentRepo(Repo):
         self.conn.commit()
 
     @synchronized
-    def set_track_field(self, track_id, field, value) -> None:
+    def _choose_track_field(self, track_id, field, value, *, now=None):
         track_id = catalog.resolve_entry(self.conn, track_id)
         """Overwrite a single canonical track column (used by conflict resolution). Whitelisted."""
         spec = _FIELD_COLUMN.get(field)
@@ -361,19 +388,24 @@ class EnrichmentRepo(Repo):
             v = cast(value) if value not in (None, "") else ("" if cast is str else None)
         except (TypeError, ValueError):
             v = value
-        catalog.choose_field(self.conn,track_id,col,v,'conflict_resolution')
-        self.conn.commit()
+        catalog.choose_field(self.conn,track_id,col,v,'conflict_resolution',now=now)
+
+    @synchronized
+    def set_track_field(self, track_id, field, value) -> None:
+        with self.conn:
+            self._choose_track_field(track_id,field,value)
 
     @synchronized
     def resolve_conflict(self, track_id, field, value, now=None) -> None:
         track_id = catalog.resolve_entry(self.conn, track_id)
         """Apply the user's choice: overwrite the canonical column and mark the conflict resolved."""
-        self.set_track_field(track_id, field, value)
-        self.conn.execute(
-            "UPDATE enrichment_conflict SET resolved=1, resolved_value=?, updated_at=? "
-            "WHERE track_id=? AND field=?",
-            (None if value is None else str(value), now or time.time(), track_id, field))
-        self.conn.commit()
+        at = time.time() if now is None else now
+        with self.conn:
+            self._choose_track_field(track_id,field,value,now=at)
+            self.conn.execute(
+                "UPDATE enrichment_conflict SET resolved=1, resolved_value=?, updated_at=? "
+                "WHERE track_id=? AND field=?",
+                (None if value is None else str(value), at, track_id, field))
 
     @synchronized
     def conflict_count_for_playlist(self, playlist_id) -> int:
@@ -621,7 +653,8 @@ class EnrichmentRepo(Repo):
                 value = candidate["value"]
                 option = by_value.get(key(value))
                 if option is None:
-                    option = {"value": str(value), "label": value, "current": False,
+                    option = {"value": str(value) if value is not None else "",
+                              "label": value if value not in (None,'') else "Not set", "current": False,
                               "providers": [], "source_note": ""}
                     by_value[key(value)] = option
                     options.append(option)
@@ -634,7 +667,9 @@ class EnrichmentRepo(Repo):
                 for finding in findings:
                     if key(finding["value"]) == current_key and finding["provider"] not in options[0]["providers"]:
                         options[0]["providers"].append(finding["provider"])
-            if row["resolved_value"] is not None and key(row["resolved_value"]) == current_key:
+            override = self.conn.execute('SELECT 1 FROM entry_field_choices WHERE entry_id=? AND field=?',
+                                         (conflict['track_id'],spec[0] if spec else conflict['field'])).fetchone()
+            if override:
                 options[0]["source_note"] = "Your choice"
             elif not options[0]["providers"]:
                 options[0]["source_note"] = ("No saved value" if current_key is None else

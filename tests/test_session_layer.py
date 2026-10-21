@@ -8,7 +8,7 @@ def test_hour_old_play_dominates_12h_old_at_hl4h(store):
     """At session_halflife=4h, an hour-old play should contribute more weight than a 12-hour-old one,
     so the tilt vector should be closer to the fresh play's direction. Weight ratio:
     decay_weight(3600, 4/24) / decay_weight(43200, 4/24) = 0.5**(1/4) / 0.5**(3) ≈ 6.73"""
-    iid = store.upsert_identity("main", "test", None, True)
+    iid = store.identities.upsert_identity("main", "test", None, True)
 
     # Create two distinct test vectors: one pointing along [1, 0] and another along [0, 1]
     # (will embed them in the full space by padding with zeros)
@@ -23,7 +23,7 @@ def test_hour_old_play_dominates_12h_old_at_hl4h(store):
 
     now = 1000000.0
     # Record two plays at different ages
-    store.import_play_events(iid, [
+    store.history.import_play_events(iid, [
         ("track1|artist1", "v1", now - 3600.0),    # 1 hour old
         ("track2|artist2", "v2", now - 43200.0),   # 12 hours old
     ])
@@ -66,14 +66,14 @@ def test_quiet_store_returns_none(store):
 
 def test_below_gate_returns_none(store):
     """When fewer than now_min_events keys contribute, session_tilt returns None."""
-    iid = store.upsert_identity("main", "test", None, True)
+    iid = store.identities.upsert_identity("main", "test", None, True)
 
     V = np.random.randn(5, 3).astype(np.float64)
     idx = {f"track{i}|artist{i}": i for i in range(5)}
 
     now = 1000000.0
     # Record only 1 play
-    store.import_play_events(iid, [
+    store.history.import_play_events(iid, [
         ("track0|artist0", "v0", now - 3600.0),
     ])
 
@@ -86,14 +86,14 @@ def test_below_gate_returns_none(store):
 
 def test_keys_absent_from_idx_do_not_contribute(store):
     """Keys in play_events that are absent from idx should not contribute to tilt or count toward gate."""
-    iid = store.upsert_identity("main", "test", None, True)
+    iid = store.identities.upsert_identity("main", "test", None, True)
 
     V = np.eye(3, dtype=np.float64)
     idx = {"track0|artist0": 0, "track1|artist1": 1}  # Only 2 keys in idx
 
     now = 1000000.0
     # Record 3 plays: 2 in idx, 1 absent
-    store.import_play_events(iid, [
+    store.history.import_play_events(iid, [
         ("track0|artist0", "v0", now - 3600.0),
         ("track1|artist1", "v1", now - 7200.0),
         ("track2|artist2", "v2", now - 10800.0),  # This key is NOT in idx
@@ -116,19 +116,19 @@ def test_keys_absent_from_idx_do_not_contribute(store):
 
 def test_session_tilt_passes_radio_exclusion_to_play_events_since(store, monkeypatch):
     """#93v2 pin: session_tilt must resolve the radio playlist ids (layers._radio_list_ids) and pass
-    them as exclude_list_ids to store.play_events_since, so radio's own machine-queued plays cannot
+    them as exclude_list_ids to store.history.play_events_since, so radio's own machine-queued plays cannot
     feed this layer. Behavior is covered end-to-end by test_now_layer.py's equivalent test for the
     NOW layer (same underlying mechanism); this pins the parameter-passing contract for THIS call
     site specifically."""
-    store.set_setting("radio_playlist_ytm", "PLRADIO")
-    store.set_setting("radio_playlist_a_ytm", "PLRADIO_A")
+    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
+    store.settings.set_setting("radio_playlist_a_ytm", "PLRADIO_A")
     captured = {}
-    orig = store.play_events_since
+    orig = store.history.play_events_since
 
     def fake(since_ts, exclude_list_ids=None):
         captured["exclude_list_ids"] = exclude_list_ids
         return orig(since_ts, exclude_list_ids=exclude_list_ids)
-    monkeypatch.setattr(store, "play_events_since", fake)
+    monkeypatch.setattr(store.history, "play_events_since", fake)
 
     layers.session_tilt(store, 1000.0, np.zeros((1, 1)), {})
 
@@ -138,14 +138,14 @@ def test_session_tilt_passes_radio_exclusion_to_play_events_since(store, monkeyp
 def test_zero_norm_contribution_returns_none(store):
     """When a key's vector has zero norm, it should be skipped. If all vectors are zero-norm,
     the result should be None."""
-    iid = store.upsert_identity("main", "test", None, True)
+    iid = store.identities.upsert_identity("main", "test", None, True)
 
     # Create vectors with zero norm
     V = np.zeros((3, 4), dtype=np.float64)
     idx = {f"track{i}|artist{i}": i for i in range(3)}
 
     now = 1000000.0
-    store.import_play_events(iid, [
+    store.history.import_play_events(iid, [
         ("track0|artist0", "v0", now - 3600.0),
         ("track1|artist1", "v1", now - 7200.0),
         ("track2|artist2", "v2", now - 10800.0),

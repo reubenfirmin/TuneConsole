@@ -41,7 +41,7 @@ class _Cards(HTMLParser):
 
 @pytest.fixture
 def engagement(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     store.modes.replace_modes([
         {"mode_id": mid, "label": genre, "families": [[genre, 1]],
          "centroid": np.eye(2, dtype=np.float32)[mid - 1], "size": 40, "rep_keys": []}
@@ -54,7 +54,7 @@ def engagement(store):
              "title": f"Song {mid} {i}", "artist": f"Artist {mid} {i}", "album": "",
              "thumbnail": None, "plays": 0, "reason": "", "lane": lane, "genre": genre}
             for i in range(20)]}
-    store.put_proposals("mode_bundles", payload, 1)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1)
     clock = [1_700_000_000.0]
     fake = FakeClient()
     client = TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: clock[0]),
@@ -73,7 +73,7 @@ def engagement(store):
             "recipe": json.dumps(card["recipe"])})
         assert response.status_code == 200
         pid = next(pid for pid, mode in store.modes.pick_rows() if mode == mid)
-        selected[mid] = next(playlist for playlist in store.get_playlists() if playlist.id == pid)
+        selected[mid] = next(playlist for playlist in store.playlists.get_playlists() if playlist.id == pid)
     # These are the production ingestion functions used by /bridge/ws; no listen-stat mock.
     ctx = SimpleNamespace(store=store)
     first, second = cards[1]["tracks"][:2]
@@ -91,11 +91,11 @@ def engagement(store):
 
 def test_saved_mode_retains_attributed_plays_and_exit_depth_over_multiple_days(engagement):
     data = engagement
-    events = data.store.play_events_since(data.start)
+    events = data.store.history.play_events_since(data.start)
     assert len(events) == 3
     assert {event["playlist_ytm_id"] for event in events} == {data.selected[1].ytm_playlist_id}
     assert events[-1]["played_at"] - events[0]["played_at"] == 86400
-    exits = data.store.player_events_since(data.start, kind="track_exit")
+    exits = data.store.player_events.player_events_since(data.start, kind="track_exit")
     assert [classify_exit(event["position"], event["duration"]) for event in exits] == ["completion", "skip", "completion"]
     assert {event["playlist_ytm_id"] for event in exits} == {data.selected[1].ytm_playlist_id}
     board = {row["mode_id"]: row for row in mode_eval.mode_scoreboard(data.store)}
@@ -109,8 +109,8 @@ def test_saved_mode_retains_attributed_plays_and_exit_depth_over_multiple_days(e
 def test_saved_mode_retains_the_link_needed_to_read_skip_and_completion_depth(engagement):
     store = engagement.store
     picks = dict(store.modes.pick_rows())
-    playlist_ids = {playlist.ytm_playlist_id: playlist.id for playlist in store.get_playlists()}
-    exits = store.player_events_since(engagement.start, kind="track_exit")
+    playlist_ids = {playlist.ytm_playlist_id: playlist.id for playlist in store.playlists.get_playlists()}
+    exits = store.player_events.player_events_since(engagement.start, kind="track_exit")
     # Part C requires a persistent trace of mode choice and engagement. Use the stored pick,
     # playlist provenance and production exit classifier, without inventing a scoreboard API.
     depth = [(picks[playlist_ids[event["playlist_ytm_id"]]],
@@ -125,6 +125,6 @@ def test_organic_play_does_not_count_as_engagement_with_a_saved_mode(engagement)
     assert live_plays.handle_play_event(data.ctx, {
         "type": "play", "videoId": track["video_id"], "title": track["title"],
         "artist": track["artist"]}, data.start + 2 * 86400)
-    assert data.store.play_events_since(data.start)[-1]["playlist_ytm_id"] is None
+    assert data.store.history.play_events_since(data.start)[-1]["playlist_ytm_id"] is None
     board = {row["mode_id"]: row for row in mode_eval.mode_scoreboard(data.store)}
     assert board[2]["plays"] == 0, "Playing the same song organically is not a mode-playlist selection"

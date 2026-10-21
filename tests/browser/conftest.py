@@ -36,8 +36,8 @@ def _free_port():
 
 @pytest.fixture
 def live_app(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))

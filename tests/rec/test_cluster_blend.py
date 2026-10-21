@@ -1,4 +1,5 @@
 import numpy as np
+from types import SimpleNamespace
 from yt_playlist.rec import embed, rec_params
 
 
@@ -8,6 +9,9 @@ class VStore:
         self._collab = collab      # {key: np.array}
         self._content = content     # {key: np.array}
         self._settings = {rec_params.SETTING_PREFIX + "cluster_content_weight": str(w)}
+        self.settings = SimpleNamespace(get_setting=self.get_setting)
+        self.rec_model = SimpleNamespace(get_rec_vectors=self.get_rec_vectors,
+                                         content_generation=self.content_generation)
 
     def get_rec_vectors(self):
         return [(k, v.astype(np.float32).tobytes()) for k, v in self._collab.items()]

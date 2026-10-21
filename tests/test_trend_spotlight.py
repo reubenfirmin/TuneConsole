@@ -44,15 +44,15 @@ def test_build_stamps_spotlight_review_month(store):
     build() doesn't re-fire the month-rollover detector for the same month. now=59*86400.0 (Mar 1,
     1970-03) so Feb (the day-31 snapshot) is a genuinely completed past month under month_review's own
     `now` argument (not real wall-clock time.time())."""
-    store.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history_snapshots FK
+    store.identities.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history_snapshots FK
     _track(store, "k1", "A1", "house")
     for d in (0, 1, 2, 3):
         _snap(store, d, ["k1"])
     _snap(store, 31, ["k1"])
     now = 59 * 86400.0
 
-    assert store.get_setting("trend_spotlight_review_month") is None   # sanity: unset before build()
+    assert store.settings.get_setting("trend_spotlight_review_month") is None   # sanity: unset before build()
     payload = tr.build(store, now)
     assert payload["review"]["month"] == "1970-02"
     assert payload["spotlight"]["signature"] == "month_review:1970-02"   # review actually won the slot
-    assert store.get_setting("trend_spotlight_review_month") == "1970-02"
+    assert store.settings.get_setting("trend_spotlight_review_month") == "1970-02"

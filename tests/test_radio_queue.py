@@ -142,8 +142,8 @@ def test_on_play_rebuild_purges_skip_tainted_pick(monkeypatch, store):
     vid_to_key = {m["video_id"]: k for k, m in meta.items()}
     monkeypatch.setattr(radio, "_score_map", lambda st, now: dict(scores))
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: {k: meta[k] for k in keys if k in meta})
-    monkeypatch.setattr(store, "identity_key_for_video", lambda vid: vid_to_key.get(vid))
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: {k: meta[k] for k in keys if k in meta})
+    monkeypatch.setattr(store.tracks, "identity_key_for_video", lambda vid: vid_to_key.get(vid))
 
     s = radio.RadioSession()
     radio.start_session(store, s, now=1.0)
@@ -232,8 +232,8 @@ def test_force_topup_rebuilds_in_place_without_advance(monkeypatch, store):
     vid_to_key = {m["video_id"]: k for k, m in meta.items()}
     monkeypatch.setattr(radio, "_score_map", lambda st, now: dict(scores))
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: {k: meta[k] for k in keys if k in meta})
-    monkeypatch.setattr(store, "identity_key_for_video", lambda vid: vid_to_key.get(vid))
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: {k: meta[k] for k in keys if k in meta})
+    monkeypatch.setattr(store.tracks, "identity_key_for_video", lambda vid: vid_to_key.get(vid))
 
     s = radio.RadioSession()
     radio.start_session(store, s, now=1.0)
@@ -265,29 +265,29 @@ def _meta(keys):
 
 
 def _ident(store):
-    return store.upsert_identity("main", "ref", None, True)
+    return store.identities.upsert_identity("main", "ref", None, True)
 
 
 def test_recent_radio_keys_matches_any_of_the_three_radio_settings(store):
     rec_params.set_param(store, "radio_freshness_days", 3.0)
-    store.set_setting("radio_playlist_a_ytm", "PLA")
-    store.set_setting("radio_playlist_b_ytm", "PLB")
-    store.set_setting("radio_playlist_ytm", "PLV2")
+    store.settings.set_setting("radio_playlist_a_ytm", "PLA")
+    store.settings.set_setting("radio_playlist_b_ytm", "PLB")
+    store.settings.set_setting("radio_playlist_ytm", "PLV2")
     ident = _ident(store)
     now = 10 * 86400.0
-    store.record_play_event(ident, "kA", "vA", now - 1 * 86400.0, playlist_ytm_id="PLA")
-    store.record_play_event(ident, "kB", "vB", now - 2 * 86400.0, playlist_ytm_id="PLB")
-    store.record_play_event(ident, "kV2", "vV2", now - 0.5 * 86400.0, playlist_ytm_id="PLV2")
-    store.record_play_event(ident, "kOld", "vOld", now - 10 * 86400.0, playlist_ytm_id="PLA")   # outside window
-    store.record_play_event(ident, "kOther", "vOther", now - 0.1 * 86400.0, playlist_ytm_id="PLREAL")  # not radio
+    store.history.record_play_event(ident, "kA", "vA", now - 1 * 86400.0, playlist_ytm_id="PLA")
+    store.history.record_play_event(ident, "kB", "vB", now - 2 * 86400.0, playlist_ytm_id="PLB")
+    store.history.record_play_event(ident, "kV2", "vV2", now - 0.5 * 86400.0, playlist_ytm_id="PLV2")
+    store.history.record_play_event(ident, "kOld", "vOld", now - 10 * 86400.0, playlist_ytm_id="PLA")   # outside window
+    store.history.record_play_event(ident, "kOther", "vOther", now - 0.1 * 86400.0, playlist_ytm_id="PLREAL")  # not radio
     assert radio._recent_radio_keys(store, now) == {"kA", "kB", "kV2"}
 
 
 def test_recent_radio_keys_off_when_freshness_days_zero(store):
     rec_params.set_param(store, "radio_freshness_days", 0)
-    store.set_setting("radio_playlist_ytm", "PLV2")
+    store.settings.set_setting("radio_playlist_ytm", "PLV2")
     ident = _ident(store)
-    store.record_play_event(ident, "k", "v", 100.0, playlist_ytm_id="PLV2")
+    store.history.record_play_event(ident, "k", "v", 100.0, playlist_ytm_id="PLV2")
     assert radio._recent_radio_keys(store, 200.0) == set()
 
 
@@ -325,7 +325,7 @@ def test_pick_next_fail_open_clears_cooldown_when_whole_catalog_is_in_it(monkeyp
     scores = {"a": 1.0, "b": 0.9}
     monkeypatch.setattr(radio, "_score_map", lambda st, now: dict(scores))
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: _meta(keys))
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: _meta(keys))
     s = radio.RadioSession(); s.active = True
     s.recent_radio = {"a", "b"}   # the entire tiny catalog is under cooldown
     pick = radio.pick_next(store, s, now=10.0)
@@ -340,7 +340,7 @@ def test_pick_next_leaves_cooldown_alone_when_eligible_without_clearing_it(monke
     scores = {"a": 1.0, "b": 0.9}
     monkeypatch.setattr(radio, "_score_map", lambda st, now: dict(scores))
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: _meta(keys))
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: _meta(keys))
     s = radio.RadioSession(); s.active = True
     s.recent_radio = {"a"}
     pick = radio.pick_next(store, s, now=10.0)
@@ -396,7 +396,7 @@ def test_two_sessions_different_seeded_rng_diverge_on_seed_set(monkeypatch, stor
     scores = {chr(97 + i): 1.0 - i * 0.05 for i in range(15)}   # 'a'..'o', descending
     monkeypatch.setattr(radio, "_score_map", lambda st, now: dict(scores))
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: _meta(keys))
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: _meta(keys))
 
     monkeypatch.setattr(radio, "_rng", random.Random(1))
     s1 = radio.RadioSession()
@@ -416,7 +416,7 @@ def test_variety_zero_equals_old_argmax_on_a_fixture_where_sampling_would_differ
     scores = {"a": 1.0, "b": 0.9, "c": 0.8, "d": 0.7, "e": 0.6}
     monkeypatch.setattr(radio, "_score_map", lambda st, now: dict(scores))
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: _meta(keys))
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: _meta(keys))
     # Rig the rng to a value that (at variety > 0) would draw a lower rank, to prove variety=0 never
     # even consults it.
     class _FixedRng:

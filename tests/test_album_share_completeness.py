@@ -17,8 +17,8 @@ def _album():
 
 
 def _client(store, album=None):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.replace_saved_albums([{"browse": "MPRE", "title": "Album", "artist": "Artist"}])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.collection.replace_saved_albums([{"browse": "MPRE", "title": "Album", "artist": "Artist"}])
     client = FakeClient(albums={"MPRE": album}) if album is not None else None
     return TestClient(create_app(store, lambda: {iid: client} if client else {}, now_fn=lambda: 1),
                       base_url="http://127.0.0.1")
@@ -26,13 +26,13 @@ def _client(store, album=None):
 
 def _materialize(store):
     for track in _album()["tracks"]:
-        store.upsert_track(track["videoId"], track["title"], "Artist", "Album", 200,
+        store.tracks.upsert_track(track["videoId"], track["title"], "Artist", "Album", 200,
                            album_browse_id="MPRE")
     remember_album(store, "MPRE", _album())
 
 
 def test_saved_metadata_and_incidental_tracks_require_a_full_live_read(store):
-    store.upsert_track("v1", "First", "Artist", "Album", 200, album_browse_id="MPRE")
+    store.tracks.upsert_track("v1", "First", "Artist", "Album", 200, album_browse_id="MPRE")
     response = _client(store, _album()).get("/album/MPRE/share.txt")
     assert response.status_code == 200
     assert [line.rsplit("=", 1)[1] for line in response.text.splitlines()] == ["v2", "v1", "v2"]
@@ -40,7 +40,7 @@ def test_saved_metadata_and_incidental_tracks_require_a_full_live_read(store):
 
 def test_complete_cached_export_preserves_order_duplicates_and_supports_offline(store):
     # Incidental insertion order must not dictate the exported album order.
-    store.upsert_track("v1", "First", "Artist", "Album", 200, album_browse_id="MPRE")
+    store.tracks.upsert_track("v1", "First", "Artist", "Album", 200, album_browse_id="MPRE")
     _materialize(store)
     response = _client(store).get("/album/MPRE/share.txt")
     assert response.status_code == 200
@@ -50,7 +50,7 @@ def test_complete_cached_export_preserves_order_duplicates_and_supports_offline(
 
 @pytest.mark.parametrize("problem", ["offline", "continuation", "continuations", "count", "invalid-count", "unsupported", "empty"])
 def test_failed_or_incomplete_live_read_never_downloads_a_partial_file(store, problem):
-    store.upsert_track("v1", "First", "Artist", "Album", 200, album_browse_id="MPRE")
+    store.tracks.upsert_track("v1", "First", "Artist", "Album", 200, album_browse_id="MPRE")
     album = _album()
     if problem in ("continuation", "continuations"):
         album[problem] = ["next"]

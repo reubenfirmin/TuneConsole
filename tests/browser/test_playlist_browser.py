@@ -36,12 +36,12 @@ def _free_port():
 def live_playlist_app():
     s = Store(":memory:")
     s.init_schema()
-    iid = s.upsert_identity("Main", "cred", None, True)
-    pid = s.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
-    t0 = s.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)
-    t1 = s.upsert_track("v1", "Song B", "Artist Y", "Alb", 200, 1)
-    s.set_playlist_tracks(pid, [t0, t1])
-    s.set_track_genre(t0, "Rock")            # one track starts with a genre, one blank
+    iid = s.identities.upsert_identity("Main", "cred", None, True)
+    pid = s.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
+    t0 = s.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)
+    t1 = s.tracks.upsert_track("v1", "Song B", "Artist Y", "Alb", 200, 1)
+    s.playlists.set_playlist_tracks(pid, [t0, t1])
+    s.tracks.set_track_genre(t0, "Rock")            # one track starts with a genre, one blank
     client = FakeClient(
         tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},
                         {"videoId": "v1", "setVideoId": "sv1"}]},
@@ -89,9 +89,9 @@ def test_set_year_click_to_edit(live_playlist_app, page):
 
 def test_conflict_provider_opens_lookup_without_changing_choice(live_playlist_app, page):
     base, pid, store = (live_playlist_app[key] for key in ("base", "pid", "store"))
-    tid = store.playlist_tracks_detail(pid)[0]["track_id"]
-    store.set_track_enrichment(tid, None, "1952")
-    store.upsert_conflict(tid, "year", [{"provider": "musicbrainz", "value": "1952"},
+    tid = store.charts.playlist_tracks_detail(pid)[0]["track_id"]
+    store.tracks.set_track_enrichment(tid, None, "1952")
+    store.enrichment.upsert_conflict(tid, "year", [{"provider": "musicbrainz", "value": "1952"},
                                          {"provider": "discogs", "value": "2001"}])
     page.context.route("https://www.discogs.com/**", lambda route: route.fulfill(body="Provider results"))
     page.goto(f"{base}/playlist/{pid}")
@@ -112,7 +112,7 @@ def test_conflict_provider_opens_lookup_without_changing_choice(live_playlist_ap
     alternative.check()
     modal.get_by_role("button", name="Save choices").click()
     expect(modal.get_by_text("Nothing left to resolve.", exact=False)).to_be_visible()
-    assert store.playlist_tracks_detail(pid)[0]["year"] == "2001"
+    assert store.charts.playlist_tracks_detail(pid)[0]["year"] == "2001"
 
 
 def test_genre_control_opens_dialog_and_accepts_custom_value(live_playlist_app, page):

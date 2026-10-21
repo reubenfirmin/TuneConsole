@@ -4,16 +4,16 @@ from yt_playlist.rec import embed, scoring, surfaces
 
 
 def _model(store, album=None, thumbnail=None):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = [store.upsert_track(f"a{i}", f"A{i}", "Alpha", album, None, thumbnail=thumbnail) for i in range(8)]
-    b = [store.upsert_track(f"b{i}", f"B{i}", "Beta", album, None, thumbnail=thumbnail) for i in range(8)]
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = [store.tracks.upsert_track(f"a{i}", f"A{i}", "Alpha", album, None, thumbnail=thumbnail) for i in range(8)]
+    b = [store.tracks.upsert_track(f"b{i}", f"B{i}", "Beta", album, None, thumbnail=thumbnail) for i in range(8)]
     for track in a:
-        store.set_track_genre(track, "Techno")
+        store.tracks.set_track_genre(track, "Techno")
     for track in b:
-        store.set_track_genre(track, "Folk")
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PA", "Night drive", 8, "a", 1.0), a)
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PB", "Sunday", 8, "b", 1.0), b)
-    store.add_history_snapshot(iid, 100.0, [f"a{i}|alpha" for i in range(4)])
+        store.tracks.set_track_genre(track, "Folk")
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "Night drive", 8, "a", 1.0), a)
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "Sunday", 8, "b", 1.0), b)
+    store.history.add_history_snapshot(iid, 100.0, [f"a{i}|alpha" for i in range(4)])
     embed.build_and_store(store, dim=4)
     keys, V, idx = embed.load_vectors(store)
     return scoring.playlist_taste(store), keys, V, idx
@@ -21,7 +21,7 @@ def _model(store, album=None, thumbnail=None):
 
 def test_trace_final_scores_equal_production_scores(store):
     taste, keys, V, idx = _model(store)
-    store.set_weight("genre:techno", 1.4, now=100.0)
+    store.rec_model.set_weight("genre:techno", 1.4, now=100.0)
 
     served = surfaces._score_candidates(store, taste, keys, V, idx, now=100.0)
     traced, traces = surfaces._score_candidates(
@@ -53,8 +53,8 @@ def test_taste_comparison_retains_suppressed_baseline_track_with_reason(store):
     baseline = surfaces.taste_comparison(store, now=100.0, limit=6)
     assert baseline and all(row["in_cohort"] for row in baseline)
     key = baseline[0]["key"]
-    metadata = store.tracks_by_keys([key])[key]
-    store.record_feedback("for_you", key, "dismiss", until=1000.0, now=101.0)
+    metadata = store.rec_query.tracks_by_keys([key])[key]
+    store.rec_model.record_feedback("for_you", key, "dismiss", until=1000.0, now=101.0)
 
     current = surfaces.taste_comparison(store, now=102.0, keys=[key], limit=6)
     retained = next(row for row in current if row["key"] == key)

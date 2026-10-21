@@ -27,8 +27,8 @@ def make_worker(store, now=1000.0, fill=None):
 
 
 def _unprocessed(store, vid="v1", title="S", artist="A"):
-    store.set_setting("enrich_caught_up_at", "100")        # created_at below -> not "new"
-    return store.upsert_track(vid, title, artist, None, 200, created_at=1.0)
+    store.settings.set_setting("enrich_caught_up_at", "100")        # created_at below -> not "new"
+    return store.tracks.upsert_track(vid, title, artist, None, 200, created_at=1.0)
 
 
 def test_drain_processes_batch_and_marks_timestamps(store):
@@ -39,7 +39,7 @@ def test_drain_processes_batch_and_marks_timestamps(store):
     row = store.conn.execute(
         "SELECT first_enriched_at f, last_enriched_at l FROM tracks WHERE id=?", (t,)).fetchone()
     assert row["f"] == 1000.0 and row["l"] == 1000.0
-    assert store.queue_remaining() == 0                    # nothing left unprocessed
+    assert store.enrichment.queue_remaining() == 0                    # nothing left unprocessed
 
 
 def test_stamps_caught_up_after_primary_drains(store):
@@ -47,24 +47,24 @@ def test_stamps_caught_up_after_primary_drains(store):
     w = make_worker(store, now=1000.0)
     w.drain_once()                                         # drains the one track (_had_work=True)
     assert w.drain_once() == 0                             # primary empty now
-    assert float(store.get_setting("enrich_caught_up_at")) == 1000.0
+    assert float(store.settings.get_setting("enrich_caught_up_at")) == 1000.0
 
 
 def test_paused_drain_does_not_mark(store):
     t = _unprocessed(store)
-    store.set_setting("enrich_worker_enabled", "0")        # paused
+    store.settings.set_setting("enrich_worker_enabled", "0")        # paused
     w = make_worker(store, now=1000.0)
     assert w.drain_once() == 0                             # should_stop -> batch abandoned
-    assert store.queue_remaining() == 1                    # left for next time, not marked
+    assert store.enrichment.queue_remaining() == 1                    # left for next time, not marked
 
 
 def test_resweep_reprocesses_stale_incomplete(store):
-    t = store.upsert_track("v1", "S", "A", None, 200, created_at=1.0)
-    store.set_setting("enrich_caught_up_at", "100")
-    store.set_setting("enrich_resweep_days", "0")          # everything older than 'now' is stale
-    store.mark_enriched([t], now=1.0)                      # processed, still missing all fields
+    t = store.tracks.upsert_track("v1", "S", "A", None, 200, created_at=1.0)
+    store.settings.set_setting("enrich_caught_up_at", "100")
+    store.settings.set_setting("enrich_resweep_days", "0")          # everything older than 'now' is stale
+    store.enrichment.mark_enriched([t], now=1.0)                      # processed, still missing all fields
     w = make_worker(store, now=1000.0)
-    assert store.next_enrich_batch(10) == []               # not in primary (already processed)
+    assert store.enrichment.next_enrich_batch(10) == []               # not in primary (already processed)
     assert w.drain_once() == 1                             # picked up by re-sweep
     assert w.calls == [[t]]
     assert store.conn.execute(
@@ -74,9 +74,9 @@ def test_resweep_reprocesses_stale_incomplete(store):
 def test_enrichment_fills_via_waterfall_are_persisted(store):
     t = _unprocessed(store)
     # a fake waterfall that actually fills genre, like the real one would
-    w = make_worker(store, now=1000.0, fill=lambda s, tr: s.set_track_enrichment(tr["id"], "Rock", "1999"))
+    w = make_worker(store, now=1000.0, fill=lambda s, tr: s.tracks.set_track_enrichment(tr["id"], "Rock", "1999"))
     w.drain_once()
-    assert store.coverage_stats()["genre"] == 1
+    assert store.enrichment.coverage_stats()["genre"] == 1
 
 
 def test_library_enrichment_schedules_genre_group_catchup(store, monkeypatch):
@@ -93,7 +93,7 @@ def test_library_enrichment_schedules_genre_group_catchup(store, monkeypatch):
 
 def test_tracks_skipped_by_waterfall_remain_in_primary_queue(store):
     first = _unprocessed(store, "v1", "One")
-    second = store.upsert_track("v2", "Two", "A", None, 200, created_at=1.0)
+    second = store.tracks.upsert_track("v2", "Two", "A", None, 200, created_at=1.0)
     w = make_worker(store, now=1000.0)
     w.waterfall_fn = lambda *_args, **_kwargs: [first]
     assert w.drain_once(limit=10) == 1
@@ -101,7 +101,7 @@ def test_tracks_skipped_by_waterfall_remain_in_primary_queue(store):
         "SELECT first_enriched_at FROM tracks WHERE id=?", (first,)).fetchone()[0] == 1000.0
     assert store.conn.execute(
         "SELECT first_enriched_at FROM tracks WHERE id=?", (second,)).fetchone()[0] is None
-    assert [t["id"] for t in store.next_enrich_batch(10)] == [second]
+    assert [t["id"] for t in store.enrichment.next_enrich_batch(10)] == [second]
 
 
 @pytest.mark.parametrize("interrupt", [None, "pause", "error"])
@@ -119,11 +119,11 @@ def test_real_waterfall_commits_each_track_before_next_lookup(store, interrupt):
             assert worker.busy
             assert track["title"] in worker.activity["text"]
             if track["id"] == first and interrupt == "pause":
-                store.set_setting("enrich_worker_enabled", "0")
+                store.settings.set_setting("enrich_worker_enabled", "0")
             if track["id"] == second:
                 # This is still inside the waterfall: the batch hasn't returned yet.
-                assert store.queue_remaining() == 1
-                assert store.enriched_tracks()[0]["id"] == first
+                assert store.enrichment.queue_remaining() == 1
+                assert store.enrichment.enriched_tracks()[0]["id"] == first
                 if interrupt == "error":
                     raise RuntimeError("provider unavailable")
             return EnrichmentResult(self.name, {})  # no match is still a completed check
@@ -135,8 +135,8 @@ def test_real_waterfall_commits_each_track_before_next_lookup(store, interrupt):
     else:
         assert worker.drain_once() == (1 if interrupt == "pause" else 2)
     assert not worker.busy
-    assert store.queue_remaining() == (1 if interrupt else 0)
-    assert store.coverage_stats()["genre"] == 0
+    assert store.enrichment.queue_remaining() == (1 if interrupt else 0)
+    assert store.enrichment.coverage_stats()["genre"] == 0
 
 
 def test_breaker_skipped_tracks_stay_queued_with_live_warning(store):
@@ -155,6 +155,6 @@ def test_breaker_skipped_tracks_stay_queued_with_live_warning(store):
 
     worker.waterfall_fn = partial(run_waterfall, registry={"musicbrainz": Provider()})
     assert worker.drain_once() == 0
-    assert store.enriched_tracks() == []
-    assert {t["id"] for t in store.next_enrich_batch(10)} == {first, second}
+    assert store.enrichment.enriched_tracks() == []
+    assert {t["id"] for t in store.enrichment.next_enrich_batch(10)} == {first, second}
     assert "unreachable" in worker.activity["warning"]

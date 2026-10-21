@@ -16,6 +16,7 @@ from yt_playlist.util.matching import normalize, recording_title
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
 from yt_playlist.providers.enrich_queue import PriorityGate
 from yt_playlist.providers import genres
+from yt_playlist.providers.enrichment import apply_findings
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +291,7 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
     progress. Scope is a playlist (playlist_id) or an explicit `pending` list (e.g. an album's tracks).
     `on_progress(event_dict)` receives info/track/done events for the SSE stream."""
     enrich_fn = enrich_fn or enrich_full   # resolved here so tests can monkeypatch module-level enrich_full
-    pending = store.tracks_to_enrich(playlist_id) if pending is None else pending
+    pending = store.tracks.tracks_to_enrich(playlist_id) if pending is None else pending
 
     def _per_item(i, total, t):
         genre, year, mbid, _rel = enrich_fn(t["title"], t["artist"])   # one search: genre, year, MBID
@@ -298,10 +299,8 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop
             on_progress({"type": "err", "text": "MusicBrainz looks unreachable; enrichment stopped. "
                          "The remaining tracks will retry next time."})
             return False
-        if mbid:
-            store.set_track_mbid(t["id"], mbid)
-        store.set_track_enrichment(t["id"], genre, year)
-        eff_genre, eff_year = store.get_track_enrichment(t["id"])    # report what actually stuck
+        apply_findings(store,t['id'],name,{'genre':genre,'year':year,'mb_recording_id':mbid})
+        eff_genre, eff_year = store.tracks.get_track_enrichment(t["id"])    # report what actually stuck
         bits = " · ".join(x for x in (genre, year) if x) or "no match"
         on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
                      "genre": eff_genre, "year": eff_year,

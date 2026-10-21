@@ -270,10 +270,10 @@ def test_backend_deck_start_frame_carries_epoch_and_standby_boundary():
     # Backend half of the C1/C2 contract, pinned as source text alongside the extension halves so
     # the pair cannot drift apart silently (the WS-level pin lives in test_radio_routes.py's
     # test_start_dual_deck_start_carries_epoch_and_standby_boundary).
-    bridge_src = (Path(__file__).resolve().parents[1]
-                  / "src/yt_playlist/web/routes/bridge.py").read_text()
-    deck_start = bridge_src.split('"type": "deck-start"', 1)[1][:600]
-    assert '"epoch": deck_epoch' in deck_start
+    controller_src = (Path(__file__).resolve().parents[1]
+                      / "src/yt_playlist/web/radio_controller.py").read_text()
+    deck_start = controller_src.split('"type": "deck-start"', 1)[1][:600]
+    assert '"epoch": session.epoch' in deck_start
     assert '"standbyBoundaryVideoId"' in deck_start
 
 

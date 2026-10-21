@@ -1,22 +1,22 @@
 import pytest
 from yt_playlist.core import setup as setup_mod
-from yt_playlist.core.config import load_identities
+from yt_playlist.core.config import load_identities, validate_identities
 
 
 def test_validate_identities_rules():
     ok = [{"label": "main", "is_master": True}, {"label": "brand", "is_master": False}]
-    setup_mod.validate_identities(ok)  # no raise
+    validate_identities(ok)  # no raise
 
     with pytest.raises(ValueError, match="at least one"):
-        setup_mod.validate_identities([])
+        validate_identities([])
     with pytest.raises(ValueError, match="needs a label"):
-        setup_mod.validate_identities([{"label": "  ", "is_master": True}])
+        validate_identities([{"label": "  ", "is_master": True}])
     with pytest.raises(ValueError, match="unique"):
-        setup_mod.validate_identities([{"label": "a", "is_master": True}, {"label": "a", "is_master": False}])
+        validate_identities([{"label": "a", "is_master": True}, {"label": "a", "is_master": False}])
     with pytest.raises(ValueError, match="exactly one"):
-        setup_mod.validate_identities([{"label": "a", "is_master": False}])
+        validate_identities([{"label": "a", "is_master": False}])
     with pytest.raises(ValueError, match="exactly one"):
-        setup_mod.validate_identities([{"label": "a", "is_master": True}, {"label": "b", "is_master": True}])
+        validate_identities([{"label": "a", "is_master": True}, {"label": "b", "is_master": True}])
 
 
 def test_write_config_roundtrips(tmp_path):

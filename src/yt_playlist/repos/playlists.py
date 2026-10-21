@@ -14,6 +14,50 @@ _FIRST_TRACK_THUMBNAIL = (
 
 class PlaylistRepo(Repo):
     @synchronized
+    def playlist_provenance(self, ytm) -> dict:
+        row = self.conn.execute('SELECT origin,adopted,description FROM playlist_provenance WHERE ytm=?',
+                                (ytm,)).fetchone()
+        return dict(row) if row else {'origin': 'ordinary', 'adopted': 1, 'description': None}
+
+    @synchronized
+    def set_playlist_provenance(self, ytm, *, origin, adopted, description=None) -> None:
+        with self.conn:
+            self.conn.execute('INSERT INTO playlist_provenance VALUES (?,?,?,?) '
+                              'ON CONFLICT(ytm) DO UPDATE SET origin=excluded.origin,'
+                              'adopted=excluded.adopted,description=excluded.description',
+                              (ytm, origin, int(adopted), description))
+
+    @synchronized
+    def mark_generated_playlist(self, ytm, description=None) -> None:
+        from yt_playlist.library.playlist_metadata import GENERATED_DESCRIPTION
+        self.set_playlist_provenance(ytm, origin='tuneconsole', adopted=False,
+                                     description=description or GENERATED_DESCRIPTION)
+
+    @synchronized
+    def adopt_generated_playlist(self, ytm) -> None:
+        from yt_playlist.library.playlist_metadata import PROMOTED_DESCRIPTION
+        with self.conn:
+            self.conn.execute("UPDATE playlist_provenance SET adopted=1,description=? WHERE ytm=? "
+                              "AND origin='tuneconsole'", (PROMOTED_DESCRIPTION, ytm))
+
+    @synchronized
+    def is_quarantined_playlist(self, ytm) -> bool:
+        return self.conn.execute('SELECT 1 FROM quarantined_playlists WHERE ytm=?', (ytm,)).fetchone() is not None
+
+    @synchronized
+    def reconcile_playlist_provenance(self, ytm, description) -> None:
+        from yt_playlist.library.playlist_metadata import is_generated_description, PROMOTED_DESCRIPTION
+        current = self.playlist_provenance(ytm)
+        promoted = PROMOTED_DESCRIPTION.casefold() in (description or '').casefold()
+        generated = is_generated_description(description)
+        if generated or promoted or current['origin'] == 'tuneconsole':
+            # A stale marker cannot undo explicit local adoption. An absent description is
+            # not an adoption decision, including incomplete sync responses.
+            adopted = promoted or (current['origin'] == 'tuneconsole' and current['adopted'])
+            self.set_playlist_provenance(ytm, origin='tuneconsole', adopted=adopted,
+                                         description=description if description is not None else current['description'])
+
+    @synchronized
     def playlist_kind(self, playlist_id) -> str:
         """Classify a playlist by its tracks' YouTube videoType.
 

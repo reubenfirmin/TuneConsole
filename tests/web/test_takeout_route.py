@@ -28,8 +28,8 @@ def _entry(title, artist, vid, iso):
 def _client():
     store = Store(":memory:")
     store.init_schema()
-    store.upsert_identity("main", "bridge", None, True)
-    store.upsert_track("vidA", "Suave", "Danny Wabbit", "", 200)
+    store.identities.upsert_identity("main", "bridge", None, True)
+    store.tracks.upsert_track("vidA", "Suave", "Danny Wabbit", "", 200)
     rec_worker = _FakeRecWorker()
     templates = Jinja2Templates(directory=_TEMPLATES_DIR)
     ctx = type("C", (), {
@@ -60,7 +60,7 @@ def test_upload_reports_and_triggers_rebuild():
     # Success replaces the whole import block (form included), not just the note under the button.
     assert resp.headers.get("HX-Retarget") == "#takeout-import-block"
     assert rec_worker.calls == 1
-    assert store.get_setting("takeout_imported_at") is not None
+    assert store.settings.get_setting("takeout_imported_at") is not None
 
     # Re-posting the same file is idempotent: nothing new added, worker not re-triggered.
     resp2 = client.post("/import/takeout",
@@ -81,7 +81,7 @@ def test_genuinely_unreadable_upload_gets_json_hint():
     # Errors must NOT retarget: the note lands under the form, which survives for a retry.
     assert "HX-Retarget" not in resp.headers
     assert rec_worker.calls == 0
-    assert store.get_setting("takeout_imported_at") is None
+    assert store.settings.get_setting("takeout_imported_at") is None
 
 
 def _html_row(title, video_id, artist, iso_date_text):
@@ -111,7 +111,7 @@ def test_html_export_now_parses_and_reports_unreadable_dates():
     assert "Import complete" in body       # matched == 1 (Suave, in the library)
     assert "Skipped 1 entry with an unreadable date" in body
     assert rec_worker.calls == 1
-    assert store.get_setting("takeout_imported_at") is not None
+    assert store.settings.get_setting("takeout_imported_at") is not None
 
 
 def _unmatched_payload():
@@ -129,7 +129,7 @@ def test_seeding_is_automatic_above_threshold():
                        files={"file": ("watch-history.json", _unmatched_payload(), "application/json")})
     assert resp.status_code == 200
     assert "to Discovery, so TuneConsole can recommend their music." in resp.text
-    pool = store.get_discovered_artists()
+    pool = store.discovery.get_discovered_artists()
     assert len(pool) == 1
     assert pool[0]["artist"] == "Nobody"
 
@@ -143,7 +143,7 @@ def test_below_threshold_does_not_seed():
                                        "application/json")})
     assert resp.status_code == 200
     assert "to Discovery, so TuneConsole can recommend their music." not in resp.text
-    assert store.get_discovered_artists() == []
+    assert store.discovery.get_discovered_artists() == []
 
 
 def test_zero_match_import_snoozes_the_nag():
@@ -155,8 +155,8 @@ def test_zero_match_import_snoozes_the_nag():
                        files={"file": ("watch-history.json", json.dumps(entries).encode(),
                                        "application/json")})
     assert resp.status_code == 200
-    assert store.get_setting("takeout_imported_at") is None
-    assert store.get_setting("takeout_nag_dismissed_at") == "1700000000.0"
+    assert store.settings.get_setting("takeout_imported_at") is None
+    assert store.settings.get_setting("takeout_nag_dismissed_at") == "1700000000.0"
 
 
 def test_upload_does_not_purge_uncorroborated_history_between_events():

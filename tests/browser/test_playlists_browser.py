@@ -39,13 +39,13 @@ def live_pl_data(tmp_path):
 
     s = Store(":memory:")
     s.init_schema()
-    iid = s.upsert_identity("Main", "cred", None, True)
-    a = s.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
-    b = s.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
-    g = s.upsert_playlist(iid, "PLG", "Gamma", 1, "h", 1.0)
-    s.set_playlist_tracks(a, [s.upsert_track("v1", "SongA", "X", None, None, 1)])
-    s.set_playlist_tracks(b, [s.upsert_track("v2", "SongB", "Y", None, None, 1)])
-    s.set_playlist_tracks(g, [s.upsert_track("v3", "SongC", "Z", None, None, 1)])
+    iid = s.identities.upsert_identity("Main", "cred", None, True)
+    a = s.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
+    b = s.playlists.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
+    g = s.playlists.upsert_playlist(iid, "PLG", "Gamma", 1, "h", 1.0)
+    s.playlists.set_playlist_tracks(a, [s.tracks.upsert_track("v1", "SongA", "X", None, None, 1)])
+    s.playlists.set_playlist_tracks(b, [s.tracks.upsert_track("v2", "SongB", "Y", None, None, 1)])
+    s.playlists.set_playlist_tracks(g, [s.tracks.upsert_track("v3", "SongC", "Z", None, None, 1)])
     client = FakeClient(tracks={"PLA": [_track("v1", "SongA", "X")],
                                 "PLB": [_track("v2", "SongB", "Y")],
                                 "PLG": [_track("v3", "SongC", "Z")]})
@@ -83,12 +83,13 @@ def recent_pl_app(live_pl_data):
         ("HIDDEN", "Hidden draft", 60),
         ("LM", "Liked Music", 60),
     ]:
-        store.upsert_playlist(iid, ytm, title, 0, "", 2_000_000, created_at=2_000_000 - age)
+        store.playlists.upsert_playlist(iid, ytm, title, 0, "", 2_000_000, created_at=2_000_000 - age)
     for title in ("303", "Brexit List"):
-        store.upsert_playlist(iid, title, title, 0, "", 2_000_000)
-    store.set_playlist_group("GENERATED", "Generated")
-    store.set_playlist_group("PLA", "Faves")
-    store.hide_playlist("HIDDEN")
+        store.playlists.upsert_playlist(iid, title, title, 0, "", 2_000_000)
+    store.playlists.set_playlist_group("GENERATED", "Generated")
+    store.playlists.mark_generated_playlist('GENERATED')
+    store.playlists.set_playlist_group("PLA", "Faves")
+    store.playlists.hide_playlist("HIDDEN")
     return live_pl_data["base"]
 
 
@@ -165,11 +166,11 @@ def live_slow_delete_app(tmp_path):
 
     s = Store(":memory:")
     s.init_schema()
-    iid = s.upsert_identity("Main", "cred", None, True)
-    a = s.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
-    b = s.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
-    s.set_playlist_tracks(a, [s.upsert_track("v1", "SongA", "X", None, None, 1)])
-    s.set_playlist_tracks(b, [s.upsert_track("v2", "SongB", "Y", None, None, 1)])
+    iid = s.identities.upsert_identity("Main", "cred", None, True)
+    a = s.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
+    b = s.playlists.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
+    s.playlists.set_playlist_tracks(a, [s.tracks.upsert_track("v1", "SongA", "X", None, None, 1)])
+    s.playlists.set_playlist_tracks(b, [s.tracks.upsert_track("v2", "SongB", "Y", None, None, 1)])
     client = _SlowDeleteClient(tracks={"PLA": [_track("v1", "SongA", "X")],
                                        "PLB": [_track("v2", "SongB", "Y")]})
     app = create_app(s, lambda: {iid: client}, now_fn=lambda: 1.0)
@@ -231,15 +232,16 @@ def test_copy_into_appends_songs_to_existing_playlist(live_pl_app, page):
 def test_generated_playlists_sort_by_creation_date_descending(live_app, store, page):
     from datetime import datetime
 
-    iid = store.get_identities()[0].id
+    iid = store.identities.get_identities()[0].id
     for ytm, title, created in [
         ("older", "Zulu - October 19 2026 #1", None),
         ("newer", "Beta - October 20 2026 #1", None),
         ("latest", "Alpha", datetime(2026, 10, 20, 12).timestamp()),
         ("unknown", "Unknown creation date", None),
     ]:
-        store.upsert_playlist(iid, ytm, title, 0, "h", 1, created_at=created)
-        store.set_playlist_group(ytm, "Generated")
+        store.playlists.upsert_playlist(iid, ytm, title, 0, "h", 1, created_at=created)
+        store.playlists.set_playlist_group(ytm, "Generated")
+        store.playlists.mark_generated_playlist(ytm)
     page.goto(f"{live_app}/playlists")
     page.get_by_role("button", name="Generated playlists", exact=False).click()
     generated = page.locator("#generated-playlists .ptitle")

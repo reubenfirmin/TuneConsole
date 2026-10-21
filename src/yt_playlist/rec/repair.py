@@ -48,7 +48,7 @@ def plan_like_ratchet_repair(store, now) -> dict:
     crossing would bake another wrong permanent nudge.
     """
     actual, nonlike_floor = {}, {}
-    for r in store.graduation_audit_rows():
+    for r in store.rec_surface.graduation_audit_rows():
         if r["source"] == "like":
             actual[r["axis"]] = actual.get(r["axis"], 0) + 1
         else:
@@ -56,7 +56,7 @@ def plan_like_ratchet_repair(store, now) -> dict:
     threshold = rec_params.get_param(store, "theme_threshold")
     graduate_up = rec_params.get_param(store, "graduate_up")
     entitled, ledger = {}, {}
-    for key in reversed(store.recent_liked_keys()):        # oldest-first (see docstring: order-free)
+    for key in reversed(store.rec_model.recent_liked_keys()):        # oldest-first (see docstring: order-free)
         for axis in transient.facets_for(store, [key]):
             score = ledger.get(axis, 0.0) + _OLD_SOURCE_W_LIKE
             if score >= threshold:      # graduate_facet fires at most once per bump: one discount
@@ -64,7 +64,7 @@ def plan_like_ratchet_repair(store, now) -> dict:
                 score -= threshold
             ledger[axis] = score
     halflife = rec_params.get_param(store, "weight_revert_halflife_d")
-    weights = store.get_weights(now=now, revert_halflife_d=halflife)
+    weights = store.rec_model.get_weights(now=now, revert_halflife_d=halflife)
     adjustments = []
     for axis in sorted(actual):
         surplus = actual[axis] - entitled.get(axis, 0)
@@ -74,7 +74,7 @@ def plan_like_ratchet_repair(store, now) -> dict:
         adjustments.append({"axis": axis, "actual": actual[axis],
                             "entitled": entitled.get(axis, 0), "surplus": surplus,
                             "weight_before": w_before, "weight_after": w_after,
-                            "theme_before": store.get_theme(axis) or 0.0})
+                            "theme_before": store.rec_surface.get_theme(axis) or 0.0})
     return {"adjustments": adjustments}
 
 
@@ -89,29 +89,29 @@ def apply_like_ratchet_repair(store, now):
       the very surplus repaired here), so the stamp is armed now; a future clear/re-record cycle
       must not re-graduate them.
     """
-    if store.get_setting(STAMP_KEY):
+    if store.settings.get_setting(STAMP_KEY):
         return None
     plan = plan_like_ratchet_repair(store, now)
     changed = 0
     for adj in plan["adjustments"]:
         if adj["weight_after"] != adj["weight_before"]:
-            store.set_weight(adj["axis"], adj["weight_after"], now=now)
+            store.rec_model.set_weight(adj["axis"], adj["weight_after"], now=now)
             changed += 1
         if adj["theme_before"]:
-            store.discount_theme(adj["axis"], adj["theme_before"])   # zero the polluted residual
+            store.rec_surface.discount_theme(adj["axis"], adj["theme_before"])   # zero the polluted residual
         logger.info(
             "like-ratchet repair: %s actual=%d entitled=%d surplus=%d weight %.4f -> %.4f "
             "(pending theme %.3f -> 0)", adj["axis"], adj["actual"], adj["entitled"],
             adj["surplus"], adj["weight_before"], adj["weight_after"], adj["theme_before"])
-    stamped_prov = store.stamp_sync_like_provenance()
+    stamped_prov = store.rec_model.stamp_sync_like_provenance()
     grad_stamps = 0
-    for key in store.recent_liked_keys():
-        grad_stamps += 1 if store.mark_graduated_once(key, "like_grad", now) else 0
-    for key in store.disliked_identity_keys():
-        grad_stamps += 1 if store.mark_graduated_once(key, "dislike_grad", now) else 0
+    for key in store.rec_model.recent_liked_keys():
+        grad_stamps += 1 if store.rec_model.mark_graduated_once(key, "like_grad", now) else 0
+    for key in store.rec_model.disliked_identity_keys():
+        grad_stamps += 1 if store.rec_model.mark_graduated_once(key, "dislike_grad", now) else 0
     summary = (f"adjusted {changed} of {len(plan['adjustments'])} like-touched axis weight(s); "
                f"{stamped_prov} like row(s) stamped sync-provenance; "
                f"{grad_stamps} once-ever graduation stamp(s) backfilled")
-    store.set_setting(STAMP_KEY, summary)
+    store.settings.set_setting(STAMP_KEY, summary)
     logger.info("like-ratchet repair complete: %s", summary)
     return summary

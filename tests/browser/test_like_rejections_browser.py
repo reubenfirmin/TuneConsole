@@ -10,12 +10,12 @@ from yt_playlist.library.ops import PlaylistOps
 def test_heart_completion_preserves_server_outcome(live_app, store, page, monkeypatch, liked, failure):
     page_errors = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
-    iid = store.get_identities()[0].id
-    pid = store.get_playlists()[0].id
-    store.upsert_playlist(iid, "LM", "Liked Music", 0, "", 0)
-    entry = store.upsert_track("rating", "Rating song", "Artist", None, 200)
-    store.set_playlist_tracks(pid, [entry])
-    store.set_song_liked(iid, "rating", liked)
+    iid = store.identities.get_identities()[0].id
+    pid = store.playlists.get_playlists()[0].id
+    store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "", 0)
+    entry = store.tracks.upsert_track("rating", "Rating song", "Artist", None, 200)
+    store.playlists.set_playlist_tracks(pid, [entry])
+    store.playlists.set_song_liked(iid, "rating", liked)
     if failure:
         def reject(self, video_id, on):
             if failure == "validation":
@@ -39,7 +39,7 @@ def test_heart_completion_preserves_server_outcome(live_app, store, page, monkey
     page.wait_for_function("window.ratingCompletions.length === 1")
     expect(heart).to_have_attribute("aria-pressed", str(liked if failure else not liked).lower())
     assert page.evaluate("window.ratingCompletions[0]") == {"successful": not bool(failure), "failed": bool(failure)}
-    assert store.playlist_tracks_detail(pid)[0]["liked"] == (liked if failure else not liked)
+    assert store.charts.playlist_tracks_detail(pid)[0]["liked"] == (liked if failure else not liked)
     if failure:
         expect(page.locator("#toasts .toast-err")).to_be_visible()
         expect(page.locator("#toasts")).to_contain_text(

@@ -63,7 +63,7 @@ class Ctx:
     spotify_import_lock: object = field(default_factory=threading.Lock)
 
     def __post_init__(self):
-        raw = self.store.get_setting(AUTH_EXPIRED_KEY)
+        raw = self.store.settings.get_setting(AUTH_EXPIRED_KEY)
         if raw:
             try:                                    # keys are ints (identity ids) so on_auth_ok's pop matches
                 self.auth_expired.update({int(k): v for k, v in json.loads(raw).items()})
@@ -72,10 +72,10 @@ class Ctx:
 
     def _persist_auth_expired(self):
         if self.auth_expired:
-            self.store.set_setting(AUTH_EXPIRED_KEY,
+            self.store.settings.set_setting(AUTH_EXPIRED_KEY,
                                    json.dumps({str(k): v for k, v in self.auth_expired.items()}))
         else:
-            self.store.delete_setting(AUTH_EXPIRED_KEY)
+            self.store.settings.delete_setting(AUTH_EXPIRED_KEY)
 
     def flag_auth_expired(self, identity_id, label):
         """Record (and persist) that an identity's session expired. Drives the re-auth banner."""
@@ -104,7 +104,7 @@ class Ctx:
         return PlaylistOps(self.store, self.client_provider, self.now_fn)
 
     def playlist_by_id(self, pid):
-        pl = self.store.get_playlist(pid)
+        pl = self.store.playlists.get_playlist(pid)
         if pl is None:
             raise HTTPException(status_code=404, detail="playlist not found")
         return pl

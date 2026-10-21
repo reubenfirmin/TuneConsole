@@ -47,7 +47,7 @@ def test_skip_penalty_arithmetic():
 def test_pick_next_picks_top_eligible(monkeypatch, store):
     monkeypatch.setattr(radio, "_score_map", lambda st, now: {"a": 1.0, "b": 0.9, "c": 0.8})
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)   # no modes -> mode penalty inert
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: _meta(keys))
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: _meta(keys))
     s = radio.RadioSession(); s.active = True
     pick = radio.pick_next(store, s, now=10.0)
     assert pick["key"] == "a"
@@ -58,7 +58,7 @@ def test_pick_next_picks_top_eligible(monkeypatch, store):
 def test_pick_next_skips_dispatched_and_primed(monkeypatch, store):
     monkeypatch.setattr(radio, "_score_map", lambda st, now: {"a": 1.0, "b": 0.9, "c": 0.8})
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: _meta(keys))
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: _meta(keys))
     s = radio.RadioSession(); s.active = True
     s.dispatched_keys = {"a"}
     s.primed = {"key": "b"}
@@ -72,7 +72,7 @@ def test_pick_next_honors_artist_cap(monkeypatch, store):
             "c": {"video_id": "vc", "title": "Tc", "artist": "other"}}
     monkeypatch.setattr(radio, "_score_map", lambda st, now: {"a": 1.0, "b": 0.9, "c": 0.8})
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: meta)
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: meta)
     rec_params.set_param(store, "radio_artist_cap", 1)
     s = radio.RadioSession(); s.active = True
     s.artist_counts = {"same": 1}                              # artist already at cap
@@ -94,7 +94,7 @@ def test_pick_next_reaches_past_exhausted_pool(monkeypatch, store):
     scores = {"a": 1.0, "b": 0.9, "c": 0.8, "d": 0.7, "e": 0.6}
     monkeypatch.setattr(radio, "_score_map", lambda st, now: scores)
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: _meta(keys))
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: _meta(keys))
     monkeypatch.setattr(radio, "_params", lambda st: {
         "artist_cap": 10, "pool": 2, "artist_pen": 0.5, "mode_pen": 0.25,
         "halflife_h": 2.0, "volume_floor": 0.1, "variety": 0,
@@ -118,7 +118,7 @@ def test_pick_next_none_when_catalog_exhausted(monkeypatch, store):
     scores = {"a": 1.0, "b": 0.9}
     monkeypatch.setattr(radio, "_score_map", lambda st, now: scores)
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: _meta(keys))
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: _meta(keys))
     s = radio.RadioSession(); s.active = True
     s.dispatched_keys = {"a", "b"}   # every candidate already played
     assert radio.pick_next(store, s, now=10.0) is None
@@ -131,7 +131,7 @@ def test_pick_next_excludes_missing_video_id(monkeypatch, store):
             "b": {"video_id": "vb", "title": "Tb", "artist": "art_b"}}
     monkeypatch.setattr(radio, "_score_map", lambda st, now: {"a": 1.0, "b": 0.9})
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: meta)
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: meta)
     s = radio.RadioSession(); s.active = True
     assert radio.pick_next(store, s, now=10.0)["key"] == "b"
 
@@ -174,7 +174,7 @@ def test_pick_next_applies_tilt(monkeypatch, store):
     monkeypatch.setattr(radio, "_axis_info", lambda st, keys: {
         "x": ("House", None, "1990", "DJ"), "y": ("Techno", None, "2000", "DJ2"),
         "z": ("House", None, "2010", "DJ3")})
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: {
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: {
         k: {"video_id": "v" + k, "title": "T" + k, "artist": "a" + k} for k in keys})
     s = radio.RadioSession(); s.active = True
     s.tilts = {"genre:House": 1.5, "era:1990": 0.5}
@@ -204,6 +204,6 @@ def test_pick_next_no_tilt_skips_axis_info(monkeypatch, store):
     monkeypatch.setattr(radio, "_score_map", lambda st, now: {"a": 1.0, "b": 0.9})
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
     monkeypatch.setattr(radio, "_axis_info", _boom)
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: _meta(keys))
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: _meta(keys))
     s = radio.RadioSession(); s.active = True
     assert radio.pick_next(store, s, now=10.0)["key"] == "a"

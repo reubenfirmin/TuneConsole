@@ -4,7 +4,7 @@ from yt_playlist.core import updatecheck
 
 
 def update_card(monkeypatch, page, store, *, kind="flatpak"):
-    store.set_setting("last_sync_at", "1")
+    store.settings.set_setting("last_sync_at", "1")
     monkeypatch.setattr(updatecheck, "update_nudge", lambda _: {
         "kind": kind, "current": "0.1.9", "latest": "0.2.0",
         "command": "Update now", "link": None,

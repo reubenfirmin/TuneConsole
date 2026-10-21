@@ -1,15 +1,14 @@
 """Track-ordering primitives: arrange a chosen set of tracks into a pleasing sequence.
 
 A leaf of the rec/ layer: depends only on genre_map (genre segue distances), the library DAO (to
-fill genres), and util.matching. It must NOT import recommend or journeys, so journeys can use
-dj_order without the old circular import. `recommend` re-exports these for existing call sites.
+fill genres), and util.matching. Journeys depend on ordering; ordering does not depend on journeys
+or on recommendation assembly.
 """
 import random
 from collections import Counter
 
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
-from yt_playlist.rec.rec_dao import RecDao
 
 
 def _field(item, name):
@@ -32,7 +31,7 @@ def attach_genres(store, items):
     key_of = {id(it): (_field(it, "key")
                        or identity_key(_field(it, "title") or "", _field(it, "artist") or ""))
               for it in items}
-    genres = RecDao(store).track_genres([k for k in key_of.values() if k])
+    genres = store.rec_query.track_genres([k for k in key_of.values() if k])
     for it in items:
         g = genres.get(key_of[id(it)]) or (_field(it, "genre") or "")
         if isinstance(it, dict):

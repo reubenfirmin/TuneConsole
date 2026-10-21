@@ -8,8 +8,7 @@ rebuild, so frequent syncs never pile up.
 import threading
 import time
 
-from yt_playlist.rec import artist_model, embed, model_selection, recommend, surfaces
-from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.rec import actions, artist_model, embed, model_selection, surfaces
 from yt_playlist.core.activity import activity_for, WorkClosing
 
 
@@ -212,17 +211,16 @@ class RecWorker:
         from yt_playlist.rec import discover
         log = self.ctx.logger
         store = self.ctx.store
-        dao = RecDao(store)
         now = self.ctx.now_fn()
         t0 = time.monotonic()
         log.info("rec rebuild: starting")
         restored = False
-        restore_id = store.get_setting("rec_selection_restore")
+        restore_id = store.settings.get_setting("rec_selection_restore")
         if restore_id:
             model_selection.update_followup(store, now, now_fn=self.ctx.now_fn)
-            restored = store.rec.model.restore_model_selection(int(restore_id), now)
-            store.set_setting("rec_selection_restore", "")
-        n = store.rec_vectors_count() if restored else embed.build_and_store(store)
+            restored = store.model_selection.restore_model_selection(int(restore_id), now)
+            store.settings.set_setting("rec_selection_restore", "")
+        n = store.rec_model.rec_vectors_count() if restored else embed.build_and_store(store)
         log.info("rec rebuild: embedded %d vectors in %.1fs", n, time.monotonic() - t0)
         try:
             model_selection.maintain(store, now, now_fn=self.ctx.now_fn)
@@ -285,7 +283,7 @@ class RecWorker:
         # materializing it here (sync changes the playlists this depends on, so a rebuild is the right
         # moment). Last-good: a failure leaves the previous summary in place.
         try:
-            payload = recommend.refresh_cleanup(store, now)
+            payload = actions.refresh_cleanup(store, now)
             log.info("rec rebuild: cleanup → %d playlist(s)", payload["count"])
         except Exception:  # noqa: BLE001 - never let the cleanup scan crash a rebuild
             log.warning("rec rebuild: cleanup summary failed", exc_info=True)

@@ -36,10 +36,10 @@ def test_subgenre_empty_is_none():
 
 def test_subgenre_lean_is_independent_of_family():
     from yt_playlist.core.store import Store
-    from yt_playlist.rec import recommend
+    from yt_playlist.rec import scoring
     s = Store(":memory:"); s.init_schema()
-    a = s.upsert_track("v1", "a", "x", None, None); s.set_track_genre(a, "minimal techno")
-    b = s.upsert_track("v2", "b", "y", None, None); s.set_track_genre(b, "dub techno")
-    s.set_lean("genre:minimal techno", 1.6, 1000.0)
-    mult = recommend._axis_weights_for(s, ["a|x", "b|y"], now=1000.0)
+    a = s.tracks.upsert_track("v1", "a", "x", None, None); s.tracks.set_track_genre(a, "minimal techno")
+    b = s.tracks.upsert_track("v2", "b", "y", None, None); s.tracks.set_track_genre(b, "dub techno")
+    s.rec_model.set_lean("genre:minimal techno", 1.6, 1000.0)
+    mult = scoring._axis_weights_for(s, ["a|x", "b|y"], now=1000.0)
     assert mult["a|x"] > mult["b|y"]   # only the minimal-techno track is lifted; both share family techno

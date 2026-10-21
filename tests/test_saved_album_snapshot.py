@@ -14,15 +14,15 @@ def _album(bid):
 
 @pytest.fixture
 def mirror(store, monkeypatch):
-    first = store.upsert_identity('main', 'bridge', None, True)
-    second = store.upsert_identity('brand', 'bridge', 'brand-id', False)
-    store.add_saved_album({'browse': 'OLD', 'title': 'Previously saved', 'artist': 'Artist'})
+    first = store.identities.upsert_identity('main', 'bridge', None, True)
+    second = store.identities.upsert_identity('brand', 'bridge', 'brand-id', False)
+    store.collection.add_saved_album({'browse': 'OLD', 'title': 'Previously saved', 'artist': 'Artist'})
     monkeypatch.setattr(sync, 'with_retry', lambda fn: fn())
     materialized = []
     monkeypatch.setattr(sync, '_materialize_album_tracks',
                         lambda store, clients, saved, progress: materialized.append(saved))
     return SimpleNamespace(store=store, first=first, second=second,
-                           before=store.get_saved_albums(), materialized=materialized)
+                           before=store.collection.get_saved_albums(), materialized=materialized)
 
 
 class AlbumClient:
@@ -48,7 +48,7 @@ def test_failed_or_incomplete_account_preserves_the_shared_mirror(mirror, respon
     events = []
     sync._sync_saved_albums(mirror.store, dict(zip(
         (mirror.first, mirror.second), map(AlbumClient, responses))), events.append)
-    assert mirror.store.get_saved_albums() == mirror.before
+    assert mirror.store.collection.get_saved_albums() == mirror.before
     assert mirror.materialized == []
     assert 'unchanged' in events[-1]['text']
 
@@ -57,13 +57,13 @@ def test_failed_or_incomplete_account_preserves_the_shared_mirror(mirror, respon
 def test_skipped_accounts_preserve_the_shared_mirror(mirror, skipped):
     clients = {mirror.first: AlbumClient([])} if skipped == 'one' else {}
     sync._sync_saved_albums(mirror.store, clients, None)
-    assert mirror.store.get_saved_albums() == mirror.before
+    assert mirror.store.collection.get_saved_albums() == mirror.before
 
 
 def test_verified_empty_libraries_clear_the_previous_mirror(mirror):
     sync._sync_saved_albums(mirror.store,
                             {mirror.first: AlbumClient([]), mirror.second: AlbumClient([])}, None)
-    assert mirror.store.get_saved_albums() == []
+    assert mirror.store.collection.get_saved_albums() == []
 
 
 def test_all_accounts_are_fetched_without_the_old_500_album_limit(mirror):
@@ -71,8 +71,8 @@ def test_all_accounts_are_fetched_without_the_old_500_album_limit(mirror):
     second = AlbumClient([_album('BRAND')])
     sync._sync_saved_albums(mirror.store, {mirror.first: first, mirror.second: second}, None)
     assert first.limits == second.limits == [None]
-    assert len(mirror.store.saved_album_ids()) == 502
-    assert 'OLD' not in mirror.store.saved_album_ids()
+    assert len(mirror.store.collection.saved_album_ids()) == 502
+    assert 'OLD' not in mirror.store.collection.saved_album_ids()
 
 
 def _renderer(bid):
@@ -147,7 +147,7 @@ def test_partial_production_pagination_never_replaces_saved_membership(mirror, l
     sync._sync_saved_albums(mirror.store,
                             {mirror.first: client, mirror.second: AlbumClient([])}, events.append)
     assert len(bridge.calls) == 2
-    assert mirror.store.get_saved_albums() == mirror.before
+    assert mirror.store.collection.get_saved_albums() == mirror.before
     assert 'unchanged' in events[-1]['text']
 
 
@@ -158,4 +158,4 @@ def test_missing_or_signed_out_grid_is_unavailable_not_empty(mirror, response):
     client, _ = _production_client([response])
     sync._sync_saved_albums(mirror.store,
                             {mirror.first: client, mirror.second: AlbumClient([])}, None)
-    assert mirror.store.get_saved_albums() == mirror.before
+    assert mirror.store.collection.get_saved_albums() == mirror.before

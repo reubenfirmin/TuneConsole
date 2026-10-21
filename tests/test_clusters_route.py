@@ -11,7 +11,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -22,7 +22,7 @@ def _unit(deg):
 
 
 def _modelled_track(store, vid, title, artist, xy):
-    store.upsert_track(vid, title, artist, None, None, thumbnail="t.jpg")
+    store.tracks.upsert_track(vid, title, artist, None, None, thumbnail="t.jpg")
     k = identity_key(title, artist)
     v = np.asarray(xy, dtype=np.float32)
     v /= np.linalg.norm(v) + 1e-9
@@ -31,7 +31,7 @@ def _modelled_track(store, vid, title, artist, xy):
 
 def test_page_renders_canvas(store):
     c, _ = _client(store)
-    store.replace_rec_vectors([("a|b", np.ones(4, dtype=np.float32).tobytes())])   # model built
+    store.rec_model.replace_rec_vectors([("a|b", np.ones(4, dtype=np.float32).tobytes())])   # model built
     html = c.get("/clusters").text
     assert "cluster-canvas" in html          # the pan/zoom canvas mount point
 
@@ -46,7 +46,7 @@ def test_page_without_model_prompts_to_sync(store):
 def test_search_returns_json_seeds(store):
     c, _ = _client(store)
     _, row = _modelled_track(store, "r1", "Spektrum", "Ritmo", _unit(0))
-    store.replace_rec_vectors([row])
+    store.rec_model.replace_rec_vectors([row])
     res = c.get("/clusters/search", params={"q": "rit"}).json()
     assert any(r["kind"] == "artist" and r["label"] == "Ritmo" for r in res)
 
@@ -57,7 +57,7 @@ def test_expand_returns_pushed_ring(store):
     ka, ra = _modelled_track(store, "a", "Near A", "A", _unit(20))
     kb, rb = _modelled_track(store, "b", "Near B", "B", _unit(-20))
     kn, rn = _modelled_track(store, "n", "Pruned", "N", _unit(18))   # sits on top of A
-    store.replace_rec_vectors([rp, ra, rb, rn])
+    store.rec_model.replace_rec_vectors([rp, ra, rb, rn])
 
     ring = c.post("/clusters/expand",
                   json={"pos_keys": [kp], "neg_keys": [kn], "exclude": [], "k": 2}).json()["ring"]
@@ -74,7 +74,7 @@ def test_expand_empty_without_model(store):
 
 
 def _save_client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = FakeClient()
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), fc
@@ -82,8 +82,8 @@ def _save_client(store):
 
 def test_save_resolves_keys_to_tracks(store):
     c, fc = _save_client(store)
-    store.upsert_track("va", "Ta", "Art", None, None)
-    store.upsert_track("vb", "Tb", "Art", None, None)
+    store.tracks.upsert_track("va", "Ta", "Art", None, None)
+    store.tracks.upsert_track("vb", "Tb", "Art", None, None)
     keep = [identity_key("Ta", "Art"), identity_key("Tb", "Art")]
     r = c.post("/clusters/save", data={"name": "My Cluster", "keep_keys": json.dumps(keep),
                                        "central_keys": "[]"})
@@ -92,13 +92,13 @@ def test_save_resolves_keys_to_tracks(store):
     # generated mix ("My Cluster #1") and its recipe is persisted.
     assert fc.created[0][1].startswith("My Cluster")
     assert sorted(fc.added[0][1]) == ["va", "vb"]
-    assert store.get_recipe(fc.created[0][0])["model"] == "cluster"
+    assert store.rec_surface.get_recipe(fc.created[0][0])["model"] == "cluster"
 
 
 def test_save_always_folds_in_central_tracks(store):
     c, fc = _save_client(store)
-    store.upsert_track("va", "Ta", "Art", None, None)
-    store.upsert_track("vc", "Tc", "Central", None, None)
+    store.tracks.upsert_track("va", "Ta", "Art", None, None)
+    store.tracks.upsert_track("vc", "Tc", "Central", None, None)
     keep = json.dumps([identity_key("Ta", "Art")])
     central = json.dumps([identity_key("Tc", "Central")])
 
@@ -117,7 +117,7 @@ def test_save_persists_canvas_for_reopen(store):
     """#48: a successful save stashes the full canvas keyed by the new playlist's ytm, and
     /clusters/state/<ytm> returns it verbatim so the cluster can be reopened and regrown."""
     c, fc = _save_client(store)
-    store.upsert_track("va", "Ta", "Art", None, None)
+    store.tracks.upsert_track("va", "Ta", "Art", None, None)
     keep = json.dumps([identity_key("Ta", "Art")])
     state = json.dumps({"v": 1, "rootId": 1, "nodes": [{"id": 1, "kind": "central"}], "trunk": []})
     r = c.post("/clusters/save", data={"name": "Reopenable", "keep_keys": keep,
@@ -136,7 +136,7 @@ def test_state_404_when_no_canvas(store):
 def test_save_without_state_stores_no_canvas(store):
     """Older clients (or a save with no state field) don't create a canvas row, so reopen 404s."""
     c, fc = _save_client(store)
-    store.upsert_track("va", "Ta", "Art", None, None)
+    store.tracks.upsert_track("va", "Ta", "Art", None, None)
     keep = json.dumps([identity_key("Ta", "Art")])
     c.post("/clusters/save", data={"name": "NoCanvas", "keep_keys": keep, "central_keys": "[]"})
     assert c.get(f"/clusters/state/{fc.created[0][0]}").status_code == 404

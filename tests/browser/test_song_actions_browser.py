@@ -184,8 +184,8 @@ def test_partial_creation_keeps_warning_and_playlist_link(song_app, page, monkey
 
 def test_keyboard_reuses_one_menu_after_row_replacement(song_app, page):
     store, source = song_app["store"], song_app["source"]
-    second = store.upsert_track("second", "Second Song", "Someone", "", 200)
-    store.set_playlist_tracks(source, store.get_playlist_track_ids(source) + [second])
+    second = store.tracks.upsert_track("second", "Second Song", "Someone", "", 200)
+    store.playlists.set_playlist_tracks(source, store.playlists.get_playlist_track_ids(source) + [second])
     page.goto(f"{song_app['base']}/playlist/{source}")
     first = page.get_by_role("button", name="More actions for Owned Song")
     first.focus()
@@ -215,11 +215,11 @@ def test_keyboard_reuses_one_menu_after_row_replacement(song_app, page):
 
 def test_suggestion_feedback_uses_shared_menu(song_app, page):
     store = song_app["store"]
-    owned = store.get_playlist_track_ids(song_app["source"])[0]
-    bonus = store.upsert_track("bonus", "Bonus Song", "Artist & Friends", "", 200)
+    owned = store.playlists.get_playlist_track_ids(song_app["source"])[0]
+    bonus = store.tracks.upsert_track("bonus", "Bonus Song", "Artist & Friends", "", 200)
     for tid in [owned, bonus]:
-        store.set_track_genre(tid, "Techno")
-    store.set_playlist_tracks(song_app["destination"], [owned, bonus])
+        store.tracks.set_track_genre(tid, "Techno")
+    store.playlists.set_playlist_tracks(song_app["destination"], [owned, bonus])
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
     tile = page.locator(".tile-suggest").filter(has_text="Bonus Song")
     tile.get_by_role("button", name="More actions for Bonus Song").click()
@@ -245,11 +245,11 @@ def test_now_playing_uses_shared_menu(song_app, page):
 
 def test_adding_suggestion_to_current_playlist_refreshes_when_done(song_app, page):
     store = song_app["store"]
-    owned = store.get_playlist_track_ids(song_app["source"])[0]
-    bonus = store.upsert_track("bonus", "Bonus Song", "Artist & Friends", "", 200)
+    owned = store.playlists.get_playlist_track_ids(song_app["source"])[0]
+    bonus = store.tracks.upsert_track("bonus", "Bonus Song", "Artist & Friends", "", 200)
     for tid in [owned, bonus]:
-        store.set_track_genre(tid, "Techno")
-    store.set_playlist_tracks(song_app["destination"], [owned, bonus])
+        store.tracks.set_track_genre(tid, "Techno")
+    store.playlists.set_playlist_tracks(song_app["destination"], [owned, bonus])
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
     page.locator(".tile-suggest").get_by_role("button", name="More actions for Bonus Song").click()
     page.get_by_role("menuitem", name="Add song to playlist", exact=True).click()
@@ -265,11 +265,11 @@ def test_adding_suggestion_to_current_playlist_refreshes_when_done(song_app, pag
 @pytest.mark.parametrize("surface", ["artist", "charts", "saved_album"])
 def test_library_views_share_song_actions(song_app, page, surface):
     store = song_app["store"]
-    store.upsert_track("owned-song", "Owned Song", "Artist & Friends", "Album", 180,
+    store.tracks.upsert_track("owned-song", "Owned Song", "Artist & Friends", "Album", 180,
                        album_browse_id="MPRE_owned")
-    store.add_saved_album({"browse": "MPRE_owned", "title": "Album", "artist": "Artist & Friends",
+    store.collection.add_saved_album({"browse": "MPRE_owned", "title": "Album", "artist": "Artist & Friends",
                            "year": "2000", "thumbnail": ""})
-    store.add_history_snapshot(song_app["main_id"], 50, [store.identity_key_for_video("owned-song")])
+    store.history.add_history_snapshot(song_app["main_id"], 50, [store.tracks.identity_key_for_video("owned-song")])
     path = {"artist": "/artist?name=Artist%20%26%20Friends", "charts": "/charts",
             "saved_album": "/album?browse=MPRE_owned"}[surface]
     page.goto(song_app["base"] + path)
@@ -284,6 +284,7 @@ def test_library_views_share_song_actions(song_app, page, surface):
 
 def test_generated_playlist_keeps_contextual_mood_actions(song_app, page):
     song_app["store"].set_playlist_group("SOURCE", "Generated")
+    song_app['store'].playlists.mark_generated_playlist('SOURCE')
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
     row = page.get_by_role("row").filter(has_text="Owned Song")
     trigger = row.get_by_role("button", name="More actions for Owned Song")
@@ -309,8 +310,8 @@ def test_generated_playlist_keeps_contextual_mood_actions(song_app, page):
 def test_mix_track_menu_stays_above_card_and_opens_playlist_dialog(live_app, store, page, tmp_path):
     from tests.test_home_other_genres import seed_genres
     seed_genres(store)
-    store.set_setting("last_sync_at", "1")
-    store.set_setting("onboard_dismissed", "1")
+    store.settings.set_setting("last_sync_at", "1")
+    store.settings.set_setting("onboard_dismissed", "1")
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(live_app + "/")
     card = page.locator("#gen-wheelhouse")

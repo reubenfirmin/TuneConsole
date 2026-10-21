@@ -10,13 +10,13 @@ DAY = 86400.0
 
 def _store():
     s = Store(":memory:"); s.init_schema()
-    s.upsert_identity("main", "bridge", None, True)
+    s.identities.upsert_identity("main", "bridge", None, True)
     return s
 
 
 def _track(s, key, genre="techno"):
-    t = s.upsert_track(f"v_{key}", key.split("|")[0], key.split("|")[1], "", 200)
-    s.set_track_genre(t, genre)
+    t = s.tracks.upsert_track(f"v_{key}", key.split("|")[0], key.split("|")[1], "", 200)
+    s.tracks.set_track_genre(t, genre)
     return t
 
 
@@ -24,7 +24,7 @@ def test_month_old_mood_tap_is_nearly_gone():
     s = _store()
     _track(s, "song|artist")
     now = 1000 * DAY
-    s.record_mood(["song|artist"], +1, now - 30 * DAY)      # one month old, nothing since
+    s.rec_surface.record_mood(["song|artist"], +1, now - 30 * DAY)      # one month old, nothing since
     leans = transient.facet_leans(s, now)
     val = leans.get("genre:techno", 0.0)
     assert 0 <= val < 0.06                                   # 30d at 7d half-life ~ 0.05
@@ -39,10 +39,10 @@ def test_rapid_plays_do_not_erase_a_recent_like():
     s = _store()
     _track(s, "loved|artist", genre="jazz")
     now = 1000 * DAY
-    s.record_like("loved|artist", now - 3600, provenance="action")  # a live thumbs-up (transient)
+    s.rec_model.record_like("loved|artist", now - 3600, provenance="action")  # a live thumbs-up (transient)
     for i in range(50):
         _track(s, f"p{i}|other", genre="techno")
-        s.record_play_event(1, f"p{i}|other", None, now - 1800 + i * 30)
+        s.history.record_play_event(1, f"p{i}|other", None, now - 1800 + i * 30)
     leans = transient.facet_leans(s, now)
     jazz = leans.get("genre:jazz", 0.0)
     assert jazz > 0.4 * float(__import__("yt_playlist.rec.rec_params", fromlist=["x"]).get_param(s, "like_transient_w")) or jazz > 0.4

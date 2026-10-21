@@ -29,11 +29,11 @@ def _seed_bundles(store):
     for surf in ms.CARD_SURFACES:
         payload["1"][surf] = items(f"{surf}h", "house")
         payload["2"][surf] = items(f"{surf}t", "techno")
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
 
 
 def _client(store, now=1000.0):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                       base_url="http://127.0.0.1")
 

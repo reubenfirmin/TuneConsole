@@ -26,14 +26,14 @@ def build(ctx) -> APIRouter:
         view = "playlists" if request.query_params.get("view") == "playlists" else "saved"
         data = {"view": view}
         if view == "saved":
-            data["saved"] = store.get_saved_albums()   # populated by sync (get_library_albums)
+            data["saved"] = store.collection.get_saved_albums()   # populated by sync (get_library_albums)
         else:
-            data["albums"] = store.collection_albums()
+            data["albums"] = store.collection.collection_albums()
         return templates.TemplateResponse(request, "albums.html", data)
 
     @router.get("/artists")
     def artists_page(request: Request):
-        return templates.TemplateResponse(request, "artists.html", {"artists": store.collection_artists()})
+        return templates.TemplateResponse(request, "artists.html", {"artists": store.collection.collection_artists()})
 
     def _album_and_client(browse_id):
         clients = ctx.client_provider() or {}
@@ -48,7 +48,7 @@ def build(ctx) -> APIRouter:
     def _save_album(browse_id):
         client, album = _album_and_client(browse_id)
         client.rate_playlist(album["audioPlaylistId"], "LIKE")
-        store.add_saved_album({
+        store.collection.add_saved_album({
             "browse": browse_id, "title": album.get("title"), "type": album.get("type"),
             "artist": ", ".join(x.get("name", "") for x in (album.get("artists") or [])),
             "year": album.get("year"), "thumbnail": best_thumb(album.get("thumbnails"))})
@@ -56,7 +56,7 @@ def build(ctx) -> APIRouter:
     def _unsave_album(browse_id):
         client, album = _album_and_client(browse_id)
         client.rate_playlist(album["audioPlaylistId"], "INDIFFERENT")
-        store.remove_saved_album(browse_id)
+        store.collection.remove_saved_album(browse_id)
 
     @router.post("/collection/save-album")
     async def save_album(request: Request):

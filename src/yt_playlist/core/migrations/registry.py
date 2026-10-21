@@ -3,7 +3,8 @@ from . import (v001_baseline, v002_enrichment, v003_discovery_audit, v004_playli
                v005_retired_lanes, v006_history_window, v007_like_ratchet, v008_recordings,
                v009_served_outcomes, v010_play_event_subjects, v011_takeout_coverage,
                v012_enrichment_retries, v013_provider_coverage, v014_artwork_retries,
-               v015_album_shares, v016_first_play_checkpoint, v017_retire_lane_log)
+               v015_album_shares, v016_first_play_checkpoint, v017_retire_lane_log,
+               v018_discovery_sources, v019_playlist_provenance, v020_metadata_selections)
 
 MIGRATIONS = (
     Migration(1, 'legacy_baseline', v001_baseline.apply),
@@ -23,4 +24,7 @@ MIGRATIONS = (
     Migration(15, 'album_share_snapshots', v015_album_shares.apply, replaces_data=False),
     Migration(16, 'first_play_checkpoint', v016_first_play_checkpoint.apply, replaces_data=False),
     Migration(17, 'retire_lane_log', v017_retire_lane_log.apply, replaces_data=False),
+    Migration(18, 'typed_discovery_sources', v018_discovery_sources.apply),
+    Migration(19, 'playlist_generation_and_adoption', v019_playlist_provenance.apply),
+    Migration(20, 'metadata_choices_and_selected_sources', v020_metadata_selections.apply),
 )

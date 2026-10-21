@@ -18,7 +18,7 @@ def test_load_seeds_default_order_all_enabled(store):
 
 def test_load_drops_unknown_and_appends_missing(store):
     # Saved state knows only deezer (+ a bogus name); the rest must be appended, enabled.
-    store.set_setting("enrichment_order", json.dumps(
+    store.settings.set_setting("enrichment_order", json.dumps(
         [{"name": "bogus", "enabled": True}, {"name": "deezer", "enabled": False}]))
     cfg = E.load_config(store)
     assert "bogus" not in names(cfg)
@@ -29,14 +29,14 @@ def test_load_drops_unknown_and_appends_missing(store):
 
 
 def test_load_repairs_acousticbrainz_after_musicbrainz(store):
-    store.set_setting("enrichment_order", json.dumps(
+    store.settings.set_setting("enrichment_order", json.dumps(
         [{"name": "acousticbrainz", "enabled": True}, {"name": "musicbrainz", "enabled": True}]))
     cfg = names(E.load_config(store))
     assert cfg.index("acousticbrainz") > cfg.index("musicbrainz")
 
 
 def test_load_tolerates_corrupt_json(store):
-    store.set_setting("enrichment_order", "{not json")
+    store.settings.set_setting("enrichment_order", "{not json")
     assert names(E.load_config(store)) == [p["name"] for p in E.PROVIDERS]
 
 
@@ -72,7 +72,7 @@ from tests.conftest import FakeClient                     # noqa: E402
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     return TestClient(app, base_url="http://127.0.0.1")
 

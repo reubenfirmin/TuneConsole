@@ -109,7 +109,7 @@ def test_ws_play_frame_advances_radio_queue_and_reconciles_playlist(monkeypatch)
 
     store = Store(":memory:")
     store.init_schema()
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
 
     class _FakeClient:
         pass
@@ -203,7 +203,7 @@ def test_radio_apply_defers_commit_until_reconcile_succeeds(monkeypatch):
 
     store = Store(":memory:")
     store.init_schema()
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
 
     class _FakeClient:
         pass

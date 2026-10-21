@@ -20,7 +20,6 @@ class FakeDao:
 def test_content_features_tokens(monkeypatch):
     # techno → family techno; 1995 → decade 1990
     content = {"s|a": ("Techno", "1995"), "t|b": ("Deep House", "2001"), "u|c": ("Techno", None)}
-    monkeypatch.setattr(embed, "RecDao", lambda store: FakeDao(content))
     feats, rows = embed.content_features(content)
     assert "fam:techno" in feats          # genre-family token present
     assert any(t.startswith("dec:1990") for t in feats)
@@ -35,7 +34,7 @@ def test_build_content_vectors_normalized_and_filtered(tmp_path, monkeypatch):
     from yt_playlist.core.store import Store
     s = Store(str(tmp_path / "t.db")); s.init_schema()
     content = {"s|a": ("Techno", "1995"), "t|b": ("Techno", "1990")}
-    monkeypatch.setattr(embed, "RecDao", lambda store: FakeDao(content))
+    monkeypatch.setattr(s, "rec_query", FakeDao(content))
     keys, V = embed.build_content_vectors(s)
     assert set(keys) == {"s|a", "t|b"}
     norms = np.linalg.norm(V, axis=1)
@@ -47,7 +46,7 @@ def test_build_content_vectors_normalized_and_filtered(tmp_path, monkeypatch):
 def test_build_content_vectors_excludes_untagged(tmp_path, monkeypatch):
     from yt_playlist.core.store import Store
     s = Store(str(tmp_path / "t.db")); s.init_schema()
-    monkeypatch.setattr(embed, "RecDao", lambda store: FakeDao({}))   # no genre, no audio anywhere
+    monkeypatch.setattr(s, "rec_query", FakeDao({}))   # no genre, no audio anywhere
     keys, V = embed.build_content_vectors(s)
     assert keys == [] and V.shape[0] == 0
 
@@ -63,7 +62,7 @@ def test_audio_features_sharpen_within_genre(tmp_path, monkeypatch):
         "hi2": {"energy": 0.92, "bpm": 148.0, "danceability": 0.88},
         "lo":  {"energy": 0.10, "bpm": 90.0,  "danceability": 0.2},
     }
-    monkeypatch.setattr(embed, "RecDao", lambda store: FakeDao(content, audio))
+    monkeypatch.setattr(s, "rec_query", FakeDao(content, audio))
     keys, V = embed.build_content_vectors(s)
     idx = {k: i for i, k in enumerate(keys)}
     sim_hi = float(V[idx["hi1"]] @ V[idx["hi2"]])
@@ -78,7 +77,7 @@ def test_track_with_audio_but_no_genre_is_included(tmp_path, monkeypatch):
     content = {"g1": ("Techno", "2000"), "g2": ("Techno", "2000")}
     audio = {"g1": {"energy": 0.9, "bpm": 150.0}, "g2": {"energy": 0.85, "bpm": 145.0},
              "x":  {"energy": 0.88, "bpm": 148.0}}     # x has audio but no genre
-    monkeypatch.setattr(embed, "RecDao", lambda store: FakeDao(content, audio))
+    monkeypatch.setattr(s, "rec_query", FakeDao(content, audio))
     keys, V = embed.build_content_vectors(s)
     assert "x" in keys
     assert np.isclose(np.linalg.norm(V[keys.index("x")]), 1.0)
@@ -91,7 +90,7 @@ def test_music_scale_is_a_categorical_feature(tmp_path, monkeypatch):
     content = {k: ("Techno", "2000") for k in ("m1", "m2", "maj")}
     audio = {"m1": {"music_scale": "minor"}, "m2": {"music_scale": "minor"},
              "maj": {"music_scale": "major"}}
-    monkeypatch.setattr(embed, "RecDao", lambda store: FakeDao(content, audio))
+    monkeypatch.setattr(s, "rec_query", FakeDao(content, audio))
     keys, V = embed.build_content_vectors(s)
     idx = {k: i for i, k in enumerate(keys)}
     assert float(V[idx["m1"]] @ V[idx["m2"]]) > float(V[idx["m1"]] @ V[idx["maj"]])

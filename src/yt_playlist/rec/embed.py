@@ -14,7 +14,6 @@ import numpy as np
 
 from yt_playlist.util import genre_catalog, genre_map
 from yt_playlist.rec import rec_params
-from yt_playlist.rec.rec_dao import RecDao
 
 # Default embedding dimensionality. 48 is the recall@k-tuned default for manual builds; Auto-tune
 # (eval_recs) may override it via the `rec_dim` setting. Not user-exposed (see rec_params docstring).
@@ -45,11 +44,11 @@ def _normalize(v):
 def build_vectors(store, dim=DIM):
     """Return (keys, V), L2-normalised per-track embeddings. Method ('svd' default, or 'item2vec')
     comes from the recall@k-tuned `rec_embed_method` setting."""
-    baskets = store.rec_baskets()
+    baskets = store.rec_query.rec_baskets()
     return build_vectors_from_baskets(
         baskets, dim=dim,
-        method=store.get_setting("rec_embed_method") or "svd",
-        weights=_cooc_weights(store) if store.get_setting("rec_cooc_weighting") == "1" else None,
+        method=store.settings.get_setting("rec_embed_method") or "svd",
+        weights=_cooc_weights(store) if store.settings.get_setting("rec_cooc_weighting") == "1" else None,
     )
 
 
@@ -80,7 +79,7 @@ def _cooc_weights(store):
     slightly favored weighting (0.768 -> 0.777), but that is exactly the overfit-to-heavy-tracks artifact
     temporal_recall is there to expose. Only flip the setting on if a future re-run on more retained
     history reverses this; the toggle and harness are kept so that re-test is one call."""
-    return {k: 1.0 + math.log1p(c) for k, c in store.play_counts().items() if c}
+    return {k: 1.0 + math.log1p(c) for k, c in store.rec_query.play_counts().items() if c}
 
 
 def _cooc_matrix(baskets, keys, weights=None):
@@ -199,9 +198,9 @@ def build_and_store(store, dim=None) -> int:
 
     dim defaults to the recall@k-tuned `rec_dim` setting (or DIM if unset/untuned)."""
     if dim is None:
-        dim = int(store.get_setting("rec_dim") or DIM)
+        dim = int(store.settings.get_setting("rec_dim") or DIM)
     keys, V = build_vectors(store, dim)
-    store.replace_rec_vectors([(k, V[i].tobytes()) for i, k in enumerate(keys)])
+    store.rec_model.replace_rec_vectors([(k, V[i].tobytes()) for i, k in enumerate(keys)])
     return len(keys)
 
 
@@ -217,7 +216,7 @@ def _load_vector_rows(rows):
 
 def load_vectors(store):
     """Return (keys, V, idx) from persisted vectors, or ([], None, {}) if none built yet."""
-    return _load_vector_rows(store.get_rec_vectors())
+    return _load_vector_rows(store.rec_model.get_rec_vectors())
 
 
 # === Content vectors: a "what a track IS" space (genre/era + audio), parallel to the collaborative one.
@@ -321,7 +320,7 @@ def encode_content(model, genre, year, audio):
 
 
 def _content_inputs(store):
-    dao = RecDao(store)
+    dao = store.rec_query
     return sorted(dao.library_keys()), dao.track_content(), dao.track_audio_features()
 
 
@@ -366,7 +365,7 @@ def content_model_fingerprint(model) -> str:
 
 def content_space_id(store, *, snapshot=None) -> str:
     """Fingerprint of the currently-persisted content model, or "" when none is built yet."""
-    raw = snapshot["model"] if snapshot is not None else store.get_setting("rec_content_model")
+    raw = snapshot["model"] if snapshot is not None else store.settings.get_setting("rec_content_model")
     return content_model_fingerprint(json.loads(raw)) if raw else ""
 
 
@@ -379,11 +378,11 @@ def build_content_vectors(store, dim=None):  # dim kept for signature symmetry; 
 def build_content_and_store(store, *, inputs=None) -> int:
     """Build library content vectors + the shared model, persist both, and re-encode the out-of-corpus
     pool into the (just-rebuilt) space so the two stay comparable. Returns the library count."""
-    previous = store.content_generation()
+    previous = store.rec_model.content_generation()
     inputs = inputs if inputs is not None else _content_inputs(store)
     keys, V, model = _build_library_content(store, inputs=inputs)
-    discovered = _encode_discovered(store.get_discovered_tracks(), model)
-    if not store.publish_content_generation(
+    discovered = _encode_discovered(store.discovery.get_discovered_tracks(), model)
+    if not store.rec_model.publish_content_generation(
             [(k, V[i].tobytes()) for i, k in enumerate(keys)], discovered, json.dumps(model),
             genre_catalog.REVISION, _content_input_fingerprint(inputs), previous["generation"]):
         raise RuntimeError("Content generation changed during rebuild; retry the refresh")
@@ -403,11 +402,11 @@ def build_discovered_content_vectors(store) -> int:
     """Encode the out-of-corpus discovered-track pool into the shared content space (Phase 2). Uses the
     persisted model. A competing model publication forces a fresh encoding, never a mixed pool."""
     for _ in range(3):
-        snapshot = store.content_generation()
+        snapshot = store.rec_model.content_generation()
         if not snapshot["model"]:
             return 0
-        out = _encode_discovered(store.get_discovered_tracks(), json.loads(snapshot["model"]))
-        if store.publish_content_generation(snapshot["library"], out, snapshot["model"],
+        out = _encode_discovered(store.discovery.get_discovered_tracks(), json.loads(snapshot["model"]))
+        if store.rec_model.publish_content_generation(snapshot["library"], out, snapshot["model"],
                 snapshot["revision"] or "", snapshot["inputs"], snapshot["generation"]):
             return len(out)
     raise RuntimeError("Content generation changed during discovery encoding; retry the refresh")
@@ -415,12 +414,12 @@ def build_discovered_content_vectors(store) -> int:
 
 def load_content_vectors(store, *, snapshot=None):
     """Return (keys, V, idx) from persisted content vectors, or ([], None, {}) if none built."""
-    return _load_vector_rows(snapshot["library"] if snapshot is not None else store.get_rec_content_vectors())
+    return _load_vector_rows(snapshot["library"] if snapshot is not None else store.rec_model.get_rec_content_vectors())
 
 
 def load_discovered_content_vectors(store, *, snapshot=None):
     """Return (keys, V, idx) of out-of-corpus content vectors, or ([], None, {}) if none built."""
-    return _load_vector_rows(snapshot["discovered"] if snapshot is not None else store.get_rec_discovered_content_vectors())
+    return _load_vector_rows(snapshot["discovered"] if snapshot is not None else store.rec_model.get_rec_discovered_content_vectors())
 
 
 def maybe_rebuild_content_vectors(store, step=0.05) -> bool:
@@ -432,15 +431,15 @@ def maybe_rebuild_content_vectors(store, step=0.05) -> bool:
     """
     inputs = _content_inputs(store)
     total = len(inputs[0])
-    if not total and not store.get_setting("rec_content_model"):
+    if not total and not store.settings.get_setting("rec_content_model"):
         return False
-    current_genres = store.get_setting("rec_content_genre_revision") == genre_catalog.REVISION
-    if (store.get_setting("rec_content_inputs") == _content_input_fingerprint(inputs)
-            and store.get_setting("rec_content_model") and current_genres):
+    current_genres = store.settings.get_setting("rec_content_genre_revision") == genre_catalog.REVISION
+    if (store.settings.get_setting("rec_content_inputs") == _content_input_fingerprint(inputs)
+            and store.settings.get_setting("rec_content_model") and current_genres):
         return False
     build_content_and_store(store, inputs=inputs)
     bucket = int((len(inputs[1]) / total) // step) if total else 0
-    store.set_setting("rec_content_cov_bucket", str(bucket))
+    store.settings.set_setting("rec_content_cov_bucket", str(bucket))
     return True
 
 
@@ -628,7 +627,7 @@ def _content_space(store, include_new):
     """Load the content (genre/era) vector space for cluster_expand. When include_new (Phase 2),
     widen it with the OUT-OF-CORPUS discovered-track pool, but only when they share the same model
     space (same column count). Returns (keys, V, idx)."""
-    snapshot = store.content_generation()
+    snapshot = store.rec_model.content_generation()
     ckeys, CV, cidx = load_content_vectors(store, snapshot=snapshot)
     if include_new:
         dkeys, DV, _ = load_discovered_content_vectors(store, snapshot=snapshot)

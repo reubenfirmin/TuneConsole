@@ -24,34 +24,34 @@ def apply_dislikes(store, status_map, now, provenance="sync") -> None:
     Graduation is additionally gated by a once-EVER per-key stamp (mark_graduated_once) that
     survives clear/re-record cycles: without it, a likeStatus flap deleted the like row and let the
     next sync re-graduate the same like daily, ratcheting artist weights to the cap."""
-    existing_dis = store.disliked_identity_keys()
-    existing_like = set(store.recent_liked_keys())
+    existing_dis = store.rec_model.disliked_identity_keys()
+    existing_like = set(store.rec_model.recent_liked_keys())
     until = now + rec_params.get_param(store, "dislike_suppress_days") * 86400
     for key, status in status_map.items():
         if status == "DISLIKE":
-            if key not in existing_dis and store.record_dislike(key, until, now) \
-                    and store.mark_graduated_once(key, "dislike_grad", now):
+            if key not in existing_dis and store.rec_model.record_dislike(key, until, now) \
+                    and store.rec_model.mark_graduated_once(key, "dislike_grad", now):
                 graduate_moods(store, [key], -1.0, now,
                                source=rec_params.get_param(store, "source_w_dislike"),
                                source_label="dislike")
             if key in existing_like:
-                store.clear_like(key)                       # a dislike supersedes a prior like
+                store.rec_model.clear_like(key)                       # a dislike supersedes a prior like
         elif status == "LIKE":
             # record_like handles idempotency itself (and upgrades sync->action provenance on a
             # re-observation without returning True), so no existing_like pre-check here.
-            if store.record_like(key, now, provenance=provenance) \
-                    and store.mark_graduated_once(key, "like_grad", now):
+            if store.rec_model.record_like(key, now, provenance=provenance) \
+                    and store.rec_model.mark_graduated_once(key, "like_grad", now):
                 w_param = "source_w_like" if provenance == "action" else "source_w_like_synced"
                 graduate_moods(store, [key], 1.0, now,
                                source=rec_params.get_param(store, w_param),
                                source_label="like")
             if key in existing_dis:
-                store.clear_dislike(key)                    # a like clears a prior dislike (preserved)
+                store.rec_model.clear_dislike(key)                    # a like clears a prior dislike (preserved)
         elif status == "INDIFFERENT":
             if key in existing_dis:
-                store.clear_dislike(key)
+                store.rec_model.clear_dislike(key)
             if key in existing_like:
-                store.clear_like(key)
+                store.rec_model.clear_like(key)
 
 
 def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -> None:
@@ -60,14 +60,14 @@ def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -
     `source` is the signal's SOURCE_W_* weight (graduation speed). `source_label` names the driving
     signal for the §1c graduation log. Model-only. NEVER suppresses."""
     threshold = rec_params.get_param(store, "theme_threshold")
-    score = store.bump_theme(axis, signed * source, now)
+    score = store.rec_surface.bump_theme(axis, signed * source, now)
     if abs(score) >= threshold:
         factor = (rec_params.get_param(store, "graduate_up") if score > 0
                   else rec_params.get_param(store, "graduate_down"))
-        new_weight = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
+        new_weight = store.rec_model.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
                                         now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-        store.discount_theme(axis, math.copysign(threshold, score))
-        store.log_graduation(axis, source_label, score, factor, new_weight, now)
+        store.rec_surface.discount_theme(axis, math.copysign(threshold, score))
+        store.rec_surface.log_graduation(axis, source_label, score, factor, new_weight, now)
 
 
 def graduate_moods(store, keys, signed, now, source=1.0, source_label="mood") -> None:
@@ -110,27 +110,27 @@ def graduate_slider_exposure(store, now) -> None:
     threshold = rec_params.get_param(store, "theme_threshold")
     w_slider = rec_params.get_param(store, "source_w_slider")
     today = _utc_day(now)
-    for row in store.lean_rows():
+    for row in store.rec_model.lean_rows():
         axis, value, last_day = row["axis"], row["value"], row["last_graduated_day"]
         if last_day == today:
             continue                                          # already exposed today
         magnitude = abs(value - 1.0)
-        store.set_lean_graduated_day(axis, today)             # stamp the held-day either way
+        store.rec_model.set_lean_graduated_day(axis, today)             # stamp the held-day either way
         if magnitude == 0.0:
             continue
         signed = math.copysign(magnitude * w_slider, value - 1.0)
-        score = store.bump_theme(axis, signed, now)
+        score = store.rec_surface.bump_theme(axis, signed, now)
         if abs(score) >= threshold:
             factor = (rec_params.get_param(store, "graduate_up") if score > 0
                       else rec_params.get_param(store, "graduate_down"))
             halflife = rec_params.get_param(store, "weight_revert_halflife_d")
-            old_perm = store.get_weights(now=now, revert_halflife_d=halflife).get(axis, 1.0)
-            new_perm = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
+            old_perm = store.rec_model.get_weights(now=now, revert_halflife_d=halflife).get(axis, 1.0)
+            new_perm = store.rec_model.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
                                           now=now, revert_halflife_d=halflife)
             ratio = (new_perm / old_perm) if old_perm > 0 else 1.0
-            store.set_lean(axis, value / ratio, now)          # conserve: new_perm*(value/ratio) == old_perm*value
-            store.discount_theme(axis, math.copysign(threshold, score))
-            store.log_graduation(axis, "slider", score, factor, new_perm, now)
+            store.rec_model.set_lean(axis, value / ratio, now)          # conserve: new_perm*(value/ratio) == old_perm*value
+            store.rec_surface.discount_theme(axis, math.copysign(threshold, score))
+            store.rec_surface.log_graduation(axis, "slider", score, factor, new_perm, now)
 
 
 def graduate_play_exposure(store, now) -> None:
@@ -152,17 +152,17 @@ def graduate_play_exposure(store, now) -> None:
     w_play = rec_params.get_param(store, "source_w_play")
     today = _utc_day(now)
     for axis, lean in transient.play_facet_leans(store, now).items():
-        if store.get_play_graduated_day(axis) == today:
+        if store.rec_surface.get_play_graduated_day(axis) == today:
             continue                                          # already exposed this axis today
-        store.set_play_graduated_day(axis, today)             # stamp the day either way
+        store.rec_surface.set_play_graduated_day(axis, today)             # stamp the day either way
         magnitude = abs(lean)
         if magnitude == 0.0:
             continue
-        score = store.bump_theme(axis, magnitude * w_play, now)    # plays only ever push up
+        score = store.rec_surface.bump_theme(axis, magnitude * w_play, now)    # plays only ever push up
         if abs(score) >= threshold:
             factor = (rec_params.get_param(store, "graduate_up") if score > 0
                       else rec_params.get_param(store, "graduate_down"))
-            new_weight = store.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
+            new_weight = store.rec_model.nudge_weight(axis, factor, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX,
                                             now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-            store.discount_theme(axis, math.copysign(threshold, score))
-            store.log_graduation(axis, "play", score, factor, new_weight, now)
+            store.rec_surface.discount_theme(axis, math.copysign(threshold, score))
+            store.rec_surface.log_graduation(axis, "play", score, factor, new_weight, now)

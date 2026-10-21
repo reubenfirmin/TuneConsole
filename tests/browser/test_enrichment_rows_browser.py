@@ -5,12 +5,12 @@ from playwright.sync_api import expect
 
 @pytest.mark.parametrize("scope", ["playlist", "album"])
 def test_replaced_rows_keep_genre_and_year_controls(live_app, store, page, scope):
-    entry = store.upsert_track("live-row", "Live row song", "Artist", "Album", 200,
+    entry = store.tracks.upsert_track("live-row", "Live row song", "Artist", "Album", 200,
                                album_browse_id="BID")
-    store.set_track_genre(entry, "Rock")
+    store.tracks.set_track_genre(entry, "Rock")
     playlist = store.conn.execute("SELECT id FROM playlists").fetchone()[0]
-    store.set_playlist_tracks(playlist, [entry])
-    store.replace_saved_albums([{"browse": "BID", "title": "Album", "artist": "Artist",
+    store.playlists.set_playlist_tracks(playlist, [entry])
+    store.collection.replace_saved_albums([{"browse": "BID", "title": "Album", "artist": "Artist",
                                  "year": "2000", "type": "Album", "thumbnail": None}])
     page.goto(f"{live_app}/playlist/{playlist}" if scope == "playlist" else f"{live_app}/album?browse=BID")
     row = page.locator('tr.srow[data-vid="live-row"]')

@@ -16,6 +16,7 @@ from yt_playlist.util import net
 from yt_playlist.providers import musicbrainz
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
 from yt_playlist.providers.enrich_queue import PriorityGate
+from yt_playlist.providers.enrichment import apply_findings
 
 logger = logging.getLogger(__name__)
 
@@ -151,20 +152,20 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, mbid_fn=Non
     and persist it. Scope is a playlist or an explicit `pending` list."""
     enrich_fn = enrich_fn or enrich
     mbid_fn = mbid_fn or musicbrainz.recording_mbid
-    pending = store.tracks_missing_audio(playlist_id) if pending is None else pending
+    pending = store.tracks.tracks_missing_audio(playlist_id) if pending is None else pending
 
     def _per_item(i, total, t):
         mbid = t.get("mb_recording_id")
         if not mbid:
             mbid = mbid_fn(t["title"], t["artist"])
             if mbid:
-                store.set_track_mbid(t["id"], mbid)
+                apply_findings(store,t['id'],'musicbrainz',{'mb_recording_id':mbid})
         feat = enrich_fn(mbid) if mbid else _empty()
         if _breaker.tripped():
             on_progress({"type": "err", "text": "AcousticBrainz looks unreachable. Stopped. "
                          "The remaining tracks will retry next time."})
             return False
-        store.set_track_audio(t["id"], **feat)
+        apply_findings(store,t['id'],name,feat)
         bits = []
         if feat["bpm"]:
             bits.append(f"{feat['bpm']:.0f} BPM")

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import FakeClient, _track
-from yt_playlist.library import executor
+from yt_playlist.library import executor, playlist_undo
 from yt_playlist.repos.base import GENERATED_GROUP
 
 
@@ -13,10 +13,10 @@ from yt_playlist.repos.base import GENERATED_GROUP
 def source(store, tmp_path, monkeypatch):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(executor, "with_retry", lambda read: read())
-    iid = store.upsert_identity("Main", "bridge", None, True)
-    pid = store.upsert_playlist(iid, "SOURCE", "Cached title", 1, "", 1)
-    tid = store.upsert_track("one", "Cached song", "Artist", None, 200)
-    store.set_playlist_tracks(pid, [tid])
+    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    pid = store.playlists.upsert_playlist(iid, "SOURCE", "Cached title", 1, "", 1)
+    tid = store.tracks.upsert_track("one", "Cached song", "Artist", None, 200)
+    store.playlists.set_playlist_tracks(pid, [tid])
     tracks = [_track("new", "Added remotely", "Artist", set_video_id="new-first"),
               _track("one", "Current title", "Artist", set_video_id="one"),
               _track("new", "Added remotely", "Artist", set_video_id="new-second")]
@@ -30,20 +30,21 @@ def test_every_deletion_path_backs_up_current_order_and_occurrences(store, sourc
     if operation == "manual":
         executor.delete_playlist(store, pid, client, 1000000)
     elif operation == "gc":
-        store.set_playlist_group("SOURCE", GENERATED_GROUP)
+        store.playlists.set_playlist_group("SOURCE", GENERATED_GROUP)
+        store.playlists.mark_generated_playlist('SOURCE')
         assert executor.gc_generated_playlists(store, {iid: client}, 1000000, grace_days=1)
     elif operation == "move":
         # A move knows the two songs locally, but its cached order lacks the remote repeat.
-        new = store.upsert_track("new", "Added remotely", "Artist", None, 200)
-        one = store.upsert_track("one", "Cached song", "Artist", None, 200)
-        store.set_playlist_tracks(pid, [one, new])
-        target = store.upsert_identity("Other", "bridge", None, False)
+        new = store.tracks.upsert_track("new", "Added remotely", "Artist", None, 200)
+        one = store.tracks.upsert_track("one", "Cached song", "Artist", None, 200)
+        store.playlists.set_playlist_tracks(pid, [one, new])
+        target = store.identities.upsert_identity("Other", "bridge", None, False)
         destination = FakeClient(catalog=client._catalog)
         result = executor.copy_or_move_playlist(store, pid, target, client, destination,
                                                 1000000, delete_source=True)
         assert result["deleted"]
     else:
-        keep = store.upsert_playlist(iid, "KEEP", "Kept", 3, "", 1)
+        keep = store.playlists.upsert_playlist(iid, "KEEP", "Kept", 3, "", 1)
         if operation == "merge":
             executor.apply_result(store, {iid: client}, [keep, pid], ["new", "one"], keep, 1000000)
         else:
@@ -58,14 +59,14 @@ def test_every_deletion_path_backs_up_current_order_and_occurrences(store, sourc
     assert [t["remote"] for t in saved["tracks"]] == tracks
     assert saved["identity_id"] == iid
     assert "SOURCE" in client.deleted
-    assert store.get_playlist(pid) is None
+    assert store.playlists.get_playlist(pid) is None
 
 
 def test_undo_uses_the_remote_snapshot_including_unseen_additions(store, source):
     iid, pid, client, _ = source
     executor.delete_playlist(store, pid, client, 2)
-    action, = store.get_actions()
-    executor.undo_action(store, action.id, {iid: client}, 3)
+    action, = store.actions.get_actions()
+    playlist_undo.undo_action(store, action.id, {iid: client}, 3)
     assert client.added[-1] == ("PL_NEW_0", ["new", "one", "new"])
     assert [t["videoId"] for t in client._tracks["PL_NEW_0"]] == ["new", "one", "new"]
 
@@ -83,8 +84,8 @@ def test_incomplete_remote_read_preserves_playlist_and_publishes_nothing(
     with pytest.raises(ValueError):
         executor.delete_playlist(store, pid, client, 2)
     assert not client.deleted
-    assert store.get_playlist(pid) is not None
-    assert store.get_actions() == []
+    assert store.playlists.get_playlist(pid) is not None
+    assert store.actions.get_actions() == []
     assert not list(tmp_path.glob("backups/*"))
 
 
@@ -111,13 +112,13 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
     assert prior.read_bytes() == saved
     assert list((tmp_path / "backups").iterdir()) == [prior]
     assert not client.deleted
-    assert store.get_playlist(pid) is not None
-    assert store.get_actions() == []
+    assert store.playlists.get_playlist(pid) is not None
+    assert store.actions.get_actions() == []
 
 
 def test_merge_gate_and_backup_use_the_same_source_snapshot(store, source, monkeypatch):
     iid, pid, client, tracks = source
-    keep = store.upsert_playlist(iid, "KEEP", "Kept", 3, "", 1)
+    keep = store.playlists.upsert_playlist(iid, "KEEP", "Kept", 3, "", 1)
     reads = []
     get = client.get_playlist
 
@@ -132,5 +133,5 @@ def test_merge_gate_and_backup_use_the_same_source_snapshot(store, source, monke
     aid = executor.store_plan(store, executor.MergePlan(pid, keep, [], []), "delete", "SOURCE", 1)
     executor.execute_planned(store, aid, {iid: client}, 2)
     assert reads == ["SOURCE"]
-    payload = json.loads(Path(json.loads(store.get_action(aid).undo_json)["backup"]).read_text())
+    payload = json.loads(Path(json.loads(store.actions.get_action(aid).undo_json)["backup"]).read_text())
     assert [t["video_id"] for t in payload["tracks"]] == ["new", "one", "new"]

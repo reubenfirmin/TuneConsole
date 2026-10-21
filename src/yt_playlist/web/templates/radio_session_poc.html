@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Radio Session experiment · TuneConsole{% endblock %}
+{% block page_class %}page-workflow{% endblock %}
+{% block body %}
+<div class="page-head">
+  <h1>Radio Session <span class="muted">experiment</span></h1>
+  <p>Three songs to start. Two songs ahead as you listen.</p>
+</div>
+<section class="card section-block" id="radio-session-poc">
+  <p>Start creates a new <strong>Radio Session</strong> playlist in YouTube Music and plays its first song.
+    When song two begins, song four is added to the playlist. Each song you play makes room for another.</p>
+  <p class="section-note">Keep shuffle and repeat off for this experiment.
+    You can leave this page while it runs; keep TuneConsole and the extension connected.</p>
+  <div class="cluster">
+    <button type="button" class="btn primary" id="session-start">Start Radio Session</button>
+    <button type="button" class="btn" id="session-stop" disabled>Stop adding songs</button>
+    <a id="session-playlist" target="_blank" rel="noopener" hidden>Open playlist in YouTube Music</a>
+  </div>
+  <p id="session-status" role="status" aria-live="polite">Checking connection…</p>
+  <p id="session-error" role="alert" hidden></p>
+  <ol id="session-tracks" aria-label="Radio Session playlist"></ol>
+  <p class="section-note">Played songs stay in the playlist. Stop leaves it saved in YouTube Music.</p>
+</section>
+<script src="/static/radio-session-poc.js?v={{ asset_v }}"></script>
+{% endblock %}

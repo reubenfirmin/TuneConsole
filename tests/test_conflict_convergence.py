@@ -9,14 +9,14 @@ from yt_playlist.util import net
 @pytest.fixture
 def conflict(store):
     track = _track(store)
-    iid = store.upsert_identity("Main", "bridge", None, True)
-    playlist = store.upsert_playlist(iid, "PL", "Library", 1, "", 100)
-    store.set_playlist_tracks(playlist, [track["id"]])
+    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    playlist = store.playlists.upsert_playlist(iid, "PL", "Library", 1, "", 100)
+    store.playlists.set_playlist_tracks(playlist, [track["id"]])
     providers = [FakeProv("musicbrainz", {"Hyperballad": {"genre": "Rock", "year": "2000"}}),
                  FakeProv("discogs", {"Hyperballad": {"genre": "Pop", "year": "2001"}})]
     config = _cfg(("musicbrainz", True), ("discogs", True))
     _run(store, [track], providers, config)
-    assert store.conflict_count_for_playlist(playlist) == 2
+    assert store.enrichment.conflict_count_for_playlist(playlist) == 2
     return track, playlist, providers, config
 
 
@@ -30,18 +30,18 @@ def test_agreement_retires_conflicts_but_keeps_historical_evidence(store, confli
     previous = _rows(store, track)
     providers[1]._by_title = providers[0]._by_title
     _run(store, [track], providers, config)
-    assert store.conflict_count_for_playlist(playlist) == 0
-    assert store.unresolved_conflicts_for_playlist(playlist) == []
+    assert store.enrichment.conflict_count_for_playlist(playlist) == 0
+    assert store.enrichment.unresolved_conflicts_for_playlist(playlist) == []
     current = _rows(store, track)
     assert all(row["resolved"] == 2 for row in current.values())
     assert {field: row["candidates"] for field, row in current.items()} == {
         field: row["candidates"] for field, row in previous.items()}
     assert store.conn.execute("SELECT COUNT(*) FROM enrichment_log").fetchone()[0] == 8
-    assert store.get_track_enrichment(track["id"]) == ("Rock", "2000")
+    assert store.tracks.get_track_enrichment(track["id"]) == ("Rock", "2000")
     # Even the original options become a current disagreement again after automatic retirement.
     providers[1]._by_title = {"Hyperballad": {"genre": "Pop", "year": "2001"}}
     _run(store, [track], providers, config)
-    assert store.conflict_count_for_playlist(playlist) == 2
+    assert store.enrichment.conflict_count_for_playlist(playlist) == 2
 
 
 @pytest.mark.parametrize("problem", ["timeout", "breaker", "disabled", "unavailable", "no-match", "missing-field"])
@@ -72,7 +72,7 @@ def test_partial_evidence_cannot_retire_previous_disagreements(store, conflict, 
 def test_all_previous_candidate_providers_must_return_the_field(store, conflict):
     track, playlist, providers, config = conflict
     providers[1]._by_title = providers[0]._by_title
-    store.upsert_conflict(track["id"], "genre", [
+    store.enrichment.upsert_conflict(track["id"], "genre", [
         {"provider": "musicbrainz", "value": "Rock"}, {"provider": "discogs", "value": "Pop"},
         {"provider": "lastfm", "value": "Jazz"}])
     _run(store, [track], providers, config)
@@ -81,7 +81,7 @@ def test_all_previous_candidate_providers_must_return_the_field(store, conflict)
 
 def test_partial_disagreement_cannot_drop_an_unrefreshed_candidate_before_later_agreement(store, conflict):
     track, playlist, providers, config = conflict
-    store.upsert_conflict(track["id"], "genre", [
+    store.enrichment.upsert_conflict(track["id"], "genre", [
         {"provider": "musicbrainz", "value": "Rock"}, {"provider": "discogs", "value": "Pop"},
         {"provider": "lastfm", "value": "Jazz"}])
     _run(store, [track], providers, config)  # Last.fm skipped while the others still disagree.
@@ -92,27 +92,27 @@ def test_partial_disagreement_cannot_drop_an_unrefreshed_candidate_before_later_
 
 def test_agreement_preserves_user_resolution_and_new_value_reopening_rule(store, conflict):
     track, playlist, providers, config = conflict
-    store.resolve_conflict(track["id"], "genre", "Chosen")
+    store.enrichment.resolve_conflict(track["id"], "genre", "Chosen")
     providers[1]._by_title = providers[0]._by_title
     _run(store, [track], providers, config)
     assert _rows(store, track)["genre"]["resolved"] == 1
-    assert store.get_track_enrichment(track["id"])[0] == "Chosen"
+    assert store.tracks.get_track_enrichment(track["id"])[0] == "Chosen"
     providers[1]._by_title = {"Hyperballad": {"genre": "Pop", "year": "2000"}}
     _run(store, [track], providers, config)
     assert _rows(store, track)["genre"]["resolved"] == 1
     providers[1]._by_title = {"Hyperballad": {"genre": "Jazz", "year": "2000"}}
     _run(store, [track], providers, config)
     assert _rows(store, track)["genre"]["resolved"] == 0
-    assert store.get_track_enrichment(track["id"])[0] == "Chosen"
+    assert store.tracks.get_track_enrichment(track["id"])[0] == "Chosen"
 
 
 def test_agreement_from_an_associated_item_retires_recording_facts_only(store, conflict):
     track, playlist, providers, config = conflict
-    other = store.upsert_track("alternate", "Hyperballad", "Bjork", None, 200)
-    store.associate_youtube_item("alternate", store.catalog_subject(track["id"])["recording_id"],
+    other = store.tracks.upsert_track("alternate", "Hyperballad", "Bjork", None, 200)
+    store.tracks.associate_youtube_item("alternate", store.tracks.catalog_subject(track["id"])["recording_id"],
         source="user", evidence={"verified": True}, now=200)
     providers[1]._by_title = providers[0]._by_title
-    _run(store, [store.catalog_subject(other)], providers, config)
+    _run(store, [store.tracks.catalog_subject(other)], providers, config)
     rows = _rows(store, track)
     assert rows["genre"]["resolved"] == 2
     assert rows["year"]["resolved"] == 0

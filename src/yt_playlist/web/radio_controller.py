@@ -31,12 +31,12 @@ class RadioController:
         return next(iter((self.ctx.client_provider() or {}).items()), (None, None))
 
     def _resolve(self, key, title, vids, client, identity, now):
-        ytm = self.store.get_setting(key) or ""
-        if not ytm or not any(p.ytm_playlist_id == ytm for p in self.store.get_playlists()):
+        ytm = self.store.settings.get_setting(key) or ""
+        if not ytm or not any(p.ytm_playlist_id == ytm for p in self.store.playlists.get_playlists()):
             result = executor.create_generated_playlist(
                 self.store, title, [{"video_id": v} for v in vids], client, now, identity)
             ytm = result["new_ytm"]
-            self.store.set_setting(key, ytm)
+            self.store.settings.set_setting(key, ytm)
         result = playlist_mutation.reconcile_playlist(client, ytm, vids)
         return ytm, result
 
@@ -162,9 +162,9 @@ class RadioController:
             self._record(session, result)
             if not result.complete:
                 session.active = False
-                self.store.set_setting("radio_active", "0")
+                self.store.settings.set_setting("radio_active", "0")
                 return {"ok": False, "reason": result.error, "apply": result.diagnostics()}
-            self.store.set_setting("radio_active", "1")
+            self.store.settings.set_setting("radio_active", "1")
             self.bridge.send_control({"type": "navigate",
                 "url": radio_mod.playlist_watch_url(plan["first"]["video_id"], ytm)})
             if plan["primed"]:
@@ -209,7 +209,7 @@ class RadioController:
                 if not session.active or session.start_gen != generation:
                     return {"ok": False, "reason": "stopped during start"}
                 session.dual_deck = False  # extension confirms actual tabs with deck-ready
-                store.set_setting("radio_active", "1")
+                store.settings.set_setting("radio_active", "1")
                 self.bridge.send_control({"type": "deck-start",
                     "liveUrl": radio_mod.playlist_watch_url(plan["live"]["first"]["video_id"], resolved["live"]),
                     "standbyUrl": radio_mod.playlist_watch_url(plan["standby"]["first"]["video_id"], resolved["standby"]),
@@ -242,7 +242,7 @@ class RadioController:
             if session.start_gen == generation:
                 session.reset()
                 if self.store is not None:
-                    self.store.set_setting("radio_active", "0")
+                    self.store.settings.set_setting("radio_active", "0")
 
     def stop(self, *, send=True):
         session = self.session
@@ -251,7 +251,7 @@ class RadioController:
                 session.start_gen += 1  # invalidates queued work, including plans with epoch zero
                 session.reset()
         if self.store is not None:
-            self.store.set_setting("radio_active", "0")
+            self.store.settings.set_setting("radio_active", "0")
         if send:
             for frame in ({"type": "radio-prime", "url": None, "videoId": None}, {"type": "deck-stop"}):
                 try:

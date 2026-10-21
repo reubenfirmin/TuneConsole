@@ -10,6 +10,8 @@ import time
 from yt_playlist.util.matching import identity_key, normalize
 from yt_playlist.core.catalog_identity import ITEM_FIELDS, RECORDING_FIELDS, unresolved_ref
 from yt_playlist.core.catalog_state import rekey_state as rekey_serialized_state
+from yt_playlist.core.discovery_sources import retain as retain_discovery_source
+from yt_playlist.core import metadata
 from yt_playlist.util.thumbnails import is_placeholder_art
 
 
@@ -43,8 +45,11 @@ def resolve_key(conn, key, video_id=None):
     return rows[0][0] if len(rows) == 1 else None
 
 
-def choose_field(conn, entry_id, field, value, source='user'):
+def choose_field(conn, entry_id, field, value, source='user', *, now=None):
     entry_id = resolve_entry(conn,entry_id)
+    if field not in (*ITEM_FIELDS,*RECORDING_FIELDS):
+        raise ValueError(f'Unknown metadata field: {field}')
+    metadata.record_choice(conn,entry_id,field,value,source,now=now)
     conn.execute('INSERT INTO entry_field_choices VALUES (?,?,?,?) ON CONFLICT(entry_id,field) DO UPDATE SET value_json=excluded.value_json,source=excluded.source', (entry_id,field,json.dumps(value),source))
 
 
@@ -65,11 +70,11 @@ def update_artwork(conn, entry_id, url, *, source):
         return
     current = row['thumbnail']
     useful = current and current.strip() and not is_placeholder_art(current)
-    if is_placeholder_art(url) and (source == 'provider' or current):
+    if is_placeholder_art(url) and (source != 'youtube' or current):
         return
-    if source == 'provider' and useful:
+    if source != 'youtube' and useful:
         return
-    conn.execute('UPDATE catalog_tracks SET thumbnail=? WHERE id=?', (url.strip(), entry_id))
+    metadata.select(conn,entry_id,'thumbnail',url.strip(),source)
 
 
 def play_key(conn, key, video_id):
@@ -181,7 +186,8 @@ def associate_item(conn, video_id, recording_id, *, source, evidence, now):
             conn.execute('INSERT INTO discovery_memberships VALUES (?,?,?,?,?,?) ON CONFLICT(recording_id) DO UPDATE SET found_at=MIN(found_at,excluded.found_at),offered_count=offered_count+excluded.offered_count,first_shown=MIN(COALESCE(first_shown,excluded.first_shown),COALESCE(excluded.first_shown,first_shown)),last_shown=MAX(COALESCE(last_shown,excluded.last_shown),COALESCE(excluded.last_shown,last_shown))', (recording_id,member['entry_id'],member['found_at'],member['first_shown'],member['last_shown'],member['offered_count']))
             conn.execute('DELETE FROM discovery_memberships WHERE recording_id=?', (previous,))
         for row in conn.execute('SELECT * FROM discovery_sources WHERE recording_id=?', (previous,)).fetchall():
-            conn.execute('INSERT OR IGNORE INTO discovery_sources VALUES (?,?,?,?)', (recording_id,row['source_token'],row['input_video_id'],row['found_at']))
+            retain_discovery_source(conn, recording_id, row['source_token'], row['input_video_id'],
+                                    row['last_found_at'], first_found_at=row['found_at'])
         conn.execute('DELETE FROM discovery_sources WHERE recording_id=?', (previous,))
     invalidate_derived(conn)
 
@@ -240,8 +246,12 @@ def upsert(conn, video_id, title, artist, album=None, duration_s=None, available
                   video_type=video_type,artist_browse_id=artist_browse_id,album_browse_id=album_browse_id)
     for field,value in values.items():
         if value is not None:
-            table, column, subject = ('youtube_items','video_id',video_id) if video_id else ('unresolved_items','entry_id',entry_id)
-            conn.execute(f'UPDATE {table} SET {field}=? WHERE {column}=?', (value,subject))
+            selected = metadata.selected_source(conn,entry_id,field)
+            if selected in (None,'youtube','legacy_unknown'):
+                metadata.select(conn,entry_id,field,value,'youtube',now=now)
+    for field,value in (('title',title),('artist',artist),('orig_title',title),('orig_artist',artist)):
+        if metadata.selected_source(conn,entry_id,field) is None:
+            metadata.select(conn,entry_id,field,value,'youtube',now=now)
     update_artwork(conn, entry_id, thumbnail, source='youtube')
     if library:
         conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'observed',?)", (entry_id,now))

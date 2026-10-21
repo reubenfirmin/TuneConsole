@@ -12,11 +12,11 @@ _real_genre_artists = road_trip.genre_artists
 
 
 def test_road_trip_recipe_crud(store):
-    rid = store.save_road_trip_recipe(None, "Beach Run", 60, ["Tame Impala"], ["synthpop"],
+    rid = store.road_trip.save_road_trip_recipe(None, "Beach Run", 60, ["Tame Impala"], ["synthpop"],
                                        240, 1000.0, familiarity_pct=80)
     assert isinstance(rid, int)
 
-    recipes = store.list_road_trip_recipes()
+    recipes = store.road_trip.list_road_trip_recipes()
     assert len(recipes) == 1
     r = recipes[0]
     assert r == {"id": rid, "name": "Beach Run", "own_pct": 60, "artists": ["Tame Impala"],
@@ -25,13 +25,13 @@ def test_road_trip_recipe_crud(store):
                 "familiarity_pct": 80, "last_playlist_id": None, "created_at": 1000.0,
                 "updated_at": 1000.0}
 
-    got = store.get_road_trip_recipe(rid)
+    got = store.road_trip.get_road_trip_recipe(rid)
     assert got["name"] == "Beach Run"
-    assert store.get_road_trip_recipe(rid + 1) is None
+    assert store.road_trip.get_road_trip_recipe(rid + 1) is None
 
-    store.save_road_trip_recipe(rid, "Beach Run 2", 70, ["Tame Impala", "MGMT"], ["synthpop"],
+    store.road_trip.save_road_trip_recipe(rid, "Beach Run 2", 70, ["Tame Impala", "MGMT"], ["synthpop"],
                                 300, 2000.0)
-    updated = store.get_road_trip_recipe(rid)
+    updated = store.road_trip.get_road_trip_recipe(rid)
     assert updated["name"] == "Beach Run 2"
     assert updated["own_pct"] == 70
     assert updated["artists"] == ["Tame Impala", "MGMT"]
@@ -39,28 +39,28 @@ def test_road_trip_recipe_crud(store):
     assert updated["familiarity_pct"] == 50           # default when the caller doesn't pass one
     assert updated["updated_at"] == 2000.0
 
-    store.set_road_trip_last_playlist(rid, "PL_NEW_0")
-    assert store.get_road_trip_recipe(rid)["last_playlist_id"] == "PL_NEW_0"
+    store.road_trip.set_road_trip_last_playlist(rid, "PL_NEW_0")
+    assert store.road_trip.get_road_trip_recipe(rid)["last_playlist_id"] == "PL_NEW_0"
 
-    store.delete_road_trip_recipe(rid)
-    assert store.list_road_trip_recipes() == []
+    store.road_trip.delete_road_trip_recipe(rid)
+    assert store.road_trip.list_road_trip_recipes() == []
 
 
 def test_road_trip_draft_crud_and_recipe_delete_cascade(store):
-    rid = store.save_road_trip_recipe(None, "Beach Run", 60, [], [], 60, 1000.0)
-    assert store.get_road_trip_draft(rid) is None
-    assert store.latest_road_trip_draft() is None
+    rid = store.road_trip.save_road_trip_recipe(None, "Beach Run", 60, [], [], 60, 1000.0)
+    assert store.road_trip.get_road_trip_draft(rid) is None
+    assert store.road_trip.latest_road_trip_draft() is None
 
-    store.save_road_trip_draft(rid, {"picks": ["v1", "v2"], "seed": 7}, 1000.0)
-    assert store.get_road_trip_draft(rid) == {"picks": ["v1", "v2"], "seed": 7}
-    assert store.latest_road_trip_draft() == {"recipe_id": rid,
+    store.road_trip.save_road_trip_draft(rid, {"picks": ["v1", "v2"], "seed": 7}, 1000.0)
+    assert store.road_trip.get_road_trip_draft(rid) == {"picks": ["v1", "v2"], "seed": 7}
+    assert store.road_trip.latest_road_trip_draft() == {"recipe_id": rid,
                                               "state": {"picks": ["v1", "v2"], "seed": 7}}
 
-    store.save_road_trip_draft(rid, {"picks": ["v3"], "seed": 8}, 2000.0)     # upsert, not insert
-    assert store.get_road_trip_draft(rid)["picks"] == ["v3"]
+    store.road_trip.save_road_trip_draft(rid, {"picks": ["v3"], "seed": 8}, 2000.0)     # upsert, not insert
+    assert store.road_trip.get_road_trip_draft(rid)["picks"] == ["v3"]
 
-    store.delete_road_trip_recipe(rid)                # deleting the recipe takes its draft with it
-    assert store.get_road_trip_draft(rid) is None
+    store.road_trip.delete_road_trip_recipe(rid)                # deleting the recipe takes its draft with it
+    assert store.road_trip.get_road_trip_draft(rid) is None
 
 
 # --------------------------------------------------------------------------- pools
@@ -88,11 +88,11 @@ def no_network(monkeypatch):
 
 def _library(monkeypatch, store, songs):
     """Stand in for the whole collection. `songs` are (key, video_id, title, artist, plays, liked)."""
-    monkeypatch.setattr(store, "library_songs", lambda: [
+    monkeypatch.setattr(store.rec_query, "library_songs", lambda: [
         {"key": k, "video_id": v, "title": ti, "artist": ar, "album": "Alb", "thumbnail": None,
          "duration": 300, "genre": "", "year": None, "liked": liked}
         for k, v, ti, ar, plays, liked in songs])
-    monkeypatch.setattr(store, "play_counts", lambda: {
+    monkeypatch.setattr(store.rec_query, "play_counts", lambda: {
         k: plays for k, v, ti, ar, plays, liked in songs})
 
 
@@ -117,8 +117,8 @@ def test_own_side_honours_the_taste_models_exclusions(store, monkeypatch):
     _library(monkeypatch, store, [("k_a", "v_a", "Keep", "Artist A", 1, False),
                                   ("k_b", "v_b", "Dismissed", "Artist B", 1, False),
                                   ("k_c", "v_c", "Muted", "Muted Artist", 1, False)])
-    monkeypatch.setattr(store, "suppressed_keys", lambda surface, now: {"k_b"})
-    monkeypatch.setattr(store, "muted_artists", lambda: {"Muted Artist"})
+    monkeypatch.setattr(store.rec_model, "suppressed_keys", lambda surface, now: {"k_b"})
+    monkeypatch.setattr(store.rec_model, "muted_artists", lambda: {"Muted Artist"})
 
     assert [c["video_id"] for c in road_trip.own_candidates(store, 1000.0)] == ["v_a"]
 
@@ -126,7 +126,7 @@ def test_own_side_honours_the_taste_models_exclusions(store, monkeypatch):
 def test_own_side_honours_recipe_genre_blacklist(store, monkeypatch):
     _library(monkeypatch, store, [("k_a", "v_a", "Keep", "Artist A", 1, False),
                                   ("k_b", "v_b", "Blocked", "Artist B", 1, False)])
-    monkeypatch.setattr(store, "keys_in_genre_selection", lambda genres: {"k_b"})
+    monkeypatch.setattr(store.rec_query, "keys_in_genre_selection", lambda genres: {"k_b"})
 
     state = {"blacklist_genres": ["Metal"]}
     assert [c["video_id"] for c in road_trip.own_candidates(store, 1000.0, state)] == ["v_a"]
@@ -452,8 +452,8 @@ def _stub_pools(monkeypatch, store=None, own_count=40, other_count=40, own_plays
               "genre": own_genre(i), "year": own_year(i), "liked": False}
              for i in range(own_count)]
     if store is not None:
-        monkeypatch.setattr(store, "library_songs", lambda: songs)
-        monkeypatch.setattr(store, "play_counts",
+        monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
+        monkeypatch.setattr(store.rec_query, "play_counts",
                             lambda: {f"k{i}": (own_plays or (lambda i: i))(i) for i in range(own_count)})
 
     def songs_fn(client, kind, name, cap, store=None, decade=None):
@@ -546,7 +546,7 @@ def test_blend_reserves_song_slots_with_library_genre_and_era_targets(
         # Blend songs take ten minutes; Theirs takes three. The source percentages still refer
         # to song counts, and Yours' absent genres/years must not consume Blend's reserved slots.
         durations = {"Rock": 600, "Pop": 240, "Trance": 480, "Deep House": 360}
-        for candidate in store.library_songs():
+        for candidate in store.rec_query.library_songs():
             candidate["duration"] = durations[candidate["genre"]]
         for candidate in state["pool"]:
             candidate["duration"] = 180
@@ -870,8 +870,8 @@ def _mixed_library(monkeypatch, store, rock=4, other=36):
     songs += [{"key": f"kp{i}", "video_id": f"p{i}", "title": f"Pop {i}",
                "artist": f"Pop Artist {i}", "album": "", "thumbnail": None, "duration": 300,
                "genre": "Pop", "year": 2000, "liked": False} for i in range(other)]
-    monkeypatch.setattr(store, "library_songs", lambda: songs)
-    monkeypatch.setattr(store, "play_counts", lambda: {s["key"]: i for i, s in enumerate(songs)})
+    monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
+    monkeypatch.setattr(store.rec_query, "play_counts", lambda: {s["key"]: i for i, s in enumerate(songs)})
     monkeypatch.setattr(road_trip, "other_input_songs", lambda *a, **k: ([], []))
 
 

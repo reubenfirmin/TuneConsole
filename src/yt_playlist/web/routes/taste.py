@@ -4,8 +4,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
-from yt_playlist.rec import autotune_run, eval_recs, experiments, model_selection, rec_params, recommend, rose, taste_viz
-from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.rec import autotune_run, eval_recs, experiments, model_selection, rec_params, rose, surfaces, taste_analysis, taste_viz
 from yt_playlist.web.context import form_float
 
 
@@ -17,14 +16,14 @@ def build(ctx) -> APIRouter:
     param_keys = tuple(rec_params.SETTING_PREFIX + p.name for p in rec_params.PARAMS)
 
     def _checkpoint_context():
-        raw = store.get_setting(checkpoint_setting)
+        raw = store.settings.get_setting(checkpoint_setting)
         checkpoint = json.loads(raw) if raw else None
         if checkpoint:
             checkpoint["saved_at_iso"] = datetime.fromtimestamp(checkpoint["saved_at"], timezone.utc).isoformat()
         return {"checkpoint": checkpoint}
 
     def _save_starting_point(replace=False):
-        store.rec.model.save_taste_settings(checkpoint_setting, param_keys, ctx.now(), replace=replace)
+        store.rec_model.save_taste_settings(checkpoint_setting, param_keys, ctx.now(), replace=replace)
 
     # The three multiplier layers of a facet's chain, in the order the ranker composes them:
     # lasting bias (permanent weight x standing lean), the transient tilt, and their product.
@@ -71,7 +70,7 @@ def build(ctx) -> APIRouter:
         now = ctx.now()
         rows = store.modes.list_modes(active_only=True)
         rep_keys = [k for m in rows for k in m["rep_keys"]]
-        meta = store.tracks_by_keys(rep_keys)
+        meta = store.rec_query.tracks_by_keys(rep_keys)
         modes = []
         for m in rows:
             tracks = [meta[k] for k in m["rep_keys"] if k in meta]
@@ -183,8 +182,8 @@ def build(ctx) -> APIRouter:
         ], ("transient", "graduation"))
 
     def _model_context():
-        bd = recommend.taste_breadth(store)
-        dao = RecDao(store)
+        bd = taste_analysis.taste_breadth(store)
+        dao = store.rec_query
         tracks_total = dao.tracks_total()
         tagged = sum(dao.genre_distribution().values())
         return {
@@ -195,7 +194,7 @@ def build(ctx) -> APIRouter:
             "breadth": bd["breadth"],
             "breadth_tagged": bd["n_tagged"],
             "breadth_families": bd["n_families"],
-            "baskets": len(store.rec_baskets()),
+            "baskets": len(store.rec_query.rec_baskets()),
         }
 
     def _autotune_context(*, limit=6):
@@ -208,10 +207,10 @@ def build(ctx) -> APIRouter:
 
     def _feedback_context():
         now = ctx.now()
-        bans = store.list_dislikes()
+        bans = store.rec_model.list_dislikes()
         keys = [row["item_key"] for row in bans]
-        metadata = store.tracks_by_keys(keys)
-        metadata.update(store.discovered_tracks_by_keys([key for key in keys if key not in metadata]))
+        metadata = store.rec_query.tracks_by_keys(keys)
+        metadata.update(store.discovery.discovered_tracks_by_keys([key for key in keys if key not in metadata]))
         tracks = []
         for row in bans:
             key = row["item_key"]
@@ -224,14 +223,14 @@ def build(ctx) -> APIRouter:
                            "until_iso": expiry.isoformat() if expiry else None,
                            "until_label": ("Expired" if until <= now else expiry.strftime("%b %d, %Y"))
                                           if expiry else "No expiry"})
-        return {"feedback": {kind: count for kind, count in store.rec.model.feedback_summary().items()
+        return {"feedback": {kind: count for kind, count in store.rec_model.feedback_summary().items()
                              if not kind.endswith("_grad")}, "bans": tracks}
 
     def _recommendation_context():
-        bd = recommend.taste_breadth(store)
+        bd = taste_analysis.taste_breadth(store)
         now = ctx.now()
-        weights = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-        records = store.weight_records()
+        weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
+        records = store.rec_model.weight_records()
         families = sorted(bd["families"].items(), key=lambda x: -x[1])
         genres = []
         for family, share in families:
@@ -260,14 +259,14 @@ def build(ctx) -> APIRouter:
     @router.get("/taste/panels/{panel}")
     def taste_panel(request: Request, panel: str):
         if panel == "overview":
-            dao = RecDao(store)
+            dao = store.rec_query
             total = dao.tracks_total()
             choices = taste_viz.mix_choices(store)
             profiles = {r["mode_id"]: r["profile"] for r in choices["rows"]}
             data = {"viz": taste_viz.overview(store, ctx.now(), profiles=profiles),
                     "mode_refreshing": bool(ctx.rec_worker and ctx.rec_worker.busy),
                     "generation": {"choices": choices},
-                    "vectors": store.rec_vectors_count(),
+                    "vectors": store.rec_model.rec_vectors_count(),
                     "coverage": sum(dao.genre_distribution().values()) / total if total else 0.0}
         elif panel == "experiment":
             data = _checkpoint_context()
@@ -302,7 +301,7 @@ def build(ctx) -> APIRouter:
 
     @router.post("/taste/checkpoint/restore")
     def taste_restore_checkpoint():
-        store.rec.model.restore_taste_settings(checkpoint_setting, param_keys)
+        store.rec_model.restore_taste_settings(checkpoint_setting, param_keys)
         return _refresh()
 
     @router.get("/taste/viz/recent-sound")
@@ -328,8 +327,8 @@ def build(ctx) -> APIRouter:
                                            "temporal": eval_recs.rolling_temporal_recall(
                                                store, holdout_days=holdout_days, k=20),
                                            "holdout_days": holdout_days,
-                                           "grad_counts": store.graduation_log_counts(),
-                                           "served": store.recommendation_scorecard(
+                                           "grad_counts": store.rec_surface.graduation_log_counts(),
+                                           "served": store.rec_surface.recommendation_scorecard(
                                                now - 30 * 86400, now)})
 
     @router.get("/taste/preview")
@@ -337,7 +336,7 @@ def build(ctx) -> APIRouter:
         # Manual-refresh live sample of For You under the current knobs (recomputed only on demand).
         # A random slice of the matching pool (not the top-N) so every refresh shows a new set,
         # even when the knobs haven't changed.
-        items = recommend.taste_sample(store, ctx.now(), limit=8)
+        items = surfaces.taste_sample(store, ctx.now(), limit=8)
         return templates.TemplateResponse(request, "_partials/taste_preview.html", {
             "items": items, "lane_labels": {name: label for name, label, _ in rec_params.LANES}})
 
@@ -347,11 +346,11 @@ def build(ctx) -> APIRouter:
         start = end - 30 * 86400 if start is None else start
         if not (0 <= start < end and end - start <= 90 * 86400):
             raise HTTPException(422, "Choose an ordered date range of at most 90 days.")
-        return store.recommendation_scorecard(start, end)
+        return store.rec_surface.recommendation_scorecard(start, end)
 
     @router.get("/taste/served/{impression_id}")
     def served_trace(impression_id: int):
-        trace = store.served_recommendation(impression_id)
+        trace = store.rec_surface.served_recommendation(impression_id)
         if trace is None:
             raise HTTPException(404, "Recommendation impression not found.")
         return trace
@@ -363,7 +362,7 @@ def build(ctx) -> APIRouter:
         start = max(0, end - 30 * 86400) if start is None else start
         if not (0 <= start < end <= now and end - start <= 90 * 86400):
             raise HTTPException(422, "Choose a past date range of at most 90 days.")
-        return {**store.experiment_report(start, end, now), **experiments.lifecycle(store),
+        return {**store.rec_surface.experiment_report(start, end, now), **experiments.lifecycle(store),
                 "decisions": experiments.decisions(store)}
 
     @router.post("/taste/experiments/decision")
@@ -376,16 +375,16 @@ def build(ctx) -> APIRouter:
             raise HTTPException(422, str(exc)) from exc
 
     def _comparison_context():
-        raw = store.get_setting(comparison_setting)
+        raw = store.settings.get_setting(comparison_setting)
         if not raw:
             return {"comparison": None}
         try:
             baseline = json.loads(raw)
         except (TypeError, ValueError):
             return {"comparison": None}
-        current = recommend.taste_comparison(store, ctx.now(), [row["key"] for row in baseline])
+        current = surfaces.taste_comparison(store, ctx.now(), [row["key"] for row in baseline])
         before = {row["key"]: row for row in baseline}
-        weights = store.get_weights(
+        weights = store.rec_model.get_weights(
             now=ctx.now(),
             revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
         rows = []
@@ -442,12 +441,12 @@ def build(ctx) -> APIRouter:
 
     @router.post("/taste/comparison/baseline")
     def taste_comparison_baseline(request: Request):
-        baseline = recommend.taste_comparison(store, ctx.now())
+        baseline = surfaces.taste_comparison(store, ctx.now())
         compact = [{"key": row["key"], "rank": row["rank"], "score": row["score"],
                     "trace": row["trace"], "lane": row["lane"],
                     "lane_weight": row["lane_weight"]}
                    for row in baseline]
-        store.set_setting(comparison_setting, json.dumps(compact))
+        store.settings.set_setting(comparison_setting, json.dumps(compact))
         return templates.TemplateResponse(request, "_partials/taste_comparison.html",
                                           {**_comparison_context(), "baseline_captured": True})
 
@@ -465,9 +464,9 @@ def build(ctx) -> APIRouter:
                 raise HTTPException(status_code=400, detail="Unknown recommendation source")
             _save_starting_point()
             if axis.startswith("genre:"):     # genre weights use the [0,2] band so a family can be muted
-                store.set_weight(axis, weight, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX, now=ctx.now())
+                store.rec_model.set_weight(axis, weight, lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX, now=ctx.now())
             else:
-                store.set_weight(axis, weight, now=ctx.now())
+                store.rec_model.set_weight(axis, weight, now=ctx.now())
         return _stale()
 
     @router.post("/taste/param")
@@ -496,7 +495,7 @@ def build(ctx) -> APIRouter:
         # Everything back to defaults: lane + genre weights and every scalar knob. Full reload so the
         # sliders visibly snap back. Leaves vectors / feedback alone (they have their own controls).
         _save_starting_point()
-        store.reset_weights()
+        store.rec_model.reset_weights()
         rec_params.reset_all_params(store)
         return _refresh()
 
@@ -517,19 +516,19 @@ def build(ctx) -> APIRouter:
 
     @router.post("/taste/model-selection/restore")
     def restore_model_selection(request: Request):
-        run_id = store.get_setting("rec_selection_active_run")
+        run_id = store.settings.get_setting("rec_selection_active_run")
         if not run_id:
             raise HTTPException(status_code=409, detail="There is no model selection to restore.")
-        store.set_setting("rec_selection_paused", "1")
-        store.set_setting("rec_selection_restore", run_id)
+        store.settings.set_setting("rec_selection_paused", "1")
+        store.settings.set_setting("rec_selection_restore", run_id)
         ctx.rec_worker.trigger()
         return _autotune_status(request)
 
     @router.post("/taste/model-selection/resume")
     def resume_model_selection(request: Request):
-        if store.get_setting("rec_selection_restore"):
+        if store.settings.get_setting("rec_selection_restore"):
             raise HTTPException(status_code=409, detail="Wait for the previous model to finish restoring.")
-        store.set_setting("rec_selection_paused", "")
+        store.settings.set_setting("rec_selection_paused", "")
         ctx.rec_worker.trigger()
         return _autotune_status(request)
 
@@ -549,19 +548,19 @@ def build(ctx) -> APIRouter:
     @router.post("/taste/reset-weights")
     def taste_reset_weights():
         _save_starting_point()
-        store.reset_weights()
+        store.rec_model.reset_weights()
         return _refresh()
 
     @router.post("/taste/clear-feedback")
     def taste_clear_feedback():
-        RecDao(store).clear_feedback()
+        store.rec_model.clear_feedback()
         return _refresh()
 
     @router.post("/taste/unban")
     async def taste_unban(request: Request):
         key = (await request.form()).get("key")
         if key:
-            store.clear_dislike(key)
+            store.rec_model.clear_dislike(key)
         return _refresh()
 
     return router

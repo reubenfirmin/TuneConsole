@@ -27,6 +27,8 @@ def _playlist(store, pid, ytm, title, group=None, ident=1):
         (pid, ident, ytm, title))
     if group:
         store.conn.execute("INSERT INTO playlist_group(ytm, name) VALUES (?,?)", (ytm, group))
+    if group == 'Generated':
+        store.playlists.mark_generated_playlist(ytm)
     store.conn.commit()
 
 

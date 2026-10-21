@@ -7,7 +7,7 @@ from yt_playlist.core.store import Store
 def store():
     s = Store(":memory:")
     s.init_schema()
-    s.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history/play_events FKs
+    s.identities.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history/play_events FKs
     return s
 
 

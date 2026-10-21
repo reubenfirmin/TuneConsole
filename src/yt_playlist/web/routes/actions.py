@@ -73,8 +73,8 @@ def build(ctx) -> APIRouter:
             params = json.loads(action.params_json or "{}")
         except (ValueError, KeyError, TypeError):
             return action.kind
-        src = store.get_playlist(pe.plan.source_playlist_id)
-        tgt = store.get_playlist(pe.plan.target_playlist_id)
+        src = store.playlists.get_playlist(pe.plan.source_playlist_id)
+        tgt = store.playlists.get_playlist(pe.plan.target_playlist_id)
         src_name = params.get("source_title") or (src.title if src else None) or pe.source_ytm_playlist_id
         tgt_name = params.get("target_title") or (tgt.title if tgt else None) or "target"
         if pe.mode == "delete":
@@ -93,7 +93,7 @@ def build(ctx) -> APIRouter:
     def actions(request: Request):
         # Drafts save merge-editor selections; they haven't changed any playlists.
         rows = []
-        for a in store.get_actions():
+        for a in store.actions.get_actions():
             if a.status == "draft":
                 continue
             try:
@@ -111,7 +111,7 @@ def build(ctx) -> APIRouter:
 
     @router.post("/undo/{action_id}")
     def undo(action_id: int):
-        act = store.get_action(action_id)
+        act = store.actions.get_action(action_id)
         desc = _action_desc(act) if act is not None else f"action #{action_id}"
         try:
             ctx.ops().undo(action_id)   # reverts + best-effort targeted refresh of the target

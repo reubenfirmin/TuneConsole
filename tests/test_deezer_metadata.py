@@ -41,14 +41,14 @@ def test_legacy_audio_projection_remains_compatible(requests):
 @pytest.mark.parametrize("chosen", [False, True])
 def test_deezer_only_facts_reach_shared_sink_and_preserve_choices(store, requests, membership, chosen):
     if membership == "library":
-        entry = store.upsert_track("video", "Song", "Artist", "Album", 200)
+        entry = store.tracks.upsert_track("video", "Song", "Artist", "Album", 200)
     else:
-        store.upsert_discovered_track("song|artist", "video", "Song", "Artist", "Album", None,
+        store.discovery.upsert_discovered_track("song|artist", "video", "Song", "Artist", "Album", None,
                                       None, None, "BROWSE", 100)
-        entry = store.track_ids_for_videos(["video"])["video"]
+        entry = store.tracks.track_ids_for_videos(["video"])["video"]
     if chosen:
-        store.set_track_genre(entry, "Chosen genre")
-        store.set_track_year(entry, "1990")
+        store.tracks.set_track_genre(entry, "Chosen genre")
+        store.tracks.set_track_year(entry, "1990")
 
     class EmptyProvider:
         name = "musicbrainz"
@@ -58,17 +58,17 @@ def test_deezer_only_facts_reach_shared_sink_and_preserve_choices(store, request
         def probe(self, track, store): return EnrichmentResult(self.name, {})
 
     events = []
-    completed = waterfall.run_waterfall(store, [store.catalog_subject(entry)],
+    completed = waterfall.run_waterfall(store, [store.tracks.catalog_subject(entry)],
         [{"name": "musicbrainz", "enabled": True}, {"name": "deezer", "enabled": True}],
         events.append, registry={"musicbrainz": EmptyProvider(), "deezer": deezer})
     assert completed
     assert len(requests) == 3
-    assert store.get_track_enrichment(entry) == (("Chosen genre", "1990") if chosen else ("Electronic", "2000"))
-    fields = store.enrichment_attempts("song|artist")["deezer"]["fields"]
+    assert store.tracks.get_track_enrichment(entry) == (("Chosen genre", "1990") if chosen else ("Electronic", "2000"))
+    fields = store.enrichment.enrichment_attempts("song|artist")["deezer"]["fields"]
     assert fields["genre"] == "Electronic" and fields["year"] == "2000"
     logged = {row["field"]: (row["value"], row["field_scope"]) for row in store.conn.execute(
         "SELECT field,value,field_scope FROM enrichment_log WHERE provider='deezer'")}
     assert logged["genre"] == ("Electronic", "recording")
     assert logged["year"] == ("2000", "release")
     assert logged["bpm"] == ("128.0", "recording")
-    assert store.get_track_audio(entry)[0] == 128
+    assert store.tracks.get_track_audio(entry)[0] == 128

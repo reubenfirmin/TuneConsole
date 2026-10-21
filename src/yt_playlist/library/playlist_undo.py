@@ -9,6 +9,8 @@ from uuid import uuid4
 from ytmusicapi.exceptions import YTMusicServerError
 
 from yt_playlist.core import paths
+from yt_playlist.library.playlist_metadata import content_hash
+from yt_playlist.library.sync import refresh_playlist
 from yt_playlist.library.playlist_mutation import restore_playlist_sequence
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.library.undo_conflicts import keeper_target, playlist_state, require_unchanged_copy
@@ -69,13 +71,12 @@ def _client(clients, identity):
 
 
 def _refresh(store, client, identity, playlist_id, title, now, *, created_at=None):
-    from yt_playlist.library.sync import refresh_playlist, content_hash
     detail = _existing(client, playlist_id)
     if detail is None:
         raise ValueError(f"Recovered playlist {playlist_id} is missing. Review it before retrying Undo.")
     title = detail.get("title") or title or "Restored"
     if created_at is not None:
-        store.upsert_playlist(identity, playlist_id, title, len(detail["tracks"]),
+        store.playlists.upsert_playlist(identity, playlist_id, title, len(detail["tracks"]),
                               content_hash([t["videoId"] for t in detail["tracks"]]), now,
                               created_at=created_at)
     refresh_playlist(store, identity, client, playlist_id, title, now, snapshot=detail)
@@ -155,8 +156,21 @@ def _find_created(client, marker):
 
 def _restore_backup(store, clients, step, now, save):
     payload = json.loads(Path(step["backup"]).read_text(encoding="utf-8"))
+    if payload.get('snapshot_version', 1) not in (1, 2):
+        raise ValueError('Unsupported playlist backup version. Review it before recovering manually.')
     identity = payload.get("identity_id")
     client = _client(clients, identity)
+    from yt_playlist.library.playlist_metadata import GENERATED_DESCRIPTION, PROMOTED_DESCRIPTION, is_generated_description
+    provenance = payload.get('provenance') or store.playlists.playlist_provenance(payload['ytm_playlist_id'])
+    description = payload.get('description') or provenance.get('description') or 'Recreated by TuneConsole undo'
+    if is_generated_description(description) and provenance['origin'] == 'ordinary':
+        provenance = {'origin': 'tuneconsole', 'adopted': False, 'description': description}
+    if provenance['origin'] == 'tuneconsole':
+        marker = PROMOTED_DESCRIPTION if provenance['adopted'] else GENERATED_DESCRIPTION
+        if provenance['adopted'] and is_generated_description(description):
+            description = PROMOTED_DESCRIPTION
+        elif marker.casefold() not in description.casefold():
+            description += '\n' + marker
     target = [t.get("video_id") for t in payload.get("tracks", [])]
     if any(not isinstance(v, str) or not v for v in target):
         raise ValueError("The backup contains unidentified items. Review it before recovering manually.")
@@ -177,8 +191,7 @@ def _restore_backup(store, clients, step, now, save):
             step["phase"] = "creating"
             save()
             try:
-                new_id = client.create_playlist(payload["title"],
-                                                 "Recreated by TuneConsole undo. " + step["marker"])
+                new_id = client.create_playlist(payload["title"], description + '\n' + step["marker"])
             except Exception as exc:
                 if _http_status(exc) in (400, 401, 403):
                     step["phase"] = "pending"
@@ -192,6 +205,12 @@ def _restore_backup(store, clients, step, now, save):
             step["phase"] = "created"
             save()  # commit the ID before any track writes or local materialization
     new_id = step["created_id"]
+    if not step.get('original_survived'):
+        store.playlists.set_playlist_provenance(new_id, origin=provenance['origin'],
+                                               adopted=provenance['adopted'], description=description)
+        group = payload.get('group', store.playlists.get_playlist_groups().get(payload['ytm_playlist_id']))
+        if group:
+            store.playlists.set_playlist_group(new_id, group)
     if step["phase"] != "remote_complete":
         _restore(client, new_id, target, step, save)
     _refresh(store, client, identity, new_id, payload.get("title"), now,
@@ -213,9 +232,9 @@ def _delete_copy(store, clients, step, save):
         if _existing(client, step["ytm"]) is not None:
             raise ValueError(f"YouTube has not confirmed deletion of copy {step['ytm']}. "
                              "It was preserved. Retry Undo to check again.") from error
-    for pl in store.get_playlists():
+    for pl in store.playlists.get_playlists():
         if pl.identity_id == step["identity"] and pl.ytm_playlist_id == step["ytm"]:
-            store.remove_playlist(pl.id)
+            store.playlists.remove_playlist(pl.id)
 
 
 def undo_action(store, action_id, clients, now):
@@ -246,7 +265,7 @@ def undo_action(store, action_id, clients, now):
                                 raise ValueError("The kept playlist is missing. Review it in YouTube Music.")
                             target = keeper_target(entry, playlist_state(detail))
                         _restore(client, entry["ytm"], target, step, save)
-                    pl = next((p for p in store.get_playlists() if p.identity_id == entry["identity"]
+                    pl = next((p for p in store.playlists.get_playlists() if p.identity_id == entry["identity"]
                                and p.ytm_playlist_id == entry["ytm"]), None)
                     _refresh(store, client, entry["identity"], entry["ytm"], pl.title if pl else None, now)
                 elif step["kind"] == "backup":

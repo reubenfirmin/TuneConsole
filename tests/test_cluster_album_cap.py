@@ -14,7 +14,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -25,7 +25,7 @@ def _unit(deg):
 
 
 def _modelled(store, vid, title, artist, album, xy):
-    store.upsert_track(vid, title, artist, album, 200, thumbnail="t.jpg")
+    store.tracks.upsert_track(vid, title, artist, album, 200, thumbnail="t.jpg")
     k = identity_key(title, artist)
     v = np.asarray(xy, dtype=np.float32)
     v /= np.linalg.norm(v) + 1e-9

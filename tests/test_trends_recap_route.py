@@ -74,11 +74,11 @@ _NOW = datetime(2026, 7, 15, tzinfo=timezone.utc).timestamp()
 def _client(story, synced=True, now_fn=lambda: _NOW):
     store = Store(":memory:")
     store.init_schema()
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     if synced:
-        store.set_setting("last_sync_at", "1700000000")
+        store.settings.set_setting("last_sync_at", "1700000000")
     if story is not None:
-        store.put_proposals("trend_rollups", {"story": story}, 1000.0)
+        store.rec_surface.put_proposals("trend_rollups", {"story": story}, 1000.0)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=now_fn)
     return TestClient(app, base_url="http://127.0.0.1"), store
 
@@ -105,7 +105,7 @@ def test_cached_sparse_recap_cover_uses_activity_instead_of_old_hype():
     assert "75 plays across 5 listening days." in html
     assert "The month you went all in." not in html
     assert 'class="slide slide-all_in"' in html
-    assert store.get_proposals("trend_rollups")["story"] == story
+    assert store.rec_surface.get_proposals("trend_rollups")["story"] == story
 
 
 def test_reel_exits_land_on_the_dashboard_not_the_removed_trends_tab():
@@ -147,12 +147,12 @@ def test_opening_recap_hides_notice_across_reloads_rebuilds_and_app_restarts():
     # Seeing the notice on Home does not count as viewing the recap.
     for _ in range(2):
         assert 'id="recap-nudge"' in c.get("/").text
-    assert store.get_setting("recap_viewed_month") is None
+    assert store.settings.get_setting("recap_viewed_month") is None
 
     assert c.get("/trends/story/2026-06").status_code == 200
-    assert store.get_setting("recap_viewed_month") == "2026-06"
+    assert store.settings.get_setting("recap_viewed_month") == "2026-06"
     assert 'id="recap-nudge"' not in c.get("/").text
-    store.put_proposals("trend_rollups", {"story": _STORY}, 2000.0)
+    store.rec_surface.put_proposals("trend_rollups", {"story": _STORY}, 2000.0)
     app = create_app(store, lambda: {}, now_fn=lambda: _NOW)
     restarted = TestClient(app, base_url="http://127.0.0.1")
     assert 'id="recap-nudge"' not in restarted.get("/").text
@@ -166,7 +166,7 @@ def test_viewing_a_recap_does_not_hide_the_next_months_notice():
     assert c.get("/trends/story/2026-06").status_code == 200
     clock[0] = datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp()
     july = {**_STORY, "month": "2026-07", "month_name": "July"}
-    store.put_proposals("trend_rollups", {"story": july}, 2000.0)
+    store.rec_surface.put_proposals("trend_rollups", {"story": july}, 2000.0)
     assert 'id="recap-nudge"' in c.get("/").text
     assert c.get("/trends/story/2026-07").status_code == 200
     assert 'id="recap-nudge"' not in c.get("/").text
@@ -174,23 +174,23 @@ def test_viewing_a_recap_does_not_hide_the_next_months_notice():
 
 def test_missing_recap_does_not_change_viewed_month():
     c, store = _client(_STORY)
-    store.set_setting("recap_viewed_month", "2026-05")
+    store.settings.set_setting("recap_viewed_month", "2026-05")
     assert c.get("/trends/story/1999-01").status_code == 404
-    assert store.get_setting("recap_viewed_month") == "2026-05"
+    assert store.settings.get_setting("recap_viewed_month") == "2026-05"
     c2, store2 = _client(None)
     assert c2.get("/trends/story/2026-06").status_code == 404
-    assert store2.get_setting("recap_viewed_month") is None
+    assert store2.settings.get_setting("recap_viewed_month") is None
 
 
 def test_home_recap_nag_hidden_once_dismissed():
     clock = [_NOW]
     c, store = _client(_STORY, now_fn=lambda: clock[0])
     assert 'id="recap-nudge"' in c.get("/").text
-    store.set_setting("recap_dismissed_month", "2026-06")
+    store.settings.set_setting("recap_dismissed_month", "2026-06")
     assert "recap-nudge" not in c.get("/").text
     # a later month's recap re-shows (the dismissal is per-month)
     clock[0] = datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp()
-    store.put_proposals("trend_rollups", {"story": {**_STORY, "month": "2026-07", "month_name": "July"}}, 1000.0)
+    store.rec_surface.put_proposals("trend_rollups", {"story": {**_STORY, "month": "2026-07", "month_name": "July"}}, 1000.0)
     assert 'id="recap-nudge"' in c.get("/").text
 
 
@@ -220,4 +220,4 @@ def test_home_offers_september_in_october():
 def test_recap_dismiss_route_records_the_month():
     c, store = _client(_STORY)
     assert c.post("/onboard/recap/dismiss?month=2026-06").status_code == 200
-    assert store.get_setting("recap_dismissed_month") == "2026-06"
+    assert store.settings.get_setting("recap_dismissed_month") == "2026-06"

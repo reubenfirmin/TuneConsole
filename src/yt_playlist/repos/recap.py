@@ -12,8 +12,8 @@ class RecapRepo(Repo):
         Source spans include generated plays: these establish capture, never taste. Snapshots
         establish familiarity only; their appearances never become play counts.
         """
-        quarantine = "(playlist_ytm_id IS NULL OR playlist_ytm_id NOT IN " \
-                     "(SELECT ytm FROM playlist_group WHERE name=?))"
+        quarantine = "COALESCE(is_generated,0)=0 AND (playlist_ytm_id IS NULL OR playlist_ytm_id NOT IN " \
+                     "(SELECT ytm FROM quarantined_playlists WHERE name=?))"
         plays = [dict(r) for r in self.conn.execute(
             "SELECT identity_id, identity_key, video_id, played_at, source, playlist_ytm_id FROM play_events "
             f"WHERE played_at>=? AND played_at<? AND {quarantine} ORDER BY played_at, id",
@@ -41,7 +41,7 @@ class RecapRepo(Repo):
         familiar = {r[0].casefold() for r in self.conn.execute(
             "SELECT DISTINCT t.artist FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
             "JOIN playlists p ON p.id=pt.playlist_id WHERE t.artist<>'' AND p.ytm_playlist_id NOT IN "
-            "(SELECT ytm FROM playlist_group WHERE name=?) UNION SELECT artist FROM saved_albums "
+            "(SELECT ytm FROM quarantined_playlists WHERE name=?) UNION SELECT artist FROM saved_albums "
             "WHERE artist IS NOT NULL", (GENERATED_GROUP,))}
         albums = [{**dict(r), "keys": set(json.loads(r["track_keys"]))}
                   for r in self.conn.execute("SELECT * FROM album_tracklists")]
@@ -49,7 +49,7 @@ class RecapRepo(Repo):
             "SELECT ytm_playlist_id, MIN(title) title, MIN(created_at) created_at, "
             "MAX(track_count) track_count FROM playlists "
             "WHERE created_at>=? AND created_at<? AND created_at_source IN ('local','youtube') "
-            "AND ytm_playlist_id NOT IN (SELECT ytm FROM playlist_group WHERE name=?) "
+            "AND ytm_playlist_id NOT IN (SELECT ytm FROM quarantined_playlists WHERE name=?) "
             "AND ytm_playlist_id NOT IN (SELECT playlist_ytm FROM rec_recipes) "
             "GROUP BY ytm_playlist_id ORDER BY created_at, ytm_playlist_id", (since, until, GENERATED_GROUP))]
         return {"plays": plays, "first": first, "spans": spans, "meta": meta,

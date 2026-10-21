@@ -10,9 +10,9 @@ from yt_playlist.rec import embed
 
 
 def _seed(store):
-    tid = store.upsert_track("owned", "Owned", "Artist", None, None)
-    store.set_track_genre(tid, "Techno")
-    store.upsert_discovered_track("cold|artist", "cold", "Cold", "Artist", "", None,
+    tid = store.tracks.upsert_track("owned", "Owned", "Artist", None, None)
+    store.tracks.set_track_genre(tid, "Techno")
+    store.discovery.upsert_discovered_track("cold|artist", "cold", "Cold", "Artist", "", None,
                                   "Techno", None, "source", 0)
     embed.build_content_and_store(store)
     return tid
@@ -20,14 +20,14 @@ def _seed(store):
 
 def test_failed_publication_rolls_back_all_artifacts_even_after_later_commit(store):
     _seed(store)
-    before = store.content_generation()
+    before = store.rec_model.content_generation()
     store.conn.execute("CREATE TRIGGER reject_content BEFORE INSERT ON rec_discovered_content_vectors "
                        "BEGIN SELECT RAISE(ABORT,'injected write failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match="injected write failure"):
-        store.publish_content_generation([("new|artist", b"new")], [("bad|artist", b"bad")],
+        store.rec_model.publish_content_generation([("new|artist", b"new")], [("bad|artist", b"bad")],
             "new model", "new revision", "new inputs", before["generation"])
-    store.set_setting("unrelated", "committed")
-    assert store.content_generation() == before
+    store.settings.set_setting("unrelated", "committed")
+    assert store.rec_model.content_generation() == before
 
 
 def test_discovery_encoder_retries_against_competing_library_generation(store, monkeypatch):
@@ -39,13 +39,13 @@ def test_discovery_encoder_retries_against_competing_library_generation(store, m
         nonlocal switched
         if not switched:
             switched = True
-            store.set_track_genre(tid, "Folk")
+            store.tracks.set_track_genre(tid, "Folk")
             embed.build_content_and_store(store)
         return encode(rows, model)
 
     monkeypatch.setattr(embed, "_encode_discovered", competing_encode)
     assert embed.build_discovered_content_vectors(store) == 0
-    snapshot = store.content_generation()
+    snapshot = store.rec_model.content_generation()
     assert "fam:folk-country" in json.loads(snapshot["model"])["cat"]
     assert snapshot["library"] and snapshot["discovered"] == []
 
@@ -54,7 +54,7 @@ def test_reader_sees_old_then_new_complete_generation_during_publication(tmp_pat
     writer = Store(tmp_path / "generation.db")
     writer.init_schema()
     _seed(writer)
-    before = writer.content_generation()
+    before = writer.rec_model.content_generation()
     reader = Store(tmp_path / "generation.db")
     reader._bind_repositories()
     writing, release = threading.Event(), threading.Event()
@@ -72,7 +72,7 @@ def test_reader_sees_old_then_new_complete_generation_during_publication(tmp_pat
 
     def publish():
         try:
-            assert writer.publish_content_generation([("new|artist", b"new library")],
+            assert writer.rec_model.publish_content_generation([("new|artist", b"new library")],
                 [("new cold|artist", b"new discovery")], "new model", "revision", "inputs",
                 before["generation"])
         except BaseException as error:

@@ -44,7 +44,7 @@ class TransferPreviews:
 
 def load_job(store) -> dict | None:
     try:
-        value = json.loads(store.get_setting(JOB_KEY) or "null")
+        value = json.loads(store.settings.get_setting(JOB_KEY) or "null")
     except (TypeError, ValueError):
         return None
     return value if isinstance(value, dict) else None
@@ -57,7 +57,7 @@ def save_job(store, job: dict) -> None:
         report = job["report"]
         details = {**report["details"], "unmatched_tracks": []}
         job = {**job, "report": {**report, "details": details}}
-    store.set_setting(JOB_KEY, json.dumps(job, sort_keys=True))
+    store.settings.set_setting(JOB_KEY, json.dumps(job, sort_keys=True))
 
 
 def current_job(ctx) -> dict | None:

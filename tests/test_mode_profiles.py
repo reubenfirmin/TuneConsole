@@ -9,7 +9,7 @@ from yt_playlist.rec import embed, mode_profiles, taste_viz
 def _groups(store):
     model = {"cat": {"fam:house": 0, "dec:2010": 1, "dec:2020": 2},
              "ncat": 3, "cont": [["bpm", 120, 10], ["energy", .5, .2]]}
-    store.set_setting("rec_content_model", json.dumps(model))
+    store.settings.set_setting("rec_content_model", json.dumps(model))
     space = embed.content_space_id(store)
     centers = np.eye(5, dtype=np.float32)[:2]
     vectors, modes = [], []
@@ -17,12 +17,12 @@ def _groups(store):
         keys = []
         for i in range(10):
             title = f"Group {group} track {i}"
-            tid = store.upsert_track(f"group-{group}-{i}", title, "Artist", None, None)
+            tid = store.tracks.upsert_track(f"group-{group}-{i}", title, "Artist", None, None)
             genre = "House" if group or i < 4 else ("Funk" if i < 7 else "Drum And Bass")
-            store.set_track_genre(tid, genre)
-            store.set_track_year(tid, 2023 if group else 2013)
+            store.tracks.set_track_genre(tid, genre)
+            store.tracks.set_track_year(tid, 2023 if group else 2013)
             if group and i < 8:
-                store.set_track_audio(tid, bpm=128, energy=.9)
+                store.tracks.set_track_audio(tid, bpm=128, energy=.9)
             key = f"{title.lower()}|artist"
             keys.append(key)
             vectors.append((key, centers[group].tobytes()))
@@ -30,7 +30,7 @@ def _groups(store):
         modes.append({"mode_id": group + 1, "label": "house", "size": 20,
                       "families": [["house", 4]], "centroid": centers[group],
                       "rep_keys": keys[:2], "space": space})
-    store.replace_rec_content_vectors(vectors)
+    store.rec_model.replace_rec_content_vectors(vectors)
     store.modes.replace_modes(modes, [], 1)
 
 
@@ -55,8 +55,8 @@ def test_profiles_explain_same_label_groups_using_actual_membership(store):
 def test_profiles_preserve_missing_tags_and_dates_in_the_denominator(store):
     _groups(store)
     tid = store.conn.execute("SELECT id FROM tracks WHERE video_id='group-0-0'").fetchone()[0]
-    store.set_track_genre(tid,'')
-    store.set_track_year(tid,'')
+    store.tracks.set_track_genre(tid,'')
+    store.tracks.set_track_year(tid,'')
     mixed = mode_profiles.describe_modes(store)[1]
     assert mixed["size"] == 10
     assert sum(g["share"] for g in mixed["genres"]) == pytest.approx(1)
@@ -69,7 +69,7 @@ def test_stale_profiles_do_not_compare_incompatible_vectors_or_guess_traits(stor
     _groups(store)
     model = {"cat": {"fam:house": 0, "dec:2010": 1, "dec:2020": 2, "sub:house": 3},
              "ncat": 4, "cont": [["bpm", 120, 10], ["energy", .5, .2]]}
-    store.set_setting("rec_content_model", json.dumps(model))
+    store.settings.set_setting("rec_content_model", json.dumps(model))
     profile = mode_profiles.describe_modes(store)[1]
     assert not profile["current"]
     assert profile["size"] == 20

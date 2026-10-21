@@ -16,7 +16,7 @@ def build_transition(store):
     """(keys, W, idx): a column-stochastic co-occurrence transition matrix built from the SAME baskets
     the embedding uses. W[:, j] is the distribution of where a walker at track j steps next. Returns
     ([], None, {}) when there are no baskets."""
-    baskets = store.rec_baskets()
+    baskets = store.rec_query.rec_baskets()
     keys = sorted({k for b in baskets for k in b})
     if not keys:
         return [], None, {}

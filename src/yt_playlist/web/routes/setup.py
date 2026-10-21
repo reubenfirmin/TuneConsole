@@ -31,7 +31,7 @@ def build(ctx) -> APIRouter:
 
     def _saved_identities():
         return [{"id": i.id, "label": i.label, "brand": i.brand_account_id or "",
-                 "is_master": i.is_master} for i in store.get_identities()]
+                 "is_master": i.is_master} for i in store.identities.get_identities()]
 
     def _setup_context(request, *, rows, master_idx, error=None, status_code=200):
         return templates.TemplateResponse(request, "setup.html", {
@@ -46,7 +46,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/setup")
     def setup_page(request: Request):
-        idents = store.get_identities()
+        idents = store.identities.get_identities()
         if idents:
             rows = [{"id": i.id, "label": i.label, "brand": i.brand_account_id or ""} for i in idents]
             master_idx = next((n for n, i in enumerate(idents) if i.is_master), 0)
@@ -64,7 +64,7 @@ def build(ctx) -> APIRouter:
     def setup_remove_identity(identity_id: int):
         if setup is None:
             raise HTTPException(status_code=404, detail="setup not available")
-        identities = store.get_identities()
+        identities = store.identities.get_identities()
         removed = next((i for i in identities if i.id == identity_id), None)
         if removed is None:
             raise HTTPException(status_code=404, detail="Identity no longer exists.")
@@ -132,7 +132,7 @@ def build(ctx) -> APIRouter:
         except ValueError as e:
             if wants_json:
                 return JSONResponse({"error": str(e)}, status_code=400)
-            active_ids = {str(i.id): i.id for i in store.get_identities()}
+            active_ids = {str(i.id): i.id for i in store.identities.get_identities()}
             rows = [{"id": active_ids.get(identity_ids[idx]) if idx < len(identity_ids) else None,
                      "label": label, "brand": brands[idx] if idx < len(brands) else ""}
                     for idx, label in enumerate(labels)] or [{"id": None, "label": "", "brand": ""}]
@@ -141,7 +141,7 @@ def build(ctx) -> APIRouter:
                                   error=str(e), status_code=400)
         # Saving definitions does not authenticate them. The Identities tab checks live access and
         # clears expired-session flags only for identities whose checks actually succeed.
-        active = {i.id for i in store.get_identities()}
+        active = {i.id for i in store.identities.get_identities()}
         for identity_id in list(ctx.auth_expired):
             if identity_id not in active:
                 ctx.clear_auth_expired(identity_id)
@@ -200,7 +200,7 @@ def build(ctx) -> APIRouter:
             return templates.TemplateResponse(
                 request, "_partials/spotify_library_status.html", {"job": existing},
                 headers={"HX-Retarget": "#spotify-library-import-block", "HX-Reswap": "innerHTML"})
-        identities = store.get_identities()
+        identities = store.identities.get_identities()
         if not identities:
             return HTMLResponse(
                 '<p class="section-note">Connect the extension and configure an identity first.</p>')
@@ -222,7 +222,7 @@ def build(ctx) -> APIRouter:
             identity_id = int(value)
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Choose a destination identity") from None
-        identity = next((i for i in store.get_identities() if i.id == identity_id), None)
+        identity = next((i for i in store.identities.get_identities() if i.id == identity_id), None)
         client = (ctx.client_provider() or {}).get(identity_id) if identity else None
         if client is None:
             raise HTTPException(status_code=409, detail="Connect the selected YouTube Music identity")
@@ -309,7 +309,7 @@ def build(ctx) -> APIRouter:
                 report = import_spotify_library(store, None, client, identity.id, ctx.now_fn(),
                                                  prepared=snapshot["prepared"])
                 if report["tracks_imported"] or report["albums_imported"]:
-                    store.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
+                    store.settings.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
                 save_job(store, {**job, "status": "done", "finished_at": ctx.now_fn(), "report": report})
             except Exception:
                 ctx.logger.exception("Spotify library import failed")
@@ -328,7 +328,7 @@ def build(ctx) -> APIRouter:
         _snapshot(token, "ready", consume=True)
         job = current_job(ctx)
         if job and job.get("preview_token") == token:
-            store.delete_setting(JOB_KEY)
+            store.settings.delete_setting(JOB_KEY)
         return RedirectResponse("/setup?tab=import", status_code=303)
 
     @router.get("/import/spotify-library/status")
@@ -389,7 +389,7 @@ def build(ctx) -> APIRouter:
         job = current_job(ctx)
         if job and job.get("identity_id") is not None:
             return _destination(job["identity_id"])[1]
-        identities = store.get_identities()
+        identities = store.identities.get_identities()
         identity = next((i for i in identities if i.is_master), identities[0] if identities else None)
         client = (ctx.client_provider() or {}).get(identity.id) if identity else None
         if client is None:
@@ -441,7 +441,7 @@ def build(ctx) -> APIRouter:
         report["albums_imported" if outcome["status"] == "imported" else "albums_skipped"] += 1
         save_job(store, {**job, "report": report})
         if outcome["status"] == "imported":
-            store.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
+            store.settings.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
         return RedirectResponse("/import/spotify-library/report", status_code=303)
 
     @router.get("/import/spotify-library/spotify-thumbnail")
@@ -459,7 +459,7 @@ def build(ctx) -> APIRouter:
             if job:
                 save_job(store, {**job, "dismissed": True})
             else:
-                store.delete_setting(JOB_KEY)
+                store.settings.delete_setting(JOB_KEY)
         return Response(status_code=200)
 
     @router.post("/import/takeout")

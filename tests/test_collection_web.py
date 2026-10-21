@@ -36,8 +36,8 @@ def _refreshes(r):
 
 
 def test_artists_page_includes_saved_albums_without_playlists(store):
-    store.add_saved_album({"browse": "B1", "title": "The Album", "artist": "Album artist"})
-    store.upsert_track("v1", "Album song", "Album artist", "The Album", 200, album_browse_id="B1")
+    store.collection.add_saved_album({"browse": "B1", "title": "The Album", "artist": "Album artist"})
+    store.tracks.upsert_track("v1", "Album song", "Album artist", "The Album", 200, album_browse_id="B1")
     client = _client(store, lambda: {})
 
     response = client.get("/artists")
@@ -50,46 +50,46 @@ def test_artists_page_includes_saved_albums_without_playlists(store):
 
 
 def test_save_album_likes_and_refreshes(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = AlbumClient()
     c = _client(store, lambda: {iid: fc})
 
     r = c.post("/collection/save-album", data={"browse_id": "MPREb_x"})
     assert _refreshes(r) and r.text == ""
-    assert any(a["browse"] == "MPREb_x" for a in store.get_saved_albums())   # mirrored locally
+    assert any(a["browse"] == "MPREb_x" for a in store.collection.get_saved_albums())   # mirrored locally
     assert fc.rated == [("PLAUDIO", "LIKE")]                                  # liked on YouTube
 
 
 def test_unsave_album_unlikes_and_refreshes(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.add_saved_album({"browse": "MPREb_x", "title": "The Album", "artist": "Artist X",
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.collection.add_saved_album({"browse": "MPREb_x", "title": "The Album", "artist": "Artist X",
                            "year": "2001", "thumbnail": ""})
     fc = AlbumClient()
     c = _client(store, lambda: {iid: fc})
 
     r = c.post("/collection/unsave-album", data={"browse_id": "MPREb_x"})
     assert _refreshes(r)
-    assert all(a["browse"] != "MPREb_x" for a in store.get_saved_albums())
+    assert all(a["browse"] != "MPREb_x" for a in store.collection.get_saved_albums())
     assert fc.rated == [("PLAUDIO", "INDIFFERENT")]
 
 
 def test_save_album_without_id_returns_toast(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     c = _client(store, lambda: {iid: AlbumClient()})
     r = c.post("/collection/save-album", data={})
     assert r.status_code == 422
     assert r.headers.get("hx-reswap") == "none"
     assert 'hx-swap-oob="afterbegin:#toasts"' in r.text
     assert "no album id" in r.text
-    assert store.get_saved_albums() == []
+    assert store.collection.get_saved_albums() == []
 
 
 def test_save_album_client_error_returns_toast(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = AlbumClient(album={})                       # no audioPlaylistId -> ValueError path
     c = _client(store, lambda: {iid: fc})
     r = c.post("/collection/save-album", data={"browse_id": "X"})
     assert r.status_code == 422
     assert 'hx-swap-oob="afterbegin:#toasts"' in r.text
-    assert store.get_saved_albums() == []           # nothing saved on failure
+    assert store.collection.get_saved_albums() == []           # nothing saved on failure
     assert fc.rated == []

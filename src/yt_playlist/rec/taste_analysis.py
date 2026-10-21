@@ -5,12 +5,11 @@ import statistics
 
 from yt_playlist.util import genre_map
 from yt_playlist.rec import mix_tuning, rec_params, transient
-from yt_playlist.rec.rec_dao import RecDao
 
 
 def era_distribution(store) -> list:
     """Decades present in the library, by play-weighted share, most-prominent first."""
-    dist = RecDao(store).era_play_distribution()
+    dist = store.rec_query.era_play_distribution()
     total = sum(dist.values())
     if not total:
         return []
@@ -36,9 +35,9 @@ def taste_fingerprint(store, now) -> dict:
     """
     mix_tuning.expire(store, now)
     bd = taste_breadth(store)
-    w = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-    leans = store.get_leans()
-    hidden = store.hidden_facets()                                   # bars the user removed (display-only)
+    w = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
+    leans = store.rec_model.get_leans()
+    hidden = store.rec_model.hidden_facets()                                   # bars the user removed (display-only)
     tleans = transient.facet_leans(store, now)                       # live transient (plays+likes+mood+dislikes)
     fgain = rec_params.get_param(store, "facet_gain")
     fmin = rec_params.get_param(store, "facet_mult_min")
@@ -62,7 +61,7 @@ def taste_fingerprint(store, now) -> dict:
             ax = f"genre:{sub}"
             if sub == fam or ax in hidden or ax in leans:
                 continue
-            eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.get_lean(ax)))
+            eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.rec_model.get_lean(ax)))
             live, active = _live(ax, eff)
             out.append({"name": sub, "axis": ax, "effective": eff, "live": live, "live_active": active})
         return out
@@ -72,7 +71,7 @@ def taste_fingerprint(store, now) -> dict:
         if f"genre:{f}" in hidden:
             continue
         ax = f"genre:{f}"
-        eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.get_lean(ax)))
+        eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.rec_model.get_lean(ax)))
         live, active = _live(ax, eff)
         subs = _subs(f)
         families.append({"name": f, "share": share, "weight": w.get(ax, 1.0),
@@ -83,7 +82,7 @@ def taste_fingerprint(store, now) -> dict:
         if f"era:{d}" in hidden:
             continue
         ax = f"era:{d}"
-        eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.get_lean(ax)))
+        eff = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, w.get(ax, 1.0) * store.rec_model.get_lean(ax)))
         live, active = _live(ax, eff)
         eras.append({"name": d, "share": share, "weight": w.get(ax, 1.0),
                      "effective": eff, "live": live, "live_active": active, "pinned": ax in leans})
@@ -130,9 +129,9 @@ def playlist_facets(store, playlist_id) -> dict:
     """The mix's facets for the transient feedback panel: the genres, eras, and tracks present, each
     with the identity_keys to tilt toward/away. Genres are by descending presence; eras chronological.
     """
-    keys = store.get_playlist_track_keys(playlist_id)
-    dao = RecDao(store)
-    meta = store.tracks_by_keys(keys)
+    keys = store.playlists.get_playlist_track_keys(playlist_id)
+    dao = store.rec_query
+    meta = store.rec_query.tracks_by_keys(keys)
     genres, decades = dao.track_genres(keys), dao.track_decades(keys)
     fam_keys, era_keys = {}, {}
     for k in keys:
@@ -151,10 +150,10 @@ def playlist_facets(store, playlist_id) -> dict:
 def playlist_mood_state(store, playlist_id, now) -> int:
     """+1/-1 if there's an active *whole-mix* mood for this playlist, else 0. Persists until you change
     it (the transient signal no longer expires on a clock)."""
-    keys = set(store.get_playlist_track_keys(playlist_id))
+    keys = set(store.playlists.get_playlist_track_keys(playlist_id))
     if not keys:
         return 0
-    for _created, direction, mkeys in RecDao(store).recent_mood_events():   # newest-first
+    for _created, direction, mkeys in store.rec_surface.recent_mood_events():   # newest-first
         if set(mkeys) == keys:                       # whole-mix feedback; first match is the latest
             return 1 if direction > 0 else -1
     return 0
@@ -166,7 +165,7 @@ def track_mood_states(store, now) -> dict:
     so single-key events are exactly the per-track ones. Whole-mix and facet tilts (many keys) are
     excluded. Persists until changed; newest-first, so the first event seen for a key is the latest."""
     out = {}
-    for _created, direction, mkeys in RecDao(store).recent_mood_events():   # newest-first
+    for _created, direction, mkeys in store.rec_surface.recent_mood_events():   # newest-first
         if len(mkeys) == 1 and mkeys[0] not in out:    # first match is the latest -> latest wins
             out[mkeys[0]] = 1 if direction > 0 else -1
     return out
@@ -180,7 +179,7 @@ def taste_breadth(store) -> dict:
     or register its genres as 'in palette' (the Clapton-leak fix). Spec §5.2.
     """
     fams: dict = {}
-    for genre, c in RecDao(store).genre_play_distribution().items():
+    for genre, c in store.rec_query.genre_play_distribution().items():
         fams[genre_map.family(genre)] = fams.get(genre_map.family(genre), 0) + c
     total = sum(fams.values())
     if total == 0 or len(fams) <= 1:
@@ -219,7 +218,7 @@ def playlist_genre_diversity(store, playlist_id):
     Returns {min, max, median, n_tagged} over its tagged tracks, or None if fewer than two
     are tagged. median≈0 = tight (one vibe); median≈1 = eclectic. Spec §6.B.
     """
-    genres = store.playlist_track_genres(playlist_id)
+    genres = store.rec_query.playlist_track_genres(playlist_id)
     if len(genres) < 2:
         return None
     dists = [genre_map.distance(genres[i], genres[j])

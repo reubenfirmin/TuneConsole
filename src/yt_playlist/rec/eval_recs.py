@@ -18,7 +18,7 @@ def best_holdout(store, cap_days=30) -> int:
 
     A holdout bigger than a third of the span starves the context side of sufficient history
     to learn from, so we size the window proportionally to how much history exists."""
-    lo, hi = store.history_bounds()
+    lo, hi = store.charts.history_bounds()
     if lo is None or hi is None:
         return 1
     span_s = hi - lo
@@ -37,8 +37,8 @@ def recall_at_k(store, k=20, min_size=5, seed=0) -> dict:
     rng = np.random.default_rng(seed)
     hits = trials = 0
     n = len(keys)
-    for p in store.get_playlists():
-        members = [m for m in store.get_playlist_track_keys(p.id) if m in idx]
+    for p in store.playlists.get_playlists():
+        members = [m for m in store.playlists.get_playlist_track_keys(p.id) if m in idx]
         if len(members) < min_size:
             continue
         held = members[int(rng.integers(len(members)))]
@@ -68,8 +68,8 @@ def artist_recall_at_k(store, k=10, min_size=3, seed=0) -> dict:
     rng = np.random.default_rng(seed)
     hits = trials = 0
     n = len(artists)
-    for p in store.get_playlists():
-        pa = sorted({artist_model._artist_of(m) for m in store.get_playlist_track_keys(p.id)} & set(idx))
+    for p in store.playlists.get_playlists():
+        pa = sorted({artist_model._artist_of(m) for m in store.playlists.get_playlist_track_keys(p.id)} & set(idx))
         if len(pa) < min_size:
             continue
         held = pa[int(rng.integers(len(pa)))]
@@ -104,15 +104,15 @@ def temporal_recall(store, holdout_days=30, k=20) -> dict:
     keys, V, idx = embed.load_vectors(store)
     if V is None:
         return {"recall": None, "trials": 0, "reason": "no vectors built"}
-    _, hi = store.history_bounds()
+    _, hi = store.charts.history_bounds()
     if hi is None:
         return {"recall": None, "trials": 0, "reason": "no history"}
     cutoff = hi - holdout_days * 86400
-    before = store.history_keys_before(cutoff)
-    after = store.get_recent_history_keys(cutoff)
+    before = store.history.history_keys_before(cutoff)
+    after = store.history.get_recent_history_keys(cutoff)
     context = [key for key in before if key in idx]
     held = [key for key in after if key in idx and key not in before]   # new plays to predict
-    gen_only = store.generated_only_keys_since(cutoff)
+    gen_only = store.rec_query.generated_only_keys_since(cutoff)
     generated_excluded = sum(1 for key in held if key in gen_only)
     held = [key for key in held if key not in gen_only]
     if not context or not held:
@@ -140,11 +140,11 @@ def _causal_window(store, cutoff, end, k, dim, method) -> dict:
     Unlike temporal_recall, this never loads the live vectors. The explicit as-of baskets are fitted
     in memory, so neither persisted model state nor a later basket can leak into the representation.
     """
-    baskets, coverage = store.rec_baskets_as_of(cutoff)
+    baskets, coverage = store.rec_query.rec_baskets_as_of(cutoff)
     weights = None
-    if store.get_setting("rec_cooc_weighting") == "1":
+    if store.settings.get_setting("rec_cooc_weighting") == "1":
         weights = {key: 1.0 + math.log1p(count)
-                   for key, count in store.play_counts_before(cutoff).items() if count}
+                   for key, count in store.history.play_counts_before(cutoff).items() if count}
     keys, V = embed.build_vectors_from_baskets(
         baskets, dim=dim, method=method, weights=weights)
     base = {"cutoff": cutoff, "end": end, "k": k, "coverage": coverage,
@@ -153,11 +153,11 @@ def _causal_window(store, cutoff, end, k, dim, method) -> dict:
         return {**base, "recall": None, "trials": 0, "generated_excluded": 0,
                 "reason": "no reconstructable as-of vectors"}
     idx = {key: i for i, key in enumerate(keys)}
-    before = store.history_keys_before(cutoff)
-    after = store.history_keys_between(cutoff, end)
+    before = store.history.history_keys_before(cutoff)
+    after = store.history.history_keys_between(cutoff, end)
     context = [key for key in before if key in idx]
     held = [key for key in after if key in idx and key not in before]
-    gen_only = store.generated_only_keys_between(cutoff, end)
+    gen_only = store.rec_query.generated_only_keys_between(cutoff, end)
     generated_excluded = sum(key in gen_only for key in held)
     held = [key for key in held if key not in gen_only]
     if not context or not held:
@@ -187,7 +187,7 @@ def rolling_temporal_recall(store, holdout_days=None, k=20, windows=3, dim=None,
     """
     if holdout_days is None:
         holdout_days = best_holdout(store)
-    _lo, hi = store.history_bounds()
+    _lo, hi = store.charts.history_bounds()
     if hi is None:
         return {"recall": None, "trials": 0, "windows": [], "viable_windows": 0,
                 "holdout_days": holdout_days, "reason": "no history"}
@@ -195,7 +195,7 @@ def rolling_temporal_recall(store, holdout_days=None, k=20, windows=3, dim=None,
         _keys, live, _idx = embed.load_vectors(store)
         dim = live.shape[1] if live is not None and live.ndim == 2 else embed.DIM
     if method is None:
-        method = store.get_setting("rec_embed_method") or "svd"
+        method = store.settings.get_setting("rec_embed_method") or "svd"
     span = holdout_days * 86400.0
     rows = []
     for i in range(max(1, int(windows))):
@@ -242,7 +242,6 @@ def projection_recall(store, k=20) -> dict:
     unseen-artist performance. Unscorable targets and insufficient training folds remain explicit.
     """
     from yt_playlist.rec.discover import ContentProjection
-    from yt_playlist.rec.rec_dao import RecDao
     keys, V, idx = embed.load_vectors(store)
     empty_bd = {"by_family": {}, "by_era": {}, "by_coverage": {}}
     result = {"recall": None, "trials": 0, "eligible": 0, "unscored": 0,
@@ -251,7 +250,7 @@ def projection_recall(store, k=20) -> dict:
     if V is None:
         result["reason"] = "No reference embedding"
         return result
-    dao = RecDao(store)
+    dao = store.rec_query
     content, audio = dao.track_content(), dao.track_audio_features()
     eligible = sorted((set(content) | set(audio)) & set(idx))
     result["eligible"] = len(eligible)
@@ -313,7 +312,7 @@ def cold_rankable(store, now) -> dict:
     vs the discovered-pool size. rankable > 0 means cold tracks are recommendable by taste + the
     transient tilts (not just recency/radio order). Imported lazily to dodge a surfaces<->eval cycle."""
     from yt_playlist.rec import surfaces
-    pool = len(store.get_discovered_tracks())
+    pool = len(store.discovery.get_discovered_tracks())
     candidates = surfaces.cold_candidates(store, now)
     rankable = sum(item.score is not None for item in candidates)
     return {"rankable": rankable, "fallback": len(candidates) - rankable,
@@ -325,10 +324,9 @@ def content_rankable(store) -> dict:
     the content-space taste fit (a content vector present + content_taste built). Mirrors cold_rankable.
     Lazy imports avoid a scoring<->eval cycle."""
     from yt_playlist.rec.scoring import content_taste
-    from yt_playlist.rec.rec_dao import RecDao
     _keys, _V, idx = embed.load_vectors(store)
     _ckeys, CV, cidx = embed.load_content_vectors(store)
-    owned = set(RecDao(store).library_keys())
+    owned = set(store.rec_query.library_keys())
     vectorless_owned = owned - set(idx)
     if CV is None or not content_taste(store):
         return {"rankable": 0, "vectorless_owned": len(vectorless_owned)}
@@ -353,8 +351,8 @@ def _tune_score(store, k, metric):
     can show it and the winner can exclude it, rather than silently falling back to the in-sample metric.
     Returns (score, failed)."""
     if metric == "causal_temporal_recall":
-        dim = int(store.get_setting("rec_dim") or embed.DIM)
-        method = store.get_setting("rec_embed_method") or "svd"
+        dim = int(store.settings.get_setting("rec_dim") or embed.DIM)
+        method = store.settings.get_setting("rec_embed_method") or "svd"
         tr = rolling_temporal_recall(store, holdout_days=best_holdout(store), k=k,
                                      dim=dim, method=method).get("recall")
         if tr is None:
@@ -370,8 +368,8 @@ def autotune(store, svd_dims=(48, 64, 96, 128), item2vec_probe_dim=64, k=20) -> 
     scores against in-sample ones. Persists and rebuilds on the winner. Returns the winner, the previous
     config, the full grid for the UI, and top-level `metric`/`in_sample` describing the run. Never forces
     item2vec; it's only kept if it wins on the user's data."""
-    prev_method = store.get_setting("rec_embed_method") or "svd"
-    prev_dim = int(store.get_setting("rec_dim") or embed.DIM)
+    prev_method = store.settings.get_setting("rec_embed_method") or "svd"
+    prev_dim = int(store.settings.get_setting("rec_dim") or embed.DIM)
     metric = _pick_metric(store, k)
     prev_score, prev_failed = _tune_score(store, k, metric)
     previous = {"method": prev_method, "dim": prev_dim, "recall": prev_score, "metric": metric}
@@ -381,8 +379,8 @@ def autotune(store, svd_dims=(48, 64, 96, 128), item2vec_probe_dim=64, k=20) -> 
     grid = []
     configs = [("svd", d) for d in svd_dims] + [("item2vec", item2vec_probe_dim)]
     for method, d in configs:
-        store.set_setting("rec_embed_method", method)
-        store.set_setting("rec_dim", str(d))
+        store.settings.set_setting("rec_embed_method", method)
+        store.settings.set_setting("rec_dim", str(d))
         embed.build_and_store(store, dim=d)
         score, failed = _tune_score(store, k, metric)
         row = {"method": method, "dim": d, "recall": score, "metric": metric}
@@ -393,15 +391,15 @@ def autotune(store, svd_dims=(48, 64, 96, 128), item2vec_probe_dim=64, k=20) -> 
     viable = [g for g in grid if not g.get("failed")]
     if not viable:
         # All configs failed. Restore the previous config instead of picking an arbitrary failed row.
-        store.set_setting("rec_embed_method", prev_method)
-        store.set_setting("rec_dim", str(prev_dim))
+        store.settings.set_setting("rec_embed_method", prev_method)
+        store.settings.set_setting("rec_dim", str(prev_dim))
         embed.build_and_store(store, dim=prev_dim)
         result = {"winner": previous, "previous": previous, "grid": grid,
                   "metric": metric, "in_sample": metric == "recall_at_k", "sweep_failed": True}
     else:
         winner = max(viable, key=lambda g: g["recall"])
-        store.set_setting("rec_embed_method", winner["method"])
-        store.set_setting("rec_dim", str(winner["dim"]))
+        store.settings.set_setting("rec_embed_method", winner["method"])
+        store.settings.set_setting("rec_dim", str(winner["dim"]))
         embed.build_and_store(store, dim=winner["dim"])   # leave the live model on the winner
         result = {"winner": winner, "previous": previous, "grid": grid,
                   "metric": metric, "in_sample": metric == "recall_at_k"}
@@ -424,17 +422,17 @@ def cooc_weighting_ab(store, k=20) -> dict:
     silent fallback to the weaker in-sample recall@k the way it used to. ALWAYS check the `metric` field:
     if it is "recall_at_k", the temporal split was unavailable even at the adaptive window, so re-judge by
     calling temporal_recall directly at a holdout_days that fits the span before trusting the verdict."""
-    prev = store.get_setting("rec_cooc_weighting")
+    prev = store.settings.get_setting("rec_cooc_weighting")
     metric = _pick_metric(store, k)
     out = {}
     for label, val in (("binary", "0"), ("weighted", "1")):
-        store.set_setting("rec_cooc_weighting", val)
+        store.settings.set_setting("rec_cooc_weighting", val)
         embed.build_and_store(store)
         score, failed = _tune_score(store, k, metric)
         out[label] = {"score": score, "metric": metric}
         if failed:
             out[label]["failed"] = True
-    store.set_setting("rec_cooc_weighting", prev if prev is not None else "0")
+    store.settings.set_setting("rec_cooc_weighting", prev if prev is not None else "0")
     embed.build_and_store(store)                       # restore the live model on the prior setting
     out["winner"] = "weighted" if out["weighted"]["score"] > out["binary"]["score"] else "binary"
     return out

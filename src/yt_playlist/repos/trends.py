@@ -22,19 +22,19 @@ class TrendsRepo(Repo):
         if not exclude_generated:
             return "", []
         rows = self.conn.execute(
-            "SELECT ytm FROM playlist_group WHERE name = ?", (GENERATED_GROUP,)).fetchall()
+            "SELECT ytm FROM quarantined_playlists").fetchall()
         gen = sorted(r["ytm"] for r in rows)
         if not gen:
-            return "", []
+            return ' AND COALESCE(pe.is_generated,0)=0', []
         ph = ",".join("?" * len(gen))
-        return f" AND (pe.playlist_ytm_id IS NULL OR pe.playlist_ytm_id NOT IN ({ph}))", gen
+        return f" AND COALESCE(pe.is_generated,0)=0 AND (pe.playlist_ytm_id IS NULL OR pe.playlist_ytm_id NOT IN ({ph}))", gen
 
     @synchronized
     def generated_ytm_ids(self) -> set[str]:
         """The ytm ids of playlists this app generated. Plays sourced from these are the app's own
         recommendations echoed back, not listening the user chose."""
         rows = self.conn.execute(
-            "SELECT ytm FROM playlist_group WHERE name = ?", (GENERATED_GROUP,)).fetchall()
+            "SELECT ytm FROM quarantined_playlists").fetchall()
         return {r["ytm"] for r in rows}
 
     @synchronized
@@ -60,7 +60,7 @@ class TrendsRepo(Repo):
             "JOIN tracks t ON t.id = pt.track_id "
             "JOIN playlists p ON p.id = pt.playlist_id "
             "WHERE t.artist <> '' AND p.ytm_playlist_id NOT IN "
-            "  (SELECT ytm FROM playlist_group WHERE name = ?)", (GENERATED_GROUP,)).fetchall()
+            "  (SELECT ytm FROM quarantined_playlists)").fetchall()
         return {r["a"] for r in rows}
 
     @synchronized
@@ -71,7 +71,7 @@ class TrendsRepo(Repo):
             "JOIN tracks t ON t.id = pt.track_id "
             "JOIN playlists p ON p.id = pt.playlist_id "
             "WHERE p.ytm_playlist_id NOT IN "
-            "  (SELECT ytm FROM playlist_group WHERE name = ?)", (GENERATED_GROUP,)).fetchall()
+            "  (SELECT ytm FROM quarantined_playlists)").fetchall()
         return {r["k"] for r in rows}
 
     @synchronized
@@ -313,7 +313,7 @@ class TrendsRepo(Repo):
             "     JOIN history_items hi ON hi.identity_key = t.identity_key WHERE pt.playlist_id = p.id) cnt "
             "FROM playlists p "
             "WHERE p.id NOT IN (SELECT p2.id FROM playlists p2 "
-            "  JOIN playlist_group g ON g.ytm = p2.ytm_playlist_id WHERE g.name = :grp)",
+            "  JOIN quarantined_playlists g ON g.ytm = p2.ytm_playlist_id WHERE g.name = :grp)",
             {"grp": GENERATED_GROUP}).fetchall()
         out = [{"playlist_id": r["pid"], "title": r["title"], "last_listen": r["last"],
                 "listens": r["cnt"] or 0} for r in rows]

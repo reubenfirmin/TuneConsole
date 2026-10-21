@@ -10,8 +10,8 @@ def store():
 
 
 def test_skip_records_penalty_no_navigate_no_op(monkeypatch, store):
-    monkeypatch.setattr(store, "identity_key_for_video", lambda vid: "kold")
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: {"kold": {"artist": "Aold"}})
+    monkeypatch.setattr(store.tracks, "identity_key_for_video", lambda vid: "kold")
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: {"kold": {"artist": "Aold"}})
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
     s = radio.RadioSession(); s.active = True
     # pos 5 / dur 200 -> ratio 0.025 <= 0.30 and pos <= 120 -> "skip".
@@ -29,8 +29,8 @@ def test_completion_is_inert(store):
 
 
 def test_volume_floor_soft_skip(monkeypatch, store):
-    monkeypatch.setattr(store, "identity_key_for_video", lambda vid: "kv")
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: {"kv": {"artist": "Av"}})
+    monkeypatch.setattr(store.tracks, "identity_key_for_video", lambda vid: "kv")
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: {"kv": {"artist": "Av"}})
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
     s = radio.RadioSession(); s.active = True
     radio.react(store, s, {"kind": "volume", "videoId": "vv", "volume": 0.0}, now=100.0)
@@ -45,8 +45,8 @@ def test_volume_above_floor_is_noop(monkeypatch, store):
 
 
 def test_rate_dislike_records_penalty(monkeypatch, store):
-    monkeypatch.setattr(store, "identity_key_for_video", lambda vid: "kr")
-    monkeypatch.setattr(store, "tracks_by_keys", lambda keys: {"kr": {"artist": "Ar"}})
+    monkeypatch.setattr(store.tracks, "identity_key_for_video", lambda vid: "kr")
+    monkeypatch.setattr(store.rec_query, "tracks_by_keys", lambda keys: {"kr": {"artist": "Ar"}})
     monkeypatch.setattr(radio, "_modeinfo", lambda st: None)
     s = radio.RadioSession(); s.active = True
     out = radio.react(store, s, {"kind": "rate", "videoId": "vr",

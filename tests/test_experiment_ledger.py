@@ -9,7 +9,7 @@ from tests.test_taste_health import _client
 
 
 def _record(store, request, kind="live", ranker="cosine", at=100, cluster="1:1", key="song|band"):
-    store.record_served_impressions(request, "home", [{
+    store.rec_surface.record_served_impressions(request, "home", [{
         "key": key, "rank": 1, "lane": "wheelhouse", "model_version": "m1",
         "provenance": {"ranker": ranker, "policy_kind": kind, "propensity": .5 if kind == "live" else 0,
                        "candidate": {"video_id": "v1"},
@@ -36,21 +36,21 @@ def test_pair_replay_and_actual_assignment_propensity(store):
     assert len({p["experiment"]["candidate_fingerprint"] for p in traces}) == 1
     assert [p["propensity"] for p in traces] == [1] * 6 + [0] * 6
     assert all(p["experiment"]["state"] == "retained" for p in traces)
-    assert store.recommendation_scorecard(0, 20)["impressions"] == 6
-    assert store.lane_impression_counts() == {"wheelhouse": 6}
-    assert store.served_recommendation(rows[-1]["id"])["outcomes"] is None
+    assert store.rec_surface.recommendation_scorecard(0, 20)["impressions"] == 6
+    assert store.rec_surface.lane_impression_counts() == {"wheelhouse": 6}
+    assert store.rec_surface.served_recommendation(rows[-1]["id"])["outcomes"] is None
 
 
 def test_shadow_cannot_steal_actions_or_listening(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     _record(store, "pair:live")
     _record(store, "pair:shadow", "counterfactual", "ppr", at=110)
-    store.import_play_events(iid, [("song|band", "v1", 120)])
-    store.record_recommendation_outcomes("save", "save", ["song|band"], 121)
-    score = store.recommendation_scorecard(90, 130)
+    store.history.import_play_events(iid, [("song|band", "v1", 120)])
+    store.rec_surface.record_recommendation_outcomes("save", "save", ["song|band"], 121)
+    score = store.rec_surface.recommendation_scorecard(90, 130)
     assert score["impressions"] == score["played"] == score["save"] == 1
     assert set(score["by_ranker"]) == {"cosine"}
-    report = store.experiment_report(90, 130, 100000)
+    report = store.rec_surface.experiment_report(90, 130, 100000)
     assert report["live"]["c1:cosine"]["played"] == 1
     assert report["counterfactual"] == [{"ranker": "ppr", "rows": 1, "opportunities": 1}]
     assert report["counterfactual_outcomes"] is None
@@ -59,7 +59,7 @@ def test_shadow_cannot_steal_actions_or_listening(store):
 def test_repeat_views_do_not_manufacture_independent_samples(store):
     for i in range(101):
         _record(store, str(i), at=100 + i)
-    bucket = store.experiment_report(90, 300, 100000)["live"]["c1:cosine"]
+    bucket = store.rec_surface.experiment_report(90, 300, 100000)["live"]["c1:cosine"]
     assert bucket["opportunities"] == 101
     assert bucket["clusters"] == 1
     assert not bucket["powered"]
@@ -70,7 +70,7 @@ def test_repeat_views_do_not_manufacture_independent_samples(store):
 
 def test_pending_outcomes_are_not_promotion_evidence(store):
     _record(store, "new", at=1000)
-    assert store.experiment_report(900, 1100, 1200)["live"] == {}
+    assert store.rec_surface.experiment_report(900, 1100, 1200)["live"] == {}
 
 
 def test_retirement_is_explicit_and_disables_replay(store):
@@ -92,21 +92,21 @@ def test_shadow_default_has_no_live_ppr_outcomes(store):
     card = mode_surfaces.assemble_cards(store, 10, 0)[0]
     assert card["experiment"]["state"] == "shadow"
     _record_served_cards(store, [card], 10)
-    assert set(store.recommendation_scorecard(0, 20)["by_ranker"]) == {"cosine"}
+    assert set(store.rec_surface.recommendation_scorecard(0, 20)["by_ranker"]) == {"cosine"}
 
 
 def test_cached_solver_provenance_survives_tuning_and_identical_rebuild(store):
     _seed_one_mode(store)
-    bundles = store.get_proposals("mode_bundles")
+    bundles = store.rec_surface.get_proposals("mode_bundles")
     policy = {"algorithm": "basket-ppr-v1", "built_at": 1,
               "params": {"ppr_alpha": .75, "ppr_iters": 30}, "ranking_fingerprint": "fixed"}
     bundles["_meta"]["ppr_policy"] = policy
-    store.put_proposals("mode_bundles", bundles, 1)
+    store.rec_surface.put_proposals("mode_bundles", bundles, 1)
     rec_params.set_param(store, "ppr_alpha", .9)
     first = mode_surfaces.assemble_cards(store, 10, 0)[0]["experiment"]
     assert first["ppr_policy"]["params"]["ppr_alpha"] == .75
     policy["built_at"] = 2
-    store.put_proposals("mode_bundles", bundles, 2)
+    store.rec_surface.put_proposals("mode_bundles", bundles, 2)
     second = mode_surfaces.assemble_cards(store, 10, 0)[0]["experiment"]
     assert second["cohort"] == first["cohort"]
 
@@ -114,8 +114,8 @@ def test_cached_solver_provenance_survives_tuning_and_identical_rebuild(store):
 def test_retention_prunes_both_policies_and_versions(store):
     _record(store, "old:live")
     _record(store, "old:shadow", "counterfactual", "ppr")
-    store.record_serving_policy("m1", {"schema": 3}, 100)
-    store.record_served_impressions("prune", "home", [], 1000, prune_before=500)
+    store.rec_surface.record_serving_policy("m1", {"schema": 3}, 100)
+    store.rec_surface.record_served_impressions("prune", "home", [], 1000, prune_before=500)
     assert not store.conn.execute("SELECT 1 FROM rec_served_impressions").fetchone()
     assert not store.conn.execute("SELECT 1 FROM rec_serving_policies").fetchone()
     assert not store.conn.execute("SELECT 1 FROM rec_lane_impressions").fetchone()
@@ -134,22 +134,23 @@ def test_experiment_endpoints_validate_decisions(store):
 
 
 def test_generated_responses_stay_quarantined_and_support_explicit_live_decision(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.set_playlist_group("PLGEN", "Generated")
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.set_playlist_group("PLGEN", "Generated")
+    store.playlists.mark_generated_playlist('PLGEN')
     for i in range(100):
         for arm in ("ppr", "cosine"):
             key, at = f"{arm}{i}|band", 100 + i * 10
             _record(store, f"{arm}{i}", ranker=arm, at=at, cluster=f"{i}:1", key=key)
-            store.upsert_track(key, f"{arm}{i}", "band", None, 200)
+            store.tracks.upsert_track(key, f"{arm}{i}", "band", None, 200)
             # Distinct video snapshots keep exit attribution independent of today's catalog.
             store.conn.execute("UPDATE rec_served_impressions SET provenance=json_set(provenance,"
                                "'$.candidate.video_id',?) WHERE request_id=?", (key, f"{arm}{i}"))
             store.conn.commit()
             if arm == "ppr":
-                store.record_play_event(iid, key, key, at + 1, playlist_ytm_id="PLGEN")
-            store.record_player_event(iid, "track_exit", key, 190 if arm == "ppr" else 10,
+                store.history.record_play_event(iid, key, key, at + 1, playlist_ytm_id="PLGEN")
+            store.player_events.record_player_event(iid, "track_exit", key, 190 if arm == "ppr" else 10,
                                       200, None, None, at + 2)
-    score = store.recommendation_scorecard(90, 1200)
+    score = store.rec_surface.recommendation_scorecard(90, 1200)
     assert score["generated"] == 100 and score["organic"] == 0
     result = experiments.decide(store, "promote", "c1", "Mature live evidence meets guardrails", 100000)
     assert result["state"] == "retained" and result["decision"]["powered"]

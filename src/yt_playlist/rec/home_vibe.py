@@ -3,7 +3,6 @@ import math
 
 from yt_playlist.rec import mix_tuning
 from yt_playlist.rec.ordering import _field
-from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
 
 SETTING = "home_mix_vibe"
@@ -40,14 +39,14 @@ PRESETS = {
 
 def current(store, now):
     mix_tuning.expire(store, now)
-    value = store.get_setting(SETTING)
+    value = store.settings.get_setting(SETTING)
     return value if value in PRESETS else ""
 
 
 def audio_features(store):
     # Discoveries carry the same features as owned tracks. Prefer library metadata on overlap.
-    audio = {t["identity_key"]: t["audio"] for t in store.get_discovered_tracks()}
-    for key, features in RecDao(store).track_audio_features().items():
+    audio = {t["identity_key"]: t["audio"] for t in store.discovery.get_discovered_tracks()}
+    for key, features in store.rec_query.track_audio_features().items():
         audio[key] = {**audio.get(key, {}), **features}
     return audio
 

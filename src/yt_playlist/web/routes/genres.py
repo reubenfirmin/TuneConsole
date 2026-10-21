@@ -8,7 +8,7 @@ from yt_playlist.util import genre_catalog, genre_map
 
 def genre_list_context(store, query=""):
     """Group recognized tags using the same family assignments as recommendations."""
-    names = store.get_genre_whitelist()
+    names = store.genres.get_genre_whitelist()
     records, labels = genre_catalog.catalog()
     aliases = {}
     for key, (genre, label, source) in labels.items():
@@ -67,14 +67,14 @@ def build(ctx) -> APIRouter:
         name = (form.get("name") or "").strip()
         if not genre_catalog.normalize(name):
             return _toast(request, "enter a genre name")
-        store.add_genre(genre_lib.canonical_name(name))
+        store.genres.add_genre(genre_lib.canonical_name(name))
         genre_lib.configure(store)                     # rebuild the active matcher
         return _list(request, form.get("q") or "")
 
     @router.post("/genres/remove")
     async def genres_remove(request: Request):
         form = await request.form()
-        store.remove_genre(genre_lib.canonical_name(form.get("name") or ""))
+        store.genres.remove_genre(genre_lib.canonical_name(form.get("name") or ""))
         genre_lib.configure(store)
         return _list(request, form.get("q") or "")
 

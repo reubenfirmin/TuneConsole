@@ -12,7 +12,7 @@ def build(ctx) -> APIRouter:
 
     @router.get("/search/omni")
     def omni(request: Request, q: str = ""):
-        result = store.omni_search(q)
+        result = store.search.omni_search(q)
         return templates.TemplateResponse(request, "_partials/omni_results.html", result)
 
     return router

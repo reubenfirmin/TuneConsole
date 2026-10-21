@@ -1,8 +1,7 @@
 """Row dataclasses shared by the Store and its DAOs.
 
 Kept in their own module so DAOs can return typed rows without importing Store (which would create
-a Store <-> repo import cycle). Store re-exports these, so ``from yt_playlist.core.store import Playlist``
-keeps working for existing callers.
+a Store/repository import cycle). Consumers import these row types directly.
 """
 from dataclasses import dataclass
 

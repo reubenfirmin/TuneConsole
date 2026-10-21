@@ -53,10 +53,10 @@ def _ticker_linker(store, dim):
     if dim == "artist":
         return lambda cat: f"/artist?name={quote(cat)}"
     if dim == "album":
-        browse = store.album_browse_ids()
+        browse = store.charts.album_browse_ids()
         return lambda cat: (f"/album?browse={browse[cat]}" if cat in browse else None)
     if dim == "playlist":
-        ids = {p.title: p.id for p in store.get_playlists()}
+        ids = {p.title: p.id for p in store.playlists.get_playlists()}
         return lambda cat: (f"/playlist/{ids[cat]}" if cat in ids else None)
     return lambda cat: None
 
@@ -64,12 +64,12 @@ def _ticker_linker(store, dim):
 def _build_ticker(store, dim, periods):
     """Assemble one ticker tab: corpus baseline + per-period listen distributions -> ranked rows
     (only categories played at least once in some period, top N by recent share)."""
-    corpus = store.corpus_distribution(dim)
-    windows = {label: store.listen_distribution(dim, since=lo, until=hi) for label, (lo, hi) in periods}
+    corpus = store.charts.corpus_distribution(dim)
+    windows = {label: store.charts.listen_distribution(dim, since=lo, until=hi) for label, (lo, hi) in periods}
     data = ticker_rows(corpus, windows)
     rows = [r for r in data["rows"] if r["high"] > 0][:_TICKER_TOP]
     link = _ticker_linker(store, dim)
-    thumbnails = store.ticker_thumbnails(dim) if dim in ("artist", "album", "playlist") else {}
+    thumbnails = store.charts.ticker_thumbnails(dim) if dim in ("artist", "album", "playlist") else {}
     for r in rows:
         r["geo"] = candle_geometry(r, data["axis_max"])
         r["link"] = link(r["cat"])
@@ -87,14 +87,14 @@ def build(ctx) -> APIRouter:
         days = _WINDOWS.get(win, None)
         now = now_fn()
         since = None if days is None else now - days * 86400.0
-        earliest, _latest = store.history_bounds()
+        earliest, _latest = store.charts.history_bounds()
         periods, close_days, span_days = _ticker_periods(earliest, now, days)
         tickers = {dim: _build_ticker(store, dim, periods) for dim in _TICKER_DIMS}
         for dim, t in tickers.items():
             t["close_days"], t["span_days"] = close_days, span_days
             t["compare"] = dim in _TICKER_COMPARE
         return templates.TemplateResponse(request, "charts.html", {
-            "songs": store.top_tracks(100, since=since),
+            "songs": store.charts.top_tracks(100, since=since),
             "window": win if win in _WINDOWS else "all",
             "tickers": tickers,
         })
@@ -105,12 +105,12 @@ def build(ctx) -> APIRouter:
         browse_id = (request.query_params.get("browse") or "").strip() or None
         if not name:
             raise HTTPException(status_code=404, detail="no artist specified")
-        songs = store.artist_songs(name, browse_id)
-        info = fetch_artist_info(ctx, name, browse_id or store.artist_browse_id(name))
+        songs = store.charts.artist_songs(name, browse_id)
+        info = fetch_artist_info(ctx, name, browse_id or store.collection.artist_browse_id(name))
 
         # "Saved" is a single source of truth (membership in the saved-album set, keyed by browse_id)
         # so the collection table and the YouTube-discography table below always agree.
-        saved_ids = store.saved_album_ids()
+        saved_ids = store.collection.saved_album_ids()
 
         # Section 1, your collection: albums from library tracks, merged with saved metadata.
         coll = {}
@@ -127,7 +127,7 @@ def build(ctx) -> APIRouter:
         def _by_artist(a):
             return any(name.lower() == x.strip().lower() for x in (a.get("artist") or "").split(","))
 
-        for a in store.get_saved_albums():
+        for a in store.collection.get_saved_albums():
             if not _by_artist(a):
                 continue
             key = (a["title"] or "").lower()

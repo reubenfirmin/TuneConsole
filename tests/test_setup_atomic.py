@@ -16,7 +16,7 @@ def _configured(store, tmp_path):
 @pytest.mark.parametrize("failure", ["publish", "reload", "reconcile", "commit"])
 def test_failed_save_retains_file_accounts_and_runtime(store, tmp_path, monkeypatch, failure):
     rt = _configured(store, tmp_path)
-    before, provider, accounts = rt.config_path.read_bytes(), rt._provider, store.get_identities()
+    before, provider, accounts = rt.config_path.read_bytes(), rt._provider, store.identities.get_identities()
     if failure == "publish":
         def fail(*args):
             raise OSError("publication failed")
@@ -38,7 +38,7 @@ def test_failed_save_retains_file_accounts_and_runtime(store, tmp_path, monkeypa
     with pytest.raises(ValueError, match="not saved"):
         rt.apply_setup([{"label": "renamed", "credential_ref": "browser.json", "is_master": True}])
     assert rt.config_path.read_bytes() == before
-    assert store.get_identities() == accounts
+    assert store.identities.get_identities() == accounts
     assert rt.configured and rt._provider is provider
     assert set(rt.clients()) == {i.id for i in accounts}
     assert list(tmp_path.glob(".config.toml.*")) == []
@@ -46,23 +46,23 @@ def test_failed_save_retains_file_accounts_and_runtime(store, tmp_path, monkeypa
 
 def test_failed_reload_restores_last_usable_file_and_runtime(store, tmp_path):
     rt = _configured(store, tmp_path)
-    previous, provider, accounts = rt.config_path.read_bytes(), rt._provider, store.get_identities()
+    previous, provider, accounts = rt.config_path.read_bytes(), rt._provider, store.identities.get_identities()
     rt.config_path.write_text("invalid [ toml")
     rt.load()
     assert rt.configured and rt._provider is provider
     assert rt.config_path.read_bytes() == previous
-    assert store.get_identities() == accounts
+    assert store.identities.get_identities() == accounts
 
 
 def test_display_label_edits_preserve_ids_history_and_reopening(store, tmp_path):
     rt = _configured(store, tmp_path)
-    accounts = store.get_identities()
+    accounts = store.identities.get_identities()
     for account in accounts:
-        store.add_history_snapshot(account.id, 1, ["song|artist"])
+        store.history.add_history_snapshot(account.id, 1, ["song|artist"])
     rt.apply_setup([{"id": account.id, "label": f"Renamed {account.label}",
         "credential_ref": account.credential_ref, "brand_account_id": account.brand_account_id,
         "is_master": account.is_master} for account in accounts])
-    assert {i.id for i in store.get_identities()} == {i.id for i in accounts}
+    assert {i.id for i in store.identities.get_identities()} == {i.id for i in accounts}
     reopened = Runtime(store, rt.config_path, tmp_path)
     reopened.load()
     assert reopened.configured
@@ -82,11 +82,11 @@ def test_setup_form_carries_stable_identity_on_rename(store, tmp_path):
     from fastapi.testclient import TestClient
     from yt_playlist.web.app import create_app
     rt = _configured(store, tmp_path)
-    main, brand = store.get_identities()
+    main, brand = store.identities.get_identities()
     app = create_app(store, rt.clients, setup=rt, background_work=False)
     with TestClient(app, base_url="http://127.0.0.1") as client:
         response = client.post("/setup", headers={"accept": "application/json"}, data={
             "identity_id": [str(main.id), str(brand.id)], "label": ["New main", "New brand"],
             "brand_account_id": ["", brand.brand_account_id], "master": "0"})
         assert response.status_code == 200
-    assert [(i.id, i.label) for i in store.get_identities()] == [(main.id, "New main"), (brand.id, "New brand")]
+    assert [(i.id, i.label) for i in store.identities.get_identities()] == [(main.id, "New main"), (brand.id, "New brand")]

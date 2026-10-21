@@ -44,11 +44,11 @@ def test_enrichment_is_fill_only(store):
 
 
 def test_missing_genre_and_year_queries(store):
-    iid = store.upsert_identity("me", "c", None, True)
-    p = store.upsert_playlist(iid, "P", "P", 0, "h", 0.0)
+    iid = store.identities.upsert_identity("me", "c", None, True)
+    p = store.playlists.upsert_playlist(iid, "P", "P", 0, "h", 0.0)
     t1 = store.tracks.upsert_track("v1", "S1", "A", "Al", 100)
     t2 = store.tracks.upsert_track("v2", "S2", "A", "Al", 100)
-    store.set_playlist_tracks(p, [t1, t2])
+    store.playlists.set_playlist_tracks(p, [t1, t2])
     store.tracks.set_track_enrichment(t1, "House", "2001")  # t1 fully tagged
     assert [r["id"] for r in store.tracks.tracks_missing_genre(p)] == [t2]
     assert [r["id"] for r in store.tracks.tracks_to_enrich(p)] == [t2]
@@ -59,10 +59,10 @@ def test_track_ids_for_videos_latest_wins(store):
     assert store.tracks.track_ids_for_videos(["v1", "nope"]) == {"v1": t}
 
 
-def test_facade_delegates(store):
-    t = store.upsert_track("v1", "S", "A", "Al", 100)       # legacy store.x() call site
-    store.set_track_year(t, "2020")
-    assert store.get_track_enrichment(t) == ("", "2020")
+def test_store_binding(store):
+    t = store.tracks.upsert_track("v1", "S", "A", "Al", 100)
+    store.tracks.set_track_year(t, "2020")
+    assert store.tracks.get_track_enrichment(t) == ("", "2020")
 
 
 def test_identity_key_for_video(store):

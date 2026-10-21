@@ -3,7 +3,7 @@ import json
 import pytest
 
 from tests.conftest import FakeClient, _track
-from yt_playlist.library.executor import undo_action
+from yt_playlist.library.playlist_undo import undo_action
 from yt_playlist.library.playlist_mutation import restore_playlist_sequence
 from yt_playlist.util.action_kinds import APPLY_MERGE
 
@@ -34,9 +34,9 @@ class OccurrenceClient(FakeClient):
 
 
 def _action(store, before, current):
-    iid = store.upsert_identity("Main", "bridge", None, True)
-    pid = store.upsert_playlist(iid, "KEEP", "Kept playlist", len(current), "", 1)
-    aid = store.record_action(APPLY_MERGE, "{}", "{}", "executed", json.dumps({
+    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    pid = store.playlists.upsert_playlist(iid, "KEEP", "Kept playlist", len(current), "", 1)
+    aid = store.actions.record_action(APPLY_MERGE, "{}", "{}", "executed", json.dumps({
         "restored": [{"ytm": "KEEP", "identity": iid, "prev": before, "post": current}],
     }), 1)
     return iid, pid, aid
@@ -54,8 +54,8 @@ def test_undo_restores_exact_order_and_refreshes_keeper(store, before, current):
     undo_action(store, aid, {iid: client}, 2)
     assert [t["videoId"] for t in client._tracks["KEEP"]] == before
     # The local catalog displays each video once; recovery still preserves remote repeats.
-    assert [row[1] for row in store.get_playlist_tracks_with_meta(pid)] == list(dict.fromkeys(before))
-    assert store.get_action(aid).status == "undone"
+    assert [row[1] for row in store.playlists.get_playlist_tracks_with_meta(pid)] == list(dict.fromkeys(before))
+    assert store.actions.get_action(aid).status == "undone"
 
 
 def test_rejected_positional_changes_remain_retryable(store):
@@ -65,7 +65,7 @@ def test_rejected_positional_changes_remain_retryable(store):
     client.reject_moves = True
     with pytest.raises(ValueError, match="position change"):
         undo_action(store, aid, {iid: client}, 2)
-    assert store.get_action(aid).status != "undone"
+    assert store.actions.get_action(aid).status != "undone"
     assert [t["videoId"] for t in client._tracks["KEEP"]] == current
     client.reject_moves = False
     undo_action(store, aid, {iid: client}, 3)

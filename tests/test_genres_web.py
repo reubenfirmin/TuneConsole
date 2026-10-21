@@ -40,7 +40,7 @@ def test_add_returns_fragment_with_genre(store):
     assert "Whack-a-doodle" in r.text
     assert f"{n + 1} genres" in r.text               # count reflects the addition
     # persisted and recognized by the live matcher
-    assert "Whack-a-doodle" in store.get_genre_whitelist()
+    assert "Whack-a-doodle" in store.genres.get_genre_whitelist()
     assert g.pick_genre(["seen live", "whack-a-doodle"]) == "Whack-a-doodle"
 
 
@@ -50,7 +50,7 @@ def test_remove_drops_genre(store):
     r = c.post("/genres/remove", data={"name": "Whack-a-doodle"})
     assert r.status_code == 200
     assert "Whack-a-doodle" not in r.text
-    assert "Whack-a-doodle" not in store.get_genre_whitelist()
+    assert "Whack-a-doodle" not in store.genres.get_genre_whitelist()
     assert g.pick_genre(["whack-a-doodle"]) is None
 
 
@@ -58,43 +58,43 @@ def test_reset_restores_defaults(store):
     c = _client(store)
     n = len(g.builtin_names())
     c.post("/genres/add", data={"name": "Whack-a-doodle"})
-    assert len(store.get_genre_whitelist()) == n + 1
+    assert len(store.genres.get_genre_whitelist()) == n + 1
     r = c.post("/genres/reset")
     assert r.status_code == 200
     assert "Rock" in r.text and "Whack-a-doodle" not in r.text
-    assert len(store.get_genre_whitelist()) == n
+    assert len(store.genres.get_genre_whitelist()) == n
 
 
 def test_empty_add_returns_oob_toast(store):
     c = _client(store)
-    before = len(store.get_genre_whitelist())
+    before = len(store.genres.get_genre_whitelist())
     r = c.post("/genres/add", data={"name": "   "})
     assert r.status_code == 422
     assert r.headers.get("hx-reswap") == "none"
     assert 'hx-swap-oob="afterbegin:#toasts"' in r.text
     assert "enter a genre name" in r.text
-    assert len(store.get_genre_whitelist()) == before     # nothing added
+    assert len(store.genres.get_genre_whitelist()) == before     # nothing added
 
 
 def test_equivalent_add_is_idempotent_and_alias_removal_disables_identity(store):
     c = _client(store)
-    before = store.get_genre_whitelist()
+    before = store.genres.get_genre_whitelist()
     c.post("/genres/add", data={"name": "hip-hop"})
     c.post("/genres/add", data={"name": "rap"})
-    assert store.get_genre_whitelist() == before
+    assert store.genres.get_genre_whitelist() == before
     c.post("/genres/remove", data={"name": "hip-hop"})
     assert g.pick_genre(["rap", "hiphop", "Hip Hop"]) is None
 
 
 def test_search_matches_aliases_and_family_labels_without_changing_enabled_list(store):
     c = _client(store)
-    before = store.get_genre_whitelist()
+    before = store.genres.get_genre_whitelist()
     alias = c.get("/genres/list", params={"q": "rap"}).text
     assert "Hip Hop" in alias and "Deep House" not in alias
     family = c.get("/genres/list", params={"q": "House"}).text
     assert "Deep House" in family and 'aria-label="Jazz"' not in family
     assert "<details open>" in family
-    assert store.get_genre_whitelist() == before
+    assert store.genres.get_genre_whitelist() == before
 
 
 def test_query_survives_edits_and_escapes_input(store):

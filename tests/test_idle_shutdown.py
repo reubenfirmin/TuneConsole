@@ -184,7 +184,7 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
         assert finish.wait(5)
 
     if kind in ("playlist_enrichment", "album_enrichment"):
-        ctx.store.tracks_for_waterfall = lambda pid: []
+        ctx.store.tracks.tracks_for_waterfall = lambda pid: []
         monkeypatch.setattr(jobs.enrichment, "load_config", lambda store: {})
         monkeypatch.setattr(jobs.waterfall, "run_waterfall", blocking)
         job = jobs.start_playlist_enrichment(ctx, 1 if kind == "playlist_enrichment" else 2)

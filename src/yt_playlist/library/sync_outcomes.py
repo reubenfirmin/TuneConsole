@@ -16,12 +16,12 @@ def combined_status(results):
 
 
 def begin_attempt(store, now):
-    store.set_setting("last_sync_attempt_at", str(now))
+    store.settings.set_setting("last_sync_attempt_at", str(now))
 
 
 def finish_attempt(store, result, now):
     """Failed attempts must not refresh successful timestamps, including individual resources."""
-    previous = json.loads(store.get_setting("library_sync_state") or "{}")
+    previous = json.loads(store.settings.get_setting("library_sync_state") or "{}")
 
     def stamp(current, old):
         for name, item in current.items():
@@ -37,22 +37,22 @@ def finish_attempt(store, result, now):
         stamp({identity_id: account}, {identity_id: old})
     stamp(result.get("resources", {}), previous.get("resources", {}))
     result["last_attempt_at"] = now
-    store.set_setting("library_sync_state", json.dumps(result))
-    store.set_setting("last_sync_outcome", result["status"])
+    store.settings.set_setting("library_sync_state", json.dumps(result))
+    store.settings.set_setting("last_sync_outcome", result["status"])
     if result["status"] == "complete":
-        store.set_setting("last_sync_at", str(now))
+        store.settings.set_setting("last_sync_at", str(now))
     return result
 
 
 def sync_due(store, now, max_age_s):
     # An interrupted run or a partial attempt after a recent success needs an early retry too.
-    if store.get_setting("last_sync_outcome") not in (None, "complete"):
+    if store.settings.get_setting("last_sync_outcome") not in (None, "complete"):
         return True
-    last = store.get_setting("last_sync_at")
-    attempted = store.get_setting("last_sync_attempt_at")
+    last = store.settings.get_setting("last_sync_at")
+    attempted = store.settings.get_setting("last_sync_attempt_at")
     if attempted and (last is None or float(attempted) > float(last)):
         return True
-    state = json.loads(store.get_setting("library_sync_state") or "{}")
-    if state and set(state.get("accounts", {})) != {str(i.id) for i in store.get_identities()}:
+    state = json.loads(store.settings.get_setting("library_sync_state") or "{}")
+    if state and set(state.get("accounts", {})) != {str(i.id) for i in store.identities.get_identities()}:
         return True
     return last is None or now - float(last) >= max_age_s

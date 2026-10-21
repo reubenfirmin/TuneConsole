@@ -15,7 +15,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -26,7 +26,7 @@ def _unit(deg):
 
 
 def _track(store, title, artist, *, genre="", xy=None):
-    store.upsert_track(f"v_{title}", title, artist, "", 200, thumbnail="t.jpg")
+    store.tracks.upsert_track(f"v_{title}", title, artist, "", 200, thumbnail="t.jpg")
     k = identity_key(title, artist)
     if genre:
         store.conn.execute("UPDATE tracks SET genre=? WHERE identity_key=?", (genre, k))
@@ -43,21 +43,21 @@ def _track(store, title, artist, *, genre="", xy=None):
 # --- keys_in_families / library_genre_families -------------------------------------------------
 
 def test_keys_in_families_filters_by_family_and_drops_untagged(store):
-    store.upsert_identity("m", "c", None, True)
+    store.identities.upsert_identity("m", "c", None, True)
     a = _track(store, "Goa One", "A", genre="goa trance")     # -> trance family
     b = _track(store, "Techno One", "B", genre="acid techno")  # -> techno family
     _track(store, "Untagged", "C")                             # no genre -> never included
-    keys = store.keys_in_families(["trance"])
+    keys = store.rec_query.keys_in_families(["trance"])
     assert a in keys and b not in keys
     assert all("Untagged" not in k for k in keys)
 
 
 def test_library_genre_families_lists_present_families_with_counts(store):
-    store.upsert_identity("m", "c", None, True)
+    store.identities.upsert_identity("m", "c", None, True)
     _track(store, "Goa One", "A", genre="goa trance")
     _track(store, "Goa Two", "B", genre="psytrance")
     _track(store, "Techno", "C", genre="acid techno")
-    fams = {f["family"]: f["n"] for f in store.library_genre_families()}
+    fams = {f["family"]: f["n"] for f in store.rec_query.library_genre_families()}
     assert fams.get("trance") == 2
     assert fams.get("techno") == 1
 
@@ -68,7 +68,7 @@ def test_cluster_expand_allow_restricts_candidates(store):
     kp = _track(store, "Seed", "P", genre="goa trance", xy=_unit(0))
     ka = _track(store, "Near Trance", "A", genre="psytrance", xy=_unit(10))
     kb = _track(store, "Near Techno", "B", genre="acid techno", xy=_unit(12))
-    allow = store.keys_in_families(["trance"])
+    allow = store.rec_query.keys_in_families(["trance"])
     out = [k for k, _ in embed.cluster_expand(store, pos_keys=[kp], allow=allow, topn=5)]
     assert ka in out                      # trance candidate kept
     assert kb not in out                  # techno candidate filtered out
@@ -97,16 +97,16 @@ def test_genres_route_lists_subgenres(store):
 
 
 def test_keys_in_genre_selection_matches_genre_or_family(store):
-    store.upsert_identity("m", "c", None, True)
+    store.identities.upsert_identity("m", "c", None, True)
     goa = _track(store, "Goa", "A", genre="goa trance")
     psy = _track(store, "Psy", "B", genre="psytrance")
     tek = _track(store, "Tek", "C", genre="acid techno")
     # a specific sub-genre token matches only that genre
-    assert store.keys_in_genre_selection(["goa trance"]) == {goa}
+    assert store.rec_query.keys_in_genre_selection(["goa trance"]) == {goa}
     # a family token matches every genre in the family
-    assert store.keys_in_genre_selection(["trance"]) == {goa, psy}
+    assert store.rec_query.keys_in_genre_selection(["trance"]) == {goa, psy}
     # mixed tokens union
-    assert store.keys_in_genre_selection(["goa trance", "techno"]) == {goa, tek}
+    assert store.rec_query.keys_in_genre_selection(["goa trance", "techno"]) == {goa, tek}
 
 
 def test_expand_route_respects_allow_genres_subgenre(store):

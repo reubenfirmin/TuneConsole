@@ -35,7 +35,7 @@ def _cfg(*names_enabled):
 
 
 def _track(store, title="Hyperballad", artist="Bjork"):
-    tid = store.upsert_track("v_" + title, title, artist, None, 200)
+    tid = store.tracks.upsert_track("v_" + title, title, artist, None, 200)
     return {"id": tid, "video_id": "v_" + title, "title": title, "artist": artist,
             "mb_recording_id": None}
 
@@ -53,9 +53,9 @@ def test_first_in_order_fills_and_disagreement_is_recorded(store):
     dc = FakeProv("discogs", {"Hyperballad": {"genre": "Art Pop", "year": "1995"}})
     _run(store, [t], [mb, dc], _cfg(("musicbrainz", True), ("discogs", True)))
     # first provider in order wins the canonical fill
-    assert store.get_track_enrichment(t["id"]) == ("Electronic", "1995")
+    assert store.tracks.get_track_enrichment(t["id"]) == ("Electronic", "1995")
     # genre disagreement recorded (year agrees -> no year conflict)
-    rows = store.unresolved_conflicts_for_playlist  # exists
+    rows = store.enrichment.unresolved_conflicts_for_playlist  # exists
     c = store.conn.execute("SELECT field, candidates FROM enrichment_conflict WHERE track_id=?",
                            (t["id"],)).fetchall()
     assert len(c) == 1 and c[0]["field"] == "genre"
@@ -85,7 +85,7 @@ def test_mbid_from_first_provider_is_visible_to_later_one(store):
 
     ab = NeedsMbid("acousticbrainz")
     _run(store, [t], [mb, ab], _cfg(("musicbrainz", True), ("acousticbrainz", True)))
-    assert store.get_track_audio(t["id"])[0] == 128.0
+    assert store.tracks.get_track_audio(t["id"])[0] == 128.0
 
 
 def test_numeric_within_tolerance_does_not_conflict(store):
@@ -103,7 +103,7 @@ def test_disabled_provider_is_skipped(store):
     dc = FakeProv("discogs", {"Hyperballad": {"genre": "Pop"}})
     _run(store, [t], [mb, dc], _cfg(("musicbrainz", True), ("discogs", False)))
     assert dc.calls == []                          # discogs never probed
-    assert store.get_track_enrichment(t["id"])[0] == "Rock"
+    assert store.tracks.get_track_enrichment(t["id"])[0] == "Rock"
 
 
 def test_unavailable_provider_is_skipped_with_notice(store):
@@ -166,6 +166,6 @@ def test_real_provider_request_outcome_controls_completion_and_retains_audit(sto
                               registry={"musicbrainz": musicbrainz})
     assert bool(completed) == checked
     assert requests
-    attempts = store.enrichment_attempts(identity_key("Hyperballad", "Bjork"))
+    attempts = store.enrichment.enrichment_attempts(identity_key("Hyperballad", "Bjork"))
     assert attempts["musicbrainz"]["status"] == ("no_match" if checked else "retry")
     assert attempts["musicbrainz"]["fields"] == {}

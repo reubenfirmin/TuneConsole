@@ -9,8 +9,8 @@ from tests.test_home_other_genres import seed_genres
 @pytest.mark.parametrize("failure", ["network", "http", "unprocessable", "missing", "invalid", "empty"])
 def test_mix_regeneration_recovers_from_failure(live_app, store, page, endpoint, failure):
     seed_genres(store)
-    store.set_setting("last_sync_at", "1")
-    store.set_setting("onboard_dismissed", "1")
+    store.settings.set_setting("last_sync_at", "1")
+    store.settings.set_setting("onboard_dismissed", "1")
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))

@@ -70,7 +70,7 @@ def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED) -> l
         k = rec_params.get_param(store, "modes_k")
     if min_members is None:
         min_members = rec_params.get_param(store, "modes_min_members")
-    snapshot = store.content_generation()
+    snapshot = store.rec_model.content_generation()
     space = embed.content_space_id(store, snapshot=snapshot)
     keys, V, _idx = embed.load_content_vectors(store, snapshot=snapshot)
     if V is None or len(keys) < max(int(min_members), _MIN_CORPUS):

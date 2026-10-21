@@ -26,7 +26,7 @@ def _baseline_genre_shares(store) -> dict:
     """Library share per facet token (family and subgenre), from the owned-track genre distribution.
     corpus_distribution is keyed by raw genre; fold it into the same family/subgenre tokens the
     transient facets use so shares are directly comparable."""
-    corpus = store.corpus_distribution("genre")
+    corpus = store.charts.corpus_distribution("genre")
     total = sum(corpus.values()) or 1
     counts: dict = {}
     for g, c in corpus.items():
@@ -45,7 +45,7 @@ def ranked_subjects(store, now) -> list:
     The route walks this list and renders the first subject that actually resolves to a Wikipedia
     card, so a rotation landing on a subject with no good page never blanks the card."""
     leans = transient.facet_leans(store, now)
-    favorites = {_norm(a["artist"]) for a in store.top_artists(limit=FAVORITE_TOP_N)}
+    favorites = {_norm(a["artist"]) for a in store.charts.top_artists(limit=FAVORITE_TOP_N)}
     genre_base = _baseline_genre_shares(store)
     scored = []
     for facet, strength in leans.items():
@@ -129,7 +129,7 @@ def subject_color(subj) -> str:
 
 def _genres_in_token(store, token) -> list:
     """Raw library genres that fold into a facet token (its family or its own subgenre name)."""
-    return [g for g in store.corpus_distribution("genre")
+    return [g for g in store.charts.corpus_distribution("genre")
             if genre_map.family(g) == token or genre_map.subgenre(g) == token]
 
 
@@ -139,9 +139,9 @@ def decorate(store, subj) -> dict:
     has no image (the card always wants one); seed is the library item the explorer clusters around."""
     color = subject_color(subj)
     if subj["kind"] == "artist":
-        return {"color": color, "thumbnail": store.artist_thumbnail(subj["display"]),
+        return {"color": color, "thumbnail": store.charts.artist_thumbnail(subj["display"]),
                 "seed": subj["display"], "genre": None}
     token = subj["subject"].split(":", 1)[1]
-    rep = store.genre_representative(_genres_in_token(store, token))
+    rep = store.charts.genre_representative(_genres_in_token(store, token))
     return {"color": color, "thumbnail": rep["thumbnail"] if rep else None,
             "seed": rep["artist"] if rep else None, "genre": token}

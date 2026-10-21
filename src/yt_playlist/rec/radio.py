@@ -11,7 +11,6 @@ import numpy as np
 
 from yt_playlist.library.listen_derive import classify_exit
 from yt_playlist.rec import embed, rec_params, surfaces, taste_modes, transient
-from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
 
 WATCH_URL = "https://music.youtube.com/watch?v={vid}"
@@ -129,14 +128,14 @@ def _recent_radio_keys(store, now) -> set:
     days = float(rec_params.get_param(store, "radio_freshness_days"))
     if days <= 0:
         return set()
-    ytm_ids = {store.get_setting(RADIO_DECK_SETTING["A"]), store.get_setting(RADIO_DECK_SETTING["B"]),
-               store.get_setting(RADIO_PLAYLIST_SETTING)}
+    ytm_ids = {store.settings.get_setting(RADIO_DECK_SETTING["A"]), store.settings.get_setting(RADIO_DECK_SETTING["B"]),
+               store.settings.get_setting(RADIO_PLAYLIST_SETTING)}
     ytm_ids.discard(None)
     ytm_ids.discard("")
     if not ytm_ids:
         return set()
     since = now - days * 86400.0
-    return store.plays_by_list_ids_since(ytm_ids, since)
+    return store.rec_query.plays_by_list_ids_since(ytm_ids, since)
 
 
 def _sample_ranked(ranked, variety):
@@ -163,7 +162,7 @@ def _score_map(store, now):
     """{key: taste score} over persisted collaborative vectors, tilted by the live layered model, or
     None when the model is not built yet. Mirrors surfaces.for_you's warm branch: persisted reads
     only, no rebuild."""
-    if not store.rec_vectors_count():
+    if not store.rec_model.rec_vectors_count():
         return None
     pt = surfaces.playlist_taste(store)
     keys, V, idx = embed.load_vectors(store)
@@ -217,7 +216,7 @@ def skip_penalty(artist, mode_id, session, now, params) -> float:
 def _axis_info(store, keys):
     """{key: (family, sub, decade, artist)} for the session tilt, resolved exactly like
     scoring._axis_weights_for. Only called when a tilt is set (else the tilt is a neutral no-op)."""
-    dao = RecDao(store)
+    dao = store.rec_query
     genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
     out = {}
     for k in keys:
@@ -294,7 +293,7 @@ def pick_next(store, session, now) -> dict | None:
     def _eligible_ranked():
         excl = _exclusions(session)
         candidates = [k for k in scores if k not in excl]
-        meta = store.tracks_by_keys(candidates)
+        meta = store.rec_query.tracks_by_keys(candidates)
         eligible = [k for k in candidates if meta.get(k) and meta[k].get("video_id")]
         return meta, sorted(eligible, key=lambda k: -scores[k])[:params["pool"]]
 
@@ -661,10 +660,10 @@ def record_skip(store, session, video_id, now) -> None:
     when the video id does not resolve to a library key (nothing to penalize)."""
     if not video_id:
         return
-    key = store.identity_key_for_video(video_id)
+    key = store.tracks.identity_key_for_video(video_id)
     if not key:
         return
-    m = store.tracks_by_keys([key]).get(key) or {}
+    m = store.rec_query.tracks_by_keys([key]).get(key) or {}
     session.skips.append((m.get("artist"), _nearest_mode(key, _modeinfo(store)), now))
 
 

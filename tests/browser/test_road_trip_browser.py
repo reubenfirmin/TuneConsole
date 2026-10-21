@@ -33,13 +33,13 @@ def _free_port():
 def live_road_trip_app(monkeypatch):
     store = Store(":memory:")
     store.init_schema()
-    iid = store.upsert_identity("Main", "cred", None, True)
+    iid = store.identities.upsert_identity("Main", "cred", None, True)
     # A handful of songs of your own, not one: your side of the mix is the whole collection, so a
     # one-song library leaves nothing to swap in when a slot is crossed out.
-    pid = store.upsert_playlist(iid, "PL1", "Mix", 6, "h", 1.0)
-    mine = [store.upsert_track(f"v{i}", f"My Song {i}", f"My Artist {i}", "Alb", 200, 1)
+    pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 6, "h", 1.0)
+    mine = [store.tracks.upsert_track(f"v{i}", f"My Song {i}", f"My Artist {i}", "Alb", 200, 1)
             for i in range(6)]
-    store.set_playlist_tracks(pid, mine)
+    store.playlists.set_playlist_tracks(pid, mine)
     # The server runs in this process, so patching the Deezer facts lookup here keeps the build
     # (which enriches every "theirs" candidate) entirely offline.
     monkeypatch.setattr(road_trip_rec, "_facts",
@@ -100,9 +100,9 @@ def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monke
     expect(page.locator(".rt-draft")).to_be_visible(timeout=10000)
     expect(page.locator(".rt-list .rt-row").first).to_be_visible()
     expect(page.locator(".rt-draft button:has-text('Save to YouTube')")).to_be_visible(timeout=10000)
-    assert store.list_road_trip_recipes()[0]["last_playlist_id"] is None
-    rid = store.list_road_trip_recipes()[0]["id"]
-    assert store.get_road_trip_draft(rid) is not None
+    assert store.road_trip.list_road_trip_recipes()[0]["last_playlist_id"] is None
+    rid = store.road_trip.list_road_trip_recipes()[0]["id"]
+    assert store.road_trip.get_road_trip_draft(rid) is not None
     expect(page.locator(".rt-axes .fp-slider").first).to_be_visible()
 
     # Draft songs open the same global menu as library tracks, while Swap remains immediate.
@@ -136,7 +136,7 @@ def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monke
         page.wait_for_function("form => !form.isConnected", arg=old_form)
         expect(mix).to_have_js_property("open", True)
         expect(passenger).to_have_js_property("open", False)
-        assert store.get_road_trip_recipe(rid)[field] == expected
+        assert store.road_trip.get_road_trip_recipe(rid)[field] == expected
 
     page.get_by_role("button", name="Choose passenger music").click()
     expect(passenger).to_have_js_property("open", True)
@@ -154,7 +154,7 @@ def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monke
     page.wait_for_function("form => !form.isConnected", arg=old_form)
     expect(genre_slider).to_have_value("0")
     expect(passenger).to_have_js_property("open", True)
-    state = store.get_road_trip_draft(rid)
+    state = store.road_trip.get_road_trip_draft(rid)
     assert state["targets"]["theirs"][posted["axis"][0]] == 0.0
     assert state["targets"]["mine"] == {}
     assert state["stats"]["their_count"] == 0
@@ -164,7 +164,7 @@ def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monke
     passenger.get_by_role("button", name="Reset genre balance").click()
     page.wait_for_function("form => !form.isConnected", arg=old_form)
     expect(genre_slider).to_have_value("100")
-    assert store.get_road_trip_draft(rid)["targets"]["theirs"] == {}
+    assert store.road_trip.get_road_trip_draft(rid)["targets"]["theirs"] == {}
 
     passenger.locator("summary").press("Enter")
     expect(page.locator(".rt-step[open]")).to_have_count(0)
@@ -198,27 +198,27 @@ def test_build_curate_then_save_road_trip_recipe(live_road_trip_app, page, monke
         expect(loading.get_by_role("heading", name="Wiring up your playlist")).to_be_visible()
         expect(page.get_by_role("button", name="Save to YouTube")).to_be_disabled()
         assert saving.is_set()
-        assert store.get_road_trip_recipe(rid)["last_playlist_id"] is None
+        assert store.road_trip.get_road_trip_recipe(rid)["last_playlist_id"] is None
     finally:
         release.set()
     page.wait_for_url("**/playlist/*", timeout=10000)
     assert loading.is_closed()
 
-    recipes = store.list_road_trip_recipes()
+    recipes = store.road_trip.list_road_trip_recipes()
     assert len(recipes) == 1
     last_ytm = recipes[0]["last_playlist_id"]
     assert last_ytm is not None
-    assert store.get_playlist_groups()[last_ytm] == GENERATED_GROUP
-    playlist = next(p for p in store.get_playlists() if p.ytm_playlist_id == last_ytm)
+    assert store.playlists.get_playlist_groups()[last_ytm] == GENERATED_GROUP
+    playlist = next(p for p in store.playlists.get_playlists() if p.ytm_playlist_id == last_ytm)
     expect(page).to_have_url(f"{base_url}/playlist/{playlist.id}")
 
 
 def test_failed_save_closes_loading_screen_and_keeps_the_draft(live_road_trip_app, page, monkeypatch):
     base_url, store = live_road_trip_app
-    rid = store.save_road_trip_recipe(None, "Save failure", 100, [], [], 20, 1000)
-    state = road_trip_rec.start_draft(store, store.get_road_trip_recipe(rid), 1000, seed=7)
+    rid = store.road_trip.save_road_trip_recipe(None, "Save failure", 100, [], [], 20, 1000)
+    state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
     road_trip_rec.finish_draft(state, store, 1000)
-    store.save_road_trip_draft(rid, state, 1000)
+    store.road_trip.save_road_trip_draft(rid, state, 1000)
     release = threading.Event()
 
     def failed_save(*args, **kwargs):
@@ -239,13 +239,13 @@ def test_failed_save_closes_loading_screen_and_keeps_the_draft(live_road_trip_ap
     assert loading.is_closed()
     expect(page).to_have_url(f"{base_url}/road_trip")
     expect(page.locator(".rt-row")).to_have_count(len(state["picked"]))
-    assert store.get_road_trip_draft(rid)["saved_playlist_id"] is None
+    assert store.road_trip.get_road_trip_draft(rid)["saved_playlist_id"] is None
 
 
 def test_passenger_balance_stays_visible_during_background_search(live_road_trip_app, page, monkeypatch):
     base_url, store = live_road_trip_app
-    rid = store.save_road_trip_recipe(None, "Three genres", 0, [], ["Rock", "Pop", "Jazz"], 100, 1000)
-    state = road_trip_rec.start_draft(store, store.get_road_trip_recipe(rid), 1000, seed=1)
+    rid = store.road_trip.save_road_trip_recipe(None, "Three genres", 0, [], ["Rock", "Pop", "Jazz"], 100, 1000)
+    state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=1)
     state["pool"] = [road_trip_rec._candidate(
         f"{genre}-{i}", f"Song {i}", f"Artist {genre} {i}", "", None, 300, "theirs", genre, 1995)
         for genre, count in [("Rock", 5), ("Pop", 3), ("Jazz", 2)] for i in range(count)]
@@ -254,7 +254,7 @@ def test_passenger_balance_stays_visible_during_background_search(live_road_trip
     state["own_facts_left"] = 0
     state["targets"]["theirs"] = {"genre:Rock": .5, "genre:Pop": .3, "genre:Jazz": .2}
     road_trip_rec.finish_draft(state, store, 1000)
-    store.save_road_trip_draft(rid, state, 1000)
+    store.road_trip.save_road_trip_draft(rid, state, 1000)
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
     page.goto(f"{base_url}/road_trip")
@@ -269,7 +269,7 @@ def test_passenger_balance_stays_visible_during_background_search(live_road_trip
         sliders.first.evaluate("(el, value) => { el.value = value; el.dispatchEvent(new Event('input', {bubbles: true})); }", value)
     for slider, value in zip(sliders.all(), ["20", "48", "32"]):
         expect(slider).to_have_value(value)
-    assert store.get_road_trip_draft(rid)["targets"]["theirs"]["genre:Rock"] == .5
+    assert store.road_trip.get_road_trip_draft(rid)["targets"]["theirs"]["genre:Rock"] == .5
 
     try:
         old_form = page.locator(".rt-form").element_handle()
@@ -282,7 +282,7 @@ def test_passenger_balance_stays_visible_during_background_search(live_road_trip
             expect(slider).to_be_disabled()
             expect(slider).to_have_value(value)
         assert held
-        assert store.get_road_trip_draft(rid)["targets"]["theirs"] == {
+        assert store.road_trip.get_road_trip_draft(rid)["targets"]["theirs"] == {
             "genre:Rock": .2, "genre:Pop": .48, "genre:Jazz": .32}
     finally:
         for worker in held:
@@ -302,8 +302,8 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     genres = ["Rock", "Pop", "Jazz"]
-    rid = store.save_road_trip_recipe(None, "Add music", 0, [], genres, 100, 1000)
-    state = road_trip_rec.start_draft(store, store.get_road_trip_recipe(rid), 1000, seed=7)
+    rid = store.road_trip.save_road_trip_recipe(None, "Add music", 0, [], genres, 100, 1000)
+    state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
     state["pool"] = [road_trip_rec._candidate(
         f"{genre}-{i}", f"Song {i}", f"Artist {genre} {i}", "", None, 300, "theirs", genre, 1995)
         for genre in genres for i in range(12)]
@@ -313,7 +313,7 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
     state["done_inputs"] = genres.copy()
     state["own_facts_left"] = 0
     road_trip_rec.finish_draft(state, store, 1000)
-    store.save_road_trip_draft(rid, state, 1000)
+    store.road_trip.save_road_trip_draft(rid, state, 1000)
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
     monkeypatch.setattr(road_trip_rec, "artist_genre",
@@ -342,10 +342,10 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
         page.wait_for_function("form => !form.isConnected", arg=old_form)
         assert not errors
         assert held
-        waiting = store.get_road_trip_draft(rid)
+        waiting = store.road_trip.get_road_trip_draft(rid)
         assert waiting["building"]
         assert not any(c["genre"] == new_genre for c in waiting["pool"])
-        assert new_genre in {road_trip_rec._canon_genre(g) for g in store.get_road_trip_recipe(rid)["genres"]}
+        assert new_genre in {road_trip_rec._canon_genre(g) for g in store.road_trip.get_road_trip_recipe(rid)["genres"]}
         if addition == "artist":
             expect(passenger.locator(".genre-chip.is-theirs").filter(has_text="Classic Rock like Journey")).to_be_visible()
             expect(passenger.locator(".rt-axis-context").filter(has_text="Like Journey")).to_be_visible()
@@ -358,7 +358,7 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
         for worker in held:
             worker()
     expect(passenger.get_by_role("slider", name=new_genre, exact=True)).to_be_enabled(timeout=10000)
-    assert any(c["genre"] == new_genre for c in store.get_road_trip_draft(rid)["picked"])
+    assert any(c["genre"] == new_genre for c in store.road_trip.get_road_trip_draft(rid)["picked"])
     page.reload()
     for genre, pct in zip(genres + [new_genre], [45, 23, 7, 25]):
         expect(passenger.get_by_role("slider", name=genre, exact=True)).to_have_value(str(pct))
@@ -372,9 +372,9 @@ def test_track_sources_distinguish_blend_on_desktop_and_mobile(live_road_trip_ap
     songs = [{"key": f"own-{i}", "video_id": f"own-{i}", "title": f"Library song {i}",
               "artist": f"Library artist {i}", "album": "", "thumbnail": None, "duration": 300,
               "genre": "Rock" if i % 2 else "Jazz", "year": 1995, "liked": False} for i in range(12)]
-    monkeypatch.setattr(store, "library_songs", lambda: songs)
-    rid = store.save_road_trip_recipe(None, "Three pools", 50, [], ["Rock"], 60, 1000)
-    state = road_trip_rec.start_draft(store, store.get_road_trip_recipe(rid), 1000, seed=7)
+    monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
+    rid = store.road_trip.save_road_trip_recipe(None, "Three pools", 50, [], ["Rock"], 60, 1000)
+    state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
     state["pool"] = [road_trip_rec._candidate(
         f"their-{i}", f"Passenger song {i}", f"Passenger artist {i}", "", None, 300,
         "theirs", "Pop", 1995) for i in range(12)]
@@ -387,7 +387,7 @@ def test_track_sources_distinguish_blend_on_desktop_and_mobile(live_road_trip_ap
     state["picked"] = [c for c in state["picked"] if c["mix_source"] != "blend" or c is first_blend]
     state["picks"] = [c["video_id"] for c in state["picked"]]
     state.pop("mix_version")
-    store.save_road_trip_draft(rid, state, 1000)
+    store.road_trip.save_road_trip_draft(rid, state, 1000)
     page.goto(f"{base_url}/road_trip")
     expect(page.locator(".rt-pool-counts")).to_have_text("4 Yours · 4 Theirs · 4 Blend")
     expect(page.locator(".rt-balance-control output")).to_have_text("34% Yours · 33% Theirs · 33% Blend")
@@ -411,8 +411,8 @@ def test_track_sources_distinguish_blend_on_desktop_and_mobile(live_road_trip_ap
 def test_saved_overallocated_passenger_balance_is_normalized(live_road_trip_app, page, monkeypatch, legacy_backend):
     base_url, store = live_road_trip_app
     genres = ["Post-Punk", "Singer-Songwriter", "Indie Rock", "Alternative Rock"]
-    rid = store.save_road_trip_recipe(None, "Saved balance", 0, [], genres, 60, 1000)
-    state = road_trip_rec.start_draft(store, store.get_road_trip_recipe(rid), 1000, seed=1)
+    rid = store.road_trip.save_road_trip_recipe(None, "Saved balance", 0, [], genres, 60, 1000)
+    state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=1)
     state["pool"] = [road_trip_rec._candidate(
         f"track-{i}", f"Song {i}", f"Artist {i}", "", None, 300, "theirs", genre, 1995)
         for i, genre in enumerate(genres)]
@@ -426,7 +426,7 @@ def test_saved_overallocated_passenger_balance_is_normalized(live_road_trip_app,
         row["target"] = state["targets"]["theirs"].get(row["key"])
         if legacy_backend:
             row.pop("balance_pct", None)
-    store.save_road_trip_draft(rid, state, 1000)
+    store.road_trip.save_road_trip_draft(rid, state, 1000)
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
     if legacy_backend:
@@ -442,7 +442,7 @@ def test_saved_overallocated_passenger_balance_is_normalized(live_road_trip_app,
         expect(passenger.get_by_text("Restart TuneConsole to load the updated mix controls.")).to_be_visible()
         for genre, pct in zip(genres, [47, 12, 25, 16]):
             expect(passenger.get_by_role("slider", name=genre, exact=True)).to_have_value(str(pct))
-        assert store.get_road_trip_draft(rid)["targets"]["theirs"] == state["targets"]["theirs"]
+        assert store.road_trip.get_road_trip_draft(rid)["targets"]["theirs"] == state["targets"]["theirs"]
         return
 
     try:
@@ -451,7 +451,7 @@ def test_saved_overallocated_passenger_balance_is_normalized(live_road_trip_app,
         page.wait_for_function("form => !form.isConnected", arg=old_form)
         for genre, pct in zip(genres, [100, 0, 0, 0]):
             expect(passenger.get_by_role("slider", name=genre, exact=True)).to_have_value(str(pct))
-        assert sum(store.get_road_trip_draft(rid)["targets"]["theirs"].values()) == 1
+        assert sum(store.road_trip.get_road_trip_draft(rid)["targets"]["theirs"].values()) == 1
     finally:
         for worker in held:
             worker()
@@ -459,10 +459,10 @@ def test_saved_overallocated_passenger_balance_is_normalized(live_road_trip_app,
     expect(passenger.get_by_role("slider", name="Post-Punk", exact=True)).to_be_enabled(timeout=10000)
     # A background enrichment can discover another genre after the targets were set. Its observed
     # share must not be added on top of the existing 100% requested budget on the next render.
-    saved = store.get_road_trip_draft(rid)
+    saved = store.road_trip.get_road_trip_draft(rid)
     saved["axes"]["theirs"].append({"key": "genre:Funk", "kind": "genre", "name": "Funk",
                                      "share": .4, "target": None})
-    store.save_road_trip_draft(rid, saved, 1000)
+    store.road_trip.save_road_trip_draft(rid, saved, 1000)
     page.reload()
     for genre, pct in zip(genres + ["Funk"], [100, 0, 0, 0, 0]):
         expect(passenger.get_by_role("slider", name=genre, exact=True)).to_have_value(str(pct))

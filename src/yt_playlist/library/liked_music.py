@@ -31,7 +31,7 @@ class LikedMusic:
         """The one primitive every LM shim shares: rate the song on YouTube and mirror the like in
         the local LM playlist so the derived `liked` flag / membership flips at once."""
         with_retry(lambda: client.rate_song(video_id, "LIKE" if on else "INDIFFERENT"))
-        self.store.set_song_liked(identity_id, video_id, on)
+        self.store.playlists.set_song_liked(identity_id, video_id, on)
 
     def add(self, playlist_id, tracks, client, now) -> dict:
         """"Add" on Liked Music = like each song. YouTube rejects directly-added LM items, so this is
@@ -46,12 +46,12 @@ class LikedMusic:
         for t in items:
             # Seed the catalog row FIRST: set_song_liked (inside set_rating) looks the song up by
             # video_id, so a brand-new alternate version must exist in `tracks` before we can like it.
-            self.store.upsert_track(t["videoId"], t.get("title", ""), t.get("artist"),
+            self.store.tracks.upsert_track(t["videoId"], t.get("title", ""), t.get("artist"),
                                     t.get("album"), t.get("duration"), 1,
                                     None, None, t.get("album_browse"), t.get("thumbnail"))
             self.set_rating(pl.identity_id, t["videoId"], True, client)
             titles.append(t.get("title", ""))
-        self.store.record_action(ADD_TRACKS,
+        self.store.actions.record_action(ADD_TRACKS,
                                  json.dumps({"playlist": pl.title, "added": len(items), "titles": titles}),
                                  "{}", "executed", "{}", now)
         return {"added": len(items), "skipped": 0, "count": len(items)}
@@ -61,15 +61,15 @@ class LikedMusic:
         Counterpart to executor.remove_track for the LM case."""
         pl = self._require_lm(playlist_id)
         self.set_rating(pl.identity_id, video_id, False, client)
-        count = len(self.store.get_playlist_track_ids(playlist_id))
-        self.store.set_playlist_track_count(playlist_id, count, now)
-        self.store.record_action(REMOVE_TRACK,
+        count = len(self.store.playlists.get_playlist_track_ids(playlist_id))
+        self.store.playlists.set_playlist_track_count(playlist_id, count, now)
+        self.store.actions.record_action(REMOVE_TRACK,
                                  json.dumps({"playlist": pl.title, "video_id": video_id, "unliked": True}),
                                  "{}", "executed", "{}", now)
         return {"count": count}
 
     def _require_lm(self, playlist_id):
-        pl = self.store.get_playlist(playlist_id)
+        pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
             raise ValueError("playlist no longer exists")
         if not self.is_lm(pl):                            # guard: these shims are Liked-Music-only

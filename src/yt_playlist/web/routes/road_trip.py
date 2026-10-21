@@ -65,16 +65,16 @@ def build(ctx) -> APIRouter:
     def _draft_ctx(recipe_id=None):
         """The draft to show: a named recipe's, else whichever was touched most recently."""
         entry = (None if recipe_id is None
-                 else {"recipe_id": recipe_id, "state": store.get_road_trip_draft(recipe_id)})
+                 else {"recipe_id": recipe_id, "state": store.road_trip.get_road_trip_draft(recipe_id)})
         if entry is None or entry["state"] is None:
-            entry = store.latest_road_trip_draft()
+            entry = store.road_trip.latest_road_trip_draft()
         if not entry or not entry.get("state"):
             return None
         # A draft persisted by an older build must not crash the page it reopens on.
         state, rid = road_trip_rec.normalized(entry["state"], store, now_fn()), entry["recipe_id"]
         if state.get("building") and rid not in _BUILDING:      # orphaned build: settle it
             state = road_trip_rec.finish_draft(state, store, now_fn())
-            store.save_road_trip_draft(rid, state, now_fn())
+            store.road_trip.save_road_trip_draft(rid, state, now_fn())
         tracks = road_trip_rec.draft_tracks(state)
         # Progress polls of an unchanged draft are one offer, rather than new opportunities.
         fingerprint = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()[:16]
@@ -84,7 +84,7 @@ def build(ctx) -> APIRouter:
                                                 (request_id,)).fetchone()
         if not already_shown:
             measurement.record_recommendations(store, "road_trip", [
-                {**track, "key": store.identity_key_for_video(track["video_id"]) or
+                {**track, "key": store.tracks.identity_key_for_video(track["video_id"]) or
                                 identity_key(track["title"], track["artist"]),
                  "out_of_corpus": track.get("source") == "theirs"} for track in tracks],
                 now_fn(), lane="draft", ranker="road-trip-mix", request_id=request_id,
@@ -102,9 +102,9 @@ def build(ctx) -> APIRouter:
         draft is shown); `blank` empties the editor for a new one."""
         draft = _draft_ctx(recipe_id)
         loaded = recipe_id if recipe_id is not None else (draft or {}).get("recipe_id")
-        form_recipe = None if blank or loaded is None else store.get_road_trip_recipe(loaded)
+        form_recipe = None if blank or loaded is None else store.road_trip.get_road_trip_recipe(loaded)
         return templates.TemplateResponse(request, "_partials/road_trip_body.html",
-                                          {"recipes": store.list_road_trip_recipes(),
+                                          {"recipes": store.road_trip.list_road_trip_recipes(),
                                            "draft": draft, "error": error,
                                            "form_recipe": form_recipe or BLANK_RECIPE})
 
@@ -117,8 +117,8 @@ def build(ctx) -> APIRouter:
         loaded = (draft or {}).get("recipe_id")
         return templates.TemplateResponse(
             request, "road_trip.html",
-            {"recipes": store.list_road_trip_recipes(), "draft": draft,
-             "form_recipe": (store.get_road_trip_recipe(loaded) if loaded is not None else None)
+            {"recipes": store.road_trip.list_road_trip_recipes(), "draft": draft,
+             "form_recipe": (store.road_trip.get_road_trip_recipe(loaded) if loaded is not None else None)
                             or BLANK_RECIPE})
 
     @router.post("/road_trip/recipes/{recipe_id}/edit")
@@ -130,7 +130,7 @@ def build(ctx) -> APIRouter:
     def new_road_trip(request: Request):
         """Clear the editor without mixing route creation into the live tuning controls."""
         return templates.TemplateResponse(request, "_partials/road_trip_body.html",
-                                          {"recipes": store.list_road_trip_recipes(),
+                                          {"recipes": store.road_trip.list_road_trip_recipes(),
                                            "draft": None, "error": None,
                                            "form_recipe": BLANK_RECIPE})
 
@@ -150,7 +150,7 @@ def build(ctx) -> APIRouter:
         except (TypeError, ValueError):
             target_minutes = 60
         artists, genres = _clean_list(form.get("artists")), _clean_list(form.get("genres"))
-        previous = store.get_road_trip_recipe(recipe_id) if recipe_id is not None else None
+        previous = store.road_trip.get_road_trip_recipe(recipe_id) if recipe_id is not None else None
         previous_artists = {a.casefold() for a in (previous or {}).get("artists", [])}
         known_genres = {road_trip_rec._canon_genre(g) for g in genres}
         for artist in artists:
@@ -160,18 +160,18 @@ def build(ctx) -> APIRouter:
             if genre and genre not in known_genres:
                 genres.append(genre)
                 known_genres.add(genre)
-        recipe_id = store.save_road_trip_recipe(
+        recipe_id = store.road_trip.save_road_trip_recipe(
             recipe_id, name, own_pct, artists, genres, target_minutes, now_fn(),
             familiarity_pct=familiarity_pct,
             blacklist_genres=_clean_list(form.get("blacklist_genres")))
         # Editing the recipe a draft is already showing steers THAT draft rather than starting over:
         # tracks for a removed artist leave at once, an added one streams in, the rest is a re-pick.
-        state = store.get_road_trip_draft(recipe_id)
+        state = store.road_trip.get_road_trip_draft(recipe_id)
         if state is not None:
-            recipe = store.get_road_trip_recipe(recipe_id)
+            recipe = store.road_trip.get_road_trip_recipe(recipe_id)
             state = road_trip_rec.apply_recipe(
                 road_trip_rec.normalized(state, store, now_fn()), store, now_fn(), recipe)
-            store.save_road_trip_draft(recipe_id, state, now_fn())
+            store.road_trip.save_road_trip_draft(recipe_id, state, now_fn())
             _, client = _client()
             if state["pending"] and client is not None:
                 with _BUILD_LOCK:
@@ -181,7 +181,7 @@ def build(ctx) -> APIRouter:
 
     @router.delete("/road_trip/recipes/{recipe_id}")
     def delete_recipe(request: Request, recipe_id: int):
-        store.delete_road_trip_recipe(recipe_id)
+        store.road_trip.delete_road_trip_recipe(recipe_id)
         return _body(request)
 
     @router.post("/road_trip/recipes/{recipe_id}/build")
@@ -192,16 +192,16 @@ def build(ctx) -> APIRouter:
 
         Seeded randomly and told what the last build used, so running the same recipe again gives a
         different playlist."""
-        recipe = store.get_road_trip_recipe(recipe_id)
+        recipe = store.road_trip.get_road_trip_recipe(recipe_id)
         if recipe is None:
             return JSONResponse({"error": "recipe not found"}, status_code=404)
         _, client = _client()
         if client is None:
             return _body(request, recipe_id, error="Connect an account to build a playlist.")
-        previous = (store.get_road_trip_draft(recipe_id) or {}).get("picks") or []
+        previous = (store.road_trip.get_road_trip_draft(recipe_id) or {}).get("picks") or []
         state = road_trip_rec.start_draft(store, recipe, now_fn(), random.randrange(1 << 30),
                                           previous)
-        store.save_road_trip_draft(recipe_id, state, now_fn())
+        store.road_trip.save_road_trip_draft(recipe_id, state, now_fn())
         if state["building"]:
             with _BUILD_LOCK:            # registered here, not in the worker: a poll can land first
                 _BUILDING.add(recipe_id)
@@ -220,28 +220,28 @@ def build(ctx) -> APIRouter:
         try:
             with _draft_worker_lock(recipe_id):
                 while True:
-                    state = store.get_road_trip_draft(recipe_id)
+                    state = store.road_trip.get_road_trip_draft(recipe_id)
                     if state is None or not state.get("pending"):
                         break
                     road_trip_rec.add_other_input(state, store, client, state["pending"].pop(0))
-                    store.save_road_trip_draft(recipe_id, state, now_fn())
+                    store.road_trip.save_road_trip_draft(recipe_id, state, now_fn())
                 # Their side is in. Now tag YOUR untagged tracks so your half gets sliders too -
                 # last, because the playlist is already usable without it.
-                state = store.get_road_trip_draft(recipe_id)
+                state = store.road_trip.get_road_trip_draft(recipe_id)
                 if state is not None and state.get("own_facts_left"):
                     state["phase"] = "mine"
-                    store.save_road_trip_draft(recipe_id, state, now_fn())
+                    store.road_trip.save_road_trip_draft(recipe_id, state, now_fn())
                     road_trip_rec.fill_own_facts(state, store, now_fn())
-                    store.save_road_trip_draft(recipe_id, state, now_fn())
+                    store.road_trip.save_road_trip_draft(recipe_id, state, now_fn())
         except Exception as e:  # noqa: BLE001 - a failed lookup must not leave the draft stuck
             error = str(e) or type(e).__name__
             raise
         finally:
-            state = store.get_road_trip_draft(recipe_id)
+            state = store.road_trip.get_road_trip_draft(recipe_id)
             if state is not None:
                 if error:
                     state["build_error"] = error
-                store.save_road_trip_draft(
+                store.road_trip.save_road_trip_draft(
                     recipe_id, road_trip_rec.finish_draft(state, store, now_fn()), now_fn())
             with _BUILD_LOCK:
                 _BUILDING.discard(recipe_id)
@@ -258,11 +258,11 @@ def build(ctx) -> APIRouter:
         Most changes are pure re-picks. One isn't: dragging a slider past what the pool holds queues
         YouTube searches to deepen it (rec.set_share), which the background worker then runs - so if
         anything ends up pending, kick it off and let the panel poll, exactly as a build does."""
-        state = store.get_road_trip_draft(recipe_id)
+        state = store.road_trip.get_road_trip_draft(recipe_id)
         if state is None:
             return _body(request, error="That playlist is gone - build it again.")
         state = change(road_trip_rec.normalized(state, store, now_fn()))
-        store.save_road_trip_draft(recipe_id, state, now_fn())
+        store.road_trip.save_road_trip_draft(recipe_id, state, now_fn())
         _, client = _client()
         if state.get("pending") and client is not None:
             with _BUILD_LOCK:
@@ -330,15 +330,15 @@ def build(ctx) -> APIRouter:
 
     @router.delete("/road_trip/draft/{recipe_id}")
     def discard_draft(request: Request, recipe_id: int):
-        store.delete_road_trip_draft(recipe_id)
+        store.road_trip.delete_road_trip_draft(recipe_id)
         return _body(request)
 
     @router.post("/road_trip/draft/{recipe_id}/save")
     async def save_draft(request: Request, recipe_id: int):
         """Materialize exactly what's on screen as a YouTube playlist (Generated group: quarantined
         from the taste model and GC'd on the normal schedule), using the shared save/play feedback."""
-        recipe = store.get_road_trip_recipe(recipe_id)
-        state = store.get_road_trip_draft(recipe_id)
+        recipe = store.road_trip.get_road_trip_recipe(recipe_id)
+        state = store.road_trip.get_road_trip_draft(recipe_id)
         result = {"name": f"Road Trip: {recipe['name']}" if recipe else "Road Trip"}
 
         def response(error=None):
@@ -363,9 +363,9 @@ def build(ctx) -> APIRouter:
                         "target_minutes": state["target_minutes"],
                         "achieved_minutes": stats.get("minutes"), "own_count": stats.get("own_count"),
                         "their_count": stats.get("their_count")})
-            store.set_road_trip_last_playlist(recipe_id, saved["new_ytm"])
+            store.road_trip.set_road_trip_last_playlist(recipe_id, saved["new_ytm"])
             state["saved_playlist_id"] = saved["new_ytm"]
-            store.save_road_trip_draft(recipe_id, state, now_fn())
+            store.road_trip.save_road_trip_draft(recipe_id, state, now_fn())
             result.update(ytm=saved["new_ytm"], pid=saved["pid"], added=saved["added"])
             if saved["added"]:
                 measurement.record_action(store, "save", now_fn(), playlist_id=saved["pid"],

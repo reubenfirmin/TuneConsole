@@ -1,14 +1,14 @@
-from yt_playlist.rec import embed, recommend
+from yt_playlist.rec import embed, surfaces
 from yt_playlist.util.matching import identity_key
 
 
 def _two_clusters(store):
     """Two disjoint 6-track clusters (A in playlist PA, B in PB). identity_key = 'a0|ab' etc."""
-    iid = store.upsert_identity("main", "cred", None, True)
-    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(6)]
-    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(6)]
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PA", "PA", 6, "h", 0.0), A)
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PB", "PB", 6, "h2", 0.0), B)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(6)]
+    B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(6)]
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 6, "h", 0.0), A)
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 6, "h2", 0.0), B)
     return iid, A, B
 
 
@@ -30,10 +30,11 @@ def test_neighbors_for_unmodeled_uses_artist_proxy(store):
     # A generated (quarantined) track by artist 'AB' gets no vector of its own, but 'songs like this'
     # should still work, proxied through the AB tracks that ARE in the model.
     iid, A, B = _two_clusters(store)
-    g = store.upsert_track("gnew", "GNEW", "AB", None, None)
-    gpl = store.upsert_playlist(iid, "PG", "Gen", 1, "h2", 0.0)
-    store.set_playlist_tracks(gpl, [g])
-    store.set_playlist_group("PG", "Generated")
+    g = store.tracks.upsert_track("gnew", "GNEW", "AB", None, None)
+    gpl = store.playlists.upsert_playlist(iid, "PG", "Gen", 1, "h2", 0.0)
+    store.playlists.set_playlist_tracks(gpl, [g])
+    store.playlists.set_playlist_group("PG", "Generated")
+    store.playlists.mark_generated_playlist('PG')
     embed.build_and_store(store, dim=4)
 
     seed = identity_key("GNEW", "AB")
@@ -44,22 +45,22 @@ def test_neighbors_for_unmodeled_uses_artist_proxy(store):
 
 def test_for_you_uses_taste_neighbourhood_when_built(store):
     iid, A, _ = _two_clusters(store)
-    store.add_history_snapshot(iid, 1.0, ["a0|ab", "a1|ab"])   # you play the A cluster
+    store.history.add_history_snapshot(iid, 1.0, ["a0|ab", "a1|ab"])   # you play the A cluster
     embed.build_and_store(store, dim=4)
-    items = recommend.for_you(store, now=1000.0)
+    items = surfaces.for_you(store, now=1000.0)
     assert any(i.reason == "In your taste neighbourhood" for i in items)
 
 
 def test_complete_playlist_uses_same_artist_and_genre_not_track_embedding(store):
     iid, A, B = _two_clusters(store)
     for tid in A:
-        store.set_track_genre(tid, "Techno")
+        store.tracks.set_track_genre(tid, "Techno")
     for tid in B:
-        store.set_track_genre(tid, "Rock")
-    target = store.upsert_playlist(iid, "PT", "Target", 2, "h3", 0.0)
-    store.set_playlist_tracks(target, [A[0], A[1]])             # seed with two A tracks
+        store.tracks.set_track_genre(tid, "Rock")
+    target = store.playlists.upsert_playlist(iid, "PT", "Target", 2, "h3", 0.0)
+    store.playlists.set_playlist_tracks(target, [A[0], A[1]])             # seed with two A tracks
     embed.build_and_store(store, dim=4)
-    items = recommend.complete_playlist(store, target, limit=4)
+    items = surfaces.complete_playlist(store, target, limit=4)
     assert items
     assert all(i.artist == "AB" for i in items)                # same artist + genre; B is ineligible
 

@@ -22,7 +22,6 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
 from yt_playlist.library.live_plays import resolve_identity
-from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util.matching import identity_key
 
 
@@ -400,21 +399,21 @@ def import_takeout(store, raw, *, on_progress=None) -> dict:
     parsed, unparsed_dates = load_watch_history(raw)   # the .zip Takeout serves works as-is; JSON
                                                         # or the default HTML export, either way
     progress(f'Matching {len(parsed):,} history entries to your library…')
-    owned = set(RecDao(store).library_keys())
+    owned = set(store.rec_query.library_keys())
     matched_rows, unmatched = [], Counter()
     for p in parsed:
-        key = store.identity_key_for_video(p["video_id"]) if p["video_id"] else None
+        key = store.tracks.identity_key_for_video(p["video_id"]) if p["video_id"] else None
         if key is None and not p["video_id"]:
-            key = store.match_recording(p["title"], p["artist"])
+            key = store.tracks.match_recording(p["title"], p["artist"])
         if key not in owned:
             unmatched[p["artist"] or "?"] += 1
             continue
         matched_rows.append((key, p["video_id"], p["ts"]))
     progress(f'Saving {len(matched_rows):,} matched plays…')
-    plays_added = store.import_plays(ident, [(k, ts) for k, _v, ts in matched_rows])
-    events_added = store.import_play_events(ident, matched_rows)
+    plays_added = store.history.import_plays(ident, [(k, ts) for k, _v, ts in matched_rows])
+    events_added = store.history.import_play_events(ident, matched_rows)
     data = raw.encode() if isinstance(raw, str) else raw
-    import_id = store.record_takeout_import(
+    import_id = store.history.record_takeout_import(
         hashlib.sha256(data).hexdigest(), ident, time.time(), parsed, unparsed_dates)
     span_days = 0
     if parsed:
@@ -447,10 +446,10 @@ def seed_discovery_from_unmatched(store, unmatched_artists, now, min_plays=3) ->
     thumbnail with our empty ones (final-review finding). Seeding only ever ADDS new names.
 
     Returns how many artists were seeded."""
-    existing = {a.get("artist", "") for a in (store.get_discovered_artists() or [])}
+    existing = {a.get("artist", "") for a in (store.discovery.get_discovered_artists() or [])}
     seeded = 0
     for artist, plays in unmatched_artists.items():
         if plays >= min_plays and artist not in existing:
-            store.upsert_discovered_artist(artist, float(plays), None, None, None, now)
+            store.discovery.upsert_discovered_artist(artist, float(plays), None, None, None, now)
             seeded += 1
     return seeded

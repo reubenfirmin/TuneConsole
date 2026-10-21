@@ -30,15 +30,15 @@ def _rows(path):
 
 
 def test_audit_snapshots_actual_genres_and_decades_with_unknown_coverage(store, audit_path):
-    tid = store.upsert_track("v1", "Owned", "Artist", None, None)
-    store.set_track_year(tid, "1995")
+    tid = store.tracks.upsert_track("v1", "Owned", "Artist", None, None)
+    store.tracks.set_track_year(tid, "1995")
     tracks = [ForYouItem("Owned", "Artist", "", "v1", None, 0, "", key="owned|artist", genre="Jazz"),
               {"key": "new|a", "genre": "Britpop", "year": 2001},
               {"key": "unknown|b", "artist": "Unknown"}]
     proto = home._proto(store, "explore", "From your catalog", tracks, 1000)
     proto["recipe"] = {"facets": {"genres": ["techno"]}}  # intent must not masquerade as actual content
     home_audit.record(store, [proto], 1000, source="/home/cards", epoch=8, card_epochs={"explore": 3})
-    store.set_track_year(tid, "2020")  # later enrichment cannot alter the written snapshot
+    store.tracks.set_track_year(tid, "2020")  # later enrichment cannot alter the written snapshot
     row = _rows(audit_path)[0]
     card = row["cards"][0]
     assert row["timestamp"] == "1970-01-01T00:16:40+00:00"

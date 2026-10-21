@@ -6,12 +6,8 @@ serves sync routes from a threadpool, so every DB call serializes on that one lo
 """
 from functools import wraps
 
-# Auto-assigned group for playlists this app generates from recommendations. Anything in this group
-# is quarantined from every taste signal (groupings/analysis/scores), so the engine never feeds on
-# its own suggestions. A generated playlist graduates ONLY when you promote it: move it out of this
-# group (it then counts as one of your real playlists). Playing it does not graduate it; adoption is
-# an explicit act, so a saved suggestion you never endorse can't quietly reshape your taste model.
-# The single source of truth (re-exported by rec_query for existing importers).
+# Default display group for generated playlists. Policy lives in playlist_provenance;
+# changing a group never changes taste eligibility. Only explicit adoption lifts quarantine.
 #
 # TWO TIERS OF SIGNAL. Conflating them is the trap, in both directions:
 #

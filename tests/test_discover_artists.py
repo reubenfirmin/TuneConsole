@@ -21,13 +21,13 @@ def _ctx(store):
 
 
 def test_new_artists_taste_pinned_and_cached(store, monkeypatch):
-    iid = store.upsert_identity("main", "cred", None, True)
-    band = [store.upsert_track(f"c{i}", f"C{i}", "CoreBand", None, None) for i in range(10)]
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PC", "Core Mix", 10, "h", 0.0), band)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    band = [store.tracks.upsert_track(f"c{i}", f"C{i}", "CoreBand", None, None) for i in range(10)]
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PC", "Core Mix", 10, "h", 0.0), band)
     for _ in range(5):
-        store.add_history_snapshot(iid, 1.0, ["c0|coreband"])   # play -> anchor + playlist weight
+        store.history.add_history_snapshot(iid, 1.0, ["c0|coreband"])   # play -> anchor + playlist weight
     embed.build_and_store(store, dim=4)
-    store.set_setting("lastfm_api_key", "KEY")
+    store.settings.set_setting("lastfm_api_key", "KEY")
 
     calls = []
     def fake(name, key, limit=50):
@@ -48,5 +48,5 @@ def test_new_artists_taste_pinned_and_cached(store, monkeypatch):
 
 
 def test_new_artists_empty_without_key(store):
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
     assert discover.new_artists(_ctx(store)) == []

@@ -2,6 +2,7 @@
 each track-pair by a per-track gain, so heavily-played combinations dominate over stale ones, while
 the default (no weights) stays the binary-membership model."""
 import numpy as np
+from types import SimpleNamespace
 
 from yt_playlist.rec import embed
 
@@ -27,9 +28,7 @@ def test_cooc_weighting_off_matches_binary():
 
 def test_cooc_weights_grow_with_playcount(monkeypatch):
     # The per-track gain rises with play frequency; an unplayed track keeps the binary baseline (1.0).
-    class _S:
-        def play_counts(self):
-            return {"hot": 99, "warm": 3, "cold": 0}
-    w = embed._cooc_weights(_S())
+    query = SimpleNamespace(play_counts=lambda: {"hot": 99, "warm": 3, "cold": 0})
+    w = embed._cooc_weights(SimpleNamespace(rec_query=query))
     assert w.get("hot", 1.0) > w.get("warm", 1.0) > 1.0           # more plays -> larger gain
     assert w.get("cold", 1.0) == 1.0                              # never played -> neutral, never erased

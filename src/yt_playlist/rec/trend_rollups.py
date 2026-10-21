@@ -364,7 +364,7 @@ def detect_spotlight(weeks, months, review, floor_day, store, now, days=(), insi
         return {"signature": top["signature"], "anchor": "insights",
                 "headline": top["headline"], "detail": top["detail"]}
     # 1. Month rollover: a new full-month recap became available.
-    if review is not None and review["month"] != store.get_setting("trend_spotlight_review_month"):
+    if review is not None and review["month"] != store.settings.get_setting("trend_spotlight_review_month"):
         return {"signature": f"month_review:{review['month']}", "anchor": "review",
                 "headline": "Your month in review is ready",
                 "detail": f"{review['plays']} plays across {review['listen_days']} days last month."}
@@ -547,7 +547,7 @@ def build(store, now) -> dict:
                "overlays": compute_overlay_series(day_counts, meta, weeks),
                "insights": insights, "review": review, "health": health_snapshot(store, now),
                "story": story, "spotlight": spotlight}
-    store.put_proposals("trend_rollups", payload, now)
+    store.rec_surface.put_proposals("trend_rollups", payload, now)
     # Only mark the review month "consumed" when its month-rollover candidate is the one that actually
     # won the spotlight cascade. detect_spotlight lets insights (priority 0) outrank the month-rollover
     # detector, so on a week where an insight fires, the review would otherwise be silently burned
@@ -555,7 +555,7 @@ def build(store, now) -> dict:
     # build until a build finally has no higher-priority insight to beat it.
     if (review is not None and spotlight is not None
             and spotlight["signature"] == f"month_review:{review['month']}"):
-        store.set_setting("trend_spotlight_review_month", review["month"])
+        store.settings.set_setting("trend_spotlight_review_month", review["month"])
     return payload
 
 

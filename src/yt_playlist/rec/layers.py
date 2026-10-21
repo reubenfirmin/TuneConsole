@@ -56,7 +56,7 @@ def now_mode_mix(store, now):
     window_h = rec_params.get_param(store, "now_window_h")
     min_events = int(rec_params.get_param(store, "now_min_events"))
     since = now - window_h * 3600.0
-    rows = store.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
+    rows = store.history.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
 
     # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
     # overwrite lands on the latest occurrence of each key).
@@ -117,7 +117,7 @@ def evidence_coverage(store, now) -> dict:
     cidx = cidx if CV is not None else {}
 
     def one(window_h):
-        rows = store.play_events_since(now - window_h * 3600.0,
+        rows = store.history.play_events_since(now - window_h * 3600.0,
                                        exclude_list_ids=_radio_list_ids(store))
         latest = {r["identity_key"]: r["played_at"] for r in rows}
         mapped = sum(k in cidx for k in latest)
@@ -146,7 +146,7 @@ def session_tilt(store, now, V, idx) -> np.ndarray | None:
     min_events = int(rec_params.get_param(store, "now_min_events"))
     session_hl_h = rec_params.get_param(store, "session_halflife_h")
     since = now - 24 * 3600.0
-    rows = store.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
+    rows = store.history.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
 
     # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
     # overwrite lands on the latest occurrence of each key).
@@ -206,7 +206,7 @@ def session_mode_mix(store, now):
     min_events = int(rec_params.get_param(store, "now_min_events"))
     session_hl_h = rec_params.get_param(store, "session_halflife_h")
     since = now - 24 * 3600.0
-    rows = store.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
+    rows = store.history.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
 
     # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
     # overwrite lands on the latest occurrence of each key).

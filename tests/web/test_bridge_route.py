@@ -9,7 +9,7 @@ from yt_playlist.core.bridge import Bridge
 from yt_playlist.web.routes.bridge import build as build_bridge_route, EXTENSION_ORIGIN
 
 
-class _FakeStore:
+class _FakeSettings:
     """Minimal store stub: just enough get_setting/set_setting for the WS route's pairing flag."""
     def __init__(self):
         self.settings = {}
@@ -19,6 +19,11 @@ class _FakeStore:
 
     def set_setting(self, key, value):
         self.settings[key] = value
+
+
+class _FakeStore:
+    def __init__(self):
+        self.settings = _FakeSettings()
 
 
 def _app(bridge):
@@ -83,7 +88,7 @@ def test_play_frame_persists_event():
     import time
     from yt_playlist.core.store import Store
     s = Store(":memory:"); s.init_schema()
-    s.upsert_identity("main", "bridge", None, True)
+    s.identities.upsert_identity("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
     ctx = type("C", (), {"bridge": bridge, "store": s,
@@ -95,9 +100,9 @@ def test_play_frame_persists_event():
                       "likeStatus": "INDIFFERENT", "videoId": "v1",
                       "playlist": "PLabc", "brandId": ""})
         deadline = time.time() + 5           # the route persists via a worker thread; poll for it
-        while time.time() < deadline and not s.play_events_since(0):
+        while time.time() < deadline and not s.history.play_events_since(0):
             time.sleep(0.05)
-    evs = s.play_events_since(0)
+    evs = s.history.play_events_since(0)
     assert len(evs) == 1
     assert evs[0]["video_id"] == "v1" and evs[0]["playlist_ytm_id"] == "PLabc"
 
@@ -192,7 +197,7 @@ def test_rich_now_playing_heartbeat_restores_expired_ui_without_recording_play()
     persistence path."""
     from yt_playlist.core.store import Store
     store = Store(":memory:"); store.init_schema()
-    store.upsert_identity("main", "bridge", None, True)
+    store.identities.upsert_identity("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
     ctx = type("C", (), {"bridge": bridge, "store": store})()
@@ -212,7 +217,7 @@ def test_rich_now_playing_heartbeat_restores_expired_ui_without_recording_play()
             "likeStatus": "LIKE", "video_id": "v-recovered", "paused": False,
             "playlist_ytm_id": "OLAK5uy_album", "album_browse_id": "MPRE_album",
         }
-        assert store.play_events_since(0) == []
+        assert store.history.play_events_since(0) == []
 
 
 @pytest.mark.parametrize("kind", ["play", "now-heartbeat"])
@@ -264,10 +269,10 @@ def test_legacy_heartbeat_for_another_video_does_not_inherit_source():
     ("", "", {"kind": "album", "title": "Release", "url": "/album?browse=MPRE_album", "external": False}),
 ])
 def test_bridge_status_links_to_playing_source(store, playlist, album, expected):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PL_source", "Source", 1, "h", 0)
-    store.upsert_track("v1", "Song", "Artist", "Release", 200, album_browse_id="MPRE_album")
-    store.add_saved_album({"browse": "MPRE_other", "title": "Other release"})
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.upsert_playlist(iid, "PL_source", "Source", 1, "h", 0)
+    store.tracks.upsert_track("v1", "Song", "Artist", "Release", 200, album_browse_id="MPRE_album")
+    store.collection.add_saved_album({"browse": "MPRE_other", "title": "Other release"})
     bridge = Bridge()
     bridge.now_playing = {"title": "Song", "video_id": "v1", "playlist_ytm_id": playlist,
                           "album_browse_id": album}
@@ -312,13 +317,13 @@ def test_ws_disconnect_resets_radio_session_and_clears_setting():
     with radio.lock:
         radio.active = True
         radio.dispatched_keys.add("k")
-    store.set_setting("radio_active", "1")
+    store.settings.set_setting("radio_active", "1")
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}):
         assert radio.active is True   # still active while the socket is up
     # Socket closed on exiting the `with` block; the route's `finally` block has run.
     assert radio.active is False
     assert radio.dispatched_keys == set()
-    assert store.get_setting("radio_active") == "0"
+    assert store.settings.get_setting("radio_active") == "0"
 
 
 def test_play_frame_includes_paused_false():
@@ -351,7 +356,7 @@ def test_repeated_paused_play_frames_only_refresh_presence(monkeypatch, caplog):
     from yt_playlist.rec.radio import RadioSession
 
     store = Store(":memory:"); store.init_schema()
-    store.upsert_identity("main", "bridge", None, True)
+    store.identities.upsert_identity("main", "bridge", None, True)
     bridge = Bridge()
     radio = RadioSession()
     with radio.lock:
@@ -375,7 +380,7 @@ def test_repeated_paused_play_frames_only_refresh_presence(monkeypatch, caplog):
             assert bridge.now_playing["video_id"] == "v1"
             assert bridge.now_playing["paused"] is True
             assert radio.waiting is True
-            assert store.play_events_since(0) == []
+            assert store.history.play_events_since(0) == []
             assert on_play_calls == []
         assert "Received play notification" not in caplog.text
 
@@ -427,7 +432,7 @@ def test_pevent_frame_persists_raw_event():
     import time
     from yt_playlist.core.store import Store
     s = Store(":memory:"); s.init_schema()
-    s.upsert_identity("main", "bridge", None, True)
+    s.identities.upsert_identity("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
     ctx = type("C", (), {"bridge": bridge, "store": s,
@@ -438,9 +443,9 @@ def test_pevent_frame_persists_raw_event():
         ws.send_json({"type": "pevent", "kind": "track_exit", "videoId": "v1",
                       "position": 20.0, "duration": 400.0, "playlist": "PL1", "brandId": ""})
         deadline = time.time() + 5
-        while time.time() < deadline and not s.player_events_since(0):
+        while time.time() < deadline and not s.player_events.player_events_since(0):
             time.sleep(0.05)
-    evs = s.player_events_since(0)
+    evs = s.player_events.player_events_since(0)
     assert len(evs) == 1 and evs[0]["kind"] == "track_exit" and evs[0]["at"] == 1234.0
 
 
@@ -451,7 +456,7 @@ def test_standby_play_frame_is_ignored(monkeypatch):
     from yt_playlist.rec import radio as radio_mod
     from yt_playlist.rec.radio import RadioSession
     s = Store(":memory:"); s.init_schema()
-    s.upsert_identity("main", "bridge", None, True)
+    s.identities.upsert_identity("main", "bridge", None, True)
     bridge = Bridge()
     radio = RadioSession()
     with radio.lock:
@@ -475,7 +480,7 @@ def test_standby_play_frame_is_ignored(monkeypatch):
         # bridge.now_playing on its own, which would mask what we're testing here.
         assert bridge.now_playing is None
         assert on_play_calls == []
-    assert s.play_events_since(0) == []
+    assert s.history.play_events_since(0) == []
 
 
 def test_live_play_frame_is_processed():
@@ -483,7 +488,7 @@ def test_live_play_frame_is_processed():
     # as an untagged frame did before deck attribution existed (see test_play_frame_persists_event).
     from yt_playlist.core.store import Store
     s = Store(":memory:"); s.init_schema()
-    s.upsert_identity("main", "bridge", None, True)
+    s.identities.upsert_identity("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
     ctx = type("C", (), {"bridge": bridge, "store": s,
@@ -495,12 +500,12 @@ def test_live_play_frame_is_processed():
                       "thumbnail": "", "likeStatus": "INDIFFERENT", "videoId": "v1",
                       "playlist": "PLabc", "brandId": ""})
         deadline = time.time() + 5
-        while time.time() < deadline and not s.play_events_since(0):
+        while time.time() < deadline and not s.history.play_events_since(0):
             time.sleep(0.05)
         # Assert while the socket is still open: on disconnect the route's `finally` block resets
         # bridge.now_playing to None regardless, which would mask what we're testing here.
         assert bridge.now_playing is not None and bridge.now_playing["video_id"] == "v1"
-    evs = s.play_events_since(0)
+    evs = s.history.play_events_since(0)
     assert len(evs) == 1 and evs[0]["video_id"] == "v1" and evs[0]["playlist_ytm_id"] == "PLabc"
 
 

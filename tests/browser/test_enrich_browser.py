@@ -4,11 +4,11 @@ import pytest
 
 
 def _seed(store):
-    first = store.upsert_track("v1", "Checked song", "First artist", None, 200)
-    second = store.upsert_track("v2", "Queued song", "Second artist", None, 200)
-    store.set_track_enrichment(first, "Rock", "1999")
-    store.mark_enriched([first], 1.0)
-    store.upsert_conflict(first, "genre", [{"provider": "musicbrainz", "value": "Rock"},
+    first = store.tracks.upsert_track("v1", "Checked song", "First artist", None, 200)
+    second = store.tracks.upsert_track("v2", "Queued song", "Second artist", None, 200)
+    store.tracks.set_track_enrichment(first, "Rock", "1999")
+    store.enrichment.mark_enriched([first], 1.0)
+    store.enrichment.upsert_conflict(first, "genre", [{"provider": "musicbrainz", "value": "Rock"},
                                            {"provider": "discogs", "value": "Pop"}])
     return first, second
 
@@ -39,12 +39,12 @@ def test_tiles_navigate_and_conflict_choice_is_saved(live_app, store, page):
     expect(page.locator(".conflict-save-status svg")).to_be_visible()
     expect(page.locator(".conflict-choice.is-current")).to_contain_text("Pop")
     expect(page.get_by_role("radio", name="Pop", exact=True)).to_be_checked()
-    assert store.get_track_enrichment(first)[0] == "Pop"
+    assert store.tracks.get_track_enrichment(first)[0] == "Pop"
     # The card stays in place; another click can correct a choice without navigating away.
     page.get_by_role("radio", name="Rock", exact=True).check()
     expect(page.get_by_role("status")).to_have_text("Saved")
     expect(page.locator(".conflict-choice.is-current")).to_contain_text("Rock")
-    assert store.get_track_enrichment(first)[0] == "Rock"
+    assert store.tracks.get_track_enrichment(first)[0] == "Rock"
     page.reload()
     expect(page.get_by_text("No open conflicts.", exact=True)).to_be_visible()
 
@@ -55,7 +55,7 @@ def test_counts_advance_without_reloading_and_fit_mobile(live_app, store, page):
     page.goto(f"{live_app}/enrich")
     status = page.locator(".enrich-status-card")
     expect(page.locator('.metric[href="/enrich/queue"] .v')).to_have_text("1")
-    store.mark_enriched([second], 1.0)
+    store.enrichment.mark_enriched([second], 1.0)
     expect(page.locator('.metric[href="/enrich/queue"] .v')).to_have_text("0", timeout=6000)
     expect(page.locator('.metric[href="/enrich/processed"] .v')).to_have_text("100%")
     expect(page.get_by_text("Caught up", exact=False)).to_be_visible()
@@ -69,8 +69,8 @@ def test_counts_advance_without_reloading_and_fit_mobile(live_app, store, page):
 
 @pytest.mark.parametrize("width", [1280, 390])
 def test_one_queue_shows_library_and_discovery_tracks(live_app, store, page, width, tmp_path):
-    store.upsert_track("lib", "Library song", "Artist", None, 200)
-    store.upsert_discovered_track("new|artist", "new", "Discovery song", "Artist", None, None,
+    store.tracks.upsert_track("lib", "Library song", "Artist", None, 200)
+    store.discovery.upsert_discovered_track("new|artist", "new", "Discovery song", "Artist", None, None,
                                   None, None, "radio:seed", 1.0)
     page.set_viewport_size({"width": width, "height": 900})
     page.goto(f"{live_app}/enrich")
@@ -103,13 +103,13 @@ def test_clicking_current_radio_saves_and_keyboard_choice_updates(live_app, stor
     # Clicking the already-checked current value must still count as an explicit choice.
     page.get_by_role("radio", name="Rock", exact=True).click()
     expect(page.get_by_role("status")).to_have_text("Saved")
-    assert store.outstanding_conflicts() == 0
+    assert store.enrichment.outstanding_conflicts() == 0
     page.get_by_role("radio", name="Rock", exact=True).focus()
     page.keyboard.press("ArrowRight")
     expect(page.locator(".conflict-choice.is-current")).to_contain_text("Pop")
     expect(page.get_by_role("status")).to_have_text("Saved")
     expect(page.get_by_role("radio", name="Pop", exact=True)).to_be_focused()
-    assert store.get_track_enrichment(first)[0] == "Pop"
+    assert store.tracks.get_track_enrichment(first)[0] == "Pop"
 
 
 def test_failed_save_restores_current_radio_and_retry_works(live_app, store, page):
@@ -119,8 +119,8 @@ def test_failed_save_restores_current_radio_and_retry_works(live_app, store, pag
     page.get_by_role("radio", name="Pop", exact=True).check()
     expect(page.get_by_role("status")).to_contain_text("Could not save")
     expect(page.get_by_role("radio", name="Rock", exact=True)).to_be_checked()
-    assert store.get_track_enrichment(first)[0] == "Rock"
+    assert store.tracks.get_track_enrichment(first)[0] == "Rock"
     page.unroute("**/enrich/conflicts/*/genre*")
     page.get_by_role("radio", name="Pop", exact=True).check()
     expect(page.get_by_role("status")).to_have_text("Saved")
-    assert store.get_track_enrichment(first)[0] == "Pop"
+    assert store.tracks.get_track_enrichment(first)[0] == "Pop"

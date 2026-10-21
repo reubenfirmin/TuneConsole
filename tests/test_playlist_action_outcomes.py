@@ -9,9 +9,9 @@ from yt_playlist.web.app import create_app
 
 @pytest.fixture
 def library(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    first = store.upsert_playlist(iid, "PLA", "Alpha", 0, "", 0)
-    second = store.upsert_playlist(iid, "PLB", "Beta", 0, "", 0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    first = store.playlists.upsert_playlist(iid, "PLA", "Alpha", 0, "", 0)
+    second = store.playlists.upsert_playlist(iid, "PLB", "Beta", 0, "", 0)
     client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1),
                         base_url="http://127.0.0.1")
     return client, first, second
@@ -26,7 +26,7 @@ def test_failed_and_mixed_delete_batches_report_each_item(store, library, monkey
         calls.append(pid)
         if pid in [ids[i] for i in failed_ids]:
             raise ValueError("Delete rejected")
-        store.remove_playlist(pid)
+        store.playlists.remove_playlist(pid)
     monkeypatch.setattr(PlaylistOps, "delete", delete)
     response = client.post("/playlists/delete", data={"ids": f"{first},{second},{first}"})
     result = response.json()
@@ -70,10 +70,10 @@ def test_copy_exception_is_a_failure_with_uncertainty_and_recovery_guidance(libr
 
 
 def test_cleanup_cache_failure_does_not_hide_successful_deletion(store, library, monkeypatch):
-    from yt_playlist.rec import recommend
+    from yt_playlist.rec import actions
     client, first, _ = library
-    monkeypatch.setattr(PlaylistOps, "delete", lambda self, pid: store.remove_playlist(pid))
-    monkeypatch.setattr(recommend, "refresh_cleanup", lambda *args: (_ for _ in ()).throw(RuntimeError("cache failure")))
+    monkeypatch.setattr(PlaylistOps, "delete", lambda self, pid: store.playlists.remove_playlist(pid))
+    monkeypatch.setattr(actions, "refresh_cleanup", lambda *args: (_ for _ in ()).throw(RuntimeError("cache failure")))
     response = client.post("/playlists/delete", data={"ids": str(first)})
     assert response.json()["status"] == "complete"
     assert response.json()["items"][0]["status"] == "deleted"

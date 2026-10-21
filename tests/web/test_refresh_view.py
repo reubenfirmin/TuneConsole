@@ -26,9 +26,9 @@ def _client(store, provider, bridge):
 
 
 def _seed_three(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track(f"v{i}", f"S{i}", "X", "Alb", 200, 1) for i in range(3)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
+    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", "Alb", 200, 1) for i in range(3)])
     fc = FakeClient(tracks={"PL1": [{"videoId": f"v{i}", "setVideoId": f"sv{i}"} for i in range(3)]})
     return iid, a, fc
 
@@ -54,12 +54,12 @@ def test_disconnected_extension_does_not_break_the_route(store):
     r = c.post(f"/playlist/{a}/remove-track", data={"video_id": "v1"})
 
     assert r.status_code == 200 and r.text == ""
-    assert [t["video_id"] for t in store.playlist_tracks_detail(a)] == ["v0", "v2"]
+    assert [t["video_id"] for t in store.charts.playlist_tracks_detail(a)] == ["v0", "v2"]
 
 
 def test_failed_op_does_not_fire_refresh_view(store):
     # A nonexistent playlist -> the op raises ValueError -> a toast, no mutation, and no control frame.
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
     bridge = _StubBridge()
     c = _client(store, lambda: {}, bridge)
 
@@ -71,9 +71,9 @@ def test_failed_op_does_not_fire_refresh_view(store):
 
 def test_add_tracks_posts_refresh_view(store):
     import json
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
+    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
     bridge = _StubBridge()
     c = _client(store, lambda: {iid: FakeClient()}, bridge)
 
@@ -85,9 +85,9 @@ def test_add_tracks_posts_refresh_view(store):
 
 
 def test_rename_posts_refresh_view(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PL1", "Old Name", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "S", "X", "Al", 200, 1)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PL1", "Old Name", 1, "h", 1.0)
+    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S", "X", "Al", 200, 1)])
     bridge = _StubBridge()
     c = _client(store, lambda: {iid: FakeClient()}, bridge)
 
@@ -119,7 +119,7 @@ def test_delete_posts_refresh_view_for_removed_playlist(store, monkeypatch, tmp_
     r = c.post("/playlists/delete", data={"ids": str(a)})
 
     assert r.headers.get("hx-redirect", "").startswith("/playlists?result=")
-    assert store.get_playlist(a) is None
+    assert store.playlists.get_playlist(a) is None
     assert bridge.calls == [{"type": "refresh-view", "playlist": "PL1"}]
 
 
@@ -127,9 +127,9 @@ def test_delete_of_system_playlist_hides_only_and_does_not_fire(store, monkeypat
     # Undeletable system playlists are only hidden locally: nothing changed on YouTube, so there
     # is nothing to refresh.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
-    store.set_playlist_tracks(lm, [store.upsert_track("v1", "S", "X", "Al", 200, 1)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
+    store.playlists.set_playlist_tracks(lm, [store.tracks.upsert_track("v1", "S", "X", "Al", 200, 1)])
     bridge = _StubBridge()
     c = _client(store, lambda: {iid: FakeClient()}, bridge)
 
@@ -140,10 +140,10 @@ def test_delete_of_system_playlist_hides_only_and_does_not_fire(store, monkeypat
 
 
 def _two_identity_move(store):
-    i1 = store.upsert_identity("main", "c1", None, True)
-    i2 = store.upsert_identity("Alt", "c2", None, False)
-    pid = store.upsert_playlist(i1, "PL1", "Mix", 1, "h", 1.0)
-    store.set_playlist_tracks(pid, [store.upsert_track("v1", "S", "X", None, None, 1)])
+    i1 = store.identities.upsert_identity("main", "c1", None, True)
+    i2 = store.identities.upsert_identity("Alt", "c2", None, False)
+    pid = store.playlists.upsert_playlist(i1, "PL1", "Mix", 1, "h", 1.0)
+    store.playlists.set_playlist_tracks(pid, [store.tracks.upsert_track("v1", "S", "X", None, None, 1)])
     return i1, i2, pid
 
 

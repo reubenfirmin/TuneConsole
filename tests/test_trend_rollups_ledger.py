@@ -37,6 +37,7 @@ def _generated(store, pid, ytm, title="Radio"):
     store.conn.execute("INSERT INTO playlists(id,identity_id,ytm_playlist_id,title) VALUES (?,1,?,?)",
                        (pid, ytm, title))
     store.conn.execute("INSERT INTO playlist_group(ytm,name) VALUES (?,'Generated')", (ytm,))
+    store.playlists.mark_generated_playlist(ytm)
     store.conn.commit()
 
 
@@ -133,6 +134,7 @@ def _owned(store, pid, tid, key, artist, ytm="PL_own", generated=False):
                        "VALUES (?,1,?,'p')", (pid, ytm))
     if generated:
         store.conn.execute("INSERT OR IGNORE INTO playlist_group(ytm,name) VALUES (?,'Generated')", (ytm,))
+        store.playlists.mark_generated_playlist(ytm)
     from tests.conftest import seed_catalog_track
     seed_catalog_track(store,key,'t',artist,track_id=tid,video_id='v'+key)
     store.conn.execute("INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES (?,?,0)",

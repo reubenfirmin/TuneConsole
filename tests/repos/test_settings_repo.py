@@ -15,6 +15,7 @@ def test_set_none_stores_empty_string(store):
     assert store.settings.get_setting("k") == ""
 
 
-def test_facade_delegates(store):
-    store.set_setting("lastfm_api_key", "abc")           # legacy store.x() call site
-    assert store.get_setting("lastfm_api_key") == "abc"
+def test_setting_persists_on_the_shared_connection(store):
+    store.settings.set_setting("lastfm_api_key", "abc")
+    assert store.conn.execute("SELECT value FROM settings WHERE key='lastfm_api_key'").fetchone()[0] == "abc"
+    assert store.settings.get_setting("lastfm_api_key") == "abc"

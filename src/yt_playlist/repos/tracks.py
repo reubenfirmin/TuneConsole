@@ -133,10 +133,10 @@ class TrackRepo(Repo):
         return [dict(r) for r in rows]
 
     @synchronized
-    def set_track_art(self, track_id, url) -> None:
+    def set_track_art(self, track_id, url, *, source='provider') -> None:
         """Persist provider fallback using the same artwork precedence as ingestion."""
         with self.conn:
-            catalog.update_artwork(self.conn, track_id, url, source='provider')
+            catalog.update_artwork(self.conn, track_id, url, source=source)
 
     @synchronized
     def set_track_genre(self, track_id, genre) -> None:
@@ -159,7 +159,6 @@ class TrackRepo(Repo):
         title = (title or "").strip()
         if not title:
             return
-        self.conn.execute("UPDATE catalog_tracks SET title=? WHERE id=?", (title, track_id))
         catalog.choose_field(self.conn,track_id,'title',title)
         self.conn.commit()
 
@@ -170,7 +169,6 @@ class TrackRepo(Repo):
         artist = (artist or "").strip()
         if not artist:
             return
-        self.conn.execute("UPDATE catalog_tracks SET artist=? WHERE id=?", (artist, track_id))
         catalog.choose_field(self.conn,track_id,'artist',artist)
         self.conn.commit()
 

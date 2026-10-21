@@ -6,16 +6,16 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     return iid, TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                            base_url="http://127.0.0.1")
 
 
 def test_songs_like_this_renders_neighbours(store):
     iid, c = _client(store)
-    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(6)]
-    [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(6)]
-    store.set_playlist_tracks(store.upsert_playlist(iid, "P", "P", 12, "h", 0.0), A)
+    A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(6)]
+    [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(6)]
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "P", "P", 12, "h", 0.0), A)
     embed.build_and_store(store, dim=4)
 
     r = c.get("/track/a0/similar")              # a0's video_id

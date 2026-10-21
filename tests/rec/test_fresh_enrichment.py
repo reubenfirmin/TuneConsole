@@ -16,7 +16,7 @@ from yt_playlist.util.matching import identity_key
 
 @pytest.mark.parametrize("with_modes", [False, True])
 def test_fresh_waits_for_metadata_then_generates_a_playlist_without_a_model(store, with_modes):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     if with_modes:
         store.modes.replace_modes([
             {"mode_id": 1, "label": "House", "families": [["house", 1]],
@@ -26,20 +26,20 @@ def test_fresh_waits_for_metadata_then_generates_a_playlist_without_a_model(stor
     for i in range(12):
         title, artist = f"Unenriched {i}", f"Unknown artist {i}"
         key = identity_key(title, artist)
-        store.upsert_discovered_track(key, f"new{i}", title, artist, "", None,
+        store.discovery.upsert_discovered_track(key, f"new{i}", title, artist, "", None,
                                       None, None, None, 100)
         keys.append(key)
 
     # Discovery alone supplies no ranking evidence. Keep the tracks queued for enrichment.
     mode_surfaces.prepare_bundles(store, 200)
     assert fresh_pool.pick(store, 200) == []
-    pending = store.get_discovered_tracks()
+    pending = store.discovery.get_discovered_tracks()
     assert {r["identity_key"] for r in pending} == set(keys)
     assert all(r["last_enriched"] is None for r in pending)
 
     # Metadata makes an unscored fallback eligible even before a taste/artist model exists.
     for key in keys:
-        store.set_discovered_enrichment(key, None, "2000")
+        store.discovery.set_discovered_enrichment(key, None, "2000")
     fresh_pool.prepare(store, 250)
     picked = fresh_pool.pick(store, 250)
     assert {t["key"] for t in picked} == set(keys)
@@ -68,19 +68,19 @@ def test_enrichment_updates_fresh_ranking_modes_and_generated_playlist(store, mo
         a["audio"] = {"bpm": 172.0, "energy": .92, "danceability": .88}
         b["audio"] = {"bpm": 88.0, "energy": .18, "danceability": .20}
 
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     groups = []
     for group, fields in (("A", a), ("B", b)):
-        tids = [store.upsert_track(f"{group}{i}", f"{group}{i}", group, None, 200) for i in range(10)]
+        tids = [store.tracks.upsert_track(f"{group}{i}", f"{group}{i}", group, None, 200) for i in range(10)]
         for tid in tids:
-            store.set_track_genre(tid, fields["genre"])
-            store.set_track_year(tid, fields["year"])
+            store.tracks.set_track_genre(tid, fields["genre"])
+            store.tracks.set_track_year(tid, fields["year"])
             if fields["audio"]:
-                store.set_track_audio(tid, **fields["audio"])
-        pid = store.upsert_playlist(iid, group, group, 10, group, 1)
-        store.set_playlist_tracks(pid, tids)
-        store.mark_enriched(tids, 200)
-        groups.append(sorted(store.get_playlist_track_keys(pid)))
+                store.tracks.set_track_audio(tid, **fields["audio"])
+        pid = store.playlists.upsert_playlist(iid, group, group, 10, group, 1)
+        store.playlists.set_playlist_tracks(pid, tids)
+        store.enrichment.mark_enriched(tids, 200)
+        groups.append(sorted(store.playlists.get_playlist_track_keys(pid)))
     embed.build_and_store(store, dim=8)
     embed.build_content_and_store(store)
     _, vectors, idx = embed.load_vectors(store)
@@ -98,7 +98,7 @@ def test_enrichment_updates_fresh_ranking_modes_and_generated_playlist(store, mo
                       "space": embed.content_space_id(store), "size": 10000 if mid == 1 else 10,
                       "families": [[genre_map.family(fields["genre"]), 10]], "rep_keys": keys[:4]})
     store.modes.replace_modes(modes, retired_ids=[], now=200)
-    store.put_proposals("mode_bundles", {
+    store.rec_surface.put_proposals("mode_bundles", {
         "1": {"wheelhouse": [], "explore": [], "comfort": [], "fresh": []},
         "2": {"wheelhouse": [], "explore": [], "comfort": [], "fresh": []},
         "all": {"wheelhouse": [], "explore": [], "comfort": [], "fresh": []},
@@ -109,11 +109,11 @@ def test_enrichment_updates_fresh_ranking_modes_and_generated_playlist(store, mo
         for i in range(4):
             title, artist = f"{prefix} {i}", f"New {prefix} artist {i}"
             key = identity_key(title, artist)
-            store.upsert_discovered_track(key, f"{prefix}{i}", title, artist, "", None,
+            store.discovery.upsert_discovered_track(key, f"{prefix}{i}", title, artist, "", None,
                                           b["genre"], b["year"], "genre:techno", 100,
                                           audio=b["audio"])
             target.append(key)
-    store.mark_discovered_enriched(reference, 200)
+    store.discovery.mark_discovered_enriched(reference, 200)
     embed.build_discovered_content_vectors(store)
     fresh_pool.prepare(store, 200)
     assert [t["key"] for t in fresh_pool.pick(store, 200, size=4)] == reference
@@ -131,7 +131,7 @@ def test_enrichment_updates_fresh_ranking_modes_and_generated_playlist(store, mo
     assert worker.drain_once(limit=4) == 4
     picked = fresh_pool.pick(store, 500, size=4)
     assert {t["key"] for t in picked} == set(changed)
-    bundles = store.get_proposals("mode_bundles")
+    bundles = store.rec_surface.get_proposals("mode_bundles")
     assert {t["key"] for t in bundles["1"]["fresh"]} == set(changed)
     assert {t["key"] for t in bundles["2"]["fresh"]} == set(reference)
     assert all(t["year"] == 2024 for t in bundles["1"]["fresh"])

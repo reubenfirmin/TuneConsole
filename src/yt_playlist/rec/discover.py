@@ -17,7 +17,6 @@ from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.rec import artist_model, embed, rec_params, discovery_pool
 from yt_playlist.rec.scoring import playlist_taste, discovery_facet_weight
 from yt_playlist.providers import lastfm
-from yt_playlist.rec.rec_dao import RecDao
 
 
 def fetch_artist_info(ctx, name, browse_id=None):
@@ -110,7 +109,7 @@ class ContentProjection:
         keys, V, idx = embed.load_vectors(store)
         if V is None:
             return None
-        dao = RecDao(store)
+        dao = store.rec_query
         content, audio = dao.track_content(), dao.track_audio_features()
         if training_keys is not None:
             allowed = set(training_keys)
@@ -139,7 +138,7 @@ class ContentProjection:
 def _anchors(store, V, idx, top_n=30):
     """[(display_name, weight, unit_vector)]: your artists weighted by play × taste-centrality, so
     the *core* of your taste anchors discovery (not one-off saves)."""
-    seeds = store.top_played_keys(limit=12)
+    seeds = store.rec_query.top_played_keys(limit=12)
     centre = embed._centroid(V, idx, [(seeds, 1.0)]) if seeds else None
     if centre is None:
         centre = V.mean(0)
@@ -148,7 +147,7 @@ def _anchors(store, V, idx, top_n=30):
     for k in idx:
         by_artist.setdefault(k.rsplit("|", 1)[-1], []).append(idx[k])
     out = []
-    for a in store.top_artists(top_n):
+    for a in store.charts.top_artists(top_n):
         rows = by_artist.get(normalize(a["artist"]))
         if not rows:
             continue
@@ -213,7 +212,7 @@ def new_artists(ctx, limit=15, max_anchors=30):
     anchors = _anchors(store, V, idx, top_n=max_anchors)
     if not anchors:
         return []
-    dao = RecDao(store)
+    dao = store.rec_query
     owned = dao.library_artists()
     now = ctx.now_fn()
 
@@ -223,10 +222,10 @@ def new_artists(ctx, limit=15, max_anchors=30):
     display = {}
     for name, _, _ in anchors:
         nkey = normalize(name)
-        cached = dao.cached_similar(nkey, now)
+        cached = store.rec_surface.cached_similar(nkey, now)
         if cached is None:
             cached = [[n, m] for n, m in lastfm.similar_artists(name, key)]
-            dao.cache_similar(nkey, cached, now)
+            store.rec_surface.cache_similar(nkey, cached, now)
         for n, _ in cached:
             display.setdefault(normalize(n), n)
 
@@ -257,15 +256,15 @@ def run_discovery(ctx, now, budget=25) -> dict:
     bridged new-artist pool; prune anything since acquired. Bounded by `budget` so each pass is cheap
     and the pools fill in over many runs rather than re-scanning everything every sync."""
     store = ctx.store
-    dao = RecDao(store)
-    owned_albums, saved = dao.owned_albums(), dao.saved_album_ids()
+    dao = store.rec_query
+    owned_albums, saved = dao.owned_albums(), store.collection.saved_album_ids()
     artist_genre = dao.artist_genres()                    # #18: tag a new album by its (owned) artist's genre
     # #52: scan only the top-N most-engaged artists, holding a small ROTATING per-artist album sample
     # (old albums surface over time) instead of every album of every artist you have ever touched.
     artist_limit = rec_params.get_param(store, "discovery_artist_limit")
     per_artist = rec_params.get_param(store, "discovery_albums_per_artist")
     rng = random.Random(int(now))                         # varies per pass so the rotation moves over time
-    due = store.artists_due_for_scan(now, budget=budget, artist_limit=artist_limit)
+    due = store.discovery.artists_due_for_scan(now, budget=budget, artist_limit=artist_limit)
     for artist in due:
         try:
             info = fetch_artist_info(ctx, artist)
@@ -273,12 +272,12 @@ def run_discovery(ctx, now, budget=25) -> dict:
             info = None
         _scan_artist_albums(store, artist, info, owned_albums, saved,
                             artist_genre.get(artist), now, per_artist, rng)
-        store.mark_scanned(artist, now)
+        store.discovery.mark_scanned(artist, now)
     for a in new_artists(ctx):                            # taste-bridged new artists, accumulated
-        store.upsert_discovered_artist(a["artist"], a["score"], a.get("because"), a.get("fits"),
+        store.discovery.upsert_discovered_artist(a["artist"], a["score"], a.get("because"), a.get("fits"),
                                        a.get("thumbnail"), now, genre=a.get("genre"))
-    store.prune_discovered(owned_albums, saved, dao.library_artists())
-    store.prune_discovered_tracks(dao.library_keys(), held_keys=store.generated_track_keys())
+    store.discovery.prune_discovered(owned_albums, saved, dao.library_artists())
+    store.discovery.prune_discovered_tracks(dao.library_keys(), held_keys=store.rec_query.generated_track_keys())
     cleanup_discovery_pool(store, rng)                     # #52: bound the pool + prune orphaned tracks
     populate_discovered_tracks(ctx, now)                   # #13 P2: out-of-corpus candidate tracks
     try:
@@ -300,11 +299,11 @@ def _scan_artist_albums(store, artist, info, owned_albums, saved, genre, now, pe
             continue
         catalog.append({"browse_id": bid, "title": title, "year": alb.get("year"),
                         "thumbnail": alb.get("thumbnail")})
-    pooled = store.discovered_albums_for_artist(artist)
+    pooled = store.discovery.discovered_albums_for_artist(artist)
     keep, add = discovery_pool.rotate_album_sample(catalog, pooled, per, rng)
-    store.delete_discovered_albums([b for b in pooled if b not in keep])
+    store.discovery.delete_discovered_albums([b for b in pooled if b not in keep])
     for alb in add:
-        store.upsert_discovered_album(alb["browse_id"], artist, alb["title"], alb["year"],
+        store.discovery.upsert_discovered_album(alb["browse_id"], artist, alb["title"], alb["year"],
                                       alb["thumbnail"], now, genre=genre)
 
 
@@ -314,7 +313,7 @@ def enforce_album_bounds(store, keep_artists, per_artist, rng) -> int:
     random-varied subset among ties so the kept sample spans the catalogue). Returns albums removed."""
     keep = set(keep_artists)
     by_artist: dict = {}
-    for a in store.get_discovered_albums():
+    for a in store.discovery.get_discovered_albums():
         by_artist.setdefault(a["artist"], {})[a["browse_id"]] = a.get("offered_count") or 0
     to_delete = []
     for artist, pooled in by_artist.items():
@@ -323,7 +322,7 @@ def enforce_album_bounds(store, keep_artists, per_artist, rng) -> int:
         elif len(pooled) > per_artist:
             keepset = discovery_pool.choose_album_keep(pooled, per_artist, rng)
             to_delete.extend(b for b in pooled if b not in keepset)
-    return store.delete_discovered_albums(to_delete)
+    return store.discovery.delete_discovered_albums(to_delete)
 
 
 def cleanup_discovery_pool(store, rng=None) -> dict:
@@ -333,9 +332,9 @@ def cleanup_discovery_pool(store, rng=None) -> dict:
     rng = rng or random.Random(0)
     limit = rec_params.get_param(store, "discovery_artist_limit")
     per = rec_params.get_param(store, "discovery_albums_per_artist")
-    keep_artists = {a["artist"] for a in store.interested_artists(limit=limit)}
+    keep_artists = {a["artist"] for a in store.discovery.interested_artists(limit=limit)}
     albums_removed = enforce_album_bounds(store, keep_artists, per, rng)
-    tracks_removed = store.prune_orphan_discovered_tracks(held_keys=store.generated_track_keys())
+    tracks_removed = store.discovery.prune_orphan_discovered_tracks(held_keys=store.rec_query.generated_track_keys())
     return {"albums_removed": albums_removed, "tracks_removed": tracks_removed}
 
 
@@ -345,8 +344,8 @@ def gc_discovery(ctx, now) -> dict:
     cleaned up or promoted. Best-effort; returns the per-pool delete counts {albums, artists, tracks}."""
     store = ctx.store
     gc_days = rec_params.get_param(store, "discovery_gc_days")
-    held = store.generated_track_keys()
-    return store.gc_discovery_pool(now, gc_days, held)
+    held = store.rec_query.generated_track_keys()
+    return store.discovery.gc_discovery_pool(now, gc_days, held)
 
 
 def populate_radio_tracks(ctx, now, seeds=6, per_seed_limit=12) -> int:
@@ -357,15 +356,15 @@ def populate_radio_tracks(ctx, now, seeds=6, per_seed_limit=12) -> int:
     Best-effort: no client/network -> 0."""
     store = ctx.store
     # Radio is parked. Previewing its UI must not enable periodic catalog harvesting.
-    if store.get_setting("radio_discovery_enabled", "0") != "1":
+    if store.settings.get_setting("radio_discovery_enabled", "0") != "1":
         return 0
     client = next(iter((ctx.client_provider() or {}).values()), None)
     if client is None:
         return 0
-    owned = RecDao(store).library_keys()
-    have = {r["identity_key"] for r in store.get_discovered_tracks()}
+    owned = store.rec_query.library_keys()
+    have = {r["identity_key"] for r in store.discovery.get_discovered_tracks()}
     added = 0
-    for t in store.top_tracks(seeds):
+    for t in store.charts.top_tracks(seeds):
         vid = t.get("video_id")
         if not vid:
             continue
@@ -379,14 +378,15 @@ def populate_radio_tracks(ctx, now, seeds=6, per_seed_limit=12) -> int:
             artist = ((r.get("artists") or [{}])[0] or {}).get("name", "")
             if not v or not title:
                 continue
-            key = store.identity_key_for_video(v)
-            if key in owned or key in have:
+            key = store.tracks.identity_key_for_video(v)
+            if key in owned:
                 continue
-            key = store.upsert_discovered_track(identity_key(title, artist), v, title, artist, None,
+            existing = key in have
+            key = store.discovery.upsert_discovered_track(identity_key(title, artist), v, title, artist, None,
                                           best_thumb(r.get("thumbnail") or r.get("thumbnails")),
                                           None, None, f"radio:{vid}", now)
             have.add(key)
-            added += 1
+            added += int(not existing)
             taken += 1
             if taken >= per_seed_limit:
                 break
@@ -402,10 +402,10 @@ def populate_discovered_tracks(ctx, now, budget=4) -> int:
     client = next(iter((ctx.client_provider() or {}).values()), None)
     if client is None:
         return 0
-    owned = RecDao(store).library_keys()
-    have = {t.get("source_browse_id") for t in store.get_discovered_tracks()}
-    todo = [a for a in store.get_discovered_albums() if a["browse_id"] not in have
-            and not store.get_setting("discovery_tracks_fetched:" + a["browse_id"])][:budget]
+    owned = store.rec_query.library_keys()
+    have = store.discovery.discovered_source_tokens('album')
+    todo = [a for a in store.discovery.get_discovered_albums() if a["browse_id"] not in have
+            and not store.settings.get_setting("discovery_tracks_fetched:" + a["browse_id"])][:budget]
     n = 0
     for alb in todo:
         try:
@@ -418,15 +418,15 @@ def populate_discovered_tracks(ctx, now, budget=4) -> int:
             vid, title = t.get("videoId"), (t.get("title") or "").strip()
             if not vid or not title:
                 continue
-            key = store.identity_key_for_video(vid)
+            key = store.tracks.identity_key_for_video(vid)
             if key in owned:
                 continue
-            store.upsert_discovered_track(identity_key(title, artist), vid, title, artist, alb.get("title"),
+            store.discovery.upsert_discovered_track(identity_key(title, artist), vid, title, artist, alb.get("title"),
                                           alb.get("thumbnail"), alb.get("genre"), alb.get("year"),
                                           alb["browse_id"], now)
             n += 1
         if (data or {}).get("tracks"):
-            store.set_setting("discovery_tracks_fetched:" + alb["browse_id"], "1")
+            store.settings.set_setting("discovery_tracks_fetched:" + alb["browse_id"], "1")
     if n:
         embed.build_discovered_content_vectors(store)
     return n
@@ -446,7 +446,7 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
 
     #18: the FACET overlay applies: albums in a muted genre-family are excluded, and the family
     weight is a secondary bias within the recency buckets (recency stays primary)."""
-    albums = store.get_discovered_albums()
+    albums = store.discovery.get_discovered_albums()
     if not albums:
         return []
     wmap, family_weights = {}, {}
@@ -512,7 +512,7 @@ def pick_discovered_artists(store, n, now):
 
     #18: the FACET overlay applies: artists in a muted genre-family are excluded, and the family
     weight multiplies the taste score (favored families rise, 'less X lately' gently lowers X)."""
-    arts = store.get_discovered_artists()
+    arts = store.discovery.get_discovered_artists()
     if not arts:
         return []
     scored = []

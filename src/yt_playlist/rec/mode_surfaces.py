@@ -12,9 +12,8 @@ from itertools import permutations
 
 import numpy as np
 
-from yt_playlist.rec import (embed, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, recommend, surfaces,
+from yt_playlist.rec import (embed, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, surfaces,
                              taste_modes, transient, measurement)
-from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
 
 CARD_SURFACES = ("wheelhouse", "explore", "comfort", "fresh")
@@ -72,7 +71,7 @@ def _bucket_pool(pool, mode_ids, C, lidx, LV, didx, DV, cap):
 
 def refresh_fresh(store, pool, now):
     """Rebucket newly ranked discoveries after enrichment without rebuilding library surfaces."""
-    snapshot = store.content_generation()
+    snapshot = store.rec_model.content_generation()
     modes = taste_modes.live_modes(store, snapshot=snapshot)
     mode_ids = [m["mode_id"] for m in modes]
     buckets = {}
@@ -83,7 +82,7 @@ def refresh_fresh(store, pool, now):
         buckets = _bucket_pool(pool, mode_ids, C, {}, None, didx, DV, cap)
     # Merge into the latest payload so a concurrent library rebuild cannot lose its surfaces.
     with store._lock:
-        payload = store.get_proposals("mode_bundles")
+        payload = store.rec_surface.get_proposals("mode_bundles")
         if not payload:
             return
         for mid, bucket in payload.items():
@@ -98,19 +97,20 @@ def refresh_fresh(store, pool, now):
                 for item in bucket.get("fresh", []):
                     item["pool_policy"] = versions.get(item.get("key"))
         payload.setdefault("all", {})["fresh"] = fresh
-        store.put_proposals("mode_bundles", payload, now)
+        store.rec_surface.put_proposals("mode_bundles", payload, now)
 
 
 def prepare_bundles(store, now) -> dict:
     """Bucket each surface's pool by nearest mode; cache under rec_proposals['mode_bundles']. Payload
     {str(mode_id): {surface: [item_dict, ...]}}. Empty dict when there are no modes."""
-    snapshot = store.content_generation()
+    snapshot = store.rec_model.content_generation()
     modes = taste_modes.live_modes(store, snapshot=snapshot)
     if not modes:
-        store.put_proposals("mode_bundles", {}, now)
+        store.rec_surface.put_proposals("mode_bundles", {}, now)
         # Fresh also works before metadata coverage is sufficient to form taste modes.
-        from yt_playlist.rec import fresh_pool
-        fresh_pool.prepare(store, now)
+        pool = surfaces.cold_candidates(store, now, limit=None)
+        store.rec_surface.put_proposals("fresh_pool", measurement.stamp_pool(
+            store, [surfaces._item_to_fresh_dict(t) for t in pool], now, "cold"), now)
         return {}
     mode_ids = [m["mode_id"] for m in modes]
     C = np.stack([m["centroid"].astype(np.float64) for m in modes])
@@ -121,9 +121,9 @@ def prepare_bundles(store, now) -> dict:
     # genre with only six candidates even when the library contains hundreds of matching songs.
     lim = max(len(lkeys), int(rec_params.get_param(store, "modes_pool_limit")))
     pools = {
-        "wheelhouse": recommend.for_you(store, now, limit=lim),
-        "explore": recommend.explore_for_you(store, now, limit=lim),
-        "comfort": recommend.comfort_listening(store, now, limit=lim),
+        "wheelhouse": surfaces.for_you(store, now, limit=lim),
+        "explore": surfaces.explore_for_you(store, now, limit=lim),
+        "comfort": surfaces.comfort_listening(store, now, limit=lim),
         "fresh": surfaces.cold_candidates(store, now, limit=None),
     }
     payload = {str(mid): {} for mid in mode_ids}
@@ -152,7 +152,7 @@ def prepare_bundles(store, now) -> dict:
     # membership, not a scorer pool, so it must apply the same hard suppression the scorers do
     # (YouTube dislikes + dismiss/mute/snooze) or a thumbs-down track leaks back into the card.
     _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, years=years, year_cuts=cuts,
-                    suppressed=store.suppressed_keys("for_you", now))
+                    suppressed=store.rec_model.suppressed_keys("for_you", now))
     for mode_id in mode_ids:
         bucket = payload.get(str(mode_id), {})
         if bucket.get("temporal"):
@@ -174,10 +174,10 @@ def prepare_bundles(store, now) -> dict:
                                                    .encode()).hexdigest()}
     except Exception:  # noqa: BLE001 - PPR precompute must never break bundle prep
         payload["_ppr"] = {}
-    store.put_proposals("mode_bundles", payload, now)
+    store.rec_surface.put_proposals("mode_bundles", payload, now)
     # Supersede the last on-demand pool too, so explicit-genre Fresh previews use the worker's
     # latest metadata/ranking rather than keeping an older clicked job's snapshot forever.
-    store.put_proposals("fresh_pool", payload.get("all", {}).get("fresh", []), now)
+    store.rec_surface.put_proposals("fresh_pool", payload.get("all", {}).get("fresh", []), now)
     return payload
 
 
@@ -203,7 +203,7 @@ def _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, *, years, year_
     Vf = LV.astype(np.float64)
     sims = Vf @ C.T                                # (n_tracks, n_modes) cosine
     near = sims.argmax(axis=1)
-    meta = store.tracks_by_keys(lkeys)
+    meta = store.rec_query.tracks_by_keys(lkeys)
     genres = store.modes.genres_for(lkeys)
     allt = []
     for j, mid in enumerate(mode_ids):
@@ -364,7 +364,7 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
     the assigned mode's bucket is not), TEMPORAL rotates into the 4th slot so the row stays at four,
     rather than dropping to three. Returns [] when there are no bundles/modes (caller falls back to
     legacy cards)."""
-    bundles = store.get_proposals("mode_bundles")
+    bundles = store.rec_surface.get_proposals("mode_bundles")
     modes = store.modes.list_modes(active_only=True)
     if not bundles or not modes:
         return []
@@ -417,9 +417,9 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
             b = [d for d in b if _in_band(d.get("year"), band, year_cuts[0], year_cuts[1])]
         return b
 
-    generated = set(RecDao(store).generated_track_keys())
-    blocked = generated | store.suppressed_keys("for_you", now)
-    muted = store.muted_artists()
+    generated = set(store.rec_query.generated_track_keys())
+    blocked = generated | store.rec_model.suppressed_keys("for_you", now)
+    muted = store.rec_model.muted_artists()
 
     if vibe_rank.preset:
         # An explicit vibe can also change the styles offered, rather than just reshuffle
@@ -481,7 +481,7 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
                 if surf in ("wheelhouse", "explore"):
                     keys, _, _ = embed.load_content_vectors(store)
                     limit = max(len(keys), int(rec_params.get_param(store, "modes_pool_limit")))
-                    scorer = recommend.for_you if surf == "wheelhouse" else recommend.explore_for_you
+                    scorer = surfaces.for_you if surf == "wheelhouse" else surfaces.explore_for_you
                     pool.extend(_item_dict(it) for it in scorer(store, now, limit=limit))
             unique = {}
             for item in pool:

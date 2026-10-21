@@ -4,9 +4,9 @@ import os
 import threading
 from pathlib import Path
 
-from yt_playlist.core.config import load_identities
+from yt_playlist.core.config import load_identities, validate_identities
 from yt_playlist.core.identities import build_client
-from yt_playlist.core.setup import (write_config, validate_identities, prepared_config,
+from yt_playlist.core.setup import (write_config, prepared_config,
                                     restore_config, BROWSER_CREDENTIAL_FILENAME)
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class Runtime:
 
     @property
     def credentials_present(self) -> bool:
-        return self.store.get_setting("bridge_paired") == "1"
+        return self.store.settings.get_setting("bridge_paired") == "1"
 
     def clients(self) -> dict:
         """Client provider passed to the web app. Returns {} while unconfigured (no identity yet) so

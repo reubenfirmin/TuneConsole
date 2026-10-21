@@ -4,13 +4,13 @@ from yt_playlist.util.matching import identity_key
 
 
 def test_recall_recovers_held_out_cluster_track(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     # one tight 8-track cluster (one playlist) + a distractor cluster, so the held-out
     # track should rank near the rest of its own playlist.
-    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0) for i in range(8)]
-    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None, created_at=0) for i in range(8)]
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
+    A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0) for i in range(8)]
+    B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None, created_at=0) for i in range(8)]
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
     embed.build_and_store(store, dim=4)
 
     res = eval_recs.recall_at_k(store, k=5, min_size=5)
@@ -19,17 +19,17 @@ def test_recall_recovers_held_out_cluster_track(store):
 
 
 def test_recall_none_without_vectors(store):
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
     assert eval_recs.recall_at_k(store)["recall_at_k"] is None
 
 
 def _two_cluster_playlists(store):
     """Two tight 8-track clusters, one per playlist, so the embedding separates A from B. Returns iid."""
-    iid = store.upsert_identity("main", "cred", None, True)
-    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0) for i in range(8)]
-    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None, created_at=0) for i in range(8)]
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0) for i in range(8)]
+    B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None, created_at=0) for i in range(8)]
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
     embed.build_and_store(store, dim=4)
     return iid
 
@@ -40,8 +40,8 @@ def test_temporal_recall_recovers_recent_plays_from_history(store):
     # own held-out members near the context centroid, so recall is high.
     iid = _two_cluster_playlists(store)
     day, t_recent = 86400, 1_000_000.0
-    store.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+    store.history.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
+    store.history.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
 
     res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
     assert res["trials"] == 4                 # the four held-out recent plays, none seen before the cutoff
@@ -56,17 +56,18 @@ def test_temporal_recall_excludes_generated_only_held_plays(store):
     from yt_playlist.repos.rec_query import GENERATED_GROUP
     iid = _two_cluster_playlists(store)
     day, t_recent = 86400, 1_000_000.0
-    store.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
-    store.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
-    store.set_playlist_group("PLGEN", GENERATED_GROUP)
+    store.history.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
+    store.history.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+    store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
+    store.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)
+    store.playlists.mark_generated_playlist('PLGEN')
     # cutoff = 1_000_000 - 5*86400 = 568_000; all provenance rows below are inside the window.
-    store.record_play_event(iid, identity_key("A6", "AB"), "a6", 999_000.0, playlist_ytm_id="PLGEN")
-    store.record_play_event(iid, identity_key("A7", "AB"), "a7", 998_000.0, playlist_ytm_id="PLGEN")
+    store.history.record_play_event(iid, identity_key("A6", "AB"), "a6", 999_000.0, playlist_ytm_id="PLGEN")
+    store.history.record_play_event(iid, identity_key("A7", "AB"), "a7", 998_000.0, playlist_ytm_id="PLGEN")
     # A5 is MIXED evidence: one generated play plus one organic (no-playlist) play, spaced beyond
     # the 30-minute live-dedup merge window so they land as two distinct rows. It must stay held.
-    store.record_play_event(iid, identity_key("A5", "AB"), "a5", 997_000.0, playlist_ytm_id="PLGEN")
-    store.record_play_event(iid, identity_key("A5", "AB"), "a5", 990_000.0, playlist_ytm_id=None)
+    store.history.record_play_event(iid, identity_key("A5", "AB"), "a5", 997_000.0, playlist_ytm_id="PLGEN")
+    store.history.record_play_event(iid, identity_key("A5", "AB"), "a5", 990_000.0, playlist_ytm_id=None)
 
     res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
 
@@ -81,12 +82,13 @@ def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store):
     from yt_playlist.repos.rec_query import GENERATED_GROUP
     iid = _two_cluster_playlists(store)
     day, t_recent = 86400, 1_000_000.0
-    store.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
-    store.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
-    store.set_playlist_group("PLGEN", GENERATED_GROUP)
+    store.history.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
+    store.history.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+    store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
+    store.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)
+    store.playlists.mark_generated_playlist('PLGEN')
     for i in range(4, 8):
-        store.record_play_event(iid, identity_key(f"A{i}", "AB"), f"a{i}", 990_000.0 + i * 3600,
+        store.history.record_play_event(iid, identity_key(f"A{i}", "AB"), f"a{i}", 990_000.0 + i * 3600,
                                 playlist_ytm_id="PLGEN")
 
     res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
@@ -97,7 +99,7 @@ def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store):
 
 
 def test_temporal_recall_none_without_vectors(store):
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
     assert eval_recs.temporal_recall(store)["recall"] is None
 
 
@@ -109,8 +111,8 @@ def test_temporal_recall_none_without_history(store):
 def test_rolling_temporal_recall_rebuilds_as_of_cutoff(store):
     iid = _two_cluster_playlists(store)
     day, t = 86400, 5_000_000.0
-    store.add_history_snapshot(iid, t - 20 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.add_history_snapshot(iid, t, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+    store.history.add_history_snapshot(iid, t - 20 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
+    store.history.add_history_snapshot(iid, t, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
 
     result = eval_recs.rolling_temporal_recall(store, holdout_days=5, windows=3, k=8, dim=4)
 
@@ -123,15 +125,15 @@ def test_rolling_temporal_recall_rebuilds_as_of_cutoff(store):
 
 
 def test_as_of_baskets_ignore_post_cutoff_playlist_changes(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    tracks = [store.upsert_track(f"v{i}", f"T{i}", "Artist", None, None, created_at=10) for i in range(8)]
-    stable = store.upsert_playlist(iid, "stable", "Stable", 4, "s", 20)
-    changed = store.upsert_playlist(iid, "changed", "Changed", 4, "old", 20)
-    store.set_playlist_tracks(stable, tracks[:4])
-    store.set_playlist_tracks(changed, tracks[4:])
-    store.upsert_playlist(iid, "changed", "Changed", 4, "future", 200)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    tracks = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Artist", None, None, created_at=10) for i in range(8)]
+    stable = store.playlists.upsert_playlist(iid, "stable", "Stable", 4, "s", 20)
+    changed = store.playlists.upsert_playlist(iid, "changed", "Changed", 4, "old", 20)
+    store.playlists.set_playlist_tracks(stable, tracks[:4])
+    store.playlists.set_playlist_tracks(changed, tracks[4:])
+    store.playlists.upsert_playlist(iid, "changed", "Changed", 4, "future", 200)
 
-    before, coverage = store.rec_baskets_as_of(100)
+    before, coverage = store.rec_query.rec_baskets_as_of(100)
     changed_keys = {identity_key(f"T{i}", "Artist") for i in range(4, 8)}
 
     assert coverage["safe_playlists"] == 1
@@ -141,16 +143,16 @@ def test_as_of_baskets_ignore_post_cutoff_playlist_changes(store):
 def test_projection_recall_breakdown_by_family_and_coverage(store):
     # The scalar projection_recall hides where grounding fails. The breakdown must partition trials by
     # genre family, era, and coverage band so the failure modes are locatable.
-    iid = store.upsert_identity("main", "cred", None, True)
-    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(15)]
-    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(15)]
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(15)]
+    B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(15)]
     for t in A:
-        store.set_track_genre(t, "Techno")
-        store.set_track_year(t, "2015")       # cluster A has a year (coverage band: genre+year)
+        store.tracks.set_track_genre(t, "Techno")
+        store.tracks.set_track_year(t, "2015")       # cluster A has a year (coverage band: genre+year)
     for t in B:
-        store.set_track_genre(t, "Folk")      # cluster B has no year (coverage band: genre only)
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PA", "PA", 10, "h", 0.0), A)
-    store.set_playlist_tracks(store.upsert_playlist(iid, "PB", "PB", 10, "h2", 0.0), B)
+        store.tracks.set_track_genre(t, "Folk")      # cluster B has no year (coverage band: genre only)
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 10, "h", 0.0), A)
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 10, "h2", 0.0), B)
     embed.build_and_store(store, dim=8)
 
     r = eval_recs.projection_recall(store, k=10)
@@ -164,13 +166,13 @@ def test_projection_recall_breakdown_by_family_and_coverage(store):
 
 
 def test_autotune_returns_grid_and_picks_best(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     # Two tight clusters across several playlists so recall is well-defined and svd wins.
-    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(40)]
-    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(40)]
+    A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(40)]
+    B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(40)]
     for j in range(6):
-        store.set_playlist_tracks(store.upsert_playlist(iid, f"PA{j}", "PA", 8, f"ha{j}", 0.0), A[j*5:j*5+8])
-        store.set_playlist_tracks(store.upsert_playlist(iid, f"PB{j}", "PB", 8, f"hb{j}", 0.0), B[j*5:j*5+8])
+        store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PA{j}", "PA", 8, f"ha{j}", 0.0), A[j*5:j*5+8])
+        store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PB{j}", "PB", 8, f"hb{j}", 0.0), B[j*5:j*5+8])
 
     res = eval_recs.autotune(store)
 
@@ -198,8 +200,8 @@ def test_autotune_scores_by_temporal_recall_when_history_spans_the_window(store)
     # in-sample recall@k. With a history span wider than the holdout window, autotune uses temporal_recall.
     iid = _two_cluster_playlists(store)
     day, t = 86400, 5_000_000.0
-    store.add_history_snapshot(iid, t - 40 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.add_history_snapshot(iid, t, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+    store.history.add_history_snapshot(iid, t - 40 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
+    store.history.add_history_snapshot(iid, t, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
     res = eval_recs.autotune(store, svd_dims=(4,), item2vec_probe_dim=4, k=8)
     assert res["grid"]
     assert all(g.get("metric") == "causal_temporal_recall" for g in res["grid"]), \
@@ -214,4 +216,4 @@ def test_cooc_weighting_ab_compares_both_builds(store):
     assert set(res) >= {"binary", "weighted", "winner"}
     assert res["winner"] in ("binary", "weighted")
     assert "score" in res["binary"] and "metric" in res["weighted"]
-    assert store.get_setting("rec_cooc_weighting") in (None, "0")   # prior setting restored
+    assert store.settings.get_setting("rec_cooc_weighting") in (None, "0")   # prior setting restored

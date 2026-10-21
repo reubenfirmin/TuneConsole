@@ -33,7 +33,7 @@ def _cleanup_excluded(store) -> set:
     """Playlist DB ids hidden from every Cleanup category: app-generated (quarantined) playlists.
     They're built from your library, so they trivially overlap/duplicate their source playlists, and
     they're app-managed, not yours to tidy (#21)."""
-    return store.excluded_playlist_ids()
+    return store.rec_query.excluded_playlist_ids()
 
 @dataclass
 class IdenticalGroup:
@@ -62,10 +62,10 @@ def find_identical_groups(store, ignored_sigs=None):
     ignored_sigs = ignored_sigs or set()
     excluded = _cleanup_excluded(store)
     by_keys = {}
-    for p in store.get_playlists():
+    for p in store.playlists.get_playlists():
         if not _manageable(p) or p.id in excluded:
             continue
-        keys = frozenset(store.get_playlist_track_keys(p.id))
+        keys = frozenset(store.playlists.get_playlist_track_keys(p.id))
         if not keys:            # empty -> not a real duplicate; handled separately
             continue
         by_keys.setdefault(keys, []).append(p)
@@ -96,7 +96,7 @@ def find_near_duplicate_groups(store, threshold=0.70, exclude_playlist_ids=None,
         adj.setdefault(a, set()).add(b)
         adj.setdefault(b, set()).add(a)
         sims[frozenset((a, b))] = d.similarity
-    pls = {p.id: p for p in store.get_playlists()}
+    pls = {p.id: p for p in store.playlists.get_playlists()}
     seen, groups = set(), []
     for start in adj:
         if start in seen:
@@ -122,9 +122,9 @@ def find_empty_playlists(store, ignored=None):
     `ignored`: ytm ids dismissed from the Empty category."""
     ignored = ignored or set()
     excluded = _cleanup_excluded(store)
-    return sorted((p for p in store.get_playlists()
+    return sorted((p for p in store.playlists.get_playlists()
                    if _manageable(p) and p.id not in excluded and p.ytm_playlist_id not in ignored
-                   and not store.get_playlist_track_keys(p.id)),
+                   and not store.playlists.get_playlist_track_keys(p.id)),
                   key=lambda p: p.title.lower())
 
 def find_tiny_playlists(store, max_tracks=3, ignored=None):
@@ -133,10 +133,10 @@ def find_tiny_playlists(store, max_tracks=3, ignored=None):
     ignored = ignored or set()
     excluded = _cleanup_excluded(store)
     out = []
-    for p in store.get_playlists():
+    for p in store.playlists.get_playlists():
         if not _manageable(p) or p.id in excluded or p.ytm_playlist_id in ignored:
             continue
-        n = len(store.get_playlist_track_keys(p.id))
+        n = len(store.playlists.get_playlist_track_keys(p.id))
         if 1 <= n <= max_tracks:
             out.append((n, p))
     return [p for _, p in sorted(out, key=lambda np: (np[0], np[1].title.lower()))]
@@ -150,8 +150,8 @@ def _pairs_with_keys(store):
     # system playlists (Liked Music, Episodes for Later) and app-generated playlists (#21) are never
     # dupe/overlap candidates
     excluded = _cleanup_excluded(store)
-    pls = [p for p in store.get_playlists() if _manageable(p) and p.id not in excluded]
-    keyed = [(p, store.get_playlist_track_keys(p.id)) for p in pls]
+    pls = [p for p in store.playlists.get_playlists() if _manageable(p) and p.id not in excluded]
+    keyed = [(p, store.playlists.get_playlist_track_keys(p.id)) for p in pls]
     for (pa, ka), (pb, kb) in combinations(keyed, 2):
         yield pa, ka, pb, kb
 
@@ -181,7 +181,7 @@ def near_duplicate_pairs(store, groups, suppressed=None, ignored_ytm=None, kept=
     """
     out = []
     for group in groups:
-        keyed = [(p, store.get_playlist_track_keys(p.id)) for p in group.playlists]
+        keyed = [(p, store.playlists.get_playlist_track_keys(p.id)) for p in group.playlists]
         for (pa, ka), (pb, kb) in combinations(keyed, 2):
             if (_overlap_visible(pa, pb, suppressed, ignored_ytm, kept)
                     and threshold <= jaccard(ka, kb) < 1):
@@ -221,7 +221,7 @@ class CleanupSummary:
 
     def as_payload(self) -> dict:
         """The tiny, JSON-serializable shape the home card needs, cached as a rec proposal so the
-        home page never re-runs the (O(n²)) scan below on every load. See recommend.refresh_cleanup."""
+        home page never re-runs the (O(n²)) scan below on every load. See rec.actions.refresh_cleanup."""
         return {"count": self.count, "thumbnails": self.thumbnails(2)}
 
 def cleanup_summary(store):
@@ -230,14 +230,14 @@ def cleanup_summary(store):
     tiny playlists, and overlaps), minus any the user has ignored. Mirrors the cleanup page's own
     exclusions so a fully-triaged library reports nothing. Insertion order is dupes-first, so the
     thumbnails it surfaces are the playlists most likely to have cover art."""
-    ci = store.get_cleanup_ignored()                    # {category: set(ytm)} per-playlist dismissals
-    ignored_sigs = store.get_ignored_merge_sigs()       # dismissed merge suggestions
+    ci = store.overlaps.get_cleanup_ignored()                    # {category: set(ytm)} per-playlist dismissals
+    ignored_sigs = store.overlaps.get_ignored_merge_sigs()       # dismissed merge suggestions
     groups = find_identical_groups(store, ignored_sigs=ignored_sigs)
     exact_ids = {p.id for g in groups for p in g.playlists}
     near_groups = find_near_duplicate_groups(store, exclude_playlist_ids=exact_ids,
                                              ignored_sigs=ignored_sigs)
-    prefs = {"suppressed": store.get_suppressed_overlap_pairs(),
-             "ignored_ytm": store.get_overlap_ignored(), "kept": store.get_overlap_kept_pairs()}
+    prefs = {"suppressed": store.overlaps.get_suppressed_overlap_pairs(),
+             "ignored_ytm": store.overlaps.get_overlap_ignored(), "kept": store.overlaps.get_overlap_kept_pairs()}
     near_pairs = near_duplicate_pairs(store, near_groups, **prefs)
     dupe_ids = {p.id for d in find_dupes(store) for p in (d.playlist_a, d.playlist_b)}
     overlaps = find_overlaps(store, exclude_playlist_ids=dupe_ids, **prefs)

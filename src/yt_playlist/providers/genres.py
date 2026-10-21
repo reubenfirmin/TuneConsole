@@ -37,12 +37,12 @@ def set_active(names):
 def configure(store):
     """Atomically upgrade the catalog and defaults, then publish the enabled matcher."""
     store.genres.configure_catalog()
-    set_active(store.get_genre_whitelist())
+    set_active(store.genres.get_genre_whitelist())
 
 
 def reset(store):
     store.genres.configure_catalog(reset=True)
-    set_active(store.get_genre_whitelist())
+    set_active(store.genres.get_genre_whitelist())
 
 
 @functools.lru_cache(maxsize=1)

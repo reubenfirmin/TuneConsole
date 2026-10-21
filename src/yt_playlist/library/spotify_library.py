@@ -8,7 +8,7 @@ import logging
 import re
 import zipfile
 
-from yt_playlist.library.sync import content_hash
+from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library.playlist_mutation import _read as _read_playlist
 from yt_playlist.util.matching import fuzzy_ratio, identity_key, normalize, track_artist
 from yt_playlist.util.retry import with_retry
@@ -117,14 +117,14 @@ def _spotify_url(uri, kind):
 
 def _load_state(store, key):
     try:
-        value = json.loads(store.get_setting(key) or "[]")
+        value = json.loads(store.settings.get_setting(key) or "[]")
         return set(value) if isinstance(value, list) else set()
     except (TypeError, ValueError):
         return set()
 
 
 def _save_state(store, key, values):
-    store.set_setting(key, json.dumps(sorted(values)))
+    store.settings.set_setting(key, json.dumps(sorted(values)))
 
 
 def _song_key(title, artist):
@@ -231,7 +231,7 @@ def find_album_candidates(client, row, limit=5):
 
 def _playlist_transfers(store, identity_id):
     key = f"{_PLAYLIST_STATE}:{identity_id}"
-    value = json.loads(store.get_setting(key) or "{}")
+    value = json.loads(store.settings.get_setting(key) or "{}")
     return key, value
 
 
@@ -245,13 +245,13 @@ def _remember_playlist(store, identity_id, remote_id, title, tracks, now):
         artist = track_artist(track)
         album = track.get("album") or {}
         album = album.get("name", "") if isinstance(album, dict) else album
-        ids.append(store.upsert_track(video, track.get("title") or "", artist, album,
+        ids.append(store.tracks.upsert_track(video, track.get("title") or "", artist, album,
                                       track.get("duration_seconds"),
                                       thumbnail=best_thumb(track.get("thumbnails"))))
-    keys = [store.catalog_subject(tid)["identity_key"] for tid in ids]
-    local_id = store.upsert_playlist(identity_id, remote_id, title, len(set(ids)), content_hash(keys), now)
-    store.set_playlist_tracks(local_id, ids)
-    store.ensure_playlist_thumbnail(local_id)
+    keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in ids]
+    local_id = store.playlists.upsert_playlist(identity_id, remote_id, title, len(set(ids)), content_hash(keys), now)
+    store.playlists.set_playlist_tracks(local_id, ids)
+    store.playlists.ensure_playlist_thumbnail(local_id)
 
 
 def _order_imported_tracks(client, remote_id, source_videos):
@@ -305,12 +305,12 @@ def _transfer_playlist(store, client, identity_id, playlist, fingerprint, now):
         # be reconciled against that same remote playlist, even after restarting the application.
         transfer = {"ytm_playlist_id": remote_id, "complete": False, "updated_at": now, "last_run_added": 0}
         transfers[fingerprint] = transfer
-        store.set_setting(state_key, json.dumps(transfers))
+        store.settings.set_setting(state_key, json.dumps(transfers))
         tracks = []
     else:
         remote_id = transfer["ytm_playlist_id"]
         transfer["last_run_added"] = 0
-        store.set_setting(state_key, json.dumps(transfers))
+        store.settings.set_setting(state_key, json.dumps(transfers))
         tracks = _read_playlist(client, remote_id)
     # Retain the source slot for every accepted match, including across failed lookups on a retry.
     positions = transfer.setdefault("source_video_ids", [None] * len(playlist["resolution"]))
@@ -319,7 +319,7 @@ def _transfer_playlist(store, client, identity_id, playlist, fingerprint, now):
             positions[index] = row["match"]["videoId"]
     intended = list(dict.fromkeys(video for video in positions if video))
     transfer.update(complete=False, order_verified=False)
-    store.set_setting(state_key, json.dumps(transfers))
+    store.settings.set_setting(state_key, json.dumps(transfers))
     _remember_playlist(store, identity_id, remote_id, playlist["name"], tracks, now)
     present = {t.get("videoId") for t in tracks}
     pending = [video for video in intended if video not in present]
@@ -335,12 +335,12 @@ def _transfer_playlist(store, client, identity_id, playlist, fingerprint, now):
         _remember_playlist(store, identity_id, remote_id, playlist["name"], tracks, now)
         added += len(batch)
         transfer["last_run_added"] = added
-        store.set_setting(state_key, json.dumps(transfers))
+        store.settings.set_setting(state_key, json.dumps(transfers))
     tracks = _order_imported_tracks(client, remote_id, intended)
     _remember_playlist(store, identity_id, remote_id, playlist["name"], tracks, now)
     transfer.update(complete=not any(row["status"] == "lookup_failed"
                                      for row in playlist["resolution"]), order_verified=True, updated_at=now)
-    store.set_setting(state_key, json.dumps(transfers))
+    store.settings.set_setting(state_key, json.dumps(transfers))
     return remote_id, added, resumed
 
 
@@ -360,13 +360,12 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
     # compare exact title+contents against playlists that predate this importer, so an equivalent
     # YouTube Music playlist is not recreated merely because it has no Spotify import marker.
     existing_playlists = set()
-    groups = store.get_playlist_groups()
-    for existing in store.get_playlists():
+    for existing in store.playlists.get_playlists():
         if (existing.identity_id != identity_id or existing.ytm_playlist_id == "LM"
                 or existing.ytm_playlist_id.startswith("RD")
-                or groups.get(existing.ytm_playlist_id) == GENERATED_GROUP):
+                or store.playlists.is_quarantined_playlist(existing.ytm_playlist_id)):
             continue
-        rows = store.get_playlist_tracks_with_meta(existing.id)
+        rows = store.playlists.get_playlist_tracks_with_meta(existing.id)
         keys = frozenset(_song_key(t[2], t[3]) for t in rows)
         title_key = normalize(existing.title)
         existing_playlists.add((title_key, keys))
@@ -471,7 +470,7 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
             existing_playlists.add(source_signature)
 
     saved = {(normalize(a.get("title")), normalize(a.get("artist")))
-             for a in store.get_saved_albums()}
+             for a in store.collection.get_saved_albums()}
     saved_editions = {(_album_title(title), _album_artist(artist)) for title, artist in saved}
     for source in parsed["albums"]:
         key = (normalize(source["title"]), normalize(source["artist"]))
@@ -511,7 +510,7 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
                 continue
             client.rate_playlist(audio_id, "LIKE")
             artist = ", ".join(a.get("name", "") for a in (album.get("artists") or []) if a.get("name"))
-            store.add_saved_album({"browse": match["browse_id"], "title": album.get("title") or source["title"],
+            store.collection.add_saved_album({"browse": match["browse_id"], "title": album.get("title") or source["title"],
                                    "artist": artist or source["artist"], "year": album.get("year"),
                                    "type": album.get("type"), "thumbnail": best_thumb(album.get("thumbnails"))})
         except Exception:  # an optional album must not hide completed playlist results
@@ -537,7 +536,7 @@ def save_selected_album(store, client, item, browse_id):
     candidate = next((c for c in item.get("candidates") or [] if c.get("browse_id") == browse_id), None)
     if candidate is None:
         raise ValueError("candidate is not part of this report")
-    already_saved = browse_id in {a.get("browse") for a in store.get_saved_albums()}
+    already_saved = browse_id in {a.get("browse") for a in store.collection.get_saved_albums()}
     album = with_retry(lambda: client.get_album(browse_id)) or {}
     audio_id = album.get("audioPlaylistId")
     if not audio_id:
@@ -545,7 +544,7 @@ def save_selected_album(store, client, item, browse_id):
     if not already_saved:
         client.rate_playlist(audio_id, "LIKE")
         artist = ", ".join(a.get("name", "") for a in (album.get("artists") or []) if a.get("name"))
-        store.add_saved_album({
+        store.collection.add_saved_album({
             "browse": browse_id, "title": album.get("title") or candidate["title"],
             "artist": artist or candidate.get("artist") or item.get("artist") or "",
             "year": album.get("year"), "type": album.get("type"),

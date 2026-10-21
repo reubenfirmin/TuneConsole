@@ -73,7 +73,7 @@ class RecQueryRepo(Repo):
 
     def _not_a_mix(self, col="duration_s") -> str:
         """Keep tracks within the saved length limit, including unknown durations (#44)."""
-        return f"({col} IS NULL OR {col} <= {rec_params.max_track_duration_s(self._settings)})"
+        return f"({col} IS NULL OR {col} <= {60 * rec_params.setting_param(self._settings, 'max_track_minutes')})"
 
     # --- library primitives ---
     @synchronized
@@ -204,11 +204,6 @@ class RecQueryRepo(Repo):
                             "album": r["album"] or "", "video_id": r["vid"], "thumbnail": r["thumb"],
                             "genre": r["genre"] or ""})
         return out
-
-    @synchronized
-    def saved_album_ids(self) -> set:
-        return {r["browse_id"] for r in self.conn.execute(
-            "SELECT browse_id FROM saved_albums")}
 
     @synchronized
     def track_content(self) -> dict:
@@ -473,7 +468,7 @@ class RecQueryRepo(Repo):
                 "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
                 "JOIN tracks t ON t.id=pt.track_id "
                 "JOIN rec_vectors rv ON rv.identity_key=t.identity_key "
-                "LEFT JOIN playlist_group g ON g.ytm=p.ytm_playlist_id "
+                "LEFT JOIN quarantined_playlists g ON g.ytm=p.ytm_playlist_id "
                 "WHERE searchnorm(p.title) LIKE ? AND (g.name IS NULL OR g.name<>?) "
                 "GROUP BY p.id ORDER BY n DESC LIMIT ?", (like, GENERATED_GROUP, limit)):
             out.append({"kind": "playlist", "label": r["label"],
@@ -617,13 +612,10 @@ class RecQueryRepo(Repo):
     # --- generated-playlist quarantine (so the engine never feeds on its own suggestions) ---
     @synchronized
     def excluded_playlist_ids(self, group=GENERATED_GROUP) -> set:
-        """DB ids of generated playlists still quarantined from every taste signal. A generated
-        playlist (group == `group`) is excluded until you promote it. Move it out of the group so
-        it counts as one of your real playlists. Playing it does NOT graduate it; only the explicit
-        move into your library does (see /playlist/{id}/promote)."""
+        """Generated playlists remain excluded until explicit adoption, regardless of group."""
         rows = self.conn.execute(
             "SELECT p.id id FROM playlists p "
-            "JOIN playlist_group g ON g.ytm=p.ytm_playlist_id WHERE g.name=:grp",
+            "JOIN quarantined_playlists g ON g.ytm=p.ytm_playlist_id WHERE g.name=:grp",
             {"grp": group}).fetchall()
         return {r["id"] for r in rows}
 
@@ -635,7 +627,7 @@ class RecQueryRepo(Repo):
         return {r["identity_key"] for r in self.conn.execute(
             "SELECT DISTINCT t.identity_key FROM playlist_tracks pt "
             "JOIN tracks t ON t.id=pt.track_id JOIN playlists p ON p.id=pt.playlist_id "
-            "JOIN playlist_group g ON g.ytm=p.ytm_playlist_id WHERE g.name=?", (group,))}
+            "JOIN quarantined_playlists g ON g.ytm=p.ytm_playlist_id WHERE g.name=?", (group,))}
 
     @synchronized
     def generated_only_keys(self, group=GENERATED_GROUP) -> set:
@@ -666,21 +658,10 @@ class RecQueryRepo(Repo):
         not purely self-generated). UTC day = int(played_at // 86400), matching the store's other
         day bucketing. Independent of graduation: promoting the playlist stops new generated plays
         from accruing, but does not retroactively change quarantined history."""
-        excl = self.excluded_playlist_ids(group)
-        if not excl:
-            return set()
-        qs = ",".join("?" * len(excl))
-        ytm_ids = {r["ytm_playlist_id"] for r in self.conn.execute(
-            f"SELECT ytm_playlist_id FROM playlists WHERE id IN ({qs})", list(excl))}
-        if not ytm_ids:
-            return set()
-        generated_ids = ytm_ids | {"RDAMPL" + y for y in ytm_ids}
-        gqs = ",".join("?" * len(generated_ids))
         rows = self.conn.execute(
             "SELECT identity_key k, CAST(played_at / 86400 AS INTEGER) day, "
-            f"SUM(CASE WHEN playlist_ytm_id IN ({gqs}) THEN 0 ELSE 1 END) non_generated "
-            "FROM play_events GROUP BY identity_key, day",
-            list(generated_ids)).fetchall()
+            "SUM(CASE WHEN is_generated=1 THEN 0 ELSE 1 END) non_generated "
+            "FROM play_events GROUP BY identity_key, day").fetchall()
         return {(r["day"], r["k"]) for r in rows if r["non_generated"] == 0}
 
     @synchronized
@@ -692,41 +673,21 @@ class RecQueryRepo(Repo):
         predicting its own suggestions. Keys with NO play_events rows in the window are NOT in the
         set (day-model rows carry no provenance, so there is no evidence to condemn them:
         conservatively kept, matching the per-day helper's mixed-evidence rule)."""
-        excl = self.excluded_playlist_ids(group)
-        if not excl:
-            return set()
-        qs = ",".join("?" * len(excl))
-        ytm_ids = {r["ytm_playlist_id"] for r in self.conn.execute(
-            f"SELECT ytm_playlist_id FROM playlists WHERE id IN ({qs})", list(excl))}
-        if not ytm_ids:
-            return set()
-        generated_ids = ytm_ids | {"RDAMPL" + y for y in ytm_ids}
-        gqs = ",".join("?" * len(generated_ids))
         rows = self.conn.execute(
             "SELECT identity_key k, "
-            f"SUM(CASE WHEN playlist_ytm_id IN ({gqs}) THEN 0 ELSE 1 END) non_generated "
+            "SUM(CASE WHEN is_generated=1 THEN 0 ELSE 1 END) non_generated "
             "FROM play_events WHERE played_at >= ? GROUP BY identity_key",
-            list(generated_ids) + [since_ts]).fetchall()
+            (since_ts,)).fetchall()
         return {r["k"] for r in rows if r["non_generated"] == 0}
 
     @synchronized
     def generated_only_keys_between(self, start_ts, end_ts, group=GENERATED_GROUP) -> set[str]:
         """Windowed generated-only provenance for causal evaluation's [start, end) interval."""
-        excl = self.excluded_playlist_ids(group)
-        if not excl:
-            return set()
-        qs = ",".join("?" * len(excl))
-        ytm_ids = {r["ytm_playlist_id"] for r in self.conn.execute(
-            f"SELECT ytm_playlist_id FROM playlists WHERE id IN ({qs})", list(excl))}
-        if not ytm_ids:
-            return set()
-        generated_ids = ytm_ids | {"RDAMPL" + y for y in ytm_ids}
-        gqs = ",".join("?" * len(generated_ids))
         rows = self.conn.execute(
             "SELECT identity_key k, "
-            f"SUM(CASE WHEN playlist_ytm_id IN ({gqs}) THEN 0 ELSE 1 END) non_generated "
+            "SUM(CASE WHEN is_generated=1 THEN 0 ELSE 1 END) non_generated "
             "FROM play_events WHERE played_at>=? AND played_at<? GROUP BY identity_key",
-            list(generated_ids) + [start_ts, end_ts]).fetchall()
+            (start_ts, end_ts)).fetchall()
         return {r["k"] for r in rows if r["non_generated"] == 0}
 
     @synchronized

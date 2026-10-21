@@ -120,7 +120,7 @@ def run_once(store) -> None:
         # The newest id alone would hide those changes once a newer upload had been repaired.
         evidence = [tuple(row) for row in imports]
         watermark = hashlib.sha256(json.dumps(evidence).encode()).hexdigest()
-        if watermark == store.get_setting(PHANTOM_PURGE_SEEN):
+        if watermark == store.settings.get_setting(PHANTOM_PURGE_SEEN):
             return
         try:
             from yt_playlist.core import paths
@@ -129,4 +129,4 @@ def run_once(store) -> None:
         except Exception:
             logger.warning('repair skipped; history preserved, no successful purge recorded', exc_info=True)
             return
-        store.set_setting(PHANTOM_PURGE_SEEN, watermark)
+        store.settings.set_setting(PHANTOM_PURGE_SEEN, watermark)

@@ -9,7 +9,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0),
                       base_url="http://127.0.0.1")
 
@@ -26,7 +26,7 @@ def test_fresh_cold_item_gets_feedback_radio_does_not(store):
              "artist": f"Cold Artist {i}", "album": "", "thumbnail": None,
              "plays": 0, "reason": "New", "lane": "cold", "genre": ""} for i in range(6)]
     payload = {"1": {surf: (cold if surf == "fresh" else []) for surf in ms.CARD_SURFACES}}
-    store.put_proposals("mode_bundles", payload, 1000.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1000.0)
     c = _client(store)
     html = c.get("/home/cards").text
     assert "Cold Song 0" in html

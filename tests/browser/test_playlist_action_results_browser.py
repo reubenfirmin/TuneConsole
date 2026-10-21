@@ -8,8 +8,8 @@ from yt_playlist.library.ops import PlaylistOps
 @pytest.mark.parametrize("operation", ["copy", "delete"])
 @pytest.mark.parametrize("outcome", ["failed", "partial"])
 def test_bulk_action_result_survives_navigation_and_reload(live_app, store, page, monkeypatch, operation, outcome):
-    first = store.get_playlists()[0]
-    second = store.upsert_playlist(first.identity_id, "PLB", "Second playlist", 0, "", 0)
+    first = store.playlists.get_playlists()[0]
+    second = store.playlists.upsert_playlist(first.identity_id, "PLB", "Second playlist", 0, "", 0)
     calls = []
     if operation == "copy":
         def copy(*args):
@@ -24,7 +24,7 @@ def test_bulk_action_result_survives_navigation_and_reload(live_app, store, page
             calls.append(pid)
             if outcome == "failed" or pid == first.id:
                 raise ValueError("Delete rejected")
-            store.remove_playlist(pid)
+            store.playlists.remove_playlist(pid)
         monkeypatch.setattr(PlaylistOps, "delete", delete)
     page.goto(f"{live_app}/playlists")
     page.locator(f'.playlist-table-card tr[data-playlist-id="{first.id}"] input').check()

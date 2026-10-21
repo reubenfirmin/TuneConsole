@@ -6,7 +6,7 @@ from yt_playlist.repos.base import synchronized
 
 
 def decisions(store):
-    return json.loads(store.get_setting("ppr_experiment_decisions") or "[]")
+    return json.loads(store.settings.get_setting("ppr_experiment_decisions") or "[]")
 
 
 def last_decision(store):
@@ -28,7 +28,7 @@ def decide(store, decision, cohort, reason, now):
         raise ValueError("Choose promote or retire and supply a reason.")
     if len(reason) > 2000 or not isinstance(cohort, str) or len(cohort) > 100:
         raise ValueError("Decision fields are too long.")
-    report = store.experiment_report(max(0, now - 90 * 86400), now, now)
+    report = store.rec_surface.experiment_report(max(0, now - 90 * 86400), now, now)
     arms = report["live"]
     ppr, cosine = arms.get(cohort + ":ppr"), arms.get(cohort + ":cosine")
     powered = all(a and a["clusters"] >= report["min_clusters_per_arm"] for a in (ppr, cosine))

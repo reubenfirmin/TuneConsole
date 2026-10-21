@@ -77,8 +77,8 @@ def test_start_creates_seeds_and_navigates_into_playlist(client):
     tc, ctx, bridge = client
     assert tc.post("/radio/start").json() == {"ok": True}
     assert ctx.radio.active is True
-    assert ctx.store.get_setting("radio_playlist_ytm") == "PLRADIO"
-    assert ctx.store.get_setting("radio_active") == "1"
+    assert ctx.store.settings.get_setting("radio_playlist_ytm") == "PLRADIO"
+    assert ctx.store.settings.get_setting("radio_active") == "1"
     nav = next(f for f in bridge.sent if f["type"] == "navigate")
     assert nav["url"] == "https://music.youtube.com/watch?v=v1&list=PLRADIO"   # into OUR playlist
     prime = next(f for f in bridge.sent if f["type"] == "radio-prime")
@@ -98,13 +98,13 @@ def test_single_tab_start_stopped_during_remote_setup_does_not_revive(client, mo
 
     def create_then_stop(*args, **kwargs):
         ctx.radio.reset()
-        ctx.store.set_setting("radio_active", "0")
+        ctx.store.settings.set_setting("radio_active", "0")
         return {"new_ytm": "PLRADIO", "pid": 1}
 
     monkeypatch.setattr(executor, "create_generated_playlist", create_then_stop)
     assert tc.post("/radio/start").json()["ok"] is False
     assert not ctx.radio.active
-    assert ctx.store.get_setting("radio_active") == "0"
+    assert ctx.store.settings.get_setting("radio_active") == "0"
     assert not any(frame["type"] == "navigate" for frame in bridge.sent)
 
 
@@ -128,13 +128,13 @@ def test_start_reuses_existing_playlist(client, monkeypatch):
     # A radio_playlist_ytm already on record (and still present in the store's playlists) must be
     # reconciled to the new seeds rather than recreating a fresh playlist.
     tc, ctx, bridge = client
-    ctx.store.set_setting("radio_playlist_ytm", "PLOLD")
-    monkeypatch.setattr(ctx.store, "get_playlists", lambda: [
+    ctx.store.settings.set_setting("radio_playlist_ytm", "PLOLD")
+    monkeypatch.setattr(ctx.store.playlists, "get_playlists", lambda: [
         type("P", (), {"ytm_playlist_id": "PLOLD"})()])
     calls = []
     monkeypatch.setattr(playlist_mutation, "reconcile_playlist", lambda *a: calls.append(a) or PlaylistResult("complete", tuple(a[2])))
     assert tc.post("/radio/start").json() == {"ok": True}
-    assert ctx.store.get_setting("radio_playlist_ytm") == "PLOLD"
+    assert ctx.store.settings.get_setting("radio_playlist_ytm") == "PLOLD"
     assert calls   # _reconcile was used instead of create_generated_playlist
 
 
@@ -150,8 +150,8 @@ def test_start_dual_creates_both_decks_and_sends_deck_start(client, monkeypatch)
                         lambda *a, **k: {"new_ytm": next(ytms), "pid": 1})
     assert tc.post("/radio/start").json() == {"ok": True}
     assert ctx.radio.active is True
-    a = ctx.store.get_setting("radio_playlist_a_ytm")
-    b = ctx.store.get_setting("radio_playlist_b_ytm")
+    a = ctx.store.settings.get_setting("radio_playlist_a_ytm")
+    b = ctx.store.settings.get_setting("radio_playlist_b_ytm")
     assert a and b and a != b
     ds = next(f for f in bridge.sent if f["type"] == "deck-start")
     assert "&list=" in ds["liveUrl"] and "&list=" in ds["standbyUrl"]
@@ -231,7 +231,7 @@ def test_start_dual_aborted_by_stop_during_setup_sends_no_deck_start(client, mon
         # what /radio/stop does to session state, landing mid-setup
         with ctx.radio.lock:
             ctx.radio.reset()
-        ctx.store.set_setting("radio_active", "0")
+        ctx.store.settings.set_setting("radio_active", "0")
         return {"new_ytm": "PLA", "pid": 1}
     monkeypatch.setattr(executor, "create_generated_playlist", _create_then_stop)
 
@@ -239,7 +239,7 @@ def test_start_dual_aborted_by_stop_during_setup_sends_no_deck_start(client, mon
 
     assert r["ok"] is False
     assert ctx.radio.active is False
-    assert ctx.store.get_setting("radio_active") == "0"
+    assert ctx.store.settings.get_setting("radio_active") == "0"
     assert not any(f["type"] == "deck-start" for f in bridge.sent)
     assert not any(f["type"] == "navigate" for f in bridge.sent)   # nor a v2 fallback start
 
@@ -408,7 +408,7 @@ def test_stop_clears(client):
     tc.post("/radio/start")
     assert tc.post("/radio/stop").json() == {"ok": True}
     assert ctx.radio.active is False
-    assert ctx.store.get_setting("radio_active") == "0"
+    assert ctx.store.settings.get_setting("radio_active") == "0"
     assert tc.get("/bridge/status").json()["radio"] is False
 
 
@@ -465,7 +465,7 @@ def test_steer_sets_session_tilt_and_returns_bars(client):
     assert ctx.radio.tilts == {"genre:Rock": 1.6}
     assert 'id="radio-customize-bars"' in r.text
     # Never touches the permanent taste model.
-    assert ctx.store.get_leans() == {}
+    assert ctx.store.rec_model.get_leans() == {}
 
 
 def test_steer_clamps_weight_to_genre_range(client):

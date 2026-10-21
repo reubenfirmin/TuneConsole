@@ -22,14 +22,14 @@ class _AlbumClient(FakeClient):
 
 
 def test_saved_album_tracks_folded_in_once(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = _AlbumClient()
 
     sync.sync_all(store, {iid: fc}, now=1.0)
-    keys = store.library_keys()
+    keys = store.rec_query.library_keys()
     assert identity_key("So What", "Miles Davis") in keys        # album track now in the corpus
     assert identity_key("Freddie Freeloader", "Miles Davis") in keys
-    assert "MPREb_X" in store.materialized_album_ids()
+    assert "MPREb_X" in store.tracks.materialized_album_ids()
     assert fc.album_calls == 1
 
     sync.sync_all(store, {iid: fc}, now=2.0)                      # already materialized -> no re-fetch
@@ -37,18 +37,18 @@ def test_saved_album_tracks_folded_in_once(store):
 
 
 def test_incidental_album_track_does_not_prevent_full_materialization(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_track("v1", "So What", "Miles Davis", "Kind of Blue", 100,
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.tracks.upsert_track("v1", "So What", "Miles Davis", "Kind of Blue", 100,
                        album_browse_id="MPREb_X")
     client = _AlbumClient()
     sync.sync_all(store, {iid: client}, now=1.0)
     assert client.album_calls == 1
-    assert identity_key("Freddie Freeloader", "Miles Davis") in store.library_keys()
+    assert identity_key("Freddie Freeloader", "Miles Davis") in store.rec_query.library_keys()
     assert store.collection.cached_album_tracklist_ids() == {"MPREb_X"}
 
 
 def test_browsing_an_unsaved_album_does_not_prevent_later_library_materialization(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     client = _AlbumClient()
     remember_album(store, "MPREb_X", client.get_album("MPREb_X"),
                    {"title": "Kind of Blue", "artist": "Miles Davis"})

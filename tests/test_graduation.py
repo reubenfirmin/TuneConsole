@@ -1,65 +1,65 @@
 # tests/test_graduation.py
 import json
 import pytest
-from yt_playlist.rec import recommend
+from yt_playlist.rec import graduation
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
 
 def test_graduation_crosses_threshold_and_resets(store):
-    tid = store.upsert_track("v1", "S", "Coltrane", None, None, 1)
-    store.set_track_genre(tid, "jazz")
-    store.set_track_year(tid, "1960")
+    tid = store.tracks.upsert_track("v1", "S", "Coltrane", None, None, 1)
+    store.tracks.set_track_genre(tid, "jazz")
+    store.tracks.set_track_year(tid, "1960")
     k = identity_key("S", "Coltrane")
-    recommend.graduate_moods(store, [k], 1, now=1.0)            # +1.0 each facet, below 1.2
-    assert store.get_weights(now=1.0).get("artist:Coltrane", 1.0) == 1.0
-    recommend.graduate_moods(store, [k], 1, now=2.0)           # total 2.0 -> graduate
+    graduation.graduate_moods(store, [k], 1, now=1.0)            # +1.0 each facet, below 1.2
+    assert store.rec_model.get_weights(now=1.0).get("artist:Coltrane", 1.0) == 1.0
+    graduation.graduate_moods(store, [k], 1, now=2.0)           # total 2.0 -> graduate
     # #85 read at the same `now` used for the nudge, else read-time reversion (vs real wall-clock
     # time) would erase it before the assertion runs.
-    w = store.get_weights(now=2.0)
+    w = store.rec_model.get_weights(now=2.0)
     assert w.get("artist:Coltrane", 1.0) > 1.0
     assert w.get("era:1960", 1.0) > 1.0
     assert any(ax.startswith("genre:") and v > 1.0 for ax, v in w.items())
-    assert store.get_theme("artist:Coltrane") == pytest.approx(0.8)   # 2.0 - 1.2 remainder
+    assert store.rec_surface.get_theme("artist:Coltrane") == pytest.approx(0.8)   # 2.0 - 1.2 remainder
 
 
 def test_presence_weighting_tames_diffuse_artist(store):
     keys = []
     for i in range(20):
-        tid = store.upsert_track(f"v{i}", f"S{i}", f"Art{i}", None, None, 1)
-        store.set_track_genre(tid, "jazz")
-        store.set_track_year(tid, "1965")
+        tid = store.tracks.upsert_track(f"v{i}", f"S{i}", f"Art{i}", None, None, 1)
+        store.tracks.set_track_genre(tid, "jazz")
+        store.tracks.set_track_year(tid, "1965")
         keys.append(identity_key(f"S{i}", f"Art{i}"))
     for t in range(3):
-        recommend.graduate_moods(store, keys, 1, now=float(t))
-    w = store.get_weights(now=2.0)   # #85 same `now` as the last nudge; avoids real-wall-clock reversion
+        graduation.graduate_moods(store, keys, 1, now=float(t))
+    w = store.rec_model.get_weights(now=2.0)   # #85 same `now` as the last nudge; avoids real-wall-clock reversion
     assert any(ax.startswith("genre:") and v > 1.0 for ax, v in w.items())
     assert all(not ax.startswith("artist:") or v == 1.0 for ax, v in w.items())
 
 
 def test_graduation_never_suppresses(store):
-    tid = store.upsert_track("v1", "S", "Coltrane", None, None, 1)
-    store.set_track_genre(tid, "jazz")
+    tid = store.tracks.upsert_track("v1", "S", "Coltrane", None, None, 1)
+    store.tracks.set_track_genre(tid, "jazz")
     k = identity_key("S", "Coltrane")
     for t in range(5):
-        recommend.graduate_moods(store, [k], 1, now=float(t))
-    assert k not in store.suppressed_keys("for_you", 100.0)
-    assert k not in store.disliked_identity_keys()
+        graduation.graduate_moods(store, [k], 1, now=float(t))
+    assert k not in store.rec_model.suppressed_keys("for_you", 100.0)
+    assert k not in store.rec_model.disliked_identity_keys()
 
 
 def test_recs_mood_route_feeds_graduation(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    tid = store.upsert_track("v1", "S", "Coltrane", None, None, 1)
-    store.set_track_genre(tid, "jazz")
-    pid = store.upsert_playlist(iid, "PL", "Mix", 1, "h", 0.0)
-    store.set_playlist_tracks(pid, [tid])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    tid = store.tracks.upsert_track("v1", "S", "Coltrane", None, None, 1)
+    store.tracks.set_track_genre(tid, "jazz")
+    pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 1, "h", 0.0)
+    store.playlists.set_playlist_tracks(pid, [tid])
     c = TestClient_factory(store, iid)
     k = identity_key("S", "Coltrane")
     c.post("/recs/mood", data={"keys": json.dumps([k]), "dir": "1", "intensity": "lot"})  # signed 2 -> crosses
     # #85 the route nudged at now_fn()==1.0; read at the same `now` so reversion (vs real wall-clock
     # time) doesn't erase the nudge before the assertion runs.
-    assert store.get_weights(now=1.0).get("artist:Coltrane", 1.0) > 1.0
+    assert store.rec_model.get_weights(now=1.0).get("artist:Coltrane", 1.0) > 1.0
 
 
 def TestClient_factory(store, iid):

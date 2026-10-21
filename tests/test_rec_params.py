@@ -2,7 +2,7 @@
 import pytest
 
 from yt_playlist.rec import rec_params
-from yt_playlist.rec.recommend import genre_adjusted_scores
+from yt_playlist.rec.scoring import genre_adjusted_scores
 
 
 # --- registry / get_param ---
@@ -81,7 +81,7 @@ def test_boolean_param_roundtrip(store, monkeypatch):
     assert rec_params.get_param(store, "test_flag") is True          # default
     rec_params.set_param(store, "test_flag", False)
     assert rec_params.get_param(store, "test_flag") is False
-    assert store.get_setting("rec_param:test_flag") == "0"
+    assert store.settings.get_setting("rec_param:test_flag") == "0"
 
 
 def test_registry_has_expected_groups_and_advanced_flag():

@@ -364,8 +364,13 @@ def _clamp(spec, value):
 
 def get_param(store, name):
     """Current value of a scalar knob - the stored override, clamped, or the registry default."""
+    return setting_param(store.settings, name)
+
+
+def setting_param(settings, name):
+    """Read a registered parameter through its explicit settings repository."""
     spec = PARAMS_BY_NAME[name]
-    raw = store.get_setting(SETTING_PREFIX + name)
+    raw = settings.get_setting(SETTING_PREFIX + name)
     if raw is None or raw == "":
         return spec.default
     if spec.boolean:
@@ -385,25 +390,25 @@ def set_param(store, name, value) -> None:
     """Persist a scalar knob override (clamped to its spec range)."""
     spec = PARAMS_BY_NAME[name]
     if spec.boolean:
-        store.set_setting(SETTING_PREFIX + name, "1" if _clamp(spec, value) else "0")
+        store.settings.set_setting(SETTING_PREFIX + name, "1" if _clamp(spec, value) else "0")
     else:
-        store.set_setting(SETTING_PREFIX + name, str(_clamp(spec, value)))
+        store.settings.set_setting(SETTING_PREFIX + name, str(_clamp(spec, value)))
 
 
 def reset_param(store, name) -> None:
     """Drop a scalar knob's override so it reverts to the registry default."""
     PARAMS_BY_NAME[name]   # validate the name
-    store.delete_setting(SETTING_PREFIX + name)
+    store.settings.delete_setting(SETTING_PREFIX + name)
 
 
 def reset_all_params(store) -> None:
     """Revert every scalar knob to its default."""
     for p in PARAMS:
-        store.delete_setting(SETTING_PREFIX + p.name)
+        store.settings.delete_setting(SETTING_PREFIX + p.name)
 
 
 # --- Transient model (lifecycle / recency) ---
-SYNC_STALE_S = 24 * 3600       # sync older than this is "stale" (also used by recommend.sync_status)
+SYNC_STALE_S = 24 * 3600       # sync older than this is "stale" (also used by actions.sync_status)
 # Source weights into the transient leans
 PLAY_TRANSIENT_W = 0.30        # one recent play's positive push
 LIKE_TRANSIENT_W = 0.45        # one recent like's positive push to facet leans (stronger than a play)

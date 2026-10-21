@@ -8,9 +8,9 @@ def _s():
 
 def test_track_view_has_stats_and_gc_at():
     s = _s()
-    s.upsert_discovered_track("a|x", "v1", "Song", "Artist", "Alb", None, "house", "2020", "r", 100.0)
-    s.mark_offered("track", ["a|x"], 200.0)
-    rows = {r["identity_key"]: r for r in s.discovery_track_view(1000.0, gc_days=30)}
+    s.discovery.upsert_discovered_track("a|x", "v1", "Song", "Artist", "Alb", None, "house", "2020", "r", 100.0)
+    s.discovery.mark_offered("track", ["a|x"], 200.0)
+    rows = {r["identity_key"]: r for r in s.discovery.discovery_track_view(1000.0, gc_days=30)}
     r = rows["a|x"]
     assert r["found_at"] == 100.0 and r["offered_count"] == 1
     assert r["gc_at"] == 200.0 + 30 * 86400
@@ -19,18 +19,18 @@ def test_track_view_has_stats_and_gc_at():
 
 def test_unshown_track_expires_from_found_date():
     s = _s()
-    s.upsert_discovered_track("a|x", "v1", "Song", "Artist", "Alb", None, None, None, "r", 100.0)
-    r = s.discovery_track_view(1000.0, gc_days=30)[0]
+    s.discovery.upsert_discovered_track("a|x", "v1", "Song", "Artist", "Alb", None, None, None, "r", 100.0)
+    r = s.discovery.discovery_track_view(1000.0, gc_days=30)[0]
     assert r["gc_at"] == 100.0 + 30 * 86400
 
 
 def test_album_and_artist_views():
     s = _s()
-    s.upsert_discovered_album("b1", "Artist", "Album", "2020", None, 100.0, genre="house")
-    s.upsert_discovered_artist("Artist", 0.5, None, None, None, 100.0, genre="house")
-    s.mark_offered("album", ["b1"], 200.0)
-    s.mark_offered("artist", ["Artist"], 200.0)
-    alb = s.discovery_album_view(1000.0, gc_days=30)[0]
-    art = s.discovery_artist_view(1000.0, gc_days=30)[0]
+    s.discovery.upsert_discovered_album("b1", "Artist", "Album", "2020", None, 100.0, genre="house")
+    s.discovery.upsert_discovered_artist("Artist", 0.5, None, None, None, 100.0, genre="house")
+    s.discovery.mark_offered("album", ["b1"], 200.0)
+    s.discovery.mark_offered("artist", ["Artist"], 200.0)
+    alb = s.discovery.discovery_album_view(1000.0, gc_days=30)[0]
+    art = s.discovery.discovery_artist_view(1000.0, gc_days=30)[0]
     assert alb["title"] == "Album" and alb["offered_count"] == 1 and alb["gc_at"] == 200.0 + 30 * 86400
     assert art["artist"] == "Artist" and art["offered_count"] == 1 and art["gc_at"] == 200.0 + 30 * 86400

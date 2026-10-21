@@ -55,17 +55,17 @@ def test_enrich_none_when_no_data(monkeypatch):
 
 
 def test_enrich_playlist_resolves_mbid_then_fills(store, monkeypatch):
-    iid = store.upsert_identity("main", "cred", None, True)
-    t1 = store.upsert_track("v1", "Song", "Artist", "Alb", 200)
-    pid = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1000.0)
-    store.set_playlist_tracks(pid, [t1])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    t1 = store.tracks.upsert_track("v1", "Song", "Artist", "Alb", 200)
+    pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1000.0)
+    store.playlists.set_playlist_tracks(pid, [t1])
     # track has no stored MBID -> provider resolves it live, persists it, then enriches
     monkeypatch.setattr(ab, "enrich",
                         lambda mbid: {**ab._empty(), "bpm": 130.0, "energy": 0.6,
                                       "danceability": 0.8})
     events = []
     ab.enrich_playlist(store, pid, events.append, mbid_fn=lambda title, artist: "mbid-live")
-    assert store.get_track_audio(t1) == (130.0, 0.6, 0.8)
-    rows = store.tracks_missing_audio(pid)
+    assert store.tracks.get_track_audio(t1) == (130.0, 0.6, 0.8)
+    rows = store.tracks.tracks_missing_audio(pid)
     assert rows == []  # fully populated now
     assert any(e.get("type") == "done" for e in events)

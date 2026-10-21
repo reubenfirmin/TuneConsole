@@ -7,14 +7,14 @@ from yt_playlist.util.matching import identity_key
 
 def prepare(store):
     seed_sounds(store)
-    store.set_setting("last_sync_at", "1")
-    store.set_setting("onboard_dismissed", "1")
-    iid = store.get_identities()[0].id
+    store.settings.set_setting("last_sync_at", "1")
+    store.settings.set_setting("onboard_dismissed", "1")
+    iid = store.identities.get_identities()[0].id
     for i, genre in enumerate(["Jazz", "Techno", "Trance", "Indie Rock", "Ambient", "Classical"]):
-        tid = store.upsert_track(f"favorite-{i}", f"Favorite {i}", f"Favorite artist {i}", None, None)
-        store.set_track_genre(tid, genre)
-        store.set_track_year(tid, 1960 + i * 10)
-        store.add_history_snapshot(iid, 1, [identity_key(f"Favorite {i}", f"Favorite artist {i}")] * 10)
+        tid = store.tracks.upsert_track(f"favorite-{i}", f"Favorite {i}", f"Favorite artist {i}", None, None)
+        store.tracks.set_track_genre(tid, genre)
+        store.tracks.set_track_year(tid, 1960 + i * 10)
+        store.history.add_history_snapshot(iid, 1, [identity_key(f"Favorite {i}", f"Favorite artist {i}")] * 10)
 
 
 def test_vibe_applies_persists_recovers_from_failure_and_resets(live_app, store, page):
@@ -36,7 +36,7 @@ def test_vibe_applies_persists_recovers_from_failure_and_resets(live_app, store,
     expect(gentle).to_be_checked()
     expect(dialog).to_be_visible()
     expect(dialog.locator("#home-vibe-status")).to_have_text("In the mix: Keep it gentle.")
-    assert store.get_setting(home_vibe.SETTING) == "gentle"
+    assert store.settings.get_setting(home_vibe.SETTING) == "gentle"
     page.reload()
     expect(dialog).to_be_visible()
     expect(gentle).to_be_checked()
@@ -124,7 +124,7 @@ def test_open_vibe_tab_resets_when_tuning_expires(live_app, store, page):
     dialog.get_by_role("tab", name="Vibe", exact=True).click()
     dialog.get_by_role("radio", name="Headspace", exact=True).check()
     expect(page.locator("#home-mode-cards")).to_have_attribute("data-vibe", "focus")
-    store.set_setting(mix_tuning.UPDATED_AT_SETTING, str(1 - mix_tuning.TTL_S))
+    store.settings.set_setting(mix_tuning.UPDATED_AT_SETTING, str(1 - mix_tuning.TTL_S))
     with page.expect_response("**/home/fingerprint"):
         page.clock.fast_forward(mix_tuning.TTL_S * 1000)
     expect(dialog.get_by_role("radio", name="Take it as it comes", exact=True)).to_be_checked()

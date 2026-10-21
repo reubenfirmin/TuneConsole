@@ -8,26 +8,26 @@ from yt_playlist.web.app import create_app
 
 
 def client_at(store, clock):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: clock[0]),
                       base_url="http://127.0.0.1")
 
 
 def assert_cleared(store):
-    assert store.get_leans() == {}
-    assert store.hidden_facets() == set()
+    assert store.rec_model.get_leans() == {}
+    assert store.rec_model.hidden_facets() == set()
     assert rec_params.get_param(store, "breadth_bias") == 0
-    assert store.get_proposals("home_genre_request") == {}
-    assert store.get_setting("home_mix_vibe") is None
-    assert store.get_setting(mix_tuning.UPDATED_AT_SETTING) is None
+    assert store.rec_surface.get_proposals("home_genre_request") == {}
+    assert store.settings.get_setting("home_mix_vibe") is None
+    assert store.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) is None
 
 
 def test_clear_resets_genre_selections_and_all_biases_together(store):
     seed_genres(store)
     clock = [1000.0]
     client = client_at(store, clock)
-    store.set_weight("genre:jazz", 1.4, now=clock[0])
-    learned = store.get_weights(now=clock[0])
+    store.rec_model.set_weight("genre:jazz", 1.4, now=clock[0])
+    learned = store.rec_model.get_weights(now=clock[0])
     client.post("/home/mix-genres", data={"genres": ["jazz", "techno"]})
     client.post("/home/steer", data={"axis": "genre:jazz", "weight": "2"})
     client.post("/home/breadth", data={"breadth_bias": ".8"})
@@ -37,7 +37,7 @@ def test_clear_resets_genre_selections_and_all_biases_together(store):
     response = client.post("/home/fingerprint/reset")
     assert response.status_code == 200
     assert_cleared(store)
-    assert store.get_weights(now=clock[0]) == learned
+    assert store.rec_model.get_weights(now=clock[0]) == learned
     assert 'data-requested-genres=\'[]\'' in response.text
     assert 'hx-swap-oob="outerHTML"' in response.text  # mixes and controls update in one response
     assert "Reset mix adjustments" in response.text
@@ -64,7 +64,7 @@ def test_every_control_expires_at_four_hours_without_reads_extending_it(store, p
     clock[0] += mix_tuning.TTL_S - 1
     response = client.get("/home/cards")
     assert float(response.headers["X-Mix-Tuning-Remaining"]) == 1
-    assert store.get_setting(mix_tuning.UPDATED_AT_SETTING) == "1000.0"
+    assert store.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) == "1000.0"
     # A new client still sees the persisted expiry, rather than starting a new browser timer.
     clock[0] += 1
     response = client_at(store, clock).get("/home/fingerprint")
@@ -82,13 +82,13 @@ def test_last_adjustment_extends_window_and_new_session_drops_expired_choices(st
     client.post("/home/steer", data={"axis": "genre:jazz", "weight": "2"})
     clock[0] = 1000 + mix_tuning.TTL_S
     client.get("/home/cards")
-    assert store.get_lean("genre:jazz") == 2
-    assert store.get_proposals("home_genre_request")["include_genres"] == ["jazz"]
+    assert store.rec_model.get_lean("genre:jazz") == 2
+    assert store.rec_surface.get_proposals("home_genre_request")["include_genres"] == ["jazz"]
 
     clock[0] += 3600
     client.post("/home/breadth", data={"breadth_bias": ".5"})
-    assert store.get_leans() == {}
-    assert store.get_proposals("home_genre_request") == {}
+    assert store.rec_model.get_leans() == {}
+    assert store.rec_surface.get_proposals("home_genre_request") == {}
     assert rec_params.get_param(store, "breadth_bias") == .5
     assert mix_tuning.remaining(store, clock[0]) == mix_tuning.TTL_S
 
@@ -109,7 +109,7 @@ def test_expired_biases_stop_affecting_recommendations_without_opening_controls(
     else:
         graduation.graduate_slider_exposure(store, clock[0])
     assert_cleared(store)
-    assert store.get_weights(now=clock[0]) == {}
+    assert store.rec_model.get_weights(now=clock[0]) == {}
 
 
 def test_temporary_bias_does_not_become_learned_taste_across_midnight(store):
@@ -119,5 +119,5 @@ def test_temporary_bias_does_not_become_learned_taste_across_midnight(store):
     graduation.graduate_slider_exposure(store, clock[0])
     clock[0] += 120
     graduation.graduate_slider_exposure(store, clock[0])
-    assert store.theme_rows() == []
-    assert store.get_weights(now=clock[0]) == {}
+    assert store.rec_surface.theme_rows() == []
+    assert store.rec_model.get_weights(now=clock[0]) == {}

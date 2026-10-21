@@ -47,7 +47,7 @@ def test_parse_error_counts_as_reachable():
 
 @pytest.mark.parametrize("provider", [musicbrainz, discogs, lastfm])
 def test_enrich_loop_aborts_when_host_unreachable(provider, store, monkeypatch):
-    ids = [store.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(20)]
+    ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(20)]
     pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art"}
                for i, tid in enumerate(ids)]
 
@@ -77,7 +77,7 @@ def test_enrich_loop_aborts_when_host_unreachable(provider, store, monkeypatch):
 @pytest.mark.parametrize("provider", [musicbrainz, discogs, lastfm])
 def test_enrich_loop_completes_when_host_reachable(provider, store, monkeypatch):
     """A genuine no-match (host up, empty result) must NOT trip the breaker: all tracks processed."""
-    ids = [store.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(8)]
+    ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(8)]
     pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art"}
                for i, tid in enumerate(ids)]
 
@@ -101,7 +101,7 @@ def test_enrich_loop_completes_when_host_reachable(provider, store, monkeypatch)
 
 
 def test_deezer_breaker_aborts_when_host_unreachable(store, monkeypatch):
-    ids = [store.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(20)]
+    ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(20)]
     pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art"}
                for i, tid in enumerate(ids)]
     calls = []
@@ -120,7 +120,7 @@ def test_deezer_breaker_aborts_when_host_unreachable(store, monkeypatch):
 
 
 def test_deezer_breaker_completes_when_host_reachable(store, monkeypatch):
-    ids = [store.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(8)]
+    ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(8)]
     pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art"}
                for i, tid in enumerate(ids)]
     calls = []
@@ -138,7 +138,7 @@ def test_deezer_breaker_completes_when_host_reachable(store, monkeypatch):
 
 
 def test_acousticbrainz_breaker_aborts_when_host_unreachable(store, monkeypatch):
-    ids = [store.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(20)]
+    ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(20)]
     pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art",
                 "mb_recording_id": f"mbid-{i}"} for i, tid in enumerate(ids)]
     calls = []
@@ -157,7 +157,7 @@ def test_acousticbrainz_breaker_aborts_when_host_unreachable(store, monkeypatch)
 
 
 def test_acousticbrainz_breaker_completes_when_host_reachable(store, monkeypatch):
-    ids = [store.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(8)]
+    ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(8)]
     pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art",
                 "mb_recording_id": f"mbid-{i}"} for i, tid in enumerate(ids)]
     calls = []

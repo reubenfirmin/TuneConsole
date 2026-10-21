@@ -11,17 +11,17 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
 
 def _seed(store, iid):
-    a = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
-    tid = store.upsert_track("v0", "Hyperballad", "Bjork", "Post", 200, 1)
-    store.set_playlist_tracks(a, [tid])
-    store.set_track_enrichment(tid, "Electronic", "1995")     # canonical = MusicBrainz's pick
-    store.upsert_conflict(tid, "genre", [{"provider": "musicbrainz", "value": "Electronic"},
+    a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    tid = store.tracks.upsert_track("v0", "Hyperballad", "Bjork", "Post", 200, 1)
+    store.playlists.set_playlist_tracks(a, [tid])
+    store.tracks.set_track_enrichment(tid, "Electronic", "1995")     # canonical = MusicBrainz's pick
+    store.enrichment.upsert_conflict(tid, "genre", [{"provider": "musicbrainz", "value": "Electronic"},
                                          {"provider": "discogs", "value": "Art Pop"}])
     return a, tid
 
@@ -50,23 +50,23 @@ def test_resolve_overwrites_column_and_clears_conflict(store):
     # canonical column overwritten with the user's pick...
     assert store.conn.execute("SELECT genre FROM tracks WHERE id=?", (tid,)).fetchone()["genre"] == "Art Pop"
     # ...and the conflict no longer counts
-    assert store.conflict_count_for_playlist(a) == 0
+    assert store.enrichment.conflict_count_for_playlist(a) == 0
     assert "Nothing left to resolve" in r.text
 
 
 @pytest.mark.parametrize("scope", ["playlist", "album"])
 def test_provider_links_look_up_track_and_survive_partial_resolution(store, scope):
     c, iid = _client(store)
-    pid = store.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     title, artist = 'Critical Choice / "Live"', "Björk & Friends"
-    tid = store.upsert_track("v0", title, artist, "Album", 200, 1, album_browse_id="BID")
-    store.set_playlist_tracks(pid, [tid])
+    tid = store.tracks.upsert_track("v0", title, artist, "Album", 200, 1, album_browse_id="BID")
+    store.playlists.set_playlist_tracks(pid, [tid])
     mbid = "b1234567-1234-1234-1234-123456789abc"
-    store.set_track_mbid(tid, mbid)
+    store.tracks.set_track_mbid(tid, mbid)
     providers = ["musicbrainz", "discogs", "lastfm", "deezer", "acousticbrainz"]
-    store.upsert_conflict(tid, "year", [{"provider": p, "value": str(1952 + i)}
+    store.enrichment.upsert_conflict(tid, "year", [{"provider": p, "value": str(1952 + i)}
                                          for i, p in enumerate(providers)])
-    store.upsert_conflict(tid, "genre", [{"provider": "musicbrainz", "value": "Electronic"},
+    store.enrichment.upsert_conflict(tid, "genre", [{"provider": "musicbrainz", "value": "Electronic"},
                                           {"provider": "discogs", "value": "Art Pop"}])
     base = f"/playlist/{pid}" if scope == "playlist" else "/album/BID"
 
@@ -97,7 +97,7 @@ def test_provider_links_look_up_track_and_survive_partial_resolution(store, scop
 def test_unknown_provider_remains_plain_text(store):
     c, iid = _client(store)
     pid, tid = _seed(store, iid)
-    store.upsert_conflict(tid, "genre", [{"provider": "unknown", "value": "Rock"},
+    store.enrichment.upsert_conflict(tid, "genre", [{"provider": "unknown", "value": "Rock"},
                                           {"provider": "discogs", "value": "Art Pop"}])
     body = c.get(f"/playlist/{pid}/conflicts").text
     assert '<span class="muted conflict-prov">unknown</span>' in body

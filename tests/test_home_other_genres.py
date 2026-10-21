@@ -26,7 +26,7 @@ def seed_genres(store):
                       "plays": 0, "reason": "", "lane": lane} for i in range(20)]
             bundles[str(mid)][lane] = items
             bundles["all"].setdefault(lane, []).extend(items)
-    store.put_proposals("mode_bundles", bundles, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", bundles, 1.0)
 
 
 def offered(response):
@@ -40,16 +40,16 @@ def test_other_genres_changes_actual_themes_without_changing_taste(store):
     before = client.get("/home/cards")
     current = offered(before)
     assert len(current) == 4
-    bundles = store.get_proposals("mode_bundles")
-    weights, leans = store.get_weights(), store.get_leans()
+    bundles = store.rec_surface.get_proposals("mode_bundles")
+    weights, leans = store.rec_model.get_weights(), store.rec_model.get_leans()
     response = client.post("/home/other-genres", data={"genres": json.dumps(sorted(current))})
     assert response.status_code == 200
     assert len(offered(response)) == 2
     assert not offered(response) & current
     assert "Different genres for this set" in response.text
     assert "genre_request" in response.text  # saved recipe and diagnostic audit carry the request
-    assert store.get_weights() == weights and store.get_leans() == leans
-    assert store.get_proposals("mode_bundles") == bundles
+    assert store.rec_model.get_weights() == weights and store.rec_model.get_leans() == leans
+    assert store.rec_surface.get_proposals("mode_bundles") == bundles
     assert home._epoch(store, "cards") == 1
 
     # Re-fetching and steering preserve this menu's request. A normal refresh ends it.
@@ -75,11 +75,11 @@ def test_invalid_genre_request_does_not_advance_rotation(store):
     for value in ["broken", "null", '"jazz"', "[]", "[4]", '[""]', "{}"]:
         assert client.post("/home/other-genres", data={"genres": value}).status_code == 400
     assert home._epoch(store, "cards") == 0
-    assert store.get_proposals("home_genre_request") is None
+    assert store.rec_surface.get_proposals("home_genre_request") is None
 
 
 def test_genre_filter_uses_families_and_artist_fallback(store, monkeypatch):
-    monkeypatch.setattr(store, "artist_genre_years", lambda: {"A": {"genre": "Jazz"}})
+    monkeypatch.setattr(store.rec_query, "artist_genre_years", lambda: {"A": {"genre": "Jazz"}})
     items = [{"key": "known", "genre": "Jazz"}, {"key": "inferred", "artist": "A"},
              {"key": "unknown"}, {"key": "new", "genre": "Techno"}]
     assert home_themes.other_genres(store, items, {genre_map.family("Jazz")}) == [items[-1]]
@@ -87,13 +87,13 @@ def test_genre_filter_uses_families_and_artist_fallback(store, monkeypatch):
 
 def test_other_genres_never_backfills_the_previous_genres(store):
     seed_genres(store)
-    bundles = store.get_proposals("mode_bundles")
+    bundles = store.rec_surface.get_proposals("mode_bundles")
     for mid in range(1, 6):
         bundles[str(mid)] = {}
     # Thin new-genre buckets used to be topped up with arbitrary general-pool genres.
     for lane in mode_surfaces.CARD_SURFACES:
         bundles["0"][lane] = bundles["0"][lane][:4]
-    store.put_proposals("mode_bundles", bundles, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", bundles, 1.0)
     avoid = {genre_map.family(g) for g in ["Techno", "Trance", "Indie Rock", "Ambient", "Classical"]}
     cards = mode_surfaces.assemble_cards(store, 1000, 1, avoid_genres=avoid)
     assert cards
@@ -102,12 +102,12 @@ def test_other_genres_never_backfills_the_previous_genres(store):
 
 def test_other_genres_does_not_attribute_a_rethemed_card_to_the_old_mode(store):
     seed_genres(store)
-    bundles = store.get_proposals("mode_bundles")
+    bundles = store.rec_surface.get_proposals("mode_bundles")
     # The jazz-led mode has enough techno in its bucket to survive a track-only filter.
     # Showing those leftovers under the jazz mode would teach the wrong theme on a pick.
     for lane in mode_surfaces.CARD_SURFACES:
         bundles["0"][lane] += bundles["1"][lane]
-    store.put_proposals("mode_bundles", bundles, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", bundles, 1.0)
     cards = mode_surfaces.assemble_cards(store, 1000, 1, avoid_genres={genre_map.family("Jazz")})
     assert cards and all(c["mode_id"] != 0 for c in cards)
     assert all(t["genre"] != "Jazz" for c in cards for t in c["tracks"])
@@ -115,18 +115,18 @@ def test_other_genres_does_not_attribute_a_rethemed_card_to_the_old_mode(store):
 
 def test_other_genres_uses_current_library_genres_before_rendering(store):
     seed_genres(store)
-    bundles = store.get_proposals("mode_bundles")
+    bundles = store.rec_surface.get_proposals("mode_bundles")
     # The worker cached Techno; enrichment has since corrected these tracks to Jazz.
     # Leave other alternatives available so this must succeed without the usual-mix fallback.
     for lane, items in bundles["1"].items():
         for i, item in enumerate(items):
             item["title"] = f"{lane} song {i}"
             item["key"] = identity_key(item["title"], item["artist"])
-            tid = store.upsert_track(f"{lane}-{i}", item["title"], item["artist"], None, None)
-            store.set_track_genre(tid, "Jazz")
+            tid = store.tracks.upsert_track(f"{lane}-{i}", item["title"], item["artist"], None, None)
+            store.tracks.set_track_genre(tid, "Jazz")
         # General backfill carries the same stale rows as the mode bucket.
         bundles["all"][lane] = list(items)
-    store.put_proposals("mode_bundles", bundles, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", bundles, 1.0)
     client = _client(store)
 
     response = client.post("/home/other-genres", data={
@@ -136,12 +136,12 @@ def test_other_genres_uses_current_library_genres_before_rendering(store):
     assert "Different genres for this set" in response.text
     assert offered(response) == {"ambient"}
     assert "jazz" not in offered(client.get("/home/cards"))
-    assert store.get_proposals("mode_bundles") == bundles
+    assert store.rec_surface.get_proposals("mode_bundles") == bundles
 
 
 def test_genre_filter_resolves_library_metadata_without_mutating_candidates(store):
-    tid = store.upsert_track("v", "Song", "Artist", None, None)
-    store.set_track_genre(tid, "Techno")
+    tid = store.tracks.upsert_track("v", "Song", "Artist", None, None)
+    store.tracks.set_track_genre(tid, "Techno")
     items = [{"key": identity_key("Song", "Artist"), "genre": "Jazz"}]
 
     result = home_themes.other_genres(store, items, {genre_map.family("Jazz")})
@@ -153,16 +153,16 @@ def test_genre_filter_resolves_library_metadata_without_mutating_candidates(stor
 def test_chosen_genres_constrain_tracks_and_expire_without_changing_taste(store):
     seed_genres(store)
     client = _client(store)
-    weights, leans = store.get_weights(), store.get_leans()
-    bundles = store.get_proposals("mode_bundles")
+    weights, leans = store.rec_model.get_weights(), store.rec_model.get_leans()
+    bundles = store.rec_surface.get_proposals("mode_bundles")
     response = client.post("/home/mix-genres", data={"genres": ["jazz", "techno"]})
 
     assert response.status_code == 200
     assert offered(response) == {"jazz", "techno"}
     assert "Your chosen genres" in response.text
     assert '"kind": "chosen_genres"' in response.text
-    assert store.get_weights() == weights and store.get_leans() == leans
-    assert store.get_proposals("mode_bundles") == bundles
+    assert store.rec_model.get_weights() == weights and store.rec_model.get_leans() == leans
+    assert store.rec_surface.get_proposals("mode_bundles") == bundles
     assert offered(client.get("/home/cards")) == offered(response)
     assert offered(client.post("/home/breadth", data={"breadth_bias": "0.5"})) == offered(response)
     regular = client.post("/home/refresh-cards")
@@ -172,12 +172,12 @@ def test_chosen_genres_constrain_tracks_and_expire_without_changing_taste(store)
 
 def test_chosen_genres_filter_backfill_and_keep_mode_attribution(store):
     seed_genres(store)
-    bundles = store.get_proposals("mode_bundles")
+    bundles = store.rec_surface.get_proposals("mode_bundles")
     for lane in mode_surfaces.CARD_SURFACES:
         # A jazz-led mode contains techno; a techno-led mode needs general backfill.
         bundles["0"][lane] += bundles["1"][lane]
         bundles["1"][lane] = bundles["1"][lane][:4]
-    store.put_proposals("mode_bundles", bundles, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", bundles, 1.0)
     cards = mode_surfaces.assemble_cards(store, 1000, 1, include_genres={"techno"})
     assert cards
     assert all(c["mode_id"] == 1 for c in cards)
@@ -190,16 +190,16 @@ def test_chosen_genres_validate_before_advancing_the_menu(store):
     for genres in [[], [""], ["not-available"], ["jazz", "not-available"], ["jazz"] * 101]:
         assert client.post("/home/mix-genres", data={"genres": genres}).status_code == 400
     assert home._epoch(store, "cards") == 0
-    assert store.get_proposals("home_genre_request") is None
+    assert store.rec_surface.get_proposals("home_genre_request") is None
 
 
 def test_chosen_genres_keep_a_fresh_skeleton_when_the_pool_cannot_fill_a_mix(store):
     seed_genres(store)
-    bundles = store.get_proposals("mode_bundles")
+    bundles = store.rec_surface.get_proposals("mode_bundles")
     for lane in mode_surfaces.CARD_SURFACES:
         bundles["0"][lane] = bundles["0"][lane][:1]
         bundles["all"][lane] = [t for t in bundles["all"][lane] if t["genre"] != "Jazz"]
-    store.put_proposals("mode_bundles", bundles, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", bundles, 1.0)
     response = _client(store).post("/home/mix-genres", data={"genres": ["jazz"]})
     assert response.status_code == 200
     assert 'id="gen-fresh"' in response.text and 'class="fresh-pool-art"' in response.text
@@ -210,12 +210,12 @@ def test_chosen_genres_keep_a_fresh_skeleton_when_the_pool_cannot_fill_a_mix(sto
 
 
 def test_available_genres_follow_current_metadata_and_artist_fallback(store, monkeypatch):
-    tid = store.upsert_track("v", "Song", "Artist", None, None)
-    store.set_track_genre(tid, "Techno")
-    monkeypatch.setattr(store, "artist_genre_years", lambda: {"A": {"genre": "Jazz"}})
+    tid = store.tracks.upsert_track("v", "Song", "Artist", None, None)
+    store.tracks.set_track_genre(tid, "Techno")
+    monkeypatch.setattr(store.rec_query, "artist_genre_years", lambda: {"A": {"genre": "Jazz"}})
     items = [{"key": identity_key("Song", "Artist"), "genre": "Ambient"},
              {"key": "inferred", "artist": "A"}, {"key": "unknown"}]
-    store.put_proposals("mode_bundles", {"all": {"wheelhouse": items}}, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", {"all": {"wheelhouse": items}}, 1.0)
     assert home_themes.genre_options(store) == [
         {"family": "techno", "label": "techno"}, {"family": "jazz", "label": "jazz"}]
     assert [item["key"] for item in home_themes.matching_genres(store, items, include={"jazz"})] == ["inferred"]
@@ -224,10 +224,10 @@ def test_available_genres_follow_current_metadata_and_artist_fallback(store, mon
 
 def test_available_genres_prioritize_listening_over_alphabet_and_candidate_volume(store):
     seed_genres(store)
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     for genre, count in {"Trance": 100, "Techno": 60, "Jazz": 20, "Ambient": 1}.items():
-        tid = store.upsert_track(genre, genre, "Artist", None, None)
-        store.set_track_genre(tid, genre)
-        store.add_history_snapshot(iid, 1.0, [identity_key(genre, "Artist")] * count)
+        tid = store.tracks.upsert_track(genre, genre, "Artist", None, None)
+        store.tracks.set_track_genre(tid, genre)
+        store.history.add_history_snapshot(iid, 1.0, [identity_key(genre, "Artist")] * count)
     options = home_themes.genre_options(store)
     assert [option["label"] for option in options[:3]] == ["trance", "techno", "jazz"]

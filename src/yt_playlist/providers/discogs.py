@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 
 from yt_playlist.providers import genres
+from yt_playlist.providers.enrichment import apply_findings
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
 from yt_playlist.util import net
 from yt_playlist.util.matching import normalize
@@ -46,7 +47,7 @@ def token(store=None, config_path=None):
     if env and env.strip():
         return env.strip()
     if store is not None:
-        saved = store.get_setting("discogs_token")
+        saved = store.settings.get_setting("discogs_token")
         if saved and saved.strip():
             return saved.strip()
     path = config_path or paths.config_path()
@@ -172,7 +173,7 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, tok=None, s
     (playlist_id) or an explicit `pending` list (an album's tracks)."""
     enrich_fn = enrich_fn or enrich
     tok = tok or token(store)
-    pending = store.tracks_to_enrich(playlist_id) if pending is None else pending   # missing genre OR year
+    pending = store.tracks.tracks_to_enrich(playlist_id) if pending is None else pending   # missing genre OR year
     auth = "with token" if tok else "anonymously (slower)"
 
     def _per_item(i, total, t):
@@ -181,8 +182,8 @@ def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, tok=None, s
             on_progress({"type": "err", "text": "Discogs looks unreachable. Stopped. "
                          "The remaining tracks will retry next time."})
             return False
-        store.set_track_enrichment(t["id"], genre, year)
-        eff_genre, eff_year = store.get_track_enrichment(t["id"])
+        apply_findings(store,t['id'],name,{'genre':genre,'year':year})
+        eff_genre, eff_year = store.tracks.get_track_enrichment(t["id"])
         bits = " · ".join(x for x in (genre, year) if x) or "no match"
         on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
                      "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']}: {bits}"})

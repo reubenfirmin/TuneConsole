@@ -18,16 +18,16 @@ class _TrackInputParser(HTMLParser):
 
 
 def _seed(store, genre="Techno"):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_track("v1", "Anchor", "Band", None, None)
-    b = store.upsert_track("v2", "Bonus", "Band", None, None)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.tracks.upsert_track("v1", "Anchor", "Band", None, None)
+    b = store.tracks.upsert_track("v2", "Bonus", "Band", None, None)
     if genre:
-        store.set_track_genre(a, genre)
-        store.set_track_genre(b, genre)
-    target = store.upsert_playlist(iid, "PT", "Target", 1, "h", 0.0)
-    store.set_playlist_tracks(target, [a])
-    other = store.upsert_playlist(iid, "PO", "Other", 2, "h2", 0.0)
-    store.set_playlist_tracks(other, [a, b])
+        store.tracks.set_track_genre(a, genre)
+        store.tracks.set_track_genre(b, genre)
+    target = store.playlists.upsert_playlist(iid, "PT", "Target", 1, "h", 0.0)
+    store.playlists.set_playlist_tracks(target, [a])
+    other = store.playlists.upsert_playlist(iid, "PO", "Other", 2, "h2", 0.0)
+    store.playlists.set_playlist_tracks(other, [a, b])
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return target, TestClient(app, base_url="http://127.0.0.1")
 
@@ -61,7 +61,7 @@ def test_suggestion_card_has_wired_add_button(store):
 
 
 def test_recs_rebuild_endpoint(store):
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/recs/rebuild")
@@ -74,7 +74,7 @@ def test_add_suggested_track_adds_it_to_the_playlist(store):
     r = c.post(f"/playlist/{target}/add-tracks",
                data={"track": json.dumps({"videoId": "v2", "title": "Bonus", "artist": "Band"})})
     assert r.status_code == 200
-    assert "bonus|band" in store.get_playlist_track_keys(target)
+    assert "bonus|band" in store.playlists.get_playlist_track_keys(target)
 
 
 def test_suggestion_add_appends_row_without_refresh(store):
@@ -91,8 +91,8 @@ def test_suggestion_add_appends_row_without_refresh(store):
 
 def test_genreless_suggestion_add_requeues_enrichment(store):
     target, c = _seed(store, genre=None)
-    tid = store.track_ids_for_videos(["v2"])["v2"]
-    store.mark_enriched([tid], now=5.0)  # an earlier provider miss would otherwise wait 30 days
+    tid = store.tracks.track_ids_for_videos(["v2"])["v2"]
+    store.enrichment.mark_enriched([tid], now=5.0)  # an earlier provider miss would otherwise wait 30 days
 
     class Worker:
         triggered = 0

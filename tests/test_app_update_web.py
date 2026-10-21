@@ -16,6 +16,10 @@ class FakeUpdater:
         self.fail_restart = fail_restart
         self.calls = []
 
+    @property
+    def busy(self):
+        return self.phase in {"installing", "restarting"}
+
     def snapshot(self):
         return {"instance": "before", "phase": self.phase, "message": "", "progress": None}
 
