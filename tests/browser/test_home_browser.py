@@ -96,7 +96,8 @@ def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, stor
         expect(card.locator('.fresh-pool-tile > span').first).to_have_css("animation-name", "fresh-pool-beat")
         page.screenshot(path=tmp_path / "fresh-building.png")
         page.emulate_media(reduced_motion="reduce")
-        assert card.locator('.fresh-pool-tile > span').first.evaluate("el => getComputedStyle(el).animationName") == "none"
+        # Pool builds keep their activity animation under either motion preference.
+        expect(card.locator('.fresh-pool-tile > span').first).to_have_css("animation-name", "fresh-pool-beat")
         page.reload()
         expect(card).to_have_attribute("aria-busy", "true")
         assert len(calls) == 1

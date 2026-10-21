@@ -1782,7 +1782,7 @@ function lastfmKey(configured) {
 }
 
 // ── Taste-model visualization tooltips ──────────────────────────────────────
-// A single floating div, formatted from each element's data-tip JSON (title + labelled rows).
+// A single floating div for plain text or structured data-tip JSON (title + labelled rows).
 // Document-level delegation so it also covers the lazily htmx-swapped embedding-engine panel.
 function initVizTooltip() {
   let tip = null, current = null, hideTimer = null, plainText = '';
@@ -1820,6 +1820,11 @@ function initVizTooltip() {
     return tip;
   }
   function render(d) {
+    if (d.text !== undefined) {
+      plainText = String(d.text);
+      ensure().textContent = plainText;
+      return;
+    }
     const dot = /^#[0-9a-fA-F]{3,8}$/.test(d.dot || '') ? d.dot : '';
     const lines = [d.title];
     if (d.desc) lines.push(d.desc);

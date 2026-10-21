@@ -751,7 +751,12 @@ def test_feedback_uses_track_table_with_artwork_sorting_and_unban(live_app, stor
 
 
 @pytest.mark.parametrize("width", [1920, 1440, 1024, 390, 320])
-def test_taste_topics_show_one_group_at_a_time(live_app, store, page, width, tmp_path):
+def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request, width, tmp_path):
+    from yt_playlist.rec.rec_worker import RecWorker
+
+    # Keep the synthetic layout fixture stable; startup group repair is tested separately.
+    monkeypatch.setattr(RecWorker, "trigger_mode_refresh", lambda self, **kw: None)
+    live_app = request.getfixturevalue("live_app")
     iid = store.get_identities()[0].id
     styles = ["Warehouse techno", "Late-night jazz", "Guitar music"] + [f"Listening style {i}" for i in range(4, 15)]
     vectors = np.eye(len(styles), dtype=np.float32)
