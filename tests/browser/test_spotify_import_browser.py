@@ -66,7 +66,7 @@ def test_zip_import_waits_for_confirmation_and_uses_selected_destination(spotify
     expect(page.get_by_role("heading", name="Excluded mix")).to_have_count(0)
     expect(page.get_by_text("Confident match", exact=True)).to_be_visible()
     assert spotify_app.first.created == spotify_app.second.created == []
-    page.screenshot(path="/tmp/tuneconsole-spotify-preview.png", full_page=True)
+    page.screenshot(path="/tmp/tuneconsole-spotify-preview.png", full_page=True, animations="disabled")
     page.get_by_role("button", name="Confirm import to Destination account").click()
     expect(page.get_by_text("Spotify import complete.", exact=True)).to_be_visible(timeout=15000)
     assert spotify_app.first.created == []

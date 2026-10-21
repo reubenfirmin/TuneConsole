@@ -156,6 +156,7 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
     assert import_page.text.count("View latest Spotify import report") == 1
     assert "The report is ready with everything added" not in import_page.text
 
+    assert "Spotify import complete" in web.get("/").text
     store.set_setting("last_sync_at", "999.0")
     dashboard = web.get("/")
     assert "Spotify import complete" in dashboard.text

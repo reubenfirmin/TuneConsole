@@ -152,6 +152,9 @@
   </div>
   {% else %}
   <div class="home-first-stage">
+    {% if spotify_library_job %}
+      {% with job=spotify_library_job %}{% include "_partials/spotify_library_notice.html" %}{% endwith %}
+    {% endif %}
     {% include "_partials/takeout_nag.html" %}
   {# Pre-sync placeholder: only once the extension is connected (not while the live sync console is
      streaming). Before connecting, the onboard hero above is the whole first-run screen. #}
