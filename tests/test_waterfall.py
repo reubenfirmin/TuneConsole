@@ -166,6 +166,6 @@ def test_real_provider_request_outcome_controls_completion_and_retains_audit(sto
                               registry={"musicbrainz": musicbrainz})
     assert bool(completed) == checked
     assert requests
-    attempts = json.loads(store.get_setting("enrich_attempts:" + identity_key("Hyperballad", "Bjork")))
+    attempts = store.enrichment_attempts(identity_key("Hyperballad", "Bjork"))
     assert attempts["musicbrainz"]["status"] == ("no_match" if checked else "retry")
     assert attempts["musicbrainz"]["fields"] == {}

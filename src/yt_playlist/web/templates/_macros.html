@@ -1,5 +1,10 @@
 {# Reusable bits shared across templates. #}
 
+{# Canonical flow names and a shared, key-based colour scheme. #}
+{% macro flow_badge(key, label=None) -%}
+<span class="flow-badge" data-flow="{{ key or 'auto' }}">{{ label or journey_labels.get(key, (key or 'Pick for me')|replace('_', ' ')|capitalize) }}</span>
+{%- endmacro %}
+
 {# audio/video/mixed marker for a playlist. #}
 {% macro kindicon(kind) -%}
 {% if kind == 'audio' %}<span class="kind kind-audio" title="Audio playlist">♪</span>

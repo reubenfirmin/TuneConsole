@@ -12,8 +12,8 @@ def test_library_sample_spreads_genres(store):
     rows = [("house", i) for i in range(10)] + [("rock-indie", i) for i in range(10)] + \
            [("jazz", i) for i in range(10)]
     for g, i in rows:
-        store.conn.execute("INSERT INTO tracks (identity_key, title, artist, genre, video_id) "
-                           "VALUES (?,?,?,?,?)", (f"{g}|{i}", f"{g}{i}", f"art{g}{i}", g, f"v{g}{i}"))
+        from tests.conftest import seed_catalog_track
+        seed_catalog_track(store,f"{g}|{i}",f"{g}{i}",f"art{g}{i}",genre=g,video_id=f"v{g}{i}")
     store.conn.commit()
     out = onboarding.library_sample(store, n=6)
     assert 1 <= len(out) <= 6

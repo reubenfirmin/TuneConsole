@@ -49,18 +49,15 @@ def test_rediscovery_preserves_enrichment_when_catalog_metadata_is_missing():
     assert s.coverage_stats(include_discovery=True)["processed"] == 1
 
 
-def test_legacy_discovery_stamps_are_requeued_once_without_schema_or_metadata_changes(tmp_path):
-    import json
+def test_legacy_discovery_stamps_are_requeued_once_without_metadata_changes(tmp_path, legacy_store):
     path = tmp_path / "legacy.db"
-    s = Store(path)
-    s.init_schema()
-    s.upsert_track("library", "Library", "Artist", None, None)
-    s.upsert_discovered_track("cold", "v1", "Cold", "Artist", None, None, "House", "2020",
-                              "radio:seed", 100, audio={"bpm": 128.0})
+    s = legacy_store
+    with s.conn:
+        s.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key) VALUES ('library','Library','Artist','library|artist')")
+        s.conn.execute("INSERT INTO discovered_tracks(identity_key,video_id,title,artist,genre,year,source_browse_id,found_at,bpm) VALUES ('cold','v1','Cold','Artist','House','2020','radio:seed',100,128)")
+        s.conn.execute('DROP TABLE schema_migrations')
     s.mark_discovered_enriched(["cold"], 200)
     s.delete_setting("discovery_enrichment_audit_requeued")  # simulate a pre-repair database
-    schema = list(s.conn.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name"))
-    schema = [row[0] for row in schema]
     s.conn.close()
     repaired = Store(path)
     repaired.init_schema()
@@ -68,13 +65,11 @@ def test_legacy_discovery_stamps_are_requeued_once_without_schema_or_metadata_ch
     row = repaired.discovered_tracks_by_keys(["cold"])["cold"]
     assert row["last_enriched"] is None
     assert (row["genre"], row["year"], row["audio"]) == ("House", "2020", {"bpm": 128.0})
-    assert [r[0] for r in repaired.conn.execute(
-        "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")] == schema
     repaired.record_enrichment_attempt("cold", "deezer", {}, now=300)
     repaired.mark_discovered_enriched(["cold"], 300)
     repaired.conn.close()
     reopened = Store(path)
     reopened.init_schema()
     assert reopened.queue_remaining() == 1
-    assert json.loads(reopened.get_setting("enrich_attempts:cold"))["deezer"]["status"] == "no_match"
+    assert reopened.enrichment_attempts("cold")["deezer"]["status"] == "no_match"
     reopened.conn.close()

@@ -10,8 +10,26 @@
 <div class="mood-panel" id="mood-{{ pid }}">
   <span class="mood-q">Want more music like this?</span>
   <div class="mood-btns" hx-target="#mood-{{ pid }}" hx-swap="outerHTML">
-    <button type="button" class="mood-btn" hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": 1}'>🔥 More of this vibe</button>
-    <button type="button" class="mood-btn" hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": -1}'>🙅 Not my mood</button>
+    <button type="button" class="mood-btn mood-btn--more" hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": 1}'>
+      <svg class="mood-mark" viewBox="0 0 24 24" width="20" height="20" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true" focusable="false">
+        <path class="mood-wave" d="M3 10v4m4-8v12m4-15v18m4-10v5"/>
+        <path class="mood-sign" d="M20 3v6m-3-3h6"/>
+      </svg>
+      <span class="mood-label">More of this vibe</span>
+      {% include "_partials/mood_spill.html" %}
+    </button>
+    <button type="button" class="mood-btn mood-btn--less" hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": -1}'>
+      <svg class="mood-mark" viewBox="0 0 24 24" width="20" height="20" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true" focusable="false">
+        <path class="mood-wave" d="M3 10v4m4-7v10m4-5v3m4-4v3"/>
+        <path class="mood-sign" d="M17 6h6"/>
+      </svg>
+      <span class="mood-label">Not my mood</span>
+      {% include "_partials/mood_tears.html" %}
+    </button>
   </div>
   <p class="mood-note">Changes your Home recommendations until you choose again. Repeated choices also update your saved preferences.</p>
 </div>

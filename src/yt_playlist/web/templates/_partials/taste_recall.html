@@ -70,10 +70,23 @@
         <p>{{ served.played }} of {{ served.impressions }} recommendations shown in the last 30 days led to a play within 24 hours.</p>
         <p class="model-health-evidence">{{ served.organic }} played directly; {{ served.generated }} played through generated playlists. A recommendation can count in both groups.</p>
         {% if served.unknown_provenance %}<p class="model-health-evidence">Playlist context wasn’t recorded for plays of {{ served.unknown_provenance }} recommendation{{ 's' if served.unknown_provenance != 1 else '' }}.</p>{% endif %}
+        <p class="model-health-evidence">{{ served.open }} opened; {{ served.start }} playback requests; {{ served.save }} saved; {{ served.promotion }} promoted to your library. Saving a generated mix is a product response, not an organic preference signal.</p>
+        <p class="model-health-evidence">{{ served.conversion }} of {{ served.cold_impressions }} discoveries were saved to your library or promoted. {{ served.unique_artists }} artists and {{ served.unique_genres }} genre families were shown.</p>
+        {% if served.play_depth_samples %}<p class="model-health-evidence">Average listening depth: {{ '%.0f'|format(served.mean_play_depth * 100) }}% across {{ served.play_depth_samples }} recommendations with a playback exit.</p>{% endif %}
+        <details><summary>Coverage and response samples</summary>
+          <dl class="model-health-breakdown-list">
+            {% for label, bucket in served.by_ownership.items() %}
+            <div><dt>{{ label|capitalize }} tracks</dt><dd>{{ bucket.played }} played / {{ bucket.impressions }} shown{% if not bucket.powered %} · collecting evidence{% endif %}</dd></div>
+            {% endfor %}
+            {% for axis, groups in served.by_metadata.items() %}{% for label, bucket in groups.items() %}
+            <div><dt>{{ axis|capitalize }} {{ label }}</dt><dd>{{ bucket.played }} played / {{ bucket.impressions }} shown{% if not bucket.powered %} · collecting evidence{% endif %}</dd></div>
+            {% endfor %}{% endfor %}
+          </dl>
+        </details>
         {% if not served.powered %}<p class="model-health-caution">Early result: at least {{ served.min_impressions }} recommendations need to be shown before there’s enough evidence to judge it.</p>{% endif %}
         {% else %}
         <p class="model-health-unavailable">No recommendations tracked yet</p>
-        <p>Tracking starts when Home next shows recommendations. Come back after listening to see how often suggestions lead to a play.</p>
+        <p>Tracking starts when you next see recommendations. Come back after listening to see how often suggestions lead to a play.</p>
         {% endif %}
       </article>
       <article class="card model-health-metric model-health-metric--learning">

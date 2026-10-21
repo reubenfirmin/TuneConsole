@@ -54,8 +54,9 @@ def test_profiles_explain_same_label_groups_using_actual_membership(store):
 
 def test_profiles_preserve_missing_tags_and_dates_in_the_denominator(store):
     _groups(store)
-    store.conn.execute("UPDATE tracks SET genre=NULL,mb_year=NULL WHERE video_id='group-0-0'")
-    store.conn.commit()
+    tid = store.conn.execute("SELECT id FROM tracks WHERE video_id='group-0-0'").fetchone()[0]
+    store.set_track_genre(tid,'')
+    store.set_track_year(tid,'')
     mixed = mode_profiles.describe_modes(store)[1]
     assert mixed["size"] == 10
     assert sum(g["share"] for g in mixed["genres"]) == pytest.approx(1)

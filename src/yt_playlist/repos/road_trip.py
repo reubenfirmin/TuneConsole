@@ -1,7 +1,6 @@
 """RoadTripRepo: saved 'Road Trip' recipes (name, other-people's artists/genres, own-collection
 mine/theirs split, familiarity lean, target length) plus the live DRAFT each recipe
-builds into. Owns its own tables (created lazily/idempotently, same pattern as RecSurfaceRepo) since
-it's a first-class saved-config feature, not rec-serving state.
+builds into. Numbered migrations create its tables before repository use.
 
 The draft is the on-screen playlist: its candidate pool, the slots currently picked, the slots the
 user crossed out, and the per-party genre/era slider positions. It lives in the DB rather than in
@@ -13,39 +12,10 @@ import json
 
 from yt_playlist.repos.base import Repo, synchronized
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS road_trip_recipes (
-  id               INTEGER PRIMARY KEY AUTOINCREMENT,
-  name             TEXT NOT NULL,
-  own_pct          INTEGER NOT NULL,
-  artists          TEXT NOT NULL,
-  genres           TEXT NOT NULL,
-  blacklist_genres TEXT NOT NULL,   -- legacy: the genre bars on the draft replaced it
-  target_minutes   INTEGER NOT NULL,
-  last_playlist_id TEXT,
-  created_at       REAL NOT NULL,
-  updated_at       REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS road_trip_drafts (
-  recipe_id  INTEGER PRIMARY KEY,
-  state      TEXT NOT NULL,
-  updated_at REAL NOT NULL
-);
-"""
-
 DEFAULT_FAMILIARITY_PCT = 50   # dead centre: favorites and deeper cuts weighted alike
 
 
 class RoadTripRepo(Repo):
-    def __init__(self, db):
-        super().__init__(db)
-        with self._lock:
-            self.conn.executescript(_SCHEMA)
-            cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(road_trip_recipes)")}
-            if "familiarity_pct" not in cols:    # added with the familiarity slider
-                self.conn.execute("ALTER TABLE road_trip_recipes ADD COLUMN familiarity_pct INTEGER "
-                                  f"NOT NULL DEFAULT {DEFAULT_FAMILIARITY_PCT}")
-
     @synchronized
     def list_road_trip_recipes(self) -> list:
         rows = self.conn.execute(

@@ -12,9 +12,8 @@ def store():
 
 
 def test_dislike_does_not_emit_artist_lean(store, monkeypatch):
-    store.conn.execute(
-        "INSERT INTO tracks (identity_key, title, artist, genre, mb_year) VALUES (?, ?, ?, ?, ?)",
-        ("billy|rebel", "Rebel Yell", "Billy Idol", "rock-classic", "1983"))
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,"billy|rebel","Rebel Yell","Billy Idol",genre="rock-classic",mb_year="1983")
     store.conn.commit()
     store.record_dislike("billy|rebel", None, 100.0)
     # #85: staleness_factor is gone; facet_leans decays each event on its own wall clock and never

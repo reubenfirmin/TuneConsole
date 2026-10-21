@@ -27,6 +27,18 @@ def normalize(s: str) -> str:
 def identity_key(title: str, artist: str) -> str:
     return f"{normalize(title)}|{normalize(artist)}"
 
+
+def recording_title(title: str) -> str:
+    """Matching evidence that retains live, remix, edit, and version qualifiers.
+
+    A remaster can describe the same performance; its mastering measurements still belong to
+    provider/item evidence. Search normalization is deliberately broader than this check.
+    """
+    title = re.sub(r"[\(\[]\s*(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?\s*[\)\]]", " ", title or "", flags=re.I)
+    folded = unicodedata.normalize("NFKD", title).casefold()
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    return _WS_RE.sub(" ", _PUNCT_RE.sub(" ", folded)).strip()
+
 def search_squash(s: str) -> str:
     """Punctuation/space/accent-insensitive key for substring search: 'L.S.D.' -> 'lsd',
     'Café del Mar' -> 'cafedelmar'. Builds on normalize() (accent fold, feat/remaster noise removed,

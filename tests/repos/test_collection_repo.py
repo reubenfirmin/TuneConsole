@@ -94,11 +94,13 @@ def test_collection_artists_merges_saved_albums_without_double_counting_songs(st
     store.set_playlist_tracks(p1, [track])
     store.set_playlist_tracks(p2, [track])
     # Album sync doesn't always have the artist ID; a second release can contain the same song.
-    store.upsert_track("v2", "Song", "Artist", "Compilation", 200, album_browse_id="B2")
+    other = store.upsert_track("v2", "Song", "Artist", "Compilation", 200, album_browse_id="B2")
+    store.associate_youtube_item('v2',store.catalog_subject(track)['recording_id'],
+                                source='fixture_verified',evidence={'recording':'same performance'},now=1)
     store.upsert_track("v3", "Album only", "Artist", "Compilation", 200, album_browse_id="B2")
     store.add_saved_album(_album("B1", title="Original", artist="Artist"))
     store.add_saved_album(_album("B2", title="Compilation", artist="Artist"))
-    store.add_history_snapshot(iid, 1.0, ["song|artist", "album only|artist"])
+    store.add_history_snapshot(iid, 1.0, [store.catalog_subject(track)['identity_key'], "album only|artist"])
 
     artist, = store.collection_artists()
     assert artist["browse"] == "UC_artist"

@@ -4,18 +4,17 @@ def _seed_two_playlists(store, keys_a, keys_b):
     iid = store.upsert_identity("main", "cred", None, True)
     pa = store.upsert_playlist(iid, "PLA", "A", len(keys_a), "ha", 100.0)
     pb = store.upsert_playlist(iid, "PLB", "B", len(keys_b), "hb", 100.0)
-    # keys here are pre-formed identity_key strings used as both title and artist=x;
-    # we pass the key as video_id surrogate to avoid unique-constraint issues across playlists.
-    tids_a = [store.upsert_track(f"a{i}", k, "x", None, None) for i, k in enumerate(keys_a)]
+    # Shared fixture songs refer to the same exact upload in both playlists.
+    tids_a = [store.upsert_track('track:'+k, k, "x", None, None) for k in keys_a]
     store.set_playlist_tracks(pa, tids_a)
     tids_b = []
     for i, k in enumerate(keys_b):
         # reuse existing track if key already inserted (shared tracks between playlists)
-        existing = store.conn.execute("SELECT id FROM tracks WHERE identity_key=?", (k,)).fetchone()
+        existing = store.conn.execute("SELECT id FROM tracks WHERE video_id=?", ('track:'+k,)).fetchone()
         if existing:
             tids_b.append(existing[0])
         else:
-            tids_b.append(store.upsert_track(f"b{i}", k, "x", None, None))
+            tids_b.append(store.upsert_track('track:'+k, k, "x", None, None))
     store.set_playlist_tracks(pb, tids_b)
 
 def test_jaccard():

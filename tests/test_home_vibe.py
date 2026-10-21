@@ -59,7 +59,7 @@ def test_vibe_changes_offered_styles_as_well_as_track_order(store):
     for mid in range(6):
         for items in bundles[str(mid)].values():
             for item in items:
-                store.upsert_discovered_track(item["key"], "v", item["title"], item["artist"], "", None,
+                store.upsert_discovered_track(item["key"], item["key"], item["title"], item["artist"], "", None,
                     item["genre"], None, None, 1, audio={"energy": mid / 5, "bpm": 60 + mid * 24})
     client = client_at(store, [1000.0])
     client.post("/home/vibe", data={"vibe": "gentle"})
@@ -79,7 +79,7 @@ def seed_sounds(store):
                 item["artist"] = f"Artist {mid} {i}"
                 # Put the soft tracks beyond a full card, so a post-selection reordering fails.
                 energy = .1 if i >= 12 else .9
-                store.upsert_discovered_track(item["key"], "v", item["title"], item["artist"], "", None,
+                store.upsert_discovered_track(item["key"], item["key"], item["title"], item["artist"], "", None,
                     item["genre"], None, None, 1,
                     audio={"energy": energy, "bpm": 70 if i >= 12 else 160, "mood_relaxed": 1 - energy})
     store.put_proposals("mode_bundles", bundles, 1)

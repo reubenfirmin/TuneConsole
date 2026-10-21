@@ -11,7 +11,7 @@ import os
 import threading
 
 from yt_playlist.providers import enrichment
-from yt_playlist.providers.waterfall import run_waterfall, TrackSink, DiscoveredSink
+from yt_playlist.providers.waterfall import run_waterfall, TrackSink
 
 
 class EnrichWorker:
@@ -125,12 +125,13 @@ class EnrichWorker:
         if completed:
             try:                                  # never let a rebuild crash the drain
                 from yt_playlist.rec import embed, fresh_pool
-                if any(isinstance(key, int) for key in completed):
+                memberships = store.enrichment_memberships(completed)
+                if 'library' in memberships:
                     rebuilt = embed.maybe_rebuild_content_vectors(store)
                     rec_worker = getattr(self.ctx, "rec_worker", None)
                     if rec_worker is not None:
                         rec_worker.trigger_mode_refresh(force=rebuilt)
-                if any(isinstance(key, str) for key in completed):
+                if 'discovery' in memberships:
                     embed.build_discovered_content_vectors(store)
                     fresh_pool.prepare(store, self.ctx.now_fn())
             except Exception:  # noqa: BLE001
@@ -144,16 +145,13 @@ class EnrichWorker:
         The returned-id fallback keeps older injected waterfalls compatible.
         """
         completed = set()
-        batch_keys = {t["id"] if "id" in t else t["identity_key"] for t in batch}
+        batch_keys = {t['job_id'] for t in batch}
 
         def mark(keys):
-            self.ctx.store.mark_enriched([k for k in keys if isinstance(k, int)], self.ctx.now_fn())
-            self.ctx.store.mark_discovered_enriched(
-                [k for k in keys if isinstance(k, str)], self.ctx.now_fn())
+            self.ctx.store.mark_recordings_enriched(keys, self.ctx.now_fn())
 
         def sink_for(track):
-            return (TrackSink(self.ctx.store, track) if "id" in track else
-                    DiscoveredSink(self.ctx.store, track["identity_key"]))
+            return TrackSink(self.ctx.store, track)
 
         self._busy = True
         with self._lock:
@@ -165,9 +163,7 @@ class EnrichWorker:
                 self._record_activity(warning=event["text"])
                 return
             if event.get("type") == "track" and event.get("fully_attempted"):
-                track_key = event.get("track_id")
-                if track_key is None:
-                    track_key = event.get("identity_key")
+                track_key = event.get('job_id', event.get('track_id'))
                 if track_key in batch_keys and track_key not in completed:
                     mark([track_key])
                     completed.add(track_key)

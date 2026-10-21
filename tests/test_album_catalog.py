@@ -22,3 +22,13 @@ def test_partial_album_responses_cannot_set_a_denominator(store):
     remember_album(store, "continuation", value)
     remember_album(store, "empty", {})
     assert store.collection.cached_album_tracklist_ids() == set()
+
+
+def test_metadata_only_album_entries_keep_source_links_without_ownership(store):
+    remember_album(store,'release-a',album())
+    remember_album(store,'release-a',album())
+    remember_album(store,'release-b',album())
+    assert store.conn.execute('SELECT COUNT(*) FROM unresolved_items').fetchone()[0] == 8
+    assert store.conn.execute('SELECT COUNT(*) FROM album_track_links').fetchone()[0] == 8
+    assert not store.library_keys()
+    assert not store.conn.execute('SELECT 1 FROM youtube_items').fetchone()

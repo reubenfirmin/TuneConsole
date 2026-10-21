@@ -1,0 +1,227 @@
+"""Catalog identity operations. Callers own transactions and the Store lock.
+
+The integer entry handle preserves old URLs/actions. It resolves to a recording and,
+when known, an exact YouTube item. Text keys are opaque compatibility labels, never
+evidence that two uploads contain the same recording.
+"""
+import json
+import time
+
+from yt_playlist.util.matching import identity_key, normalize
+
+ITEM_FIELDS = ('title','artist','orig_title','orig_artist','album','duration_s','available',
+               'video_type','artist_browse_id','album_browse_id','thumbnail','mb_year',
+               'loudness','dynamic_complexity','popularity','gain','label')
+
+
+def resolve_entry(conn, entry_id):
+    row = conn.execute('SELECT entry_id FROM legacy_track_refs WHERE legacy_id=?', (entry_id,)).fetchone()
+    return row[0] if row else entry_id
+
+
+def resolve_recording(conn, recording_id):
+    seen = set()
+    while recording_id not in seen:
+        seen.add(recording_id)
+        row = conn.execute('SELECT recording_id FROM recording_redirects WHERE retired_id=?', (recording_id,)).fetchone()
+        if row is None:
+            return recording_id
+        recording_id = row[0]
+    raise ValueError('Cyclic recording redirects')
+
+
+def resolve_key(conn, key, video_id=None):
+    if video_id and video_id.strip():
+        row = conn.execute('SELECT r.identity_key FROM youtube_items y JOIN recordings r ON r.id=y.recording_id WHERE y.video_id=?', (video_id,)).fetchone()
+        if row:
+            return row[0]
+        return None
+    row = conn.execute('SELECT id,identity_key FROM recordings WHERE identity_key=?', (key,)).fetchone()
+    if row:
+        rid = resolve_recording(conn,row[0])
+        return conn.execute('SELECT identity_key FROM recordings WHERE id=?', (rid,)).fetchone()[0]
+    rows = conn.execute('SELECT DISTINCT r.identity_key FROM recording_aliases a JOIN recordings r ON r.id=a.recording_id WHERE a.alias=?', (key,)).fetchall()
+    return rows[0][0] if len(rows) == 1 else None
+
+
+def choose_field(conn, entry_id, field, value, source='user'):
+    entry_id = resolve_entry(conn,entry_id)
+    conn.execute('INSERT INTO entry_field_choices VALUES (?,?,?,?) ON CONFLICT(entry_id,field) DO UPDATE SET value_json=excluded.value_json,source=excluded.source', (entry_id,field,json.dumps(value),source))
+
+
+def play_key(conn, key, video_id):
+    resolved = resolve_key(conn,key,video_id)
+    if resolved:
+        return resolved
+    if video_id and video_id.strip() and conn.execute('SELECT 1 FROM recordings WHERE identity_key=?', (key,)).fetchone():
+        return '@unresolved-video:' + video_id
+    return key
+
+
+def replace_hints(conn, entry_id, fields):
+    """Direct findings can replace retained import hints once; selected values stay protected."""
+    from yt_playlist.core.migrations.v008_recordings import RECORDING_FIELDS, ITEM_FIELDS
+    entry_id = resolve_entry(conn,entry_id)
+    row = conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry_id,)).fetchone()
+    if row is None:
+        return
+    for field,value in fields.items():
+        if value is None or field not in {*RECORDING_FIELDS,*ITEM_FIELDS}:
+            continue
+        hints = conn.execute(
+            'SELECT h.* FROM catalog_field_hints h JOIN catalog_entries e ON e.id=h.entry_id '
+            'WHERE h.active=1 AND h.field=? AND '+
+            ('e.recording_id=?' if field in RECORDING_FIELDS else 'e.id=?'),
+            (field,row['recording_id'] if field in RECORDING_FIELDS else entry_id)).fetchall()
+        if any(json.loads(h['value_json']) == row[field] for h in hints):
+            conn.execute(f'UPDATE catalog_tracks SET {field}=? WHERE id=?', (value,entry_id))
+            for hint in hints:
+                conn.execute('UPDATE catalog_field_hints SET active=0 WHERE entry_id=? AND field=? AND source=?',
+                             (hint['entry_id'],field,hint['source']))
+
+
+def invalidate_derived(conn):
+    for table in ('rec_vectors','rec_content_vectors','rec_discovered_content_vectors',
+                  'rec_artist_vectors','rec_artist_content_vectors','rec_proposals'):
+        conn.execute(f'DELETE FROM {table}')
+    conn.execute("DELETE FROM settings WHERE key IN ('rec_content_model','rec_content_cov_bucket','rec_content_genre_revision')")
+    # Keep rollback evidence, but do not restore vectors from before an association/key change.
+    conn.execute('UPDATE rec_model_selection_runs SET identity_version=0 WHERE identity_version=2')
+
+
+def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=None):
+    """Move only established associations; raw observations and unknown aliases stay intact."""
+    subject = previous_recording_id or recording_id
+    for table in ('play_events','history_items','rec_served_impressions','rec_lane_impressions'):
+        conn.execute(f'UPDATE {table} SET identity_key=?,recording_id=? WHERE recording_id=?', (new_key,recording_id,subject))
+    for row in conn.execute('SELECT rowid,* FROM rec_feedback WHERE recording_id=?', (subject,)).fetchall():
+        payload = json.dumps(dict(row))
+        conn.execute("INSERT OR IGNORE INTO identity_state_archive VALUES ('feedback_reassociation',?,?,?)", (f'{subject}:{row["rowid"]}:{old_key}',payload,'verified association or alias disambiguation; learning is not replayed'))
+        conn.execute('DELETE FROM rec_feedback WHERE rowid=?', (row['rowid'],))
+        conn.execute('INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at,target_type,recording_id) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(surface,item_key,scope) DO UPDATE SET kind=excluded.kind,reason=excluded.reason,until=excluded.until,created_at=excluded.created_at,target_type=excluded.target_type,recording_id=excluded.recording_id WHERE excluded.created_at>=COALESCE(rec_feedback.created_at,0)', (row['surface'],new_key,row['kind'],row['reason'],row['scope'],row['until'],row['created_at'],row['target_type'],recording_id))
+    for row in conn.execute('SELECT * FROM rec_impressions WHERE item_key=?', (old_key,)).fetchall():
+        conn.execute('INSERT INTO rec_impressions VALUES (?,?,?,?) ON CONFLICT(surface,item_key) DO UPDATE SET views=views+excluded.views,last_shown=MAX(COALESCE(last_shown,0),COALESCE(excluded.last_shown,0))', (row['surface'],new_key,row['views'],row['last_shown']))
+    conn.execute('DELETE FROM rec_impressions WHERE item_key=?', (old_key,))
+    for row in conn.execute('SELECT rowid migration_rowid,keys FROM rec_mood').fetchall():
+        try:
+            keys = json.loads(row['keys'])
+            if isinstance(keys,list):
+                conn.execute('UPDATE rec_mood SET keys=? WHERE rowid=?', (json.dumps(list(dict.fromkeys(new_key if k==old_key else k for k in keys))),row['migration_rowid']))
+        except (ValueError,TypeError):
+            pass
+    from yt_playlist.core.migrations.v008_recordings import convert_state
+    for table,idcol,column in [('album_tracklists','browse_id','track_keys'),('taste_modes','mode_id','rep_keys'),('cluster_canvas','playlist_ytm','state'),('road_trip_drafts','recipe_id','state'),('rec_recipes','playlist_ytm','recipe')]:
+        for row in conn.execute(f'SELECT * FROM {table}').fetchall():
+            try:
+                value = convert_state(json.loads(row[column]),{old_key:new_key})
+                conn.execute(f'UPDATE {table} SET {column}=? WHERE {idcol}=?', (json.dumps(value),row[idcol]))
+            except (ValueError,TypeError):
+                pass
+
+
+def associate_item(conn, video_id, recording_id, *, source, evidence, now):
+    """Apply an explicit verified association; ingestion/provider guesses never call this."""
+    if not source or not isinstance(evidence,dict) or not evidence:
+        raise ValueError('A verified association requires its source and supporting evidence')
+    recording_id = resolve_recording(conn,recording_id)
+    item = conn.execute('SELECT recording_id FROM youtube_items WHERE video_id=?', (video_id,)).fetchone()
+    target = conn.execute('SELECT identity_key FROM recordings WHERE id=?', (recording_id,)).fetchone()
+    if item is None or target is None:
+        raise ValueError('Unknown item or recording')
+    previous = item[0]
+    if previous == recording_id:
+        return
+    payload = json.dumps(evidence,sort_keys=True)
+    previous_key = conn.execute('SELECT identity_key FROM recordings WHERE id=?', (previous,)).fetchone()[0]
+    conn.execute('INSERT INTO item_recording_associations(video_id,recording_id,previous_recording_id,source,evidence,at) VALUES (?,?,?,?,?,?)', (video_id,recording_id,previous,source,payload,now))
+    conn.execute('UPDATE youtube_items SET recording_id=? WHERE video_id=?', (recording_id,video_id))
+    conn.execute('UPDATE catalog_entries SET recording_id=? WHERE video_id=?', (recording_id,video_id))
+    conn.execute('UPDATE album_track_links SET recording_id=? WHERE video_id=?', (recording_id,video_id))
+    conn.execute('UPDATE legacy_track_refs SET recording_id=? WHERE video_id=?', (recording_id,video_id))
+    # Verified musical identity permits reuse of recording facts, never item/release fields.
+    from yt_playlist.core.migrations.v008_recordings import RECORDING_FIELDS
+    for field in RECORDING_FIELDS:
+        conn.execute(f'UPDATE recordings SET {field}=(SELECT {field} FROM recordings WHERE id=?) '
+                     f"WHERE id=? AND ({field} IS NULL OR {field}='')", (previous,recording_id))
+    # Exact-video observations can follow the corrected association without changing raw evidence.
+    conn.execute('UPDATE play_events SET recording_id=?,identity_key=? WHERE video_id=?', (recording_id,target[0],video_id))
+    conn.execute('UPDATE recordings SET provisional=0 WHERE id=?', (recording_id,))
+    if not conn.execute('SELECT 1 FROM catalog_entries WHERE recording_id=?', (previous,)).fetchone():
+        rekey_state(conn,previous_key,target[0],recording_id,previous_recording_id=previous)
+        conn.execute('INSERT OR REPLACE INTO recording_redirects VALUES (?,?,?,?)', (previous,recording_id,source,payload))
+        conn.execute('UPDATE recording_redirects SET recording_id=? WHERE recording_id=?', (recording_id,previous))
+        for row in conn.execute('SELECT alias,source FROM recording_aliases WHERE recording_id=?', (previous,)).fetchall():
+            conn.execute('INSERT OR IGNORE INTO recording_aliases VALUES (?,?,?)', (row['alias'],recording_id,row['source']))
+        conn.execute('DELETE FROM recording_aliases WHERE recording_id=?', (previous,))
+        member = conn.execute('SELECT * FROM discovery_memberships WHERE recording_id=?', (previous,)).fetchone()
+        if member:
+            conn.execute('INSERT INTO discovery_memberships VALUES (?,?,?,?,?,?) ON CONFLICT(recording_id) DO UPDATE SET found_at=MIN(found_at,excluded.found_at),offered_count=offered_count+excluded.offered_count,first_shown=MIN(COALESCE(first_shown,excluded.first_shown),COALESCE(excluded.first_shown,first_shown)),last_shown=MAX(COALESCE(last_shown,excluded.last_shown),COALESCE(excluded.last_shown,last_shown))', (recording_id,member['entry_id'],member['found_at'],member['first_shown'],member['last_shown'],member['offered_count']))
+            conn.execute('DELETE FROM discovery_memberships WHERE recording_id=?', (previous,))
+        for row in conn.execute('SELECT * FROM discovery_sources WHERE recording_id=?', (previous,)).fetchall():
+            conn.execute('INSERT OR IGNORE INTO discovery_sources VALUES (?,?,?,?)', (recording_id,row['source_token'],row['input_video_id'],row['found_at']))
+        conn.execute('DELETE FROM discovery_sources WHERE recording_id=?', (previous,))
+    invalidate_derived(conn)
+
+
+def add_alias(conn, alias, recording_id, source):
+    conn.execute('INSERT OR IGNORE INTO recording_aliases VALUES (?,?,?)', (alias,recording_id,source))
+    rows = conn.execute('SELECT r.id,r.identity_key,r.artist FROM recording_aliases a JOIN recordings r ON r.id=a.recording_id WHERE a.alias=?', (alias,)).fetchall()
+    if len(rows) < 2:
+        return
+    # Once an alias becomes ambiguous, nobody keeps the bare key as a privileged first match.
+    renamed = False
+    for row in rows:
+        if row['identity_key'] != alias:
+            continue
+        key = f"@recording:{row['id']}|" + normalize(row['artist'] or '')
+        conn.execute('UPDATE recordings SET identity_key=? WHERE id=?', (key,row['id']))
+        rekey_state(conn,alias,key,row['id'])
+        renamed = True
+    # Existing embeddings/proposals use the previous key space. Rebuild, retaining rollback artifacts.
+    if renamed:
+        invalidate_derived(conn)
+
+
+def upsert(conn, video_id, title, artist, album=None, duration_s=None, available=None,
+           video_type=None, artist_browse_id=None, album_browse_id=None, thumbnail=None,
+           created_at=None, *, library=False, source_ref=None, preferred_key=None):
+    from yt_playlist.core.migrations.v008_recordings import unresolved_ref
+    video_id = video_id if video_id and video_id.strip() else None
+    source_ref = None if video_id else (source_ref or unresolved_ref(album_browse_id or album,title,artist))
+    row = conn.execute('SELECT * FROM catalog_entries WHERE video_id=?' if video_id else 'SELECT * FROM catalog_entries WHERE source_ref=?', (video_id or source_ref,)).fetchone()
+    now = time.time() if created_at is None else created_at
+    if row is None:
+        alias = preferred_key or identity_key(title,artist)
+        rid = conn.execute('INSERT INTO recordings(identity_key,title,artist,created_at) VALUES (?,?,?,?)', ('@new:'+str(time.time_ns()),title,artist,now)).lastrowid
+        existing = conn.execute('SELECT 1 FROM recording_aliases WHERE alias=? LIMIT 1', (alias,)).fetchone()
+        key = f'@recording:{rid}|' + normalize(artist or '') if existing else alias
+        conn.execute('UPDATE recordings SET identity_key=? WHERE id=?', (key,rid))
+        if video_id:
+            conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist) VALUES (?,?,?,?,?,?)', (video_id,rid,title,artist,title,artist))
+        entry_id = conn.execute('INSERT INTO catalog_entries(recording_id,video_id,source_ref) VALUES (?,?,?)', (rid,video_id,source_ref)).lastrowid
+        if not video_id:
+            conn.execute('INSERT INTO unresolved_items(entry_id,title,artist,orig_title,orig_artist) VALUES (?,?,?,?,?)', (entry_id,title,artist,title,artist))
+        add_alias(conn,alias,rid,'youtube' if video_id else 'source_entry')
+        add_alias(conn,identity_key(title,artist),rid,'youtube' if video_id else 'source_entry')
+        if video_id:
+            conn.execute("INSERT INTO item_recording_associations(video_id,recording_id,source,evidence,at) VALUES (?,?,'new_upload','{}',?)", (video_id,rid,now))
+            current_key = conn.execute('SELECT identity_key FROM recordings WHERE id=?', (rid,)).fetchone()[0]
+            conn.execute('UPDATE play_events SET recording_id=?,identity_key=? WHERE video_id=? AND recording_id IS NULL', (rid,current_key,video_id))
+        # An unresolved exact-video observation must never borrow this new recording's text key.
+        current_key = conn.execute('SELECT identity_key FROM recordings WHERE id=?', (rid,)).fetchone()[0]
+        conn.execute("UPDATE play_events SET identity_key='@unresolved-video:'||video_id WHERE recording_id IS NULL AND identity_key=? AND NULLIF(trim(video_id),'') IS NOT NULL AND NOT EXISTS(SELECT 1 FROM youtube_items y WHERE y.video_id=play_events.video_id)", (current_key,))
+    else:
+        entry_id, rid = row['id'], row['recording_id']
+        add_alias(conn,identity_key(title,artist),rid,'youtube' if video_id else 'source_entry')
+    # Metadata refresh never overwrites an effective title/credit correction or its reset value.
+    values = dict(album=album,duration_s=duration_s,available=None if available is None else int(available),
+                  video_type=video_type,artist_browse_id=artist_browse_id,album_browse_id=album_browse_id,thumbnail=thumbnail)
+    for field,value in values.items():
+        if value is not None:
+            table, column, subject = ('youtube_items','video_id',video_id) if video_id else ('unresolved_items','entry_id',entry_id)
+            conn.execute(f'UPDATE {table} SET {field}=? WHERE {column}=?', (value,subject))
+    if library:
+        conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'observed',?)", (entry_id,now))
+    if album_browse_id:
+        conn.execute("INSERT OR IGNORE INTO album_track_links(browse_id,recording_id,entry_id,video_id,source) VALUES (?,?,?,?,'youtube')", (album_browse_id,rid,entry_id,video_id))
+    return entry_id

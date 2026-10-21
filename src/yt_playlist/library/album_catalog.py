@@ -1,5 +1,4 @@
 """Keep full fetched album track lists for measured listening coverage."""
-from yt_playlist.util.matching import identity_key
 from yt_playlist.util.thumbnails import best_thumb
 
 
@@ -19,6 +18,7 @@ def remember_album(store, browse_id, album, fallback=None):
     title = album.get("title") or fallback.get("title")
     if not title or not artist or any(not t.get("title") for t in tracks):
         return
-    keys = sorted({identity_key(t["title"], artists(t) or artist) for t in tracks})
+    keys = sorted({store.observe_track(t.get("videoId"), t["title"], artists(t) or artist,
+                                      album=title,album_browse_id=browse_id) for t in tracks})
     store.collection.cache_album_tracklist(
         browse_id, title, artist, best_thumb(album.get("thumbnails")) or fallback.get("thumbnail"), keys)

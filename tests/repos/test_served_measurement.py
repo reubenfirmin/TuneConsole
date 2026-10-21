@@ -3,6 +3,7 @@
 import pytest
 
 from yt_playlist.web.routes.home import _record_served_cards
+from yt_playlist.rec import measurement
 
 
 def _shown(store, request, at, key="song|artist", rank=1, surface="home"):
@@ -147,3 +148,74 @@ def test_home_records_final_card_order_and_trace(store):
     assert rows[0]["lane"] == "explore" and rows[0]["mode_id"] == 7
     assert len(rows[0]["model_version"]) == 16
     assert '"ranker": "ppr"' in rows[0]["provenance"]
+
+
+def test_coverage_conversion_and_variety_use_immutable_serving_metadata(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    tid = store.upsert_track("owned", "Owned", "Known artist", None, 200)
+    store.set_track_genre(tid, "Techno")
+    store.set_track_year(tid, "1999")
+    pid = store.upsert_playlist(iid, "PL", "Library", 1, "h", 0)
+    store.set_playlist_tracks(pid, [tid])
+    store.upsert_discovered_track("cold|new artist", "cold", "Cold", "New artist", "", None,
+                                  None, "2000", "source", 0)
+    measurement.record_recommendations(store, "home", [
+        {"key": "owned|known artist", "score": .9}, {"key": "cold|new artist", "score": .8}], 100)
+    store.record_recommendation_outcomes("save-generated", "save", ["cold|new artist"], 110, generated=True)
+    before = store.recommendation_scorecard(90, 105)
+    assert before["save"] == 1 and before["conversion"] == 0
+    store.record_recommendation_outcomes("promote", "promotion", ["cold|new artist"], 120)
+    store.record_recommendation_outcomes("promote", "promotion", ["cold|new artist"], 120)
+    score = store.recommendation_scorecard(90, 105)
+    assert score["impressions"] == 2 and score["cold_impressions"] == 1
+    assert score["conversion"] == score["promotion"] == 1
+    assert score["discovery_conversion_rate"] == 1
+    assert score["unique_artists"] == 2 and score["unique_genres"] == 1
+    assert score["by_metadata"]["genre"]["missing"]["impressions"] == 1
+    assert score["by_metadata"]["year"]["present"]["impressions"] == 2
+    assert score["by_ownership"]["cold"]["conversion"] == 1
+    assert score["by_surface"]["home"]["unique_artists"] == 2
+    # Enrichment and ownership change later, but not the historical cohort/slices.
+    store.set_discovered_enrichment("cold|new artist", "Folk", "2000")
+    adopted = store.upsert_track("cold", "Cold", "New artist", None, 200)
+    store.set_playlist_tracks(pid, [tid, adopted])
+    assert store.recommendation_scorecard(90, 105) == score
+    assert store.conn.execute("SELECT COUNT(*) FROM rec_response_events").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("offset,credited", [(-1, 0), (0, 1), (3600, 1), (3601, 0)])
+def test_explicit_outcomes_follow_bounded_nearest_ownership(store, offset, credited):
+    _shown(store, "first", 50)
+    _shown(store, "second", 100, surface="similar")
+    store.record_recommendation_outcomes("open", "open", ["song|artist"], 100 + offset)
+    store.record_recommendation_outcomes("save", "save", ["song|artist"], 100 + offset)
+    score = store.recommendation_scorecard(100, 110, outcome_window_h=1)
+    assert score["open"] == score["save"] == credited
+    assert store.recommendation_scorecard(40, 100, outcome_window_h=1)["save"] == (offset == -1)
+
+
+def test_cold_exit_depth_and_staleness_have_samples_per_surface(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.upsert_discovered_track("cold|artist", "cold", "Cold", "Artist", "", None,
+                                  "Techno", None, "source", 0)
+    measurement.record_recommendations(store, "similar", [{"key": "cold|artist"}], 100)
+    store.record_player_event(iid, "track_exit", "cold", 180, 200, None, None, 120)
+    score = store.recommendation_scorecard(90, 110)
+    assert score["completion"] == 1
+    assert score["mean_play_depth"] == pytest.approx(.9)
+    assert score["by_surface"]["similar"]["play_depth_samples"] == 1
+    assert score["by_surface"]["similar"]["never_played"] == 1
+    assert score["by_surface"]["similar"]["powered"] is False
+    assert score["by_surface"]["similar"]["verdict"] is None
+
+
+def test_retention_prunes_responses_and_only_orphaned_old_policies(store):
+    measurement.record_recommendations(store, "similar", [{"key": "a|artist"}], 10)
+    store.record_recommendation_outcomes("old", "open", ["a|artist"], 20)
+    store.record_serving_policy("orphan", {"old": True}, 1)
+    measurement.record_recommendations(store, "similar", [{"key": "b|artist"}], 100)
+    store.record_served_impressions("prune", "home", [], 101, prune_before=50)
+    assert store.conn.execute("SELECT COUNT(*) FROM rec_response_events").fetchone()[0] == 0
+    assert store.conn.execute("SELECT COUNT(*) FROM rec_serving_policies WHERE model_version='orphan'").fetchone()[0] == 0
+    row = store.conn.execute("SELECT id FROM rec_served_impressions").fetchone()
+    assert store.served_recommendation(row["id"])["configuration"] is not None

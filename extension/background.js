@@ -6,6 +6,12 @@
 
 const ORIGIN = "https://music.youtube.com";
 const APP_ORIGIN = "http://127.0.0.1:8765";
+// Build-time flag: scripts/build-extension.sh --enable-radio opts into the unreleased feature.
+const RADIO_ENABLED = false;
+const SENSOR_VERSION = 4;
+const RADIO_CONTROL_TYPES = new Set([
+  "radio-prime", "deck-start", "deck-navigate", "deck-boundary-config", "deck-toggle", "deck-stop",
+]);
 let ws = null;
 
 function isAllowed(u) {
@@ -15,6 +21,11 @@ function isAllowed(u) {
   } catch (e) {
     return false;
   }
+}
+
+function isMissingReceiver(error) {
+  return String(error && error.message ? error.message : error)
+    === "Could not establish connection. Receiving end does not exist.";
 }
 
 async function sha1Hex(str) {
@@ -42,6 +53,15 @@ async function ytmTabs() {
 async function firstYtmTab() {
   const tabs = await ytmTabs();
   return tabs[0] || null;
+}
+
+// Playback launches and library fetches must make their find/create decision under the same
+// lock. Release it before waiting for document readiness so playback can navigate a starting tab.
+let tabCoordination = Promise.resolve();
+function coordinateYtmTabs(operation) {
+  const result = tabCoordination.then(operation);
+  tabCoordination = result.catch(() => {});
+  return result;
 }
 
 // A tab opened before the extension loaded never got the declared content script. Inject it on
@@ -74,25 +94,39 @@ async function resyncNowPlaying() {
   for (const t of tabs) { try { await chrome.tabs.sendMessage(t.id, { type: "resync-now" }); } catch (e) {} }
 }
 
-async function pingSensor(tabId) {
+async function pingSensor(tabId, requireMain = true) {
   try {
-    const reply = await chrome.tabs.sendMessage(tabId, { type: "sensor-ping" });
-    return reply && reply.ok ? { ok: true, reply } : { ok: false, error: "invalid sensor reply" };
+    const reply = await chrome.tabs.sendMessage(tabId, { type: "sensor-ping", main: requireMain });
+    if (!reply || !reply.ok) return { ok: false, error: "invalid sensor reply" };
+    if (requireMain && (reply.mainVersion !== SENSOR_VERSION ||
+        typeof reply.mainAgeMs !== "number" || !Number.isFinite(reply.mainAgeMs) ||
+        reply.mainAgeMs < 0 || reply.mainAgeMs >= 10000)) {
+      return { ok: false, reply, error: "MAIN sensor missing, outdated, or stale" };
+    }
+    return { ok: true, reply };
   } catch (e) {
     return { ok: false, error: String(e && e.message ? e.message : e) };
   }
 }
 
-// A failed reinjection usually means the tab's renderer predates the extension or Chrome has lost
-// the content-script receiver. A real navigation boundary is the reliable repair. Keep a cooldown
-// per tab so the periodic health alarm can never trap a broken tab in a reload loop.
+// A failed reinjection may need a real navigation boundary to recover. Reload only after a separate
+// media probe confirms it is idle; an update must not cut off music if sensor replacement fails.
 const SENSOR_RELOAD_COOLDOWN_MS = 60000;
 const sensorReloadedAt = new Map();
 async function reloadUnresponsiveSensor(tabId) {
   const last = sensorReloadedAt.get(tabId) || 0;
   if (Date.now() - last < SENSOR_RELOAD_COOLDOWN_MS) return false;
-  sensorReloadedAt.set(tabId, Date.now());
   try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.audible) return false;
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => Array.from(document.querySelectorAll("video, audio"))
+        .some(media => !media.ended && (!media.paused || media.currentTime > 0)),
+    });
+    // A missing result is unknown, so defer repair until a later probe or a user navigation.
+    if (results[0]?.result !== false) return false;
+    sensorReloadedAt.set(tabId, Date.now());
     await suppressBeforeUnload(tabId);
     await chrome.tabs.reload(tabId);
     console.warn("[TuneConsole] reloading YTM tab to restore its sensor", tabId);
@@ -104,7 +138,7 @@ async function reloadUnresponsiveSensor(tabId) {
 }
 
 // Observable + self-healing tab boundary. A live WebSocket proves only the service worker is alive;
-// this independently proves that each YTM tab has a responding content sensor. One failed probe gets
+// this independently proves that each YTM tab has responding isolated and MAIN sensors. A failed probe gets
 // one reinjection and retry, and the result is reported to /bridge/status without touching play data.
 async function probeSensorHealth() {
   let tabs = [], responding = 0, reinjected = 0, reloading = 0, errors = [];
@@ -132,15 +166,6 @@ async function probeSensorHealth() {
   return report;
 }
 
-// On extension install/reload, reload any open YouTube Music tabs so they pick up the fresh content
-// script. That way reloading the extension is the only reload you need, no manual tab refresh.
-async function reloadYtmTabs() {
-  const tabs = await chrome.tabs.query({ url: "https://music.youtube.com/*" });
-  for (const t of tabs) {
-    try { await chrome.tabs.reload(t.id); } catch (e) {}
-  }
-}
-
 // Note: rate/playpause/radio-prime below intentionally stay no-ops when there is no YTM tab (via
 // pickYtmTab returning null). A rate/playpause/radio-prime control is meaningless without a tab
 // already playing something, so unlike the fetch path there is nothing useful to open a tab for.
@@ -148,12 +173,17 @@ async function reloadYtmTabs() {
 // Playback ownership survives queue changes, including YouTube autoplay outside our playlists.
 // Browsing another music tab must not redirect controls away from the tab making sound.
 const playingTabs = new Set();
+const mediaMutedTabs = new Set();
+const pendingPlays = new Map();
 let playbackTabId = null;
 async function pickYtmTab() {
-  const tabs = await ytmTabs();
+  const tabs = (await ytmTabs()).filter(t => t.id !== standbyTabId);
   if (!tabs.length) return null;
-  const playing = tabs.find(t => t.audible && !t.mutedInfo?.muted) ||
-    tabs.find(t => t.id === playbackTabId) || tabs.find(t => playingTabs.has(t.id));
+  const unmuted = tabs.filter(t => !t.mutedInfo?.muted && !mediaMutedTabs.has(t.id));
+  const playing = unmuted.find(t => t.audible) ||
+    unmuted.find(t => t.id === playbackTabId && playingTabs.has(t.id)) ||
+    unmuted.find(t => playingTabs.has(t.id)) ||
+    unmuted.find(t => t.id === playbackTabId) || tabs.find(t => t.id === playbackTabId);
   if (playing) return playing;
   const active = tabs.find((t) => t.active);
   if (active) return active;
@@ -186,6 +216,8 @@ function cancelPlaybackRescue() {
 function armPlaybackRescue(tabId) {
   cancelPlaybackRescue();          // a newer play supersedes any episode still in flight
   playingTabs.delete(tabId);       // the navigate wipes the old document: assume silence until told otherwise
+  mediaMutedTabs.delete(tabId);
+  pendingPlays.delete(tabId);
   rescue = { tabId, foregrounded: false, timer: setTimeout(() => runPlaybackRescue(tabId), RESCUE_WAIT_MS) };
 }
 
@@ -270,15 +302,14 @@ async function finishPlaybackRescue(episode) {
 }
 
 // music.youtube.com so the backend can only ever point our own tab at YouTube Music.
-let navigation = Promise.resolve();
 async function navigateYtmTab(url) {
   try {
     if (new URL(url).origin !== ORIGIN) return;
   } catch (e) {
     return;
   }
-  // Serialize launches so two requests that both observe zero tabs cannot each open one.
-  navigation = navigation.then(async () => {
+  // Share tab creation with fetch startup as well as other playback launches.
+  return coordinateYtmTabs(async () => {
     const tab = await pickYtmTab();
     if (tab) {
       // Reuse the existing tab in the background so you stay on TuneConsole.
@@ -305,7 +336,6 @@ async function navigateYtmTab(url) {
       } catch (e) {}
     }
   }).catch(e => console.warn("[TuneConsole] navigate failed:", e));
-  return navigation;
 }
 
 async function pauseOtherYtmTabs(keepId) {
@@ -346,6 +376,7 @@ async function rateInYtmTab(action) {
   try {
     await chrome.tabs.sendMessage(tab.id, { type: "rate", action });
   } catch (e) {
+    if (!isMissingReceiver(e)) return; // the click may already have toggled the rating
     await inject(tab.id);
     try { await chrome.tabs.sendMessage(tab.id, { type: "rate", action }); } catch (e2) {}
   }
@@ -358,6 +389,7 @@ async function playPauseInYtmTab() {
   try {
     await chrome.tabs.sendMessage(tab.id, { type: "playpause" });
   } catch (e) {
+    if (!isMissingReceiver(e)) return; // a second click would undo a delivered toggle
     await inject(tab.id);
     try { await chrome.tabs.sendMessage(tab.id, { type: "playpause" }); } catch (e2) {}
   }
@@ -367,13 +399,14 @@ async function playPauseInYtmTab() {
 // tracklist, etc.) show up promptly without ever interrupting playback. The content script owns the
 // "is it safe to reload" decision (it checks the URL and playback state); this just delivers the ask.
 async function refreshViewInYtmTab(playlist) {
-  const tab = await pickYtmTab();
-  if (!tab) return;
-  try {
-    await chrome.tabs.sendMessage(tab.id, { type: "refresh-view", playlist });
-  } catch (e) {
-    await inject(tab.id);
-    try { await chrome.tabs.sendMessage(tab.id, { type: "refresh-view", playlist }); } catch (e2) {}
+  // The edited playlist may be open in a browsing tab while another tab owns playback.
+  for (const tab of await ytmTabs()) {
+    try {
+      await chrome.tabs.sendMessage(tab.id, { type: "refresh-view", playlist });
+    } catch (e) {
+      await inject(tab.id);
+      try { await chrome.tabs.sendMessage(tab.id, { type: "refresh-view", playlist }); } catch (e2) {}
+    }
   }
 }
 
@@ -446,7 +479,7 @@ function ensureDeckStateRestored() {
   if (!restoreDeckStatePromise) restoreDeckStatePromise = restoreDeckState();
   return restoreDeckStatePromise;
 }
-ensureDeckStateRestored();
+if (RADIO_ENABLED) ensureDeckStateRestored();
 
 function tabForRole(role) {
   return role === "standby" ? standbyTabId : liveTabId;
@@ -725,7 +758,7 @@ async function handleDeckStop() {
 // the navigated document reports complete. The live tab gets the same re-arm (it only navigates in
 // rare reconcile paths, but a wiped live boundary is exactly the C2 autoplay leak).
 chrome.tabs.onUpdated.addListener(async (tabId, info) => {
-  if (info.status !== "complete") return;
+  if (!RADIO_ENABLED || info.status !== "complete") return;
   await ensureDeckStateRestored();   // SW-wake race guard: see restoreDeckState's comment
   if (tabId === standbyTabId) {
     driveTab(standbyTabId, "deck-pause-mute");
@@ -741,6 +774,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, info) => {
 // Awaits the restore first (L7, final review): an SW woken by this very close would otherwise read
 // the module-default null ids and skip the fallback signal entirely.
 chrome.windows.onRemoved.addListener(async (windowId) => {
+  if (!RADIO_ENABLED) return;
   await ensureDeckStateRestored();   // SW-wake race guard: see restoreDeckState's comment
   if (deckWindowId == null || windowId !== deckWindowId) return;
   sendDeckReady(true, "radio window closed");
@@ -759,8 +793,11 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   // because the deck logic below deliberately returns early for non-deck tabs (which is most of
   // them) and playingTabs would otherwise grow for the life of the service worker.
   playingTabs.delete(tabId);
+  mediaMutedTabs.delete(tabId);
+  pendingPlays.delete(tabId);
   if (playbackTabId === tabId) playbackTabId = null;
   if (rescue && rescue.tabId === tabId) cancelPlaybackRescue();
+  if (!RADIO_ENABLED) return;
   await ensureDeckStateRestored();   // SW-wake race guard: see restoreDeckState's comment
   if (tabId !== liveTabId && tabId !== standbyTabId) return;
   console.log("[TuneConsole] deck tab closed", tabId, "- leaving self-heal to the next deck-navigate");
@@ -786,55 +823,53 @@ function waitForTabComplete(tabId, budgetMs) {
       if (id === tabId && info.status === "complete") finish(true);
     };
     chrome.tabs.onUpdated.addListener(onUpdated);
+    timer = setTimeout(() => finish(false), budgetMs);
     chrome.tabs.get(tabId, (tab) => {
       if (chrome.runtime.lastError) { finish(false); return; }
-      if (tab && tab.status === "complete") finish(true);
+      if (tab && tab.status === "complete" && !tab.pendingUrl) finish(true);
     });
-    timer = setTimeout(() => finish(false), budgetMs);
   });
 }
 
-// Non-destructive probe for "is the content script listening yet": resync-now is already used this
-// same way on bridge reconnect (see resyncNowPlaying) and has no side effect worth avoiding here, so
-// reuse it instead of inventing a new message type in content.js.
+// Readiness checks must not reset play deduplication or re-emit persisted play reports.
 async function pingContentScript(tabId) {
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: "resync-now" });
-    return true;
-  } catch (e) {
-    return false;
-  }
+  return (await pingSensor(tabId, false)).ok;
 }
 
-// Open a YTM tab in the background and wait for it to be usable: loaded, content script injected,
-// and answering messages. Same inject-and-retry pattern as rate/playpause/etc, just looped with a
-// deadline instead of a single retry, since a freshly created tab can take a while to load.
-async function createAndWaitForYtmTab() {
-  console.log("[TuneConsole] no YTM tab for fetch, opening one in the background");
-  let tab;
-  try {
-    tab = await chrome.tabs.create({ url: `${ORIGIN}/`, active: false });
-  } catch (e) {
-    return null;
-  }
+// New and already-loading tabs share the same readiness boundary. Keep the entire wait within
+// the fetch startup budget, including the initial document load.
+async function waitForYtmTabReady(tab) {
   const deadline = Date.now() + 15000;
-  await Promise.race([waitForTabComplete(tab.id), new Promise((r) => setTimeout(r, 15000))]);
+  if (!await waitForTabComplete(tab.id, 15000)) return null;
   await inject(tab.id);
   while (Date.now() < deadline) {
     if (await pingContentScript(tab.id)) return tab;
     await inject(tab.id);
     await new Promise((r) => setTimeout(r, 300));
   }
-  return null; // timed out; caller falls back to the existing "open music.youtube.com" error
+  return null;
 }
 
-// Dedupe: several fetches can race in while there is no YTM tab open. They must not each open their
-// own tab, so share a single in-flight "create and wait" promise; once it settles, forget it so a
-// later miss (e.g. the tab got closed again) can open a fresh one.
+async function createAndWaitForYtmTab() {
+  const selected = await coordinateYtmTabs(async () => {
+    const existing = await firstYtmTab();
+    if (existing) return { tab: existing, created: false };
+    console.log("[TuneConsole] no YTM tab for fetch, opening one in the background");
+    try {
+      return { tab: await chrome.tabs.create({ url: `${ORIGIN}/`, active: false }), created: true };
+    } catch (e) {
+      return null;
+    }
+  });
+  if (!selected || !selected.tab) return null;
+  const { tab, created } = selected;
+  return created || tab.status === "loading" || tab.pendingUrl ? waitForYtmTabReady(tab) : tab;
+}
+
+// Install the shared promise before the first tab query. A concurrent fetch must wait even after
+// Chrome exposes the newly created tab, while its document and sensor are still loading.
 let ensureTabPromise = null;
-async function ensureYtmTab() {
-  const existing = await firstYtmTab();
-  if (existing) return existing;
+function ensureYtmTab() {
   if (!ensureTabPromise) {
     ensureTabPromise = createAndWaitForYtmTab().finally(() => { ensureTabPromise = null; });
   }
@@ -858,16 +893,22 @@ async function handleFrame(frame) {
     res = await sendFetch(tab.id, frame, auth);
     if (!res) throw new Error("no response from content script");
   } catch (e) {
-    // The tab likely predates the extension load; inject the content script and retry once.
-    await inject(tab.id);
+    // Only a missing receiver proves the request never reached fetch(). A lost reply may follow
+    // a successful mutation; replaying it could add a track twice or undo a toggle.
+    const failed = error => ({
+      id: frame.id, status: 0,
+      body: JSON.stringify({ error: isMissingReceiver(error)
+        ? "content script not ready, reload the music.youtube.com tab"
+        : "response lost; the request may have completed. Check YouTube Music before retrying." }),
+    });
+    if (!isMissingReceiver(e)) return failed(e);
+    const installed = await inject(tab.id);
+    if (!installed.ok) return failed(e);
     try {
       res = await sendFetch(tab.id, frame, auth);
       if (!res) throw new Error("no response from content script");
     } catch (e2) {
-      return {
-        id: frame.id, status: 0,
-        body: JSON.stringify({ error: "content script not ready, reload the music.youtube.com tab" }),
-      };
+      return failed(e2);
     }
   }
   return { id: frame.id, status: res.status, body: res.body, timeZone: res.timeZone };
@@ -971,6 +1012,7 @@ function connect() {
     if (frame && frame.type === "rate") { rateInYtmTab(frame.action); return; }
     if (frame && frame.type === "playpause") { playPauseInYtmTab(); return; }
     if (frame && frame.type === "refresh-view") { refreshViewInYtmTab(frame.playlist); return; }
+    if (!RADIO_ENABLED && frame && RADIO_CONTROL_TYPES.has(frame.type)) return;
     if (frame && frame.type === "radio-prime") { primeRadioInYtmTab(frame.url); return; }
     // #93 v3 dual-deck (T7j): deck manager control frames from the backend.
     if (frame && frame.type === "deck-start") { handleDeckStart(frame); return; }
@@ -997,8 +1039,9 @@ function connect() {
 // tracked `ended` fires this straight from content.js, so the toggle happens immediately rather than
 // waiting on a WS round trip; the epoch it echoes back was already recorded by
 // handleDeckBoundaryConfig/deck-toggle, so toggleDecks() here needs no argument.
-chrome.runtime.onMessage.addListener((msg, sender) => {
+async function relayPlaybackMessage(msg, sender) {
   if (msg && msg.type === "deck-boundary") {
+    if (!RADIO_ENABLED) return;
     // L6 (final review): only the LIVE deck tab's boundary may toggle. A stray `ended` in the old,
     // still-armed standby tab (e.g. the user manually plays it before its rebuild navigate lands)
     // must not fire a spurious swap. Async so an SW woken by this very message restores the tracked
@@ -1012,6 +1055,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     return;
   }
   if (!msg) return;
+  if (!RADIO_ENABLED && msg.type === "pevent" && msg.kind === "deck-waiting") return;
   // Frame tagging (#93 v3): every play/pevent relayed from a tracked deck tab carries which deck it
   // came from, so the backend can ignore frames from a muted, parked standby tab.
   //
@@ -1053,24 +1097,42 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   // happens when the background swap genuinely failed to start.
   const srcTabId = sender && sender.tab && sender.tab.id;
   if ((msg.type === "play" || msg.type === "now-heartbeat") && srcTabId != null && deck !== "standby") {
-    if (msg.paused) {
+    if (msg.type === "play") pendingPlays.set(srcTabId, msg);
+    if (msg.muted) mediaMutedTabs.add(srcTabId);
+    else mediaMutedTabs.delete(srcTabId);
+    if (msg.paused || msg.muted) {
       playingTabs.delete(srcTabId);
     } else {
       playingTabs.add(srcTabId);
-      playbackTabId = srcTabId;
-      if (rescue && rescue.tabId === srcTabId && !rescue.foregrounded) cancelPlaybackRescue();
     }
-    // Paused tabs keep sending metadata. They must not replace the playing tab's source/card.
-    if (msg.paused && playbackTabId != null && playbackTabId !== srcTabId) return;
+    // Use the same current tab/mute information as rate and play/pause controls. Unpaused alone
+    // does not establish ownership: another tab may be audible while this one is tab/media-muted.
+    const owner = await pickYtmTab();
+    playbackTabId = owner ? owner.id : null;
+    if (srcTabId !== playbackTabId) return;
+    // Chrome's audible flag can lag a pause/track handoff. Keep a rejected play until this tab
+    // actually owns playback, rather than losing it forever to the content sensor's dedup key.
+    const pending = pendingPlays.get(srcTabId);
+    if (msg.type === "now-heartbeat" && !msg.paused && !msg.muted && !owner.mutedInfo?.muted &&
+        msg.brandKnown && msg.metadataVerified !== false && pending &&
+        msg.videoId === pending.videoId && msg.brandId === pending.brandId) {
+      msg = Object.assign({}, pending, msg, { type: "play" });
+    }
+    if (!msg.paused && !msg.muted && !owner.mutedInfo?.muted &&
+        rescue && rescue.tabId === srcTabId && !rescue.foregrounded) cancelPlaybackRescue();
   }
-  if (msg.type === "pevent" && ["state", "bye"].includes(msg.kind) &&
-      playbackTabId != null && srcTabId !== playbackTabId) return;
+  if (msg.type === "pevent" && ["state", "bye"].includes(msg.kind) && deck !== "standby") {
+    const owner = await pickYtmTab();
+    if (owner) playbackTabId = owner.id;
+    if (playbackTabId != null && srcTabId !== playbackTabId) return;
+  }
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (msg.type === "play") {
     ws.send(JSON.stringify({ type: "play", title: msg.title, artist: msg.artist,
       thumbnail: msg.thumbnail, likeStatus: msg.likeStatus, videoId: msg.videoId,
       playlist: msg.playlist || "", albumBrowseId: msg.albumBrowseId || "",
       brandId: msg.brandId || "", paused: !!msg.paused, timeZone: msg.timeZone, deck }));
+    pendingPlays.delete(srcTabId);
   } else if (msg.type === "now-heartbeat") {
     // Metadata makes the non-persisting heartbeat able to restore a card that aged out while Chrome
     // throttled the YTM page (commonly during an audio-device switch).
@@ -1080,6 +1142,15 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   } else if (msg.type === "pevent") {
     ws.send(JSON.stringify(Object.assign({}, msg, { deck })));   // #91 already a flat, self-describing frame
   }
+}
+
+// Tab queries are asynchronous; serialize reports so an older snapshot cannot overtake a newer
+// play/pause or account change while ownership is being resolved.
+let playbackRelay = Promise.resolve();
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!msg || !["play", "now-heartbeat", "pevent", "deck-boundary"].includes(msg.type)) return;
+  playbackRelay = playbackRelay.then(() => relayPlaybackMessage(msg, sender))
+    .catch(error => console.warn("[TuneConsole] playback relay failed", error));
 });
 
 // Belt and suspenders: an alarm wakes the service worker periodically so it reconnects if the
@@ -1088,39 +1159,16 @@ chrome.alarms.create("bridge-keepalive", { periodInMinutes: 0.4 });
 chrome.alarms.onAlarm.addListener(() => { connect(); probeSensorHealth(); });
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
-chrome.runtime.onInstalled.addListener(reloadYtmTabs);   // reload open YTM tabs so one reload suffices
+// Refresh the extension's sensors in place so a store update does not interrupt music.
+chrome.runtime.onInstalled.addListener(injectAllYtmTabs);
 chrome.runtime.onInstalled.addListener(publishLocalPlayerStatus);
 chrome.runtime.onStartup.addListener(publishLocalPlayerStatus);
 connect();
 
-// Quality of life: keep a single TuneConsole tab. When a second one appears (the app relaunches and
-// opens another, or you open one by hand), close the extras and focus the one that was already there
-// so you never end up with a pile of 127.0.0.1:8765 tabs.
-let dedupeBusy = false;
-async function dedupeAppTabs() {
-  if (dedupeBusy) return;
-  dedupeBusy = true;
-  try {
-    const tabs = await localPlayerTabs();
-    if (tabs.length <= 1) return;
-    tabs.sort((a, b) => a.id - b.id);       // keep the oldest tab (preserves its state)
-    const keep = tabs[0];
-    for (const t of tabs.slice(1)) { try { await chrome.tabs.remove(t.id); } catch (e) {} }
-    try {
-      await chrome.tabs.update(keep.id, { active: true });
-      if (keep.windowId != null) await chrome.windows.update(keep.windowId, { focused: true });
-    } catch (e) {}
-  } catch (e) {
-    // no tabs permission / query failed: nothing to do
-  } finally {
-    dedupeBusy = false;
-  }
-}
+// Manual app tabs can hold different views or unfinished edits. openLocalPlayer() already reuses
+// an existing tab for extension launches; leave tabs opened by the user alone.
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.status === "complete" && tab.url && tab.url.startsWith("https://music.youtube.com/")) {
     probeSensorHealth();
-  }
-  if (info.status === "complete" && isLocalPlayerUrl(tab.url)) {
-    dedupeAppTabs();
   }
 });

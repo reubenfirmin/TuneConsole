@@ -9,11 +9,11 @@ import asyncio
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, parse_qs
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from yt_playlist.library import executor, live_plays, player_events
-from yt_playlist.rec import radio as radio_mod, rec_params, recommend
+from yt_playlist.rec import measurement, radio as radio_mod, rec_params, recommend
 from yt_playlist.web.context import form_float
 
 logger = logging.getLogger(__name__)
@@ -536,6 +536,16 @@ def build(ctx) -> APIRouter:
             return {"ok": False, "error": "url must be a music.youtube.com link"}
         try:
             bridge.send_control({"type": "navigate", "url": url})
+            query = parse_qs(urlparse(url).query)
+            video_id = (query.get("v") or [None])[0]
+            if video_id:
+                measurement.record_action(ctx.store, "start", ctx.now_fn(), video_id=video_id)
+            elif query.get("list"):
+                playlist = query["list"][0].removeprefix("RDAMPL")
+                for pl in ctx.store.get_playlists():
+                    if pl.ytm_playlist_id == playlist:
+                        measurement.record_action(ctx.store, "start", ctx.now_fn(), playlist_id=pl.id)
+                        break
             return {"ok": True}
         except Exception as e:  # noqa: BLE001 - UI reports the connection failure for retry
             return {"ok": False, "error": str(e)}

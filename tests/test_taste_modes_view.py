@@ -21,10 +21,9 @@ def _client(store, now=10_000.0):
 
 
 def test_taste_page_lists_modes(store):
-    store.conn.executescript(
-        "INSERT INTO tracks (identity_key, title, artist, genre) VALUES "
-        "('h|1', 'Strobe', 'Deadmau5', 'house'),"
-        "('h|2', 'Opus', 'Eric Prydz', 'house');")
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,'h|1','Strobe','Deadmau5',video_id='strobe',genre='house')
+    seed_catalog_track(store,'h|2','Opus','Eric Prydz',video_id='opus',genre='house')
     store.conn.commit()
     store.modes.replace_modes(
         [{"mode_id": 1, "label": "house", "families": [["house", 2]],

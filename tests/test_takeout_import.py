@@ -25,16 +25,24 @@ def _e(title, artist, vid, iso):
             "subtitles": [{"name": f"{artist} - Topic"}], "time": iso}
 
 
-def test_video_id_match_and_title_fallback_and_unmatched():
+def test_video_id_match_and_missing_video_title_fallback_and_unmatched():
     s = _store()
     entries = [_e("Suave", "Danny Wabbit", "vidA", "2024-01-01T10:00:00Z"),      # videoId match
-               _e("Pulse", "Klockworks", "OTHERVID", "2024-01-02T10:00:00Z"),    # falls back to title/artist
+               _e("Pulse", "Klockworks", None, "2024-01-02T10:00:00Z"),          # no video, unique version-preserving match
                _e("Ghost Song", "Nobody", "NOVID9", "2024-01-03T10:00:00Z")]     # unmatched
     report = import_takeout(s, _raw(entries))
     assert report["matched"] == 2 and report["unmatched"] == 1
     assert report["plays_added"] == 2 and report["events_added"] == 2
     assert report["unmatched_artists"] == {"Nobody": 1}
     assert report["span_days"] >= 2
+
+
+def test_unknown_video_does_not_borrow_another_uploads_identity():
+    s = _store()
+    report = import_takeout(s, _raw([
+        _e("Pulse", "Klockworks", "OTHERVID", "2024-01-02T10:00:00Z")]))
+    assert report["matched"] == 0 and report["unmatched"] == 1
+    assert report["plays_added"] == 0 and report["events_added"] == 0
 
 
 def test_reimport_adds_nothing():

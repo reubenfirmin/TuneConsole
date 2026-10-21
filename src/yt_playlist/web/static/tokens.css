@@ -511,6 +511,19 @@
   --mix-tune-hover:     var(--p-lime-400);
   --mix-tune-hover-ink: var(--p-pink-550);
 
+  /* ---- flow identity: stable across mix previews, feedback and the DJ picker ---- */
+  --flow-energy-arc:   var(--p-orange-300);
+  --flow-warm-up:      var(--p-amber-300);
+  --flow-wind-down:    var(--p-lavender-300);
+  --flow-smooth-segue: var(--p-cyan-400);
+  --flow-odyssey:      var(--p-magenta-400);
+  --flow-time-machine: var(--p-blue-300);
+  --flow-throwback:    var(--p-pink-200);
+  --flow-deep-dive:    var(--p-blue-400);
+  --flow-rediscovery:  var(--p-mint-300);
+  --flow-shuffle:      var(--p-lilac-200);
+  --flow-default:      var(--p-lilac-500);
+
   /* ---- taste "rose" wheel: categorical identity around the fingerprint ---- */
   --rose-0: var(--accent);      --rose-1: var(--teal);        --rose-2: var(--danger);
   --rose-3: var(--amber);       --rose-4: var(--up);          --rose-5: var(--p-lavender-300);

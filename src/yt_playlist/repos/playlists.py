@@ -63,10 +63,12 @@ class PlaylistRepo(Repo):
 
     @synchronized
     def set_playlist_tracks(self, playlist_id, track_ids) -> None:
+        from yt_playlist.core.catalog import resolve_entry
         # de-dupe by track id, keeping first position: YouTube's get_playlist can return the same
         # video many times (pagination duplication), which would otherwise inflate the playlist.
         seen = set()
-        unique = [t for t in track_ids if not (t in seen or seen.add(t))]
+        resolved = [resolve_entry(self.conn,t) for t in track_ids]
+        unique = [t for t in resolved if not (t in seen or seen.add(t))]
         with self.conn:
             self.conn.execute("DELETE FROM playlist_tracks WHERE playlist_id=?", (playlist_id,))
             self.conn.executemany(
@@ -92,10 +94,10 @@ class PlaylistRepo(Repo):
                     "SELECT ?,?,(SELECT IFNULL(MAX(position),-1)+1 FROM playlist_tracks WHERE playlist_id=?) "
                     "WHERE NOT EXISTS(SELECT 1 FROM playlist_tracks WHERE playlist_id=? AND track_id=?)",
                     (lm_id, tid, lm_id, lm_id, tid))
-            else:   # drop every copy of this song (by identity_key) from this identity's LM
+            else:
                 self.conn.execute(
                     "DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id IN "
-                    "(SELECT id FROM tracks WHERE identity_key=?)", (lm_id, key))
+                    "(SELECT id FROM tracks WHERE video_id=?)", (lm_id, video_id))
 
     @synchronized
     def get_playlist_track_ids(self, playlist_id) -> list:

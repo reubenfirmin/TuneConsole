@@ -1,15 +1,15 @@
 # tests/test_store.py
-def test_play_provenance_upgrade_preserves_unknown_history_and_reopens(tmp_path):
+def test_play_provenance_upgrade_preserves_unknown_history_and_reopens(tmp_path, legacy_store):
     from yt_playlist.core.store import Store
 
-    path = tmp_path / "state.db"
-    store = Store(path)
-    store.init_schema()
+    store = legacy_store
+    path = tmp_path / "legacy.db"
     iid = store.upsert_identity("main", "cred", None, True)
     store.set_playlist_group("PLGEN", "Generated")
-    store.record_play_event(iid, "song|artist", "vid", 120, playlist_ytm_id="RDAMPLPLGEN")
     with store.conn:
+        store.conn.execute("INSERT INTO play_events(identity_id,identity_key,video_id,played_at,playlist_ytm_id) VALUES (?,'song|artist','vid',120,'RDAMPLPLGEN')", (iid,))
         store.conn.execute("ALTER TABLE play_events DROP COLUMN is_generated")
+        store.conn.execute("DROP TABLE schema_migrations")
     store.conn.close()
 
     store = Store(path)
@@ -26,13 +26,16 @@ def test_play_provenance_upgrade_preserves_unknown_history_and_reopens(tmp_path)
     store.conn.close()
 
 
-def test_retired_source_weights_are_removed_and_not_restored(store):
+def test_retired_source_weights_are_removed_and_not_restored(legacy_store):
+    store = legacy_store
     store.set_weight("lane:explore", 1.3, now=1000)
     store.set_weight("lane:deep_cut", 1.7, now=900)
     store.set_weight("genre:jazz", 0, lo=0, now=800)
     expected = {axis: row for axis, row in store.weight_records().items() if axis != "lane:explore"}
     param_keys = ("rec_param:breadth_bias",)
     store.rec.model.save_taste_settings("old-source-checkpoint", param_keys, 1000)
+    with store.conn:
+        store.conn.execute("DROP TABLE schema_migrations")
 
     store.init_schema()
     assert store.weight_records() == expected
@@ -42,7 +45,8 @@ def test_retired_source_weights_are_removed_and_not_restored(store):
     assert store.weight_records() == expected
 
 
-def test_playlist_creation_date_migration_backfills_only_known_dates(store):
+def test_playlist_creation_date_migration_backfills_only_known_dates(legacy_store):
+    store = legacy_store
     import json
     from yt_playlist.util.action_kinds import COPY_PLAYLIST, MOVE_IDENTITY
 
@@ -60,6 +64,7 @@ def test_playlist_creation_date_migration_backfills_only_known_dates(store):
     with store.conn:
         store.conn.execute("ALTER TABLE playlists DROP COLUMN created_at")
         store.conn.execute("DELETE FROM settings WHERE key='playlist_created_at_backfilled'")
+        store.conn.execute("DROP TABLE schema_migrations")
     store.init_schema()
     dates = {p.ytm_playlist_id: p.created_at for p in store.get_playlists()}
     assert dates == {"song": 100, "generated": 50, "303": None, "Brexit List": None,

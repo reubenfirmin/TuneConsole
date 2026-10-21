@@ -110,12 +110,15 @@ def _target_ytm_id(store, playlist_id):
     return store.get_playlist(playlist_id).ytm_playlist_id
 
 def _remote_keys(client, ytm_playlist_id):
-    """Current remote identity_keys of a playlist, or None if it can't be read (deleted/unparseable)."""
+    """Exact remote upload IDs, or None if the complete contents cannot be established."""
     try:
         detail = with_retry(lambda: client.get_playlist(ytm_playlist_id, limit=None))
     except Exception:  # noqa: BLE001 - deleted playlist or ytmusicapi parse failure
         return None
-    return {identity_key(t.get("title", ""), track_artist(t)) for t in detail.get("tracks", [])}
+    tracks = detail.get("tracks", [])
+    if any(not t.get("videoId") for t in tracks):
+        return None
+    return {t["videoId"] for t in tracks}
 
 def _remote_video_ids(client, ytm_playlist_id):
     """Current remote videoIds (in order) of a playlist, for capturing prior contents before a merge."""
@@ -130,7 +133,10 @@ def _verify_and_delete(store, plan, source_client, target_client, source_ytm_pla
     target_ytm = _target_ytm_id(store, plan.target_playlist_id)
     source_keys = _remote_keys(source_client, source_ytm_playlist_id)
     if source_keys is None:  # can't read the source remotely; fall back to its last-synced contents
-        source_keys = store.get_playlist_track_keys(plan.source_playlist_id)
+        cached = store.get_playlist_tracks_with_meta(plan.source_playlist_id)
+        if any(not row[1] for row in cached):
+            raise ValueError("The source contains unresolved uploads; re-sync before deleting it")
+        source_keys = {row[1] for row in cached}
     if source_keys:  # empty source loses nothing -> safe to delete without reading the target
         target_keys = _remote_keys(target_client, target_ytm)
         if target_keys is None:
@@ -515,7 +521,7 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
             ti, ar = t.get("title") or "", t.get("artist") or ""
             track_ids.append(store.upsert_track(
                 t["video_id"], ti, ar, t.get("album") or "", t["duration"], thumbnail=t.get("thumbnail")))
-            keys.append(identity_key(ti, ar))
+        keys = [store.catalog_subject(tid)["identity_key"] for tid in track_ids]
         db_pid = store.upsert_playlist(identity_id, new_pid, title, len(track_ids),
                                        content_hash(list(dict.fromkeys(keys))), now, created_at=now)
         store.set_playlist_tracks(db_pid, track_ids)
@@ -609,7 +615,7 @@ def create_playlist_from_album(store, browse_id, name, client, now, identity_id)
             continue
         ti, ar, al = meta[v]
         track_ids.append(store.upsert_track(v, ti, ar, al, None, thumbnail=thumb))
-        keys.append(identity_key(ti, ar))
+    keys = [store.catalog_subject(tid)["identity_key"] for tid in track_ids]
     from yt_playlist.library.sync import content_hash   # local import avoids an import cycle
     db_pid = store.upsert_playlist(identity_id, new_pid, title, len(track_ids),
                                    content_hash(list(dict.fromkeys(keys))), now, created_at=now)

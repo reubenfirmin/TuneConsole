@@ -341,6 +341,21 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "_partials/taste_preview.html", {
             "items": items, "lane_labels": {name: label for name, label, _ in rec_params.LANES}})
 
+    @router.get("/taste/scorecard")
+    def served_scorecard(start: float | None = None, end: float | None = None):
+        end = ctx.now() if end is None else end
+        start = end - 30 * 86400 if start is None else start
+        if not (0 <= start < end and end - start <= 90 * 86400):
+            raise HTTPException(422, "Choose an ordered date range of at most 90 days.")
+        return store.recommendation_scorecard(start, end)
+
+    @router.get("/taste/served/{impression_id}")
+    def served_trace(impression_id: int):
+        trace = store.served_recommendation(impression_id)
+        if trace is None:
+            raise HTTPException(404, "Recommendation impression not found.")
+        return trace
+
     def _comparison_context():
         raw = store.get_setting(comparison_setting)
         if not raw:

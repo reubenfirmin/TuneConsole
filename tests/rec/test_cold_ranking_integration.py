@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from yt_playlist.rec import discover, embed, rec_params, scoring, surfaces, transient
+from yt_playlist.rec import discover, embed, eval_recs, rec_params, scoring, surfaces, transient
 from yt_playlist.util.matching import identity_key
 
 
@@ -131,8 +131,34 @@ def test_explicit_cold_mood_still_contributes_with_library_evidence(store, cold_
     assert _rank(store) == [cold["Techno"], cold["Folk"]]
 
 
-def test_discovery_without_metadata_follows_ranked_candidates(store, cold_library):
+def test_discovery_without_metadata_is_not_surfaced(store, cold_library):
     key = "unknown song|unknown artist"
     store.upsert_discovered_track(key, "unknown", "Unknown song", "Unknown artist", "", None,
                                   None, None, "MPRE_new", 10)
-    assert _rank(store)[-1] == key
+    assert key not in _rank(store)
+    assert eval_recs.cold_rankable(store, 1000) == {
+        "rankable": 2, "fallback": 0, "eligible": 2, "pool": 3}
+
+
+@pytest.mark.parametrize("weight", [0.5, 2.0])
+def test_rankable_missing_genre_stays_neutral_against_equally_fitting_tagged_candidate(
+        store, cold_library, monkeypatch, weight):
+    # Both have year evidence and a genuine projection, rather than comparing a scored track to
+    # the unprojectable fallback used by the old missing-metadata tests.
+    class EqualProjection:
+        def predict(self, *args, **kwargs):
+            return np.array([1., 0.])
+
+    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, s: EqualProjection()))
+    monkeypatch.setattr(surfaces, "discovery_facet_weight", scoring.discovery_facet_weight)
+    store.upsert_discovered_track("untagged|new artist", "untagged", "Untagged", "New artist", "", None,
+                                  None, "2000", "MPRE_new", 10)
+    store.set_weight("genre:folk-country", 0, lo=0, hi=2, now=1000)
+    store.set_weight("genre:techno", weight, lo=0, hi=2, now=1000)
+    candidates = surfaces.cold_candidates(store, 1000)
+    assert len(candidates) == 2
+    assert candidates[0].score == pytest.approx(candidates[1].score)
+    assert all(t.score is not None for t in candidates)
+
+    store.set_weight("genre:techno", 0, lo=0, hi=2, now=1000)
+    assert [t.key for t in surfaces.cold_candidates(store, 1000)] == ["untagged|new artist"]

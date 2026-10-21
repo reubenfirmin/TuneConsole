@@ -26,6 +26,7 @@ def _fake_rec_dao(owned):
 def test_radio_pull_persists_unowned_and_dedups(monkeypatch, store):
     store.set_setting("radio_discovery_enabled", "1")
     owned = identity_key("Owned", "Owned Artist")
+    store.upsert_track('own1','Owned','Owned Artist',None,None)
     monkeypatch.setattr(discover, "RecDao", _fake_rec_dao({owned}))
     monkeypatch.setattr(store, "top_tracks", lambda n: [{"video_id": "seed1"}], raising=False)
 

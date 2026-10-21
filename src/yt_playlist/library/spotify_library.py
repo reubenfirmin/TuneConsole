@@ -247,7 +247,7 @@ def _remember_playlist(store, identity_id, remote_id, title, tracks, now):
         ids.append(store.upsert_track(video, track.get("title") or "", artist, album,
                                       track.get("duration_seconds"),
                                       thumbnail=best_thumb(track.get("thumbnails"))))
-        keys.append(identity_key(track.get("title") or "", artist))
+    keys = [store.catalog_subject(tid)["identity_key"] for tid in ids]
     local_id = store.upsert_playlist(identity_id, remote_id, title, len(set(ids)), content_hash(keys), now)
     store.set_playlist_tracks(local_id, ids)
     store.ensure_playlist_thumbnail(local_id)

@@ -394,10 +394,9 @@ def import_takeout(store, raw) -> dict:
     matched_rows, unmatched = [], Counter()
     for p in parsed:
         key = store.identity_key_for_video(p["video_id"]) if p["video_id"] else None
-        if key is None:
-            cand = identity_key(p["title"], p["artist"])
-            key = cand if cand in owned else None
-        if key is None:
+        if key is None and not p["video_id"]:
+            key = store.match_recording(p["title"], p["artist"])
+        if key not in owned:
             unmatched[p["artist"] or "?"] += 1
             continue
         matched_rows.append((key, p["video_id"], p["ts"]))

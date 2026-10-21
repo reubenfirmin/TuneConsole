@@ -764,9 +764,6 @@
   .playlist-influence-share .playlist-influence-mobile-label { margin-left: .25em; }
   .playlist-influence-scale { padding-inline: .5rem; font-size: .65rem; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .playlist-blend-segment { transition: none; }
-}
 .taste-control-guide { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 2rem; margin: 1.5rem 0; }
 .taste-control-guide dt { font-size: var(--type-ui); font-weight: 650; margin-bottom: .6rem; }
@@ -897,7 +894,6 @@ a.conflict-prov { text-decoration: underline; text-underline-offset: 0.15em; }
 .vt-n { color: var(--faint); font-size: 0.69rem; line-height: 1.3; margin: 0 0 0.28rem; }
 .vt-n:last-child { margin-bottom: 0; }
 .vt-div { margin-top: 0.42rem; padding-top: 0.42rem; border-top: 1px solid var(--border); }
-@media (prefers-reduced-motion: reduce) { .viz-tip { transition: none; } }
 
 /* Tooltip description paragraph (e.g. a candidate lane's "what it finds"). */
 .vt-desc { color: var(--dim); font-size: 0.73rem; line-height: 1.35; margin: -0.1rem 0 0.45rem;
@@ -1022,7 +1018,6 @@ a.conflict-prov { text-decoration: underline; text-underline-offset: 0.15em; }
 .conflict-save-status.is-saved { color: var(--notice-ok-text); animation: conflict-saved .25s ease-out; }
 .conflict-save-status.is-error { color: var(--danger); }
 @keyframes conflict-saved { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: none; } }
-@media (prefers-reduced-motion: reduce) { .conflict-save-status.is-saved, .conflict-current-check { animation: none; } }
 .cov-grid { display: flex; flex-direction: column; gap: 0.55rem; }
 /* Fixed columns: label · bar (1fr, so every bar shares the same max width) · percent · raw count.
    Percent and raw count each get their own column so they align down the list. */

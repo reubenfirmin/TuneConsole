@@ -67,7 +67,6 @@
     var orbit = document.getElementById('gen-orbit');
     var canvas = document.getElementById('gen-fx');
     var ctx = canvas.getContext('2d');
-    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     // The clicked card's surviving thumbnails, stashed by genOpenYT() before this window opened.
     var thumbs = [];
@@ -139,7 +138,7 @@
       for (var i = 0; i < nodes.length; i++) {
         var n = nodes[i];
         var r = (n.ring ? rOut : rIn) * (1 + 0.05 * Math.sin(t * 0.7 + n.bob));
-        var a = n.a0 + (reduce ? 0 : t * n.spin);
+        var a = n.a0 + t * n.spin;
         var x = cx + r * Math.cos(a);
         var y = cy + r * Math.sin(a) * SQ;
         var depth = (Math.sin(a) + 1) / 2;          // 0 = far side, 1 = near side
@@ -151,14 +150,13 @@
         ctx.strokeStyle = g; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(x, y); ctx.stroke();
 
-        if (!reduce) {                              // a pulse travelling from the node toward the hub
-          var f = (t * 0.32 + n.pulse) % 1;         // 0 at node → 1 at hub
-          var px = x + (cx - x) * f, py = y + (cy - y) * f;
-          ctx.beginPath(); ctx.arc(px, py, 2.3, 0, Math.PI * 2);
-          ctx.fillStyle = alpha(C.trunk, (0.2 + 0.7 * f).toFixed(2));
-          ctx.shadowColor = C.pulseGlow; ctx.shadowBlur = 9;
-          ctx.fill(); ctx.shadowBlur = 0;
-        }
+        // A pulse travelling from the node toward the hub.
+        var f = (t * 0.32 + n.pulse) % 1;
+        var px = x + (cx - x) * f, py = y + (cy - y) * f;
+        ctx.beginPath(); ctx.arc(px, py, 2.3, 0, Math.PI * 2);
+        ctx.fillStyle = alpha(C.trunk, (0.2 + 0.7 * f).toFixed(2));
+        ctx.shadowColor = C.pulseGlow; ctx.shadowBlur = 9;
+        ctx.fill(); ctx.shadowBlur = 0;
 
         var s = 0.72 + 0.42 * depth;
         n.el.style.transform = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) +

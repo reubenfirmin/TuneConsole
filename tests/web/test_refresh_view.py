@@ -147,7 +147,8 @@ def _two_identity_move(store):
     return i1, i2, pid
 
 
-def test_move_that_deletes_source_posts_refresh_view(store):
+def test_move_that_deletes_source_posts_refresh_view(store,monkeypatch,tmp_path):
+    monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path))
     # A cross-identity MOVE deletes the source playlist on YouTube; a tab sitting on it should
     # reload to show that. The copy destination is brand new, so no refresh fires for it.
     i1, i2, pid = _two_identity_move(store)

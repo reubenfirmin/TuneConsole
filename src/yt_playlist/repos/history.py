@@ -3,6 +3,7 @@ import datetime
 import logging
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from yt_playlist.core import catalog
 from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized
 
 logger = logging.getLogger(__name__)
@@ -122,15 +123,24 @@ class HistoryRepo(Repo):
         recorded = 0
         for play_ts, keys in by_date.items():
             sid = self._snapshot_for_date(identity_id, play_ts)
-            existing = {r["identity_key"] for r in self.conn.execute(
-                "SELECT identity_key FROM history_items WHERE snapshot_id=?", (sid,))}
-            new = sorted(keys - existing)
+            new = self._new_history_keys(sid,keys)
             if new:
                 self.conn.executemany("INSERT INTO history_items(snapshot_id, identity_key) VALUES (?,?)",
                                       [(sid, k) for k in new])
                 recorded += len(new)
         self.conn.commit()
         return recorded
+
+    def _new_history_keys(self, snapshot_id, keys):
+        existing = {r['identity_key'] for r in self.conn.execute(
+            'SELECT identity_key FROM history_items WHERE snapshot_id=?', (snapshot_id,))}
+        subjects = {}
+        for key in sorted(keys):
+            subject = catalog.resolve_key(self.conn,key) or key
+            if subject not in existing:
+                subjects.setdefault(subject,key)
+        # Insert the observed key; the catalog trigger retains it beside the resolved subject.
+        return list(subjects.values())
 
     def _snapshot_for_date(self, identity_id, play_ts):
         """Get-or-create the single snapshot for (identity, play-date), so all of a day's plays share
@@ -287,9 +297,11 @@ class HistoryRepo(Repo):
             "AND (ytm=? OR 'RDAMPL' || ytm=?))",
             (GENERATED_GROUP, playlist_ytm_id, playlist_ytm_id)).fetchone()[0]
         row = self.conn.execute(
-            "SELECT id, identity_key, played_at FROM play_events WHERE identity_id=? "
+            "SELECT id, identity_key, video_id, played_at FROM play_events WHERE identity_id=? "
             "ORDER BY played_at DESC, id DESC LIMIT 1", (identity_id,)).fetchone()
-        if (row and row["identity_key"] == identity_key
+        subject = catalog.play_key(self.conn,identity_key,video_id)
+        if (row and row["identity_key"] == subject
+                and (not video_id or not row['video_id'] or video_id == row['video_id'])
                 and played_at - row["played_at"] < _LIVE_DEDUP_S):
             self.conn.execute(
                 "UPDATE play_events SET like_status=COALESCE(?, like_status), "
@@ -345,9 +357,7 @@ class HistoryRepo(Repo):
         added = 0
         for play_ts, keys in by_date.items():
             sid = self._snapshot_for_date(identity_id, play_ts)
-            existing = {r["identity_key"] for r in self.conn.execute(
-                "SELECT identity_key FROM history_items WHERE snapshot_id=?", (sid,))}
-            new = sorted(keys - existing)
+            new = self._new_history_keys(sid,keys)
             if new:
                 self.conn.executemany(
                     "INSERT INTO history_items(snapshot_id, identity_key) VALUES (?,?)",
@@ -370,12 +380,14 @@ class HistoryRepo(Repo):
         for key, vid, ts in rows:
             if not key:
                 continue
+            subject = catalog.play_key(self.conn,key,vid)
             cur = self.conn.execute(
                 "INSERT INTO play_events(identity_id, identity_key, video_id, played_at, source) "
                 "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS ("
                 "  SELECT 1 FROM play_events WHERE identity_id=? AND identity_key=? "
+                "  AND (NULLIF(trim(video_id),'') IS NULL OR NULLIF(trim(?),'') IS NULL OR video_id=?) "
                 "  AND played_at BETWEEN ? - 2.0 AND ? + 2.0)",
-                (identity_id, key, vid, ts, source, identity_id, key, ts, ts))
+                (identity_id, key, vid, ts, source, identity_id, subject, vid, vid, ts, ts))
             added += cur.rowcount
         self.conn.commit()
         return added

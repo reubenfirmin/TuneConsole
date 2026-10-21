@@ -64,9 +64,11 @@ def test_batch_excludes_processed_and_respects_limit(store):
     assert len(store.next_enrich_batch(1)) == 1         # limit honored
 
 
-def test_startup_requeues_legacy_processed_rows_with_no_attempt_evidence(store):
-    tid = _track(store, "v1", "Skipped", "A", created_at=1.0)
-    store.mark_enriched([tid], now=5.0)
+def test_startup_requeues_legacy_processed_rows_with_no_attempt_evidence(legacy_store):
+    store = legacy_store
+    with store.conn:
+        tid = store.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key,created_at,first_enriched_at,last_enriched_at) VALUES ('v1','Skipped','A','skipped|a',1,5,5)").lastrowid
+        store.conn.execute('DROP TABLE schema_migrations')
     store.delete_setting("enrich_unattempted_batch_repaired")
     store.init_schema()
     row = store.conn.execute(

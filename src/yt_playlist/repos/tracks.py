@@ -1,55 +1,73 @@
 """TrackRepo: track rows and their genre/year enrichment."""
-from yt_playlist.util.matching import identity_key
+from yt_playlist.util.matching import identity_key, normalize, recording_title
+from yt_playlist.core import catalog
 from yt_playlist.util.thumbnails import is_placeholder_art
 from yt_playlist.repos.base import Repo, synchronized
 
 
 class TrackRepo(Repo):
     @synchronized
+    def associate_youtube_item(self, video_id, recording_id, *, source, evidence, now):
+        with self.conn:
+            catalog.associate_item(self.conn,video_id,recording_id,source=source,evidence=evidence,now=now)
+    @synchronized
+    def resolve_identity_key(self, key, video_id=None):
+        return catalog.resolve_key(self.conn, key, video_id)
+
+    @synchronized
+    def match_recording(self, title, artist):
+        """Resolve text-only imports conservatively, retaining performance/version qualifiers."""
+        rows = self.conn.execute(
+            'SELECT DISTINCT c.recording_id,c.identity_key,c.title,c.artist FROM catalog_tracks c '
+            'JOIN recording_aliases a ON a.recording_id=c.recording_id WHERE a.alias=?',
+            (identity_key(title,artist),)).fetchall()
+        keys = {r['identity_key'] for r in rows if recording_title(r['title']) == recording_title(title)
+                and normalize(r['artist']) == normalize(artist)}
+        return next(iter(keys)) if len(keys)==1 else None
+
+    @synchronized
+    def catalog_subject(self, track_id):
+        return self.track_for_waterfall(track_id)
+
+    @synchronized
+    def observe_track(self, video_id, title, artist, *, now=None, album=None, album_browse_id=None):
+        with self.conn:
+            entry_id = catalog.upsert(self.conn,video_id,title,artist,album=album,
+                                      album_browse_id=album_browse_id,created_at=now,library=False)
+            return self.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?', (entry_id,)).fetchone()[0]
+
+    @synchronized
+    def record_item_rating(self, identity_id, video_id, status, *, source, now):
+        self.conn.execute('INSERT INTO item_ratings VALUES (?,?,?,?,?) ON CONFLICT(identity_id,video_id) DO UPDATE SET status=excluded.status,source=excluded.source,observed_at=excluded.observed_at', (identity_id,video_id,status,source,now))
+        self.conn.commit()
+
+    @synchronized
     def upsert_track(self, video_id, title, artist, album, duration_s, available=None,
                      video_type=None, artist_browse_id=None, album_browse_id=None, thumbnail=None,
-                     created_at=None) -> int:
-        key = identity_key(title, artist)
-        row = self.conn.execute(
-            "SELECT id FROM tracks WHERE identity_key=? AND IFNULL(video_id,'')=IFNULL(?,'')",
-            (key, video_id)).fetchone()
-        if row:
-            # keep these fresh on re-sync (backfills existing rows once the data is available)
-            for col, val in (("duration_s", duration_s),
-                             ("available", None if available is None else int(available)),
-                             ("video_type", video_type),
-                             ("artist_browse_id", artist_browse_id),
-                             ("album_browse_id", album_browse_id),
-                             ("thumbnail", thumbnail)):
-                if val is not None:
-                    self.conn.execute(f"UPDATE tracks SET {col}=? WHERE id=?", (val, row["id"]))
-            self.conn.commit()
-            return row["id"]
-        cur = self.conn.execute(
-            "INSERT INTO tracks(video_id,title,artist,album,duration_s,identity_key,available,"
-            "video_type,artist_browse_id,album_browse_id,thumbnail,orig_title,orig_artist,created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, strftime('%s','now')))",
-            (video_id, title, artist, album, duration_s, key,
-             None if available is None else int(available), video_type,
-             artist_browse_id, album_browse_id, thumbnail, title, artist, created_at))
-        self.conn.commit()
-        return cur.lastrowid
+                     created_at=None, *, source_ref=None) -> int:
+        with self.conn:
+            return catalog.upsert(
+                self.conn, video_id, title, artist, album, duration_s, available,
+                video_type, artist_browse_id, album_browse_id, thumbnail, created_at,
+                library=True, source_ref=source_ref)
 
     @synchronized
     def identity_key_for_video(self, video_id) -> str | None:
-        """#91 Map an observed videoId to the library's identity_key (None when not in the library)."""
+        """Resolve an observed upload in the catalog, independently of library membership."""
         row = self.conn.execute(
-            "SELECT identity_key FROM tracks WHERE video_id=? LIMIT 1", (video_id,)).fetchone()
+            "SELECT identity_key FROM catalog_tracks WHERE video_id=? LIMIT 1", (video_id,)).fetchone()
         return row["identity_key"] if row else None
 
     @synchronized
     def known_duration(self, title, artist):
         """A duration (seconds) we already hold for this song under ANY stored row, else None. Lets a
         generated playlist reuse a time we know from one videoId for the same song under another."""
-        row = self.conn.execute(
-            "SELECT MAX(duration_s) d FROM tracks WHERE identity_key=?",
-            (identity_key(title, artist),)).fetchone()
-        return row["d"] if row and row["d"] is not None else None
+        rows = self.conn.execute(
+            "SELECT DISTINCT recording_id,duration_s,title,artist FROM catalog_tracks "
+            "WHERE identity_key=?", (catalog.resolve_key(self.conn,identity_key(title,artist)),)).fetchall()
+        exact = [r for r in rows if (r["title"] or "").strip().casefold() == (title or "").strip().casefold()
+                 and (r["artist"] or "").strip().casefold() == (artist or "").strip().casefold()]
+        return max((r["duration_s"] for r in exact if r["duration_s"] is not None), default=None)
 
     @synchronized
     def tracks_to_enrich(self, playlist_id) -> list:
@@ -57,7 +75,7 @@ class TrackRepo(Repo):
         Blank counts as missing so re-running enrichment retries tracks that didn't fully resolve."""
         rows = self.conn.execute(
             "SELECT t.id, t.video_id, t.title, t.artist FROM playlist_tracks pt "
-            "JOIN tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? "
+            "JOIN catalog_tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? "
             "AND (t.genre IS NULL OR t.genre = '' OR t.mb_year IS NULL OR t.mb_year = '') "
             "ORDER BY pt.position", (playlist_id,)).fetchall()
         return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"], "artist": r["artist"]}
@@ -68,7 +86,7 @@ class TrackRepo(Repo):
         """A saved album's folded-in tracks still missing genre or year, the album-scoped twin of
         tracks_to_enrich, so the same enrich runners work over an album."""
         rows = self.conn.execute(
-            "SELECT t.id, t.video_id, t.title, t.artist FROM tracks t WHERE t.album_browse_id=? "
+            "SELECT t.id, t.video_id, t.title, t.artist FROM catalog_tracks t JOIN album_track_links a ON a.entry_id=t.id WHERE a.browse_id=? "
             "AND (t.genre IS NULL OR t.genre = '' OR t.mb_year IS NULL OR t.mb_year = '') "
             "ORDER BY t.id", (album_browse_id,)).fetchall()
         return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"], "artist": r["artist"]}
@@ -92,15 +110,16 @@ class TrackRepo(Repo):
         off an already-resolved MBID."""
         rows = self.conn.execute(
             "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id, t.thumbnail FROM playlist_tracks pt "
-            f"JOIN tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? AND ({self._NEEDS}) "
+            f"JOIN catalog_tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? AND ({self._NEEDS}) "
             "ORDER BY pt.position", (playlist_id,)).fetchall()
         return [dict(r) for r in rows]
 
     @synchronized
     def track_for_waterfall(self, track_id) -> dict | None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         """One track for an explicit user-requested lookup, even if other metadata is complete."""
         row = self.conn.execute(
-            "SELECT id, video_id, title, artist, mb_recording_id, thumbnail FROM tracks WHERE id=?",
+            "SELECT id, recording_id, identity_key, video_id, title, artist, mb_recording_id, thumbnail FROM catalog_tracks WHERE id=?",
             (track_id,)).fetchone()
         return dict(row) if row is not None else None
 
@@ -109,63 +128,75 @@ class TrackRepo(Repo):
         """A saved album's folded-in tracks the waterfall still has work for, album-scoped twin of
         tracks_for_waterfall."""
         rows = self.conn.execute(
-            "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id, t.thumbnail FROM tracks t "
-            f"WHERE t.album_browse_id=? AND ({self._NEEDS}) ORDER BY t.id", (album_browse_id,)).fetchall()
+            "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id, t.thumbnail FROM catalog_tracks t "
+            "JOIN album_track_links a ON a.entry_id=t.id "
+            f"WHERE a.browse_id=? AND ({self._NEEDS}) ORDER BY t.id", (album_browse_id,)).fetchall()
         return [dict(r) for r in rows]
 
     @synchronized
     def set_track_art(self, track_id, url) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         """Fill-only cover art from a provider. YouTube's own cover is authoritative and is never
         overwritten, but its generic grey disc (served whenever it has no art, which for an upload is
         always) counts as no art, so a real cover may replace it."""
         if not url:
             return
-        row = self.conn.execute("SELECT thumbnail FROM tracks WHERE id=?", (track_id,)).fetchone()
+        row = self.conn.execute("SELECT thumbnail FROM catalog_tracks WHERE id=?", (track_id,)).fetchone()
         if row is None or (row["thumbnail"] and not is_placeholder_art(row["thumbnail"])):
             return
-        self.conn.execute("UPDATE tracks SET thumbnail=? WHERE id=?", (url, track_id))
+        self.conn.execute("UPDATE catalog_tracks SET thumbnail=? WHERE id=?", (url, track_id))
         self.conn.commit()
 
     @synchronized
     def set_track_genre(self, track_id, genre) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         # manual override: set exactly what the user chose (may be blank to clear)
-        self.conn.execute("UPDATE tracks SET genre=? WHERE id=?", (genre or "", track_id))
+        catalog.choose_field(self.conn,track_id,'genre',genre or '')
         self.conn.commit()
 
     @synchronized
     def set_track_year(self, track_id, year) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         # manual override: set exactly what the user typed (may be blank to clear)
-        self.conn.execute("UPDATE tracks SET mb_year=? WHERE id=?", (year or "", track_id))
+        catalog.choose_field(self.conn,track_id,'mb_year',str(year) if year is not None else '')
         self.conn.commit()
 
     @synchronized
     def set_track_title(self, track_id, title) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         # manual fix: overwrite the live title in place so downstream consumers use it. Never blank.
         title = (title or "").strip()
         if not title:
             return
-        self.conn.execute("UPDATE tracks SET title=? WHERE id=?", (title, track_id))
+        self.conn.execute("UPDATE catalog_tracks SET title=? WHERE id=?", (title, track_id))
+        catalog.choose_field(self.conn,track_id,'title',title)
         self.conn.commit()
 
     @synchronized
     def set_track_artist(self, track_id, artist) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         # manual fix: overwrite the live artist in place. Never blank.
         artist = (artist or "").strip()
         if not artist:
             return
-        self.conn.execute("UPDATE tracks SET artist=? WHERE id=?", (artist, track_id))
+        self.conn.execute("UPDATE catalog_tracks SET artist=? WHERE id=?", (artist, track_id))
+        catalog.choose_field(self.conn,track_id,'artist',artist)
         self.conn.commit()
 
     @synchronized
     def reset_track_title(self, track_id) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
+        self.conn.execute("DELETE FROM entry_field_choices WHERE entry_id=? AND field='title'", (track_id,))
         # restore the original YouTube title (undo a manual fix).
-        self.conn.execute("UPDATE tracks SET title=orig_title WHERE id=? AND orig_title IS NOT NULL",
+        self.conn.execute("UPDATE catalog_tracks SET title=orig_title WHERE id=? AND orig_title IS NOT NULL",
                           (track_id,))
         self.conn.commit()
 
     @synchronized
     def reset_track_artist(self, track_id) -> None:
-        self.conn.execute("UPDATE tracks SET artist=orig_artist WHERE id=? AND orig_artist IS NOT NULL",
+        track_id = catalog.resolve_entry(self.conn, track_id)
+        self.conn.execute("DELETE FROM entry_field_choices WHERE entry_id=? AND field='artist'", (track_id,))
+        self.conn.execute("UPDATE catalog_tracks SET artist=orig_artist WHERE id=? AND orig_artist IS NOT NULL",
                           (track_id,))
         self.conn.commit()
 
@@ -174,17 +205,18 @@ class TrackRepo(Repo):
         """Playlist tracks with no genre yet (for Last.fm genre enrichment), in playlist order."""
         rows = self.conn.execute(
             "SELECT t.id, t.video_id, t.title, t.artist FROM playlist_tracks pt "
-            "JOIN tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? "
+            "JOIN catalog_tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? "
             "AND (t.genre IS NULL OR t.genre = '') ORDER BY pt.position", (playlist_id,)).fetchall()
         return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"], "artist": r["artist"]}
                 for r in rows]
 
     @synchronized
     def set_track_enrichment(self, track_id, genre, year) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         # fill-only: set a field just when it's currently blank. So enrichment fills gaps and never
         # overwrites what you already have. MusicBrainz and Last.fm each top up the other's misses.
         self.conn.execute(
-            "UPDATE tracks SET "
+            "UPDATE catalog_tracks SET "
             "  genre = CASE WHEN (genre IS NULL OR genre='') AND ? <> '' THEN ? ELSE genre END, "
             "  mb_year = CASE WHEN (mb_year IS NULL OR mb_year='') AND ? <> '' THEN ? ELSE mb_year END "
             "WHERE id=?",
@@ -193,8 +225,9 @@ class TrackRepo(Repo):
 
     @synchronized
     def get_track_enrichment(self, track_id):
+        track_id = catalog.resolve_entry(self.conn, track_id)
         """Current (genre, year) for a track, used to report the effective value after a fill."""
-        row = self.conn.execute("SELECT genre, mb_year FROM tracks WHERE id=?", (track_id,)).fetchone()
+        row = self.conn.execute("SELECT genre, mb_year FROM catalog_tracks WHERE id=?", (track_id,)).fetchone()
         if row is None:
             return ("", "")
         return (row["genre"] or "", row["mb_year"] or "")
@@ -205,6 +238,7 @@ class TrackRepo(Repo):
                         mood_relaxed=None, mood_acoustic=None, instrumental=None,
                         loudness=None, dynamic_complexity=None,
                         popularity=None, gain=None, label=None) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         # fill-only: each provided (non-None) field fills its column only when it's currently NULL,
         # so re-running a provider (or a second provider) tops up gaps without clobbering data.
         fields = {"bpm": bpm, "energy": energy, "danceability": danceability,
@@ -216,28 +250,31 @@ class TrackRepo(Repo):
         updates = {c: v for c, v in fields.items() if v is not None}
         if not updates:
             return
+        catalog.replace_hints(self.conn,track_id,updates)
         # column names come from the fixed literal dict above (not user input) -> safe to inline
         sets = ", ".join(f"{c} = CASE WHEN {c} IS NULL THEN ? ELSE {c} END" for c in updates)
-        self.conn.execute(f"UPDATE tracks SET {sets} WHERE id=?",
+        self.conn.execute(f"UPDATE catalog_tracks SET {sets} WHERE id=?",
                           list(updates.values()) + [track_id])
         self.conn.commit()
 
     @synchronized
     def get_track_audio(self, track_id):
+        track_id = catalog.resolve_entry(self.conn, track_id)
         """Current (bpm, energy, danceability) for a track, each float or None."""
         row = self.conn.execute(
-            "SELECT bpm, energy, danceability FROM tracks WHERE id=?", (track_id,)).fetchone()
+            "SELECT bpm, energy, danceability FROM catalog_tracks WHERE id=?", (track_id,)).fetchone()
         if row is None:
             return (None, None, None)
         return (row["bpm"], row["energy"], row["danceability"])
 
     @synchronized
     def set_track_mbid(self, track_id, mbid) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         # fill-only: keep the first MBID we resolve for a track.
         if not mbid:
             return
         self.conn.execute(
-            "UPDATE tracks SET mb_recording_id = CASE "
+            "UPDATE catalog_tracks SET mb_recording_id = CASE "
             "WHEN mb_recording_id IS NULL OR mb_recording_id='' THEN ? ELSE mb_recording_id END "
             "WHERE id=?", (mbid, track_id))
         self.conn.commit()
@@ -248,7 +285,7 @@ class TrackRepo(Repo):
         Carries mb_recording_id so AcousticBrainz can key off it without a second query."""
         rows = self.conn.execute(
             "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id FROM playlist_tracks pt "
-            "JOIN tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? "
+            "JOIN catalog_tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? "
             "AND (t.bpm IS NULL OR t.energy IS NULL OR t.danceability IS NULL) "
             "ORDER BY pt.position", (playlist_id,)).fetchall()
         return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"],
@@ -260,7 +297,7 @@ class TrackRepo(Repo):
         out = {}
         for vid in video_ids:
             row = self.conn.execute(
-                "SELECT id FROM tracks WHERE video_id=? ORDER BY id DESC LIMIT 1", (vid,)).fetchone()
+                "SELECT id FROM catalog_tracks WHERE video_id=? ORDER BY id DESC LIMIT 1", (vid,)).fetchone()
             if row is not None:
                 out[vid] = row["id"]
         return out
@@ -269,5 +306,5 @@ class TrackRepo(Repo):
     def materialized_album_ids(self) -> set:
         """browse_ids of saved albums whose tracks we've already folded into the library, so sync
         only fetches an album's track list once, not on every pass."""
-        return {r["album_browse_id"] for r in self.conn.execute(
-            "SELECT DISTINCT album_browse_id FROM tracks WHERE album_browse_id IS NOT NULL")}
+        return {r["browse_id"] for r in self.conn.execute(
+            "SELECT DISTINCT a.browse_id FROM album_track_links a JOIN library_memberships m ON m.entry_id=a.entry_id")}

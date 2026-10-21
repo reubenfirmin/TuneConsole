@@ -6,6 +6,12 @@
 
 if (!window.__tcBridgeLoaded) {
   window.__tcBridgeLoaded = true;
+  // Build-time flag, kept in sync with the service worker by scripts/build-extension.sh.
+  const RADIO_ENABLED = false;
+  const SENSOR_VERSION = 4;
+  let mainFrameAt = null;
+  let sensorProbeSerial = 0;
+  const sensorProbes = new Map();
 
   const isAllowed = (u) => {
     try {
@@ -163,14 +169,29 @@ if (!window.__tcBridgeLoaded) {
     document.addEventListener("keydown", retryPlay, { once: true });
   };
 
+  const sensorStatus = () => {
+    const v = document.querySelector("video");
+    return { ok: true, hasVideo: !!v, paused: !!(v && v.paused), url: location.href,
+      mainVersion: mainFrameAt === null ? null : SENSOR_VERSION,
+      mainAgeMs: mainFrameAt === null ? null : Math.max(0, Date.now() - mainFrameAt) };
+  };
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "sensor-ping") {
-      // Explicit liveness handshake: reaching this listener proves the isolated-world sensor is
-      // installed in this particular YTM tab. Keep it synchronous so the service worker can use a
-      // rejected sendMessage as the signal to reinject.
-      const v = document.querySelector("video");
-      sendResponse({ ok: true, hasVideo: !!v, paused: !!(v && v.paused), url: location.href });
-      return;
+      // Fetch readiness needs only this receiver. Health also asks MAIN to sample immediately,
+      // so timer throttling in background tabs does not look like a failed sensor.
+      if (!msg.main) { sendResponse(sensorStatus()); return; }
+      const id = ++sensorProbeSerial;
+      const finish = () => {
+        if (!sensorProbes.has(id)) return;
+        clearTimeout(timer);
+        sensorProbes.delete(id);
+        sendResponse(sensorStatus());
+      };
+      const timer = setTimeout(finish, 750);
+      sensorProbes.set(id, finish);
+      try { window.postMessage({ __tcSensorProbe: { version: SENSOR_VERSION, id } }, "*"); }
+      catch (e) { finish(); }
+      return true;
     }
     if (msg.type === "rate") { clickRate(msg.action); return; }
     if (msg.type === "playpause") { clickPlayPause(); return; }
@@ -179,6 +200,7 @@ if (!window.__tcBridgeLoaded) {
       return true; // keep the response channel open until playback has been checked
     }
     if (msg.type === "radio-prime") {
+      if (!RADIO_ENABLED) return;
       // #93 a null/absent url means "clear the stored prime" (sent by /radio/stop), never a URL to
       // navigate to: without this, a stale prime from a stopped radio would hijack the tab on the
       // next organic track end.
@@ -186,12 +208,14 @@ if (!window.__tcBridgeLoaded) {
       return;
     }
     if (msg.type === "radio-boundary") {
+      if (!RADIO_ENABLED) return;
       // #93 v3 dual-deck (T7j/T7k): background arms/disarms this deck's boundary vid. Ending it is
       // the toggle trigger (see the `ended` handoff below). A falsy videoId clears it (deck-stop).
       boundaryVid = msg.videoId || null;
       return;
     }
     if (msg.type === "deck-pause-mute" || msg.type === "deck-pause") {
+      if (!RADIO_ENABLED && msg.type === "deck-pause-mute") return;
       // #93 v3 dual-deck: keep a standby tab silent -- pause it the instant it (re)loads, and pause
       // the old live tab right after a toggle. Drive the player-bar control only if actually
       // playing, so this never flips an already-paused tab into playing.
@@ -202,6 +226,7 @@ if (!window.__tcBridgeLoaded) {
       return;
     }
     if (msg.type === "deck-play") {
+      if (!RADIO_ENABLED) return;
       // #93 v3 dual-deck: the newly-live tab must call play() while the TAB IS STILL MUTED (the
       // probe-verified order); background unmutes at the tab level right after this resolves.
       //
@@ -270,70 +295,67 @@ if (!window.__tcBridgeLoaded) {
   // MAIN-world companion (nowplaying_main.js) that reads it and postMessages track changes here. We
   // also poll the player-bar DOM as a fallback. Either source feeds report(); dedup keeps it quiet.
   let lastNowPlaying = "";
+  let lastAccount = null; // null means unknown; an empty brandId means the verified main account.
   let primedUrl = null;  // #93 dynamic radio: the next track's watch URL, handed off on track end.
                           // A plain in-scope let: a hard navigation reloads the content script and
                           // this is wiped for free, so a stale prime cannot survive across pages.
   let boundaryVid = null;  // #93 v3 dual-deck: this deck's last track; ending it toggles decks.
   const report = (np) => {
     if (!np || !np.title) return;
-    np.likeStatus = readLikeStatus();
-    let vid = np.videoId || "";
-    if (!vid) {
-      try { vid = new URL(location.href).searchParams.get("v") || ""; } catch (e) {}
-    }
-    let lst = np.playlist || "";
-    if (!("playlist" in np)) {  // Only the DOM fallback needs URL context.
-      try {
-        const u = new URL(location.href);
-        // The page being browsed can still point at a different song/queue.
-        if (!vid || u.searchParams.get("v") === vid) lst = u.searchParams.get("list") || "";
-      } catch (e) {}
-    }
-    // Read the playing song's album from the player bar, never from the page being browsed.
-    let albumBrowseId = "";
-    const albumLink = document.querySelector(
-      'ytmusic-player-bar a[href*="/browse/MPRE"], ' +
-      'ytmusic-player-bar a[href*="/browse/FEmusic_library_privately_owned_release_detail"]');
-    if (albumLink) {
-      try { albumBrowseId = decodeURIComponent(new URL(albumLink.href, location.href).pathname.split("/browse/")[1] || ""); } catch (e) {}
-    }
+    const vid = np.videoId || "";
+    const lst = np.playlist || "";
+    // MAIN captures these fields together with the bar's identity. DOM fallback must prove its
+    // identity too; a bar still showing the preceding song cannot rate the new playing video.
+    const bar = np.playerBar || domNowPlaying();
+    const matches = !!vid && bar && bar.videoId === vid;
+    const likeStatus = matches ? bar.likeStatus || "" : "";
+    const albumBrowseId = matches ? bar.albumBrowseId || "" : "";
     // The MediaSession and DOM can format the same title/artist differently. Use the video id
-    // when available so switching sources does not re-report a play; a rating change still does.
-    const key = (vid ? "video:" + vid : "track:" + np.title + " | " + np.artist) +
-                " | " + np.likeStatus;
+    // when available so switching sources does not re-report a play. Account/rating changes still do.
+    const key = JSON.stringify([np.brandId, vid || [np.title, np.artist], likeStatus]);
     // The backend ages this card out when the YTM tab disappears. Keep its presence fresh when
     // paused or unchanged, without recording another play. Chrome can throttle both sensors in a
     // background tab, causing them to take turns reporting the same paused track.
-    if (np.paused || key === lastNowPlaying) {
+    if (np.paused || !vid || !np.brandKnown || np.metadataVerified === false || key === lastNowPlaying) {
       // Carry the current snapshot as well as presence. Chrome can suspend/throttle this page while
       // audio devices change; if that gap exceeds the backend's stale-card timeout, a presence-only
       // heartbeat cannot rebuild Now Playing and the UI stays blank until the next track. This frame
       // is still a heartbeat (never a persisted play), but is now self-healing.
       try { chrome.runtime.sendMessage({
         type: "now-heartbeat", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
-        likeStatus: np.likeStatus, videoId: vid, playlist: lst, albumBrowseId, paused: !!np.paused,
+        metadataVerified: np.metadataVerified !== false,
+        likeStatus, videoId: vid, playlist: lst, albumBrowseId, paused: !!np.paused,
+        muted: !!np.muted, brandKnown: !!np.brandKnown, brandId: np.brandId || "",
       }); } catch (e) {}
       return;
     }
     lastNowPlaying = key;
-    console.log("[TuneConsole] now playing:", np.title, "-", np.artist, np.likeStatus);
+    console.log("[TuneConsole] now playing:", np.title, "-", np.artist, likeStatus);
     chrome.runtime.sendMessage({
       type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
-      likeStatus: np.likeStatus, videoId: vid, playlist: lst, albumBrowseId, brandId: np.brandId || "",
-      paused: !!np.paused, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      metadataVerified: np.metadataVerified !== false,
+      likeStatus, videoId: vid, playlist: lst, albumBrowseId, brandId: np.brandId || "",
+      paused: !!np.paused, muted: !!np.muted, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
   };
-  let lastMainAt = 0;
+  let lastMainAt = null;
+  let lastMain = null;
   let lastPlayer = null;   // #91 latest playback point, for the pagehide goodbye
   window.addEventListener("message", (ev) => {
     if (ev.source !== window || !ev.data) return;
+    // Store updates can leave a legacy MAIN-world interval in the page. Its URL-derived identity
+    // must not compete with the new player-derived sensor injected without interrupting music.
+    if ((ev.data.__tcPlayer || ev.data.__tcNow) && ev.data.__tcSensorVersion !== SENSOR_VERSION) return;
     if (ev.data.__tcPlayer) {
       const p = ev.data.__tcPlayer;
+      lastAccount = p.brandKnown ? { brandId: p.brandId || "" } : null;
+      if (!p.brandKnown) return; // Unknown account must not become main-account playback history.
       lastPlayer = { videoId: p.videoId, position: p.position, duration: p.duration, brandId: p.brandId };
       try { chrome.runtime.sendMessage(Object.assign({ type: "pevent" }, p)); } catch (e) {}
       // #93 the instant the track ends, hand off to the primed radio track before YouTube Music
       // autoplays its own next. suppress_unload_main.js already neutralized the unload prompt.
       if (p.kind === "ended") {
+        if (!RADIO_ENABLED) return;
         // #93 v3: at the live deck's boundary, toggle decks (background owns the tab swap: it
         // plays the standby tab while still muted, then unmutes, per the probe-verified order).
         // Otherwise fall back to the v2 re-sync: navigate ONLY to a playlist watch url (carries
@@ -356,8 +378,22 @@ if (!window.__tcBridgeLoaded) {
       return;
     }
     if (!ev.data.__tcNow) return;
-    lastMainAt = Date.now();
-    report(ev.data.__tcNow);
+    mainFrameAt = Date.now(); // Incomplete snapshots still prove that MAIN is alive.
+    const finishProbe = sensorProbes.get(ev.data.__tcSensorProbeId);
+    if (finishProbe) finishProbe();
+    const np = ev.data.__tcNow;
+    lastAccount = np.brandKnown ? { brandId: np.brandId || "" } : null;
+    if (np.videoId && np.title) {
+      lastMainAt = Date.now();
+      lastMain = np;
+      report(np);
+    } else {
+      // A live but incomplete MAIN sensor must not starve a usable player-bar fallback.
+      lastMainAt = null;
+      const fallback = domNowPlaying();
+      if (fallback && np.playerBar) fallback.playerBar = np.playerBar;
+      report(fallback);
+    }
   });
   window.addEventListener("pagehide", () => {
     // #91 goodbye: close the session and the last track's record when the tab goes away.
@@ -369,7 +405,7 @@ if (!window.__tcBridgeLoaded) {
   // YouTube Music's own radio past our last queued track. While parked at the boundary track,
   // intercept it (capture phase, ahead of YTM's own handler) and toggle decks ourselves instead.
   document.addEventListener("click", (ev) => {
-    if (!boundaryVid) return;
+    if (!RADIO_ENABLED || !boundaryVid) return;
     try {
       const next = ev.target.closest &&
         ev.target.closest("ytmusic-player-bar .next-button, tp-yt-paper-icon-button.next-button");
@@ -393,11 +429,43 @@ if (!window.__tcBridgeLoaded) {
                 document.querySelector("ytmusic-player-bar img");
     if (t && t.textContent.trim()) {
       const v = document.querySelector("video");
+      let videoId = "", playlist = "";
+      // Only the player bar describes playback. A browsed watch/playlist URL is unrelated.
+      const link = document.querySelector('ytmusic-player-bar a[href*="watch?"]');
+      try {
+        if (link) {
+          const u = new URL(link.href, location.href);
+          videoId = u.searchParams.get("v") || "";
+          if (videoId) playlist = u.searchParams.get("list") || "";
+        }
+        if (img) {
+          const u = new URL(img.src);
+          const match = /\/vi(?:_webp)?\/([^/]+)/.exec(u.pathname);
+          if (u.hostname.endsWith(".ytimg.com") && match) {
+            if (videoId && videoId !== match[1]) { videoId = ""; playlist = ""; }
+            else videoId = match[1];
+          }
+        }
+      } catch (e) {}
+      let albumBrowseId = "";
+      const albumLink = document.querySelector(
+        'ytmusic-player-bar a[href*="/browse/MPRE"], ' +
+        'ytmusic-player-bar a[href*="/browse/FEmusic_library_privately_owned_release_detail"]');
+      if (videoId && albumLink) {
+        try { albumBrowseId = decodeURIComponent(new URL(albumLink.href, location.href).pathname.split("/browse/")[1] || ""); } catch (e) {}
+      }
+      // Keep the actual queue through MAIN-world throttling only when the DOM confirms its song.
+      if (videoId && lastMain && lastMain.videoId === videoId && lastAccount &&
+          lastMain.brandKnown && lastMain.brandId === lastAccount.brandId) playlist = lastMain.playlist || "";
       return {
         title: t.textContent.trim(),
         artist: b ? b.textContent.trim().split("•")[0].trim() : "",
         thumbnail: img ? img.src : "",
+        videoId, playlist, likeStatus: videoId ? readLikeStatus() : "", albumBrowseId,
+        brandKnown: lastAccount !== null,
+        brandId: lastAccount ? lastAccount.brandId : "",
         paused: !v || v.paused,
+        muted: !!v && (v.muted || v.volume === 0),
       };
     }
     return null;
@@ -405,9 +473,8 @@ if (!window.__tcBridgeLoaded) {
   setInterval(() => {
     // Deferred playlist edits must progress even while the primary now-playing sensor is healthy.
     reconcilePlaylistRefresh();
-    // The MAIN-world MediaSession is the primary source. Only fall back to the DOM when it has gone
-    // quiet, so the two never both report (their titles differ slightly, which was double-logging).
-    if (Date.now() - lastMainAt < 5000) return;
+    // A complete MAIN snapshot is primary. Fall back when it is unavailable, incomplete, or stale.
+    if (lastMainAt !== null && Date.now() - lastMainAt < 5000) return;
     const np = domNowPlaying();
     if (np) report(np);
   }, 2000);

@@ -28,7 +28,7 @@ _AUDIO = ("bpm", "energy", "danceability", "music_key", "music_scale", "mood_hap
           "popularity", "gain", "label")
 
 # Plumbing a provider hands to another step rather than a finding about the track. Never logged (it
-# would pollute the enrichment log and the transparency UI) and never persisted.
+# would pollute the field comparison UI). Retained in the full provider attempt evidence.
 _INTERNAL = ("mb_release_ids",)
 
 # Providers that return a ready-to-use cover URL, in priority order. Art is deliberately NOT applied
@@ -39,12 +39,12 @@ _ART_SOURCES = ("deezer",)
 
 
 class TrackSink:
-    """Default persistence sink: write a provider's findings onto the canonical LIBRARY track (by id),
-    log every field, and record cross-provider conflicts. This is the pre-#50 behavior, unchanged."""
+    """Persist shared findings and item-scoped evidence for either catalog membership."""
     def __init__(self, store, track):
         self.store, self.track = store, track
 
     def set_enrichment(self, genre, year):
+        self.store.replace_catalog_hints(self.track['id'],{'genre':genre,'mb_year':year})
         self.store.set_track_enrichment(self.track["id"], genre, year)
 
     def set_mbid(self, mbid):
@@ -52,6 +52,7 @@ class TrackSink:
         self.track["mb_recording_id"] = self.track.get("mb_recording_id") or mbid
 
     def set_audio(self, **audio):
+        self.store.replace_catalog_hints(self.track['id'],audio)
         self.store.set_track_audio(self.track["id"], **audio)
 
     def set_art(self, url):
@@ -65,41 +66,6 @@ class TrackSink:
 
     def effective_enrichment(self):
         return self.store.get_track_enrichment(self.track["id"])
-
-
-class DiscoveredSink:
-    """#50 cold sink: write genre/year/audio onto a discovered_tracks row (by identity_key). Discovered
-    tracks are candidates, not canonical library rows, so MBID, the enrichment log, and conflict review
-    are no-ops. Remembers the last genre/year it set so effective_enrichment can echo it for progress."""
-    def __init__(self, store, identity_key):
-        self.store, self.key = store, identity_key
-        self._genre = self._year = None
-
-    def set_enrichment(self, genre, year):
-        if genre is not None:
-            self._genre = genre
-        if year is not None:
-            self._year = year
-        self.store.set_discovered_enrichment(self.key, genre, year)
-
-    def set_mbid(self, mbid):
-        pass
-
-    def set_art(self, url):
-        # A discovered track is a candidate, not a library row: it carries no art of its own.
-        pass
-
-    def set_audio(self, **audio):
-        self.store.set_discovered_audio(self.key, **audio)
-
-    def log(self, run_id, provider, field, value):
-        pass
-
-    def upsert_conflict(self, field, candidates):
-        pass
-
-    def effective_enrichment(self):
-        return (self._genre, self._year)
 
 
 def _apply(sink, track, res) -> None:
@@ -154,10 +120,10 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                   sink_for=None):
     """Enrich `tracks` through the enabled providers in `config` order. `config` is the list from
     enrichment.load_config(store). `registry` (name -> provider module) is injectable for tests.
-    `sink_for(track) -> sink` selects per-track persistence: the default builds a TrackSink (library
-    tracks); the cold path (#50) passes one that builds a DiscoveredSink (discovered_tracks).
+    `sink_for(track) -> sink` supports injected persistence; the default TrackSink writes to the
+    shared catalog regardless of library/discovery membership.
 
-    Returns the ids (or discovered identity keys) of tracks for which every selected/available
+    Returns explicit recording job IDs (entry IDs for direct callers without a job) for which every selected/available
     provider answered without request failures. A circuit breaker can skip later tracks in the batch;
     callers must not mark those tracks processed, because they still need a prompt retry."""
     registry = registry or REGISTRY
@@ -203,6 +169,7 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
             _gate.wait_turn(seq, on_wait=lambda: on_progress(
                 {"type": "info", "waiting": True,
                  "text": "Waiting: a newer run is enriching first…"}))
+            t = {**t, **(store.catalog_subject(t["id"]) or {})}
             sink = sink_for(t)
             results = []
             attempted = 0
@@ -217,11 +184,11 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                     with net.probe_errors() as errors:
                         res = m.probe(t, store)
                 except Exception:
-                    store.record_enrichment_attempt(key, m.name, {}, retry=True)
+                    store.record_enrichment_attempt(key, m.name, {}, retry=True, video_id=t.get("video_id"))
                     raise
                 retry = bool(errors) or m.tripped()
-                fields = {k: v for k, v in res.fields.items() if k not in _INTERNAL}
-                store.record_enrichment_attempt(key, m.name, fields, retry=retry)
+                fields = dict(res.fields)
+                store.record_enrichment_attempt(key, m.name, fields, retry=retry, video_id=t.get("video_id"))
                 if not retry:
                     attempted += 1
                 else:
@@ -248,9 +215,9 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 conflicts_found += 1
             eff_genre, eff_year = sink.effective_enrichment()
             if attempted == len(chosen):
-                fully_attempted.append(t.get("id", t.get("identity_key")))
+                fully_attempted.append(t.get("job_id", t["id"]))
             on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                         "track_id": t.get("id"), "identity_key": t.get("identity_key"),
+                         "track_id": t.get("id"), "job_id": t.get("job_id", t["id"]), "identity_key": t.get("identity_key"),
                          "fully_attempted": attempted == len(chosen),
                          "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']}"})
         note = f" · {conflicts_found} disagreement(s) to review" if conflicts_found else ""

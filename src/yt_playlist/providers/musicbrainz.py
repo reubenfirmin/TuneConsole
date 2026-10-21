@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 
 from yt_playlist.util import net
-from yt_playlist.util.matching import normalize
+from yt_playlist.util.matching import normalize, recording_title
 from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
 from yt_playlist.providers.enrich_queue import PriorityGate
 from yt_playlist.providers import genres
@@ -37,7 +37,9 @@ def reset() -> None:
 def probe(track, store=None) -> EnrichmentResult:
     """Read-only lookup: genre, year, the recording MBID (which keys AcousticBrainz), and the
     candidate release MBIDs (which key Cover Art Archive). All from the one search."""
-    genre, year, mbid, release_ids = enrich_full(track["title"], track["artist"])
+    result = enrich_full(track["title"], track["artist"], include_identifiers=True)
+    genre, year, mbid, release_ids = result[:4]
+    isrcs = result[4] if len(result)>4 else []
     fields = {}
     if genre:
         fields["genre"] = genre
@@ -47,6 +49,8 @@ def probe(track, store=None) -> EnrichmentResult:
         fields["mb_recording_id"] = mbid
     if release_ids:
         fields["mb_release_ids"] = release_ids
+    if isrcs:
+        fields["isrc"] = isrcs
     return EnrichmentResult("musicbrainz", fields)
 
 _API = "https://musicbrainz.org/ws/2"
@@ -204,8 +208,8 @@ def _matches_recording(recording, title, artist):
     individual credits, credited names/aliases, or the combined credit without accepting another
     artist's recording of the same title. Keep meaningful title qualifiers even on the retry.
     """
-    wanted_title, wanted_artist = normalize(title), normalize(artist)
-    if not wanted_title or not wanted_artist or normalize(recording.get("title")) != wanted_title:
+    wanted_title, wanted_artist = recording_title(title), normalize(artist)
+    if not wanted_title or not wanted_artist or recording_title(recording.get("title")) != wanted_title:
         return False
     names, joined = set(), []
     for credit in recording.get("artist-credit") or []:
@@ -243,7 +247,7 @@ def _release_ids(recordings):
     return ids
 
 
-def enrich_full(title, artist):
+def enrich_full(title, artist, *, include_identifiers=False):
     """(genre, year, mb_recording_id, release_ids) from a SINGLE recording search. Callers that also
     want the MBID (the enrichment waterfall, the playlist runner) use this instead of enrich() plus a
     separate recording_mbid(), so a track costs one search rather than two.
@@ -253,7 +257,8 @@ def enrich_full(title, artist):
     stays the single seam where MusicBrainz touches the network."""
     recs = _recording_search(title, artist)
     genre, year = _genre_year(recs)
-    return genre, year, (recs[0].get("id") if recs else None), _release_ids(recs)
+    result = (genre, year, (recs[0].get("id") if recs else None), _release_ids(recs))
+    return (*result, (recs[0].get("isrcs") or []) if recs else []) if include_identifiers else result
 
 
 def _genre_year(recordings):
@@ -269,7 +274,8 @@ def _genre_year(recordings):
     mbid = rec.get("id")
     if mbid:
         try:
-            full = _get(f"recording/{mbid}", {"inc": "genres+tags+releases", "fmt": "json"})
+            full = _get(f"recording/{mbid}", {"inc": "genres+tags+releases+isrcs", "fmt": "json"})
+            rec["isrcs"] = full.get("isrcs") or rec.get("isrcs") or []
             genre = _top_label(full)
             year = year or _earliest_year([full])
         except Exception as e:  # noqa: BLE001

@@ -80,3 +80,23 @@ def test_retry_does_not_drop_meaningful_title_qualifier(monkeypatch):
     monkeypatch.setattr(musicbrainz, "_search_recordings", lambda *args: [
         {"id": "wrong", "title": "Song", "artist-credit": [{"name": "Artist"}]}])
     assert musicbrainz.recording_mbid("Song (Part II)", "Artist") is None
+
+
+def test_live_remix_and_radio_edit_are_not_studio_matches(monkeypatch):
+    monkeypatch.setattr(musicbrainz, "_search_recordings", lambda *args: [
+        {"id": "studio", "title": "Song", "artist-credit": [{"name": "Artist"}]}])
+    for title in ("Song (Live)", "Song (Club Remix)", "Song (Radio Edit)"):
+        assert musicbrainz.recording_mbid(title, "Artist") is None
+
+
+def test_full_enrichment_retains_isrc_candidates(monkeypatch):
+    def fake_get(path, params):
+        if path == "recording":
+            return {"recordings": [{"id": "recording", "title": "Song",
+                    "artist-credit": [{"name": "Artist"}]}]}
+        assert path == "recording/recording"
+        assert "isrcs" in params["inc"]
+        return {"isrcs": ["GB1234567890", "GB0987654321"]}
+    monkeypatch.setattr(musicbrainz, "_get", fake_get)
+    assert musicbrainz.enrich_full("Song", "Artist", include_identifiers=True)[4] == [
+        "GB1234567890", "GB0987654321"]

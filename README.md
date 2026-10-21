@@ -73,6 +73,41 @@ in the browser, with no separate Google OAuth connection.
 
 ## Architecture
 
+### Database upgrades and catalog identity
+
+Database upgrades run before repositories or background workers start. The ordered
+registry is `src/yt_playlist/core/migrations/registry.py`; add a new migration there
+and keep released versions unchanged. A migration uses explicit SQL on the supplied
+connection. The runner owns its transaction, version stamp and rollback; migration
+code must never commit, use `executescript`, or call repository write methods.
+
+Before upgrading an existing database, TuneConsole creates and integrity-checks a
+SQLite snapshot in `backups/` beside that database. Snapshot filenames identify
+the source and target schema versions. Fresh installations and reopening a current
+database do not create migration backups. Startup reports failed versions without
+starting the application against a partly upgraded schema.
+
+To recover, stop TuneConsole, preserve the failed database together with any `-wal`,
+`-shm` or journal files, and copy the verified backup to the database location.
+Remove the stopped database's old sidecar files from that location before reopening.
+Use an application release compatible with the backup's schema. Recovery is manual;
+TuneConsole never automatically downgrades or restores over your database.
+
+The shared catalog separates a musical recording (`recordings.id`) from its playable
+uploads (`youtube_items.video_id`). New uploads get separate provisional recordings;
+matching titles, MusicBrainz IDs, or ISRC candidates do not merge them automatically.
+Verified associations retain their source and evidence. Playlist operations and
+YouTube ratings still address exact uploads. Missing-video album entries remain
+metadata with explicit album links and are excluded from playable recommendations.
+
+Library and discovery memberships reference this catalog. One recording enrichment
+queue retains full provider responses, identifiers, and scoped findings for either
+membership. Discovery expiry removes candidate membership while preserving catalog
+and enrichment evidence. Legacy numeric URLs/actions resolve through
+`legacy_track_refs`; raw interaction keys and ambiguous evidence remain retained.
+Derived vectors are rebuilt in identity version 2, and incompatible model rollback
+artifacts remain available for inspection rather than being loaded into that space.
+
 ### The stack
 
 TuneConsole is a single local process.
@@ -125,12 +160,12 @@ implementation lives in `src/yt_playlist/rec/` and has four main parts:
   discoveries with no usable metadata or artist signal remain available after ranked candidates.
   Explicit genre requests still require a known matching genre.
   Failed provider requests remain queued; successful misses count as checks. Per-provider outcomes
-  are retained by track identity in the existing settings store until track consolidation.
+  are retained in recording-linked attempt history with their input upload and full response.
   Discovery Pools shows saved metadata and genre, era, and metadata-gap charts. Legacy discovery batch stamps are
   requeued once because the old sink retained no provider history. Daily cleanup also expires
   never-shown tracks from their discovery date (30 days by default), while generated playlists
   protect their tracks. Expired tracks are removed from prepared recommendations too.
-  Track storage consolidation is deferred in [schema_changes_plan.md](schema_changes_plan.md).
+  Further artist, album, and source modeling is planned in [schema_changes_plan.md](schema_changes_plan.md).
   Album and artist views count tiles visible on Home's Discover tab once per visit.
   Historical background loads are retained
   separately and do not start the cleanup clock.
@@ -170,3 +205,40 @@ the displayed description. They describe the offered tracks even if these differ
 Normal loads, repeated previews, and refreshes are all recorded; use the path and epoch to separate
 them when reviewing the week. These are server offers, not confirmed views or inferred rejections.
 The audit is diagnostic only and does not feed the recommendation models.
+
+### Recommendation response measurement
+
+Fresh songs exclude discoveries with neither usable ranking evidence nor genre/year/audio metadata.
+Metadata-bearing tracks may follow scored candidates as explicitly unscored fallbacks while a model
+is unavailable. The cold rankability diagnostic reports scored and fallback counts separately.
+Genre tilts use the same missing-metadata neutrality rule for cold and owned candidates: when genre
+coverage is mixed, known positive weights are geometrically centered and missing genre stays neutral.
+Hard mutes remain exclusions.
+
+The 90-day served ledger records final track recommendations from Home mixes, playlist completion,
+Songs like, Clusters, and Road Trip drafts. Each impression preserves its final rank, lane/mode, available candidate score,
+and serving policy fingerprint. Policy records retain effective parameters, preferences, exclusions,
+recent evidence, and identities of the actual collaborative/content/artist/taste/mode models. Cached
+candidate pools also retain their build policy, separately from the policy at rendering. Metadata
+availability, ownership, artist/genre and last-play time are snapshotted when served; later enrichment
+or adoption cannot change a historical coverage slice. Diagnostic previews and ordinary library or
+search tables are excluded. Unchanged Road Trip progress polls count as a single draft offer.
+These are server-rendered offers, not proof the browser saw every row.
+
+The north-star metric is **rendered to played within 24 hours**. Completion, skip, repeat rate and
+artist/genre variety are guardrails; listening depth and days since last play describe sustained
+listening and staleness. Generated responses are measured separately from organic preference evidence.
+Open, successful playback requests, successful saves, and promotions have their own event ledger;
+a playback request is not proof playback started. Discovery conversion means a cold recommendation
+was explicitly saved into the library or its generated playlist was promoted. Merely generating a
+playlist does not count as conversion. Nothing in this measurement ledger trains the taste model.
+
+Outcomes belong to the nearest preceding impression across all surfaces, within an inclusive 24-hour
+window; report cohorts use `[start, end)`. Repeated events can credit an impression only once per
+outcome. Historical impressions without coverage/provenance remain unknown. Reports expose sample
+sizes per slice, mark fewer than 100 impressions as collecting evidence, and never infer a comparative
+verdict from observational data. Recall/projection metrics remain component diagnostics.
+
+The Taste model health panel shows response and coverage summaries. `GET /taste/scorecard` returns
+the full scorecard (optional Unix-second `start` and `end`, at most 90 days);
+`GET /taste/served/{id}` returns an impression and its stored policy for inspection.

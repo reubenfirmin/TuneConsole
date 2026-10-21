@@ -19,6 +19,7 @@ from yt_playlist.web.icons import arrow_icon
 
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core import updatecheck
+from yt_playlist.rec.journeys import JOURNEY_LABELS
 from yt_playlist.rec.radio import RadioSession
 from yt_playlist.web.context import Ctx
 from yt_playlist.web.jobs import SyncJobs
@@ -234,6 +235,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 return "0"
     templates.env.globals["asset_v"] = _AssetVersion()
     templates.env.globals["arrow_icon"] = arrow_icon
+    templates.env.globals["journey_labels"] = JOURNEY_LABELS
     templates.env.filters["linkify"] = _linkify
     templates.env.globals["provider_search_url"] = provider_search_url
 

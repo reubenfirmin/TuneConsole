@@ -209,7 +209,7 @@ def test_standby_play_is_self_corrected_in_frame_relay():
     # "play" report arrives from the tracked standby tab, background must immediately pause it again,
     # while still tagging+forwarding the frame as "standby" (the backend already drops those).
     src = (EXT / "background.js").read_text()
-    relay = src.split('chrome.runtime.onMessage.addListener((msg, sender) => {', 1)[1]
+    relay = src.split('async function relayPlaybackMessage(msg, sender) {', 1)[1]
     assert 'msg.type === "play" && deck === "standby"' in relay
     assert 'driveTab(standbyTabId, "deck-pause")' in relay
 
@@ -282,7 +282,7 @@ def test_background_deck_boundary_is_sender_gated_to_live_tab():
     # it before its rebuild navigate lands) must not fire a spurious toggle: the deck-boundary
     # runtime message only toggles when it came from the tracked LIVE tab.
     src = (EXT / "background.js").read_text()
-    relay = src.split('chrome.runtime.onMessage.addListener((msg, sender) => {', 1)[1]
+    relay = src.split('async function relayPlaybackMessage(msg, sender) {', 1)[1]
     gate = relay.split('if (!msg) return;', 1)[0]
     assert 'msg.type === "deck-boundary"' in gate
     assert "sender.tab.id === liveTabId" in gate
@@ -295,7 +295,7 @@ def test_background_onremoved_listeners_await_restored_state():
     src = (EXT / "background.js").read_text()
     win = src.split("chrome.windows.onRemoved.addListener", 1)[1][:700]
     assert "await ensureDeckStateRestored()" in win
-    tab = src.split("chrome.tabs.onRemoved.addListener", 1)[1][:500]
+    tab = src.split("chrome.tabs.onRemoved.addListener", 1)[1].split("\n});", 1)[0]
     assert "await ensureDeckStateRestored()" in tab
 
 
@@ -391,7 +391,7 @@ def test_wait_for_tab_complete_has_deadline_and_times_out_to_false():
     # sendDeckReady(true), exactly like any other probe failure in this file.
     src = (EXT / "background.js").read_text()
     fn = src.split("function waitForTabComplete(tabId, budgetMs) {", 1)[1]
-    fn = fn.split("\n// Non-destructive probe", 1)[0]
+    fn = fn.split("\n// Readiness checks", 1)[0]
     assert "budgetMs == null ? 30000 : budgetMs" in fn
     assert "setTimeout(() => finish(false), budgetMs)" in fn
     # Completion still resolves true (the happy path callers rely on).
@@ -400,12 +400,10 @@ def test_wait_for_tab_complete_has_deadline_and_times_out_to_false():
     # versa) cannot double-resolve or leak the onUpdated listener.
     assert "if (done) return;" in fn
     assert "chrome.tabs.onUpdated.removeListener(onUpdated);" in fn
-    # Other waitForTabComplete callers still degrade sensibly with the new deadline: createAndWaitFor-
-    # YtmTab already races it against its OWN 15s timeout and ignores the resolved value (it falls
-    # through to the inject/ping loop's own bounded retry regardless), so it is unaffected by the
-    # longer 30s default.
-    caller = src.split("async function createAndWaitForYtmTab() {", 1)[1][:800]
-    assert "Promise.race([waitForTabComplete(tab.id), new Promise((r) => setTimeout(r, 15000))])" in caller
+    # Fetch startup uses the same bounded helper with a shorter budget and stops on load failure.
+    caller = src.split("async function waitForYtmTabReady(tab) {", 1)[1].split(
+        "async function createAndWaitForYtmTab", 1)[0]
+    assert "if (!await waitForTabComplete(tab.id, 15000)) return null;" in caller
     # toggleDecks and handleDeckNavigate do not call waitForTabComplete at all (they verify tab/window
     # liveness directly via chrome.tabs.get/chrome.windows.get instead), so a hung load there was never
     # this function's problem to begin with; nothing to change in those paths.
@@ -418,7 +416,7 @@ def test_background_focuses_radio_window_once_per_waiting_episode():
     # guarded so it fires at most once per episode, and the guard resets on the next real deck play.
     src = (EXT / "background.js").read_text()
     assert "let deckWaitingFocused = false;" in src
-    relay = src.split('chrome.runtime.onMessage.addListener((msg, sender) => {', 1)[1]
+    relay = src.split('async function relayPlaybackMessage(msg, sender) {', 1)[1]
     assert 'msg.type === "pevent" && msg.kind === "deck-waiting"' in relay
     assert "chrome.windows.update(deckWindowId, { focused: true })" in relay
     assert "deckWaitingFocused = true" in relay

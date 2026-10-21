@@ -33,8 +33,8 @@ def test_prune_orphan_discovered_tracks_keeps_radio_and_live_albums():
     s = _s()
     s.upsert_discovered_album("alb1", "A", "T", "2000", None, 0.0)
     s.upsert_discovered_track("t|1", "v", "T", "A", "Alb", None, None, None, "alb1", 0.0)   # source exists
-    s.upsert_discovered_track("t|2", "v", "T2", "A", "Alb", None, None, None, "gone", 0.0)  # source gone
-    s.upsert_discovered_track("r|3", "v", "R", "A", None, None, None, None, "radio:vid", 0.0)  # radio
+    s.upsert_discovered_track("t|2", "v2", "T2", "A", "Alb", None, None, None, "gone", 0.0)  # source gone
+    s.upsert_discovered_track("r|3", "v3", "R", "A", None, None, None, None, "radio:vid", 0.0)  # radio
     s.prune_orphan_discovered_tracks()
     keys = {r["identity_key"] for r in s.get_discovered_tracks()}
     assert keys == {"t|1", "r|3"}                         # orphan album-track gone; radio kept

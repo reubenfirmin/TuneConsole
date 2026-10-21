@@ -9,7 +9,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from yt_playlist.rec import rec_params
+from yt_playlist.rec import measurement, rec_params
 
 
 def track_pool_summary(tracks):
@@ -95,6 +95,8 @@ def build(ctx) -> APIRouter:
                 except Exception:  # noqa: BLE001 - a failed like must not 500 the page
                     ctx.logger.warning("discovery add (like) failed for %s", id, exc_info=True)
                     return Response(status_code=502)
+                measurement.record_action(store, "save", ctx.now_fn(), keys=[id],
+                                          event_id=f"discovery-save:{id}")
         return Response(status_code=200)
 
     return router

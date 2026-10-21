@@ -241,6 +241,20 @@ def _pop_band(popularity, threshold):
     return "mainstream" if popularity >= threshold else None
 
 
+def center_known_weights(weights, present):
+    """Keep unavailable metadata neutral when known candidates share an upside multiplier.
+
+    Center only positive, available weights; explicit zeros remain exclusions. The warm and cold
+    rankers use this same contract so enrichment coverage cannot itself become preference evidence.
+    """
+    if all(present.get(k, False) for k in weights):
+        return dict(weights)
+    known = [v for k, v in weights.items() if present.get(k, False) and v > 0]
+    center = math.exp(sum(math.log(v) for v in known) / len(known)) if known else 1.0
+    return {k: (1.0 if not present.get(k, False) else v / center if v > 0 else v)
+            for k, v in weights.items()}
+
+
 def _axis_weights_for(store, keys, now=None, with_details=False):
     """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
     the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
@@ -297,16 +311,10 @@ def _axis_weights_for(store, keys, now=None, with_details=False):
     # center the KNOWN positive multipliers on geometric mean 1.0 and leave unknowns at exactly 1.0.
     # Known zeros are explicit facet mutes and remain hard exclusions.
     for axis in ("genre", "era", "artist"):
-        if not any(not present[k][axis] for k in keys):
-            continue
-        known = [details[k]["axes"][axis] for k in keys
-                 if present[k][axis] and details[k]["axes"][axis] > 0]
-        center = math.exp(sum(math.log(v) for v in known) / len(known)) if known else 1.0
+        centered = center_known_weights({k: details[k]["axes"][axis] for k in keys},
+                                        {k: present[k][axis] for k in keys})
         for k in keys:
-            if not present[k][axis]:
-                details[k]["axes"][axis] = 1.0
-            elif details[k]["axes"][axis] > 0:
-                details[k]["axes"][axis] /= center
+            details[k]["axes"][axis] = centered[k]
 
     for k in keys:
         axes = details[k]["axes"]

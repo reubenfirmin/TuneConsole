@@ -97,7 +97,7 @@ def import_spotify_data(store, raw) -> dict:
     owned = set(RecDao(store).library_keys())
     matched, unmatched = [], Counter()
     for row in parsed:
-        key = identity_key(row["title"], row["artist"])
+        key = store.match_recording(row["title"], row["artist"])
         if key not in owned:
             unmatched[row["artist"]] += 1
             continue

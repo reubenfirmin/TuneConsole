@@ -75,7 +75,8 @@ if (scenario === 'unrelated') {
     assert.equal(reloads, 0, 'navigating away should retire the old view update');
   } else {
     // The MAIN-world sensor may still be reporting; that must not starve deferred refreshes.
-    listeners.message({source: window, data: {__tcNow: {title: 'Song', videoId: 'v1', paused: false}}});
+    listeners.message({source: window, data: {__tcSensorVersion: 4,
+      __tcNow: {title: 'Song', videoId: 'v1', paused: false}}});
     if (scenario === 'ended') video.ended = true;
     else video.paused = true;
     tick();

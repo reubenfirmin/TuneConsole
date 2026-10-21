@@ -152,6 +152,8 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="playlist not found")
         labels = {i.id: i.label for i in store.get_identities()}
         tracks = store.playlist_tracks_detail(pid)
+        from yt_playlist.rec import measurement
+        measurement.record_action(store, "open", now_fn(), playlist_id=pid)
         is_generated = store.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP
         recipe = store.get_recipe(pl.ytm_playlist_id) if is_generated else None
         return templates.TemplateResponse(request, "playlist.html", {
@@ -231,6 +233,7 @@ def build(ctx) -> APIRouter:
             return _toast(request, "select at least one version to add")
         after_video_id = form.get("after_video_id") or None
         from_suggestion = form.get("suggestion") == "1" and len(tracks) == 1 and not after_video_id
+        before = {t["video_id"] for t in store.playlist_tracks_detail(pid)}
         try:
             await asyncio.to_thread(ctx.ops().add_tracks, pid, tracks, after_video_id)
         except ValueError as e:
@@ -241,6 +244,13 @@ def build(ctx) -> APIRouter:
         _refresh_ytm_view(ctx, store, pid)
         if after_video_id:
             _record_alt_version_events(pid, after_video_id, tracks)
+        from yt_playlist.rec import measurement
+        present = {t["video_id"] for t in store.playlist_tracks_detail(pid)}
+        for track in tracks:
+            video_id = track.get("videoId")
+            if video_id in present and video_id not in before:
+                measurement.record_action(store, "save", now_fn(), video_id=video_id,
+                                          generated=_is_generated(pid))
         if from_suggestion:
             video_id = tracks[0].get("videoId")
             details = store.playlist_tracks_detail(pid)
@@ -488,7 +498,12 @@ def build(ctx) -> APIRouter:
         pl = store.get_playlist(pid)
         if pl is None:
             return _refresh()
+        was_generated = store.get_playlist_groups().get(pl.ytm_playlist_id) == "Generated"
         store.set_playlist_group(pl.ytm_playlist_id, "")
+        if was_generated:
+            from yt_playlist.rec import measurement
+            measurement.record_action(store, "promotion", now_fn(), playlist_id=pid,
+                                      event_id=f"promote:{pl.ytm_playlist_id}")
         client = (ctx.client_provider() or {}).get(pl.identity_id)
         if client is not None:
             try:

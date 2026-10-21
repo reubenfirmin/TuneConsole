@@ -1,12 +1,13 @@
 """RecModelRepo: the learned taste model: blend weights, feedback events, and embedding vectors.
 
-Owns the rec_weights / rec_feedback / rec_vectors tables (created in store.py's central SCHEMA).
+Owns rec_weights / rec_feedback / rec_vectors; numbered migrations create their tables.
 Split out of the former monolithic RecRepo so each rec concern is its own focused DAO.
 """
 import json
 import time
 
 from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.core import catalog
 
 # Learned blend weights live in [_WEIGHT_MIN, _WEIGHT_MAX] around the 1.0 prior: the floor stops a run
 # of negative feedback from disabling an axis outright (a 0 weight would never win the for_you fair
@@ -118,6 +119,7 @@ class RecModelRepo(Repo):
     @synchronized
     def record_feedback(self, surface, item_key, kind, reason=None, scope="", until=None, now=None) -> None:
         """Persist a feedback event (dismiss/less/more/mute/not_now). Upserts per (surface,item,scope)."""
+        item_key = catalog.resolve_key(self.conn,item_key) or item_key
         self.conn.execute(
             "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) "
             "VALUES (?,?,?,?,?,?,?) ON CONFLICT(surface,item_key,scope) DO UPDATE SET "
@@ -374,7 +376,7 @@ class RecModelRepo(Repo):
     @synchronized
     def start_selection(self, now, result):
         cur = self.conn.execute(
-            "INSERT INTO rec_model_selection_runs(started_at,result_json) VALUES (?,?)",
+            "INSERT INTO rec_model_selection_runs(started_at,result_json,identity_version) VALUES (?,?,2)",
             (now, json.dumps(result)))
         self.conn.commit()
         return cur.lastrowid
@@ -411,9 +413,11 @@ class RecModelRepo(Repo):
 
     @synchronized
     def restore_model_selection(self, run_id, now):
-        row = self.conn.execute("SELECT result_json FROM rec_model_selection_runs WHERE id=?", (run_id,)).fetchone()
+        row = self.conn.execute("SELECT result_json,identity_version FROM rec_model_selection_runs WHERE id=?", (run_id,)).fetchone()
         if not row:
             return False
+        if row['identity_version'] != 2:
+            raise ValueError('This model predates a catalog identity change. Rebuild a model before restoring it.')
         result = json.loads(row["result_json"])
         if result.get("status") != "applied" or not self.conn.execute(
                 "SELECT 1 FROM rec_model_previous_vectors WHERE run_id=? LIMIT 1", (run_id,)).fetchone():

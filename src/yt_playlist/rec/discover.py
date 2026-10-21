@@ -367,10 +367,10 @@ def populate_radio_tracks(ctx, now, seeds=6, per_seed_limit=12) -> int:
             artist = ((r.get("artists") or [{}])[0] or {}).get("name", "")
             if not v or not title:
                 continue
-            key = identity_key(title, artist)
+            key = store.identity_key_for_video(v)
             if key in owned or key in have:
                 continue
-            store.upsert_discovered_track(key, v, title, artist, None,
+            key = store.upsert_discovered_track(identity_key(title, artist), v, title, artist, None,
                                           best_thumb(r.get("thumbnail") or r.get("thumbnails")),
                                           None, None, f"radio:{vid}", now)
             have.add(key)
@@ -406,10 +406,10 @@ def populate_discovered_tracks(ctx, now, budget=4) -> int:
             vid, title = t.get("videoId"), (t.get("title") or "").strip()
             if not vid or not title:
                 continue
-            key = identity_key(title, artist)
+            key = store.identity_key_for_video(vid)
             if key in owned:
                 continue
-            store.upsert_discovered_track(key, vid, title, artist, alb.get("title"),
+            store.upsert_discovered_track(identity_key(title, artist), vid, title, artist, alb.get("title"),
                                           alb.get("thumbnail"), alb.get("genre"), alb.get("year"),
                                           alb["browse_id"], now)
             n += 1

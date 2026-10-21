@@ -161,7 +161,7 @@ def test_44_cold_discovery_long_mix_is_excluded_before_saving(db):
     for key, video, title in [("one|a", "one", "Song one"), ("mix|dj", "mix", "DJ concert"),
                               ("two|b", "two", "Song two")]:
         db.upsert_discovered_track(key, video, title, key.split("|")[1], "", None,
-                                   None, None, "source", 100)
+                                   "Techno", None, "source", 100)
     candidates = surfaces.cold_candidates(db, 100)
     tracks = [{"video_id": t.video_id, "title": t.title, "artist": t.artist} for t in candidates]
     client = FakeClient(song_durations={"one": 200, "mix": 7200, "two": 200})

@@ -1,47 +1,13 @@
 """DiscoveryRepo: the background outward-discovery state: which artists we've scanned (and when),
 and the accumulating pools of new albums / new artists we've found, with last-shown bookkeeping.
 
-Owns its own tables (created lazily/idempotently). The interest signal (which artists are worth
+Tables are created by numbered migrations. The interest signal (which artists are worth
 scanning) is computed live from your library: play counts, playlist participation, saved albums.
 """
 import json
 
 from yt_playlist.repos.base import Repo, synchronized
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS artist_scans (
-  artist TEXT PRIMARY KEY,
-  scanned_at REAL                         -- last time we hit YT/Last.fm for this artist
-);
-CREATE TABLE IF NOT EXISTS discovered_albums (
-  browse_id TEXT PRIMARY KEY,
-  artist TEXT, title TEXT, year TEXT, thumbnail TEXT,
-  found_at REAL,                          -- first time we discovered it (drives recency)
-  last_shown REAL,                        -- last time it was surfaced on Home (anti-repeat)
-  genre TEXT                              -- #18: candidate genre for the facet overlay
-);
-CREATE TABLE IF NOT EXISTS discovered_artists (
-  artist TEXT PRIMARY KEY,
-  score REAL, because TEXT, fits TEXT, thumbnail TEXT,
-  found_at REAL, last_shown REAL,
-  genre TEXT                              -- #18: candidate genre for the facet overlay
-);
-CREATE TABLE IF NOT EXISTS discovered_tracks (
-  identity_key TEXT PRIMARY KEY,          -- #13 Phase 2: out-of-corpus candidate tracks for clusters
-  video_id TEXT, title TEXT, artist TEXT, album TEXT, thumbnail TEXT,
-  genre TEXT, year TEXT,
-  bpm REAL, energy REAL, danceability REAL, mood_happy REAL, mood_sad REAL,
-  mood_relaxed REAL, mood_acoustic REAL, instrumental REAL, loudness REAL,
-  dynamic_complexity REAL, music_key TEXT, music_scale TEXT,
-  source_browse_id TEXT,                  -- the discovered album/artist it came from
-  found_at REAL,
-  last_enriched REAL                      -- #50: when the cold-enrichment waterfall last probed it (NULL = queued)
-);
-CREATE TABLE IF NOT EXISTS discovery_visible_impressions (
-  view_id TEXT NOT NULL, kind TEXT NOT NULL, item_id TEXT NOT NULL, shown_at REAL NOT NULL,
-  PRIMARY KEY (view_id, kind, item_id)
-);
-"""
+from yt_playlist.core import catalog
 
 # Audio/content columns persisted per discovered track (mirrors the library `tracks` audio set).
 _DTRACK_AUDIO = ("bpm", "energy", "danceability", "mood_happy", "mood_sad", "mood_relaxed",
@@ -52,41 +18,6 @@ _GENERATED_PL = "(SELECT ytm FROM playlist_group WHERE name='Generated')"   # ex
 
 
 class DiscoveryRepo(Repo):
-    def __init__(self, db):
-        super().__init__(db)
-        with self._lock:
-            self.conn.executescript(_SCHEMA)
-            for tbl in ("discovered_albums", "discovered_artists"):   # #18: add genre to pre-existing DBs
-                cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({tbl})")}
-                if "genre" not in cols:
-                    self.conn.execute(f"ALTER TABLE {tbl} ADD COLUMN genre TEXT")
-            dt_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(discovered_tracks)")}
-            if "last_enriched" not in dt_cols:                        # #50: cold-enrichment queue stamp
-                self.conn.execute("ALTER TABLE discovered_tracks ADD COLUMN last_enriched REAL")
-            # #52/#53: engagement tracking on every pool (first_shown = GC clock start; offered_count =
-            # times surfaced; last_shown back-filled onto discovered_tracks, which lacked it).
-            for tbl in ("discovered_albums", "discovered_artists", "discovered_tracks"):
-                cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({tbl})")}
-                for col, decl in (("first_shown", "REAL"), ("last_shown", "REAL"),
-                                  ("offered_count", "INTEGER NOT NULL DEFAULT 0")):
-                    if col not in cols:
-                        self.conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {decl}")
-            # Album/artist counts used to record GETs, including hidden tabs and polling. Preserve
-            # those values for audit, then start the view count and expiry clock from real exposure.
-            with self.conn:
-                self.conn.execute("SAVEPOINT discovery_views_migration")
-                for tbl in ("discovered_albums", "discovered_artists"):
-                    cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({tbl})")}
-                    if "legacy_offered_count" not in cols:
-                        self.conn.execute(f"ALTER TABLE {tbl} ADD COLUMN legacy_offered_count INTEGER NOT NULL DEFAULT 0")
-                        self.conn.execute(f"ALTER TABLE {tbl} ADD COLUMN legacy_first_shown REAL")
-                        self.conn.execute(f"ALTER TABLE {tbl} ADD COLUMN legacy_last_shown REAL")
-                        self.conn.execute(
-                            f"UPDATE {tbl} SET legacy_offered_count=offered_count, "
-                            "legacy_first_shown=first_shown, legacy_last_shown=last_shown, "
-                            "offered_count=0, first_shown=NULL, last_shown=NULL")
-                self.conn.execute("RELEASE discovery_views_migration")
-            self.conn.commit()
 
     # --- interest: every artist you engage with, ranked by engagement intensity. Weights ramp with how
     # deliberate the act is: a play is passive (1), filing into a playlist is active curation (2), saving
@@ -152,9 +83,11 @@ class DiscoveryRepo(Repo):
         and genre-sourced tracks have their own lifecycle and are kept. Returns the
         count removed."""
         rows = self.conn.execute(
-            "SELECT identity_key FROM discovered_tracks WHERE source_browse_id NOT LIKE 'radio:%' "
-            "AND source_browse_id NOT LIKE 'genre:%' "
-            "AND source_browse_id NOT IN (SELECT browse_id FROM discovered_albums)").fetchall()
+            "SELECT r.identity_key FROM discovery_memberships d JOIN recordings r ON r.id=d.recording_id "
+            "WHERE EXISTS(SELECT 1 FROM discovery_sources s WHERE s.recording_id=d.recording_id) "
+            "AND NOT EXISTS(SELECT 1 FROM discovery_sources s WHERE s.recording_id=d.recording_id "
+            "AND (s.source_token LIKE 'radio:%' OR s.source_token LIKE 'genre:%' "
+            "OR s.source_token IN (SELECT browse_id FROM discovered_albums)))").fetchall()
         held = set(held_keys)
         gone = [(r["identity_key"],) for r in rows if r["identity_key"] not in held]
         self.conn.executemany("DELETE FROM discovered_tracks WHERE identity_key=?", gone)
@@ -209,24 +142,41 @@ class DiscoveryRepo(Repo):
     # --- #13 Phase 2: out-of-corpus candidate tracks (for the Clusters "reach for new music" mode) ---
     @synchronized
     def upsert_discovered_track(self, identity_key, video_id, title, artist, album, thumbnail,
-                                genre, year, source_browse_id, now, audio=None) -> None:
-        audio = audio or {}
-        cols = (["identity_key", "video_id", "title", "artist", "album", "thumbnail", "genre", "year",
-                 "source_browse_id", "found_at"] + list(_DTRACK_AUDIO))
-        vals = ([identity_key, video_id, title, artist, album, thumbnail, genre, year,
-                 source_browse_id, now] + [audio.get(c) for c in _DTRACK_AUDIO])
-        metadata = {"genre", "year", *_DTRACK_AUDIO}
-        updates = ", ".join(
-            f"{c}=COALESCE(excluded.{c}, discovered_tracks.{c})" if c in metadata else f"{c}=excluded.{c}"
-            for c in cols if c not in ("identity_key", "found_at"))
-        self.conn.execute(
-            f"INSERT INTO discovered_tracks({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) "
-            f"ON CONFLICT(identity_key) DO UPDATE SET {updates}", vals)
-        self.conn.commit()
+                                genre, year, source_browse_id, now, audio=None) -> str:
+        with self.conn:
+            entry_id = catalog.upsert(self.conn, video_id, title, artist, album,
+                                      thumbnail=thumbnail, created_at=now, library=False,
+                                      preferred_key=identity_key)
+            row = self.conn.execute("SELECT recording_id,identity_key FROM catalog_tracks WHERE id=?", (entry_id,)).fetchone()
+            rid = row["recording_id"]
+            catalog.add_alias(self.conn, identity_key, rid, "discovery")
+            self.conn.execute(
+                "INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?) "
+                "ON CONFLICT(recording_id) DO NOTHING", (rid,entry_id,now))
+            if source_browse_id:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO discovery_sources VALUES (?,?,?,?)",
+                    (rid,source_browse_id,video_id or None,now))
+                if self.conn.execute("SELECT 1 FROM discovered_albums WHERE browse_id=?", (source_browse_id,)).fetchone():
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO album_track_links(browse_id,recording_id,entry_id,video_id,source) "
+                        "VALUES (?,?,?,?,'discovery')", (source_browse_id,rid,entry_id,video_id or None))
+            self.conn.execute(
+                "UPDATE catalog_tracks SET genre=COALESCE(genre,?),mb_year=COALESCE(mb_year,?) WHERE id=?",
+                (genre,year,entry_id))
+            for field, value in (audio or {}).items():
+                if field in _DTRACK_AUDIO and value is not None:
+                    self.conn.execute(f"UPDATE catalog_tracks SET {field}=COALESCE({field},?) WHERE id=?", (value,entry_id))
+            for field,value in {'genre':genre,'mb_year':year,**(audio or {})}.items():
+                if value is not None and field in {'genre','mb_year',*_DTRACK_AUDIO}:
+                    self.conn.execute(
+                        'INSERT OR IGNORE INTO catalog_field_hints(entry_id,field,source,value_json) VALUES (?,?,?,?)',
+                        (entry_id,field,source_browse_id or 'discovery',json.dumps(value)))
+            return self.conn.execute("SELECT identity_key FROM recordings WHERE id=?", (rid,)).fetchone()[0]
 
     @staticmethod
     def _dtrack_row(r) -> dict:
-        d = {k: r[k] for k in ("identity_key", "video_id", "title", "artist", "album", "thumbnail",
+        d = {k: r[k] for k in ("id", "recording_id", "identity_key", "video_id", "title", "artist", "album", "thumbnail",
                                "genre", "year", "source_browse_id", "found_at",
                                "first_shown", "last_shown", "offered_count", "last_enriched")}
         d["audio"] = {c: r[c] for c in _DTRACK_AUDIO if r[c] is not None}
@@ -373,16 +323,19 @@ class DiscoveryRepo(Repo):
             out[key] = cur.rowcount
         held = set(held_track_keys or ())
         rows = self.conn.execute(
-            "SELECT identity_key, source_browse_id FROM discovered_tracks "
+            "SELECT identity_key,recording_id FROM discovered_tracks "
             "WHERE COALESCE(first_shown, found_at) < ?",
             (cutoff,)).fetchall()
         gone = [r["identity_key"] for r in rows if r["identity_key"] not in held]
         if gone:
             # Keep successful album-fetch markers after expiry, so the next discovery tick cannot
             # immediately refill an expired album. These are fetch history, never queue entries.
+            source_tokens = {s[0] for r in rows if r['identity_key'] in gone
+                             for s in self.conn.execute(
+                                 'SELECT source_token FROM discovery_sources WHERE recording_id=?',
+                                 (r['recording_id'],))}
             self.conn.executemany("INSERT OR IGNORE INTO settings(key,value) VALUES (?, '1')",
-                                  [("discovery_tracks_fetched:" + r["source_browse_id"],)
-                                   for r in rows if r["source_browse_id"]])
+                                  [("discovery_tracks_fetched:" + token,) for token in source_tokens])
             self.conn.executemany("DELETE FROM discovered_tracks WHERE identity_key=?", [(k,) for k in gone])
             self.conn.executemany("DELETE FROM settings WHERE key=?",
                                   [("enrich_attempts:" + k,) for k in gone

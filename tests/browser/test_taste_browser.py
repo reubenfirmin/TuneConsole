@@ -497,7 +497,12 @@ def test_model_health_groups_results_and_explains_tuning(live_app, store, page, 
                             "genre+year+audio": {"recall": .64, "trials": 40}}}})
     monkeypatch.setattr(store, "recommendation_scorecard", lambda *args, **kwargs:
                         {"impressions": 80, "played": 16, "acceptance_rate": .20,
-                         "organic": 10, "generated": 8, "powered": False, "min_impressions": 100})
+                         "organic": 10, "generated": 8, "powered": False, "min_impressions": 100,
+                         "open": 8, "start": 10, "save": 4, "promotion": 1, "conversion": 2,
+                         "cold_impressions": 8, "unique_artists": 12, "unique_genres": 3,
+                         "by_ownership": {"cold": {"played": 2, "impressions": 8, "powered": False}},
+                         "by_metadata": {"genre": {"missing": {"played": 1, "impressions": 5,
+                                                                  "powered": False}}}})
     monkeypatch.setattr(store, "graduation_log_counts", lambda: {"play": 38, "like": 8, "slider": 3})
     store.set_setting(autotune_run.RESULT_SETTING, json.dumps({
         "ran_at": 1_792_512_000,
@@ -998,7 +1003,9 @@ def test_feature_settings_select_features_and_preserve_saved_edits(live_app, sto
     expect(navigation.get_by_role("tab")).to_have_count(8)
     expect(features.locator("details")).to_have_count(0)
     expect(features.locator("#taste-feature-radio")).to_have_count(0)
-    expect(features.get_by_role("slider")).to_have_count(14)
+    # Track length is now a Home control too; keep it available alongside refresh/variety/comfort.
+    expect(features.get_by_role("slider")).to_have_count(15)
+    expect(features.locator("#param-max_track_minutes")).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
     home = features.locator("#taste-feature-home")

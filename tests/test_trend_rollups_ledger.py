@@ -29,7 +29,7 @@ def _ev(store, key, when, playlist=None):
     ts = when.timestamp() if isinstance(when, dt.datetime) else float(when)
     store.conn.execute(
         "INSERT INTO play_events(identity_id,identity_key,video_id,played_at,playlist_ytm_id) "
-        "VALUES (1,?,?,?,?)", (key, "v", ts, playlist))
+        "VALUES (1,?,?,?,?)", (key, "v" + key, ts, playlist))
     store.conn.commit()
 
 
@@ -84,7 +84,8 @@ def _months(store):
 
 
 def test_month_review_song_of_the_month_counts_real_plays(store):
-    store.conn.execute("INSERT INTO tracks(id,identity_key,title,artist) VALUES (1,'a','Hey You','Ben')")
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,'a','Hey You','Ben',track_id=1,video_id='va')
     store.conn.commit()
     for d in (3, 12):
         _ev(store, "a", dt.datetime(2026, 6, d, 12, tzinfo=dt.UTC))
@@ -96,8 +97,9 @@ def test_month_review_song_of_the_month_counts_real_plays(store):
 
 
 def test_month_review_top_artists_exclude_generated_playlist_plays(store):
-    store.conn.execute("INSERT INTO tracks(id,identity_key,title,artist) VALUES (1,'a','T','Underworld')")
-    store.conn.execute("INSERT INTO tracks(id,identity_key,title,artist) VALUES (2,'b','T2','Orbital')")
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,'a','T','Underworld',track_id=1,video_id='va')
+    seed_catalog_track(store,'b','T2','Orbital',track_id=2,video_id='vb')
     store.conn.commit()
     _generated(store, 1, "PL_gen")
     _ev(store, "a", dt.datetime(2026, 6, 3, 12, tzinfo=dt.UTC), playlist="PL_gen")
@@ -110,7 +112,8 @@ def test_month_review_top_artists_exclude_generated_playlist_plays(store):
 
 
 def test_month_review_falls_back_to_history_without_a_ledger(store):
-    store.conn.execute("INSERT INTO tracks(id,identity_key,title,artist) VALUES (1,'a','T','Ben')")
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,'a','T','Ben',track_id=1,video_id='va')
     store.conn.commit()
     store.history.add_history_snapshot(1, int(dt.datetime(2026, 6, 3, 12, tzinfo=dt.UTC).timestamp()), ["a"])
     now = dt.datetime(2026, 7, 9, tzinfo=dt.UTC).timestamp()
@@ -130,8 +133,8 @@ def _owned(store, pid, tid, key, artist, ytm="PL_own", generated=False):
                        "VALUES (?,1,?,'p')", (pid, ytm))
     if generated:
         store.conn.execute("INSERT OR IGNORE INTO playlist_group(ytm,name) VALUES (?,'Generated')", (ytm,))
-    store.conn.execute("INSERT INTO tracks(id,identity_key,title,artist) VALUES (?,?,'t',?)",
-                       (tid, key, artist))
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,key,'t',artist,track_id=tid,video_id='v'+key)
     store.conn.execute("INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES (?,?,0)",
                        (pid, tid))
     store.conn.commit()
@@ -181,7 +184,8 @@ def test_build_treats_a_migrated_library_as_known(store):
 def test_build_still_finds_a_true_discovery(store):
     """Played, but in no playlist of yours: that is brand new."""
     _owned(store, 1, 1, "owned", "Underworld")
-    store.conn.execute("INSERT INTO tracks(id,identity_key,title,artist) VALUES (2,'fresh','t','Newcomer')")
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,'fresh','t','Newcomer',track_id=2,video_id='vfresh')
     store.conn.commit()
     _ev(store, "fresh", 10 * DAY)
     tr._build_first_play_index(store)

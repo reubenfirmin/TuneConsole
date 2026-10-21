@@ -348,6 +348,7 @@ def content_model_fingerprint(model) -> str:
     each pass; the geometry it induces is close enough for centroid matching to remain meaningful.
     """
     payload = json.dumps({
+        "catalog_identity_version": 2,
         "cat": sorted(model.get("cat", {}).items(), key=lambda kv: (kv[1], kv[0])),
         "cont": [c[0] for c in model.get("cont", [])],
     }, sort_keys=True)

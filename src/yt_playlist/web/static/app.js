@@ -147,14 +147,12 @@ function regenerateMix(button) {
   button.dataset.regenerating = '1';
   button.setAttribute('aria-busy', 'true');
   card.classList.add('is-regenerating');
-  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   Array.from(card.querySelectorAll('.gen-focus .gen-row')).forEach((row, index) => {
     row.animate([
       { opacity: 1, filter: 'saturate(1)', transform: 'translateX(0)' },
-      { opacity: reduced ? .82 : .58, filter: reduced ? 'saturate(.85)' : 'saturate(.35)',
-        transform: reduced ? 'translateX(0)' : 'translateX(.22rem)' },
+      { opacity: .58, filter: 'saturate(.35)', transform: 'translateX(.22rem)' },
       { opacity: 1, filter: 'saturate(1)', transform: 'translateX(0)' }
-    ], { duration: reduced ? 900 : 1250, delay: index * 55, iterations: Infinity, easing: 'ease-in-out' });
+    ], { duration: 1250, delay: index * 55, iterations: Infinity, easing: 'ease-in-out' });
   });
   htmx.trigger(button, 'mix-regenerate');
 }
@@ -170,15 +168,13 @@ document.addEventListener('htmx:beforeSwap', (event) => {
 
   event.detail.shouldSwap = false;
   const rows = Array.from(target.querySelectorAll('.gen-focus .gen-row'));
-  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const step = reduced ? 16 : 38;
-  const duration = reduced ? 110 : 280;
+  const step = 38;
+  const duration = 280;
   rows.forEach((row, index) => {
     row.getAnimations().forEach((animation) => animation.cancel());
     row.animate([
       { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0)' },
-      { opacity: 0, transform: reduced ? 'scale(.99)' : 'translateX(1.25rem) scale(.97)',
-        filter: reduced ? 'blur(0)' : 'blur(5px)' }
+      { opacity: 0, transform: 'translateX(1.25rem) scale(.97)', filter: 'blur(5px)' }
     ], { duration, delay: index * step, easing: 'cubic-bezier(.55,0,.8,.35)', fill: 'both' });
   });
 
@@ -192,13 +188,12 @@ document.addEventListener('htmx:beforeSwap', (event) => {
     if (replacement.dataset.recipe) target.dataset.recipe = replacement.dataset.recipe;
     else delete target.dataset.recipe;
     htmx.process(target);
-    const enterStep = reduced ? 16 : 44;
+    const enterStep = 44;
     incoming.forEach((row, index) => {
       const animation = row.animate([
-        { opacity: 0, transform: reduced ? 'scale(.99)' : 'translateX(-1rem) scale(.98)',
-          filter: reduced ? 'blur(0)' : 'blur(5px)' },
+        { opacity: 0, transform: 'translateX(-1rem) scale(.98)', filter: 'blur(5px)' },
         { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0)' }
-      ], { duration: reduced ? 130 : 400, delay: index * enterStep,
+      ], { duration: 400, delay: index * enterStep,
            easing: 'cubic-bezier(.18,.78,.2,1)', fill: 'both' });
       animation.finished.then(() => row.style.removeProperty('opacity')).catch(() => {});
     });

@@ -3072,7 +3072,3 @@ body:has(.fp-dialog[open]) { overflow: hidden; }
 }
 .gen-sub { font-family: var(--font-sans); color: var(--dim); font-size: 1rem; line-height: 1.55;
   margin: 0; max-width: 36ch; }
-
-@media (prefers-reduced-motion: reduce) {
-  .gen-hub-ring, .gen-dot, .gen-cursor, .gen-hub .brand-eq .eqbar { animation: none; }
-}

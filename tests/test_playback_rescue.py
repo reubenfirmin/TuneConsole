@@ -85,7 +85,9 @@ const context = vm.createContext({
   WebSocket: class { static CLOSED = 3; static OPEN = 1; readyState = 0; },
   chrome: {
     tabs: {
-      query: async () => { const tab = tabs.get(activeTab()); return tab ? [{ ...tab }] : []; },
+      query: async (query = {}) => query.active
+        ? [...tabs.values()].filter(t => t.active && t.windowId === focusedWindow).map(t => ({...t}))
+        : [...tabs.values()].map(t => ({...t})),
       update: async (id, changes) => {
         if (!tabs.has(id)) throw new Error("tab closed");
         if (changes.active) { activate(id); activations.push(id); }
@@ -139,7 +141,7 @@ const advance = async elapsed => {
   if (scenario === "already_youtube") activate(2);
   context.armPlaybackRescue(2);
   if (scenario === "app_before_nudge") activate(1);
-  if (scenario === "playing_before_wait") play();
+  if (scenario === "playing_before_wait") { play(); await flush(); }
   await advance(2500);
   if (scenario === "playing_before_wait") {
     assert.deepEqual(activations, []);
