@@ -44,7 +44,12 @@ def test_prepare_buckets_by_nearest_mode(monkeypatch, store):
     assert [d["key"] for d in payload["2"]["wheelhouse"]] == ["k2"]
     assert payload["all"]["fresh"][0]["year"] == 2026
     assert store.get_proposals("mode_bundles") is not None
-    assert store.get_proposals("fresh_pool") == [surfaces._item_to_fresh_dict(fresh)]
+    refreshed = store.get_proposals("fresh_pool")
+    assert len(refreshed) == 1 and refreshed[0]["key"] == "new|artist"
+    assert refreshed[0]["genre"] == "house" and refreshed[0]["year"] == 2026
+    assert refreshed[0]["score"] is None
+    assert store.conn.execute("SELECT configuration FROM rec_serving_policies WHERE model_version=?",
+                              (refreshed[0]["pool_policy"],)).fetchone() is not None
 
 
 def test_temporal_excludes_disliked_library_tracks(monkeypatch, store):

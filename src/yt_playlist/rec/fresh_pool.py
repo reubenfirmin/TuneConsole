@@ -1,7 +1,7 @@
 """On-demand discovery for a Fresh card whose requested genres have too few candidates."""
 from collections import Counter, deque
 
-from yt_playlist.rec import embed, home_themes, home_vibe, rec_params, road_trip, surfaces
+from yt_playlist.rec import embed, home_themes, home_vibe, measurement, rec_params, road_trip, surfaces
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
@@ -36,15 +36,15 @@ def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message
                 title, name = row.get("title"), row.get("artist")
                 if not title or not name or not row.get("video_id"):
                     continue
-                key = identity_key(title, name)
+                key = store.identity_key_for_video(row["video_id"])
                 if key in owned or key in have or key in suppressed or name in muted:
                     continue
                 actual_genre = row.get("genre") or genre
                 actual_family = genre_map.family(actual_genre)
                 if actual_family in avoid_genres or (include_genres and actual_family not in include_genres):
                     continue
-                store.upsert_discovered_track(
-                    key, row["video_id"], title, name, row.get("album"), row.get("thumbnail"),
+                key = store.upsert_discovered_track(
+                    identity_key(title, name), row["video_id"], title, name, row.get("album"), row.get("thumbnail"),
                     actual_genre, None, f"genre:{family}", ctx.now_fn())
                 have.add(key)
                 added += 1
@@ -58,7 +58,8 @@ def prepare(store, now):
     from yt_playlist.rec import mode_surfaces
 
     pool = surfaces.cold_candidates(store, now, limit=None)
-    store.put_proposals("fresh_pool", [surfaces._item_to_fresh_dict(t) for t in pool], now)
+    store.put_proposals("fresh_pool", measurement.stamp_pool(
+        store, [surfaces._item_to_fresh_dict(t) for t in pool], now, "cold"), now)
     mode_surfaces.refresh_fresh(store, pool, now)
 
 

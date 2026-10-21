@@ -30,6 +30,7 @@ class Bridge:
         self.now_playing = None    # {"title", "artist"} pushed by the extension, or None
         self.now_playing_seen_at = None  # monotonic heartbeat; expires stale state after a tab vanishes
         self.sensor_health = None  # latest extension probe of YTM tab/content-script health
+        self.source_timezone = None  # browser timezone for YouTube's local-day history shelves
 
     @property
     def connected(self) -> bool:
@@ -40,6 +41,7 @@ class Bridge:
             self._conn_id = next(self._conn_ids)
             self._send = send_coro_fn
             self._loop = loop
+            self.source_timezone = None
             return self._conn_id
 
     def disconnect(self, conn_id: int | None = None) -> None:
@@ -51,14 +53,17 @@ class Bridge:
             self._send = None
             self._loop = None
             self._conn_id = None
+            self.source_timezone = None
             pending, self._pending = self._pending, {}
         for fut in pending.values():
             if not fut.done():
                 fut.set_exception(BridgeError("bridge disconnected"))
 
-    def resolve(self, req_id: int, status: int, text: str) -> None:
+    def resolve(self, req_id: int, status: int, text: str, source_timezone=None) -> None:
         with self._lock:
             fut = self._pending.pop(req_id, None)
+            if fut is not None:
+                self.source_timezone = source_timezone
         if fut is not None and not fut.done():
             fut.set_result((status, text))
 

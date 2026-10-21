@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.util.duration import parse_duration
+from yt_playlist.rec import measurement
 
 
 class Song(BaseModel):
@@ -60,6 +61,9 @@ def build(ctx):
         except Exception as exc:
             ctx.logger.exception("create playlist from song failed")
             raise HTTPException(502, "Couldn't create the playlist. Please try again.") from exc
+        if result["added"]:
+            measurement.record_action(store, "save", ctx.now_fn(), video_id=body.song.video_id,
+                                      event_id=f"song-create:{result['db_pid']}")
         return {"url": f"/playlist/{result['db_pid']}", "title": result["title"], "added": bool(result["added"]),
                 "message": ("Playlist created." if result["added"] else
                             "Playlist created, but YouTube couldn't add this song.")}
@@ -77,6 +81,9 @@ def build(ctx):
             ctx.logger.exception("add song to playlist failed")
             raise HTTPException(502, "Couldn't add the song. Please try again.") from exc
         playlist = store.get_playlist(body.playlist_id)
+        if result["added"] and not result.get("already_present"):
+            measurement.record_action(store, "save", ctx.now_fn(), video_id=body.song.video_id,
+                                      generated=store.get_playlist_groups().get(playlist.ytm_playlist_id) == "Generated")
         try:
             ctx.bridge.send_control({"type": "refresh-view", "playlist": playlist.ytm_playlist_id})
         except Exception:  # noqa: BLE001 - a disconnected player must not undo a successful add

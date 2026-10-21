@@ -12,7 +12,8 @@ def store():
 def _synced_thin(store):
     # a sync has run (so onboarding applies) but the model is thin: low coverage, no modes
     store.set_setting("last_sync_at", "999")
-    store.conn.execute("INSERT INTO tracks (identity_key, title, artist) VALUES ('a|x','T','A')")
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,'a|x','T','A')
     store.conn.execute("UPDATE tracks SET first_enriched_at=1 WHERE identity_key='a|x'")
     store.conn.commit()
 
@@ -50,10 +51,10 @@ def test_inactive_when_taste_ready(store, monkeypatch):
 
 def test_warmup_progress_scales_and_caps(store):
     assert onboarding.warmup_progress(store) == 0           # nothing enriched -> 0%
-    store.conn.executescript(
-        "INSERT INTO tracks (identity_key,title,artist,genre) VALUES ('a|1','t','a','house');"
-        "INSERT INTO tracks (identity_key,title,artist,genre) VALUES ('a|2','t','a','');"
-        "UPDATE tracks SET first_enriched_at=1;")
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,'a|1','t','a',genre='house')
+    seed_catalog_track(store,'a|2','t','a',genre='')
+    store.conn.execute("UPDATE tracks SET first_enriched_at=1")
     store.conn.commit()
     assert 0 < onboarding.warmup_progress(store) <= 100     # partial coverage -> partial progress
     store.conn.execute("UPDATE tracks SET genre='house'")   # full coverage

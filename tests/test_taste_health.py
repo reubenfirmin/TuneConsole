@@ -34,6 +34,18 @@ def test_health_panel_shows_graduation_counts(store):
     assert "Saved preference updates" in r.text and "Mood choices" in r.text
 
 
+def test_health_panel_explains_unknown_historical_play_provenance(store):
+    client = _client(store)
+    store.record_served_impressions("one", "home", [{
+        "lane": "wheelhouse", "identity_key": "song|band", "rank": 1,
+    }], 100)
+    store.import_play_events(store.get_identities()[0].id, [("song|band", "v1", 120)])
+    response = client.get("/taste/recall")
+    assert response.status_code == 200
+    assert "Playlist context wasn’t recorded for plays of 1 recommendation." in response.text
+    assert "0 played directly; 0 played through generated playlists." in response.text
+
+
 def test_health_checks_show_zero_scores_and_explain_samples(store, monkeypatch):
     from yt_playlist.rec import eval_recs
 
@@ -47,7 +59,10 @@ def test_health_checks_show_zero_scores_and_explain_samples(store, monkeypatch):
                          "breakdown": {"by_coverage": {"genre+year": {"recall": 0.0, "trials": 24}}}})
     monkeypatch.setattr(store, "recommendation_scorecard", lambda *args, **kwargs:
                         {"impressions": 10, "played": 0, "acceptance_rate": 0.0,
-                         "organic": 0, "generated": 0, "powered": False, "min_impressions": 50})
+                         "organic": 0, "generated": 0, "powered": False, "min_impressions": 50,
+                         "open": 0, "start": 0, "save": 0, "promotion": 0, "conversion": 0,
+                         "cold_impressions": 0, "unique_artists": 0, "unique_genres": 0,
+                         "by_ownership": {}, "by_metadata": {}})
     html = _client(store).get("/taste/recall").text
     assert html.count('class="model-health-reading">0%') == 4
     assert "Not enough" not in html

@@ -72,11 +72,9 @@ def test_choice_learning_keeps_counts_distinct_and_uses_last_evidence_time(store
 
 
 def test_genres_and_meta_for(store):
-    store.conn.executescript(
-        "INSERT INTO tracks (identity_key, title, artist, genre) VALUES "
-        "('a|x', 'Song A', 'Artist A', 'house'),"
-        "('b|y', 'Song B', 'Artist B', '');")
-    store.conn.commit()
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,'a|x','Song A','Artist A',genre='house')
+    seed_catalog_track(store,'b|y','Song B','Artist B',genre='')
     assert store.modes.genres_for(["a|x", "b|y", "c|z"]) == {"a|x": "house"}
     meta = store.modes.meta_for(["a|x"])
     assert meta["a|x"] == {"title": "Song A", "artist": "Artist A"}

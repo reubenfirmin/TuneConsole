@@ -9,13 +9,16 @@ import socket
 import threading
 import time
 import re
+import json
 
 import pytest
 import uvicorn
 from playwright.sync_api import expect
+from websockets.sync.client import connect
 
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
+from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 from tests.conftest import FakeClient
 
 pytestmark = pytest.mark.browser
@@ -42,6 +45,8 @@ def live_playlist_app():
     client = FakeClient(
         tracks={"PL1": [{"videoId": "v0", "setVideoId": "sv0"},
                         {"videoId": "v1", "setVideoId": "sv1"}]},
+        catalog={"valt": {"videoId": "valt", "setVideoId": "svalt", "title": "Song A (Live)",
+                           "artists": [{"name": "Artist X"}], "duration_seconds": 210}},
         search_results=[  # alternate-version search (source is excluded by find_alternates)
             {"videoId": "v0", "title": "Song A", "artists": [{"name": "Artist X"}], "duration_seconds": 200},
             {"videoId": "valt", "title": "Song A (Live)", "artists": [{"name": "Artist X"}], "duration_seconds": 210}])
@@ -52,7 +57,7 @@ def live_playlist_app():
     thread.start()
     while not server.started:
         time.sleep(0.02)
-    yield {"base": f"http://127.0.0.1:{port}", "pid": pid, "store": s}
+    yield {"base": f"http://127.0.0.1:{port}", "pid": pid, "store": s, "client": client}
     server.should_exit = True
     thread.join(timeout=5)
 
@@ -159,6 +164,94 @@ def test_now_playing_heart_immediately_updates_matching_playlist_row(live_playli
     expect(row.locator(".like-btn")).to_have_class(re.compile(r".*\bon\b.*"))
 
 
+@pytest.mark.parametrize("initial_status", ["INDIFFERENT", "LIKE"])
+def test_playing_track_table_heart_survives_status_polls(live_playlist_app, page, initial_status):
+    base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    snapshot = {"type": "now-heartbeat", "title": "Song A", "artist": "Artist X",
+                "videoId": "v0", "likeStatus": initial_status, "paused": False}
+    desired_status = "LIKE" if initial_status == "INDIFFERENT" else "INDIFFERENT"
+    pressed = "true" if desired_status == "LIKE" else "false"
+    with connect(base.replace("http://", "ws://") + "/bridge/ws",
+                 origin=EXTENSION_ORIGIN, open_timeout=5) as extension:
+        extension.send(json.dumps(snapshot))
+        page.goto(f"{base}/playlist/{pid}")
+        widget = page.locator(".global-now-playing")
+        heart = page.get_by_role("row").filter(has_text="Song A").locator(".like-btn")
+        expect(widget).to_be_visible()
+        expect(heart).to_have_attribute("aria-pressed", "false" if pressed == "true" else "true")
+
+        with page.expect_response(lambda r: r.url.endswith(("/now-playing/rate", "/track/like")),
+                                  timeout=5000):
+            heart.click()
+        expect(heart).to_have_attribute("aria-pressed", pressed)
+        # A poll can arrive before the player applies the click. It must not undo the user's choice.
+        page.evaluate("""() => {
+          window.ratingPolled = false;
+          window.addEventListener('track-like-changed', () => { window.ratingPolled = true; }, {once: true});
+        }""")
+        with page.expect_response(lambda r: r.url.endswith("/bridge/status"), timeout=8000) as polled:
+            pass
+        assert polled.value.json()["now_playing"]["likeStatus"] == initial_status
+        page.wait_for_function("window.ratingPolled")
+        expect(heart).to_have_attribute("aria-pressed", pressed)
+        if pressed == "true":
+            expect(widget.locator(".hs-heart")).to_have_class(re.compile(r"\bon\b"))
+        else:
+            expect(widget.locator(".hs-heart")).not_to_have_class(re.compile(r"\bon\b"))
+
+        frame = json.loads(extension.recv(timeout=5))
+        while frame == {"ping": 1}:
+            frame = json.loads(extension.recv(timeout=5))
+        assert frame == {"type": "rate", "action": "like"}
+
+        extension.send(json.dumps({**snapshot, "likeStatus": desired_status}))
+        with page.expect_response(lambda r: r.url.endswith("/bridge/status")
+                                  and r.json().get("now_playing", {}).get("likeStatus") == desired_status,
+                                  timeout=8000):
+            pass
+        expect(heart).to_have_attribute("aria-pressed", pressed)
+        assert live_playlist_app["client"].rated == []  # Only the player control writes this rating.
+
+
+def test_other_track_table_heart_keeps_using_liked_music(live_playlist_app, page):
+    base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    with connect(base.replace("http://", "ws://") + "/bridge/ws",
+                 origin=EXTENSION_ORIGIN, open_timeout=5) as extension:
+        extension.send(json.dumps({"type": "now-heartbeat", "title": "Song A", "artist": "Artist X",
+                                   "videoId": "v0", "likeStatus": "INDIFFERENT", "paused": False}))
+        page.goto(f"{base}/playlist/{pid}")
+        expect(page.locator(".global-now-playing")).to_be_visible()
+        heart = page.get_by_role("row").filter(has_text="Song B").locator(".like-btn")
+        with page.expect_response(lambda r: r.url.endswith("/track/like")):
+            heart.click()
+        expect(heart).to_have_attribute("aria-pressed", "true")
+        assert live_playlist_app["client"].rated == [("v1", "LIKE")]
+        with page.expect_response(lambda r: r.url.endswith("/bridge/status"), timeout=8000):
+            pass
+        expect(heart).to_have_attribute("aria-pressed", "true")
+        expect(page.locator(".global-now-playing .hs-heart")).not_to_have_class(re.compile(r"\bon\b"))
+
+
+@pytest.mark.parametrize("failure", ["rejected", "network"])
+def test_playing_track_table_heart_reverts_on_failed_rating(live_playlist_app, page, failure):
+    base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    if failure == "rejected":
+        page.route("**/now-playing/rate", lambda route: route.fulfill(json={"ok": False}))
+    else:
+        page.route("**/now-playing/rate", lambda route: route.abort())
+    with connect(base.replace("http://", "ws://") + "/bridge/ws",
+                 origin=EXTENSION_ORIGIN, open_timeout=5) as extension:
+        extension.send(json.dumps({"type": "now-heartbeat", "title": "Song A", "artist": "Artist X",
+                                   "videoId": "v0", "likeStatus": "INDIFFERENT", "paused": False}))
+        page.goto(f"{base}/playlist/{pid}")
+        expect(page.locator(".global-now-playing")).to_be_visible()
+        heart = page.get_by_role("row").filter(has_text="Song A").locator(".like-btn")
+        heart.click()
+        expect(heart).to_have_attribute("aria-pressed", "false")
+        expect(page.locator(".global-now-playing .hs-heart")).not_to_have_class(re.compile(r"\bon\b"))
+        assert live_playlist_app["client"].rated == []
+
+
 def test_remove_track_drops_row(live_playlist_app, page):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     page.goto(f"{base}/playlist/{pid}")
@@ -170,8 +263,12 @@ def test_remove_track_drops_row(live_playlist_app, page):
     expect(page.get_by_role("link", name="Song A", exact=True)).to_be_visible()
 
 
-def test_find_and_add_alternate_version(live_playlist_app, page):
+@pytest.mark.parametrize("indexing_lag", [False, True])
+def test_find_and_add_alternate_version(live_playlist_app, page, indexing_lag):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
+    client = live_playlist_app["client"]
+    if indexing_lag:
+        client._catalog["valt"].pop("setVideoId")
     page.goto(f"{base}/playlist/{pid}")
     row = page.get_by_role("row").filter(has_text="Song A")
     row.get_by_title("More actions").click()
@@ -181,6 +278,16 @@ def test_find_and_add_alternate_version(live_playlist_app, page):
     page.get_by_role("button", name="Add to playlist").click()
     # HX-Refresh reload -> the chosen alternate is now a row in the table
     expect(page.get_by_role("link", name="Song A (Live)", exact=True)).to_be_visible()
+    retry = page.get_by_role("button", name="Retry placement")
+    if indexing_lag:
+        expect(page.get_by_role("status").filter(has_text="placement after the original song")).to_be_visible()
+        assert [t["videoId"] for t in client._tracks["PL1"]] == ["v0", "v1", "valt"]
+        client._catalog["valt"]["setVideoId"] = "svalt"
+        retry.click()
+    expect(retry).to_have_count(0)
+    assert [t["videoId"] for t in client._tracks["PL1"]] == ["v0", "valt", "v1"]
+    assert [t["video_id"] for t in live_playlist_app["store"].playlist_tracks_detail(pid)] == ["v0", "valt", "v1"]
+    assert client.added == [("PL1", ["valt"])]
 
 
 def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):
@@ -189,7 +296,7 @@ def test_enrich_updates_cells_live(live_playlist_app, page, monkeypatch):
     import yt_playlist.providers.musicbrainz as mb
     from tests.conftest import only_provider
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist: ("Electronic", "1998", None, []) if title == "Song B"
+                        lambda title, artist, **kwargs: ("Electronic", "1998", None, []) if title == "Song B"
                         else (None, None, None, []))
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     only_provider(live_playlist_app["store"], "musicbrainz")

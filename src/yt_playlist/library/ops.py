@@ -18,6 +18,7 @@ from yt_playlist.library.executor import (
     deserialize_plan, execute_planned, remove_track, rename_playlist,
     reorder_track, search_versions, store_plan, undo_action)
 from yt_playlist.library.liked_music import LikedMusic
+from yt_playlist.library.playlist_positions import retry_insertions
 
 logger = logging.getLogger("yt_playlist.ops")
 
@@ -161,6 +162,10 @@ class PlaylistOps:
         if LikedMusic.is_lm(pl):
             return LikedMusic(self.store).remove(playlist_id, video_id, client, self.now_fn())
         return remove_track(self.store, playlist_id, video_id, client, self.now_fn())
+
+    def retry_track_placement(self, playlist_id) -> int:
+        client = self._require_client(playlist_id)
+        return retry_insertions(self.store, playlist_id, client, self.now_fn())
 
     def rename(self, playlist_id, title) -> dict:
         client = self._require_client(playlist_id)

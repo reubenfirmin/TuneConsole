@@ -10,6 +10,9 @@
 {% set other_albums = details.albums|rejectattr('status', 'equalto', 'unmatched')|list if details else [] %}
 {% set playlist_reasons = {
   'created': 'Created in YouTube Music',
+  'resumed': 'Resumed the existing YouTube Music playlist',
+  'transfer_failed': 'Transfer failed; upload the same ZIP to resume this playlist',
+  'lookup_failed': 'Some lookups failed; upload the same ZIP to retry',
   'previously_imported': 'Previously imported by TuneConsole',
   'already_exists': 'An identical playlist already exists',
   'name_already_exists': 'A playlist with this name already exists',
@@ -22,6 +25,7 @@
   'already_in_library': 'Already in your YouTube Music library',
   'no_confident_match': 'No confident catalog match',
   'not_saveable': 'Catalog result had no saveable album',
+  'lookup_or_save_failed': 'Lookup or save failed; retry this album',
   'saved_by_user': 'You selected and saved this match'
 } %}
 <div class="import-report-shell">
@@ -31,21 +35,26 @@
 
   <header class="import-report-hero">
     <h1>Spotify import report</h1>
+    {% if job.identity_label %}<p>Destination: <strong>{{ job.identity_label }}</strong></p>{% endif %}
     <p class="import-report-deck">What TuneConsole found in the export, what changed in YouTube
       Music, and every item it deliberately left alone.</p>
   </header>
 
   <section class="import-report-verdict" aria-labelledby="report-outcome">
     <div>
+      {% if report.playlists_failed %}
+      <p class="import-report-error">{{ report.playlists_failed }} playlist transfers need a retry.
+        Completed work was kept. Upload the same ZIP and select those playlists to resume them.</p>
+      {% endif %}
       {% if added %}
       <h2 id="report-outcome">Your YouTube Music library was updated.</h2>
       <p>TuneConsole created {{ report.playlists_imported }} playlists, added
         {{ report.tracks_imported }} tracks, and saved {{ report.albums_imported }} albums.</p>
       {% else %}
-      <h2 id="report-outcome">No new library items were needed.</h2>
-      <p>The export was processed successfully. Its playlists and most saved albums were already
+      <h2 id="report-outcome">{{ 'The import needs attention.' if report.playlists_failed else 'No new library items were needed.' }}</h2>
+      <p>{% if report.playlists_failed %}Some playlist transfers failed. Review their outcomes below.{% else %}The export was processed successfully. Its playlists and most saved albums were already
         represented in YouTube Music; {{ unmatched }} track or album {{ 'entry' if unmatched == 1 else 'entries' }}
-        could not be matched with enough confidence.</p>
+        could not be matched with enough confidence.{% endif %}</p>
       {% endif %}
     </div>
   </section>
@@ -64,6 +73,7 @@
         <div><dt>Found in export</dt><dd>{{ report.playlists_found }}</dd></div>
         <div><dt>Created in YouTube Music</dt><dd>{{ report.playlists_imported }}</dd></div>
         <div><dt>Skipped</dt><dd>{{ report.playlists_skipped }}</dd></div>
+        {% if report.playlists_failed %}<div><dt>Need a retry</dt><dd>{{ report.playlists_failed }}</dd></div>{% endif %}
       </dl>
     </article>
 
@@ -151,8 +161,8 @@
     {% if unmatched_albums %}
     <details class="import-audit-group" open>
       <summary><span>Unmatched albums</span><strong>{{ unmatched_albums|length }}</strong></summary>
-      <p class="import-audit-note">TuneConsole would not choose for you when the catalog result was
-        ambiguous. Compare the Spotify source with the YouTube Music candidates, then save the right one.</p>
+      <p class="import-audit-note">These albums could not be matched or saved. Compare the Spotify
+        source with the YouTube Music candidates, then save the right one.</p>
       <div class="import-unmatched-albums">
         {% for item in unmatched_albums %}
         <article class="import-unmatched-album" id="album-{{ item.report_index }}"

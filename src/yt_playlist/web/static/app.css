@@ -77,7 +77,6 @@ a:has(> .ui-arrow--external) {
   animation: eq-bounce 1.05s ease-in-out infinite;
 }
 @keyframes eq-bounce { 0%, 100% { transform: scaleY(0.35); } 50% { transform: scaleY(1); } }
-@media (prefers-reduced-motion: reduce) { .brand-eq .eqbar { animation: none; } }
 .topbar nav { display: flex; gap: 0.15rem; margin-left: auto; min-width: 0;
   overflow-x: auto; scrollbar-width: none; }
 .topbar nav::-webkit-scrollbar { display: none; }
@@ -294,6 +293,28 @@ h2.section .scope-tag, h3.section .scope-tag {
   border-color: var(--border-strong);
   padding: .75rem .875rem;
 }
+/* Flow badges keep the same identity in every playlist and picker. */
+.flow-badge {
+  --flow-color: var(--flow-default);
+  display: inline-flex; align-items: center; gap: .35rem; max-width: 100%;
+  padding: .2rem .55rem; border: 1px solid color-mix(in srgb, var(--flow-color) 35%, transparent);
+  border-radius: 999px; background: color-mix(in srgb, var(--flow-color) 10%, var(--surface-inset));
+  color: var(--flow-color); font-size: var(--type-sm); font-weight: 600; line-height: 1.25;
+  vertical-align: middle;
+}
+.flow-badge::before { content: ""; flex: none; width: .35rem; height: .35rem;
+  border-radius: 50%; background: var(--flow-color); }
+.flow-badge[data-flow="energy_arc"] { --flow-color: var(--flow-energy-arc); }
+.flow-badge[data-flow="warm_up"] { --flow-color: var(--flow-warm-up); }
+.flow-badge[data-flow="wind_down"] { --flow-color: var(--flow-wind-down); }
+.flow-badge[data-flow="smooth_segue"] { --flow-color: var(--flow-smooth-segue); }
+.flow-badge[data-flow="odyssey"] { --flow-color: var(--flow-odyssey); }
+.flow-badge[data-flow="time_machine"] { --flow-color: var(--flow-time-machine); }
+.flow-badge[data-flow="throwback"] { --flow-color: var(--flow-throwback); }
+.flow-badge[data-flow="deep_dive"] { --flow-color: var(--flow-deep-dive); }
+.flow-badge[data-flow="rediscovery"] { --flow-color: var(--flow-rediscovery); }
+.flow-badge[data-flow="shuffle"] { --flow-color: var(--flow-shuffle); }
+
 /* metric strip */
 .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: var(--sp-4); }
 .metric {
@@ -812,15 +833,34 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
    scrollbar (#106). */
 .modal.modal-similar #similar-results { flex: 1; min-height: 0; overflow-y: auto; padding-inline: 0.4rem; }
 .modal.modal-similar .alt-list { max-height: none; overflow: visible; margin: 0.2rem -0.4rem 0; }
+/* These rows have optional checkboxes and artwork. Let metadata take the remaining width without
+   shifting it into a fixed grid column when either is absent (#106). */
+.modal.modal-similar .alt-row { display: flex; }
+.modal.modal-similar .alt-meta { flex: 1; }
+.modal.modal-similar .alt-row > :not(.alt-meta) { flex: none; }
 
 /* Shared song menu: native popover escapes table/card clipping. */
 .rowmenu { position: relative; text-align: right; overflow: visible; }
-/* Per-track "more/less like this" marker, shown left of the ⋯ on generated playlists. */
-.mood-flag { font-size: var(--type-body); line-height: 1; margin-right: 0.15rem; vertical-align: middle; cursor: default; }
 .dots { background: transparent; border: none; box-shadow: none; color: var(--faint);
   font-size: var(--type-lg); line-height: 1; padding: 0.15rem 0.4rem; border-radius: 6px; cursor: pointer; }
 .dots:hover { background: var(--surface-2); color: var(--text); box-shadow: none; }
 .song-menu-trigger { min-width: 2rem; min-height: 2rem; flex: none; }
+/* Feedback and the menu share one fixed footprint so marked rows stay aligned. */
+.song-menu-trigger--mood { display: inline-grid; place-items: center; width: 2rem; padding-inline: 0; vertical-align: middle; }
+.song-menu-trigger--mood > span { grid-area: 1 / 1; transition: opacity .16s ease, transform .2s ease; }
+.song-menu-trigger--mood .mood-flag { display: inline-flex; font-size: 1.125rem; line-height: 1; }
+.song-menu-trigger--mood:is(.has-mood-more, .has-mood-less) .song-menu-dots {
+  opacity: 0; transform: translateY(.25rem) scale(.75);
+}
+.song-menu-trigger--mood:is(:hover, :focus-visible, [aria-expanded="true"]) .song-menu-dots {
+  opacity: 1; transform: none;
+}
+.song-menu-trigger--mood:is(:hover, :focus-visible, [aria-expanded="true"]) .mood-flag {
+  opacity: 0; transform: translateY(-.25rem) scale(.75) rotate(-12deg);
+}
+.song-menu-trigger--mood.has-mood-more { background: color-mix(in srgb, var(--amber) 7%, transparent); }
+.song-menu-trigger--mood.has-mood-less { background: var(--accent-soft); }
+.song-menu-trigger--mood:is(:hover, :focus-visible) { background: var(--surface-2); }
 .song-inline-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: .1rem; }
 .song-action-menu { position: fixed; inset: auto; margin: 0; min-width: 14rem;
   max-width: calc(100vw - 1rem); max-height: calc(100dvh - 1rem); overflow-y: auto;
@@ -915,7 +955,6 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
   .song-playlist-dialog.has-result .song-dialog-art { width: 4rem; }
   .song-dialog-track-copy h2 { font-size: 1.375rem; }
 }
-@media (prefers-reduced-motion: reduce) { .song-playlist-dialog[open] { animation: none; } }
 
 /* drag-to-reorder handle on the # column */
 .drag-handle { color: var(--faint); cursor: grab; user-select: none; }
@@ -1088,19 +1127,5 @@ main:not(.page-clusters) .section.toggle:focus-visible { border-radius: var(--ra
   main:not(.page-clusters) :where(.btn-sm, .dots, .head-icon, .chip-x, .banner-x, .toast-x) {
     min-width: 2.75rem;
     min-height: 2.75rem;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  html { scroll-behavior: auto; }
-  /* The mix board and tuning launcher keep their transitions to avoid snapping. */
-  main:not(.page-clusters),
-  main:not(.page-clusters) *:not(.dash-directions :is(.gen-lanes, .gen-lanes *, .fingerprint, .fp-collapse, .fp-mood-mark)),
-  main:not(.page-clusters) *:not(.dash-directions :is(.gen-lanes, .gen-lanes *, .fingerprint, .fp-collapse, .fp-mood-mark))::before,
-  main:not(.page-clusters) *:not(.dash-directions :is(.gen-lanes, .gen-lanes *, .fingerprint, .fp-collapse, .fp-mood-mark))::after {
-    animation-duration: .01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: .01ms !important;
-    scroll-behavior: auto !important;
   }
 }

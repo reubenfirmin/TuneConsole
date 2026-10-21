@@ -446,9 +446,9 @@ def centroid_tilt_panel(store, now, top=6) -> dict:
     """The embedding axis, read at the two timescales on which a free direction exists.
 
     SESSION (`layers.session_tilt`, hours half-life) and TRANSIENT (`transient.centroid_tilt`, days
-    half-life) are both unit directions in the same collaborative space, so projecting each onto the
-    same genre-family centroids puts them on one comparable -1..+1 scale: which sounds this sitting
-    leans toward, against which sounds the last few weeks lean toward.
+    half-life) are bounded tilts in the same collaborative space. Projecting each onto the same
+    genre-family centroids puts them on one comparable -1..+1 scale, including the fading strength
+    used by scoring: which sounds this sitting leans toward, against the last few weeks' lean.
 
     NOW has no row here by design. An hour of listening is too few events to estimate a direction in
     embedding space without whiplash, so the NOW layer is categorical over taste modes instead (see
@@ -462,22 +462,20 @@ def centroid_tilt_panel(store, now, top=6) -> dict:
     keys, V, idx = embed.load_vectors(store)
     if V is None:
         return panel
-    # Both already return unit directions (their wall-clock decay is baked in per-event, before
-    # normalization). Re-normalizing is defensive, and keeps the projection an honest cosine.
+    # Keep each tilt's magnitude: normalizing again would hide decay from the live model display.
     tilts = {"session": layers.session_tilt(store, now, V, idx),
              "transient": transient.centroid_tilt(store, now, V, idx)}
-    unit = {k: (t / (np.linalg.norm(t) + 1e-9)) if t is not None else None for k, t in tilts.items()}
-    if unit["session"] is None and unit["transient"] is None:
+    if tilts["session"] is None and tilts["transient"] is None:
         return panel
 
     fams = []
     for fam, c in _family_centroids(store, keys, V, idx).items():
         row = {"name": fam}
-        for layer, t in unit.items():
+        for layer, t in tilts.items():
             row[layer] = float(c @ t) if t is not None else None
         fams.append(row)
     fams.sort(key=lambda r: -max(abs(r[k] or 0.0) for k in ("session", "transient")))
     panel.update(families=fams[:top],
-                 has_session=unit["session"] is not None,
-                 has_transient=unit["transient"] is not None)
+                 has_session=tilts["session"] is not None,
+                 has_transient=tilts["transient"] is not None)
     return panel

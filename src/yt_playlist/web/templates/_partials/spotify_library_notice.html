@@ -8,6 +8,13 @@
     <div class="alert-foot"><a class="btn btn-sm alert-go" href="/setup?tab=import">View status {{ arrow_icon('right') }}</a></div>
   </div>
 </div>
+{% elif job.status == 'preview' %}
+<div class="alert-card card card--featured alert-nudge" id="spotify-library-notice">
+  <div class="alert-body">
+    <span class="alert-title"><strong>Spotify import preview is ready.</strong> Review matches before adding anything.</span>
+    <div class="alert-foot"><a class="btn btn-sm alert-go" href="/import/spotify-library/preview/{{ job.preview_token }}">Review and confirm {{ arrow_icon('right') }}</a></div>
+  </div>
+</div>
 {% elif job.status == 'done' %}
 <div class="alert-card card card--featured alert-nudge" id="spotify-library-notice">
   <button type="button" class="alert-x" aria-label="Dismiss" title="Dismiss"
@@ -16,7 +23,8 @@
   <span class="alert-cover"><img src="/static/nag/spotify-import.png" alt="" loading="lazy"
        onerror="this.closest('.alert-cover').classList.add('no-art'); this.remove()"></span>
   <div class="alert-body">
-    <span class="alert-title"><strong>Spotify import complete.</strong> Review what was added, skipped, and unmatched.</span>
+    <span class="alert-title"><strong>Spotify import complete.</strong> Review what was added, skipped, and unmatched.
+      {% if job.report.playlists_failed %}Some playlists need a retry.{% endif %}</span>
     <div class="alert-foot"><a class="btn btn-sm alert-go" href="/import/spotify-library/report">View report {{ arrow_icon('right') }}</a></div>
   </div>
 </div>

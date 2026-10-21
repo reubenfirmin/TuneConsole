@@ -1,10 +1,8 @@
 """Home tab: the default landing page: Sync control, Take-Action triage, and For-You recs."""
 import asyncio
-import hashlib
 import json
 import threading
 import time
-import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Request, Response
@@ -15,6 +13,7 @@ from yt_playlist.library import executor
 from yt_playlist.util import genre_map
 from yt_playlist.rec import arc_energy, embed, home_audit, home_themes, home_vibe, journeys, mix_tuning, onboarding, rec_params, recipes, recommend, into_recently
 from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.rec import measurement
 from yt_playlist.rec.trend_rollups import last_complete_month
 from yt_playlist.providers import wikipedia, lastfm
 from yt_playlist.web.context import form_float
@@ -185,7 +184,6 @@ _CARD_LABELS = {"wheelhouse": "More in your wheelhouse", "explore": "From your c
 
 # #87 retention only needs to outlive the future lane-bandit's evidence window, not forever.
 _LANE_IMPRESSION_RETAIN_D = 30
-_SERVED_IMPRESSION_RETAIN_D = 90
 
 
 def _record_lane_impressions(store, items, now):
@@ -200,16 +198,12 @@ def _record_lane_impressions(store, items, now):
                                   prune_before=now - _LANE_IMPRESSION_RETAIN_D * 86400)
 
 
-def _served_model_version(store, ranker):
-    """Stable identity for the serving model, intentionally excluding request/recipe randomness."""
-    raw = json.dumps({"schema": "home-cards-v1", "ranker": ranker or "lane",
-                      "content_space": embed.content_space_id(store)}, sort_keys=True)
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+def _served_model_version(store, ranker, now=None):
+    return measurement.serving_policy(store, time.time() if now is None else now, ranker or "lane")[0]
 
 
 def _record_served_cards(store, protos, now):
     """#113 log only the final twelve-track cards handed to the template."""
-    request_id = uuid.uuid4().hex
     rows = []
     rank = 0
     for card_position, proto in enumerate(protos, 1):
@@ -217,14 +211,15 @@ def _record_served_cards(store, protos, now):
         for track_position, track in enumerate(proto["tracks"], 1):
             rank += 1
             key = track.get("key") if isinstance(track, dict) else getattr(track, "key", None)
-            rows.append({"identity_key": key, "rank": rank, "lane": proto["lane"],
-                         "mode_id": proto.get("mode_id"), "score": None,
-                         "model_version": _served_model_version(store, ranker),
-                         "provenance": {"ranker": ranker, "card_position": card_position,
+            details = dict(track) if isinstance(track, dict) else vars(track).copy()
+            rows.append({**details, "key": key, "rank": rank, "lane": proto["lane"],
+                         "mode_id": proto.get("mode_id"),
+                         "serving_context": {**details.get("serving_context", {}),
+                                        "ranker": ranker, "card_position": card_position,
                                         "track_position": track_position,
                                         "recipe": proto.get("recipe", {})}})
-    store.record_served_impressions(request_id, "home", rows, now,
-                                     prune_before=now - _SERVED_IMPRESSION_RETAIN_D * 86400)
+    measurement.record_recommendations(store, "home", rows, now,
+                                       ranker="assembled-cards")
 
 
 def _one_card(store, card, now, *, avoid_genres=(), include_genres=()):
@@ -964,6 +959,9 @@ def build(ctx) -> APIRouter:
                         target=executor.navigate_when_ready,
                         args=(client, bridge, res["new_ytm"], watch_url), daemon=True).start()
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
+                if res.get("pid") and res.get("added"):
+                    measurement.record_action(store, "save", now_fn(), playlist_id=res["pid"],
+                                              event_id=f"generate:{res['new_ytm']}", generated=True)
                 if isinstance(recipe, dict) and recipe.get("mode_id") is not None and res.get("pid"):
                     try:
                         store.modes.log_pick(res["pid"], int(recipe["mode_id"]), now_fn(),

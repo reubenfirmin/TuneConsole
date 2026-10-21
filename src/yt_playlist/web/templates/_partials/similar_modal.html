@@ -21,7 +21,6 @@
             <span class="alt-title">{{ f.title }}</span>
             <span class="alt-sub">{{ f.artist }}{% if f.album %} · {{ f.album }}{% endif %}</span>
           </span>
-          <span class="mono alt-dur"></span>
           <a class="alink" href="https://music.youtube.com/watch?v={{ f.video_id }}"
              target="_blank" rel="noopener" @click.stop title="Play on YouTube Music">Play {{ arrow_icon('external') }}</a>
         </label>

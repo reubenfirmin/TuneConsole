@@ -15,7 +15,7 @@ from yt_playlist.util.matching import identity_key
 
 
 @pytest.mark.parametrize("with_modes", [False, True])
-def test_fresh_without_any_enrichment_or_artist_model_can_generate_a_playlist(store, with_modes):
+def test_fresh_waits_for_metadata_then_generates_a_playlist_without_a_model(store, with_modes):
     iid = store.upsert_identity("main", "cred", None, True)
     if with_modes:
         store.modes.replace_modes([
@@ -30,17 +30,25 @@ def test_fresh_without_any_enrichment_or_artist_model_can_generate_a_playlist(st
                                       None, None, None, 100)
         keys.append(key)
 
-    # The normal background rebuild must prepare Fresh even before modes/model coverage exist.
+    # Discovery alone supplies no ranking evidence. Keep the tracks queued for enrichment.
     mode_surfaces.prepare_bundles(store, 200)
-    picked = fresh_pool.pick(store, 200)
+    assert fresh_pool.pick(store, 200) == []
+    pending = store.get_discovered_tracks()
+    assert {r["identity_key"] for r in pending} == set(keys)
+    assert all(r["last_enriched"] is None for r in pending)
+
+    # Metadata makes an unscored fallback eligible even before a taste/artist model exists.
+    for key in keys:
+        store.set_discovered_enrichment(key, None, "2000")
+    fresh_pool.prepare(store, 250)
+    picked = fresh_pool.pick(store, 250)
     assert {t["key"] for t in picked} == set(keys)
-    assert all(not t["genre"] and t["year"] is None for t in picked)
-    assert all(r["last_enriched"] is None for r in store.get_discovered_tracks())
+    assert all(not t["genre"] and t["year"] == 2000 and t["score"] is None for t in picked)
     # Unknown genres remain unknown; they must not pretend to satisfy an explicit genre request.
-    assert fresh_pool.pick(store, 200, include_genres=["house"]) == []
+    assert fresh_pool.pick(store, 250, include_genres=["house"]) == []
 
     client = FakeClient()
-    result = executor.create_generated_playlist(store, "Fresh songs", picked, client, 200, iid,
+    result = executor.create_generated_playlist(store, "Fresh songs", picked, client, 250, iid,
                                                 recipe={"model": "fresh"})
     assert result["added"] == 12
     assert set(client.added[0][1]) == {f"new{i}" for i in range(12)}
@@ -116,7 +124,7 @@ def test_enrichment_updates_fresh_ranking_modes_and_generated_playlist(store, mo
             sink.set_enrichment(a["genre"], a["year"])
             if a["audio"]:
                 sink.set_audio(**a["audio"])
-        return changed
+        return [track['job_id'] for track in batch]
 
     worker = EnrichWorker(SimpleNamespace(store=store, now_fn=lambda: 500,
                                          logger=logging.getLogger(__name__)), waterfall_fn=waterfall)

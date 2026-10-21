@@ -1,6 +1,15 @@
 import pytest
 from yt_playlist.core.store import Store
 
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync(monkeypatch):
+    """Tests drive sync/update checks explicitly, without periodic jobs leaking into later tests."""
+    from yt_playlist.web import app as webapp
+
+    monkeypatch.setattr(webapp, "_background_sync_loop", lambda *args, **kwargs: None)
+
+
 @pytest.fixture
 def store():
     s = Store(":memory:")
@@ -8,11 +17,48 @@ def store():
     return s
 
 
+@pytest.fixture
+def legacy_store(tmp_path):
+    """A genuine pre-catalog database for upgrade tests, never a damaged current schema."""
+    from yt_playlist.core.migrations import migrate
+    from yt_playlist.core.migrations.registry import MIGRATIONS
+    s = Store(tmp_path / 'legacy.db')
+    migrate(s.conn, registry=MIGRATIONS[:7])
+    s._bind_repositories()
+    yield s
+    s.conn.close()
+
+
 def only_provider(store, name):
     """Configure the enrichment waterfall to run exactly one provider (others disabled), lets a
     route-level test exercise the single-icon waterfall while isolating one provider's behavior."""
     from yt_playlist.providers import enrichment as E
     E.save_config(store, [{"name": p["name"], "enabled": p["name"] == name} for p in E.PROVIDERS])
+
+
+def seed_catalog_track(store, key, title, artist, *, video_id=None, track_id=None, **metadata):
+    """Seed explicit catalog subjects for tests whose opaque keys/IDs are part of the fixture."""
+    with store.conn:
+        rid = store.conn.execute(
+            'INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
+            (track_id,key,title,artist)).lastrowid
+        if video_id:
+            store.conn.execute(
+                'INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist) VALUES (?,?,?,?,?,?)',
+                (video_id,rid,title,artist,title,artist))
+        store.conn.execute('INSERT INTO catalog_entries(id,recording_id,video_id,source_ref) VALUES (?,?,?,?)',
+                           (rid,rid,video_id,None if video_id else 'fixture:'+key))
+        if not video_id:
+            store.conn.execute('INSERT INTO unresolved_items(entry_id,title,artist,orig_title,orig_artist) VALUES (?,?,?,?,?)',
+                               (rid,title,artist,title,artist))
+        store.conn.execute("INSERT INTO library_memberships VALUES (?,'fixture',NULL)", (rid,))
+        store.conn.execute("INSERT INTO recording_aliases VALUES (?,?,'fixture')", (key,rid))
+        if metadata:
+            columns = {r[1] for r in store.conn.execute('PRAGMA table_info(catalog_tracks)')}
+            assert metadata.keys() <= columns
+            store.conn.execute('UPDATE catalog_tracks SET '+','.join(f'{field}=?' for field in metadata)+' WHERE id=?',
+                               [*metadata.values(),rid])
+    return rid
 
 
 class FakeClient:
@@ -49,10 +95,14 @@ class FakeClient:
     def add_playlist_items(self, playlistId, videoIds):
         self.added.append((playlistId, list(videoIds)))
         dst = self._tracks.setdefault(playlistId, [])
+        results = []
         for vid in videoIds:
             t = self._catalog.get(vid)
             if t is not None:
                 dst.append(t)
+                if t.get("setVideoId"):
+                    results.append({"videoId": vid, "setVideoId": t["setVideoId"]})
+        return {"status": "STATUS_SUCCEEDED", "playlistEditResults": results}
     def remove_playlist_items(self, playlistId, videos):
         self.removed.append((playlistId, list(videos)))
         gone = {v.get("videoId") for v in videos}
@@ -69,7 +119,16 @@ class FakeClient:
             details["lengthSeconds"] = str(secs)   # real ytmusicapi returns it as a string
         return {"videoDetails": details}
     def edit_playlist(self, playlistId, **kw):
-        self.edited.append((playlistId, kw)); return "STATUS_SUCCEEDED"
+        self.edited.append((playlistId, kw))
+        move = kw.get("moveItem")
+        if move:
+            moved, successor = move if isinstance(move, tuple) else (move, None)
+            tracks = self._tracks.get(playlistId, [])
+            item = next(t for t in tracks if t.get("setVideoId") == moved)
+            tracks.remove(item)
+            index = next((i for i, t in enumerate(tracks) if t.get("setVideoId") == successor), len(tracks))
+            tracks.insert(index, item)
+        return "STATUS_SUCCEEDED"
 
 def _track(vid, title, artist, dur=200, album="Alb", set_video_id=None):
     t = {"videoId": vid, "title": title, "artists": [{"name": artist}],

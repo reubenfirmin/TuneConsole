@@ -32,7 +32,7 @@ def test_migration_adds_audio_columns_to_old_db(tmp_path):
 
 def _seed_playlist(store, titles):
     iid = store.upsert_identity("main", "cred", None, True)
-    tids = [store.upsert_track(f"v{i}", t, "Artist", "Alb", 200) for i, t in enumerate(titles)]
+    tids = [store.upsert_track(f"v:{t}", t, "Artist", "Alb", 200) for t in titles]
     pid = store.upsert_playlist(iid, "PL1", "Mix", len(tids), "h", 1000.0)
     store.set_playlist_tracks(pid, tids)
     return pid, tids

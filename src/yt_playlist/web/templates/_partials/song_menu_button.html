@@ -2,9 +2,13 @@
    Context enables playlist-specific actions; it never supplies another menu. #}
 {% macro song_menu(song, context={}, dynamic='') -%}
 {% if dynamic or song.video_id|default('') %}
-<button type="button" class="dots song-menu-trigger" title="More actions"
+<button type="button" class="dots song-menu-trigger{{ ' song-menu-trigger--mood' if context.mood_key|default('') else '' }}" title="More actions"
         aria-haspopup="menu"
         aria-controls="song-action-menu" aria-expanded="false"
+        {% if context.mood_key|default('') %}
+        :title="mood > 0 ? 'More actions · More like this is active' : mood < 0 ? 'More actions · Less like this is active' : 'More actions'"
+        :class="{ 'has-mood-more': mood > 0, 'has-mood-less': mood < 0 }"
+        {% endif %}
         {% if dynamic %}
         x-show="{{ dynamic }}.video_id"
         :aria-label="'More actions for ' + {{ dynamic }}.title"
@@ -17,6 +21,14 @@
                       "duration": song.duration|default(none),
                       "album_browse": song.album_browse|default(none)}|tojson }}'
         {% endif %}
-        data-song-context='{{ context|tojson }}'>⋯</button>
+        data-song-context='{{ context|tojson }}'>
+  {% if context.mood_key|default('') %}
+  <span class="song-menu-dots" aria-hidden="true">⋯</span>
+  <span class="mood-flag" x-show="mood !== 0" x-cloak aria-hidden="true">
+    <span class="mood-flag-flame" x-show="mood > 0">🔥</span>
+    <span class="mood-flag-less" x-show="mood < 0">🙅</span>
+  </span>
+  {% else %}⋯{% endif %}
+</button>
 {% endif %}
 {%- endmacro %}

@@ -65,7 +65,7 @@ def test_centroid_tilt_newest_dominates_and_persists(store):
     store.record_mood(["a|x"], -1, now=1001.0)                 # newest: away
     assert transient.centroid_tilt(store, 1001.0, V, idx)[0] < 0
     # #85: this used to assert no wall-clock decay; now a single event fades on the clock (mood_halflife_d)
-    # but its unit direction never hits exactly zero magnitude, so the tilt stays defined 30d out.
+    # Its fading magnitude stays defined 30d out, rather than being normalized back to full strength.
     store2_tilt = transient.centroid_tilt(store, 1001.0 + 30 * 86400, V, idx)
     assert store2_tilt is not None
 

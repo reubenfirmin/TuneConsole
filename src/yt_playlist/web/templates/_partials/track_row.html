@@ -65,10 +65,6 @@
   <td class="num mono">{{ t.plays or '' }}</td>
   <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
   <td class="rowmenu"{% if is_generated and t.identity_key %} x-data="{ mood: {{ (mood_states|default({})).get(t.identity_key, 0) }} }"{% endif %}>
-    {% if is_generated and t.identity_key %}
-    <span class="mood-flag" x-show="mood !== 0" x-cloak x-text="mood > 0 ? '🔥' : '🙅'"
-          :title="mood > 0 ? 'You asked for more like this (tuning your Home picks)' : 'You asked for less like this (tuning your Home picks)'"></span>
-    {% endif %}
     {{ song_menu(t, {"playlist": true, "mood_key": t.identity_key if is_generated else ''}) }}
   </td>
 </tr>

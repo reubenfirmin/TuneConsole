@@ -7,6 +7,7 @@ from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.matching import fuzzy_ratio, normalize, track_artist, identity_key
 from yt_playlist.util.retry import with_retry
 from yt_playlist.core import paths
+from yt_playlist.library.playlist_positions import cancel_insertions, retry_insertions
 from yt_playlist.util.action_kinds import (
     PLAN, APPLY_MERGE, MOVE_IDENTITY, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED, COPY_PLAYLIST,
     COPY_INTO, ADD_TRACKS, REMOVE_TRACK, RENAME_PLAYLIST, UNDO, UNDOABLE_KINDS, is_undoable)
@@ -109,12 +110,15 @@ def _target_ytm_id(store, playlist_id):
     return store.get_playlist(playlist_id).ytm_playlist_id
 
 def _remote_keys(client, ytm_playlist_id):
-    """Current remote identity_keys of a playlist, or None if it can't be read (deleted/unparseable)."""
+    """Exact remote upload IDs, or None if the complete contents cannot be established."""
     try:
         detail = with_retry(lambda: client.get_playlist(ytm_playlist_id, limit=None))
     except Exception:  # noqa: BLE001 - deleted playlist or ytmusicapi parse failure
         return None
-    return {identity_key(t.get("title", ""), track_artist(t)) for t in detail.get("tracks", [])}
+    tracks = detail.get("tracks", [])
+    if any(not t.get("videoId") for t in tracks):
+        return None
+    return {t["videoId"] for t in tracks}
 
 def _remote_video_ids(client, ytm_playlist_id):
     """Current remote videoIds (in order) of a playlist, for capturing prior contents before a merge."""
@@ -129,7 +133,10 @@ def _verify_and_delete(store, plan, source_client, target_client, source_ytm_pla
     target_ytm = _target_ytm_id(store, plan.target_playlist_id)
     source_keys = _remote_keys(source_client, source_ytm_playlist_id)
     if source_keys is None:  # can't read the source remotely; fall back to its last-synced contents
-        source_keys = store.get_playlist_track_keys(plan.source_playlist_id)
+        cached = store.get_playlist_tracks_with_meta(plan.source_playlist_id)
+        if any(not row[1] for row in cached):
+            raise ValueError("The source contains unresolved uploads; re-sync before deleting it")
+        source_keys = {row[1] for row in cached}
     if source_keys:  # empty source loses nothing -> safe to delete without reading the target
         target_keys = _remote_keys(target_client, target_ytm)
         if target_keys is None:
@@ -145,14 +152,15 @@ def _verify_and_delete(store, plan, source_client, target_client, source_ytm_pla
     source_client.delete_playlist(source_ytm_playlist_id)
     return backup_path
 
-def _add_items(client, ytm_playlist_id, video_ids):
+def _add_items(client, ytm_playlist_id, video_ids, set_video_ids=None):
     """Add items, surviving a batch rejection. YouTube 400s the WHOLE add_playlist_items call if any
     single videoId is invalid/unavailable, which would otherwise kill an entire merge. So on failure
     we retry one id at a time and skip the bad ones. Returns (added_count, skipped_video_ids)."""
     if not video_ids:
         return 0, []
     try:
-        client.add_playlist_items(ytm_playlist_id, video_ids)
+        result = client.add_playlist_items(ytm_playlist_id, video_ids)
+        _remember_added_handles(result, set_video_ids)
         return len(video_ids), []
     except Exception:  # noqa: BLE001 - usually one unavailable id poisoning the batch
         logger.warning("batch add of %d items to %s failed; retrying individually",
@@ -160,7 +168,8 @@ def _add_items(client, ytm_playlist_id, video_ids):
         added, skipped = 0, []
         for v in video_ids:
             try:
-                client.add_playlist_items(ytm_playlist_id, [v])
+                result = client.add_playlist_items(ytm_playlist_id, [v])
+                _remember_added_handles(result, set_video_ids)
                 added += 1
             except Exception:  # noqa: BLE001
                 skipped.append(v)
@@ -169,12 +178,20 @@ def _add_items(client, ytm_playlist_id, video_ids):
     return added, skipped
 
 
-def add_items_resilient(client, playlist_id, item_ids, batch_size=100):
+def _remember_added_handles(result, handles):
+    if handles is None or not isinstance(result, dict):
+        return
+    for item in result.get("playlistEditResults", []):
+        if item and item.get("videoId") and item.get("setVideoId"):
+            handles[item["videoId"]] = item["setVideoId"]
+
+
+def add_items_resilient(client, playlist_id, item_ids, batch_size=100, *, set_video_ids=None):
     """Public import boundary: bounded batches, with per-item recovery for a rejected batch."""
     added, skipped = 0, []
     ids = list(item_ids)
     for start in range(0, len(ids), max(1, batch_size)):
-        n, bad = _add_items(client, playlist_id, ids[start:start + max(1, batch_size)])
+        n, bad = _add_items(client, playlist_id, ids[start:start + max(1, batch_size)], set_video_ids)
         added += n
         skipped.extend(bad)
     return added, skipped
@@ -456,6 +473,7 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
     your library): the playlist is excluded from playlist-level signals, and its unplayed-only tracks
     are excluded from the embedding baskets, until you actually play it."""
     from yt_playlist.library.sync import content_hash   # local import avoids an import cycle
+    from yt_playlist.rec import rec_params
     group = group or GENERATED_GROUP
     uniq, seen = [], set()
     for t in tracks:
@@ -465,6 +483,23 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
             uniq.append(t)
     if not uniq:
         raise ValueError("no tracks to add")
+    # Resolve times before any remote writes: Fresh discoveries often have no stored duration,
+    # and finding a two-hour concert after adding it is too late (#44). Keep these copies so local
+    # materialization reuses each result, including unknowns, without another lookup (#26).
+    max_duration = rec_params.max_track_duration_s(store)
+    eligible = []
+    for t in uniq:
+        dur = t.get("duration")
+        if dur is None:
+            dur = store.known_duration(t.get("title") or "", t.get("artist") or "")
+        if dur is None:
+            dur = _fetch_song_duration(client, t["video_id"])
+        if dur is None or dur <= max_duration:
+            eligible.append({**t, "duration": dur})
+    excluded = len(uniq) - len(eligible)
+    uniq = eligible
+    if not uniq:
+        raise ValueError("No tracks are within the maximum track length set in Taste Model.")
     title = (title or "Generated playlist").strip()
     if recipe is not None:                                # recipe-driven: version the title
         from yt_playlist.rec.recommend import versioned_title
@@ -484,28 +519,21 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
             if t["video_id"] in skipped_set:
                 continue
             ti, ar = t.get("title") or "", t.get("artist") or ""
-            # Recommendation tracks arrive without a time (the rec pipeline doesn't carry one). Reuse a
-            # duration we already know for this song (free), else fetch it once, so the generated
-            # playlist's rows show their length instead of a blank (#26).
-            dur = t.get("duration")
-            if dur is None:
-                dur = store.known_duration(ti, ar)
-            if dur is None:
-                dur = _fetch_song_duration(client, t["video_id"])
             track_ids.append(store.upsert_track(
-                t["video_id"], ti, ar, t.get("album") or "", dur, thumbnail=t.get("thumbnail")))
-            keys.append(identity_key(ti, ar))
+                t["video_id"], ti, ar, t.get("album") or "", t["duration"], thumbnail=t.get("thumbnail")))
+        keys = [store.catalog_subject(tid)["identity_key"] for tid in track_ids]
         db_pid = store.upsert_playlist(identity_id, new_pid, title, len(track_ids),
                                        content_hash(list(dict.fromkeys(keys))), now, created_at=now)
         store.set_playlist_tracks(db_pid, track_ids)
         store.ensure_playlist_thumbnail(db_pid)
     store.record_action(COPY_PLAYLIST,
                         json.dumps({"title": title, "source": "recommendations", "group": group,
-                                    "added": added, "skipped": len(skipped)}),
+                                    "added": added, "skipped": len(skipped) + excluded}),
                         "{}", "executed", json.dumps({"new_ytm": new_pid}), now)
     if recipe is not None:
         store.set_recipe(new_pid, recipe, now)           # remember exactly how this one was made
-    return {"new_ytm": new_pid, "pid": db_pid, "title": title, "added": added, "skipped": len(skipped)}
+    return {"new_ytm": new_pid, "pid": db_pid, "title": title, "added": added,
+            "skipped": len(skipped) + excluded}
 
 def _playlist_ready(client, ytm_id) -> bool:
     """Has YouTube materialized this playlist enough to load it? A just-created playlist returns a
@@ -587,7 +615,7 @@ def create_playlist_from_album(store, browse_id, name, client, now, identity_id)
             continue
         ti, ar, al = meta[v]
         track_ids.append(store.upsert_track(v, ti, ar, al, None, thumbnail=thumb))
-        keys.append(identity_key(ti, ar))
+    keys = [store.catalog_subject(tid)["identity_key"] for tid in track_ids]
     from yt_playlist.library.sync import content_hash   # local import avoids an import cycle
     db_pid = store.upsert_playlist(identity_id, new_pid, title, len(track_ids),
                                    content_hash(list(dict.fromkeys(keys))), now, created_at=now)
@@ -730,16 +758,11 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_
     items = [t for t in tracks if t.get("videoId")]
     if not items:
         raise ValueError("no tracks to add")
-    # the track currently after the anchor, captured before we append, so we know where to slot the
-    # new tracks back to. None (anchor is last, or absent) means "leave them at the end".
-    successor_vid = None
-    if after_video_id:
-        order = [t["video_id"] for t in store.playlist_tracks_detail(playlist_id)]
-        if after_video_id in order:
-            i = order.index(after_video_id)
-            successor_vid = order[i + 1] if i + 1 < len(order) else None
+    if after_video_id and after_video_id not in {t["video_id"] for t in store.playlist_tracks_detail(playlist_id)}:
+        raise ValueError("the original track is no longer in this playlist")
+    handles = {}
     added, skipped = add_items_resilient(client, pl.ytm_playlist_id,
-                                          [t["videoId"] for t in items])
+                                          [t["videoId"] for t in items], set_video_ids=handles)
     skipped_set = set(skipped)
     existing = store.get_playlist_track_ids(playlist_id)
     new_ids, titles = [], []
@@ -755,11 +778,8 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_
                                           t.get("album"), dur, 1,
                                           None, None, t.get("album_browse"), t.get("thumbnail")))
         titles.append(t.get("title", ""))
-    # Splice the new tracks into the store order right after the anchor, so the UI (which renders
-    # from the store on refresh) shows them below the clicked track immediately. This is independent
-    # of the best-effort YouTube reorder below, which silently gives up when YouTube's indexing lag
-    # hides a just-added track from the read-back, leaving them stranded at the end otherwise (#40).
-    new_unique = [i for i in new_ids if i not in existing]
+    # Show the requested order immediately, but retain a durable pending move until YouTube confirms.
+    new_unique = list(dict.fromkeys(i for i in new_ids if i not in existing))
     insert_at = len(existing)
     if after_video_id:
         anchor_tid = store.track_ids_for_videos([after_video_id]).get(after_video_id)
@@ -769,22 +789,18 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_
     store.set_playlist_tracks(playlist_id, combined)
     store.set_playlist_track_count(playlist_id, len(combined), now)
     store.ensure_playlist_thumbnail(playlist_id)
+    position_plan = {}
+    if after_video_id and new_unique:
+        tmap = store.track_ids_for_videos([t["videoId"] for t in items])
+        video_ids = [t["videoId"] for t in items if t["videoId"] not in skipped_set
+                     and tmap.get(t["videoId"]) in new_unique]
+        position_plan = {"playlist_id": playlist_id, "after_video_id": after_video_id,
+                         "video_ids": list(dict.fromkeys(video_ids)), "set_video_ids": handles}
     store.record_action(ADD_TRACKS,
                         json.dumps({"playlist": pl.title, "added": added, "titles": titles}),
-                        "{}", "executed", "{}", now)
-    # Move each new track to sit just before the anchor's old successor. Moving them in order before the
-    # same successor preserves their order (each lands right after the previous one). Best-effort: the
-    # add already succeeded, so a positioning hiccup just leaves a track at the end rather than failing.
-    if successor_vid:
-        for t in items:
-            if t["videoId"] in skipped_set:
-                continue
-            try:
-                reorder_track(store, playlist_id, t["videoId"], successor_vid, client, now)
-            except Exception:  # noqa: BLE001 - positioning is best-effort
-                logger.warning("could not slot %s below %s in playlist %s",
-                               t["videoId"], after_video_id, playlist_id)
-    return {"added": added, "skipped": len(skipped), "count": len(combined)}
+                        json.dumps(position_plan), "pending" if position_plan else "executed", "{}", now)
+    pending = retry_insertions(store, playlist_id, client, now) if position_plan else 0
+    return {"added": added, "skipped": len(skipped), "count": len(combined), "position_pending": pending}
 
 
 def _set_video_ids(client, ytm_playlist_id) -> dict:
@@ -829,6 +845,7 @@ def remove_track(store, playlist_id, video_id, client, now) -> dict:
         raise ValueError("track not found on YouTube (already removed?)")
     with_retry(lambda: client.remove_playlist_items(
         pl.ytm_playlist_id, [{"videoId": video_id, "setVideoId": svid}]))
+    cancel_insertions(store, playlist_id, now)
     moved_tid = store.track_ids_for_videos([video_id]).get(video_id)
     ids = [i for i in store.get_playlist_track_ids(playlist_id) if i != moved_tid]
     store.set_playlist_tracks(playlist_id, ids)
@@ -857,6 +874,7 @@ def reorder_track(store, playlist_id, video_id, before_video_id, client, now) ->
     # moveItem=(moved, successor) places `moved` before `successor`; a bare setVideoId moves to the end
     with_retry(lambda: client.edit_playlist(
         pl.ytm_playlist_id, moveItem=(moved, successor) if successor else moved))
+    cancel_insertions(store, playlist_id, now)
     tmap = store.track_ids_for_videos([video_id] + ([before_video_id] if before_video_id else []))
     moved_tid = tmap.get(video_id)
     ids = [i for i in store.get_playlist_track_ids(playlist_id) if i != moved_tid]

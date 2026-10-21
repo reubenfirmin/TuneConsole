@@ -9,6 +9,7 @@ import json
 import time
 
 from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.core import catalog
 
 # field concept name -> (tracks column, caster). The whitelist that makes a user-chosen resolution
 # safe to write straight into the canonical column.
@@ -22,34 +23,60 @@ _FIELD_COLUMN = {
 
 class EnrichmentRepo(Repo):
     @synchronized
-    def record_enrichment_attempt(self, identity_key, provider, fields, *, retry=False, now=None):
-        """Retain the latest provider answers by identity while canonical track storage is deferred.
+    def replace_catalog_hints(self, track_id, fields):
+        """A direct provider answer can supersede an imported album/radio hint.
 
-        The existing settings KV holds this temporary audit data; it is not a second work queue.
-        Empty successful answers are retained too, so a miss can be distinguished from no lookup.
+        Selected user choices remain item-scoped. Provider-selected and unknown legacy values
+        continue to use the fill-only policy; every superseded hint remains retained as evidence.
         """
-        key = "enrich_attempts:" + identity_key
-        row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        attempts = json.loads(row["value"]) if row else {}
-        attempts[provider] = {"at": time.time() if now is None else now,
-                              "status": "retry" if retry else ("found" if fields else "no_match"),
-                              "fields": fields}
-        self.conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)",
-                          (key, json.dumps(attempts)))
+        with self.conn:
+            catalog.replace_hints(self.conn,track_id,fields)
+
+    @synchronized
+    def record_enrichment_attempt(self, identity_key, provider, fields, *, retry=False, now=None, video_id=None):
+        key = catalog.resolve_key(self.conn, identity_key, video_id)
+        row = self.conn.execute("SELECT id FROM recordings WHERE identity_key=?", (key,)).fetchone()
+        result = {"at": time.time() if now is None else now,
+                  "status": "retry" if retry else ("found" if fields else "no_match"), "fields": fields}
+        if row is None:
+            self.conn.execute("INSERT OR REPLACE INTO legacy_enrichment_attempts VALUES (?,?,?)",
+                              (identity_key,json.dumps({provider:result}),"unresolved input identity"))
+        else:
+            self.conn.execute(
+                "INSERT INTO provider_attempts(recording_id,input_video_id,provider,at,status,fields_json) VALUES (?,?,?,?,?,?)",
+                (row["id"],video_id or "",provider,result["at"],result["status"],json.dumps(fields)))
         self.conn.commit()
+
+    @synchronized
+    def enrichment_attempts(self, identity_key, video_id=None):
+        key = catalog.resolve_key(self.conn,identity_key,video_id)
+        rows = self.conn.execute(
+            "SELECT p.* FROM provider_attempts p WHERE "
+            "(p.recording_id=(SELECT id FROM recordings WHERE identity_key=?) OR "
+            "p.input_video_id IN (SELECT y.video_id FROM youtube_items y JOIN recordings r "
+            "ON r.id=y.recording_id WHERE r.identity_key=?)) "
+            "AND (? IS NULL OR p.input_video_id=?) ORDER BY p.at,p.id",
+            (key,key,video_id,video_id)).fetchall()
+        return {r["provider"]: {"at":r["at"],"status":r["status"],"fields":json.loads(r["fields_json"])}
+                for r in rows}
 
     @synchronized
     def genre_provenance(self, track_id) -> dict | None:
         """Current genre plus the latest retained answer from each enrichment provider."""
+        track_id = catalog.resolve_entry(self.conn, track_id)
         track = self.conn.execute(
-            "SELECT id, title, artist, COALESCE(genre, '') genre FROM tracks WHERE id=?", (track_id,)
+            "SELECT id, recording_id, video_id, title, artist, COALESCE(genre, '') genre FROM catalog_tracks WHERE id=?", (track_id,)
         ).fetchone()
         if track is None:
             return None
         rows = self.conn.execute(
-            "SELECT provider, value FROM enrichment_log e WHERE track_id=? AND field='genre' "
-            "AND id=(SELECT MAX(id) FROM enrichment_log newer WHERE newer.track_id=e.track_id "
-            "AND newer.field=e.field AND newer.provider=e.provider) ORDER BY id", (track_id,)
+            "WITH relevant AS (SELECT * FROM enrichment_log WHERE field='genre' AND "
+            "((field_scope='recording' AND (recording_id=? OR input_video_id IN "
+            "(SELECT video_id FROM youtube_items WHERE recording_id=?))) OR "
+            "(field_scope='legacy_item' AND (input_video_id=? OR track_id=?)))) "
+            "SELECT provider,value FROM relevant e WHERE id=(SELECT MAX(id) FROM relevant newer "
+            "WHERE newer.provider=e.provider) ORDER BY id",
+            (track['recording_id'],track['recording_id'],track['video_id'],track_id)
         ).fetchall()
         candidates = [{"provider": r["provider"], "value": r["value"] or ""} for r in rows]
         conflict = self.conn.execute(
@@ -80,15 +107,46 @@ class EnrichmentRepo(Repo):
 
     @synchronized
     def log_enrichment(self, track_id, run_id, provider, field, value, now=None) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
+        subject = self.conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (track_id,)).fetchone()
+        scope = ('release' if field in ('year','label','mb_release_ids','cover_url') else
+                 'item' if field in ('popularity','gain','loudness','dynamic_complexity') else 'recording')
         self.conn.execute(
-            "INSERT INTO enrichment_log(track_id, run_id, provider, field, value, created_at) "
-            "VALUES (?,?,?,?,?,?)",
+            "INSERT INTO enrichment_log(track_id, run_id, provider, field, value, created_at,recording_id,input_video_id,field_scope) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (track_id, run_id, provider, field,
-             None if value is None else str(value), now or time.time()))
+             None if value is None else str(value), time.time() if now is None else now,
+             subject['recording_id'],subject['video_id'],scope))
+        if value and field in ('mb_recording_id','isrc'):
+            scheme = 'musicbrainz' if field == 'mb_recording_id' else 'isrc'
+            values = value if isinstance(value,(list,tuple)) else [value]
+            for identifier in values:
+                self.conn.execute("INSERT INTO recording_identifiers(recording_id,scheme,entity_type,value,source,input_video_id,status,observed_at) VALUES (?,?, 'recording',?,?,?,'candidate',?)",
+                                  (subject['recording_id'],scheme,str(identifier),provider,subject['video_id'],time.time() if now is None else now))
         self.conn.commit()
 
     @synchronized
+    def mark_recordings_enriched(self, recording_ids, now):
+        self.conn.executemany('UPDATE recordings SET first_enriched_at=COALESCE(first_enriched_at,?),last_enriched_at=? WHERE id=?',
+                              [(now,now,rid) for rid in recording_ids])
+        self.conn.commit()
+
+    @synchronized
+    def enrichment_memberships(self, recording_ids):
+        ids = list(recording_ids)
+        if not ids:
+            return set()
+        placeholders = ','.join('?' for _ in ids)
+        scopes = set()
+        if self.conn.execute(f'SELECT 1 FROM catalog_entries e JOIN library_memberships l ON l.entry_id=e.id WHERE e.recording_id IN ({placeholders}) LIMIT 1',ids).fetchone():
+            scopes.add('library')
+        if self.conn.execute(f'SELECT 1 FROM discovery_memberships WHERE recording_id IN ({placeholders}) LIMIT 1',ids).fetchone():
+            scopes.add('discovery')
+        return scopes
+
+    @synchronized
     def upsert_conflict(self, track_id, field, candidates, now=None) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         """Record (or refresh) a disagreement for one track+field. `candidates` is a list of
         {"provider","value"}. Re-run rule: refresh the candidate list; a previously-resolved conflict
         stays resolved while its candidate *values* are unchanged, but reopens if a new value appears."""
@@ -108,10 +166,17 @@ class EnrichmentRepo(Repo):
             "ON CONFLICT(track_id, field) DO UPDATE SET "
             f"  candidates=excluded.candidates, resolved={resolved_clause}, updated_at=excluded.updated_at",
             (track_id, field, payload, now or time.time()))
+        self.conn.execute(
+            "UPDATE enrichment_conflict SET recording_id=(SELECT recording_id FROM catalog_entries WHERE id=?),"
+            "input_video_id=(SELECT video_id FROM catalog_entries WHERE id=?),field_scope=? "
+            "WHERE track_id=? AND field=?",
+            (track_id,track_id,'release' if field in ('year','label') else
+             'item' if field in ('popularity','gain') else 'recording',track_id,field))
         self.conn.commit()
 
     @synchronized
     def set_track_field(self, track_id, field, value) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         """Overwrite a single canonical track column (used by conflict resolution). Whitelisted."""
         spec = _FIELD_COLUMN.get(field)
         if spec is None:
@@ -121,11 +186,12 @@ class EnrichmentRepo(Repo):
             v = cast(value) if value not in (None, "") else ("" if cast is str else None)
         except (TypeError, ValueError):
             v = value
-        self.conn.execute(f"UPDATE tracks SET {col}=? WHERE id=?", (v, track_id))
+        catalog.choose_field(self.conn,track_id,col,v,'conflict_resolution')
         self.conn.commit()
 
     @synchronized
     def resolve_conflict(self, track_id, field, value, now=None) -> None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         """Apply the user's choice: overwrite the canonical column and mark the conflict resolved."""
         self.set_track_field(track_id, field, value)
         self.conn.execute(
@@ -146,7 +212,7 @@ class EnrichmentRepo(Repo):
     def conflict_count_for_album(self, album_browse_id) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) n FROM enrichment_conflict c "
-            "JOIN tracks t ON t.id=c.track_id "
+            "JOIN catalog_tracks t ON t.id=c.track_id "
             "WHERE t.album_browse_id=? AND c.resolved=0", (album_browse_id,)).fetchone()
         return row["n"]
 
@@ -161,7 +227,7 @@ class EnrichmentRepo(Repo):
             "SELECT c.track_id, c.field, c.candidates, t.title, t.artist, t.video_id, t.mb_recording_id "
             "FROM enrichment_conflict c "
             "JOIN playlist_tracks pt ON pt.track_id=c.track_id "
-            "JOIN tracks t ON t.id=c.track_id "
+            "JOIN catalog_tracks t ON t.id=c.track_id "
             "WHERE pt.playlist_id=? AND c.resolved=0 ORDER BY t.title, c.field",
             (playlist_id,)).fetchall()
         return self._conflicts(rows)
@@ -170,49 +236,38 @@ class EnrichmentRepo(Repo):
     def unresolved_conflicts_for_album(self, album_browse_id) -> list:
         rows = self.conn.execute(
             "SELECT c.track_id, c.field, c.candidates, t.title, t.artist, t.video_id, t.mb_recording_id "
-            "FROM enrichment_conflict c JOIN tracks t ON t.id=c.track_id "
+            "FROM enrichment_conflict c JOIN catalog_tracks t ON t.id=c.track_id "
             "WHERE t.album_browse_id=? AND c.resolved=0 ORDER BY t.title, c.field",
             (album_browse_id,)).fetchall()
         return self._conflicts(rows)
 
     # --- enrichment worker: priority queue, processed bookkeeping, coverage stats ----------------
 
-    # One logical track stream over the existing storage. Discovery membership and canonical track
-    # storage will be consolidated separately; queue ordering must not depend on the source table.
-    _TRACKS_CTE = """
-        enrichment_tracks AS (
-            SELECT 'library' source, id, id queue_order, identity_key, video_id, title, artist,
-                   album_browse_id, thumbnail, mb_recording_id, created_at,
-                   first_enriched_at, last_enriched_at, genre, mb_year, bpm, energy, danceability
-            FROM tracks
-            UNION ALL
-            SELECT 'discovery', NULL, rowid, identity_key, video_id, title, artist,
-                   source_browse_id, thumbnail, NULL, found_at,
-                   last_enriched, last_enriched, genre, year, bpm, energy, danceability
-            FROM discovered_tracks
-        )
-    """
+    # One representative input per recording, independent of library/discovery overlap.
+    _TRACKS_CTE = "enrichment_tracks AS (SELECT * FROM catalog_enrichment_tracks)"
 
     @staticmethod
     def _queue_track(row):
-        # The waterfall uses a library id or a discovery identity key as its completion token.
-        # Omit the absent id rather than returning id=None, which would mask the identity key.
-        return {k: row[k] for k in ("source", "id", "identity_key", "video_id", "title", "artist",
+        # Completion addresses the recording job; id identifies its exact input item/entry.
+        return {"job_id": row["recording_id"], **{k: row[k] for k in ("recording_id", "source", "id", "identity_key", "video_id", "title", "artist",
                                     "thumbnail", "mb_recording_id")
-                if k != "id" or row[k] is not None}
+                if k != "id" or row[k] is not None}}
 
     # Per-track song plays + the play sums of the containers it belongs to (playlist / album / artist).
     # Reused by the priority queue. `tp` = track plays; the three container CTEs aggregate over members.
     _QUEUE_CTES = """
         WITH plays AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key),
-        tp AS (SELECT t.id, COALESCE(p.c,0) sp FROM tracks t
+        tp AS (SELECT t.id,t.recording_id, COALESCE(p.c,0) sp FROM catalog_tracks t
                LEFT JOIN plays p ON p.identity_key=t.identity_key),
-        pl_plays AS (SELECT pt.playlist_id, SUM(tp.sp) c FROM playlist_tracks pt
-                     JOIN tp ON tp.id=pt.track_id GROUP BY pt.playlist_id),
-        al_plays AS (SELECT t.album_browse_id ab, SUM(tp.sp) c FROM tracks t JOIN tp ON tp.id=t.id
-                     WHERE t.album_browse_id IS NOT NULL GROUP BY t.album_browse_id),
-        ar_plays AS (SELECT t.artist ar, SUM(tp.sp) c FROM tracks t JOIN tp ON tp.id=t.id
-                     WHERE t.artist IS NOT NULL AND t.artist<>'' GROUP BY t.artist)
+        pl_plays AS (SELECT playlist_id,SUM(sp) c FROM (
+                     SELECT DISTINCT pt.playlist_id,tp.recording_id,tp.sp FROM playlist_tracks pt
+                     JOIN tp ON tp.id=pt.track_id) GROUP BY playlist_id),
+        al_plays AS (SELECT ab,SUM(sp) c FROM (
+                     SELECT DISTINCT t.album_browse_id ab,tp.recording_id,tp.sp FROM catalog_tracks t
+                     JOIN tp ON tp.id=t.id WHERE t.album_browse_id IS NOT NULL) GROUP BY ab),
+        ar_plays AS (SELECT ar,SUM(sp) c FROM (
+                     SELECT DISTINCT t.artist ar,tp.recording_id,tp.sp FROM catalog_tracks t
+                     JOIN tp ON tp.id=t.id WHERE t.artist IS NOT NULL AND t.artist<>'') GROUP BY ar)
     """
 
     @synchronized
@@ -262,9 +317,10 @@ class EnrichmentRepo(Repo):
         """Stamp a processed pass: set first_enriched_at once, bump last_enriched_at every time."""
         if not track_ids:
             return
+        track_ids = [catalog.resolve_entry(self.conn,t) for t in track_ids]
         qs = ",".join("?" * len(track_ids))
         self.conn.execute(
-            f"UPDATE tracks SET first_enriched_at = COALESCE(first_enriched_at, ?), "
+            f"UPDATE catalog_tracks SET first_enriched_at = COALESCE(first_enriched_at, ?), "
             f"last_enriched_at = ? WHERE id IN ({qs})", [now, now, *track_ids])
         self.conn.commit()
 
@@ -276,12 +332,12 @@ class EnrichmentRepo(Repo):
         suggestion is fresh user intent, so it deserves an immediate retry even when that library
         track was attempted before.
         """
-        track_ids = list(dict.fromkeys(track_ids))
+        track_ids = list(dict.fromkeys(catalog.resolve_entry(self.conn,t) for t in track_ids))
         if not track_ids:
             return
         qs = ",".join("?" * len(track_ids))
         self.conn.execute(
-            f"UPDATE tracks SET first_enriched_at=NULL, last_enriched_at=NULL WHERE id IN ({qs})",
+            f"UPDATE catalog_tracks SET first_enriched_at=NULL, last_enriched_at=NULL WHERE id IN ({qs})",
             track_ids)
         self.conn.commit()
 
@@ -291,12 +347,12 @@ class EnrichmentRepo(Repo):
         prefix = "WITH " + self._TRACKS_CTE if include_discovery else ""
         table = "enrichment_tracks" if include_discovery else "tracks"
         r = self.conn.execute(
-            prefix + " SELECT COUNT(*) total, "
-            "  SUM(first_enriched_at IS NOT NULL) processed, "
-            "  SUM(genre IS NOT NULL AND genre<>'') genre, "
-            "  SUM(mb_year IS NOT NULL AND mb_year<>'') year, "
-            "  SUM(bpm IS NOT NULL) bpm, SUM(energy IS NOT NULL) energy, "
-            f"  SUM(danceability IS NOT NULL) danceability FROM {table}").fetchone()
+            prefix + " SELECT COUNT(*) total,SUM(processed) processed,SUM(genre) genre,"
+            "SUM(year) year,SUM(bpm) bpm,SUM(energy) energy,SUM(danceability) danceability FROM ("
+            "SELECT recording_id,MAX(first_enriched_at IS NOT NULL) processed,"
+            "MAX(genre IS NOT NULL AND genre<>'') genre,MAX(mb_year IS NOT NULL AND mb_year<>'') year,"
+            "MAX(bpm IS NOT NULL) bpm,MAX(energy IS NOT NULL) energy,"
+            f"MAX(danceability IS NOT NULL) danceability FROM {table} GROUP BY recording_id)").fetchone()
         return {k: (r[k] or 0) for k in
                 ("total", "processed", "genre", "year", "bpm", "energy", "danceability")}
 
@@ -344,7 +400,7 @@ class EnrichmentRepo(Repo):
         columns = ", ".join("t." + col for col in sorted({spec[0] for spec in _FIELD_COLUMN.values()}))
         return ("SELECT c.track_id, c.field, c.candidates, c.resolved_value, "
                 "t.title, t.artist, t.video_id, t.mb_recording_id, "
-                f"{columns} FROM enrichment_conflict c JOIN tracks t ON t.id=c.track_id")
+                f"{columns} FROM enrichment_conflict c JOIN catalog_tracks t ON t.id=c.track_id")
 
     def _review_conflicts(self, rows):
         """Always offer the saved value, even if it is absent from today's provider candidates.
@@ -409,19 +465,21 @@ class EnrichmentRepo(Repo):
 
     @synchronized
     def enrichment_conflict_detail(self, track_id, field) -> dict | None:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         rows = self.conn.execute(self._review_select() + " WHERE c.track_id=? AND c.field=?",
                                  (track_id, field)).fetchall()
         return self._review_conflicts(rows)[0] if rows else None
 
     @synchronized
     def resolve_enrichment_candidate(self, track_id, field, value, now=None) -> bool:
+        track_id = catalog.resolve_entry(self.conn, track_id)
         """Accept a provider candidate or the current saved value. Repeated choices are safe."""
         spec = _FIELD_COLUMN.get(field)
         if spec is None:
             return False
         row = self.conn.execute(
             f"SELECT c.candidates, t.{spec[0]} current_value FROM enrichment_conflict c "
-            "JOIN tracks t ON t.id=c.track_id WHERE c.track_id=? AND c.field=?",
+            "JOIN catalog_tracks t ON t.id=c.track_id WHERE c.track_id=? AND c.field=?",
             (track_id, field)).fetchone()
         if row is None:
             return False

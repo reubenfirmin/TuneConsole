@@ -80,7 +80,7 @@ def test_mixed_evidence_day_keeps_the_full_session_basket(store):
     # merge window so they land as two distinct play_events rows) -- mixed evidence, so A stays.
     store.add_history_snapshot(iid, _NOON, [key_a, key_b])
     store.record_play_event(iid, key_a, "va", 10.0, playlist_ytm_id="PLGEN")
-    store.record_play_event(iid, key_a, "va2", 3000.0, playlist_ytm_id=None)
+    store.record_play_event(iid, key_a, "va", 3000.0, playlist_ytm_id=None)
 
     baskets = _session_baskets(store)
     assert frozenset({key_a, key_b}) in baskets

@@ -20,6 +20,7 @@
           {% if a.status == 'executed' %}<span class="tag teal">{{ a.status }}</span>
           {% elif a.status in ('cancelled', 'undone') %}<span class="tag">{{ a.status }}</span>
           {% elif a.status == 'planned' %}<span class="tag amber">{{ a.status }}</span>
+          {% elif a.status == 'pending' %}<span class="tag amber">placement pending</span>
           {% else %}<span class="tag">{{ a.status }}</span>{% endif %}
         </td>
         <td>

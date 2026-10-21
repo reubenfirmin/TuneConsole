@@ -32,7 +32,7 @@ GENERATED_GROUP = "Generated"
 LIKED_EXISTS = ("EXISTS(SELECT 1 FROM playlist_tracks lpt "
                 "JOIN playlists lpl ON lpl.id = lpt.playlist_id "
                 "JOIN tracks lt ON lt.id = lpt.track_id "
-                "WHERE lpl.ytm_playlist_id = 'LM' AND lt.identity_key = t.identity_key)")
+                "WHERE lpl.ytm_playlist_id = 'LM' AND lt.video_id = t.video_id)")
 
 
 def synchronized(method):

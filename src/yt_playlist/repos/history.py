@@ -1,8 +1,10 @@
 """HistoryRepo: listening-history snapshots and their item keys."""
 import datetime
 import logging
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.core import catalog
+from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized
 
 logger = logging.getLogger(__name__)
 
@@ -12,10 +14,12 @@ _LIVE_DEDUP_S = 1800     # #75 same-track re-reports within this window merge (l
                          # past it, the same track is a genuine replay and logs a new event
 
 
-def _parse_played_date(played, taken_at):
+def _parse_played_date(played, taken_at, source_timezone=None):
     """Resolve YouTube's relative `played` bucket ('Today' / 'Yesterday' / 'Jun 25' / 'Jun 25, 2025') to
-    an ABSOLUTE UTC day (a noon timestamp), anchored on the sync time `taken_at` (#58). Returns None when
-    the bucket cannot be resolved.
+    an absolute LOCAL calendar date, stored at noon UTC, anchored on the sync time `taken_at` (#58).
+    Use the browser's IANA timezone when supplied; older clients and explicit local callers use the
+    machine's local timezone. The storage timestamp is only a date key, not the actual play time.
+    Returns None when the bucket cannot be resolved.
 
     Because the bucket is relative, the SAME play reads 'Today' on one sync and 'Yesterday' the next.
     Both resolve to the same date, which is what makes play recording idempotent.
@@ -31,7 +35,14 @@ def _parse_played_date(played, taken_at):
     truth. The caller drops it. A play we cannot date is not lost: the extension records live plays with
     real timestamps (library/live_plays.py), and a dateable row still backfills.
     """
-    sync_day = datetime.datetime.fromtimestamp(taken_at, tz=datetime.timezone.utc).date()
+    timezone = None
+    if source_timezone:
+        try:
+            timezone = ZoneInfo(source_timezone)
+        except (ZoneInfoNotFoundError, ValueError, TypeError):
+            logger.warning("history: invalid source timezone %r; using the machine's local timezone",
+                           source_timezone)
+    sync_day = datetime.datetime.fromtimestamp(taken_at, tz=timezone).date()
     p = (played or "").strip().lower()
     if p == "today":
         day = sync_day
@@ -77,11 +88,12 @@ class HistoryRepo(Repo):
         return sid
 
     @synchronized
-    def record_history_plays(self, identity_id, taken_at, items) -> int:
+    def record_history_plays(self, identity_id, taken_at, items, *, source_timezone=None) -> int:
         """#49/#58 Idempotent capture-time play recording. `items` is the recently-played window as
-        [(identity_key, played_bucket), ...] (a bare key is also accepted -> played=None -> the sync
-        day). Each play is keyed by (identity_key, played-DATE): the relative `played` bucket resolved
-        to an absolute day via taken_at. Re-fetching the same window -- even when 'Today' becomes
+        [(identity_key, played_bucket), ...] (a bare key is also accepted and means played now).
+        Each play is keyed by (identity_key, played-DATE): the relative `played` bucket resolved
+        via taken_at in source_timezone (the browser's timezone, or machine local time when omitted).
+        Re-fetching the same window -- even when 'Today' becomes
         'Yesterday' the next day -- maps to the same date and records nothing new, so COUNT(*) counts
         plays, not lingering; a reordered/unstable window cannot create phantom plays. Same-date repeats
         merge. Returns the number of new (key, date) plays recorded.
@@ -102,24 +114,33 @@ class HistoryRepo(Repo):
             if not key:
                 continue
             if bare:
-                play_ts = _parse_played_date("today", taken_at)     # caller asserts: played now
+                play_ts = _parse_played_date("today", taken_at, source_timezone)  # played now
             else:
-                play_ts = _parse_played_date(played, taken_at)
+                play_ts = _parse_played_date(played, taken_at, source_timezone)
                 if play_ts is None:                                 # undateable window row: not a play today
                     continue
             by_date.setdefault(play_ts, set()).add(key)
         recorded = 0
         for play_ts, keys in by_date.items():
             sid = self._snapshot_for_date(identity_id, play_ts)
-            existing = {r["identity_key"] for r in self.conn.execute(
-                "SELECT identity_key FROM history_items WHERE snapshot_id=?", (sid,))}
-            new = sorted(keys - existing)
+            new = self._new_history_keys(sid,keys)
             if new:
                 self.conn.executemany("INSERT INTO history_items(snapshot_id, identity_key) VALUES (?,?)",
                                       [(sid, k) for k in new])
                 recorded += len(new)
         self.conn.commit()
         return recorded
+
+    def _new_history_keys(self, snapshot_id, keys):
+        existing = {r['identity_key'] for r in self.conn.execute(
+            'SELECT identity_key FROM history_items WHERE snapshot_id=?', (snapshot_id,))}
+        subjects = {}
+        for key in sorted(keys):
+            subject = catalog.resolve_key(self.conn,key) or key
+            if subject not in existing:
+                subjects.setdefault(subject,key)
+        # Insert the observed key; the catalog trigger retains it beside the resolved subject.
+        return list(subjects.values())
 
     def _snapshot_for_date(self, identity_id, play_ts):
         """Get-or-create the single snapshot for (identity, play-date), so all of a day's plays share
@@ -220,16 +241,16 @@ class HistoryRepo(Repo):
         the history branch of the union: the next YTM history sync re-records every radio play as a
         day-granular history_items row with NO provenance (YTM history carries no playlist
         attribution), and MAX(ts) GROUP BY key would resurrect the excluded play through that shadow.
-        So while an exclusion is active, a history row whose (identity_key, UTC day) has a matching
+        So while an exclusion is active, a history row whose (identity_key, calendar day) has a matching
         excluded-provenance play_event is suppressed too; history rows for keys/days with no such
         radio event (organic listening, pre-live history) pass through untouched. history_items
         carries no video id, so (identity_key, day) IS the play's identity in the day-granular
         model, making it the correct shadow-match join.
 
         The day match is widened to ADJACENT days (play day within shadow day +/- 1): play_events
-        timestamps are real UTC, but _parse_played_date anchors YTM's LOCAL-day 'Today'/'Yesterday'
-        buckets on the UTC sync day, so a non-UTC user's evening radio play can land its shadow one
-        UTC day off in either direction and would slip past an exact-day match, re-entering the
+        timestamps are real UTC, but history dates represent the browser's local calendar day at
+        noon UTC. A non-UTC user's radio play can land its shadow one UTC day off and would slip past
+        an exact-day match (as can legacy rows anchored to the UTC sync day), re-entering the
         funnel. Collateral of the widening stays confined to same-track adjacent-day history rows,
         and only when radio played that exact track: the conservative direction for a machine-play
         exclusion (an organic same-track play two or more days away always survives)."""
@@ -269,22 +290,31 @@ class HistoryRepo(Repo):
         """#75 Persist one live now-playing report from the extension. The content script re-reports
         the SAME track when its likeStatus changes, so a report matching the identity's latest event
         (same key, within _LIVE_DEDUP_S) updates that row (like_status; playlist id only if missing)
-        instead of logging a second play. Returns True when a NEW play event was recorded."""
+        instead of logging a second play. Snapshot generated policy with the playlist context so
+        promotion cannot rewrite a play's provenance. Returns True when a NEW play was recorded."""
+        is_generated = self.conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM playlist_group WHERE name=? "
+            "AND (ytm=? OR 'RDAMPL' || ytm=?))",
+            (GENERATED_GROUP, playlist_ytm_id, playlist_ytm_id)).fetchone()[0]
         row = self.conn.execute(
-            "SELECT id, identity_key, played_at FROM play_events WHERE identity_id=? "
+            "SELECT id, identity_key, video_id, played_at FROM play_events WHERE identity_id=? "
             "ORDER BY played_at DESC, id DESC LIMIT 1", (identity_id,)).fetchone()
-        if (row and row["identity_key"] == identity_key
+        subject = catalog.play_key(self.conn,identity_key,video_id)
+        if (row and row["identity_key"] == subject
+                and (not video_id or not row['video_id'] or video_id == row['video_id'])
                 and played_at - row["played_at"] < _LIVE_DEDUP_S):
             self.conn.execute(
                 "UPDATE play_events SET like_status=COALESCE(?, like_status), "
+                "is_generated=CASE WHEN playlist_ytm_id IS NULL AND ? IS NOT NULL "
+                "THEN ? ELSE is_generated END, "
                 "playlist_ytm_id=COALESCE(playlist_ytm_id, ?) WHERE id=?",
-                (like_status, playlist_ytm_id, row["id"]))
+                (like_status, playlist_ytm_id, is_generated, playlist_ytm_id, row["id"]))
             self.conn.commit()
             return False
         self.conn.execute(
             "INSERT INTO play_events(identity_id, identity_key, video_id, played_at, "
-            "playlist_ytm_id, like_status, source) VALUES (?,?,?,?,?,?,'live')",
-            (identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status))
+            "playlist_ytm_id, like_status, is_generated, source) VALUES (?,?,?,?,?,?,?,'live')",
+            (identity_id, identity_key, video_id, played_at, playlist_ytm_id, like_status, is_generated))
         self.conn.commit()
         return True
 
@@ -327,9 +357,7 @@ class HistoryRepo(Repo):
         added = 0
         for play_ts, keys in by_date.items():
             sid = self._snapshot_for_date(identity_id, play_ts)
-            existing = {r["identity_key"] for r in self.conn.execute(
-                "SELECT identity_key FROM history_items WHERE snapshot_id=?", (sid,))}
-            new = sorted(keys - existing)
+            new = self._new_history_keys(sid,keys)
             if new:
                 self.conn.executemany(
                     "INSERT INTO history_items(snapshot_id, identity_key) VALUES (?,?)",
@@ -352,12 +380,14 @@ class HistoryRepo(Repo):
         for key, vid, ts in rows:
             if not key:
                 continue
+            subject = catalog.play_key(self.conn,key,vid)
             cur = self.conn.execute(
                 "INSERT INTO play_events(identity_id, identity_key, video_id, played_at, source) "
                 "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS ("
                 "  SELECT 1 FROM play_events WHERE identity_id=? AND identity_key=? "
+                "  AND (NULLIF(trim(video_id),'') IS NULL OR NULLIF(trim(?),'') IS NULL OR video_id=?) "
                 "  AND played_at BETWEEN ? - 2.0 AND ? + 2.0)",
-                (identity_id, key, vid, ts, source, identity_id, key, ts, ts))
+                (identity_id, key, vid, ts, source, identity_id, subject, vid, vid, ts, ts))
             added += cur.rowcount
         self.conn.commit()
         return added

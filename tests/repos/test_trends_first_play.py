@@ -1,4 +1,5 @@
 import pytest
+from tests.conftest import seed_catalog_track
 from yt_playlist.core.store import Store
 
 
@@ -22,10 +23,7 @@ def _snap(store, day, keys):
 
 
 def _track(store, key, artist, genre=""):
-    store.conn.execute(
-        "INSERT INTO tracks(identity_key, video_id, title, artist, genre) VALUES (?,?,?,?,?)",
-        (key, "v" + key, "T" + key, artist, genre))
-    store.conn.commit()
+    seed_catalog_track(store,key,"T"+key,artist,video_id="v"+key,genre=genre)
 
 
 def _build(store):

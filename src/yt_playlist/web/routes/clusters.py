@@ -11,7 +11,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, recommend
+from yt_playlist.rec import embed, measurement, recommend
 from yt_playlist.library import executor
 
 RING_SIZE = 6        # tracks added per "grow", a small ring keeps the canvas legible
@@ -133,6 +133,10 @@ def build(ctx) -> APIRouter:
                          "artist": m["artist"], "album": m["album"], "thumbnail": m["thumbnail"],
                          "genre": g, "family": genre_map.family(g), "score": round(score, 4),
                          "out_of_corpus": new})
+        measurement.record_recommendations(store, "clusters", ring, now_fn(), lane="ring",
+                                           ranker="cluster-expand",
+                                           provenance={"positive_seeds": pos, "negative_seeds": neg,
+                                                       "genre_selection": tokens})
         return JSONResponse({"ring": ring})
 
     @router.post("/clusters/explain")
@@ -200,6 +204,9 @@ def build(ctx) -> APIRouter:
                     executor.create_generated_playlist, store, name, tracks, client, now_fn(),
                     identity_id, recipe=recipe)
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
+                if res["added"]:
+                    measurement.record_action(store, "save", now_fn(), playlist_id=res["pid"],
+                                              event_id=f"generate:{res['new_ytm']}", generated=True)
                 # Play in the already-open YouTube Music tab (background), same as /home/generate:
                 # wait until YouTube confirms the new playlist is loadable before switching, on a
                 # background thread so this response is not held.

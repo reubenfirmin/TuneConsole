@@ -147,10 +147,6 @@
   .provider-toggle { grid-column: 4; grid-row: 1; }
   .provider-key { grid-column: 2 / -1; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .provider-card, .provider-switch, .provider-switch::after { transition: none; }
-}
-
 .takeout-steps { margin: 0; padding-left: 1.2rem; }
 .takeout-file { display: flex; align-items: center; gap: .6rem; position: relative; }
 .takeout-file-label { cursor: pointer; margin: 0; }

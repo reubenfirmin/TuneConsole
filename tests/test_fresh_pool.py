@@ -9,14 +9,25 @@ from yt_playlist.rec import embed, fresh_pool, mode_surfaces, road_trip, surface
 from yt_playlist.util.matching import identity_key
 
 
-def test_fresh_card_renders_completely_unenriched_discoveries(store):
+def test_fresh_card_waits_for_metadata_then_renders_discoveries(store):
+    keys = []
     for i in range(12):
         title, artist = f"Unenriched {i}", f"Unknown artist {i}"
-        store.upsert_discovered_track(identity_key(title, artist), f"new{i}", title, artist,
+        key = identity_key(title, artist)
+        store.upsert_discovered_track(key, f"new{i}", title, artist,
                                       None, None, None, None, None, 100)
+        keys.append(key)
     mode_surfaces.prepare_bundles(store, 200)
 
     with _client(store) as client:
+        waiting = client.get("/home/cards")
+        assert waiting.status_code == 200
+        assert 'data-title="Unenriched ' not in waiting.text
+        assert "Discover a fresh mix" in waiting.text
+
+        for key in keys:
+            store.set_discovered_enrichment(key, "House", None)
+        fresh_pool.prepare(store, 250)
         response = client.get("/home/cards")
     assert response.status_code == 200
     assert 'data-title="Unenriched ' in response.text

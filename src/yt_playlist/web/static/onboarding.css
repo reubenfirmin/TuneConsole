@@ -6,7 +6,6 @@
 .presync-art .pbar { transform-box: fill-box; transform-origin: 50% 100%;
   animation: presync-eq 1.9s ease-in-out infinite; }
 @keyframes presync-eq { 0%, 100% { transform: scaleY(0.28); opacity: 0.55; } 50% { transform: scaleY(1); opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .presync-art .pbar { animation: none; } }
 .presync-title { font-family: var(--font-sans); font-size: var(--type-xl); font-weight: 600;
   color: var(--text); margin: 0 0 0.45rem; }
 .presync-sub { color: var(--dim); font-size: var(--type-body); max-width: 42ch; margin: 0 auto; line-height: 1.5; }

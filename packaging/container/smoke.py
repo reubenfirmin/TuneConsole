@@ -108,6 +108,7 @@ print(json.dumps({'version': importlib.metadata.version('yt-playlist'),
 from yt_playlist.core import paths
 from yt_playlist.core.store import Store
 store = Store(paths.db_path())
+store.init_schema()
 store.set_setting('container_smoke', 'persisted')
 (paths.backups_dir() / 'container-smoke.txt').write_text('persisted')
 """)
@@ -116,7 +117,9 @@ store.set_setting('container_smoke', 'persisted')
         run("exec", name, "python", "-c", """
 from yt_playlist.core import paths
 from yt_playlist.core.store import Store
-assert Store(paths.db_path()).get_setting('container_smoke') == 'persisted'
+store = Store(paths.db_path())
+store.init_schema()
+assert store.get_setting('container_smoke') == 'persisted'
 assert (paths.backups_dir() / 'container-smoke.txt').read_text() == 'persisted'
 assert paths.app_log_path().is_file()
 """)

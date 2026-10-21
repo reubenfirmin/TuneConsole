@@ -1,5 +1,5 @@
 """Library pools built only after clicking an unfilled Home mix."""
-from yt_playlist.rec import home_themes, home_vibe, mode_surfaces, rec_params, recommend
+from yt_playlist.rec import home_themes, home_vibe, measurement, mode_surfaces, rec_params, recommend
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
 
@@ -20,6 +20,7 @@ def prepare(store, now, parameters):
         tracks = [mode_surfaces._item_dict(t) for t in scorer(store, now, limit=max(300, len(keys)))]
     tracks = home_themes.matching_genres(store, tracks, include=parameters["include_genres"],
                                         avoid=parameters["avoid_genres"])
+    tracks = measurement.stamp_pool(store, tracks, now, lane)
     store.put_proposals(f"home_pool:{lane}", {"parameters": parameters, "tracks": tracks}, now)
 
 

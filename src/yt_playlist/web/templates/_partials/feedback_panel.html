@@ -1,19 +1,14 @@
 {# Transient feedback control panel for a Generated playlist: a simple whole-mix mood plus an
    expandable set of per-genre / per-era levers. Everything here tilts the Home lanes and sticks
    until you change it, NOT a permanent taste signal. The simple buttons record without swapping
-   the panel (so Advanced stays reachable) and reflect your choice as 'selected', persisted from
+   the panel (so Detailed feedback stays reachable) and reflect your choice as 'selected', persisted from
    the active mood across a refresh. Per-track feedback lives in the track listing, not here.
    Expects `pid`, `facets` ({genres, eras}), and `mood_state` (+1/-1/0). #}
+{% from "_macros.html" import flow_badge %}
+{% set feedback_help = "Your feedback helps shape future recommendations. Repeated choices also update your saved preferences." %}
 <section class="fb-panel card card--inset" id="fb-{{ pid }}"
          x-data="{ sel: {{ mood_state|default(0) }}, detailed: false }">
   {% set is_cluster = recipe and recipe.model == 'cluster' %}
-  {% if recipe and recipe.facets and not is_cluster %}
-  <p class="fb-recipe">Made from
-    {% if recipe.facets.genres %}<span class="fb-chip">{{ recipe.facets.genres|join(' · ') }}</span>{% endif %}
-    {% if recipe.facets.eras %}<span class="fb-chip">{{ recipe.facets.eras|join(' · ') }}s</span>{% endif %}
-    {% if recipe.facets.artists %}<span class="fb-chip">{{ recipe.facets.artists|join(' · ') }}</span>{% endif %}
-  </p>
-  {% endif %}
   <div class="fb-simple">
     {% if is_cluster %}
     <a class="fb-type-chip" href="/clusters{% if has_cluster_canvas %}?from={{ pl.ytm_playlist_id|urlencode }}{% endif %}"
@@ -22,68 +17,160 @@
     <span class="fb-q">Want more music like this?</span>
     {% endif %}
     <div class="fb-btns">
-      <button type="button" class="mood-btn" :class="{ 'fb-sel': sel === 1 }" @click="sel = 1"
-              hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": 1}' hx-swap="none">🔥 More of this vibe</button>
-      <button type="button" class="mood-btn" :class="{ 'fb-sel': sel === -1 }" @click="sel = -1"
-              hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": -1}' hx-swap="none">🙅 Not my mood</button>
-      <button type="button" class="fb-toggle" @click="detailed = !detailed"
-              :aria-expanded="detailed" aria-controls="fb-details-{{ pid }}">
-        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
-             :class="{ 'is-open': detailed }"><path d="M4 8h16l-8 8z"/></svg>
-        Detailed feedback
+      <button type="button" class="mood-btn mood-btn--more" :class="{ 'fb-sel': sel === 1 }"
+              :aria-pressed="sel === 1" @click="sel = 1"
+              hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": 1}' hx-swap="none">
+        <svg class="mood-mark" viewBox="0 0 24 24" width="20" height="20" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true" focusable="false">
+          <path class="mood-wave" d="M3 10v4m4-8v12m4-15v18m4-10v5"/>
+          <path class="mood-sign" d="M20 3v6m-3-3h6"/>
+        </svg>
+        <span class="mood-label">More of this vibe</span>
+        {% include "_partials/mood_spill.html" %}
+      </button>
+      <button type="button" class="mood-btn mood-btn--less" :class="{ 'fb-sel': sel === -1 }"
+              :aria-pressed="sel === -1" @click="sel = -1"
+              hx-post="/recs/mood" hx-vals='{"pid": {{ pid }}, "dir": -1}' hx-swap="none">
+        <svg class="mood-mark" viewBox="0 0 24 24" width="20" height="20" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true" focusable="false">
+          <path class="mood-wave" d="M3 10v4m4-7v10m4-5v3m4-4v3"/>
+          <path class="mood-sign" d="M17 6h6"/>
+        </svg>
+        <span class="mood-label">Not my mood</span>
+        {% include "_partials/mood_tears.html" %}
       </button>
     </div>
+    <button type="button" class="fb-toggle" @click="detailed = !detailed"
+            :aria-expanded="detailed" aria-controls="fb-details-{{ pid }}">
+      Detailed feedback
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
+           :class="{ 'is-open': detailed }"><path d="M4 8h16l-8 8z"/></svg>
+    </button>
   </div>
 
   <div class="fb-detailed" id="fb-details-{{ pid }}" x-show="detailed" x-cloak>
-    {% if journey_label %}
-    <div class="fb-group fb-flow">
-      <div class="fb-lever" x-data="{ sel: 0 }"><span class="fb-name"><strong>Flow:</strong> {{ journey_label }}</span>
-        <button type="button" class="fb-less" @click="sel = -1" :class="{ 'fb-sel': sel === -1 }"
-                hx-post="/recs/journey" hx-swap="none" hx-on::after-request="fbFlash(this)"
-                hx-vals='{"pid": {{ pid }}, "dir": -1}'>less</button>
-        <button type="button" class="fb-more" @click="sel = 1" :class="{ 'fb-sel': sel === 1 }"
-                hx-post="/recs/journey" hx-swap="none" hx-on::after-request="fbFlash(this)"
-                hx-vals='{"pid": {{ pid }}, "dir": 1}'>more</button>
-      </div>
-      <p class="fb-sub">{{ journey_desc }}</p>
+    <div class="fb-detail-head">
+      {% if recipe and recipe.facets and not is_cluster %}
+      <dl class="fb-recipe">
+        <dt>Made from</dt>
+        <dd>
+          {% for genre in recipe.facets.genres|default([], true) %}<span class="fb-chip">{{ genre }}</span>{% endfor %}
+          {% for era in recipe.facets.eras|default([], true) %}<span class="fb-chip">{{ era }}s</span>{% endfor %}
+          {% for artist in recipe.facets.artists|default([], true) %}<span class="fb-chip">{{ artist }}</span>{% endfor %}
+        </dd>
+      </dl>
+      {% endif %}
+      <button type="button" class="fb-info" aria-label="How feedback works" aria-description="{{ feedback_help }}"
+              data-tip='{{ {"text": feedback_help}|tojson }}'>
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+             stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M12 11v6m0-10h.01"/>
+        </svg>
+      </button>
     </div>
-    {% endif %}
     {% if facets and (facets.genres or facets.eras) %}
-    <p class="fb-sub">Choose which genres and eras you want more or less of in Home recommendations. Your choices stay active until you change them.</p>
-    {% if facets.genres %}
-    <div class="fb-group"><span class="fb-grouphead">By genre</span>
-      {% for g in facets.genres %}
-      <div class="fb-lever" x-data="{ sel: 0 }"><span class="fb-name">{{ g.name }}</span>
-        <button type="button" class="fb-less" @click="sel = -1" :class="{ 'fb-sel': sel === -1 }"
-                hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
-                hx-vals='{"keys": {{ g['keys']|tojson|tojson }}, "dir": -1}'>less</button>
-        <button type="button" class="fb-more" @click="sel = 1" :class="{ 'fb-sel': sel === 1 }"
-                hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
-                hx-vals='{"keys": {{ g['keys']|tojson|tojson }}, "dir": 1}'>more</button>
+    <div class="fb-facets">
+      {% if facets.genres %}
+      <div class="fb-group">
+        <h3 class="fb-grouphead">
+          <svg class="fb-section-icon fb-record" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false">
+            <circle cx="10" cy="10" r="8"/>
+            <circle cx="10" cy="10" r="2"/>
+            <path d="M4.5 8a6 6 0 0 1 3.5-3.5M12 15.5a6 6 0 0 0 3.5-3.5"/>
+          </svg>
+          By genre
+        </h3>
+        {% for g in facets.genres %}
+        <div class="fb-lever" x-data="{ sel: 0 }">
+          <span class="fb-name">{{ g.name }}</span>
+          <div class="fb-vote" role="group" aria-label="Feedback for {{ g.name }}">
+            <button type="button" class="fb-more" @click="sel = 1" :class="{ 'fb-sel': sel === 1 }"
+                    :aria-pressed="sel === 1" aria-label="More {{ g.name }}"
+                    hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
+                    hx-vals='{"keys": {{ g['keys']|tojson|tojson }}, "dir": 1}'>more</button>
+            <button type="button" class="fb-less" @click="sel = -1" :class="{ 'fb-sel': sel === -1 }"
+                    :aria-pressed="sel === -1" aria-label="Less {{ g.name }}"
+                    hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
+                    hx-vals='{"keys": {{ g['keys']|tojson|tojson }}, "dir": -1}'>less</button>
+          </div>
+        </div>
+        {% endfor %}
       </div>
-      {% endfor %}
-    </div>
-    {% endif %}
-    {% if facets.eras %}
-    <div class="fb-group"><span class="fb-grouphead">By era</span>
-      {% for e in facets.eras %}
-      <div class="fb-lever" x-data="{ sel: 0 }"><span class="fb-name">{{ e.name }}s</span>
-        <button type="button" class="fb-less" @click="sel = -1" :class="{ 'fb-sel': sel === -1 }"
-                hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
-                hx-vals='{"keys": {{ e['keys']|tojson|tojson }}, "dir": -1}'>less</button>
-        <button type="button" class="fb-more" @click="sel = 1" :class="{ 'fb-sel': sel === 1 }"
-                hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
-                hx-vals='{"keys": {{ e['keys']|tojson|tojson }}, "dir": 1}'>more</button>
+      {% endif %}
+      {% if facets.eras %}
+      <div class="fb-group">
+        <h3 class="fb-grouphead">
+          <svg class="fb-section-icon" viewBox="0 0 24 20" width="20" height="18" aria-hidden="true" focusable="false">
+            <rect x="2" y="3" width="20" height="14" rx="3"/>
+            <g class="fb-tape-reel"><circle cx="8" cy="8" r="2.25"/><path d="M8 5.75v4.5M5.75 8h4.5"/></g>
+            <g class="fb-tape-reel"><circle cx="16" cy="8" r="2.25"/><path d="M16 5.75v4.5M13.75 8h4.5"/></g>
+            <path d="m6 17 2-4h8l2 4M10.5 8h3"/>
+          </svg>
+          By era
+        </h3>
+        {% for e in facets.eras %}
+        <div class="fb-lever" x-data="{ sel: 0 }">
+          <span class="fb-name">{{ e.name }}s</span>
+          <div class="fb-vote" role="group" aria-label="Feedback for {{ e.name }}s">
+            <button type="button" class="fb-more" @click="sel = 1" :class="{ 'fb-sel': sel === 1 }"
+                    :aria-pressed="sel === 1" aria-label="More {{ e.name }}s"
+                    hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
+                    hx-vals='{"keys": {{ e['keys']|tojson|tojson }}, "dir": 1}'>more</button>
+            <button type="button" class="fb-less" @click="sel = -1" :class="{ 'fb-sel': sel === -1 }"
+                    :aria-pressed="sel === -1" aria-label="Less {{ e.name }}s"
+                    hx-post="/recs/mood" hx-swap="none" hx-on::after-request="fbFlash(this)"
+                    hx-vals='{"keys": {{ e['keys']|tojson|tojson }}, "dir": -1}'>less</button>
+          </div>
+        </div>
+        {% endfor %}
       </div>
-      {% endfor %}
+      {% endif %}
     </div>
-    {% endif %}
     {% else %}
     <p class="fb-sub">These tracks need genre and release-year information. Use <strong>Enrich it</strong>
       (✨ above) to enable genre and era feedback.</p>
     {% endif %}
-    <p class="fb-note">Changes current recommendations. Repeated choices also update your saved preferences.</p>
+    {% if journey_label %}
+    <div class="fb-group fb-flow" x-data="{ sel: 0 }">
+      <div class="fb-flow-main">
+        <div class="fb-flow-heading">
+          <h3 class="fb-grouphead">
+            <svg class="fb-section-icon fb-flow-wave" viewBox="0 0 24 20" width="20" height="18" aria-hidden="true" focusable="false">
+              <path d="M1 10h4l3-7 5 14 4-9h6"/>
+            </svg>
+            Flow
+          </h3>
+          {{ flow_badge(recipe.journey if recipe else None, journey_label) }}
+        </div>
+        <div class="fb-vote" role="group" aria-label="Rate the {{ journey_label }} flow"
+             {% if journey_desc %}aria-describedby="fb-flow-description-{{ pid }}"{% endif %}>
+          <button type="button" class="fb-more" @click="sel = 1" :class="{ 'fb-sel': sel === 1 }"
+                  :aria-pressed="sel === 1" aria-label="Like this flow: {{ journey_label }}"
+                  hx-post="/recs/journey" hx-swap="none" hx-on::after-request="fbFlash(this)"
+                  hx-vals='{"pid": {{ pid }}, "dir": 1}'>
+            <svg class="fb-vote-mark fb-heart" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true" focusable="false">
+              <path d="M10 17S3 12.6 3 8a4 4 0 0 1 7-2.5A4 4 0 0 1 17 8c0 4.6-7 9-7 9Z"/>
+            </svg>
+            Like this flow
+          </button>
+          <button type="button" class="fb-less" @click="sel = -1" :class="{ 'fb-sel': sel === -1 }"
+                  :aria-pressed="sel === -1" aria-label="Not for me: {{ journey_label }} flow"
+                  hx-post="/recs/journey" hx-swap="none" hx-on::after-request="fbFlash(this)"
+                  hx-vals='{"pid": {{ pid }}, "dir": -1}'>
+            <svg class="fb-vote-mark fb-meh" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true" focusable="false">
+              <circle cx="10" cy="10" r="7"/>
+              <path d="M7 8h.01M13 8h.01M7 13h6"/>
+            </svg>
+            Not for me
+          </button>
+        </div>
+      </div>
+      {% if journey_desc %}<p class="fb-sub" id="fb-flow-description-{{ pid }}">{{ journey_desc }}</p>{% endif %}
+    </div>
+    {% endif %}
   </div>
 </section>
 <script>

@@ -13,8 +13,8 @@ from yt_playlist.util.duration import ago as _ago
 from yt_playlist.util.matching import normalize
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.rec.rec_dao import RecDao
-from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood,
-                                     content_taste, discovery_facet_weight, playlist_taste,
+from yt_playlist.rec.scoring import (_apply_axis_weights, _apply_mood, axis_adjusted_scores,
+                                     center_known_weights, content_taste, discovery_facet_weight, playlist_taste,
                                      score_with_traces)
 from yt_playlist.repos.base import GENERATED_GROUP
 
@@ -33,6 +33,7 @@ class ForYouItem:
     genre: str = ""    # filled in at DJ-ordering time (attach_genres) so dj_order can do genre segues
     year: int | None = None   # release year, for lanes whose tracks aren't in the library to look up
     trace: dict | None = None  # Taste-page-only production score decomposition; absent on normal serving
+    score: float | None = None  # Actual ranker score; None means an eligible, unscored fallback.
 
 
 def rotate_sample(items, size, epoch):
@@ -152,6 +153,8 @@ def for_you(store, now, limit=24, include_traces=False) -> list[ForYouItem]:
     queues = [[list(rows), reason, lane, weights.get(f"lane:{lane}", 1.0), 0]
               for rows, reason, lane in sources]
     out = _weighted_fair_queue(queues, limit, hard, muted, traces=traces)
+    for item in out:
+        item.score = sims.get(item.key) if sims is not None else None
     if include_traces and pt and V is not None:
         for item in out:
             if item.trace is None or item.key not in idx:
@@ -189,7 +192,9 @@ def comfort_listening(store, now, limit=24) -> list[ForYouItem]:
             title=r["title"], artist=r["artist"], album=r["album"], video_id=r["video_id"],
             thumbnail=r["thumbnail"], plays=r["plays"],
             reason="One of your most-played - you haven't reached for it lately",
-            key=r["key"], lane="comfort"))
+            key=r["key"], lane="comfort",
+            score=r["plays"] * min(1.0, (now - r["last_played"]) /
+                                   max(1.0, gp(store, "comfort_recency_full_days") * 86400))))
     return out
 
 
@@ -303,7 +308,7 @@ def _rotation_reason(n) -> str:
 
 
 # HOME CARD: "Fresh" ("Fresh songs"). Draws from the discovery pool. Metadata and artist signals
-# improve ranking when available; unrankable discoveries remain eligible as fallback candidates.
+# improve ranking when available; metadata-bearing discoveries can follow as unscored fallbacks.
 # Radio harvesting is separately feature-flagged in discover.populate_radio_tracks.
 
 
@@ -336,10 +341,11 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
 
     Projects each pool track into the collaborative embedding via ContentProjection (so per-playlist
     taste fit and the collaborative mood tilt apply), folds in the audio tilt over the discovered
-    content vectors (#45 cold), and scales by the #18 discovery facet overlay (a muted family is
-    hard-excluded, consistent with discovered albums/artists). Tracks without a usable vector follow
-    the ranked candidates in discovery order. If the projection or taste model isn't ready, the
-    discovery pool still supplies Fresh. Enrichment improves ordering, never gates eligibility.
+    content vectors (#45 cold), and applies the #18 discovery facet overlay on a positive percentile
+    scale, bounded by axis_weight_cap. A muted family is hard-excluded, consistent with discovered
+    albums/artists. Tracks with some metadata but no usable vector follow in discovery order.
+    Without metadata or a usable artist projection there is no ranking evidence, so the track waits
+    for enrichment instead of being surfaced. A missing model never masquerades as a scored result.
     """
     from yt_playlist.rec.discover import ContentProjection   # lazy: avoid the surfaces<->discover cycle
     rows = store.get_discovered_tracks()
@@ -359,17 +365,28 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
     if keys:
         V = np.vstack(vecs)
         idx = {k: i for i, k in enumerate(keys)}
-        # Same scoring pipeline as warm tracks, with the discovered content vectors for audio tilt.
+        # Library plays/mood must remain visible even though none of those keys is a candidate.
+        # Keep projected discoveries too, so explicit feedback on a cold track still contributes.
+        evidence_V, evidence_idx = V, idx
+        _, warm_V, warm_idx = embed.load_vectors(store)
+        if warm_V is not None:
+            evidence_V = np.vstack((warm_V, V))
+            evidence_idx = {k: len(warm_V) + i for k, i in idx.items()}
+            evidence_idx.update(warm_idx)  # prefer the actual library vector for overlapping keys
         values = _apply_mood(pt.score_all(V), store, now, V, idx,
-                             content_vecs=embed.load_discovered_content_vectors(store))
+                             content_vecs=embed.load_discovered_content_vectors(store),
+                             evidence_vecs=(evidence_V, evidence_idx))
         scores = {k: float(values[i]) for i, k in enumerate(keys)}
     suppressed = store.suppressed_keys("for_you", now)
     muted = store.muted_artists()
-    scored = []
-    family_weights = {}
+    candidates, facet_weights, family_weights = [], {}, {}
     for r in rows:
         k = r["identity_key"]
         if k in suppressed or r.get("artist") in muted:
+            continue
+        has_metadata = (bool(r.get("genre")) or _as_year(r.get("year")) is not None
+                        or any(value not in (None, "") for value in (r.get("audio") or {}).values()))
+        if k not in scores and not has_metadata:
             continue
         fam = genre_map.family(r.get("genre")) if r.get("genre") else None
         if fam not in family_weights:
@@ -377,8 +394,18 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
         fw = family_weights[fam]
         if fw is None:                                  # muted family: hard-exclude (mirrors #18 discovery)
             continue
-        score = scores.get(k)
-        scored.append((score * fw if score is not None else None, r))
+        candidates.append(r)
+        facet_weights[k] = fw
+    # #114/#86: multiplying signed cosine scores reverses boosts below zero. Use the same positive
+    # rank base as warm candidates, after exclusions so muted tracks cannot distort percentiles.
+    rankable = {r["identity_key"]: scores[r["identity_key"]]
+                for r in candidates if r["identity_key"] in scores}
+    facet_weights = center_known_weights(
+        {k: facet_weights[k] for k in rankable},
+        {r["identity_key"]: bool(r.get("genre")) for r in candidates})
+    scores = axis_adjusted_scores(rankable, facet_weights,
+                                  cap=rec_params.get_param(store, "axis_weight_cap"))
+    scored = [(scores.get(r["identity_key"]), r) for r in candidates]
     # Keep unknown tracks after ranked tracks, even when a known taste score is negative.
     # Stable sorting preserves discovery order within the fallback instead of inventing a fit score.
     scored.sort(key=lambda t: (t[0] is None, -(t[0] or 0.0)))
@@ -394,7 +421,7 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
         out.append(ForYouItem(r.get("title") or "", r.get("artist") or "", r.get("album") or "",
                               r.get("video_id"), r.get("thumbnail"), 0, reason,
                               r["identity_key"], lane="cold", genre=r.get("genre") or "",
-                              year=_as_year(r.get("year"))))
+                              year=_as_year(r.get("year")), score=scores.get(r["identity_key"])))
     return out
 
 
@@ -409,7 +436,7 @@ def _item_to_fresh_dict(item) -> dict:
     feedback parity); the Fresh card template reads video_id/title/artist/thumbnail and ignores extras."""
     return {"video_id": item.video_id, "title": item.title, "artist": item.artist,
             "thumbnail": item.thumbnail, "key": item.key, "reason": item.reason, "lane": item.lane,
-            "genre": item.genre, "year": item.year}
+            "genre": item.genre, "year": item.year, "score": item.score}
 
 
 CATALOG_CONTENT_FRAC = 0.25   # share of Catalog reserved for content-only (genre/era) rediscovery tracks
@@ -508,7 +535,7 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
         p = plays.get(k, 0)
         reason = "Never played, sits near your taste" if p == 0 else f"Barely played ({p}×), worth another spin"
         out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"], m["thumbnail"],
-                              p, reason, k, "explore"))
+                              p, reason, k, "explore", score=collab.get(k, content.get(k))))
         if len(out) >= limit:
             break
     return out
@@ -603,7 +630,7 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
             reason = "New · " + reason
         out.append(ForYouItem(c.get("title") or "", artist, c.get("album") or "",
                               c.get("video_id"), c.get("thumbnail"), 0, reason, key,
-                              lane="related_artist", genre=c.get("genre") or ""))
+                              lane="related_artist", genre=c.get("genre") or "", score=_score))
     return out
 
 

@@ -24,7 +24,7 @@ class CollectionRepo(Repo):
         """Fetched metadata alone does not mean every track was folded into the library."""
         materialized = {}
         for row in self.conn.execute(
-                "SELECT album_browse_id, identity_key FROM tracks WHERE album_browse_id IS NOT NULL"):
+                "SELECT a.browse_id,t.identity_key FROM album_track_links a JOIN tracks t ON t.id=a.entry_id"):
             materialized.setdefault(row[0], set()).add(row[1])
         return {row[0] for row in self.conn.execute("SELECT browse_id, track_keys FROM album_tracklists")
                 if set(json.loads(row[1])) <= materialized.get(row[0], set())}

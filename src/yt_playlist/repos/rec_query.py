@@ -7,6 +7,7 @@ grouped here because the generators all depend on the same exclusion logic (excl
 """
 from collections import Counter
 
+from yt_playlist.rec import rec_params
 from yt_playlist.repos.base import (  # noqa: F401  (GENERATED_GROUP re-exported)
     GENERATED_GROUP, LIKED_EXISTS, Repo, synchronized)
 from yt_playlist.util import genre_map
@@ -54,9 +55,8 @@ def _exclude_clause(column, ids, *, connective="AND") -> str:
 # Co-occurrence basket caps for the embedding model (see rec_baskets). A basket bigger than its cap is
 # dropped: it links too many tracks to carry a real signal. Structural sources get generous caps; the
 # content sources (whole genre family / decade) are capped tighter since they would otherwise produce
-# huge, low-information baskets. Tracks longer than _MAX_TRACK_DURATION_S are DJ mixes/compilations,
-# not songs, so they're excluded from every basket.
-_MAX_TRACK_DURATION_S = 1200   # 20 min: above this it's a mix/live set/compilation, not a track
+# huge, low-information baskets. Tracks longer than the Taste Model's maximum track length are
+# excluded from every basket, using the same limit as generated playlists.
 _ARTIST_BASKET_CAP = 50        # an artist's whole catalogue is a weaker co-occurrence signal than a playlist
 _CONTENT_BASKET_CAP = 80       # one genre family / one decade: cap hard, these get large fast
 # Catch-all playlists (more than this many tracks) are excluded from the embedding + taste: they link
@@ -66,15 +66,15 @@ _CONTENT_BASKET_CAP = 80       # one genre family / one decade: cap hard, these 
 _CATCHALL_SIZE_FLOOR = 120
 
 
-def _not_a_mix(col="duration_s") -> str:
-    """SQL predicate keeping only real songs (duration <= the cap, or unknown), excluding DJ mixes /
-    live sets / concerts. The candidate generators apply it so a 30-minute mix never lands in a
-    generated playlist of short songs (#44); mirrors the embedding's own basket filter. `col` is the
-    duration column, optionally table-qualified (e.g. 't.duration_s')."""
-    return f"({col} IS NULL OR {col} <= {_MAX_TRACK_DURATION_S})"
-
-
 class RecQueryRepo(Repo):
+    def __init__(self, db):
+        super().__init__(db)
+        self._settings = db.settings
+
+    def _not_a_mix(self, col="duration_s") -> str:
+        """Keep tracks within the saved length limit, including unknown durations (#44)."""
+        return f"({col} IS NULL OR {col} <= {rec_params.max_track_duration_s(self._settings)})"
+
     # --- library primitives ---
     @synchronized
     def key_for_video(self, video_id):
@@ -198,7 +198,7 @@ class RecQueryRepo(Repo):
         for r in self.conn.execute(
                 "SELECT identity_key k, MIN(title) title, MIN(artist) artist, MIN(album) album, "
                 "MIN(video_id) vid, MIN(thumbnail) thumb, MIN(NULLIF(genre,'')) genre "
-                "FROM tracks WHERE title<>'' GROUP BY identity_key"):
+                "FROM playable_library_tracks WHERE title<>'' GROUP BY identity_key"):
             if r["k"].rsplit("|", 1)[-1] in want:
                 out.append({"key": r["k"], "title": r["title"], "artist": r["artist"],
                             "album": r["album"] or "", "video_id": r["vid"], "thumbnail": r["thumb"],
@@ -268,7 +268,7 @@ class RecQueryRepo(Repo):
         qs = ",".join("?" * len(keys))
         rows = self.conn.execute(
             f"SELECT identity_key k, MIN(title) title, MIN(artist) artist, MIN(album) album, "
-            f"       MIN(video_id) vid, MIN(thumbnail) thumb FROM tracks "
+            f"       MIN(video_id) vid, MIN(thumbnail) thumb FROM playable_library_tracks "
             f"WHERE identity_key IN ({qs}) GROUP BY identity_key", keys).fetchall()
         return {r["k"]: {"title": r["title"], "artist": r["artist"], "album": r["album"] or "",
                          "video_id": r["vid"], "thumbnail": r["thumb"]} for r in rows}
@@ -525,8 +525,8 @@ class RecQueryRepo(Repo):
             "       MIN(t.album) album, MIN(t.thumbnail) thumb, MIN(t.duration_s) dur, "
             "       MIN(NULLIF(t.genre,'')) genre, MIN(NULLIF(t.mb_year,'')) yr, "
             f"      MAX(CASE WHEN {LIKED_EXISTS} THEN 1 ELSE 0 END) liked "
-            "FROM tracks t WHERE t.video_id IS NOT NULL AND t.video_id<>'' "
-            f"  AND {_not_a_mix('t.duration_s')} "
+            "FROM playable_library_tracks t WHERE t.video_id IS NOT NULL AND t.video_id<>'' "
+            f"  AND {self._not_a_mix('t.duration_s')} "
             "GROUP BY t.identity_key").fetchall()
         out = []
         for r in rows:
@@ -767,7 +767,7 @@ class RecQueryRepo(Repo):
         good = {r["k"] for r in self.conn.execute(
             "SELECT DISTINCT identity_key k FROM tracks "
             "WHERE (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
-            "AND (duration_s IS NULL OR duration_s <= ?)", (_MAX_TRACK_DURATION_S,))}
+            f"AND {self._not_a_mix()}")}
         good -= self.generated_only_keys()               # quarantine generated songs until promoted
         excl = self.excluded_playlist_ids() | self.catchall_playlist_ids()   # generated + grab-bags
         pl_where = _exclude_clause("pt.playlist_id", excl, connective="WHERE")
@@ -849,7 +849,7 @@ class RecQueryRepo(Repo):
         good = {r["k"] for r in self.conn.execute(
             "SELECT DISTINCT identity_key k FROM tracks WHERE created_at IS NOT NULL AND created_at<=? "
             "AND (video_type IS NULL OR video_type <> 'MUSIC_VIDEO_TYPE_UGC') "
-            "AND (duration_s IS NULL OR duration_s <= ?)", (cutoff, _MAX_TRACK_DURATION_S))}
+            f"AND {self._not_a_mix()}", (cutoff,))}
         good |= proven_by_playlist
         good -= self.generated_only_keys()
         out = []
@@ -907,7 +907,7 @@ class RecQueryRepo(Repo):
             "  GROUP BY hi.identity_key), "
             "     names AS (SELECT identity_key, MIN(title) title, MIN(artist) artist, "
             "               MIN(album) album, MIN(video_id) vid, MIN(thumbnail) thumb "
-            f"              FROM tracks WHERE {_not_a_mix()} GROUP BY identity_key) "
+            f"              FROM playable_library_tracks WHERE {self._not_a_mix()} GROUP BY identity_key) "
             "SELECT n.identity_key k, n.title, n.artist, n.album, n.vid, n.thumb, "
             "       p.c plays, p.last last "
             "FROM names n JOIN plays p ON p.identity_key=n.identity_key "
@@ -933,13 +933,14 @@ class RecQueryRepo(Repo):
             " seedpl AS (SELECT DISTINCT pt.playlist_id pid FROM playlist_tracks pt "
             "            JOIN tracks t ON t.id=pt.track_id JOIN seeds s ON s.k=t.identity_key"
             f"            WHERE 1=1{seed_excl}), "
-            " cand AS (SELECT t.identity_key key, MIN(t.title) title, MIN(t.artist) artist, "
-            "                 MIN(t.album) album, MIN(t.video_id) vid, MIN(t.thumbnail) thumb, "
+            " cand AS (SELECT t.identity_key key, MIN(c.title) title, MIN(c.artist) artist, "
+            "                 MIN(c.album) album, MIN(c.video_id) vid, MIN(c.thumbnail) thumb, "
             "                 COUNT(DISTINCT pt.playlist_id) sp, COALESCE(MAX(tp.c),0) plays "
             "          FROM playlist_tracks pt JOIN seedpl ON seedpl.pid=pt.playlist_id "
             "          JOIN tracks t ON t.id=pt.track_id "
+            "          JOIN playable_library_tracks c ON c.recording_id=t.recording_id "
             "          LEFT JOIN tp ON tp.identity_key=t.identity_key "
-            f"          WHERE t.title<>'' AND {_not_a_mix('t.duration_s')} GROUP BY t.identity_key) "
+            f"          WHERE c.title<>'' AND {self._not_a_mix('c.duration_s')} GROUP BY t.identity_key) "
             "SELECT key, title, artist, album, vid, thumb, sp, plays FROM cand "
             "WHERE key NOT IN (SELECT k FROM seeds) AND plays<=1 "
             "ORDER BY sp DESC, plays ASC, key LIMIT :limit",
@@ -960,8 +961,8 @@ class RecQueryRepo(Repo):
             " trk AS (SELECT t.identity_key key, MIN(t.title) title, MIN(t.artist) artist, "
             "                MIN(t.album) album, MIN(t.video_id) vid, MIN(t.thumbnail) thumb, "
             "                COALESCE(MAX(tp.c),0) plays "
-            "         FROM tracks t LEFT JOIN tp ON tp.identity_key=t.identity_key "
-            f"        WHERE t.title<>'' AND t.artist<>'' AND {_not_a_mix('t.duration_s')} "
+            "         FROM playable_library_tracks t LEFT JOIN tp ON tp.identity_key=t.identity_key "
+            f"        WHERE t.title<>'' AND t.artist<>'' AND {self._not_a_mix('t.duration_s')} "
             "         GROUP BY t.identity_key), "
             " ap AS (SELECT artist, SUM(plays) total FROM trk GROUP BY artist), "
             " r AS (SELECT trk.*, ap.total atot, "
@@ -988,14 +989,15 @@ class RecQueryRepo(Repo):
             " shared AS (SELECT DISTINCT pt.playlist_id pid FROM playlist_tracks pt "
             "            JOIN tracks t ON t.id=pt.track_id JOIN pm ON pm.key=t.identity_key "
             "            WHERE pt.playlist_id<>:pid), "
-            " cand AS (SELECT t.identity_key key, MIN(t.title) title, MIN(t.artist) artist, "
-            "                 MIN(t.album) album, MIN(t.video_id) vid, MIN(t.thumbnail) thumb, "
+            " cand AS (SELECT t.identity_key key, MIN(c.title) title, MIN(c.artist) artist, "
+            "                 MIN(c.album) album, MIN(c.video_id) vid, MIN(c.thumbnail) thumb, "
             "                 MAX(CASE WHEN t.artist IN (SELECT artist FROM pa) THEN 1 ELSE 0 END) sa, "
             "                 COUNT(DISTINCT CASE WHEN pt.playlist_id IN (SELECT pid FROM shared) "
             "                                THEN pt.playlist_id END) cooc "
             "          FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id "
-            f"          WHERE t.identity_key NOT IN (SELECT key FROM pm) AND t.title<>'' "
-            f"          AND {_not_a_mix('t.duration_s')} "
+            "          JOIN playable_library_tracks c ON c.recording_id=t.recording_id "
+            f"          WHERE t.identity_key NOT IN (SELECT key FROM pm) AND c.title<>'' "
+            f"          AND {self._not_a_mix('c.duration_s')} "
             "          GROUP BY t.identity_key) "
             "SELECT key, title, artist, album, vid, thumb, sa, cooc FROM cand "
             "WHERE sa=1 OR cooc>0 ORDER BY (sa*2+cooc) DESC, cooc DESC, key LIMIT :limit",

@@ -5,6 +5,7 @@ from yt_playlist.util.matching import identity_key, track_artist, track_album
 from yt_playlist.util.retry import error_summary, with_retry
 from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.library.executor import is_generated_description
+from yt_playlist.library.playlist_positions import retry_insertions
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.repos.base import GENERATED_GROUP
 
@@ -74,6 +75,9 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
                   on_auth_expired=None, on_auth_ok=None) -> None:
     label = label or f"identity {identity_id}"
     logger.info("syncing identity %s", identity_id)
+    # Only these rows can be disproved by this library snapshot. A playlist created while
+    # the remote fetch is in flight may not appear in it yet, even while it is playing.
+    existing_playlists = [p for p in store.get_playlists() if p.identity_id == identity_id]
     _emit(on_progress, "info", f"{label}: fetching playlists…")
     try:
         playlists = with_retry(lambda: client.get_library_playlists(limit=None),
@@ -119,19 +123,19 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
                                      _album(t), t.get("duration_seconds"), t.get("isAvailable"),
                                      t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")))
             track_ids.append(tid)
-            keys.append(identity_key(t.get("title", ""), _artist(t)))
             status = t.get("likeStatus")
-            if status in _STATUS_PRIORITY:
-                rk = identity_key(t.get("title", ""), _artist(t))
+            if status in _STATUS_PRIORITY and t.get("videoId"):
+                rk = t["videoId"]
                 if rk not in rated or _STATUS_PRIORITY[status] > _STATUS_PRIORITY[rated[rk]]:
                     rated[rk] = status
         track_ids = list(dict.fromkeys(track_ids))   # de-dupe (YouTube can repeat a video; see set_playlist_tracks)
-        keys = list(dict.fromkeys(keys))
+        keys = [store.catalog_subject(tid)["identity_key"] for tid in track_ids]
         chash = content_hash(keys)
         db_pid = store.upsert_playlist(identity_id, pid, pl.get("title", ""),
                                        len(track_ids), chash, now,
                                        best_thumb(pl.get("thumbnails")) or best_thumb(detail.get("thumbnails")))
         store.set_playlist_tracks(db_pid, track_ids)
+        retry_insertions(store, db_pid, client, now, attempts=1)
         store.ensure_playlist_thumbnail(db_pid)
         _sync_generated_group(store, pid, detail.get("description"), groups)
         refreshed += 1
@@ -145,8 +149,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     # clear on a non-result. A later, real sync re-adds anything genuinely missing.
     auth_bad = False
     if playlists:
-        stale = [p for p in store.get_playlists()
-                 if p.identity_id == identity_id and p.ytm_playlist_id not in seen_ytm]
+        stale = [p for p in existing_playlists if p.ytm_playlist_id not in seen_ytm]
         for p in stale:
             store.remove_playlist(p.id)
         if stale:
@@ -166,18 +169,25 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     from yt_playlist.rec import recommend            # local import avoids any import cycle
     # provenance='sync': bulk-discovered statuses carry no real action time, so their likes stay out
     # of the transient model and graduate at the low sync-like weight (see graduation.apply_dislikes).
-    recommend.apply_dislikes(store, rated, now, provenance="sync")
+    for video_id, status in rated.items():
+        store.record_item_rating(identity_id, video_id, status, source="sync", now=now)
+    recommend.apply_dislikes(store, {store.identity_key_for_video(v): s for v,s in rated.items()},
+                             now, provenance="sync")
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history(),
                              operation=f"fetch history for {label!r} (identity {identity_id})")
-        hist = [(identity_key(t.get("title", ""), _artist(t)), t.get("played")) for t in history]
+        hist = [(store.observe_track(t["videoId"], t.get("title", ""), _artist(t), now=now)
+                 if t.get("videoId") else
+                 (store.resolve_identity_key(identity_key(t.get("title", ""), _artist(t)))
+                  or identity_key(t.get("title", ""), _artist(t))), t.get("played")) for t in history]
         # Record plays keyed by (track, played-date): YouTube re-sends the same recently-played window
         # each fetch (~91% overlap), so record_history_plays dedups on the absolute play-date (the
         # relative `played` bucket resolved via `now`). #75: this daily fetch is now BACKFILL for plays
         # that happened while the app was not running; live plays arrive via the extension's play
         # events (library/live_plays.py) and dedup against the same (track, date) model.
-        store.record_history_plays(identity_id, now, hist)
+        store.record_history_plays(identity_id, now, hist,
+                                   source_timezone=getattr(client, "history_timezone", None))
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")
@@ -197,12 +207,12 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now) ->
                                  _album(t), t.get("duration_seconds"), t.get("isAvailable"),
                                  t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")))
         track_ids.append(tid)
-        keys.append(identity_key(t.get("title", ""), _artist(t)))
     track_ids = list(dict.fromkeys(track_ids))   # de-dupe repeated videos
-    keys = list(dict.fromkeys(keys))
+    keys = [store.catalog_subject(tid)["identity_key"] for tid in track_ids]
     db_pid = store.upsert_playlist(identity_id, ytm_playlist_id, title,
                                    len(track_ids), content_hash(keys), now, best_thumb(detail.get("thumbnails")))
     store.set_playlist_tracks(db_pid, track_ids)
+    retry_insertions(store, db_pid, client, now, attempts=1)
     store.ensure_playlist_thumbnail(db_pid)
 
 def _sync_saved_albums(store, clients, on_progress) -> None:
@@ -250,7 +260,6 @@ def _materialize_album_tracks(store, clients, saved, on_progress) -> None:
         except Exception as e:  # noqa: BLE001 - one album's failure shouldn't abort the rest
             logger.warning("album-tracks fetch failed for %s: %s", bid, e)
             continue
-        remember_album(store, bid, album, meta)
         for t in (album or {}).get("tracks") or []:
             if not t.get("title"):
                 continue
@@ -258,6 +267,7 @@ def _materialize_album_tracks(store, clients, saved, on_progress) -> None:
             store.upsert_track(t.get("videoId"), t.get("title"), artist, meta["title"], None,
                                album_browse_id=bid, thumbnail=meta["thumbnail"])
             added += 1
+        remember_album(store, bid, album, meta)
     _emit(on_progress, "info", f"album tracks folded in: {added} from {len(todo)} album(s)")
 
 def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None) -> None:

@@ -11,7 +11,7 @@ def test_gc_expires_aged_unshown_tracks_and_keeps_recent_and_held():
     s = _s()
     day = 86400.0
     for k in ("old|x", "new|y", "held|z", "unshown|w"):
-        s.upsert_discovered_track(k, "v", k[0], k[0], None, None, None, None, "r", 0.0)
+        s.upsert_discovered_track(k, "v:" + k, k[0], k[0], None, None, None, None, "r", 0.0)
     now = 100 * day
     s.mark_offered("track", ["old|x", "held|z"], now - 40 * day)   # first_shown 40d ago -> aged
     s.mark_offered("track", ["new|y"], now - 5 * day)              # first_shown 5d ago -> fresh
@@ -48,7 +48,7 @@ def test_prune_keeps_held_generated_keys():
 def test_gc_removes_stale_tracks_from_cached_fresh_and_mode_recommendations():
     s = _s()
     for key, found in (("old", 0), ("held", 0), ("recent", 99 * 86400)):
-        s.upsert_discovered_track(key, "v", key, "Artist", None, None, "House", "2020", "album", found)
+        s.upsert_discovered_track(key, "v:" + key, key, "Artist", None, None, "House", "2020", "album", found)
     items = [{"key": key, "title": key} for key in ("old", "held", "recent")]
     s.put_proposals("fresh_pool", items, 1)
     s.put_proposals("mode_bundles", {"all": {"fresh": items, "wheelhouse": [{"key": "library"}]},
@@ -66,6 +66,6 @@ def test_gc_removes_stale_tracks_from_cached_fresh_and_mode_recommendations():
 def test_orphan_cleanup_preserves_tracks_in_generated_playlists():
     s = _s()
     for key in ("held", "unheld"):
-        s.upsert_discovered_track(key, "v", key, "Artist", None, None, None, None, "gone-album", 0)
+        s.upsert_discovered_track(key, "v:" + key, key, "Artist", None, None, None, None, "gone-album", 0)
     assert s.prune_orphan_discovered_tracks(held_keys={"held"}) == 1
     assert set(s.discovered_tracks_by_keys(["held", "unheld"])) == {"held"}

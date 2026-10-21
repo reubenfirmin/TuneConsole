@@ -10,6 +10,7 @@ import json
 
 import numpy as np
 
+from yt_playlist.library.listen_derive import classify_exit
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -157,6 +158,36 @@ class ModesRepo(Repo):
             sql += " AND created_at < ?"
             args.append(float(before))
         return [(r["playlist_id"], r["mode_id"]) for r in self.conn.execute(sql, args).fetchall()]
+
+    @synchronized
+    def playlist_engagement(self, since=None) -> dict:
+        """Engagement with picked playlists, attributed by playlist AND account, after the pick.
+
+        `since` selects the same pick cohort as pick_rows. Organic plays and sync-history
+        appearances have no playlist provenance and cannot measure engagement with a mode.
+        Exits remain raw; skips/completions are classified at read time with the shared rules.
+        Plays and exits are queried separately so joining them cannot multiply either count.
+        """
+        cohort = "FROM rec_mode_picks mp JOIN playlists p ON p.id=mp.playlist_id "
+        bounds = "(:since IS NULL OR mp.created_at>=:since)"
+        args = {"since": since}
+        rows = self.conn.execute(
+            "SELECT p.id, COUNT(pe.id) plays, MAX(pe.played_at) last_play " + cohort +
+            "LEFT JOIN play_events pe ON pe.playlist_ytm_id=p.ytm_playlist_id "
+            "AND pe.identity_id=p.identity_id AND pe.played_at>=mp.created_at "
+            f"WHERE {bounds} GROUP BY p.id", args).fetchall()
+        stats = {r["id"]: {"plays": r["plays"], "last_play": r["last_play"],
+                            "skips": 0, "completions": 0} for r in rows}
+        exits = self.conn.execute(
+            "SELECT p.id, pe.position, pe.duration " + cohort +
+            "JOIN player_events pe ON pe.playlist_ytm_id=p.ytm_playlist_id "
+            "AND pe.identity_id=p.identity_id AND pe.at>=mp.created_at "
+            f"WHERE {bounds} AND pe.kind IN ('track_exit', 'bye')", args).fetchall()
+        for event in exits:
+            verdict = classify_exit(event["position"], event["duration"])
+            if verdict in ("skip", "completion"):
+                stats[event["id"]]["skips" if verdict == "skip" else "completions"] += 1
+        return stats
 
     @synchronized
     def choice_learning_rows(self) -> list[dict]:

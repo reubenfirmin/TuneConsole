@@ -1,105 +1,58 @@
 """RecSurfaceRepo: the recommendation *serving* surfaces: impression counts (anti-staleness
 erosion), materialized last-good proposals, and the Last.fm similar-artist cache.
 
-Owns its own tables (created lazily/idempotently) since they're rec-internal serving state.
+Tables are created by numbered migrations before repositories are bound.
 """
 import json
+import statistics
 
 from yt_playlist.library.listen_derive import classify_exit
 
 from yt_playlist.repos.base import Repo, synchronized
 
 MOOD_EVENT_CAP = 200   # bound the rec_mood table (count, not age); this repo owns that table
-
-_SCHEMA = """
--- per-(surface, item) view counts + last_shown: anti-staleness erosion and per-card rotation
-CREATE TABLE IF NOT EXISTS rec_impressions (
-  surface TEXT NOT NULL,                  -- 'for_you' | 'explore' | 'suggest'
-  item_key TEXT NOT NULL,
-  views INTEGER NOT NULL DEFAULT 0,       -- times shown (debounced), for anti-staleness erosion
-  last_shown REAL,                        -- drives the recycle cooldown
-  PRIMARY KEY (surface, item_key)
-);
--- materialized last-good proposal payloads per surface (rec worker writes, routes read)
-CREATE TABLE IF NOT EXISTS rec_proposals (
-  surface TEXT PRIMARY KEY,               -- 'fresh_songs' | 'discover'
-  payload TEXT NOT NULL,                  -- JSON, materialized by the rec worker (last-good serving)
-  built_at REAL
-);
--- Last.fm similar-artist cache (14-day TTL); also the #28 artist model's edge source
-CREATE TABLE IF NOT EXISTS rec_artist_similar (
-  artist TEXT PRIMARY KEY,                -- anchor artist (display name)
-  payload TEXT NOT NULL,                  -- JSON [[name, match], ...] from Last.fm
-  fetched_at REAL
-);
--- count-capped log of mood feedback events (the transient model's mood seed)
-CREATE TABLE IF NOT EXISTS rec_mood (
-  created_at REAL NOT NULL,               -- when the mood feedback was given (drives time-decay)
-  direction INTEGER NOT NULL,             -- +1 = more of this vibe, -1 = not my mood
-  keys TEXT NOT NULL                      -- JSON list of the playlist's track identity_keys (the seed)
-);
--- the theme/params a generated playlist was built from (legible + re-runnable)
-CREATE TABLE IF NOT EXISTS rec_recipes (
-  playlist_ytm TEXT PRIMARY KEY,          -- the generated playlist's YouTube id
-  recipe TEXT NOT NULL,                   -- JSON: the rolled theme + params + dj seed + version
-  created_at REAL
-);
--- the full canvas blob behind a saved cluster playlist, so it can be reopened and regrown (#48)
-CREATE TABLE IF NOT EXISTS cluster_canvas (
-  playlist_ytm TEXT PRIMARY KEY,          -- the generated playlist's YouTube id (#48: reopen its cluster)
-  state TEXT NOT NULL,                     -- JSON: the full canvas blob (nodes, trunk, seeds, filter, view)
-  created_at REAL
-);
--- graduation ledger: persistent signed running totals (the transient -> permanent funnel)
-CREATE TABLE IF NOT EXISTS rec_theme (
-  facet      TEXT PRIMARY KEY,             -- 'genre:<fam>' | 'era:<decade>' | 'artist:<name>'
-  score      REAL NOT NULL,                -- persistent signed running total (interaction-driven, no time decay)
-  updated_at REAL NOT NULL                 -- bookkeeping only
-);
--- per-axis once-per-UTC-day stamp: the play-exposure graduation idempotency guard
-CREATE TABLE IF NOT EXISTS rec_play_grad (
-  axis               TEXT PRIMARY KEY,      -- facet token, e.g. 'genre:techno'
-  last_graduated_day TEXT                   -- UTC YYYY-MM-DD the play-exposure funnel last graduated this axis
-);
--- append-only graduation instrumentation: one row per threshold-crossing nudge (model-health panel)
-CREATE TABLE IF NOT EXISTS rec_grad_log (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  axis       TEXT NOT NULL,                 -- the facet that graduated, e.g. 'genre:techno'
-  source     TEXT NOT NULL,                 -- the signal that drove it: 'play' | 'slider' | 'vibe' | 'like' | ...
-  score      REAL NOT NULL,                 -- the ledger value at the crossing (what tripped THEME_THRESHOLD)
-  factor     REAL NOT NULL,                 -- the nudge multiplier applied (graduate_up / graduate_down)
-  new_weight REAL NOT NULL,                 -- the resulting permanent weight after the nudge
-  created_at REAL NOT NULL
-);
--- #113 what the recommender actually put on screen. Outcomes are deliberately derived from the
--- immutable play/player ledgers at read time, so attribution rules can improve without rewriting
--- history. One request/rank is one opportunity; retries of the same render are idempotent.
-CREATE TABLE IF NOT EXISTS rec_served_impressions (
-  id                INTEGER PRIMARY KEY,
-  request_id        TEXT NOT NULL,
-  surface           TEXT NOT NULL,
-  lane              TEXT NOT NULL,
-  mode_id           INTEGER,
-  identity_key      TEXT NOT NULL,
-  rank               INTEGER NOT NULL,
-  score              REAL,
-  model_version      TEXT NOT NULL,
-  provenance         TEXT NOT NULL,
-  served_at          REAL NOT NULL,
-  UNIQUE(request_id, surface, rank)
-);
-CREATE INDEX IF NOT EXISTS ix_rec_served_at ON rec_served_impressions(served_at);
-CREATE INDEX IF NOT EXISTS ix_rec_served_key_at ON rec_served_impressions(identity_key, served_at);
-"""
+RESPONSE_RETAIN_DAYS = 90
 
 
 class RecSurfaceRepo(Repo):
-    def __init__(self, db):
-        super().__init__(db)
-        with self._lock:
-            self.conn.executescript(_SCHEMA)   # this DAO owns its tables (idempotent)
-
     # --- #113 served recommendation -> observed outcome ledger -------------------------------
+    @synchronized
+    def record_serving_policy(self, version, configuration, now) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO rec_serving_policies VALUES (?,?,?)",
+            (version, json.dumps(configuration, sort_keys=True), now))
+        self.conn.commit()
+
+    @synchronized
+    def served_recommendation(self, impression_id):
+        row = self.conn.execute(
+            "SELECT i.*,p.configuration FROM rec_served_impressions i "
+            "LEFT JOIN rec_serving_policies p USING(model_version) WHERE i.id=?",
+            (impression_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["provenance"] = json.loads(result["provenance"])
+        result["configuration"] = json.loads(result["configuration"]) if result["configuration"] else None
+        pool = result["provenance"].get("pool_policy")
+        pool_row = self.conn.execute("SELECT configuration FROM rec_serving_policies WHERE model_version=?",
+                                     (pool,)).fetchone() if pool else None
+        result["pool_configuration"] = json.loads(pool_row[0]) if pool_row else None
+        result["outcomes"] = self.recommendation_scorecard(result["served_at"], result["served_at"] + 1,
+                                                          impression_id=impression_id)
+        return result
+
+    @synchronized
+    def record_recommendation_outcomes(self, event_id, kind, keys, now, generated=False) -> None:
+        if kind not in {"open", "start", "save", "promotion"}:
+            raise ValueError("unsupported recommendation response")
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO rec_response_events(event_id,kind,identity_key,at,is_generated) "
+            "VALUES (?,?,?,?,?)", [(event_id, kind, key, now, int(generated)) for key in set(keys) if key])
+        self.conn.execute("DELETE FROM rec_response_events WHERE at < ?",
+                          (now - RESPONSE_RETAIN_DAYS * 86400,))
+        self.conn.commit()
+
     @synchronized
     def record_served_impressions(self, request_id, surface, items, now, prune_before=None) -> None:
         """Persist final rendered order, not the larger candidate set.
@@ -123,83 +76,142 @@ class RecSurfaceRepo(Repo):
                 "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
         if prune_before is not None:
             self.conn.execute("DELETE FROM rec_served_impressions WHERE served_at < ?", (prune_before,))
+            self.conn.execute("DELETE FROM rec_response_events WHERE at < ?", (prune_before,))
+            self.conn.execute("DELETE FROM rec_serving_policies WHERE created_at < ? AND model_version NOT IN "
+                              "(SELECT DISTINCT model_version FROM rec_served_impressions) "
+                              "AND model_version NOT IN (SELECT json_extract(provenance,'$.pool_policy') "
+                              "FROM rec_served_impressions WHERE json_extract(provenance,'$.pool_policy') IS NOT NULL)",
+                              (prune_before,))
         self.conn.commit()
 
     @synchronized
-    def recommendation_scorecard(self, start, end, outcome_window_h=24, min_impressions=100) -> dict:
+    def recommendation_scorecard(self, start, end, outcome_window_h=24, min_impressions=100,
+                                 impression_id=None) -> dict:
         """Attribute subsequent play/exit events to the nearest preceding rendered opportunity.
 
         The impression range is bounded to ``[start, end)``; outcomes may arrive for
-        ``outcome_window_h`` after each impression. Generated-playlist plays are useful response
-        evidence but are reported separately and never counted as organic preference evidence.
+        ``outcome_window_h`` after each impression. Ownership is resolved across all impressions
+        before filtering report totals. Generated-playlist plays are useful response evidence but
+        are reported separately and never counted as organic preference evidence. Historical plays
+        without play-time policy count as responses, with unknown generated/organic provenance.
         """
         impressions = [dict(r) for r in self.conn.execute(
             "SELECT * FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
-            "ORDER BY served_at,id", (start, end)).fetchall()]
+            "AND (? IS NULL OR id=?) ORDER BY served_at,id",
+            (start, end, impression_id, impression_id)).fetchall()]
         horizon = max(0.0, float(outcome_window_h)) * 3600.0
         states = {r["id"]: {"played": False, "organic": False, "generated": False,
-                             "skip": False, "completion": False} for r in impressions}
+                             "unknown_provenance": False, "skip": False,
+                             "completion": False, "open": False, "start": False,
+                             "save": False, "promotion": False, "conversion": False,
+                             "play_depth": None} for r in impressions}
+        candidates = {r["id"]: json.loads(r["provenance"]).get("candidate", {}) for r in impressions}
 
-        by_key = {}
-        for imp in impressions:
-            by_key.setdefault(imp["identity_key"], []).append(imp)
+        report_keys = {r["identity_key"] for r in impressions}
 
         def nearest(key, at):
-            eligible = [r for r in by_key.get(key, ())
-                        if r["served_at"] <= at <= r["served_at"] + horizon]
-            return max(eligible, key=lambda r: (r["served_at"], r["id"])) if eligible else None
+            if key not in report_keys:
+                return None
+            owner = self.conn.execute(
+                "SELECT id FROM rec_served_impressions WHERE identity_key=? "
+                "AND served_at>=? AND served_at<=? ORDER BY served_at DESC,id DESC LIMIT 1",
+                (key, at - horizon, at)).fetchone()
+            return owner["id"] if owner else None
 
-        generated = {r["ytm"] for r in self.conn.execute(
-            "SELECT ytm FROM playlist_group WHERE name='Generated'").fetchall()}
-        generated |= {"RDAMPL" + y for y in generated}
         for play in self.conn.execute(
-                "SELECT identity_key,played_at,playlist_ytm_id FROM play_events "
+                "SELECT identity_key,played_at,is_generated FROM play_events "
                 "WHERE played_at>=? AND played_at<=? ORDER BY played_at,id", (start, end + horizon)):
-            imp = nearest(play["identity_key"], play["played_at"])
-            if not imp:
+            state = states.get(nearest(play["identity_key"], play["played_at"]))
+            if state is None:
                 continue
-            state = states[imp["id"]]
             state["played"] = True
-            if play["playlist_ytm_id"] in generated:
+            if play["is_generated"] == 1:
                 state["generated"] = True
-            else:
+            elif play["is_generated"] == 0:
                 state["organic"] = True
+            else:
+                state["unknown_provenance"] = True
+
+        for event in self.conn.execute(
+                "SELECT * FROM rec_response_events WHERE at>=? AND at<=? ORDER BY at,id",
+                (start, end + horizon)):
+            owner = nearest(event["identity_key"], event["at"])
+            state = states.get(owner)
+            if state is None:
+                continue
+            state[event["kind"]] = True
+            if (candidates[owner].get("ownership") == "cold"
+                    and (event["kind"] == "promotion"
+                         or event["kind"] == "save" and not event["is_generated"])):
+                state["conversion"] = True
 
         exits = self.conn.execute(
             "SELECT pe.video_id,pe.position,pe.duration,pe.at,"
-            "(SELECT identity_key FROM tracks WHERE video_id=pe.video_id LIMIT 1) identity_key "
+            "COALESCE((SELECT identity_key FROM tracks WHERE video_id=pe.video_id LIMIT 1),"
+            "(SELECT identity_key FROM discovered_tracks WHERE video_id=pe.video_id LIMIT 1)) identity_key "
             "FROM player_events pe WHERE pe.kind IN ('track_exit','bye','ended') "
             "AND pe.at>=? AND pe.at<=? ORDER BY pe.at,pe.id", (start, end + horizon)).fetchall()
         for event in exits:
             if event["identity_key"] is None:
                 continue
-            imp = nearest(event["identity_key"], event["at"])
-            if not imp:
+            state = states.get(nearest(event["identity_key"], event["at"]))
+            if state is None:
                 continue
             outcome = classify_exit(event["position"], event["duration"])
             if outcome in ("skip", "completion"):
-                states[imp["id"]][outcome] = True
+                state[outcome] = True
+            if event["duration"] and event["duration"] > 0 and event["position"] is not None:
+                depth = max(0.0, min(1.0, event["position"] / event["duration"]))
+                state["play_depth"] = max(state["play_depth"] or 0, depth)
 
         n = len(impressions)
         counts = {name: sum(1 for state in states.values() if state[name])
-                  for name in ("played", "organic", "generated", "skip", "completion")}
+                  for name in ("played", "organic", "generated", "unknown_provenance", "skip", "completion",
+                               "open", "start", "save", "promotion", "conversion")}
 
-        def breakdown(field):
+        def breakdown(label_for):
             groups = {}
             for imp in impressions:
-                label = imp[field] or "unknown"
-                bucket = groups.setdefault(label, {"impressions": 0, "played": 0,
-                                                    "skip": 0, "completion": 0})
+                label = label_for(imp) or "unknown"
+                bucket = groups.setdefault(label, {"impressions": 0, **{name: 0 for name in counts}})
+                bucket.setdefault("_rows", []).append(imp)
                 bucket["impressions"] += 1
-                for outcome in ("played", "skip", "completion"):
+                for outcome in counts:
                     bucket[outcome] += int(states[imp["id"]][outcome])
             for bucket in groups.values():
+                rows = bucket.pop("_rows")
+                metadata = [candidates[r["id"]] for r in rows]
+                depths = [states[r["id"]]["play_depth"] for r in rows
+                          if states[r["id"]]["play_depth"] is not None]
+                ages = [max(0, r["served_at"] - candidates[r["id"]]["last_played"]) / 86400
+                        for r in rows if candidates[r["id"]].get("last_played") is not None]
+                cold = sum(c.get("ownership") == "cold" for c in metadata)
+                unique = len({r["identity_key"] for r in rows})
                 bucket["acceptance_rate"] = bucket["played"] / bucket["impressions"]
+                bucket["completion_rate"] = bucket["completion"] / bucket["impressions"]
+                bucket["skip_rate"] = bucket["skip"] / bucket["impressions"]
+                bucket["cold_impressions"] = cold
+                bucket["discovery_conversion_rate"] = bucket["conversion"] / cold if cold else None
+                bucket["unique_items"] = unique
+                bucket["repeat_rate"] = (len(rows) - unique) / len(rows)
+                bucket["unique_artists"] = len({c["artist"] for c in metadata if c.get("artist")})
+                bucket["unique_genres"] = len({c["genre"] for c in metadata if c.get("genre")})
+                bucket["mean_play_depth"] = statistics.mean(depths) if depths else None
+                bucket["play_depth_samples"] = len(depths)
+                bucket["median_days_since_play"] = statistics.median(ages) if ages else None
+                bucket["staleness_samples"] = len(ages)
+                bucket["never_played"] = sum(c.get("last_played") is None and "last_played" in c for c in metadata)
+                bucket["powered"] = bucket["impressions"] >= int(min_impressions)
+                bucket["verdict"] = None
             return groups
 
         unique_keys = {r["identity_key"] for r in impressions}
         repeats = n - len(unique_keys)
         powered = n >= int(min_impressions)
+        depths = [s["play_depth"] for s in states.values() if s["play_depth"] is not None]
+        staleness = [max(0, r["served_at"] - candidates[r["id"]]["last_played"]) / 86400
+                     for r in impressions if candidates[r["id"]].get("last_played") is not None]
+        cold = sum(c.get("ownership") == "cold" for c in candidates.values())
         return {
             "start": start, "end": end, "outcome_window_h": outcome_window_h,
             "impressions": n, **counts,
@@ -210,9 +222,27 @@ class RecSurfaceRepo(Repo):
             # Acceptance is the north star because a live play is the broadest reliable response
             # sensor today. Completion and skip are guardrails; organic_rate is evidence suitable
             # for taste learning, while generated response is product efficacy only.
-            "north_star": "rendered_to_played", "guardrails": ["skip_rate", "completion_rate"],
+            "north_star": "rendered_to_played",
+            "guardrails": ["skip_rate", "completion_rate", "repeat_rate", "unique_artists", "unique_genres"],
+            "open_rate": counts["open"] / n if n else None,
+            "save_rate": counts["save"] / n if n else None,
+            "cold_impressions": cold,
+            "discovery_conversion_rate": counts["conversion"] / cold if cold else None,
+            "mean_play_depth": statistics.mean(depths) if depths else None,
+            "play_depth_samples": len(depths),
+            "unique_artists": len({c["artist"] for c in candidates.values() if c.get("artist")}),
+            "unique_genres": len({c["genre"] for c in candidates.values() if c.get("genre")}),
+            "median_days_since_play": statistics.median(staleness) if staleness else None,
+            "staleness_samples": len(staleness),
+            "never_played": sum(c.get("last_played") is None and "last_played" in c for c in candidates.values()),
             "unique_items": len(unique_keys), "repeat_rate": repeats / n if n else None,
-            "by_surface": breakdown("surface"), "by_lane": breakdown("lane"),
+            "by_surface": breakdown(lambda r: r["surface"]),
+            "by_lane": breakdown(lambda r: r["lane"]),
+            "by_mode": breakdown(lambda r: str(r["mode_id"]) if r["mode_id"] is not None else "unknown"),
+            "by_ownership": breakdown(lambda r: candidates[r["id"]].get("ownership")),
+            "by_metadata": {axis: breakdown(lambda r, axis=axis:
+                ("present" if candidates[r["id"]]["coverage"].get(axis) else "missing")
+                if "coverage" in candidates[r["id"]] else "unknown") for axis in ("genre", "year", "audio")},
             "min_impressions": int(min_impressions), "powered": powered,
             # A volume threshold can make a descriptive rate stable; it cannot manufacture a
             # counterfactual. #110's controlled comparison may add a verdict later.
@@ -295,7 +325,7 @@ class RecSurfaceRepo(Repo):
         return self.recent_mood_events()
 
     # --- #87 lane impressions: pure instrumentation for a future lane bandit (rec_lane_impressions,
-    #     defined in core.store SCHEMA since it's a plain append-only log, not surface-owned state) ---
+    #     created by the schema baseline since it's a plain append-only log) ---
     @synchronized
     def record_lane_impressions(self, items, now, prune_before=None) -> None:
         """Log which lane served each rendered item: items is [(lane, identity_key), ...]. One

@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Preview Spotify import · TuneConsole{% endblock %}
+{% block body %}
+<h1>Preview Spotify import</h1>
+<p>Destination: <strong>{{ identity.label }}</strong></p>
+<p class="section-note">Source: Spotify Account Data export. Source song metadata is held temporarily
+  on this machine and discarded after the transfer. Only the matched YouTube Music recordings below
+  will be added. Ambiguous, unavailable, unmatched, and failed lookups are skipped.</p>
+{% set labels = {'matched': 'Confident match', 'ambiguous': 'Ambiguous — skipped',
+  'unavailable': 'Unavailable — skipped', 'unmatched': 'Unmatched — skipped',
+  'lookup_failed': 'Lookup failed — retry needed'} %}
+{% for playlist in prepared.playlists %}
+<section class="card">
+  <h2>{{ playlist.name }}</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Spotify track</th><th>Artist</th><th>Resolution</th><th>YouTube Music recording</th></tr></thead>
+      <tbody>
+      {% for row in playlist.resolution %}
+      <tr>
+        <td>{{ row.source.title }}</td><td>{{ row.source.artist }}</td>
+        <td>{{ labels[row.status] }}</td>
+        <td>{% if row.match %}<a href="https://music.youtube.com/watch?v={{ row.match.videoId|urlencode }}"
+          target="_blank" rel="noopener">{{ row.match.title }} {{ arrow_icon('external') }}</a>{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endfor %}
+{% if prepared.albums %}
+<section class="card">
+  <h2>Saved albums</h2>
+  <p>{{ prepared.albums|length }} saved albums will also be matched and saved to {{ identity.label }}.
+    Unmatched albums can be reviewed in the report afterward.</p>
+</section>
+{% endif %}
+<p class="section-note">Existing identical playlists are skipped. Interrupted transfers resume their
+  existing YouTube Music playlist. Failed playlists can be retried by uploading the same ZIP.
+  This preview expires after two hours.</p>
+<form method="post" action="/import/spotify-library/confirm"
+      x-data="{ saving: false }" @submit="saving = true">
+  <input type="hidden" name="preview_token" value="{{ preview_token }}">
+  <div class="btn-row">
+    <button type="submit" class="btn-primary" :disabled="saving">Confirm import to {{ identity.label }}</button>
+    <button type="submit" class="btn-ghost" formaction="/import/spotify-library/cancel">Cancel</button>
+  </div>
+</form>
+{% endblock %}

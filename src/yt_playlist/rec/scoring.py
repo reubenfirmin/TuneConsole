@@ -241,6 +241,20 @@ def _pop_band(popularity, threshold):
     return "mainstream" if popularity >= threshold else None
 
 
+def center_known_weights(weights, present):
+    """Keep unavailable metadata neutral when known candidates share an upside multiplier.
+
+    Center only positive, available weights; explicit zeros remain exclusions. The warm and cold
+    rankers use this same contract so enrichment coverage cannot itself become preference evidence.
+    """
+    if all(present.get(k, False) for k in weights):
+        return dict(weights)
+    known = [v for k, v in weights.items() if present.get(k, False) and v > 0]
+    center = math.exp(sum(math.log(v) for v in known) / len(known)) if known else 1.0
+    return {k: (1.0 if not present.get(k, False) else v / center if v > 0 else v)
+            for k, v in weights.items()}
+
+
 def _axis_weights_for(store, keys, now=None, with_details=False):
     """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
     the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
@@ -297,16 +311,10 @@ def _axis_weights_for(store, keys, now=None, with_details=False):
     # center the KNOWN positive multipliers on geometric mean 1.0 and leave unknowns at exactly 1.0.
     # Known zeros are explicit facet mutes and remain hard exclusions.
     for axis in ("genre", "era", "artist"):
-        if not any(not present[k][axis] for k in keys):
-            continue
-        known = [details[k]["axes"][axis] for k in keys
-                 if present[k][axis] and details[k]["axes"][axis] > 0]
-        center = math.exp(sum(math.log(v) for v in known) / len(known)) if known else 1.0
+        centered = center_known_weights({k: details[k]["axes"][axis] for k in keys},
+                                        {k: present[k][axis] for k in keys})
         for k in keys:
-            if not present[k][axis]:
-                details[k]["axes"][axis] = 1.0
-            elif details[k]["axes"][axis] > 0:
-                details[k]["axes"][axis] /= center
+            details[k]["axes"][axis] = centered[k]
 
     for k in keys:
         axes = details[k]["axes"]
@@ -376,7 +384,7 @@ mood_tilt = transient.centroid_tilt   # back-compat: tests/callers use recommend
 
 
 def _audio_tilt_boost(store, now, idx, content_vecs=None):
-    """Per-row cosine of each candidate's CONTENT vector to the recent-listening audio direction
+    """Per-row alignment to the recent-listening audio tilt, including its fading magnitude
     (#45), aligned to V rows via `idx` (key -> row). None when there is no audio tilt or no content
     vectors built. A candidate without a content vector contributes 0, so the term degrades gracefully
     as audio coverage rises rather than being all-or-nothing.
@@ -398,17 +406,22 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None):
     return boost
 
 
-def _mood_components(scores, store, now, V, idx, content_vecs=None):
-    """Return the exact additive vector-score components used by `_apply_mood`."""
+def _mood_components(scores, store, now, V, idx, content_vecs=None, evidence_vecs=None):
+    """Return the exact additive vector-score components used by `_apply_mood`.
+
+    `evidence_vecs` optionally supplies (V, idx) for producing collaborative/session tilts,
+    independently of the candidates being scored. Both must use the same embedding space.
+    """
     base = np.asarray(scores, dtype=np.float64)
     components = {"durable": base.copy(), "transient": np.zeros(len(base)),
                   "session": np.zeros(len(base)), "audio": np.zeros(len(base))}
     Vn = None
-    tilt = transient.centroid_tilt(store, now, V, idx)
+    evidence_V, evidence_idx = (V, idx) if evidence_vecs is None else evidence_vecs
+    tilt = transient.centroid_tilt(store, now, evidence_V, evidence_idx)
     if tilt is not None:
         Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
         components["transient"] = MOOD_ALPHA * (Vn @ tilt)
-    st = layers.session_tilt(store, now, V, idx)
+    st = layers.session_tilt(store, now, evidence_V, evidence_idx)
     if st is not None:
         if Vn is None:
             Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
@@ -425,7 +438,7 @@ def _mood_components(scores, store, now, V, idx, content_vecs=None):
     return components
 
 
-def _apply_mood(scores, store, now, V, idx, content_vecs=None):
+def _apply_mood(scores, store, now, V, idx, content_vecs=None, evidence_vecs=None):
     """Blend the transient tilts into per-track scores. #85: each tilt decays internally, per event, on
     its own wall clock (see transient.decay_weight); there is no separate external staleness relax here
     any more, so this just adds the (already-decayed) tilts straight in.
@@ -440,8 +453,10 @@ def _apply_mood(scores, store, now, V, idx, content_vecs=None):
     collaborative one.
 
     `content_vecs` selects the audio tilt's content-vector source: warm callers leave it None (library
-    vectors); the cold path passes the discovered-content vectors so out-of-corpus tracks get the tilt."""
-    return _mood_components(scores, store, now, V, idx, content_vecs)["combined"]
+    vectors); the cold path passes the discovered-content vectors so out-of-corpus tracks get the tilt.
+    `evidence_vecs` supplies the collaborative evidence corpus when it differs from the candidates.
+    """
+    return _mood_components(scores, store, now, V, idx, content_vecs, evidence_vecs)["combined"]
 
 
 def score_with_traces(store, taste, keys, V, idx, now):

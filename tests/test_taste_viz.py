@@ -402,6 +402,15 @@ def test_centroid_tilt_reports_transient_alone_when_session_is_gated(store, monk
     assert {f["name"] for f in panel["families"]} == {"techno", "jazz"}
 
 
+def test_centroid_tilt_display_preserves_fading_magnitude(store, monkeypatch):
+    _install_tilt_space(store, monkeypatch,
+                        session=np.array([0.5, 0.0]), transient_dir=np.array([0.0, 0.125]))
+    panel = taste_viz.centroid_tilt_panel(store, now=1000)
+    fams = {f["name"]: f for f in panel["families"]}
+    assert fams["techno"]["session"] == pytest.approx(0.5)
+    assert fams["jazz"]["transient"] == pytest.approx(0.125)
+
+
 def test_now_layer_has_no_embedding_direction(store, monkeypatch):
     """NOW is categorical over modes by design (layers.py: an hour of plays cannot place a direction
     without whiplash). Pin that the embedding panel never grows a `now` row."""

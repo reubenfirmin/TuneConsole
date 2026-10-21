@@ -46,14 +46,18 @@ def handle_play_event(ctx, msg, now) -> bool:
     if ident is None:
         return False
     key = make_key(title, artist)
+    if msg.get('videoId'):
+        key = store.observe_track(msg['videoId'],title,artist,now=now)
     status = (msg.get("likeStatus") or "").strip()
     new = store.record_play_event(ident, key, (msg.get("videoId") or None), now,
                                   playlist_ytm_id=(msg.get("playlist") or None),
                                   like_status=(status or None))
     if new:
-        store.record_history_plays(ident, now, [key])       # keep the (track, day) model current
+        store.record_history_plays(ident, now, [key], source_timezone=msg.get("timeZone"))
         store.set_setting("last_plays_sync_at", str(now))   # plays-freshness for the sync-status badge
     if status in _STATUSES:
+        if msg.get('videoId'):
+            store.record_item_rating(ident,msg['videoId'],status,source='action',now=now)
         # provenance='action': observed live while the user is engaged, so the event time is real
         # and the like keeps full transient participation.
         graduation.apply_dislikes(store, {key: status}, now, provenance="action")  # idempotent by design

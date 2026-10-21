@@ -24,7 +24,8 @@ def _free_port():
 
 
 @pytest.fixture
-def live_cleanup_app():
+def live_cleanup_app(monkeypatch, tmp_path):
+    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     s = Store(":memory:")
     s.init_schema()
     iid = s.upsert_identity("Main", "c1", None, True)

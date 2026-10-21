@@ -10,7 +10,7 @@ def test_gc_discovery_uses_knob_and_holds_generated(monkeypatch):
     s = Store(":memory:"); s.init_schema()
     day = 86400.0
     s.upsert_discovered_track("gen|x", "v", "A", "X", None, None, None, None, "r", 0.0)
-    s.upsert_discovered_track("old|y", "v", "B", "Y", None, None, None, None, "r", 0.0)
+    s.upsert_discovered_track("old|y", "v-old", "B", "Y", None, None, None, None, "r", 0.0)
     now = 100 * day
     s.mark_offered("track", ["gen|x", "old|y"], now - 40 * day)
     rec_params.set_param(s, "discovery_gc_days", 30)

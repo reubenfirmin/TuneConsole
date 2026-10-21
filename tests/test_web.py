@@ -658,7 +658,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     from tests.conftest import only_provider
     # stub MusicBrainz so the test never hits the network (one enrich_full yields genre, year, MBID)
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist: {"S0": ("rock", "1998", None, []),
+                        lambda title, artist, **kwargs: {"S0": ("rock", "1998", None, []),
                                                "S1": ("jazz", "2003", None, [])}.get(title, (None, None, None, [])))
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
@@ -685,7 +685,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
 
     # re-run after MusicBrainz gains a genre for v2. It fills the gap and v2 is now complete
     monkeypatch.setattr(mb, "enrich_full",
-                        lambda title, artist: ("ambient", "2010", None, []) if title == "Sx"
+                        lambda title, artist, **kwargs: ("ambient", "2010", None, []) if title == "Sx"
                         else (None, None, None, []))
     jid2 = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid2}") as st:
@@ -986,7 +986,8 @@ def test_move_run_copy_returns_row_with_message(store):
     assert store.get_playlist(pid) is not None
 
 
-def test_move_run_move_removes_row(store):
+def test_move_run_move_removes_row(store,monkeypatch,tmp_path):
+    monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path))
     i1, i2, pid = _two_identity_move(store)
     c = _client(store, lambda: {i1: FakeClient(), i2: FakeClient()})
     r = c.post("/move/run", data={"playlist": pid, "target_identity": i2})   # move (no copy_only)
@@ -1012,7 +1013,8 @@ def test_move_run_gone_playlist_drops_row(store):
     assert r.status_code == 200 and r.text.strip() == ""
 
 
-def test_delete_empty_removes_row(store):
+def test_delete_empty_removes_row(store,monkeypatch,tmp_path):
+    monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path))
     iid = store.upsert_identity("main", "cred", None, True)
     pid = store.upsert_playlist(iid, "PLE", "Empty One", 0, "h", 1.0)   # no tracks
     c = _client(store, lambda: {iid: FakeClient()})
@@ -1039,7 +1041,8 @@ def test_unhide_overlap_restores_to_overlaps_section(store):
     assert c.get("/cleanup").text.count('class="ov-row"') == 1  # restored to the Overlaps section
 
 
-def test_keep_one_refreshes_and_deletes_other_copies(store):
+def test_keep_one_refreshes_and_deletes_other_copies(store,monkeypatch,tmp_path):
+    monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path))
     iid = store.upsert_identity("main", "cred", None, True)
     a = store.upsert_playlist(iid, "PLA", "Dup A", 2, "h", 1.0)
     b = store.upsert_playlist(iid, "PLB", "Dup B", 2, "h", 1.0)

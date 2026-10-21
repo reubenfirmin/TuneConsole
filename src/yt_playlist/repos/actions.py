@@ -55,3 +55,10 @@ class ActionRepo(Repo):
         rows = self.conn.execute("SELECT * FROM actions ORDER BY id DESC").fetchall()
         return [Action(r["id"], r["kind"], r["params_json"], r["plan_json"], r["undo_json"],
                        r["status"], r["created_at"], r["executed_at"]) for r in rows]
+
+    @synchronized
+    def get_pending_actions(self, kind) -> list[Action]:
+        rows = self.conn.execute(
+            "SELECT * FROM actions WHERE kind=? AND status='pending' ORDER BY id", (kind,)).fetchall()
+        return [Action(r["id"], r["kind"], r["params_json"], r["plan_json"], r["undo_json"],
+                       r["status"], r["created_at"], r["executed_at"]) for r in rows]

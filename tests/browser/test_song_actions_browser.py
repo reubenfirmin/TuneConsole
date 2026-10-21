@@ -286,12 +286,24 @@ def test_generated_playlist_keeps_contextual_mood_actions(song_app, page):
     song_app["store"].set_playlist_group("SOURCE", "Generated")
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
     row = page.get_by_role("row").filter(has_text="Owned Song")
-    row.get_by_role("button", name="More actions for Owned Song").click()
+    trigger = row.get_by_role("button", name="More actions for Owned Song")
+    initial_width = trigger.bounding_box()["width"]
+    trigger.click()
     with page.expect_response("**/recs/mood") as response:
         page.get_by_role("menuitem", name="🔥 More like this").click()
     assert response.value.ok
-    expect(row.locator(".mood-flag")).to_have_text("🔥")
-    expect(row.locator(".mood-flag")).to_be_visible()
+    expect(trigger.locator(".mood-flag-flame")).to_be_visible()
+    expect(trigger).to_have_attribute("title", "More actions · More like this is active")
+    assert trigger.bounding_box()["width"] == initial_width
+    page.reload()
+    expect(trigger.locator(".mood-flag-flame")).to_be_visible()
+    trigger.click()
+    with page.expect_response("**/recs/mood"):
+        page.get_by_role("menuitem", name="🙅 Less like this").click()
+    expect(trigger.locator(".mood-flag-less")).to_be_visible()
+    expect(trigger.locator(".mood-flag-flame")).not_to_be_visible()
+    expect(trigger).to_have_attribute("title", "More actions · Less like this is active")
+    assert trigger.bounding_box()["width"] == initial_width
 
 
 def test_mix_track_menu_stays_above_card_and_opens_playlist_dialog(live_app, store, page, tmp_path):

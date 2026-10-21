@@ -85,6 +85,7 @@ def handle_player_event(ctx, msg, now) -> bool:
     store.record_player_event(ident, kind, video_id, position, duration, playlist,
                               json.dumps(payload) if payload else None, now)
     if kind == "rate" and video_id and action in _RATE_STATUS:
+        store.record_item_rating(ident,video_id,_RATE_STATUS[action],source='action',now=now)
         key = store.identity_key_for_video(video_id)
         if key:
             # provenance='action': an observed rate call is a real-time user action, so the like

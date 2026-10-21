@@ -178,10 +178,16 @@ def facet_multiplier(lean, gain, lo, hi) -> float:
 
 
 def centroid_tilt(store, now, V, idx):
-    """Unit embedding direction from the unified transient stream: mood events, recent plays,
+    """Bounded embedding tilt from the unified transient stream: mood events, recent plays,
     recent likes (action provenance only, see recent_liked_with_ts), and recent skips (#84,
-    negative), each wall-clock decayed by its own half-life (#85). None if quiet. Decay is per-event and internal; callers apply no external freshness
-    factor."""
+    negative), each wall-clock decayed by its own half-life (#85). None if quiet.
+
+    Divide the decayed vector sum by the contributing sources' UNDECAYED absolute weights. Its
+    norm is at most one, retains freshness, and falls when signals disagree. Normalizing by the
+    decayed vector's norm would erase aging whenever the evidence direction stays the same.
+    Missing/zero vectors and disabled sources contribute neither signal nor denominator.
+    Callers use this magnitude directly, without another normalization or freshness factor.
+    """
     gp = rec_params.get_param
     limit = gp(store, "recent_play_limit")
     skip_hl, skip_w = gp(store, "skip_halflife_d"), gp(store, "skip_transient_w")
@@ -194,11 +200,8 @@ def centroid_tilt(store, now, V, idx):
     mood_hl = gp(store, "mood_halflife_d")
     play_hl, play_w = gp(store, "play_halflife_d"), gp(store, "play_transient_w")
     like_hl, like_w = gp(store, "like_halflife_d"), gp(store, "like_transient_w")
-    # tilt accumulates a wall-clock-decayed vector sum of UNIT directions across all transient
-    # sources; each contribution is decayed by decay_weight(age, half_life) (fresher events count for
-    # more) and the whole sum is renormalized to a single unit direction at the end. Each mood event
-    # adds its signed centroid direction (direction = +1 like / -1 dislike).
     tilt = np.zeros(V.shape[1], dtype=np.float64)
+    weight = 0.0
     for ts, direction, keys in events:
         rows = [idx[k] for k in keys if k in idx]
         if not rows:
@@ -208,9 +211,13 @@ def centroid_tilt(store, now, V, idx):
         if nrm == 0:
             continue
         tilt += direction * decay_weight(now - ts, mood_hl) * (c / nrm)
+        weight += abs(direction)
 
     def _add_dir(pairs, w_base, half_life_d):
         # Add each track's own unit vector, scaled by its source weight (w_base) and wall-clock decay.
+        nonlocal tilt, weight
+        if w_base == 0:
+            return
         for k, ts in pairs:
             if k not in idx:
                 continue
@@ -218,20 +225,19 @@ def centroid_tilt(store, now, V, idx):
             nrm = np.linalg.norm(v)
             if nrm == 0:
                 continue
-            nonlocal tilt
             tilt = tilt + w_base * decay_weight(now - ts, half_life_d) * (v / nrm)
+            weight += abs(w_base)
 
     _add_dir(plays, play_w, play_hl)
     _add_dir(likes, like_w, like_hl)
     # #84: a skip subtracts the skipped track's own unit direction, pulling the tilt AWAY from it
     # (negative w_base reuses the same accumulation the positive sources use).
     _add_dir(skips, -skip_w, skip_hl)
-    n = np.linalg.norm(tilt)
-    return tilt / n if n > 0 else None                   # unit direction, or None when nothing accumulated
+    return tilt / weight if weight > 0 and np.any(tilt) else None
 
 
 def audio_centroid_tilt(store, now):
-    """Unit direction in the audio-aware CONTENT vector space toward recent listening, so ranking can
+    """Bounded tilt in the audio-aware CONTENT vector space toward recent listening, so ranking can
     lean to the SOUND of what you have been playing (tempo / energy / mood), not just its genre/era/
     artist facets or its co-occurrence neighbours. The content-space sibling of `centroid_tilt`: same
     transient stream (mood events, recent plays, recent action-provenance likes), same recency
@@ -245,42 +251,10 @@ def audio_centroid_tilt(store, now):
     factor, mirroring `centroid_tilt`. #84: recent skips contribute too, subtracting the skipped
     track's own unit direction, same weight/decay as `centroid_tilt`.
 
-    This is the producer only. The scorer applies it (a content-space cosine term parallel to the
+    This is the producer only. The scorer applies it (a content-space alignment term parallel to the
     collaborative `_apply_mood`); see the wiring note that ships with this change.
     """
     _ckeys, CV, cidx = embed.load_content_vectors(store)
     if CV is None:
         return None
-    gp = rec_params.get_param
-    mood_hl = gp(store, "mood_halflife_d")
-    play_hl, play_w = gp(store, "play_halflife_d"), gp(store, "play_transient_w")
-    like_hl, like_w = gp(store, "like_halflife_d"), gp(store, "like_transient_w")
-    skip_hl, skip_w = gp(store, "skip_halflife_d"), gp(store, "skip_transient_w")
-    limit = gp(store, "recent_play_limit")
-    tilt = np.zeros(CV.shape[1], dtype=np.float64)
-
-    for ts, direction, keys in store.recent_mood_events():     # newest-first
-        rows = [cidx[k] for k in keys if k in cidx]
-        if not rows:
-            continue
-        c = CV[rows].mean(0)
-        nrm = np.linalg.norm(c)
-        if nrm == 0:
-            continue
-        tilt += direction * decay_weight(now - ts, mood_hl) * (c / nrm)
-
-    def _add_dir(pairs, w_base, half_life_d):
-        nonlocal tilt
-        for k, ts in pairs:
-            if k not in cidx:
-                continue
-            tilt = tilt + w_base * decay_weight(now - ts, half_life_d) * CV[cidx[k]]  # rows already unit
-
-    _add_dir(evidence_plays(store, limit),
-             play_w, play_hl)
-    _add_dir(store.recent_liked_with_ts(limit=limit), like_w, like_hl)
-    # #84: same lookback rationale as facet_leans/centroid_tilt (4 half-lives); negative weight pulls
-    # the tilt away from the skipped track's own direction.
-    _add_dir(store.recent_skips_with_ts(now - 4 * skip_hl * 86400), -skip_w, skip_hl)
-    n = np.linalg.norm(tilt)
-    return tilt / n if n > 0 else None
+    return centroid_tilt(store, now, CV, cidx)

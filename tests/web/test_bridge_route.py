@@ -42,9 +42,11 @@ def test_our_extension_origin_connects_and_round_trips():
         t.start()
         frame = ws.receive_json()
         assert frame["body"] == {"b": 1}
-        ws.send_json({"id": frame["id"], "status": 200, "body": json.dumps({"ok": True})})
+        ws.send_json({"id": frame["id"], "status": 200, "body": json.dumps({"ok": True}),
+                      "timeZone": "America/Costa_Rica"})
         t.join(timeout=5)
         assert out["res"] == (200, json.dumps({"ok": True}))
+        assert bridge.source_timezone == "America/Costa_Rica"
 
 
 def test_wrong_origin_rejected():
@@ -231,7 +233,7 @@ def test_playback_context_survives_sensor_frames_and_legacy_heartbeats(kind):
         while time.time() < deadline and bridge.now_playing["title"] != "Legacy refresh":
             time.sleep(0.01)
         assert bridge.now_playing["playlist_ytm_id"] == "PL_source"
-        assert client.get("/bridge/status").json()["now_playing"]["source"]["external"] is True
+        assert client.get("/bridge/status").json()["now_playing"]["source"] is None
 
         ws.send_json({"type": "now-heartbeat", "title": "New queue", "videoId": "v1", "paused": True,
                       "playlist": "", "albumBrowseId": ""})
@@ -253,11 +255,8 @@ def test_legacy_heartbeat_for_another_video_does_not_inherit_source():
     ("PL_source", "MPRE_other", {"kind": "playlist", "title": "Source", "url": "/playlist/1", "external": False}),
     ("OLAK5uy_album", "", {"kind": "album", "title": "Release", "url": "/album?browse=MPRE_album", "external": False}),
     ("", "MPRE_other", {"kind": "album", "title": "Other release", "url": "/album?browse=MPRE_other", "external": False}),
-    ("PL_unknown", "MPRE_album", {"kind": "playlist", "title": "Playing playlist",
-                                  "url": "https://music.youtube.com/playlist?list=PL_unknown", "external": True}),
-    ("RDCLAK5uy_curated", "MPRE_album", {"kind": "playlist", "title": "Playing playlist",
-                                        "url": "https://music.youtube.com/playlist?list=RDCLAK5uy_curated",
-                                        "external": True}),
+    ("PL_unknown", "MPRE_album", None),
+    ("RDCLAK5uy_curated", "MPRE_album", None),
     ("RDAMVMv1", "MPRE_album", None),
     ("RDAMPLsource", "MPRE_album", None),
     ("RDEMautoplay", "", None),

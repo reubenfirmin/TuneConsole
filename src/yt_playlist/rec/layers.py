@@ -6,7 +6,7 @@ NOW layer (`now_mode_posterior`): a confidence-gated categorical posterior over 
 taste modes (rec/taste_modes.py), read from the last `now_window_h` hours of REAL plays only.
 
 Why a discrete posterior over modes and not a single blended direction (the way `transient.
-centroid_tilt` averages recent vectors into one unit vector)? Averaging raw content vectors across a
+centroid_tilt` averages recent vectors into one tilt)? Averaging raw content vectors across a
 short, recent window is exactly the wrong shape for "right now": two or three plays are enough for
 someone to hop between unrelated corners of their taste (a house track, then a chill acoustic one),
 and blending their vectors produces a "free vector" that points at neither region: a meaningless
@@ -21,10 +21,10 @@ posterior is a guess dressed up as a read. `now_min_events` distinct played keys
 sound) must clear before this returns anything; below that, quiet hours and thin evidence return
 None, not a weak posterior a caller might mistake for a strong one.
 
-SESSION layer (`session_tilt`): a unit direction over plays from the last 24 hours of REAL plays,
+SESSION layer (`session_tilt`): a bounded tilt over plays from the last 24 hours of REAL plays,
 each wall-clock decayed by `session_halflife_h` (hours scale). Same conceptual sibling as centroid_tilt
 but tuned for within-session carry-over. Mirrors centroid_tilt's style: accumulates weighted vectors,
-returns a renormalized unit direction or None when quiet/below gate.
+returns a mean of decayed unit vectors or None when quiet/below gate.
 """
 import numpy as np
 
@@ -131,10 +131,10 @@ def evidence_coverage(store, now) -> dict:
 
 
 def session_tilt(store, now, V, idx) -> np.ndarray | None:
-    """Unit embedding direction from plays in the current listening session: plays from the last
+    """Bounded embedding tilt from plays in the current listening session: plays from the last
     24 hours (the kernel does the shaping), each wall-clock decayed by `session_halflife_h` (hours).
     Same transient-model sibling as centroid_tilt: accumulates wall-clock-decayed unit vectors,
-    returns a single renormalized unit direction or None when quiet/below gate.
+    returns their mean with decay preserved, or None when quiet/below gate.
 
     Plays are deduped per identity_key (each key's latest timestamp in the window wins). Only plays
     whose keys exist in idx (the CALLER'S vector index: scoring passes the collaborative V/idx, the
@@ -158,10 +158,10 @@ def session_tilt(store, now, V, idx) -> np.ndarray | None:
     if len(played_keys) < min_events:
         return None
 
-    # tilt accumulates a wall-clock-decayed vector sum of UNIT directions across recent plays;
-    # each contribution is decayed by decay_weight(age, half_life) (fresher plays count for more)
-    # and the whole sum is renormalized to a single unit direction at the end.
+    # Divide by the number of usable directions, independent of age, so quiet hours reduce
+    # magnitude rather than being canceled by normalization (#85/#45).
     tilt = np.zeros(V.shape[1], dtype=np.float64)
+    contributing = 0
     for k in played_keys:
         ts = latest[k]
         v = V[idx[k]]
@@ -170,14 +170,16 @@ def session_tilt(store, now, V, idx) -> np.ndarray | None:
             continue
         # session_halflife_h is in hours; decay_weight expects half_life_d in days.
         tilt = tilt + transient.decay_weight(now - ts, session_hl_h / 24.0) * (v / nrm)
+        contributing += 1
 
-    n = np.linalg.norm(tilt)
-    return tilt / n if n > 0 else None  # unit direction, or None when nothing accumulated
+    if contributing < min_events or not np.any(tilt):
+        return None
+    return tilt / contributing
 
 
 def session_mode_mix(store, now):
     """The SESSION layer's legible companion to `session_tilt`. `session_tilt` blends recent plays
-    into a single unit direction in the collaborative embedding space - real signal, but not something
+    into a single bounded tilt in the collaborative embedding space - real signal, but not something
     that can be honestly labeled (a blend of two unrelated corners of taste is a "free vector" that
     points at neither, the same reason `now_mode_posterior` classifies rather than averages). This
     function anchors the same session-scale evidence to the user's real, previously-discovered taste

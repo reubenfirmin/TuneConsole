@@ -31,9 +31,8 @@ def _playlist(store, pid, ytm, title, group=None, ident=1):
 
 
 def _track(store, tid, key, artist, title="t"):
-    store.conn.execute(
-        "INSERT INTO tracks(id, identity_key, title, artist) VALUES (?,?,?,?)", (tid, key, title, artist))
-    store.conn.commit()
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,key,title,artist,track_id=tid,video_id='v'+key)
 
 
 def _event(store, key, day, playlist=None, ident=1, sec=0):

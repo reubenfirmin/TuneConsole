@@ -38,6 +38,10 @@ class ParamSpec:
 
 # Each default equals the constant it replaced, so behaviour is unchanged until a user moves it.
 PARAMS = [
+    ParamSpec("max_track_minutes", "Maximum track length (minutes)", "discovery",
+              "Longest track allowed in generated song playlists. Lower limits keep DJ mixes and "
+              "concerts out. Tracks with unknown length remain eligible.",
+              1, 180, 1, 20, integer=True),
     ParamSpec("comfort_min_plays", "Comfort Listening: minimum plays", "discovery",
               "Minimum past plays for a forgotten favorite to appear in Comfort Listening. "
               "Raise this to include only tracks you played often.",
@@ -369,6 +373,11 @@ def get_param(store, name):
         return _clamp(spec, raw)
     except (TypeError, ValueError):
         return spec.default
+
+
+def max_track_duration_s(store):
+    """Shared track-length limit for recommendation pools and generated playlist saves (#44)."""
+    return 60 * get_param(store, "max_track_minutes")
 
 
 def set_param(store, name, value) -> None:

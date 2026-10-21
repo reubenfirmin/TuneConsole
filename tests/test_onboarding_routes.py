@@ -18,8 +18,8 @@ def _client(store):
 
 
 def _synced_thin(store):
-    store.conn.execute("INSERT INTO tracks (identity_key, title, artist, video_id) "
-                       "VALUES ('a|x','T','A','v1')")
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,'a|x','T','A',video_id='v1')
     store.conn.execute("UPDATE tracks SET first_enriched_at=1 WHERE identity_key='a|x'")
     store.conn.commit()
     store.set_setting("last_sync_at", "999")   # makes sync.last_synced_ago truthy so home enters the synced branch

@@ -13,6 +13,7 @@ its draft - so one swap keeps them consistent. Saving to YouTube uses the standa
 result, which closes the loading screen and opens the saved playlist.
 """
 import asyncio
+import hashlib
 import json
 import random
 import threading
@@ -21,7 +22,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from yt_playlist.library import executor
-from yt_playlist.rec import road_trip as road_trip_rec
+from yt_playlist.rec import measurement, road_trip as road_trip_rec
+from yt_playlist.util.matching import identity_key
 
 MIN_TARGET_MINUTES = 15
 MAX_TARGET_MINUTES = 12 * 60
@@ -79,8 +81,24 @@ def build(ctx) -> APIRouter:
         if state.get("building") and rid not in _BUILDING:      # orphaned build: settle it
             state = road_trip_rec.finish_draft(state, store, now_fn())
             store.save_road_trip_draft(rid, state, now_fn())
-        return {"state": state, "recipe_id": rid,
-                "tracks": road_trip_rec.draft_tracks(state)}
+        tracks = road_trip_rec.draft_tracks(state)
+        # Progress polls of an unchanged draft are one offer, rather than new opportunities.
+        fingerprint = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()[:16]
+        request_id = f"road-trip:{rid}:{fingerprint}"
+        with store._lock:
+            already_shown = store.conn.execute("SELECT 1 FROM rec_served_impressions WHERE request_id=? LIMIT 1",
+                                                (request_id,)).fetchone()
+        if not already_shown:
+            measurement.record_recommendations(store, "road_trip", [
+                {**track, "key": store.identity_key_for_video(track["video_id"]) or
+                                identity_key(track["title"], track["artist"]),
+                 "out_of_corpus": track.get("source") == "theirs"} for track in tracks],
+                now_fn(), lane="draft", ranker="road-trip-mix", request_id=request_id,
+                provenance={"recipe_id": rid, "seed": state.get("seed"),
+                            "own_pct": state.get("own_pct"),
+                            "familiarity_pct": state.get("familiarity_pct"),
+                            "targets": state.get("targets"), "blacklist_genres": state.get("blacklist_genres")})
+        return {"state": state, "recipe_id": rid, "tracks": tracks}
 
     BLANK_RECIPE = {"id": None, "name": "", "own_pct": 50, "familiarity_pct": 50,
                     "target_minutes": 60, "artists": [], "genres": [], "blacklist_genres": []}
@@ -355,6 +373,9 @@ def build(ctx) -> APIRouter:
             state["saved_playlist_id"] = saved["new_ytm"]
             store.save_road_trip_draft(recipe_id, state, now_fn())
             result.update(ytm=saved["new_ytm"], pid=saved["pid"], added=saved["added"])
+            if saved["added"]:
+                measurement.record_action(store, "save", now_fn(), playlist_id=saved["pid"],
+                                          event_id=f"generate:{saved['new_ytm']}", generated=True)
             bridge = getattr(ctx, "bridge", None)
             if bridge is not None and getattr(bridge, "connected", False):
                 watch_url = f"https://music.youtube.com/watch?list={saved['new_ytm']}"

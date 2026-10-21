@@ -77,8 +77,8 @@ def test_falls_back_to_next_subject_when_first_fails(store, monkeypatch):
 
 
 def test_artist_card_uses_local_thumbnail_color_and_cta(store, monkeypatch):
-    store.conn.execute("INSERT INTO tracks(id, identity_key, title, artist, thumbnail) "
-                       "VALUES (1,'k|khruangbin','T','Khruangbin','http://local/k.jpg')")
+    from tests.conftest import seed_catalog_track
+    seed_catalog_track(store,'k|khruangbin','T','Khruangbin',track_id=1,thumbnail='http://local/k.jpg')
     store.conn.commit()
     monkeypatch.setattr(into_recently, "subjects_for_epoch",
                         lambda s, now, epoch=0: [{"kind": "artist", "subject": "artist:Khruangbin",

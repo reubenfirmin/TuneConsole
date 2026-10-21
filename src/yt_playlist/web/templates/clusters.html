@@ -1,4 +1,5 @@
 {% extends "base.html" %}{% block title %}Clusters · TuneConsole{% endblock %}{% block page_class %}page-clusters{% endblock %}{% block body %}
+{% from "_macros.html" import flow_badge %}
 {% macro cluster_arrow(kind) -%}
 <svg class="cluster-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -196,18 +197,18 @@
     <!-- DJ Journey: how the saved mix is ordered -->
     <div class="cluster-journey" @click.outside="journeyOpen = false">
       <button type="button" class="cj-toggle" @click="journeyOpen = !journeyOpen" title="DJ Journey: how the mix is ordered">
-        <span class="cj-cur">Journey — <span x-text="journeyName"></span></span>
+        <span class="cj-cur">Journey <span class="flow-badge" :data-flow="journey" x-text="journeyName"></span></span>
         <span class="cj-caret">{{ cluster_arrow('down') }}</span>
       </button>
       <div class="cj-panel" x-show="journeyOpen" x-cloak>
         <button type="button" class="cj-item" :class="{ on: journey === 'auto' }"
                 @click="journey = 'auto'; journeyName = 'Pick for me'; journeyOpen = false; persist()">
-          <strong>Pick for me</strong><span>Choose the song order for me</span>
+          <strong>Pick for me</strong><span class="cj-hint">Choose the song order for me</span>
         </button>
         {% for j in journeys %}
         <button type="button" class="cj-item" :class="{ on: journey === '{{ j.key }}' }"
                 @click="journey = '{{ j.key }}'; journeyName = '{{ j.label }}'; journeyOpen = false; persist()">
-          <strong>{{ j.label }}</strong><span>{{ j.hint }}</span>
+          {{ flow_badge(j.key, j.label) }}<span class="cj-hint">{{ j.hint }}</span>
         </button>
         {% endfor %}
       </div>

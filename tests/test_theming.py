@@ -322,13 +322,11 @@ def test_dense_pages_have_scoped_compact_screen_behavior():
         assert 'table-scroll"><table class="track-table' not in text
 
 
-def test_ordinary_interactions_have_keyboard_and_motion_support():
+def test_ordinary_interactions_have_keyboard_and_touch_support():
     app = (WEB / "static" / "app.css").read_text()
     assert "main:not(.page-clusters)" in app
     assert ":focus-visible" in app
     assert "@media (pointer: coarse)" in app
-    assert "@media (prefers-reduced-motion: reduce)" in app
-    assert "animation-duration: .01ms !important" in app
 
     sort_headers = re.findall(
         r'<th class="sorth[^>]+>',

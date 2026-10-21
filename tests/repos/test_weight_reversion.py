@@ -49,3 +49,25 @@ def test_manual_set_weight_is_fresh_evidence():
     s.set_weight("a", 1.8, now=90 * DAY)                 # manual override re-stamps the clock
     assert s.get_weights(now=90 * DAY)["a"] == pytest.approx(1.8)
     assert s.get_weights(now=150 * DAY)["a"] == pytest.approx(1.4)   # one 60d half-life after the SET
+
+
+@pytest.mark.parametrize("factor", [0.5, 1.0, 2.0])
+@pytest.mark.parametrize("updated_at", [None, 0.0])
+def test_automatic_nudges_preserve_explicit_genre_mutes(store, factor, updated_at):
+    # Legacy mutes and fresh mutes survive both elapsed-time reversion and a positive clamp floor.
+    store.conn.execute("INSERT INTO rec_weights(axis, weight, updated_at) VALUES (?, ?, ?)",
+                       ("genre:jazz", 0.0, updated_at))
+    store.conn.commit()
+    for day in (1, 60, 365):
+        assert store.nudge_weight("genre:jazz", factor, now=day * DAY) == 0.0
+        assert store.nudge_weight("genre:jazz", factor, lo=0.0, hi=2.0, now=day * DAY) == 0.0
+        assert store.get_weights(now=day * DAY)["genre:jazz"] == 0.0
+        assert store.weight_records()["genre:jazz"]["weight"] == 0.0
+
+
+def test_manual_unmute_allows_automatic_learning_again(store):
+    store.set_weight("genre:jazz", 0.0, lo=0.0, hi=2.0, now=0.0)
+    assert store.nudge_weight("genre:jazz", 1.1, now=DAY) == 0.0
+    store.set_weight("genre:jazz", 0.8, lo=0.0, hi=2.0, now=DAY)
+    assert store.nudge_weight("genre:jazz", 1.1, now=DAY) == pytest.approx(0.88)
+    assert store.get_weights(now=DAY)["genre:jazz"] == pytest.approx(0.88)

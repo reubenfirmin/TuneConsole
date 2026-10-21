@@ -41,7 +41,9 @@ def spotify_zip(count=1):
 class SearchClient(FakeClient):
     def search(self, query, filter="songs"):
         title = query.removesuffix(" Artist")
-        return [_track("vid_" + title.replace(" ", "_"), title, "Artist")]
+        track = _track("vid_" + title.replace(" ", "_"), title, "Artist")
+        self._catalog[track["videoId"]] = track
+        return [track]
 
 
 def shown(db, request, at):
@@ -50,11 +52,6 @@ def shown(db, request, at):
         "model_version": "test"}], at)
 
 
-@pytest.mark.skip(reason=(
-    "Deferred for deployment: https://github.com/reubenfirmin/TuneConsole/issues/85; "
-    "also tracked by https://github.com/reubenfirmin/TuneConsole/issues/88 and "
-    "https://github.com/reubenfirmin/TuneConsole/issues/45"
-))
 def test_85_old_mood_has_less_ranking_influence(db):
     now = 1000 * DAY
     db.record_mood(["song|artist"], 1, now)
@@ -65,9 +62,6 @@ def test_85_old_mood_has_less_ranking_influence(db):
     assert old <= fresh / 8 + 1e-9, {"fresh_delta": fresh, "21_day_delta": old}
 
 
-@pytest.mark.skip(reason=(
-    "Deferred for deployment: https://github.com/reubenfirmin/TuneConsole/issues/22"
-))
 def test_22_unrelated_same_name_in_other_account_does_not_block_import(db):
     other_identity = db.upsert_identity("other", "other-bridge", None, False)
     tid = db.upsert_track("unrelated", "Unrelated song", "Another artist", "", 200)
@@ -77,9 +71,6 @@ def test_22_unrelated_same_name_in_other_account_does_not_block_import(db):
     assert report["playlists_imported"] == 1, report["details"]["playlists"]
 
 
-@pytest.mark.skip(reason=(
-    "Deferred for deployment: https://github.com/reubenfirmin/TuneConsole/issues/22"
-))
 def test_22_retry_resumes_playlist_after_second_batch_failure(db):
     class FailSecondBatch(SearchClient):
         calls = 0
@@ -92,15 +83,19 @@ def test_22_retry_resumes_playlist_after_second_batch_failure(db):
 
     client = FailSecondBatch()
     raw = spotify_zip(101)
-    with pytest.raises(RuntimeError):
-        import_spotify_library(db, raw, client, 1, 100)
-    import_spotify_library(db, raw, client, 1, 101)
+    first = import_spotify_library(db, raw, client, 1, 100)
+    assert first["playlists_failed"] == 1
+    assert first["tracks_imported"] == 100
+    assert first["details"]["playlists"][0]["tracks_added"] == 100
+    assert db.get_playlists()[0].track_count == 100
+    again = import_spotify_library(db, raw, client, 1, 101)
+    assert again["playlists_imported"] == 1
+    assert again["tracks_imported"] == 1
     assert len(client.created) == 1, {"remote_playlists_created": client.created}
+    assert len(client._tracks[client.created[0][0]]) == 101
+    assert db.get_playlists()[0].track_count == 101
 
 
-@pytest.mark.skip(reason=(
-    "Deferred for deployment: https://github.com/reubenfirmin/TuneConsole/issues/113"
-))
 def test_113_later_impression_outside_report_owns_the_outcome(db):
     db.upsert_track("vid", "song", "artist", None, None)
     shown(db, "first", 100)
@@ -110,9 +105,6 @@ def test_113_later_impression_outside_report_owns_the_outcome(db):
     assert first_report["played"] == 0, first_report
 
 
-@pytest.mark.skip(reason=(
-    "Deferred for deployment: https://github.com/reubenfirmin/TuneConsole/issues/113"
-))
 def test_113_generated_provenance_survives_playlist_promotion(db):
     db.upsert_track("vid", "song", "artist", None, None)
     db.conn.execute("INSERT INTO playlist_group(ytm,name) VALUES ('PLGEN','Generated')")
@@ -127,21 +119,15 @@ def test_113_generated_provenance_survives_playlist_promotion(db):
     assert after["generated"] == 1 and after["organic"] == 0, after
 
 
-@pytest.mark.skip(reason=(
-    "Deferred for deployment: https://github.com/reubenfirmin/TuneConsole/issues/58"
-))
 def test_58_same_local_day_today_survives_utc_midnight(db):
     # Both captures occur on Oct 20 in Costa Rica (17:30 and 18:30).
     first = datetime.datetime(2026, 10, 20, 23, 30, tzinfo=datetime.timezone.utc).timestamp()
     second = first + 3600
     items = [("song|artist", "Today")]
-    assert db.record_history_plays(1, first, items) == 1
-    assert db.record_history_plays(1, second, items) == 0
+    assert db.record_history_plays(1, first, items, source_timezone="America/Costa_Rica") == 1
+    assert db.record_history_plays(1, second, items, source_timezone="America/Costa_Rica") == 0
 
 
-@pytest.mark.skip(reason=(
-    "Deferred for deployment: https://github.com/reubenfirmin/TuneConsole/issues/114"
-))
 def test_114_explicit_genre_mute_survives_automatic_graduation(db):
     now = 1000 * DAY
     db.set_weight("genre:jazz", 0, lo=0, hi=2, now=now)
@@ -150,9 +136,6 @@ def test_114_explicit_genre_mute_survives_automatic_graduation(db):
     assert db.get_weights(now=now + DAY)["genre:jazz"] == 0
 
 
-@pytest.mark.skip(reason=(
-    "Deferred for deployment: https://github.com/reubenfirmin/TuneConsole/issues/40"
-))
 def test_40_alternate_remote_position_survives_readback_lag(db):
     anchor = _track("anchor", "Original", "Artist", set_video_id="set_anchor")
     following = _track("following", "Next", "Other", set_video_id="set_following")
@@ -174,14 +157,11 @@ def test_40_alternate_remote_position_survives_readback_lag(db):
     assert [t["videoId"] for t in client._tracks["PL"]] == ["anchor", "alt", "following"]
 
 
-@pytest.mark.skip(reason=(
-    "Deferred for deployment: https://github.com/reubenfirmin/TuneConsole/issues/44"
-))
 def test_44_cold_discovery_long_mix_is_excluded_before_saving(db):
     for key, video, title in [("one|a", "one", "Song one"), ("mix|dj", "mix", "DJ concert"),
                               ("two|b", "two", "Song two")]:
         db.upsert_discovered_track(key, video, title, key.split("|")[1], "", None,
-                                   None, None, "source", 100)
+                                   "Techno", None, "source", 100)
     candidates = surfaces.cold_candidates(db, 100)
     tracks = [{"video_id": t.video_id, "title": t.title, "artist": t.artist} for t in candidates]
     client = FakeClient(song_durations={"one": 200, "mix": 7200, "two": 200})
@@ -189,11 +169,6 @@ def test_44_cold_discovery_long_mix_is_excluded_before_saving(db):
     assert "mix" not in [video for _, batch in client.added for video in batch]
 
 
-@pytest.mark.skip(reason=(
-    "Deferred for deployment: https://github.com/reubenfirmin/TuneConsole/issues/86; "
-    "also tracked by https://github.com/reubenfirmin/TuneConsole/issues/18 and "
-    "https://github.com/reubenfirmin/TuneConsole/issues/114"
-))
 def test_86_boosting_cold_genre_does_not_lower_its_rank(db, monkeypatch):
     class Projection:
         def predict(self, genre, year=None, audio=None, artist=None):

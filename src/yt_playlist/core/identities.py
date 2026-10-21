@@ -30,7 +30,13 @@ STUB_AUTH = {
 }
 
 
+class BridgeClient(YTMusic):
+    @property
+    def history_timezone(self):
+        return self._session._bridge.source_timezone
+
+
 def build_client(cfg: IdentityConfig, bridge) -> YTMusic:
     # All network I/O is executed by the extension via the bridge session; STUB_AUTH just satisfies
     # ytmusicapi's own construction and auth checks. brand_account_id still selects the identity.
-    return YTMusic(STUB_AUTH, cfg.brand_account_id, requests_session=BridgeSession(bridge))
+    return BridgeClient(STUB_AUTH, cfg.brand_account_id, requests_session=BridgeSession(bridge))

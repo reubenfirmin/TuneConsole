@@ -48,9 +48,16 @@ def test_now_playing_returns_to_source(live_app, store, page, kind, width):
     assert playback_requests == []
 
 
-def test_now_playing_without_context_has_no_source_link(live_app, page):
+@pytest.mark.parametrize("source", [
+    None,
+    {"kind": "playlist", "title": "Playing playlist", "external": True,
+     "url": "https://music.youtube.com/playlist?list=PL_unknown"},
+    {"kind": "playlist", "title": "Playing playlist",
+     "url": "https://music.youtube.com/playlist?list=PL_unknown"},
+])
+def test_now_playing_without_local_source_has_no_source_link(live_app, page, source):
     page.route("**/bridge/status", lambda route: route.fulfill(json={
-        "connected": True, "now_playing": {"title": "Song", "artist": "Artist", "source": None},
+        "connected": True, "now_playing": {"title": "Song", "artist": "Artist", "source": source},
     }))
     page.goto(f"{live_app}/playlists")
     expect(page.locator(".global-now-playing")).to_be_visible()

@@ -112,7 +112,7 @@ def test_fresh_creation_starts_enrichment_and_page_rejoins(store, monkeypatch, r
     only_provider(store, "musicbrainz")
     started, release = threading.Event(), threading.Event()
 
-    def enrich(title, artist):
+    def enrich(title, artist, **kwargs):
         started.set()
         assert release.wait(timeout=10)
         return "Rock", "1998", None, []

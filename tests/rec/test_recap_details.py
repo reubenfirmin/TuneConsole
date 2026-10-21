@@ -297,9 +297,8 @@ def test_worker_bakes_all_three_screens_and_replaces_overlapping_old_beats(store
     familiar_months(data)
     add_plays(data, "2026-09", per_day=12, artist="New artist", genre="jazz", album="MPRE")
     for key, card in data["meta"].items():
-        store.conn.execute(
-            "INSERT INTO tracks(identity_key,title,artist,genre,album_browse_id) VALUES (?,?,?,?,?)",
-            (key, card["title"], card["artist"], card["genre"], card["album_browse_id"]))
+        from tests.conftest import seed_catalog_track
+        seed_catalog_track(store,key,card["title"],card["artist"],genre=card["genre"],album_browse_id=card["album_browse_id"])
     rows = [(p["identity_key"], p["played_at"]) for p in data["plays"]]
     rows += [("old", month_bounds("2026-01")[0]), ("future", month_bounds("2026-10")[0])]
     store.conn.executemany("INSERT INTO play_events(identity_id,identity_key,played_at,source) "

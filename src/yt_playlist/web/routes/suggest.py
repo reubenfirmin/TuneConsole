@@ -48,6 +48,9 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=404, detail="playlist not found")
         now = now_fn()
         suggestions = recommend.complete_playlist(store, pid, now=now)
+        from yt_playlist.rec import measurement
+        measurement.record_recommendations(store, "playlist_completion", suggestions, now,
+                                           lane="complete", ranker="artist-genre", provenance={"playlist_id": pid})
         return templates.TemplateResponse(request, "_partials/playlist_suggestions.html", {
             "suggestions": suggestions,
             "pid": pid,
@@ -70,6 +73,12 @@ def build(ctx) -> APIRouter:
         meta = store.tracks_by_keys(keys + ([key] if key else []))
         pool = store.discovered_tracks_by_keys([k for k in keys if k not in meta])
         items = [meta.get(k) or pool[k] for k in keys if k in meta or k in pool]
+        from yt_playlist.rec import measurement
+        scores = dict(nbrs)
+        measurement.record_recommendations(store, "similar", [
+            {**item, "key": k, "score": scores[k]} for k in keys
+            if (item := meta.get(k) or pool.get(k))], now_fn(),
+            lane="similar", ranker="blended-neighbors", provenance={"seed": key})
         return templates.TemplateResponse(request, "_partials/similar_modal.html",
                                           {"items": items, "seed": meta.get(key, {}),
                                            "have_model": store.rec_vectors_count() > 0,

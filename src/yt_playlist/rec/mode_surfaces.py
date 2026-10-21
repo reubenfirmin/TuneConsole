@@ -11,7 +11,7 @@ from itertools import permutations
 import numpy as np
 
 from yt_playlist.rec import (embed, home_themes, home_vibe, layers, mode_eval, rec_params, recommend, surfaces,
-                             taste_modes, transient)
+                             taste_modes, transient, measurement)
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
 
@@ -44,7 +44,7 @@ def _item_dict(it) -> dict:
             "artist": it.artist, "album": getattr(it, "album", ""), "thumbnail": it.thumbnail,
             "plays": getattr(it, "plays", 0), "reason": getattr(it, "reason", ""),
             "lane": getattr(it, "lane", ""), "genre": getattr(it, "genre", "") or "",
-            "year": getattr(it, "year", None)}
+            "year": getattr(it, "year", None), "score": getattr(it, "score", None)}
 
 
 def _nearest_mode(key, mode_ids, C, lidx, LV, didx, DV):
@@ -88,7 +88,13 @@ def refresh_fresh(store, pool, now):
                 bucket["fresh"] = buckets.get(mid, [])
         for mid, items in buckets.items():
             payload.setdefault(mid, {})["fresh"] = items
-        payload.setdefault("all", {})["fresh"] = [_item_dict(it) for it in pool]
+        fresh = measurement.stamp_pool(store, [_item_dict(it) for it in pool], now, "cold")
+        versions = {item["key"]: item.get("pool_policy") for item in fresh}
+        for bucket in payload.values():
+            if isinstance(bucket, dict):
+                for item in bucket.get("fresh", []):
+                    item["pool_policy"] = versions.get(item.get("key"))
+        payload.setdefault("all", {})["fresh"] = fresh
         store.put_proposals("mode_bundles", payload, now)
 
 
@@ -125,17 +131,29 @@ def prepare_bundles(store, now) -> dict:
         # a user's smaller genre families, even when they have plenty of eligible library tracks.
         payload.setdefault("all", {})[surf] = [_item_dict(it) for it in pool
                                                if getattr(it, "key", "")]
-    # Temporal surface (#63): each mode's own library member tracks, carrying release year, for the
-    # date-banded 4th card (Throwback / Time Flies / Recent Picks). Built from content-vector
-    # membership, not a scorer pool, so it must apply the same hard suppression the scorers do
-    # (YouTube dislikes + dismiss/mute/snooze) or a thumbs-down track leaks back into the card.
-    _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap,
-                    store.suppressed_keys("for_you", now))
-    # Meta: Comfort's credibility signal (its pool size) + the user's release-year band cuts (terciles).
+        stamped = measurement.stamp_pool(store, payload["all"][surf], now, surf)
+        versions = {item["key"]: item.get("pool_policy") for item in stamped}
+        payload["all"][surf] = stamped
+        for mid in mode_ids:
+            for item in payload[str(mid)][surf]:
+                item["pool_policy"] = versions.get(item.get("key"))
+    # Compute the library-relative bands before capping temporal candidates: a mode's top matches
+    # can all be old releases even when its middle and newer bands have plenty of eligible tracks.
     years = store.modes.years_for(lkeys) if lkeys else {}
     yvals = sorted(y for y in years.values() if y)
     cuts = ([int(np.percentile(yvals, 33)), int(np.percentile(yvals, 66))]
             if len(yvals) >= 30 else None)
+    # Temporal surface (#63): each mode's own library member tracks, carrying release year, for the
+    # date-banded 4th card (Throwback / Time Flies / Recent Picks). Built from content-vector
+    # membership, not a scorer pool, so it must apply the same hard suppression the scorers do
+    # (YouTube dislikes + dismiss/mute/snooze) or a thumbs-down track leaks back into the card.
+    _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, years=years, year_cuts=cuts,
+                    suppressed=store.suppressed_keys("for_you", now))
+    for mode_id in mode_ids:
+        bucket = payload.get(str(mode_id), {})
+        if bucket.get("temporal"):
+            bucket["temporal"] = measurement.stamp_pool(store, bucket["temporal"], now, "temporal")
+    # Meta: Comfort's credibility signal (its pool size) + the user's release-year band cuts (terciles).
     payload["_meta"] = {"comfort_pool": len(pools["comfort"]), "year_cuts": cuts,
                         "full_pools": True}
     # #57 per-mode PPR ordering, precomputed for the A/B in-mode ranker. Best-effort: a failure leaves
@@ -149,7 +167,7 @@ def prepare_bundles(store, now) -> dict:
     store.put_proposals("mode_bundles", payload, now)
     # Supersede the last on-demand pool too, so explicit-genre Fresh previews use the worker's
     # latest metadata/ranking rather than keeping an older clicked job's snapshot forever.
-    store.put_proposals("fresh_pool", [surfaces._item_to_fresh_dict(it) for it in pools["fresh"]], now)
+    store.put_proposals("fresh_pool", payload.get("all", {}).get("fresh", []), now)
     return payload
 
 
@@ -161,9 +179,10 @@ def _temporal_item(key, meta, genres, years) -> dict:
             "genre": genres.get(key) or "", "year": years.get(key)}
 
 
-def _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, suppressed=frozenset()) -> None:
-    """Per mode, its library member tracks (nearest the mode centroid, top `cap`), each carrying its
-    release year, under payload[mode]['temporal'] + a general 'all' temporal pool. `suppressed` keys
+def _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, *, years, year_cuts,
+                    suppressed=frozenset()) -> None:
+    """Per mode, its library member tracks (nearest the mode centroid, top `cap` per release-year
+    band), under payload[mode]['temporal'] + a general 'all' temporal pool. `suppressed` keys
     (YouTube dislikes, dismiss/mute/snooze) are dropped so this membership surface honours feedback
     the same way the scorer pools do."""
     if LV is None or not lkeys:
@@ -176,14 +195,20 @@ def _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, suppressed=froz
     near = sims.argmax(axis=1)
     meta = store.tracks_by_keys(lkeys)
     genres = store.modes.genres_for(lkeys)
-    years = store.modes.years_for(lkeys)
     allt = []
     for j, mid in enumerate(mode_ids):
         rows = np.where(near == j)[0]
         rows = rows[np.argsort(-sims[rows, j])]
         rows = [i for i in rows if lkeys[i] not in suppressed]
         items = [_temporal_item(lkeys[i], meta, genres, years) for i in rows]
-        payload[str(mid)]["temporal"] = items[:cap]
+        if year_cuts is None:
+            payload[str(mid)]["temporal"] = items[:cap]
+        else:
+            candidates = []
+            for band in range(3):
+                band_items = [d for d in items if _in_band(d["year"], band, *year_cuts)]
+                candidates.extend(band_items[:cap])
+            payload[str(mid)]["temporal"] = candidates
         allt.extend(items)
     payload.setdefault("all", {})["temporal"] = allt
 
@@ -489,6 +514,12 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
         if len(items) < _MIN_CARD:                          # credibility gate: too thin to show
             return None, bucket
         label = _BAND_LABELS[band] if surf == "temporal" else _CARD_LABELS[surf]
+        # The candidate-fit score is not the final assembly order: preserve both its origin and
+        # the ordering inputs, before diversity, genre backfill and the later DJ journey.
+        items = [{**item, "serving_context": {"score_kind": "candidate_fit", "source_ranker": surf,
+                  "ordering_ranker": ranker, "ppr_position": ppr_pos.get(item["key"]) if ranker == "ppr" else None,
+                  "facet_tilt": _tilt_key(item, leans), "vibe": vibe_rank.preset,
+                  "vibe_affinity": vibe_rank.affinity(item)}} for item in items]
         return {"lane": surf, "label": label, "mode_id": mid, "ranker": ranker,
                 "tracks": items}, bucket
 

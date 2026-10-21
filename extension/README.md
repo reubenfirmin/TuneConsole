@@ -48,6 +48,24 @@ edits, follows). All events land in the local database; nothing leaves your mach
 
 ### Playback events
 
+Track and playlist IDs come from the playing video's player state, so browsing another song or
+playlist does not change listening attribution. The DOM fallback uses player-bar links or artwork;
+it never borrows IDs from the address bar. If the playing video cannot be identified, it sends
+presence updates without recording a play.
+
+Player-bar metadata is used when its track ID matches the playing video, preserving album artwork
+and artist credits even when the artwork URL has no video ID. MediaSession metadata is used when
+its artwork confirms that video. Ratings and album links are captured with the bar's track ID;
+stale fields cannot be attached to a different song. Unverified player-only metadata updates
+presence until matching metadata is available. Incomplete MAIN-world reports allow the player-bar
+fallback to continue. Playback history waits for a verified account; DOM fallback retains that
+account across track changes instead of treating an unknown account as the main account.
+
+Now Playing and playback controls select the same music tab, preferring audible, unmuted playback.
+Muted or paused secondary tabs cannot replace an audible tab's card. Playback launches and library
+requests share tab-creation coordination, and concurrent library requests share the startup wait
+for a new or already-loading music tab before sending fetches.
+
 The extension observes the video element and player UI to capture listening behavior. Each event
 includes the video ID, playback position (in seconds), track duration, and current shuffle/repeat
 mode (unknown values are empty strings):
@@ -88,6 +106,15 @@ Check the service worker console for the reason:
   `music.youtube.com` and retry.
 - "blocked by allowlist": the backend asked for a URL outside `youtubei/v1/`; this is expected
   behavior, not a bug.
+- "response lost; the request may have completed": the tab stopped responding after delivery.
+  Check YouTube Music before retrying an edit; the extension avoids replaying an uncertain request.
+
+Extension updates inject fresh sensors into open music tabs without reloading them. Sensor recovery
+checks both the isolated receiver and a fresh, versioned MAIN sample, and can repair MAIN even if
+the isolated receiver still answers. It also defers reloads while media is playing or paused partway
+through a track. Fetch readiness only requires the isolated receiver. Playlist edits refresh
+matching views across music tabs when playback allows it. Manually opened local app tabs stay open;
+the public site's Local Player button reuses an existing app tab.
 
 ## Files
 
@@ -102,3 +129,13 @@ Set a version in `manifest.json` higher than the last uploaded version, then run
 `scripts/build-extension.sh` from the repository root. Upload the resulting
 `dist/tuneconsole-extension-<version>.zip` to the existing store listing.
 The package omits the development `key`, README, hidden files, and source maps.
+
+Radio is unreleased and disabled at build time in normal packages and unpacked source loads.
+Those builds ignore radio commands and skip radio storage recovery; normal playback, library
+requests, and listening sensors remain available. To make an internal radio preview, run
+`scripts/build-extension.sh --enable-radio`. It produces
+`dist/tuneconsole-extension-<version>-radio-preview.zip`, marks the extension name as a radio
+preview, and adds the `storage` permission needed to recover radio decks after a worker restart.
+It retains the development `key`, so you can extract it and load the directory unpacked for
+local preview use. Do not upload the preview package to the public listing. The app's radio
+controls are available at `http://127.0.0.1:8765/?radio=true`.

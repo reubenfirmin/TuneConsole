@@ -294,8 +294,10 @@ def cold_rankable(store, now) -> dict:
     transient tilts (not just recency/radio order). Imported lazily to dodge a surfaces<->eval cycle."""
     from yt_playlist.rec import surfaces
     pool = len(store.get_discovered_tracks())
-    rankable = len(surfaces.cold_candidates(store, now, limit=10_000))
-    return {"rankable": rankable, "pool": pool}
+    candidates = surfaces.cold_candidates(store, now)
+    rankable = sum(item.score is not None for item in candidates)
+    return {"rankable": rankable, "fallback": len(candidates) - rankable,
+            "eligible": len(candidates), "pool": pool}
 
 
 def content_rankable(store) -> dict:

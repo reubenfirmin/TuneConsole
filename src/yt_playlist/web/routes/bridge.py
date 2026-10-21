@@ -9,11 +9,11 @@ import asyncio
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode, urlparse, parse_qs
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from yt_playlist.library import executor, live_plays, player_events
-from yt_playlist.rec import radio as radio_mod, rec_params, recommend
+from yt_playlist.rec import measurement, radio as radio_mod, rec_params, recommend
 from yt_playlist.web.context import form_float
 
 logger = logging.getLogger(__name__)
@@ -74,12 +74,6 @@ def build(ctx) -> APIRouter:
                 url = (f"/playlist/{source['id']}" if source["kind"] == "playlist" else
                        "/album?" + urlencode({"browse": source["browse"]}))
                 source = {"kind": source["kind"], "title": source["title"], "url": url, "external": False}
-            elif playlist and (not playlist.startswith("RD") or playlist.startswith("RDCLAK5uy_")):
-                # Autoplay/radio queues have no playlist to return to. RDCLAK ids are curated
-                # playlists, so preserve their links alongside ordinary playlists and albums.
-                kind = "album" if playlist.startswith("OLAK5uy_") else "playlist"
-                source = {"kind": kind, "title": f"Playing {kind}", "external": True,
-                          "url": "https://music.youtube.com/playlist?list=" + quote(playlist, safe="")}
             now_playing = {**now_playing, "source": source}
         return {"connected": bridge.connected, "now_playing": now_playing,
                 "sensor_health": getattr(bridge, "sensor_health", None),
@@ -542,6 +536,16 @@ def build(ctx) -> APIRouter:
             return {"ok": False, "error": "url must be a music.youtube.com link"}
         try:
             bridge.send_control({"type": "navigate", "url": url})
+            query = parse_qs(urlparse(url).query)
+            video_id = (query.get("v") or [None])[0]
+            if video_id:
+                measurement.record_action(ctx.store, "start", ctx.now_fn(), video_id=video_id)
+            elif query.get("list"):
+                playlist = query["list"][0].removeprefix("RDAMPL")
+                for pl in ctx.store.get_playlists():
+                    if pl.ytm_playlist_id == playlist:
+                        measurement.record_action(ctx.store, "start", ctx.now_fn(), playlist_id=pl.id)
+                        break
             return {"ok": True}
         except Exception as e:  # noqa: BLE001 - UI reports the connection failure for retry
             return {"ok": False, "error": str(e)}
@@ -853,7 +857,7 @@ def build(ctx) -> APIRouter:
                 except (KeyError, ValueError, TypeError):
                     logger.warning("malformed bridge frame, ignoring: %r", msg)
                     continue
-                bridge.resolve(req_id, status, body)
+                bridge.resolve(req_id, status, body, source_timezone=msg.get("timeZone"))
         except WebSocketDisconnect:
             pass
         finally:

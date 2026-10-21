@@ -10,6 +10,7 @@ from yt_playlist.rec import road_trip as road_trip_rec
 from yt_playlist.web.routes import road_trip as road_trip_route
 from yt_playlist.repos.rec_query import GENERATED_GROUP
 from yt_playlist.web.app import create_app
+from yt_playlist.util.matching import identity_key
 from tests.conftest import FakeClient
 
 
@@ -58,6 +59,26 @@ def test_road_trip_page_renders(store):
     r = c.get("/road_trip")
     assert r.status_code == 200
     assert "Road Trip" in r.text
+
+
+def test_draft_serving_and_generated_save_are_measured_without_counting_progress_polls(store, monkeypatch):
+    c, _ = _app(store, monkeypatch=monkeypatch)
+    _stub_pools(monkeypatch, store)
+    rid = _recipe(store)
+    assert c.post(f"/road_trip/recipes/{rid}/build").status_code == 200
+    draft = store.get_road_trip_draft(rid)
+    rows = store.conn.execute("SELECT * FROM rec_served_impressions WHERE surface='road_trip' ORDER BY rank").fetchall()
+    assert [r["identity_key"] for r in rows] == [identity_key(t["title"], t["artist"])
+                                               for t in road_trip_rec.draft_tracks(draft)]
+    assert rows
+    before = store.recommendation_scorecard(999, 1001)["impressions"]
+    for _ in range(3):
+        assert c.get(f"/road_trip/draft/{rid}/progress").status_code == 200
+    assert store.recommendation_scorecard(999, 1001)["impressions"] == before
+    assert c.post(f"/road_trip/draft/{rid}/save").status_code == 200
+    score = store.recommendation_scorecard(999, 1001)
+    assert score["save"] == len(rows) and score["conversion"] == 0
+    assert score["by_ownership"]["cold"]["impressions"] > 0
 
 
 def test_reopening_and_saving_repairs_passenger_genre_membership(store):

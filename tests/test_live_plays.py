@@ -90,3 +90,16 @@ def test_no_master_falls_back_to_first_identity():
     ident = s.get_identities()[0].id
     assert live_plays.handle_play_event(_ctx(s), _msg(), 1000.0) is True
     assert s.play_events_since(0)[0]["identity_id"] == ident
+
+
+def test_live_play_and_history_backfill_share_browser_date():
+    import datetime
+
+    s = _store()
+    now = datetime.datetime(2026, 10, 21, 0, 30, tzinfo=datetime.timezone.utc).timestamp()
+    assert live_plays.handle_play_event(_ctx(s), _msg(timeZone="America/Costa_Rica"), now)
+    assert s.record_history_plays(1, now + 3600, [("song|artist", "Today")],
+                                  source_timezone="America/Costa_Rica") == 0
+    want = datetime.datetime(2026, 10, 20, 12, tzinfo=datetime.timezone.utc).timestamp()
+    assert s.conn.execute("SELECT taken_at FROM history_snapshots").fetchone()[0] == want
+    assert s.play_events_since(0)[0]["played_at"] == now

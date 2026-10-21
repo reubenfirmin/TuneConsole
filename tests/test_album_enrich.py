@@ -21,7 +21,7 @@ def test_album_enrich_runner_fills_genres(store, monkeypatch):
     _fold_album(store)
     pending = store.album_tracks_to_enrich("BID")
     assert len(pending) == 4
-    monkeypatch.setattr(musicbrainz, "enrich_full", lambda title, artist: ("rock", "2001", None, []))
+    monkeypatch.setattr(musicbrainz, "enrich_full", lambda title, artist, **kwargs: ("rock", "2001", None, []))
 
     musicbrainz.enrich_playlist(store, None, lambda ev: None, pending=pending)
 
