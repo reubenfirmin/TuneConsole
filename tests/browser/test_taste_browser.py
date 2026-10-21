@@ -762,18 +762,21 @@ def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request
     vectors = np.eye(len(styles), dtype=np.float32)
     mode_rows = []
     content_vectors = []
+    recent_plays = []
     for i, style in enumerate(styles):
         genre, year = [("Techno", 1997), ("Jazz", 1964), ("Rock", 1978)][i % 3]
         rep_keys = []
         for j in range(3):
             title, artist = f"Track {i} sample {j} - The extended version", f"Artist {i} & collaborator {j}"
             thumbnail = ["/static/nag/intro.png", "/static/nag/trends.png", None][j]
-            track = store.upsert_track(f"taste-{i}-{j}", title, artist, None, None, thumbnail=thumbnail)
+            video_id = f"taste-{i}-{j}"
+            track = store.upsert_track(video_id, title, artist, None, None, thumbnail=thumbnail)
             store.set_track_genre(track, genre)
             store.set_track_year(track, year)
             key = identity_key(title, artist)
             rep_keys.append(key)
             content_vectors.append((key, vectors[i].tobytes()))
+            recent_plays.append((key, video_id, 1.0))
         store.add_history_snapshot(iid, 1.0, rep_keys)
         mode_rows.append({"mode_id": i + 1, "label": style, "families": [[genre.lower(), 1]],
                           "centroid": vectors[i], "size": 10 + i,
@@ -787,8 +790,7 @@ def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request
         store.modes.log_pick(playlist, 1, now=1.0)
     store.modes.log_pick(5, 2, now=1.0)
     store.replace_rec_content_vectors(content_vectors)
-    store.import_play_events(iid, [(key, f"recent-{i}", 1.0)
-                                   for i, (key, _vector) in enumerate(content_vectors[:4])])
+    store.import_play_events(iid, recent_plays[:4])
     store.set_weight("lane:deep_cut", 1.6, now=1.0)
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
