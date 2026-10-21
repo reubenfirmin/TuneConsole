@@ -5,6 +5,61 @@ picked (Save & play), and how much its picked playlists were then listened to (e
 Pick and impression counts drive theme selection across the row via Thompson sampling; mode_scoreboard
 also provides display aggregation. Reads only; writes nothing."""
 
+import numpy as np
+
+
+def choice_posterior(picks, offers):
+    """Parameters of the selection distribution used by the Home theme sampler."""
+    return 1 + picks, 1 + max(0, offers - picks)
+
+
+def _choice_contrast(rows, strongest):
+    """One supported contrast, not predicted menu shares or absolute increases.
+
+    Compare the best-supported choice with the most-offered group whose middle-80% interval
+    is entirely below it. Untested groups remain exploratory. Identical labels are separate
+    model groups and must not be merged or presented as opposing preferences.
+    """
+    if not strongest:
+        return None
+    leader = strongest[0]
+    for row in sorted(rows, key=lambda r: (-r["offered"], r["mode_id"])):
+        if (row["has_evidence"] and row["high"] < leader["low"]
+                and row["label"].casefold() != leader["label"].casefold()):
+            return {"favored": [leader], "less_supported": [row]}
+    return None
+
+
+def choice_evidence(store):
+    """Expose the sampler's evidence without interpreting saves as confirmed listening.
+
+    Picks are successful playlist creations, not unique clicks per offer. Preserve both raw
+    counts, including repeat selections, and use the sampler's bounded posterior rather than
+    presenting their ratio as a click-through rate. Intervals use a fixed simulation so the
+    read-only chart stays stable between visits and needs no statistics dependency.
+    """
+    offered = store.modes.impression_counts()
+    picked = {}
+    for _playlist_id, mid in store.modes.pick_rows():
+        picked[mid] = picked.get(mid, 0) + 1
+    rows = []
+    for color, mode in enumerate(store.modes.list_modes(active_only=True)):
+        mid = mode["mode_id"]
+        offers, picks = offered.get(mid, 0), picked.get(mid, 0)
+        # The sampler ignores orphan picks until an impression exists for that mode.
+        alpha, beta = choice_posterior(picks if mid in offered else 0, offers)
+        rng = np.random.default_rng(mid)
+        low, high = np.quantile(rng.beta(alpha, beta, 16384), [0.1, 0.9])
+        rows.append({"mode_id": mid, "label": mode["label"], "color_idx": color,
+                     "offered": offers, "picked": picks, "has_evidence": mid in offered,
+                     "alpha": alpha, "beta": beta,
+                     "estimate": alpha / (alpha + beta), "low": float(low), "high": float(high)})
+    strongest = sorted((r for r in rows if r["picked"] and r["offered"]),
+                       key=lambda r: (-r["low"], r["mode_id"]))[:3]
+    return {"rows": rows, "strongest": strongest, "contrast": _choice_contrast(rows, strongest),
+            "offered": sum(r["offered"] for r in rows),
+            "picked": sum(r["picked"] for r in rows)}
+
 
 def mode_bandit_stats(store, *, before=None) -> dict:
     """{mode_id: (picks, impressions)}, pooled across framings. `before` freezes the evidence at

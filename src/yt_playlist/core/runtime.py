@@ -48,10 +48,7 @@ class Runtime:
             return
         try:
             cfgs = load_identities(self.config_path)
-            label_to_id = {
-                c.label: self.store.upsert_identity(
-                    c.label, c.credential_ref, c.brand_account_id, c.is_master)
-                for c in cfgs}
+            label_to_id = self.store.identities.replace_identities(cfgs)
         except (ValueError, KeyError) as e:
             logger.warning("config not usable, showing setup: %s", e)
             return

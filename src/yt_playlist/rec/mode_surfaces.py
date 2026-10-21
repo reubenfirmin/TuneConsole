@@ -10,7 +10,7 @@ from itertools import permutations
 
 import numpy as np
 
-from yt_playlist.rec import (embed, home_themes, layers, mode_eval, rec_params, recommend, surfaces,
+from yt_playlist.rec import (embed, home_themes, home_vibe, layers, mode_eval, rec_params, recommend, surfaces,
                              taste_modes, transient)
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
@@ -43,7 +43,8 @@ def _item_dict(it) -> dict:
     return {"key": getattr(it, "key", ""), "video_id": it.video_id, "title": it.title,
             "artist": it.artist, "album": getattr(it, "album", ""), "thumbnail": it.thumbnail,
             "plays": getattr(it, "plays", 0), "reason": getattr(it, "reason", ""),
-            "lane": getattr(it, "lane", ""), "genre": getattr(it, "genre", "") or ""}
+            "lane": getattr(it, "lane", ""), "genre": getattr(it, "genre", "") or "",
+            "year": getattr(it, "year", None)}
 
 
 def _nearest_mode(key, mode_ids, C, lidx, LV, didx, DV):
@@ -58,12 +59,48 @@ def _nearest_mode(key, mode_ids, C, lidx, LV, didx, DV):
     return mode_ids[int((C @ v).argmax())]
 
 
+def _bucket_pool(pool, mode_ids, C, lidx, LV, didx, DV, cap):
+    buckets = {str(mid): [] for mid in mode_ids}
+    for it in pool:
+        mid = _nearest_mode(getattr(it, "key", ""), mode_ids, C, lidx, LV, didx, DV)
+        if mid is not None and len(buckets[str(mid)]) < cap:
+            buckets[str(mid)].append(_item_dict(it))
+    return buckets
+
+
+def refresh_fresh(store, pool, now):
+    """Rebucket newly ranked discoveries after enrichment without rebuilding library surfaces."""
+    modes = taste_modes.live_modes(store)
+    mode_ids = [m["mode_id"] for m in modes]
+    buckets = {}
+    if modes:
+        C = np.stack([m["centroid"].astype(np.float64) for m in modes])
+        _, DV, didx = embed.load_discovered_content_vectors(store)
+        cap = int(rec_params.get_param(store, "modes_cand_per_mode"))
+        buckets = _bucket_pool(pool, mode_ids, C, {}, None, didx, DV, cap)
+    # Merge into the latest payload so a concurrent library rebuild cannot lose its surfaces.
+    with store._lock:
+        payload = store.get_proposals("mode_bundles")
+        if not payload:
+            return
+        for mid, bucket in payload.items():
+            if mid != "all" and not mid.startswith("_"):
+                bucket["fresh"] = buckets.get(mid, [])
+        for mid, items in buckets.items():
+            payload.setdefault(mid, {})["fresh"] = items
+        payload.setdefault("all", {})["fresh"] = [_item_dict(it) for it in pool]
+        store.put_proposals("mode_bundles", payload, now)
+
+
 def prepare_bundles(store, now) -> dict:
     """Bucket each surface's pool by nearest mode; cache under rec_proposals['mode_bundles']. Payload
     {str(mode_id): {surface: [item_dict, ...]}}. Empty dict when there are no modes."""
     modes = taste_modes.live_modes(store)
     if not modes:
         store.put_proposals("mode_bundles", {}, now)
+        # Fresh also works before metadata coverage is sufficient to form taste modes.
+        from yt_playlist.rec import fresh_pool
+        fresh_pool.prepare(store, now)
         return {}
     mode_ids = [m["mode_id"] for m in modes]
     C = np.stack([m["centroid"].astype(np.float64) for m in modes])
@@ -81,14 +118,7 @@ def prepare_bundles(store, now) -> dict:
     }
     payload = {str(mid): {} for mid in mode_ids}
     for surf, pool in pools.items():
-        buckets = {str(mid): [] for mid in mode_ids}
-        for it in pool:
-            mid = _nearest_mode(getattr(it, "key", ""), mode_ids, C, lidx, LV, didx, DV)
-            if mid is None:
-                continue
-            b = buckets[str(mid)]
-            if len(b) < cap:                       # pool is pre-ranked, so first `cap` = top `cap`
-                b.append(_item_dict(it))
+        buckets = _bucket_pool(pool, mode_ids, C, lidx, LV, didx, DV, cap)
         for mid in mode_ids:
             payload[str(mid)][surf] = buckets[str(mid)]
         # Keep the full ranked surface for backfill: the global head can contain almost none of
@@ -178,7 +208,7 @@ def thompson_mode_scores(stats, mode_ids, rng) -> dict:
     out = {}
     for mid in mode_ids:
         picks, imps = stats.get(mid, (0, 0))
-        out[mid] = rng.betavariate(1 + picks, 1 + max(0, imps - picks))
+        out[mid] = rng.betavariate(*mode_eval.choice_posterior(picks, imps))
     return out
 
 
@@ -323,10 +353,11 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
         if not modes:
             return []
     leans = transient.facet_leans(store, now)
+    vibe_rank = home_vibe.ranker(store, now)
     n = int(rec_params.get_param(store, "modes_menu_size"))
     now_posterior = layers.now_mode_posterior(store, now)
     evidence_before = store.modes.epoch_started_at(epoch)
-    chosen = select_modes(store, modes, leans, epoch, n=max(n, 4),
+    chosen = select_modes(store, modes, leans, epoch, n=len(modes) if vibe_rank.preset else max(n, 4),
                           stats=mode_eval.mode_bandit_stats(store, before=evidence_before),
                           now_posterior=now_posterior)
     if not chosen:
@@ -351,13 +382,26 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
             b = [d for d in b if _in_band(d.get("year"), band, year_cuts[0], year_cuts[1])]
         return b
 
-    # Depth is a fillability constraint, not a theme preference. Once a bucket can fill a card,
-    # respect the sampled theme priority instead of always handing the deepest mode the same slot.
-    # Count usable tracks: saved songs and diversity-dropped rows cannot fill the preview.
     generated = set(RecDao(store).generated_track_keys())
     blocked = generated | store.suppressed_keys("for_you", now)
     muted = store.muted_artists()
 
+    if vibe_rank.preset:
+        # An explicit vibe can also change the styles offered, rather than just reshuffle
+        # twelve intense songs inside an intense mode. Preserve learned order on ties.
+        def sound_match(mid):
+            values = sorted((vibe_rank.affinity(d) for surf in active for d in _bucket(mid, surf)
+                             if d.get("key") and d["key"] not in blocked and d.get("artist") not in muted),
+                            reverse=True)
+            head = values[:PROTO_SIZE]
+            return sum(head) / len(head) if head else 0.5
+
+        chosen.sort(key=sound_match, reverse=True)
+        chosen = chosen[:max(n, 4)]
+
+    # Depth is a fillability constraint, not a theme preference. Once a bucket can fill a card,
+    # respect the sampled theme priority instead of always handing the deepest mode the same slot.
+    # Count usable tracks: saved songs and diversity-dropped rows cannot fill the preview.
     def _depth(mid, surf):
         items = [d for d in _bucket(mid, surf) if d.get("key") and d["key"] not in blocked
                  and d.get("artist") not in muted]
@@ -420,6 +464,7 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
         items = [d for d in bucket if d.get("key") and d["key"] not in seen
                  and d.get("artist") not in muted]
         items.sort(key=_order_key(ranker, ppr_pos, leans))
+        items = vibe_rank(items)
         items = _diversify(items, cap_a, cap_al)
         if surf != "comfort" and len(items) < PROTO_SIZE:   # Comfort is NEVER backfilled (#63 credibility)
             taken = {d["key"] for d in items}
@@ -438,6 +483,7 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
             else:
                 extra = home_themes.matching_genres(store, extra, include=include_genres)
                 extra.sort(key=order)
+            extra = vibe_rank(extra)
             items = _diversify(items + extra, cap_a, cap_al)
         items = items[:PROTO_SIZE]
         if len(items) < _MIN_CARD:                          # credibility gate: too thin to show

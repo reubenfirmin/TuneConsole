@@ -1,14 +1,17 @@
-"""Task 6 (#50): once the library enrich queue is caught up, drain_once enriches a batch of the
-discovered (cold) pool through a DiscoveredSink, newest pulls first."""
+"""One enrichment queue can mix library and discovery tracks and refresh Fresh's ranking."""
+from functools import partial
+import logging
 from types import SimpleNamespace
 
+import pytest
+
 from yt_playlist.enrich.enrich_worker import EnrichWorker
+from yt_playlist.providers.base import EnrichmentResult
+from yt_playlist.providers.waterfall import run_waterfall
 
 
-def test_drain_processes_discovered_when_library_caught_up(monkeypatch, store):
+def test_drain_processes_discovered(store):
     store.upsert_discovered_track("a|x", "v1", "A", "X", None, None, None, None, "radio:s", 100.0)
-    monkeypatch.setattr(store, "next_enrich_batch", lambda n: [], raising=False)   # library caught up
-    monkeypatch.setattr(store, "resweep_batch", lambda n, b: [], raising=False)
     seen = {}
 
     def fake_waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None):
@@ -24,3 +27,86 @@ def test_drain_processes_discovered_when_library_caught_up(monkeypatch, store):
     assert store.discovered_tracks_by_keys(["a|x"])["a|x"]["genre"] == "techno"
     # probed once: the row is now stamped, so the next drain finds nothing and returns 0
     assert w.drain_once(limit=10) == 0
+
+
+def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store):
+    from yt_playlist.rec import embed, fresh_pool
+
+    store.set_setting("enrich_caught_up_at", "50")
+    store.upsert_track("older", "Older library song", "Artist", None, 200, created_at=1.0)
+    newest = store.upsert_track("newest", "Newest library song", "Artist", None, 200, created_at=200.0)
+    store.upsert_discovered_track("new|artist", "new", "New", "Artist", None, None,
+                                  None, None, "radio:seed", 100.0)
+    seen, prepared = [], []
+    monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", lambda s: None)
+    monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: None)
+    monkeypatch.setattr(fresh_pool, "prepare", lambda s, now: prepared.append(
+        s.discovered_tracks_by_keys(["new|artist"])["new|artist"]))
+
+    def waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None):
+        seen.append([track["title"] for track in batch])
+        for track in batch:
+            sink_for(track).set_enrichment("techno", "2024")
+            sink_for(track).set_audio(bpm=128.0, energy=.8, danceability=.7)
+
+    ctx = SimpleNamespace(store=store, now_fn=lambda: 500.0,
+                          logger=SimpleNamespace(warning=lambda *a, **k: None))
+    worker = EnrichWorker(ctx, waterfall_fn=waterfall)
+    assert worker.drain_once(limit=2) == 2
+    assert seen == [["Newest library song", "New"]]
+    assert store.queue_remaining() == 1
+    assert store.get_track_enrichment(newest) == ("techno", "2024")
+    assert prepared[0]["genre"] == "techno" and prepared[0]["year"] == "2024"
+    assert prepared[0]["audio"] == {"bpm": 128.0, "energy": .8, "danceability": .7}
+    assert worker.drain_once(limit=1) == 1
+    assert seen[-1] == ["Older library song"]
+    assert store.queue_remaining() == 0
+
+
+@pytest.mark.parametrize("interrupt", [None, "pause", "error", "breaker"])
+def test_mixed_waterfall_commits_each_track_and_keeps_unfinished_work(store, monkeypatch, interrupt):
+    from yt_playlist.rec import embed, fresh_pool
+
+    monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", lambda s: None)
+    monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: None)
+    monkeypatch.setattr(fresh_pool, "prepare", lambda s, now: None)
+    store.set_setting("enrich_caught_up_at", "1")
+    library = store.upsert_track("lib", "Library", "Artist", None, 200, created_at=200.0)
+    store.upsert_discovered_track("new|artist", "new", "New", "Artist", None, None,
+                                  None, None, "radio:seed", 300.0)
+    ctx = SimpleNamespace(store=store, now_fn=lambda: 500.0, logger=logging.getLogger("test"))
+    worker = EnrichWorker(ctx)
+
+    class Provider:
+        name = "musicbrainz"
+        def available(self, _store): return True
+        def reset(self): self.dead = False
+        def tripped(self): return self.dead
+        def probe(self, track, _store):
+            if track["title"] == "New":
+                if interrupt == "pause":
+                    store.set_setting("enrich_worker_enabled", "0")
+                if interrupt == "breaker":
+                    self.dead = True
+            else:
+                # The discovery completion must already be visible before the library lookup.
+                assert store.queue_remaining() == 1
+                assert store.enriched_tracks()[0]["title"] == "New"
+                if interrupt == "error":
+                    raise RuntimeError("provider unavailable")
+            return EnrichmentResult(self.name, {"genre": "techno", "year": "2024", "bpm": 128.0})
+
+    worker.waterfall_fn = partial(run_waterfall, registry={"musicbrainz": Provider()})
+    if interrupt == "error":
+        with pytest.raises(RuntimeError, match="provider unavailable"):
+            worker.drain_once()
+    else:
+        assert worker.drain_once() == (0 if interrupt == "breaker" else (1 if interrupt else 2))
+    assert store.queue_remaining() == (2 if interrupt == "breaker" else (1 if interrupt else 0))
+    assert store.discovered_tracks_by_keys(["new|artist"])["new|artist"]["genre"] == "techno"
+    pending = store.next_enrich_batch(10)
+    if interrupt == "breaker":
+        assert {track["title"] for track in pending} == {"New", "Library"}
+    else:
+        assert [track["id"] for track in pending] == ([library] if interrupt else [])
+    assert not worker.busy

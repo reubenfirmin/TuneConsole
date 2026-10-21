@@ -1,36 +1,32 @@
+{% import "_partials/taste_track.html" as tracks %}
 {% if comparison is none %}
-<p class="section-note">Save a starting point, adjust the settings, then compare how the same tracks rank.</p>
+<p class="taste-comparison-empty">No picks captured yet. Capture the current top 24 to start your comparison.</p>
 {% elif comparison %}
-<p class="section-note">The track selection stays fixed for this comparison. Each result shows changes to its score and recommendation category separately.</p>
-<ol class="preview-list comparison-list">
+{% if baseline_captured %}<p class="section-note" role="status">Current picks captured. Change a setting, then choose <strong>Compare changes</strong>.</p>{% endif %}
+<p class="section-note">Tracks from your captured picks stay in the comparison, alongside any new top picks. <strong>Before</strong> is the captured top {{ comparison_limit }}; <strong>Now</strong> uses your current settings. Listening, feedback, and model updates since the capture can also affect the results.</p>
+<table class="taste-track-table taste-comparison-table" aria-label="Before and after suggestions">
+  <thead><tr><th scope="col">Song</th><th scope="col" class="taste-rank-column">Before</th><th scope="col" class="taste-rank-column">Now</th><th scope="col">What changed</th></tr></thead>
+  <tbody>
   {% for i in comparison %}
-  <li>
-    <span class="preview-lane">{% if i.status == 'entered' %}NEW{% elif i.status == 'exited' %}OUT{% elif i.rank_delta > 0 %}<span role="img" aria-label="Up {{ i.rank_delta }} {{ 'place' if i.rank_delta == 1 else 'places' }}">{{ arrow_icon('up') }}{{ i.rank_delta }}</span>{% elif i.rank_delta < 0 %}<span role="img" aria-label="Down {{ -i.rank_delta }} {{ 'place' if i.rank_delta == -1 else 'places' }}">{{ arrow_icon('down') }}{{ -i.rank_delta }}</span>{% else %}—{% endif %}</span>
-    <span class="preview-song"><strong>{{ i.title }}</strong> · {{ i.artist }}</span>
-    <span class="preview-reason">
+  <tr>
+    <td class="taste-track-cell">{{ tracks.song(i) }}</td>
+    <td class="taste-track-rank" data-label="Before">{% if i.old_rank %}<strong>#{{ i.old_rank }}</strong>{% else %}<span>Not captured</span>{% endif %}</td>
+    <td class="taste-track-rank" data-label="Now">{% if i.rank %}<strong>#{{ i.rank }}</strong>{% else %}<span>Outside top {{ comparison_limit }}</span>{% endif %}</td>
+    <td class="taste-track-change">
+    <span class="taste-rank-change" data-status="{{ i.status }}">{% if i.status == 'entered' %}NEW{% elif i.status == 'exited' %}OUT{% elif i.rank_delta > 0 %}{{ arrow_icon('up') }} Up {{ i.rank_delta }}{% elif i.rank_delta < 0 %}{{ arrow_icon('down') }} Down {{ -i.rank_delta }}{% else %}Same place{% endif %}</span>
+    <p class="taste-track-reason">
       {% if i.status == 'entered' %}Added to the top {{ comparison_limit }} at #{{ i.rank }}
       {% elif i.status == 'exited' %}Was #{{ i.old_rank }} · {% if not i.eligible %}excluded: {{ i.eligibility_reason }}{% else %}no longer in the top {{ comparison_limit }}{% endif %}
-      {% else %}#{{ i.old_rank }} to #{{ i.rank }}{% if i.score_delta is not none %} · score {{ '%+.3f'|format(i.score_delta) }}{% endif %}{% endif %}
-    </span>
-    <details class="score-trace">
-      <summary>{% if i.changes %}Largest change: {{ i.changes[0].label }} {{ '%+.3f'|format(i.changes[0].delta) }}{% elif i.status == 'entered' %}Added to the top picks{% elif i.status == 'exited' %}Removed from the top picks{% else %}Score unchanged{% endif %}</summary>
-      <div class="trace-grid">
-        {% if i.old_score is not none %}<span>Starting score</span><strong>{{ '%.3f'|format(i.old_score) }}</strong>{% endif %}
-        <span>Current score</span><strong>{{ '%.3f'|format(i.score) }}</strong>
-        {% for c in i.changes %}
-        <span>{{ c.label }}</span>
-        <strong>{% if c.multiplier %}×{{ '%.3f'|format(c.before) }} to ×{{ '%.3f'|format(c.after) }}{% else %}{{ '%+.3f'|format(c.before) }} to {{ '%+.3f'|format(c.after) }}{% endif %}</strong>
-        {% endfor %}
-        {% if i.old_lane_weight is not none or i.lane_weight is not none %}
-        <span>Recommendation category</span><strong>{{ lane_labels.get(i.old_lane, i.old_lane) or '—' }}{% if i.old_lane != i.lane %} to {{ lane_labels.get(i.lane, i.lane) or 'not selected' }}{% endif %}</strong>
-        {% endif %}
-      </div>
-      {% if not i.eligible %}<p class="muted trace-note">This track is currently excluded: {{ i.eligibility_reason }}.</p>{% endif %}
-      {% if not i.changes and i.status == 'stayed' %}<p class="muted trace-note">This track's score is unchanged. Its rank can still move when other tracks score differently or recommendation categories get more space.</p>{% endif %}
-    </details>
-  </li>
+      {% else %}#{{ i.old_rank }} to #{{ i.rank }}{% endif %}
+    </p>
+    {% if i.changes %}<p class="preview-explanation">What changed: {% for c in i.changes %}{{ c.label|lower }} {% if c.delta > 0 %}increased{% else %}decreased{% endif %}{% if not loop.last %}; {% else %}.{% endif %}{% endfor %}</p>
+    {% elif i.status == 'stayed' %}<p class="preview-explanation">This track’s match is unchanged. Its place can still move when other tracks change or a category gets more space.</p>{% endif %}
+    {% if i.old_lane or i.lane %}<p class="taste-comparison-source">{{ lane_labels.get(i.old_lane or i.lane, i.old_lane or i.lane) }}{% if i.old_lane and i.old_lane != i.lane %} to {{ lane_labels.get(i.lane, i.lane) or 'not selected' }}{% endif %}</p>{% endif %}
+    </td>
+  </tr>
   {% endfor %}
-</ol>
+  </tbody>
+</table>
 {% else %}
-<p class="section-note">No tracks are ready to compare. Build the model, then save a starting point.</p>
+<p class="section-note">No tracks are ready to compare. Sync your library and let the model finish building, then capture picks again.</p>
 {% endif %}

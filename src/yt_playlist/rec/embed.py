@@ -12,7 +12,7 @@ import math
 
 import numpy as np
 
-from yt_playlist.util import genre_map
+from yt_playlist.util import genre_catalog, genre_map
 from yt_playlist.rec import rec_params
 from yt_playlist.rec.rec_dao import RecDao
 
@@ -373,6 +373,7 @@ def build_content_and_store(store) -> int:
     store.replace_rec_content_vectors([(k, V[i].tobytes()) for i, k in enumerate(keys)])
     store.set_setting("rec_content_model", json.dumps(model))
     build_discovered_content_vectors(store, model)
+    store.set_setting("rec_content_genre_revision", genre_catalog.REVISION)
     return len(keys)
 
 
@@ -405,7 +406,8 @@ def load_discovered_content_vectors(store):
 
 def maybe_rebuild_content_vectors(store, step=0.05) -> bool:
     """Rebuild content vectors when genre coverage crosses into a higher `step` bucket (and on the
-    first call). Coverage = (distinct tracks with a genre) / (distinct tracks). Bounds rebuilds to
+    first call or after a genre catalog update). Coverage = (distinct tracks with a genre) /
+    (distinct tracks). Bounds coverage-triggered rebuilds to
     ~1/step over the library's enrichment lifetime while keeping the content space current as
     enrichment fills in. Returns True iff it rebuilt."""
     dao = RecDao(store)
@@ -423,7 +425,10 @@ def maybe_rebuild_content_vectors(store, step=0.05) -> bool:
     # left the gate permanently shut (bucket never re-crosses once coverage plateaus) and the discovered
     # pool unencodable forever, so "reach for new music" surfaced nothing (#48). A missing model always
     # forces a rebuild, which re-persists it and re-encodes the out-of-corpus pool in the same space.
-    if bucket <= prev and store.get_setting("rec_content_model"):
+    # Family and alias changes also change the encoding of already-tagged tracks. Refresh both
+    # pools once per catalog revision even when coverage has stopped growing.
+    current_genres = store.get_setting("rec_content_genre_revision") == genre_catalog.REVISION
+    if bucket <= prev and store.get_setting("rec_content_model") and current_genres:
         return False
     build_content_and_store(store)
     store.set_setting("rec_content_cov_bucket", str(bucket))

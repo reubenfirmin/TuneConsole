@@ -140,10 +140,9 @@ body:has(.page-clusters) .global-now-playing-slot { display: none; }
 .rl-upcoming-artist { color: var(--dim); }
 .rl-upcoming-artist::before { content: " \00b7 "; }
 
-/* Poster action cards: a big cover across the top, minimal orienting text, then the CTA. auto-fit
-   so the cards stretch to FILL the row (no trailing empty columns). */
-/* Notices occupy the space they actually need; the page no longer fabricates muted filler cards. */
-.alerts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+/* Poster action cards: a big cover across the top, minimal orienting text, then the CTA.
+   Keep four desktop columns so fewer notices leave empty space instead of stretching. */
+.alerts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: .8125rem; margin-bottom: 1.8rem; }
 @media (max-width: 64rem) { .alerts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 34rem) { .alerts { grid-template-columns: 1fr; } }
@@ -592,7 +591,6 @@ details.advanced .knob { margin-bottom: 1.125rem; }
 .fp-footer p { flex: 1 1 15rem; margin: 0; }
 .fp-collapsible { display: grid; gap: .8125rem; margin-top: .8125rem; }
 .fp-head { display: flex; align-items: center; gap: .9375rem; flex-wrap: wrap; }
-.fp-tune { margin-left: auto; color: var(--accent-2); font-weight: 600; }
 /* Row tools live OVER THE LABEL, not the slider: pinned to the label's right edge and revealed only
    when you hover the label (never the slider, which stays fully usable). Self-contained chips so they
    read over the label text. They consume no column width (absolute), so columns don't gain a gap. */
@@ -635,8 +633,7 @@ details.advanced .knob { margin-bottom: 1.125rem; }
 .fp-slider-wrap { position: relative; flex: 1; display: inline-flex; align-items: center; }
 .fp-slider-wrap .fp-slider { flex: 1; }
 /* Breadth master dial (#7): a compact inline control in the header: [Breadth] Focused (-•-) Eclectic
-   "naturally balanced". Its own line on narrow screens (the header wraps); the Tune link is pushed to
-   the far right by .fp-tune's margin-left:auto, so the two global controls bracket the header. */
+   "naturally balanced". Its own line on narrow screens (the header wraps). */
 .fp-breadth { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
 /* flex-basis (not width) fixes the size: the global input[type=range]{width:100%} outranks a plain
    .class width, but a flex item sizes from its basis: same trick the genre .fp-slider uses. */

@@ -1,0 +1,29 @@
+<section id="recognized-genre-tags" class="genre-editor" aria-labelledby="genre-editor-heading">
+  <h2 id="genre-editor-heading">Recognized genre tags</h2>
+  <p>Choose which MusicBrainz, Last.fm and Discogs tags can be used as genres.
+     Defaults combine MusicBrainz genres with curated names and equivalent tags.
+     A tag must appear in the provider's metadata to match; adding it here does not assign it to songs.</p>
+  <p>Changes affect future metadata matching. Removing tags or resetting the list does not
+     change genres already saved on songs. Accepting non-genre tags can reduce recommendation quality.</p>
+  <div class="genre-add">
+    <input type="text" name="name" aria-label="Genre tag" placeholder="Add a genre tag…" autocomplete="off"
+           hx-post="/genres/add" hx-trigger="keyup[key=='Enter']"
+           hx-include="#genre-filter"
+           hx-target="#genre-list" hx-swap="innerHTML"
+           hx-on::after-request="this.value=''">
+    <button type="button"
+            hx-post="/genres/add" hx-include="previous input, #genre-filter"
+            hx-target="#genre-list" hx-swap="innerHTML"
+            hx-on::after-request="this.previousElementSibling.value=''">Add</button>
+    <button type="button" class="btn-ghost"
+            hx-post="/genres/reset" hx-include="#genre-filter" hx-target="#genre-list" hx-swap="innerHTML"
+            title="Restore the built-in list of {{ builtin_count }} genre tags">Reset to defaults</button>
+  </div>
+  <label class="genre-filter" for="genre-filter">Find a genre, alias or family</label>
+  <input id="genre-filter" type="search" name="q" placeholder="Search genres…" autocomplete="off"
+         hx-get="/genres/list" hx-trigger="input changed delay:200ms, search"
+         hx-target="#genre-list" hx-swap="innerHTML">
+  <div id="genre-list">
+    {% include "_partials/genre_list.html" %}
+  </div>
+</section>

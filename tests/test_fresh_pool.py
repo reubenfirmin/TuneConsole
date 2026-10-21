@@ -5,8 +5,23 @@ from types import SimpleNamespace
 
 from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import _client
-from yt_playlist.rec import embed, fresh_pool, road_trip, surfaces
+from yt_playlist.rec import embed, fresh_pool, mode_surfaces, road_trip, surfaces
 from yt_playlist.util.matching import identity_key
+
+
+def test_fresh_card_renders_completely_unenriched_discoveries(store):
+    for i in range(12):
+        title, artist = f"Unenriched {i}", f"Unknown artist {i}"
+        store.upsert_discovered_track(identity_key(title, artist), f"new{i}", title, artist,
+                                      None, None, None, None, None, 100)
+    mode_surfaces.prepare_bundles(store, 200)
+
+    with _client(store) as client:
+        response = client.get("/home/cards")
+    assert response.status_code == 200
+    assert 'data-title="Unenriched ' in response.text
+    assert 'hx-post="/home/generate"' in response.text
+    assert "Discover a fresh mix" not in response.text
 
 
 def test_populate_searches_each_selected_genre_and_keeps_only_new_matching_songs(store, monkeypatch):

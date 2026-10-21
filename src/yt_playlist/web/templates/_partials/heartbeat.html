@@ -2,12 +2,21 @@
 <script>
   // Every app page, including standalone recaps, keeps the packaged server alive.
   (function () {
-    function beat() { fetch('/heartbeat', { method: 'POST', keepalive: true }).catch(function () {}); }
+    // A document ID keeps delayed pagehide beacons from cancelling another tab or a new page.
+    var page = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    var query = '?page=' + encodeURIComponent(page);
+    var active = true;
+    function beat() {
+      if (active) fetch('/heartbeat' + query, { method: 'POST', keepalive: true }).catch(function () {});
+    }
     beat();
     setInterval(beat, 3000);
     addEventListener('visibilitychange', function () { if (!document.hidden) beat(); });
-    addEventListener('pageshow', beat);
-    addEventListener('pagehide', function () { try { navigator.sendBeacon('/goodbye'); } catch (e) {} });
+    addEventListener('pageshow', function () { active = true; beat(); });
+    addEventListener('pagehide', function () {
+      active = false;
+      try { navigator.sendBeacon('/goodbye' + query); } catch (e) {}
+    });
   })();
 </script>
 {% endif %}

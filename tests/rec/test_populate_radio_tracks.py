@@ -24,6 +24,7 @@ def _fake_rec_dao(owned):
 
 
 def test_radio_pull_persists_unowned_and_dedups(monkeypatch, store):
+    store.set_setting("radio_discovery_enabled", "1")
     owned = identity_key("Owned", "Owned Artist")
     monkeypatch.setattr(discover, "RecDao", _fake_rec_dao({owned}))
     monkeypatch.setattr(store, "top_tracks", lambda n: [{"video_id": "seed1"}], raising=False)
@@ -39,7 +40,16 @@ def test_radio_pull_persists_unowned_and_dedups(monkeypatch, store):
 
 
 def test_no_client_returns_zero(store):
+    store.set_setting("radio_discovery_enabled", "1")
     # No client short-circuits to 0 before any DB work.
     ctx = SimpleNamespace(store=store, client_provider=lambda: {},
                           now_fn=lambda: 1.0, logger=SimpleNamespace(info=lambda *a, **k: None))
     assert discover.populate_radio_tracks(ctx, 1.0) == 0
+
+
+def test_radio_discovery_is_disabled_by_default_without_requesting_a_client(store):
+    def unexpected_client():
+        raise AssertionError("Disabled radio discovery must not fetch any catalog data")
+    ctx = SimpleNamespace(store=store, client_provider=unexpected_client)
+    assert discover.populate_radio_tracks(ctx, 1.0) == 0
+    assert store.get_discovered_tracks() == []

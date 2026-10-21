@@ -4,7 +4,7 @@ import threading
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from yt_playlist.core.setup import BROWSER_CREDENTIAL_FILENAME
 from yt_playlist.library.takeout import (TakeoutFormatError, import_takeout,
@@ -17,6 +17,7 @@ from yt_playlist.library.spotify_library import (SpotifyLibraryFormatError,
                                                   load_spotify_library,
                                                   save_selected_album)
 from yt_playlist.providers import enrichment, lastfm, spotify
+from yt_playlist.web.identity_checks import check_identities
 from yt_playlist.web.spotify_import import (ACTIVE_STATUSES, JOB_KEY, current_job,
                                             estimate, save_job)
 
@@ -25,9 +26,14 @@ def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates, setup = ctx.store, ctx.templates, ctx.setup
 
+    def _saved_identities():
+        return [{"id": i.id, "label": i.label, "brand": i.brand_account_id or "",
+                 "is_master": i.is_master} for i in store.get_identities()]
+
     def _setup_context(request, *, rows, master_idx, error=None, status_code=200):
         return templates.TemplateResponse(request, "setup.html", {
             "rows": rows, "master_idx": master_idx, "error": error,
+            "saved_identities": _saved_identities(),
             "configured": (setup.configured if setup else True),
             "flash": request.query_params.get("flash"),
             "enrichment": enrichment.load_config(store),
@@ -39,13 +45,39 @@ def build(ctx) -> APIRouter:
     def setup_page(request: Request):
         idents = store.get_identities()
         if idents:
-            rows = [{"label": i.label, "brand": i.brand_account_id or ""} for i in idents]
+            rows = [{"id": i.id, "label": i.label, "brand": i.brand_account_id or ""} for i in idents]
             master_idx = next((n for n, i in enumerate(idents) if i.is_master), 0)
         else:
-            # Pre-fill a sensible default so a single-account user who just paired the extension can
-            # click Save without being nagged to invent an identity. They can rename it or add more.
-            rows, master_idx = [{"label": "main", "brand": ""}], 0
+            # Pre-fill a sensible default for a single-account user. They can rename it or add more.
+            rows, master_idx = [{"id": None, "label": "main", "brand": ""}], 0
         return _setup_context(request, rows=rows, master_idx=master_idx)
+
+    @router.get("/setup/identities/check")
+    def setup_identity_checks(identity_id: int | None = None):
+        # A sync route runs in a worker thread: bridge calls must leave the WebSocket loop free.
+        return {"checks": check_identities(ctx, identity_id), "auth_labels": list(ctx.auth_expired.values())}
+
+    @router.post("/setup/identities/{identity_id}/remove")
+    def setup_remove_identity(identity_id: int):
+        if setup is None:
+            raise HTTPException(status_code=404, detail="setup not available")
+        identities = store.get_identities()
+        removed = next((i for i in identities if i.id == identity_id), None)
+        if removed is None:
+            raise HTTPException(status_code=404, detail="Identity no longer exists.")
+        remaining = [i for i in identities if i.id != identity_id]
+        if not remaining:
+            raise HTTPException(status_code=409, detail="Keep at least one identity.")
+        main = next((i for i in remaining if i.is_master), remaining[0])
+        try:
+            setup.apply_setup([{"label": i.label, "credential_ref": i.credential_ref,
+                                "brand_account_id": i.brand_account_id, "is_master": i.id == main.id}
+                               for i in remaining])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.clear_auth_expired(identity_id)
+        return {"message": f'Removed identity "{removed.label}".', "main_identity_id": main.id,
+                "identity_count": len(remaining), "auth_labels": list(ctx.auth_expired.values())}
 
     def _enrichment_panel(request):
         return templates.TemplateResponse(request, "_partials/enrichment_panel.html", {
@@ -70,14 +102,16 @@ def build(ctx) -> APIRouter:
     async def setup_submit(request: Request):
         if setup is None:
             raise HTTPException(status_code=404, detail="setup not available")
+        wants_json = "application/json" in request.headers.get("accept", "")
         form = await request.form()
         labels, brands = form.getlist("label"), form.getlist("brand_account_id")
+        identity_ids = form.getlist("identity_id")
         master = form.get("master")
         identities = []
         for idx, label in enumerate(labels):
-            if not (label or "").strip():
-                continue
             brand = brands[idx] if idx < len(brands) else ""
+            if not (label or "").strip() and not (brand or "").strip():
+                continue
             identities.append({
                 "label": label.strip(),
                 "brand_account_id": (brand or "").strip() or None,
@@ -87,24 +121,26 @@ def build(ctx) -> APIRouter:
             # The credential is the live extension pairing now, so no capture is passed here.
             setup.apply_setup(identities)
         except ValueError as e:
-            rows = [{"label": l, "brand": b} for l, b in zip(labels, brands)] or [{"label": "", "brand": ""}]
+            if wants_json:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            active_ids = {str(i.id): i.id for i in store.get_identities()}
+            rows = [{"id": active_ids.get(identity_ids[idx]) if idx < len(identity_ids) else None,
+                     "label": label, "brand": brands[idx] if idx < len(brands) else ""}
+                    for idx, label in enumerate(labels)] or [{"id": None, "label": "", "brand": ""}]
             master_idx = int(master) if (master or "").isdigit() else 0
             return _setup_context(request, rows=rows, master_idx=master_idx,
                                   error=str(e), status_code=400)
-        ctx.clear_all_auth_expired()                # success clears the stale-session banner (persisted)
-        # Syncing is automatic in the background now (fires as soon as the extension is connected and
-        # then periodically), so there is no button to point at. "Has synced before" tells a re-auth
-        # apart from a first-time setup only to word the confirmation.
-        has_synced = bool(store.get_setting("last_sync_at"))
-        if has_synced:
-            # Nothing for them to do: the background sync catches up. A transient toast, not a banner.
-            return RedirectResponse(
-                f"/?toast={quote('You’re authenticated again. Your library will refresh automatically.')}",
-                status_code=303)
+        # Saving definitions does not authenticate them. The Identities tab checks live access and
+        # clears expired-session flags only for identities whose checks actually succeed.
+        active = {i.id for i in store.get_identities()}
+        for identity_id in list(ctx.auth_expired):
+            if identity_id not in active:
+                ctx.clear_auth_expired(identity_id)
+        if wants_json:
+            return {"identities": _saved_identities(), "auth_labels": list(ctx.auth_expired.values())}
         n = len(identities)
-        msg = (f"Saved {n} identit{'y' if n == 1 else 'ies'}. Keep a signed-in music.youtube.com tab "
-               "open and your library will sync automatically.")
-        return RedirectResponse(f"/?flash={quote(msg)}", status_code=303)
+        msg = f"Saved {n} identit{'y' if n == 1 else 'ies'}."
+        return RedirectResponse(f"/setup?tab=identities&flash={quote(msg)}", status_code=303)
 
     @router.post("/import/spotify")
     async def import_spotify_route(request: Request):

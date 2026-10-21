@@ -1,0 +1,73 @@
+{% macro card(axis, title, rows, kind='progress', note='', maximum=3, footnote='', link_text='') %}
+{% set filters = [('all', 'All'), ('chosen', 'Chosen'), ('unchosen', 'Unchosen')] if kind == 'choices' else [('all', 'All'), ('boost', 'More'), ('reduction', 'Less')] if kind == 'sources' else [('all', 'All'), ('boost', 'Boosts'), ('reduction', 'Reductions')] %}
+{% set search_name = 'saved changes' if kind == 'changes' else title|lower %}
+<article class="learning-card learning-card--{{ axis }}{% if kind != 'progress' %} learning-card--reading{% endif %}" aria-labelledby="learning-{{ axis }}-title"
+         x-data="learningCard({{ rows|tojson|forceescape }}, '{{ kind }}', {{ maximum }})">
+  <header class="learning-card-head">
+    <h3 id="learning-{{ axis }}-title">{{ title }}</h3>
+    <span>{{ 'Latest ' ~ rows|length ~ ' steps' if kind == 'changes' else rows|length ~ ' tracked' }}</span>
+  </header>
+  {% if note %}<p class="learning-card-note">{{ note }}</p>{% endif %}
+  <div class="learning-direction-filters" role="group" aria-label="Filter {{ search_name }}{{ ' by learning direction' if kind == 'progress' else ' by direction' if kind == 'changes' else '' }}">
+    {% for key, label in filters %}
+    <button type="button"{% if key in ('boost', 'chosen') %} class="learning-filter--boost"{% elif key == 'reduction' %} class="learning-filter--reduction"{% endif %}
+            :aria-pressed="filter === '{{ key }}'" @click="setFilter('{{ key }}')"><span>{{ label }}</span><strong x-text="counts.{{ key }}"></strong></button>
+    {% endfor %}
+  </div>
+  <div class="learning-focus" :class="{'is-reduction': current &amp;&amp; current.direction === 'reduction'}">
+    <div class="learning-dial{% if kind in ('choices', 'changes') %} learning-dial--counter{% endif %}" aria-hidden="true">
+      <svg viewBox="0 0 200 190" fill="none">
+        <path class="learning-dial-track" d="M 36.36 163.64 A 90 90 0 1 1 163.64 163.64" pathLength="100"/>
+        <path class="learning-dial-ticks" d="M 44.85 155.15 A 78 78 0 1 1 155.15 155.15" pathLength="100"/>
+        {% if kind in ('progress', 'sources') %}
+        <path class="learning-dial-value" d="M 36.36 163.64 A 90 90 0 1 1 163.64 163.64" pathLength="100"
+              :stroke-dasharray="(current ? current.percent : 0) + ' 100'"/>
+        {% endif %}
+        {% if kind == 'sources' %}<path class="learning-dial-neutral" d="M 100 0 V 20" transform="rotate({{ 270 / maximum - 135 }} 100 100)"/>{% endif %}
+      </svg>
+      <div class="learning-dial-reading"><strong x-text="reading(current)"></strong><span>{{ 'to next update' if kind == 'progress' else 'selections' if kind == 'choices' else 'source weight' if kind == 'sources' else 'weight saved then' }}</span></div>
+    </div>
+    <div class="learning-selected" aria-live="polite" aria-atomic="true">
+      <h4 x-text="current ? current.name : emptyTitle"></h4>
+      <p><span class="sr-only" x-text="reading(current) + ' {{ 'to next update' if kind == 'progress' else 'selections' if kind == 'choices' else 'source weight' if kind == 'sources' else 'weight saved then' }}. '"></span><span x-text="direction(current)"></span></p>
+      {% if kind == 'changes' %}<p class="learning-selected-context" x-show="current" x-text="current ? axisName(current) + ' · ' + current.source + ' triggered the step' : ''"></p>{% endif %}
+    </div>
+  </div>
+  {% if rows %}
+  <div class="learning-browser">
+    <label class="learning-search" for="learning-search-{{ axis }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg>
+      <span class="sr-only">Search {{ search_name }}</span>
+      <input id="learning-search-{{ axis }}" type="search" placeholder="Search {{ search_name }}" x-model="query" @input="search()">
+    </label>
+    <p class="learning-list-label">Newest updates first · select to inspect</p>
+    <div class="learning-entries">
+      <template x-for="row in visible" :key="row.facet">
+        <button type="button" class="learning-entry" :class="{'is-reduction': row.direction === 'reduction'}"
+                :aria-pressed="current &amp;&amp; current.facet === row.facet" :title="row.name" @click="selected = row.facet">
+          <span class="learning-entry-name" x-text="row.name"></span>
+          <span class="learning-entry-direction" x-text="entryDirection(row)"></span>
+          <strong><span x-text="reading(row)"></span>{% if kind == 'choices' %}<span class="sr-only"> selections</span>{% endif %}</strong>
+          <time class="learning-entry-updated" :datetime="row.updated_at == null ? null : new Date(row.updated_at * 1000).toISOString()" x-text="updatedDate(row)"></time>
+          {% if kind in ('progress', 'sources') %}<span class="learning-entry-track" aria-hidden="true"><i :style="{width: row.percent + '%'}"></i></span>{% endif %}
+        </button>
+      </template>
+      <p class="learning-no-results" x-show="!filtered.length" x-text="query.trim() ? 'No matches. Try another search or filter.' : emptyTitle + '.'" x-cloak></p>
+    </div>
+    <nav class="learning-pagination" aria-label="{{ title }} results">
+      <span role="status" x-text="range"></span>
+      <button type="button" :disabled="page === 0" @click="move(-1)" aria-label="Previous {{ search_name }}">{{ arrow_icon('left') }}</button>
+      <button type="button" :disabled="page + 1 >= pages" @click="move(1)" aria-label="Next {{ search_name }}">{{ arrow_icon('right') }}</button>
+    </nav>
+  </div>
+  {% else %}
+  <p class="learning-empty">{{ 'As you listen and give feedback, ' ~ title|lower ~ ' will appear here.' if kind == 'progress' else 'Mix offers and selections will appear here as you use Home.' if kind == 'choices' else 'No saved learning steps yet. Evidence builds in the meters above before it changes a saved preference.' }}</p>
+  {% endif %}
+  {% if footnote or link_text %}
+  <footer class="learning-card-foot">
+    {% if footnote %}<p>{{ footnote }}</p>{% endif %}
+    {% if link_text %}<a href="#generated" @click.prevent="select('generated')">{{ link_text }} {{ arrow_icon('right') }}</a>{% endif %}
+  </footer>
+  {% endif %}
+</article>
+{% endmacro %}

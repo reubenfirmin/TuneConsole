@@ -1,31 +1,94 @@
-{# §1 model-health panel, swapped in via outerHTML so each metric becomes its own stat-grid cell:
-   warm-path recall@k, forward-looking temporal recall, cold-path content grounding (with its
-   coverage-band breakdown), and graduation counts by source from the §1c log. #}
-{% if recall.recall_at_k is not none %}
-<div><strong>{{ '%.0f'|format(recall.recall_at_k * 100) }}%</strong><span>playlist prediction (top {{ recall.k }}; {{ '%.0f'|format(recall.lift) }}× random, {{ recall.trials }} playlists)</span></div>
-{% else %}
-<div><strong>-</strong><span>playlist prediction (build the model first)</span></div>
-{% endif %}
+<div id="model-health-checks">
+  <section class="model-health-section" aria-labelledby="model-predictions-title">
+    <div class="model-health-section-head">
+      <h2 id="model-predictions-title">How well it predicts</h2>
+      <p>Each percentage is the share of test tracks found in the top 20 matches. Higher means more matches in that check; the checks use different data and aren’t directly comparable.</p>
+    </div>
+    <div class="model-health-tests">
+      <article class="card model-health-metric model-health-metric--primary">
+        <div class="model-health-metric-head"><h3>Future listening</h3><span class="model-health-tag">Looking ahead</span></div>
+        {% if temporal.recall is not none %}
+        <p class="model-health-reading">{{ '%.0f'|format(temporal.recall * 100) }}%</p>
+        <span class="model-health-meter" aria-hidden="true"><i style="width: {{ '%.1f'|format(temporal.recall * 100) }}%"></i></span>
+        {% else %}<p class="model-health-unavailable">Not enough history</p>{% endif %}
+        <p>Uses earlier library and listening data to predict tracks you played later.</p>
+        {% if temporal.recall is not none %}
+        <p class="model-health-evidence">{{ temporal.trials }} test tracks across {{ temporal.viable_windows }} of {{ temporal.requested_windows }} test periods, each {{ holdout_days }} {{ 'day' if holdout_days == 1 else 'days' }} long.{% if temporal.generated_excluded %} {{ temporal.generated_excluded }} tracks played only through generated recommendations were excluded.{% endif %}</p>
+        {% else %}
+        <p class="model-health-evidence">Keep syncing and listening, or import listening history. This check needs data from before a {{ holdout_days }}-day test period and enough later plays.</p>
+        {% endif %}
+      </article>
 
-{% if temporal.recall is not none %}
-<div><strong>{{ '%.0f'|format(temporal.recall * 100) }}%</strong><span>future-play prediction (top {{ temporal.k }}; {{ temporal.viable_windows }}/{{ temporal.requested_windows }} test periods, {{ temporal.trials }} test tracks{% if temporal.generated_excluded %}, {{ temporal.generated_excluded }} generated recommendations excluded{% endif %})</span></div>
-{% else %}
-<div><strong>-</strong><span>future-play prediction (needs library history from before a {{ holdout_days }}-day test period)</span></div>
-{% endif %}
+      <article class="card model-health-metric">
+        <div class="model-health-metric-head"><h3>Playlist matches</h3><span class="model-health-tag">Library check</span></div>
+        {% if recall.recall_at_k is not none %}
+        <p class="model-health-reading">{{ '%.0f'|format(recall.recall_at_k * 100) }}%</p>
+        <span class="model-health-meter" aria-hidden="true"><i style="width: {{ '%.1f'|format(recall.recall_at_k * 100) }}%"></i></span>
+        {% else %}<p class="model-health-unavailable">Not enough playlist data</p>{% endif %}
+        <p>Hides one track from each eligible playlist, then tries to find it using the remaining songs.</p>
+        {% if recall.recall_at_k is not none %}
+        <p class="model-health-evidence">{{ recall.trials }} playlists tested.{% if recall.lift is not none %} {{ '%.1f'|format(recall.lift) }} times the random baseline.{% endif %} This checks existing playlists, not future listening.</p>
+        {% else %}
+        <p class="model-health-evidence">Sync playlists with at least five modeled tracks, then build the model.</p>
+        {% endif %}
+      </article>
 
-{% if proj.recall is not none %}
-<div><strong>{{ '%.0f'|format(proj.recall * 100) }}%</strong><span>prediction from track information ({{ proj.trials }} tracks){% for band, b in proj.breakdown.by_coverage.items() %}{% if b.recall is not none %} · {{ band }} {{ '%.0f'|format(b.recall * 100) }}%{% endif %}{% endfor %}</span></div>
-{% else %}
-<div><strong>-</strong><span>prediction from track information (needs more genre and audio tags)</span></div>
-{% endif %}
+      <article class="card model-health-metric">
+        <div class="model-health-metric-head"><h3>Matches from track details</h3><span class="model-health-tag">Track information</span></div>
+        {% if proj.recall is not none %}
+        <p class="model-health-reading">{{ '%.0f'|format(proj.recall * 100) }}%</p>
+        <span class="model-health-meter" aria-hidden="true"><i style="width: {{ '%.1f'|format(proj.recall * 100) }}%"></i></span>
+        {% else %}<p class="model-health-unavailable">Not enough track details</p>{% endif %}
+        <p>Checks how well genre, year, artist, and available audio features reproduce the model’s track matches.</p>
+        {% if proj.recall is not none %}
+        <p class="model-health-evidence">{{ proj.trials }} tracks checked. This measures how track information supports similarity, not whether you’ll enjoy a song.</p>
+        <details class="model-health-breakdown">
+          <summary>Results by available track details</summary>
+          <dl class="model-health-breakdown-list">
+            {% for band, b in proj.breakdown.by_coverage.items() %}{% if b.recall is not none %}
+            <div><dt>{{ band|replace('+', ', ')|capitalize }}</dt><dd>{{ '%.0f'|format(b.recall * 100) }}% <small>({{ b.trials }} tracks)</small></dd></div>
+            {% endif %}{% endfor %}
+          </dl>
+        </details>
+        {% else %}
+        <p class="model-health-evidence">Build the model and enrich more tracks with genre and other details.</p>
+        {% endif %}
+      </article>
+    </div>
+  </section>
 
-<div><strong>{{ grad_counts.values()|sum }}</strong><span>saved preference updates{% if grad_counts %}: {% for src, c in grad_counts.items() %}{{ src }} {{ c }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</span></div>
-
-{% if served.impressions %}
-<div><strong>{{ '%.0f'|format(served.acceptance_rate * 100) }}%</strong><span>recommendations you played
-  ({{ served.played }}/{{ served.impressions }} shown in the last 30 days; {{ served.organic }} played directly,
-  {{ served.generated }} from generated playlists){% if not served.powered %} · needs
-  {{ served.min_impressions }} shown before the result is reliable{% endif %}</span></div>
-{% else %}
-<div><strong>-</strong><span>recommendations you played (tracking starts when For You next shows recommendations)</span></div>
-{% endif %}
+  <section class="model-health-section" aria-labelledby="model-listening-title">
+    <div class="model-health-section-head">
+      <h2 id="model-listening-title">What happens when you listen</h2>
+      <p>These are observed activity and learning counts. They measure different things from the prediction checks above.</p>
+    </div>
+    <div class="model-health-activity">
+      <article class="card model-health-metric model-health-metric--listening">
+        <h3>Recommendations you played</h3>
+        {% if served.impressions %}
+        <p class="model-health-reading">{{ '%.0f'|format(served.acceptance_rate * 100) }}%</p>
+        <p>{{ served.played }} of {{ served.impressions }} recommendations shown in the last 30 days led to a play within 24 hours.</p>
+        <p class="model-health-evidence">{{ served.organic }} played directly; {{ served.generated }} played through generated playlists. A recommendation can count in both groups.</p>
+        {% if not served.powered %}<p class="model-health-caution">Early result: at least {{ served.min_impressions }} recommendations need to be shown before there’s enough evidence to judge it.</p>{% endif %}
+        {% else %}
+        <p class="model-health-unavailable">No recommendations tracked yet</p>
+        <p>Tracking starts when Home next shows recommendations. Come back after listening to see how often suggestions lead to a play.</p>
+        {% endif %}
+      </article>
+      <article class="card model-health-metric model-health-metric--learning">
+        <h3>Saved preference updates</h3>
+        <p class="model-health-reading">{{ '{:,}'.format(grad_counts.values()|sum) }}</p>
+        <p>Logged changes to lasting genre, era, and artist preferences from listening and feedback. These are preference changes, so one action can produce several updates.</p>
+        {% if grad_counts %}
+        {% set source_labels = {'play': 'Listening', 'like': 'Likes', 'dislike': 'Dislikes', 'feedback': 'Recommendation feedback', 'vibe': 'Mood choices', 'mood': 'Mood choices', 'slider': 'Saved slider settings', 'event': 'Other activity'} %}
+        <dl class="model-health-breakdown-list">
+          {% for source, count in grad_counts.items() %}
+          <div><dt>{{ source_labels.get(source, source|replace('_', ' ')|capitalize) }}</dt><dd>{{ '{:,}'.format(count) }}</dd></div>
+          {% endfor %}
+        </dl>
+        {% else %}<p class="model-health-evidence">No lasting preference changes have been logged yet.</p>{% endif %}
+        <a class="taste-detail-link" href="#learning" @click="select('learning')">Review learning settings</a>
+      </article>
+    </div>
+  </section>
+</div>

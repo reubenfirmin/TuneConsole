@@ -47,3 +47,21 @@ def test_populate_skips_owned_tracks(store):
     keys = {d["identity_key"] for d in store.get_discovered_tracks()}
     assert identity_key("Track One", "New Artist") not in keys      # owned one skipped
     assert identity_key("Track Two", "New Artist") in keys
+
+
+def test_expired_album_tracks_are_not_immediately_refetched(store, monkeypatch):
+    monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: None)
+    store.upsert_discovered_album("alb1", "New Artist", "Some Album", "2024", None, 1.0)
+    ctx = _Ctx(store, _FakeClient())
+    assert discover.populate_discovered_tracks(ctx, 1.0) == 2
+    assert store.gc_discovery_pool(40 * 86400, 30, set())["tracks"] == 2
+    assert store.get_discovered_albums()   # album discovery has its own lifetime
+    assert discover.populate_discovered_tracks(ctx, 40 * 86400) == 0
+    assert store.get_discovered_tracks() == []
+
+
+def test_legacy_album_tracks_do_not_refill_after_expiry(store):
+    store.upsert_discovered_album("alb1", "New Artist", "Some Album", "2024", None, 1.0)
+    store.upsert_discovered_track("old", "v", "Old", "New Artist", None, None, None, None, "alb1", 1)
+    assert store.gc_discovery_pool(40 * 86400, 30, set())["tracks"] == 1
+    assert discover.populate_discovered_tracks(_Ctx(store, _FakeClient()), 40 * 86400) == 0

@@ -527,18 +527,16 @@ def test_rediscover_albums_rotates_through_cold_pool_by_epoch(store):
     assert titles(2) == ["A", "B", "C"]      # wraps back around the ranked pool
 
 
-def test_graduation_disabled_is_noop(store):
-    from yt_playlist.rec import rec_params
+def test_graduation_ignores_removed_pause_setting(store):
     store.upsert_identity("main", "cred", None, True)
-    rec_params.set_param(store, "graduation_enabled", False)
-    before = dict(store.get_weights())
-    # a strong, repeated like-graduation that WOULD normally cross the threshold
+    # Existing installations may still have the retired switch saved as disabled.
+    store.set_setting("rec_param:graduation_enabled", "0")
     for _ in range(10):
         recommend.graduate_facet(store, "genre:rock", 1.0, now=1000.0, source=1.0)
-    assert dict(store.get_weights()) == before   # nothing graduated
+    assert store.get_weights(now=1000.0).get("genre:rock", 1.0) > 1.0
 
 
-def test_graduation_enabled_still_graduates(store):
+def test_repeated_evidence_graduates(store):
     store.upsert_identity("main", "cred", None, True)
     for _ in range(10):
         recommend.graduate_facet(store, "genre:rock", 1.0, now=1000.0, source=1.0)

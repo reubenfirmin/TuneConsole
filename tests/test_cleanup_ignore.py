@@ -1,6 +1,9 @@
 """Category-scoped cleanup ignores, end-to-end through the routes: a per-playlist dismissal (Empty/
 Tiny) and a per-merge dismissal (Exact/Near duplicates) both drop the item from the cleanup page AND
 the home 'Playlist cleanups' count, and unignoring restores it."""
+import json
+
+import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import recommend
@@ -49,3 +52,53 @@ def test_ignore_merge_round_trip(store):
 
     c.post("/cleanup/unignore-merge", data={"signature": "PLA|PLB"})
     assert _count_after_reload(c, store) == 2                      # restored
+
+
+def _near_playlists(store, iid):
+    tracks = [store.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(10)]
+    for n, ytm in enumerate(("PLA", "PLB", "PLC")):
+        pid = store.upsert_playlist(iid, ytm, f"Similar {ytm}", 8, "h", 0.0)
+        store.set_playlist_tracks(pid, tracks[:7] + [tracks[7 + n]])
+
+
+@pytest.mark.parametrize("action,data,remaining_pairs,remaining_playlists", [
+    ("suppress", {"a": "PLA", "b": "PLB"}, 2, 3),
+    ("ignore", {"ytm": "PLA"}, 1, 2),
+    ("ignore", {"ytm": "PLB"}, 1, 2),
+    ("mute-others", {"a": "PLA", "b": "PLB"}, 1, 2),
+    ("suppress-many", {"pairs": json.dumps([["PLA", "PLB"], ["PLA", "PLC"], ["PLB", "PLC"]])}, 0, 0),
+])
+def test_near_duplicate_menu_actions_update_page_and_home_count(
+        store, action, data, remaining_pairs, remaining_playlists):
+    iid, c = _app(store)
+    _near_playlists(store, iid)
+    assert c.get("/cleanup").text.count('class="ov-row"') == 3
+    assert _count_after_reload(c, store) == 3
+
+    response = c.post(f"/overlaps/{action}", data=data)
+    assert response.headers["hx-refresh"] == "true"
+    assert c.get("/cleanup").text.count('class="ov-row"') == remaining_pairs
+    assert _count_after_reload(c, store) == remaining_playlists
+    if action == "mute-others":
+        assert 'data-ay="PLA" data-by="PLB"' in c.get("/cleanup").text
+
+
+@pytest.mark.parametrize("hide,restore,data", [
+    ("suppress", "unsuppress", {"a": "PLA", "b": "PLB"}),
+    ("ignore", "unignore", {"ytm": "PLA"}),
+])
+def test_near_duplicate_preferences_restore_pairs(store, hide, restore, data):
+    iid, c = _app(store)
+    _near_playlists(store, iid)
+    c.post(f"/overlaps/{hide}", data=data)
+    c.post(f"/overlaps/{restore}", data=data)
+    assert c.get("/cleanup").text.count('class="ov-row"') == 3
+    assert _count_after_reload(c, store) == 3
+
+
+def test_previously_ignored_near_merge_stays_hidden(store):
+    iid, c = _app(store)
+    _near_playlists(store, iid)
+    c.post("/cleanup/ignore-merge", data={"members": "PLA,PLB,PLC"})
+    assert c.get("/cleanup").text.count('class="ov-row"') == 0
+    assert _count_after_reload(c, store) == 0

@@ -323,13 +323,13 @@ def cleanup_discovery_pool(store, rng=None) -> dict:
     per = rec_params.get_param(store, "discovery_albums_per_artist")
     keep_artists = {a["artist"] for a in store.interested_artists(limit=limit)}
     albums_removed = enforce_album_bounds(store, keep_artists, per, rng)
-    tracks_removed = store.prune_orphan_discovered_tracks()
+    tracks_removed = store.prune_orphan_discovered_tracks(held_keys=store.generated_track_keys())
     return {"albums_removed": albums_removed, "tracks_removed": tracks_removed}
 
 
 def gc_discovery(ctx, now) -> dict:
-    """#52 daily sweep: remove pool items first shown longer than discovery_gc_days ago and never
-    added. A track in a live generated playlist (generated_track_keys) is held until that playlist is
+    """Daily sweep: expire unsaved suggestions, aging unshown tracks from when they were found.
+    A track in a live generated playlist (generated_track_keys) is held until that playlist is
     cleaned up or promoted. Best-effort; returns the per-pool delete counts {albums, artists, tracks}."""
     store = ctx.store
     gc_days = rec_params.get_param(store, "discovery_gc_days")
@@ -341,8 +341,12 @@ def populate_radio_tracks(ctx, now, seeds=6, per_seed_limit=12) -> int:
     """#50: persist unowned YTM-radio tracks (seeded by your top tracks) into the discovered pool, so
     the cold ranker and Clusters share one growing cold source. Dedups vs owned and the existing pool;
     genre/year/audio are left null for the cold-enrichment worker to fill. Returns how many were added.
-    Best-effort: no client/network -> 0. (fresh_songs still produces the radio-order fallback list.)"""
+    Disabled unless radio_discovery_enabled is explicitly set to "1".
+    Best-effort: no client/network -> 0."""
     store = ctx.store
+    # Radio is parked. Previewing its UI must not enable periodic catalog harvesting.
+    if store.get_setting("radio_discovery_enabled", "0") != "1":
+        return 0
     client = next(iter((ctx.client_provider() or {}).values()), None)
     if client is None:
         return 0
@@ -388,7 +392,8 @@ def populate_discovered_tracks(ctx, now, budget=4) -> int:
         return 0
     owned = RecDao(store).library_keys()
     have = {t.get("source_browse_id") for t in store.get_discovered_tracks()}
-    todo = [a for a in store.get_discovered_albums() if a["browse_id"] not in have][:budget]
+    todo = [a for a in store.get_discovered_albums() if a["browse_id"] not in have
+            and not store.get_setting("discovery_tracks_fetched:" + a["browse_id"])][:budget]
     n = 0
     for alb in todo:
         try:
@@ -408,6 +413,8 @@ def populate_discovered_tracks(ctx, now, budget=4) -> int:
                                           alb.get("thumbnail"), alb.get("genre"), alb.get("year"),
                                           alb["browse_id"], now)
             n += 1
+        if (data or {}).get("tracks"):
+            store.set_setting("discovery_tracks_fetched:" + alb["browse_id"], "1")
     if n:
         embed.build_discovered_content_vectors(store)
     return n
@@ -422,7 +429,8 @@ def _discovery_facet_w(store, genre, now):
 
 def pick_discovered_albums(store, n, now, recent_frac=0.7):
     """Surface n albums from the discovered pool: recency-biased (so new releases reliably pop), with
-    some older ones mixed in, de-prioritizing what was shown most recently. Stamps last_shown.
+    some older ones mixed in, de-prioritizing what was shown most recently. Selection is read-only;
+    the browser records impressions only for visible tiles.
 
     #18: the FACET overlay applies: albums in a muted genre-family are excluded, and the family
     weight is a secondary bias within the recency buckets (recency stays primary)."""
@@ -484,7 +492,6 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7):
     if len(chosen) < n:                                          # a bucket was thin, top up from the rest
         chosen += fill(recent + older, n - len(chosen))
     chosen = chosen[:n]
-    store.mark_shown("album", [a["browse_id"] for a in chosen], now)
     return chosen
 
 
@@ -508,5 +515,4 @@ def pick_discovered_artists(store, n, now):
         scored.append((a, (a.get("score") or 0.0) * w))
     scored.sort(key=lambda t: (-t[1], t[0].get("last_shown") or 0.0))
     chosen = [a for a, _ in scored[:n]]
-    store.mark_shown("artist", [a["artist"] for a in chosen], now)
     return chosen

@@ -1,0 +1,26 @@
+{# Shared song identity and playback for the live sample and fixed comparison. #}
+{% macro song(item) -%}
+<div class="taste-track">
+  <span class="taste-track-art art-album">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 18V5l11-2v13M9 8l11-2"/><ellipse cx="6" cy="18" rx="3" ry="2"/><ellipse cx="17" cy="16" rx="3" ry="2"/></svg>
+    {% if item.thumbnail %}<img src="{{ item.thumbnail }}" alt="" width="48" height="48" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+  </span>
+  <div class="taste-track-info">
+    {% if item.video_id %}<a class="ptitle" href="https://music.youtube.com/watch?v={{ item.video_id|urlencode }}" target="_blank" rel="noopener" data-yt-info>{{ item.title }}</a>
+    {% else %}<strong>{{ item.title }}</strong>{% endif %}
+    <a class="alink" href="/artist?name={{ item.artist|urlencode }}">{{ item.artist }}</a>
+    {% if item.album %}<span class="taste-track-album">{{ item.album }}</span>{% endif %}
+    {% if not item.video_id %}<span class="taste-track-album">Playback unavailable</span>{% endif %}
+  </div>
+  {% if item.video_id %}
+  <a class="taste-track-play" href="https://music.youtube.com/watch?v={{ item.video_id|urlencode }}" target="_blank" rel="noopener"
+     aria-label="Play {{ item.title }} by {{ item.artist }} on YouTube Music" title="Play on YouTube Music">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 4.5v15L20 12Z"/></svg>
+  </a>
+  {% endif %}
+</div>
+{%- endmacro %}
+
+{% macro source(lane, labels) -%}
+<span class="taste-track-source" data-source="{{ lane }}">{{ labels.get(lane, lane) or 'Taste pick' }}</span>
+{%- endmacro %}

@@ -1,20 +1,14 @@
-{% from "_macros.html" import pllink with context %}
-{# One movable playlist. htmx: Copy/Move post to /move/run; the to-identity comes from the
-   #move-to select via hx-include. A move that deletes the source returns empty (row fades out);
-   copy / kept-source / error re-render this row with a message. from-filter stays Alpine. #}
-<tbody class="move-row" x-show="from === {{ p.identity_id }}" x-cloak
-       x-transition.opacity.duration.300ms>
-  <tr>
-    <td>{{ pllink(p.ytm_playlist_id, p.title, p.track_count) }}</td>
-    <td class="cell-actions">
-      <button type="button" class="btn-ghost btn-sm" :disabled="!canMove()"
-              hx-post="/move/run" hx-include="#move-to" hx-vals='{"playlist": {{ p.id }}, "copy_only": "1"}'
-              hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Copy {{ arrow_icon('right') }}</button>
-      <button type="button" class="btn-sm" :disabled="!canMove()"
-              hx-post="/move/run" hx-include="#move-to" hx-vals='{"playlist": {{ p.id }}}'
-              hx-target="closest tbody" hx-swap="outerHTML swap:300ms" hx-indicator="closest tr">Move {{ arrow_icon('right') }}</button>
-      {% if message %}<span class="muted">{{ message }}</span>{% endif %}
-      {% if error %}<span class="notice notice--compact err">{{ error }}</span>{% endif %}
+<tbody class="move-row" x-show="from === {{ p.identity_id }}" x-cloak>
+  <tr :class="{ selrow: sel[{{ p.id }}] }" data-playlist-id="{{ p.id }}">
+    <td class="selcell" @click="rowCheck({{ p.id }}, $event)">
+      <input type="checkbox" aria-label="Select {{ p.title }}" :checked="!!sel[{{ p.id }}]"
+             :disabled="busy" @click.stop="rowCheck({{ p.id }}, $event)">
     </td>
+    <td class="move-title">
+      <a href="/playlist/{{ p.id }}" title="YouTube playlist ID: {{ p.ytm_playlist_id }}">{{ p.title }}</a>
+      {% if message %}<span class="muted">{{ message }}</span>{% endif %}
+      {% if error %}<span class="err">{{ error }}</span>{% endif %}
+    </td>
+    <td class="num">{{ p.track_count }}</td>
   </tr>
 </tbody>

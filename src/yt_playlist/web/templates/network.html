@@ -1,23 +1,35 @@
 {% extends "base.html" %}{% block title %}Network · TuneConsole{% endblock %}{% block page_class %}page-workflow page-network{% endblock %}{% block body %}
 <div class="page-head">
   <h1>Network log</h1>
-  <p>Every request the server makes is checked against a fixed allowlist <em>before</em> it leaves the
-    machine, and recorded here. This is how the app proves it only talks to YouTube and the
-    metadata-enrichment services, and never sends your sign-in anywhere else.</p>
+  <p>See where TuneConsole connects.</p>
 </div>
+
+<p class="section-note">Every server request is checked against a fixed allowlist <em>before</em>
+  it leaves your machine, then recorded here. Permitted services are grouped by purpose below.</p>
 
 <div class="card section-block workflow-control network-policy">
   <h2 class="section section-flush">Allowlist</h2>
-  <p class="section-note">The only hosts the server is permitted to reach. Anything else is blocked
+  <p class="section-note">Only the hosts and exact requests listed here are permitted. Anything else is blocked
     and shows up below in red. To change this list you have to edit the source
     (<code class="mono">yt_playlist/egress.py</code>) and restart; it can't be widened at runtime.</p>
-  <p>
-    {% for d in allowlist %}<span class="tag teal mono">{{ d }}</span> {% endfor %}
-  </p>
-  <p class="section-note">Playlist dates also permits these specific HTTPS requests:</p>
-  <ul class="section-note">
-    {% for method, host, path in metadata_endpoints %}<li><code>{{ method }} {{ host }}{{ path }}</code></li>{% endfor %}
-  </ul>
+  {% for group in allowlist_groups %}
+  <section class="space-before" aria-labelledby="network-purpose-{{ loop.index }}">
+    <h3 class="section section-flush" id="network-purpose-{{ loop.index }}">{{ group.title }}</h3>
+    <p class="section-note">{{ group.description }}</p>
+    <div class="cluster">
+      {% for domain in group.domains %}<span class="tag teal mono">{{ domain }}</span>{% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+  <section class="space-before" aria-labelledby="network-updates">
+    <h3 class="section section-flush" id="network-updates">Update Checks</h3>
+    <p class="section-note">Check GitHub for a new TuneConsole release once a day. No library data or
+      sign-in details are sent. Only this exact request is allowed; other GitHub URLs, query strings,
+      request bodies, and methods are blocked.</p>
+    <ul class="section-note flush">
+      {% for method, url in allowed_requests %}<li><code class="mono break-anywhere">{{ method }} {{ url }}</code></li>{% endfor %}
+    </ul>
+  </section>
 </div>
 
 <div class="card workflow-sheet">
@@ -47,8 +59,6 @@
 </div>
 
 <p class="section-note space-before">
-  <strong>One honest caveat:</strong> this logs traffic the <em>server</em> makes. Cover-art thumbnails
-  in the UI are loaded directly by your browser from Google's image CDNs and never pass through the
-  server, so they don't appear here, and no credentials are attached to those image loads. The log
-  rotates daily and keeps 7 days.</p>
+  This logs traffic the <em>server</em> makes. Cover-art images are loaded directly by your browser
+  from their image hosts, so those image loads don't appear here. The log rotates daily and keeps 7 days.</p>
 {% endblock %}

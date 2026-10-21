@@ -255,6 +255,13 @@ def test_legacy_heartbeat_for_another_video_does_not_inherit_source():
     ("", "MPRE_other", {"kind": "album", "title": "Other release", "url": "/album?browse=MPRE_other", "external": False}),
     ("PL_unknown", "MPRE_album", {"kind": "playlist", "title": "Playing playlist",
                                   "url": "https://music.youtube.com/playlist?list=PL_unknown", "external": True}),
+    ("RDCLAK5uy_curated", "MPRE_album", {"kind": "playlist", "title": "Playing playlist",
+                                        "url": "https://music.youtube.com/playlist?list=RDCLAK5uy_curated",
+                                        "external": True}),
+    ("RDAMVMv1", "MPRE_album", None),
+    ("RDAMPLsource", "MPRE_album", None),
+    ("RDEMautoplay", "", None),
+    ("RDQMmix", "MPRE_album", None),
     ("", "", {"kind": "album", "title": "Release", "url": "/album?browse=MPRE_album", "external": False}),
 ])
 def test_bridge_status_links_to_playing_source(store, playlist, album, expected):

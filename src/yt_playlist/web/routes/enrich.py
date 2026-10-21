@@ -2,31 +2,58 @@
 enrichment stats. The page polls /enrich/stats so the bars advance live as the worker drains."""
 import asyncio
 import json
+import math
 import threading
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from yt_playlist.providers import enrichment, waterfall
+from yt_playlist.providers import enrichment, genres as genre_lib, waterfall
 from yt_playlist.web import viz
+from yt_playlist.web.routes.genres import genre_list_context
 
 
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, templates = ctx.store, ctx.templates
+    provider_labels = {p["name"]: p["label"] for p in enrichment.PROVIDERS}
+
+    def age(timestamp):
+        if timestamp is None:
+            return "never"
+        seconds = max(0, int(ctx.now_fn() - timestamp))
+        if seconds < 60:
+            return f"{seconds}s ago"
+        if seconds < 3600:
+            return f"{seconds // 60}m ago"
+        if seconds < 86400:
+            return f"{seconds // 3600}h ago"
+        return f"{seconds // 86400}d ago"
 
     def _ctx():
-        cov = store.coverage_stats()
+        cov = store.coverage_stats(include_discovery=True)
         total = cov["total"]
         def pct(k):
+            if k == "processed" and total:
+                # Never claim 100% while a few tracks still await their first pass.
+                return math.floor(1000 * cov[k] / total) / 10
             return round(100 * cov[k] / total) if total else 0
         remaining = store.queue_remaining()
+        now = ctx.now_fn()
+        progress = store.enrichment_activity_stats(now)
         enabled = store.get_setting("enrich_worker_enabled", "1") == "1"
         busy = bool(ctx.enrich_worker and ctx.enrich_worker.busy)
+        activity = ctx.enrich_worker.activity if ctx.enrich_worker else {}
         if not enabled:
             state = "paused"
-        elif busy or remaining > 0:
+        elif activity.get("state") in ("blocked", "error"):
+            state = activity["state"]
+        elif busy and activity.get("state") == "waiting":
+            state = "waiting"
+        elif busy:
             state = "running"
+        elif remaining:
+            state = "queued"
         else:
             state = "idle"
         return {
@@ -35,16 +62,65 @@ def build(ctx) -> APIRouter:
                     ("processed", "genre", "year", "bpm", "energy", "danceability")},
             "remaining": remaining, "conflicts": store.outstanding_conflicts(),
             "enabled": enabled, "state": state,
+            "activity": activity, "activity_age": age(activity.get("updated_at")),
+            "progress": progress, "age": age,
             "spark": viz.area_spark(store.processed_timeline()),
         }
 
     @router.get("/enrich")
     def enrich_page(request: Request):
-        return templates.TemplateResponse(request, "enrich.html", _ctx())
+        return templates.TemplateResponse(request, "enrich.html", {
+            **_ctx(),
+            **genre_list_context(store),
+            "builtin_count": len(genre_lib.builtin_names()),
+        })
 
     @router.get("/enrich/stats")
     def enrich_stats(request: Request):
         return templates.TemplateResponse(request, "_partials/enrich_stats.html", _ctx())
+
+    def detail(request, view, page):
+        total = (store.queue_remaining() if view == "queue" else
+                 store.coverage_stats(include_discovery=True)["processed"] if view == "processed" else
+                 store.outstanding_conflicts())
+        size = 20 if view == "conflicts" else 40
+        pages = max(1, (total + size - 1) // size)
+        page = min(page, pages)
+        offset = (page - 1) * size
+        fetch = {"queue": store.next_enrich_batch, "processed": store.enriched_tracks,
+                 "conflicts": store.unresolved_enrichment_conflicts}[view]
+        return templates.TemplateResponse(request, "enrich_detail.html", {
+            "view": view, "rows": fetch(size, offset), "total": total, "page": page,
+            "pages": pages, "start": offset + 1 if total else 0,
+            "end": min(offset + size, total), "age": age,
+            "provider_labels": provider_labels,
+        })
+
+    @router.get("/enrich/queue")
+    def enrich_queue(request: Request, page: int = Query(1, ge=1)):
+        return detail(request, "queue", page)
+
+    @router.get("/enrich/processed")
+    def enrich_processed(request: Request, page: int = Query(1, ge=1)):
+        return detail(request, "processed", page)
+
+    @router.get("/enrich/conflicts")
+    def enrich_conflicts(request: Request, page: int = Query(1, ge=1)):
+        return detail(request, "conflicts", page)
+
+    @router.post("/enrich/conflicts/{track_id}/{field}")
+    async def resolve_enrich_conflict(request: Request, track_id: int, field: str,
+                                     page: int = Query(1, ge=1)):
+        value = (await request.form()).get("value")
+        if not isinstance(value, str) or not store.resolve_enrichment_candidate(
+                track_id, field, value, now=ctx.now_fn()):
+            raise HTTPException(status_code=400, detail="Choose a current provider candidate.")
+        if request.headers.get("HX-Request") == "true":
+            return templates.TemplateResponse(request, "_partials/enrich_conflict.html", {
+                "c": store.enrichment_conflict_detail(track_id, field), "saved": True,
+                "provider_labels": provider_labels, "page": page,
+            })
+        return RedirectResponse(f"/enrich/conflicts?page={page}", status_code=303)
 
     @router.post("/enrich/toggle")
     def enrich_toggle(request: Request):

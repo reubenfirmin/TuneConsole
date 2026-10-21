@@ -16,6 +16,8 @@ from yt_playlist.providers import musicbrainz, lastfm, discogs, deezer, acoustic
 from yt_playlist.providers import base, coverart
 from yt_playlist.providers.enrich_queue import PriorityGate
 from yt_playlist.util.thumbnails import is_placeholder_art
+from yt_playlist.util import net
+from yt_playlist.util.matching import identity_key
 
 REGISTRY = {m.name: m for m in (musicbrainz, lastfm, discogs, deezer, acousticbrainz)}
 _gate = PriorityGate()
@@ -156,11 +158,12 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
     tracks); the cold path (#50) passes one that builds a DiscoveredSink (discovered_tracks).
 
     Returns the ids (or discovered identity keys) of tracks for which every selected/available
-    provider was actually invoked. A provider circuit breaker can skip later tracks in the batch;
+    provider answered without request failures. A circuit breaker can skip later tracks in the batch;
     callers must not mark those tracks processed, because they still need a prompt retry."""
     registry = registry or REGISTRY
     sink_for = sink_for or (lambda t: TrackSink(store, t))
     run_id = run_id or uuid.uuid4().hex
+    labels = {p["name"]: p.get("label", p["name"]) for p in config}
     chosen = []
     for p in config:
         if not p.get("enabled"):
@@ -170,6 +173,7 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
             continue
         if not mod.available(store):
             on_progress({"type": "info",
+                         "warning": True,
                          "text": f"{p.get('label', p['name'])} is enabled but has no API key, skipping."})
             continue
         chosen.append(mod)
@@ -179,7 +183,8 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
         on_progress({"type": "done", "text": "Everything is already enriched.", "total": 0})
         return []
     if not chosen:
-        on_progress({"type": "done", "text": "No enrichment providers are enabled.", "total": 0})
+        on_progress({"type": "done", "text": "No enrichment providers are available. Check Setup.",
+                     "blocked": True, "total": 0})
         return []
 
     for m in chosen:
@@ -196,15 +201,32 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 on_progress({"type": "info", "text": "Stopped."})
                 return fully_attempted
             _gate.wait_turn(seq, on_wait=lambda: on_progress(
-                {"type": "info", "text": "Waiting: a newer run is enriching first…"}))
+                {"type": "info", "waiting": True,
+                 "text": "Waiting: a newer run is enriching first…"}))
             sink = sink_for(t)
             results = []
             attempted = 0
             for m in chosen:
                 if m.name in dead:
                     continue
-                attempted += 1
-                res = m.probe(t, store)
+                on_progress({"type": "activity", "provider": m.name, "title": t["title"],
+                             "artist": t.get("artist", ""), "i": i, "n": total,
+                             "text": f"Looking up {t['title']} with {labels[m.name]}."})
+                key = t.get("identity_key") or identity_key(t["title"], t.get("artist", ""))
+                try:
+                    with net.probe_errors() as errors:
+                        res = m.probe(t, store)
+                except Exception:
+                    store.record_enrichment_attempt(key, m.name, {}, retry=True)
+                    raise
+                retry = bool(errors) or m.tripped()
+                fields = {k: v for k, v in res.fields.items() if k not in _INTERNAL}
+                store.record_enrichment_attempt(key, m.name, fields, retry=retry)
+                if not retry:
+                    attempted += 1
+                else:
+                    on_progress({"type": "info", "warning": True,
+                                 "text": f"{labels[m.name]} lookup failed for {t['title']}; queued for retry."})
                 for fld, val in res.fields.items():
                     if fld in _INTERNAL:
                         continue
@@ -213,8 +235,13 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 results.append(res)
                 if m.tripped():                   # host unreachable. Drop it for the rest of the run
                     dead.add(m.name)
-                    on_progress({"type": "info", "text": f"{m.name} looks unreachable. "
+                    on_progress({"type": "info", "warning": True,
+                                 "text": f"{m.name} looks unreachable. "
                                  "Skipping it for the rest of this run."})
+            if needs_art(t):
+                on_progress({"type": "activity", "title": t["title"],
+                             "artist": t.get("artist", ""), "i": i, "n": total,
+                             "text": f"Checking cover art for {t['title']}."})
             _resolve_art(sink, t, results)
             for fld, candidates in base.detect_conflicts(results).items():
                 sink.upsert_conflict(fld, candidates)
@@ -223,10 +250,14 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
             if attempted == len(chosen):
                 fully_attempted.append(t.get("id", t.get("identity_key")))
             on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
+                         "track_id": t.get("id"), "identity_key": t.get("identity_key"),
+                         "fully_attempted": attempted == len(chosen),
                          "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']}"})
         note = f" · {conflicts_found} disagreement(s) to review" if conflicts_found else ""
-        on_progress({"type": "done", "text": f"Enriched {total} track(s).{note}",
-                     "total": total, "conflicts": conflicts_found})
+        remaining = total - len(fully_attempted)
+        retry_note = f" {remaining} track(s) remain queued for retry." if remaining else ""
+        on_progress({"type": "done", "text": f"Checked {len(fully_attempted)} track(s).{note}{retry_note}",
+                     "total": len(fully_attempted), "conflicts": conflicts_found})
         return fully_attempted
     finally:
         _gate.leave(seq)

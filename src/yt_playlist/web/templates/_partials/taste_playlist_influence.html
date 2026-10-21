@@ -1,0 +1,81 @@
+{% if influence.contexts %}
+<div class="playlist-influence"
+     x-data='{ selected: null, hover: null, shares: {{ influence.segments|map(attribute="percent_label")|list|tojson }}, get active() { return this.hover ?? this.selected; } }'
+     @keydown.escape="selected = null; hover = null">
+  <p class="section-note playlist-influence-intro">{% if influence.basis == 'listening' %}The model uses the sound of the tracks you’ve played as your starting taste match.{% else %}Your playlists give the model different sounds to match. Their shares combine into your starting taste match; a track’s fit to each playlist also affects its score.{% endif %}</p>
+  {% if influence.basis == 'equal' %}
+  <p class="playlist-influence-notice">Equal shares for now. As listening history arrives, plays of tracks in these playlists set their influence.</p>
+  {% elif influence.basis == 'listening' %}
+  <p class="playlist-influence-notice">Your listening history supplies the taste match until a playlist can shape it.</p>
+  {% endif %}
+
+  <div class="playlist-influence-layout">
+    <figure class="playlist-blend">
+      <div class="playlist-blend-chart">
+        <svg viewBox="-112 -112 224 224" role="img" aria-label="Playlist shares of your starting taste match" class="playlist-blend-ring">
+          <circle r="105" class="playlist-blend-guide"/>
+          <circle r="82" class="playlist-blend-track"/>
+          {% for c in influence.segments %}
+          {% set pc = 'var(--faint)' if c.is_other else 'var(--rose-' ~ loop.index0 ~ ')' %}
+          <circle r="82" pathLength="100" class="playlist-blend-segment" style="--playlist-c:{{ pc }}"
+                  stroke-dasharray="{{ '%.6f'|format(c.percent) }} {{ '%.6f'|format(100 - c.percent) }}" stroke-dashoffset="{{ '%.6f'|format(-c.offset) }}"
+                  :class="{ 'is-muted': active !== null &amp;&amp; active !== {{ loop.index0 }} }"
+                  @mouseenter="hover = {{ loop.index0 }}" @mouseleave="hover = null">
+            <title>{{ c.title }}: {{ c.percent_label }}</title>
+          </circle>
+          {% endfor %}
+          <circle r="61" class="playlist-blend-inner"/>
+        </svg>
+        <div class="playlist-blend-center" aria-hidden="true">
+          <strong x-text="active === null ? '100%' : shares[active]">100%</strong>
+          <span x-text="active === null ? 'taste blend' : 'of the blend'">taste blend</span>
+        </div>
+      </div>
+      <figcaption class="playlist-blend-caption">
+        <div x-show="active === null">
+          <h3>{% if influence.basis == 'listening' %}From your listening{% else %}{{ influence.playlist_total }} {{ 'playlist shapes' if influence.playlist_total == 1 else 'playlists shape' }} this match{% endif %}</h3>
+          <p>{% if influence.active_total > 1 %}<strong>{{ influence.top_share }}</strong> comes from your top {{ influence.top_count }}.{% else %}One source supplies the whole blend.{% endif %}</p>
+          <span class="playlist-blend-hint">Select a row to explore its share.</span>
+        </div>
+        {% for c in influence.segments %}
+        <div x-show="active === {{ loop.index0 }}" x-cloak>
+          <h3>{{ c.title }}</h3>
+          <p><strong>{{ c.percent_label }}</strong> of your starting taste match.</p>
+          {% if c.pid is not none %}<a class="playlist-blend-link" href="/playlist/{{ c.pid }}">Open playlist</a>{% endif %}
+        </div>
+        {% endfor %}
+      </figcaption>
+    </figure>
+
+    <div class="playlist-influence-ranking">
+      <div class="playlist-influence-columns" aria-hidden="true"><span>Playlist / sound</span><span>Matched plays</span><span>Influence</span></div>
+      <ol class="playlist-influence-list" aria-label="Playlists ranked by influence">
+        {% for c in influence.segments %}
+        {% set pc = 'var(--faint)' if c.is_other else 'var(--rose-' ~ loop.index0 ~ ')' %}
+        <li style="--playlist-c:{{ pc }}">
+          <button type="button" class="playlist-influence-row" :class="{ 'is-active': active === {{ loop.index0 }} }"
+                  :aria-pressed="selected === {{ loop.index0 }}" @click="selected = selected === {{ loop.index0 }} ? null : {{ loop.index0 }}"
+                  @mouseenter="hover = {{ loop.index0 }}" @mouseleave="hover = null" @focus="hover = {{ loop.index0 }}" @blur="hover = null">
+            <span class="playlist-influence-identity">
+              <span class="playlist-influence-swatch" aria-hidden="true"></span>
+              <span><span class="playlist-influence-title">{{ c.title }}</span>
+                <span class="playlist-influence-genres">{% if c.is_other %}The rest of your contributing playlists{% elif c.genres %}{{ c.genres|join(' · ') }}{% elif c.pid is none %}From your listening history{% else %}Genre not tagged{% endif %}</span></span>
+            </span>
+            <span class="playlist-influence-plays">{% if c.listens is not none %}{{ '{:,}'.format(c.listens) }}<span class="playlist-influence-mobile-label"> matched plays</span>{% else %}History{% endif %}</span>
+            <span class="playlist-influence-share">{{ c.percent_label }}<span class="playlist-influence-mobile-label"> influence</span></span>
+            <span class="playlist-influence-bar" aria-hidden="true"><i style="width:{{ '%.6f'|format(c.percent) }}%"></i></span>
+          </button>
+        </li>
+        {% endfor %}
+      </ol>
+      <div class="playlist-influence-scale" aria-hidden="true"><span>0%</span><span>50%</span><span>100% of the blend</span></div>
+    </div>
+  </div>
+  <p class="section-note playlist-influence-footnote">{% if influence.basis != 'listening' %}Matched plays are plays of tracks saved in a playlist, wherever you listened. A track in multiple playlists can count toward each. {% endif %}{% if influence.other %}The top {{ influence.contexts|length }} are shown individually; the remaining shares are grouped. {% endif %}{% if influence.unplayed_total %}{{ influence.unplayed_total }} {{ 'playlist has' if influence.unplayed_total == 1 else 'playlists have' }} no listening weight yet. {% endif %}Generated playlists and broad catch-all collections are excluded.</p>
+</div>
+{% else %}
+<div class="playlist-influence-empty">
+  <p class="section-note">Build the model and play some playlists to see their influence.</p>
+  <p>Your playlists will appear here with their sounds, matched listening, and share of your taste blend.</p>
+</div>
+{% endif %}

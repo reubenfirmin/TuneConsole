@@ -62,7 +62,7 @@
       </div>
     </form>
     {% endif %}
-    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/genres') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') or path.startswith('/discovery') %}
+    {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') or path.startswith('/discovery') %}
     <nav>
       <div class="nav-group">
         <span class="nav-group-label">Library</span>
@@ -89,9 +89,8 @@
           <a href="/enrich" class="{{ 'active' if path.startswith('/enrich') else '' }}">Enrichment</a>
           <a href="/taste" class="{{ 'active' if path.startswith('/taste') else '' }}">Taste Model</a>
           <a href="/discovery" class="{{ 'active' if path.startswith('/discovery') else '' }}">Discovery Pools</a>
-          <a href="/genres" class="{{ 'active' if path.startswith('/genres') else '' }}">Genres</a>
           <a href="/network" class="{{ 'active' if path.startswith('/network') else '' }}">Network</a>
-          <a href="/actions" class="{{ 'active' if path.startswith('/actions') else '' }}">Audit Log</a>
+          <a href="/actions" class="{{ 'active' if path.startswith('/actions') else '' }}">Action Log</a>
         </div>
       </div>
     </nav>
@@ -101,7 +100,8 @@
     {% include "_partials/now_playing.html" %}
   </div>
   <div class="authbar" x-data='authBanner({{ (auth_expired.values()|list)|tojson }})'
-       x-show="labels.length && !dismissed" x-cloak @auth-expired.window="add($event.detail.label)">
+       x-show="labels.length && !dismissed" x-cloak @auth-expired.window="add($event.detail.label)"
+       @auth-checked.window="labels = $event.detail.labels">
     <span class="authbar-body">⚠ Not signed in to YouTube Music for <strong x-text="labels.join(', ')"></strong>.
       Open <a href="https://music.youtube.com" target="_blank" rel="noopener">music.youtube.com</a> and sign in;
       the extension will pick the session back up.</span>

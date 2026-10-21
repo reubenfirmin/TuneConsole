@@ -9,6 +9,77 @@ function syncTopbarH() {
 window.addEventListener('DOMContentLoaded', syncTopbarH);
 window.addEventListener('resize', syncTopbarH);
 
+// Discovery exposure belongs to the visible tile, never the GET that prepared its HTML. A page's
+// view id survives fragment polls, so server retries and replacements cannot count the same tile twice.
+let discoveryExposure = null;
+function syncDiscoveryExposure() {
+  const home = document.getElementById('home');
+  if (discoveryExposure?.home !== home) {
+    discoveryExposure?.observer.disconnect();
+    discoveryExposure?.timers.forEach(clearTimeout);
+    discoveryExposure = null;
+  }
+  if (!home || !window.IntersectionObserver) return;
+  if (!discoveryExposure) {
+    const state = {home, viewId: crypto.randomUUID(), observed: new Set(), seen: new Set(),
+      visible: new Set(), timers: new Map()};
+    state.observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        const tile = entry.target;
+        if (!entry.isIntersecting || entry.intersectionRatio < .5) {
+          state.visible.delete(tile);
+          clearTimeout(state.timers.get(tile));
+          state.timers.delete(tile);
+          return;
+        }
+        state.visible.add(tile);
+        if (document.hidden || state.timers.has(tile)) return;
+        const kind = tile.dataset.discoveryKind, id = tile.dataset.discoveryId;
+        const key = JSON.stringify([kind, id]);
+        if (state.seen.has(key)) return;
+        state.timers.set(tile, setTimeout(() => {
+          state.timers.delete(tile);
+          if (document.hidden || !tile.isConnected || !tile.getClientRects().length ||
+              !state.visible.has(tile) || state.seen.has(key)) return;
+          state.seen.add(key);
+          fetch('/discovery/impressions', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, keepalive: true,
+            body: JSON.stringify({kind, ids: [id], view_id: state.viewId})
+          }).then(response => {
+            if (!response.ok) state.seen.delete(key);
+          }).catch(() => state.seen.delete(key));
+        }, 750));
+      });
+    }, {threshold: .5});
+    discoveryExposure = state;
+  }
+  const state = discoveryExposure;
+  state.observed.forEach(tile => {
+    if (tile.isConnected) return;
+    state.observer.unobserve(tile);
+    state.observed.delete(tile);
+    state.visible.delete(tile);
+    clearTimeout(state.timers.get(tile));
+    state.timers.delete(tile);
+  });
+  home.querySelectorAll('[data-discovery-id]').forEach(tile => {
+    if (state.observed.has(tile)) return;
+    state.observed.add(tile);
+    state.observer.observe(tile);
+  });
+}
+document.addEventListener('DOMContentLoaded', syncDiscoveryExposure);
+document.addEventListener('htmx:afterSettle', syncDiscoveryExposure);
+document.addEventListener('visibilitychange', () => {
+  if (!discoveryExposure) return;
+  discoveryExposure.timers.forEach(clearTimeout);
+  discoveryExposure.timers.clear();
+  if (!document.hidden) discoveryExposure.observed.forEach(tile => {
+    discoveryExposure.observer.unobserve(tile);
+    discoveryExposure.observer.observe(tile);
+  });
+});
+
 // htmx: a 422 carries an OOB error toast. By default htmx won't process a 4xx body,
 // so opt this status in. The server sets `HX-Reswap: none` to keep the primary
 // target untouched while the OOB toast still lands in #toasts. Bind on `document`
@@ -488,12 +559,52 @@ function playlistsTab(rows) {
     },
   };
 }
-function moveTab(fromId, toId) {
-  // Move page: the from/to identity selection and the "two different identities" gate.
-  // The copy/move actions themselves are htmx (see _partials/move_row.html).
+function moveTab(fromId, toId, rows) {
   return {
-    from: fromId, to: toId,
+    from: fromId, to: toId, rows, sel: {}, lastChecked: null,
+    busy: false, progress: '', error: '',
+    init() {
+      this.$watch('from', () => { this.sel = {}; this.lastChecked = null; });
+    },
+    visibleIds() { return this.rows.filter(r => r.identity_id === this.from).map(r => r.id); },
+    selectedIds() { return this.visibleIds().filter(id => this.sel[id]); },
+    count() { return this.selectedIds().length; },
+    allSelected() { return this.visibleIds().length > 0 && this.count() === this.visibleIds().length; },
     canMove() { return this.from != null && this.to != null && this.from !== this.to; },
+    selectAll(on) {
+      if (this.busy) return;
+      this.sel = on ? Object.fromEntries(this.visibleIds().map(id => [id, true])) : {};
+      this.lastChecked = null;
+    },
+    rowCheck(id, event) {
+      if (this.busy) return;
+      const on = !this.sel[id], ids = this.visibleIds();
+      const start = ids.indexOf(this.lastChecked), end = ids.indexOf(id);
+      if (event.shiftKey && start >= 0 && end >= 0) {
+        ids.slice(Math.min(start, end), Math.max(start, end) + 1).forEach(pid => { this.sel[pid] = on; });
+      } else {
+        this.sel[id] = on;
+      }
+      this.lastChecked = id;
+    },
+    async transfer(copyOnly) {
+      if (this.busy || !this.canMove() || !this.count()) return;
+      const ids = this.selectedIds();
+      this.busy = true;
+      this.error = '';
+      this.progress = `${copyOnly ? 'Copying' : 'Moving'} ${ids.length} playlist${ids.length === 1 ? '' : 's'}…`;
+      try {
+        await htmx.ajax('POST', '/move/bulk', {
+          target: '#move-panel', swap: 'outerHTML',
+          values: { ids: ids.join(','), source_identity: this.from,
+            target_identity: this.to, copy_only: copyOnly ? '1' : '' },
+        });
+      } catch (_) {
+        this.error = 'The transfer was interrupted. Check both identities before retrying; some playlists may have been copied or moved.';
+      } finally {
+        this.busy = false;
+      }
+    },
   };
 }
 function titleEditor(pid) {
@@ -657,6 +768,7 @@ function authBanner(initial) {
   // pops up during an AJAX sync (no page reload needed).
   return {
     labels: initial || [],
+    dismissed: false,
     add(label) { if (label && !this.labels.includes(label)) this.labels.push(label); },
   };
 }
@@ -860,14 +972,34 @@ function playerStatus() {
 window.mountNowPlayingDock = mountNowPlayingDock;
 
 // Route every YouTube Music play/open link through the extension so it plays in the EXISTING YouTube
-// Music tab (in the background, you stay on TuneConsole) instead of opening a new tab. Falls back to
-// opening the link when the extension is not connected. Ctrl/meta/middle-click still open a new tab.
+// Music tab (in the background, you stay on TuneConsole). A bridge failure must not create another
+// player that cannot stop the existing music. Ctrl/meta/middle-click still open a new tab.
 function tcPlay(url) {
+  const failed = () => {
+    document.getElementById('playback-error')?.remove();
+    const toast = document.createElement('div');
+    toast.id = 'playback-error';
+    toast.className = 'toast toast-err';
+    const message = document.createElement('span');
+    message.className = 'toast-body';
+    message.textContent = 'Couldn’t start playback. Check that TuneConsole and its browser extension are connected, then try again.';
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'toast-x';
+    dismiss.setAttribute('aria-label', 'Dismiss');
+    dismiss.textContent = '×';
+    dismiss.onclick = () => toast.remove();
+    toast.append(message, dismiss);
+    document.getElementById('toasts')?.prepend(toast);
+    return false;
+  };
   return fetch('/play', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
   }).then(r => r.json()).then(d => {
-    if (!d || !d.ok) window.open(url, '_blank', 'noopener');   // extension off: open it the old way
-  }).catch(() => { window.open(url, '_blank', 'noopener'); });
+    if (!d || !d.ok) return failed();
+    document.getElementById('playback-error')?.remove();
+    return true;
+  }).catch(failed);
 }
 window.tcPlay = tcPlay;
 // Capture phase (the `true` below) so we run BEFORE the target's own handlers: some play links live
@@ -1108,6 +1240,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('focus', refreshExpiredMixTuning);
 
 function syncHomeThemes() {
+  syncHomeVibe();
   const summary = document.getElementById('home-theme-summary');
   const options = document.getElementById('home-genre-options');
   if (!summary || !options) return;
@@ -1130,7 +1263,17 @@ function syncHomeThemes() {
       input.setAttribute('aria-label', genre.label);
       input.checked = selected.includes(genre.family);
       const name = document.createElement('span');
-      name.textContent = genre.label;
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      icon.setAttribute('viewBox', '0 0 16 16');
+      icon.setAttribute('aria-hidden', 'true');
+      icon.setAttribute('focusable', 'false');
+      for (const [kind, d] of [['add', 'M8 3.5v9M3.5 8h9'], ['check', 'm3.5 8 3 3 6-6']]) {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('class', 'fp-genre-' + kind);
+        path.setAttribute('d', d);
+        icon.append(path);
+      }
+      name.append(icon, document.createTextNode(genre.label));
       label.append(input, name);
       options.append(label);
     });
@@ -1168,6 +1311,9 @@ function updateHomeGenreSelection() {
   const busy = document.getElementById('fp-mixes-panel')?.getAttribute('aria-busy') === 'true';
   document.getElementById('home-make-mixes').disabled = busy || (!count && !homeOfferedGenres().length);
   form.querySelector('.fp-submit-label').textContent = count ? 'Make mixes' : 'Shuffle genres';
+  const note = document.getElementById('home-genre-count');
+  if (note) note.textContent = count ? count + (count === 1 ? ' genre in the mix.' : ' genres in the mix.')
+    : 'Room for a happy accident.';
   syncMixTuningIndicator();
 }
 document.addEventListener('DOMContentLoaded', syncHomeThemes);
@@ -1207,19 +1353,62 @@ document.addEventListener('htmx:afterRequest', event => {
   }
 });
 
+function syncHomeVibe() {
+  const panel = document.getElementById('fingerprint');
+  if (!panel) return;
+  const row = document.getElementById('home-mode-cards');
+  const vibe = row?.dataset.vibe ?? panel.dataset.vibe ?? '';
+  panel.querySelectorAll('#home-vibe-form input').forEach(input => { input.checked = input.value === vibe; });
+  window.dispatchEvent(new CustomEvent('home-vibe-sync', {detail: vibe}));
+  const status = document.getElementById('home-vibe-status');
+  if (status && !status.dataset.failed && !panel.querySelector('#home-vibe-form.htmx-request')) {
+    const label = panel.querySelector('#home-vibe-form input:checked')?.closest('label').querySelector('strong')?.textContent;
+    status.textContent = label ? 'In the mix: ' + label + '.' : 'Pick a vibe. Your mixes update right away.';
+  }
+}
+
+document.addEventListener('htmx:beforeRequest', event => {
+  if (event.detail.elt?.id !== 'home-vibe-form') return;
+  const status = document.getElementById('home-vibe-status');
+  delete status.dataset.failed;
+  status.textContent = 'Finding your kind of ' + (event.detail.elt.querySelector('input:checked')?.value ? 'vibe…' : 'music…');
+});
+document.addEventListener('htmx:afterRequest', event => {
+  if (event.detail.elt?.id === 'home-vibe-form') {
+    const status = document.getElementById('home-vibe-status');
+    if (!event.detail.successful) {
+      status.dataset.failed = 'true';
+      status.textContent = 'Couldn’t change the vibe. Try again.';
+    }
+    syncHomeVibe();
+    if (event.detail.successful) window.dispatchEvent(new CustomEvent('mixes-reranked'));
+  }
+  if (event.detail.elt?.matches('.fp-slider, .fp-breadth-slider')) {
+    const status = document.getElementById('home-preference-status');
+    if (status) status.textContent = event.detail.successful ? 'Freshly adjusted. Find your next mix.'
+      : 'Couldn’t update your mixes. Try that adjustment again.';
+  }
+});
+
 // Remember the taste panel's open/closed state across page loads and fragment swaps.
 function fpPanel() {
   return {
     // Power-user control: compact on first encounter; an explicit expansion remains remembered.
     collapsed: localStorage.getItem('fp_collapsed') !== '0',
-    tab: sessionStorage.getItem('fp_tab') === 'preferences' ? 'preferences' : 'mixes',
+    tab: ['vibe', 'mixes', 'preferences'].includes(sessionStorage.getItem('fp_tuning_tab')) ? sessionStorage.getItem('fp_tuning_tab') : 'vibe',
+    vibe: '',
     init() {
+      this.vibe = this.$el.dataset.vibe || '';
       if (!this.collapsed) this.$nextTick(() => this.show());
     },
     selectTab(name, focus = false) {
       this.tab = name;
-      sessionStorage.setItem('fp_tab', name);
+      sessionStorage.setItem('fp_tuning_tab', name);
       if (focus) this.$nextTick(() => this.$refs[name + 'Tab'].focus());
+    },
+    moveTab(direction) {
+      const tabs = ['vibe', 'mixes', 'preferences'];
+      this.selectTab(tabs[(tabs.indexOf(this.tab) + direction + tabs.length) % tabs.length], true);
     },
     show() {
       this.collapsed = false;

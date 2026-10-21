@@ -1,0 +1,5 @@
+<p class="knob-origin">
+  {% if w.has_record %}
+  Saved ×{{ '%.2f'|format(w.saved_weight) }}{% if w.age_days is not none %} · {{ '%.1f'|format(w.age_days) }} days ago{% else %} · date unknown{% endif %}
+  {% else %}Default ×1.00{% endif %}
+</p>

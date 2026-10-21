@@ -1,8 +1,7 @@
 {% extends "base.html" %}{% block title %}Discovery Pools · TuneConsole{% endblock %}{% block page_class %}page-discovery{% endblock %}{% block body %}
 <div class="page-head">
   <h1>Discovery Pools</h1>
-  <p>Tracks, albums, and artists recommended from outside your library. Unsaved suggestions are removed
-    {{ gc_days }} days after you first see them. Tracks in generated playlists stay until those playlists are cleaned up.</p>
+  <p>Recommendations from outside your library.</p>
 </div>
 
 {% macro gc_cell(row) -%}
@@ -14,7 +13,16 @@
 
 {% macro ingested(row) -%}
   {% set d = ((now - row.found_at) / 86400) | round(0, 'floor') | int %}
-  {{ 'today' if d <= 0 else (d ~ 'd ago') }}
+  {{ 'less than 1d ago' if d <= 0 else (d ~ 'd ago') }}
+{%- endmacro %}
+
+{% macro distribution(rows) -%}
+  {% for row in rows %}
+    <div class="discovery-bar{% if row.unknown %} is-unknown{% endif %}" title="{{ row.label }}: {{ '{:,}'.format(row.count) }} tracks ({{ row.pct }}%)">
+      <span>{{ row.label }}</span><span class="discovery-bar-count">{{ '{:,}'.format(row.count) }}</span>
+      <span class="discovery-bar-track" aria-hidden="true"><i style="--share:{{ row.pct }}%"></i></span>
+    </div>
+  {% endfor %}
 {%- endmacro %}
 
 <div class="card discovery-sheet" x-data="{ tab: 'tracks' }">
@@ -24,12 +32,40 @@
     <button type="button" class="tab-btn" :class="{ active: tab === 'artists' }" @click="tab = 'artists'">Artists ({{ artists|length }})</button>
   </div>
 
+  <p class="section-note">Unsaved suggestions are removed {{ gc_days }} days after you first see them.
+    Tracks not yet shown expire {{ gc_days }} days after being found.
+    Tracks in generated playlists stay until those playlists are cleaned up.</p>
+  <p class="section-note" x-show="tab !== 'tracks'" x-cloak>Album and artist views are counted on Home’s Discover tab.
+    Earlier background loads are listed separately; they do not count as views.</p>
+
+  {% if tracks and track_summary is defined %}
+  <div class="discovery-charts" x-show="tab === 'tracks'" aria-label="Track pool overview">
+    <figure class="discovery-chart">
+      <figcaption>By genre</figcaption>
+      {{ distribution(track_summary.genres) }}
+    </figure>
+    <figure class="discovery-chart">
+      <figcaption>By era</figcaption>
+      {{ distribution(track_summary.eras) }}
+    </figure>
+    <figure class="discovery-chart">
+      <figcaption>Unenriched</figcaption>
+      <p class="discovery-chart-total">{{ '{:,}'.format(track_summary.without_metadata) }}</p>
+      <p class="section-note">Tracks with no genre, year, or audio metadata.</p>
+      {{ distribution(track_summary.gaps) }}
+      <p class="section-note">Missing saved metadata. Categories can overlap.</p>
+    </figure>
+  </div>
+  {% endif %}
+
   <table class="pool-table" x-show="tab === 'tracks'">
     <thead><tr><th>Track</th><th>Found</th><th>Plays</th><th>Times shown</th><th>Playlists</th><th>Removed</th><th></th></tr></thead>
     <tbody>
       {% for r in tracks %}
       <tr id="dt-{{ loop.index }}">
-        <td>{{ r.title }} <span class="muted">· {{ r.artist }}</span></td>
+        <td>{{ r.title }} <span class="muted">· {{ r.artist }}</span>
+          <div class="muted">{{ r.genre or 'No genre' }}{% if r.year %} · {{ r.year }}{% endif %}{% if r.audio.bpm is defined %} · {{ r.audio.bpm|round(1) }} BPM{% endif %}{% if r.audio.energy is defined %} · Energy {{ r.audio.energy|round(2) }}{% endif %}{% if r.audio.danceability is defined %} · Danceability {{ r.audio.danceability|round(2) }}{% endif %}</div>
+        </td>
         <td>{{ ingested(r) }}</td><td>{{ r.plays }}</td><td>{{ r.offered_count }}</td>
         <td>{{ r.playlists }}</td><td>{{ gc_cell(r) }}</td>
         <td><button class="btn-sm" hx-post="/discovery/add" hx-vals='{"kind":"track","id":"{{ r.identity_key }}"}'
@@ -45,7 +81,8 @@
       {% for r in albums %}
       <tr id="da-{{ loop.index }}">
         <td>{{ r.title }} <span class="muted">· {{ r.artist }}{{ ' · ' ~ r.year if r.year }}</span></td>
-        <td>{{ ingested(r) }}</td><td>{{ r.offered_count }}</td><td>{{ gc_cell(r) }}</td>
+        <td>{{ ingested(r) }}</td><td>{{ r.offered_count }}{% if r.legacy_offered_count %}
+          <span class="muted">({{ r.legacy_offered_count }} earlier loads)</span>{% endif %}</td><td>{{ gc_cell(r) }}</td>
         <td><button class="btn-sm" hx-post="/collection/save-album" hx-vals='{"browse_id":"{{ r.browse_id }}"}'
                     hx-target="#da-{{ loop.index }}" hx-swap="outerHTML swap:0.2s">Save</button></td>
       </tr>
@@ -58,7 +95,8 @@
     <tbody>
       {% for r in artists %}
       <tr><td>{{ r.artist }}</td><td>{{ r.genre or '' }}</td><td>{{ ingested(r) }}</td>
-        <td>{{ r.offered_count }}</td><td>{{ gc_cell(r) }}</td></tr>
+        <td>{{ r.offered_count }}{% if r.legacy_offered_count %}
+          <span class="muted">({{ r.legacy_offered_count }} earlier loads)</span>{% endif %}</td><td>{{ gc_cell(r) }}</td></tr>
       {% else %}<tr><td colspan="5" class="muted">No artists in the pool yet.</td></tr>{% endfor %}
     </tbody>
   </table>

@@ -5,7 +5,7 @@ axis at the two it exists on (SESSION / TRANSIENT).
 import numpy as np
 import pytest
 
-from yt_playlist.rec import embed, layers, rec_params, scoring, taste_viz, transient
+from yt_playlist.rec import embed, graduation, layers, rec_params, scoring, taste_viz, transient
 
 
 def _install_now_modes(store):
@@ -32,6 +32,97 @@ def _seed_jazz(store):
     store.set_track_genre(t, "Jazz")
     store.add_history_snapshot(iid, 1.0, ["song|band"])
     return iid
+
+
+def test_learning_progress_groups_all_evidence_without_reinterpreting_genres(store):
+    for i in range(15):
+        store.bump_theme(f"artist:Artist {i:02}", .1 + i * .01, 1.0)
+    store.bump_theme("artist:AC:DC", -.9, 1.0)
+    store.bump_theme("genre:other:alternative metal", .6, 1.0)
+    store.bump_theme("era:1990", 1.8, 1.0)
+    data = taste_viz.learning_progress(store, 1.0)
+    artists, genres, eras = data["groups"]
+    assert len(artists["rows"]) == 16  # pagination must not discard the rest
+    assert artists["rows"][0] == {"facet": "artist:AC:DC", "name": "AC:DC",
+                                  "score": -.9, "percent": 75, "direction": "reduction",
+                                  "updated_at": 1.0}
+    assert genres["rows"][0]["name"] == "alternative metal"
+    assert genres["rows"][0]["facet"] == "genre:other:alternative metal"
+    assert genres["rows"][0]["percent"] == 50
+    assert eras["rows"][0]["name"] == "1990s"
+    assert eras["rows"][0]["percent"] == 100
+    # Accumulated learning evidence stays put as recent influence fades.
+    assert taste_viz.learning_progress(store, 100_000_000)["groups"] == data["groups"]
+
+
+@pytest.mark.parametrize("axis", ["artist", "genre", "era"])
+def test_learning_progress_orders_by_latest_evidence_not_strength(store, axis):
+    for name, score, updated_at in (("Strong boost", .9, 10), ("Strong reduction", -.9, 20),
+                                    ("Small boost", .1, 30), ("Small reduction", -.1, 40),
+                                    ("Epoch", .3, 0)):
+        store.bump_theme(f"{axis}:{name}", score, updated_at)
+
+    def rows():
+        return next(group["rows"] for group in taste_viz.learning_progress(store, 100)["groups"]
+                    if group["axis"] == axis)
+
+    assert [row["name"] for row in rows()] == ["Small reduction", "Small boost", "Strong reduction",
+                                               "Strong boost", "Epoch"]
+    assert [row["updated_at"] for row in rows()] == [40, 30, 20, 10, 0]
+    store.bump_theme(f"{axis}:Strong boost", .001, 50)
+    assert rows()[0]["name"] == "Strong boost"
+    assert rows()[0]["updated_at"] == 50
+
+
+def test_learning_source_curves_follow_configured_half_lives(store):
+    rec_params.set_param(store, "play_halflife_d", 7)
+    data = taste_viz.learning_progress(store, 1.0)
+    assert [row["title"] for row in data["activity"]] == ["Plays", "Likes", "Mood choices", "Dislikes", "Skips"]
+    play = data["activity"][0]
+    assert play["half_days"] == 7
+    assert "50.00 34.00" in play["curve"]  # day 7 of 28: half of the 60px influence remains
+    assert play["curve"].endswith("200.00 60.25")  # four half-lives: 1/16 remains
+    assert all(row["count"] == 0 for row in data["activity"])
+    assert all(not group["rows"] for group in data["groups"])
+
+
+def test_other_learning_shows_choices_faded_sources_and_completed_steps(store):
+    _install_now_modes(store)
+    store.modes.log_impressions(1, [("a", 1), ("b", 2)], 10)
+    store.modes.log_pick(1, 2, 20)
+    store.set_weight("lane:deep_cut", 2, now=100)
+    graduation.graduate_facet(store, "genre:other:alternative metal", 2, 40, source_label="like")
+    graduation.graduate_facet(store, "era:1990", -2, 30, source_label="dislike")
+    graduation.graduate_facet(store, "artist:Unfinished", .01, 50)
+    now = 100 + rec_params.get_param(store, "weight_revert_halflife_d") * 86400
+    data = taste_viz.learning_progress(store, now)
+    assert data["choices"]["picked"] == 1 and data["choices"]["offered"] == 2
+    assert [row["mode_id"] for row in data["choices"]["rows"]] == [2, 1]
+    source = data["source_weights"]["lanes"][0]
+    assert source["name"] == "deep_cut" and source["updated_at"] == 100
+    assert source["saved_weight"] == 2 and source["weight"] == pytest.approx(1.5)
+    assert [row["updated_at"] for row in data["changes"]] == [40, 30]
+    assert [(row["name"], row["direction"], row["source"]) for row in data["changes"]] == [
+        ("alternative metal", "boost", "Likes"), ("1990s", "reduction", "Dislikes")]
+    assert data["changes"][0]["new_weight"] == rec_params.get_param(store, "graduate_up")
+
+
+def test_overview_reports_recent_shifts_against_library_not_a_second_library_portrait(store, monkeypatch):
+    _install_now_modes(store)
+    keys = ["techno|artist", "folk1|artist", "folk2|artist"]
+    _install_now_content_vectors(store, monkeypatch, keys,
+                                 np.array([[1., 0.], [0., 1.], [0., 1.]], dtype=np.float32))
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.import_play_events(iid, [(key, f"v{i}", 1000.0) for i, key in enumerate(keys)])
+    recent = taste_viz.overview(store, 1000.0)["recent"]
+    by_label = {row["label"]: row for row in recent["shifts"]}
+    acoustic, techno = by_label["Chill acoustic"], by_label["Warehouse techno"]
+    assert acoustic["library"] == pytest.approx(.25)
+    assert acoustic["recent"] == pytest.approx(2 / 3)
+    assert acoustic["delta"] == pytest.approx(2 / 3 - .25)
+    assert techno["library"] == pytest.approx(.75)
+    assert techno["recent"] == pytest.approx(1 / 3)
+    assert recent["n"] == 3
 
 
 def test_viz_reflects_param_overrides(store):
@@ -94,6 +185,32 @@ def test_cold_start_is_neutral_everywhere(store):
     assert payload["genres"] == [] and payload["eras"] == [] and payload["artists"] == []
     assert payload["sources"]["plays"] == 0
     assert payload["modes"]["modes"] == []
+
+
+@pytest.mark.parametrize("saved", [1.8, 0.4])
+def test_lane_provenance_matches_the_served_weight_after_fading(store, saved):
+    rec_params.set_param(store, "weight_revert_halflife_d", 30)
+    store.set_weight("lane:deep_cut", saved, now=1000.0)
+    now = 1000.0 + 30 * 86400
+    payload = taste_viz.model_transparency(store, now=now)
+    lane = next(r for r in payload["lanes"] if r["name"] == "deep_cut")
+    served = store.get_weights(now=now, revert_halflife_d=30)["lane:deep_cut"]
+    assert payload["lane_weight_halflife_days"] == 30
+    assert lane["has_record"] is True
+    assert lane["saved_weight"] == saved
+    assert lane["age_days"] == 30
+    assert lane["weight"] == pytest.approx(1 + (saved - 1) / 2)
+    assert lane["weight"] == served
+    assert lane["fade_delta"] == pytest.approx(served - saved)
+
+
+def test_lane_provenance_distinguishes_default_from_saved_neutral(store):
+    store.set_weight("lane:deep_cut", 1.0, now=1.0)
+    lanes = {r["name"]: r for r in taste_viz.model_transparency(store, now=1.0)["lanes"]}
+    assert lanes["deep_cut"]["has_record"] is True
+    assert lanes["rotation"]["has_record"] is False
+    assert lanes["rotation"]["saved_weight"] == lanes["rotation"]["weight"] == 1.0
+    assert lanes["rotation"]["age_days"] is None
 
 
 def test_funnel_reports_threshold(store):
@@ -204,6 +321,39 @@ def test_mode_layers_empty_without_modes(store):
     assert ml["now"]["segments"] == ml["session"]["segments"] == ml["permanent"]["segments"] == []
 
 
+def test_saved_style_portrait_survives_a_content_space_change(store, monkeypatch):
+    _install_now_modes(store)
+    keys = ["a", "b", "c"]
+    _install_now_content_vectors(store, monkeypatch, keys, np.array([[1.0, 0.0]] * 3))
+    monkeypatch.setattr(embed, "content_space_id", lambda s: "new-content-space")
+    iid = store.upsert_identity("main", "cred", None, True)
+    store.import_play_events(iid, [(k, "v" + k, 1000.0) for k in keys])
+
+    ml = taste_viz.mode_layers(store, now=1000.0)
+
+    assert not ml["styles_current"]
+    assert ml["permanent"]["n"] == 80
+    assert len(ml["permanent"]["segments"]) == 2
+    assert ml["evidence"]["session"]["mapped"] == 3
+    assert ml["now"]["segments"] == ml["session"]["segments"] == []
+
+
+def test_generation_examples_read_prepared_pools_and_filter_hidden_tracks(store):
+    store.put_proposals("mode_bundles", {"all": {"wheelhouse": [
+        {"key": "hidden|artist", "title": "Hidden", "artist": "Artist"},
+        {"key": "shown|artist", "title": "Shown", "artist": "Artist"},
+    ]}}, now=1.0)
+    store.record_feedback("for_you", "hidden|artist", "dismiss", now=1.0)
+    rec_params.set_param(store, "modes_artist_cap", 3)
+
+    data = taste_viz.generated_playlists(store, now=2.0)
+
+    assert data["examples"]["wheelhouse"]["title"] == "Shown"
+    assert data["examples"]["fresh"] is None
+    assert data["artist_cap"] == 3
+    assert not data["taste_rank_ready"]
+
+
 # ── The embedding axis: SESSION / TRANSIENT ─────────────────────────────────
 
 def test_centroid_tilt_quiet_on_cold_store(store):
@@ -265,10 +415,76 @@ def test_now_layer_has_no_embedding_direction(store, monkeypatch):
 
 # ── Misc ───────────────────────────────────────────────────────────────────
 
-def test_engine_panel_reports_counts(store):
+def test_playlist_influence_preserves_whole_blend_and_listening_evidence(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    vectors, pids = [], []
+    for i, (genre, plays) in enumerate((("Techno", 6), ("Jazz", 3), ("Folk", 1), ("Rock", 0))):
+        tid = store.upsert_track(f"blend-{i}", f"Track {i}", "Artist", None, None)
+        store.set_track_genre(tid, genre)
+        pid = store.upsert_playlist(iid, f"blend-{i}", f"Playlist {i}", 1, f"blend-{i}", 0)
+        store.set_playlist_tracks(pid, [tid])
+        pids.append(pid)
+        key = f"track {i}|artist"
+        vectors.append((key, np.array([1, i + 1], dtype=np.float32).tobytes()))
+        for j in range(plays):
+            store.add_history_snapshot(iid, i * 10 + j, [key])
+    store.replace_rec_vectors(vectors)
+    store.set_setting("rec_dim", "2")
+
+    panel = taste_viz.playlist_influence_panel(store, top=2)
+
+    assert panel["basis"] == "plays"
+    assert panel["contexts_total"] == 4 and panel["playlist_total"] == 3
+    assert panel["unplayed_total"] == 1
+    assert [c["pid"] for c in panel["contexts"]] == pids[:2]
+    assert [c["listens"] for c in panel["contexts"]] == [6, 3]
+    assert panel["contexts"][0]["genres"] == ["techno"]
+    assert [c["percent_label"] for c in panel["segments"]] == ["60%", "30%", "10%"]
+    assert [c["offset"] for c in panel["segments"]] == pytest.approx([0, 60, 90])
+    assert sum(c["weight"] for c in panel["segments"]) == pytest.approx(1)
+    assert panel["other"]["title"] == "Other playlist"
+    assert panel["other"]["listens"] == 1
+
+
+def test_playlist_influence_explains_equal_weights_before_listening(store):
+    iid = store.upsert_identity("main", "cred", None, True)
+    vectors = []
+    for i in range(2):
+        tid = store.upsert_track(f"equal-{i}", f"Track {i}", "Artist", None, None)
+        pid = store.upsert_playlist(iid, f"equal-{i}", f"Playlist {i}", 1, f"equal-{i}", 0)
+        store.set_playlist_tracks(pid, [tid])
+        vectors.append((f"track {i}|artist", np.array([1, i + 1], dtype=np.float32).tobytes()))
+    store.replace_rec_vectors(vectors)
+    store.set_setting("rec_dim", "2")
+
+    panel = taste_viz.playlist_influence_panel(store)
+
+    assert panel["basis"] == "equal"
+    assert [c["percent_label"] for c in panel["contexts"]] == ["50%", "50%"]
+    assert all(c["listens"] == 0 and c["genres"] == [] for c in panel["contexts"])
+    assert panel["other"] is None
+
+
+def test_playlist_influence_identifies_behavior_fallback_as_listening(store):
+    _seed_jazz(store)
+    store.replace_rec_vectors([("song|band", np.array([1, 0], dtype=np.float32).tobytes())])
+    store.set_setting("rec_dim", "2")
+
+    panel = taste_viz.playlist_influence_panel(store)
+
+    assert panel["basis"] == "listening" and panel["playlist_total"] == 0
+    assert panel["contexts"][0]["title"] == "Your listening"
+    assert panel["contexts"][0]["listens"] is None
+    assert panel["contexts"][0]["percent_label"] == "100%"
+
+
+def test_engine_panel_reports_counts_without_loading_playlist_model(store, monkeypatch):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Technical setup must not load playlist taste")
+
+    monkeypatch.setattr(taste_viz.recommend, "playlist_taste", unexpected)
     panel = taste_viz.engine_panel(store)
     assert panel["vectors"] == store.rec_vectors_count()
-    assert panel["contexts"] == []          # no playlists -> no taste contexts
     assert panel["dim"] >= 1
 
 

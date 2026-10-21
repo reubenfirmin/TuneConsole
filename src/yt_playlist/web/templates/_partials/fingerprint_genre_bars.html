@@ -4,13 +4,9 @@
    leave the live genre picker alive. Each family can drill into its subgenres (eager-rendered, hidden,
    toggled client-side, a leaned subgenre is promoted to its own top bar instead, so no duplication). #}
 {% set pinned = fingerprint.families[6:] | selectattr('pinned') | list %}
-{% macro tools(axis, name, expandable) %}
-  {# Over-the-label tools, revealed only on label hover (CSS). Remove works on any bar/subgenre. #}
+{% macro tools(axis, name) %}
+  {# Removal stays separate from the genre's disclosure and appears on hover or keyboard focus. #}
   <span class="fp-row-tools">
-    {% if expandable %}
-    <button type="button" class="fp-icon-btn fp-expand-btn" :class="{ on: open }" @click="toggle()"
-            title="Show or hide {{ name }} subgenres" aria-label="toggle {{ name }} subgenres" :aria-expanded="open">{{ arrow_icon('disclosure') }}</button>
-    {% endif %}
     <button type="button" class="fp-icon-btn fp-remove-btn"
             hx-post="/home/fingerprint/remove" hx-vals='{"axis":"{{ axis }}"}'
             hx-target="#fp-genre-bars" hx-swap="innerHTML"
@@ -26,6 +22,7 @@
            style="--p:{{ '%.0f'|format(effective / 2 * 100) }}%"
            name="weight" hx-post="/home/steer" hx-vals='{"axis":"{{ axis }}"}'
            hx-target="#home-mode-cards" hx-swap="outerHTML" hx-trigger="change"
+           hx-sync="#fingerprint:queue last"
            hx-on::after-request="window.dispatchEvent(new CustomEvent('mixes-reranked'))"
            aria-label="favor or mute {{ name }}" title="{{ tooltip }}">
   </span>
@@ -34,18 +31,29 @@
 <div class="fp-genre"{% if g.expandable %} x-data="fpGenre()" data-fam="{{ g.name }}"{% endif %}>
   <div class="fp-row">
     <span class="fp-name-wrap">
+      {% if g.expandable %}
+      <button type="button" class="fp-genre-toggle" @click="toggle()"
+              aria-expanded="false" :aria-expanded="open.toString()" aria-controls="fp-subgenres-{{ loop.index }}"
+              aria-label="Show {{ g.name }} subgenres" :aria-label="(open ? 'Hide ' : 'Show ') + fam + ' subgenres'"
+              title="{{ g.name }}, {{ '%.0f'|format(g.share*100) }}% of your listening">
+        <svg class="fp-genre-chevron" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" focusable="false"><path d="m5.5 7.75 4.5 4.5 4.5-4.5"/></svg>
+        <span class="fp-name">{{ g.name }}</span>
+      </button>
+      {% else %}
       <span class="fp-name" title="{{ g.name }}, {{ '%.0f'|format(g.share*100) }}% of your listening">{{ g.name }}</span>
-      {{ tools("genre:" + g.name, g.name, g.expandable) }}
+      {% endif %}
+      {{ tools("genre:" + g.name, g.name) }}
     </span>
     {{ bar("genre:" + g.name, g.name, g.effective, "favor or mute " + g.name, g.live, g.live_active) }}
   </div>
   {% if g.expandable %}
-  <div class="fp-subgenres" x-show="open" x-cloak>
+  <div class="fp-subgenres" id="fp-subgenres-{{ loop.index }}" x-show="open" x-transition.opacity.duration.150ms x-cloak
+       role="group" aria-label="{{ g.name }} subgenres">
     {% for sub in g.subgenres %}
     <div class="fp-row fp-subrow">
       <span class="fp-name-wrap">
         <span class="fp-name fp-subname" title="{{ sub.name }}">{{ sub.name }}</span>
-        {{ tools(sub.axis, sub.name, false) }}
+        {{ tools(sub.axis, sub.name) }}
       </span>
       {{ bar(sub.axis, sub.name, sub.effective, sub.name, sub.live, sub.live_active) }}
     </div>

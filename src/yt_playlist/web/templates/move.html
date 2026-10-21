@@ -1,41 +1,8 @@
-{% extends "base.html" %}{% from "_macros.html" import pllink, banner with context %}{% block title %}Move · TuneConsole{% endblock %}{% block page_class %}page-workflow page-move{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Move · TuneConsole{% endblock %}{% block page_class %}page-workflow page-move{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 <div class="page-head">
-  <h1>Move playlists between identities</h1>
-  <p><strong>Move</strong> recreates a playlist under the target identity and deletes the original
-     (backup first). <strong>Copy</strong> keeps both. Tracks are re-matched in the target account.</p>
+  <h1>Move playlists</h1>
+  <p>Copy or move playlists between your identities.</p>
 </div>
-
-{% if identities|length < 2 %}
-  <div class="card"><p class="muted flush">You need at least two identities.
-    Add another in <a href="/setup">Setup</a>.</p></div>
-{% else %}
-<div x-data='moveTab({{ identities[0].id }}, {{ identities[1].id }})'>
-  <div class="card section-block workflow-control">
-    <div class="cluster">
-      <label class="opt">From
-        <select x-model.number="from" class="inline-control">
-          {% for i in identities %}<option value="{{ i.id }}">{{ i.label }}</option>{% endfor %}
-        </select>
-      </label>
-      <span class="move-arrow" aria-hidden="true">{{ arrow_icon('right') }}</span>
-      <label class="opt">To
-        <select id="move-to" name="target_identity" x-model.number="to" class="inline-control">
-          {% for i in identities %}<option value="{{ i.id }}">{{ i.label }}</option>{% endfor %}
-        </select>
-      </label>
-      <span class="notice notice--compact err" x-show="!canMove()" x-cloak>Pick two different identities.</span>
-    </div>
-  </div>
-
-  <div class="card workflow-sheet">
-    <table>
-      <thead><tr><th>Playlist</th><th></th></tr></thead>
-      {% for p in playlists %}
-      {% include "_partials/move_row.html" %}
-      {% endfor %}
-    </table>
-  </div>
-</div>
-{% endif %}
+{% include "_partials/move_panel.html" %}
 {% endblock %}

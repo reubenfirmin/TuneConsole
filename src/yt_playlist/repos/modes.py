@@ -159,6 +159,29 @@ class ModesRepo(Repo):
         return [(r["playlist_id"], r["mode_id"]) for r in self.conn.execute(sql, args).fetchall()]
 
     @synchronized
+    def choice_learning_rows(self) -> list[dict]:
+        """The sampler's active groups, counts and last evidence time, without loading vectors.
+
+        Aggregate offers and picks separately so joining them cannot multiply either count.
+        Keep orphan picks visible, but identify groups that have not been offered yet: their
+        picks do not enter the sampler until an offer exists.
+        """
+        rows = self.conn.execute(
+            "WITH offers AS (SELECT mode_id, COUNT(*) n, MAX(created_at) at "
+            "FROM rec_mode_impressions GROUP BY mode_id), "
+            "picks AS (SELECT mode_id, COUNT(*) n, MAX(created_at) at "
+            "FROM rec_mode_picks GROUP BY mode_id) "
+            "SELECT m.mode_id, m.label, COALESCE(o.n, 0) offered, "
+            "COALESCE(p.n, 0) picked, "
+            "CASE WHEN p.at IS NULL THEN o.at WHEN o.at IS NULL THEN p.at "
+            "ELSE MAX(o.at, p.at) END updated_at "
+            "FROM taste_modes m LEFT JOIN offers o ON o.mode_id=m.mode_id "
+            "LEFT JOIN picks p ON p.mode_id=m.mode_id "
+            "WHERE m.active=1 AND (o.n IS NOT NULL OR p.n IS NOT NULL) "
+            "ORDER BY updated_at DESC, m.mode_id").fetchall()
+        return [dict(row) for row in rows]
+
+    @synchronized
     def ranker_impression_counts(self, since=None) -> dict:
         """#57 {ranker: impressions}; NULL (pre-#57 rows) counts as 'cosine'."""
         sql = "SELECT COALESCE(ranker, 'cosine') r, COUNT(*) c FROM rec_mode_impressions"

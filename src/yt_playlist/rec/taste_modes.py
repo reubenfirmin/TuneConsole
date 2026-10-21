@@ -124,6 +124,15 @@ def live_modes(store):
     return [m for m in store.modes.list_modes(active_only=True) if (m.get("space") or "") == space]
 
 
+def needs_refresh(store) -> bool:
+    """Whether saved genre groups are missing or belong to an older content model."""
+    space = embed.content_space_id(store)
+    if not space:
+        return False
+    modes = store.modes.list_modes(active_only=True)
+    return not modes or any((m.get("space") or "") != space for m in modes)
+
+
 REP_MATCH_THRESHOLD = 0.5    # Fraction of an existing mode's representative tracks that must land
                              # inside a discovered cluster for the two to be the same taste region.
                              # A simple majority: below that, a fresh id is more honest.

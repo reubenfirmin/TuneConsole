@@ -955,12 +955,10 @@ tr.rowdel td { text-decoration: line-through; }
 .abx { display: inline-block; min-width: 1.1rem; text-align: center; font-family: var(--font-mono);
   font-weight: 700; font-size: 0.7rem; color: var(--light-source); background: var(--accent); border-radius: 4px;
   padding: 0 0.3rem; margin-right: 0.35rem; vertical-align: middle; }
-/* pop-up PIE menu: colored donut wedges around a dismiss hub.
-   Positioned `fixed` at the cursor (left/top set inline by Alpine), centred on the click. */
+/* Pop-up PIE menu: colored donut wedges around a dismiss hub. */
 [x-cloak] { display: none !important; }
 .pie-wrap { position: relative; display: inline-block; }
-/* absolute (not fixed): an ancestor `transform` (main's rise animation) would otherwise
-   capture fixed positioning. Coords are computed relative to .pie-wrap at click time. */
+/* Anchor inside the action cell so the menu stays within the page's right edge. */
 .pie { position: absolute; z-index: 60; width: 160px; filter: drop-shadow(0 10px 24px color-mix(in srgb, var(--shadow-ink) 55%, transparent)); }
 .pie svg { display: block; overflow: visible; }
 .wedge { cursor: pointer; stroke: var(--bg); stroke-width: 2.5; transition: filter .12s ease, opacity .12s ease; }
@@ -976,6 +974,18 @@ tr.rowdel td { text-decoration: line-through; }
 .pie-hub { fill: var(--surface-2); stroke: var(--border-2); stroke-width: 1.5; cursor: pointer; }
 .pie-hub:hover { fill: var(--surface); }
 .pie-hub-x { fill: var(--faint); font-size: 18px; font-weight: 700; letter-spacing: 1px; pointer-events: none; }
+.cleanup-pairs .kebab { min-width: 2rem; min-height: 2rem; }
+@media (max-width: 700px) {
+  .cleanup-pairs table, .cleanup-pairs thead, .cleanup-pairs tbody { display: block; }
+  .cleanup-pairs tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cleanup-pairs th, .cleanup-pairs td { min-width: 0; padding: .625rem .75rem; }
+  .cleanup-pairs thead th:nth-child(3) { grid-column: 1 / -1; }
+  .cleanup-pairs thead th:last-child { display: none; }
+  .cleanup-pairs tbody { border-bottom: 1px solid var(--border); }
+  .cleanup-pairs tbody td { border-bottom: 0; }
+  .cleanup-pairs tbody td:nth-child(-n+2) { grid-column: 1 / -1; }
+  .cleanup-pairs .cell-actions { align-self: end; }
+}
 
 hr { border: none; border-top: 1px solid var(--border); margin: 1.375rem 0; }
 .cols { display: flex; gap: 1.375rem; flex-wrap: wrap; }
@@ -1002,8 +1012,8 @@ tr.htmx-request td { text-decoration: line-through; }
 tbody.stale-row.htmx-swapping, tbody.move-row.htmx-swapping,
 tbody.empty-row.htmx-swapping { opacity: 0; transition: opacity .3s ease; }
 
-/* "inbox zero" empty state (overlaps table): reads as an achievement, not an absence */
-td.inbox-zero { text-align: center; padding: 2.4rem .9375rem; font-size: var(--type-lg);
+/* Shared Cleanup empty state: reads as an achievement, not an absence. */
+.inbox-zero { text-align: center; padding: 2.4rem .9375rem; font-size: var(--type-lg);
   color: var(--text); opacity: .85; }
 
 /* dim a duplicate-group card while its keep-one request is in flight (matches old .dim) */

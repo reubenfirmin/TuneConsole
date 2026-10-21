@@ -1,6 +1,4 @@
-"""Task 4 (#50): surfaces.cold_candidates ranks the discovered pool by taste (+ tilts), degrades
-gracefully (no audio -> still ranked on genre/era; no metadata -> dropped; no projection -> empty),
-and excludes a muted genre family."""
+"""Fresh uses metadata to rank discoveries, with an unenriched fallback and feedback exclusions."""
 import numpy as np
 
 from yt_playlist.rec import surfaces, scoring, discover
@@ -40,19 +38,57 @@ def test_ranks_by_taste_fit(monkeypatch, store):
     assert out[0].lane == "cold"
 
 
-def test_no_metadata_dropped(monkeypatch, store):
-    pool = [_row("n|c", None)]                   # projection returns the zero vector -> dropped
+def test_no_metadata_remains_eligible_after_ranked_tracks(monkeypatch, store):
+    pool = [_row("n|c", None), _row("m|b", "ambient"), _row("t|a", "techno")]
     monkeypatch.setattr(store, "get_discovered_tracks", lambda: pool, raising=False)
     _patch(monkeypatch)
-    assert surfaces.cold_candidates(store, 0.0) == []
+    out = surfaces.cold_candidates(store, 0.0)
+    assert [t.key for t in out] == ["t|a", "m|b", "n|c"]
+    assert out[-1].genre == "" and out[-1].year is None and out[-1].reason == ""
 
 
-def test_no_projection_returns_empty(monkeypatch, store):
-    pool = [_row("t|a", "techno")]
+def test_no_projection_keeps_discovery_order(monkeypatch, store):
+    pool = [_row("n|c", None), _row("t|a", "techno")]
     monkeypatch.setattr(store, "get_discovered_tracks", lambda: pool, raising=False)
     _patch(monkeypatch)
     monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, s: None))
-    assert surfaces.cold_candidates(store, 0.0) == []
+    assert [t.key for t in surfaces.cold_candidates(store, 0.0)] == ["n|c", "t|a"]
+
+
+def test_unknown_fit_is_not_mistaken_for_a_better_score(monkeypatch, store):
+    pool = [_row("n|c", None), _row("t|a", "techno")]
+    monkeypatch.setattr(store, "get_discovered_tracks", lambda: pool)
+    _patch(monkeypatch)
+    monkeypatch.setattr(surfaces, "playlist_taste",
+                        lambda s: PlaylistTaste(["p"], np.array([[-1., 0.]]), np.array([1.])))
+    assert [t.key for t in surfaces.cold_candidates(store, 0.0)] == ["t|a", "n|c"]
+
+
+def test_no_taste_model_keeps_discoveries(monkeypatch, store):
+    pool = [_row("n|c", None), _row("t|a", "techno")]
+    monkeypatch.setattr(store, "get_discovered_tracks", lambda: pool)
+    _patch(monkeypatch)
+    monkeypatch.setattr(surfaces, "playlist_taste", lambda s: None)
+    assert [t.key for t in surfaces.cold_candidates(store, 0.0)] == ["n|c", "t|a"]
+
+
+def test_unenriched_fallback_respects_dismissals_and_artist_mutes(monkeypatch, store):
+    pool = [_row("dismissed|a", None), _row("muted|b", None), _row("keep|c", None)]
+    monkeypatch.setattr(store, "get_discovered_tracks", lambda: pool)
+    _patch(monkeypatch)
+    store.record_feedback("for_you", "dismissed|a", "dismiss", now=1)
+    monkeypatch.setattr(store, "muted_artists", lambda: {"m"})
+    assert [t.key for t in surfaces.cold_candidates(store, 2)] == ["keep|c"]
+
+
+def test_no_projection_still_respects_muted_genres(monkeypatch, store):
+    pool = [_row("n|c", None), _row("t|a", "techno")]
+    monkeypatch.setattr(store, "get_discovered_tracks", lambda: pool)
+    _patch(monkeypatch)
+    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, s: None))
+    monkeypatch.setattr(surfaces, "discovery_facet_weight",
+                        lambda s, fam, now: None if fam == "techno" else 1.0)
+    assert [t.key for t in surfaces.cold_candidates(store, 0.0)] == ["n|c"]
 
 
 def test_muted_family_excluded(monkeypatch, store):

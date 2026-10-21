@@ -100,3 +100,38 @@ def test_set_track_field_rejects_unknown_field(store):
     import pytest
     with pytest.raises(ValueError):
         store.set_track_field(tid, "not_a_field", "x")
+
+
+def test_conflict_current_value_keeps_historical_provider_evidence(store):
+    tid = _track(store, genre="Electronic")
+    store.log_enrichment(tid, "old-run", "musicbrainz", "genre", "Electronic")
+    store.upsert_conflict(tid, "genre", [{"provider": "lastfm", "value": "Rock"},
+                                         {"provider": "discogs", "value": "Pop"}])
+    conflict = store.enrichment_conflict_detail(tid, "genre")
+    current, *alternatives = conflict["options"]
+    assert current["value"] == "Electronic" and current["current"]
+    assert current["providers"] == ["musicbrainz"]
+    assert current["source_note"] == ""
+    assert [o["value"] for o in alternatives] == ["Rock", "Pop"]
+
+
+def test_current_numeric_option_merges_matching_provider_values(store):
+    tid = _track(store)
+    store.set_track_audio(tid, bpm=120.0)
+    store.upsert_conflict(tid, "bpm", [{"provider": "deezer", "value": 120},
+                                       {"provider": "acousticbrainz", "value": 124}])
+    options = store.enrichment_conflict_detail(tid, "bpm")["options"]
+    assert len(options) == 2
+    assert options[0]["current"] and options[0]["providers"] == ["deezer"]
+    assert store.resolve_enrichment_candidate(tid, "bpm", options[0]["value"])
+    assert store.get_track_audio(tid)[0] == 120.0
+
+
+def test_unset_current_value_is_an_explicit_option(store):
+    tid = _track(store)
+    store.upsert_conflict(tid, "year", [{"provider": "musicbrainz", "value": "1995"},
+                                        {"provider": "discogs", "value": "1996"}])
+    option = store.enrichment_conflict_detail(tid, "year")["options"][0]
+    assert option["value"] == "" and option["label"] == "Not set" and option["current"]
+    assert store.resolve_enrichment_candidate(tid, "year", "")
+    assert store.get_track_enrichment(tid)[1] in (None, "")

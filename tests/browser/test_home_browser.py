@@ -72,6 +72,7 @@ def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, stor
     expect(page.locator("#home-mode-cards")).to_be_visible()
     page.locator("#fingerprint .fp-collapse").click()
     panel = page.locator("#fingerprint")
+    panel.get_by_role("tab", name="Genre focus", exact=True).click()
     panel.get_by_role("checkbox", name="jazz", exact=True).check()
     panel.get_by_role("checkbox", name="techno", exact=True).check()
     with page.expect_response("**/home/mix-genres"):
@@ -138,6 +139,7 @@ def test_two_ready_mixes_show_clickable_skeletons_for_the_missing_slots(live_app
     board = page.locator("#home-mode-cards")
     expect(board.locator(".gen-card")).to_have_count(4)
     page.locator("#fingerprint .fp-collapse").click()
+    page.get_by_role("tab", name="Genre focus", exact=True).click()
     for genre in ("jazz", "techno", "trance"):
         page.locator("#fingerprint").get_by_role("checkbox", name=genre, exact=True).check()
     with page.expect_response("**/home/mix-genres"):
@@ -222,7 +224,8 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     button = panel.locator("#home-make-mixes")
     expect(button).to_be_hidden()
     panel.locator(".fp-collapse").click()
-    expect(page.get_by_role("tab", name="These mixes", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(page.get_by_role("tab", name="Vibe", exact=True)).to_have_attribute("aria-selected", "true")
+    page.get_by_role("tab", name="Genre focus", exact=True).click()
     expect(button).to_be_enabled()
     choices = panel.get_by_role("checkbox")
     expect(choices).to_have_count(6)
@@ -282,11 +285,11 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     panel.locator(".fp-collapse").click()
     expect(button).to_be_enabled()
     expect(panel.locator("#home-theme-summary")).to_be_empty()
-    page.get_by_role("tab", name="Preferences", exact=True).click()
+    page.get_by_role("tab", name="Nerd out", exact=True).click()
     expect(button).to_be_hidden()
     expect(panel.locator(".fp-breadth-slider")).to_be_visible()
-    page.get_by_role("tab", name="Preferences", exact=True).press("ArrowLeft")
-    expect(page.get_by_role("tab", name="These mixes", exact=True)).to_be_focused()
+    page.get_by_role("tab", name="Nerd out", exact=True).press("ArrowLeft")
+    expect(page.get_by_role("tab", name="Genre focus", exact=True)).to_be_focused()
     for width in (1280, 390):
         page.set_viewport_size({"width": width, "height": 850})
         expect(button).to_be_visible()
@@ -319,10 +322,11 @@ def test_clear_mix_controls_resets_applied_and_draft_choices_from_either_tab(liv
     page.goto(f"{live_app}/")
     panel = page.locator("#fingerprint")
     panel.locator(".fp-collapse").click()
+    panel.get_by_role("tab", name="Genre focus", exact=True).click()
     expect(panel.get_by_role("checkbox", name="jazz", exact=True)).to_be_checked()
     clear = panel.get_by_role("button", name="Reset mix adjustments", exact=True)
     expect(clear).to_be_visible()
-    page.get_by_role("tab", name="Preferences", exact=True).click()
+    page.get_by_role("tab", name="Nerd out", exact=True).click()
     expect(clear).to_be_visible()
     expect(panel.locator(".fp-breadth-slider")).to_have_value("0.5")
     for width in (1280, 390):
@@ -339,8 +343,8 @@ def test_clear_mix_controls_resets_applied_and_draft_choices_from_either_tab(liv
 
     expect(panel.locator("dialog")).not_to_be_visible()
     panel.locator(".fp-collapse").click()
-    expect(page.get_by_role("tab", name="Preferences", exact=True)).to_have_attribute("aria-selected", "true")
-    page.get_by_role("tab", name="These mixes", exact=True).click()
+    expect(page.get_by_role("tab", name="Nerd out", exact=True)).to_have_attribute("aria-selected", "true")
+    page.get_by_role("tab", name="Genre focus", exact=True).click()
     expect(panel.locator('input[name="genres"]:checked')).to_have_count(0)
     # Clearing also discards a draft and search text even when no choice was applied.
     search = panel.get_by_role("searchbox")
@@ -349,7 +353,7 @@ def test_clear_mix_controls_resets_applied_and_draft_choices_from_either_tab(liv
     clear.click()
     expect(panel.locator("dialog")).not_to_be_visible()
     panel.locator(".fp-collapse").click()
-    expect(page.get_by_role("tab", name="These mixes", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(page.get_by_role("tab", name="Genre focus", exact=True)).to_have_attribute("aria-selected", "true")
     expect(search).to_have_value("")
     expect(panel.locator('input[name="genres"]:checked')).to_have_count(0)
     expect(panel.get_by_role("checkbox")).to_have_count(6)
@@ -369,11 +373,12 @@ def test_mix_controls_automatically_reset_an_open_page_after_four_hours(live_app
     page.goto(f"{live_app}/")
     panel = page.locator("#fingerprint")
     panel.locator(".fp-collapse").click()
+    panel.get_by_role("tab", name="Genre focus", exact=True).click()
     panel.get_by_role("checkbox", name="jazz", exact=True).check()
     panel.get_by_role("button", name="Make mixes", exact=True).click()
     expect(page.locator("#home-mode-cards")).to_have_attribute("data-requested-genres", '["jazz"]')
     panel.locator(".fp-collapse").click()
-    page.get_by_role("tab", name="Preferences", exact=True).click()
+    page.get_by_role("tab", name="Nerd out", exact=True).click()
     slider = panel.locator(".fp-breadth-slider")
     with page.expect_response("**/home/breadth"):
         slider.fill("0.5")
@@ -388,7 +393,7 @@ def test_mix_controls_automatically_reset_an_open_page_after_four_hours(live_app
     assert store.get_proposals("home_genre_request") == {}
     assert rec_params.get_param(store, "breadth_bias") == 0
     expect(panel.locator("dialog")).to_be_visible()
-    page.get_by_role("tab", name="These mixes", exact=True).click()
+    page.get_by_role("tab", name="Genre focus", exact=True).click()
     expect(panel.locator('input[name="genres"]:checked')).to_have_count(0)
 
 
@@ -426,6 +431,7 @@ def test_regenerating_one_mix_updates_shuffle_request(live_app, store, page):
     assert set(page.evaluate("homeOfferedGenres()")) == expected_genres
     card.get_by_role("button", name="Back to all mixes", exact=True).click()
     page.locator("#fingerprint .fp-collapse").click()
+    page.get_by_role("tab", name="Genre focus", exact=True).click()
     with page.expect_request("**/home/other-genres") as shuffled:
         page.get_by_role("button", name="Shuffle genres", exact=True).click()
     submitted = parse_qs(shuffled.value.post_data)["genres"][0]
@@ -442,6 +448,7 @@ def test_genre_draft_survives_unrelated_updates_and_failed_submission(live_app, 
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
     page.locator("#fingerprint .fp-collapse").click()
+    page.get_by_role("tab", name="Genre focus", exact=True).click()
     jazz = page.get_by_role("checkbox", name="jazz", exact=True)
     jazz.check()
     jazz.focus()
@@ -484,6 +491,7 @@ def test_configurator_modal_blocks_background_and_keeps_focus(live_app, store, p
     # Even a script cannot focus the navigation behind a modal dialog.
     page.locator("header nav").get_by_role("link", name="Playlists", exact=True).evaluate("el => el.focus()")
     assert dialog.evaluate("el => el.contains(document.activeElement)")
+    dialog.get_by_role("tab", name="Genre focus", exact=True).click()
     search = dialog.get_by_role("searchbox")
     search.fill("jazz")
     for width in (1280, 390):
@@ -509,7 +517,7 @@ def test_configurator_modal_blocks_background_and_keeps_focus(live_app, store, p
     assert page.url == f"{live_app}/"
     expect(page.locator(".gen-card.is-focused")).to_have_count(0)
     launcher.click()
-    dialog.get_by_role("tab", name="Preferences", exact=True).click()
+    dialog.get_by_role("tab", name="Nerd out", exact=True).click()
     preference_search = dialog.get_by_role("textbox", name="Find a genre to adjust")
     preference_search.fill("jazz")
     assert preference_search.evaluate("""el => {
@@ -540,6 +548,7 @@ def test_quick_genres_show_favorites_and_search_reaches_the_rest(live_app, store
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
     page.get_by_role("button", name="Tune these mixes", exact=True).click()
+    page.get_by_role("tab", name="Genre focus", exact=True).click()
     choices = page.locator(".fp-genre-choice:visible")
     expect(choices).to_have_count(12)
     expect(choices.first).to_have_text("techno")
@@ -558,8 +567,9 @@ def test_nav_has_home_and_playlists(live_app, page):
     assert nav.get_by_role("link", name="Playlists").is_visible()
 
 
-def test_desktop_uses_side_rail_but_clusters_has_only_exit_control(live_app, page):
-    page.set_viewport_size({"width": 1280, "height": 800})
+@pytest.mark.parametrize("width", [1280, 1920])
+def test_desktop_uses_side_rail_but_clusters_has_only_exit_control(live_app, page, width):
+    page.set_viewport_size({"width": width, "height": 800})
     page.goto(f"{live_app}/")
     tools = page.get_by_role("button", name="Tools")
     # The button is server-rendered before Alpine owns its state; wait for hydration so this tests
@@ -573,7 +583,8 @@ def test_desktop_uses_side_rail_but_clusters_has_only_exit_control(live_app, pag
     main_box = page.locator("main").bounding_box()
     rail_box = page.locator("header.topbar").bounding_box()
     assert main_box and rail_box
-    assert abs((main_box["x"] + main_box["width"] / 2) - 640) < 1
+    assert abs(main_box["x"] * 2 + main_box["width"] - width) < 1
+    assert main_box["width"] <= 1088
     assert main_box["x"] >= rail_box["x"] + rail_box["width"]
 
     page.goto(f"{live_app}/clusters")

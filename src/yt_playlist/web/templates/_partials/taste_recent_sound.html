@@ -1,0 +1,27 @@
+{% import "_partials/_viz_tip.html" as vt %}
+<p class="section-note">Compare the sound of this listening session with the last few weeks.
+  Both bars use the same scale from -1 to +1: teal on the right favors a genre's sound;
+  red on the left moves away from it. Different bars show how today's listening differs from your recent habits.
+  Session influence halves every {{ '%.0f'|format(tilt.halflife_h) }} hours.</p>
+{% if tilt.families %}
+<div class="chain-bars">
+  <div class="chain-row chain-head tilt-row">
+    <span></span><span>Session <span class="muted">· hours</span></span><span>Recent <span class="muted">· weeks</span></span>
+  </div>
+  {% for f in tilt.families %}
+  <div class="chain-row tilt-row" {{ vt.tilt_tip(f, tilt.halflife_h, tilt.play_halflife_d) }}>
+    <span class="vb-name">{{ f.name }}</span>
+    {% for v in [f.session, f.transient] %}
+    {% if v is none %}<span class="vb-div vb-absent"></span>
+    {% else %}<span class="vb-div"><i class="{{ 'pos' if v > 0 else 'neg' }}" style="width:{{ '%.0f'|format(v|abs*50) }}%"></i></span>{% endif %}
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+<p class="vb-legend"><span class="muted">
+  {%- if not tilt.has_session %}Not enough plays in the last 24 hours to show a session trend. {% endif -%}
+  {%- if not tilt.has_transient %}No recent activity is changing track similarity scores. {% endif -%}
+  The <strong>Current</strong> layer appears under <a href="#profile" @click.prevent="select('profile')">Listening styles in Taste profile</a>; it does not change individual track scores.</span></p>
+{% else %}
+<p class="section-note">Not enough recent listening to compare sounds yet.</p>
+{% endif %}

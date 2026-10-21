@@ -199,3 +199,15 @@ def test_live_modes_on_a_store_with_no_content_model(monkeypatch, store):
     _wire(monkeypatch, store, keys, V, idx)
     tm.recompute(store, now=1000.0, k=3, min_members=20)
     assert len(tm.live_modes(store)) == 3
+
+
+def test_refresh_detection_covers_missing_groups_and_same_dimension_model_changes(monkeypatch, store):
+    assert not tm.needs_refresh(store)                       # fresh install, no model yet
+    _set_model(store, [f"g{i}" for i in range(6)])
+    assert tm.needs_refresh(store)                           # existing model, missing groups
+    keys, V, idx = _vectors([[1, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0]])
+    _wire(monkeypatch, store, keys, V, idx)
+    tm.recompute(store, now=1000.0, k=3, min_members=20)
+    assert not tm.needs_refresh(store)
+    _set_model(store, [f"g{i}" for i in reversed(range(6))])   # same width, different column meanings
+    assert tm.needs_refresh(store)

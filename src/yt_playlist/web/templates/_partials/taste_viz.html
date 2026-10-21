@@ -11,10 +11,17 @@
 {% set ROSE_PALETTE = ['var(--rose-0)', 'var(--rose-1)', 'var(--rose-2)', 'var(--rose-3)', 'var(--rose-4)',
                        'var(--rose-5)', 'var(--rose-6)', 'var(--rose-7)', 'var(--rose-8)', 'var(--rose-9)'] %}
 
+{% macro overview() -%}
+{% include "_partials/taste_viz_overview.html" %}
+{%- endmacro %}
+
+{% macro layers() -%}
+<details class="advanced">
+<summary>How recommendation layers work</summary>
 {# ── The stack, stated once ──────────────────────────────────────────────── #}
 <section class="card card--data viz-dim layer-key">
   <h2 class="section section-flush">The four layers</h2>
-  <p class="section-note">Recommendations combine what you are playing now, this listening session, recent feedback, and saved preferences. The charts below show where each of these affects your picks.</p>
+  <p class="section-note">Recommendations combine what you are playing now, this listening session, recent feedback, and saved preferences. Taste profile shows how these affect your music preferences; Recent &amp; learning shows how they change over time.</p>
   <ol class="layer-key-list">
     <li><span class="layer-name">CURRENT</span><span class="layer-scale muted">hours</span>
       <span class="layer-what">Which listening styles you are playing now. Requires at least
@@ -28,10 +35,10 @@
         <em>See: Genre families, Eras, Artists, Recent sound.</em></span></li>
     <li><span class="layer-name">SAVED</span><span class="layer-scale muted">lasting</span>
       <span class="layer-what">Preferences learned over time, your saved slider settings, and the trained model.
-        <em>Shown throughout this page.</em></span></li>
+        <em>Shown throughout Taste profile.</em></span></li>
   </ol>
-  <p class="section-note flush">This view is read-only; adjust anything on the
-    <em>Controls</em> tab.</p>
+  <p class="section-note flush">Read your preferences in <em>Taste profile</em>, adjust them in
+    <em>Recommendations</em>, and control learning in <em>Recent &amp; learning</em>.</p>
 </section>
 
 <section class="card card--data viz-dim">
@@ -47,6 +54,8 @@
     {% endfor %}
   </div>
 </section>
+</details>
+{%- endmacro %}
 
 {# ── Modes axis: the only axis on which NOW and SESSION exist ─────────────── #}
 {% macro mode_ribbon(segments, layer, scale, note) -%}
@@ -56,15 +65,18 @@
 </div>
 {%- endmacro %}
 
+{% macro styles() -%}
 <section class="card card--data viz-dim mode-layers">
   <h2 class="section section-flush">Listening styles <span class="scope-tag">current · session · saved</span></h2>
-  <p class="section-note">Groups of similar music in your library. Compare what you are playing now and this session with your saved library. Each style keeps the same color across all three bars.</p>
+  <p class="section-note">Styles are groups of similar songs that can span genres. The model automatically groups tracks using genre, release decade and available sound features such as tempo, energy and mood. One genre can contain several styles.</p>
+  {% if viz.modes.modes and not viz.modes.styles_current %}<p class="section-note">The saved grouping is from the previous model. Current and session comparisons are unavailable until the styles are updated for the current model.</p>{% endif %}
 
   <div class="layer-row">
     <div class="layer-meta"><span class="layer-name">CURRENT</span><span class="layer-scale muted">last {{ viz.modes.now.window_h }}h · {{ viz.modes.evidence.now.mapped }}/{{ viz.modes.evidence.now.total }} plays matched · minimum {{ viz.modes.min_events }}</span></div>
     <div class="layer-reading">
       {% if viz.modes.now.segments %}{{ mode_ribbon(viz.modes.now.segments, "Current", "last " ~ viz.modes.now.window_h ~ "h", "each distinct play in this period counts equally") }}
       {% elif not viz.modes.modes %}<p class="rose-quiet">No listening styles found yet.</p>
+      {% elif not viz.modes.styles_current or viz.modes.evidence.now.mapped >= viz.modes.min_events %}<p class="rose-quiet">Comparison unavailable until the style model is ready.</p>
       {% else %}<p class="rose-quiet">Quiet: fewer than {{ viz.modes.min_events }} plays with a known sound in the last {{ viz.modes.now.window_h }}h.</p>{% endif %}
     </div>
   </div>
@@ -74,6 +86,7 @@
     <div class="layer-reading">
       {% if viz.modes.session.segments %}{{ mode_ribbon(viz.modes.session.segments, "Session", "last 24h", "the same plays, weighted so fresher ones count for more") }}
       {% elif not viz.modes.modes %}<p class="rose-quiet">No listening styles found yet.</p>
+      {% elif not viz.modes.styles_current or viz.modes.evidence.session.mapped >= viz.modes.min_events %}<p class="rose-quiet">Comparison unavailable until the style model is ready.</p>
       {% else %}<p class="rose-quiet">Quiet: fewer than {{ viz.modes.min_events }} plays with a known sound in the last 24h.</p>{% endif %}
     </div>
   </div>
@@ -88,6 +101,40 @@
 
   <p class="vb-legend"><span class="muted">The Current layer only chooses among your existing listening styles. It does not change individual track scores.</span></p>
 </section>
+{%- endmacro %}
+
+{% macro style_tracks() -%}
+<section class="card taste-modes">
+  <h3 class="taste-style-tracks-title">Inside the styles</h3>
+  <p class="section-note">Names reflect each group’s most common genres, so different styles can share a name. These tracks are the closest matches to each group’s center. Matching colors connect them to the bars above.</p>
+  {% if modes %}
+  <ul class="modes-list">
+    {% for m in modes %}
+    <li class="mode-row">
+      <div class="mode-head">
+        <span class="taste-facet-swatch" style="--petal-c:{{ ROSE_PALETTE[loop.index0 % ROSE_PALETTE|length] }}" aria-hidden="true"></span>
+        <h4 class="mode-label">{{ m.label }}</h4>
+        <span class="mode-size">{{ m.size }} tracks</span>
+        {% if m.fresh %}<span class="mode-new">new</span>{% endif %}
+      </div>
+      <ul class="mode-tracks">
+        {% for t in m.tracks[:3] %}
+        <li>
+          <span class="mode-track-art art-album" aria-hidden="true">
+            {% if t.thumbnail %}<img src="{{ t.thumbnail }}" alt="" width="48" height="48" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+          </span>
+          <span class="mode-track-copy"><span class="t-title">{{ t.title }}</span><span class="t-artist">{{ t.artist }}</span></span>
+        </li>
+        {% endfor %}
+      </ul>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">Listening styles appear once enough tracks have genre, era, and audio information.</p>
+  {% endif %}
+</section>
+{%- endmacro %}
 
 {# ── Facet axes: the multiplier chain the ranker literally composes ───────── #}
 {% macro rose(rows, pkey, layer, signed=true) -%}
@@ -130,24 +177,37 @@
     <figcaption class="rose-foot">saved × recent</figcaption>
   </figure>
 </div>
-<p class="vb-legend"><span class="muted">The dashed ring is <strong>×1.00</strong>, neutral. A petal
-  reaching <strong>out</strong> means that layer boosts the {{ unit }}; <strong>in</strong> means it
-  lowers its score. The last three charts use the same scale; <em>Combined</em> multiplies the saved and recent adjustments. Hover a petal to see the calculation.</span></p>
+<p class="vb-legend"><span class="muted">Dashed ring: <strong>×1.00</strong>, neutral. Outside boosts a {{ unit }}; inside lowers it. Saved, Recent, and Combined share one scale. Hover a petal for the calculation.</span></p>
 {%- endmacro %}
 
+{% macro genres() -%}
 <section class="card card--data viz-dim">
   <h2 class="section section-flush">Genre families <span class="scope-tag">saved · recent</span></h2>
   {% if viz.genres %}{{ chain_roses(viz.genres, "genre") }}
   {% else %}<p class="section-note">Run library enrichment to add genre information for this chart.</p>{% endif %}
 </section>
+{%- endmacro %}
 
+{% macro facet_key(rows) -%}
+{% if rows %}
+<ul class="taste-facet-key" aria-label="Chart colors and listening shares">
+  {% for r in rows %}
+  <li><span class="taste-facet-swatch" style="--petal-c:{{ ROSE_PALETTE[loop.index0 % ROSE_PALETTE|length] }}"></span><span>{{ r.name }}</span><strong>{{ '%.0f'|format(r.share * 100) }}%</strong></li>
+  {% endfor %}
+</ul>
+{% endif %}
+{%- endmacro %}
+
+{% macro eras() -%}
 <section class="card card--data viz-dim">
   <h2 class="section section-flush">Eras <span class="scope-tag">saved · recent</span></h2>
   {% if viz.eras %}{{ chain_roses(viz.eras, "decade") }}
   {% else %}<p class="section-note">No decade data yet.</p>{% endif %}
 </section>
+{%- endmacro %}
 
 {# Artists: a variable, long-tailed count -> honest bars, but the same four readings. #}
+{% macro artists() -%}
 <section class="card card--data viz-dim">
   <h2 class="section section-flush">Artists <span class="scope-tag">saved · recent</span></h2>
   {% if viz.artists %}
@@ -174,52 +234,10 @@
     the multiplier ranking applies to every track by that artist.</span></p>
   {% else %}<p class="section-note">No artist play data yet.</p>{% endif %}
 </section>
-
-{# ── Candidate lanes + Taste breadth (both permanent, but unrelated → own cards) ── #}
-<div class="viz-pair-cards">
-  <section class="card card--data viz-dim">
-    <h2 class="section section-flush">Recommendation mix <span class="scope-tag">saved</span></h2>
-    <p class="section-note">Four categories contribute tracks to your Home recommendations. Higher weights give a category more space; lower weights give it less. A weight of 1.0 is neutral. Hover a category to see what it recommends.</p>
-    <div class="viz-bars">
-      {% for l in viz.lanes %}
-      <div class="viz-bar-row" {{ vt.tip(l.label, [
-            {"l": "Weight", "v": "×" ~ "%.2f"|format(l.weight), "t": "strong"},
-            {"l": "Effect", "v": ("more space" if l.weight > 1.05 else ("less space" if l.weight < 0.95 else "neutral")), "n": "how often this category contributes a recommendation"}], desc=l.help) }}>
-        <span class="vb-name">{{ l.label }}</span>
-        <span class="vb-perm"><i style="width:{{ '%.0f'|format(l.weight / 3.0 * 100) }}%"></i></span>
-        <span class="vb-val mono">×{{ '%.2f'|format(l.weight) }}</span>
-      </div>
-      {% endfor %}
-    </div>
-  </section>
-  <section class="card card--data viz-dim">
-    <h2 class="section section-flush">Genre variety <span class="scope-tag">saved</span></h2>
-    {% if viz.genres %}
-    {% set shown = viz.genres | sum(attribute='share') %}
-    <div class="breadth-head" {{ vt.tip("Genre variety", [
-          {"l": "Reads as", "v": viz.breadth_word, "t": "strong"},
-          {"l": "Index", "v": "%.2f"|format(viz.breadth) ~ " / 1.00", "n": "0 = one genre only, 1 = evenly spread across many"},
-          {"l": "Top genre", "v": viz.genres[0].name ~ " · " ~ "%.0f"|format(viz.genres[0].share*100) ~ "%"},
-          {"l": "Families", "v": viz.n_families ~ " genres"}], desc="Each band shows a genre's share of your plays. More evenly sized bands mean more variety.") }}>
-      <span class="breadth-word">{{ viz.breadth_word }}</span>
-      <span class="breadth-idx mono">{{ '%.2f'|format(viz.breadth) }}<small> / 1.00</small></span>
-    </div>
-    <div class="breadth-ribbon">
-      {% for g in viz.genres %}{% set pc = ROSE_PALETTE[loop.index0 % ROSE_PALETTE|length] %}<i class="seg" style="width:{{ '%.1f'|format(g.share*100) }}%; --petal-c:{{ pc }}" {{ vt.tip(g.name, [
-            {"l": "Share of plays", "v": "%.1f"|format(g.share*100) ~ "%", "t": "strong"},
-            {"l": "Rank", "v": "#" ~ loop.index ~ " of " ~ viz.n_families, "n": "by how much you play it"}], dot=pc) }}></i>{% endfor %}
-      {% if shown < 0.995 %}<i class="seg other" {{ vt.tip("Other genres", [
-            {"l": "Share of plays", "v": "%.1f"|format((1-shown)*100) ~ "%", "t": "strong"},
-            {"l": "Families", "v": (viz.n_families - viz.genres|length) ~ " smaller ones", "n": "everything outside your top " ~ viz.genres|length}]) }} style="width:{{ '%.1f'|format((1-shown)*100) }}%"></i>{% endif %}
-    </div>
-    <p class="section-note breadth-note">Each band is a genre family, sized by share of plays.
-      A few wide bands means <strong>focused</strong>; many even bands means <strong>eclectic</strong>.
-      Your top genre is {{ '%.0f'|format(viz.genres[0].share*100) }}% of plays, across {{ viz.n_families }} families.</p>
-    {% else %}<p class="section-note">Run library enrichment to add genre information for this chart.</p>{% endif %}
-  </section>
-</div>
+{%- endmacro %}
 
 {# ── Graduation funnel: how transient becomes permanent ───────────────────── #}
+{% macro learning() -%}
 <section class="card card--data viz-dim">
   <h2 class="section section-flush">Learning progress <span class="scope-tag">recent activity becomes saved preferences</span></h2>
   <p class="section-note">Repeated listening and feedback build up here. Once a genre, era, or artist reaches the learning threshold, its saved weight increases or decreases. Likes and dislikes count more than individual plays.</p>
@@ -260,14 +278,7 @@
           {"l": "Half-life", "v": "%.0f"|format(viz.sources.halflife_days.skip) ~ "d", "t": "strong"},
           {"l": "Remaining influence", "v": "%.2f"|format(viz.sources.effective.skip), "n": "total skip weight after fading over time"}]) }}>Skips {{ viz.sources.skips }}</span>
   </p>
-  <p class="section-note source-note">This activity drives the Recent charts above. Each event's influence fades with time, even when you are not listening or syncing. Hover a tag to see how quickly it fades.{% if viz.sources.latest_age_h is not none %}
+  <p class="section-note source-note">This activity drives the Recent charts in Taste profile. Each event's influence fades with time, even when you are not listening or syncing. Hover a tag to see how quickly it fades.{% if viz.sources.latest_age_h is not none %}
     Latest activity used: {{ '%.1f'|format(viz.sources.latest_age_h) }}h ago.{% endif %}</p>
 </section>
-
-{# ── Embedding engine + the two free-direction layers (expensive → lazy) ──── #}
-<section class="card card--data viz-dim">
-  <h2 class="section section-flush">Track similarity model <span class="scope-tag">session · recent · saved</span></h2>
-  <div hx-get="/taste/viz/engine" hx-trigger="load" hx-swap="innerHTML">
-    <p class="section-note">Loading the track similarity model…</p>
-  </div>
-</section>
+{%- endmacro %}

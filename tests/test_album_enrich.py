@@ -1,8 +1,10 @@
 """Album enrichment: saved albums get an enrichable album page and the same runners (scoped to the
 album's folded-in tracks)."""
+import threading
+
 from fastapi.testclient import TestClient
 
-from yt_playlist.providers import musicbrainz
+from yt_playlist.providers import musicbrainz, waterfall
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
@@ -38,13 +40,24 @@ def test_album_page_renders_enrichable_table(store):
     assert 'aria-label="Enrich"' in html                       # the single waterfall enrich icon
 
 
-def test_album_enrich_endpoint_starts_job(store):
+def test_album_enrich_endpoint_starts_job(store, monkeypatch):
+    # Exercise job dispatch without leaving live provider requests running into later tests.
+    started = threading.Event()
+    pending_ids = []
+
+    def enrich(store, pending, config, on_progress):
+        pending_ids.extend(t["id"] for t in pending)
+        started.set()
+
+    monkeypatch.setattr(waterfall, "run_waterfall", enrich)
     iid = store.upsert_identity("main", "cred", None, True)
     _fold_album(store)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     r = c.post("/album/BID/enrich")
     assert r.status_code == 200 and "job_id" in r.json()
+    assert started.wait(2)
+    assert set(pending_ids) == {t["id"] for t in store.album_tracks_for_waterfall("BID")}
 
 
 def test_album_track_genre_edit(store):

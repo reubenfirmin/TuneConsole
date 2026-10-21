@@ -2,7 +2,9 @@
 allow the allowlist, block everything else, strip secrets from the log, and gate
 *both* HTTP stacks (requests and urllib). The request must never reach the
 underlying transport when the host is off-allowlist."""
+import io
 import urllib.request
+from email.message import Message
 
 import pytest
 import requests
@@ -22,23 +24,34 @@ def test_allowlist_membership():
     assert not host_allowed("")
 
 
-def test_playlist_metadata_allowlist_is_limited_to_exact_https_endpoints(tmp_path):
+@pytest.mark.parametrize("method,url", [
+    ("GET", "https://accounts.google.com/o/oauth2/v2/auth"),
+    ("POST", "https://oauth2.googleapis.com/token"),
+    ("GET", "https://www.googleapis.com/youtube/v3/playlists?part=snippet"),
+    ("GET", "https://www.googleapis.com/youtube/v3/channels"),
+    ("POST", "https://www.googleapis.com/youtube/v3/playlists"),
+    ("GET", "https://www.googleapis.com/drive/v3/files"),
+    ("GET", "https://gmail.googleapis.com/gmail/v1/users/me"),
+    ("GET", "https://www.googleapis.com/youtube/v3/videos"),
+    ("GET", "http://www.googleapis.com/youtube/v3/playlists"),
+    ("GET", "https://www.googleapis.com:444/youtube/v3/playlists"),
+    ("POST", "https://oauth2.googleapis.com/revoke"),
+])
+def test_google_oauth_and_data_api_are_blocked_before_transport(tmp_path, monkeypatch, method, url):
     g = EgressGuard(log_path=tmp_path / "net.log")
-    for method, url in (("POST", "https://oauth2.googleapis.com/token"),
-                        ("GET", "https://www.googleapis.com/youtube/v3/playlists?part=snippet"),
-                        ("GET", "https://www.googleapis.com/youtube/v3/channels")):
-        g.gate(url, method=method, via="requests")
-    for method, url in (("POST", "https://www.googleapis.com/youtube/v3/playlists"),
-                        ("GET", "https://www.googleapis.com/drive/v3/files"),
-                        ("GET", "https://gmail.googleapis.com/gmail/v1/users/me"),
-                        ("GET", "https://www.googleapis.com/youtube/v3/videos"),
-                        ("GET", "http://www.googleapis.com/youtube/v3/playlists"),
-                        ("GET", "https://www.googleapis.com:444/youtube/v3/playlists"),
-                        ("POST", "https://oauth2.googleapis.com/revoke")):
-        with pytest.raises(BlockedHost):
-            g.gate(url, method=method, via="requests")
-    assert not host_allowed("googleapis.com")
-    assert not host_allowed("www.googleapis.com")
+    # Register both originals so pytest restores the process-wide hooks after this test.
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", requests.adapters.HTTPAdapter.send)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", urllib.request.OpenerDirector.open)
+    g.install()
+    reached = []
+    g._orig_adapter_send = lambda *a, **k: reached.append("requests") or _Resp()
+    g._orig_opener_open = lambda *a, **k: reached.append("urllib") or _Resp()
+    with pytest.raises(BlockedHost):
+        requests.adapters.HTTPAdapter().send(_Req(url, method))
+    with pytest.raises(BlockedHost):
+        urllib.request.build_opener().open(urllib.request.Request(url, method=method))
+    assert reached == []
+    assert all("BLOCK" in line for line in g.recent())
 
 
 def test_cover_art_hosts_are_allowed():
@@ -73,8 +86,8 @@ def test_gate_blocks_unknown_host_and_logs_it(tmp_path):
 
 class _Req:
     """Minimal stand-in for a requests PreparedRequest (gate only reads url/method)."""
-    def __init__(self, url, method="GET"):
-        self.url, self.method = url, method
+    def __init__(self, url, method="GET", body=None):
+        self.url, self.method, self.body = url, method, body
 
 
 def test_install_gates_requests_stack(tmp_path):
@@ -125,7 +138,166 @@ class _Resp:
     headers = {"Content-Length": "0"}
 
 
-def test_github_api_is_allowed_for_update_check():
-    from yt_playlist.egress import host_allowed
-    assert host_allowed("api.github.com") is True
-    assert host_allowed("github.com") is True
+def test_github_has_no_domain_wide_allowance():
+    assert not host_allowed("github.com")
+    assert not host_allowed("api.github.com")
+    assert not host_allowed("uploads.github.com")
+    assert not host_allowed("raw.githubusercontent.com")
+
+
+_UPDATE_URL = "https://api.github.com/repos/reubenfirmin/TuneConsole/releases/latest"
+
+
+@pytest.fixture
+def guarded_transports(tmp_path, monkeypatch):
+    g = EgressGuard(log_path=tmp_path / "net.log")
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", requests.adapters.HTTPAdapter.send)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", urllib.request.OpenerDirector.open)
+    g.install()
+    reached = []
+    g._orig_adapter_send = lambda *a, **k: reached.append("requests") or _Resp()
+    g._orig_opener_open = lambda *a, **k: reached.append("urllib") or _Resp()
+    return g, reached
+
+
+def test_exact_github_update_request_is_allowed_on_both_stacks(guarded_transports):
+    g, reached = guarded_transports
+    requests.adapters.HTTPAdapter().send(_Req(_UPDATE_URL))
+    urllib.request.build_opener().open(_UPDATE_URL)
+    assert reached == ["requests", "urllib"]
+    assert len(g.recent()) == 2
+    assert all("verdict=ALLOW" in line for line in g.recent())
+
+
+@pytest.mark.parametrize("method,url", [
+    ("POST", _UPDATE_URL),
+    ("PUT", _UPDATE_URL),
+    ("HEAD", _UPDATE_URL),
+    ("GET", "https://github.com/reubenfirmin/TuneConsole/releases/latest"),
+    ("GET", "https://api.github.com/repos/other/project/releases/latest"),
+    ("GET", "https://api.github.com/repos/reubenfirmin/TuneConsole/issues"),
+    ("GET", "https://uploads.github.com/repos/reubenfirmin/TuneConsole/releases/latest"),
+    ("GET", "https://sub.api.github.com/repos/reubenfirmin/TuneConsole/releases/latest"),
+    ("GET", "https://raw.githubusercontent.com/other/project/main/file"),
+    ("GET", _UPDATE_URL + "?data=SECRET"),
+    ("GET", _UPDATE_URL + "#SECRET"),
+    ("GET", _UPDATE_URL + "/"),
+    ("GET", _UPDATE_URL + "/extra"),
+    ("GET", _UPDATE_URL.replace("https://", "http://")),
+    ("GET", _UPDATE_URL.replace("api.github.com", "api.github.com:443")),
+    ("GET", _UPDATE_URL.replace("api.github.com", "api.github.com:444")),
+    ("GET", _UPDATE_URL.replace("api.github.com", "SECRET@api.github.com")),
+    ("GET", _UPDATE_URL.replace("api.github.com", "api.github.com.")),
+    ("GET", _UPDATE_URL.replace("/releases/", "/%72eleases/")),
+    ("GET", _UPDATE_URL.replace("api.github.com", "api.github.com.evil.example")),
+])
+def test_other_github_requests_are_blocked_before_transport(guarded_transports, method, url):
+    g, reached = guarded_transports
+    with pytest.raises(BlockedHost):
+        requests.adapters.HTTPAdapter().send(_Req(url, method))
+    with pytest.raises(BlockedHost):
+        urllib.request.build_opener().open(urllib.request.Request(url, method=method))
+    assert reached == []
+    assert len(g.recent()) == 2
+    assert all("verdict=BLOCK" in line for line in g.recent())
+    assert "SECRET" not in "\n".join(g.recent())
+
+
+@pytest.mark.parametrize("body", [b"SECRET", b""])
+def test_github_update_request_cannot_send_a_body(guarded_transports, body):
+    g, reached = guarded_transports
+    with pytest.raises(BlockedHost):
+        requests.adapters.HTTPAdapter().send(_Req(_UPDATE_URL, body=body))
+    with pytest.raises(BlockedHost):
+        urllib.request.build_opener().open(urllib.request.Request(_UPDATE_URL, data=body, method="GET"))
+    assert reached == []
+    assert all("verdict=BLOCK" in line for line in g.recent())
+    assert "SECRET" not in "\n".join(g.recent())
+
+
+@pytest.mark.parametrize("as_request", [False, True])
+@pytest.mark.parametrize("as_keyword", [False, True])
+def test_urllib_update_request_cannot_add_data_at_open(guarded_transports, as_request, as_keyword):
+    g, reached = guarded_transports
+    url = urllib.request.Request(_UPDATE_URL) if as_request else _UPDATE_URL
+    with pytest.raises(BlockedHost):
+        if as_keyword:
+            urllib.request.build_opener().open(url, data=b"SECRET")
+        else:
+            urllib.request.build_opener().open(url, b"SECRET")
+    assert reached == []
+    assert "method=POST" in g.recent()[0]
+    assert "SECRET" not in "\n".join(g.recent())
+
+
+def test_update_checker_still_fetches_latest_release_through_guard(guarded_transports):
+    from yt_playlist.core import updatecheck
+
+    g, _ = guarded_transports
+    sent = []
+
+    def fetch(opener, request, *args, **kwargs):
+        sent.append(request)
+        return io.BytesIO(b'{"tag_name": "v0.2.0"}')
+
+    g._orig_opener_open = fetch
+    assert updatecheck._fetch_latest_release() == "0.2.0"
+    assert len(sent) == 1
+    assert sent[0].full_url == _UPDATE_URL
+    assert sent[0].get_method() == "GET"
+    assert sent[0].data is None
+    assert "verdict=ALLOW" in g.recent()[0]
+
+
+@pytest.mark.parametrize("stack", ["requests", "urllib"])
+@pytest.mark.parametrize("target", [
+    "https://api.github.com/repos/other/project/releases/latest",
+    _UPDATE_URL + "?data=SECRET",
+    "https://github.com/reubenfirmin/TuneConsole/releases/latest",
+])
+def test_github_redirects_are_checked_before_transport(tmp_path, monkeypatch, stack, target):
+    g = EgressGuard(log_path=tmp_path / "net.log")
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", requests.adapters.HTTPAdapter.send)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", urllib.request.OpenerDirector.open)
+    g.install()
+    reached = []
+
+    if stack == "requests":
+        def redirect(adapter, request, *args, **kwargs):
+            reached.append(request.url)
+            response = requests.Response()
+            response.status_code = 302
+            response.headers["Location"] = target
+            response.url = request.url
+            response.request = request
+            response._content = b""
+            response.raw = io.BytesIO()
+            return response
+
+        g._orig_adapter_send = redirect
+        with requests.Session() as session:
+            session.trust_env = False
+            with pytest.raises(BlockedHost):
+                session.get(_UPDATE_URL)
+    else:
+        class Redirect(urllib.request.BaseHandler):
+            handler_order = 100
+
+            def https_open(self, request):
+                reached.append(request.full_url)
+                headers = Message()
+                headers["Location"] = target
+                response = urllib.response.addinfourl(
+                    io.BytesIO(), headers, request.full_url, code=302)
+                response.msg = "Found"
+                return response
+
+            http_open = https_open
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), Redirect())
+        with pytest.raises(BlockedHost):
+            opener.open(_UPDATE_URL)
+
+    assert reached == [_UPDATE_URL]
+    assert any("verdict=BLOCK" in line for line in g.recent())
+    assert "SECRET" not in "\n".join(g.recent())

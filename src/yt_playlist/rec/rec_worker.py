@@ -8,7 +8,7 @@ rebuild, so frequent syncs never pile up.
 import threading
 import time
 
-from yt_playlist.rec import artist_model, embed, recommend, surfaces
+from yt_playlist.rec import artist_model, embed, model_selection, recommend, surfaces
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -21,8 +21,11 @@ class RecWorker:
         self.gc_initial_s = gc_initial_s           # first GC pass shortly after start (catches restarts)
         self._lock = threading.Lock()
         self._pending = False
+        self._modes_pending = False
+        self._modes_force = False
         self._running = False
         self._ticker_started = False
+        model_selection.recover_interrupted(ctx.store)
 
     def start_ticker(self):
         """Start the periodic background daemons (idempotent): the budgeted discovery scan (so the
@@ -74,8 +77,21 @@ class RecWorker:
 
     def trigger(self):
         """Request a rebuild. Coalesces: if one is already scheduled/running, just mark pending."""
+        self._schedule(full=True)
+
+    def trigger_mode_refresh(self, *, force=False):
+        """Repair genre groups locally, without a full model rebuild or provider requests.
+
+        Force a refresh after content vectors change even if their column names stay the same.
+        Sharing the rebuild queue prevents concurrent recomputes and keeps mid-rebuild updates.
+        """
+        self._schedule(full=False, force=force)
+
+    def _schedule(self, *, full, force=False):
         with self._lock:
-            self._pending = True
+            self._pending |= full
+            self._modes_pending |= not full
+            self._modes_force |= force
             if self._running:
                 return
             self._running = True
@@ -85,14 +101,22 @@ class RecWorker:
         while True:
             time.sleep(self.debounce_s)          # let a burst of triggers settle
             with self._lock:
-                if not self._pending:
+                if not (self._pending or self._modes_pending):
                     self._running = False
                     return
+                full, modes, force = self._pending, self._modes_pending, self._modes_force
                 self._pending = False
+                self._modes_pending = False
+                self._modes_force = False
             try:
-                self._do_rebuild()
+                if full:
+                    self._do_rebuild()           # includes genre groups and Home bundles
+                else:
+                    self._do_mode_refresh(force=force)
             except Exception:  # noqa: BLE001 - never let rec work crash the app
                 self.ctx.logger.warning("rec worker rebuild failed", exc_info=True)
+                if full and modes:              # a failed full rebuild must not swallow local repair
+                    self.trigger_mode_refresh(force=force)
 
     def rebuild(self):
         """Synchronous rebuild for the Taste-model 'rebuild' button. Guarded against the background
@@ -107,11 +131,24 @@ class RecWorker:
             self._do_rebuild()
         finally:
             with self._lock:
-                self._running = False
-                again = self._pending
-                self._pending = False
-        if again:
-            self.trigger()             # a request arrived mid-rebuild -> background catch-up pass
+                again = self._pending or self._modes_pending
+                self._running = again
+            if again:
+                threading.Thread(target=self._loop, daemon=True).start()
+
+    def _do_mode_refresh(self, *, force=False):
+        """Catch up persisted genre groups after startup, catalog updates or enrichment."""
+        from yt_playlist.rec import mode_surfaces, taste_modes
+        store = self.ctx.store
+        if model_selection.readiness(store, self.ctx.now_fn())["state"] == "ready":
+            self.trigger()
+        rebuilt = embed.maybe_rebuild_content_vectors(store)
+        if not (force or rebuilt or taste_modes.needs_refresh(store)):
+            return
+        now = self.ctx.now_fn()
+        n = taste_modes.recompute(store, now)
+        mode_surfaces.prepare_bundles(store, now)
+        self.ctx.logger.info("genre-group refresh: %d active groups; Home bundles prepared", n)
 
     def _do_rebuild(self):
         """Rebuild vectors and materialize the heavy proposal surfaces.
@@ -128,8 +165,18 @@ class RecWorker:
         now = self.ctx.now_fn()
         t0 = time.monotonic()
         log.info("rec rebuild: starting")
-        n = embed.build_and_store(store)
+        restored = False
+        restore_id = store.get_setting("rec_selection_restore")
+        if restore_id:
+            model_selection.update_followup(store, now, now_fn=self.ctx.now_fn)
+            restored = store.rec.model.restore_model_selection(int(restore_id), now)
+            store.set_setting("rec_selection_restore", "")
+        n = store.rec_vectors_count() if restored else embed.build_and_store(store)
         log.info("rec rebuild: embedded %d vectors in %.1fs", n, time.monotonic() - t0)
+        try:
+            model_selection.maintain(store, now, now_fn=self.ctx.now_fn)
+        except Exception:  # comparison failures must leave the regular rebuild usable
+            log.warning("automatic model comparison failed", exc_info=True)
         # Keep the content (genre/era) space + its model in step with the collaborative rebuild, so the
         # cluster blend and the out-of-corpus "new music" pool refresh on the regular rebuild cadence
         # rather than ONLY when an enrichment batch happens to cross a coverage bucket (#48). Bucket-gated

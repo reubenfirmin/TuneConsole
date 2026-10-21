@@ -95,6 +95,21 @@ def test_find_near_duplicate_groups_clusters(store):
     assert {p.ytm_playlist_id for p in groups[0].playlists} == {"PLx", "PLy", "PLz"}
 
 
+def test_near_duplicate_pairs_only_include_similar_edges(store):
+    from yt_playlist.library.analysis import find_near_duplicate_groups, near_duplicate_pairs
+    iid = store.upsert_identity("main", "cred", None, True)
+    tracks = [store.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(10)]
+    # A-B and B-C are 80% similar; A-C is only 60%, despite sharing a connected group.
+    for ytm, members in (("PLA", tracks[:8]), ("PLB", tracks), ("PLC", tracks[2:])):
+        pid = store.upsert_playlist(iid, ytm, ytm, len(members), "h", 1.0)
+        store.set_playlist_tracks(pid, members)
+    groups = find_near_duplicate_groups(store)
+    assert len(groups) == 1
+    pairs = near_duplicate_pairs(store, groups)
+    assert {frozenset((p.playlist_a.ytm_playlist_id, p.playlist_b.ytm_playlist_id))
+            for p in pairs} == {frozenset(("PLA", "PLB")), frozenset(("PLB", "PLC"))}
+
+
 def test_find_overlaps_kept_pair_survives_ignore(store):
     from yt_playlist.library.analysis import find_overlaps
     iid = store.upsert_identity("main", "cred", None, True)

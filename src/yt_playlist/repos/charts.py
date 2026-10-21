@@ -242,11 +242,19 @@ class ChartsRepo(Repo):
 
     @synchronized
     def artist_songs(self, artist, browse_id=None) -> list[dict]:
-        """An artist's songs that appear in your playlists: play count + which playlists hold each."""
+        """An artist's stored library songs: play count + which playlists hold each."""
         artist_filter = "t.artist=?"
         params = [artist]
         if browse_id:
-            artist_filter += " AND t.artist_browse_id=?"
+            known_ids = {r[0] for r in self.conn.execute(
+                "SELECT DISTINCT artist_browse_id FROM tracks WHERE artist=? "
+                "AND NULLIF(artist_browse_id,'') IS NOT NULL", (artist,))}
+            # Saved-album sync may omit artist IDs. Keep those tracks alongside the sole
+            # known artist, using the same fallback as the Artists index.
+            if known_ids == {browse_id}:
+                artist_filter += " AND (t.artist_browse_id=? OR NULLIF(t.artist_browse_id,'') IS NULL)"
+            else:
+                artist_filter += " AND t.artist_browse_id=?"
             params.append(browse_id)
         songs = self.conn.execute(
             "SELECT t.identity_key key, MIN(t.title) title, MIN(t.album) album, MIN(t.video_id) vid, "

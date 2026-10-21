@@ -29,8 +29,18 @@ async function authHeader() {
   return `SAPISIDHASH ${ts}_${await sha1Hex(`${ts} ${c.value} ${ORIGIN}`)}`;
 }
 
+async function ytmTabs() {
+  // A newly opened/restored tab can have only pendingUrl. A URL-filtered query misses it,
+  // allowing a second launch (or a concurrent library fetch) to create another music tab.
+  const tabs = await chrome.tabs.query({});
+  return tabs.filter(tab => {
+    try { return new URL(tab.pendingUrl || tab.url).origin === ORIGIN; }
+    catch (e) { return false; }
+  });
+}
+
 async function firstYtmTab() {
-  const tabs = await chrome.tabs.query({ url: "https://music.youtube.com/*" });
+  const tabs = await ytmTabs();
   return tabs[0] || null;
 }
 
@@ -135,10 +145,16 @@ async function reloadYtmTabs() {
 // pickYtmTab returning null). A rate/playpause/radio-prime control is meaningless without a tab
 // already playing something, so unlike the fetch path there is nothing useful to open a tab for.
 
-// Prefer the active/most-recently-used YouTube Music tab (the one the user is actually listening in).
+// Playback ownership survives queue changes, including YouTube autoplay outside our playlists.
+// Browsing another music tab must not redirect controls away from the tab making sound.
+const playingTabs = new Set();
+let playbackTabId = null;
 async function pickYtmTab() {
-  const tabs = await chrome.tabs.query({ url: "https://music.youtube.com/*" });
+  const tabs = await ytmTabs();
   if (!tabs.length) return null;
+  const playing = tabs.find(t => t.audible && !t.mutedInfo?.muted) ||
+    tabs.find(t => t.id === playbackTabId) || tabs.find(t => playingTabs.has(t.id));
+  if (playing) return playing;
   const active = tabs.find((t) => t.active);
   if (active) return active;
   return tabs.slice().sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
@@ -159,8 +175,6 @@ const RESCUE_DWELL_MS = 600;   // minimum foreground time; a paused/loading play
 const RESCUE_RETRY_MS = 500;
 const RESCUE_TIMEOUT_MS = 6000;
 let rescue = null;
-// Tabs currently reporting real playback, so the rescue can tell "it worked" from "still silent".
-const playingTabs = new Set();
 
 function cancelPlaybackRescue() {
   if (!rescue) return;
@@ -256,35 +270,50 @@ async function finishPlaybackRescue(episode) {
 }
 
 // music.youtube.com so the backend can only ever point our own tab at YouTube Music.
+let navigation = Promise.resolve();
 async function navigateYtmTab(url) {
   try {
     if (new URL(url).origin !== ORIGIN) return;
   } catch (e) {
     return;
   }
-  const tab = await pickYtmTab();
-  if (tab) {
-    // Reuse the existing tab, this is the common case (you already have YouTube Music open). Do NOT
-    // activate it: the swap happens in the background so you stay on TuneConsole.
-    try {
-      await suppressBeforeUnload(tab.id);   // seamless swap, no "Reload site?" prompt
-      await chrome.tabs.update(tab.id, { url });
-      armPlaybackRescue(tab.id);            // #101: a background swap often will not autoplay
-      console.log("[TuneConsole] navigated existing YTM tab (background)", tab.id, "->", url);
-    } catch (e) {
-      console.warn("[TuneConsole] navigate update failed:", e);
+  // Serialize launches so two requests that both observe zero tabs cannot each open one.
+  navigation = navigation.then(async () => {
+    const tab = await pickYtmTab();
+    if (tab) {
+      // Reuse the existing tab in the background so you stay on TuneConsole.
+      try {
+        await suppressBeforeUnload(tab.id);
+        await chrome.tabs.update(tab.id, { url });
+        playbackTabId = tab.id;
+        armPlaybackRescue(tab.id);
+        await pauseOtherYtmTabs(tab.id);
+        console.log("[TuneConsole] navigated existing YTM tab (background)", tab.id, "->", url);
+      } catch (e) {
+        console.warn("[TuneConsole] navigate update failed:", e);
+      }
+    } else {
+      console.log("[TuneConsole] no existing YTM tab, opening one in the background");
+      // A brand-new background tab needs the same autoplay rescue as a reused one.
+      try {
+        const made = await chrome.tabs.create({ url, active: false });
+        if (made && made.id != null) {
+          playbackTabId = made.id;
+          armPlaybackRescue(made.id);
+          await pauseOtherYtmTabs(made.id);
+        }
+      } catch (e) {}
     }
-  } else {
-    // Only when there is genuinely no YouTube Music tab: open one (in the background), since there is
-    // nothing to swap.
-    console.log("[TuneConsole] no existing YTM tab, opening one in the background");
-    // A brand-new background tab is even less likely to autoplay than a reused one, so it gets the
-    // same rescue.
-    try {
-      const made = await chrome.tabs.create({ url, active: false });
-      if (made && made.id != null) armPlaybackRescue(made.id);
-    } catch (e) {}
-  }
+  }).catch(e => console.warn("[TuneConsole] navigate failed:", e));
+  return navigation;
+}
+
+async function pauseOtherYtmTabs(keepId) {
+  const tabs = await ytmTabs();
+  await Promise.all(tabs.filter(t => t.id !== keepId).map(async tab => {
+    await driveTab(tab.id, "deck-pause"); // idempotent: never resumes an already paused player
+    playingTabs.delete(tab.id);
+  }));
 }
 
 // YouTube Music registers a beforeunload handler that pops "Reload site? Changes you made may not be
@@ -730,6 +759,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   // because the deck logic below deliberately returns early for non-deck tabs (which is most of
   // them) and playingTabs would otherwise grow for the life of the service worker.
   playingTabs.delete(tabId);
+  if (playbackTabId === tabId) playbackTabId = null;
   if (rescue && rescue.tabId === tabId) cancelPlaybackRescue();
   await ensureDeckStateRestored();   // SW-wake race guard: see restoreDeckState's comment
   if (tabId !== liveTabId && tabId !== standbyTabId) return;
@@ -1022,14 +1052,19 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   // navigated tab reports real sound. That is the "if needed" in the issue: the switch only ever
   // happens when the background swap genuinely failed to start.
   const srcTabId = sender && sender.tab && sender.tab.id;
-  if (msg.type === "play" && srcTabId != null) {
+  if ((msg.type === "play" || msg.type === "now-heartbeat") && srcTabId != null && deck !== "standby") {
     if (msg.paused) {
       playingTabs.delete(srcTabId);
     } else {
       playingTabs.add(srcTabId);
+      playbackTabId = srcTabId;
       if (rescue && rescue.tabId === srcTabId && !rescue.foregrounded) cancelPlaybackRescue();
     }
+    // Paused tabs keep sending metadata. They must not replace the playing tab's source/card.
+    if (msg.paused && playbackTabId != null && playbackTabId !== srcTabId) return;
   }
+  if (msg.type === "pevent" && ["state", "bye"].includes(msg.kind) &&
+      playbackTabId != null && srcTabId !== playbackTabId) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (msg.type === "play") {
     ws.send(JSON.stringify({ type: "play", title: msg.title, artist: msg.artist,

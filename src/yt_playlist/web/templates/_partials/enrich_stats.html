@@ -1,28 +1,59 @@
 {# Live enrichment stats: worker state + pause, coverage bars, queue/conflict tiles, trend sparkline.
    Re-rendered standalone by /enrich/stats (the page polls it) and by /enrich/toggle. #}
 {% from "_partials/_viz_tip.html" import tip %}
+<section class="card workflow-console enrich-status-card" aria-labelledby="enrich-status-heading">
 <div class="enrich-head">
+  <div class="enrich-status-title">
+  <h2 id="enrich-status-heading">Status</h2>
   <span class="enrich-state state-{{ state }}">
-    {% if state == 'running' %}● Enriching{% elif state == 'paused' %}❙❙ Paused{% else %}✓ Caught up{% endif %}
+    {% if state == 'running' %}Enriching{% elif state == 'paused' %}Paused
+    {% elif state == 'queued' %}Queued{% elif state == 'waiting' %}Waiting for another lookup
+    {% elif state == 'blocked' %}Needs setup{% elif state == 'error' %}Retrying after an error
+    {% else %}Caught up{% endif %}
   </span>
+  </div>
   <button type="button" class="btn-sm" hx-post="/enrich/toggle" hx-target="#enrich-stats" hx-swap="innerHTML">
     {{ 'Pause worker' if enabled else 'Resume worker' }}
   </button>
 </div>
 
-<div class="enrich-tiles">
-  <div class="metric"><div class="v">{{ remaining }}</div><div class="l">In queue</div></div>
-  <div class="metric"><div class="v">{{ cov.processed }}/{{ cov.total }}</div><div class="l">Processed</div></div>
-  <div class="metric"><div class="v">{{ conflicts }}</div><div class="l">Open conflicts</div></div>
+<div class="enrich-activity" aria-live="polite" role="status">
+  {% if state == 'paused' %}
+  <p>Automatic lookups are paused. A track already in progress will finish first.</p>
+  {% elif state in ['running', 'waiting', 'blocked', 'error'] %}
+  <p>{{ activity.text }}{% if state == 'running' %} <span class="section-note">Updated {{ activity_age }}.</span>{% endif %}</p>
+  {% if activity.scope == 'refresh' %}<p class="section-note">Refreshing older tracks with missing metadata.</p>{% endif %}
+  {% elif state == 'queued' %}
+  <p>Waiting for the worker to start its next lookup.</p>
+  {% else %}
+  <p>Every track has had a provider pass. Missing metadata is retried periodically.</p>
+  {% endif %}
+  {% if activity.warning and enabled %}<p class="enrich-warning">{{ activity.warning }}</p>{% endif %}
+  <p class="section-note">
+    {% if progress.latest is not none %}Last track completed {{ age(progress.latest) }}.{% else %}No tracks completed yet.{% endif %}
+    {{ '{:,}'.format(progress.recent) }} tracks checked in the past 15 minutes.
+    {% if state in ['blocked', 'error'] %}<a href="{{ '/setup?tab=enrichment' if state == 'blocked' else '/network' }}">{{ 'Check providers' if state == 'blocked' else 'View requests' }}</a>{% endif %}
+  </p>
 </div>
 
+</section>
+<section class="card workflow-console enrich-coverage-card" aria-label="Enrichment coverage">
+<div class="enrich-tiles">
+  <a class="metric" href="/enrich/queue"><span class="v">{{ '{:,}'.format(remaining) }}</span><span class="l">In queue {{ arrow_icon('right') }}</span><span class="section-note">Tracks awaiting a provider pass</span></a>
+  <a class="metric" href="/enrich/processed"><span class="v">{{ '%g'|format(pct.processed) }}%</span><span class="l">Processed {{ arrow_icon('right') }}</span><span class="section-note">{{ '{:,}'.format(cov.processed) }} of {{ '{:,}'.format(cov.total) }} tracks checked</span></a>
+  <a class="metric" href="/enrich/conflicts"><span class="v">{{ '{:,}'.format(conflicts) }}</span><span class="l">Open conflicts {{ arrow_icon('right') }}</span><span class="section-note">Field disagreements to review</span></a>
+</div>
+<p class="section-note">Library and discovery tracks share this queue. Discovery metadata helps choose songs for Fresh playlists.</p>
+<p class="section-note">Processed means checked, even when providers have no match. Conflicts do not block the queue.</p>
+
+<p class="section-note">Metadata coverage</p>
 <div class="cov-grid">
   {% for key, label in [('processed','Processed'), ('genre','Genre'), ('year','Year'),
                          ('bpm','BPM'), ('energy','Energy'), ('danceability','Danceability')] %}
   <div class="cov-row">
     <span class="cov-label">{{ label }}</span>
     <div class="cov-bar"><i style="width:{{ pct[key] }}%"></i></div>
-    <span class="cov-pct">{{ pct[key] }}%</span>
+    <span class="cov-pct">{{ '%g'|format(pct[key]) }}%</span>
     <span class="cov-raw">{{ cov[key] }}/{{ cov.total }}</span>
   </div>
   {% endfor %}
@@ -43,3 +74,4 @@
   <p class="section-note">Not enough processed yet to chart.</p>
   {% endif %}
 </div>
+</section>

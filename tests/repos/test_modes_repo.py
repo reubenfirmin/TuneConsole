@@ -55,6 +55,22 @@ def test_next_mode_id_spans_retired(store):
     assert store.modes.next_mode_id() == 3   # not 2: retired ids are never reused
 
 
+def test_choice_learning_keeps_counts_distinct_and_uses_last_evidence_time(store):
+    store.modes.replace_modes([_mode(mid, "house", [["house", 1]], [1], 10, [])
+                               for mid in range(1, 5)], [], 1)
+    store.modes.log_impressions(1, [("a", 1), ("b", 1), ("c", 2), ("d", 4)], 10)
+    store.modes.log_impressions(1, [("a", 1)], 100)  # re-render is not new evidence
+    store.modes.log_pick(1, 1, 20)
+    store.modes.log_pick(2, 1, 30)
+    store.modes.log_pick(2, 1, 100)  # repeating a successful creation is idempotent
+    store.modes.log_impressions(2, [("a", 2)], 40)
+    store.modes.log_pick(3, 3, 50)  # retain an orphan pick without inventing an offer
+    store.modes.replace_modes([], [4], 100)
+    rows = store.modes.choice_learning_rows()
+    assert [(r["mode_id"], r["offered"], r["picked"], r["updated_at"]) for r in rows] == [
+        (3, 0, 1, 50), (2, 2, 0, 40), (1, 2, 2, 30)]
+
+
 def test_genres_and_meta_for(store):
     store.conn.executescript(
         "INSERT INTO tracks (identity_key, title, artist, genre) VALUES "

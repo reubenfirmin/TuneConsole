@@ -1,14 +1,20 @@
 """EnrichWorker drain logic, exercised synchronously via drain_once with a fake waterfall."""
 import logging
+from functools import partial
 from types import SimpleNamespace
 
+import pytest
+from unittest.mock import Mock
+
 from yt_playlist.enrich.enrich_worker import EnrichWorker
+from yt_playlist.providers.base import EnrichmentResult
+from yt_playlist.providers.waterfall import run_waterfall
 
 
 def make_worker(store, now=1000.0, fill=None):
     calls = []
 
-    def fake_wf(s, tracks, config, on_progress, should_stop=None):
+    def fake_wf(s, tracks, config, on_progress, should_stop=None, sink_for=None):
         calls.append([t["id"] for t in tracks])
         for t in tracks:
             if fill:
@@ -73,6 +79,17 @@ def test_enrichment_fills_via_waterfall_are_persisted(store):
     assert store.coverage_stats()["genre"] == 1
 
 
+@pytest.mark.parametrize("rebuilt", [False, True])
+def test_library_enrichment_schedules_genre_group_catchup(store, monkeypatch, rebuilt):
+    from yt_playlist.rec import embed
+    _unprocessed(store)
+    worker = make_worker(store)
+    worker.ctx.rec_worker = SimpleNamespace(trigger_mode_refresh=Mock())
+    monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", lambda s: rebuilt)
+    assert worker.drain_once() == 1
+    worker.ctx.rec_worker.trigger_mode_refresh.assert_called_once_with(force=rebuilt)
+
+
 def test_tracks_skipped_by_waterfall_remain_in_primary_queue(store):
     first = _unprocessed(store, "v1", "One")
     second = store.upsert_track("v2", "Two", "A", None, 200, created_at=1.0)
@@ -84,3 +101,60 @@ def test_tracks_skipped_by_waterfall_remain_in_primary_queue(store):
     assert store.conn.execute(
         "SELECT first_enriched_at FROM tracks WHERE id=?", (second,)).fetchone()[0] is None
     assert [t["id"] for t in store.next_enrich_batch(10)] == [second]
+
+
+@pytest.mark.parametrize("interrupt", [None, "pause", "error"])
+def test_real_waterfall_commits_each_track_before_next_lookup(store, interrupt):
+    first = _unprocessed(store, "v1", "One")
+    second = _unprocessed(store, "v2", "Two")
+    worker = make_worker(store)
+
+    class Provider:
+        name = "musicbrainz"
+        def available(self, _store): return True
+        def reset(self): pass
+        def tripped(self): return False
+        def probe(self, track, _store):
+            assert worker.busy
+            assert track["title"] in worker.activity["text"]
+            if track["id"] == first and interrupt == "pause":
+                store.set_setting("enrich_worker_enabled", "0")
+            if track["id"] == second:
+                # This is still inside the waterfall: the batch hasn't returned yet.
+                assert store.queue_remaining() == 1
+                assert store.enriched_tracks()[0]["id"] == first
+                if interrupt == "error":
+                    raise RuntimeError("provider unavailable")
+            return EnrichmentResult(self.name, {})  # no match is still a completed check
+
+    worker.waterfall_fn = partial(run_waterfall, registry={"musicbrainz": Provider()})
+    if interrupt == "error":
+        with pytest.raises(RuntimeError, match="provider unavailable"):
+            worker.drain_once()
+        assert worker.activity["state"] == "error"
+    else:
+        assert worker.drain_once() == (1 if interrupt == "pause" else 2)
+    assert not worker.busy
+    assert store.queue_remaining() == (1 if interrupt else 0)
+    assert store.coverage_stats()["genre"] == 0
+
+
+def test_breaker_skipped_tracks_stay_queued_with_live_warning(store):
+    first = _unprocessed(store, "v1", "One")
+    second = _unprocessed(store, "v2", "Two")
+    worker = make_worker(store)
+
+    class Provider:
+        name = "musicbrainz"
+        def available(self, _store): return True
+        def reset(self): self.dead = False
+        def tripped(self): return self.dead
+        def probe(self, track, _store):
+            self.dead = True
+            return EnrichmentResult(self.name, {})
+
+    worker.waterfall_fn = partial(run_waterfall, registry={"musicbrainz": Provider()})
+    assert worker.drain_once() == 0
+    assert store.enriched_tracks() == []
+    assert {t["id"] for t in store.next_enrich_batch(10)} == {first, second}
+    assert "unreachable" in worker.activity["warning"]

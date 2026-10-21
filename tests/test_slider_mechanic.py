@@ -28,8 +28,11 @@ def test_exposure_graduates_once_per_held_day():
     assert abs(s.get_theme(axis) - rec_params.SOURCE_W_SLIDER * 1.0) < 1e-9
 
 
-def test_exposure_migrates_conserving_effective_multiplier():
+@pytest.mark.parametrize("legacy_pause", [False, True])
+def test_exposure_migrates_conserving_effective_multiplier(legacy_pause):
     s, axis = _store()
+    if legacy_pause:
+        s.set_setting("rec_param:graduation_enabled", "0")
     s.set_lean(axis, 2.0, 0.0)
     before_eff = s.get_weights(now=0.0).get(axis, 1.0) * s.get_lean(axis)   # 1.0 * 2.0 = 2.0
     # three held days cross threshold (3 * 0.5 = 1.5 >= 1.2)

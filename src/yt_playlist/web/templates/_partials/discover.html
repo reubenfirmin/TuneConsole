@@ -1,17 +1,17 @@
 {% if building %}
-<div hx-get="/home/discover" hx-trigger="load delay:4s" hx-swap="outerHTML">
+<div hx-get="/home/discover" hx-trigger="intersect once delay:4s" hx-swap="outerHTML">
   <h2 class="section">Explore your artists' catalogs <span class="refreshing">finding…</span></h2>
   <div class="album-grid">{% for _ in range(6) %}<div class="tile"><div class="tile-cover skeleton art-album"></div></div>{% endfor %}</div>
 </div>
 {% elif albums %}
 {% from "_macros.html" import tile %}
-<div{% if stale %} hx-get="/home/discover" hx-trigger="load delay:3s" hx-swap="outerHTML"{% endif %}>
+<div{% if stale %} hx-get="/home/discover" hx-trigger="intersect once delay:3s" hx-swap="outerHTML"{% endif %}>
 <h2 class="section">Explore your artists' catalogs{% if stale %} <span class="refreshing">refreshing…</span>{% endif %}</h2>
 <p class="section-note">Albums by your most-played artists that you don't own or have saved.</p>
 <div class="album-grid" id="album-grid">
   {% for a in albums %}
   {{ tile('album', a.thumbnail, a.title, a.artist ~ (' · ' ~ a.year if a.year else ''),
-          "/album?browse=" ~ a.browse_id) }}
+          "/album?browse=" ~ a.browse_id, discovery_id=a.browse_id) }}
   {% endfor %}
 </div>
 {# Always 3 rows tall: columns flow with the viewport, and anything past row 3 is hidden. #}

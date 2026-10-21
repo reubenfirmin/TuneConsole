@@ -2,7 +2,7 @@
    labelled rows). The floating tooltip (app.js initVizTooltip) reads and formats it. Each row:
    {l: label, v: value, n: note?, t: tone? (pos|neg|strong), div: true? (hairline above)}.
    `dot` is an optional hex color for the title marker (used to match a rose petal's color).
-   Imported by taste_viz.html and taste_viz_engine.html so both render identical popups. #}
+   Shared by the taste charts so they render identical popups. #}
 
 {% macro _attr(title, rows, accent='', dot='', desc='') -%}
 data-tip='{{ {"title": title, "accent": accent, "dot": dot, "desc": desc, "rows": rows}|tojson }}'

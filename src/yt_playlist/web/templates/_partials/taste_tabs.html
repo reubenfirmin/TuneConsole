@@ -1,0 +1,17 @@
+{% macro bar(items, prefix='taste', state='tab', action='select', label='Taste Model sections', extra_class='') -%}
+<div class="tabs taste-tabs {{ extra_class }}" role="tablist" aria-label="{{ label }}"
+     x-init="$nextTick(() => revealTasteTab($el.querySelector('[aria-selected=true]')))"
+     @keydown="moveTasteTab($event)">
+  {% for key, title in items %}
+  <button type="button" class="tab-btn" role="tab" id="{{ prefix }}-{{ key }}-tab"
+          :class="{ active: {{ state }} === '{{ key }}' }" :aria-selected="{{ state }} === '{{ key }}'"
+          :tabindex="{{ state }} === '{{ key }}' ? 0 : -1" aria-controls="{{ prefix }}-{{ key }}-panel"
+          @click="{{ action }}('{{ key }}')">{{ title }}</button>
+  {% endfor %}
+</div>
+{%- endmacro %}
+
+{% macro panel(key, prefix='taste', state='tab', extra_class='') -%}
+id="{{ prefix }}-{{ key }}-panel" class="tab-panel {{ extra_class }}" role="tabpanel" tabindex="0"
+aria-labelledby="{{ prefix }}-{{ key }}-tab" x-show="{{ state }} === '{{ key }}'" x-cloak
+{%- endmacro %}

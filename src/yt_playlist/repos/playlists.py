@@ -1,6 +1,5 @@
 """PlaylistRepo: playlists, their track membership/ordering, groups, and hidden flags."""
 import json
-import math
 
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.models import Playlist
@@ -61,24 +60,6 @@ class PlaylistRepo(Repo):
              "local" if created_at is not None else None, row["id"]))
         self.conn.commit()
         return row["id"]
-
-    @synchronized
-    def set_youtube_playlist_dates(self, dates) -> int:
-        """YouTube's timestamp supersedes local estimates, across copies of the same ID.
-
-        Metadata never inserts a library row, changes its sync/edit timestamps, or
-        clears an existing date when an account/playlist is unavailable.
-        """
-        changed = 0
-        with self.conn:
-            for ytm, stamp in dates.items():
-                if not isinstance(stamp, (float, int)) or not math.isfinite(stamp) or stamp <= 0:
-                    continue
-                changed += self.conn.execute(
-                    "UPDATE playlists SET created_at=?, created_at_source='youtube' "
-                    "WHERE ytm_playlist_id=? AND (created_at IS NOT ? "
-                    "OR created_at_source IS NOT 'youtube')", (stamp, ytm, stamp)).rowcount
-        return changed
 
     @synchronized
     def set_playlist_tracks(self, playlist_id, track_ids) -> None:

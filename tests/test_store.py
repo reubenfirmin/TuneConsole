@@ -1,4 +1,20 @@
 # tests/test_store.py
+def test_retired_source_weights_are_removed_and_not_restored(store):
+    store.set_weight("lane:explore", 1.3, now=1000)
+    store.set_weight("lane:deep_cut", 1.7, now=900)
+    store.set_weight("genre:jazz", 0, lo=0, now=800)
+    expected = {axis: row for axis, row in store.weight_records().items() if axis != "lane:explore"}
+    param_keys = ("rec_param:breadth_bias",)
+    store.rec.model.save_taste_settings("old-source-checkpoint", param_keys, 1000)
+
+    store.init_schema()
+    assert store.weight_records() == expected
+    assert store.rec.model.restore_taste_settings("old-source-checkpoint", param_keys)
+    assert store.weight_records() == expected
+    store.init_schema()
+    assert store.weight_records() == expected
+
+
 def test_playlist_creation_date_migration_backfills_only_known_dates(store):
     import json
     from yt_playlist.util.action_kinds import COPY_PLAYLIST, MOVE_IDENTITY

@@ -14,7 +14,7 @@ def build(ctx) -> APIRouter:
 
     def _refresh():
         # htmx does a full page reload; the page recomputes, so a restored comparison
-        # lands back in whichever section now applies (Exact duplicates or Overlaps).
+        # lands back in whichever cleanup section now applies.
         return Response(status_code=200, headers={"HX-Refresh": "true"})
 
     @router.get("/cleanup")
@@ -32,6 +32,8 @@ def build(ctx) -> APIRouter:
         suppressed = store.get_suppressed_overlap_pairs()
         ignored_ytm = store.get_overlap_ignored()
         kept_pairs = store.get_overlap_kept_pairs()
+        near_pairs = analysis.near_duplicate_pairs(store, near_groups, suppressed=suppressed,
+                                                   ignored_ytm=ignored_ytm, kept=kept_pairs)
         overlaps = analysis.find_overlaps(store, exclude_playlist_ids=dupe_ids,
                                           suppressed=suppressed, ignored_ytm=ignored_ytm, kept=kept_pairs)
         playlists = store.get_playlists()
@@ -57,12 +59,12 @@ def build(ctx) -> APIRouter:
         # summary goes stale. Refresh it now so the home "Playlist cleanups" count stays honest.
         recommend.refresh_cleanup(store, now_fn())
         return templates.TemplateResponse(request, "cleanup.html", {
-            "groups": groups, "near_groups": near_groups, "overlaps": overlaps,
+            "groups": groups, "near_pairs": near_pairs, "overlaps": overlaps,
             "empties": empties, "tiny": tiny, "kinds": kinds,
             "identities": {i.id: i.label for i in store.get_identities()},
             "n_playlists": len(playlists),
             "n_identities": len(store.get_identities()),
-            "n_groups": len(groups), "n_near": len(near_groups), "n_overlaps": len(overlaps),
+            "n_groups": len(groups), "n_near": len(near_pairs), "n_overlaps": len(overlaps),
             "hidden": hidden, "ignored": ignored,
             "ignored_empty": ignored_empty, "ignored_tiny": ignored_tiny, "ignored_merges": ignored_merges,
             "flash": request.query_params.get("flash"),

@@ -26,7 +26,7 @@ shapes ranking).
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, eval_recs, layers, mix_tuning, rec_params, recommend, transient
+from yt_playlist.rec import embed, layers, mix_tuning, mode_eval, mode_profiles, rec_params, recommend, surfaces, transient
 from yt_playlist.rec.rec_dao import RecDao
 
 
@@ -51,6 +51,78 @@ def _axis_rows(prefix, shares, weights, standing, leans, fparams):
                      "transient_lean": tlean, "transient_mult": tmult,
                      "effective": pw * sl * tmult})
     return rows
+
+
+def mix_choices(store):
+    """Choice evidence with descriptions of the groups those choices actually train."""
+    evidence = mode_eval.choice_evidence(store)
+    profiles = mode_profiles.describe_modes(store)
+    for row in evidence["rows"]:
+        row["profile"] = profiles[row["mode_id"]]
+    return evidence
+
+
+def generated_playlists(store, now):
+    """Generation facts from prepared pools and saved settings; never rebuild a Home mix."""
+    bundles = store.get_proposals("mode_bundles") or {}
+    blocked = store.suppressed_keys("for_you", now) | set(RecDao(store).generated_track_keys())
+    muted = store.muted_artists()
+    examples = {}
+    for source in ("wheelhouse", "explore", "fresh", "comfort"):
+        examples[source] = next((t for t in bundles.get("all", {}).get(source, [])
+                                 if t.get("key") not in blocked and t.get("artist") not in muted), None)
+    gp = rec_params.get_param
+    return {"choices": mix_choices(store), "examples": examples,
+            "taste_rank_ready": bool(surfaces.playlist_taste(store)),
+            "catalog_content_percent": round(surfaces.CATALOG_CONTENT_FRAC * 100),
+            "comfort_min_plays": gp(store, "comfort_min_plays"),
+            "comfort_recency_days": gp(store, "comfort_recency_full_days"),
+            "artist_cap": gp(store, "modes_artist_cap"),
+            "album_cap": gp(store, "modes_album_cap"),
+            "fresh_artist_cap": gp(store, "fresh_artist_cap")}
+
+
+def source_weights(store, now):
+    """Source controls without loading the facet, style, or learning diagnostics."""
+    mix_tuning.expire(store, now)
+    halflife = rec_params.get_param(store, "weight_revert_halflife_d")
+    weights = store.get_weights(now=now, revert_halflife_d=halflife)
+    records = store.weight_records()
+    lanes = []
+    for name, label, help_text in rec_params.LANES:
+        record = records.get(f"lane:{name}")
+        weight = weights.get(f"lane:{name}", rec_params.LANE_DEFAULT)
+        saved = record["weight"] if record else rec_params.LANE_DEFAULT
+        updated = record["updated_at"] if record else None
+        lanes.append({"name": name, "label": label, "help": help_text, "weight": weight,
+                      "saved_weight": saved, "has_record": record is not None,
+                      "updated_at": updated,
+                      "age_days": max(0.0, (now - updated) / 86400) if updated is not None else None,
+                      "fade_delta": weight - saved})
+    return {"lanes": lanes, "lane_weight_halflife_days": halflife}
+
+
+def overview(store, now, profiles=None):
+    """Only the three Overview readings; no training baskets, pools, or ranking diagnostics."""
+    bd = recommend.taste_breadth(store)
+    shares, n, current_modes = layers.session_mode_mix(store, now)
+    modes = store.modes.list_modes(active_only=True)
+    library = _permanent_mode_shares(modes)
+    shifts = []
+    if shares:
+        for color, mode in enumerate(modes):
+            mid = mode["mode_id"]
+            recent, saved = shares.get(mid, 0.0), library.get(mid, 0.0)
+            label = profiles[mid]["title"] if profiles and mid in profiles else mode["label"]
+            shifts.append({"label": label, "color_idx": color,
+                           "recent": recent, "library": saved, "delta": recent - saved})
+    shifts.sort(key=lambda r: -abs(r["delta"]))
+    return {"genres": [{"name": name, "share": share} for name, share in
+                       sorted(bd["families"].items(), key=lambda x: -x[1])],
+            "breadth_word": _breadth_word(bd["breadth"]),
+            "recent": {"shifts": shifts[:3], "n": n, "styles_current": bool(current_modes),
+                       "has_styles": bool(modes), "evidence": layers.evidence_coverage(store, now)["session"],
+                       "min_events": int(rec_params.get_param(store, "now_min_events"))}}
 
 
 def _attach_graduation(rows, prefix, theme, thr):
@@ -102,11 +174,15 @@ def mode_layers(store, now) -> dict:
     and SESSION are confidence-gated (`now_min_events` distinct played keys with a known sound);
     below the gate they report nothing rather than a weak guess, and `segments` is empty.
     """
-    now_shares, now_n, modes = layers.now_mode_mix(store, now)
+    now_shares, now_n, current_modes = layers.now_mode_mix(store, now)
     session_shares, session_n, _ = layers.session_mode_mix(store, now)
     evidence = layers.evidence_coverage(store, now)
+    # The saved grouping remains meaningful when enrichment changes the content space. Do not
+    # classify new plays against stale centroids, but keep that last library portrait visible.
+    modes = store.modes.list_modes(active_only=True)
     return {
         "modes": modes,
+        "styles_current": bool(current_modes),
         "now": {"segments": _ribbon_segments(now_shares, modes), "n": now_n,
                 "window_h": rec_params.get_param(store, "now_window_h")},
         "session": {"segments": _ribbon_segments(session_shares, modes), "n": session_n,
@@ -160,13 +236,85 @@ def _sources(store, now):
     }
 
 
+def learning_progress(store, now) -> dict:
+    """Learning readings from saved evidence, without vectors or style classification.
+
+    Keep every ledger entry available for searching. Progress measures the next threshold
+    crossing, not a taste score or a share of listening. The ledger itself does not decay.
+    """
+    threshold = rec_params.get_param(store, "theme_threshold")
+    groups = {axis: {"axis": axis, "title": title, "rows": []} for axis, title in
+              (("artist", "Artists"), ("genre", "Genres"), ("era", "Eras"))}
+    for entry in store.theme_rows():
+        axis, separator, name = entry["facet"].partition(":")
+        if not separator:
+            axis, name = "other", entry["facet"]
+        if axis not in groups:
+            groups[axis] = {"axis": axis, "title": "Recommendation categories" if axis == "lane"
+                            else "Other preferences", "rows": []}
+        if axis == "genre":
+            name = name.removeprefix("other:")
+        elif axis == "era" and name.isdigit():
+            name += "s"
+        score = entry["score"]
+        groups[axis]["rows"].append({
+            "facet": entry["facet"], "name": name,
+            "percent": min(100, int(abs(score) / threshold * 100)),
+            "direction": "boost" if score > 0 else "reduction" if score < 0 else "neutral",
+            "score": score, "updated_at": entry["updated_at"],
+        })
+    for group in groups.values():
+        group["rows"].sort(key=lambda row: (-row["updated_at"],
+                                            row["name"].casefold(), row["facet"]))
+
+    sources = _sources(store, now)
+    activity = []
+    for key, title, count in (("play", "Plays", sources["plays"]),
+                              ("like", "Likes", sources["likes"]),
+                              ("mood", "Mood choices", sources["mood_pos"] + sources["mood_neg"]),
+                              ("dislike", "Dislikes", sources["dislikes"]),
+                              ("skip", "Skips", sources["skips"])):
+        half = sources["halflife_days"][key]
+        points = [(i * 200 / 56, 64 - 60 * transient.decay_weight(i * .5 * 86400, half))
+                  for i in range(57)]
+        curve = "M " + " L ".join(f"{x:.2f} {y:.2f}" for x, y in points)
+        activity.append({"key": key, "title": title, "count": count, "half_days": half,
+                         "curve": curve, "fill": curve + " L 200 64 L 0 64 Z"})
+    choices = store.modes.choice_learning_rows()
+    weight_sources = source_weights(store, now)
+    weight_sources["lanes"].sort(key=lambda row: (row["updated_at"] is None,
+                                                -(row["updated_at"] or 0), row["label"]))
+    weight_sources["maximum"] = rec_params.LANE_MAX
+    changes = []
+    source_labels = {"play": "Listening", "like": "Likes", "dislike": "Dislikes",
+                     "mood": "Mood feedback", "vibe": "Mood feedback",
+                     "feedback": "Recommendation feedback", "slider": "Held adjustments"}
+    for entry in store.recent_graduations(limit=50):
+        axis, _, name = entry["axis"].partition(":")
+        if axis == "genre":
+            name = name.removeprefix("other:")
+        elif axis == "era" and name.isdigit():
+            name += "s"
+        changes.append({"id": entry["id"], "name": name or entry["axis"], "axis": axis,
+                        "direction": "boost" if entry["factor"] > 1 else "reduction" if entry["factor"] < 1 else "neutral",
+                        "factor": entry["factor"], "new_weight": entry["new_weight"],
+                        "source": source_labels.get(entry["source"], "Other feedback"),
+                        "updated_at": entry["created_at"]})
+    return {"groups": list(groups.values()), "activity": activity,
+            "choices": {"rows": choices, "total": len(choices),
+                        "offered": sum(row["offered"] for row in choices),
+                        "picked": sum(row["picked"] for row in choices)},
+            "source_weights": weight_sources, "changes": changes,
+            "latest_age_h": sources["latest_age_h"]}
+
+
 def model_transparency(store, now) -> dict:
     """The cheap transparency payload: the per-facet multiplier chain on each axis (genre family /
     era decade / artist), the modes axis at all three timescales it exists on, lanes, breadth,
     sources, and the graduation funnel. Expensive panels (embedding/recall, playlist contexts,
-    centroid tilt) are separate (engine_panel / centroid_tilt_panel), htmx-lazy on the page."""
-    mix_tuning.expire(store, now)
-    weights = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
+    centroid tilt) are separate (playlist_influence_panel / centroid_tilt_panel), htmx-lazy on the page."""
+    sources = source_weights(store, now)
+    weights = store.get_weights(now=now, revert_halflife_d=sources["lane_weight_halflife_days"])
     standing = store.get_leans()
     leans = transient.facet_leans(store, now)
     theme = {r["facet"]: r["score"] for r in store.theme_rows()}
@@ -189,8 +337,7 @@ def model_transparency(store, now) -> dict:
     return {
         "genres": genres, "eras": eras, "artists": artists,
         "modes": mode_layers(store, now),
-        "lanes": [{"name": n, "label": lbl, "help": h, "weight": weights.get(f"lane:{n}", 1.0)}
-                  for n, lbl, h in rec_params.LANES],
+        **sources,
         "breadth": bd["breadth"], "n_families": bd["n_families"],
         "breadth_word": _breadth_word(bd["breadth"]),
         # #85: no "freshness" key any more - the old sync-staleness relax of the whole transient read
@@ -215,31 +362,64 @@ def model_transparency(store, now) -> dict:
     }
 
 
-def _dominant_family(store, pid) -> str:
-    """The genre family a playlist leans on most - a concrete handle on its 'sound' for the viz."""
-    from collections import Counter
-    fams = Counter(genre_map.family(g) for g in store.playlist_track_genres(pid) if g)
-    return fams.most_common(1)[0][0] if fams else ""
-
-
-def engine_panel(store, top=12) -> dict:
-    """The permanent embedding 'engine' - vectors/baskets/dim/method, recall@k, and the per-playlist
-    taste contexts: which playlists the recommender blends to model your taste, each weighted by how
-    much you listen to it, tagged with its dominant genre so the blend is legible."""
-    contexts, total_contexts = [], 0
-    pt = recommend.playlist_taste(store)
-    if pt:
-        order = list(np.argsort(-pt.weights))
-        total_contexts = len(order)
-        for i in order[:top]:
-            pid = pt.pids[i] if i < len(pt.pids) else None
-            contexts.append({"title": pt.titles[i], "weight": float(pt.weights[i]),
-                             "genre": _dominant_family(store, pid) if pid is not None else ""})
-    return {"vectors": store.rec_vectors_count(), "baskets": len(store.rec_baskets()),
+def engine_panel(store) -> dict:
+    """The track similarity model's technical setup, without loading vectors or taste contexts."""
+    return {"vectors": store.rec_vectors_count(),
             "dim": int(store.get_setting("rec_dim") or embed.DIM),
-            "method": store.get_setting("rec_embed_method") or "auto",
-            "recall": eval_recs.recall_at_k(store), "contexts": contexts,
-            "contexts_total": total_contexts}
+            "method": store.get_setting("rec_embed_method") or "auto"}
+
+
+def playlist_influence_panel(store, top=8) -> dict:
+    """Actual taste-model shares, their listening evidence, and the undisplayed remainder.
+
+    Keep the denominator across ALL contexts: a shortened ranking must still describe the whole
+    blend. Zero-weight playlists don't contribute, and the behavior-only fallback isn't a playlist.
+    """
+    from collections import Counter
+
+    def share_label(weight):
+        return "<0.1%" if 0 < weight < .001 else f"{weight * 100:.1f}".removesuffix(".0") + "%"
+
+    panel = {"contexts": [], "segments": [], "contexts_total": 0, "active_total": 0,
+             "playlist_total": 0, "unplayed_total": 0, "basis": "equal", "top_count": 0,
+             "top_share": "0%", "other": None}
+    pt = recommend.playlist_taste(store)
+    if not pt:
+        return panel
+    pids = [pt.pids[i] if i < len(pt.pids) else None for i in range(len(pt.titles))]
+    stats = store.get_playlist_listen_stats()
+    order = sorted((i for i, weight in enumerate(pt.weights) if weight > 0),
+                   key=lambda i: (-float(pt.weights[i]), pt.titles[i].casefold()))
+    playlist_total = sum(pids[i] is not None for i in order)
+    basis = ("listening" if not playlist_total else
+             "plays" if any(stats.get(pid, (None, 0))[1] for pid in pids) else "equal")
+    panel.update(contexts_total=len(pt.titles), active_total=len(order), playlist_total=playlist_total,
+                 unplayed_total=len(pt.titles) - len(order), basis=basis,
+                 top_count=min(3, len(order)), top_share=share_label(sum(float(pt.weights[i]) for i in order[:3])))
+    offset = 0.0
+    for i in order[:top]:
+        pid, weight = pids[i], float(pt.weights[i])
+        families = (Counter(genre_map.family(g) for g in store.playlist_track_genres(pid) if g)
+                    if pid is not None else Counter())
+        genres = [name for name, _ in sorted(families.items(), key=lambda row: (-row[1], row[0]))[:2]]
+        context = {"pid": pid, "title": pt.titles[i], "weight": weight,
+                   "percent": weight * 100, "percent_label": share_label(weight), "offset": offset,
+                   "genre": genres[0] if genres else "", "genres": genres,
+                   "listens": stats.get(pid, (None, 0))[1] if pid is not None else None,
+                   "is_other": False}
+        panel["contexts"].append(context)
+        offset += weight * 100
+    panel["segments"] = list(panel["contexts"])
+    remaining = order[top:]
+    if remaining:
+        weight = sum(float(pt.weights[i]) for i in remaining)
+        title = "Other playlist" if len(remaining) == 1 else f"Other {len(remaining)} playlists"
+        panel["other"] = {"title": title, "weight": weight,
+                          "percent": weight * 100, "percent_label": share_label(weight), "offset": offset,
+                          "listens": sum(stats.get(pids[i], (None, 0))[1] for i in remaining),
+                          "is_other": True, "pid": None, "genres": []}
+        panel["segments"].append(panel["other"])
+    return panel
 
 
 def _family_centroids(store, keys, V, idx) -> dict:

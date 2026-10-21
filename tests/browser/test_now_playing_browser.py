@@ -55,3 +55,36 @@ def test_now_playing_without_context_has_no_source_link(live_app, page):
     page.goto(f"{live_app}/playlists")
     expect(page.locator(".global-now-playing")).to_be_visible()
     expect(page.locator(".hs-source")).to_have_count(0)
+
+
+@pytest.mark.parametrize("failure", ["disconnected", "network", "invalid_response"])
+def test_failed_playback_does_not_open_an_uncontrolled_music_tab(live_app, store, page, failure):
+    requests = []
+    recovered = False
+
+    def play(route):
+        requests.append(route.request.post_data_json)
+        if recovered:
+            route.fulfill(json={"ok": True})
+        elif failure == "network":
+            route.abort()
+        elif failure == "invalid_response":
+            route.fulfill(status=503, content_type="text/plain", body="Unavailable")
+        else:
+            route.fulfill(json={"ok": False, "error": "no extension connected"})
+
+    page.route("**/play", play)
+    playlist = store.get_playlists()[0]
+    page.goto(f"{live_app}/playlist/{playlist.id}")
+    control = page.get_by_role("link", name="Play on YouTube Music")
+    control.click()
+    error = page.locator("#playback-error")
+    expect(error).to_contain_text("Couldn’t start playback")
+    assert len(page.context.pages) == 1
+    assert requests == [{"url": f"https://music.youtube.com/playlist?list={playlist.ytm_playlist_id}"}]
+    # The existing play control works on retry and clears the error once the bridge recovers.
+    recovered = True
+    control.click()
+    expect(error).to_have_count(0)
+    assert len(requests) == 2
+    assert len(page.context.pages) == 1

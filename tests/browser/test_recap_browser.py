@@ -16,6 +16,11 @@ from tests.test_trends_recap_route import _client, _STORY, _detailed_story
 def _serve_recap(port, data_dir):
     os.environ["YT_PLAYLIST_EXIT_ON_IDLE"] = "1"
     os.environ["YT_PLAYLIST_HOME"] = data_dir
+    # Exercise the production monitor without waiting two minutes for startup protection.
+    # Unit tests cover the default deadlines with a controlled clock.
+    from yt_playlist.web import app as web_app
+    web_app._UI_STARTUP_GRACE_S = 1
+    web_app._UI_CLOSE_GRACE_S = 5
     client, _ = _client(_STORY)
     uvicorn.run(client.app, host="127.0.0.1", port=port, log_level="warning")
 
@@ -53,11 +58,10 @@ def test_recap_keeps_packaged_server_alive_through_download_and_exit(packaged_re
     page.goto(base + "/")
     page.get_by_role("tab", name="Needs attention", exact=True).click()
     expect(page.locator("#recap-nudge")).to_be_visible()
-    # Leaving Home sends /goodbye. The standalone reel must cancel it immediately and continue
-    # heartbeating, or the production monitor kills the server after its 2.5-second grace period.
-    with page.expect_response(lambda r: r.url == base + "/heartbeat" and r.status == 204):
+    # The standalone reel registers its own document lease while Home's lease expires.
+    with page.expect_response(lambda r: r.url.startswith(base + "/heartbeat?") and r.status == 204):
         page.locator('#recap-nudge a[href="/trends/story/2026-06"]').click()
-    page.wait_for_timeout(3500)  # pass the real monitor's shutdown grace while the reel is open
+    page.wait_for_timeout(6500)  # pass the fixture's close grace while the reel is open
     assert process.is_alive()
     page.get_by_role("button", name=f"Beat {len(_STORY['beats'])}", exact=True).click()
     save = page.get_by_role("button", name="Save image", exact=True)
@@ -70,7 +74,7 @@ def test_recap_keeps_packaged_server_alive_through_download_and_exit(packaged_re
     download.save_as(image)
     assert image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert page.url == base + "/trends/story/2026-06"
-    with page.expect_response(lambda r: r.url == base + "/heartbeat" and r.status == 204):
+    with page.expect_response(lambda r: r.url.startswith(base + "/heartbeat?") and r.status == 204):
         page.get_by_role("link", name="Close", exact=True).click()
     assert page.url == base + "/"
     expect(page.locator("#recap-nudge")).to_have_count(0)
@@ -78,6 +82,23 @@ def test_recap_keeps_packaged_server_alive_through_download_and_exit(packaged_re
     assert errors == []
     # Retain normal packaged behavior: closing the actual UI tab should still stop the server.
     page.close()
+    process.join(timeout=8)
+    assert not process.is_alive()
+
+
+def test_closing_one_ui_tab_preserves_the_other(packaged_recap, page):
+    base, process = packaged_recap
+    page.goto(base + "/")
+    other = page.context.new_page()
+    other.goto(base + "/")
+    page.close()
+    try:
+        other.wait_for_timeout(6500)
+        assert process.is_alive()
+        other.reload()
+        assert other.locator("main").is_visible()
+    finally:
+        other.close()
     process.join(timeout=8)
     assert not process.is_alive()
 

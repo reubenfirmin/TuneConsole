@@ -104,6 +104,10 @@ def facet_leans(store, now) -> dict:
     the wall clock (per-source half-life params); a month-old vibe tap is nearly gone even if the
     user never interacted again."""
     gp = rec_params.get_param
+    # TODO: consider replacing the legacy 0–2 play/like strengths with a consistent scale.
+    # This is an arbitrary tuning range: 0 disables the extra signal; 1 is not neutral.
+    # Defaults are 0.30 (plays) / 0.45 (likes). Taste Model displays 0–100% of the range;
+    # keep stored values and scoring unchanged unless a future cleanup migrates them together.
     play_w, like_w, dislike_w = (gp(store, "play_transient_w"), gp(store, "like_transient_w"),
                                  gp(store, "dislike_transient_w"))
     play_hl, mood_hl = gp(store, "play_halflife_d"), gp(store, "mood_halflife_d")

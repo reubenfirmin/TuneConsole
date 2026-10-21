@@ -1,0 +1,111 @@
+{% set refreshing_groups = mode_refreshing and (not viz.recent.has_styles or not viz.recent.styles_current) %}
+<div class="taste-overview-cards"{% if refreshing_groups %}
+     hx-get="/taste/panels/overview" hx-trigger="every 3s"
+     hx-target="closest .taste-panel-content" hx-swap="innerHTML settle:0ms"{% endif %}>
+  <section class="card card--data taste-summary">
+    <header class="taste-summary-head">
+      <div><h2>Your long-term taste</h2></div>
+      {% if viz.genres %}<span class="taste-summary-reading">{{ viz.breadth_word|capitalize }} <small>genre variety</small></span>{% endif %}
+    </header>
+    <p class="section-note">The genres at the heart of your library. Each tagged track counts once, plus its recorded plays, so favorites carry more weight.</p>
+    {% if viz.genres %}
+    <div class="taste-genre-bars" aria-label="Listening-weighted genre shares">
+      {% for g in viz.genres[:5] %}
+      <div class="taste-genre-bar" style="--petal-c:{{ ROSE_PALETTE[loop.index0 % ROSE_PALETTE|length] }}">
+        <span>{{ g.name }}</span><span class="taste-share-track"><i style="width:{{ '%.2f'|format(g.share*100) }}%"></i></span><strong>{{ '%.1f'|format(g.share*100) }}%</strong>
+      </div>
+      {% endfor %}
+      {% set other = 1 - (viz.genres[:5]|sum(attribute='share')) %}
+      {% if other > 0.0001 %}
+      <div class="taste-genre-bar taste-other"><span>Other genres</span><span class="taste-share-track"><i style="width:{{ '%.2f'|format(other*100) }}%"></i></span><strong>{{ '%.1f'|format(other*100) }}%</strong></div>
+      {% endif %}
+    </div>
+    {% else %}<p class="taste-quiet">Your genre portrait appears once tagged tracks have listening history.</p>{% endif %}
+    <a class="taste-detail-link" href="#profile" @click="select('profile')">Explore taste profile {{ arrow_icon('right') }}</a>
+  </section>
+
+  <section class="card card--data taste-summary">
+    <header class="taste-summary-head"><div><h2>What’s changed recently?</h2></div></header>
+    <p class="section-note">The biggest shifts in the last 24 hours from your library’s usual balance. Tracks are grouped by genre, era, and sound; fresher plays count more.</p>
+    {% if viz.recent.shifts %}
+    <div class="taste-shifts" role="table" aria-label="Recent listening compared with library music groups">
+      <div class="taste-shift-head" role="row"><span role="columnheader">Music group</span><span aria-hidden="true"></span><span role="columnheader">Library</span><span role="columnheader">Last 24h</span></div>
+      {% for r in viz.recent.shifts %}
+      <div class="taste-shift-row" role="row" style="--petal-c:{{ ROSE_PALETTE[r.color_idx % ROSE_PALETTE|length] }}">
+        <strong role="rowheader">{{ r.label }}</strong>
+        <span class="taste-shift-plot" aria-hidden="true">
+          <i class="taste-shift-line" style="left:{{ [r.library, r.recent]|min * 100 }}%;width:{{ r.delta|abs * 100 }}%"></i>
+          <i class="taste-shift-library" style="left:{{ r.library * 100 }}%"></i><i class="taste-shift-recent" style="left:{{ r.recent * 100 }}%"></i>
+        </span>
+        <span class="taste-shift-value" role="cell"><small>Library </small>{{ '%.0f'|format(r.library*100) }}%</span>
+        <span class="taste-shift-value" role="cell"><small>Last 24h </small>{{ '%.0f'|format(r.recent*100) }}%</span>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="taste-shift-key"><i class="taste-shift-library" aria-hidden="true"></i> Share of grouped library <i class="taste-shift-recent" aria-hidden="true"></i> Share of recent listening</p>
+    {% elif refreshing_groups %}
+    <p class="taste-ribbon-empty" role="status">Updating your music groups automatically. This comparison will appear when they’re ready.</p>
+    {% elif viz.recent.has_styles and not viz.recent.styles_current %}
+    <p class="taste-ribbon-empty">Recent plays can’t be compared yet: the music groups need to be updated for the current model.</p>
+    {% elif not viz.recent.has_styles %}
+    <p class="taste-ribbon-empty">This comparison appears once your library has been grouped by genre, era, and sound.</p>
+    {% else %}
+    <p class="taste-ribbon-empty">{{ viz.recent.evidence.mapped }} matched tracks in the last 24 hours. At least {{ viz.recent.min_events }} are needed to show a shift.</p>
+    {% endif %}
+    <a class="taste-detail-link" href="#profile" @click="select('profile')">Compare all music groups {{ arrow_icon('right') }}</a>
+  </section>
+
+  <section class="card card--data taste-summary taste-choice-summary">
+    <header class="taste-summary-head">
+      <div><h2>Your mix preferences</h2></div>
+    </header>
+    <p class="section-note">When you play the mix, your choice trains the model to bring back more music from that group. Groups combine genre, era, and sound.</p>
+    <dl class="taste-choice-stats" aria-label="Mix choices for current music groups">
+      <div><dt>Mixes offered</dt><dd>{{ '{:,}'.format(generation.choices.offered) }}</dd></div>
+      <div><dt>Mix selections</dt><dd>{{ '{:,}'.format(generation.choices.picked) }}</dd></div>
+      <div><dt>Music groups chosen</dt><dd>{{ generation.choices.rows|selectattr('picked')|list|length }}</dd></div>
+    </dl>
+    {% set contrast = generation.choices.contrast %}
+    {% if contrast %}
+    <div class="taste-choice-contrast">
+      <div class="taste-choice-side taste-choice-favored">
+        <h3>Your choices favor</h3>
+        <ul class="taste-choice-themes">
+          {% for r in contrast.favored %}
+          <li style="--petal-c:{{ ROSE_PALETTE[r.color_idx % ROSE_PALETTE|length] }}">
+            <strong>{{ r.profile.title }}</strong><small class="taste-choice-composition">{% for g in r.profile.genres[:2] %}{{ g.name }} {{ '%.0f'|format(g.share*100) }}%{{ ' · ' if not loop.last }}{% endfor %}</small><span>{{ r.picked }} selection{{ '' if r.picked == 1 else 's' }} · {{ r.offered }} offer{{ '' if r.offered == 1 else 's' }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      <div class="taste-choice-side taste-choice-less">
+        <h3>Over</h3>
+        <ul class="taste-choice-themes">
+          {% for r in contrast.less_supported %}
+          <li style="--petal-c:{{ ROSE_PALETTE[r.color_idx % ROSE_PALETTE|length] }}">
+            <strong>{{ r.profile.title }}</strong><small class="taste-choice-composition">{% for g in r.profile.genres[:2] %}{{ g.name }} {{ '%.0f'|format(g.share*100) }}%{{ ' · ' if not loop.last }}{% endfor %}</small><span>{{ r.picked }} selection{{ '' if r.picked == 1 else 's' }} · {{ r.offered }} offer{{ '' if r.offered == 1 else 's' }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+    <p class="taste-choice-effect">Your choices nudge future menus toward <strong>{{ contrast.favored[0].profile.title }}</strong> over <strong>{{ contrast.less_supported[0].profile.title }}</strong>. Your library, recent listening, and variety also shape the mixes.</p>
+    {% elif generation.choices.strongest %}
+    <div class="taste-choice-pending">
+      <h3>You’ve been choosing</h3>
+      <ul class="taste-choice-themes">
+        {% for r in generation.choices.strongest %}
+        <li style="--petal-c:{{ ROSE_PALETTE[r.color_idx % ROSE_PALETTE|length] }}">
+          <strong>{{ r.profile.title }}</strong><small class="taste-choice-composition">{% for g in r.profile.genres[:2] %}{{ g.name }} {{ '%.0f'|format(g.share*100) }}%{{ ' · ' if not loop.last }}{% endfor %}</small><span>{{ r.picked }} selection{{ '' if r.picked == 1 else 's' }} · {{ r.offered }} offer{{ '' if r.offered == 1 else 's' }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      <p class="taste-choice-effect">Still learning which groups to bring back more often. There isn’t a clear preference to compare yet.</p>
+    </div>
+    {% else %}
+    <p class="taste-quiet">No mix selections to learn from yet. Play a mix on Home to start shaping which music groups come back.</p>
+    {% endif %}
+    <a class="taste-detail-link" href="#generated" @click="select('generated')">See all choices &amp; how they’re used {{ arrow_icon('right') }}</a>
+  </section>
+</div>
+<a class="taste-status-line" href="#health" @click="select('health')"><span class="taste-status-dot{% if vectors %} ready{% endif %}" aria-hidden="true"></span>{% if vectors %}Model ready · {{ vectors }} modeled tracks{% else %}Model not built yet{% endif %} · {{ '%.0f'|format(coverage*100) }}% genre coverage {{ arrow_icon('right') }}</a>

@@ -73,18 +73,22 @@ def test_tokens_css_is_the_only_stylesheet_with_literals():
 
 def test_every_referenced_token_is_defined():
     """A var(--x) with no definition renders as nothing — catch typos before a blank UI does."""
-    defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", TOKENS.read_text()))
+    # Components can declare local properties using the shared role tokens.
+    styles = "\n".join(p.read_text() for p in (WEB / "static").glob("*.css"))
+    defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", styles))
     # set from JS or inline style at runtime, so they have no static definition
     runtime = {
         "--topbar-h", "--p", "--card", "--dot", "--heat", "--subj", "--petal-c",
-            "--node-hue", "--node-sat", "--node-light", "--bg-grad", "--v", "--tile",
-            "--mix-order", "--mix-x", "--mix-y", "--genre-tint",
+        "--node-hue", "--node-sat", "--node-light", "--bg-grad", "--v", "--tile",
+        "--mix-order", "--mix-x", "--mix-y", "--genre-tint",
+        "--part-opacity", "--playlist-c", "--share",
     }
     missing = {}
     for p in _source_files():
         if p.suffix not in {".css", ".html", ".js"}:
             continue
-        for tok in re.findall(r"var\((--[a-z0-9-]+)", p.read_text(errors="ignore")):
+        # Match complete names; Jinja constructs such as --rose-{{ index }} are dynamic.
+        for tok in re.findall(r"var\((--[a-z0-9-]+)\s*[,)]", p.read_text(errors="ignore")):
             if tok not in defined and tok not in runtime:
                 missing.setdefault(tok, set()).add(p.name)
     assert not missing, f"undefined tokens referenced: { {k: sorted(v) for k, v in missing.items()} }"
@@ -265,7 +269,7 @@ def test_shared_spacing_scale_and_layout_primitives_are_used():
     app = (WEB / "static" / "app.css").read_text()
     templates = "\n".join(
         (WEB / "templates" / name).read_text()
-        for name in ("albums.html", "charts.html", "cleanup.html", "move.html",
+        for name in ("albums.html", "charts.html", "cleanup.html", "move.html", "_partials/move_panel.html",
                      "network.html", "playlists.html")
     )
     for role in ("--sp-1", "--sp-2", "--sp-3", "--sp-4", "--sp-5", "--sp-6", "--sp-7"):

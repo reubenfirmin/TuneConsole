@@ -107,3 +107,66 @@ def test_processed_timeline_is_cumulative(store):
     tl = store.processed_timeline(buckets=3)
     assert tl[-1]["n"] == 3                            # cumulative reaches total
     assert [p["n"] for p in tl] == sorted(p["n"] for p in tl)  # monotonic
+
+
+def test_one_priority_order_applies_to_both_sources_before_limit_and_offset(store):
+    from yt_playlist.util.matching import identity_key
+
+    store.set_setting("enrich_caught_up_at", "100")
+    _track(store, "lib-new", "Newest library", "A", created_at=400.0)
+    _track(store, "lib-old", "Old library", "B", created_at=1.0)
+    store.upsert_discovered_track("new|c", "disc-new", "New discovery", "C", None, None,
+                                  None, None, "radio:s", 300.0)
+    played_key = identity_key("Played discovery", "D")
+    store.upsert_discovered_track(played_key, "disc-played", "Played discovery", "D", None, None,
+                                  None, None, "radio:s", 1.0)
+    _play(store, played_key, 5)
+    assert _names(store.next_enrich_batch(10)) == [
+        "Newest library", "New discovery", "Played discovery", "Old library"]
+    assert _names(store.next_enrich_batch(2, 1)) == ["New discovery", "Played discovery"]
+    assert store.queue_remaining() == 4
+
+
+def test_discovery_uses_artist_engagement_in_shared_priority(store):
+    from yt_playlist.util.matching import identity_key
+
+    store.set_setting("enrich_caught_up_at", "100")
+    played = _track(store, "played", "Played", "Artist", created_at=1.0)
+    _play(store, identity_key("Played", "Artist"), 5)
+    store.mark_enriched([played], 10.0)
+    _track(store, "orphan", "Library orphan", "Other", created_at=2.0)
+    store.upsert_discovered_track("new|artist", "new", "Artist discovery", "Artist", None, None,
+                                  None, None, "radio:s", 1.0)
+    assert _names(store.next_enrich_batch(10)) == ["Artist discovery", "Library orphan"]
+
+
+def test_combined_coverage_processed_list_activity_and_timeline(store):
+    library = _track(store, "lib", "Library", "A", created_at=1.0)
+    store.mark_enriched([library], 10.0)
+    store.upsert_discovered_track("new|b", "new", "Discovery", "B", None, None,
+                                  "techno", "2024", "radio:s", 1.0)
+    store.set_discovered_audio("new|b", bpm=128.0)
+    assert store.queue_remaining() == 1
+    assert store.coverage_stats(include_discovery=True) == {
+        "total": 2, "processed": 1, "genre": 1, "year": 1, "bpm": 1, "energy": 0, "danceability": 0}
+    store.mark_discovered_enriched(["new|b"], 20.0)
+    assert store.queue_remaining() == 0
+    assert [track["title"] for track in store.enriched_tracks()] == ["Discovery", "Library"]
+    assert store.enrichment_activity_stats(1000.0) == {"latest": 20.0, "recent": 0}
+    assert store.enrichment_activity_stats(100.0) == {"latest": 20.0, "recent": 2}
+    assert store.processed_timeline()[-1]["n"] == 2
+    # Onboarding's existing library-coverage query must not change with the discovery pool.
+    assert store.coverage_stats()["total"] == 1
+
+
+def test_resweep_selects_both_sources_by_oldest_check(store):
+    library = _track(store, "lib", "Library", "A")
+    store.mark_enriched([library], 20.0)
+    for title, timestamp in (("Stale", 10.0), ("Fresh", 1000.0), ("Complete", 1.0)):
+        store.upsert_discovered_track(title, title, title, "B", None, None,
+                                      None, None, "radio:s", 1.0)
+        store.mark_discovered_enriched([title], timestamp)
+    store.set_discovered_enrichment("Complete", "techno", "2024")
+    store.set_discovered_audio("Complete", bpm=128.0, energy=.8, danceability=.7)
+    assert _names(store.resweep_batch(10, stale_before=500.0)) == ["Stale", "Library"]
+    assert store.resweep_batch(1, stale_before=500.0)[0]["identity_key"] == "Stale"

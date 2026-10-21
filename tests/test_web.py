@@ -74,6 +74,9 @@ def test_actions_route_renders(store):
     c = TestClient(app)
     r = c.get("/actions")
     assert r.status_code == 200
+    assert "<title>Action Log · TuneConsole</title>" in r.text
+    assert "<h1>Action Log</h1>" in r.text
+    assert "Audit Log" not in r.text
     assert "merge" in r.text.lower()
 
 
@@ -152,34 +155,36 @@ def test_setup_post_applies_and_redirects(store):
         "brand_account_id": ["", "UC9"],
         "master": "0",
     }, follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"].startswith("/")  # dashboard, with a flash
+    assert r.status_code == 303
+    location = urlsplit(r.headers["location"])
+    assert location.path == "/setup" and parse_qs(location.query)["tab"] == ["identities"]
     identities = rt.applied
     assert [i["label"] for i in identities] == ["main", "brand"]
     assert identities[0]["is_master"] and not identities[1]["is_master"]
     assert identities[1]["brand_account_id"] == "UC9"
 
 def _setup_redirect(store, rt):
-    """POST a valid single-identity setup and return (key, value) of the redirect's query param."""
-    from urllib.parse import urlsplit, parse_qsl
+    """POST a valid single-identity setup and return its redirect query."""
     app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/setup", data={"label": "main", "brand_account_id": "", "master": "0"},
                follow_redirects=False)
     assert r.status_code == 303
-    (key, value), = parse_qsl(urlsplit(r.headers["location"]).query)
-    return key, value
+    location = urlsplit(r.headers["location"])
+    assert location.path == "/setup"
+    return parse_qs(location.query)
 
 def test_setup_first_time_flashes_saved(store):
-    # Never synced -> the background sync will pull the library once paired, so just confirm the save
-    # with a persistent flash (no manual sync button to point at anymore).
-    key, value = _setup_redirect(store, _FakeRuntime(store, configured=False))
-    assert key == "flash" and "Saved" in value and "automatically" in value
+    query = _setup_redirect(store, _FakeRuntime(store, configured=False))
+    assert query["tab"] == ["identities"]
+    assert query["flash"] == ["Saved 1 identity."]
 
-def test_setup_reauth_shows_toast(store):
-    # Synced before -> nothing to do, the background sync catches up, so a transient toast (not a banner).
+def test_setup_existing_library_does_not_claim_reauthentication(store):
     store.set_setting("last_sync_at", "1.0")
-    key, value = _setup_redirect(store, _FakeRuntime(store, configured=True))
-    assert key == "toast" and "authenticated again" in value
+    query = _setup_redirect(store, _FakeRuntime(store, configured=True))
+    assert query["tab"] == ["identities"]
+    assert "toast" not in query
+    assert "authenticated" not in query["flash"][0]
 
 def test_setup_post_skips_blank_label_rows(store):
     rt = _FakeRuntime(store, configured=False)
@@ -212,14 +217,22 @@ def test_setup_post_without_collaborator_404(store):
 # --- network transparency page ---
 
 def test_network_page_renders_allowlist(store, tmp_path, monkeypatch):
+    from yt_playlist.egress import ALLOWED_DOMAINS
+
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))   # keep the lazy guard's log off the real FS
     rt = _FakeRuntime(store, configured=True, credentials_present=True)
     app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.get("/network")
     assert r.status_code == 200
-    for host in ("youtube.com", "musicbrainz.org", "discogs.com", "audioscrobbler.com"):
-        assert host in r.text
+    for host in ALLOWED_DOMAINS:
+        assert f'<span class="tag teal mono">{host}</span>' in r.text
+    for purpose in ("YouTube Music", "Track Metadata", "Artist and Genre Summaries",
+                    "Cover Art", "Update Checks"):
+        assert f'>{purpose}</h3>' in r.text
+    assert "GET https://api.github.com/repos/reubenfirmin/TuneConsole/releases/latest" in r.text
+    assert '<span class="tag teal mono">github.com</span>' not in r.text
+    assert "request bodies, and methods are blocked" in r.text
 
 def test_network_log_line_parser():
     from yt_playlist.web.routes.network import _parse
@@ -259,15 +272,16 @@ def test_tools_menu_only_shows_move_for_multiple_identities(store):
     assert '<a href="/move"' in c.get("/").text
 
 
-def test_audit_log_is_last_in_tools_menu(store):
+def test_action_log_is_last_in_tools_menu(store):
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     body = TestClient(app).get("/").text
     menu = body.split('class="tools-pop"', 1)[1].split("</div>", 1)[0]
 
-    assert '>Audit Log</a>' in menu
+    assert '>Action Log</a>' in menu
     assert menu.find('href="/setup"') < menu.find('href="/cleanup"')
-    assert menu.rfind('href="/genres"') > menu.rfind('href="/setup"')
-    assert menu.rfind('href="/network"') > menu.rfind('href="/genres"')
+    assert 'href="/genres"' not in menu
+    assert menu.rfind('href="/enrich"') > menu.rfind('href="/setup"')
+    assert menu.rfind('href="/network"') > menu.rfind('href="/enrich"')
     assert menu.rfind('href="/actions"') > menu.rfind('href="/network"')
 
 
@@ -519,6 +533,10 @@ def test_merge_apply_route(store, monkeypatch, tmp_path, return_to, label):
     if expected.query:
         assert query["sort"] == ["name"]
     assert client.deleted == ["PLB"] and store.get_playlist(b) is None
+    log = c.get("/actions").text
+    assert "merged into “A”, deleted “B”" in log
+    assert "merge_draft" not in log
+    assert "/undo/" in log
 
 
 def test_merge_apply_ignores_stale_ids_in_url(store, monkeypatch, tmp_path):
@@ -561,6 +579,9 @@ def test_merge_update_toggle_and_setall_persist(store):
     upd = f"/merge/update?ids={a},{b}"
     r = c.post(upd, data={"field": "toggle", "value": "v:v1"})
     assert r.status_code == 200 and "1 / 2" in r.text     # one excluded now
+    log = c.get("/actions").text
+    assert "merge_draft" not in log and "No actions yet." in log
+    assert store.get_draft(f"{a},{b}") is not None
     # the draft survives a "refresh" (re-GET), v1 still excluded
     assert "1 / 2" in c.get(f"/merge?ids={a},{b}").text
     assert "0 / 2" in c.post(upd, data={"field": "setall", "value": "0"}).text   # none
@@ -651,8 +672,10 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
-    types = [_json.loads(l[6:])["type"] for l in body.splitlines() if l.startswith("data: ")]
+    events = [_json.loads(l[6:]) for l in body.splitlines() if l.startswith("data: ")]
+    types = [e["type"] for e in events if e["type"] != "activity"]
     assert types == ["info", "track", "track", "track", "done", "end"]
+    assert [e["title"] for e in events if e.get("provider") == "musicbrainz"] == ["S0", "S1", "Sx"]
 
     detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.playlist_tracks_detail(a)}
     assert detail["v0"] == ("rock", "1998") and detail["v1"] == ("jazz", "2003")
@@ -737,19 +760,19 @@ def test_sync_prunes_when_library_is_real(store):
     assert sorted(p.title for p in store.get_playlists()) == ["New"]    # GONE pruned, New added
 
 
-def test_resignin_clears_banner_and_flashes(store):
+def test_saving_identity_definitions_does_not_clear_expired_session(store):
     rt = _FakeRuntime(store, configured=True)
-    store.set_setting("last_sync_at", "1.0")             # has synced before -> a genuine re-signin
+    iid = store.upsert_identity("main", "browser.json", None, True)
+    store.set_setting("last_sync_at", "1.0")
     app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
-    app.state.ctx.auth_expired["main"] = "Main"          # simulate an expired session (banner shown)
+    app.state.ctx.flag_auth_expired(iid, "Main")
     c = TestClient(app, base_url="http://127.0.0.1")
 
     r = c.post("/setup", data={"label": ["main"],
                                "brand_account_id": [""], "master": "0"}, follow_redirects=False)
     assert r.status_code == 303
-    # Synced before -> nothing to do (background sync catches up), so a transient toast back to Home.
-    assert r.headers["location"].startswith("/?toast=") and "authenticated%20again" in r.headers["location"]
-    assert app.state.ctx.auth_expired == {}                          # stale-session banner cleared
+    assert r.headers["location"].startswith("/setup?tab=identities&flash=")
+    assert app.state.ctx.auth_expired == {iid: "Main"}
 
 
 def test_jobs_find_active():
@@ -801,8 +824,10 @@ def test_discogs_fills_genre_and_year(store, monkeypatch):
     jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
-    types = [_json.loads(l[6:])["type"] for l in body.splitlines() if l.startswith("data: ")]
+    events = [_json.loads(l[6:]) for l in body.splitlines() if l.startswith("data: ")]
+    types = [e["type"] for e in events if e["type"] != "activity"]
     assert types == ["info", "track", "track", "done", "end"]
+    assert [e["title"] for e in events if e.get("provider") == "discogs"] == ["Born Slippy", "Unknown"]
     detail = {t["video_id"]: (t["genre"], t["year"]) for t in store.playlist_tracks_detail(a)}
     assert detail["v0"] == ("Techno", "1995")        # style->genre, earliest year
     assert detail["v1"] == ("", "")

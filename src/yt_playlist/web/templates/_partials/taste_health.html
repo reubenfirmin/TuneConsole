@@ -1,0 +1,18 @@
+<div class="taste-health">
+  <header class="model-health-intro">
+    <h2>How your model is doing</h2>
+    <p>See what your model learns from and how its predictions compare with your listening.</p>
+  </header>
+
+  {% include "_partials/model_status.html" %}
+
+  <section class="model-health-section model-health-tuning" aria-labelledby="model-tuning-title">
+    <div class="model-health-section-head">
+      <h2 id="model-tuning-title">Automatic model selection</h2>
+      <p>We test which setup best predicts the unplayed tracks in your library you’ll listen to later. Each picks 20 tracks using your earlier library and listening data.</p>
+    </div>
+    <div class="card model-health-tuning-card">
+      {% include "_partials/autotune_status.html" %}
+    </div>
+  </section>
+</div>

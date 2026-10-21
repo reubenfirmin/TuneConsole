@@ -1,34 +1,29 @@
+{% import "_partials/taste_track.html" as tracks %}
 {% if items %}
-<ol class="preview-list">
+<table class="taste-track-table taste-sample-table" aria-label="Sample suggestions">
+  <thead><tr><th scope="col">Song</th><th scope="col">Why this pick</th></tr></thead>
+  <tbody>
   {% for i in items %}
-  <li>
-    <span class="preview-lane">{{ lane_labels.get(i.lane, i.lane) or 'Pick' }}</span>
-    <span class="preview-song"><strong>{{ i.title }}</strong> · {{ i.artist }}</span>
-    <span class="preview-reason">{{ i.reason }}</span>
+  <tr>
+    <td class="taste-track-cell">{{ tracks.song(i) }}</td>
+    <td class="taste-track-why">
+    {{ tracks.source(i.lane, lane_labels) }}
+    <p class="taste-track-reason">{{ i.reason }}</p>
     {% if i.trace %}
-    <details class="score-trace">
-      <summary>Why this rank · {{ '%.3f'|format(i.trace.final) }}</summary>
-      <div class="trace-grid">
-        <span>Saved taste match</span><strong>{{ '%+.3f'|format(i.trace.durable) }}</strong>
-        <span>Recent listening adjustment</span><strong>{{ '%+.3f'|format(i.trace.transient_delta) }}</strong>
-        <span>Session adjustment</span><strong>{{ '%+.3f'|format(i.trace.session_delta) }}</strong>
-        <span>Sound adjustment{% if i.trace.metadata_present and not i.trace.metadata_present.audio %} · no audio data, unchanged{% endif %}</span><strong>{{ '%+.3f'|format(i.trace.audio_delta) }}</strong>
-        <span>Combined similarity score</span><strong>{{ '%+.3f'|format(i.trace.combined) }}</strong>
-        <span>Base score after ranking</span><strong>{{ '%.3f'|format(i.trace.rank_base) }}</strong>
-        {% for axis, value in i.trace.axes.items() %}
-        <span>{{ axis|capitalize }} multiplier{% if i.trace.axis_labels.get(axis) %} · {{ i.trace.axis_labels.get(axis) }}{% elif i.trace.metadata_present and axis in i.trace.metadata_present and not i.trace.metadata_present.get(axis) %} · unavailable, neutral{% endif %}</span><strong>×{{ '%.3f'|format(value) }}</strong>
-        {% endfor %}
-        <span>Combined preference multiplier{% if i.trace.axis_product > i.trace.axis_cap %} · limited from ×{{ '%.3f'|format(i.trace.axis_product) }}{% endif %}</span><strong>×{{ '%.3f'|format(i.trace.axis_applied) }}</strong>
-        <span>Final score</span><strong>{{ '%.3f'|format(i.trace.final) }}</strong>
-      </div>
-      {% if i.trace.contexts %}<p class="trace-contexts"><span class="muted">Most influential saved playlists:</span>
-        {% for c in i.trace.contexts %}{{ c.name }} {{ '%+.3f'|format(c.contribution) }}{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
-      <p class="muted trace-note">Current listening chooses the leading listening-style card; it does not change this track's score.</p>
-    </details>
+    <p class="preview-explanation">
+      {% if i.trace.contexts %}Matches music in {% for c in i.trace.contexts %}{{ c.name }}{% if not loop.last %}, {% else %}.{% endif %}{% endfor %}
+      {% else %}Selected using your saved taste and listening preferences.{% endif %}
+      {% if i.trace.transient_delta > 0 %}Your recent listening favors it.{% elif i.trace.transient_delta < 0 %}Your recent listening makes it a weaker match.{% endif %}
+      {% if i.trace.session_delta > 0 %}It also fits this listening session.{% elif i.trace.session_delta < 0 %}This session makes it a weaker match.{% endif %}
+      {% if i.trace.audio_delta > 0 %}Its tempo, energy, or mood fits your recent listening.{% endif %}
+      {% for axis, value in i.trace.axes.items() %}{% if value > 1.01 %}Your {{ axis }} preference favors it{% if i.trace.axis_labels.get(axis) %} ({{ i.trace.axis_labels.get(axis) }}){% endif %}.{% elif value < 0.99 %}Your {{ axis }} preference gives it less priority{% if i.trace.axis_labels.get(axis) %} ({{ i.trace.axis_labels.get(axis) }}){% endif %}.{% endif %}{% endfor %}
+    </p>
     {% endif %}
-  </li>
+    </td>
+  </tr>
   {% endfor %}
-</ol>
+  </tbody>
+</table>
 {% else %}
-<p class="section-note">No recommendations match these settings yet. Build the model or reduce your filters.</p>
+<p class="section-note">No sample suggestions are available. If you have just started, sync your library and let the model finish building. If this followed a settings change, reset the control you changed or use <strong>Restore starting point</strong>.</p>
 {% endif %}

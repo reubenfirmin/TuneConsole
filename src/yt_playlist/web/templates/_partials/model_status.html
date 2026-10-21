@@ -1,10 +1,41 @@
-{# Model status stat-grid. Re-fetches itself when Auto-tune finishes (autotune-done event on body),
-   so the vector count / dim and the lazy recall@20 cell reflect the freshly tuned model. #}
-<div class="card card--data stat-grid" id="model-status"
+{# Re-fetch the data summary and lazy prediction checks when Auto-tune finishes. #}
+<div id="model-status"
      hx-get="/taste/model-status" hx-trigger="autotune-done from:body" hx-swap="outerHTML">
-  <div><strong>{{ vectors }}</strong><span>tracks modeled</span></div>
-  <div><strong>{{ baskets }}</strong><span>track groups used for training</span></div>
-  <div><strong>{{ '%.0f'|format(coverage * 100) }}%</strong><span>genre coverage ({{ tagged }}/{{ tracks_total }})</span></div>
-  <div><strong>{{ '%.2f'|format(breadth) }}</strong><span>genre variety (0=focused, 1=eclectic)</span></div>
-  <div hx-get="/taste/recall" hx-trigger="load" hx-swap="outerHTML"><strong>…</strong><span>prediction accuracy (computing)</span></div>
+  <section class="model-health-section model-health-foundation" aria-labelledby="model-data-title">
+    <div class="model-health-section-head">
+      <div class="model-health-title-row">
+        <h2 id="model-data-title">The data behind your model</h2>
+        <span class="model-health-state {{ 'model-health-state--built' if vectors }}"><span aria-hidden="true"></span>{{ 'Model built' if vectors else 'Awaiting first build' }}</span>
+      </div>
+      <p>{% if vectors %}The track similarity model is built. The checks below show how well it works with your data.{% else %}No track similarity model has been built yet. Sync your library to build one.{% endif %}</p>
+    </div>
+    <dl class="model-health-facts">
+      <div class="model-health-fact model-health-fact--lead"><dt>Tracks modeled</dt><dd><strong>{{ '{:,}'.format(vectors) }}</strong>
+        <p>Tracks the model can compare by learned similarity.</p>
+        <svg class="model-health-network" viewBox="0 0 240 84" fill="none" aria-hidden="true">
+          <path d="m14 55 47-30 47 37 53-44 61 31M14 55l94 7 114-13M61 25l100-7M61 25l47 37"/>
+          <circle cx="14" cy="55" r="5"/><circle cx="61" cy="25" r="8"/><circle cx="108" cy="62" r="6"/><circle cx="161" cy="18" r="5"/><circle cx="222" cy="49" r="8"/>
+        </svg>
+      </dd></div>
+      <div class="model-health-fact model-health-fact--method"><dt>Learning method</dt><dd><strong>{{ {'svd': 'SVD', 'item2vec': 'Item2Vec', 'auto': 'Automatic'}.get(method, method) }}</strong>
+        <p>{{ {'svd': 'Finds patterns in your playlists and albums.', 'item2vec': 'Learns from sequences of tracks in your listening.', 'auto': 'Automatic model selection chooses how track similarity is learned.'}.get(method, 'Learns which songs belong together.') }}</p></dd></div>
+      <div class="model-health-fact model-health-fact--size"><dt>Model size</dt><dd><strong>{{ dim }}<small> dimensions</small></strong>
+        <p>Learned features per track.</p></dd></div>
+      <div class="model-health-fact model-health-fact--groups"><dt>Training groups</dt><dd><strong>{{ '{:,}'.format(baskets) }}</strong>
+        <p>Groups of tracks used to learn which songs belong together.</p></dd></div>
+      <div class="model-health-fact model-health-fact--coverage"><dt>Genre coverage</dt><dd><strong>{% if tracks_total %}{{ '%.0f'|format(coverage * 100) }}%{% else %}—{% endif %}</strong>
+        {% if tracks_total %}<span class="model-health-meter" aria-hidden="true"><i style="width: {{ '%.1f'|format(coverage * 100) }}%"></i></span>{% endif %}
+        <p>{{ '{:,}'.format(tagged) }} of {{ '{:,}'.format(tracks_total) }} library tracks have a genre tag.</p></dd></div>
+      <div class="model-health-fact model-health-fact--variety"><dt>Listening variety</dt><dd><strong>{% if breadth_tagged %}{{ '%.0f'|format(breadth * 100) }}<small>/100</small>{% else %}—{% endif %}</strong>
+        {% if breadth_tagged %}<div class="model-health-variety" aria-hidden="true"><span class="model-health-spectrum"><i style="left: {{ '%.1f'|format(breadth * 100) }}%"></i></span><span>Focused</span><span>Varied</span></div>{% endif %}
+        <p>{% if breadth_tagged %}Based on {{ breadth_families }} genre {{ 'family' if breadth_families == 1 else 'families' }} in your listening. 0 is focused; 100 is evenly spread.{% else %}Needs listening to genre-tagged tracks.{% endif %} This describes your taste, not model quality.</p></dd></div>
+    </dl>
+  </section>
+
+  <div id="model-health-checks" hx-get="/taste/recall" hx-trigger="intersect once, taste-retry" hx-swap="outerHTML"
+       hx-on::after-request="if(event.detail.elt === this &amp;&amp; !event.detail.successful) { this.querySelector('[role=status]').textContent = 'Could not load the model checks.'; this.querySelector('button').hidden = false; }">
+    <p class="section-note" role="status">Checking predictions and recent listening…</p>
+    <button type="button" class="btn-ghost btn-sm" hidden
+            onclick="htmx.trigger(this.parentElement, 'taste-retry')">Try checks again</button>
+  </div>
 </div>

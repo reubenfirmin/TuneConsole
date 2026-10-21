@@ -69,8 +69,7 @@ def test_transient_param_defaults_match_constants(store):
 
 
 def test_graduation_params_registered(store):
-    assert rec_params.PARAMS_BY_NAME["graduation_enabled"].boolean is True
-    assert rec_params.get_param(store, "graduation_enabled") is True
+    assert "graduation_enabled" not in rec_params.PARAMS_BY_NAME
     assert rec_params.get_param(store, "theme_threshold") == rec_params.THEME_THRESHOLD
     assert rec_params.get_param(store, "source_w_play") == rec_params.SOURCE_W_PLAY
     assert rec_params.PARAMS_BY_NAME["theme_threshold"].group == "graduation"

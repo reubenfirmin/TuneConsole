@@ -1,3 +1,5 @@
+import pytest
+
 from yt_playlist.rec import rec_params
 
 
@@ -61,10 +63,13 @@ def test_play_source_is_weak():
     assert abs(s.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_PLAY   # but ledger accumulated
 
 
-def test_play_exposure_graduates_over_several_days():
+@pytest.mark.parametrize("legacy_pause", [False, True])
+def test_play_exposure_graduates_over_several_days(legacy_pause):
     # Sustained recent listening graduates the permanent weight up via daily exposure (mirrors the
     # held-slider mechanic). Plays feed only the transient; this is the single funnel into permanent.
     s, now, axis = _store_with_play_history("Techno", n=10)
+    if legacy_pause:
+        s.set_setting("rec_param:graduation_enabled", "0")
     day = 86400
     before = s.get_weights(now=now).get(axis, 1.0)
     for d in range(8):

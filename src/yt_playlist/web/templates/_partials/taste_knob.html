@@ -1,27 +1,51 @@
-{# one knob. Expects `p` = {name,label,help,min,max,step,value,default,boolean}. #}
+{# One knob. Values stay in model units; percentage knobs only convert the displayed labels. #}
+{% macro reset(p, compact=false) -%}
+<button class="knob-reset" type="button" title="Reset to default ({{ p.default_label }})"
+        data-target="param-{{ p.name }}" data-default="{{ p.default }}" onclick="resetKnob(this)"
+        hx-post="/taste/reset-param" hx-vals='{"name":"{{ p.name }}"}' hx-swap="none" aria-label="Reset {{ p.label }} to default">{{ arrow_icon('reset') }}{% if not compact %} Reset{% endif %}</button>
+{%- endmacro %}
 {% if p.boolean %}
 <div class="knob knob-toggle">
   <label>
-    <input type="checkbox" id="param-{{ p.name }}" name="value" {% if p.value %}checked{% endif %}
+    <input type="checkbox" id="param-{{ p.name }}" name="value" {% if p.value %}checked{% endif %} aria-describedby="help-param-{{ p.name }}"
            hx-post="/taste/param" hx-vals='{"name":"{{ p.name }}"}' hx-trigger="change" hx-swap="none">
     {{ p.label }}
   </label>
-  <p class="knob-help">{{ p.help }}</p>
+  <p class="knob-help" id="help-param-{{ p.name }}">{{ p.help }}</p>
 </div>
 {% else %}
-<div class="knob">
+<div class="knob" data-param="{{ p.name }}">
   <div class="knob-head">
-    <label>{{ p.label }}</label>
-    <output id="out-param-{{ p.name }}">{{ p.value }}</output>
-    <button class="knob-reset" type="button" title="Reset to default"
-            data-target="param-{{ p.name }}" data-default="{{ p.default }}" onclick="resetKnob(this)"
-            hx-post="/taste/reset-param" hx-vals='{"name":"{{ p.name }}"}' hx-swap="none" aria-label="Reset {{ p.label }} to default">{{ arrow_icon('reset') }}</button>
+    <label for="param-{{ p.name }}">{{ p.label }}</label>
+    {% if feature_controls|default(false) %}<div class="knob-value">{% endif %}
+    <output id="out-param-{{ p.name }}" for="param-{{ p.name }}">{{ p.value_label }}</output>
+    {% if feature_controls|default(false) %}
+      <p class="knob-origin" id="default-param-{{ p.name }}">Default {{ p.default_label }}</p>
+    </div>
+    {% endif %}
+    {% if not recommendation_controls|default(false) %}{{ reset(p) }}{% endif %}
   </div>
+  {% if p.percentage and not recommendation_controls|default(false) %}<p class="knob-help" id="help-param-{{ p.name }}">{{ p.help }}</p>{% endif %}
   <input type="range" id="param-{{ p.name }}" name="value" value="{{ p.value }}"
+         style="--knob-position: {{ 100 * (p.value - p.min) / (p.max - p.min) }}%"
+         {% if p.percentage %}data-percentage="1" aria-valuetext="{{ p.value_label }}"{% endif %}
          {% if p.step == 1 %}data-int="1"{% endif %}
+         {% if p.step < 0.01 %}data-precision="6"{% endif %}
          min="{{ p.min }}" max="{{ p.max }}" step="{{ p.step }}"
+         aria-describedby="help-param-{{ p.name }} default-param-{{ p.name }}"
          hx-post="/taste/param" hx-vals='{"name":"{{ p.name }}"}' hx-trigger="change" hx-swap="none"
          oninput="updateOut(this)">
-  <p class="knob-help">{{ p.help }}</p>
+  {% if p.low %}<div class="knob-scale{% if p.percentage %} knob-percentage-scale{% endif %}"><span>{{ p.low }}</span><span>{{ p.high }}</span>{% if p.percentage %}<span class="knob-default-marker" style="left:calc(.5rem + (100% - 1rem) * {{ (p.default - p.min) / (p.max - p.min) }})" title="Default {{ p.default_label }}" aria-hidden="true"></span>{% endif %}</div>{% endif %}
+  {% if not p.percentage or recommendation_controls|default(false) %}<p class="knob-help" id="help-param-{{ p.name }}">{{ p.help }}</p>{% endif %}
+  {% if recommendation_controls|default(false) %}
+  <div class="knob-footer">
+    {% if not feature_controls|default(false) %}
+    <p class="knob-origin" id="default-param-{{ p.name }}">Default {{ p.default_label }}</p>
+    {% endif %}
+    {{ reset(p, feature_controls|default(false)) }}
+  </div>
+  {% else %}
+  <p class="knob-origin" id="default-param-{{ p.name }}">Default {{ p.default_label }}</p>
+  {% endif %}
 </div>
 {% endif %}

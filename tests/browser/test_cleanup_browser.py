@@ -38,6 +38,11 @@ def live_cleanup_app():
     ov = [s.upsert_track(f"o{i}", f"O{i}", "X", None, None, 1) for i in range(4)]
     oa = s.upsert_playlist(iid, "POVA", "Ov A", 3, "h", 1.0); s.set_playlist_tracks(oa, ov[0:3])
     ob = s.upsert_playlist(iid, "POVB", "Ov B", 3, "h", 1.0); s.set_playlist_tracks(ob, ov[1:4])
+    # Three near-duplicates share seven tracks and each have a different eighth track.
+    near = [s.upsert_track(f"n{i}", f"N{i}", "X", None, None, 1) for i in range(10)]
+    for n, ytm in enumerate(("PNEARA", "PNEARB", "PNEARC")):
+        pid = s.upsert_playlist(iid, ytm, f"Near {chr(65 + n)}", 8, "h", 1.0)
+        s.set_playlist_tracks(pid, near[:7] + [near[7 + n]])
     app = create_app(s, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
@@ -68,10 +73,46 @@ def test_keep_one_resolves_duplicate_group(live_cleanup_app, page):
 
 def test_overlap_hide_pair_via_pie_menu(live_cleanup_app, page):
     page.goto(f"{live_cleanup_app}/cleanup")
-    row = page.locator("tbody.ov-row")
+    row = page.locator('[data-section="overlaps"] tbody.ov-row')
     expect(row).to_have_count(1)
     row.locator(".kebab").click()                                   # open the radial pie menu
     row.locator(".wedge.w-hide").dispatch_event("click")           # "hide this pair" wedge
     # htmx.ajax -> HX-Refresh -> reload; the pair is now suppressed and appears under "Hidden"
     expect(page.get_by_role("button", name="Hidden overlaps 1")).to_be_visible()
-    expect(page.locator("tbody.ov-row")).to_have_count(0)          # gone from the Overlaps table
+    expect(page.locator('[data-section="overlaps"] tbody.ov-row')).to_have_count(0)
+    expect(page.locator('[data-section="near"] tbody.ov-row')).to_have_count(3)
+
+
+def test_near_duplicate_hide_and_restore_via_same_pie_menu(live_cleanup_app, page):
+    page.goto(f"{live_cleanup_app}/cleanup")
+    rows = page.locator('[data-section="near"] tbody.ov-row')
+    expect(rows).to_have_count(3)
+    row = rows.first
+    row.get_by_role("button", name="More actions").click()
+    expect(row.get_by_role("menu", name="Overlap actions")).to_be_visible()
+    row.locator(".wedge.w-hide").click()
+    expect(rows).to_have_count(2)
+    expect(page.locator('[data-section="overlaps"] tbody.ov-row')).to_have_count(1)
+    page.get_by_role("button", name="Hidden overlaps 1").click()
+    page.get_by_role("button", name="Unhide", exact=True).click()
+    expect(rows).to_have_count(3)
+
+
+def test_near_duplicate_bulk_hide_only_affects_its_table(live_cleanup_app, page):
+    page.goto(f"{live_cleanup_app}/cleanup")
+    rows = page.locator('[data-section="near"] tbody.ov-row')
+    rows.first.get_by_role("button", name="More actions").click()
+    rows.first.locator(".wedge.w-below").click()
+    expect(page.get_by_role("heading", name="Hide these pairs?")).to_be_visible()
+    page.get_by_role("button", name="Yes, hide them").click()
+    expect(rows).to_have_count(0)
+    expect(page.locator('[data-section="overlaps"] tbody.ov-row')).to_have_count(1)
+
+
+def test_near_duplicate_review_returns_to_near_section(live_cleanup_app, page):
+    page.goto(f"{live_cleanup_app}/cleanup")
+    page.locator('[data-section="near"]').get_by_role("link", name="Review", exact=True).first.click()
+    back = page.get_by_role("link", name="Back to cleanup")
+    expect(back).to_have_attribute("href", "/cleanup#near")
+    back.click()
+    expect(page).to_have_url(f"{live_cleanup_app}/cleanup#near")

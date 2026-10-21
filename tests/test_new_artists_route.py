@@ -21,4 +21,4 @@ def test_new_artists_building_polls(store):
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     app.state.ctx.rec_worker._running = True
     c = TestClient(app, base_url="http://127.0.0.1")
-    assert 'hx-trigger="load delay:4s"' in c.get("/home/new-artists").text
+    assert 'hx-trigger="intersect once delay:4s"' in c.get("/home/new-artists").text

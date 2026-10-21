@@ -1,29 +1,31 @@
 {% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Setup · TuneConsole{% endblock %}
+{% block page_class %}page-setup{% endblock %}
 {% block page_styles %}<link rel="stylesheet" href="/static/setup.css?v={{ asset_v }}">{% endblock %}
 {% block body %}
 <div class="page-head">
   <h1>Set up TuneConsole</h1>
-  <p>Connect the browser extension and choose the YouTube identities to use.</p>
+  <p>Connect YouTube Music, choose metadata providers, and import your playlists and listening history.</p>
 </div>
 
-{% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
 {% if error %}{% call banner('err') %}<strong>{{ error }}</strong>{% endcall %}{% endif %}
-{% if configured %}{% call banner('') %}Already configured. Saving will update your settings.{% endcall %}{% endif %}
 
-<div x-data='setupForm({{ rows|tojson }}, {{ master_idx|tojson }}, {{ configured|tojson }})'>
+<div x-data='setupForm({{ rows|tojson }}, {{ master_idx|tojson }}, {{ configured|tojson }}, {{ saved_identities|tojson }}, {{ flash|tojson }}, {{ (error is not none)|tojson }})'
+     @focus.window="refreshIdentityChecks()" @visibilitychange.document="if (!document.hidden) refreshIdentityChecks()">
+  <div class="notice ok banner" role="status" x-show="identityMessage" x-cloak>
+    <span class="banner-body" x-text="identityMessage"></span>
+    <button type="button" class="banner-x" @click="identityMessage = ''" title="Dismiss" aria-label="Dismiss">×</button>
+  </div>
 
   <div class="tabs" role="tablist">
     <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'browser' }"
             @click="tab = 'browser'" :aria-selected="tab === 'browser'">Pairing</button>
-    <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'identities' }"
-            @click="tab = 'identities'" :aria-selected="tab === 'identities'">Identities</button>
     <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'enrichment' }"
             @click="tab = 'enrichment'" :aria-selected="tab === 'enrichment'">Enrichment</button>
     <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'import' }"
             @click="tab = 'import'" :aria-selected="tab === 'import'">Import</button>
+    <button type="button" class="tab-btn" role="tab" :class="{ active: tab === 'identities' }"
+            @click="tab = 'identities'" :aria-selected="tab === 'identities'">Identities</button>
   </div>
-
-<form method="post" action="/setup" x-ref="form">
 
   {# ── Tab 1: Pairing (the browser-extension bridge) ────────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'browser'" x-cloak>
@@ -37,7 +39,7 @@
                : 'Open a signed-in music.youtube.com tab. Until the extension connects, the app cannot reach YouTube Music at all.'"></div>
       </div>
     </div>
-    <div class="card">
+    <div class="card" x-show="!connected" x-cloak>
       <h2 class="section section-flush">Pair the browser extension</h2>
       <details class="advanced advanced-spaced">
         <summary>Why an extension?</summary>
@@ -66,59 +68,14 @@
         nothing to paste. Keep a <code class="mono">music.youtube.com</code> tab open while signed in.
         The extension is recognized by its identity, so no other program can use this connection.</p>
 
-      <div class="btn-row btn-row-spaced" x-show="!connected" x-cloak>
+      <div class="btn-row btn-row-spaced">
         <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
            target="_blank" rel="noopener">Get the extension {{ arrow_icon('external') }}</a>
       </div>
     </div>
   </div>
 
-  {# ── Tab 2: Identities ────────────────────────────────────────────────────────────── #}
-  <div class="tab-panel" role="tabpanel" x-show="tab === 'identities'" x-cloak>
-    <div class="card">
-      <h2 class="section section-flush">Your identities</h2>
-      <p class="section-note">Add one row for each YouTube identity. Choose a <strong>main identity</strong>
-        to receive playlists merged from multiple identities. For a brand account, enter its
-        <strong>Brand account ID</strong>: open
-        <a href="https://myaccount.google.com/brandaccounts" target="_blank" rel="noopener">myaccount.google.com/brandaccounts</a>,
-        pick the account, and copy the id from the URL <code class="mono">…/b/&lt;id&gt;/</code>. Leave it blank for your main account.</p>
-
-      <table>
-        <thead><tr><th>Label</th><th>Brand account ID</th><th class="col-master">Main identity</th><th class="col-actions"></th></tr></thead>
-        <tbody>
-          <template x-for="(row, i) in rows" :key="i">
-            <tr>
-              <td><input name="label" x-model="row.label" placeholder="main"></td>
-              <td><input name="brand_account_id" x-model="row.brand" placeholder="(blank for main account)"></td>
-              <td class="cell-center"><input class="input-auto" type="radio" name="master" :value="i" x-model.number="masterIdx"></td>
-              <td><button type="button" class="btn-ghost btn-sm" x-show="rows.length > 1"
-                          @click="rows.splice(i, 1); if (masterIdx >= rows.length) masterIdx = 0">×</button></td>
-            </tr>
-          </template>
-        </tbody>
-      </table>
-
-      <div class="btn-row btn-row-roomy">
-        <button type="button" class="btn-ghost btn-sm" @click="rows.push({label: '', brand: ''})">+ Add identity</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="setup-actions" x-show="tab === 'browser' || tab === 'identities'" x-cloak>
-    <span class="muted setup-connected-copy" x-show="connected" x-cloak>✓ Extension connected</span>
-    <button type="submit" class="btn-primary setup-save">Save</button>
-  </div>
-</form>
-
-  <div class="tab-panel" role="tabpanel" x-show="tab === 'browser'" x-cloak>
-    <div class="card">
-      <h2 class="section section-flush">Playlist dates</h2>
-      <p class="section-note">Include playlists created outside TuneConsole in New, using their original YouTube dates.</p>
-      <a class="quiet-link" href="/setup/playlist-dates">Connect playlist dates {{ arrow_icon('right') }}</a>
-    </div>
-  </div>
-
-  {# ── Tab 3: Enrichment (provider order + Last.fm key) ──────────────────────────────── #}
+  {# ── Tab 2: Enrichment (provider order + Last.fm key) ──────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'enrichment'" x-cloak>
     <div class="card">
       <h2 class="section section-flush">Metadata providers</h2>
@@ -126,7 +83,7 @@
     </div>
   </div>
 
-  {# ── Tab 4: Local listening-history imports ─────────────────────────────────────────── #}
+  {# ── Tab 3: Local listening-history imports ─────────────────────────────────────────── #}
   <div class="tab-panel" role="tabpanel" x-show="tab === 'import'" x-cloak>
     <div class="card">
       <h2 class="section section-flush">Import Spotify playlists and albums</h2>
@@ -262,11 +219,115 @@
       </div>
     </div>
   </div>
+
+  {# ── Tab 4: Identities ────────────────────────────────────────────────────────────── #}
+  <form method="post" action="/setup?tab=identities" x-ref="form"
+        @change="saveIdentities()" @submit.prevent="saveIdentities()" :aria-busy="String(saving)">
+    <div class="tab-panel" role="tabpanel" x-show="tab === 'identities'" x-cloak>
+      <div class="card" x-ref="identityCard">
+        <h2 class="section section-flush">Your identities</h2>
+        <p class="notice err" role="alert" x-show="identitySaveError" x-text="identitySaveError" x-cloak></p>
+        <p class="notice err" role="alert" x-show="identityRemoveError" x-text="identityRemoveError" x-cloak></p>
+        <p class="section-note">Add one row for each YouTube identity. Choose a <strong>main identity</strong>
+          to receive playlists merged from multiple identities. Leave <strong>Brand account ID</strong>
+          blank for your personal account. Changes save and check automatically.</p>
+
+        <section id="identity-id-guide" class="identity-add-help" x-ref="identityGuide" popover="manual"
+                 aria-labelledby="identity-id-guide-title" @toggle="identityGuideOpen = $event.newState === 'open'"
+                 @resize.window="positionIdentityGuide()" @scroll.window="positionIdentityGuide()"
+                 @keydown.escape.window="if ($refs.identityGuide.matches(':popover-open')) $refs.identityGuide.hidePopover()">
+          <header class="identity-guide-head">
+            <h3 id="identity-id-guide-title">Find your Brand account ID</h3>
+            <button type="button" class="identity-guide-close" aria-label="Close Brand account ID help"
+                    @click="$refs.identityGuide.hidePopover(); $refs.identityGuideButton.focus({preventScroll: true})">×</button>
+          </header>
+          <ol>
+            <li>Click <a class="btn btn-ghost btn-sm" href="https://myaccount.google.com/brandaccounts"
+              target="_blank" rel="noopener">Open Google Brand Accounts {{ arrow_icon('external') }}</a>.
+              Use the Google account signed in to YouTube Music.</li>
+            <li>Under <strong>Your Brand Accounts</strong>, click the identity’s name. If it is missing,
+              use your profile picture at the top right to switch Google accounts.</li>
+            <li>In the browser’s address bar, copy only the number after <code class="mono">/b/</code>.
+              Example address:
+              <code class="mono identity-id-example">myaccount.google.com/b/<wbr><strong>123456789012345678901</strong>/</code></li>
+            <li>Paste your number into <strong>Brand account ID</strong> and enter a <strong>Label</strong>.
+              Changes save and check automatically when you leave the field.</li>
+          </ol>
+          <p>For your personal account, leave <strong>Brand account ID</strong> blank.</p>
+        </section>
+
+        <table>
+          <thead><tr><th>Label</th><th><span class="identity-id-heading">Brand account ID
+            <button type="button" class="identity-guide-trigger" x-ref="identityGuideButton"
+                    aria-label="How to find your Brand account ID" aria-controls="identity-id-guide"
+                    :aria-expanded="String(identityGuideOpen)" @click="toggleIdentityGuide()">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/>
+                <path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 2-2.5 2-2.5 4m0 3h.01"/></svg>
+            </button>
+          </span></th><th class="col-master">Main identity</th><th class="col-actions"></th></tr></thead>
+          <tbody>
+            <template x-for="(row, i) in rows" :key="i">
+              <tr>
+                <td>
+                  <input type="hidden" name="identity_id" :value="row.id || ''">
+                  <div class="identity-label">
+                    <input name="label" x-model="row.label" :disabled="removingIdentity" :aria-label="'Label for identity ' + (i + 1)" placeholder="main">
+                    <button type="button" class="identity-auth" :class="'identity-auth--' + authState(row)"
+                            :aria-label="authLabel(row)" :title="authLabel(row)"
+                            :aria-expanded="String(openIdentityHelp === row.id)" aria-controls="identity-auth-help"
+                            :disabled="saving || removingIdentity || checkingIds.includes(row.id) || rowChanged(row) || authState(row) === 'valid'"
+                            @click="showIdentityStatus(row)">
+                      <span class="identity-auth-dot" :class="{ spinner: checkingIds.includes(row.id) }" aria-hidden="true"></span>
+                    </button>
+                  </div>
+                </td>
+                <td><input name="brand_account_id" x-model="row.brand" :disabled="removingIdentity" :aria-label="'Brand account ID for identity ' + (i + 1)" placeholder="(blank for personal account)"></td>
+                <td class="cell-center"><input class="input-auto" type="radio" name="master" :value="i" x-model.number="masterIdx" :disabled="removingIdentity" :aria-label="'Use ' + (row.label || 'identity ' + (i + 1)) + ' as main identity'"></td>
+                <td><button type="button" class="btn-ghost btn-sm" :style="{visibility: rows.length > 1 ? 'visible' : 'hidden'}"
+                            :disabled="removingIdentity"
+                            :aria-label="'Remove ' + (row.label || 'identity ' + (i + 1))" @click="removeIdentity(i)">×</button></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+
+        <section id="identity-auth-help" class="identity-auth-help" role="region"
+                 :aria-label="'Connection help for ' + (helpIdentity?.label || 'identity')"
+                 x-show="helpIdentity" @keydown.escape.window="openIdentityHelp = null" x-cloak>
+          <strong x-text="identityChecks[openIdentityHelp]?.heading"></strong>
+          <p x-text="identityChecks[openIdentityHelp]?.message"></p>
+          <a x-show="/^\d+$/.test(helpIdentity?.brand || '')"
+             :href="'https://myaccount.google.com/b/' + encodeURIComponent(helpIdentity?.brand || '') + '/'"
+             target="_blank" rel="noopener">Open this identity’s account details</a>
+          <a x-show="identityChecks[openIdentityHelp]?.help_url === 'https://music.youtube.com'"
+             href="https://music.youtube.com" target="_blank" rel="noopener">Open YouTube Music</a>
+          <ol>
+            <li>Open <a href="https://myaccount.google.com/brandaccounts" target="_blank" rel="noopener">Google Brand Accounts</a>
+              using the same Google account signed in to YouTube Music.</li>
+            <li>Choose the brand account for this identity. If it is missing, switch to the Google
+              account that owns or manages it.</li>
+            <li>Copy the number after <code class="mono">/b/</code> in its address, such as
+              <code class="mono">myaccount.google.com/b/123456789012345678901/</code>, and compare it
+              with the Brand account ID above. Enter only the number. For a personal account,
+              leave the field blank.</li>
+          </ol>
+          <p class="identity-auth-auto">Corrections save and check automatically when you leave the field.
+            TuneConsole also checks again when you return to this page after changing accounts or signing in.</p>
+        </section>
+
+        <div class="btn-row btn-row-roomy">
+          <button type="button" class="btn-ghost btn-sm" :disabled="saving || removingIdentity"
+                  @click="rows.push({id: null, label: '', brand: ''}); $nextTick(() => showIdentityGuide())">+ Add identity</button>
+        </div>
+      </div>
+    </div>
+
+  </form>
 </div>
 
 <script>
-function setupForm(rows, masterIdx, configured) {
-  // Tabs (Pairing / Identities) are pure client state. ?tab=identities|enrichment deep-links a tab
+function setupForm(rows, masterIdx, configured, savedIdentities, initialMessage, hasError = false) {
+  // Tabs are pure client state. ?tab=enrichment|import|identities deep-links a tab
   // (the home nudge cards use it); anything else lands on Pairing. The pairing indicator polls
   // GET /bridge/status every couple seconds so it flips to connected the moment the extension
   // pairs, no reload needed. Alpine calls init() automatically since it's a method on the
@@ -276,14 +337,232 @@ function setupForm(rows, masterIdx, configured) {
     rows: rows,
     masterIdx: masterIdx,
     configured: configured,
-    tab: ['identities', 'enrichment', 'import'].includes(wanted) ? wanted : 'browser',
+    savedIdentities: savedIdentities,
+    tab: hasError ? 'identities' : (['identities', 'enrichment', 'import'].includes(wanted) ? wanted : 'browser'),
     connected: false,
+    saving: false, saveQueued: false, saveTask: null, identitySaveError: '',
+    removingIdentity: false, identityRemoveError: '', identityMessage: initialMessage || '',
+    identityChecks: {}, checkingIds: [], identityChecksLoaded: false, openIdentityHelp: null,
+    identityGuideOpen: false,
+    pendingCheckIds: [],
+    get helpIdentity() {
+      return this.rows.find(row => row.id === this.openIdentityHelp && !this.rowChanged(row)) || null;
+    },
+    get identityDirty() {
+      const populated = this.rows.filter(row => row.id || row.label.trim() || row.brand.trim());
+      return populated.length !== this.savedIdentities.length || populated.some(row => {
+        const saved = this.savedIdentities.find(saved => saved.id === row.id);
+        return !saved || row.id !== saved.id || row.label.trim() !== saved.label || row.brand.trim() !== saved.brand
+          || (this.rows[this.masterIdx] === row) !== saved.is_master;
+      });
+    },
     init() {
       const poll = () => fetch('/bridge/status').then(r => r.json())
-        .then(d => { this.connected = !!d.connected; })
+        .then(d => {
+          const reconnected = !this.connected && !!d.connected;
+          this.connected = !!d.connected;
+          if (reconnected) this.refreshIdentityChecks();
+        })
         .catch(() => {});
       poll();
       setInterval(poll, 2000);
+      this.$watch('tab', tab => {
+        if (tab !== 'identities') this.$refs.identityGuide.hidePopover();
+        if (tab === 'identities') {
+          if (this.identityChecksLoaded) this.refreshIdentityChecks();
+          else this.checkIdentities();
+        }
+      });
+      if (this.tab === 'identities') this.$nextTick(() => this.checkIdentities());
+    },
+    toggleIdentityGuide() {
+      if (this.$refs.identityGuide.matches(':popover-open')) this.$refs.identityGuide.hidePopover();
+      else this.showIdentityGuide();
+    },
+    showIdentityGuide() {
+      this.$refs.identityGuide.showPopover({ source: this.$refs.identityGuideButton });
+      this.positionIdentityGuide();
+    },
+    positionIdentityGuide() {
+      const guide = this.$refs.identityGuide;
+      if (!guide.matches(':popover-open')) return;
+      guide.style.cssText = '';
+      if (innerWidth <= 600) return;
+      const card = this.$refs.identityCard.getBoundingClientRect();
+      const gap = 16, width = guide.offsetWidth;
+      const fitsBeside = card.right + gap + width <= innerWidth - gap;
+      const left = fitsBeside ? card.right + gap : Math.min(card.right - width, innerWidth - width - gap);
+      const spaceAbove = card.top - gap * 2, spaceBelow = innerHeight - card.bottom - gap * 2;
+      const below = spaceBelow >= spaceAbove;
+      // Keep the panel outside the editable card, even in short windows.
+      const top = fitsBeside ? Math.max(gap, Math.min(card.top, innerHeight - guide.offsetHeight - gap))
+        : below ? card.bottom + gap : gap;
+      const height = fitsBeside ? innerHeight - top - gap : Math.max(120, below ? spaceBelow : spaceAbove);
+      guide.style.left = Math.max(gap, left) + 'px';
+      guide.style.top = top + 'px';
+      guide.style.bottom = 'auto';
+      guide.style.maxHeight = height + 'px';
+    },
+    saveIdentities() {
+      if (this.removingIdentity) return Promise.resolve();
+      this.saveQueued = true;
+      if (this.saving) return this.saveTask;
+      this.saveTask = this.persistIdentities();
+      return this.saveTask;
+    },
+    async persistIdentities() {
+      this.saving = true;
+      const changedIds = new Set();
+      try {
+        while (this.saveQueued) {
+          this.saveQueued = false;
+          if (!this.identityDirty) continue;
+          try {
+            const submitted = this.rows.map(row => ({ row, label: row.label.trim(), brand: row.brand.trim() }));
+            const body = new URLSearchParams({ master: String(this.masterIdx) });
+            for (const item of submitted) {
+              body.append('identity_id', item.row.id || '');
+              body.append('label', item.label);
+              body.append('brand_account_id', item.brand);
+            }
+            const response = await fetch('/setup?tab=identities', { method: 'POST', body, keepalive: true,
+              headers: { Accept: 'application/json' } });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(result.error || 'Could not save these changes. Edit the field to try again.');
+            for (const item of submitted) {
+              const saved = result.identities.find(saved => saved.label === item.label);
+              if (!saved) continue; // an empty draft is kept locally until it has a label
+              const previous = this.savedIdentities.find(previous => previous.id === saved.id);
+              if (!previous || previous.brand !== saved.brand) changedIds.add(saved.id);
+              item.row.id = saved.id;
+            }
+            this.savedIdentities = result.identities;
+            this.configured = true;
+            this.identitySaveError = '';
+            this.identityMessage = '';
+            this.$dispatch('auth-checked', { labels: result.auth_labels });
+            this.updateMoveLink();
+          } catch (error) {
+            this.identitySaveError = error.message || 'Could not save these changes. Edit the field to try again.';
+          }
+        }
+      } finally {
+        this.saving = false;
+        for (const id of changedIds) this.checkIdentities(id);
+      }
+    },
+    updateMoveLink() {
+      const menu = document.querySelector('.tools-pop');
+      let move = menu?.querySelector('a[href="/move"]');
+      if (this.savedIdentities.length < 2) move?.remove();
+      else if (menu && !move) {
+        move = document.createElement('a');
+        move.href = '/move';
+        move.textContent = 'Move';
+        menu.querySelector('a[href="/cleanup"]')?.after(move);
+      }
+    },
+    dropRow(i) {
+      this.rows.splice(i, 1);
+      if (this.masterIdx === i) this.masterIdx = 0;
+      else if (this.masterIdx > i) this.masterIdx--;
+    },
+    async removeIdentity(i) {
+      if (this.removingIdentity) return;
+      this.removingIdentity = true;
+      this.identityRemoveError = '';
+      try {
+        // A field's change event may start a save just before this click. Finish it first.
+        if (this.saving) await this.saveTask;
+        const row = this.rows[i];
+        if (!row.id) { this.dropRow(i); return; }
+        const response = await fetch(`/setup/identities/${row.id}/remove`, { method: 'POST' });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || 'Could not remove this identity. Try again.');
+        this.savedIdentities = this.savedIdentities.filter(saved => saved.id !== row.id)
+          .map(saved => ({ ...saved, is_master: saved.id === result.main_identity_id }));
+        this.dropRow(i);
+        delete this.identityChecks[row.id];
+        this.openIdentityHelp = null;
+        this.identityMessage = result.message;
+        this.identitySaveError = '';
+        this.$dispatch('auth-checked', { labels: result.auth_labels });
+        this.updateMoveLink();
+        const url = new URL(location.href);
+        url.searchParams.set('tab', 'identities');
+        url.searchParams.set('flash', result.message);
+        history.replaceState(null, '', url);
+      } catch (error) {
+        this.identityRemoveError = error.message || 'Could not remove this identity. Try again.';
+      } finally {
+        this.removingIdentity = false;
+        this.flushIdentityChecks();
+      }
+    },
+    rowChanged(row) {
+      const saved = this.savedIdentities.find(saved => saved.id === row.id);
+      return !saved || row.label.trim() !== saved.label || row.brand.trim() !== saved.brand;
+    },
+    authState(row) {
+      if (this.rowChanged(row)) return 'unknown';
+      if (this.checkingIds.includes(row.id)) return 'checking';
+      return this.identityChecks[row.id]?.state || 'unknown';
+    },
+    authLabel(row) {
+      const name = row.label || 'Identity';
+      if (this.rowChanged(row)) return `${name}: authentication updates after editing`;
+      if (this.checkingIds.includes(row.id)) return `${name}: checking authentication`;
+      const check = this.identityChecks[row.id];
+      if (check?.state === 'valid') return `${name}: authenticated`;
+      return `${name}: ${check?.heading || 'Not checked'}. Show connection help.`;
+    },
+    showIdentityStatus(row) {
+      const check = this.identityChecks[row.id];
+      if (check?.state === 'valid') return;
+      this.openIdentityHelp = this.openIdentityHelp === row.id ? null : row.id;
+    },
+    refreshIdentityChecks() {
+      if (this.tab !== 'identities' || document.hidden || this.saving || this.removingIdentity) return;
+      for (const row of this.rows) {
+        const check = this.identityChecks[row.id];
+        if (check && check.state !== 'valid' && !this.rowChanged(row) && !this.checkingIds.includes(row.id)) {
+          this.checkIdentities(row.id);
+        }
+      }
+    },
+    checkIdentities(identityId = null) {
+      const ids = this.savedIdentities.filter(saved => identityId === null || saved.id === identityId).map(saved => saved.id);
+      this.pendingCheckIds = [...new Set([...this.pendingCheckIds, ...ids])];
+      return this.flushIdentityChecks();
+    },
+    async flushIdentityChecks() {
+      if (this.checkingIds.length || this.removingIdentity) return;
+      const ids = this.pendingCheckIds.filter(id => this.savedIdentities.some(saved => saved.id === id));
+      this.pendingCheckIds = [];
+      if (!ids.length) return;
+      const identityId = ids.length === 1 ? ids[0] : null;
+      const definitions = this.savedIdentities.map(saved => ({ ...saved }));
+      this.checkingIds = ids;
+      try {
+        const response = await fetch('/setup/identities/check' + (identityId === null ? '' : `?identity_id=${identityId}`));
+        if (!response.ok) throw new Error('check failed');
+        const result = await response.json();
+        for (const check of result.checks) {
+          const before = definitions.find(saved => saved.id === check.identity_id);
+          if (before && this.savedIdentities.some(saved => saved.id === check.identity_id && saved.brand === before.brand)) {
+            this.identityChecks[check.identity_id] = check;
+          }
+        }
+        if (this.identityChecks[this.openIdentityHelp]?.state === 'valid') this.openIdentityHelp = null;
+        this.$dispatch('auth-checked', { labels: result.auth_labels });
+        this.identityChecksLoaded = true;
+      } catch (_) {
+        for (const id of ids) this.identityChecks[id] = { state: 'unverified', heading: 'Could not check authentication',
+          message: 'The connection check was interrupted. TuneConsole checks automatically when you return to this page.' };
+      } finally {
+        this.checkingIds = [];
+        if (this.pendingCheckIds.length) this.flushIdentityChecks();
+      }
     },
   };
 }

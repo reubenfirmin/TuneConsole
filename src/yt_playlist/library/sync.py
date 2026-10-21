@@ -260,33 +260,14 @@ def _materialize_album_tracks(store, clients, saved, on_progress) -> None:
             added += 1
     _emit(on_progress, "info", f"album tracks folded in: {added} from {len(todo)} album(s)")
 
-def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None,
-             playlist_dates=None) -> None:
+def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_auth_ok=None) -> None:
     labels = {idn.id: idn.label for idn in store.get_identities()}
     for identity_id, client in clients.items():
         sync_identity(store, identity_id, client, now,
                       on_progress=on_progress, label=labels.get(identity_id),
                       on_auth_expired=on_auth_expired, on_auth_ok=on_auth_ok)
-    if playlist_dates is not None:
-        sync_playlist_dates(store, playlist_dates, on_progress)
     _sync_saved_albums(store, clients, on_progress)
     store.set_setting("last_sync_at", str(now))   # drives the Home "Time to sync" nudge
     # the recommendation model is rebuilt by the decoupled RecWorker (triggered from the sync
     # route), so a burst of syncs coalesces into one rebuild instead of blocking each sync.
     _emit(on_progress, "done", "sync complete", final=True)
-
-
-def sync_playlist_dates(store, provider, on_progress=None):
-    """An optional metadata outage must not fail or erase the Music library sync."""
-    try:
-        report = provider.refresh(store)
-        if report["updated"]:
-            _emit(on_progress, "info", f"Updated creation dates for {report['updated']} playlists")
-        for message in report["errors"]:
-            _emit(on_progress, "info", message)
-        return report
-    except (OSError, ValueError):
-        logger.warning("playlist creation dates unavailable")
-        message = "Playlist dates could not refresh. Your saved dates are unchanged."
-        _emit(on_progress, "info", message)
-        return {"updated": 0, "errors": [message]}

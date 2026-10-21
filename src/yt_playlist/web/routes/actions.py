@@ -80,8 +80,9 @@ def build(ctx) -> APIRouter:
 
     @router.get("/actions")
     def actions(request: Request):
+        # Drafts save merge-editor selections; they haven't changed any playlists.
         rows = [{"a": a, "desc": _action_desc(a), "undoable": is_undoable(a.kind),
-                 "when": _when(a.created_at)} for a in store.get_actions()]
+                 "when": _when(a.created_at)} for a in store.get_actions() if a.status != "draft"]
         return templates.TemplateResponse(request, "actions.html", {
             "rows": rows, "flash": request.query_params.get("flash"),
             "flasherr": request.query_params.get("flasherr")})

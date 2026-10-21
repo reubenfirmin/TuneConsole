@@ -58,6 +58,10 @@ def _get_json(url):
         _breaker.record(e)
         raise
     _breaker.record()
+    if isinstance(data, dict) and data.get("error"):
+        # Deezer reports quota/API errors as HTTP 200. Code 800 means no catalogue entry.
+        if data["error"].get("code") != 800:
+            net.record_probe_failure("Deezer API error")
     return data
 
 

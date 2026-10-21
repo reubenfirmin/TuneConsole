@@ -1,5 +1,5 @@
 """Library pools built only after clicking an unfilled Home mix."""
-from yt_playlist.rec import home_themes, mode_surfaces, rec_params, recommend
+from yt_playlist.rec import home_themes, home_vibe, mode_surfaces, rec_params, recommend
 from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util import genre_map
 
@@ -42,5 +42,6 @@ def pick(store, now, parameters, exclude_keys=()):
             return []
         tracks = [t for t in tracks if mode_surfaces._in_band(t.get("year"), parameters["epoch"] % 3,
                                                              cuts[0], cuts[1])]
+    tracks = home_vibe.rank(store, now, tracks)
     return mode_surfaces._diversify(tracks, int(rec_params.get_param(store, "modes_artist_cap")),
                                     int(rec_params.get_param(store, "modes_album_cap")))

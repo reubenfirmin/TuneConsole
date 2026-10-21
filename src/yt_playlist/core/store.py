@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS identities (
   brand_account_id TEXT,
   is_master INTEGER NOT NULL DEFAULT 0,
   last_auth_ok REAL,
+  active INTEGER NOT NULL DEFAULT 1,
   UNIQUE(label)
 );
 CREATE TABLE IF NOT EXISTS tracks (
@@ -172,6 +173,25 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS genre_whitelist (
   name TEXT PRIMARY KEY COLLATE NOCASE   -- editable genre whitelist for tag matching
 );
+-- Identity, equivalent labels and family membership are separate from the enabled tag list.
+CREATE TABLE IF NOT EXISTS genre_family (
+  key TEXT PRIMARY KEY, name TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS genre_catalog (
+  key TEXT PRIMARY KEY, name TEXT NOT NULL,
+  family_key TEXT REFERENCES genre_family(key),
+  source TEXT NOT NULL, family_source TEXT, description TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS genre_alias (
+  label_key TEXT PRIMARY KEY, label TEXT NOT NULL,
+  genre_key TEXT NOT NULL REFERENCES genre_catalog(key), source TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_genre_alias_genre ON genre_alias(genre_key);
+CREATE TABLE IF NOT EXISTS genre_external_id (
+  provider TEXT NOT NULL, external_id TEXT NOT NULL,
+  genre_key TEXT NOT NULL REFERENCES genre_catalog(key),
+  PRIMARY KEY (provider, external_id)
+);
 CREATE TABLE IF NOT EXISTS enrichment_log (
   id INTEGER PRIMARY KEY,
   track_id INTEGER NOT NULL,
@@ -195,6 +215,23 @@ CREATE TABLE IF NOT EXISTS enrichment_conflict (
 CREATE TABLE IF NOT EXISTS rec_vectors (
   identity_key TEXT PRIMARY KEY,
   vec BLOB NOT NULL                       -- float32 taste-embedding for the track (see embed.py)
+);
+CREATE TABLE IF NOT EXISTS rec_model_selection_runs (
+  id INTEGER PRIMARY KEY,
+  started_at REAL NOT NULL,
+  result_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rec_model_previous_vectors (
+  run_id INTEGER NOT NULL REFERENCES rec_model_selection_runs(id),
+  identity_key TEXT NOT NULL,
+  vec BLOB NOT NULL,
+  PRIMARY KEY (run_id, identity_key)
+);
+CREATE TABLE IF NOT EXISTS rec_model_forecasts (
+  run_id INTEGER NOT NULL REFERENCES rec_model_selection_runs(id),
+  made_at REAL NOT NULL,
+  forecast_json TEXT NOT NULL,
+  PRIMARY KEY (run_id, made_at)
 );
 CREATE TABLE IF NOT EXISTS rec_content_vectors (
   identity_key TEXT PRIMARY KEY,
@@ -355,6 +392,9 @@ class Store:
     def init_schema(self):
         self.conn.executescript(SCHEMA)
         # migrations: add columns to pre-existing databases
+        identity_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(identities)")}
+        if "active" not in identity_cols:
+            self.conn.execute("ALTER TABLE identities ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tracks)")}
         if "available" not in cols:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN available INTEGER")
@@ -417,6 +457,13 @@ class Store:
                 "AND bpm IS NULL AND energy IS NULL AND danceability IS NULL "
                 "AND mb_recording_id IS NULL")
             self.set_setting("enrich_unattempted_batch_repaired", "1")
+        # Discovery's old sink discarded provider evidence. Its batch stamps cannot prove which
+        # providers answered. Recheck those legacy rows once, retaining all metadata already saved.
+        if not self.get_setting("discovery_enrichment_audit_requeued"):
+            with self.conn:
+                self.conn.execute("UPDATE discovered_tracks SET last_enriched=NULL")
+                self.conn.execute("INSERT INTO settings(key,value) VALUES (?,?)",
+                                  ("discovery_enrichment_audit_requeued", "1"))
         pcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(playlists)")}
         if "thumbnail" not in pcols:
             self.conn.execute("ALTER TABLE playlists ADD COLUMN thumbnail TEXT")
@@ -444,6 +491,12 @@ class Store:
         wcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(rec_weights)")}
         if "updated_at" not in wcols:
             self.conn.execute("ALTER TABLE rec_weights ADD COLUMN updated_at REAL")
+        # Retire saved source weights whose lanes no longer have a scoring consumer.
+        from yt_playlist.rec.rec_params import LANE_NAMES
+        source_axes = tuple(f"lane:{name}" for name in sorted(LANE_NAMES))
+        self.conn.execute(
+            f"DELETE FROM rec_weights WHERE axis LIKE 'lane:%' AND axis NOT IN ({','.join('?' for _ in source_axes)})",
+            source_axes)
         # #57 which in-mode ranker (ppr / cosine) filled each mode card, for the selection-log A/B
         icols = {r["name"] for r in self.conn.execute("PRAGMA table_info(rec_mode_impressions)")}
         if "ranker" not in icols:
