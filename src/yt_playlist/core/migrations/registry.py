@@ -7,7 +7,8 @@ from . import (v001_baseline, v002_enrichment, v003_discovery_audit, v004_playli
                v018_discovery_sources, v019_playlist_provenance, v020_metadata_selections,
                v021_artists, v022_artist_references, v023_albums, v024_account_scope,
                v025_relationships,v026_listening_observations,v027_artist_identity_redirects,
-               v028_discovery_representatives,v029_artist_provisional_names)
+               v028_discovery_representatives,v029_artist_provisional_names,
+               v030_account_scope_preservation)
 
 MIGRATIONS = (
     Migration(1, 'legacy_baseline', v001_baseline.apply),
@@ -39,4 +40,5 @@ MIGRATIONS = (
     Migration(27, 'artist_identity_redirects', v027_artist_identity_redirects.apply),
     Migration(28, 'discovery_representatives', v028_discovery_representatives.apply),
     Migration(29, 'artist_provisional_names', v029_artist_provisional_names.apply),
+    Migration(30, 'account_scope_preservation', v030_account_scope_preservation.apply),
 )

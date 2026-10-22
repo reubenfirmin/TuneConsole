@@ -388,12 +388,31 @@ def test_now_playing_toggle_returns_ok_false_when_not_connected():
     assert r.json()["ok"] is False
 
 
-@pytest.mark.parametrize("ok", [True, False])
+@pytest.mark.parametrize("outcome", ["ok", "rejected", "http_error"])
 @pytest.mark.parametrize("like_status", [None, "LIKE", "INDIFFERENT", "DISLIKE"])
-def test_rate_target_and_result_round_trip_without_blocking_socket(ok, like_status):
+def test_rate_uses_library_api_for_exact_target_without_blocking_socket(store, monkeypatch, outcome, like_status):
+    from types import SimpleNamespace
+    from tests.conftest import FakeClient
+    from yt_playlist.core.config import IdentityConfig
+    from yt_playlist.core.identities import build_client
+    from yt_playlist.library import ratings
+    from yt_playlist.library.ops import PlaylistOps
+
     bridge = Bridge()
-    client = TestClient(_app(bridge))
+    other = store.identities.upsert_identity("Other", "bridge", "other-brand", False)
+    main = store.identities.upsert_identity("Main", "bridge", "main-brand", True)
+    remote_other = FakeClient()
+    remote_main = build_client(IdentityConfig("Main", "bridge", "main-brand", True), bridge)
+    ops = PlaylistOps(store, lambda: {other: remote_other, main: remote_main}, lambda: 1234)
+    ctx = SimpleNamespace(bridge=bridge, store=store, ops=lambda: ops, now_fn=lambda: 1234)
+    app = FastAPI()
+    app.include_router(build_bridge_route(ctx))
+    client = TestClient(app)
+    monkeypatch.setattr(ratings, "with_retry", lambda fn: fn())
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
+        # Playback has already advanced and neither player-bar identity nor rating is available.
+        # The API must still rate A, the song the user clicked, rather than the new playing song.
+        bridge.now_playing = {"video_id": "B", "likeStatus": "LIKE"}
         result = []
         payload = {"action": "like", "videoId": "A"}
         if like_status is not None:
@@ -402,16 +421,23 @@ def test_rate_target_and_result_round_trip_without_blocking_socket(ok, like_stat
             json=payload).json()))
         worker.start()
         frame = ws.receive_json()
-        assert {k: frame[k] for k in ("type", "action", "videoId")} == {
-            "type": "rate", "action": "like", "videoId": "A"}
-        if like_status is not None:
-            assert frame["likeStatus"] == like_status
-        else:
-            assert "likeStatus" not in frame
-        ws.send_json({"id": frame["id"], "status": 200,
-                      "body": json.dumps({"ok": ok, "error": "" if ok else "song changed"})})
+        status = like_status or "LIKE"
+        endpoint = {"LIKE": "like", "DISLIKE": "dislike", "INDIFFERENT": "removelike"}[status]
+        assert frame["method"] == "POST"
+        assert frame["url"].split("?")[0] == f"https://music.youtube.com/youtubei/v1/like/{endpoint}"
+        assert frame["body"]["target"] == {"videoId": "A"}
+        assert frame["body"]["context"]["user"]["onBehalfOfUser"] == "main-brand"
+        body = ({"error": {"message": "Rejected", "code": 403}} if outcome == "http_error" else
+                {"status": "STATUS_FAILED" if outcome == "rejected" else "STATUS_SUCCEEDED"})
+        ws.send_json({"id": frame["id"], "status": 403 if outcome == "http_error" else 200,
+                      "body": json.dumps(body)})
         worker.join(timeout=5)
-        assert result == [{"ok": ok, "error": "" if ok else "song changed"}]
+        assert not worker.is_alive()
+        assert result[0]["ok"] is (outcome == "ok")
+        assert remote_other.rated == []
+        rating = store.tracks.item_rating(main, "A")
+        assert (rating["status"] if rating else None) == (status if outcome == "ok" else None)
+        assert bridge.now_playing == {"video_id": "B", "likeStatus": "LIKE"}
 
 
 def test_rate_requires_displayed_target():

@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from yt_playlist.util import genre_map
-from yt_playlist.rec import embed, layers, mix_tuning, rec_params, transient
+from yt_playlist.rec import embed, layers, mix_tuning, negative, rec_params, transient
 from yt_playlist.rec.taste_analysis import taste_breadth
 
 
@@ -418,7 +418,8 @@ def _mood_components(scores, store, now, V, idx, content_vecs=None, evidence_vec
     """
     base = np.asarray(scores, dtype=np.float64)
     components = {"durable": base.copy(), "transient": np.zeros(len(base)),
-                  "session": np.zeros(len(base)), "audio": np.zeros(len(base))}
+                  "session": np.zeros(len(base)), "audio": np.zeros(len(base)),
+                  "negative": negative.penalties(store, V, idx, evidence_vecs=evidence_vecs)}
     Vn = None
     evidence_V, evidence_idx = (V, idx) if evidence_vecs is None else evidence_vecs
     tilt = transient.centroid_tilt(store, now, evidence_V, evidence_idx)
@@ -439,7 +440,8 @@ def _mood_components(scores, store, now, V, idx, content_vecs=None, evidence_vec
                                   content_snapshot=content_snapshot)
         if boost is not None:
             components["audio"] = w * boost
-    components["combined"] = sum(components[name] for name in ("durable", "transient", "session", "audio"))
+    components["combined"] = sum(components[name] for name in
+                                  ("durable", "negative", "transient", "session", "audio"))
     return components
 
 
@@ -490,6 +492,7 @@ def score_with_traces(store, taste, keys, V, idx, now):
         axis = axis_details.get(key, {"axes": {}, "raw_product": 1.0, "breadth": 1.0})
         traces[key] = {
             "durable": float(components["durable"][i]),
+            "negative_delta": float(components["negative"][i]),
             "contexts": [],
             "transient_delta": float(components["transient"][i]),
             "session_delta": float(components["session"][i]),

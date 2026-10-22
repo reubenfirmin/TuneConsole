@@ -34,7 +34,7 @@ def test_trace_final_scores_equal_production_scores(store):
         assert trace["final"] == pytest.approx(trace["rank_base"] * trace["axis_applied"])
         assert trace["combined"] == pytest.approx(
             trace["durable"] + trace["transient_delta"]
-            + trace["session_delta"] + trace["audio_delta"])
+            + trace["session_delta"] + trace["audio_delta"] + trace["negative_delta"])
 
 
 def test_taste_sample_items_carry_trace_but_normal_serving_does_not(store):

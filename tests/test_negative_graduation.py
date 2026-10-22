@@ -1,8 +1,5 @@
 # tests/test_negative_graduation.py
-"""#84 (mirrors #54 on the permanent side): a dislike or negative vibe is a verdict on the tracks
-themselves, not on an artist's whole catalogue. graduate_moods must not graduate `artist:` axes on
-negative signed events, even though the genre/era ledger keeps accruing normally. Positive signals
-(likes, positive vibe taps) still graduate artists as before."""
+"""Track negatives never establish permanent artist, genre, or era preferences."""
 import pytest
 
 from yt_playlist.core.store import Store
@@ -34,29 +31,16 @@ def _two_billy_idol_tracks(store):
     return k1, k2
 
 
-def test_two_dislikes_do_not_graduate_artist_but_genre_still_accrues(store):
-    """#84: two dislikes of the same artist (2 x source_w_dislike 1.0 == 2.0 > THEME_THRESHOLD 1.2)
-    used to permanently down-weight artist:Billy Idol -- the exact leak #54 fixed on the transient
-    side. They must not now, while the genre ledger (same math) still crosses and graduates down."""
+def test_two_dislikes_do_not_graduate_artist_genre_or_era(store):
     k1, k2 = _two_billy_idol_tracks(store)
     graduation.apply_dislikes(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=100.0)
 
-    # The artist axis was never even touched: no ledger entry, no permanent weight change.
-    assert store.rec_surface.get_theme("artist:Billy Idol") is None
     w = store.rec_model.get_weights(now=100.0)
-    assert w.get("artist:Billy Idol", 1.0) == 1.0
-
-    # The genre ledger did accrue and cross THEME_THRESHOLD (1.0 + 1.0 = 2.0 > 1.2), graduating down.
-    # VERIFY: source_w_dislike=1.0, signed=-1.0/call, presence weight 1/1 each -> -1.0, -1.0 -> -2.0.
-    # copysign(1.2, -2.0) == -1.2 discounted -> -2.0 - (-1.2) == -0.8 remainder.
-    assert store.rec_surface.get_theme("genre:jazz") == pytest.approx(-0.8)
-    assert w.get("genre:jazz", 1.0) < 1.0
-
-    # The graduation log carries no artist rows at all (none were ever logged), and definitely none
-    # for a negative (down-graduating) artist crossing.
-    rows = store.rec_surface.recent_graduations(limit=50)
-    assert not any(r["axis"].startswith("artist:") for r in rows)
-    assert any(r["axis"] == "genre:jazz" for r in rows)
+    for axis in ("artist:Billy Idol", "genre:jazz", "era:1980s"):
+        assert store.rec_surface.get_theme(axis) is None
+        assert w.get(axis, 1.0) == 1.0
+    assert store.rec_surface.recent_graduations(limit=50) == []
+    assert store.rec_model.disliked_identity_keys() == {k1, k2}
 
 
 def test_positive_graduate_moods_still_graduates_artist(store):
@@ -78,29 +62,27 @@ def test_positive_graduate_moods_still_graduates_artist(store):
     assert any(r["axis"] == "artist:Coltrane" for r in rows)
 
 
-def test_negative_vibe_tap_also_skips_artist(store):
-    """The fix is sign-based, not source-label-based: a negative *vibe* tap (source_label='mood', not
-    'dislike') must also skip the artist axis, exactly like apply_dislikes does."""
+def test_negative_vibe_tap_also_leaves_permanent_facets_alone(store):
     k1, k2 = _two_billy_idol_tracks(store)
     source_w_vibe = rec_params.get_param(store, "source_w_vibe")
 
     graduation.graduate_moods(store, [k1], -1, now=1.0, source=source_w_vibe, source_label="mood")
     graduation.graduate_moods(store, [k2], -1, now=2.0, source=source_w_vibe, source_label="mood")
 
-    assert store.rec_surface.get_theme("artist:Billy Idol") is None
-    assert store.rec_model.get_weights(now=2.0).get("artist:Billy Idol", 1.0) == 1.0
-    # The genre ledger still accrued under the same negative vibe (same math as the dislike case).
-    assert store.rec_surface.get_theme("genre:jazz") == pytest.approx(-0.8)
-    rows = store.rec_surface.recent_graduations(limit=50)
-    assert not any(r["axis"].startswith("artist:") for r in rows)
+    for axis in ("artist:Billy Idol", "genre:jazz", "era:1980s"):
+        assert store.rec_surface.get_theme(axis) is None
+        assert store.rec_model.get_weights(now=2.0).get(axis, 1.0) == 1.0
+    assert store.rec_surface.recent_graduations(limit=50) == []
 
 
-def test_repeat_apply_dislikes_accrues_once_not_twice(store):
-    """The once-not-twice invariant on an ACCRUING axis (the old test_dislike_sync guard asserted it
-    on the artist axis, which #84 emptied): re-applying the same dislikes (a re-sync re-capturing
-    the same likeStatus) must not double the genre ledger. record_dislike's first-seen dedup is the
-    mechanism; this pins it on the ledger side."""
+def test_repeat_dislikes_preserve_original_evidence_time(store):
     k1, k2 = _two_billy_idol_tracks(store)
     graduation.apply_dislikes(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=100.0)
     graduation.apply_dislikes(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=200.0)
-    assert store.rec_surface.get_theme("genre:jazz") == pytest.approx(-0.8)   # not -2.6: accrued once
+    assert set(store.rec_model.disliked_with_ts()) == {(k1, 100.0), (k2, 100.0)}
+    assert store.rec_surface.get_theme("genre:jazz") is None
+
+
+def test_deliberate_negative_facet_steering_still_graduates(store):
+    graduation.graduate_facet(store, "genre:jazz", -2, now=100, source_label="slider")
+    assert store.rec_model.get_weights(now=100)["genre:jazz"] < 1

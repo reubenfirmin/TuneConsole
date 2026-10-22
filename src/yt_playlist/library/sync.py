@@ -246,6 +246,8 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
             if on_auth_expired:
                 on_auth_expired(identity_id, label)
     if not auth_bad:
+        from yt_playlist.library import ratings
+        ratings.reconcile_pending(store, identity_id, client)
         if on_auth_ok:
             on_auth_ok(identity_id)   # genuine success -> clear any "expired" flag
         logger.info("synced identity %s (%s): %d playlists listed, %d refreshed, %d skipped",
@@ -281,12 +283,13 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now, *,
 
 def _sync_saved_albums(store, clients, on_progress):
     """Refresh each complete account snapshot without deleting another account's evidence."""
-    saved, snapshots = {}, {}
+    saved, snapshots, revisions = {}, {}, {}
     configured = {identity.id for identity in store.identities.get_identities()}
     complete = bool(clients) and configured <= clients.keys()
     outcomes = {str(i): resource("skipped", "Account unavailable") for i in configured - clients.keys()}
     for identity_id, client in clients.items():
         try:
+            revisions[identity_id] = store.collection.saved_album_revision(identity_id)
             albums = with_retry(lambda: client.get_library_albums(limit=None))
             if not isinstance(albums, list):
                 raise ValueError("saved-album snapshot is unavailable")
@@ -311,7 +314,14 @@ def _sync_saved_albums(store, clients, on_progress):
         _emit(on_progress, "info", "saved albums unchanged: no complete account snapshots")
         return outcomes, resource("skipped", "Complete account snapshots unavailable"), resource(
             "skipped", "Saved-album mirror unchanged")
-    store.collection.replace_saved_album_snapshots(snapshots)
+    accepted = store.collection.replace_saved_album_snapshots(snapshots, expected_revisions=revisions)
+    for identity_id in snapshots.keys()-accepted:
+        complete = False
+        outcomes[str(identity_id)] = resource('skipped', 'Account or saved library changed during fetch')
+    if not accepted:
+        _emit(on_progress, 'info', 'saved albums unchanged: account snapshots became stale')
+        return outcomes, resource('skipped', 'Account snapshots became stale'), resource(
+            'skipped', 'Saved-album mirror unchanged')
     saved = {a['browse']:a for a in store.collection.get_saved_albums()}
     _emit(on_progress, "info", f"saved albums: {len(saved)}")
     tracks = _materialize_album_tracks(store, clients, saved, on_progress)

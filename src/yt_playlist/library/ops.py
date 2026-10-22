@@ -12,6 +12,7 @@ import logging
 from yt_playlist.core.accounts import client_for
 
 from yt_playlist.library import analysis
+from yt_playlist.library import ratings
 from yt_playlist.library import sync as sync_mod
 from yt_playlist.library.executor import (
     MergePlan, add_tracks_to_playlist, apply_result, copy_into_playlist, copy_or_move_playlist,
@@ -175,12 +176,14 @@ class PlaylistOps:
         return reorder_track(self.store, playlist_id, video_id, before_video_id, client, self.now_fn())
 
     def set_liked(self, video_id, on) -> dict:
-        # The like-button path: like/unlike a song in your main account's Liked Music (LM is
-        # per-account; we target master). Resolve the master client here, then hand the rate+mirror
-        # to LikedMusic so all LM membership changes go through one primitive.
-        identity_id,client = client_for(self.store,self._clients())
-        LikedMusic(self.store).set_rating(identity_id, video_id, on, client)
+        self.set_rating(video_id, "LIKE" if on else "INDIFFERENT")
         return {"liked": bool(on)}
+
+    def set_rating(self, video_id, status) -> dict:
+        """Rate the exact requested video in the main account, including the playing song."""
+        identity_id,client = client_for(self.store,self._clients())
+        ratings.set_rating(self.store, identity_id, video_id, status, client, self.now_fn())
+        return {"likeStatus": status}
 
     def _require_client(self, playlist_id):
         pl = self.store.playlists.get_playlist(playlist_id)

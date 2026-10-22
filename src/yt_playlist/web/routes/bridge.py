@@ -12,7 +12,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from yt_playlist.core.activity import activity_for
-from yt_playlist.library import live_plays, player_events
+from yt_playlist.library import live_plays, player_events, ratings
 from yt_playlist.rec import measurement
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,11 @@ def build(ctx) -> APIRouter:
             bridge.now_playing = now_playing = None
             bridge.now_playing_seen_at = None
         if now_playing is not None:
+            store = getattr(ctx, "store", None)
+            if getattr(store, "tracks", None) is not None:
+                rating = ratings.main_rating(store, now_playing.get("video_id"))
+                if rating:
+                    now_playing = {**now_playing, "likeStatus": rating["status"]}
             collection = getattr(getattr(ctx, "store", None), "collection", None)
             resolve = getattr(collection, "playback_source", None)
             source = resolve(now_playing.get("playlist_ytm_id"), now_playing.get("video_id"),
@@ -100,20 +105,24 @@ def build(ctx) -> APIRouter:
             return {"ok": False, "error": "displayed video ID is required"}
         if like_status is not None and like_status not in ("LIKE", "DISLIKE", "INDIFFERENT"):
             return {"ok": False, "error": "invalid rating state"}
+        if like_status is None:
+            # Compatibility with older pages that sent a toggle instead of the desired state.
+            rating = ratings.main_rating(ctx.store, video_id)
+            playing = bridge.now_playing or {}
+            current = rating["status"] if rating else (
+                playing.get("likeStatus") if playing.get("video_id") == video_id else None)
+            want = "LIKE" if action == "like" else "DISLIKE"
+            like_status = "INDIFFERENT" if current == want else want
         try:
             logger.info("rating requested: video=%s action=%s desired=%s connected=%s",
                         video_id, action, like_status, bridge.connected)
-            control = {"type": "rate", "action": action, "videoId": video_id}
-            if like_status is not None:
-                control["likeStatus"] = like_status
-            status, body = await bridge.request_control(control)
-            result = json.loads(body)
-            ok = status == 200 and result.get("ok") is True
-            logger.log(logging.INFO if ok else logging.WARNING,
-                       "rating result: video=%s desired=%s status=%s ok=%s error=%s",
-                       video_id, like_status, status, ok, result.get("error", ""))
-            return {"ok": ok,
-                    "error": result.get("error", "")}
+            # ytmusicapi performs the write through the authenticated extension transport.
+            # Run it off the event loop so that transport's WebSocket replies can be received.
+            await activity_for(ctx).to_thread(ctx.ops().set_rating, video_id, like_status)
+            if like_status == "LIKE":
+                measurement.record_action(ctx.store, "save", ctx.now_fn(), video_id=video_id)
+            logger.info("rating confirmed: video=%s desired=%s", video_id, like_status)
+            return {"ok": True, "error": ""}
         except Exception as exc:
             logger.warning("rating failed: video=%s desired=%s", video_id, like_status, exc_info=True)
             return {"ok": False, "error": str(exc)}

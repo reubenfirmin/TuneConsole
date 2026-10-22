@@ -889,12 +889,12 @@ function homeStatus() {
       const want = action === 'like' ? 'LIKE' : 'DISLIKE';
       const current = this.nowPlaying;
       const previous = current.likeStatus;
-      // Optimistic toggle (clicking the active one clears it, matching YouTube Music); the next poll
-      // reconciles with the real state the extension read back from the player.
+      // The next poll reconciles with the backend's confirmed rating.
       this.nowPlaying.likeStatus = this.nowPlaying.likeStatus === want ? 'INDIFFERENT' : want;
       fetch('/now-playing/rate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, videoId: this.nowPlaying.video_id }),
+        body: JSON.stringify({ action, videoId: this.nowPlaying.video_id,
+                               likeStatus: this.nowPlaying.likeStatus }),
       }).then(r => r.json()).then(d => {
         if (!d.ok && this.nowPlaying === current) current.likeStatus = previous;
       }).catch(() => { if (this.nowPlaying === current) current.likeStatus = previous; });
@@ -947,8 +947,8 @@ function playerStatus() {
             next.likeStatus === pending.likeStatus || Date.now() >= pending.expires) {
           this.pendingRating = null;
         } else {
-          // The player sensor can still report the old rating while YTM handles our click.
-          // Keep both hearts on the requested state until it confirms, with a bounded wait.
+          // A status request can finish before the rating API write. Keep both hearts on the
+          // requested state until the backend confirms it, with a bounded wait.
           next.likeStatus = pending.likeStatus;
         }
       }
@@ -958,8 +958,7 @@ function playerStatus() {
     requestLike(event) {
       const { videoId, liked } = event.detail;
       if (!this.connected || !this.nowPlaying || this.nowPlaying.video_id !== videoId) return;
-      // A table heart on the playing song must drive YTM's player control too. An API-only
-      // write leaves that control stale, and every status poll would undo the table's update.
+      // Share the backend rating action with the sidebar so both hearts update together.
       event.preventDefault();
       this.rate('like', liked ? 'LIKE' : 'INDIFFERENT');
     },

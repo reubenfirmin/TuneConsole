@@ -260,7 +260,7 @@ def test_like_clear_rerecord_does_not_regraduate(store):
 def test_dislike_clear_rerecord_does_not_regraduate(store):
     axis = _genre_track(store)
     graduation.apply_dislikes(store, {KEY: "DISLIKE"}, 1000.0)
-    assert store.rec_surface.get_theme(axis) == -rec_params.SOURCE_W_DISLIKE
+    assert store.rec_surface.get_theme(axis) is None
     # a like supersedes (clears the dislike row), then the user dislikes again
     graduation.apply_dislikes(store, {KEY: "LIKE"}, 2000.0)
     assert KEY not in store.rec_model.disliked_identity_keys()

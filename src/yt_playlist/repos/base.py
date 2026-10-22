@@ -23,12 +23,14 @@ from functools import wraps
 #     Do not "fix" this tier by quarantining it: that deletes the only non-circular signal we have.
 GENERATED_GROUP = "Generated"
 
-# A track is "liked" if its song (identity_key) appears in any "Liked Music" (LM) playlist. Used as a
-# correlated subquery in the per-song views; the outer query must alias the tracks table as `t`.
-LIKED_EXISTS = ("EXISTS(SELECT 1 FROM playlist_tracks lpt "
+# Prefer the main account's recorded rating, including confirmed writes before LM has synced.
+# Otherwise use cached Liked Music membership. The outer query must alias tracks as `t`.
+LIKED_EXISTS = ("COALESCE((SELECT r.status='LIKE' FROM item_ratings r "
+                "JOIN identities i ON i.id=r.identity_id WHERE i.active=1 AND i.is_master=1 "
+                "AND r.video_id=t.video_id), EXISTS(SELECT 1 FROM playlist_tracks lpt "
                 "JOIN playlists lpl ON lpl.id = lpt.playlist_id "
                 "JOIN tracks lt ON lt.id = lpt.track_id "
-                "WHERE lpl.ytm_playlist_id = 'LM' AND lt.video_id = t.video_id)")
+                "WHERE lpl.ytm_playlist_id = 'LM' AND lt.video_id = t.video_id))")
 
 
 def synchronized(method):

@@ -25,6 +25,7 @@ class RecWorker:
         self._lock = threading.Lock()
         self._pending = False
         self._modes_pending = False
+        self._ratings_pending = False
         self._content_pending = set()
         self._running = False
         self._ticker_started = False
@@ -50,7 +51,7 @@ class RecWorker:
     def shutdown(self):
         self._stop.set()
         with self._lock:
-            self._pending = self._modes_pending = False
+            self._pending = self._modes_pending = self._ratings_pending = False
             self._content_pending.clear()
 
     def join(self, timeout):
@@ -117,6 +118,10 @@ class RecWorker:
         """Initialize missing genre groups and bundles; reuse an already prepared model."""
         self._schedule(full=False, modes=True)
 
+    def trigger_rating_update(self):
+        """Resolve exact-video rating subjects without blocking the bridge's response reader."""
+        self._schedule(full=False, ratings=True)
+
     def trigger_content_update(self, keys=(), *, video_ids=()):
         """Coalesce changed recordings for placement into the existing model and cluster pools."""
         keys = set(keys)
@@ -124,18 +129,19 @@ class RecWorker:
         if keys:
             self._schedule(full=False, keys=keys)
 
-    def _schedule(self, *, full, modes=False, keys=()):
+    def _schedule(self, *, full, modes=False, keys=(), ratings=False):
         with self._lock:
             if not self.enabled or self._stop.is_set() or not self.work.accepting:
                 return
-            previous = (self._pending, self._modes_pending, len(self._content_pending))
+            previous = (self._pending, self._modes_pending, self._ratings_pending, len(self._content_pending))
             self._pending |= full
             self._modes_pending |= modes
+            self._ratings_pending |= ratings
             self._content_pending.update(keys)
-            if previous != (self._pending, self._modes_pending, len(self._content_pending)):
+            if previous != (self._pending, self._modes_pending, self._ratings_pending, len(self._content_pending)):
                 caller = traceback.extract_stack(limit=3)[0]
                 self.ctx.logger.info("rec scheduled: kind=%s changed_tracks=%d running=%s source=%s:%d in %s",
-                    "full" if full else ("initialization" if modes else "incremental"),
+                    "full" if full else ("ratings" if ratings else "initialization" if modes else "incremental"),
                     len(self._content_pending), self._running,
                     caller.filename, caller.lineno, caller.name)
             if self._running:
@@ -161,13 +167,24 @@ class RecWorker:
     def _loop(self):
         while not self._stop.wait(self.debounce_s):
             with self._lock:
-                if not (self._pending or self._modes_pending or self._content_pending):
+                if not (self._pending or self._modes_pending or self._content_pending or self._ratings_pending):
                     self._running = False
                     return
                 full, modes, keys = self._pending, self._modes_pending, self._content_pending
+                ratings_pending = self._ratings_pending
                 self._pending = False
                 self._modes_pending = False
+                self._ratings_pending = False
                 self._content_pending = set()
+            if ratings_pending:
+                try:
+                    from yt_playlist.library import ratings
+                    clients = self.ctx.client_provider() or {}
+                    for identity in self.ctx.store.identities.get_identities():
+                        keys.update(ratings.reconcile_pending(
+                            self.ctx.store, identity.id, clients.get(identity.id)))
+                except Exception:
+                    self.ctx.logger.warning("rating subject update failed", exc_info=True)
             try:
                 if full:
                     self._do_rebuild()           # includes genre groups and Home bundles
@@ -198,7 +215,7 @@ class RecWorker:
             self.work.wrap("recommendation rebuild", self._do_rebuild)()
         finally:
             with self._lock:
-                again = self._pending or self._modes_pending or bool(self._content_pending)
+                again = self._pending or self._modes_pending or self._ratings_pending or bool(self._content_pending)
                 self._running = again
             if again:
                 self._start_loop()

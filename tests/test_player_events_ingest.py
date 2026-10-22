@@ -99,7 +99,7 @@ def test_rating_requires_confirmation_but_retains_raw_outcomes(monkeypatch, acti
     s.tracks.upsert_track("v", "Song", "Artist", "", None)
     ratings, model = [], []
     monkeypatch.setattr(s.tracks, "record_item_rating", lambda *a, **kw: ratings.append((a, kw)))
-    monkeypatch.setattr(player_events.graduation, "apply_dislikes", lambda *a, **kw: model.append((a, kw)))
+    monkeypatch.setattr(player_events.ratings.graduation, "apply_dislikes", lambda *a, **kw: model.append((a, kw)))
     msg = {"kind": "rate", "url": f"https://music.youtube.com/youtubei/v1/like/{action}",
            "body": json.dumps({"target": {"videoId": "v"}}), **outcome}
     assert player_events.handle_player_event(_ctx(s), msg, 1000.0)

@@ -122,6 +122,9 @@ def validate_catalog(conn, version):
     elif version >= 21:
         from . import v021_artists
         v021_artists.validate(conn)
+    if version >= 30:
+        from . import v030_account_scope_preservation
+        v030_account_scope_preservation.validate(conn)
     if version == 22:
         from . import v022_artist_references
         v022_artist_references.validate(conn)

@@ -47,6 +47,27 @@ class TrackRepo(Repo):
         self.conn.commit()
 
     @synchronized
+    def item_rating(self, identity_id, video_id):
+        row = self.conn.execute(
+            "SELECT status,source,observed_at FROM item_ratings WHERE identity_id=? AND video_id=?",
+            (identity_id, video_id)).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def pending_action_ratings(self, identity_id):
+        """Live ratings not yet reflected in the model, including unresolved exact uploads."""
+        return [dict(row) for row in self.conn.execute(
+            "SELECT ir.video_id,ir.status,ir.observed_at FROM item_ratings ir "
+            "LEFT JOIN catalog_tracks c ON c.video_id=ir.video_id "
+            "WHERE ir.identity_id=? AND ir.source IN ('api','action') AND ("
+            "(ir.status IN ('LIKE','DISLIKE') AND NOT EXISTS (SELECT 1 FROM rec_feedback f "
+            "WHERE f.item_key=c.identity_key AND f.kind=lower(ir.status))) OR "
+            "(ir.status='INDIFFERENT' AND EXISTS (SELECT 1 FROM rec_feedback f "
+            "WHERE f.item_key=c.identity_key AND f.kind IN ('like','dislike')))) "
+            "ORDER BY ir.observed_at,ir.video_id",
+            (identity_id,))]
+
+    @synchronized
     def upsert_track(self, video_id, title, artist, album, duration_s, available=None,
                      video_type=None, artist_browse_id=None, album_browse_id=None, thumbnail=None,
                      created_at=None, *, source_ref=None, credits=None) -> int:

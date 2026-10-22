@@ -68,6 +68,64 @@ def test_verified_empty_libraries_clear_the_previous_mirror(mirror):
     assert mirror.store.collection.get_saved_albums() == []
 
 
+@pytest.mark.parametrize('operation', ['save','unsave','save-again','unsave-again'])
+def test_sync_snapshot_cannot_undo_a_later_successful_membership_write(mirror,operation):
+    collection = mirror.store.collection
+    saved = {'browse':'SAVED','title':'Saved','artist':'Artist'}
+    if operation in {'unsave','save-again'}:
+        collection.add_saved_album(saved,identity_id=mirror.first)
+
+    class InterleavingClient:
+        def get_library_albums(self,limit=None):
+            # The remote snapshot was taken before a successful local write. The
+            # same-value writes must invalidate it too, even without changed rows.
+            old = [_album('SAVED')] if operation.startswith('unsave') else []
+            if operation.startswith('save'):
+                collection.add_saved_album(saved,identity_id=mirror.first)
+            else:
+                collection.remove_saved_album('SAVED',identity_id=mirror.first)
+            return old
+
+    outcomes,summary,_ = sync._sync_saved_albums(mirror.store,{
+        mirror.first:InterleavingClient(),mirror.second:AlbumClient([_album('OTHER')])},None)
+    assert ('SAVED' in collection.saved_album_ids())==operation.startswith('save')
+    assert {'OLD','OTHER'}<=collection.saved_album_ids()
+    assert outcomes[str(mirror.first)]['status']=='skipped'
+    assert summary['status']=='partial'
+    assert not mirror.store.conn.execute('SELECT 1 FROM album_library_snapshots WHERE identity_id=?',
+                                         (mirror.first,)).fetchone()
+
+
+def test_stale_snapshot_does_not_count_toward_legacy_reconciliation(mirror):
+    collection = mirror.store.collection
+
+    class InterleavingClient:
+        def get_library_albums(self,limit=None):
+            collection.remove_saved_album('absent',identity_id=mirror.first)
+            return []
+
+    outcomes,summary,_ = sync._sync_saved_albums(mirror.store,{mirror.first:InterleavingClient()},None)
+    assert summary['status']=='skipped'
+    assert collection.saved_album_ids()=={'OLD'}
+    assert mirror.materialized==[]
+
+
+def test_deactivated_account_failure_and_missing_snapshot_keep_reconciliation_pending(mirror):
+    with mirror.store.conn:
+        mirror.store.conn.execute('UPDATE identities SET active=0 WHERE id=?', (mirror.second,))
+    sync._sync_saved_albums(mirror.store,{mirror.first:AlbumClient([])},None)
+    assert mirror.store.collection.saved_album_ids()=={'OLD'}
+    with mirror.store.conn:
+        mirror.store.conn.execute('UPDATE identities SET active=1 WHERE id=?', (mirror.second,))
+    sync._sync_saved_albums(mirror.store,{
+        mirror.first:AlbumClient([]),mirror.second:AlbumClient(TimeoutError('offline'))},None)
+    assert mirror.store.collection.saved_album_ids()=={'OLD'}
+    sync._sync_saved_albums(mirror.store,{mirror.first:AlbumClient([])},None)
+    assert mirror.store.collection.saved_album_ids()=={'OLD'}
+    sync._sync_saved_albums(mirror.store,{mirror.second:AlbumClient([])},None)
+    assert mirror.store.collection.saved_album_ids()==set()
+
+
 def test_successful_account_refresh_preserves_failed_accounts_snapshot(mirror):
     mirror.store.collection.replace_saved_album_snapshots({
         mirror.first:[{'browse':'FIRST','title':'First'}],

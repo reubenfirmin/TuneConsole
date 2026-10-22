@@ -71,31 +71,75 @@ class CollectionRepo(Repo):
         return None
 
     # --- saved albums (mirror of the YouTube Music library, synced locally) ---
+    def _start_legacy_cohort(self):
+        """Freeze the required owners; added legacy evidence needs fresh observations."""
+        if not self.conn.execute('SELECT 1 FROM album_library_memberships WHERE identity_id IS NULL').fetchone():
+            self.conn.execute('DELETE FROM album_library_legacy_cohort')
+            self.conn.execute('INSERT INTO album_library_legacy_cohort(identity_id) SELECT id FROM identities')
+        else:
+            self.conn.execute('UPDATE album_library_legacy_cohort SET observed_at=NULL')
+
+    def _advance_album_revision(self, identity_id):
+        # Unattributed edits affect every possible owner: a fetch admitted before
+        # newly added legacy evidence cannot count as its successful observation.
+        owners = [identity_id] if identity_id is not None else [r[0] for r in self.conn.execute('SELECT id FROM identities')]
+        self.conn.executemany('INSERT INTO album_library_revisions VALUES (?,1) '
+                              'ON CONFLICT(identity_id) DO UPDATE SET revision=revision+1', [(i,) for i in owners])
+
+    @synchronized
+    def saved_album_revision(self, identity_id):
+        """Capture before remote work; snapshot commits compare under a write reservation."""
+        row = self.conn.execute('SELECT revision FROM album_library_revisions WHERE identity_id=?',
+                                (identity_id,)).fetchone()
+        return row[0] if row else 0
+
     @synchronized
     def replace_saved_albums(self, albums) -> None:
+        """Replace unattributed legacy data without erasing known account ownership."""
         albums = list(albums)
         with self.conn:
-            self.conn.execute('DELETE FROM album_library_memberships')
+            self._advance_album_revision(None)
+            self.conn.execute('DELETE FROM album_library_memberships WHERE identity_id IS NULL')
+            self._start_legacy_cohort()
             for a in albums:
                 if a.get('browse'):
                     album_catalog.save(self.conn,a)
 
     @synchronized
-    def replace_saved_album_snapshots(self, snapshots, *, now=None):
-        """Complete snapshots replace only their owner. Missing accounts retain prior evidence."""
-        active = {i[0] for i in self.conn.execute('SELECT id FROM identities WHERE active=1')}
-        if set(snapshots)-active:
-            raise ValueError('Unknown or inactive saved-album account')
+    def replace_saved_album_snapshots(self, snapshots, *, expected_revisions=None, now=None):
+        """Commit complete, current snapshots; return the accepted account IDs.
+
+        Callers fetching remotely must pass revisions captured before their fetch.
+        Without revisions, this is an immediate repository membership transaction.
+        """
+        accepted = set()
         with self.conn:
+            # Serialize the revision check and replacement across Store connections,
+            # as well as threads using this repository. No network work occurs here.
+            if not self.conn.in_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            active = {i[0] for i in self.conn.execute('SELECT id FROM identities WHERE active=1')}
             for identity_id,items in snapshots.items():
+                if identity_id not in active:
+                    continue
+                if expected_revisions is not None and (
+                        identity_id not in expected_revisions or
+                        expected_revisions[identity_id]!=self.saved_album_revision(identity_id)):
+                    continue
+                self._advance_album_revision(identity_id)
                 self.conn.execute('DELETE FROM album_library_memberships WHERE identity_id=?', (identity_id,))
                 for item in items:
                     album_catalog.save(self.conn,item,identity_id=identity_id)
+                observed_at = time.time() if now is None else now
                 self.conn.execute('INSERT INTO album_library_snapshots VALUES (?,?) ON CONFLICT(identity_id) '
-                                  'DO UPDATE SET observed_at=excluded.observed_at', (identity_id,time.time() if now is None else now))
-            known = {r[0] for r in self.conn.execute('SELECT identity_id FROM album_library_snapshots')}
-            if active and active<=known:
+                                  'DO UPDATE SET observed_at=excluded.observed_at', (identity_id,observed_at))
+                self.conn.execute('UPDATE album_library_legacy_cohort SET observed_at=? WHERE identity_id=?',
+                                  (observed_at,identity_id))
+                accepted.add(identity_id)
+            cohort = list(self.conn.execute('SELECT observed_at FROM album_library_legacy_cohort'))
+            if accepted and cohort and all(row[0] is not None for row in cohort):
                 self.conn.execute('DELETE FROM album_library_memberships WHERE identity_id IS NULL')
+        return accepted
 
     @synchronized
     def saved_album_ids(self) -> set:
@@ -108,13 +152,19 @@ class CollectionRepo(Repo):
     @synchronized
     def add_saved_album(self, a, *, identity_id=None) -> None:
         with self.conn:
+            if not self.conn.in_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            self._advance_album_revision(identity_id)
+            if identity_id is None:
+                self._start_legacy_cohort()
             album_catalog.save(self.conn,a,identity_id=identity_id)
 
     @synchronized
     def remove_saved_album(self, browse_id, *, identity_id=None) -> None:
-        self.conn.execute('DELETE FROM album_library_memberships WHERE album_id=? AND identity_id IS ?',
-                          (album_catalog.lookup(self.conn,browse_id),identity_id))
-        self.conn.commit()
+        with self.conn:
+            self._advance_album_revision(identity_id)
+            self.conn.execute('DELETE FROM album_library_memberships WHERE album_id=? AND identity_id IS ?',
+                              (album_catalog.lookup(self.conn,browse_id),identity_id))
 
     @synchronized
     def get_saved_albums(self, *, identity_id=None) -> list[dict]:

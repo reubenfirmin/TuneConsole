@@ -168,12 +168,13 @@ def test_now_playing_heart_immediately_updates_matching_playlist_row(live_playli
     expect(row.locator(".like-btn")).to_have_attribute("aria-pressed", str(desired_status == "LIKE").lower())
 
 
-@pytest.mark.parametrize("initial_status", ["INDIFFERENT", "LIKE"])
-def test_playing_track_table_heart_survives_status_polls(live_playlist_app, page, initial_status):
+@pytest.mark.parametrize("initial_status", ["", "INDIFFERENT", "LIKE"])
+@pytest.mark.parametrize("control", ["table", "sidebar"])
+def test_playing_track_heart_uses_backend_and_survives_stale_sensor(live_playlist_app, page, initial_status, control):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     snapshot = {"type": "now-heartbeat", "title": "Song A", "artist": "Artist X",
                 "videoId": "v0", "likeStatus": initial_status, "paused": False}
-    desired_status = "LIKE" if initial_status == "INDIFFERENT" else "INDIFFERENT"
+    desired_status = "INDIFFERENT" if initial_status == "LIKE" else "LIKE"
     pressed = "true" if desired_status == "LIKE" else "false"
     with connect(base.replace("http://", "ws://") + "/bridge/ws",
                  origin=EXTENSION_ORIGIN, open_timeout=5) as extension:
@@ -184,26 +185,22 @@ def test_playing_track_table_heart_survives_status_polls(live_playlist_app, page
         expect(widget).to_be_visible()
         expect(heart).to_have_attribute("aria-pressed", "false" if pressed == "true" else "true")
 
-        with page.expect_response(lambda r: r.url.endswith(("/now-playing/rate", "/track/like")),
-                                  timeout=5000):
-            heart.click()
-            frame = json.loads(extension.recv(timeout=5))
-            while frame == {"ping": 1}:
-                frame = json.loads(extension.recv(timeout=5))
-            assert {k: frame[k] for k in ("type", "action", "videoId")} == {
-                "type": "rate", "action": "like", "videoId": "v0"}
-            assert frame["likeStatus"] == desired_status
-            extension.send(json.dumps({"id": frame["id"], "status": 200,
-                                       "body": json.dumps({"ok": True})}))
+        target = heart if control == "table" else widget.locator(".hs-heart")
+        with page.expect_response(lambda r: r.url.endswith("/now-playing/rate"), timeout=5000) as response:
+            target.click()
+        assert response.value.json()["ok"] is True
         expect(heart).to_have_attribute("aria-pressed", pressed)
-        # A poll can arrive before the player applies the click. It must not undo the user's choice.
+        assert live_playlist_app["client"].rated == [("v0", desired_status)]
+        # YouTube's player bar is not refreshed by the API write. Even its old LIKE readout
+        # after an unlike must not overwrite the confirmed backend state or taste feedback.
+        extension.send(json.dumps({**snapshot, "type": "play", "brandId": ""}))
         page.evaluate("""() => {
           window.ratingPolled = false;
           window.addEventListener('track-like-changed', () => { window.ratingPolled = true; }, {once: true});
         }""")
         with page.expect_response(lambda r: r.url.endswith("/bridge/status"), timeout=8000) as polled:
             pass
-        assert polled.value.json()["now_playing"]["likeStatus"] == initial_status
+        assert polled.value.json()["now_playing"]["likeStatus"] == desired_status
         page.wait_for_function("window.ratingPolled")
         expect(heart).to_have_attribute("aria-pressed", pressed)
         if pressed == "true":
@@ -211,13 +208,11 @@ def test_playing_track_table_heart_survives_status_polls(live_playlist_app, page
         else:
             expect(widget.locator(".hs-heart")).not_to_have_class(re.compile(r"\bon\b"))
 
-        extension.send(json.dumps({**snapshot, "likeStatus": desired_status}))
-        with page.expect_response(lambda r: r.url.endswith("/bridge/status")
-                                  and r.json().get("now_playing", {}).get("likeStatus") == desired_status,
-                                  timeout=8000):
-            pass
+        # Recreate Alpine state to prove this is durable, rather than its optimistic timeout.
+        page.reload()
+        expect(widget).to_be_visible()
         expect(heart).to_have_attribute("aria-pressed", pressed)
-        assert live_playlist_app["client"].rated == []  # Only the player control writes this rating.
+        assert live_playlist_app["client"].rated == [("v0", desired_status)]
 
 
 def test_other_track_table_heart_keeps_using_liked_music(live_playlist_app, page):

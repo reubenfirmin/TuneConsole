@@ -43,15 +43,22 @@ def handle_play_event(ctx, msg, now) -> bool:
     if msg.get('videoId'):
         key = store.tracks.observe_track(msg['videoId'],title,artist,now=now)
     status = (msg.get("likeStatus") or "").strip()
+    rating = store.tracks.item_rating(ident, msg.get("videoId"))
+    confirmed = rating is not None and rating["source"] == "api"
+    if confirmed:
+        # An API write does not refresh YTM's player bar. Its old readout must not undo the
+        # confirmed result; another confirmed action or a library sync can reconcile it.
+        status = rating["status"]
     new = store.history.record_play_event(ident, key, (msg.get("videoId") or None), now,
                                   playlist_ytm_id=(msg.get("playlist") or None),
                                   like_status=(status or None),source_timezone=msg.get('timeZone'))
     if new:
         store.settings.set_setting("last_plays_sync_at", str(now))   # plays-freshness for the sync-status badge
     if status in _STATUSES:
-        if msg.get('videoId'):
+        if msg.get('videoId') and not confirmed:
             store.tracks.record_item_rating(ident,msg['videoId'],status,source='action',now=now)
         # provenance='action': observed live while the user is engaged, so the event time is real
         # and the like keeps full transient participation.
-        graduation.apply_dislikes(store, {key: status}, now, provenance="action")  # idempotent by design
+        event_time = rating["observed_at"] if confirmed else now
+        graduation.apply_dislikes(store, {key: status}, event_time, provenance="action")
     return new

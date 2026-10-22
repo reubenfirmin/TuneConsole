@@ -18,7 +18,7 @@ def test_one_half_life_halves():
 def test_halflife_params_registered_with_defaults():
     by_name = rec_params.PARAMS_BY_NAME
     for name, default in [("play_halflife_d", 3), ("mood_halflife_d", 7),
-                          ("like_halflife_d", 21), ("dislike_halflife_d", 45),
+                          ("like_halflife_d", 21), ("dislike_halflife_d", 5),
                           ("weight_revert_halflife_d", 60)]:
         assert name in by_name and by_name[name].default == default
 

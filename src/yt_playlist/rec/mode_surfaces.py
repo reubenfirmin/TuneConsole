@@ -13,7 +13,7 @@ from itertools import permutations
 import numpy as np
 
 from yt_playlist.rec import (embed, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, surfaces,
-                             taste_modes, transient, measurement)
+                             taste_modes, transient, measurement, negative)
 from yt_playlist.util import genre_map
 
 CARD_SURFACES = ("wheelhouse", "explore", "comfort", "fresh")
@@ -30,12 +30,17 @@ def _ranker_for(epoch, mode_id, share) -> str:
     return "ppr" if random.Random(seed).random() < share else "cosine"
 
 
-def _order_key(ranker, ppr_pos, leans):
+def _order_key(ranker, ppr_pos, leans, penalties=None):
     """Sort key for a card's candidates: ascending PPR position for the 'ppr' arm (unknown keys last),
     else the existing descending mood-tilt for the 'cosine' arm. Both return ascending-sortable values."""
+    penalties = penalties or {}
     if ranker == "ppr":
-        return lambda d: ppr_pos.get(d.get("key"), _PPR_TAIL)
-    return lambda d: -_tilt_key(d, leans)
+        # Put positions on a unit scale so the bounded dislike delta has the same strength
+        # whatever depth the cached PPR ranking contains. Missing candidates still follow it.
+        scale = max(1, len(ppr_pos)) if any(penalties.values()) else 1
+        return lambda d: (ppr_pos.get(d.get("key"), _PPR_TAIL) / scale
+                          - penalties.get(d.get("key"), 0.0))
+    return lambda d: -_tilt_key(d, leans) - penalties.get(d.get("key"), 0.0)
 
 
 def _item_dict(it) -> dict:
@@ -466,6 +471,15 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
     # per-render machinery that already blocks a track across cards.
     cards, seen = [], set(blocked)
     full_pools = {}
+    dislike_deltas = {}
+
+    def ordering(ranker, positions, items):
+        missing = {d["key"] for d in items if d.get("key") and d["key"] not in dislike_deltas}
+        if missing:
+            deltas = negative.for_keys(store, missing)
+            dislike_deltas.update({key: deltas.get(key, 0.0) for key in missing})
+        return _order_key(ranker, positions, leans, dislike_deltas)
+
     mode_families = {m["mode_id"]: max(m["families"], key=lambda f: f[1])[0]
                      for m in modes if m.get("families")}
 
@@ -499,7 +513,7 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
         items = [d for d in bucket if d.get("key") and d["key"] not in seen
                  and d.get("artist") not in muted]
         candidate_keys = {d["key"] for d in items}
-        items.sort(key=_order_key(ranker, ppr_pos, leans))
+        items.sort(key=ordering(ranker, ppr_pos, items))
         items = vibe_rank(items)
         items = _diversify(items, cap_a, cap_al)
         if surf != "comfort" and len(items) < PROTO_SIZE:   # Comfort is NEVER backfilled (#63 credibility)
@@ -509,7 +523,7 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
                 pool = [d for d in pool if _in_band(d.get("year"), band, year_cuts[0], year_cuts[1])]
             extra = [d for d in pool if d.get("key") and d["key"] not in seen and d["key"] not in taken]
             family = mode_families.get(mid)
-            order = _order_key(ranker, ppr_pos, leans)
+            order = ordering(ranker, ppr_pos, extra)
             if family:
                 distance = lambda d: genre_map.family_distance(family, genre_map.family(d.get("genre")))
                 # Exhaust the SAME family across the whole library before adding close neighbors.
@@ -531,6 +545,7 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
         items = [{**item, "serving_context": {"score_kind": "candidate_fit", "source_ranker": surf,
                   "ordering_ranker": ranker, "ppr_position": ppr_pos.get(item["key"]) if ranker == "ppr" else None,
                   "facet_tilt": _tilt_key(item, leans), "vibe": vibe_rank.preset,
+                  "negative_delta": dislike_deltas.get(item["key"], 0.0),
                   "vibe_affinity": vibe_rank.affinity(item)}} for item in items]
         return {"lane": surf, "label": label, "mode_id": mid, "ranker": ranker,
                 "tracks": items, "_candidate_keys": candidate_keys}, bucket

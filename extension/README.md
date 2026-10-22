@@ -100,16 +100,21 @@ All events are stored locally in the app's database.
 ## Radio Session console
 
 Home's Radio tab (`/#radio`) injects `radio_session.js` on demand.
-It reads Music's native playback store, turns the identified Autoplay switch off, and revisits
-the saved playlist after each confirmed change. Once the sidebar page contains the saved tracks,
-it follows the current song's native watch endpoint with the current playback position. The
-session starts with three songs, then keeps one song saved
+It reads Music's native playback store, turns the identified Autoplay switch off, and asks Music's
+native fetch handler to refresh the saved playlist after each confirmed change. The handler uses
+the current playback endpoint and fetches the playlist from YouTube without navigating or seeking.
+The session starts with three songs, then keeps one song saved
 ahead; the four continuations on Home are proposals, and selecting one replaces only the
 unplayed playlist suffix. Opening Radio reattaches to the current session without restarting it.
 It confirms adoption against Music's actual upcoming tracks, separately from the embedded video
-player and the browse page. A native navigation request alone does not confirm a direction switch.
-Navigation is attempted once per saved version and current song, preserving the paused state.
-The observer never dispatches native queue edits or sends a track array to the player.
+player and the browse page. Sending a refresh request alone does not confirm a direction switch.
+An unconfirmed change gets at most three refresh attempts, at least eight seconds apart.
+After playback adopts a change, the observer also clicks the playlist's sidebar link once to
+refresh its visible rows. Browse refreshes have their own state and continue after playback is
+confirmed; routine status polls do not keep clicking the link. The compact report includes
+`page_synced` alongside `playback_synced`.
+The observer does not play, pause, seek, dispatch store mutations, or supply playback items;
+Music fetches and reconciles its own saved-playlist contents.
 
 After reloading the unpacked extension, start a session and open the **YouTube Music tab's**
 DevTools console (page context). To copy the compact live playback report:

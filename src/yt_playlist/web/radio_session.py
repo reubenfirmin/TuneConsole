@@ -1,8 +1,8 @@
 """Saved-playlist radio, observed through the extension's native playback state.
 
 Start with three songs in a new YouTube playlist; then keep one song ahead of
-the currently playing song. Refresh through the saved playlist's native
-watch endpoint, without editing the playback queue or reloading the tab.
+the currently playing song. Ask Music's native refresh handler to fetch the saved
+playlist, without supplying playback items or reloading the tab.
 """
 import asyncio
 import json
@@ -445,7 +445,7 @@ class PlaylistRadio:
 
     def _browser(self, s):
         # A replacement can involve several saved-playlist edits. Only ask the
-        # native player to revisit the playlist after the final state is saved.
+        # native player to fetch the playlist after the final state is saved.
         refresh = s.refresh_needed and not s.requested_direction and (not s.replacement or s.replacement.saved)
         refresh_at = self.ctx.now_fn() if refresh else None
         payload = {"playlist": s.playlist, "videoIds": [t["video_id"] for t in s.tracks],
@@ -473,10 +473,9 @@ class PlaylistRadio:
             s.error = None
             s.browser = result
             s.browser_seen_at = time.monotonic()
-            # Sidebar navigation proves only that the browse view changed. The
-            # actual player's future must match before acknowledging the edit.
-            if result.get("playback_synced"):
-                s.refresh_needed = False
+            # A refresh request alone is not acknowledgement. Keep checking the
+            # actual future, including if a late response restores an older one.
+            s.refresh_needed = not bool(result.get("playback_synced"))
             if refresh_at is not None and result.get("refresh") in {"clicked", "requested"}:
                 s.mutation_windows.append([refresh_at, self.ctx.now_fn() + 3])
             self._report_playback(s, result)
@@ -497,7 +496,12 @@ class PlaylistRadio:
         report = (result.get("observerVersion"), player.get("playlist_ytm_id"), video,
                   saved, loaded, embedded, result.get("playback_synced"),
                   result.get("refresh"), result.get("autoplay"), native.get("available"))
-        signature = report[:7] + report[8:]
+        refresh_state = result.get("refresh")
+        if refresh_state in {"clicked", "requested", "waiting", "waiting for native playlist refresh"}:
+            refresh_state = "pending"
+        elif refresh_state in {"confirmed", "not requested"}:
+            refresh_state = None
+        signature = report[:7] + report[8:] + (refresh_state,)
         if signature == s.observer_report and result.get("refresh") not in {"clicked", "requested"}:
             return
         s.observer_report = signature

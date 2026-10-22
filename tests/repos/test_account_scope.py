@@ -6,7 +6,7 @@ import pytest
 
 from yt_playlist.core.accounts import client_for
 from yt_playlist.core.migrations import Migration,MigrationError,migrate
-from yt_playlist.core.migrations import registry,v024_account_scope
+from yt_playlist.core.migrations import registry,v024_account_scope,v030_account_scope_preservation
 from yt_playlist.core.store import Store
 
 
@@ -20,14 +20,23 @@ def installed_v23(tmp_path):
     store.conn.close()
 
 
-def test_installed_account_scope_preserves_unknown_ownership_and_curation(installed_v23):
+@pytest.mark.parametrize('installed_version', [23,29])
+def test_installed_account_scope_preserves_unknown_ownership_and_curation(installed_v23,installed_version):
     store = installed_v23
+    migrate(store.conn,registry=registry.MIGRATIONS[:installed_version])
     store.init_schema()
     assert store.playlists.get_playlist(1).scope_ref=='@account:1:LM'
     assert store.playlists.get_playlist(2).scope_ref=='@account:2:LM'
     assert store.playlists.get_playlist(4).scope_ref==store.playlists.get_playlist(5).scope_ref=='shared'
-    assert store.playlists.get_playlist_groups()=={'@legacy:LM':'Old likes','shared':'Keep'}
-    assert store.playlists.get_hidden_playlists()=={'@legacy:LM','@account:1:SE'}
+    refs = {'@account:1:LM','@account:2:LM'}
+    assert store.playlists.get_playlist_groups()==dict.fromkeys(refs,'Old likes') | {'shared':'Keep'}
+    assert store.playlists.get_hidden_playlists()==refs | {'@account:1:SE'}
+    assert store.overlaps.get_overlap_ignored()==refs | {'shared'}
+    assert store.overlaps.get_cleanup_ignored()=={'empty':refs,'tiny':{'shared'}}
+    inherited = [json.loads(r[0]) for r in store.conn.execute(
+        "SELECT payload FROM identity_state_archive WHERE kind='playlist_scope_inherited:playlist_group'")]
+    assert {r['inherited']['ytm'] for r in inherited}==refs
+    assert all(r['original']=={'ytm':'@legacy:LM','name':'Old likes'} for r in inherited)
     assert store.overlaps.get_suppressed_overlap_pairs()=={frozenset(('@legacy:LM','shared'))}
     assert store.overlaps.get_ignored_merges()[0]['members']==['@account:1:SE','shared']
     assert store.rec_surface.get_recipe('shared')=={'model':'cluster'}
@@ -36,6 +45,66 @@ def test_installed_account_scope_preserves_unknown_ownership_and_curation(instal
     state = list(store.conn.iterdump())
     store.init_schema()
     assert list(store.conn.iterdump())==state
+
+    # Inherited choices become ordinary independent preferences. Membership churn
+    # retains those choices, while a newly added account inherits nothing.
+    store.playlists.set_playlist_group('LM','Changed',identity_id=1)
+    store.playlists.unhide_playlist('LM',identity_id=1)
+    store.overlaps.unignore_cleanup('@account:1:LM','empty')
+    store.playlists.remove_playlist(2)
+    restored = store.playlists.upsert_playlist(2,'LM','Main likes',0,'h',1)
+    third = store.identities.upsert_identity('New','bridge','new-brand',False)
+    new = store.playlists.upsert_playlist(third,'LM','New likes',0,'h',1)
+    assert store.playlists.get_playlist_groups()['@account:1:LM']=='Changed'
+    assert store.playlists.get_playlist_groups()[store.playlists.get_playlist(restored).scope_ref]=='Old likes'
+    assert store.playlists.get_playlist(new).scope_ref not in store.playlists.get_playlist_groups()
+    assert store.playlists.get_hidden_playlists()=={'@account:2:LM','@account:1:SE'}
+    assert store.overlaps.get_cleanup_ignored()['empty']=={'@account:2:LM'}
+
+
+def test_account_scope_repair_preserves_existing_account_override(installed_v23):
+    store = installed_v23
+    migrate(store.conn,registry=registry.MIGRATIONS[:29])
+    with store.conn:
+        store.conn.execute("INSERT INTO playlist_group VALUES ('@account:1:LM','Already changed')")
+    store.init_schema()
+    assert store.playlists.get_playlist_groups()=={
+        '@account:1:LM':'Already changed','@account:2:LM':'Old likes','shared':'Keep'}
+
+
+def test_repair_does_not_restore_albums_already_resolved_by_every_original_account(installed_v23):
+    store = installed_v23
+    migrate(store.conn,registry=registry.MIGRATIONS[:29])
+    with store.conn:
+        store.conn.execute("INSERT INTO albums(id,title,metadata_rank) VALUES (1,'Removed',2)")
+        store.conn.execute("INSERT INTO album_provider_ids VALUES ('youtube','removed',1)")
+        store.conn.execute('INSERT INTO identity_state_archive VALUES (?,?,?,?)',
+                           ('album_legacy:saved_albums','removed','{"browse_id":"removed"}','original album'))
+        store.conn.executemany('INSERT INTO album_library_snapshots VALUES (?,1)', [(1,),(2,)])
+    store.init_schema()
+    assert store.collection.saved_album_ids()==set()
+
+
+def test_account_scope_repair_failure_keeps_installed_v29_unchanged(installed_v23,tmp_path,monkeypatch):
+    store = installed_v23
+    migrate(store.conn,registry=registry.MIGRATIONS[:29])
+    before = list(store.conn.iterdump())
+    current = registry.MIGRATIONS
+    def fail(conn,context):
+        v030_account_scope_preservation.apply(conn,context)
+        raise RuntimeError('interrupt preservation repair')
+    monkeypatch.setattr(registry,'MIGRATIONS',(*current[:29],Migration(30,current[29].name,fail)))
+    with pytest.raises(MigrationError,match='interrupt preservation repair'):
+        migrate(store.conn,backup_dir=tmp_path / 'repair-backups')
+    assert list(store.conn.iterdump())==before
+    backups = list((tmp_path / 'repair-backups').glob('*.db'))
+    assert len(backups)==1
+    with sqlite3.connect(backups[0]) as backup:
+        assert backup.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+        assert backup.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==29
+    monkeypatch.setattr(registry,'MIGRATIONS',current)
+    store.init_schema()
+    assert store.playlists.get_playlist_groups()['@account:2:LM']=='Old likes'
 
 
 def test_scope_upgrade_failure_rolls_back_with_verified_backup(installed_v23,tmp_path,monkeypatch):

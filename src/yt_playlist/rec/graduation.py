@@ -8,8 +8,8 @@ from yt_playlist.rec import mix_tuning, rec_params, transient
 
 
 def apply_dislikes(store, status_map, now, provenance="sync") -> None:
-    """Fold per-track likeStatus into the model. A first-seen DISLIKE -> a long global suppression +
-    a negative graduation contribution. A first-seen LIKE -> a positive graduation contribution
+    """Fold per-track likeStatus into the model. A first-seen DISLIKE retains a global suppression
+    and durable negative-vector evidence. A first-seen LIKE -> a positive graduation contribution
     (plus, for 'action' provenance only, transient participation via the like row itself). A
     no-longer-disliked/liked track has its suppression/like cleared. NO direct permanent axis nudge.
     Graduation owns that. Idempotent.
@@ -17,9 +17,9 @@ def apply_dislikes(store, status_map, now, provenance="sync") -> None:
     `provenance`: 'sync' when the statuses come from the library sync's bulk rated map (no real
     action time; likes stay out of the transient model and graduate at the low source_w_like_synced
     weight), 'action' when observed live through the extension (real event time; full transient
-    participation, normal source_w_like weight). An INDIFFERENT here must only ever arrive from the
-    sync's complete whole-run view: the player pipelines filter it out because their readouts show
-    INDIFFERENT before YTM hydrates the real rating (see live_plays/player_events).
+    participation, normal source_w_like weight). INDIFFERENT must come from a confirmed rating
+    request or a complete library sync. Unconfirmed player readouts can show INDIFFERENT before
+    YTM hydrates the real rating (see live_plays/player_events).
 
     Graduation is additionally gated by a once-EVER per-key stamp (mark_graduated_once) that
     survives clear/re-record cycles: without it, a likeStatus flap deleted the like row and let the
@@ -28,12 +28,10 @@ def apply_dislikes(store, status_map, now, provenance="sync") -> None:
     existing_like = set(store.rec_model.recent_liked_keys())
     until = now + rec_params.get_param(store, "dislike_suppress_days") * 86400
     for key, status in status_map.items():
+        if not key:
+            continue
         if status == "DISLIKE":
-            if key not in existing_dis and store.rec_model.record_dislike(key, until, now) \
-                    and store.rec_model.mark_graduated_once(key, "dislike_grad", now):
-                graduate_moods(store, [key], -1.0, now,
-                               source=rec_params.get_param(store, "source_w_dislike"),
-                               source_label="dislike")
+            store.rec_model.record_dislike(key, until, now)
             if key in existing_like:
                 store.rec_model.clear_like(key)                       # a dislike supersedes a prior like
         elif status == "LIKE":
@@ -76,18 +74,17 @@ def graduate_moods(store, keys, signed, now, source=1.0, source_label="mood") ->
     `source_label` names it for the graduation log. Model-only. NEVER suppresses. `signed` carries
     intensity (±1, ±2 on 'a lot').
 
-    #54/#84: a negative signal (signed < 0: a dislike, a negative vibe tap, ...) is a verdict on the
-    tracks themselves, not on an artist's whole catalogue, so `artist:` axes are skipped whenever
-    signed < 0 -- otherwise two dislikes of one artist (2 x source_w_dislike 1.0 > THEME_THRESHOLD
-    1.2) would permanently down-weight that artist, the exact leak #54 already fixed on the transient
-    side (transient.facet_leans' dislike/skip drop_artist). Positive signals still graduate artists."""
+    Negative track feedback does not establish a permanent artist, genre, or era preference.
+    Its short-lived facets stay in transient.py; explicit dislikes also retain their own vector
+    direction. Deliberate facet steering still graduates through graduate_facet/slider exposure.
+    Positive track signals continue to graduate all their facets."""
+    if signed <= 0:
+        return
     facets = transient.facets_for(store, keys)
     if not facets:
         return
     n = len(set(keys)) or 1
     for axis, axis_keys in facets.items():
-        if signed < 0 and axis.startswith("artist:"):
-            continue
         graduate_facet(store, axis, signed * (len(axis_keys) / n), now,
                        source=source, source_label=source_label)
 

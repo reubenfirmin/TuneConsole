@@ -128,6 +128,10 @@ PARAMS = [
     ParamSpec("dislike_transient_w", "Recent dislikes: influence", "transient",
               "How much recent dislikes reduce recommendations for similar music.",
               0.0, 3.0, 0.05, 1.50),
+    ParamSpec("dislike_durable_w", "Remember disliked music", "discovery",
+              "Keep reducing matches to disliked tracks after recent feedback fades. "
+              "Removing a dislike removes this influence; genre and era preferences stay independent.",
+              0.0, 1.0, 0.05, 0.35),
     ParamSpec("audio_transient_w", "Follow recent sound", "transient",
               "Adds extra preference for similar tempo, energy, and mood. Off removes this boost. "
               "Stronger settings can make picks sound alike. Requires sound information.",
@@ -147,9 +151,9 @@ PARAMS = [
     ParamSpec("like_halflife_d", "Like memory half-life (days)", "transient",
               "Days until a like has half its original influence on current recommendations.", 1, 90, 1, 21, integer=True),
     ParamSpec("dislike_halflife_d", "Dislike fade half-life (days)", "transient",
-              "Days until a dislike has half its original effect on similar music. "
-              "The separate dislike ban still controls when the disliked track itself can return.",
-              5, 180, 5, 45, integer=True),
+              "Days until a dislike has half its original effect on recent genre and era preferences. "
+              "Remembered disliked music and the track exclusion have separate controls.",
+              5, 180, 5, 5, integer=True),
     ParamSpec("mood_alpha", "Mood choice influence", "transient",
               "How strongly a mood choice changes recommendations relative to your saved taste.",
               0.0, 1.0, 0.05, 0.35),
@@ -208,8 +212,6 @@ PARAMS = [
               "are unknown, so they do not affect current mood. At the default, about three similar "
               "likes produce one saved preference update.",
               0.0, 2.0, 0.05, 0.4, advanced=True),
-    ParamSpec("source_w_dislike", "Speed: dislikes", "graduation",
-              "How quickly dislikes update saved preferences.", 0.0, 2.0, 0.05, 1.0, advanced=True),
     ParamSpec("source_w_vibe", "Speed: mood choices", "graduation",
               "How quickly mood choices update saved preferences.", 0.0, 2.0, 0.05, 1.0, advanced=True),
     ParamSpec("source_w_feedback", "Speed: suggestion feedback", "graduation",
@@ -400,7 +402,6 @@ SOURCE_W_VIBE = 1.0       # vibe / facet lever (unchanged from today)
 SOURCE_W_LIKE = 1.0       # thumbs-up observed live in the player - strong (real action time)
 SOURCE_W_LIKE_SYNCED = 0.4  # like discovered by the library sync - low (no reliable action time;
                             # a single one must not cross THEME_THRESHOLD on its own)
-SOURCE_W_DISLIKE = 1.0    # thumbs-down (sign supplied by caller) - strong
 SOURCE_W_SLIDER = 0.5     # per held-day of a full lean (~2-3 held days -> one graduation step)
 SOURCE_W_PLAY = 0.08      # one play - weak; passive listening must not silently rewrite taste
 PLAY_GRAD_SESSION_CAP = 0.4   # max play-graduation contribution per session (a binge can't graduate)

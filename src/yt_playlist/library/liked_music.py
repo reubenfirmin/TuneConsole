@@ -10,7 +10,7 @@ class and get translated into the right rate_song + local-membership update.
 import json
 
 from yt_playlist.util.action_kinds import ADD_TRACKS, REMOVE_TRACK
-from yt_playlist.util.retry import with_retry
+from yt_playlist.library import ratings
 
 LM_PLAYLIST_ID = "LM"
 
@@ -27,11 +27,11 @@ class LikedMusic:
         """True if `pl` is the YouTube Liked Music system playlist (the one needing these shims)."""
         return pl is not None and pl.ytm_playlist_id == LM_PLAYLIST_ID
 
-    def set_rating(self, identity_id, video_id, on, client) -> None:
+    def set_rating(self, identity_id, video_id, on, client, now) -> None:
         """The one primitive every LM shim shares: rate the song on YouTube and mirror the like in
         the local LM playlist so the derived `liked` flag / membership flips at once."""
-        with_retry(lambda: client.rate_song(video_id, "LIKE" if on else "INDIFFERENT"))
-        self.store.playlists.set_song_liked(identity_id, video_id, on)
+        ratings.set_rating(self.store, identity_id, video_id,
+                           "LIKE" if on else "INDIFFERENT", client, now)
 
     def add(self, playlist_id, tracks, client, now) -> dict:
         """"Add" on Liked Music = like each song. YouTube rejects directly-added LM items, so this is
@@ -49,7 +49,7 @@ class LikedMusic:
             self.store.tracks.upsert_track(t["videoId"], t.get("title", ""), t.get("artist"),
                                     t.get("album"), t.get("duration"), 1,
                                     None, None, t.get("album_browse"), t.get("thumbnail"))
-            self.set_rating(pl.identity_id, t["videoId"], True, client)
+            self.set_rating(pl.identity_id, t["videoId"], True, client, now)
             titles.append(t.get("title", ""))
         self.store.actions.record_action(ADD_TRACKS,
                                  json.dumps({"playlist": pl.title, "added": len(items), "titles": titles}),
@@ -60,7 +60,7 @@ class LikedMusic:
         """"Remove" on Liked Music = unlike the song. LM has no removable playlist item to delete.
         Counterpart to executor.remove_track for the LM case."""
         pl = self._require_lm(playlist_id)
-        self.set_rating(pl.identity_id, video_id, False, client)
+        self.set_rating(pl.identity_id, video_id, False, client, now)
         count = len(self.store.playlists.get_playlist_track_ids(playlist_id))
         self.store.playlists.set_playlist_track_count(playlist_id, count, now)
         self.store.actions.record_action(REMOVE_TRACK,

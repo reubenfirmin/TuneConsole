@@ -136,7 +136,7 @@ def build(ctx) -> APIRouter:
              ]),
             ("preferences", "Ranking & feedback", "amber",
              "Set how strongly stated preferences affect rankings, how long dislikes exclude tracks, and what counts as mainstream for feedback.", [
-                 ("", ("breadth_gain", "axis_weight_cap", "dislike_suppress_", "pop_")),
+                 ("", ("breadth_gain", "axis_weight_cap", "dislike_suppress_", "dislike_durable_w", "pop_")),
              ]),
             ("artists", "Related artists", "blue",
              "Choose how the app finds connections between artists. These settings affect related-artist suggestions.", [
@@ -418,6 +418,7 @@ def build(ctx) -> APIRouter:
 
     def _trace_changes(old, current):
         fields = (("durable", "Saved taste match", False),
+                  ("negative_delta", "Disliked music adjustment", False),
                   ("transient_delta", "Recent listening adjustment", False),
                   ("session_delta", "Session adjustment", False),
                   ("audio_delta", "Sound adjustment", False),

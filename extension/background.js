@@ -413,7 +413,7 @@ async function refreshViewInYtmTab(playlist) {
   }
 }
 
-// Observe Music's playback state and revisit its saved-playlist watch endpoint.
+// Observe Music's playback state and request its native saved-playlist refresh.
 async function playlistSessionInYtmTab(frame) {
   const tab = await pickYtmTab();
   if (!tab) return {ok: false, error: "No YouTube Music tab is open."};
