@@ -94,3 +94,26 @@ def test_macos_native_install_reconnects_after_listener_disappears(live_app, pag
         state.update(instance="updated-mac-process", phase="current", message="Up to date.")
     assert calls == {"install": 1, "restart": 0}
     assert len(page.context.pages) == 1
+
+
+def test_manual_relaunch_preserves_card_and_reconnects_to_new_instance(live_app, page, store, monkeypatch):
+    state, calls = update_card(monkeypatch, page, store)
+    state.update(phase="ready")
+
+    def manual_restart(route):
+        calls["restart"] += 1
+        state.update(phase="manual_restart", message="Update installed. Close TuneConsole, then open it again.")
+        route.fulfill(json=dict(state))
+
+    page.route("**/app-update/restart", manual_restart)
+    page.goto(f"{live_app}/#notices")
+    card = page.locator("#update-nudge")
+    card.get_by_role("button", name="Restart to update", exact=True).click()
+    expect(card.get_by_role("status")).to_contain_text("Close TuneConsole")
+    expect(card.get_by_role("button", name="Restart to update", exact=True)).to_be_hidden()
+    expect(card.get_by_role("button", name="Update now", exact=True)).to_be_hidden()
+    with page.expect_navigation(wait_until="domcontentloaded", timeout=10000):
+        state.update(instance="fresh-launch", phase="current", message="Up to date.")
+    assert calls == {"install": 0, "restart": 1}
+    assert page.url == f"{live_app}/#notices"
+    assert len(page.context.pages) == 1

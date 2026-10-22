@@ -2,7 +2,7 @@
 from collections import Counter, deque
 from yt_playlist.core.accounts import catalog_client
 
-from yt_playlist.rec import embed, home_themes, home_vibe, measurement, mode_surfaces, rec_params, road_trip, surfaces
+from yt_playlist.rec import embed, home_themes, home_vibe, measurement, mode_surfaces, rec_params, road_trip_candidates, surfaces
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 
@@ -28,10 +28,10 @@ def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message
         on_progress(f"Finding fresh {genre} songs…")
         # Resolve the genre to known artists, then fetch their songs. A text search for a genre
         # would return mixes and uploads whose titles merely contain those words.
-        for artist in road_trip.genre_artists(store, genre, limit=6):
+        for artist in road_trip_candidates.genre_artists(store, genre, limit=6):
             if artist in muted:
                 continue
-            rows, _ = road_trip.other_input_songs(client, "artist", artist, 4, store)
+            rows, _ = road_trip_candidates.other_input_songs(client, "artist", artist, 4, store)
             for row in rows:
                 title, name = row.get("title"), row.get("artist")
                 if not title or not name or not row.get("video_id"):

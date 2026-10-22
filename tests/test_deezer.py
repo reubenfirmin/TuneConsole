@@ -42,14 +42,18 @@ def test_enrich_none_on_deezer_error_body(monkeypatch):
     assert deezer.enrich("Song", "Artist") == deezer._empty()
 
 
-def test_enrich_playlist_fills_bpm(store, monkeypatch):
+def test_waterfall_probe_fills_bpm_and_records_evidence(store, monkeypatch):
+    from yt_playlist.providers.waterfall import run_waterfall
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t1 = store.tracks.upsert_track("v1", "Song", "Artist", "Alb", 200)
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1000.0)
     store.playlists.set_playlist_tracks(pid, [t1])
-    monkeypatch.setattr(deezer, "enrich",
-                        lambda title, artist: {**deezer._empty(), "bpm": 140.0})
+    monkeypatch.setattr(deezer, "lookup",
+                        lambda title, artist, **kw: {**deezer._empty(), "bpm": 140.0})
     events = []
-    deezer.enrich_playlist(store, pid, events.append)
+    run_waterfall(store, store.tracks.tracks_for_waterfall(pid),
+                  [{"name": "deezer", "enabled": True}], events.append)
     assert store.tracks.get_track_audio(t1)[0] == 140.0
     assert any(e.get("type") == "done" for e in events)
+    attempt = store.enrichment.enrichment_attempts("song|artist")["deezer"]
+    assert attempt["status"] == "found" and attempt["fields"]["bpm"] == 140.0

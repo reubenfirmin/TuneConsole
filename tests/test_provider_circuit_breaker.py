@@ -1,9 +1,10 @@
-"""Transport failures, throttling and server outages trip a provider; valid misses do not."""
+"""Provider outages and confirmed misses exercise the supported waterfall and evidence sink."""
 import urllib.error
 
 import pytest
 
 from yt_playlist.providers import acousticbrainz, deezer, discogs, lastfm, musicbrainz
+from yt_playlist.providers.waterfall import run_waterfall
 from yt_playlist.util import net
 
 
@@ -19,13 +20,11 @@ def test_breaker_trips_only_after_threshold_consecutive_failures():
 
 def test_server_response_or_success_resets_the_streak():
     b = net.CircuitBreaker(threshold=2)
-    dns = urllib.error.URLError("down")
-    http = urllib.error.HTTPError("u", 404, "missing", {}, None)
-    b.record(dns)
-    b.record(http)                 # a valid miss clears the streak
+    b.record(urllib.error.URLError("down"))
+    b.record(urllib.error.HTTPError("u", 404, "missing", {}, None))
     assert b.consecutive == 0
-    b.record(dns)
-    b.record()                     # success, streak cleared
+    b.record(urllib.error.URLError("down"))
+    b.record()
     assert b.consecutive == 0
 
 
@@ -41,134 +40,49 @@ def test_throttle_and_server_errors_do_not_clear_outage_streak():
 
 def test_parse_error_counts_as_reachable():
     b = net.CircuitBreaker(threshold=1)
-    b.record(ValueError("bad json"))   # we got bytes back, just couldn't parse them
+    b.record(ValueError("bad json"))
     assert not b.tripped()
 
 
-@pytest.mark.parametrize("provider", [musicbrainz, discogs, lastfm])
-def test_enrich_loop_aborts_when_host_unreachable(provider, store, monkeypatch):
-    ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(20)]
-    pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art"}
-               for i, tid in enumerate(ids)]
-
-    calls = []
-    dns = urllib.error.URLError("Name or service not known")
-
-    # musicbrainz's loop pulls genre, year and MBID from one enrich_full call; others use enrich.
-    seam = "enrich_full" if provider is musicbrainz else "enrich"
-
-    def fake_enrich(title, artist, *extra):       # discogs/lastfm pass a token/key as a 3rd arg
-        calls.append(title)
-        provider._breaker.record(dns)             # stand in for the failing network call
-        return (None, None, None, []) if provider is musicbrainz else (None, None)
-
-    monkeypatch.setattr(provider, seam, fake_enrich)
-    # lastfm refuses to start without a key; give it one so we reach the loop
-    monkeypatch.setattr(lastfm, "api_key", lambda *a, **k: "k", raising=False)
-
-    events = []
-    provider.enrich_playlist(store, None, events.append, pending=pending)
-
-    threshold = provider._breaker.threshold
-    assert len(calls) == threshold                # stopped at the threshold, not all 20 tracks
-    assert any(e.get("type") == "err" and "unreachable" in e["text"] for e in events)
-
-
-@pytest.mark.parametrize("provider", [musicbrainz, discogs, lastfm])
-def test_enrich_loop_completes_when_host_reachable(provider, store, monkeypatch):
-    """A genuine no-match (host up, empty result) must NOT trip the breaker: all tracks processed."""
+@pytest.mark.parametrize("provider", [musicbrainz, discogs, lastfm, deezer, acousticbrainz])
+@pytest.mark.parametrize("offline", [False, True])
+def test_waterfall_probe_distinguishes_outages_from_confirmed_misses(
+        provider, offline, store, monkeypatch):
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 8, "h", 1000)
     ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(8)]
-    pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art"}
-               for i, tid in enumerate(ids)]
-
+    store.playlists.set_playlist_tracks(pid, ids)
     calls = []
 
-    seam = "enrich_full" if provider is musicbrainz else "enrich"
+    def response(*args, **kwargs):
+        calls.append(args)
+        if offline:
+            exc = urllib.error.URLError("offline")
+            provider._breaker.record(exc)
+            raise exc
+        provider._breaker.record()
+        return {}
 
-    def fake_enrich(title, artist, *extra):
-        calls.append(title)
-        provider._breaker.record()                # reachable, just no match for this track
-        return (None, None, None, []) if provider is musicbrainz else (None, None)
-
-    monkeypatch.setattr(provider, seam, fake_enrich)
-    monkeypatch.setattr(lastfm, "api_key", lambda *a, **k: "k", raising=False)
-
+    seam = "_get" if provider in (musicbrainz, discogs, lastfm) else "_get_json"
+    monkeypatch.setattr(provider, seam, response)
+    monkeypatch.setattr(lastfm, "api_key", lambda *args: "key")
+    # AcousticBrainz probes a known recording; isolate MusicBrainz requests from this provider test.
+    monkeypatch.setattr(musicbrainz, "recording_mbid", lambda *args: "mbid")
     events = []
-    provider.enrich_playlist(store, None, events.append, pending=pending)
-
-    assert len(calls) == 8                         # plowed through every track, no early stop
-    assert not any(e.get("type") == "err" for e in events)
-
-
-def test_deezer_breaker_aborts_when_host_unreachable(store, monkeypatch):
-    ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(20)]
-    pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art"}
-               for i, tid in enumerate(ids)]
-    calls = []
-    dns = urllib.error.URLError("Name or service not known")
-
-    def fake_enrich(title, artist):           # Deezer's enrich returns a metadata dict
-        calls.append(title)
-        deezer._breaker.record(dns)
-        return deezer._empty()
-
-    monkeypatch.setattr(deezer, "enrich", fake_enrich)
-    events = []
-    deezer.enrich_playlist(store, None, events.append, pending=pending)
-    assert len(calls) == deezer._breaker.threshold        # stopped at the threshold, not all 20
-    assert any(e.get("type") == "err" and "unreachable" in e["text"] for e in events)
-
-
-def test_deezer_breaker_completes_when_host_reachable(store, monkeypatch):
-    ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(8)]
-    pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art"}
-               for i, tid in enumerate(ids)]
-    calls = []
-
-    def fake_enrich(title, artist):
-        calls.append(title)
-        deezer._breaker.record()              # reachable, just no BPM for this track
-        return deezer._empty()
-
-    monkeypatch.setattr(deezer, "enrich", fake_enrich)
-    events = []
-    deezer.enrich_playlist(store, None, events.append, pending=pending)
-    assert len(calls) == 8                     # plowed through every track, no early stop
-    assert not any(e.get("type") == "err" for e in events)
-
-
-def test_acousticbrainz_breaker_aborts_when_host_unreachable(store, monkeypatch):
-    ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(20)]
-    pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art",
-                "mb_recording_id": f"mbid-{i}"} for i, tid in enumerate(ids)]
-    calls = []
-    dns = urllib.error.URLError("Name or service not known")
-
-    def fake_enrich(mbid):                    # AcousticBrainz enrich returns a feature dict
-        calls.append(mbid)
-        acousticbrainz._breaker.record(dns)
-        return acousticbrainz._empty()
-
-    monkeypatch.setattr(acousticbrainz, "enrich", fake_enrich)
-    events = []
-    acousticbrainz.enrich_playlist(store, None, events.append, pending=pending)
-    assert len(calls) == acousticbrainz._breaker.threshold     # stopped at threshold, not all 20
-    assert any(e.get("type") == "err" and "unreachable" in e["text"] for e in events)
-
-
-def test_acousticbrainz_breaker_completes_when_host_reachable(store, monkeypatch):
-    ids = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Art", None, None) for i in range(8)]
-    pending = [{"id": tid, "video_id": f"v{i}", "title": f"T{i}", "artist": "Art",
-                "mb_recording_id": f"mbid-{i}"} for i, tid in enumerate(ids)]
-    calls = []
-
-    def fake_enrich(mbid):
-        calls.append(mbid)
-        acousticbrainz._breaker.record()      # reachable, just no data for this MBID
-        return acousticbrainz._empty()
-
-    monkeypatch.setattr(acousticbrainz, "enrich", fake_enrich)
-    events = []
-    acousticbrainz.enrich_playlist(store, None, events.append, pending=pending)
-    assert len(calls) == 8                     # processed every track, no early stop
-    assert not any(e.get("type") == "err" for e in events)
+    completed = run_waterfall(store, store.tracks.tracks_for_waterfall(pid),
+                              [{"name": provider.name, "enabled": True}], events.append,
+                              registry={provider.name: provider}, now_fn=lambda: 1000)
+    attempt = store.enrichment.enrichment_attempts("t0|art")[provider.name]
+    # A known MusicBrainz recording ID is itself retained evidence for AcousticBrainz.
+    expected = "found" if provider is acousticbrainz else "no_match"
+    assert attempt["status"] == ("retry" if offline else expected)
+    if offline:
+        assert completed == []
+        assert len(calls) < 8
+        assert any(event.get("warning") for event in events)
+        recording_id = store.tracks.track_for_waterfall(ids[0])["recording_id"]
+        state = store.enrichment.enrichment_provider_state(recording_id)[provider.name]
+        assert state["retry_at"] > 1000
+    else:
+        assert len(completed) == 8
+        assert not any(event.get("warning") for event in events)

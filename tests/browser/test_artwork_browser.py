@@ -12,14 +12,16 @@ def artwork_library(store, live_app):
                                 thumbnail="/static/nag/intro.png")
     first = store.tracks.upsert_track("v1", "Shape Song", "Shape Artist", "Shape Album", 180,
                                album_browse_id="MPRE_shape", thumbnail="/static/nag/intro.png")
-    second = store.tracks.upsert_track("v2", "Missing Song", "Missing Artist", "Missing Album", 180)
+    second = store.tracks.upsert_track("v2", "Missing Song", "Missing Artist", "Missing Album", 180,
+                                      album_browse_id="MPRE_missing")
     store.playlists.set_playlist_tracks(pid, [first, second])
     missing_pid = store.playlists.upsert_playlist(iid, "PLMISSING", "Missing Mix", 1, "h", 0.0)
     store.playlists.set_playlist_tracks(missing_pid, [second])
     store.collection.add_saved_album({"browse": "MPRE_shape", "title": "Shape Album", "artist": "Shape Artist",
                            "thumbnail": "/static/nag/lastfm.png"})
     keys = [identity_key("Shape Song", "Shape Artist"), identity_key("Missing Song", "Missing Artist")]
-    store.history.add_history_snapshot(iid, 0.0, keys)
+    # live_app's clock is 1.0; a coarse day's noon key must precede that clock.
+    store.history.record_history_plays(iid, -86400.0, keys, source_timezone="UTC")
     return live_app, pid
 
 

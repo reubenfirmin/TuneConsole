@@ -8,7 +8,8 @@ from . import (v001_baseline, v002_enrichment, v003_discovery_audit, v004_playli
                v021_artists, v022_artist_references, v023_albums, v024_account_scope,
                v025_relationships,v026_listening_observations,v027_artist_identity_redirects,
                v028_discovery_representatives,v029_artist_provisional_names,
-               v030_account_scope_preservation)
+               v030_account_scope_preservation,v031_spotify_history,v032_generated_play_policy,
+               v033_capture_evidence)
 
 MIGRATIONS = (
     Migration(1, 'legacy_baseline', v001_baseline.apply),
@@ -41,4 +42,7 @@ MIGRATIONS = (
     Migration(28, 'discovery_representatives', v028_discovery_representatives.apply),
     Migration(29, 'artist_provisional_names', v029_artist_provisional_names.apply),
     Migration(30, 'account_scope_preservation', v030_account_scope_preservation.apply),
+    Migration(31, 'spotify_history_provenance', v031_spotify_history.apply),
+    Migration(32, 'generated_play_policy_constraint', v032_generated_play_policy.apply),
+    Migration(33, 'capture_evidence', v033_capture_evidence.apply),
 )

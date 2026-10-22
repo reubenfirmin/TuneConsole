@@ -140,3 +140,17 @@ def test_store_exposes_only_named_repositories_and_preserves_them_on_reinit(stor
     assert not hasattr(store, "get_setting")
     assert not hasattr(store, "rec")
     assert "__getattr__" not in type(store).__dict__
+
+
+def test_recommendation_services_keep_http_and_acquisition_out_of_policy():
+    modules = _modules()
+    for name in ("yt_playlist.rec.home_cards", "yt_playlist.rec.road_trip",
+                 "yt_playlist.rec.road_trip_candidates", "yt_playlist.rec.road_trip_mix"):
+        imports = set(_imports(modules[name]))
+        assert not any(i.startswith(("yt_playlist.web", "fastapi", "starlette")) for i in imports), name
+        if name.endswith("road_trip_mix"):
+            assert not any(i.startswith(("yt_playlist.providers", "yt_playlist.repos",
+                                         "yt_playlist.core", "yt_playlist.library")) for i in imports), name
+            assert not imports & {"yt_playlist.rec.road_trip", "yt_playlist.rec.road_trip_candidates"}
+        if name.endswith("road_trip_candidates"):
+            assert not imports & {"yt_playlist.rec.road_trip", "yt_playlist.rec.road_trip_mix"}

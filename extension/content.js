@@ -120,11 +120,27 @@ if (!window.__tcBridgeLoaded) {
     return !!(v && !v.paused && !v.ended && v.readyState >= 2);
   };
   const playbackDelay = () => new Promise(resolve => setTimeout(resolve, 250));
-  const ensurePlaying = async () => {
-    if (playbackStarted()) return { playing: true };
+  const ensurePlaying = async (target = {}) => {
+    const identity = () => {
+      const state = lastMainAt !== null && Date.now() - lastMainAt < 5000 ? lastMain : domNowPlaying();
+      return {videoId: state?.videoId || '', playlist: state?.playlist || ''};
+    };
+    const matches = () => {
+      const state = identity();
+      const playlist = value => (value || '').replace(/^RDAMPL/, '');
+      return (!target.videoId || state.videoId === target.videoId) &&
+        (!target.playlist || playlist(state.playlist) === playlist(target.playlist));
+    };
+    const result = playing => ({playing, ...identity()});
+    // A watch navigation can leave the preceding player alive while its new
+    // queue loads. Do not resume or confirm that preceding song.
+    if (!matches()) return result(false);
     const v = document.querySelector("video");
+    const position = v?.currentTime || 0;
+    const progressed = () => document.querySelector('video') === v && matches() &&
+      playbackStarted() && v.currentTime > position + .05;
     const browse = new URL(location.href).pathname.startsWith("/browse/");
-    if (browse) {
+    if (browse && !playbackStarted()) {
       // Do not resume the previous song instead of starting the album/playlist just opened.
       clickPlaybackStart();
     } else if (v && v.paused) {
@@ -135,10 +151,10 @@ if (!window.__tcBridgeLoaded) {
       } catch (e) {}
     }
     await playbackDelay();
-    if (playbackStarted()) return { playing: true };
+    if (progressed()) return result(true);
     if (!browse) clickPlaybackStart();
     await playbackDelay();
-    return { playing: playbackStarted() };
+    return result(progressed());
   };
 
   const sensorStatus = () => {
@@ -182,7 +198,7 @@ if (!window.__tcBridgeLoaded) {
     }
     if (msg.type === "playpause") { clickPlayPause(); return; }
     if (msg.type === "ensure-playing") {
-      ensurePlaying().then(sendResponse, () => sendResponse({ playing: false }));
+      ensurePlaying(msg).then(sendResponse, () => sendResponse({ playing: false }));
       return true; // keep the response channel open until playback has been checked
     }
     if (msg.type === "pause") {

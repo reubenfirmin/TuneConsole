@@ -30,7 +30,7 @@ def _seed_jazz(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Jazz")
-    store.history.add_history_snapshot(iid, 1.0, ["song|band"])
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     return iid
 
 
@@ -228,8 +228,8 @@ def test_artists_populate_from_play_history(store):
     store.tracks.upsert_track("vb", "BSong", "Bob", None, None)
     day = 86400.0
     for ts in (day, 2 * day, 3 * day):
-        store.history.add_history_snapshot(iid, ts, ["asong|alice"])
-    store.history.add_history_snapshot(iid, 4 * day, ["bsong|bob"])
+        store.history.record_history_plays(iid, ts, ["asong|alice"], source_timezone="UTC")
+    store.history.record_history_plays(iid, 4 * day, ["bsong|bob"], source_timezone="UTC")
     arts = {r["name"]: r for r in taste_viz.model_transparency(store, now=5 * day)["artists"]}
     assert "Alice" in arts and "Bob" in arts
     assert arts["Alice"]["share"] > arts["Bob"]["share"]
@@ -242,7 +242,7 @@ def test_artist_shares_normalize_over_all_artists(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     for i in range(13):
         store.tracks.upsert_track(f"v{i}", f"S{i}", f"Art{i}", None, None)
-        store.history.add_history_snapshot(iid, 10.0 + i, [f"s{i}|art{i}"])
+        store.history.record_history_plays(iid, 10.0 + i, [f"s{i}|art{i}"], source_timezone="UTC")
     shares = dict(taste_viz._artist_shares(store, top=12))
     assert len(shares) == 12                                  # displays the top 12
     # each is 1/13 (normalized over all 13), so the 12 shown sum to 12/13, NOT 1.0
@@ -436,7 +436,7 @@ def test_playlist_influence_preserves_whole_blend_and_listening_evidence(store):
         key = f"track {i}|artist"
         vectors.append((key, np.array([1, i + 1], dtype=np.float32).tobytes()))
         for j in range(plays):
-            store.history.add_history_snapshot(iid, j * 86400.0, [key])
+            store.history.record_history_plays(iid, j * 86400.0, [key], source_timezone="UTC")
     store.rec_model.replace_rec_vectors(vectors)
     store.settings.set_setting("rec_dim", "2")
 

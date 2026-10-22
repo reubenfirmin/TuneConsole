@@ -8,6 +8,7 @@ zero, so the card surfaces a specific rising taste ('shoegaze') rather than a tr
 from yt_playlist.rec import transient
 from yt_playlist.util import genre_map
 from yt_playlist.web import theme
+from yt_playlist.providers.base import LookupUnavailable
 
 FAVORITE_TOP_N = 15        # all-time top artists treated as settled favorites (excluded)
 GENRE_OBVIOUS_SHARE = 0.20  # a genre at or above this share of the library is fully "obvious"
@@ -110,12 +111,21 @@ def prewarm_pool(store, now, fetch_fn=None, limit=PREWARM_POOL) -> int:
     fetched = 0
     for subj in ranked_subjects(store, now)[:limit]:
         row = store.wiki.get(subj["subject"])
-        if row is not None and store.wiki.is_fresh(row, now):
+        if not store.wiki.should_refresh(subj["subject"], row, now):
             continue
-        payload = fetch_fn(subj["kind"], subj["display"])
-        store.wiki.put(subj["subject"], subj["kind"], subj["display"], payload, now)
+        refresh_summary(store, subj, now, fetch_fn)
         fetched += 1
     return fetched
+
+
+def refresh_summary(store, subj, now, fetch_fn):
+    """Persist only confirmed answers, preserving any stale card during an outage."""
+    try:
+        payload = fetch_fn(subj["kind"], subj["display"])
+    except LookupUnavailable:
+        store.wiki.defer(subj["subject"], now)
+    else:
+        store.wiki.put(subj["subject"], subj["kind"], subj["display"], payload, now)
 
 
 def subject_color(subj) -> str:

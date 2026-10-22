@@ -37,6 +37,9 @@ class FakePortal:
         self.sender = None
         self.installs = 0
         self.spawn = None
+        self.spawns = []
+        self.probe_exit = 0
+        self.signals = []
         bus.add_message_handler(self.handle)
 
     def handle(self, message):
@@ -55,7 +58,18 @@ class FakePortal:
             return Message.new_method_return(message)
         if message.member == "Spawn":
             self.spawn = message
-            return Message.new_method_return(message, "u", [12345])
+            self.spawns.append(message)
+            pid = 12345 + len(self.spawns)
+            if message.body[1][-1] == b"--help\0" and self.probe_exit is not None:
+                # Intentionally send before the method reply to cover a fast child exit.
+                self.bus.send(Message(destination=message.sender, path=PORTAL_PATH,
+                                      interface=PORTAL, member="SpawnExited",
+                                      message_type=MessageType.SIGNAL, signature="uu",
+                                      body=[pid, self.probe_exit]))
+            return Message.new_method_return(message, "u", [pid])
+        if message.member == "SpawnSignal":
+            self.signals.append(message.body)
+            return Message.new_method_return(message)
 
     async def emit(self, member, info, *, sender_bus=None):
         data = {key: Variant("u" if isinstance(value, int) else "s", value)
@@ -97,7 +111,32 @@ def test_install_progress_and_latest_version_restart(bus_address):
             assert argv == ["/app/bin/yt-playlist", "--exit-on-idle", "--wait-for-port",
                             "--host", "127.0.0.1", "--port", "9123"]
             assert portal.spawn.body[4] == 2        # latest installed version; survives the old bus
+            assert len(portal.spawns) == 2
+            assert portal.spawns[0].body[4] == 18   # probe dies with this caller
             assert updater.phase == "restarting"
+        finally:
+            await updater.close()
+            service.disconnect()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("exit_status", [256, 9, None])
+def test_incompatible_or_stalled_replacement_requires_manual_relaunch(bus_address, monkeypatch, exit_status):
+    monkeypatch.setattr("yt_playlist.core.flatpak_update._START_CHECK_TIMEOUT_S", .05)
+
+    async def run():
+        service, portal, updater = await portal_pair(bus_address)
+        try:
+            portal.probe_exit = exit_status
+            await portal.emit("Progress", {"status": 2})
+            result = await updater.restart("127.0.0.1", 9123)
+            assert result["phase"] == "manual_restart"
+            assert "applications menu" in result["message"]
+            assert not updater.busy
+            assert len(portal.spawns) == 1
+            assert portal.signals == ([[12346, 15, True]] if exit_status is None else [])
+            assert (await updater.install())["phase"] == "manual_restart"
+            assert portal.installs == 0
         finally:
             await updater.close()
             service.disconnect()

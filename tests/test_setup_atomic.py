@@ -58,7 +58,7 @@ def test_display_label_edits_preserve_ids_history_and_reopening(store, tmp_path)
     rt = _configured(store, tmp_path)
     accounts = store.identities.get_identities()
     for account in accounts:
-        store.history.add_history_snapshot(account.id, 1, ["song|artist"])
+        store.history.record_history_plays(account.id, 1, ["song|artist"], source_timezone="UTC")
     rt.apply_setup([{"id": account.id, "label": f"Renamed {account.label}",
         "credential_ref": account.credential_ref, "brand_account_id": account.brand_account_id,
         "is_master": account.is_master} for account in accounts])
@@ -67,7 +67,7 @@ def test_display_label_edits_preserve_ids_history_and_reopening(store, tmp_path)
     reopened.load()
     assert reopened.configured
     assert set(reopened.clients()) == {i.id for i in accounts}
-    assert {r[0] for r in store.conn.execute("SELECT identity_id FROM history_snapshots")} == {i.id for i in accounts}
+    assert {r[0] for r in store.conn.execute("SELECT identity_id FROM listening_observations")} == {i.id for i in accounts}
 
 
 def test_clients_use_bridge_wired_after_startup_load(store, tmp_path):
@@ -96,7 +96,7 @@ def test_label_swap_and_reuse_keep_account_history_separate(store,tmp_path):
     rt = _configured(store,tmp_path)
     main,brand = store.identities.get_identities()
     for account in (main,brand):
-        store.history.add_history_snapshot(account.id,1,['song|artist'])
+        store.history.record_history_plays(account.id,1,['song|artist'],source_timezone='UTC')
         store.playlists.upsert_playlist(account.id,'LM',account.label,0,'h',1)
     rt.apply_setup([dict(id=main.id,label=brand.label,credential_ref=main.credential_ref,is_master=True),
                     dict(id=brand.id,label=main.label,credential_ref=brand.credential_ref,
@@ -105,7 +105,7 @@ def test_label_swap_and_reuse_keep_account_history_separate(store,tmp_path):
     rt.apply_setup([dict(label=main.label,credential_ref='browser.json',brand_account_id='NEW',is_master=True)])
     new = store.identities.get_master_identity()
     assert new.id not in {main.id,brand.id}
-    assert {r[0] for r in store.conn.execute('SELECT identity_id FROM history_snapshots')}=={main.id,brand.id}
+    assert {r[0] for r in store.conn.execute('SELECT identity_id FROM listening_observations')}=={main.id,brand.id}
     assert {r[0] for r in store.conn.execute('SELECT scope_ref FROM playlists')}=={
         f'@account:{main.id}:LM',f'@account:{brand.id}:LM'}
 

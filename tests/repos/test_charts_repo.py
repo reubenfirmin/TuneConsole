@@ -11,8 +11,8 @@ def _seed(store):
     store.playlists.set_playlist_tracks(lm, [a])                     # Alpha is liked (in LM)
     ka = store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (a,)).fetchone()["k"]
     kb = store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (b,)).fetchone()["k"]
-    store.history.add_history_snapshot(iid, 1000.0, [ka, ka, kb])  # duplicate capture is still one day
-    store.history.add_history_snapshot(iid, 86400+1000.0, [ka])   # Alpha on another day
+    store.history.record_history_plays(iid, 1000.0, [ka, ka, kb], source_timezone="UTC")
+    store.history.record_history_plays(iid, 86400+1000.0, [ka], source_timezone="UTC")
     return iid, pl
 
 

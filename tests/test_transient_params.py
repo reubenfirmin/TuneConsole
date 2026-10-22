@@ -14,7 +14,7 @@ def _store_with_play_history(genre="Techno", n=10, now=1000.0):
         tid = s.tracks.upsert_track(f"v{i}", f"song{i}", "band", None, None)
         s.tracks.set_track_genre(tid, genre)
         keys.append(identity_key(f"song{i}", "band"))
-    s.history.add_history_snapshot(iid, now, keys)
+    s.history.record_history_plays(iid, now, keys, source_timezone="UTC")
     return s, now
 
 

@@ -177,6 +177,21 @@ class CollectionRepo(Repo):
         return [dict(r) for r in rows]
 
     @synchronized
+    def saved_album_owners(self, browse_id=None) -> dict:
+        """Retain inactive and unknown owners in combined-library reads and mutations."""
+        owners = {}
+        for row in self.conn.execute(
+                "SELECT p.provider_id browse,m.identity_id,i.label,i.active "
+                "FROM album_library_memberships m JOIN album_provider_ids p "
+                "ON p.album_id=m.album_id AND p.provider='youtube' "
+                "LEFT JOIN identities i ON i.id=m.identity_id "
+                "WHERE (? IS NULL OR p.provider_id=?) ORDER BY i.label COLLATE NOCASE,m.identity_id",
+                (browse_id,browse_id)):
+            owners.setdefault(row['browse'], []).append({
+                'identity_id': row['identity_id'], 'label': row['label'], 'active': bool(row['active'])})
+        return owners
+
+    @synchronized
     def saved_albums_recency(self) -> dict:
         """{browse_id: newest play ts across the album's tracks | None}. Plays come from history (a
         track's identity_key in a snapshot). LEFT JOINs throughout, so an album whose tracks aren't in
@@ -203,7 +218,7 @@ class CollectionRepo(Repo):
             "SELECT a.id album_id,a.title album,t.identity_key key,a.artist artist,p.provider_id browse, "
             "       MIN(t.thumbnail) thumb, GROUP_CONCAT(DISTINCT pt.playlist_id) pls "
             "FROM albums a JOIN album_tracks at ON at.album_id=a.id JOIN tracks t ON t.id=at.entry_id "
-            "JOIN playlist_tracks pt ON pt.track_id=t.id LEFT JOIN album_provider_ids p "
+            "JOIN playlist_tracks pt ON pt.track_id=t.id JOIN album_provider_ids p "
             "ON p.album_id=a.id AND p.provider='youtube' WHERE NULLIF(a.title,'') IS NOT NULL "
             "GROUP BY a.id,t.identity_key").fetchall()
         albums = {}
@@ -255,7 +270,7 @@ class CollectionRepo(Repo):
             if r["key"] not in a["_songs"]:
                 a["plays"] += plays.get(r["key"], 0)
             a["_songs"].add(r["key"])
-            if r['album_id'] is not None:
+            if r['album_browse']:
                 a['_albums'].add(r['album_id'])
             a["thumbnail"] = a["thumbnail"] or r["thumb"]
             a["_pls"].update((r["pls"] or "").split(","))
@@ -291,14 +306,14 @@ class CollectionRepo(Repo):
         for row in self.conn.execute(
                 "SELECT a.id,a.title album,a.year,a.thumbnail thumb,p.provider_id browse, "
                 "EXISTS(SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id) saved "
-                "FROM albums a LEFT JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
+                "FROM albums a JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
                 "WHERE EXISTS(SELECT 1 FROM album_tracks at JOIN tracks t ON t.id=at.entry_id "
                 "JOIN track_artists ta ON ta.entry_id=t.id WHERE at.album_id=a.id AND ta.artist_id=?) "
                 "OR (EXISTS(SELECT 1 FROM album_library_memberships m WHERE m.album_id=a.id) "
                 "AND EXISTS(SELECT 1 FROM album_artists aa WHERE aa.album_id=a.id AND aa.artist_id=?))", (aid,aid)):
             collection[row['id']] = {**dict(row),'songs':0,'plays':0,'_pls':set()}
         if self.conn.execute(
-                'SELECT 1 FROM tracks t JOIN track_artists ta ON ta.entry_id=t.id WHERE ta.artist_id=? '
+                "SELECT 1 FROM tracks t JOIN track_artists ta ON ta.entry_id=t.id WHERE ta.artist_id=? AND NULLIF(TRIM(t.album),'') IS NULL "
                 'AND NOT EXISTS(SELECT 1 FROM album_tracks at WHERE at.entry_id=t.id) LIMIT 1', (aid,)).fetchone():
             collection[None] = dict(id=None,album='Singles / no album',year=None,thumb=None,
                                     browse=None,saved=False,songs=0,plays=0,_pls=set())
@@ -306,8 +321,11 @@ class CollectionRepo(Repo):
                 "SELECT at.album_id,t.identity_key,MIN(NULLIF(t.thumbnail,'')) thumb, "
                 "GROUP_CONCAT(DISTINCT pt.playlist_id) pls FROM tracks t LEFT JOIN album_tracks at ON at.entry_id=t.id "
                 "JOIN track_artists ta ON ta.entry_id=t.id LEFT JOIN playlist_tracks pt ON pt.track_id=t.id "
-                "WHERE ta.artist_id=? GROUP BY at.album_id,t.identity_key", (aid,)):
-            album = collection[row['album_id']]
+                "WHERE ta.artist_id=? AND (at.album_id IS NOT NULL OR NULLIF(TRIM(t.album),'') IS NULL) "
+                "GROUP BY at.album_id,t.identity_key", (aid,)):
+            album = collection.get(row['album_id'])
+            if album is None:
+                continue  # Historical title-only labels are metadata, not identified releases.
             album['songs'] += 1
             album['plays'] += plays.get(row['identity_key'],0)
             album['thumb'] = album['thumb'] or row['thumb']

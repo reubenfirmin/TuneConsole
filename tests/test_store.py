@@ -145,7 +145,7 @@ def test_upsert_track_backfills_duration_on_resync(store):
 def test_history_keys_window(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     day = 86400
-    store.history.add_history_snapshot(iid, 5 * day, ["song a|artist", "song c|artist"])
+    store.history.record_history_plays(iid, 5 * day, ["song a|artist", "song c|artist"], source_timezone="UTC")
     assert store.history.get_recent_history_keys(4 * day) == {"song a|artist", "song c|artist"}
     assert store.history.get_recent_history_keys(6 * day) == set()
 

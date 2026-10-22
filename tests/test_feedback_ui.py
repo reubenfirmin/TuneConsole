@@ -9,8 +9,8 @@ def _seed(store):
     store.tracks.upsert_track("v1", "Hit", "Fav", None, None)
     store.tracks.upsert_track("v2", "Bench", "Fav", None, None)   # deep cut -> appears in for_you
     now = 1000.0
-    store.history.add_history_snapshot(iid, now - 100, ["hit|fav"])
-    store.history.add_history_snapshot(iid, now - 50, ["hit|fav"])
+    store.history.record_history_plays(iid, now - 100, ["hit|fav"], source_timezone="UTC")
+    store.history.record_history_plays(iid, now - 50, ["hit|fav"], source_timezone="UTC")
     store.settings.set_setting("last_sync_at", str(now))     # synced -> Home renders the rec feed
     return iid, TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                            base_url="http://127.0.0.1")

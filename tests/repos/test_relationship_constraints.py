@@ -128,8 +128,8 @@ def test_indexes_support_the_affected_queries(store):
     queries = (
         ('SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position',(1,),'ix_playlist_item_position'),
         ('SELECT playlist_id FROM unresolved_playlist_items WHERE entry_id=?',(1,),'ix_unresolved_playlist_entry'),
-        ('SELECT snapshot_id FROM history_items WHERE recording_id=?',(1,),'ix_history_item_recording_snapshot'),
-        ('SELECT id FROM history_snapshots WHERE identity_id=? AND taken_at>=?',(1,1),'ix_history_snapshot_account_time'),
+        ('SELECT capture_id FROM listening_observations WHERE recording_id=? AND day>=?',(1,'2026-01-01'),'ix_listening_observation_recording_day'),
+        ('SELECT id FROM listening_capture_receipts WHERE identity_id=? AND captured_at>=?',(1,1),'ix_listening_capture_account_time'),
         ('SELECT id FROM play_events WHERE identity_id=? AND playlist_ytm_id=? AND played_at>=?',(1,'PL',1),'ix_play_event_account_playlist_time'),
         ('SELECT recording_id FROM youtube_items WHERE video_id=?',('a',),'sqlite_autoindex_youtube_items_1'),
         ('SELECT recording_id FROM recording_identifiers WHERE scheme=? AND entity_type=? AND value=?',('musicbrainz','recording','id'),'ix_recording_identifier'),

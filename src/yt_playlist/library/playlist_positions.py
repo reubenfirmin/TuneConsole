@@ -2,6 +2,7 @@
 import json
 import logging
 
+from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.util.action_kinds import ADD_TRACKS
 from yt_playlist.util.retry import with_retry
 
@@ -18,7 +19,7 @@ def pending_insertions(store, playlist_id):
 
 
 def _move(client, ytm_id, plan):
-    tracks = client.get_playlist(ytm_id, limit=None).get("tracks", [])
+    tracks = validate_playlist(client.get_playlist(ytm_id, limit=None))["tracks"]
     videos = plan["video_ids"]
     # Resolve the anchor's current successor, excluding the songs we are positioning. This also
     # makes a retry safe after only part of a multi-song move succeeded or the old successor went away.

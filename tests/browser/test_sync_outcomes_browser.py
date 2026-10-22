@@ -8,7 +8,7 @@ import pytest
 def test_console_respects_terminal_outcome(page, outcome):
     page.goto("about:blank")
     page.add_script_tag(path=str(Path(__file__).parents[2] /
-                                "src/yt_playlist/web/static/app.js"))
+                                "src/yt_playlist/web/static/home.js"))
     result = page.evaluate("""outcome => {
         const sources = [];
         window.EventSource = class {

@@ -15,8 +15,8 @@ import numpy as np
 from yt_playlist.util import genre_catalog, genre_map
 from yt_playlist.rec import rec_params
 
-# Default embedding dimensionality. 48 is the recall@k-tuned default for manual builds; Auto-tune
-# (eval_recs) may override it via the `rec_dim` setting. Not user-exposed (see rec_params docstring).
+# Default embedding dimensionality. Automatic model selection may override it through `rec_dim`.
+# Not user-exposed (see rec_params docstring).
 DIM = 48
 # A truncated SVD needs more tracks than output dims to be well-posed; require a small margin above
 # `dim` so the randomised solver has rank to work with (below this we return an empty model).
@@ -73,12 +73,12 @@ def _cooc_weights(store):
     Recency weighting is a natural extension; playcount is the signal available without a history join.
 
     VERDICT (measured 2026-06-26 on the real library: 4303 vectors, ~5.7 days of retained history): this
-    does NOT help, so `rec_cooc_weighting` ships OFF by default. A/B'd via eval_recs.cooc_weighting_ab on
+    does NOT help, so `rec_cooc_weighting` ships OFF by default. The retired manual harness compared
     temporal_recall (predict-your-next-plays): binary membership beat or tied playcount-weighting at every
     holdout window tested (0.5d..3d; deltas -0.045 .. 0.000, weighting never ahead). In-sample recall@k
     slightly favored weighting (0.768 -> 0.777), but that is exactly the overfit-to-heavy-tracks artifact
     temporal_recall is there to expose. Only flip the setting on if a future re-run on more retained
-    history reverses this; the toggle and harness are kept so that re-test is one call."""
+    history reverses this using isolated candidate fitting, without mutating the serving model."""
     return {k: 1.0 + math.log1p(c) for k, c in store.rec_query.play_counts().items() if c}
 
 

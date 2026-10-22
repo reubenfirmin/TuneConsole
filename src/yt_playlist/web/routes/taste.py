@@ -283,7 +283,8 @@ def build(ctx) -> APIRouter:
             data = {"learning": taste_viz.learning_progress(store, ctx.now()),
                     "learning_sections": _learning_sections()}
         elif panel == "health":
-            data = {**_model_context(), **_autotune_context()}
+            data = {**_model_context(), **_autotune_context(),
+                    'spotify_history': store.history.spotify_history_stats()}
         elif panel == "feedback":
             data = _feedback_context()
         else:

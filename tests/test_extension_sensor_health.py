@@ -8,6 +8,7 @@ import pytest
 
 @pytest.mark.parametrize("scenario", [
     "fresh", "missing_main", "old_version", "stale", "missing_receiver", "partial_injection",
+    "negative_age", "invalid_age", "infinite_age", "missing_observer",
 ])
 def test_health_repairs_main_sensor_even_when_content_receiver_answers(scenario):
     node = shutil.which("node")
@@ -24,6 +25,10 @@ let contentReady = scenario !== 'missing_receiver';
 let mainVersion = scenario === 'old_version' ? 3
   : ['missing_main', 'partial_injection', 'missing_receiver'].includes(scenario) ? null : 4;
 let mainAgeMs = scenario === 'stale' ? 20000 : mainVersion === null ? null : 0;
+if (scenario === 'negative_age') mainAgeMs = -1;
+if (scenario === 'invalid_age') mainAgeMs = '0';
+if (scenario === 'infinite_age') mainAgeMs = Infinity;
+if (scenario === 'missing_observer') mainVersion = null;
 class Socket {
   static OPEN = 1; static CLOSED = 3;
   constructor() { this.readyState = 0; sockets.push(this); }
@@ -51,24 +56,27 @@ const chrome = {
       mainVersion = 4;
       mainAgeMs = 0;
     }
+    if (scenario === 'missing_observer' && call.files.includes('observer_main.js'))
+      throw Error('observer injection failed');
     return [];
   }},
   windows: {onRemoved: event()}, alarms: {create() {}, onAlarm: event()},
 };
 const context = vm.createContext({chrome, WebSocket: Socket, URL,
   console: {log() {}, warn() {}}, setTimeout() {}, clearTimeout() {}});
-vm.runInContext(fs.readFileSync('extension/background.js', 'utf8'), context);
+const {sensors} = require('./tests/extension_worker.cjs').loadWorker(context);
 sockets[0].readyState = Socket.OPEN;
 (async () => {
   if (contentReady) {
-    assert.equal(await context.pingContentScript(1), true,
+    assert.equal(await sensors.pingContent(1), true,
       'missing MAIN must not block the independent fetch receiver');
     assert.equal(probes.at(-1).main, false);
   }
-  const report = await context.probeSensorHealth();
-  assert.equal(report.healthy, scenario !== 'partial_injection');
-  assert.equal(report.respondingTabs, scenario === 'partial_injection' ? 0 : 1);
-  assert.equal(report.reinjectedTabs, ['fresh', 'partial_injection'].includes(scenario) ? 0 : 1);
+  const report = await sensors.probe();
+  const failed = ['partial_injection', 'missing_observer'].includes(scenario);
+  assert.equal(report.healthy, !failed);
+  assert.equal(report.respondingTabs, failed ? 0 : 1);
+  assert.equal(report.reinjectedTabs, scenario === 'fresh' || failed ? 0 : 1);
   assert.equal(frames.at(-1).type, 'sensor-health');
   assert.equal(frames.at(-1).healthy, report.healthy);
   assert.equal(probes.at(-1).main, true);

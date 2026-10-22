@@ -49,7 +49,7 @@ def test_tilt_leans_toward_the_sound_of_recent_plays(tmp_path, monkeypatch):
     }
     s = _store_with_content(tmp_path, monkeypatch, content, audio)
     iid = s.identities.upsert_identity("main", "cred", None, True)
-    s.history.add_history_snapshot(iid, 1000.0, ["hi1|a"])      # recently played a high-energy track
+    s.history.record_play_event(iid, "hi1|a", None, 1000.0, source_timezone="UTC")
 
     tilt = transient.audio_centroid_tilt(s, now=1000.0)
     assert tilt is not None
@@ -66,7 +66,7 @@ def test_tilt_degrades_gracefully_when_recent_track_has_no_content_vector(tmp_pa
     audio = {"hi|a": {"energy": 0.9}}
     s = _store_with_content(tmp_path, monkeypatch, content, audio)
     iid = s.identities.upsert_identity("main", "cred", None, True)
-    s.history.add_history_snapshot(iid, 1000.0, ["unknown|x"])     # no content vector for this key
+    s.history.record_play_event(iid, "unknown|x", None, 1000.0, source_timezone="UTC")
     assert transient.audio_centroid_tilt(s, now=1000.0) is None   # no contribution, no error
 
 
@@ -75,7 +75,7 @@ def test_tilt_is_none_when_content_model_unbuilt(tmp_path):
     s = Store(str(tmp_path / "t.db"))
     s.init_schema()
     iid = s.identities.upsert_identity("main", "cred", None, True)
-    s.history.add_history_snapshot(iid, 1000.0, ["hi|a"])
+    s.history.record_play_event(iid, "hi|a", None, 1000.0, source_timezone="UTC")
     assert transient.audio_centroid_tilt(s, now=1000.0) is None   # no content vectors at all
 
 
@@ -90,7 +90,7 @@ def _store_three_tracks_with_recent_play(tmp_path, monkeypatch):
     }
     s = _store_with_content(tmp_path, monkeypatch, content, audio)
     iid = s.identities.upsert_identity("main", "cred", None, True)
-    s.history.add_history_snapshot(iid, 1000.0, ["hi1|a"])              # recent high-energy play
+    s.history.record_play_event(iid, "hi1|a", None, 1000.0, source_timezone="UTC")
     return s
 
 

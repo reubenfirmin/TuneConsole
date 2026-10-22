@@ -291,9 +291,11 @@ def run_discovery(ctx, now, budget=25) -> dict:
                             artist_genre.get(store.artists.key(ref['artist_id'])), now, per_artist, rng,
                             artist_id=ref['artist_id'])
         store.discovery.mark_scanned(ref['artist_id'], now)
+    spotify = store.history.spotify_history_stats()
+    source = 'spotify_model' if spotify['events'] or spotify['days'] or spotify['artists'] else 'discovery'
     for a in new_artists(ctx):                            # taste-bridged new artists, accumulated
         store.discovery.upsert_discovered_artist(a["artist"], a["score"], a.get("because"), a.get("fits"),
-                                       a.get("thumbnail"), now, genre=a.get("genre"),artist_id=a.get('artist_id'))
+                                       a.get("thumbnail"), now, genre=a.get("genre"),artist_id=a.get('artist_id'),source=source)
     store.discovery.prune_discovered(owned_albums, saved, dao.library_artists())
     store.discovery.prune_discovered_tracks(dao.library_keys(), held_keys=store.rec_query.generated_track_keys())
     cleanup_discovery_pool(store, rng)                     # #52: bound the pool + prune orphaned tracks

@@ -30,8 +30,8 @@ def test_for_you_respects_dismissals(store):
     store.tracks.upsert_track("v1", "Hit", "Fav", None, None)
     store.tracks.upsert_track("v2", "Bench", "Fav", None, None)   # deep cut -> surfaces in for_you
     now = 1000.0
-    store.history.add_history_snapshot(iid, now - 100, ["hit|fav"])
-    store.history.add_history_snapshot(iid, now - 50, ["hit|fav"])
+    store.history.record_history_plays(iid, now - 100, ["hit|fav"], source_timezone="UTC")
+    store.history.record_history_plays(iid, now - 50, ["hit|fav"], source_timezone="UTC")
 
     assert "bench|fav" in {i.key for i in surfaces.for_you(store, now=now)}
     store.rec_model.record_feedback("for_you", "bench|fav", "dismiss", now=now)

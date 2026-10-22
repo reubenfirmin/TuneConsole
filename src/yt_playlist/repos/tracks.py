@@ -43,8 +43,21 @@ class TrackRepo(Repo):
 
     @synchronized
     def record_item_rating(self, identity_id, video_id, status, *, source, now):
-        self.conn.execute('INSERT INTO item_ratings VALUES (?,?,?,?,?) ON CONFLICT(identity_id,video_id) DO UPDATE SET status=excluded.status,source=excluded.source,observed_at=excluded.observed_at', (identity_id,video_id,status,source,now))
-        self.conn.commit()
+        self.record_item_ratings(identity_id, {video_id: status}, source=source, now=now)
+
+    @synchronized
+    def record_item_ratings(self, identity_id, statuses, *, source, now):
+        """A sync confirmation retains the real time/provenance of an unchanged live action."""
+        retain_action = ("excluded.source='sync' AND item_ratings.status=excluded.status "
+                         "AND item_ratings.source IN ('api','action')")
+        with self.conn:
+            self.conn.executemany(
+                'INSERT INTO item_ratings VALUES (?,?,?,?,?) '
+                'ON CONFLICT(identity_id,video_id) DO UPDATE SET '
+                f'source=CASE WHEN {retain_action} THEN item_ratings.source ELSE excluded.source END,'
+                f'observed_at=CASE WHEN {retain_action} THEN item_ratings.observed_at ELSE excluded.observed_at END,'
+                'status=excluded.status',
+                [(identity_id, video_id, status, source, now) for video_id, status in statuses.items()])
 
     @synchronized
     def item_rating(self, identity_id, video_id):
@@ -54,18 +67,48 @@ class TrackRepo(Repo):
         return dict(row) if row else None
 
     @synchronized
+    def recording_ratings(self, keys):
+        from yt_playlist.core import rating_feedback
+
+        return rating_feedback.aggregate(self.conn, keys)
+
+    @synchronized
     def pending_action_ratings(self, identity_id):
-        """Live ratings not yet reflected in the model, including unresolved exact uploads."""
-        return [dict(row) for row in self.conn.execute(
-            "SELECT ir.video_id,ir.status,ir.observed_at FROM item_ratings ir "
-            "LEFT JOIN catalog_tracks c ON c.video_id=ir.video_id "
-            "WHERE ir.identity_id=? AND ir.source IN ('api','action') AND ("
-            "(ir.status IN ('LIKE','DISLIKE') AND NOT EXISTS (SELECT 1 FROM rec_feedback f "
-            "WHERE f.item_key=c.identity_key AND f.kind=lower(ir.status))) OR "
-            "(ir.status='INDIFFERENT' AND EXISTS (SELECT 1 FROM rec_feedback f "
-            "WHERE f.item_key=c.identity_key AND f.kind IN ('like','dislike')))) "
-            "ORDER BY ir.observed_at,ir.video_id",
-            (identity_id,))]
+        """Unresolved actions or combined feedback still awaiting projection.
+
+        An account's like suppressed by another contribution's dislike is reconciled,
+        not an endlessly pending like. The same holds for a neutral contribution while
+        another account/upload still supplies explicit feedback.
+        """
+        from yt_playlist.core import rating_feedback
+
+        rows = self.conn.execute(
+            "SELECT ir.video_id,ir.status,ir.observed_at,r.identity_key FROM item_ratings ir "
+            "LEFT JOIN youtube_items y ON y.video_id=ir.video_id "
+            "LEFT JOIN recordings r ON r.id=y.recording_id "
+            "WHERE ir.identity_id=? AND ir.source IN ('api','action') "
+            "ORDER BY ir.observed_at,ir.video_id", (identity_id,)).fetchall()
+        keys = {row['identity_key'] for row in rows if row['identity_key']}
+        combined = rating_feedback.aggregate(self.conn, keys)
+        feedback = {}
+        for row in rating_feedback.feedback_rows(self.conn, keys):
+            if row['kind'] in ('like', 'dislike'):
+                feedback.setdefault(row['item_key'], {})[row['kind']] = row['reason']
+        pending = []
+        for row in rows:
+            key = row['identity_key']
+            if key is None:
+                needs_projection = row['status'] in ('LIKE', 'DISLIKE')
+            else:
+                expected = combined[key]
+                actual = feedback.get(key, {})
+                expected_kinds = set() if expected.status == 'INDIFFERENT' else {expected.status.lower()}
+                needs_projection = (set(actual) != expected_kinds or
+                                    (expected.status == 'LIKE' and expected.provenance == 'action'
+                                     and actual.get('like') != 'action'))
+            if needs_projection:
+                pending.append({name: row[name] for name in ('video_id', 'status', 'observed_at')})
+        return pending
 
     @synchronized
     def upsert_track(self, video_id, title, artist, album, duration_s, available=None,
@@ -83,6 +126,15 @@ class TrackRepo(Repo):
         row = self.conn.execute(
             "SELECT identity_key FROM catalog_tracks WHERE video_id=? LIMIT 1", (video_id,)).fetchone()
         return row["identity_key"] if row else None
+
+    @synchronized
+    def thumbnail_for_video(self, video_id) -> str | None:
+        """Cached artwork for this exact upload, including tracks outside the library."""
+        row = self.conn.execute(
+            "SELECT thumbnail FROM catalog_tracks WHERE video_id=? "
+            "AND thumbnail IS NOT NULL AND thumbnail != '' ORDER BY id DESC LIMIT 1",
+            (video_id,)).fetchone()
+        return row["thumbnail"] if row else None
 
     @synchronized
     def known_duration(self, title, artist):
@@ -171,6 +223,39 @@ class TrackRepo(Repo):
         # manual override: set exactly what the user chose (may be blank to clear)
         catalog.choose_field(self.conn,track_id,'genre',genre or '')
         self.conn.commit()
+
+    @synchronized
+    def metadata_for_video(self, video_id) -> dict | None:
+        row = self.conn.execute(
+            "SELECT id track_id, title, artist, COALESCE(genre, '') genre, "
+            "COALESCE(mb_year, '') year, orig_title, orig_artist "
+            "FROM catalog_tracks WHERE video_id=?", (video_id,)).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def update_metadata(self, video_id, values, *, observation) -> None:
+        """Save the dialog as one transaction without overriding unchanged provider values.
+
+        Songs discovered outside the library become catalog observations, never library members.
+        Restoring an original title or artist removes its manual override.
+        """
+        with self.conn:
+            current = self.metadata_for_video(video_id)
+            if current is None:
+                catalog.upsert(self.conn, video_id, **observation, library=False)
+                current = self.metadata_for_video(video_id)
+            entry_id = current['track_id']
+            for field in ('title', 'artist', 'genre', 'year'):
+                if field not in values:
+                    continue
+                value = values[field]
+                column = 'mb_year' if field == 'year' else field
+                if field in ('title', 'artist') and value == current['orig_' + field]:
+                    self.conn.execute('DELETE FROM entry_field_choices WHERE entry_id=? AND field=?',
+                                      (entry_id, field))
+                    self.conn.execute(f'UPDATE catalog_tracks SET {column}=? WHERE id=?', (value, entry_id))
+                elif value != current[field]:
+                    catalog.choose_field(self.conn, entry_id, column, value)
 
     @synchronized
     def set_track_year(self, track_id, year) -> None:

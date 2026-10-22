@@ -45,7 +45,7 @@ def test_neighbors_for_unmodeled_uses_artist_proxy(store):
 
 def test_for_you_uses_taste_neighbourhood_when_built(store):
     iid, A, _ = _two_clusters(store)
-    store.history.add_history_snapshot(iid, 1.0, ["a0|ab", "a1|ab"])   # you play the A cluster
+    store.history.record_history_plays(iid, 1.0, ["a0|ab", "a1|ab"], source_timezone="UTC")
     embed.build_and_store(store, dim=4)
     items = surfaces.for_you(store, now=1000.0)
     assert any(i.reason == "In your taste neighbourhood" for i in items)

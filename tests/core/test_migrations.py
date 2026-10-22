@@ -25,11 +25,11 @@ def test_takeout_coverage_upgrade_preserves_legacy_rows_without_inventing_author
     store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'legacy')")
     store.conn.commit()
     store.init_schema()
-    row = store.conn.execute('SELECT identity_key,source FROM history_items').fetchone()
+    row = store.conn.execute('SELECT identity_key,source FROM listening_observations').fetchone()
     assert tuple(row) == ('legacy', 'unknown')
     assert store.conn.execute('SELECT COUNT(*) FROM takeout_imports').fetchone()[0] == 0
     store.init_schema()
-    assert store.conn.execute('SELECT COUNT(*) FROM history_items').fetchone()[0] == 1
+    assert store.conn.execute('SELECT COUNT(*) FROM listening_observations').fetchone()[0] == 1
 
 
 def test_early_fixture_preserves_ids_and_backup(tmp_path):
@@ -116,9 +116,8 @@ def test_rejects_caller_transaction_without_committing_or_rolling_it_back():
     assert not conn.execute('SELECT * FROM data').fetchall()
 
 
-def test_frozen_like_repair_matches_existing_dry_run_and_preserves_stamp(legacy_store):
+def test_frozen_like_repair_preserves_published_entitlement_and_stamp(legacy_store):
     from yt_playlist.core.migrations.registry import MIGRATIONS
-    from yt_playlist.rec.repair import plan_like_ratchet_repair
     s = legacy_store
     now = 1_000_000
     s.conn.execute('DELETE FROM schema_migrations WHERE version=7')
@@ -132,10 +131,12 @@ def test_frozen_like_repair_matches_existing_dry_run_and_preserves_stamp(legacy_
         for n in range(14):
             s.conn.execute("INSERT INTO rec_grad_log(axis,source,score,factor,new_weight,created_at) VALUES (?,'like',2,1.05,2,?)", (axis,now-50+n))
     s.conn.commit()
-    expected = plan_like_ratchet_repair(s,now)
     migrate(s.conn,registry=MIGRATIONS[:7],clock=lambda:now)
-    for adjustment in expected['adjustments']:
-        assert s.rec_model.get_weights(now=now)[adjustment['axis']] == pytest.approx(adjustment['weight_after'])
+    # Three likes earned two crossings of the frozen 1.2 threshold; twelve of
+    # fourteen logged graduations were surplus. Current catalog repositories
+    # cannot read this predecessor's physical tracks table.
+    for axis in ('genre:house','era:1990','artist:Artist'):
+        assert s.rec_model.get_weights(now=now)[axis] == pytest.approx(2 / 1.05 ** 12)
     stamp = s.settings.get_setting('like_ratchet_repaired')
     assert '3 once-ever graduation stamp(s)' in stamp
     before = s.rec_model.weight_records()

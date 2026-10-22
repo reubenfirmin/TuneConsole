@@ -13,6 +13,7 @@ from playwright.sync_api import expect
 
 from yt_playlist.core.store import Store
 from yt_playlist.rec import road_trip as road_trip_rec
+from yt_playlist.rec import road_trip_candidates as candidates
 from yt_playlist.repos.rec_query import GENERATED_GROUP
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes import road_trip as road_trip_route
@@ -42,14 +43,14 @@ def live_road_trip_app(monkeypatch):
     store.playlists.set_playlist_tracks(pid, mine)
     # The server runs in this process, so patching the Deezer facts lookup here keeps the build
     # (which enriches every "theirs" candidate) entirely offline.
-    monkeypatch.setattr(road_trip_rec, "_facts",
+    monkeypatch.setattr(candidates, "_facts",
                         lambda title, artist: {"popularity": 500, "year": 2015,
                                                "genre": "psychedelic", "duration": 245})
-    monkeypatch.setattr(road_trip_rec, "artist_genre", lambda s, name: "Psychedelic Rock")
+    monkeypatch.setattr(candidates, "artist_genre", lambda s, name: "Psychedelic Rock")
     # Picking an artist auto-fills their GENRE, and a genre input resolves through Last.fm and
     # MusicBrainz to find that genre's top artists. Stub it: without this the build makes real
     # network calls, which is both wrong for a test and slow enough to miss the timeout.
-    monkeypatch.setattr(road_trip_rec, "genre_artists",
+    monkeypatch.setattr(candidates, "genre_artists",
                         lambda store, genre, decade=None, limit=12: ["Tame Impala"])
 
     client = FakeClient(
@@ -246,7 +247,7 @@ def test_passenger_balance_stays_visible_during_background_search(live_road_trip
     base_url, store = live_road_trip_app
     rid = store.road_trip.save_road_trip_recipe(None, "Three genres", 0, [], ["Rock", "Pop", "Jazz"], 100, 1000)
     state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=1)
-    state["pool"] = [road_trip_rec._candidate(
+    state["pool"] = [candidates._candidate(
         f"{genre}-{i}", f"Song {i}", f"Artist {genre} {i}", "", None, 300, "theirs", genre, 1995)
         for genre, count in [("Rock", 5), ("Pop", 3), ("Jazz", 2)] for i in range(count)]
     for candidate in state["pool"]:
@@ -304,7 +305,7 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
     genres = ["Rock", "Pop", "Jazz"]
     rid = store.road_trip.save_road_trip_recipe(None, "Add music", 0, [], genres, 100, 1000)
     state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
-    state["pool"] = [road_trip_rec._candidate(
+    state["pool"] = [candidates._candidate(
         f"{genre}-{i}", f"Song {i}", f"Artist {genre} {i}", "", None, 300, "theirs", genre, 1995)
         for genre in genres for i in range(12)]
     for candidate in state["pool"]:
@@ -316,7 +317,7 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
     store.road_trip.save_road_trip_draft(rid, state, 1000)
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
-    monkeypatch.setattr(road_trip_rec, "artist_genre",
+    monkeypatch.setattr(candidates, "artist_genre",
                         lambda store, name: "Classic Rock" if name == "Journey" else None)
     page.route("**/road_trip/autocomplete/artists?*",
                lambda route: route.fulfill(json={"results": ["Journey"]}))
@@ -327,7 +328,7 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
                   "artist": name if kind == "artist" else f"{name} Artist {i}", "album": "",
                   "thumbnail": None, "duration": 300, "genre": genre} for i in range(8)], [])
 
-    monkeypatch.setattr(road_trip_rec, "other_input_songs", songs)
+    monkeypatch.setattr(candidates, "other_input_songs", songs)
     page.goto(f"{base_url}/road_trip")
     passenger = page.locator(".rt-step").filter(has=page.locator("summary strong", has_text="Passenger music"))
     new_genre = "Funk" if addition == "genre" else "Classic Rock"
@@ -345,7 +346,7 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
         waiting = store.road_trip.get_road_trip_draft(rid)
         assert waiting["building"]
         assert not any(c["genre"] == new_genre for c in waiting["pool"])
-        assert new_genre in {road_trip_rec._canon_genre(g) for g in store.road_trip.get_road_trip_recipe(rid)["genres"]}
+        assert new_genre in {candidates._canon_genre(g) for g in store.road_trip.get_road_trip_recipe(rid)["genres"]}
         if addition == "artist":
             expect(passenger.locator(".genre-chip.is-theirs").filter(has_text="Classic Rock like Journey")).to_be_visible()
             expect(passenger.locator(".rt-axis-context").filter(has_text="Like Journey")).to_be_visible()
@@ -375,7 +376,7 @@ def test_track_sources_distinguish_blend_on_desktop_and_mobile(live_road_trip_ap
     monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
     rid = store.road_trip.save_road_trip_recipe(None, "Three pools", 50, [], ["Rock"], 60, 1000)
     state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
-    state["pool"] = [road_trip_rec._candidate(
+    state["pool"] = [candidates._candidate(
         f"their-{i}", f"Passenger song {i}", f"Passenger artist {i}", "", None, 300,
         "theirs", "Pop", 1995) for i in range(12)]
     for candidate in state["pool"]:
@@ -413,7 +414,7 @@ def test_saved_overallocated_passenger_balance_is_normalized(live_road_trip_app,
     genres = ["Post-Punk", "Singer-Songwriter", "Indie Rock", "Alternative Rock"]
     rid = store.road_trip.save_road_trip_recipe(None, "Saved balance", 0, [], genres, 60, 1000)
     state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=1)
-    state["pool"] = [road_trip_rec._candidate(
+    state["pool"] = [candidates._candidate(
         f"track-{i}", f"Song {i}", f"Artist {i}", "", None, 300, "theirs", genre, 1995)
         for i, genre in enumerate(genres)]
     for candidate in state["pool"]:

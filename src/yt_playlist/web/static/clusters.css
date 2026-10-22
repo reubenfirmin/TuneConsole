@@ -334,37 +334,6 @@ main.page-clusters { max-width: none; margin: 0; padding: 0; animation: none; }
   white-space: nowrap; align-self: center; }
 .cluster-reset { display: inline-flex; align-items: center; gap: 0.3rem; }
 .cluster-reset:hover { border-color: var(--danger); color: var(--danger); }
-.cg-box { display: flex; align-items: center; flex-wrap: wrap; gap: 0.3rem; cursor: text;
-  padding: 0.4rem 0.6rem; min-height: 2.65rem; box-sizing: border-box; width: 100%;
-  /* #d: the box grows taller ONLY when chips truly run out of horizontal room. It used to wrap early
-     because the input demanded a wide min-width and got bumped to its own line; the input now shrinks
-     (see .cg-box input) so it tucks in after the chips and a second row appears only when needed. */
-  background: var(--surface); border: 1.5px solid var(--border-2); border-radius: 1.3rem; }
-.cg-box.on { border-color: var(--cta); }
-.cg-box:focus-within { border-color: var(--focus-ring); box-shadow: none; }
-.cg-icon { color: var(--faint); font-size: 0.9rem; flex: none; }
-.cg-box input { flex: 1 1 2rem; min-width: 2rem; border: none; background: none; outline: none;
-  color: var(--text); font-size: 0.9rem; padding: 0.1rem 0; }
-.cg-chip { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; flex: none;
-  white-space: nowrap; background: color-mix(in srgb, var(--cta) 12%, transparent); color: var(--cta); border: 1px solid color-mix(in srgb, var(--cta) 40%, transparent);
-  border-radius: 999px; padding: 0.08rem 0.5rem; font-size: 0.76rem; font-weight: 600;
-  text-transform: capitalize; }
-.cg-chip::after { content: '✕'; font-size: 0.6rem; opacity: 0.7; }
-.cg-chip:hover { background: color-mix(in srgb, var(--cta) 22%, transparent); }
-.cg-x { flex: none; border: none; background: none; color: var(--faint); cursor: pointer;
-  font-size: 0.72rem; line-height: 1; padding: 0 0.1rem; }
-.cg-x:hover { color: var(--text); }
-.cg-suggest { position: absolute; z-index: 6; top: calc(100% + 0.35rem); left: 0; right: 0; margin: 0;
-  padding: 0.3rem; list-style: none; background: var(--surface); border: 1px solid var(--border-2);
-  border-radius: var(--radius-sm); box-shadow: var(--shadow); max-height: 20rem; overflow-y: auto; }
-.cg-suggest li { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.5rem;
-  border-radius: 6px; cursor: pointer; }
-.cg-suggest li:hover, .cg-suggest li.sel { background: var(--accent-soft); }
-.cg-name { flex: 1; text-transform: capitalize; }
-.cg-kind { font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.08em; flex: none;
-  padding: 0.08rem 0.35rem; border-radius: 4px; background: var(--surface-2); color: var(--faint); }
-.cg-kind.family { color: var(--accent-2); }
-.cg-n { font-size: 0.72rem; color: var(--faint); min-width: 1.5rem; text-align: right; }
 
 .cluster-zoombar { position: absolute; right: 0.8rem; bottom: 0.8rem; z-index: 4; display: flex; flex-direction: column; gap: 0.3rem; }
 .cluster-zoombar button {

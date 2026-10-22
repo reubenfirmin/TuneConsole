@@ -264,6 +264,7 @@ const vm = require('node:vm');
 const messages = [], handlers = new Map(), timers = new Map();
 let serial = 0, now = 30000, available = true, playlist = 'PL_playing';
 let data = {video_id: 'playing', title: 'Song', author: 'Artist'};
+let playerResponse = null;
 let config = {LOGGED_IN: true, DELEGATED_SESSION_ID: 'brand-A'};
 let bar = null;
 const windowHandlers = new Map();
@@ -272,7 +273,8 @@ const video = {
   addEventListener(type, fn) { handlers.set(type, fn); },
   removeEventListener(type, fn) { if (handlers.get(type) === fn) handlers.delete(type); },
 };
-const player = {getVideoData: () => data, getPlaylistId: () => playlist};
+const player = {getVideoData: () => data, getPlaylistId: () => playlist,
+  getPlayerResponse: () => playerResponse};
 const window = {__tcNowPoller: true, postMessage: msg => messages.push(msg),
   addEventListener: (type, fn) => windowHandlers.set(type, fn),
   removeEventListener: (type, fn) => {
@@ -378,6 +380,24 @@ tick();
 assert.equal(latest().playerBar.likeStatus, '', 'a stale rating target must not rate the next song');
 bar = null;
 data.author = 'Artist';
+// Official album artwork has no embedded video ID, but a matching player response
+// can provide it without authorizing stale MediaSession titles or uploader credits.
+playerResponse = {videoDetails: {videoId: 'next', thumbnail: {thumbnails: [
+  {url: 'https://yt3.googleusercontent.com/album=w120'},
+  {url: 'https://yt3.googleusercontent.com/album=w544'},
+]}}};
+tick();
+assert.equal(latest().thumbnail, 'https://yt3.googleusercontent.com/album=w544');
+assert.equal(latest().title, 'Next');
+assert.equal(latest().artist, 'Artist');
+assert.equal(latest().metadataVerified, false, 'artwork alone must not validate recording credits');
+playerResponse.videoDetails.videoId = 'playing';
+tick();
+assert.equal(latest().thumbnail, '', 'a stale player response must not supply the previous artwork');
+playerResponse = {videoDetails: {videoId: 'next', thumbnail: {thumbnails: []}}};
+tick();
+assert.equal(latest().thumbnail, '');
+playerResponse = null;
 playlist = '';
 tick();
 assert.equal(latest().playlist, '', 'an actual queue clear must stay clear');
@@ -411,6 +431,11 @@ assert.equal(window.__tcNowPoller.lastSampleAt, now);
 vm.runInNewContext(source, context);
 assert.equal(timers.size, 1, 'reinjection must not add another interval');
 assert.equal(handlers.size, 4);
+delete window.__tcNowPoller.revision; // An implementation upgrade keeps the wire protocol.
+vm.runInNewContext(source, context);
+assert.equal(timers.size, 1, 'the revised sensor replaces a healthy predecessor without duplicate timers');
+assert.equal(handlers.size, 4);
+assert.equal(window.__tcNowPoller.revision, 1);
 window.__tcNowPoller.version = 1; // a future version replaces the existing sensor in place
 vm.runInNewContext(source, context);
 tick();

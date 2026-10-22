@@ -13,7 +13,7 @@ def test_wheelhouse_excludes_play_recency_lane(store):
     day = 86400.0
     now = 200 * day
     for d in (120, 100, 80, 60):                              # 4 plays, last 60 days ago
-        store.history.add_history_snapshot(iid, now - d * day, ["gem|x"])
+        store.history.record_history_plays(iid, now - d * day, ["gem|x"], source_timezone="UTC")
 
     # Bench (never played) is X's deep cut, so Gem isn't; with no playlists Gem isn't a neighbour
     # either. Wheelhouse must not resurface Gem on play-recency alone.
@@ -30,9 +30,9 @@ def test_comfort_listening_favors_high_play_not_recent(store):
     day = 86400.0
     now = 400 * day
     for d in (300, 250, 200, 150, 90):                       # 5 plays, last 90 days ago
-        store.history.add_history_snapshot(iid, now - d * day, ["old favorite|x"])
+        store.history.record_history_plays(iid, now - d * day, ["old favorite|x"], source_timezone="UTC")
     for d in (20, 15, 10, 5, 1):                             # 5 plays, last yesterday
-        store.history.add_history_snapshot(iid, now - d * day, ["recent favorite|x"])
+        store.history.record_history_plays(iid, now - d * day, ["recent favorite|x"], source_timezone="UTC")
 
     items = surfaces.comfort_listening(store, now=now, limit=10)
     titles = [i.title for i in items]
@@ -49,9 +49,9 @@ def test_comfort_listening_excludes_never_and_barely_played(store):
     store.tracks.upsert_track("v3", "Worn", "X", None, None)        # 5 plays
     day = 86400.0
     now = 400 * day
-    store.history.add_history_snapshot(iid, now - 50 * day, ["barely|x"])
+    store.history.record_history_plays(iid, now - 50 * day, ["barely|x"], source_timezone="UTC")
     for d in (200, 150, 100, 80, 60):
-        store.history.add_history_snapshot(iid, now - d * day, ["worn|x"])
+        store.history.record_history_plays(iid, now - d * day, ["worn|x"], source_timezone="UTC")
 
     titles = {i.title for i in surfaces.comfort_listening(store, now=now, limit=10)}
     assert "Worn" in titles
@@ -66,8 +66,8 @@ def test_for_you_genre_suppression_reduces_that_family(store):
     folk = [store.tracks.upsert_track(f"f{i}", f"F{i}", "FolkBand", None, None) for i in range(6)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PT", "Techno", 6, "h", 0.0), techno)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PF", "Folk", 6, "h2", 0.0), folk)
-    store.history.add_history_snapshot(iid, 1.0, ["t0|technoband"])
-    store.history.add_history_snapshot(iid, 1.0, ["f0|folkband"])
+    store.history.record_history_plays(iid, 1.0, ["t0|technoband"], source_timezone="UTC")
+    store.history.record_history_plays(iid, 1.0, ["f0|folkband"], source_timezone="UTC")
     for t in techno:
         store.tracks.set_track_genre(t, "Techno")
     for f in folk:
@@ -95,10 +95,10 @@ def test_comfort_candidates_scores_plays_times_recency(store):
     day = 86400.0
     now = 400 * day + day / 2  # Coarse observations use a noon date key.
     for d in (300, 250, 200, 120):                              # 4 plays, last 120d ago -> factor 1.0
-        store.history.add_history_snapshot(iid, now - d * day, ["dormant|x"])
+        store.history.record_history_plays(iid, now - d * day, ["dormant|x"], source_timezone="UTC")
     for d in (40, 35, 30, 25, 20, 15, 10, 1):                  # 8 plays, last yesterday -> factor ~1/30
-        store.history.add_history_snapshot(iid, now - d * day, ["heavyrecent|x"])
-    store.history.add_history_snapshot(iid, now - 10 * day, ["barely|x"])   # 1 play -> below min_plays
+        store.history.record_history_plays(iid, now - d * day, ["heavyrecent|x"], source_timezone="UTC")
+    store.history.record_history_plays(iid, now - 10 * day, ["barely|x"], source_timezone="UTC")
 
     res = store.rec_query.comfort_candidates(now=now, min_plays=4, recency_full_days=30, limit=10)
     titles = [r["title"] for r in res]
@@ -117,8 +117,8 @@ def test_for_you_blends_real_signals_with_reasons(store):
     pl = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 0.0)
     store.playlists.set_playlist_tracks(pl, [hit, nb])
     now = 1000.0
-    store.history.add_history_snapshot(iid, now - 100, ["hit|fav"])
-    store.history.add_history_snapshot(iid, now - 50, ["hit|fav"])
+    store.history.record_history_plays(iid, now - 100, ["hit|fav"], source_timezone="UTC")
+    store.history.record_history_plays(iid, now - 50, ["hit|fav"], source_timezone="UTC")
 
     items = surfaces.for_you(store, now=now, limit=10)
     titles = {i.title for i in items}
@@ -136,8 +136,8 @@ def test_for_you_never_empty_without_history_depth(store):
     store.tracks.upsert_track("v2", "Bench", "Band", None, None)          # neglected by same artist
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PL", "P", 1, "h", 0.0), [a])
     now = 1000.0
-    store.history.add_history_snapshot(iid, now - 60, ["played|band"])     # all history is RECENT
-    store.history.add_history_snapshot(iid, now - 30, ["played|band"])
+    store.history.record_history_plays(iid, now - 60, ["played|band"], source_timezone="UTC")
+    store.history.record_history_plays(iid, now - 30, ["played|band"], source_timezone="UTC")
 
     items = surfaces.for_you(store, now=now, limit=10)
     assert items, "for_you must not be empty on a fresh library with plays"
@@ -172,8 +172,8 @@ def test_taste_sample_is_a_rotating_slice_not_the_top_n(store):
     for n in range(30):                                            # 30 artists -> 30 deep-cut candidates
         store.tracks.upsert_track(f"h{n}", f"Hit{n}", f"Band{n}", None, None)
         store.tracks.upsert_track(f"d{n}", f"Deep{n}", f"Band{n}", None, None)
-        store.history.add_history_snapshot(iid, now - 100, [f"hit{n}|band{n}"])
-        store.history.add_history_snapshot(iid, now - 50, [f"hit{n}|band{n}"])
+        store.history.record_history_plays(iid, now - 100, [f"hit{n}|band{n}"], source_timezone="UTC")
+        store.history.record_history_plays(iid, now - 50, [f"hit{n}|band{n}"], source_timezone="UTC")
 
     runs = [tuple(i.key for i in surfaces.taste_sample(store, now, limit=8)) for _ in range(15)]
     assert all(len(set(r)) == 8 for r in runs)         # a full, deduped slice every refresh
@@ -245,7 +245,7 @@ def test_take_action_has_no_manual_enrich_nag(store):
     ts = [store.tracks.upsert_track(f"h{i}", f"H{i}", "HA", None, None) for i in range(6)]   # all gappy
     php = store.playlists.upsert_playlist(iid, "PH", "Hot List", 6, "h", 0.0, "http://t/hot.jpg")
     store.playlists.set_playlist_tracks(php, ts)
-    store.history.add_history_snapshot(iid, 1.0, ["h0|ha"])
+    store.history.record_history_plays(iid, 1.0, ["h0|ha"], source_timezone="UTC")
     items = actions.take_action(store, now=1000.0, auth_expired={})
     assert not [i for i in items if i.kind == "enrich"]
 
@@ -298,8 +298,8 @@ def _seed_two_eras(store):
         store.tracks.set_track_year(t, "2005")
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PN", "Nineties", 6, "h", 0.0), nineties)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PO", "Noughts", 6, "h2", 0.0), noughts)
-    store.history.add_history_snapshot(iid, 1.0, ["n0|nb0"])
-    store.history.add_history_snapshot(iid, 1.0, ["o0|ob0"])
+    store.history.record_history_plays(iid, 1.0, ["n0|nb0"], source_timezone="UTC")
+    store.history.record_history_plays(iid, 1.0, ["o0|ob0"], source_timezone="UTC")
     embed.build_and_store(store, dim=4)
     return iid
 
@@ -402,10 +402,10 @@ def _seed_pl(store, iid, ytm, title, n, now, played_at=None, group=None, play_ea
         if group == "Generated":
             store.playlists.mark_generated_playlist(ytm)
     if played_at is not None:
-        store.history.add_history_snapshot(iid, played_at, [keys[0]])
+        store.history.record_play_event(iid, keys[0], f"v_{ytm}_0", played_at, source_timezone="UTC")
     for k, ts in zip(keys, play_each_at or []):
         if ts is not None:
-            store.history.add_history_snapshot(iid, ts, [k])
+            store.history.record_play_event(iid, k, None, ts, source_timezone="UTC")
     return pid
 
 
@@ -485,7 +485,7 @@ def test_rediscover_rotation_stays_within_coldest_pool(store):
 
 
 def _seed_album(store, iid, browse, title, now, played_at=None, n=2, year="2020", thumb="t.jpg"):
-    """A saved album of `n` tracks (linked by album_browse_id), optionally with one play snapshot."""
+    """A saved album of `n` tracks, optionally with timestamped listening events."""
     from yt_playlist.util.matching import identity_key
     store.collection.add_saved_album({"browse": browse, "title": title, "artist": f"{browse} artist",
                                       "year": year, "type": "Album", "thumbnail": thumb})
@@ -495,7 +495,8 @@ def _seed_album(store, iid, browse, title, now, played_at=None, n=2, year="2020"
         store.tracks.upsert_track(f"v_{browse}_{i}", t, a, None, None, album_browse_id=browse)
         keys.append(identity_key(t, a))
     if played_at is not None:
-        store.history.add_history_snapshot(iid, played_at, keys)
+        store.history.import_listening_events(iid, [(key, None, played_at) for key in keys],
+                                             source_timezone="UTC")
 
 
 def test_rediscover_albums_empty_when_no_saved(store):
@@ -559,7 +560,8 @@ def test_generators_exclude_dj_mixes(store):
     store.tracks.upsert_track("v2", "Live Set", "X", None, 3600)         # 60-min concert/mix
     store.tracks.upsert_track("v3", "Untimed", "X", None, None)          # unknown duration -> kept
     for d in range(6):                                            # all well-played, then gone quiet
-        store.history.add_history_snapshot(iid, now - (40 + d) * day, ["short song|x", "live set|x", "untimed|x"])
+        store.history.record_history_plays(iid, now - (40 + d) * day,
+            ["short song|x", "live set|x", "untimed|x"], source_timezone="UTC")
 
     keys = {r["key"] for r in store.rec_query.comfort_candidates(now=now, min_plays=4, recency_full_days=30, limit=20)}
     assert "short song|x" in keys
@@ -575,8 +577,8 @@ def test_library_candidate_pools_follow_the_saved_duration_limit(store):
     store.playlists.set_playlist_tracks(pid, tids)
     now = 1000 * 86400
     for day in range(4):
-        store.history.add_history_snapshot(iid, now - (40 + day) * 86400,
-                                   [title + "|artist" for title, _ in titles])
+        store.history.record_history_plays(iid, now - (40 + day) * 86400,
+            [title + "|artist" for title, _ in titles], source_timezone="UTC")
     assert len(store.rec_query.library_songs()) == 4
     rec_params.set_param(store, "max_track_minutes", 5)
     expected = {"short|artist", "boundary|artist", "unknown|artist"}

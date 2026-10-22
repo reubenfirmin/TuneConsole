@@ -2,7 +2,7 @@
 
 import pytest
 
-from yt_playlist.web.routes.home import _record_served_cards
+from yt_playlist.rec.home_cards import _record_served_cards
 from yt_playlist.rec import measurement
 
 

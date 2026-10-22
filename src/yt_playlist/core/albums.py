@@ -32,17 +32,14 @@ def _credit_subject(conn, album_id, previous):
 
 def observe(conn, browse_id, *, title=None, artist=None, year=None, type=None,
             thumbnail=None, genre=None, credits=None, artist_id=None, rank=0):
-    legacy_key = None if browse_id else json.dumps([title,artist],ensure_ascii=False)
-    aid = lookup(conn,browse_id) if browse_id else None
-    if aid is None and legacy_key is not None:
-        row = conn.execute('SELECT id FROM albums WHERE legacy_key=?', (legacy_key,)).fetchone()
-        aid = row[0] if row else None
+    if not browse_id:
+        raise ValueError('An album requires a YouTube browse ID.')
+    aid = lookup(conn,browse_id)
     values = tuple(None if v=='' else v for v in (title,artist,str(year) if year is not None else None,type,thumbnail,genre))
     previous_rank = None
     if aid is None:
-        aid = conn.execute('INSERT INTO albums(title,artist,year,type,thumbnail,genre,metadata_rank,legacy_key) VALUES (?,?,?,?,?,?,?,?)', (*values,rank,legacy_key)).lastrowid
-        if browse_id:
-            conn.execute("INSERT INTO album_provider_ids VALUES ('youtube',?,?)", (browse_id,aid))
+        aid = conn.execute('INSERT INTO albums(title,artist,year,type,thumbnail,genre,metadata_rank) VALUES (?,?,?,?,?,?,?)', (*values,rank)).lastrowid
+        conn.execute("INSERT INTO album_provider_ids VALUES ('youtube',?,?)", (browse_id,aid))
     else:
         previous_rank = conn.execute('SELECT metadata_rank FROM albums WHERE id=?', (aid,)).fetchone()[0]
         fields = ('title','artist','year','type','thumbnail','genre')
@@ -68,6 +65,10 @@ def observe(conn, browse_id, *, title=None, artist=None, year=None, type=None,
 
 
 def link(conn, entry_id, browse_id=None, *, title=None, artist=None, source='youtube'):
+    # A track's album label is retained in its metadata. It does not identify a
+    # release, and must not manufacture another album when a refresh omits its ID.
+    if not browse_id:
+        return None
     aid = observe(conn,browse_id,title=title,artist=artist)
     if not conn.execute('SELECT 1 FROM album_tracks WHERE album_id=? AND entry_id=?', (aid,entry_id)).fetchone():
         conn.execute('INSERT INTO album_tracks(album_id,entry_id,is_full,source) VALUES (?,?,0,?)', (aid,entry_id,source))

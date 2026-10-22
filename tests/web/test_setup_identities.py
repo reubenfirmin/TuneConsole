@@ -191,7 +191,7 @@ def test_remove_persists_without_checks_or_unrelated_form_changes(identity_setup
     ids = {i.label: i.id for i in t.store.identities.get_identities()}
     for label, iid in ids.items():
         t.app.state.ctx.flag_auth_expired(iid, label)
-    snapshot = t.store.history.add_history_snapshot(ids["Brand"], 1.0, ["song|artist"])
+    t.store.history.record_history_plays(ids["Brand"], 1.0, ["song|artist"], source_timezone="UTC")
     response = t.client.post(f'/setup/identities/{ids["Brand"]}/remove', data={"label": "unsaved edit"})
     assert response.status_code == 200
     assert response.json() == {"message": 'Removed identity "Brand".', "main_identity_id": ids["main"],
@@ -199,8 +199,8 @@ def test_remove_persists_without_checks_or_unrelated_form_changes(identity_setup
     assert [i.label for i in t.store.identities.get_identities()] == ["main"]
     assert t.app.state.ctx.auth_expired == {ids["main"]: "main"}
     assert t.clients["Brand"].checks == t.clients["main"].checks == 0
-    assert t.store.conn.execute("SELECT identity_id FROM history_snapshots WHERE id=?",
-                                (snapshot,)).fetchone()[0] == ids["Brand"]
+    assert t.store.history.listening_day_counts(ids["Brand"]) == {"song|artist": 1}
+    assert t.store.history.listening_day_counts(ids["main"]) == {}
     t.runtime.load()
     assert set(t.runtime.clients()) == {ids["main"]}
 

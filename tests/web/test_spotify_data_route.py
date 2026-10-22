@@ -6,9 +6,11 @@ import threading
 import time
 import zipfile
 
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, _track
+from yt_playlist.rec import rec_params, transient
 from yt_playlist.web.app import create_app
 
 
@@ -86,18 +88,53 @@ def test_setup_offers_local_export_upload_without_oauth(store):
     assert "Playlist1.json" in body and "YourLibrary.json" in body
     assert 'hx-post="/import/spotify-library/v5"' in body
     assert "Restart TuneConsole" in body
-    assert 'hx-post="/import/spotify"' in body
+    assert 'hx-post="/import/spotify/v2"' in body
     assert "Client ID" not in body and "/spotify/connect" not in body
 
 
 def test_upload_imports_history_and_replaces_form_with_report(store):
     client = _client(store)
-    response = client.post("/import/spotify", files={
+    response = client.post("/import/spotify/v2", files={
         "file": ("my_spotify_data.zip", _payload(), "application/zip")})
     assert response.status_code == 200
     assert "Spotify import complete" in response.text
     assert response.headers["HX-Retarget"] == "#spotify-import-block"
     assert store.settings.get_setting("spotify_imported_at") == "1000.0"
+
+
+def test_history_upload_reaches_home_learning_and_requests_model_refresh(store, monkeypatch):
+    now = 1704103200.0  # The export's timestamp, so its play participates in recent taste.
+    store.identities.upsert_identity('main', 'bridge', None, True)
+    tid = store.tracks.upsert_track('yt', 'Song', 'Artist', None, 180)
+    store.tracks.set_track_genre(tid, 'Techno')
+    rec_params.set_param(store, 'source_w_play', 1.0)
+    rec_params.set_param(store, 'theme_threshold', 0.2)
+    app = create_app(store, lambda: {}, now_fn=lambda: now, background_work=False)
+    refreshes = []
+    monkeypatch.setattr(app.state.ctx.rec_worker, 'trigger', lambda: refreshes.append(True))
+    client = TestClient(app, base_url='http://127.0.0.1:8123')
+
+    # File upload alone is sufficient; no additional permission or certification fields.
+    response = client.post('/import/spotify/v2', files={
+        'file': ('history.zip', _payload(), 'application/zip')})
+    assert response.status_code == 200 and 'Spotify import complete' in response.text
+    assert refreshes == [True]
+    assert transient.play_facet_leans(store, now)
+    assert client.get('/').status_code == 200
+    weights = store.rec_model.get_weights(now=now)
+    assert weights and all(weight > 1.0 for weight in weights.values())
+
+    client.post('/import/spotify/v2', files={'file': ('history.zip', _payload(), 'application/zip')})
+    assert client.get('/').status_code == 200
+    assert store.history.spotify_history_stats()['events'] == 1
+    assert store.rec_model.get_weights(now=now) == weights
+    assert refreshes == [True]
+
+    removed = client.post('/import/spotify/remove')
+    assert 'Saved taste preferences were kept' in removed.text
+    assert refreshes == [True, True]
+    assert transient.play_facet_leans(store, now) == {}
+    assert store.rec_model.get_weights(now=now) == weights
 
 
 def test_unreadable_upload_keeps_form_for_retry(store):
@@ -106,6 +143,61 @@ def test_unreadable_upload_keeps_form_for_retry(store):
     assert response.status_code == 200
     assert "Could not find Spotify Extended Streaming History" in response.text
     assert "HX-Retarget" not in response.headers
+
+
+def test_history_removal_is_available_after_upload_and_on_reload(store):
+    client = _client(store)
+    response = client.post('/import/spotify', files={'file':('history.zip',_payload(),'application/zip')})
+    assert 'Remove Spotify history' in response.text
+    assert 'Remove Spotify history' in client.get('/setup?tab=import').text
+    iid = store.identities.get_identities()[0].id
+    event = store.conn.execute('SELECT * FROM play_events').fetchone()
+    store.history.import_listening_events(iid,[(event['identity_key'],None,event['played_at'])],source='takeout')
+    response = client.post('/import/spotify/remove')
+    assert response.status_code == 200
+    assert response.headers['HX-Retarget'] == '#spotify-import-block'
+    assert 'Spotify history removed' in response.text
+    assert store.history.spotify_history_stats()['events'] == 0
+    assert len(store.history.play_events_since(0)) == 1
+    assert store.settings.get_setting('spotify_imported_at') is None
+    assert 'Remove Spotify history' not in client.get('/setup?tab=import').text
+    status = client.get('/import/history/status?source=spotify',headers={'accept':'application/json'}).json()
+    assert status['done'] and status['outcome'] == 'complete'
+    assert 'removed' in status['message']
+
+
+def test_report_explains_quality_filters_without_exposing_private_fields(store):
+    client = _client(store)
+    rows = [dict(ts='2024-01-01T10:00:00Z',master_metadata_track_name='Song',
+                 master_metadata_album_artist_name='Artist',spotify_track_uri='spotify:track:x',
+                 ms_played=180000,ip_addr='PRIVATE_SENTINEL')]
+    rows.extend([{**rows[0], 'ms_played':0},
+                 {**rows[0], 'spotify_track_uri':'spotify:track:short','ms_played':1000},
+                 {**rows[0], 'spotify_track_uri':'spotify:track:private','incognito_mode':True}])
+    response = client.post('/import/spotify',files={'file':('audio.json',json.dumps(rows),'application/json')})
+    assert '1 duplicate entries' in response.text
+    assert '1 listens under 30 seconds' in response.text
+    assert '1 private-session listens' in response.text
+    assert 'PRIVATE_SENTINEL' not in response.text
+    assert 'PRIVATE_SENTINEL' not in '\n'.join(store.conn.iterdump())
+
+
+@pytest.mark.parametrize('source_timezone', ['UTC', 'America/Costa_Rica'])
+def test_daily_only_spotify_history_can_be_removed(store, source_timezone):
+    from yt_playlist.core import listening
+    client = _client(store)
+    iid = store.identities.get_identities()[0].id
+    with store.conn:
+        listening.calendar(store.conn, iid, 'UTC')
+        listening.observe_day(store.conn, iid, 'old-song', '2024-01-01', 'spotify', source_timezone, 100)
+    assert store.history.spotify_history_stats()['events'] == 0
+    assert store.history.spotify_history_stats()['days'] == int(source_timezone == 'UTC')
+    assert store.history.spotify_history_stats()['unresolved_days'] == int(source_timezone != 'UTC')
+    assert 'Remove Spotify history' in client.get('/setup?tab=import').text
+    assert client.post('/import/spotify/remove').status_code == 200
+    assert store.history.spotify_history_stats()['days'] == 0
+    assert store.history.spotify_history_stats()['unresolved_days'] == 0
+    assert 'Remove Spotify history' not in client.get('/setup?tab=import').text
 
 
 def test_account_data_requires_selection_preview_and_confirmation_before_writes(store):

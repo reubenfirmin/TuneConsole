@@ -14,7 +14,9 @@ def prepare(store):
         tid = store.tracks.upsert_track(f"favorite-{i}", f"Favorite {i}", f"Favorite artist {i}", None, None)
         store.tracks.set_track_genre(tid, genre)
         store.tracks.set_track_year(tid, 1960 + i * 10)
-        store.history.add_history_snapshot(iid, 1, [identity_key(f"Favorite {i}", f"Favorite artist {i}")] * 10)
+        for day in range(10):
+            store.history.record_history_plays(iid, 1 - day * 86400,
+                [identity_key(f"Favorite {i}", f"Favorite artist {i}")], source_timezone="UTC")
 
 
 def test_vibe_applies_persists_recovers_from_failure_and_resets(live_app, store, page):

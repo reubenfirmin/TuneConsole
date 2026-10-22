@@ -23,6 +23,10 @@ def pytest_addoption(parser):
         "--test-lock-wait", type=float, default=0, metavar="SECONDS",
         help="Wait up to SECONDS for the shared test lock (default: fail immediately).",
     )
+    parser.addoption(
+        "--run-flatpak-build", action="store_true",
+        help="Build and exercise real packaged Flatpak versions in the focused packaging tests.",
+    )
 
 
 def _owner(lock):

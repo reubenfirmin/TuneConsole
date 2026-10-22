@@ -5,8 +5,9 @@
 // classifies skips/completions/sessions from the raw stream.
 (function () {
   var SENSOR_VERSION = 4;
+  var SENSOR_REVISION = 1; // Implementation changes can replace a compatible, healthy sensor.
   var previous = window.__tcNowPoller;
-  if (previous && previous.version === SENSOR_VERSION && !previous.stopped &&
+  if (previous && previous.version === SENSOR_VERSION && previous.revision === SENSOR_REVISION && !previous.stopped &&
       previous.lastSampleAt != null && Date.now() - previous.lastSampleAt < 10000) return;
   if (previous && previous.stop) previous.stop();
 
@@ -18,7 +19,7 @@
   function playerInfo() {
     // The URL describes the page being browsed, which can differ from the playing song/queue.
     // Read both identifiers from the same player instead; unknown context stays empty.
-    var info = { videoId: "", playlist: "", title: "", artist: "" };
+    var info = { videoId: "", playlist: "", title: "", artist: "", thumbnail: "" };
     try {
       var host = document.querySelector("ytmusic-player");
       var player = document.querySelector("#movie_player");
@@ -30,6 +31,21 @@
         info.artist = data.author || "";
       }
       if (info.videoId && player.getPlaylistId) info.playlist = player.getPlaylistId() || "";
+      // Album-art URLs often have no video ID. The player response supplies that identity
+      // separately, so it can cover a stale/missing bar without trusting stale MediaSession art.
+      if (info.videoId && typeof player.getPlayerResponse === "function") {
+        var response = player.getPlayerResponse();
+        var details = response && response.videoDetails;
+        var thumbs = details && details.thumbnail && details.thumbnail.thumbnails;
+        if (details && details.videoId === info.videoId && Array.isArray(thumbs)) {
+          for (var i = thumbs.length - 1; i >= 0; i--) {
+            if (thumbs[i] && typeof thumbs[i].url === "string" && thumbs[i].url) {
+              info.thumbnail = thumbs[i].url;
+              break;
+            }
+          }
+        }
+      }
     } catch (e) {}
     return info;
   }
@@ -107,10 +123,10 @@
     }
     if (info.videoId && bar.videoId === info.videoId && bar.title && bar.artist) {
       return { title: bar.title, artist: bar.artist,
-               thumbnail: bar.thumbnail || art, verified: true };
+               thumbnail: bar.thumbnail || art || info.thumbnail, verified: true };
     }
     return { title: (art && md.title) || info.title,
-             artist: (art && md.artist) || info.artist, thumbnail: art,
+             artist: (art && md.artist) || info.artist, thumbnail: art || info.thumbnail,
              verified: !!(art && md.title && md.artist) };
   }
   function shuffleRepeat() {
@@ -217,7 +233,8 @@
   window.addEventListener("message", onProbe);
   // Future updates can replace this sensor without reloading a tab or leaving duplicate listeners.
   // A legacy boolean marker cannot stop its old interval; content.js ignores its unversioned frames.
-  var poller = window.__tcNowPoller = { version: SENSOR_VERSION, lastSampleAt: null, stopped: false, stop: function () {
+  var poller = window.__tcNowPoller = { version: SENSOR_VERSION, revision: SENSOR_REVISION,
+    lastSampleAt: null, stopped: false, stop: function () {
     poller.stopped = true;
     clearInterval(timer);
     window.removeEventListener("message", onProbe);

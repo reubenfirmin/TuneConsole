@@ -6,7 +6,7 @@ import pytest
 from yt_playlist.core import logsetup
 from yt_playlist.rec import home_audit
 from yt_playlist.rec.surfaces import ForYouItem
-from yt_playlist.web.routes import home
+from yt_playlist.rec import home_cards as home
 
 
 @pytest.fixture

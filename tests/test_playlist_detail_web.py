@@ -68,6 +68,7 @@ def test_track_genre_returns_row_fragment(store):
     assert "<!doctype html>" not in r.text.lower()
     assert 'class="srow"' in r.text and 'data-vid="v0"' in r.text   # the <tr> swap unit
     assert "Jazz" in r.text                                          # rendered into the genre cell
+    assert 'watch?v=v0&amp;list=PL1' in r.text
     assert {t["video_id"]: t["genre"] for t in store.charts.playlist_tracks_detail(a)} == {"v0": "Jazz"}
 
 
@@ -112,11 +113,14 @@ def test_track_title_no_vid_returns_toast(store):
     assert r.status_code == 422 and 'hx-swap-oob="afterbegin:#toasts"' in r.text
 
 
-def test_track_row_renders_edit_affordances(store):
+def test_track_row_uses_song_menu_for_metadata(store):
     iid, a = _seed_one_track(store)
     c = _client(store, lambda: {iid: FakeClient()})
     r = c.get(f"/playlist/{a}")
-    assert "startEditTitle(" in r.text and "startEditArtist(" in r.text
+    assert 'Edit Metadata' in r.text
+    assert 'watch?v=v0&amp;list=PL1' in r.text
+    for inline_control in ('startEditTitle(', 'startEditArtist(', 'startEditYear(', 'class="editpen"'):
+        assert inline_control not in r.text
 
 
 def test_enrich_track_events_carry_rendered_row(store, monkeypatch):
@@ -137,6 +141,7 @@ def test_enrich_track_events_carry_rendered_row(store, monkeypatch):
     assert track_evs and all("row_html" in e for e in track_evs)     # server-rendered cell HTML
     hit = next(e for e in track_evs if e["video_id"] == "v0")
     assert 'class="srow"' in hit["row_html"] and "Rock" in hit["row_html"] and "1998" in hit["row_html"]
+    assert 'watch?v=v0&amp;list=PL1' in hit["row_html"]
 
 
 # --- remove track / reorder ---

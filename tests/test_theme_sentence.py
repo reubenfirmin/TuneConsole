@@ -147,7 +147,7 @@ def test_an_unknown_artist_borrows_nothing():
 
 def _seeded_row(store, pool, now=1000.0):
     """The four cards' themes, each rolled from the pool it would have to fill."""
-    from yt_playlist.web.routes import home
+    from yt_playlist.rec import home_cards as home
     return {lane: home._rolled_theme(store, lane, pool, now) for lane in home._ROW_LANES}
 
 
@@ -214,7 +214,7 @@ def test_fresh_items_are_focused_on_the_rolled_theme():
 def test_the_theme_chooses_the_cards_tracks_not_just_their_order():
     """The slice used to be taken BEFORE the theme was rolled, so the theme could only reorder twelve
     tracks chosen without it - every refresh returned the pool's dominant genre whatever rolled."""
-    from yt_playlist.web.routes import home
+    from yt_playlist.rec import home_cards as home
     s = _store()
     # A pool dominated by one genre, with a real seam of another: the theme has to be able to reach it.
     pool = _pool([("Trance", 2011)] * 50 + [("Jazz", 1991)] * 10)
@@ -230,7 +230,7 @@ def test_the_theme_chooses_the_cards_tracks_not_just_their_order():
 
 def test_refreshing_a_card_actually_changes_it():
     """Refresh advances the card's rotation epoch; the tracks have to follow."""
-    from yt_playlist.web.routes import home
+    from yt_playlist.rec import home_cards as home
     s = _store()
     pool = _pool([("Trance", 2011)] * 30 + [("House", 2001)] * 30)
 

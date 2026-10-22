@@ -1,4 +1,4 @@
-{# One album track row: mirrors the playlist track_row (liked toggle, click-to-edit genre/year,
+{# One album track row: mirrors the playlist track_row (liked toggle, metadata display,
    sortable data-* attrs, ⋯ menu) so the two views render alike. class 'srow' + data-vid lets the
    enrich SSE applyRow replace it, identical to the playlist flow. Needs: t, idx.
    (No reorder/remove/alternates/mood: those are playlist-only.) #}
@@ -6,44 +6,39 @@
 <tr class="srow" data-vid="{{ t.video_id }}" data-title="{{ t.title|lower }}" data-artist="{{ t.artist|lower }}"
     data-plays="{{ t.plays }}" data-len="{{ t.duration or 0 }}" data-year="{{ t.year or 0 }}"
     data-genre="{{ t.genre|lower }}">
-  <td class="num"><span class="rownum">{{ idx }}</span></td>
+  <td class="num"><div class="track-cell"><span class="rownum">{{ idx }}</span></div></td>
   <td>
+    <div class="track-cell">
     <span class="pl-cover">
       {% if t.thumbnail %}<img class="pl-thumb" src="{{ t.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
       <a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}"
          target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
     </span>
+    </div>
   </td>
   {% with video_id = t.video_id, liked = t.liked %}{% include "_partials/liked_cell.html" %}{% endwith %}
   <td class="t-wrap" title="{{ t.title }}">
-    <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-       target="_blank" rel="noopener" data-yt-info>{{ t.title }} {{ arrow_icon('external') }}</a>
+    <div class="track-cell track-cell--text">
+    <span class="ptitle">{{ t.title }}</span>
     {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
+    </div>
   </td>
-  <td class="t-wrap" title="{{ t.artist }}"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
+  <td class="t-wrap" title="{{ t.artist }}"><div class="track-cell track-cell--text"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></div></td>
   <td class="num mono mb-year">
-    <span class="ydisplay" x-show="editYearVid !== '{{ t.video_id }}'"
-          @click="startEditYear('{{ t.video_id }}')" title="Click to set year">
-      {% if t.year %}{{ t.year }}{% else %}<span class="muted ghint">＋</span>{% endif %}
-    </span>
-    <input class="yinput" type="text" inputmode="numeric" autocomplete="off" x-cloak
-           x-show="editYearVid === '{{ t.video_id }}'"
-           @keydown.enter.prevent="saveYear('{{ t.video_id }}', $event.target.value)"
-           @keydown.escape="editYearVid = null"
-           @blur="saveYear('{{ t.video_id }}', $event.target.value)">
+    <div class="track-cell">
+    <span class="ydisplay">{% if t.year %}{{ t.year }}{% else %}<span class="muted ghint">—</span>{% endif %}</span>
+    </div>
   </td>
   <td class="mb-genre">
-    <button type="button" class="genre-display-wrap" title="See or change genre"
-            aria-label="See or change genre for {{ t.title }}"
-            hx-get="/track/{{ t.track_id }}/genre-candidates" hx-target="#genre-candidates-modal"
-            hx-swap="innerHTML">
-      {% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">Set genre</span>{% endif %}
-      <span class="genre-info" aria-hidden="true">ⓘ</span>
-    </button>
+    <div class="track-cell">
+    <span class="genre-display-wrap">{% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">—</span>{% endif %}</span>
+    </div>
   </td>
-  <td class="num mono">{{ t.plays or '' }}</td>
-  <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
+  <td class="num mono"><div class="track-cell">{{ t.plays or '' }}</div></td>
+  <td class="num mono"><div class="track-cell">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</div></td>
   <td class="rowmenu">
+    <div class="track-cell">
     {{ song_menu(t) }}
+    </div>
   </td>
 </tr>

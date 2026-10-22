@@ -85,8 +85,8 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     store.tracks.upsert_track("v1", "Gem", "X", None, None)
     day = 86400.0
     now = 200 * day
-    store.history.add_history_snapshot(iid, now - 120 * day, ["gem|x"])
-    store.history.add_history_snapshot(iid, now - 110 * day, ["gem|x"])
+    store.history.record_history_plays(iid, now - 120 * day, ["gem|x"], source_timezone="UTC")
+    store.history.record_history_plays(iid, now - 110 * day, ["gem|x"], source_timezone="UTC")
     store.settings.set_setting("last_sync_at", str(now - day))   # synced user -> rec feed renders (not the placeholder)
     # Seed mode_bundles: "Gem" placed in the wheelhouse surface so the card renders it
     store.modes.replace_modes([
@@ -121,7 +121,7 @@ def test_home_feed_fragment_renders_fingerprint(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
-    store.history.add_history_snapshot(iid, 1.0, ["song|band"])   # a played, genre-tagged track -> panel renders
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     c = _client(store)
     r = c.get("/home/feed")
     assert r.status_code == 200
@@ -137,7 +137,7 @@ def test_steering_panel_hidden_until_genres_exist(store):
 
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
-    store.history.add_history_snapshot(iid, 1.0, ["song|band"])
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     assert 'id="fingerprint"' in c.get("/home/feed").text          # genres present -> panel appears  # persisted
 
 
@@ -146,7 +146,7 @@ def test_home_page_has_steering_and_fingerprint(store):
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.tracks.set_track_year(t, "1999")
-    store.history.add_history_snapshot(iid, 1.0, ["song|band"])
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     store.settings.set_setting("last_sync_at", "1000")            # synced user -> feed (with fingerprint/steer) renders
     store.settings.set_setting("onboard_dismissed", "1")          # graduated user: testing the normal feed, not onboarding
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
@@ -224,7 +224,7 @@ def test_fingerprint_bar_shows_effective_multiplier(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
-    store.history.add_history_snapshot(iid, 1.0, ["song|band"])
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     store.settings.set_setting("last_sync_at", "1000")
     store.settings.set_setting("onboard_dismissed", "1")       # graduated user: testing the normal feed, not onboarding
     fam = __import__("yt_playlist.util.genre_map", fromlist=["family"]).family("Techno")
@@ -246,7 +246,7 @@ def test_taste_fingerprint_marks_transient(store):
         t = store.tracks.upsert_track(f"v{i}", f"song{i}", "band", None, None)
         store.tracks.set_track_genre(t, "Techno")
         keys.append(identity_key(f"song{i}", "band"))
-    store.history.add_history_snapshot(iid, 1000.0, keys)
+    store.history.record_history_plays(iid, 1000.0, keys, source_timezone="UTC")
     store.settings.set_setting("last_sync_at", "1000")              # fresh -> staleness 1.0
     fam = __import__("yt_playlist.util.genre_map", fromlist=["family"]).family("Techno")
     fp = taste_analysis.taste_fingerprint(store, 1000.0)
@@ -267,7 +267,7 @@ def test_taste_fingerprint_marker_inert_when_stale(store):
         t = store.tracks.upsert_track(f"v{i}", f"song{i}", "band", None, None)
         store.tracks.set_track_genre(t, "Techno")
         keys.append(identity_key(f"song{i}", "band"))
-    store.history.add_history_snapshot(iid, 1.0, keys)
+    store.history.record_history_plays(iid, 1.0, keys, source_timezone="UTC")
     store.settings.set_setting("last_sync_at", "1.0")
     now = 1.0 + 100 * 86400                                  # 100 days later -> deeply stale
     fp = taste_analysis.taste_fingerprint(store, now)
@@ -284,7 +284,7 @@ def test_fingerprint_subgenres_attached_and_deduped(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "techno")
-    store.history.add_history_snapshot(iid, 1.0, ["song|band"])   # techno is now a played family
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     fp = taste_analysis.taste_fingerprint(store, 1000.0)
     techno = next(f for f in fp["families"] if f["name"] == "techno")
     subnames = [s["name"] for s in techno["subgenres"]]
@@ -341,7 +341,7 @@ def test_home_breadth_bar_is_interactive(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
-    store.history.add_history_snapshot(iid, 1.0, ["song|band"])
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     c = _client(store)
     html = c.get("/home/feed").text
     assert "/home/breadth" in html                       # the breadth bar is now a steering control
@@ -366,7 +366,7 @@ def test_home_has_no_stance_toggle(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
-    store.history.add_history_snapshot(iid, 1.0, ["song|band"])
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     store.settings.set_setting("last_sync_at", "1000")
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")

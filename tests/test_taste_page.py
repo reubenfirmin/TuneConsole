@@ -73,7 +73,7 @@ def test_genre_coverage_counts_tracks_instead_of_weighted_plays(store):
     store.tracks.set_track_genre(tagged, "Jazz")
     store.tracks.upsert_track("untagged", "Untagged", "Artist", None, None)
     for day in range(4):
-        store.history.add_history_snapshot(iid, day * 86400.0, ["tagged|artist"])
+        store.history.record_history_plays(iid, day * 86400.0, ["tagged|artist"], source_timezone="UTC")
 
     html = c.get("/taste/model-status").text
 
@@ -192,14 +192,7 @@ def test_taste_page_empty_autotune_state(store):
 
 
 def test_taste_page_renders_autotune_result_panel(store):
-    from yt_playlist.rec import autotune_run
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(40)]
-    B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(40)]
-    for j in range(6):
-        store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PA{j}", "PA", 8, f"ha{j}", 0.0), A[j*5:j*5+8])
-        store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PB{j}", "PB", 8, f"hb{j}", 0.0), B[j*5:j*5+8])
-    autotune_run.run_and_record(store, now=1000.0)
+    _set_autotune_result(store, metric="recall_at_k", in_sample=True)
     client = _client(store)
     main = client.get("/taste/autotune-status").text
     assert "Earlier manual Auto-tune result" not in main
@@ -209,7 +202,7 @@ def test_taste_page_renders_autotune_result_panel(store):
     assert "Playlist patterns (SVD)" in html
     assert "Selected model" in html and "Previous model" in html
     assert "percentage points" in html
-    # No history was recorded, so the sweep judged itself in-sample: the panel must say so.
+    # Historical reports must retain the original evaluation's in-sample warning.
     assert "This test used your existing playlists" in html
 
 
@@ -291,7 +284,7 @@ def test_taste_page_renders_genre_slider_for_tagged_library(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
-    store.history.add_history_snapshot(iid, 1.0, ["song|band"])    # play it so it counts toward the mix
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     html = c.get("/taste/panels/recommendations").text
@@ -374,7 +367,7 @@ def test_taste_preview_explains_scope_sources_and_two_different_samples(store):
 def test_taste_preview_explains_production_score_trace_in_plain_language(store, monkeypatch):
     from yt_playlist.rec import surfaces
     trace = {"durable": 0.4, "transient_delta": 0.1, "session_delta": -0.02,
-             "audio_delta": 0.03, "combined": 0.51, "rank_base": 0.8,
+             "audio_delta": 0.03, "negative_delta": -0.05, "combined": 0.46, "rank_base": 0.8,
              "axes": {"genre": 1.2, "era": 1.0},
              "axis_labels": {"genre": "electronic", "era": "2010s"},
              "axis_product": 1.2, "axis_applied": 1.2, "axis_cap": 1.4,
@@ -388,6 +381,7 @@ def test_taste_preview_explains_production_score_trace_in_plain_language(store, 
     assert "Why this pick" in html
     assert "Night drive" in html and "recent listening favors it" in html
     assert "This session makes it a weaker match" in html
+    assert "It resembles music you disliked" in html
     assert "genre preference favors it (electronic)" in html
     assert "<details" not in html
 
@@ -727,7 +721,7 @@ def test_taste_page_draws_the_full_chain_on_a_facet_axis(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t = store.tracks.upsert_track("vj", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Jazz")
-    store.history.add_history_snapshot(iid, 1.0, ["song|band"])
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     html = _client(store).get("/taste/panels/profile").text
     assert "Genre families" in html
     for cap in ("What you play", "Saved", "Recent", "Combined"):

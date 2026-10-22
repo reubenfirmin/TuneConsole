@@ -6,6 +6,23 @@
 
   {% include "_partials/model_status.html" %}
 
+  {% if spotify_history is defined %}
+  <section class="model-health-section" aria-labelledby="spotify-history-title">
+    <h2 id="spotify-history-title">Spotify listening history</h2>
+    <p>{{ spotify_history.events }} timestamped plays across {{ spotify_history.tracks }} library tracks;
+      {{ spotify_history.days }} track-days and {{ spotify_history.artists }} artist suggestions.</p>
+    {% if spotify_history.unresolved_days %}
+    <p>{{ spotify_history.unresolved_days }} older listening records have no confirmed local date
+      and are excluded from recommendations.</p>
+    {% endif %}
+    <p>Eligible imported listens contribute to listening patterns and recent taste. Shared plays count
+      once alongside other sources. New imports exclude private sessions and listens under 30 seconds.
+      Spotify skip flags do not create dislikes. Like other listening history, eligible plays can
+      gradually update saved taste preferences.</p>
+    <p><a href="/setup?tab=import">Manage or remove Spotify history</a></p>
+  </section>
+  {% endif %}
+
   <section class="model-health-section model-health-tuning" aria-labelledby="model-tuning-title">
     <div class="model-health-section-head">
       <h2 id="model-tuning-title">Automatic model selection</h2>

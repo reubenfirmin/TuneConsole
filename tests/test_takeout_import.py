@@ -57,7 +57,7 @@ def test_disjoint_uploads_record_separate_unverified_extents_and_preserve_gap():
     from yt_playlist.core import repair
     s = _store()
     february = 1706745600.0
-    s.history.add_history_snapshot(1, february, ['phone-only'], source='ytm_history')
+    s.history.record_history_plays(1, february, [('phone-only', 'Today')], source_timezone='UTC')
     reports = [import_takeout(s, _raw([
         _e('Suave', 'Danny Wabbit', 'vidA', f'2024-{month}-01T10:00:00Z'),
         _e('Suave', 'Danny Wabbit', 'vidA', f'2024-{month}-20T10:00:00Z'),
@@ -68,7 +68,7 @@ def test_disjoint_uploads_record_separate_unverified_extents_and_preserve_gap():
     assert all(not r['account_verified'] and not r['complete'] and r['coverage_start'] is None
                for r in imports)
     assert repair.purge_phantom_history(s.conn) == 0
-    assert s.conn.execute("SELECT 1 FROM history_items WHERE identity_key='phone-only'").fetchone()
+    assert s.conn.execute("SELECT 1 FROM listening_observations WHERE identity_key='phone-only'").fetchone()
 
 
 def test_json_timestamp_loss_is_recorded_and_cannot_authorize_repair():

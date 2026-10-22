@@ -425,7 +425,8 @@ def test_playlist_influence_shows_the_whole_blend_and_links_selected_rows(live_a
         store.playlists.set_playlist_tracks(pid, tracks)
         pids.append(pid)
         for play in range(count):
-            store.history.add_history_snapshot(iid, i * 100 + play, [f"blend {i} 0|artist"])
+            store.history.record_history_plays(iid, -play * 86400.0,
+                                               [f"blend {i} 0|artist"], source_timezone="UTC")
     store.rec_model.replace_rec_vectors(vectors)
     store.settings.set_setting("rec_dim", "2")
     errors = []
@@ -485,7 +486,7 @@ def test_model_health_groups_results_and_explains_tuning(live_app, store, page, 
     store.rec_model.replace_rec_vectors(vectors)
     store.settings.set_setting("rec_dim", "4")
     store.settings.set_setting("rec_embed_method", "svd")
-    store.history.add_history_snapshot(iid, 0, [key for key, _ in vectors])
+    store.history.record_history_plays(iid, 0, [key for key, _ in vectors], source_timezone="UTC")
     monkeypatch.setattr(eval_recs, "recall_at_k", lambda *args, **kwargs:
                         {"recall_at_k": .68, "k": 20, "trials": 42, "lift": 2.4})
     monkeypatch.setattr(eval_recs, "rolling_temporal_recall", lambda *args, **kwargs:
@@ -636,8 +637,8 @@ def test_automatic_selection_explains_waiting_and_empty_measurements(live_app, s
     if state == "insufficient":
         # Reproduce the screenshot: library/history gates pass, but the actual test is short.
         iid = store.identities.get_identities()[0].id
-        store.history.add_history_snapshot(iid, 1 - 15 * 86400, ["earlier|artist"])
-        store.history.add_history_snapshot(iid, 1, ["later|artist"])
+        store.history.record_history_plays(iid, 1 - 15 * 86400, ["earlier|artist"], source_timezone="UTC")
+        store.history.record_history_plays(iid, 1, ["later|artist"], source_timezone="UTC")
         store.rec_model.replace_rec_vectors([(f"track {i}|artist", np.ones(2, dtype=np.float32).tobytes()) for i in range(100)])
         store.settings.set_setting("rec_dim", "128")
         store.settings.set_setting(autotune_run.RESULT_SETTING, json.dumps({
@@ -777,7 +778,7 @@ def test_taste_topics_show_one_group_at_a_time(store, page, monkeypatch, request
             rep_keys.append(key)
             content_vectors.append((key, vectors[i].tobytes()))
             recent_plays.append((key, video_id, 1.0))
-        store.history.add_history_snapshot(iid, 1.0, rep_keys)
+        store.history.record_history_plays(iid, 1.0, rep_keys, source_timezone="UTC")
         mode_rows.append({"mode_id": i + 1, "label": style, "families": [[genre.lower(), 1]],
                           "centroid": vectors[i], "size": 10 + i,
                           "rep_keys": rep_keys})
@@ -1182,7 +1183,7 @@ def test_taste_controls_survive_topic_switches_and_reload(live_app, store, page)
     iid = store.identities.get_identities()[0].id
     track = store.tracks.upsert_track("genre-test", "Genre test", "Test artist", None, None)
     store.tracks.set_track_genre(track, "Techno")
-    store.history.add_history_snapshot(iid, 1.0, ["genre test|test artist"])
+    store.history.record_history_plays(iid, 1.0, ["genre test|test artist"], source_timezone="UTC")
     page.goto(live_app + "/taste#experiment/preview")
     page.locator(".taste-preview-intro").scroll_into_view_if_needed()
     expect(page.locator("#sample-body")).not_to_contain_text("Loading")

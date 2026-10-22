@@ -79,12 +79,6 @@ def build_app(*, updater=None):
     # handler, which is /dev/null in the packaged builds. Declining that config lets them reach
     # the root handlers logsetup installs, so they land in app.log.
     logsetup.configure()
-    # The home card polls GET /bridge/status every few seconds; drop those access-log lines so they
-    # do not drown the log. The endpoint still works, it just is not logged.
-    class _QuietPolls(logging.Filter):
-        def filter(self, record):
-            return "/bridge/status" not in record.getMessage()
-    logging.getLogger("uvicorn.access").addFilter(_QuietPolls())
     # Install the egress guard before anything can make a network call: from here on every
     # server-side HTTP request is allowlisted and logged (see yt_playlist.egress, read at /network).
     from yt_playlist import egress

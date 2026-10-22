@@ -41,7 +41,7 @@ def test_unverified_metadata_does_not_write_track_history_or_rating():
     s = _store()
     assert live_plays.handle_play_event(_ctx(s), _msg(metadataVerified=False, likeStatus="LIKE"), 1000) is False
     assert s.history.play_events_since(0) == []
-    assert s.conn.execute("SELECT COUNT(*) FROM history_items").fetchone()[0] == 0
+    assert s.conn.execute("SELECT COUNT(*) FROM listening_observations").fetchone()[0] == 0
     assert s.tracks.identity_key_for_video("v1") is None
     assert s.settings.get_setting("last_plays_sync_at") is None
     assert live_plays.handle_play_event(_ctx(s), _msg(metadataVerified=True), 1001) is True

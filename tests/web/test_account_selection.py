@@ -67,7 +67,15 @@ def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,ord
             assert remote_main.rated==[('AUDIO','LIKE')]
             owners = {r[0] for r in store.conn.execute('SELECT identity_id FROM album_library_memberships')}
             assert owners=={other,main}
-            assert http.post('/collection/unsave-album',data=data).status_code==200
+            # With two owners, removing an album requires choosing the account.
+            # An ambiguous request must preserve both local and remote memberships.
+            assert http.post('/collection/unsave-album',data=data).status_code==422
+            assert remote_main.rated==[('AUDIO','LIKE')] and not remote_other.rated
+            assert {r[0] for r in store.conn.execute(
+                'SELECT identity_id FROM album_library_memberships')}==owners
+            assert http.post('/collection/unsave-album',data={**data,'identity_id':main}).status_code==200
+            assert remote_main.rated==[('AUDIO','LIKE'),('AUDIO','INDIFFERENT')]
+            assert not remote_other.rated
             assert store.collection.get_saved_albums(identity_id=other)
             assert not store.collection.get_saved_albums(identity_id=main)
         else:

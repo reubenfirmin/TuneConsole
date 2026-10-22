@@ -565,7 +565,9 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=()) -> 
                 cohort_policy = {k: v for k, v in policy.items() if k != "built_at"}
                 cohort = hashlib.sha256(json.dumps({"policy": cohort_policy, "share": ab_share,
                     "caps": [cap_a, cap_al], "vibe": vibe_rank.preset,
-                    "leans": leans}, sort_keys=True).encode()).hexdigest()[:16]
+                    "leans": leans, "negative": {k: dislike_deltas[k] for k in candidates
+                                                 if dislike_deltas.get(k)}},
+                    sort_keys=True).encode()).hexdigest()[:16]
                 card["experiment"] = {
                     "schema": 1, "name": "ppr-cosine-v1", "cohort": cohort,
                     "cluster": f"{epoch}:{mid}", "share": ab_share,

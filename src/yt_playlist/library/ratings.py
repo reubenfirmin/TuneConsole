@@ -11,11 +11,27 @@ logger = logging.getLogger(__name__)
 
 def record_confirmed(store, identity_id, video_id, status, now):
     # Keep confirmed API results distinct from unconfirmed player-bar readouts.
-    store.tracks.record_item_rating(identity_id, video_id, status, source="api", now=now)
-    store.playlists.set_song_liked(identity_id, video_id, status == "LIKE")
-    key = store.tracks.identity_key_for_video(video_id)
-    if key:
-        graduation.apply_dislikes(store, {key: status}, now, provenance="action")
+    with store._lock:
+        record_observations(store, identity_id, {video_id: status}, source="api", now=now)
+        store.playlists.set_song_liked(identity_id, video_id, status == "LIKE")
+
+
+def reconcile_recordings(store, keys):
+    """One owner for feedback shared by accounts and verified alternate uploads."""
+    with store._lock:
+        graduation.apply_ratings(store, store.tracks.recording_ratings(keys))
+
+
+def record_observations(store, identity_id, statuses, *, source, now):
+    """Persist trustworthy exact-item evidence, then project the retained contributions together.
+
+    Incomplete sync callers omit neutral observations. A missing account/item contributes
+    its retained evidence, never an invented neutral. Sync confirmations of a live action
+    preserve that action's provenance and original timestamp.
+    """
+    with store._lock:
+        store.tracks.record_item_ratings(identity_id, statuses, source=source, now=now)
+        reconcile_recordings(store, {store.tracks.identity_key_for_video(v) for v in statuses})
 
 
 def _resolve_track(store, client, video_id, now):
@@ -47,8 +63,6 @@ def reconcile_pending(store, identity_id, client):
     keys = set()
     for row in store.tracks.pending_action_ratings(identity_id):
         video_id, status, now = row["video_id"], row["status"], row["observed_at"]
-        if status == "INDIFFERENT" and not store.tracks.identity_key_for_video(video_id):
-            continue
         key = _resolve_track(store, client, video_id, now)
         if key:
             # A newer rating may have arrived while metadata was fetched.
@@ -57,7 +71,7 @@ def reconcile_pending(store, identity_id, client):
                 if current is None or current["observed_at"] != now or current["status"] != status:
                     continue
                 store.playlists.set_song_liked(identity_id, video_id, status == "LIKE")
-                graduation.apply_dislikes(store, {key: status}, now, provenance="action")
+                reconcile_recordings(store, {key})
             keys.add(key)
     return keys
 
@@ -71,8 +85,6 @@ def set_rating(store, identity_id, video_id, status, client, now):
     if isinstance(result, dict) and result.get("status", "STATUS_SUCCEEDED") != "STATUS_SUCCEEDED":
         raise ValueError("YouTube wouldn’t update this song’s rating.")
     record_confirmed(store, identity_id, video_id, status, now)
-    if not store.tracks.identity_key_for_video(video_id) and status != "INDIFFERENT":
-        reconcile_pending(store, identity_id, client)
 
 
 def main_rating(store, video_id):

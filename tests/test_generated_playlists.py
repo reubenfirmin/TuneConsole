@@ -38,7 +38,7 @@ def test_generated_excluded_until_promoted(store):
 
     # Playing it does NOT graduate it. Adoption is an explicit act, not a side effect of listening.
     for _ in range(5):
-        store.history.add_history_snapshot(iid, 1.0, list(gkeys))
+        store.history.record_history_plays(iid, 1.0, list(gkeys), source_timezone="UTC")
     assert dao.excluded_playlist_ids() == {pid}                 # still quarantined despite heavy plays
 
     store.playlists.set_playlist_group(ytm, "Faves")
@@ -56,7 +56,7 @@ def test_generated_tracks_in_no_basket_until_promoted(store):
     dao = store.rec_query
 
     for _ in range(2):
-        store.history.add_history_snapshot(iid, 1.0, list(gkeys))      # even played, while still "Generated"...
+        store.history.record_history_plays(iid, 1.0, list(gkeys), source_timezone="UTC")
     keys = {k for b in dao.rec_baskets() for k in b}
     assert not (keys & gkeys)                                   # ...generated songs pollute no basket
 
@@ -161,7 +161,7 @@ def test_save_button_opens_generating_screen(store):
     t = store.tracks.upsert_track("v1", "Song", "Artist", "Alb", None, 1)
     pl = store.playlists.upsert_playlist(iid, "PL", "P", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(pl, [t])
-    store.history.add_history_snapshot(iid, 1.0, [identity_key("Song", "Artist")])
+    store.history.record_history_plays(iid, 1.0, [identity_key("Song", "Artist")], source_timezone="UTC")
     store.settings.set_setting("last_sync_at", "1.0")        # synced -> the rec feed (generated cards) renders
     c = _client(store, lambda: {iid: FakeClient()})
 
@@ -169,7 +169,7 @@ def test_save_button_opens_generating_screen(store):
     app_js = c.get("/static/app.js")
 
     assert r.status_code == 200 and app_js.status_code == 200
-    assert "function genOpenYT(" in app_js.text                  # save-button behavior is external JS
+    assert "function genOpenYT(" in app_js.text
     assert "window.open('/home/generating'" in app_js.text       # opens during the user gesture
 
 
@@ -200,7 +200,7 @@ def test_home_renders_generated_cards(store):
     t = store.tracks.upsert_track("v1", "Song", "Artist", "Alb", None, 1)
     pl = store.playlists.upsert_playlist(iid, "PL", "P", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(pl, [t])
-    store.history.add_history_snapshot(iid, 1.0, [identity_key("Song", "Artist")])
+    store.history.record_history_plays(iid, 1.0, [identity_key("Song", "Artist")], source_timezone="UTC")
     store.settings.set_setting("last_sync_at", "1.0")        # synced -> the rec feed (generated cards) renders
     store.modes.replace_modes([
         {"mode_id": 1, "label": "a", "families": [["house", 1]],
@@ -224,7 +224,7 @@ def test_comfort_proto_card_dj_ordered_with_genre(store, monkeypatch):
     attached so a genre journey is possible. Reproduces the 'comfort playlist clustered by artist,
     no genre journey' bug. The DJ used to run only at save, on data that had already dropped genre.
     Uses shuffle journey so the within-band artist-spacing guarantee applies to all items together."""
-    from yt_playlist.web.routes import home
+    from yt_playlist.rec import home_cards as home
     from yt_playlist.rec import recipes
     from yt_playlist.rec.surfaces import ForYouItem
     store.identities.upsert_identity("main", "cred", None, True)
@@ -312,7 +312,7 @@ def test_gc_keeps_generated_played_since_creation(store, monkeypatch, tmp_path):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 100 * day
     pid, _ytm, keys = _seed_generated_at(store, iid, created=now - 10 * day)
-    store.history.add_history_snapshot(iid, now - 1 * day, list(keys))             # full playthrough since creation
+    store.history.record_history_plays(iid, now - day, list(keys), source_timezone="UTC")
 
     assert executor.gc_generated_playlists(store, {iid: FakeClient()}, now) == []
     assert store.playlists.get_playlist(pid) is not None
@@ -325,7 +325,7 @@ def test_gc_keeps_generated_when_at_least_half_played(store, monkeypatch, tmp_pa
     day = 86400.0; now = 100 * day
     pid, _ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day, n=4)
     half = [identity_key(f"PLGT{i}", "GenArt") for i in (0, 1)]            # 2 of 4 = 50% played since creation
-    store.history.add_history_snapshot(iid, now - 1 * day, half)
+    store.history.record_history_plays(iid, now - day, half, source_timezone="UTC")
 
     assert executor.gc_generated_playlists(store, {iid: FakeClient()}, now) == []
     assert store.playlists.get_playlist(pid) is not None
@@ -337,7 +337,7 @@ def test_gc_deletes_generated_when_under_half_played(store, monkeypatch, tmp_pat
     iid = store.identities.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 100 * day
     _pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day, n=4)
-    store.history.add_history_snapshot(iid, now - 1 * day, [identity_key("PLGT0", "GenArt")])   # only 1 of 4 = 25%
+    store.history.record_history_plays(iid, now - day, [identity_key("PLGT0", "GenArt")], source_timezone="UTC")
     fc = FakeClient()
 
     collected = executor.gc_generated_playlists(store, {iid: fc}, now)
@@ -350,7 +350,7 @@ def test_gc_ignores_plays_before_creation(store, monkeypatch, tmp_path):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     day = 86400.0; now = 100 * day
     _pid, ytm, keys = _seed_generated_at(store, iid, created=now - 10 * day)
-    store.history.add_history_snapshot(iid, now - 20 * day, list(keys))            # only ever played pre-creation
+    store.history.record_history_plays(iid, now - 20 * day, list(keys), source_timezone="UTC")
     fc = FakeClient()
 
     collected = executor.gc_generated_playlists(store, {iid: fc}, now)
@@ -389,7 +389,7 @@ def test_gc_deletion_is_undoable(store, monkeypatch, tmp_path):
 def test_carded_orders_by_recipe_journey(store, monkeypatch):
     """_carded must order the proto by the recipe's journey. Force 'warm_up' and assert the preview
     rises in energy thirds (and still spaces artists / carries genre)."""
-    from yt_playlist.web.routes import home
+    from yt_playlist.rec import home_cards as home
     from yt_playlist.util import genre_map
     from yt_playlist.rec import recipes, journeys
     from yt_playlist.rec.surfaces import ForYouItem

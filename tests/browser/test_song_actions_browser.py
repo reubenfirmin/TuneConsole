@@ -2,6 +2,7 @@
 import socket
 import threading
 import time
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import uvicorn
@@ -182,7 +183,95 @@ def test_partial_creation_keeps_warning_and_playlist_link(song_app, page, monkey
     assert len(song_app["main"].created) == 1
 
 
-def test_keyboard_reuses_one_menu_after_row_replacement(song_app, page):
+@pytest.mark.parametrize("control", ["cover", "menu"])
+def test_playlist_play_starts_selected_track_in_playlist(song_app, page, control, tmp_path):
+    store, source = song_app["store"], song_app["source"]
+    title = "Revenge Of The Wankers (Kora Remix) (feat. Scarlett De La Torre)"
+    track = store.tracks.upsert_track("second", title, "Oceanvs Orientalis", "Album", 270,
+                                     thumbnail="/static/road-trip-hero.png")
+    store.tracks.set_track_genre(track, "Turkish")
+    store.playlists.set_playlist_tracks(source, store.playlists.get_playlist_track_ids(source) + [track])
+    page.set_viewport_size({"width": 1280, "height": 850})
+    page.route("**/play", lambda route: route.fulfill(json={"ok": True}))
+    page.goto(f"{song_app['base']}/playlist/{source}")
+    row = page.locator('tr.srow[data-vid="second"]')
+
+    def play():
+        with page.expect_request(lambda request: request.url.endswith("/play") and request.method == "POST") as request:
+            if control == "cover":
+                row.hover()
+                row.locator(".pl-play").click()
+            else:
+                row.get_by_role("button", name=f"More actions for {title}").click()
+                page.get_by_role("menuitem", name="Play on YouTube Music").click()
+        url = urlparse(request.value.post_data_json["url"])
+        assert url.netloc == "music.youtube.com" and url.path == "/watch"
+        assert parse_qs(url.query) == {"v": ["second"], "list": ["SOURCE"]}
+
+    play()
+    page.screenshot(path=tmp_path / f"playlist-top-aligned-{control}.png", animations="disabled")
+    # Both manual updates and enrichment replace a complete row with this fragment.
+    response = page.request.post(f"{song_app['base']}/playlist/{source}/track-year",
+                                 form={"video_id": "second", "year": "2019"})
+    assert response.ok
+    page.evaluate("html => enrichPanel(1, false).applyRow({video_id: 'second', row_html: html})",
+                  response.text())
+    expect(row.get_by_text("2019", exact=True)).to_be_visible()
+    play()
+
+
+@pytest.mark.parametrize("surface", ["playlist", "album", "radio"])
+def test_track_alignment_centers_single_lines_and_anchors_wrapped_lines(song_app, page, surface, monkeypatch, tmp_path):
+    store, source = song_app["store"], song_app["source"]
+    tracks = []
+    for video_id, title in [("single-line", "Song"), ("wrapped-line",
+            "Revenge Of The Wankers (Kora Remix) (feat. Scarlett De La Torre)")]:
+        track = store.tracks.upsert_track(video_id, title, "Artist", "Album", 270,
+                                         album_browse_id="MPRE_alignment", thumbnail="/static/road-trip-hero.png")
+        store.tracks.set_track_enrichment(track, "House", "2019")
+        tracks.append(track)
+    store.playlists.set_playlist_tracks(source, tracks)
+    store.collection.add_saved_album({"browse": "MPRE_alignment", "title": "Album", "artist": "Artist"})
+    if surface == "radio":
+        monkeypatch.setattr(song_app["app"].state.ctx.radio, "status", lambda: {
+            "local_id": source, "playlist_id": "SOURCE", "history_count": 2, "title": "Radio Session"})
+    path = "/album?browse=MPRE_alignment" if surface == "album" else f"/playlist/{source}"
+    page.goto(song_app["base"] + path)
+    if surface == "radio":
+        page.add_style_tag(url=song_app["base"] + "/static/radio.css")
+        page.evaluate("() => htmx.ajax('GET', '/radio/playlist', {target: '.library-table-card', swap: 'outerHTML'})")
+    for width in (1280, 390):
+        page.set_viewport_size({"width": width, "height": 850})
+        for video_id in ("single-line", "wrapped-line"):
+            row = page.locator(f'tr.srow[data-vid="{video_id}"]')
+            expect(row).to_be_visible()
+            offsets = row.evaluate("""row => {
+                const cover = row.querySelector('.pl-cover').getBoundingClientRect();
+                const anchor = cover.y + cover.height / 2;
+                const offsets = [];
+                for (const cell of row.cells) {
+                    if (!cell.getClientRects().length) continue;
+                    const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT,
+                        {acceptNode: node => node.textContent.trim() && !node.parentElement.closest('.pl-play, .rowmenu, .liked-col')
+                            ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT});
+                    const text = walker.nextNode();
+                    if (!text) continue;
+                    const range = document.createRange();
+                    range.selectNodeContents(text);
+                    const rect = range.getClientRects()[0];
+                    offsets.push({cell: cell.cellIndex, offset: rect.y + rect.height / 2 - anchor});
+                }
+                for (const selector of ['.like-btn', '.song-menu-trigger']) {
+                    const rect = row.querySelector(selector)?.getBoundingClientRect();
+                    if (rect?.height) offsets.push({cell: selector, offset: rect.y + rect.height / 2 - anchor});
+                }
+                return offsets;
+            }""")
+            assert all(abs(item["offset"]) <= 3 for item in offsets), (surface, width, video_id, offsets)
+        page.locator(".track-table").screenshot(path=tmp_path / f"track-alignment-{surface}-{width}.png")
+
+
+def test_keyboard_reuses_one_menu_after_metadata_save(song_app, page):
     store, source = song_app["store"], song_app["source"]
     second = store.tracks.upsert_track("second", "Second Song", "Someone", "", 200)
     store.playlists.set_playlist_tracks(source, store.playlists.get_playlist_track_ids(source) + [second])
@@ -202,9 +291,12 @@ def test_keyboard_reuses_one_menu_after_row_replacement(song_app, page):
     first.click()
     expect(menu).not_to_be_visible()
     row = page.get_by_role("row").filter(has_text="Second Song")
-    row.locator(".ydisplay").click()
-    row.locator(".yinput").fill("2003")
-    row.locator(".yinput").press("Enter")
+    row.get_by_role("button", name="More actions for Second Song").click()
+    menu.get_by_role("menuitem", name="Edit Metadata").click()
+    dialog = page.get_by_role("dialog", name="Edit Metadata")
+    dialog.get_by_label("Year", exact=True).fill("2003")
+    with page.expect_navigation():
+        dialog.get_by_role("button", name="Save changes").click()
     expect(row.get_by_text("2003", exact=True)).to_be_visible()
     row.get_by_role("button", name="More actions for Second Song").click()
     expect(page.locator("#song-action-menu")).to_have_count(1)
@@ -269,7 +361,8 @@ def test_library_views_share_song_actions(song_app, page, surface):
                        album_browse_id="MPRE_owned")
     store.collection.add_saved_album({"browse": "MPRE_owned", "title": "Album", "artist": "Artist & Friends",
                            "year": "2000", "thumbnail": ""})
-    store.history.add_history_snapshot(song_app["main_id"], 50, [store.tracks.identity_key_for_video("owned-song")])
+    store.history.record_play_event(song_app["main_id"],
+        store.tracks.identity_key_for_video("owned-song"), "owned-song", 50, source_timezone="UTC")
     path = {"artist": "/artist?name=Artist%20%26%20Friends", "charts": "/charts",
             "saved_album": "/album?browse=MPRE_owned"}[surface]
     page.goto(song_app["base"] + path)
@@ -329,3 +422,133 @@ def test_mix_track_menu_stays_above_card_and_opens_playlist_dialog(live_app, sto
         menu.get_by_role("menuitem", name="Create playlist from song").click()
         expect(page.get_by_label("Playlist name")).to_have_value(title)
         page.get_by_role("dialog").get_by_role("button", name="Cancel").click()
+
+
+@pytest.mark.parametrize('surface', ['playlist', 'album'])
+@pytest.mark.parametrize('width', [1280, 390])
+def test_metadata_dialog_edits_all_fields_and_restores_originals(song_app, page, surface, width, tmp_path):
+    store = song_app['store']
+    tid = store.tracks.upsert_track('owned-song', 'Owned Song', 'Artist & Friends', 'Album', 180,
+                                   album_browse_id='MPRE_owned')
+    store.collection.add_saved_album({'browse': 'MPRE_owned', 'title': 'Album', 'artist': 'Artist & Friends',
+                                      'year': '2000', 'thumbnail': ''})
+    store.tracks.set_track_enrichment(tid, 'Electronic', '1995')
+    store.enrichment.log_enrichment(tid, 'run', 'discogs', 'genre', 'Art Pop', now=1)
+    path = f"/playlist/{song_app['source']}" if surface == 'playlist' else '/album?browse=MPRE_owned'
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.set_viewport_size({'width': width, 'height': 850})
+    page.goto(song_app['base'] + path)
+    row = page.locator('tr.srow[data-vid="owned-song"]')
+    expect(row.locator('input[type="text"], .editpen, .resetpen, .genre-info')).to_have_count(0)
+    trigger = row.get_by_role('button', name='More actions for Owned Song')
+    trigger.click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    expect(dialog.get_by_label('Title', exact=True)).to_be_focused()
+    expect(dialog.get_by_label('Title', exact=True)).to_have_value('Owned Song')
+    expect(dialog.get_by_label('Artist', exact=True)).to_have_value('Artist & Friends')
+    expect(dialog.get_by_label('Genre', exact=True)).to_have_value('Electronic')
+    expect(dialog.get_by_label('Year', exact=True)).to_have_value('1995')
+    dialog.get_by_label('Title', exact=True).fill('Unsaved title')
+    page.keyboard.press('Escape')
+    expect(trigger).to_be_focused()
+    assert store.tracks.metadata_for_video('owned-song')['title'] == 'Owned Song'
+    trigger.click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    expect(dialog.get_by_label('Title', exact=True)).to_have_value('Owned Song')
+    dialog.get_by_label('Title', exact=True).fill('Fixed title')
+    dialog.get_by_label('Artist', exact=True).fill('Fixed artist')
+    dialog.get_by_role('button', name='Art Pop discogs').click()
+    dialog.get_by_label('Year', exact=True).fill('1998')
+    assert dialog.evaluate('el => el.scrollWidth <= el.clientWidth')
+    for _ in range(12):
+        page.keyboard.press('Tab')
+        assert dialog.evaluate('el => el.contains(document.activeElement)')
+    page.screenshot(path=tmp_path / f'metadata-{surface}-{width}.png', animations='disabled')
+    with page.expect_navigation():
+        dialog.get_by_role('button', name='Save changes').click()
+    expect(row.locator('.ptitle')).to_have_text('Fixed title')
+    expect(row.locator('.alink').first).to_have_text('Fixed artist')
+    expect(row.locator('.gtag')).to_have_text('Art Pop')
+    expect(row.locator('.ydisplay')).to_have_text('1998')
+    expect(row).to_have_attribute('data-genre', 'art pop')
+    expect(row).to_have_attribute('data-year', '1998')
+    row.get_by_role('button', name='More actions for Fixed title').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog.get_by_role('button', name='Restore original title').click()
+    dialog.get_by_role('button', name='Restore original artist').click()
+    dialog.get_by_label('Genre', exact=True).fill('')
+    dialog.get_by_label('Year', exact=True).fill('')
+    with page.expect_navigation():
+        dialog.get_by_role('button', name='Save changes').click()
+    expect(row.locator('.ptitle')).to_have_text('Owned Song', use_inner_text=True)
+    expect(row.locator('.gtag')).to_have_count(0)
+    expect(row.locator('.ydisplay')).to_have_text('—')
+    assert not errors
+
+
+def test_metadata_delayed_focus_does_not_interrupt_artist_editing(song_app, page):
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    page.get_by_role("button", name="More actions for Owned Song").click()
+    page.get_by_role("menuitem", name="Edit Metadata").click()
+    dialog = page.get_by_role("dialog", name="Edit Metadata")
+    expect(dialog.get_by_role("button", name="Save changes")).to_be_enabled()
+    expect(dialog.get_by_label("Title", exact=True)).to_be_focused()
+    # A queued autofocus from the load must yield to the user's next field.
+    dialog.evaluate("""async el => {
+        const state = Alpine.$data(el);
+        state.focusDialog('metadataTitle');
+        await state.$nextTick();
+        el.querySelector('input[x-model="metadata.artist"]').focus();
+        await new Promise(requestAnimationFrame);
+    }""")
+    expect(dialog.get_by_label("Artist", exact=True)).to_be_focused()
+    dialog.get_by_label("Artist", exact=True).fill("Corrected artist")
+    expect(dialog.get_by_label("Title", exact=True)).to_have_value("Owned Song")
+
+
+def test_metadata_save_failure_preserves_edits_for_retry(song_app, page):
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    page.get_by_role('button', name='More actions for Owned Song').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    title = dialog.get_by_label('Title', exact=True)
+    expect(title).to_have_value('Owned Song')
+    title.fill('Retry this title')
+    page.route('**/songs/metadata', lambda route: route.fulfill(status=503, json={'detail': 'Try again later.'}))
+    dialog.get_by_role('button', name='Save changes').click()
+    expect(dialog.get_by_role('alert')).to_have_text('Try again later.')
+    expect(title).to_have_value('Retry this title')
+    assert song_app['store'].tracks.metadata_for_video('owned-song')['title'] == 'Owned Song'
+    page.unroute('**/songs/metadata')
+    with page.expect_navigation():
+        dialog.get_by_role('button', name='Save changes').click()
+    expect(page.locator('tr.srow .ptitle')).to_have_text('Retry this title')
+
+
+def test_genre_lookup_keeps_unsaved_metadata(song_app, page, monkeypatch):
+    def lookup(store, tracks, _config, _progress):
+        store.enrichment.apply_provider_fields(tracks[0]['id'], 'discogs', {'genre': 'Ambient', 'year': '2022'})
+        store.enrichment.log_enrichment(tracks[0]['id'], 'lookup', 'discogs', 'genre', 'Ambient', now=2)
+
+    monkeypatch.setattr('yt_playlist.web.routes.enrich.waterfall.run_waterfall', lookup)
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    page.get_by_role('button', name='More actions for Owned Song').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    title = dialog.get_by_label('Title', exact=True)
+    expect(title).to_have_value('Owned Song')
+    title.fill('Still editing')
+    dialog.get_by_role('button', name='Look up genres').click()
+    suggestion = dialog.get_by_role('button', name='Ambient discogs')
+    expect(suggestion).to_be_visible()
+    expect(title).to_have_value('Still editing')
+    suggestion.click()
+    expect(dialog.get_by_label('Genre', exact=True)).to_have_value('Ambient')
+    with page.expect_response('**/songs/metadata') as response:
+        with page.expect_navigation():
+            dialog.get_by_role('button', name='Save changes').click()
+    assert set(response.value.request.post_data_json) == {'song', 'title', 'genre'}
+    track = song_app['store'].tracks.metadata_for_video('owned-song')
+    assert track['title'] == 'Still editing' and track['genre'] == 'Ambient' and track['year'] == '2022'

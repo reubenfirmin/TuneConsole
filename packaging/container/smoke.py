@@ -25,7 +25,8 @@ def main():
         if check and result.returncode:
             raise RuntimeError(f"{args.engine} {' '.join(command)}\n"
                                f"{result.stdout}{result.stderr}")
-        return result.stdout.strip()
+        # Container logs preserve the application's stdout/stderr streams separately.
+        return (result.stdout + result.stderr if command[0] == "logs" else result.stdout).strip()
 
     def request(port, path, *, method="GET", headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
@@ -58,7 +59,9 @@ def main():
     def stop():
         run("stop", "--time", "10", name)
         code = run("inspect", "--format", "{{.State.ExitCode}}", name)
-        assert code == "0", f"Server did not stop cleanly: exit {code}"
+        # Uvicorn re-raises SIGTERM after completing graceful shutdown.
+        assert code in ("0", "143"), f"Server did not stop cleanly: exit {code}"
+        assert "Application shutdown complete." in run("logs", name), "Shutdown did not complete"
         run("rm", name)
 
     try:
@@ -109,7 +112,7 @@ from yt_playlist.core import paths
 from yt_playlist.core.store import Store
 store = Store(paths.db_path())
 store.init_schema()
-store.set_setting('container_smoke', 'persisted')
+store.settings.set_setting('container_smoke', 'persisted')
 (paths.backups_dir() / 'container-smoke.txt').write_text('persisted')
 """)
         stop()
@@ -119,7 +122,7 @@ from yt_playlist.core import paths
 from yt_playlist.core.store import Store
 store = Store(paths.db_path())
 store.init_schema()
-assert store.get_setting('container_smoke') == 'persisted'
+assert store.settings.get_setting('container_smoke') == 'persisted'
 assert (paths.backups_dir() / 'container-smoke.txt').read_text() == 'persisted'
 assert paths.app_log_path().is_file()
 """)

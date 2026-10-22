@@ -29,11 +29,11 @@ fi
 export SPARKLE_PUBLIC_ED_KEY
 
 # 1. Isolated build environment with the app + PyInstaller installed (so data/metadata collect).
-python3 -m venv .build-venv
+export UV_PROJECT_ENVIRONMENT="$ROOT/packaging/macos/.build-venv"
+uv sync --project "$ROOT" --frozen --no-dev --group build --group macos --python 3.12 --no-install-project
+uv sync --project "$ROOT" --frozen --no-dev --group build --group macos --python 3.12 --no-build-isolation
 # shellcheck disable=SC1091
-. .build-venv/bin/activate
-python -m pip install -U pip wheel
-python -m pip install "$ROOT" pyinstaller 'pyobjc-framework-Cocoa>=11,<13'
+. "$UV_PROJECT_ENVIRONMENT/bin/activate"
 
 # Version is derived from the git tag by hatch-vcs and baked into the installed package metadata,
 # so nothing here needs bumping per release.

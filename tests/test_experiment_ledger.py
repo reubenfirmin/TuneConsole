@@ -3,7 +3,7 @@ import json
 import pytest
 
 from yt_playlist.rec import experiments, measurement, mode_surfaces, rec_params
-from yt_playlist.web.routes.home import _record_served_cards
+from yt_playlist.rec.home_cards import _record_served_cards
 from tests.test_ppr_assemble import _seed_one_mode
 from tests.test_taste_health import _client
 

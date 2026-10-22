@@ -11,14 +11,8 @@ def store():
 
 
 def _snap(store, day, keys):
-    """One history snapshot at taken_at = day*86400 containing `keys`. Returns snapshot id."""
-    cur = store.conn.execute("INSERT INTO history_snapshots(identity_id, taken_at) VALUES (1, ?)",
-                             (day * 86400.0,))
-    sid = cur.lastrowid
-    for k in keys:
-        store.conn.execute("INSERT INTO history_items(snapshot_id, identity_key) VALUES (?, ?)", (sid, k))
-    store.conn.commit()
-    return sid
+    """Record independent observations on an explicit UTC calendar date."""
+    store.history.record_history_plays(1, day * 86400.0, keys, source_timezone="UTC")
 
 
 def _track(store, key, artist, genre=""):

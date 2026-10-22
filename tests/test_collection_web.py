@@ -6,6 +6,7 @@ location.reload()), and surface failures via the standard 422 OOB error toast, i
 the old JSON payloads.
 """
 from fastapi.testclient import TestClient
+import pytest
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
@@ -71,6 +72,76 @@ def test_unsave_album_unlikes_and_refreshes(store):
     assert _refreshes(r)
     assert all(a["browse"] != "MPREb_x" for a in store.collection.get_saved_albums())
     assert fc.rated == [("PLAUDIO", "INDIFFERENT")]
+
+
+def test_unsave_targets_unique_non_main_owner_and_carries_owner_in_both_views(store):
+    main = store.identities.upsert_identity("Main", "cred", None, True)
+    other = store.identities.upsert_identity("Other", "cred", "other", False)
+    store.collection.add_saved_album({"browse": "B", "title": "Album", "artist": "Artist X"}, identity_id=other)
+    clients = {main: AlbumClient(), other: AlbumClient()}
+    c = _client(store, lambda: clients)
+    for path in ("/albums", "/artist?name=Artist%20X"):
+        html = c.get(path).text
+        assert f'name="identity_id" value="{other}"' in html
+        assert "Other" in html
+    response = c.post("/collection/unsave-album", data={"browse_id": "B"})
+    assert _refreshes(response)
+    assert clients[main].rated == []
+    assert clients[other].rated == [("PLAUDIO", "INDIFFERENT")]
+    assert store.collection.get_saved_albums(identity_id=other) == []
+
+
+@pytest.mark.parametrize("selected", ["main", "other"])
+def test_multiple_owners_require_choice_and_remove_only_selected_membership(store, selected):
+    main = store.identities.upsert_identity("Main", "cred", None, True)
+    other = store.identities.upsert_identity("Other", "cred", "other", False)
+    for owner in (main, other):
+        store.collection.add_saved_album({"browse": "B", "title": "Album", "artist": "Artist X"}, identity_id=owner)
+    clients = {main: AlbumClient(), other: AlbumClient()}
+    c = _client(store, lambda: clients)
+    html = c.get("/albums").text
+    assert "Unsave from Main" in html and "Unsave from Other" in html
+    assert c.post("/collection/unsave-album", data={"browse_id": "B"}).status_code == 422
+    assert all(client.rated == [] for client in clients.values())
+    chosen, retained = (main, other) if selected == "main" else (other, main)
+    response = c.post("/collection/unsave-album", data={"browse_id": "B", "identity_id": chosen})
+    assert _refreshes(response)
+    assert clients[chosen].rated == [("PLAUDIO", "INDIFFERENT")]
+    assert clients[retained].rated == []
+    assert store.collection.get_saved_albums(identity_id=chosen) == []
+    assert [a['browse'] for a in store.collection.get_saved_albums(identity_id=retained)] == ['B']
+
+
+@pytest.mark.parametrize("owner_state", ["unavailable", "inactive"])
+def test_unavailable_album_owner_never_falls_back_to_main(store, owner_state):
+    main = store.identities.upsert_identity("Main", "cred", None, True)
+    other = store.identities.upsert_identity("Other", "cred", "other", False)
+    store.collection.add_saved_album({"browse": "B", "title": "Album"}, identity_id=other)
+    clients = {main: AlbumClient()}
+    if owner_state == "inactive":
+        with store.conn:
+            store.conn.execute('UPDATE identities SET active=0 WHERE id=?', (other,))
+        clients[other] = AlbumClient()
+    c = _client(store, lambda: clients)
+    response = c.post("/collection/unsave-album", data={"browse_id": "B", "identity_id": other})
+    assert response.status_code == 422 and "not connected" in response.text
+    assert all(client.rated == [] for client in clients.values())
+    assert [a['browse'] for a in store.collection.get_saved_albums(identity_id=other)] == ['B']
+    assert store.collection.saved_album_owners('B')['B'][0]['identity_id'] == other
+
+
+def test_album_unsave_rejects_non_owner_and_unknown_legacy_ownership(store):
+    main = store.identities.upsert_identity("Main", "cred", None, True)
+    other = store.identities.upsert_identity("Other", "cred", "other", False)
+    store.collection.add_saved_album({"browse": "owned", "title": "Owned"}, identity_id=other)
+    store.collection.add_saved_album({"browse": "legacy", "title": "Legacy"})
+    clients = {main: AlbumClient(), other: AlbumClient()}
+    c = _client(store, lambda: clients)
+    for data in ({"browse_id": "owned", "identity_id": main}, {"browse_id": "legacy"},
+                 {"browse_id": "legacy", "identity_id": main}, {"browse_id": "owned", "identity_id": "bad"}):
+        assert c.post("/collection/unsave-album", data=data).status_code == 422
+    assert all(client.rated == [] for client in clients.values())
+    assert store.collection.saved_album_ids() == {'owned', 'legacy'}
 
 
 def test_save_album_without_id_returns_toast(store):

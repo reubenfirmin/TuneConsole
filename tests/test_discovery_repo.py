@@ -4,7 +4,7 @@
 def _artist_with(store, iid, name, plays=0, playlists=0, saved=0):
     t = store.tracks.upsert_track(f"v_{name}", f"S_{name}", name, None, None)
     for _ in range(plays):
-        store.history.add_history_snapshot(iid, 1.0, [f"s_{name.lower()}|{name.lower()}"])
+        store.history.record_history_plays(iid, 1.0, [f"s_{name.lower()}|{name.lower()}"], source_timezone="UTC")
     for i in range(playlists):
         store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PL_{name}_{i}", "p", 1, "h", 0.0), [t])
     for i in range(saved):
@@ -19,7 +19,7 @@ def test_interested_artists_ranks_by_combined_signal(store):
     for i in range(3):
         store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PB{i}", "p", 1, "h", 0.0), [big])
     store.tracks.upsert_track("v2", "S2", "Small", None, None)
-    store.history.add_history_snapshot(iid, 1.0, ["s2|small"])
+    store.history.record_history_plays(iid, 1.0, ["s2|small"], source_timezone="UTC")
     ranked = store.discovery.interested_artists()
     names = [r["artist"] for r in ranked]
     assert "Big" in names and "Small" in names

@@ -94,7 +94,7 @@ class TrendsRepo(Repo):
     @synchronized
     def ledger_track_plays(self, since, until, exclude_generated=True) -> dict:
         """{identity_key: plays} real plays in [since, until). Replaces month_track_plays, whose
-        COUNT(*) over history_items counted a lingering snapshot window as repeat plays."""
+        Counting coarse observations would mistake lingering history windows for repeat plays."""
         frag, args = self._generated_filter(exclude_generated)
         rows = self.conn.execute(
             f"SELECT pe.identity_key k, COUNT(*) c FROM play_events pe "
@@ -143,13 +143,8 @@ class TrendsRepo(Repo):
 
     # -- the reconciled daily model ------------------------------------------------------------
     @synchronized
-    def max_snapshot_id(self) -> int:
-        r = self.conn.execute("SELECT MAX(id) m FROM history_snapshots").fetchone()
-        return int(r["m"]) if r and r["m"] is not None else 0
-
-    @synchronized
-    def history_track_first(self, after_id) -> dict:
-        """Earliest listening day per recording. Retain the old argument for callers.
+    def history_track_first(self) -> dict:
+        """Earliest listening day per recording.
 
         A snapshot watermark cannot bound late imports, calendar changes, or
         recording reassociation, so this projection always scans all daily evidence.
@@ -221,7 +216,7 @@ class TrendsRepo(Repo):
         self.conn.execute("SAVEPOINT first_play_refresh")
         try:
             imported = setting("takeout_imported_at")
-            source = 'listening_v26'
+            source = 'listening_v33'
             self.conn.execute('DELETE FROM trend_first_play')
             rows = self.conn.execute(
                 "SELECT identity_key,CAST(julianday(MIN(day))-julianday('1970-01-01') AS INTEGER) day,"
@@ -230,8 +225,8 @@ class TrendsRepo(Repo):
             self._rebuild_artist_first_play()
             self.conn.executemany("INSERT INTO settings(key,value) VALUES (?,?) "
                                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", [
-                ("trend_first_play_watermark", str(self.max_snapshot_id())),
                 ("trend_first_play_source", source)])
+            self.conn.execute("DELETE FROM settings WHERE key='trend_first_play_watermark'")
             if imported is None:
                 self.conn.execute("DELETE FROM settings WHERE key='trend_first_play_takeout_seen'")
             else:

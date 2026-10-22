@@ -2,6 +2,47 @@
 import json
 
 
+def retain_artist(conn, artist_id, source, score, identity_id=None):
+    # Historical-schema fixtures also exercise the current identity helpers.
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='discovery_artist_sources'").fetchone():
+        return
+    if not conn.execute('SELECT 1 FROM discovered_artists WHERE artist_id=?', (artist_id,)).fetchone():
+        conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?', (artist_id,))
+    conn.execute('INSERT INTO discovery_artist_sources VALUES (?,?,?,?) '
+                 'ON CONFLICT(artist_id,source) DO UPDATE SET score=MAX(score,excluded.score)',
+                 (artist_id,source,identity_id,score or 0))
+
+
+def reconcile_artist_sources(conn, previous, target):
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='discovery_artist_sources'").fetchone():
+        return
+    if not conn.execute('SELECT 1 FROM discovered_artists WHERE artist_id=?', (target,)).fetchone():
+        conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?', (target,))
+    for row in conn.execute('SELECT s.* FROM discovery_artist_sources s JOIN discovered_artists d '
+                            'ON d.artist_id=s.artist_id WHERE s.artist_id=?', (previous,)).fetchall():
+        conn.execute('INSERT INTO discovery_artist_sources VALUES (?,?,?,?) '
+                     'ON CONFLICT(artist_id,source) DO UPDATE SET score=MAX(score,excluded.score)',
+                     (target,row['source'],row['identity_id'],row['score']))
+    conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?', (previous,))
+
+
+def remove_spotify_artists(conn):
+    affected = [r[0] for r in conn.execute(
+        "SELECT DISTINCT artist_id FROM discovery_artist_sources WHERE source LIKE 'spotify_export:%' OR source='spotify_model'")]
+    derived = {r[0] for r in conn.execute("SELECT artist_id FROM discovery_artist_sources WHERE source='spotify_model'")}
+    conn.execute("DELETE FROM discovery_artist_sources WHERE source LIKE 'spotify_export:%' OR source='spotify_model'")
+    removed = 0
+    for aid in affected:
+        if not conn.execute('SELECT 1 FROM discovery_artist_sources WHERE artist_id=?', (aid,)).fetchone():
+            removed += conn.execute('DELETE FROM discovered_artists WHERE artist_id=?', (aid,)).rowcount
+        elif aid in derived:
+            # Discard explanations/ranking computed with the removed history;
+            # independent membership survives and the clean model refreshes it.
+            conn.execute("UPDATE discovered_artists SET because='[]',fits='[]',score=("
+                         'SELECT MAX(score) FROM discovery_artist_sources WHERE artist_id=?) WHERE artist_id=?', (aid,aid))
+    return removed
+
+
 def source_identity(token):
     for kind in ('radio', 'genre'):
         if token.startswith(kind + ':'):

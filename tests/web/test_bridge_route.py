@@ -256,6 +256,24 @@ def test_legacy_heartbeat_for_another_video_does_not_inherit_source():
     assert "album_browse_id" not in snapshot
 
 
+@pytest.mark.parametrize("thumbnail", [None, "", "https://example.com/live-art.jpg"])
+@pytest.mark.parametrize("video_id", ["v_art", "unknown", None])
+def test_bridge_status_falls_back_to_artwork_for_the_exact_video(store, thumbnail, video_id):
+    cached_art = "https://example.com/cached-art.jpg"
+    store.tracks.upsert_track("v_art", "Song", "Artist", "Album", 200, thumbnail=cached_art)
+    bridge = Bridge()
+    bridge.now_playing = {"title": "Song", "artist": "Artist", "video_id": video_id,
+                          "thumbnail": thumbnail}
+    app = FastAPI()
+    app.include_router(build_bridge_route(type("C", (), {"bridge": bridge, "store": store})()))
+
+    playing = TestClient(app).get("/bridge/status").json()["now_playing"]
+    expected = thumbnail or (cached_art if video_id == "v_art" else thumbnail)
+    assert playing["thumbnail"] == expected
+    # Enrich the HTTP response without turning the fallback into a sensor observation.
+    assert bridge.now_playing["thumbnail"] == thumbnail
+
+
 @pytest.mark.parametrize("playlist, album, expected", [
     ("PL_source", "MPRE_other", {"kind": "playlist", "title": "Source", "url": "/playlist/1", "external": False}),
     ("OLAK5uy_album", "", {"kind": "album", "title": "Release", "url": "/album?browse=MPRE_album", "external": False}),
@@ -279,6 +297,28 @@ def test_bridge_status_links_to_playing_source(store, playlist, album, expected)
     app = FastAPI()
     app.include_router(build_bridge_route(type("C", (), {"bridge": bridge, "store": store})()))
     assert TestClient(app).get("/bridge/status").json()["now_playing"]["source"] == expected
+
+
+@pytest.mark.parametrize("active,playing,kind,url", [
+    (True, "PL_radio", "radio", "/#radio"),
+    (True, "PL_other", "playlist", "/playlist/2"),
+    (False, "PL_radio", "playlist", "/playlist/1"),
+])
+def test_active_radio_links_to_specialist_view(store, active, playing, kind, url):
+    from types import SimpleNamespace
+
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.upsert_playlist(iid, "PL_radio", "Radio Session", 1, "", 1)
+    store.playlists.upsert_playlist(iid, "PL_other", "Another mix", 1, "", 1)
+    bridge = Bridge()
+    bridge.now_playing = {"title": "Song", "video_id": "v1", "playlist_ytm_id": playing}
+    radio = SimpleNamespace(active=active, bootstrap=lambda: {"state": {
+        "active": active, "playlist_id": "PL_radio", "title": "Radio Session"}})
+    app = FastAPI()
+    app.include_router(build_bridge_route(SimpleNamespace(bridge=bridge, store=store, radio=radio)))
+    source = TestClient(app).get("/bridge/status").json()["now_playing"]["source"]
+    assert source["kind"] == kind
+    assert source["url"] == url
 
 
 def test_sensor_health_is_observable_and_clears_on_disconnect():

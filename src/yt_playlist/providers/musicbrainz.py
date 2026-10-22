@@ -13,10 +13,8 @@ import urllib.request
 
 from yt_playlist.util import net
 from yt_playlist.util.matching import normalize, recording_title
-from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
-from yt_playlist.providers.enrich_queue import PriorityGate
+from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 from yt_playlist.providers import genres
-from yt_playlist.providers.enrichment import apply_findings
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +58,6 @@ _USER_AGENT = "yt-playlist/0.1 ( https://github.com/yt-playlist ; rf@4rc.io )"
 _MIN_INTERVAL = 1.1                       # seconds between requests (just over the 1/s limit)
 _HTTP_TIMEOUT_S = 20                      # cap each request so a stalled socket can't wedge a run
 _pacer = RateLimiter(_MIN_INTERVAL)
-_gate = PriorityGate()                    # newest enrichment job preempts older ones
 _breaker = net.CircuitBreaker()           # stop a run once the host looks unreachable
 
 
@@ -250,7 +247,7 @@ def _release_ids(recordings):
 
 def enrich_full(title, artist, *, include_identifiers=False):
     """(genre, year, mb_recording_id, release_ids) from a SINGLE recording search. Callers that also
-    want the MBID (the enrichment waterfall, the playlist runner) use this instead of enrich() plus a
+    want the MBID (the enrichment waterfall) use this instead of enrich() plus a
     separate recording_mbid(), so a track costs one search rather than two.
 
     release_ids keys Cover Art Archive (which is keyed by release, not recording). It rides along
@@ -286,30 +283,3 @@ def _genre_year(recordings):
     return (genre, year)
 
 
-def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop=None, pending=None):
-    """Walk a track set's not-yet-enriched tracks, fetch genre+year for each, persist, and report
-    progress. Scope is a playlist (playlist_id) or an explicit `pending` list (e.g. an album's tracks).
-    `on_progress(event_dict)` receives info/track/done events for the SSE stream."""
-    enrich_fn = enrich_fn or enrich_full   # resolved here so tests can monkeypatch module-level enrich_full
-    pending = store.tracks.tracks_to_enrich(playlist_id) if pending is None else pending
-
-    def _per_item(i, total, t):
-        genre, year, mbid, _rel = enrich_fn(t["title"], t["artist"])   # one search: genre, year, MBID
-        if _breaker.tripped():             # host unreachable, so the rest would all fail too: stop
-            on_progress({"type": "err", "text": "MusicBrainz looks unreachable; enrichment stopped. "
-                         "The remaining tracks will retry next time."})
-            return False
-        apply_findings(store,t['id'],name,{'genre':genre,'year':year,'mb_recording_id':mbid})
-        eff_genre, eff_year = store.tracks.get_track_enrichment(t["id"])    # report what actually stuck
-        bits = " · ".join(x for x in (genre, year) if x) or "no match"
-        on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "genre": eff_genre, "year": eff_year,
-                     "text": f"{i}/{total} {t['title']}: {bits}"})
-
-    run_enrich_loop(
-        store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
-        empty_text="Everything is already enriched.",
-        start_text=lambda n: f"Enriching {n} track(s) via MusicBrainz…",
-        done_text=lambda n: f"Enriched {n} track(s).",
-        wait_text="Waiting: a newer playlist is enriching first…",
-        per_item=_per_item)

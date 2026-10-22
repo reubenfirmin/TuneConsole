@@ -22,9 +22,9 @@ def test_mood_event_moves_facet_lean(store):
 
 def test_recent_play_moves_lean_positive(store):
     k = _jazz_track(store, "v1", "S")
-    # Seed a play using the real API (history_items has no played_at column)
+    # This assertion concerns a recent timestamped play, rather than a capture date.
     iid = store.identities.upsert_identity("main", "c", None, True)
-    store.history.add_history_snapshot(iid, 5.0, [k])
+    store.history.record_play_event(iid, k, "v1", 5.0, source_timezone="UTC")
     leans = transient.facet_leans(store, now=10.0)
     assert leans.get("artist:A", 0.0) > 0                      # a recent play pushes its facets up
 
@@ -75,7 +75,7 @@ def test_centroid_tilt_includes_recent_plays():
     s.init_schema()
     iid = s.identities.upsert_identity("m", "c", None, True)
     s.tracks.upsert_track("v1", "s", "band", None, None)
-    s.history.add_history_snapshot(iid, 1.0, ["s|band"])
+    s.history.record_play_event(iid, "s|band", "v1", 1.0, source_timezone="UTC")
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
     idx = {"s|band": 0, "other|x": 1}
     tilt = transient.centroid_tilt(s, 1000.0, V, idx)

@@ -29,7 +29,7 @@ def test_worker_materializes_proposals(store):
     iid, ctx = _ctx(store, _ArtistClient())
     t = store.tracks.upsert_track("v1", "Song", "Fav", None, None)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "P", "P", 1, "h", 0.0), [t])
-    store.history.add_history_snapshot(iid, 1.0, ["song|fav"])
+    store.history.record_history_plays(iid, 1.0, ["song|fav"], source_timezone="UTC")
 
     RecWorker(ctx).rebuild()               # synchronous rebuild + discovery pass
     # discovery now accumulates into the pool (scan-ledger backed), not the overwrite proposals

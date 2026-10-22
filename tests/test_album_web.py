@@ -29,6 +29,10 @@ def test_album_page_renders_table_and_create_form(store):
     assert "The Album" in r.text and "Artist X" in r.text
     assert "One" in r.text and "Two" in r.text                 # the track table
     assert "/album/create-playlist" in r.text                  # the create-playlist form
+    assert '>Save Album to Library</button>' in r.text
+    assert 'class="alink"\n          href="/artist?name=Artist%20X"' in r.text
+    assert '<a class="ptitle"' not in r.text
+    assert 'class="pl-play" href="https://music.youtube.com/watch?v=v1"' in r.text
 
 
 def test_create_playlist_from_album_redirects_to_new_playlist(store, monkeypatch, tmp_path):
@@ -55,6 +59,8 @@ def test_unsaved_album_shows_full_live_tracks_not_incidental_library_subset(stor
     r = c.get("/album?browse=MPREb_x")
     assert r.status_code == 200
     assert "One" in r.text and "Two" in r.text   # BOTH live tracks, not just the incidental one
+    assert '1 of 2 tracks in your library. The album is not saved.' in r.text
+    assert 'Save Album to Library' in r.text
 
 
 def test_album_head_tools_show_share_and_enrich_icons(store):
@@ -103,6 +109,9 @@ def test_saved_album_folds_in_durations_and_renders_liked_and_plays(store):
     assert "3:01" in r.text and "2:40" in r.text          # durations parsed and rendered back as M:SS
     assert "like-btn" in r.text                            # the liked heart toggle
     assert ">Plays<" in r.text                             # the Plays column header
+    assert 'In your library' in r.text and '/collection/save-album' not in r.text
+    assert '<a class="ptitle"' not in r.text
+    assert 'class="alink" href="/artist?name=Artist%20X"' in r.text
     # the folded-in tracks actually carry the parsed duration (seconds), not None
     assert {t["title"]: t["duration"] for t in store.charts.album_tracks_detail("MPREb_x")} \
         == {"One": 181, "Two": 160}

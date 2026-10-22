@@ -16,6 +16,10 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 
+class LookupUnavailable(Exception):
+    """Optional metadata could not be checked; this is not a confirmed absence."""
+
+
 @dataclass
 class EnrichmentResult:
     provider: str                       # "musicbrainz"
@@ -128,28 +132,3 @@ class RateLimiter:
             self._last_call = time.monotonic()
 
 
-def run_enrich_loop(store, on_progress, pending, *, gate, breaker, start_text, empty_text,
-                    done_text, wait_text, per_item, should_stop=None):
-    """Shared skeleton for every provider's enrich_playlist(): short-circuit an empty set, announce
-    the run, reset the circuit breaker, enter the priority gate, then walk `pending` (honouring
-    should_stop and yielding to newer jobs) calling per_item(i, total, track) for the provider's
-    own per-track work. A per_item returning False stops the run early (used when the breaker trips
-    mid-run). start_text/done_text are called with the track count; empty_text/wait_text are strings."""
-    total = len(pending)
-    if not total:
-        on_progress({"type": "done", "text": empty_text, "total": 0})
-        return
-    on_progress({"type": "info", "text": start_text(total), "total": total})
-    breaker.reset()                            # fresh chance each run: a past outage shouldn't pre-trip it
-    seq = gate.enter()
-    try:
-        for i, t in enumerate(pending, 1):
-            if should_stop and should_stop():
-                on_progress({"type": "info", "text": "Stopped."})
-                return
-            gate.wait_turn(seq, on_wait=lambda: on_progress({"type": "info", "text": wait_text}))
-            if per_item(i, total, t) is False:     # provider signals a hard stop (host unreachable)
-                return
-        on_progress({"type": "done", "text": done_text(total), "total": total})
-    finally:
-        gate.leave(seq)

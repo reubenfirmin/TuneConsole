@@ -1,63 +1,48 @@
-# Builds the macOS .app + .dmg on a real Mac runner (Apple hardware, required for macOS builds).
-#
-#   - Push a tag like `v0.1.4`  -> builds and attaches TuneConsole-macos.dmg to a GitHub Release.
-#   - Manual "Run workflow"     -> builds and uploads the .dmg as a downloadable Actions artifact.
-#
-# The site's "Download for macOS" button points at:
-#   https://github.com/reubenfirmin/TuneConsole/releases/latest/download/TuneConsole-macos.dmg
-# so tagging a release is all that's needed to publish a new download — no artifact has to be
-# folded into the Cloudflare Pages deploy (Pages caps files at 25 MiB; the .dmg lives on Releases).
-name: macOS build
-
+name: macOS candidate
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
-
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
 permissions:
-  contents: write # needed to create/attach releases
-
+  contents: read
 jobs:
   build:
-    name: Build ${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
-            arch: arm64
-          - runner: macos-15-intel
-            arch: x86_64
+          - {runner: macos-14, arch: arm64}
+          - {runner: macos-15-intel, arch: x86_64}
     runs-on: ${{ matrix.runner }}
     env:
       SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+      SETUPTOOLS_SCM_PRETEND_VERSION: ${{ inputs.version || '0.0.0.dev0' }}
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }          # hatch-vcs needs the tag for the version
-
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-
-      - name: Build .app and .dmg
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v5
+      - name: Build locked app and DMG
         run: |
           test "$(uname -m)" = "${{ matrix.arch }}"
-          cd packaging/macos
-          ./build.sh
-
+          packaging/macos/build.sh
       - name: Smoke-test frozen app and DMG
         timeout-minutes: 2
         run: packaging/macos/smoke.sh
-
-      - name: Stage architecture-specific release asset
+      - name: Stage architecture-specific downloads
         run: |
           cp packaging/macos/dist/TuneConsole-*.dmg "TuneConsole-macos-${{ matrix.arch }}.dmg"
-          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
-            cp "TuneConsole-macos-${{ matrix.arch }}.dmg" TuneConsole-macos.dmg
-          fi
-
-      - name: Sign the update and generate its architecture-specific feed
-        if: startsWith(github.ref, 'refs/tags/')
+          if [[ '${{ matrix.arch }}' == arm64 ]]; then cp TuneConsole-macos-arm64.dmg TuneConsole-macos.dmg; fi
+      - name: Sign and verify the immutable update feed
+        if: inputs.tag != ''
         env:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
         run: |
@@ -66,27 +51,16 @@ jobs:
           cp "TuneConsole-macos-${{ matrix.arch }}.dmg" packaging/macos/dist/update-feed/
           printf '%s\n' "$SPARKLE_PRIVATE_ED_KEY" | packaging/macos/.sparkle/bin/generate_appcast \
             --ed-key-file - --maximum-versions 1 --maximum-deltas 0 \
-            --download-url-prefix "https://github.com/reubenfirmin/TuneConsole/releases/download/$GITHUB_REF_NAME/" \
-            --link https://tuneconsole.com \
-            -o "appcast-macos-${{ matrix.arch }}.xml" packaging/macos/dist/update-feed
-          SIGNATURE=$(python packaging/macos/verify_appcast.py \
-            "appcast-macos-${{ matrix.arch }}.xml" "TuneConsole-macos-${{ matrix.arch }}.dmg" \
-            "$GITHUB_REF_NAME" "${{ matrix.arch }}")
+            --download-url-prefix "https://github.com/reubenfirmin/TuneConsole/releases/download/$RELEASE_TAG/" \
+            --link https://tuneconsole.com -o "appcast-macos-${{ matrix.arch }}.xml" packaging/macos/dist/update-feed
+          signature=$(python3 packaging/macos/verify_appcast.py "appcast-macos-${{ matrix.arch }}.xml" \
+            "TuneConsole-macos-${{ matrix.arch }}.dmg" "$RELEASE_TAG" '${{ matrix.arch }}')
           printf '%s\n' "$SPARKLE_PRIVATE_ED_KEY" | packaging/macos/.sparkle/bin/sign_update \
-            --ed-key-file - --verify "TuneConsole-macos-${{ matrix.arch }}.dmg" "$SIGNATURE"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+            --ed-key-file - --verify "TuneConsole-macos-${{ matrix.arch }}.dmg" "$signature"
+      - uses: actions/upload-artifact@v4
         with:
-          name: TuneConsole-macos-${{ matrix.arch }}-dmg
+          name: release-macos-${{ matrix.arch }}
+          if-no-files-found: error
           path: |
-            TuneConsole-macos*.dmg
-            appcast-macos-*.xml
-
-      - name: Attach to the release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
             TuneConsole-macos*.dmg
             appcast-macos-*.xml

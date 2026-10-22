@@ -12,10 +12,13 @@ from yt_playlist.core import logsetup
 
 
 @pytest.fixture(autouse=True)
-def _restore_logging():
+def _restore_logging(monkeypatch):
     """configure() mutates the root logger and two excepthooks; put them back."""
     root = logging.getLogger()
     saved = list(root.handlers), root.level, sys.excepthook, threading_hook()
+    access = logging.getLogger("uvicorn.access")
+    saved_access_disabled = access.disabled
+    monkeypatch.delenv("YT_PLAYLIST_ACCESS_LOG", raising=False)
     audit = logging.getLogger("yt_playlist.home_audit")
     saved_audit = list(audit.handlers), audit.level, audit.propagate
     yield
@@ -32,6 +35,7 @@ def _restore_logging():
     for h in saved[0]:
         root.addHandler(h)
     root.setLevel(saved[1])
+    access.disabled = saved_access_disabled
     sys.excepthook = saved[2]
     set_threading_hook(saved[3])
     logsetup._installed.clear()
@@ -114,6 +118,40 @@ def test_log_level_defaults_to_info_on_garbage(tmp_path, monkeypatch):
     monkeypatch.setenv("YT_PLAYLIST_LOG_LEVEL", "not-a-level")
     logsetup.configure(log_path=tmp_path / "app.log")
     assert logging.getLogger().level == logging.INFO
+
+
+@pytest.mark.parametrize("access_log", [None, "1"])
+def test_access_logs_are_opt_in_without_hiding_errors(tmp_path, monkeypatch, access_log):
+    if access_log is not None:
+        monkeypatch.setenv("YT_PLAYLIST_ACCESS_LOG", access_log)
+    path = tmp_path / "app.log"
+    logsetup.configure(log_path=path)
+    logging.getLogger("uvicorn.access").info('127.0.0.1 - "GET /bridge/status HTTP/1.1" 200')
+    logging.getLogger("yt_playlist.test").info("application ready")
+    try:
+        raise ValueError("request failed")
+    except ValueError:
+        logging.getLogger("uvicorn.error").exception("Exception in ASGI application")
+    text = path.read_text()
+    assert ("GET /bridge/status" in text) == (access_log == "1")
+    assert "application ready" in text
+    assert "Exception in ASGI application" in text
+    assert "ValueError: request failed" in text
+
+
+def test_reconfigure_applies_access_log_setting(tmp_path, monkeypatch):
+    path = tmp_path / "app.log"
+    access = logging.getLogger("uvicorn.access")
+    logsetup.configure(log_path=path)
+    access.info("quiet by default")
+    monkeypatch.setenv("YT_PLAYLIST_ACCESS_LOG", "1")
+    logsetup.configure(log_path=path)
+    access.info("enabled for diagnostics")
+    monkeypatch.setenv("YT_PLAYLIST_ACCESS_LOG", "0")
+    logsetup.configure(log_path=path)
+    access.info("quiet again")
+    assert path.read_text().count("enabled for diagnostics") == 1
+    assert "quiet" not in path.read_text()
 
 
 def test_uncaught_exception_is_logged_and_delegated(tmp_path):

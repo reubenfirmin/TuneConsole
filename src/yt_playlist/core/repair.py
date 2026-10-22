@@ -49,18 +49,17 @@ def _phantom_rows(conn, identity_id, lo, hi):
     # Any exact event corroborates, regardless of its source. Unknown and independently observed
     # daily rows cannot be disproved by a YouTube export and must survive even without an event.
     return conn.execute(
-        "SELECT hi.rowid rid,hi.*,hs.identity_id,hs.taken_at "
-        "FROM history_items hi JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
-        "WHERE hs.identity_id=? AND hi.source='ytm_history' "
-        "AND CAST(hs.taken_at / 86400 AS INTEGER) BETWEEN ? AND ? "
-        "AND NOT EXISTS (SELECT 1 FROM listening_observations o "
-        "  WHERE o.identity_id=hs.identity_id AND o.identity_key=hi.identity_key "
-        "  AND o.source<>'ytm_history' AND (o.day=date(hs.taken_at,'unixepoch') "
-        "  OR o.source_day=date(hs.taken_at,'unixepoch'))) "
+        "SELECT o.*,c.captured_at FROM listening_observations o "
+        "JOIN listening_capture_receipts c ON c.id=o.capture_id "
+        "WHERE o.identity_id=? AND o.source='ytm_history' AND o.precision='legacy_unknown' "
+        "AND CAST(c.captured_at / 86400 AS INTEGER) BETWEEN ? AND ? "
+        "AND NOT EXISTS (SELECT 1 FROM listening_observations other "
+        "  WHERE other.identity_id=o.identity_id AND other.identity_key=o.identity_key "
+        "  AND other.source<>'ytm_history' AND (other.day=o.day OR other.source_day=o.source_day)) "
         "AND NOT EXISTS (SELECT 1 FROM play_events pe "
-        "  WHERE pe.identity_id=hs.identity_id AND pe.identity_key=hi.identity_key "
+        "  WHERE pe.identity_id=o.identity_id AND pe.identity_key=o.identity_key "
         "  AND ABS(CAST(pe.played_at / 86400 AS INTEGER) "
-        "          - CAST(hs.taken_at / 86400 AS INTEGER)) <= ?)",
+        "          - CAST(c.captured_at / 86400 AS INTEGER)) <= ?)",
         (identity_id, lo, hi, CORROBORATION_TOLERANCE_DAYS)).fetchall()
 
 
@@ -97,14 +96,14 @@ def purge_phantom_history(conn, backup_path=None) -> int:
         for ident in {r['identity_id'] for r in _verified_imports(conn)}:
             for lo, hi in takeout_windows(conn, ident):
                 for row in _phantom_rows(conn, ident, lo, hi):
-                    rows[row['rid']] = row
+                    rows[row['id']] = row
         if not rows:
             conn.rollback()
             return 0
         if backup_path is None:
             raise ValueError('History repair requires a recovery backup; nothing was deleted')
         _publish_backup(backup_path, rows.values())
-        conn.executemany('DELETE FROM history_items WHERE rowid=?', [(rid,) for rid in rows])
+        conn.executemany('DELETE FROM listening_observations WHERE id=?', [(rid,) for rid in rows])
         from .first_play import invalidate
         invalidate(conn)
         conn.commit()

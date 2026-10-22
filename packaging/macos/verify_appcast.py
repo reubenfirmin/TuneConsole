@@ -7,7 +7,11 @@ signing key doesn't match SUPublicEDKey, so its exit status alone isn't enough.
 import argparse
 import base64
 from pathlib import Path
+import sys
 import xml.etree.ElementTree as ET
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from release_policy import classify
 
 SPARKLE = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
 
@@ -23,7 +27,7 @@ def verify(feed, archive, tag, arch):
     if len(items) != 1:
         raise ValueError("Expected exactly one update in the feed")
     item = items[0]
-    if item.findtext(SPARKLE + "version") != tag.removeprefix("v"):
+    if item.findtext(SPARKLE + "version") != classify(tag).version:
         raise ValueError("Feed version doesn't match the release tag")
     enclosure = item.find("enclosure")
     expected_url = f"https://github.com/reubenfirmin/TuneConsole/releases/download/{tag}/{name}"

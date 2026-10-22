@@ -159,7 +159,7 @@ def scheduled(store, monkeypatch):
             targets.append(self.target)
 
     monkeypatch.setattr(rec_worker, "threading", SimpleNamespace(
-        Lock=threading.Lock, Event=threading.Event, Thread=QueuedThread))
+        Lock=threading.Lock, RLock=threading.RLock, Event=threading.Event, Thread=QueuedThread))
     return _worker(store), targets
 
 

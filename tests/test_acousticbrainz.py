@@ -54,7 +54,9 @@ def test_enrich_none_when_no_data(monkeypatch):
     assert not ab._breaker.tripped()   # a 404 is "reachable", must not trip the breaker
 
 
-def test_enrich_playlist_resolves_mbid_then_fills(store, monkeypatch):
+def test_waterfall_resolves_mbid_then_fills_and_records_evidence(store, monkeypatch):
+    from yt_playlist.providers import musicbrainz
+    from yt_playlist.providers.waterfall import run_waterfall
     iid = store.identities.upsert_identity("main", "cred", None, True)
     t1 = store.tracks.upsert_track("v1", "Song", "Artist", "Alb", 200)
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1000.0)
@@ -64,8 +66,12 @@ def test_enrich_playlist_resolves_mbid_then_fills(store, monkeypatch):
                         lambda mbid: {**ab._empty(), "bpm": 130.0, "energy": 0.6,
                                       "danceability": 0.8})
     events = []
-    ab.enrich_playlist(store, pid, events.append, mbid_fn=lambda title, artist: "mbid-live")
+    monkeypatch.setattr(musicbrainz, "recording_mbid", lambda *args: "mbid-live")
+    run_waterfall(store, store.tracks.tracks_for_waterfall(pid),
+                  [{"name": "acousticbrainz", "enabled": True}], events.append)
     assert store.tracks.get_track_audio(t1) == (130.0, 0.6, 0.8)
     rows = store.tracks.tracks_missing_audio(pid)
     assert rows == []  # fully populated now
     assert any(e.get("type") == "done" for e in events)
+    attempt = store.enrichment.enrichment_attempts("song|artist")["acousticbrainz"]
+    assert attempt["status"] == "found" and attempt["fields"]["mb_recording_id"] == "mbid-live"

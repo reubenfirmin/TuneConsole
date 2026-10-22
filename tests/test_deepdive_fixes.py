@@ -20,8 +20,8 @@ def test_normalize_non_latin_stays_distinct():
 def test_recent_keys_ordered_returns_latest_first(store):
     iid = store.identities.upsert_identity("me", "c", None, True)
     day = 86400.0
-    store.history.add_history_snapshot(iid, day, ["old1", "old2"])
-    store.history.add_history_snapshot(iid, 3 * day, ["new1"])
+    store.history.record_history_plays(iid, day, ["old1", "old2"], source_timezone="UTC")
+    store.history.record_history_plays(iid, 3 * day, ["new1"], source_timezone="UTC")
     recent = store.history.recent_keys_ordered(0, limit=2)
     assert recent[0] == "new1" and len(recent) == 2
     assert store.history.recent_keys_ordered(2 * day) == ["new1"]

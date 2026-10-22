@@ -16,7 +16,7 @@ def _seed_two_genres(store):
         store.tracks.set_track_genre(f, "Folk"); store.tracks.set_track_year(f, "1972")
     # play techno heavily so it dominates the preference-weighted roll (genre mass = 1 + plays/song)
     for _ in range(6):
-        store.history.add_history_snapshot(iid, 1.0, ["t0|tb"])
+        store.history.record_history_plays(iid, 1.0, ["t0|tb"], source_timezone="UTC")
     return iid
 
 
@@ -56,7 +56,7 @@ def test_roll_recipe_transient_suppresses_disfavored_genre(store):
     # seed plays so both genres appear in the play distribution
     house_keys = [identity_key(f"H{i}", f"DJ{i}") for i in range(5)]
     jazz_keys = [identity_key(f"J{i}", f"Sx{i}") for i in range(5)]
-    store.history.add_history_snapshot(iid, 1.0, house_keys + jazz_keys)
+    store.history.record_history_plays(iid, 1.0, house_keys + jazz_keys, source_timezone="UTC")
     # hammer "less house" so the transient lean is strongly negative
     for i in range(5):
         store.rec_surface.record_mood([identity_key(f"H{i}", f"DJ{i}")], -2, now=10.0)

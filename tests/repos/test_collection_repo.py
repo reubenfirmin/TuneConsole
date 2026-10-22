@@ -63,14 +63,46 @@ def test_collection_albums_aggregates_plays_and_playlists(store):
     iid = store.identities.upsert_identity("me", "c", None, True)
     p1 = store.playlists.upsert_playlist(iid, "PL1", "List 1", 0, "h", 0.0)
     p2 = store.playlists.upsert_playlist(iid, "PL2", "List 2", 0, "h", 0.0)
-    t = store.tracks.upsert_track("v1", "Song", "Artist", "The Album", 200)
+    t = store.tracks.upsert_track("v1", "Song", "Artist", "The Album", 200, album_browse_id="B1")
     store.playlists.set_playlist_tracks(p1, [t])
     store.playlists.set_playlist_tracks(p2, [t])                          # same track in two playlists
-    store.history.add_history_snapshot(iid, 1.0, ["v1" and store.conn.execute(
-        "SELECT identity_key k FROM tracks WHERE id=?", (t,)).fetchone()["k"]])
+    store.history.record_history_plays(iid, 1.0, [store.tracks.catalog_subject(t)['identity_key']],
+                                       source_timezone="UTC")
     albums = store.collection.collection_albums()
     alb = next(a for a in albums if a["album"] == "The Album")
     assert alb["artist"] == "Artist" and alb["songs"] == 1 and alb["n_pls"] == 2 and alb["plays"] == 1
+
+
+def test_legacy_album_label_is_not_counted_as_another_release(store):
+    iid = store.identities.upsert_identity('me', 'c', None, True)
+    playlist = store.playlists.upsert_playlist(iid, 'P', 'Mix', 1, 'h', 0)
+    entry = store.tracks.upsert_track('v', 'Song', 'Artist', 'Release', 100, album_browse_id='B1')
+    store.playlists.set_playlist_tracks(playlist, [entry])
+    # Reproduce a historical refresh that created a second title-only album for
+    # an exact video already attached to the identified release.
+    with store.conn:
+        legacy = store.conn.execute(
+            'INSERT INTO albums(title,artist,metadata_rank,legacy_key) VALUES (?,?,0,?)',
+            ('Release', 'Artist', '["Release","Artist"]')).lastrowid
+        store.conn.execute('INSERT INTO album_artists VALUES (?,0,?,?)',
+                           (legacy, store.artists.resolve('Artist'), 'Artist'))
+        store.conn.execute("INSERT INTO album_tracks(album_id,entry_id,is_full,source) VALUES (?,?,0,'youtube')",
+                           (legacy, entry))
+    album, = store.collection.artist_albums('Artist')
+    assert (album['browse'], album['songs'], album['n_pls'], album['saved']) == ('B1', 1, 1, False)
+    assert [a['browse'] for a in store.collection.collection_albums()] == ['B1']
+    artist, = store.collection.collection_artists()
+    assert (artist['songs'], artist['n_albums'], artist['n_pls']) == (1, 1, 1)
+    assert store.charts.corpus_distribution('album') == {f'@album:{album["id"]}': 1}
+    assert store.charts.album_labels() == {f'@album:{album["id"]}': 'Release'}
+
+
+def test_unresolved_album_labels_stay_on_tracks_and_are_not_singles(store):
+    store.tracks.upsert_track('v', 'Song', 'Artist', 'Unresolved album', 100)
+    store.tracks.upsert_track('single', 'Single', 'Artist', None, 100)
+    album, = store.collection.artist_albums('Artist')
+    assert album['album'] == 'Singles / no album' and album['songs'] == 1
+    assert {t['title'] for t in store.charts.artist_songs('Artist')} == {'Song', 'Single'}
 
 
 def test_collection_artists_includes_saved_album_tracks_without_playlists(store):
@@ -78,7 +110,7 @@ def test_collection_artists_includes_saved_album_tracks_without_playlists(store)
     store.collection.add_saved_album(_album("B1", title="The Album", artist="Artist"))
     store.tracks.upsert_track("v1", "Song", "Artist", "The Album", 200,
                        album_browse_id="B1", thumbnail="/cover.png")
-    store.history.add_history_snapshot(iid, 1.0, ["song|artist", "song|artist"])
+    store.history.record_history_plays(iid, 1.0, ["song|artist", "song|artist"], source_timezone="UTC")
 
     assert store.collection.collection_artists() == [{
         "artist": "Artist", "artist_id":store.artists.resolve('Artist'), "browse": None, "songs": 1, "plays": 1,
@@ -102,7 +134,8 @@ def test_collection_artists_merges_saved_albums_without_double_counting_songs(st
                              artist_browse_id='UC_artist')
     store.collection.add_saved_album(_album("B1", title="Original", artist="Artist"))
     store.collection.add_saved_album(_album("B2", title="Compilation", artist="Artist"))
-    store.history.add_history_snapshot(iid, 1.0, [store.tracks.catalog_subject(track)['identity_key'], "album only|artist"])
+    store.history.record_history_plays(iid, 1.0,
+        [store.tracks.catalog_subject(track)['identity_key'], "album only|artist"], source_timezone="UTC")
 
     artist, = store.collection.collection_artists()
     assert artist["browse"] == "UC_artist"

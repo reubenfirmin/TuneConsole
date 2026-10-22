@@ -277,16 +277,15 @@ def test_new_playlist_distinguishes_unknown_size_from_no_recorded_plays(data, so
     assert beat["groups"][0]["entries"][0]["detail"] == expected
 
 
-def test_repo_preserves_true_counts_with_video_variants_and_snapshot_familiarity(store):
+def test_repo_preserves_true_counts_with_video_variants_and_coarse_familiarity(store):
     store.identities.upsert_identity("main", "cred", None, True)
     key = identity_key("Song", "Artist")
     for video in ("v1", "v2"):
         store.tracks.upsert_track(video, "Song", "Artist", "Release", 100)
     since, until = month_bounds("2026-09")
-    store.conn.execute("INSERT INTO history_snapshots(identity_id,taken_at) VALUES (1,?)", (since - 86400,))
-    store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,?)", (key,))
-    store.conn.executemany("INSERT INTO play_events(identity_id,identity_key,played_at,source) "
-                           "VALUES (1,?,?,'live')", [(key, since + i) for i in range(4)])
+    store.history.record_history_plays(1, since - 86400, [key], source_timezone="UTC")
+    store.history.import_listening_events(1, [(key, None, since + i * 3600) for i in range(4)],
+                                         source_timezone="UTC")
     material = RecapRepo(store).snapshot(since, until)
     assert len(material["plays"]) == 4
     assert material["first"][key] == since - 86400 + 43200  # a coarse date, not an exact midnight play

@@ -161,11 +161,11 @@ def test_zero_match_import_snoozes_the_nag():
 
 def test_upload_does_not_purge_uncorroborated_history_between_events():
     client, store, _ = _client()
-    store.history.add_history_snapshot(1, 1704672000.0, ['phone-play'], source='ytm_history')
+    store.history.record_history_plays(1, 1704672000.0, [('phone-play', 'Today')], source_timezone='UTC')
     entries = [_entry('Suave', 'Danny Wabbit', 'vidA', '2024-01-01T10:00:00Z'),
                _entry('Suave', 'Danny Wabbit', 'vidA', '2024-01-20T10:00:00Z')]
     response = client.post('/import/takeout', files={
         'file': ('watch-history.json', json.dumps(entries).encode(), 'application/json')})
     assert response.status_code == 200
     store.init_schema()  # Startup must not reinterpret the additive import as deletion authority.
-    assert store.conn.execute("SELECT 1 FROM history_items WHERE identity_key='phone-play'").fetchone()
+    assert store.conn.execute("SELECT 1 FROM listening_observations WHERE identity_key='phone-play'").fetchone()

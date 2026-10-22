@@ -1,8 +1,8 @@
-"""Playlist actions used by the single, shared song menu on every regular song surface."""
+"""Actions used by the single, shared song menu on every regular song surface."""
 from yt_playlist.core.activity import activity_for
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.util.duration import parse_duration
@@ -34,9 +34,42 @@ class AddSong(BaseModel):
     playlist_id: int = Field(gt=0)
 
 
+class EditMetadata(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    song: Song
+    title: str | None = Field(default=None, min_length=1, max_length=1000)
+    artist: str | None = Field(default=None, max_length=1000)
+    genre: str | None = Field(default=None, max_length=80)
+    year: str | None = Field(default=None, pattern=r"^(?:[0-9]{4})?$")
+
+
 def build(ctx):
     router = APIRouter()
     store = ctx.store
+
+    @router.get("/songs/metadata")
+    def metadata(video_id: str):
+        track = store.tracks.metadata_for_video(video_id)
+        provenance = store.enrichment.genre_provenance(track['track_id']) if track else None
+        return {"metadata": track, "genre_options": provenance['options'] if provenance else [],
+                "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()),
+                                 key=str.casefold)}
+
+    @router.post("/songs/metadata")
+    def edit_metadata(body: EditMetadata):
+        song = body.song
+        changes = body.model_dump(exclude={'song'}, exclude_none=True)
+        if not changes:
+            return {"message": "Metadata saved."}
+        store.tracks.update_metadata(song.video_id, changes, observation={
+            'title': song.title, 'artist': song.artist, 'album': song.album,
+            'album_browse_id': song.album_browse, 'thumbnail': song.thumbnail,
+            'duration_s': parse_duration(song.duration) if song.duration is not None else None,
+            'created_at': ctx.now_fn(),
+        })
+        ctx.rec_worker.trigger_content_update(video_ids=[song.video_id])
+        return {"message": "Metadata saved."}
 
     @router.get("/songs/playlists")
     def destinations(video_id: str):

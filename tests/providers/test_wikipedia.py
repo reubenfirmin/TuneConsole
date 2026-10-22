@@ -1,5 +1,6 @@
 from yt_playlist.providers import wikipedia
 from yt_playlist import egress
+import pytest
 
 
 def _stub_json(monkeypatch, by_url):
@@ -78,11 +79,34 @@ def test_fetch_summary_no_search_results_is_miss(monkeypatch):
     assert wikipedia.fetch_summary("artist", "Nobody At All") is None
 
 
-def test_fetch_summary_network_error_is_miss(monkeypatch):
+def test_fetch_summary_network_error_is_retryable(monkeypatch):
     def boom(url):
         raise OSError("network down")
     monkeypatch.setattr(wikipedia, "_get_json", boom)
-    assert wikipedia.fetch_summary("artist", "Khruangbin") is None
+    with pytest.raises(wikipedia.LookupUnavailable):
+        wikipedia.fetch_summary("artist", "Khruangbin")
+
+
+def test_summary_failure_is_retryable_and_later_success_recovers(monkeypatch):
+    def failed(url):
+        if "list=search" in url:
+            return {"query": {"search": [{"title": "Khruangbin"}]}}
+        raise OSError("offline")
+    monkeypatch.setattr(wikipedia, "_get_json", failed)
+    with pytest.raises(wikipedia.LookupUnavailable):
+        wikipedia.fetch_summary("artist", "Khruangbin")
+    _stub_json(monkeypatch, {
+        "list=search": {"query": {"search": [{"title": "Khruangbin"}]}},
+        "page/summary": {"type": "standard", "extract": "Khruangbin is a trio."},
+    })
+    assert wikipedia.fetch_summary("artist", "Khruangbin")["extract"] == "Khruangbin is a trio."
+
+
+@pytest.mark.parametrize("payload", [{"error": "unavailable"}, {"query": {"search": None}}])
+def test_malformed_search_is_retryable(monkeypatch, payload):
+    _stub_json(monkeypatch, {"list=search": payload})
+    with pytest.raises(wikipedia.LookupUnavailable):
+        wikipedia.fetch_summary("artist", "Khruangbin")
 
 
 def test_wikipedia_host_is_allowed():

@@ -80,6 +80,11 @@ def configure(log_path=None) -> None:
     and that is exactly the output we are trying to stop losing. Idempotent: safe to call from
     both `main()` and `build_app()`, and again in the `--reload` child.
     """
+    # Request logs are noisy during normal use. Keep server errors on uvicorn.error
+    # while allowing access logs to be enabled for diagnostics, including packaged builds.
+    logging.getLogger("uvicorn.access").disabled = (
+        os.environ.get("YT_PLAYLIST_ACCESS_LOG", "").strip().lower()
+        not in {"1", "true", "yes", "on"})
     root = logging.getLogger()
     for h in _installed:
         root.removeHandler(h)

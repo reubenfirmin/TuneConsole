@@ -447,7 +447,9 @@ def _mood_components(scores, store, now, V, idx, content_vecs=None, evidence_vec
 
 def _apply_mood(scores, store, now, V, idx, content_vecs=None, evidence_vecs=None,
                 content_snapshot=None):
-    """Blend the transient tilts into per-track scores. #85: each tilt decays internally, per event, on
+    """Blend durable dislike evidence and transient tilts into per-track scores.
+    Explicit dislike vectors persist independently of age, transient pruning, and ban expiry.
+    #85: each transient tilt decays internally, per event, on
     its own wall clock (see transient.decay_weight); there is no separate external staleness relax here
     any more, so this just adds the (already-decayed) tilts straight in.
 

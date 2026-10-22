@@ -440,15 +440,20 @@ def seed_discovery_from_unmatched(store, unmatched_artists, now, min_plays=3) ->
     "because you play ..." / "fits your ..." lines in the New Artists tile simply don't render for
     these, rather than fabricating an explanation.
 
-    Artists ALREADY in the discovered pool are skipped: upsert_discovered_artist overwrites every
+    Artists ALREADY in the discovered pool retain their metadata: upsert_discovered_artist overwrites every
     field on conflict, so re-seeding would clobber a taste-bridge entry's richer because/fits/
-    thumbnail with our empty ones (final-review finding). Seeding only ever ADDS new names.
+    thumbnail with our empty ones (final-review finding). Retain the independent source of interest
+    even for existing suggestions, so removing another import cannot discard this contribution.
 
     Returns how many artists were seeded."""
     existing = {a.get("artist", "") for a in (store.discovery.get_discovered_artists() or [])}
     seeded = 0
     for artist, plays in unmatched_artists.items():
-        if plays >= min_plays and artist not in existing:
+        if plays < min_plays:
+            continue
+        if artist in existing:
+            store.discovery.retain_discovered_artist(artist, float(plays))
+        else:
             store.discovery.upsert_discovered_artist(artist, float(plays), None, None, None, now)
             seeded += 1
     return seeded

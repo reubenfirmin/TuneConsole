@@ -13,9 +13,9 @@ def _seed(store):
     Recent days: Alpha on both, Beta on one. Old day: Gamma.
     """
     iid = store.identities.upsert_identity("me", "c", None, True)
-    a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200)
-    b = store.tracks.upsert_track("v2", "Beta", "Artist B", "Album B", 200)
-    g = store.tracks.upsert_track("v3", "Gamma", "Artist A", "Album A", 200)
+    a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200, album_browse_id="album-a")
+    b = store.tracks.upsert_track("v2", "Beta", "Artist B", "Album B", 200, album_browse_id="album-b")
+    g = store.tracks.upsert_track("v3", "Gamma", "Artist A", "Album A", 200, album_browse_id="album-a")
     store.tracks.set_track_enrichment(a, "techno", "1995")   # 1990s
     store.tracks.set_track_enrichment(b, "house", "2005")    # 2000s
     store.tracks.set_track_enrichment(g, "techno", "2015")   # 2010s
@@ -28,9 +28,9 @@ def _seed(store):
         return store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (tid,)).fetchone()["k"]
 
     ka, kb, kg = key(a), key(b), key(g)
-    store.history.add_history_snapshot(iid, NOW, [ka, ka, kb])              # repeated capture does not inflate
-    store.history.add_history_snapshot(iid, NOW-86400, [ka])
-    store.history.add_history_snapshot(iid, NOW - 100 * 86400, [kg])        # ~100d old: Gamma x1
+    store.history.record_history_plays(iid, NOW, [ka, ka, kb], source_timezone="UTC")
+    store.history.record_history_plays(iid, NOW-86400, [ka], source_timezone="UTC")
+    store.history.record_history_plays(iid, NOW - 100 * 86400, [kg], source_timezone="UTC")
     return iid
 
 
@@ -133,7 +133,7 @@ def test_distributions_skip_untagged(store):
     iid = store.identities.upsert_identity("me", "c", None, True)
     t = store.tracks.upsert_track("v1", "Solo", "Artist", "Alb", 200)   # no enrichment
     k = store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (t,)).fetchone()["k"]
-    store.history.add_history_snapshot(iid, NOW, [k])
+    store.history.record_history_plays(iid, NOW, [k], source_timezone="UTC")
     assert store.charts.corpus_distribution("genre") == {}
     assert store.charts.listen_distribution("genre", since=None) == {}
     assert store.charts.corpus_distribution("year") == {}

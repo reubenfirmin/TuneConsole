@@ -23,7 +23,8 @@ _CAT_EXPR = {
 _PL_MEMBERSHIP = ("SELECT DISTINCT t.identity_key ik, pt.playlist_id pid "
                   "FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id")
 _ALBUM_MEMBERSHIP = ("SELECT DISTINCT t.identity_key ik,at.album_id aid "
-                     "FROM tracks t JOIN album_tracks at ON at.entry_id=t.id")
+                     "FROM tracks t JOIN album_tracks at ON at.entry_id=t.id "
+                     "JOIN album_provider_ids p ON p.album_id=at.album_id AND p.provider='youtube'")
 
 
 class ChartsRepo(Repo):
@@ -38,6 +39,7 @@ class ChartsRepo(Repo):
             rows = self.conn.execute(
                 "SELECT '@album:'||a.id cat,COALESCE(NULLIF(a.thumbnail,''),MIN(NULLIF(t.thumbnail,''))) thumbnail "
                 "FROM albums a JOIN album_tracks at ON at.album_id=a.id JOIN tracks t ON t.id=at.entry_id "
+                "JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
                 "GROUP BY a.id").fetchall()
         elif dimension == "playlist":
             rows = self.conn.execute(
@@ -60,7 +62,8 @@ class ChartsRepo(Repo):
 
     @synchronized
     def album_labels(self):
-        return {f'@album:{r[0]}':r[1] or 'Album' for r in self.conn.execute('SELECT id,title FROM albums')}
+        return {f'@album:{r[0]}':r[1] or 'Album' for r in self.conn.execute(
+            "SELECT a.id,a.title FROM albums a JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube'")}
 
     @synchronized
     def history_bounds(self) -> tuple:

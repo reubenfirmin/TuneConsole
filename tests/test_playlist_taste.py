@@ -10,8 +10,8 @@ def test_playlist_taste_weights_by_play_and_scores(store):
     store.playlists.set_playlist_tracks(pt, techno)
     store.playlists.set_playlist_tracks(pf, folk)
     for _ in range(5):                                    # you live in the techno playlist
-        store.history.add_history_snapshot(iid, 1.0, ["t0|technoband"])
-    store.history.add_history_snapshot(iid, 1.0, ["f0|folkband"])  # the Dad playlist barely played
+        store.history.record_history_plays(iid, 1.0, ["t0|technoband"], source_timezone="UTC")
+    store.history.record_history_plays(iid, 1.0, ["f0|folkband"], source_timezone="UTC")
     embed.build_and_store(store, dim=4)
 
     pt_model = scoring.playlist_taste(store)

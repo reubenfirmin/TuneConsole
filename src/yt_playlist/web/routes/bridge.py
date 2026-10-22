@@ -53,6 +53,12 @@ def build(ctx) -> APIRouter:
                 rating = ratings.main_rating(store, now_playing.get("video_id"))
                 if rating:
                     now_playing = {**now_playing, "likeStatus": rating["status"]}
+                # Sensors can verify playback before album artwork becomes available.
+                # Resolve the exact upload without borrowing the previous song's image.
+                if not now_playing.get("thumbnail") and now_playing.get("video_id"):
+                    thumbnail = store.tracks.thumbnail_for_video(now_playing["video_id"])
+                    if thumbnail:
+                        now_playing = {**now_playing, "thumbnail": thumbnail}
             collection = getattr(getattr(ctx, "store", None), "collection", None)
             resolve = getattr(collection, "playback_source", None)
             source = resolve(now_playing.get("playlist_ytm_id"), now_playing.get("video_id"),
@@ -61,6 +67,10 @@ def build(ctx) -> APIRouter:
                 url = (f"/playlist/{source['id']}" if source["kind"] == "playlist" else
                        "/album?" + urlencode({"browse": source["browse"]}))
                 source = {"kind": source["kind"], "title": source["title"], "url": url, "external": False}
+            if radio is not None:
+                session = radio.bootstrap()["state"]
+                if session.get("active") and session.get("playlist_id") == now_playing.get("playlist_ytm_id"):
+                    source = {"kind": "radio", "title": session["title"], "url": "/#radio", "external": False}
             now_playing = {**now_playing, "source": source}
         return {"connected": bridge.connected, "now_playing": now_playing,
                 "sensor_health": getattr(bridge, "sensor_health", None),

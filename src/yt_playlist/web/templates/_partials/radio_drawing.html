@@ -1,0 +1,47 @@
+{# An engraved radio landscape, occupying only the history that hasn't played yet. #}
+{% set current = tracks[session.history_count - 1] if session.history_count else none %}
+<div class="radio-history-art" aria-hidden="true">
+  <svg class="radio-engraving" viewBox="0 0 1200 340" preserveAspectRatio="xMinYMid slice">
+    <defs>
+      <radialGradient id="radio-paper-light"><stop stop-color="var(--radio-queue-1)" stop-opacity=".13"/><stop offset="1" stop-color="var(--radio-queue-1)" stop-opacity="0"/></radialGradient>
+      <linearGradient id="radio-ink-fade"><stop stop-color="var(--radio-queue-0)" stop-opacity=".6"/><stop offset=".55" stop-color="var(--radio-queue-2)" stop-opacity=".45"/><stop offset="1" stop-color="var(--radio-queue-1)" stop-opacity=".12"/></linearGradient>
+      <pattern id="radio-stipple" width="12" height="12" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".65" fill="var(--dim)" opacity=".25"/></pattern>
+      <clipPath id="radio-record-label"><circle cx="244" cy="171" r="57"/></clipPath>
+    </defs>
+    <ellipse class="radio-paper-light" cx="410" cy="166" rx="710" ry="290"/>
+    <path fill="url(#radio-stipple)" d="M45 24H1155V316H45z"/>
+    <g class="radio-wave-landscape">
+      {% for i in range(14) %}
+      <path d="M-40 {{ 48 + i * 19 }} C110 {{ 15 + i * 15 }}, 122 {{ 45 + i * 11 }}, 244 {{ 50 + i * 18 }} S440 {{ 304 - i * 15 }}, 580 {{ 265 - i * 12 }} S730 {{ 11 + i * 16 }}, 886 {{ 58 + i * 14 }} S1070 {{ 312 - i * 17 }}, 1250 {{ 224 - i * 12 }}"/>
+      {% endfor %}
+    </g>
+    <g class="radio-orbit-lines">
+      <ellipse cx="244" cy="171" rx="203" ry="117" transform="rotate(-19 244 171)"/>
+      <ellipse cx="244" cy="171" rx="179" ry="139" transform="rotate(28 244 171)"/>
+      <path d="M16 171H74m340 0h50M244 9v22m0 279v22"/>
+      <circle cx="244" cy="171" r="145" stroke-dasharray="1 9"/>
+    </g>
+    <g class="radio-record">
+      <circle class="radio-record-ground" cx="244" cy="171" r="119"/>
+      {% for radius in [65, 70, 77, 81, 88, 94, 100, 107, 113, 119] %}
+      <circle class="radio-record-groove" cx="244" cy="171" r="{{ radius }}"/>
+      {% endfor %}
+      <path class="radio-record-shine" d="M155 112a107 107 0 0 1 137-37m40 155a107 107 0 0 1-137 37"/>
+      {% if current and current.thumbnail %}<image class="radio-record-cover" href="{{ current.thumbnail }}" x="187" y="114" width="114" height="114" preserveAspectRatio="xMidYMid slice" clip-path="url(#radio-record-label)" referrerpolicy="no-referrer"/>{% endif %}
+      <circle class="radio-record-rim" cx="244" cy="171" r="57"/>
+      <circle class="radio-record-spindle" cx="244" cy="171" r="9"/>
+      <circle class="radio-record-pin" cx="244" cy="171" r="2.5"/>
+    </g>
+    <g class="radio-etched-details">
+      <path d="m438 70 5 13 13 5-13 5-5 13-5-13-13-5 13-5Zm570 177 4 10 10 4-10 4-4 10-4-10-10-4 10-4Z"/>
+      <circle cx="65" cy="227" r="5"/><circle cx="412" cy="213" r="4"/>
+      <circle cx="850" cy="79" r="8"/><circle cx="850" cy="79" r="17"/>
+      <path d="M563 81h28m-14-14v28M1094 126h20m-10-10v20M704 264h20m-10-10v20"/>
+      <path d="M545 313c32-26 66-31 98-20m-9-8c8 3 14 12 10 20"/>
+    </g>
+    <g class="radio-dial-ticks">
+      {% for i in range(46) %}<path d="M{{ 511 + i * 14 }} 35v{{ 11 if i % 5 == 0 else 4 }}"/>{% endfor %}
+      <path d="M511 52h630"/>
+    </g>
+  </svg>
+</div>

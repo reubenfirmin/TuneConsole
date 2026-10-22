@@ -42,26 +42,30 @@ def test_temporal_recall_recovers_recent_plays_from_history(store):
     # own held-out members near the context centroid, so recall is high.
     iid = _two_cluster_playlists(store)
     day, t_recent = 86400, 1_000_000.0
-    store.history.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.history.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+    store.history.record_history_plays(iid, t_recent - 10 * day,
+        [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
+    store.history.record_history_plays(iid, t_recent,
+        [identity_key(f"A{i}", "AB") for i in range(4, 8)], source_timezone="UTC")
 
     res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
     assert res["trials"] == 4                 # the four held-out recent plays, none seen before the cutoff
     assert res["recall"] == 1.0               # all recovered in the top-8 by the context centroid
 
 
-@pytest.mark.parametrize("source", ["ytm_history", "unknown"])
+@pytest.mark.parametrize("source", ["ytm_history", "independent"])
 def test_temporal_recall_excludes_generated_only_held_plays(store, source):
     # #83 closing the last circular path: a held-out play the app CAUSED (played only from a
     # quarantined generated playlist, per play_events provenance) must not count as a successful
     # prediction. Keys with organic evidence in the window (mixed, or no play_events rows at all)
-    # stay. Unknown coarse evidence is independent and also prevents exclusion.
+    # stay. Independent dated evidence also prevents exclusion.
     from yt_playlist.repos.rec_query import GENERATED_GROUP
     iid = _two_cluster_playlists(store)
     day, t_recent = 86400, 1_000_000.0
-    store.history.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.history.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)],
-                                     source=source)
+    store.history.record_history_plays(iid, t_recent - 10 * day,
+        [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
+    held = [identity_key(f"A{i}", "AB") for i in range(4, 8)]
+    store.history.record_history_plays(iid, t_recent,
+        [(key, 'Today') for key in held] if source == 'ytm_history' else held, source_timezone="UTC")
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     store.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)
     store.playlists.mark_generated_playlist('PLGEN')
@@ -80,16 +84,18 @@ def test_temporal_recall_excludes_generated_only_held_plays(store, source):
     assert res["recall"] == 1.0
 
 
-@pytest.mark.parametrize("source", ["ytm_history", "unknown"])
+@pytest.mark.parametrize("source", ["ytm_history", "independent"])
 def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store, source):
     # When EVERY held-out play is app-caused, the honest answer is "no usable split", never a
     # recall score computed over zero real plays.
     from yt_playlist.repos.rec_query import GENERATED_GROUP
     iid = _two_cluster_playlists(store)
     day, t_recent = 86400, 1_000_000.0
-    store.history.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.history.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)],
-                                     source=source)
+    store.history.record_history_plays(iid, t_recent - 10 * day,
+        [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
+    held = [identity_key(f"A{i}", "AB") for i in range(4, 8)]
+    store.history.record_history_plays(iid, t_recent,
+        [(key, 'Today') for key in held] if source == 'ytm_history' else held, source_timezone="UTC")
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     store.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)
     store.playlists.mark_generated_playlist('PLGEN')
@@ -121,8 +127,10 @@ def test_temporal_recall_none_without_history(store):
 def test_rolling_temporal_recall_rebuilds_as_of_cutoff(store):
     iid = _two_cluster_playlists(store)
     day, t = 86400, 5_000_000.0
-    store.history.add_history_snapshot(iid, t - 20 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.history.add_history_snapshot(iid, t, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+    store.history.record_history_plays(iid, t - 20 * day,
+        [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
+    store.history.record_history_plays(iid, t,
+        [identity_key(f"A{i}", "AB") for i in range(4, 8)], source_timezone="UTC")
 
     result = eval_recs.rolling_temporal_recall(store, holdout_days=5, windows=3, k=8, dim=4)
 
@@ -175,55 +183,3 @@ def test_projection_recall_breakdown_by_family_and_coverage(store):
     assert bd["by_coverage"]["genre"]["trials"] == 15
 
 
-def test_autotune_returns_grid_and_picks_best(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    # Two tight clusters across several playlists so recall is well-defined and svd wins.
-    A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(40)]
-    B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(40)]
-    for j in range(6):
-        store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PA{j}", "PA", 8, f"ha{j}", 0.0), A[j*5:j*5+8])
-        store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PB{j}", "PB", 8, f"hb{j}", 0.0), B[j*5:j*5+8])
-
-    res = eval_recs.autotune(store)
-
-    # grid present, every entry shaped, dims limited to the new grid
-    assert res["grid"], "grid must be non-empty"
-    dims = {g["dim"] for g in res["grid"] if g["method"] == "svd"}
-    assert dims == {48, 64, 96, 128}
-    assert any(g["method"] == "item2vec" for g in res["grid"])   # one sanity probe
-    # winner is the max-recall grid entry, and was persisted
-    best = max(res["grid"], key=lambda g: g["recall"])
-    assert res["winner"]["dim"] == best["dim"] and res["winner"]["method"] == best["method"]
-
-
-def test_autotune_falls_back_to_recall_at_k_without_history(store):
-    # No history snapshots -> no usable temporal split -> autotune scores configs by recall@k (#38 §5).
-    _two_cluster_playlists(store)
-    res = eval_recs.autotune(store, svd_dims=(4,), item2vec_probe_dim=4, k=5)
-    assert res["grid"]
-    assert all(g.get("metric") == "recall_at_k" for g in res["grid"]), "no history -> recall@k fallback"
-    assert res["previous"].get("metric") == "recall_at_k"
-
-
-def test_autotune_scores_by_temporal_recall_when_history_spans_the_window(store):
-    # #38 §5: the method/DIM sweep must be judged on the model's real job (predict next plays), not the
-    # in-sample recall@k. With a history span wider than the holdout window, autotune uses temporal_recall.
-    iid = _two_cluster_playlists(store)
-    day, t = 86400, 5_000_000.0
-    store.history.add_history_snapshot(iid, t - 40 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.history.add_history_snapshot(iid, t, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
-    res = eval_recs.autotune(store, svd_dims=(4,), item2vec_probe_dim=4, k=8)
-    assert res["grid"]
-    assert all(g.get("metric") == "causal_temporal_recall" for g in res["grid"]), \
-        "with a usable temporal split, autotune scores configs by forward-prediction recall"
-
-
-def test_cooc_weighting_ab_compares_both_builds(store):
-    # #38 §4c: the A/B harness builds the embedding binary AND playcount-weighted, scores each, and
-    # names a winner. The verdict is real-data-only; here we just assert the comparison shape.
-    _two_cluster_playlists(store)
-    res = eval_recs.cooc_weighting_ab(store, k=5)
-    assert set(res) >= {"binary", "weighted", "winner"}
-    assert res["winner"] in ("binary", "weighted")
-    assert "score" in res["binary"] and "metric" in res["weighted"]
-    assert store.settings.get_setting("rec_cooc_weighting") in (None, "0")   # prior setting restored

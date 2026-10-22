@@ -15,9 +15,7 @@ import urllib.request
 
 from yt_playlist.util import net
 from yt_playlist.util.matching import normalize, recording_title
-from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
-from yt_playlist.providers.enrich_queue import PriorityGate
-from yt_playlist.providers.enrichment import apply_findings
+from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +48,6 @@ _USER_AGENT = "yt-playlist/0.1 +https://4rc.io"
 _MIN_INTERVAL = 0.15                       # ~50 req / 5s soft limit -> stay well under
 _HTTP_TIMEOUT_S = 20                        # cap each request so a stalled socket can't wedge a run
 _pacer = RateLimiter(_MIN_INTERVAL)
-_gate = PriorityGate()
 _breaker = net.CircuitBreaker()
 
 
@@ -227,33 +224,3 @@ def lookup(title, artist, *, duration=None, isrc=None):
     return feat
 
 
-def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop=None, pending=None):
-    """Fill missing BPM for a track set from Deezer (fill-only). Scope is a playlist or an explicit
-    `pending` list. on_progress(event_dict) feeds the SSE stream."""
-    enrich_fn = enrich_fn or enrich
-    pending = store.tracks.tracks_missing_audio(playlist_id) if pending is None else pending
-
-    def _per_item(i, total, t):
-        feat = enrich_fn(t["title"], t["artist"])
-        if _breaker.tripped():
-            on_progress({"type": "err", "text": "Deezer looks unreachable. Stopped. "
-                         "The remaining tracks will retry next time."})
-            return False
-        # Art is not an audio feature: it has its own fill-only rule, so it never reaches
-        # set_track_audio (whose kwargs are the audio columns).
-        art = feat.pop("art", None)
-        apply_findings(store,t['id'],name,feat)
-        store.tracks.set_track_art(t["id"], art,source=name)
-        shown = f"{feat['bpm']:.0f} BPM" if feat["bpm"] else "no BPM"
-        if feat["popularity"]:
-            shown += f" · pop {feat['popularity']}"
-        on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "text": f"{i}/{total} {t['title']}: {shown}"})
-
-    run_enrich_loop(
-        store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
-        empty_text="Every track already has audio features.",
-        start_text=lambda n: f"Looking up BPM for {n} track(s) on Deezer…",
-        done_text=lambda n: f"Looked up {n} track(s).",
-        wait_text="Waiting: a newer playlist is looking up first…",
-        per_item=_per_item)

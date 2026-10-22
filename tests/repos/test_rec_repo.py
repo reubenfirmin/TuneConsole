@@ -95,7 +95,7 @@ def test_track_decades_and_artists_and_era_distribution(store):
     b = store.tracks.upsert_track("v2", "B", "Beta", None, None)    # key "b|beta"
     store.tracks.set_track_year(a, "1991")                          # -> decade "1990"
     store.tracks.set_track_year(b, "2003")                          # -> decade "2000"
-    store.history.add_history_snapshot(iid, 1.0, ["a|alpha"])        # one play of A
+    store.history.record_history_plays(iid, 1.0, ["a|alpha"], source_timezone="UTC")
 
     decades = store.rec_query.track_decades(["a|alpha", "b|beta"])
     assert decades == {"a|alpha": "1990", "b|beta": "2000"}

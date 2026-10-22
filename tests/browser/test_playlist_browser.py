@@ -75,13 +75,16 @@ def test_rename_playlist_updates_heading(live_playlist_app, page):
     expect(page.get_by_role("heading", name="Renamed Mix")).to_be_visible()
 
 
-def test_set_year_click_to_edit(live_playlist_app, page):
+def test_set_year_from_song_menu(live_playlist_app, page):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     page.goto(f"{base}/playlist/{pid}")
     row = page.get_by_role("row").filter(has_text="Song B")
-    row.locator(".ydisplay").click()                       # click-to-edit
-    row.locator(".yinput").fill("1999")
-    row.locator(".yinput").press("Enter")
+    row.get_by_role('button', name='More actions for Song B').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    dialog.get_by_label('Year', exact=True).fill('1999')
+    with page.expect_navigation():
+        dialog.get_by_role('button', name='Save changes').click()
     expect(row.get_by_text("1999")).to_be_visible()        # cell shows the new year
     page.goto(f"{base}/playlist/{pid}")                    # persisted
     expect(page.get_by_role("row").filter(has_text="Song B").get_by_text("1999")).to_be_visible()
@@ -115,34 +118,32 @@ def test_conflict_provider_opens_lookup_without_changing_choice(live_playlist_ap
     assert store.charts.playlist_tracks_detail(pid)[0]["year"] == "2001"
 
 
-def test_genre_control_opens_dialog_and_accepts_custom_value(live_playlist_app, page):
+def test_song_menu_metadata_accepts_custom_genre(live_playlist_app, page):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     page.goto(f"{base}/playlist/{pid}")
     row = page.get_by_role("row").filter(has_text="Song B")
-    row.get_by_role("button", name="See or change genre for Song B").click()
-    expect(page.get_by_role("heading", name="Genre for “Song B”")).to_be_visible()
-    override = page.get_by_role("button", name="Override")
-    apply = page.get_by_role("button", name="Apply genre")
-    ob, ab = override.bounding_box(), apply.bounding_box()
-    assert abs((ob["y"] + ob["height"] / 2) - (ab["y"] + ab["height"] / 2)) < 2
-    override.click()
-    suggestions = page.locator(".genre-suggest")
-    expect(suggestions).to_be_visible()
-    assert suggestions.bounding_box()["y"] + suggestions.bounding_box()["height"] <= \
-        page.locator(".genre-picker .modal-actions").bounding_box()["y"]
-    page.get_by_label("Custom genre").fill("Jazz Fusion")
-    page.get_by_role("button", name="Apply genre").click()
-    expect(page.get_by_role("heading", name="Mix")).to_be_visible()  # HX-Refresh completed
+    row.get_by_role('button', name='More actions for Song B').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    expect(dialog.get_by_label('Title', exact=True)).to_have_value('Song B')
+    dialog.get_by_label('Genre', exact=True).fill('Jazz Fusion')
+    with page.expect_navigation():
+        dialog.get_by_role('button', name='Save changes').click()
+    expect(page.get_by_role("heading", name="Mix")).to_be_visible()
     row = page.get_by_role("row").filter(has_text="Song B")
     expect(row.get_by_text("Jazz Fusion", exact=True)).to_be_visible()
 
 
-def test_genre_badge_itself_opens_candidate_dialog(live_playlist_app, page):
+def test_genre_badge_is_display_only(live_playlist_app, page):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     page.goto(f"{base}/playlist/{pid}")
     row = page.get_by_role("row").filter(has_text="Song A")
     row.get_by_text("Rock", exact=True).click()
-    expect(page.get_by_role("heading", name="Genre for “Song A”")).to_be_visible()
+    expect(page.get_by_role('dialog')).not_to_be_visible()
+    row.get_by_role('button', name='More actions for Song A').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    expect(dialog.get_by_label('Genre', exact=True)).to_have_value('Rock')
 
 
 @pytest.mark.parametrize("initial_status", ["INDIFFERENT", "LIKE"])

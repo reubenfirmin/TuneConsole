@@ -36,7 +36,7 @@ def test_two_dislikes_do_not_graduate_artist_genre_or_era(store):
     graduation.apply_dislikes(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=100.0)
 
     w = store.rec_model.get_weights(now=100.0)
-    for axis in ("artist:Billy Idol", "genre:jazz", "era:1980s"):
+    for axis in ("artist:Billy Idol", "genre:jazz", "era:1980"):
         assert store.rec_surface.get_theme(axis) is None
         assert w.get(axis, 1.0) == 1.0
     assert store.rec_surface.recent_graduations(limit=50) == []
@@ -69,7 +69,7 @@ def test_negative_vibe_tap_also_leaves_permanent_facets_alone(store):
     graduation.graduate_moods(store, [k1], -1, now=1.0, source=source_w_vibe, source_label="mood")
     graduation.graduate_moods(store, [k2], -1, now=2.0, source=source_w_vibe, source_label="mood")
 
-    for axis in ("artist:Billy Idol", "genre:jazz", "era:1980s"):
+    for axis in ("artist:Billy Idol", "genre:jazz", "era:1980"):
         assert store.rec_surface.get_theme(axis) is None
         assert store.rec_model.get_weights(now=2.0).get(axis, 1.0) == 1.0
     assert store.rec_surface.recent_graduations(limit=50) == []

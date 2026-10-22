@@ -32,8 +32,8 @@ def test_readiness_explains_initial_wait_pause_cooldown_and_fresh_data(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     assert ms.readiness(store, 1000)["state"] == "waiting"
     store.rec_model.replace_rec_vectors([(str(i), np.ones(2, dtype=np.float32).tobytes()) for i in range(100)])
-    store.history.add_history_snapshot(iid, 0, ["context"])
-    store.history.add_history_snapshot(iid, 15 * ms.DAY, ["later"])
+    store.history.record_history_plays(iid, 0, ["context"], source_timezone="UTC")
+    store.history.record_history_plays(iid, 15 * ms.DAY, ["later"], source_timezone="UTC")
     now = 16 * ms.DAY
     assert ms.readiness(store, now)["state"] == "ready"
     result = _result(now, "retained")
@@ -42,7 +42,7 @@ def test_readiness_explains_initial_wait_pause_cooldown_and_fresh_data(store):
     assert "next_at" in ms.readiness(store, now)
     later = now + 29 * ms.DAY
     assert "fresh listening" in ms.readiness(store, later)["reason"]
-    store.history.add_history_snapshot(iid, later - 1, [f"fresh{i}" for i in range(30)])
+    store.history.record_history_plays(iid, later - 1, [f"fresh{i}" for i in range(30)], source_timezone="UTC")
     assert ms.readiness(store, later)["state"] == "ready"
     store.settings.set_setting("rec_selection_paused", "1")
     assert ms.readiness(store, later)["state"] == "paused"
@@ -168,8 +168,8 @@ def test_real_history_drives_automatic_comparison_without_manual_action(store, m
         all_keys.append(keys)
         store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PL{group}", "Mix", 20, str(group), 0), tracks)
     for period in range(4):
-        store.history.add_history_snapshot(iid, period * 10 * ms.DAY,
-                                   [key for keys in all_keys for key in keys[period * 5:period * 5 + 5]])
+        store.history.record_history_plays(iid, period * 10 * ms.DAY,
+            [key for keys in all_keys for key in keys[period * 5:period * 5 + 5]], source_timezone="UTC")
     store.settings.set_setting("rec_dim", "4")
     embed.build_and_store(store)
     monkeypatch.setattr(ms, "CONFIGS", [("svd", 4), ("svd", 8)])

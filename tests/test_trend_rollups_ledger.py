@@ -46,12 +46,12 @@ def _generated(store, pid, ytm, title="Radio"):
 # --- Task 2.1: day_counts_source ------------------------------------------------------------------
 
 def test_day_counts_source_uses_history_when_no_ledger(store):
-    store.history.add_history_snapshot(1, 10 * DAY, ["a", "a", "b"])
+    store.history.record_history_plays(1, 10 * DAY, ["a", "a", "b"], source_timezone="UTC")
     assert sorted(tr.day_counts_source(store)) == [(10, "a", 1), (10, "b", 1)]
 
 
 def test_day_counts_source_prefers_the_ledger(store):
-    store.history.add_history_snapshot(1, 10 * DAY, ["phantom"])
+    store.history.record_history_plays(1, 10 * DAY, ["phantom"], source_timezone="UTC")
     _ev(store, "real", 10 * DAY + 5)
     assert tr.day_counts_source(store) == [(10, "real", 1)]   # the phantom history row is ignored
 
@@ -66,14 +66,14 @@ def test_day_counts_source_applies_the_generated_quarantine(store):
 # --- Task 2.2: the first-play index ---------------------------------------------------------------
 
 def test_first_play_index_retains_earlier_coarse_evidence_when_a_ledger_exists(store):
-    store.history.add_history_snapshot(1, 10 * DAY, ["a"])
+    store.history.record_history_plays(1, 10 * DAY, ["a"], source_timezone="UTC")
     _ev(store, "a", 20 * DAY)
     tr._build_first_play_index(store)
     assert store.trends.first_play_map("track")["a"] == 10
 
 
 def test_first_play_index_uses_history_without_a_ledger(store):
-    store.history.add_history_snapshot(1, 10 * DAY, ["a"])
+    store.history.record_history_plays(1, 10 * DAY, ["a"], source_timezone="UTC")
     tr._build_first_play_index(store)
     assert store.trends.first_play_map("track")["a"] == 10
 
@@ -117,7 +117,8 @@ def test_month_review_falls_back_to_history_without_a_ledger(store):
     from tests.conftest import seed_catalog_track
     seed_catalog_track(store,'a','T','Ben',track_id=1,video_id='va')
     store.conn.commit()
-    store.history.add_history_snapshot(1, int(dt.datetime(2026, 6, 3, 12, tzinfo=dt.UTC).timestamp()), ["a"])
+    store.history.record_history_plays(1, dt.datetime(2026, 6, 3, 12, tzinfo=dt.UTC).timestamp(),
+                                       ["a"], source_timezone="UTC")
     now = dt.datetime(2026, 7, 9, tzinfo=dt.UTC).timestamp()
     review = tr.month_review(_months(store), store, now, tr.day_counts_source(store),
                              store.trends.track_meta())

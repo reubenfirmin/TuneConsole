@@ -31,12 +31,6 @@ PROVIDERS = [
 _BY_NAME = {p["name"]: p for p in PROVIDERS}
 
 
-def apply_findings(store, track_id, provider, fields):
-    """Legacy single-provider entry points share the waterfall's metadata selection policy."""
-    names = [p['name'] for p in load_config(store) if p['enabled']]
-    store.enrichment.apply_provider_fields(track_id,provider,fields,providers=names)
-
-
 def provider_configuration(store, registry, config=None):
     """Effective provider availability and settings, without retaining credentials in coverage."""
     result = {}

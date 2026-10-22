@@ -88,11 +88,11 @@ const chrome = {
 const context = vm.createContext({chrome, WebSocket: Socket, URL,
   console: {log() {}, warn() {}}, setTimeout() {}, clearTimeout() {},
 });
-vm.runInContext(fs.readFileSync('extension/background.js', 'utf8'), context);
+const {playback, tabs: musicTabs} = require('./tests/extension_worker.cjs').loadWorker(context);
 sockets[0].readyState = Socket.OPEN;
 const report = async (id, msg) => {
   for (const listener of runtime.onMessage.listeners) listener(msg, {tab: tabs.find(t => t.id === id)});
-  await vm.runInContext('playbackRelay', context);
+  await playback.drained;
 };
 const next = 'https://music.youtube.com/watch?list=PL_new';
 (async () => {
@@ -150,8 +150,8 @@ const next = 'https://music.youtube.com/watch?list=PL_new';
     }
     await report(3, {type: 'pevent', kind: 'state', state: 'playing'});
     assert.equal(frames.length, count, 'muted playback must not replace the audible card');
-    await context.playPauseInYtmTab();
-    await context.rateInYtmTab('like', 'v');
+    await playback.playPause();
+    await playback.rate('like', 'v');
     assert.deepEqual(messages.map(m => [m.id, m.type]), [[2, 'playpause'], [2, 'rate']]);
     assert.equal(messages.at(-1).videoId,'v');
     // A real ownership change follows current mute state, then preserves that owner while paused.
@@ -174,23 +174,23 @@ const next = 'https://music.youtube.com/watch?list=PL_new';
       brandKnown: true, brandId: 'brand-A', paused: false, muted: false});
     assert.equal(frames.at(-1).type, 'now-heartbeat');
     assert.equal(frames.filter(frame => frame.type === 'play').length, playCount);
-    await context.playPauseInYtmTab();
+    await playback.playPause();
     assert.equal(messages.at(-1).id, 3);
     browsing.audible = false;
     await report(3, {type: 'now-heartbeat', title: 'Paused owner', paused: true});
     const pausedCount = frames.length;
     await report(2, {type: 'now-heartbeat', title: 'Muted old owner', paused: true});
     assert.equal(frames.length, pausedCount);
-    assert.equal((await context.pickYtmTab()).id, 3);
+    assert.equal((await playback.pickTab()).id, 3);
     return;
   }
   if (['audible', 'heartbeat'].includes(scenario)) {
-    await context.playPauseInYtmTab();
-    await context.rateInYtmTab('like', 'v');
+    await playback.playPause();
+    await playback.rate('like', 'v');
     assert.deepEqual(messages.map(m => [m.id, m.type]), [[2, 'playpause'], [2, 'rate']]);
   }
   if (scenario === 'pending') {
-    const ready = context.ensureYtmTab();
+    const ready = musicTabs.ensure();
     await new Promise(resolve => setImmediate(resolve));
     const tab = tabs.find(t => t.id === 2);
     Object.assign(tab, {url: tab.pendingUrl, status: 'complete'});
@@ -199,12 +199,12 @@ const next = 'https://music.youtube.com/watch?list=PL_new';
     assert.equal((await ready).id, 2);
   }
   if (scenario === 'concurrent') {
-    await Promise.all([context.navigateYtmTab(next), context.navigateYtmTab(next + '_second')]);
+    await Promise.all([playback.navigate(next), playback.navigate(next + '_second')]);
     assert.equal(created.length, 1, 'overlapping launches create a single music tab');
     assert.equal(tabs.find(t => t.id === 10).url, next + '_second');
     return;
   }
-  await context.navigateYtmTab(next);
+  await playback.navigate(next);
   if (['no_music', 'leaving'].includes(scenario)) {
     assert.equal(created.length, 1);
     assert.equal(created[0].url, next);

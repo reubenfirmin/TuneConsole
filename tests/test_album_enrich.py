@@ -1,4 +1,4 @@
-"""Album enrichment: saved albums get an enrichable album page and the same runners (scoped to the
+"""Album enrichment: saved albums get an enrichable album page and the shared waterfall (scoped to the
 album's folded-in tracks)."""
 import threading
 
@@ -17,13 +17,14 @@ def _fold_album(store, bid="BID", n=4):
                                  "year": "2001", "type": "Album", "thumbnail": None}])
 
 
-def test_album_enrich_runner_fills_genres(store, monkeypatch):
+def test_album_waterfall_fills_genres(store, monkeypatch):
     _fold_album(store)
     pending = store.tracks.album_tracks_to_enrich("BID")
     assert len(pending) == 4
     monkeypatch.setattr(musicbrainz, "enrich_full", lambda title, artist, **kwargs: ("rock", "2001", None, []))
 
-    musicbrainz.enrich_playlist(store, None, lambda ev: None, pending=pending)
+    waterfall.run_waterfall(store, pending, [{"name": "musicbrainz", "enabled": True}],
+                            lambda ev: None)
 
     detail = store.charts.album_tracks_detail("BID")
     assert all(t["genre"] == "rock" and t["year"] == "2001" for t in detail)

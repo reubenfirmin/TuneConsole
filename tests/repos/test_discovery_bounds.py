@@ -14,8 +14,8 @@ def test_interested_artists_limit():
     s.tracks.upsert_track("v1", "S1", "A", None, None)
     s.tracks.upsert_track("v2", "S2", "A", None, None)
     s.tracks.upsert_track("v3", "S3", "B", None, None)
-    s.history.add_history_snapshot(iid, 1.0, ["s1|a", "s2|a", "s3|b"])
-    s.history.add_history_snapshot(iid, 2.0, ["s1|a"])
+    s.history.record_history_plays(iid, 1.0, ["s1|a", "s2|a", "s3|b"], source_timezone="UTC")
+    s.history.record_history_plays(iid, 2.0, ["s1|a"], source_timezone="UTC")
     top = s.discovery.interested_artists(limit=1)
     assert len(top) == 1 and top[0]["artist"] == "A"     # most-engaged only
 

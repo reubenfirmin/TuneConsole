@@ -130,6 +130,36 @@ def test_assemble_empty_without_bundles(store):
     assert ms.assemble_cards(store, now=10.0, epoch=0) == []
 
 
+@pytest.mark.parametrize("ppr_share", [0, 1])
+def test_cached_cards_respond_to_durable_dislikes_and_clear_without_rebuild(store, monkeypatch, ppr_share):
+    from yt_playlist.rec import embed, graduation, rec_params
+
+    _seed(store)
+    rec_params.set_param(store, "ppr_ab_share", ppr_share)
+    monkeypatch.setattr(ms, "select_modes", lambda *args, **kwargs: [1, 2, 3, 4])
+    payload = store.rec_surface.get_proposals("mode_bundles")
+    keys = [item["key"] for bucket in payload.values() if isinstance(bucket, dict)
+            for items in bucket.values() if isinstance(items, list) for item in items]
+    vectors = np.array([[1., 0.] if key.endswith("-0") else [0., 1.] for key in keys] + [[1., 0.]])
+    index = {key: i for i, key in enumerate(keys)}
+    index["disliked-seed"] = len(keys)
+    monkeypatch.setattr(embed, "load_vectors", lambda store: (keys + ["disliked-seed"], vectors, index))
+    payload["_ppr"] = {str(mid): [item["key"] for surf in ms.CARD_SURFACES
+                                for item in payload[str(mid)][surf]] for mid in range(1, 5)}
+    store.rec_surface.put_proposals("mode_bundles", payload, 1)
+    before = ms.assemble_cards(store, now=100, epoch=0)
+    graduation.apply_dislikes(store, {"disliked-seed": "DISLIKE"}, now=1)
+    # Outlive the 365-day ban and every transient layer. The prepared payload stays unchanged.
+    after = ms.assemble_cards(store, now=1000 * 86400, epoch=0)
+    assert all(card["tracks"][0]["key"].endswith("-0") for card in before)
+    assert all(not card["tracks"][0]["key"].endswith("-0") for card in after)
+    graduation.apply_dislikes(store, {"disliked-seed": "INDIFFERENT"}, now=1000 * 86400)
+    cleared = ms.assemble_cards(store, now=1000 * 86400, epoch=0)
+    assert [[t["key"] for t in c["tracks"]] for c in cleared] == [
+        [t["key"] for t in c["tracks"]] for c in before]
+    assert store.rec_surface.get_proposals("mode_bundles") == payload
+
+
 def test_full_buckets_do_not_pin_a_theme_to_one_framing(store):
     _seed(store)
     payload = store.rec_surface.get_proposals("mode_bundles")

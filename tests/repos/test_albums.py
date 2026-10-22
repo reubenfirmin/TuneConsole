@@ -7,7 +7,7 @@ import pytest
 from yt_playlist.core import albums
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations import registry, v023_albums
-from yt_playlist.core.migrations.runner import validate_catalog
+from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
 
 
@@ -19,7 +19,7 @@ def upgrade(store):
     if current<23:
         migrate(store.conn,registry=DRAFT)
         current = 23
-    validate_catalog(store.conn,current)
+    validate_version(store.conn,current)
 
 
 @pytest.fixture

@@ -2,6 +2,8 @@
 import itertools
 import logging
 import threading
+import time
+from collections import OrderedDict, deque
 
 from yt_playlist.providers import enrichment, waterfall
 from yt_playlist.core.activity import activity_for
@@ -115,12 +117,49 @@ def start_library_pool(ctx, parameters, exclude_keys):
     return job
 
 
+class EventLog:
+    """Bounded progress with absolute cursors; eviction never renumbers surviving events."""
+    def __init__(self, limit=1000):
+        if limit < 1:
+            raise ValueError("Event retention must be positive")
+        self._events = deque(maxlen=limit)
+        self._next = 0
+        self._lock = threading.Lock()
+
+    def append(self, event):
+        with self._lock:
+            self._next += 1
+            self._events.append(event)
+
+    def __len__(self):
+        with self._lock:
+            return len(self._events)
+
+    def __getitem__(self, index):
+        with self._lock:
+            return self._events[index]
+
+    def since(self, cursor):
+        with self._lock:
+            first = self._next - len(self._events)
+            cursor = min(cursor, self._next)
+            skipped = max(0, first - cursor)
+            return skipped, [(first + i + 1, event) for i, event in enumerate(self._events)
+                             if first + i >= cursor]
+
+    @property
+    def position(self):
+        with self._lock:
+            return self._next
+
+
 class SyncJob:
-    def __init__(self, job_id, kind=None):
+    def __init__(self, job_id, kind=None, *, on_done=None, event_limit=1000):
         self.id = job_id
         self.kind = kind      # "library" for a full/plays library sync; None for enrichment jobs
-        self.events = []      # list of event dicts; append-only (safe for one producer thread)
-        self.done = False
+        self.events = EventLog(event_limit)
+        self._done = False
+        self._on_done = on_done
         self.error = None
         self.outcome = None
         self.result = None
@@ -130,45 +169,90 @@ class SyncJob:
         self.parameters = None    # immutable request parameters for an on-demand pool build
         self.exclude_keys = []    # sibling mixes visible when a library pool was requested
 
+    @property
+    def done(self):
+        return self._done
+
+    @done.setter
+    def done(self, value):
+        if value and not self._done:
+            self._done = True
+            if self._on_done:
+                self._on_done(self)
+
+
 class SyncJobs:
-    def __init__(self):
+    """Retain at most 100 completed results for one hour, plus every active job."""
+    def __init__(self, *, completed_limit=100, completed_ttl=3600, event_limit=1000,
+                 clock=time.monotonic):
+        if completed_limit < 0 or completed_ttl < 0:
+            raise ValueError("Completed job retention must be nonnegative")
         self._jobs = {}
+        self._active = {}
+        self._completed = OrderedDict()
+        self._completed_limit = completed_limit
+        self._completed_ttl = completed_ttl
+        self._event_limit = event_limit
+        self._clock = clock
         self._counter = itertools.count(1)
         self._lock = threading.Lock()
 
+    def _prune(self):
+        now = self._clock()
+        while self._completed:
+            job_id, finished_at = next(iter(self._completed.items()))
+            if (len(self._completed) <= self._completed_limit
+                    and now - finished_at < self._completed_ttl):
+                break
+            self._completed.pop(job_id)
+            self._jobs.pop(job_id, None)
+
+    def _finish(self, job):
+        with self._lock:
+            self._active.pop(job.id, None)
+            self._completed[job.id] = self._clock()
+            self._prune()
+
+    def _create(self, kind):
+        self._prune()
+        job = SyncJob(next(self._counter), kind=kind, on_done=self._finish,
+                      event_limit=self._event_limit)
+        self._jobs[job.id] = self._active[job.id] = job
+        return job
+
     def create(self, kind=None) -> SyncJob:
         with self._lock:
-            job = SyncJob(next(self._counter), kind=kind)
-            self._jobs[job.id] = job
-            return job
+            return self._create(kind)
 
     def get(self, job_id) -> "SyncJob | None":
-        return self._jobs.get(job_id)
+        with self._lock:
+            self._prune()
+            return self._jobs.get(job_id)
 
     def latest(self, kind, parameters):
         with self._lock:
-            return next((job for job in reversed(list(self._jobs.values()))
+            self._prune()
+            return next((job for job in reversed(self._jobs.values())
                          if job.kind == kind and job.parameters == parameters), None)
 
     def create_or_rejoin(self, kind, parameters):
         with self._lock:
-            for job in reversed(list(self._jobs.values())):
+            for job in reversed(self._active.values()):
                 if job.kind == kind and job.parameters == parameters and not job.done:
                     return job, False
-            job = SyncJob(next(self._counter), kind=kind)
+            job = self._create(kind)
             job.parameters = parameters
-            self._jobs[job.id] = job
             return job, True
 
     def has_active(self) -> bool:
         with self._lock:
-            return any(not job.done for job in self._jobs.values())
+            return bool(self._active)
 
     def find_active_library(self) -> "SyncJob | None":
         """The most recent still-running library sync, so the dashboard's live console can attach to
         whatever sync is in flight (the automatic background sync as well as a manual one)."""
         with self._lock:
-            for job in reversed(list(self._jobs.values())):
+            for job in reversed(self._active.values()):
                 if job.kind == "library" and not job.done:
                     return job
         return None
@@ -176,7 +260,7 @@ class SyncJobs:
     def find_active(self, playlist_id) -> "SyncJob | None":
         """The most recent still-running enrichment job for a playlist (for page-refresh rejoin)."""
         with self._lock:
-            for job in reversed(list(self._jobs.values())):
+            for job in reversed(self._active.values()):
                 if job.playlist_id == playlist_id and not job.done:
                     return job
         return None

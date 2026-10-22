@@ -27,10 +27,11 @@ logger = logging.getLogger("yt_playlist.ops")
 
 
 class PlaylistOps:
-    def __init__(self, store, client_provider, now_fn):
+    def __init__(self, store, client_provider, now_fn, *, rating_updated=None):
         self.store = store
         self._client_provider = client_provider
         self.now_fn = now_fn
+        self._rating_updated = rating_updated
 
     def _clients(self):
         return self._client_provider()
@@ -183,6 +184,8 @@ class PlaylistOps:
         """Rate the exact requested video in the main account, including the playing song."""
         identity_id,client = client_for(self.store,self._clients())
         ratings.set_rating(self.store, identity_id, video_id, status, client, self.now_fn())
+        if self._rating_updated is not None:
+            self._rating_updated()
         return {"likeStatus": status}
 
     def _require_client(self, playlist_id):

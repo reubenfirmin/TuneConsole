@@ -9,9 +9,11 @@ def test_for_you_tier2_prefers_high_play_context(store):
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BX", None, None) for i in range(10)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 10, "h", 0.0), A)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 10, "h2", 0.0), B)
-    for _ in range(8):                                   # context A is heavily played
-        store.history.add_history_snapshot(iid, 1.0, ["a0|ax"])
-    store.history.add_history_snapshot(iid, 1.0, ["b0|bx"])      # context B barely
+    # Different listening days express the intended high-play context; repeated
+    # captures on one day would all be the same coarse observation.
+    for day in range(8):
+        store.history.record_history_plays(iid, -day * 86400.0, ["a0|ax"], source_timezone="UTC")
+    store.history.record_history_plays(iid, 1.0, ["b0|bx"], source_timezone="UTC")
     embed.build_and_store(store, dim=8)
 
     keys = [i.key for i in surfaces.for_you(store, now=2.0, limit=12)]
@@ -25,5 +27,5 @@ def test_for_you_unaffected_without_vectors(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Hit", "Fav", None, None)
     store.tracks.upsert_track("v2", "Bench", "Fav", None, None)
-    store.history.add_history_snapshot(iid, 1.0, ["hit|fav"])
+    store.history.record_history_plays(iid, 1.0, ["hit|fav"], source_timezone="UTC")
     assert surfaces.for_you(store, now=2.0)             # no vectors -> still works (no Tier-2)

@@ -34,8 +34,12 @@ def build(ctx):
             return {"ok": False, "reason": "Choose a library song to start radio."}
         if any(data.get(key) is not None and not isinstance(data[key], str) for key in ("video_id", "local_date", "menu_id")):
             return {"ok": False, "reason": "Invalid Radio Session request."}
+        playlist_id = data.get("playlist_id")
+        if playlist_id is not None and (type(playlist_id) is not int or not 0 < playlist_id < 2**63 or data.get("video_id")):
+            return {"ok": False, "reason": "Choose a playlist to start radio."}
         try:
-            return await radio.work.to_thread(radio.start, data.get("video_id"), data.get("local_date"), data.get("menu_id"))
+            return await radio.work.to_thread(radio.start, data.get("video_id"), data.get("local_date"),
+                                              data.get("menu_id"), playlist_id=playlist_id)
         except ValueError as exc:
             return {"ok": False, "reason": str(exc)}
 

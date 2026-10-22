@@ -82,10 +82,10 @@ const context = vm.createContext({
   chrome, WebSocket: Socket, URL, TextEncoder, crypto: webcrypto,
   console: {log() {}, warn() {}}, setTimeout() {}, clearTimeout() {},
 });
-vm.runInContext(fs.readFileSync('extension/background.js', 'utf8'), context);
+const {playback, sensors, requests} = require('./tests/extension_worker.cjs').loadWorker(context);
 (async () => {
   if (scenario === 'refresh_views') {
-    await vm.runInContext('refreshViewInYtmTab("PL_edited")', context);
+    await playback.refreshView('PL_edited');
     assert.deepEqual(sends, [
       {id: 1, type: 'refresh-view', playlist: 'PL_edited'},
       {id: 2, type: 'refresh-view', playlist: 'PL_edited'},
@@ -109,17 +109,16 @@ vm.runInContext(fs.readFileSync('extension/background.js', 'utf8'), context);
     assert.equal(removed.length, 0, 'user-opened views must stay open');
     assert.equal(activated.length, 0, 'loading an app tab must not steal focus');
   } else if (['audible', 'playing', 'paused', 'unknown', 'idle'].includes(scenario)) {
-    const result = await vm.runInContext('reloadUnresponsiveSensor(1)', context);
+    const result = await sensors.reloadUnresponsive(1);
     assert.equal(result, scenario === 'idle');
     assert.deepEqual(reloads, scenario === 'idle' ? [1] : []);
   } else if (['playpause_lost_reply', 'rating_lost_reply'].includes(scenario)) {
-    await vm.runInContext(scenario === 'playpause_lost_reply'
-      ? 'playPauseInYtmTab()' : 'rateInYtmTab("like", "v")', context);
+    await (scenario === 'playpause_lost_reply' ? playback.playPause() : playback.rate('like', 'v'));
     assert.equal(attempts, 1, 'a lost click reply must not replay the toggle');
     assert.equal(injections.length, 0);
   } else {
-    const result = await vm.runInContext('handleFrame({id: 7, method: "POST", '
-      + 'url: "https://music.youtube.com/youtubei/v1/browse/edit_playlist", body: {}})', context);
+    const result = await requests.handle({id: 7, method: 'POST',
+      url: 'https://music.youtube.com/youtubei/v1/browse/edit_playlist', body: {}});
     assert.equal(attempts, ['missing_receiver', 'lost_retry_reply'].includes(scenario) ? 2 : 1);
     assert.equal(result.status, scenario === 'missing_receiver' ? 200 : 0);
     if (['lost_reply', 'empty_reply', 'lost_retry_reply'].includes(scenario)) {
@@ -134,7 +133,7 @@ vm.runInContext(fs.readFileSync('extension/background.js', 'utf8'), context);
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("scenario", ["new", "loading", "timeout", "closed", "launch_first", "fetch_first"])
+@pytest.mark.parametrize("scenario", ["new", "loading", "timeout", "closed", "removed", "launch_first", "fetch_first"])
 def test_concurrent_fetches_share_document_and_sensor_readiness(scenario):
     node = shutil.which("node")
     if node is None:
@@ -203,10 +202,10 @@ const context = vm.createContext({
   setTimeout(fn, delay) { const id = ++serial; timers.set(id, {fn, delay}); return id; },
   clearTimeout(id) { timers.delete(id); },
 });
-vm.runInContext(fs.readFileSync('extension/background.js', 'utf8'), context);
+const {tabs: musicTabs, playback, requests} = require('./tests/extension_worker.cjs').loadWorker(context);
 const initialListeners = onUpdated.listeners.length;
 const flush = () => new Promise(resolve => setImmediate(resolve));
-const frame = id => context.handleFrame({id, method: 'POST', body: {},
+const frame = id => requests.handle({id, method: 'POST', body: {},
   url: 'https://music.youtube.com/youtubei/v1/browse/edit_playlist'});
 const runTimer = async delay => {
   const entry = [...timers].find(([, timer]) => timer.delay === delay);
@@ -219,16 +218,16 @@ const runTimer = async delay => {
 (async () => {
   const launchUrl = 'https://music.youtube.com/watch?v=requested&list=PL_requested';
   let launch;
-  if (scenario === 'launch_first') launch = context.navigateYtmTab(launchUrl);
-  const first = context.ensureYtmTab();
-  if (scenario === 'fetch_first') launch = context.navigateYtmTab(launchUrl);
+  if (scenario === 'launch_first') launch = playback.navigate(launchUrl);
+  const first = musicTabs.ensure();
+  if (scenario === 'fetch_first') launch = playback.navigate(launchUrl);
   // Requests arriving before the initial query resolves share the same operation too.
-  assert.equal(context.ensureYtmTab(), first);
+  assert.equal(musicTabs.ensure(), first);
   const responses = [frame(1)];
   await flush();
   if (launch) {
     await launch;
-    context.cancelPlaybackRescue();
+    playback.cancelRescue();
     assert.equal(tabs.length, 1, 'playback and fetch startup must share one tab');
     assert.equal(tabs[0].pendingUrl, launchUrl, 'the requested queue must win over fetch startup');
   }
@@ -240,11 +239,21 @@ const runTimer = async delay => {
     assert.equal(timers.size, 0);
     return;
   }
-  assert.equal(context.ensureYtmTab(), first, 'visible loading tab cannot bypass the shared wait');
+  assert.equal(musicTabs.ensure(), first, 'visible loading tab cannot bypass the shared wait');
   responses.push(frame(2), frame(3));
   await flush();
   assert.equal(messages.filter(type => type === 'fetch').length, 0);
   assert.equal(injections.filter(call => call.files).length, 0, 'do not inject into an uncommitted document');
+  if (scenario === 'removed') {
+    tabs = [];
+    for (const listener of [...chrome.tabs.onRemoved.listeners]) listener(1);
+    assert.equal(await first, null);
+    assert((await Promise.all(responses)).every(reply => reply.status === 0));
+    assert.equal(onUpdated.listeners.length, initialListeners);
+    assert.equal(chrome.tabs.onRemoved.listeners.length, 1, 'remove the temporary removal waiter');
+    assert.equal(timers.size, 0, 'tab removal must clear the document timeout immediately');
+    return;
+  }
   if (scenario === 'timeout') {
     await runTimer(15000);
     assert.equal(await first, null);

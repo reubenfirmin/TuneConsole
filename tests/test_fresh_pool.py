@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import _client
-from yt_playlist.rec import embed, fresh_pool, mode_surfaces, road_trip, surfaces
+from yt_playlist.rec import embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
 from yt_playlist.util.matching import identity_key
 
 
@@ -50,8 +50,8 @@ def test_populate_searches_each_selected_genre_and_keeps_only_new_matching_songs
                 dict(video_id="owned", title="Owned", artist="Owned artist", genre="House"),
                 dict(video_id="wrong", title="Wrong", artist="Other", genre="Classical")], []
     store.tracks.upsert_track("owned", "Owned", "Owned artist", None, None)
-    monkeypatch.setattr(road_trip, "genre_artists", artists)
-    monkeypatch.setattr(road_trip, "other_input_songs", songs)
+    monkeypatch.setattr(road_trip_candidates, "genre_artists", artists)
+    monkeypatch.setattr(road_trip_candidates, "other_input_songs", songs)
     encoded = []
     monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: encoded.append(s))
     messages = []
@@ -74,7 +74,7 @@ def test_populate_searches_each_selected_genre_and_keeps_only_new_matching_songs
 def test_populate_respects_genres_to_avoid(store, monkeypatch):
     seed_genres(store)
     requested = []
-    monkeypatch.setattr(road_trip, "genre_artists", lambda s, genre, limit: requested.append(genre) or [])
+    monkeypatch.setattr(road_trip_candidates, "genre_artists", lambda s, genre, limit: requested.append(genre) or [])
     monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: None)
     ctx = SimpleNamespace(store=store, client_provider=lambda: {1: object()}, now_fn=lambda: 1000)
     fresh_pool.populate(ctx, avoid_genres=["jazz", "techno"])

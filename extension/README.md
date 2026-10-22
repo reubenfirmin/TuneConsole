@@ -136,7 +136,7 @@ or request headers.
 
 Check the service worker console for the reason:
 - No connection: confirm the app is running on `127.0.0.1:8765`. If you changed the port, update
-  `BRIDGE_URL` in `background.js` to match.
+  `bridgeUrl` and `appOrigin` in `worker/config.js` to match.
 - "open music.youtube.com": no matching tab was found; open one and keep it open.
 - "not signed in": the `SAPISID` (or `__Secure-3PAPISID`) cookie was not found; sign in to
   `music.youtube.com` and retry.
@@ -154,7 +154,22 @@ the public site's Local Player button reuses an existing app tab.
 
 ## Files
 
-- `background.js`: auto-connecting WebSocket client, allowlist, auth header, relay to the content script.
+- `background.js`: constructs modules and registers Chrome lifecycle listeners. Module factories
+  register no listeners and do no work until called by this bootstrap.
+- `worker/config.js`: shared constants and throttled warnings.
+- `worker/transport.js`: sole WebSocket owner; reconnects after three seconds. Replies use the
+  socket that received the request. Reconnect probes sensors before asking for a fresh snapshot.
+- `worker/requests.js`: endpoint allowlist, cookie-derived auth, fetch delivery, and safe retries.
+- `worker/music_tabs.js`: sole music-tab creation queue and shared fetch-readiness promise.
+  Playback launches and library fetches use this same queue. Document/sensor waits run outside
+  the queue so a launch can navigate an already-starting tab. Waits end on load, removal, or timeout.
+- `worker/playback.js`: playback ownership, muted/playing tabs, pending plays, ordered report
+  relay, control routing, and one bounded autoplay rescue episode. Removal clears tab-owned state.
+- `worker/sensors.js`: isolated/MAIN probes, injection, resync, and idle-only reload cooldowns.
+- `worker/site.js`: public-site connection status and local-player tab activation, with its own
+  coalesced open request. It receives no music/library state.
+- `worker/radio.js`: saved-playlist companion injection and response delivery. It borrows playback's
+  tab selection and owns no tabs, locks, transport listeners, or background timers.
 - `content.js`: on-demand in-page fetch, driven by messages from the service worker.
 - `site_player.js` / `site_player.css`: the public site's local-player badge and setup dialog.
 - `manifest.json`: permissions and wiring for the above.
@@ -169,3 +184,58 @@ The package omits the development `key`, README, hidden files, and source maps.
 Radio Sessions use a saved playlist in the existing YouTube Music tab. Open
 `http://127.0.0.1:8765/#radio` to choose a starting song. Reload the extension after
 updating its source so the playlist observer is available.
+
+The old two-deck radio manager and `--enable-radio` preview package were removed in commit
+`0e149f3`. The saved-playlist companion above supersedes them and ships in the normal package;
+there is no remaining disabled deck flag or separate preview package to preserve.
+
+## Message contracts
+
+These are internal extension/backend messages, not a public web API. The manifest keeps the
+MAIN and isolated scripts on Music, and the public-site script on the two TuneConsole hosts.
+
+| Boundary | Messages and response |
+| --- | --- |
+| MAIN sensor to isolated content | `window.postMessage` carries `__tcSensorVersion: 4` plus `__tcNow` (player/bar metadata, queue, account availability, pause/mute), or `__tcPlayer` (raw playback event). The isolated receiver accepts messages from the same window, ignores obsolete sensor versions, and persists neither unknown-account nor unverified metadata snapshots as plays. |
+| MAIN fetch observer to isolated content | `__tcCuration` carries a bounded request body, endpoint, page URL, and account. Ratings include settled `success`/`httpStatus`; other actions report intent. The observer returns the page's original fetch promise unchanged. |
+| Isolated content to MAIN | `__tcSensorProbe: {version, id}` requests an immediate sample. MAIN echoes `__tcSensorProbeId` on `__tcNow`. Health and rating commands use this handshake instead of trusting interval timing. |
+| Worker to isolated content | `sensor-ping` replies with receiver readiness and MAIN version/age; `main: false` checks fetch readiness alone. `fetch` carries URL/method/body/auth and replies with status/body/time zone. Both worker and receiver enforce the youtubei allowlist. |
+| Worker playback commands to content | `rate` carries the displayed `videoId`, action, and optional desired `likeStatus`; a fresh MAIN sample must identify the same player and rating target before a click. `playpause` toggles; `pause` is idempotent; `ensure-playing` replies with actual playback readiness. `refresh-view` defers matching playlist reloads during playback; `resync-now` clears report deduplication and asks MAIN for a fresh snapshot. |
+| Isolated content to worker | `play`, metadata-bearing `now-heartbeat`, and raw `pevent`. Playback resolves tab ownership in arrival order before forwarding. Muted/non-owner observations cannot take over controls or persist plays. |
+| Worker to local backend | WebSocket `/bridge/ws`: the backend authenticates the browser's extension origin. `play` can persist a verified play/rating; `now-heartbeat` restores presence without persisting a play; `pevent` carries playback/curation observations; `sensor-health` reports counts, recovery, and errors independently of socket connectivity. |
+| Local backend to worker | Request `{id, url, method, body}` gets `{id, status, body, timeZone?}`. Only a proven missing receiver allows one retry; an uncertain delivered write is never replayed. Controls are `navigate`, `playpause`, `refresh-view`, and acknowledged `rate`/`radio-session` (legacy alias `playlist-session-poc`). `{ping: 1}` is a keepalive. |
+| Worker to MAIN radio companion | Inject on demand, then call `__tcRadioSession.update({playlist, videoIds, refresh})` using `chrome.scripting`. The response reports native playback/page adoption. This boundary has no separate playback ownership or tab creation. |
+| Public site to worker | Only `local-player-status` and `open-local-player`, checked against the sender's exact site origin. Replies expose connection/open status, never account, track, or library data. |
+
+## Extension verification
+
+Run checks serially using the repository's shared pytest lock. A busy lock identifies its owner;
+wait with `--test-lock-wait=60` or hand the request to that owner. Do not launch a second test process.
+
+- Focused behavioral checks: `uv run pytest tests/test_extension_*.py tests/test_playback_rescue.py`. Node executes the actual
+  imported worker modules and sensors with explicit Chrome/page doubles. Cases cover both sensor
+  worlds, partial injection, invalid/stale samples, repair, update safety, uncertain delivery,
+  mute/ownership changes, account/metadata transitions, launch/fetch interleavings, autoplay
+  rescue timing/focus/cleanup, and packaging.
+- Installed-extension checks: `uv run pytest -m browser tests/browser/test_extension_lifecycle_browser.py tests/browser/test_extension_site_player_browser.py`.
+  Install Chromium first with `uv run playwright install chromium`; OpenSSL supplies a temporary
+  certificate for the local Music fixture server. The persistent Chromium context loads the unpacked extension,
+  uses real MAIN/isolated worlds, native media/tabs, a real WebSocket, and real backend persistence.
+  Fixtures cover album-art MediaSession/player bars, separately delayed track/rating bindings,
+  unknown accounts, stopped/throttled sensors, reload/reconnect, navigation/removal, multiple-tab
+  controls, a dropped socket, and library fetches racing playback. Music's hostname resolves to a
+  local TLS server, including the first navigation of an extension-created tab. Google endpoints/private player APIs are fixtures;
+  these checks need no signed-in account and do not certify today's live Music markup.
+- CI runs `uv run pytest` and then `uv run pytest -m browser` in their respective existing jobs;
+  the new tests are included automatically. Each test session remains serial. Missing Node skips
+  mocked JS checks locally; CI must install Node. Chromium is required for the browser job.
+
+Before store submission, also check the actual signed-in Music site in headed Chrome: install the
+built ZIP unpacked, play a playlist/album, browse another music tab, route pause/rating from the app,
+change songs/accounts, verify history and rating attribution, reload the extension while playing,
+and confirm playback continues and the app reconnects. Try a background autoplay launch and a
+library refresh together; check that only one music tab is created. Edit a playlist during playback,
+then pause to verify the deferred refresh. On the public site, check offline setup and the connected
+Local Player button. Check the saved-playlist Radio flow separately, including pause/resume and
+confirmed playback/page adoption after a continuation change. Browser fixtures cannot establish
+current YouTube UI compatibility, OS window focus, or Chrome's real autoplay policy for each user.

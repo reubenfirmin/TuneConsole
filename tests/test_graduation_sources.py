@@ -6,7 +6,7 @@ from yt_playlist.rec import rec_params
 def test_source_weights_seeded():
     assert rec_params.SOURCE_W_VIBE == 1.0
     assert rec_params.SOURCE_W_LIKE == 1.0
-    assert rec_params.SOURCE_W_DISLIKE == 1.0
+    assert "source_w_dislike" not in rec_params.PARAMS_BY_NAME
     assert rec_params.SOURCE_W_SLIDER == 0.5
     assert rec_params.SOURCE_W_PLAY == 0.08
     assert rec_params.PLAY_GRAD_SESSION_CAP == 0.4
@@ -39,7 +39,7 @@ def _store_with_play_history(genre="Techno", n=10, now=1000.0, w_play=0.5):
         tid = s.tracks.upsert_track(f"v{i}", f"song{i}", "band", None, None)
         s.tracks.set_track_genre(tid, genre)
         keys.append(identity_key(f"song{i}", "band"))
-    s.history.add_history_snapshot(iid, now, keys)
+    s.history.record_history_plays(iid, now, keys, source_timezone="UTC")
     rec_params.set_param(s, "source_w_play", w_play)
     return s, now, f"genre:{genre_map.family(genre)}"
 

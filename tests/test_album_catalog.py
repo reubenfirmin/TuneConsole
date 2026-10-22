@@ -1,3 +1,5 @@
+import pytest
+
 from yt_playlist.library.album_catalog import remember_album
 
 
@@ -32,3 +34,18 @@ def test_metadata_only_album_entries_keep_source_links_without_ownership(store):
     assert store.conn.execute('SELECT COUNT(*) FROM album_track_links').fetchone()[0] == 8
     assert not store.rec_query.library_keys()
     assert not store.conn.execute('SELECT 1 FROM youtube_items').fetchone()
+
+
+@pytest.mark.parametrize('order', [(None, 'release'), ('release', None)])
+def test_missing_album_id_cannot_create_an_unlinked_duplicate(store, order):
+    for browse in order:
+        entry = store.tracks.upsert_track('v', 'Song', 'Artist', 'Release', 100,
+                                          album_browse_id=browse)
+        if browse is None and order[0] is None:
+            assert not store.conn.execute('SELECT 1 FROM albums').fetchone()
+        assert store.conn.execute('SELECT album FROM catalog_tracks WHERE id=?', (entry,)).fetchone()[0] == 'Release'
+    assert store.conn.execute('SELECT COUNT(*) FROM albums').fetchone()[0] == 1
+    assert list(map(tuple, store.conn.execute(
+        'SELECT p.provider_id,t.entry_id FROM album_tracks t JOIN album_provider_ids p ON p.album_id=t.album_id'
+    ))) == [('release', entry)]
+    assert not store.collection.saved_album_ids()

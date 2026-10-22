@@ -1,5 +1,4 @@
 """Playlists tab: browse every playlist, sort, assign user groups, and run bulk actions."""
-import asyncio
 from yt_playlist.core.activity import activity_for
 import json
 import re
@@ -113,7 +112,8 @@ def build(ctx) -> APIRouter:
         for i, t in enumerate(store.charts.playlist_tracks_detail(pid), start=1):
             if t["video_id"] == video_id:
                 return templates.TemplateResponse(request, "_partials/track_row.html",
-                    {"t": t, "idx": i, "is_generated": gen,
+                    {"t": t, "idx": i, "pl": store.playlists.get_playlist(pid),
+                     "is_generated": gen,
                      "mood_states": taste_analysis.track_mood_states(store, now_fn()) if gen else {}})
         return Response(status_code=204)         # row no longer present, nothing to swap
 
@@ -290,7 +290,8 @@ def build(ctx) -> APIRouter:
                         ctx.enrich_worker.trigger()
                 gen = _is_generated(pid)
                 return templates.TemplateResponse(request, "_partials/suggestion_added.html", {
-                    "t": added, "idx": len(details), "is_generated": gen,
+                    "t": added, "idx": len(details), "pl": store.playlists.get_playlist(pid),
+                    "is_generated": gen,
                     "mood_states": taste_analysis.track_mood_states(store, now_fn()) if gen else {},
                 })
         return _refresh()                             # reload so the new tracks drop into the table
@@ -347,7 +348,7 @@ def build(ctx) -> APIRouter:
     async def playlist_enrich_events(request: Request, job_id: int):
         job = ctx.jobs.get(job_id)
         if job is None:
-            raise HTTPException(status_code=404, detail="no such enrichment job")
+            raise HTTPException(status_code=404, detail="Enrichment job is missing or expired.")
 
         # Events are invalidations, including replay after reconnect. Render the complete row
         # from current state at delivery, so old events cannot undo later edits or user choices.
@@ -363,28 +364,18 @@ def build(ctx) -> APIRouter:
             rows = (store.charts.album_tracks_detail(job.album_browse) if job.album_browse is not None else
                     store.charts.playlist_tracks_detail(job.playlist_id) if job.playlist_id is not None else [])
             gen_flag = _is_generated(job.playlist_id) if job.playlist_id is not None else False
+            pl = store.playlists.get_playlist(job.playlist_id) if job.playlist_id is not None else None
             for index, track in enumerate(rows, start=1):
                 if track["video_id"] == vid:
                     mood_states = taste_analysis.track_mood_states(store, now_fn()) if gen_flag else {}
                     return {**ev, "genre": track["genre"], "year": track["year"],
                             "row_html": row_tmpl.render(t=track, idx=index, is_generated=gen_flag,
-                                                        mood_states=mood_states)}
+                                                        pl=pl, mood_states=mood_states)}
             return {k: v for k, v in ev.items() if k != "row_html"}  # removed tracks stay removed
 
-        async def gen():
-            sent = 0
-            while True:
-                while sent < len(job.events):
-                    yield f"data: {json.dumps(_with_row(job.events[sent]))}\n\n"
-                    sent += 1
-                if job.done:
-                    yield f"data: {json.dumps({'type': 'end', 'error': job.error})}\n\n"
-                    return
-                if await request.is_disconnected():
-                    return
-                await asyncio.sleep(0.1)
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        from yt_playlist.web.job_events import stream_job
+        return StreamingResponse(stream_job(job, request, transform=_with_row),
+                                 media_type="text/event-stream")
 
     @router.post("/playlist/{pid}/rename")
     async def playlist_rename(pid: int, request: Request):

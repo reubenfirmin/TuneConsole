@@ -24,6 +24,19 @@ def test_health_panel_renders_when_empty(store):
     assert "at least five modeled tracks" in r.text
 
 
+def test_health_panel_separates_spotify_history_and_explains_effects(store):
+    client = _client(store)
+    iid = store.identities.get_identities()[0].id
+    store.history.import_listening_events(iid,[('spotify-only',None,1700000000)],source='spotify_export')
+    store.history.import_listening_events(iid,[('takeout-only',None,1700000100)],source='takeout')
+    response = client.get('/taste/panels/health')
+    assert response.status_code == 200
+    assert 'Spotify listening history' in response.text
+    assert '1 timestamped plays across 1 library tracks' in response.text
+    assert 'gradually update saved taste preferences' in response.text
+    assert 'Manage or remove Spotify history' in response.text
+
+
 def test_health_panel_shows_graduation_counts(store):
     tid = store.tracks.upsert_track("v1", "song", "band", None, None)
     store.tracks.set_track_genre(tid, "Techno")

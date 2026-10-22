@@ -1,6 +1,52 @@
 import pytest
 
 
+@pytest.fixture
+def expiring_pool_jobs(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.jobs import SyncJobs
+
+    jobs = SyncJobs(completed_limit=0)
+    monkeypatch.setattr(webapp, "SyncJobs", lambda: jobs)
+    return jobs
+
+
+@pytest.mark.parametrize("kind,lane", [("fresh_pool", "fresh"), ("library_pool", "wheelhouse")])
+def test_expired_pool_stops_polling_and_refreshes_mixes(expiring_pool_jobs, live_app, page, kind, lane):
+    from playwright.sync_api import expect
+
+    job = expiring_pool_jobs.create(kind)
+    job.parameters = {"include_genres": [], "avoid_genres": [], "lane": lane, "epoch": 0}
+    path = f"/home/{kind.replace('_', '-')}/{job.id}"
+    page.goto(f"{live_app}/playlists")
+    page.evaluate("""async path => {
+        const board = document.createElement('div');
+        board.id = 'home-mode-cards';
+        board.setAttribute('x-data', '{focus: null}');
+        document.body.append(board);
+        await htmx.ajax('GET', path, {target: '#home-mode-cards', swap: 'innerHTML'});
+    }""", path)
+    card = page.locator("#home-mode-cards .fresh-pool")
+    expect(card).to_have_attribute("aria-busy", "true")
+    job.done = True
+    assert expiring_pool_jobs.get(job.id) is None
+    with page.expect_response(lambda response: response.url.endswith(path)) as poll:
+        pass
+    assert poll.value.status == 200
+    expect(card).to_have_attribute("aria-busy", "false")
+    expect(card.get_by_role("status")).to_contain_text("no longer available")
+    assert card.get_attribute("hx-get") is None
+    polls = []
+    page.on("request", lambda request: polls.append(request.url) if request.url.endswith(path) else None)
+    with page.expect_response("**/home/refresh-cards") as refreshed:
+        card.get_by_role("button", name="Refresh mixes", exact=True).click()
+    assert refreshed.value.status == 200
+    expect(page.locator("#home-mode-cards > .gen-card")).to_have_count(4)
+    # Wait longer than the old polling interval to check HTMX removed its timer.
+    page.wait_for_timeout(2200)
+    assert polls == []
+
+
 @pytest.mark.parametrize("reduced_motion", ["no-preference", "reduce"])
 def test_mix_hover_crossfades_even_with_reduced_motion(live_app, store, page, reduced_motion):
     from playwright.sync_api import expect
@@ -541,7 +587,9 @@ def test_quick_genres_show_favorites_and_search_reaches_the_rest(live_app, store
     iid = store.identities.upsert_identity("main", "cred", None, True)
     tid = store.tracks.upsert_track("fav", "Favorite", "Favorite artist", None, None)
     store.tracks.set_track_genre(tid, "Techno")
-    store.history.add_history_snapshot(iid, 1.0, [identity_key("Favorite", "Favorite artist")] * 30)
+    for day in range(30):
+        store.history.record_history_plays(iid, 1 - day * 86400,
+            [identity_key("Favorite", "Favorite artist")], source_timezone="UTC")
     bundles = store.rec_surface.get_proposals("mode_bundles")
     bundles["all"]["wheelhouse"] += [
         {"key": f"archive-{i}", "genre": f"Archive {i}"} for i in range(20)]

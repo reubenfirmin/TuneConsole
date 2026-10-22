@@ -84,17 +84,15 @@ def test_apply_setup_removes_identity_from_active_accounts_and_preserves_history
     brand = {"label": "brand", "credential_ref": "browser.json", "brand_account_id": "UC9"}
     rt.apply_setup([main, brand])
     ids = {i.label: i.id for i in store.identities.get_identities()}
-    snapshot = store.history.add_history_snapshot(ids["brand"], 1.0, ["song|artist"])
+    store.history.record_history_plays(ids["brand"], 1.0, ["song|artist"], source_timezone="UTC")
     playlist = store.playlists.upsert_playlist(ids["brand"], "PL1", "Brand mix", 0, "h", 1.0)
 
     rt.apply_setup([main])
 
     assert [(i.id, i.label) for i in store.identities.get_identities()] == [(ids["main"], "main")]
     assert set(rt.clients()) == {ids["main"]}
-    assert store.conn.execute("SELECT identity_id FROM history_snapshots WHERE id=?",
-                              (snapshot,)).fetchone()[0] == ids["brand"]
-    assert store.conn.execute("SELECT identity_key FROM history_items WHERE snapshot_id=?",
-                              (snapshot,)).fetchone()[0] == "song|artist"
+    assert store.history.listening_day_counts(ids["brand"]) == {"song|artist": 1}
+    assert store.history.listening_day_counts(ids["main"]) == {}
     assert store.playlists.get_playlist(playlist).identity_id == ids["brand"]
     assert list(store.conn.execute("PRAGMA foreign_key_check")) == []
 

@@ -5,6 +5,7 @@ import pytest
 from tests.conftest import FakeClient
 from yt_playlist.core import artists
 from yt_playlist.core.migrations import Migration,MigrationError,migrate
+from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.migrations import v027_artist_identity_redirects as upgrade
 from yt_playlist.core.migrations import v029_artist_provisional_names as names_upgrade
@@ -18,11 +19,9 @@ REGISTRY = (*MIGRATIONS[:28],Migration(29,'artist_provisional_names',names_upgra
 @pytest.fixture
 def store():
     s = Store(':memory:')
-    migrate(s.conn,registry=REGISTRY)
-    s._bind_repositories()
+    s.init_schema()
     yield s
-    upgrade.validate(s.conn)
-    names_upgrade.validate(s.conn)
+    validate_version(s.conn, len(MIGRATIONS))
     s.conn.close()
 
 

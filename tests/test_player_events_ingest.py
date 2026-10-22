@@ -94,16 +94,19 @@ def test_unconfigured_store_skips():
     ({"phase": "settled", "success": False, "httpStatus": 500}, False),
     ({"phase": "settled", "success": False, "httpStatus": 0, "error": "offline"}, False),
     ({"phase": "settled", "success": True, "httpStatus": 200}, True)])
-def test_rating_requires_confirmation_but_retains_raw_outcomes(monkeypatch, action, outcome, confirmed):
+def test_rating_requires_confirmation_but_retains_raw_outcomes(action, outcome, confirmed):
     s = _store()
     s.tracks.upsert_track("v", "Song", "Artist", "", None)
-    ratings, model = [], []
-    monkeypatch.setattr(s.tracks, "record_item_rating", lambda *a, **kw: ratings.append((a, kw)))
-    monkeypatch.setattr(player_events.ratings.graduation, "apply_dislikes", lambda *a, **kw: model.append((a, kw)))
     msg = {"kind": "rate", "url": f"https://music.youtube.com/youtubei/v1/like/{action}",
            "body": json.dumps({"target": {"videoId": "v"}}), **outcome}
     assert player_events.handle_player_event(_ctx(s), msg, 1000.0)
-    assert len(ratings) == len(model) == int(confirmed)
+    rating = s.tracks.item_rating(1, "v")
+    assert (rating is not None) == confirmed
+    if confirmed:
+        assert rating == {"status": action.upper(), "source": "api", "observed_at": 1000.0}
+    key = s.tracks.identity_key_for_video("v")
+    assert (key in s.rec_model.recent_liked_keys()) == (confirmed and action == "like")
+    assert (key in s.rec_model.disliked_identity_keys()) == (confirmed and action == "dislike")
     rows = s.player_events.player_events_since(0)
     assert len(rows) == 1
     payload = json.loads(rows[0]["payload"])

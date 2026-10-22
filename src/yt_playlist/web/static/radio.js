@@ -6,11 +6,74 @@ function radioHome(initial = {}) {
   const state = initial.state || {active: false};
   const seeds = initial.seeds?.length ? initial.seeds : cached.seeds || [];
   return {
-    state, seeds, visible: false, loading: !seeds.length, busy: false, error: '',
-    showSeeds: !state.active, loaded: false, seedsLoading: false, timer: null, playlistKey: '', destroyed: false,
+    state, seeds, visible: false, loading: !seeds.length, busy: false,
+    loaded: false, seedsLoading: false, timer: null, playlistKey: '', destroyed: false,
     busyAction: '', seedMenu: initial.seedMenu || cached.seedMenu, seenMenu: null, currentVideo: null, requestSerial: 0,
-    livePlayback: initial.playback ? {data: initial.playback, at: Date.now()} : null,
+    launchSong: initial.launchPlaylist || (state.active && state.starting ? state.tracks?.[0] || {} : null),
+    launchPlaylist: initial.launchPlaylist || null,
     selectedSlot: null, switchChoice: null, switchSending: false, switchSerial: 0,
+    hoveredSlot: null, focusedSlot: null, queueCenters: {},
+    get activeSlot() { return this.state.directions?.find(branch => branch.active)?.slot ?? 0; },
+    get previewSlot() { return this.hoveredSlot ?? this.focusedSlot; },
+    get connectedSlot() { return this.previewSlot ?? this.activeSlot; },
+    queueColor(slot) { return `var(--radio-queue-${slot % 4})`; },
+    measureQueues() {
+      const bounds = this.$refs.junction?.getBoundingClientRect();
+      if (!bounds?.width) return;
+      const centers = {};
+      this.$refs.directions?.querySelectorAll('.radio-direction').forEach(queue => {
+        const rect = queue.getBoundingClientRect();
+        centers[queue.dataset.slot] = (rect.left + rect.width / 2 - bounds.left) / bounds.width * 1000;
+      });
+      this.queueCenters = centers;
+    },
+    junctionStyle(slot, detail = false) {
+      const x = Math.round(this.queueCenters[slot] ?? (slot + .5) * 1000 / (this.state.directions?.length || 4));
+      const left = Math.max(12, Math.min(180, x - 85));
+      const right = Math.min(988, Math.max(820, x + 85));
+      // Two broad, tangent-continuous arms join a single stem. Keep every
+      // destination's commands identical so the whole drawing can morph.
+      const path = detail
+        ? `M${left + 12} 0 C${left + 12} 36 ${x - 6} 26 ${x - 6} 82 L${x - 6} 112 M${right - 12} 0 C${right - 12} 36 ${x + 6} 26 ${x + 6} 82 L${x + 6} 112`
+        : `M${left} 0 C${left} 48 ${x - 18} 22 ${x - 18} 82 L${x - 18} 112 L${x + 18} 112 L${x + 18} 82 C${x + 18} 22 ${right} 48 ${right} 0 L${right - 24} 0 C${right - 24} 26 ${x} 22 ${x} 68 C${x} 22 ${left + 24} 26 ${left + 24} 0 Z`;
+      return `d: path("${path}")`;
+    },
+    layoutHistory() {
+      const scroller = this.$refs.playlist?.querySelector('.radio-track-scroll');
+      const space = scroller?.querySelector('.radio-history-space');
+      const history = scroller?.querySelector('.radio-history');
+      if (!space || !history || !scroller.clientHeight) return;
+      const headerHeight = scroller.querySelector('thead')?.getBoundingClientRect().height || 0;
+      const rowHeight = history.querySelector('tr')?.getBoundingClientRect().height || 48;
+      const height = Math.max(0, scroller.clientHeight - headerHeight - history.getBoundingClientRect().height);
+      scroller.style.setProperty('--radio-space-height', height + 'px');
+      scroller.style.setProperty('--radio-table-head', headerHeight + 'px');
+      const layoutKey = [scroller.clientWidth, scroller.clientHeight, height, history.lastElementChild?.dataset.vid].join(':');
+      if (space.dataset.layout === layoutKey) return;
+      space.dataset.layout = layoutKey;
+      const count = Math.ceil(height / rowHeight);
+      space.replaceChildren(...Array.from({length: count}, () => {
+        const row = document.createElement('tr');
+        row.className = 'radio-empty-row';
+        row.style.height = height / count + 'px';
+        const cell = row.insertCell();
+        cell.colSpan = scroller.querySelector('thead tr')?.children.length || 10;
+        return row;
+      }));
+      // Keep the newest played row at the junction, including after a table swap.
+      scroller.scrollTop = scroller.scrollHeight;
+    },
+    get launching() { return this.busyAction === 'start' || !!this.launchSong || (this.state.active && this.state.starting); },
+    get showSeeds() { return !this.state.active && !this.launching; },
+    get launchTracks() {
+      const tracks = [this.launchSong, ...(this.launchPlaylist?.tracks || []),
+        ...(this.state.tracks || []).slice(0, 8), ...this.seeds].filter(song => song?.video_id);
+      return tracks.filter((song, index) => tracks.findIndex(t => t.video_id === song.video_id) === index).slice(0, 8);
+    },
+    launchPosition(index) {
+      const angle = index * Math.PI / 4;
+      return {x: 50 + 38 * Math.cos(angle), y: 50 + 34 * Math.sin(angle)};
+    },
     tableKey(state) {
       return JSON.stringify([state.local_id, (state.tracks || []).slice(0, state.history_count || 0).map(t => t.video_id)]);
     },
@@ -25,28 +88,40 @@ function radioHome(initial = {}) {
           ({...branch, active: branch.slot === slot}))};
       }
       this.state = state;
-      this.showSeeds = !state.active;
+      if (state.active && state.starting && !this.launchSong) this.launchSong = state.tracks?.[0] || {};
     },
-    playbackChanged(data) {
-      this.livePlayback = {data, at: Date.now()};
-      const playing = data.now_playing;
-      if (this.state.active && !this.state.starting && (!data.connected || !playing || playing.paused ||
-          playing.playlist_ytm_id !== this.state.playlist_id)) {
-        ++this.requestSerial;
-        this.applyState({...this.state, active: false});
-        this.cacheView();
-        if (!this.loaded) this.loadSeeds();
+    finishLaunch() {
+      if (!this.launchSong || this.busyAction === 'start') return;
+      if (!this.state.active) {
+        console.debug('[Radio] launch returned to song choices', this.state.error);
+        this.launchSong = null;
+        this.launchPlaylist = null;
+      } else if (!this.state.starting && this.playlistKey === this.tableKey(this.state)) {
+        this.launchSong = null;
+        this.launchPlaylist = null;
       }
     },
     init() {
+      const url = new URL(location.href);
+      if (url.searchParams.has('radio_playlist')) {
+        url.searchParams.delete('radio_playlist');
+        history.replaceState(null, '', url.pathname + url.search + url.hash);
+      }
+      if (this.launchPlaylist) {
+        this.$nextTick(() => this.start(this.launchPlaylist, true));
+        return;
+      }
       this.$nextTick(() => {
         if (!this.state.active) return;
         const key = this.tableKey(this.state);
         if (this.$refs.playlist.querySelector('table')) this.playlistKey = key;
         else if (cached.playlistKey === key && cached.playlistHtml) {
-          htmx.swap(this.$refs.playlist, cached.playlistHtml, {swapStyle: 'innerHTML'});
+          htmx.swap(this.$refs.playlist, cached.playlistHtml, {swapStyle: 'innerHTML'},
+            {eventInfo: {target: this.$refs.playlist}});
           this.playlistKey = key;
         }
+        this.$refs.playlist.querySelector('.radio-history-space')?.removeAttribute('data-layout');
+        this.fitSpace();
       });
       if (!this.state.active) this.loadSeeds();
     },
@@ -71,9 +146,6 @@ function radioHome(initial = {}) {
       if (this.visible === value) return;
       this.visible = value;
       if (value) {
-        if (this.livePlayback && Date.now() - this.livePlayback.at <= 8000)
-          this.playbackChanged(this.livePlayback.data);
-        else if (this.state.active && !this.state.starting) this.applyState({...this.state, active: false});
         this.$nextTick(() => this.fitSpace()); this.poll();
       }
       else { clearTimeout(this.timer); this.timer = null; }
@@ -81,11 +153,17 @@ function radioHome(initial = {}) {
     fitSpace() {
       if (!this.visible) return;
       for (const [element, variable] of [[this.$refs.seeds, '--radio-grid-height'],
+                                        [this.$refs.launch, '--radio-launch-height'],
                                         [this.$refs.session, '--radio-session-height']]) {
         if (!element?.getClientRects().length) continue;
         const top = element.getBoundingClientRect().top + window.scrollY;
-        element.style.setProperty(variable, Math.max(320, window.innerHeight - top - 20) + 'px');
+        const height = Math.max(320, window.innerHeight - top - 20);
+        element.style.setProperty(variable, height + 'px');
+        if (element === this.$refs.session)
+          element.style.setProperty('--radio-history-height', Math.max(140, Math.min(height * .52, window.innerHeight * .5 - top - 16)) + 'px');
       }
+      this.layoutHistory();
+      this.measureQueues();
     },
     destroy() { this.destroyed = true; clearTimeout(this.timer); },
     async json(path, options) {
@@ -106,9 +184,11 @@ function radioHome(initial = {}) {
         if (!response.ok) throw new Error('Could not load the session playlist.');
         const html = await response.text();
         if (this.destroyed || serial !== this.requestSerial || this.busy) return;
-        htmx.swap(this.$refs.playlist, html, {swapStyle: 'innerHTML'});
+        htmx.swap(this.$refs.playlist, html, {swapStyle: 'innerHTML'},
+          {eventInfo: {target: this.$refs.playlist}});
         this.playlistKey = key;
       }
+      this.finishLaunch();
       this.cacheView();
       this.$nextTick(() => {
         this.fitSpace();
@@ -119,14 +199,6 @@ function radioHome(initial = {}) {
           row.classList.toggle('radio-playing', on);
           if (on) row.setAttribute('aria-current', 'true');
           else row.removeAttribute('aria-current');
-          if (on && current !== this.currentVideo) {
-            const scroller = this.$refs.playlist.querySelector('.radio-track-scroll');
-            const bounds = scroller?.getBoundingClientRect();
-            const rect = row.getBoundingClientRect();
-            const header = scroller?.querySelector('thead')?.offsetHeight || 0;
-            if (bounds && (rect.top < bounds.top + header || rect.bottom > bounds.bottom))
-              scroller.scrollTop += rect.top - bounds.top - header;
-          }
         });
         this.currentVideo = current;
         if (this.visible && state.active && state.menu_id && this.seenMenu !== state.menu_id) {
@@ -139,24 +211,40 @@ function radioHome(initial = {}) {
         }
       });
     },
-    async start(song) {
+    async start(song, fromPlaylist = false) {
       if (this.busy) return;
-      this.busy = true; this.busyAction = 'start'; this.error = '';
+      ++this.requestSerial;
+      this.launchPlaylist = fromPlaylist ? song : null;
+      this.launchSong = song;
+      this.busy = true; this.busyAction = 'start';
+      this.$nextTick(() => this.fitSpace());
       const now = new Date();
       const localDate = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, '0'),
                          String(now.getDate()).padStart(2, '0')].join('-');
       try {
         const result = await this.json('start', {method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({video_id: song.video_id, local_date: localDate, menu_id: this.seedMenu})});
-        if (!result.ok) throw new Error(result.reason || 'Could not start radio.');
+          body: JSON.stringify({...(fromPlaylist ? {playlist_id: song.id} : {video_id: song.video_id, menu_id: this.seedMenu}),
+                                local_date: localDate})});
+        if (!result.ok) {
+          console.debug('[Radio] launch returned to song choices', result.reason);
+          this.launchSong = null;
+          this.launchPlaylist = null;
+          return;
+        }
         this.applyState(result);
-      } catch (error) { this.error = error.message; }
-      finally { this.busy = false; this.busyAction = ''; await this.refresh().catch(error => { this.error = error.message; }); }
+      } catch (error) {
+        console.debug('[Radio] launch request interrupted', error);
+        // The server may have accepted the launch before the response was
+        // lost. Let status polling settle it without issuing another start.
+      } finally {
+        this.busy = false;
+        this.busyAction = '';
+        await this.refresh().catch(error => console.debug('[Radio] refresh deferred', error));
+      }
     },
     select(branch) {
       if (this.busy || branch.active || !this.state.active) return;
       ++this.requestSerial;
-      this.error = '';
       this.selectedSlot = branch.slot;
       this.switchChoice = {proposal_id: branch.id, menu_id: this.state.menu_id,
         serial: ++this.switchSerial};
@@ -190,18 +278,32 @@ function radioHome(initial = {}) {
         if (!this.destroyed) await this.refresh().catch(error => console.debug('[Radio] refresh deferred', error));
       }
     },
-    async stop() {
+    async newRadio() {
+      if (this.busy) return;
+      ++this.requestSerial;
       this.switchChoice = null; this.selectedSlot = null; ++this.switchSerial;
       this.busy = true;
-      try { await this.json('stop', {method: 'POST'}); }
-      catch (error) { this.error = error.message; }
-      finally { this.busy = false; await this.refresh().catch(error => { this.error = error.message; }); }
+      try {
+        const state = await this.json('stop', {method: 'POST'});
+        this.launchSong = null;
+        this.launchPlaylist = null;
+        this.applyState(state);
+      }
+      catch (error) {
+        console.debug('[Radio] new radio request interrupted', error);
+      } finally {
+        this.busy = false;
+        await this.refresh().catch(error => console.debug('[Radio] refresh deferred', error));
+      }
     },
     async poll() {
       clearTimeout(this.timer);
       if (this.destroyed || !this.visible) return;
       try { if (!this.busy) await this.refresh(); }
-      catch (error) { this.error = error.message; this.loading = false; }
+      catch (error) {
+        console.debug('[Radio] refresh deferred', error);
+        this.loading = false;
+      }
       if (!this.destroyed && this.visible) this.timer = setTimeout(() => this.poll(), 2000);
     },
   };

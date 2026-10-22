@@ -2,6 +2,7 @@
 import json
 import time
 
+from yt_playlist.core.discovery_sources import reconcile_artist_sources
 from yt_playlist.util.matching import normalize
 
 
@@ -63,6 +64,9 @@ def reconcile_provisional(conn, previous, target, *, source, now=None):
         conn.execute(f'UPDATE {table} SET artist_id=? WHERE artist_id=?',(target,previous))
     conn.execute('INSERT OR IGNORE INTO artist_aliases SELECT ?,alias,source FROM artist_aliases WHERE artist_id=?',
                  (target,previous))
+    reconcile_artist_sources(conn,previous,target)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='spotify_history_listens'").fetchone():
+        conn.execute('UPDATE spotify_history_listens SET artist_id=? WHERE artist_id=?', (target,previous))
 
     for table,clock in (('artist_scans','scanned_at'),('rec_artist_similar','fetched_at'),
                         ('discovered_artists','found_at')):

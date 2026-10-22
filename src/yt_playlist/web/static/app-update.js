@@ -62,6 +62,10 @@ function appUpdate() {
           if (state.busy) await new Promise(resolve => setTimeout(resolve, 2000));
         } while (state.busy && !this.destroyed);
         if (this.destroyed) return;
+        if (state.phase !== 'restarting') {
+          this.apply(state);
+          return;
+        }
         this.phase = 'restarting';
         this.message = 'Restarting TuneConsole…';
         const deadline = Date.now() + 60000;
@@ -82,6 +86,7 @@ function appUpdate() {
         this.message = error.message;
       } finally {
         this.pending = false;
+        if (!['restarting', 'reconnect'].includes(this.phase)) this.refresh();
       }
     },
     reconnect() { window.location.reload(); }

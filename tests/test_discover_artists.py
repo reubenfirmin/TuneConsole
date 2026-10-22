@@ -25,7 +25,7 @@ def test_new_artists_taste_pinned_and_cached(store, monkeypatch):
     band = [store.tracks.upsert_track(f"c{i}", f"C{i}", "CoreBand", None, None) for i in range(10)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PC", "Core Mix", 10, "h", 0.0), band)
     for _ in range(5):
-        store.history.add_history_snapshot(iid, 1.0, ["c0|coreband"])   # play -> anchor + playlist weight
+        store.history.record_history_plays(iid, 1.0, ["c0|coreband"], source_timezone="UTC")
     embed.build_and_store(store, dim=4)
     store.settings.set_setting("lastfm_api_key", "KEY")
 

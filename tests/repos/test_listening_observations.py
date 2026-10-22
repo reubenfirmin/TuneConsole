@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from tests.historical_captures import retained_capture
 from yt_playlist.core.migrations import Migration,MigrationError,migrate
 from yt_playlist.core.migrations import registry,v026_listening_observations as upgrade
 from yt_playlist.core.migrations.runner import Context
@@ -18,11 +19,7 @@ def stamp(local,zone):
 @pytest.fixture
 def listening_store():
     store = Store(':memory:')
-    # Pin the installed predecessor and apply this migration independently.
-    migrate(store.conn,registry=registry.MIGRATIONS[:25])
-    with store.conn:
-        upgrade.apply(store.conn,Context(1))
-    store._bind_repositories()
+    store.init_schema()
     store.identities.upsert_identity('main','bridge',None,True)
     store.identities.upsert_identity('other','bridge','other',False)
     yield store
@@ -113,7 +110,7 @@ def test_local_calendar_overlap_in_both_arrival_orders(listening_store,zone,loca
     assert s.conn.execute('SELECT day FROM listening_days').fetchone()[0]==local[:10]
     assert {r[0] for r in s.conn.execute('SELECT source FROM play_event_sources')}=={'live','takeout'}
     assert s.conn.execute('SELECT COUNT(*) FROM listening_observations').fetchone()[0]==1
-    assert s.conn.execute('SELECT COUNT(*) FROM history_items').fetchone()[0]==0
+    assert s.conn.execute('SELECT COUNT(*) FROM listening_capture_receipts').fetchone()[0]==0
 
 
 def test_repeated_events_and_coarse_days_are_distinct_units(listening_store):
@@ -132,13 +129,13 @@ def test_removing_one_source_preserves_overlaps_and_unknown_legacy(listening_sto
     ts = stamp('2026-10-20T12:00:00','UTC')
     s.history.import_listening_events(1,[('both',None,ts),('spotify-only',None,ts)],source='spotify')
     s.history.import_listening_events(1,[('both',None,ts)],source='takeout')
-    s.history.add_history_snapshot(1,ts,['unknown'],source='unknown')
+    retained_capture(s.conn,1,ts,['unknown'],source='unknown')
     s.history.record_history_plays(1,ts,['independent'],source_timezone='UTC')
-    raw = list(map(tuple,s.conn.execute('SELECT * FROM history_items')))
+    raw = list(map(tuple,s.conn.execute("SELECT * FROM listening_observations WHERE precision='legacy_unknown'")))
     s.history.remove_listening_source('spotify',1)
     assert s.history.event_play_counts()=={'both':1}
     assert s.history.listening_day_counts()=={'both':1,'independent':1,'unknown':1}
-    assert list(map(tuple,s.conn.execute('SELECT * FROM history_items')))==raw
+    assert list(map(tuple,s.conn.execute("SELECT * FROM listening_observations WHERE precision='legacy_unknown'")))==raw
     assert s.conn.execute('SELECT source FROM play_events').fetchone()[0]=='takeout'
     with pytest.raises(ValueError,match='Unknown legacy'):
         s.history.remove_listening_source('unknown')

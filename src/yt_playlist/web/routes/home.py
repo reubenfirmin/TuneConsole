@@ -4,8 +4,6 @@ from yt_playlist.core.activity import activity_for
 from yt_playlist.core.accounts import client_for,main_client
 import json
 import time
-import uuid
-from datetime import datetime
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
@@ -13,8 +11,9 @@ from fastapi.responses import JSONResponse
 from yt_playlist.core import updatecheck
 from yt_playlist.library import executor
 from yt_playlist.util import genre_map
-from yt_playlist.rec import actions, arc_energy, embed, graduation, home_audit, home_themes, home_vibe, journeys, mix_tuning, onboarding, ordering, rec_params, recipes, surfaces, taste_analysis, into_recently
+from yt_playlist.rec import actions, graduation, home_cards, home_themes, home_vibe, mix_tuning, onboarding, rec_params, surfaces, taste_analysis, into_recently
 from yt_playlist.rec import measurement
+from yt_playlist.rec.home_cards import _epoch, _proto
 from yt_playlist.rec.trend_rollups import last_complete_month
 from yt_playlist.providers import wikipedia, lastfm
 from yt_playlist.web.context import form_float
@@ -23,15 +22,7 @@ from yt_playlist.web.spotify_import import current_job as current_spotify_import
 from yt_playlist.web.theme import genre_tint
 
 # How many tracks each generated proto-playlist offers.
-PROTO_SIZE = 12
-# How deep each card fetches. This is the card's ENTIRE universe: the theme picks from it and every
-# refresh draws its 12 tracks from it, so at PROTO_SIZE * 5 = 60 a card cycled the same 60 tracks
-# forever (28 artists / 11 genres on a 4k-track library) and refreshes felt like variations on one
-# card. Depth is close to free here - the surfaces score every modelled track regardless of `limit`,
-# so the query cost is flat (measured: explore 194ms at 60, 202ms at 300) - and it buys the variety
-# back: 142 artists and 35 genres at 300. Not deeper still only because a card should be drawn from
-# tracks that genuinely fit, and the tail of a taste ranking stops being that.
-ROTATION_POOL = PROTO_SIZE * 25
+PROTO_SIZE = home_cards.PROTO_SIZE
 ARTISTS_PER_CARD = 10              # new-artist tiles fetched per epoch (grid caps 5 cols, clamps to 2 rows)
 ALBUMS_PER_CARD = 15               # discover album tiles fetched per epoch (grid caps 5 cols, clamps to 3 rows)
 # Home cards that rotate. Each holds its content for erosion_view_cap real Home visits, then advances
@@ -85,179 +76,19 @@ def takeout_nag_due(store, now=None) -> bool:
     return True
 
 
-def _proto(store, lane, label, items, now):
-    """Shape a recommendation lane into a dated, saveable proto-playlist card.
-
-    The note describes THIS card's actual mix (recipes.theme_sentence), not just its lane: each card
-    also rolls a theme, so two cards from one lane can be different music entirely and a fixed
-    per-lane line ("Deeper into what you already love") described neither of them."""
-    when = datetime.fromtimestamp(now).strftime("%B %-d %Y")   # e.g. "June 21 2026"
-    tracks = items[:PROTO_SIZE]
-    genres, _ = recipes.theme_counts(store, tracks)
-    return {"lane": lane, "label": label, "name": f"{label} - {when}",
-            "note": recipes.theme_sentence(store, lane, tracks), "tracks": tracks,
-            "genres": list(genres),
-            # #50: only the Fresh (out-of-corpus discovery) card carries persistent per-row feedback.
-            # Owned-track proto cards stay curate-before-listen (client-side remove only).
-            "feedback_surface": "for_you" if lane == "fresh" else None}
-
-
-def _order_by_journey(store, items, journey, seed):
-    """Order proto-card items (ForYouItem objects in preview, plain dicts on the mode path) by the
-    rolled DJ JOURNEY, attaching the per-track features journey_order needs (genre, real-audio energy,
-    decade, plays, recency). Ordering happens here, not at save, so the preview IS the playlist
-    (WYSIWYG): a Save keeps the rows you didn't prune, in the order you see."""
-    items = ordering.attach_genres(store, items)
-    _f = ordering._field
-    keys = [_f(it, "key") or "" for it in items]
-    dao = store.rec_query
-    decades, lastp, plays = dao.track_decades(keys), dao.track_last_played(keys), store.rec_query.play_counts()
-    genres = {(_f(it, "key") or ""): (_f(it, "genre") or "") for it in items}
-    arc = arc_energy.arc_energies(keys, genres, dao.track_audio_features())   # real-audio energy (#37)
-
-    def feat(it):
-        k, g = _f(it, "key") or "", _f(it, "genre") or ""
-        return {"artist": _f(it, "artist") or "", "genre": g, "energy": arc.get(k, genre_map.energy(g)),
-                "decade": decades.get(k), "plays": plays.get(k, 0), "recency": lastp.get(k, 0.0)}
-
-    return journeys.journey_order(items, journey, seed, feat)
-
-
-# The order the four cards roll their themes in. Each avoids what the ones before it took, so the
-# row explores four corners of your taste instead of four views of one - which is the whole point of
-# offering four: which card you reach for only means something if they differ.
-_ROW_LANES = ("wheelhouse", "explore", "comfort", "fresh")
-
-
-def _rolled_theme(store, lane, pool, now):
-    """This lane's theme, rolled from what its own pool holds and away from its siblings' themes.
-
-    Seeded per (lane, epoch): with the epoch alone every card in the row drew the SAME random
-    sequence and so the same genre, era and journey. The avoidance set is rebuilt by re-rolling the
-    earlier lanes, which is deterministic, so a single-card refresh lands the same theme it would
-    have had in a full render. Siblings are rolled against the library distribution (their own pools
-    aren't in hand here) purely to know what to steer clear of."""
-    dists = recipes.pool_facets(store, pool)
-    avoid = {"genres": set(), "eras": set()}
-    for other in _ROW_LANES:
-        this_one = other == lane
-        recipe = recipes.roll_recipe(store, other, seed=f"{other}:{_epoch(store, other)}",
-                                       now=now, avoid=avoid, dists=dists if this_one else None)
-        if this_one:
-            return recipe
-        avoid["genres"] |= set(recipe.get("facets", {}).get("genres", []))
-        avoid["eras"] |= set(recipe.get("facets", {}).get("eras", []))
-    return recipes.roll_recipe(store, lane, seed=f"{lane}:{_epoch(store, lane)}", now=now,
-                                 dists=dists)
-
-
-def _carded(store, lane, label, pool, now):
-    """A proto-card built from a rolled recipe: roll the theme + journey (seeded by the card's lane
-    and rotation epoch so it's stable across steer/stance previews), focus the POOL on the theme,
-    take the card's slice from what's left, then order it by the rolled JOURNEY (energy arc, eras,
-    deep dive…). Recipes predating journeys fall back to 'shuffle'.
-
-    The slice is taken AFTER the theme, not before. Rotating first and theming the twelve tracks that
-    came out let the theme reorder a card it could not change - so every refresh returned the pool's
-    dominant genre no matter what rolled."""
-    pool = ordering.attach_genres(store, list(pool))     # the theme is rolled from these genres
-    recipe = _rolled_theme(store, lane, pool, now)
-    focused = recipes.theme_filter(store, pool, recipe.get("facets", {}))
-    # Rotate within the themed head of the pool: still a fresh slice each epoch, but one drawn from
-    # the tracks that match, rather than from the whole pool.
-    focused = home_vibe.rank(store, now, focused)
-    items = (focused[:PROTO_SIZE] if home_vibe.current(store, now) else
-             surfaces.rotate_sample(focused[:PROTO_SIZE * 2], PROTO_SIZE, _epoch(store, lane)))
-    # roll_recipe forces Fresh to journey="shuffle" (unowned proposals have no plays/recency signal),
-    # so the stored recipe and this preview ordering agree. Owned lanes order by their rolled journey.
-    items = _order_by_journey(store, items, recipe.get("journey", "shuffle"),
-                              recipe.get("dj", {}).get("seed", 0))
-    p = _proto(store, lane, label, items, now)
-    p["recipe"] = recipe
-    if vibe := home_vibe.current(store, now):
-        p["recipe"]["vibe"] = vibe
-    return p
-
-
-# Labels for the four refreshable Home cards, by their internal lane name.
-_CARD_LABELS = {"wheelhouse": "More in your wheelhouse", "explore": "From your catalog",
-                "comfort": "Comfort listening", "fresh": "Fresh songs"}
-
-def _served_model_version(store, ranker, now=None):
-    return measurement.serving_policy(store, time.time() if now is None else now, ranker or "lane")[0]
-
-
-def _record_served_cards(store, protos, now):
-    """#113 log only the final twelve-track cards handed to the template."""
-    for card_position, proto in enumerate(protos, 1):
-        rows = []
-        ranker = proto.get("ranker") or "lane"
-        comparison = uuid.uuid4().hex
-        experiment = proto.get("experiment")
-        if experiment:
-            experiment = {**experiment, "comparison_id": comparison}
-        for track_position, track in enumerate(proto["tracks"], 1):
-            key = track.get("key") if isinstance(track, dict) else getattr(track, "key", None)
-            details = dict(track) if isinstance(track, dict) else vars(track).copy()
-            rows.append({**details, "key": key, "rank": track_position, "lane": proto["lane"],
-                         "mode_id": proto.get("mode_id"),
-                         "serving_context": {**details.get("serving_context", {}),
-                                        "ranker": ranker, "card_position": card_position,
-                                        "track_position": track_position,
-                                        "recipe": proto.get("recipe", {})}})
-        share = experiment["share"] if experiment else None
-        propensity = (share if ranker == "ppr" else 1 - share) if share is not None else 1.0
-        measurement.record_recommendations(store, "home", rows, now, ranker=ranker,
-            request_id=comparison + ":live", experiment=experiment, propensity=propensity)
-        if experiment and (shadow := proto.get("counterfactual")):
-            measurement.record_recommendations(store, "home", shadow["tracks"], now,
-                lane=proto["lane"], mode_id=proto.get("mode_id"), ranker=shadow["ranker"],
-                request_id=comparison + ":counterfactual", experiment=experiment,
-                policy_kind="counterfactual", propensity=0.0,
-                provenance={"recipe": proto.get("recipe", {})})
-
-
-def _one_card(store, card, now, *, avoid_genres=(), include_genres=()):
-    """Build a single Home card's proto from its full candidate POOL. Used by the per-card Refresh
-    route after the rotation has been advanced. Returns None if the card is empty.
-
-    The pool is handed over whole: _carded rolls the theme from it and takes the card's slice after
-    focusing on that theme. Slicing here first (as this used to) left the theme nothing to choose
-    from - it could only reorder twelve tracks that were picked before it was known."""
-    if card == "wheelhouse":
-        pool = list(surfaces.for_you(store, now, limit=ROTATION_POOL))
-    elif card == "explore":
-        fy = {i.key for i in surfaces.for_you(store, now, limit=ROTATION_POOL)}
-        pool = [i for i in surfaces.explore_for_you(store, now, limit=ROTATION_POOL) if i.key not in fy]
-    elif card == "comfort":
-        pool = list(surfaces.comfort_listening(store, now, limit=ROTATION_POOL))
-    elif card == "fresh":
-        from yt_playlist.rec import fresh_pool
-        # Use the worker/job's prepared ranking. A missing pool renders a clickable skeleton;
-        # scoring thousands of discoveries here would stall page loads and genre selection.
-        pool = fresh_pool.pick(store, now, include_genres, avoid_genres, size=ROTATION_POOL)
-        # NB: #53 offered-count is stamped by the CALLER (the /home/cards loop or the per-card refresh
-        # route), not here, so the cold-start fallback path doesn't double-count fresh tracks.
-    else:
-        return None
-    if avoid_genres or include_genres:
-        pool = home_themes.matching_genres(store, pool, avoid=avoid_genres, include=include_genres)
-    if not pool or ((avoid_genres or include_genres) and len(pool) < 4):
-        return None
-    p = _carded(store, card, _CARD_LABELS[card], pool, now)
-    return p
-
-
-def _epoch(store, card):
-    """The card's current rotation epoch: it holds content for erosion_view_cap views, then advances.
-    Read-only. The view tick happens in GET / so previews/re-renders don't churn the cards."""
-    cap = max(1, rec_params.get_param(store, "erosion_view_cap"))
-    return max(0, store.rec_surface.card_views(card) - 1) // cap
-
-
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
+
+    class PoolJobsAdapter:
+        def latest(self, kind, parameters):
+            return ctx.jobs.latest(kind, parameters)
+
+        def start(self, kind, parameters, excluded):
+            return (start_fresh_pool(ctx, parameters) if kind == "fresh_pool"
+                    else start_library_pool(ctx, parameters, excluded))
+
+    recommendations = home_cards.HomeCards(store, PoolJobsAdapter(), ctx.logger)
 
     def _tuning_active():
         genres = store.rec_surface.get_proposals("home_genre_request") or {}
@@ -273,12 +104,7 @@ def build(ctx) -> APIRouter:
         return response
 
     def _audit_cards(request, protos, now):
-        try:
-            home_audit.record(store, protos, now, source=request.url.path,
-                              epoch=_epoch(store, "cards"),
-                              card_epochs={p["lane"]: _epoch(store, p["lane"]) for p in protos})
-        except Exception:  # diagnostics must not prevent serving a card
-            ctx.logger.warning("Home offer audit failed", exc_info=True)
+        recommendations.audit(protos, now, request.url.path)
 
     def _feed_context(now):
         # Bake held slider exposure + sustained listening into the graduation ledger (idempotent per
@@ -317,6 +143,13 @@ def build(ctx) -> APIRouter:
         if spotify_library_job and spotify_library_job.get("dismissed"):
             spotify_library_job = None
         radio_bootstrap = ctx.radio.bootstrap()
+        launch_id = request.query_params.get("radio_playlist")
+        if launch_id is not None:
+            source = store.playlists.get_playlist(int(launch_id)) if launch_id.isdecimal() and len(launch_id) < 16 else None
+            if source is not None:
+                radio_bootstrap["launchPlaylist"] = {"id": source.id, "title": source.title,
+                    "tracks": [track for track in store.charts.playlist_tracks_detail(source.id)
+                               if track.get("video_id") and track.get("available") != 0][:8]}
         radio_state = radio_bootstrap["state"]
         radio_tracks = (store.charts.playlist_tracks_detail(radio_state["local_id"])
                         if radio_state.get("active") and radio_state.get("local_id") else [])
@@ -450,9 +283,8 @@ def build(ctx) -> APIRouter:
         cards = []
         for subj in into_recently.subjects_for_epoch(store, now, epoch=_epoch(store, "into_recently")):
             row = store.wiki.get(subj["subject"])
-            if row is None or not store.wiki.is_fresh(row, now):
-                payload = wikipedia.fetch_summary(subj["kind"], subj["display"])
-                store.wiki.put(subj["subject"], subj["kind"], subj["display"], payload, now)
+            if store.wiki.should_refresh(subj["subject"], row, now):
+                into_recently.refresh_summary(store, subj, now, wikipedia.fetch_summary)
                 row = store.wiki.get(subj["subject"])
             if not row or not row["found"] or not row["extract"]:
                 continue
@@ -474,15 +306,12 @@ def build(ctx) -> APIRouter:
     def home_refresh_card(request: Request, card: str):
         """Refresh one Home card: advance its rotation to a fresh, unseen slice, rerun that card's
         model, and re-render just that card in place."""
-        if card not in _CARD_LABELS:
+        if card not in home_cards._CARD_LABELS:
             return Response(status_code=404)
         now = now_fn()
-        store.rec_surface.refresh_card(card, max(1, rec_params.get_param(store, "erosion_view_cap")), now)
-        p = _one_card(store, card, now)
+        p = recommendations.refresh_card(card, now)
         if p is None:
             return Response(status_code=204)
-        keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None)) for t in p["tracks"]]
-        store.discovery.mark_offered("track", [k for k in keys if k], now)   # #53: this route is the sole counter here
         response = templates.TemplateResponse(request, "_partials/generated_playlist.html",
                                                {"p": p, "regenerating": True})
         _audit_cards(request, [p], now)
@@ -490,188 +319,24 @@ def build(ctx) -> APIRouter:
 
     def _cards_fragment(request, now, *, regenerating=False, use_genre_request=True, genre_notice=None,
                         swap_oob=False):
-        from yt_playlist.rec import mode_surfaces
-        mix_tuning.expire(store, now)
-        epoch = _epoch(store, "cards")
-        genre_request = store.rec_surface.get_proposals("home_genre_request") or {}
-        avoid = (set(genre_request.get("avoid_genres", []))
-                 if use_genre_request and genre_request.get("epoch") == epoch else set())
-        include = (set(genre_request.get("include_genres", []))
-                   if use_genre_request and genre_request.get("epoch") == epoch else set())
-        filters = {}
-        if avoid:
-            filters["avoid_genres"] = avoid
-        if include:
-            filters["include_genres"] = include
-        cards = mode_surfaces.assemble_cards(store, now, epoch, **filters)
-        if include:
-            cards = [c for c in cards if c["lane"] != "fresh"]
-        if cards:
-            protos = []
-            for c in cards:
-                # Roll a DJ journey for this card so the saved playlist carries a Flow (parity with the
-                # per-lane _carded cards). Seed per (epoch, mode) so each of the 4 cards rolls its OWN
-                # journey, stable across re-renders of the same epoch. We keep only the rolled journey
-                # + dj seed: the mode already defines the theme, so its facets/weights are not re-rolled.
-                rolled = recipes.roll_recipe(store, c["lane"], seed=f"{epoch}:{c['mode_id']}", now=now)
-                journey, dj = rolled.get("journey", "shuffle"), rolled.get("dj", {})
-                tracks = _order_by_journey(store, c["tracks"], journey, dj.get("seed", 0))
-                shadow = c.get("counterfactual")
-                if shadow:
-                    shadow = {**shadow, "tracks": _order_by_journey(store, shadow["tracks"], journey,
-                                                                    dj.get("seed", 0))}
-                protos.append(_proto(store, c["lane"], c["label"], tracks, now)
-                              | {"mode_id": c["mode_id"], "ranker": c["ranker"],
-                                 "experiment": c.get("experiment"), "counterfactual": shadow,
-                                 "recipe": {"model": "mode", "lane": c["lane"], "mode_id": c["mode_id"],
-                                            "ranker": c["ranker"],
-                                            "journey": journey, "dj": dj}})
-            try:
-                store.modes.log_impressions(
-                    epoch, [(c["lane"], c["mode_id"], c["ranker"]) for c in cards], now)
-            except Exception:  # noqa: BLE001 - logging must never break the card render
-                ctx.logger.warning("mode-impression log failed", exc_info=True)
-        elif filters and store.rec_surface.get_proposals("mode_bundles") and store.modes.list_modes(active_only=True):
-            protos = []  # no qualifying mode; explain and retain the usual menu below
-        else:
-            # Fallback before the first rebuild: the pre-B per-card builders, so the row is never empty.
-            protos = [p for p in (_one_card(store, name, now, **filters) for name in
-                                  ("wheelhouse", "explore", "comfort", "fresh")) if p]
-        if filters and not protos and not include:
-            return _cards_fragment(request, now, regenerating=regenerating, use_genre_request=False,
-                                   genre_notice="No other genre themes are ready yet. Here are your usual mixes.")
-        parameters = {"include_genres": sorted(include), "avoid_genres": sorted(avoid)}
-        pool_job = ctx.jobs.latest("fresh_pool", parameters)
-        if include:
-            protos = [p for p in protos if p["lane"] != "fresh"]
-        if not any(p["lane"] == "fresh" for p in protos):
-            fresh = _built_fresh(parameters, now)
-            if fresh:
-                protos.append(fresh)
-        meta = (store.rec_surface.get_proposals("mode_bundles") or {}).get("_meta", {})
-        fourth = ("comfort" if meta.get("comfort_pool", 0) >= rec_params.get_param(store, "comfort_min_pool")
-                  or not meta.get("year_cuts") else "temporal")
-        fourth = next((p["lane"] for p in protos if p["lane"] in ("comfort", "temporal")), fourth)
-        slots = []
-        for lane in ("wheelhouse", "explore", "fresh", fourth):
-            p = next((p for p in protos if p["lane"] == lane), None)
-            scoped = parameters if lane == "fresh" else {**parameters, "lane": lane, "epoch": epoch}
-            if p is None and lane != "fresh":
-                excluded = [ordering._field(t, "key") for proto in protos for t in proto["tracks"]]
-                p = _built_library(scoped, now, excluded)
-                if p:
-                    protos.append(p)
-            job = pool_job if lane == "fresh" else ctx.jobs.latest("library_pool", scoped)
-            slots.append({"proto": p, "pool": None if p else _pool_view(scoped, job)})
-        if filters:
-            genre_notice = ("Your chosen genres, just for this set." if include
-                            else "Different genres for this set of mixes.")
-            recipe_request = ({"kind": "chosen_genres", "include": sorted(include)} if include
-                              else {"kind": "other_genres", "avoid": sorted(avoid)})
-            for p in protos:
-                p["recipe"] = {**(p.get("recipe") or {}),
-                               "genre_request": recipe_request}
-        vibe = home_vibe.current(store, now)
-        for p in protos:
-            if vibe:
-                p["recipe"] = {**(p.get("recipe") or {}), "vibe": vibe}
-        for p in protos:                                   # #53 offered-count parity
-            # tracks are dicts on the mode path but ForYouItem objects on the _one_card fallback,
-            # so read the key from either shape (a bare t.get here 500s the whole card row).
-            keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None))
-                    for t in p["tracks"]]
-            store.discovery.mark_offered("track", [k for k in keys if k], now)
-        try:
-            _record_served_cards(store, protos, now)
-        except Exception:  # noqa: BLE001 - measurement must never break recommendation serving
-            ctx.logger.warning("served-impression log failed", exc_info=True)
+        result = recommendations.cards(home_cards.CardsRequest(
+            now, regenerating, use_genre_request, genre_notice))
+        # Presentation color remains with the HTTP/template adapter. Avoid asdict here:
+        # protos may contain ForYouItem rows, which must retain their existing shape.
+        context = vars(result).copy()
+        context["genre_options"] = [option | {"tint": genre_tint(option["family"])}
+                                    for option in result.genre_options]
         response = templates.TemplateResponse(request, "_partials/mode_cards.html",
-                                               {"protos": protos, "regenerating": regenerating,
-                                                "genre_notice": genre_notice,
-                                                "genre_warning": genre_notice if not filters else None,
-                                                "genre_options": [option | {"tint": genre_tint(option["family"])}
-                                                                  for option in home_themes.genre_options(store)],
-                                                "slots": slots,
-                                                "requested_genres": sorted(include), "epoch": epoch,
-                                                "vibe": vibe,
-                                                "swap_oob": swap_oob})
-        _audit_cards(request, protos, now)
+                                               {**context, "regenerating": regenerating, "swap_oob": swap_oob})
+        _audit_cards(request, result.protos, now)
         return _tuning_response(response, now)
 
-    def _pool_view(parameters, job=None):
-        lane = parameters.get("lane", "fresh")
-        fresh = lane == "fresh"
-        building = job is not None and not job.done
-        message = (job.events[-1]["text"] if building and job.events else "Finding matching songs…")
-        if job and job.done:
-            message = job.error or ("Not enough matching songs yet. Try another search or adjust your genres."
-                                    if fresh else "Not enough matching songs in your library. Try adjusting your genres.")
-        labels = {o["family"]: o["label"] for o in home_themes.genre_options(store)}
-        label = _pool_label(parameters)
-        return {"parameters": parameters, "job": job, "building": building, "message": message,
-                "lane": lane, "label": label,
-                "action": "Find fresh songs" if fresh else f"Build {label.lower()}",
-                "title": "Discover a fresh mix" if fresh else "Build this mix",
-                "building_title": "Building your fresh mix" if fresh else "Building your mix",
-                "description": ("Find new songs for these genres. Click to start." if fresh
-                                else "Find matching songs in your library. Click to start."),
-                "url": "/home/fresh-pool" if fresh else "/home/library-pool",
-                "genre_labels": [labels.get(g, g) for g in parameters["include_genres"]]}
-
-    def _pool_label(parameters):
-        lane = parameters.get("lane", "fresh")
-        return (_CARD_LABELS[lane] if lane != "temporal"
-                else {0: "Throwback", 1: "Time Flies", 2: "Recent Picks"}[parameters["epoch"] % 3])
-
-    def _built_library(parameters, now, exclude_keys):
-        from yt_playlist.rec import library_pool
-        tracks = library_pool.pick(store, now, parameters, exclude_keys)
-        if len(tracks) < 4:
-            return None
-        lane = parameters["lane"]
-        p = _carded(store, lane, _pool_label(parameters), tracks, now)
-        if len(p["tracks"]) < 4:
-            return None
-        # A full-menu regeneration can change the fourth slot between Comfort and Temporal.
-        p["mode_id"] = None
-        include, avoid = parameters["include_genres"], parameters["avoid_genres"]
-        if include or avoid:
-            p["recipe"]["genre_request"] = ({"kind": "chosen_genres", "include": include} if include
-                                            else {"kind": "other_genres", "avoid": avoid})
-        return p
-
-    def _built_fresh(parameters, now):
-        include, avoid = parameters["include_genres"], parameters["avoid_genres"]
-        if include:
-            from yt_playlist.rec import fresh_pool
-            tracks = fresh_pool.pick(store, now, include, avoid)
-            if not tracks:
-                return None
-            p = _proto(store, "fresh", _CARD_LABELS["fresh"], tracks, now)
-            p["recipe"] = recipes.roll_recipe(store, "fresh", seed=f"fresh:{_epoch(store, 'fresh')}", now=now)
-            p["recipe"]["facets"] = {"genres": include}
-        else:
-            p = _one_card(store, "fresh", now, **({"avoid_genres": avoid} if avoid else {}))
-        if p is not None:
-            # A partial themed slice must meet the same credibility floor as a mode card.
-            if len(p["tracks"]) < 4:
-                return None
-            if include or avoid:
-                p["recipe"]["genre_request"] = ({"kind": "chosen_genres", "include": include} if include
-                                                else {"kind": "other_genres", "avoid": avoid})
-            if vibe := home_vibe.current(store, now):
-                p["recipe"]["vibe"] = vibe
-        return p
-
     def _pool_fragment(request, job):
-        p = _built_fresh(job.parameters, now_fn()) if job.done and not job.error else None
-        if p:
-            store.discovery.mark_offered("track", [t["key"] for t in p["tracks"] if t.get("key")], now_fn())
-            _record_served_cards(store, [p], now_fn())
-            _audit_cards(request, [p], now_fn())
-            return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": p})
+        result = recommendations.pool(job, now_fn(), request.url.path)
+        if result.proto:
+            return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": result.proto})
         return templates.TemplateResponse(request, "_partials/pool_card.html",
-                                          {"pool": _pool_view(job.parameters, job)})
+                                          {"pool": result.pool})
 
     @router.post("/home/fresh-pool")
     async def home_fresh_pool(request: Request):
@@ -681,24 +346,22 @@ def build(ctx) -> APIRouter:
         if any(len(form.getlist(key)) > 100 or any(g not in available for g in values)
                for key, values in parameters.items()):
             return Response(status_code=400)
-        return await asyncio.to_thread(_pool_fragment, request, start_fresh_pool(ctx, parameters))
+        return await asyncio.to_thread(_pool_fragment, request, recommendations.start_pool("fresh_pool", parameters, []))
 
     @router.get("/home/fresh-pool/{job_id}")
     def home_fresh_pool_status(request: Request, job_id: int):
         job = ctx.jobs.get(job_id)
         if job is None or job.kind != "fresh_pool":
-            return Response(status_code=404)
+            return _expired_pool_fragment(request)
         return _pool_fragment(request, job)
 
-    def _library_pool_fragment(request, job):
-        p = _built_library(job.parameters, now_fn(), job.exclude_keys) if job.done and not job.error else None
-        if p:
-            store.discovery.mark_offered("track", [t["key"] for t in p["tracks"]], now_fn())
-            _record_served_cards(store, [p], now_fn())
-            _audit_cards(request, [p], now_fn())
-            return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": p})
-        return templates.TemplateResponse(request, "_partials/pool_card.html",
-                                          {"pool": _pool_view(job.parameters, job)})
+    def _expired_pool_fragment(request):
+        # HTMX leaves error responses unswapped, so polling needs a successful terminal
+        # fragment. The registry no longer has the original parameters; offer a new menu
+        # rather than retaining expired jobs for retries.
+        return templates.TemplateResponse(
+            request, "_partials/pool_expired.html", {},
+            status_code=200 if request.headers.get("HX-Request") == "true" else 404)
 
     @router.post("/home/library-pool")
     async def home_library_pool(request: Request):
@@ -717,14 +380,14 @@ def build(ctx) -> APIRouter:
                 or not isinstance(excluded, list) or len(excluded) > 200
                 or any(not isinstance(k, str) or len(k) > 1000 for k in excluded)):
             return Response(status_code=400)
-        return await asyncio.to_thread(_library_pool_fragment, request, start_library_pool(ctx, parameters, excluded))
+        return await asyncio.to_thread(_pool_fragment, request, recommendations.start_pool("library_pool", parameters, excluded))
 
     @router.get("/home/library-pool/{job_id}")
     def home_library_pool_status(request: Request, job_id: int):
         job = ctx.jobs.get(job_id)
         if job is None or job.kind != "library_pool":
-            return Response(status_code=404)
-        return _library_pool_fragment(request, job)
+            return _expired_pool_fragment(request)
+        return _pool_fragment(request, job)
 
     def _cards_safe(request, now, *, swap_oob=False):
         # The row loads via hx-trigger=load with the spinner as placeholder content: a 500 here leaves
@@ -738,7 +401,7 @@ def build(ctx) -> APIRouter:
                                                {"protos": [], "swap_oob": swap_oob})
 
     @router.get("/home/cards")
-    def home_cards(request: Request):
+    def home_cards_fragment(request: Request):
         """The mode-driven card row: 4 distinct taste-mode variations from the worker's prepared
         bundles. Lazy fragment (spinner) so live mood tilt runs off the main render."""
         return _cards_safe(request, now_fn())

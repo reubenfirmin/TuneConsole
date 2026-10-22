@@ -43,6 +43,8 @@ def build(ctx) -> APIRouter:
             "enrichment": enrichment.load_config(store),
             "lastfm_configured": lastfm.api_key(store) is not None,
             "spotify_library_job": current_job(ctx),
+            "spotify_history": store.history.spotify_history_stats(),
+            "spotify_legacy_unattributed": store.settings.get_setting('spotify_legacy_discovery_unattributed') == '1',
         }, status_code=status_code)
 
     @router.get("/setup")
@@ -153,6 +155,7 @@ def build(ctx) -> APIRouter:
         return RedirectResponse(f"/setup?tab=identities&flash={quote(msg)}", status_code=303)
 
     @router.post("/import/spotify")
+    @router.post("/import/spotify/v2")
     async def import_spotify_route(request: Request):
         form = await request.form()
         up = form.get("file")
@@ -170,8 +173,22 @@ def build(ctx) -> APIRouter:
         if "error" in report:
             return HTMLResponse(f'<p class="section-note">{escape(report["error"])}</p>')
         return templates.TemplateResponse(
-            request, "_partials/spotify_result.html", {"report": report, "seeded": seeded},
+            request, "_partials/spotify_result.html", {"report": report, "seeded": seeded,
+                "spotify_history": store.history.spotify_history_stats(),
+                "spotify_legacy_unattributed": store.settings.get_setting('spotify_legacy_discovery_unattributed') == '1'},
             headers={"HX-Retarget": "#spotify-import-block", "HX-Reswap": "innerHTML"})
+
+    @router.post('/import/spotify/remove')
+    async def remove_spotify_history(request: Request):
+        try:
+            report = await history_imports.remove_spotify()
+        except Exception:
+            return HTMLResponse('<p class="section-note" role="alert">History removal failed. Try again.</p>',
+                                status_code=500)
+        return templates.TemplateResponse(request, '_partials/spotify_removed.html', {
+            'removed': report,
+            'spotify_legacy_unattributed': store.settings.get_setting('spotify_legacy_discovery_unattributed') == '1'},
+            headers={'HX-Retarget': '#spotify-import-block', 'HX-Reswap': 'innerHTML'})
 
     @router.get('/import/history/status')
     async def history_import_status(request: Request, source: str):

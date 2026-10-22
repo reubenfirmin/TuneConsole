@@ -92,7 +92,7 @@ def artist_recall_at_k(store, k=10, min_size=3, seed=0) -> dict:
 def temporal_recall(store, holdout_days=30, k=20) -> dict:
     """The model's actual job: predict what you'll play next, not reconstruct existing playlists.
 
-    Using history_snapshots, hold out the most recent `holdout_days` of plays, treat everything played
+    Using reconciled listening days, hold out the most recent `holdout_days` of plays, treat everything played
     before the cutoff as context, and check whether each genuinely new held-out play (one not already
     in the context) ranks in the top-k by cosine to the context centroid in the embedding space. This
     rewards forward prediction, unlike the in-sample leave-one-out recall_at_k.
@@ -337,105 +337,3 @@ def content_rankable(store) -> dict:
     return {"rankable": rankable, "vectorless_owned": len(vectorless_owned)}
 
 
-def _pick_metric(store, k) -> str:
-    """Decide the sweep's metric ONCE, on the model as currently built (#83/#111). autotune must never let a
-    grid compare temporal scores against in-sample ones, so this is called a single time per run and the
-    result is threaded through every score in that run rather than re-decided per call. Prefers
-    leakage-free rolling temporal recall; falls back to in-sample recall@k only when no causal window
-    can be reconstructed at pick time."""
-    tr = rolling_temporal_recall(store, holdout_days=best_holdout(store), k=k).get("recall")
-    return "causal_temporal_recall" if tr is not None else "recall_at_k"
-
-
-def _tune_score(store, k, metric):
-    """Score the currently-built model for autotune (#38 §5, #83) with EXACTLY `metric`, never switching
-    metric mid-sweep. If the temporal split goes unavailable for one config partway through a sweep (e.g.
-    a dim change starves the context side), that config scores 0.0 and is flagged failed=True so the grid
-    can show it and the winner can exclude it, rather than silently falling back to the in-sample metric.
-    Returns (score, failed)."""
-    if metric == "causal_temporal_recall":
-        dim = int(store.settings.get_setting("rec_dim") or embed.DIM)
-        method = store.settings.get_setting("rec_embed_method") or "svd"
-        tr = rolling_temporal_recall(store, holdout_days=best_holdout(store), k=k,
-                                     dim=dim, method=method).get("recall")
-        if tr is None:
-            return 0.0, True
-        return tr, False
-    return recall_at_k(store, k=k).get("recall_at_k") or 0.0, False
-
-
-def autotune(store, svd_dims=(48, 64, 96, 128), item2vec_probe_dim=64, k=20) -> dict:
-    """A/B embedding method+dimensionality using causal rolling temporal recall (#111)
-    with a recall@k fallback when history is too thin for a temporal split, plus a single item2vec sanity
-    probe. The metric is picked ONCE for the whole run (#83) so the grid's max() never compares temporal
-    scores against in-sample ones. Persists and rebuilds on the winner. Returns the winner, the previous
-    config, the full grid for the UI, and top-level `metric`/`in_sample` describing the run. Never forces
-    item2vec; it's only kept if it wins on the user's data."""
-    prev_method = store.settings.get_setting("rec_embed_method") or "svd"
-    prev_dim = int(store.settings.get_setting("rec_dim") or embed.DIM)
-    metric = _pick_metric(store, k)
-    prev_score, prev_failed = _tune_score(store, k, metric)
-    previous = {"method": prev_method, "dim": prev_dim, "recall": prev_score, "metric": metric}
-    if prev_failed:
-        previous["failed"] = True
-
-    grid = []
-    configs = [("svd", d) for d in svd_dims] + [("item2vec", item2vec_probe_dim)]
-    for method, d in configs:
-        store.settings.set_setting("rec_embed_method", method)
-        store.settings.set_setting("rec_dim", str(d))
-        embed.build_and_store(store, dim=d)
-        score, failed = _tune_score(store, k, metric)
-        row = {"method": method, "dim": d, "recall": score, "metric": metric}
-        if failed:
-            row["failed"] = True
-        grid.append(row)
-
-    viable = [g for g in grid if not g.get("failed")]
-    if not viable:
-        # All configs failed. Restore the previous config instead of picking an arbitrary failed row.
-        store.settings.set_setting("rec_embed_method", prev_method)
-        store.settings.set_setting("rec_dim", str(prev_dim))
-        embed.build_and_store(store, dim=prev_dim)
-        result = {"winner": previous, "previous": previous, "grid": grid,
-                  "metric": metric, "in_sample": metric == "recall_at_k", "sweep_failed": True}
-    else:
-        winner = max(viable, key=lambda g: g["recall"])
-        store.settings.set_setting("rec_embed_method", winner["method"])
-        store.settings.set_setting("rec_dim", str(winner["dim"]))
-        embed.build_and_store(store, dim=winner["dim"])   # leave the live model on the winner
-        result = {"winner": winner, "previous": previous, "grid": grid,
-                  "metric": metric, "in_sample": metric == "recall_at_k"}
-    return result
-
-
-def cooc_weighting_ab(store, k=20) -> dict:
-    """#38 §4c decision harness: does playcount-weighted co-occurrence beat binary membership? Build the
-    embedding both ways, score each on temporal_recall (recall@k fallback), and report the winner. This
-    is WHERE §4c is decided, on the real library's history, not in a unit test (which has none). Restores
-    the prior `rec_cooc_weighting` setting and rebuilds the live model on it before returning.
-
-    RESULT (2026-06-26, real library): weighting did NOT win, so the setting stays off. See the verdict
-    note on embed._cooc_weights for the numbers.
-
-    #83 fix carried here too: the metric is picked ONCE (on the model as currently built, before either
-    arm is built) and held for both arms, so "binary" and "weighted" are always compared on the same
-    metric. _tune_score also now sizes the temporal holdout via best_holdout(store) instead of a fixed
-    30-day window, so a short retained history span (e.g. the real library's ~6 days) no longer forces a
-    silent fallback to the weaker in-sample recall@k the way it used to. ALWAYS check the `metric` field:
-    if it is "recall_at_k", the temporal split was unavailable even at the adaptive window, so re-judge by
-    calling temporal_recall directly at a holdout_days that fits the span before trusting the verdict."""
-    prev = store.settings.get_setting("rec_cooc_weighting")
-    metric = _pick_metric(store, k)
-    out = {}
-    for label, val in (("binary", "0"), ("weighted", "1")):
-        store.settings.set_setting("rec_cooc_weighting", val)
-        embed.build_and_store(store)
-        score, failed = _tune_score(store, k, metric)
-        out[label] = {"score": score, "metric": metric}
-        if failed:
-            out[label]["failed"] = True
-    store.settings.set_setting("rec_cooc_weighting", prev if prev is not None else "0")
-    embed.build_and_store(store)                       # restore the live model on the prior setting
-    out["winner"] = "weighted" if out["weighted"]["score"] > out["binary"]["score"] else "binary"
-    return out

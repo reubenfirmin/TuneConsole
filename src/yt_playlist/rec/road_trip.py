@@ -1,4 +1,11 @@
-"""Road Trip playlist generation: blend your taste-weighted tracks (the 'own' pool) with popular
+"""Road Trip draft transitions and normalization.
+
+Candidate acquisition belongs to road_trip_candidates; fixed-input allocation and ordering
+belong to road_trip_mix. This service owns the JSON draft's build, edit, normalize and reroll
+transitions. Routes persist the resulting draft through repos.road_trip and save playlists
+through library.executor.
+
+Blend your taste-weighted tracks (the 'own' pool) with popular
 tracks pulled from YouTube for other people's artists/genres (the 'other' pool), mixed to a target
 ratio and cut to a target duration. Neither pool needs bespoke taste-model handling: the result is
 materialized via executor.create_generated_playlist with the normal Generated group, which already
@@ -22,31 +29,23 @@ four different playlists: the seed is fresh per build, and the previous build's 
 import math
 import random
 import statistics
-from collections import Counter, deque
+from collections import Counter
 from itertools import zip_longest
 
-# `genre_names` alias: `genres` is a local/parameter name all over this module (the recipe's
-# genre inputs, a track->genre map), and shadowing the provider would be a quiet trap.
-from yt_playlist.providers import deezer, lastfm, musicbrainz
-from yt_playlist.providers import genres as genre_names
-from yt_playlist.rec.journeys import journey_order
+from yt_playlist.rec import road_trip_candidates as candidates, road_trip_mix
+from yt_playlist.rec.road_trip_candidates import _canon_genre, other_cap, own_candidates
+from yt_playlist.rec.road_trip_mix import (_apportion_percentages, _axis_genre, _bucket,
+                                        _mix_source, _mix_weights, _quota_weights,
+                                        _sample_order, _weight)
 from yt_playlist.util import genre_map
-from yt_playlist.util.thumbnails import best_thumb
 
-ARTIST_SONGS_LIMIT = 30    # top songs pulled per artist input, before the diversity cap
-GENRE_SEARCH_LIMIT = 30    # search results pulled per genre input, before the diversity cap
-MIN_ARTIST_CAP = 4         # a listed artist always gets at least this many candidates in the pool
-RELATED_ARTISTS = 3        # related artists borrowed per listed artist when their pool runs thin
+MIN_ARTIST_CAP = candidates.MIN_ARTIST_CAP
 MAX_OTHER_POOL = 44        # ceiling on their pool: every candidate costs a Deezer lookup
-AVG_TRACK_S = 210          # duration assumed for a track whose length nothing knows
+AVG_TRACK_S = road_trip_mix.AVG_TRACK_S
 POOL_SLACK = 3.0           # candidates per slot, so sliders/rerolls have somewhere to go
-FAMILIARITY_SIGMA = 0.3    # width of the familiarity band the slider selects
-REPEAT_PENALTY = 0.3       # weight multiplier for a track the previous build already used
-DURATION_LOOKUPS = 12      # cap on live get_song calls per build (durations are a nicety)
 OWN_FACT_LOOKUPS = 45      # cap on Deezer lookups spent tagging your own untagged candidates
 GENRE_BARS = 8             # genre sliders shown per party (plus any you've already pinned)
-GENRE_ARTISTS = 12         # artists a genre resolves to before YouTube is asked for tracks
-LIKE_BONUS = 8             # plays a Liked song is worth: a like is deliberate, a play can be idle
+GENRE_ARTISTS = candidates.GENRE_ARTISTS
 
 # What a picked row carries into the draft (and on to YouTube). Everything the panel renders plus
 # what the ordering and the bars need, and nothing else - the pool entries also hold scoring scratch.
@@ -55,312 +54,6 @@ _ROW_FIELDS = ("video_id", "title", "artist", "album", "thumbnail", "duration", 
 
 
 # --------------------------------------------------------------------------- candidate assembly
-
-def _decade(year):
-    """'1990' for 1994, or '' when the year is unknown. The era axis of the sliders."""
-    return str(int(year) // 10 * 10) if year else ""
-
-
-def _canon_genre(genre):
-    """One spelling per genre. The same genre reaches a candidate as "Alternative Rock" (Last.fm's
-    whitelist), "alternative rock" (what the user typed as a recipe input) or "Rock" (Deezer's album
-    genre), and three spellings mean three bars competing for the same tracks - with a quota on one
-    doing nothing about the others. Run it through the same whitelist the enrichment providers use,
-    and title-case whatever that doesn't recognize."""
-    genre = (genre or "").strip()
-    if not genre:
-        return ""
-    return genre_names.match_tag(genre) or genre.title()
-
-
-def _candidate(video_id, title, artist, album, thumbnail, duration, source, genre, year, plays=0):
-    """One pool entry. `fam` (0..1) is filled in later, once the whole side is known: familiarity is
-    a track's RANK within the pool, not an absolute play count, so the slider means the same thing
-    for a 200-play library and a 20-play one."""
-    genre = _canon_genre(genre)
-    return {"video_id": video_id, "title": title or "", "artist": artist or "",
-            "album": album or "", "thumbnail": thumbnail, "duration": duration,
-            "source": source, "genre": genre, "family": genre_map.family(genre) if genre else "",
-            "year": year, "decade": _decade(year), "plays": plays, "fam": 0.0, "score": 0.0,
-            "cluster_genre": ""}
-
-
-def _rank_scores(cands, value_of):
-    """Fill `score` (base desirability, 1.0 best) and `fam` (familiarity position, 1.0 = the most
-    familiar) from each candidate's rank on `value_of`. Rank rather than raw value so one runaway
-    play count or Deezer rank can't dominate the draw."""
-    n = len(cands)
-    if not n:
-        return cands
-    for i, c in enumerate(cands):
-        c["score"] = 1.0 - (i / n) * 0.75          # keep the tail drawable, just less likely
-    ordered = sorted(cands, key=lambda c: value_of(c) or 0)
-    for i, c in enumerate(ordered):
-        c["fam"] = (i / (n - 1)) if n > 1 else 0.5
-    return cands
-
-
-def own_candidates(store, now, state=None):
-    """YOUR SIDE: the whole collection, stratified by how much you actually listen to it.
-
-    Not a sample. An earlier version drew a few hundred candidates from the taste surfaces and
-    treated that as the pool, which made every genre question a question about the sample instead of
-    about your library - ask for 40% rock and you'd get however much rock the sample happened to
-    hold. Everything you own is eligible; `fam` (the engagement percentile) is what the
-    favorites/deeper-cuts slider slides along, and the genre and year bars pick out of the whole
-    thing. Reading the library costs ~30ms, so this is rebuilt per re-pick rather than stored.
-
-    Engagement is play count plus a bonus for a Liked song - a like is a deliberate statement where a
-    play can be an accident. `score` is deliberately flat: with the whole collection in play, nothing
-    is inherently more "recommended" than anything else, and the slider does the choosing.
-
-    Still filtered by the taste model's own exclusions: songs you dismissed or muted, and anything
-    already bundled into a generated playlist, stay out."""
-    songs = store.rec_query.library_songs()
-    plays = store.rec_query.play_counts()
-    hard = store.rec_model.suppressed_keys("for_you", now) | store.rec_query.generated_track_keys()
-    blocked_genres = (state or {}).get("blacklist_genres") or []
-    if blocked_genres:
-        hard |= store.rec_query.keys_in_genre_selection(blocked_genres)
-    muted = store.rec_model.muted_artists()
-    by_artist = store.rec_query.artist_genre_years()
-    learned = (state or {}).get("own_facts") or {}
-    out = []
-    for s in songs:
-        if s["key"] in hard or s["artist"] in muted:
-            continue
-        # Libraries are genre-tagged in patches (enrichment is incremental) and an untagged track
-        # can't appear on any bar: fall back to what this artist's OTHER tracks are tagged as, then
-        # to anything Deezer told us during this draft (fill_own_facts).
-        extra = learned.get(s["video_id"]) or {}
-        fallback = by_artist.get(s["artist"]) or {}
-        c = _candidate(s["video_id"], s["title"], s["artist"], s["album"], s["thumbnail"],
-                       s["duration"], "mine",
-                       s["genre"] or extra.get("genre") or fallback.get("genre") or "",
-                       s["year"] or extra.get("year") or fallback.get("year"),
-                       plays.get(s["key"], 0))
-        c["engagement"] = c["plays"] + (LIKE_BONUS if s["liked"] else 0)
-        out.append(c)
-    out.sort(key=lambda c: c["engagement"])
-    n = len(out)
-    for i, c in enumerate(out):
-        c["fam"] = (i / (n - 1)) if n > 1 else 0.5
-        c["score"] = 1.0
-    return out
-
-
-_FACTS_CACHE: dict = {}          # (title, artist) -> deezer facts, for the life of the process
-_ARTIST_GENRE_CACHE: dict = {}   # artist -> Last.fm genre (or None), likewise
-_GENRE_ARTIST_CACHE: dict = {}   # (genre, decade) -> ranked artist names, likewise
-# Credits a catalogue uses where an artist would go. Chasing these down on YouTube returns
-# compilations and karaoke, which is exactly what going via the databases is meant to avoid.
-_NOT_AN_ARTIST = {"various artists", "various", "[unknown]", "unknown artist", "soundtrack",
-                  "traditional", "[no artist]", "va"}
-
-
-def _facts(title, artist):
-    """Deezer catalogue facts for a candidate: {popularity, year, genre, duration}. Memoized, since
-    a rebuild of the same recipe re-draws largely the same artists. Module-level so tests can patch
-    it without a real network call (mirrors discover.fetch_artist_info's convention)."""
-    ck = (title or "", artist or "")
-    if ck not in _FACTS_CACHE:
-        if len(_FACTS_CACHE) > 4000:             # a session-length cache, not a leak
-            _FACTS_CACHE.clear()
-        _FACTS_CACHE[ck] = deezer.lookup(title, artist)
-    return _FACTS_CACHE[ck]
-
-
-def artist_genre(store, artist):
-    """A specific, whitelisted genre for an artist from Last.fm ("Alternative Rock"), or None.
-
-    Deezer only knows the ALBUM's genre, which is coarse enough to be useless for steering - it calls
-    half a library "Rock" or "Alternativo", so a bar for the genre you actually wanted never appears.
-    Last.fm's tags run through the curated whitelist in providers/genres.py, which is where names
-    like "Alternative Rock" come from. One call per ARTIST (not per track) and memoized, so their
-    side costs a handful of requests. Silent None when no API key is configured."""
-    if not artist:
-        return None
-    if artist not in _ARTIST_GENRE_CACHE:
-        key = lastfm.api_key(store)
-        _ARTIST_GENRE_CACHE[artist] = lastfm.artist_genre(artist, key) if key else None
-    return _ARTIST_GENRE_CACHE[artist]
-
-
-def _artist_page(client, name):
-    """(artist page dict, browse_id) for an artist name, or (None, None) if unresolvable."""
-    try:
-        results = client.search(name, filter="artists") or []
-    except Exception:  # noqa: BLE001 - network/parse all degrade to "no songs found"
-        return None, None
-    browse_id = results[0].get("browseId") if results else None
-    if not browse_id:
-        return None, None
-    try:
-        return (client.get_artist(browse_id) or {}), browse_id
-    except Exception:  # noqa: BLE001
-        return None, None
-
-
-def _page_songs(page, fallback_name, limit=ARTIST_SONGS_LIMIT):
-    """Normalized track dicts from an artist page's top songs (already popularity-ranked by YouTube).
-
-    artist["songs"]["results"] rows go through ytmusicapi's parse_playlist_item (browsing.py:300 ->
-    parsers/playlists.py), NOT the simplified shape shown in get_artist's own docstring: "artists"
-    is a LIST of {"name","id"} dicts (parse_song_artists), and "album" is a {"name","id"} dict or
-    None (parse_song_album) - never a plain string. duration_seconds is present when a duration was
-    found, same field name as search results."""
-    rows = (((page or {}).get("songs") or {}).get("results")) or []
-    out = []
-    for row in rows[:limit]:
-        vid = row.get("videoId")
-        if not vid:
-            continue
-        artists = row.get("artists") or []
-        out.append({"video_id": vid, "title": row.get("title") or "",
-                    "artist": (artists[0].get("name") if artists else None) or fallback_name,
-                    "album": (row.get("album") or {}).get("name") or "",
-                    "thumbnail": best_thumb(row.get("thumbnails")),
-                    "duration": row.get("duration_seconds"), "genre": ""})
-    return out
-
-
-def _artist_songs(client, name, limit=ARTIST_SONGS_LIMIT):
-    """Top songs for an artist, via YouTube Music's own artist page. [] if unresolvable."""
-    page, _ = _artist_page(client, name)
-    return _page_songs(page, name, limit)
-
-
-def _related_names(page, limit=RELATED_ARTISTS):
-    """Names of artists YouTube considers related to this one, for widening a thin pool."""
-    rows = (((page or {}).get("related") or {}).get("results")) or []
-    return [r.get("title") for r in rows[:limit] if r.get("title")]
-
-
-def _genre_songs(client, genre, limit=GENRE_SEARCH_LIMIT):
-    """Songs matching a genre term via YouTube Music search. No artist anchor exists for a genre
-    input, so this searches the term directly rather than resolving via get_artist. The search term
-    is kept as the candidate's genre: it is the only genre signal a bare search result carries, and
-    it is what the user asked for.
-
-    Deliberately does not pass `limit=` through to client.search(): FakeClient.search() (the test
-    double used throughout this suite) only accepts (query, filter), and the post-slice below
-    already caps the result count, so nothing is lost by relying on that slice alone."""
-    try:
-        results = client.search(genre, filter="songs") or []
-    except Exception:  # noqa: BLE001
-        return []
-    out = []
-    for row in results[:limit]:
-        vid = row.get("videoId")
-        if not vid:
-            continue
-        artists = row.get("artists") or []
-        out.append({"video_id": vid, "title": row.get("title") or "",
-                    "artist": (artists[0].get("name") if artists else "") or "",
-                    "album": (row.get("album") or {}).get("name") or "",
-                    "thumbnail": best_thumb(row.get("thumbnails")),
-                    "duration": row.get("duration_seconds"), "genre": genre})
-    return out
-
-
-def _cap_per_artist(rows, cap):
-    """Keep at most `cap` rows per artist, preserving YouTube's own (popularity) order."""
-    per, out = Counter(), []
-    for r in rows:
-        if per[r["artist"]] >= cap:
-            continue
-        per[r["artist"]] += 1
-        out.append(r)
-    return out
-
-
-def genre_artists(store, genre, decade=None, limit=GENRE_ARTISTS):
-    """Who to play for a genre (and optionally a decade): ranked artist names, best source first.
-
-    Last.fm's tag.getTopArtists is the primary source - "the big alternative rock artists" is exactly
-    what its listening data knows. MusicBrainz fills in behind it, and is the only one that can say
-    "released in the 2000s", so it leads when a decade is asked for. Memoized per (genre, decade).
-
-    This exists because searching YouTube for a genre STRING is a poor way to find music: the results
-    are mixes, karaoke, "top 100" uploads and whatever else matched the words. Asking a music
-    database who plays the genre, and then asking YouTube for those artists' biggest tracks, uses
-    each source for what it is actually good at."""
-    ck = (genre.lower(), decade)
-    if ck in _GENRE_ARTIST_CACHE:
-        return _GENRE_ARTIST_CACHE[ck]
-    key = lastfm.api_key(store)
-    ranked = lastfm.tag_top_artists(genre, key, limit=limit * 2) if key else []
-    if decade:
-        # MusicBrainz knows WHO released in the decade but not who matters; Last.fm knows who
-        # matters but can't filter by date. Lead with the artists both agree on - ranked by Last.fm,
-        # dated by MB - then INTERLEAVE what's left of each, because neither source wins in general:
-        # taking Last.fm's tail first buries 80s synthpop under today's synthpop revival, and taking
-        # MB's first buries Weezer under whoever else happened to release in 2003. Interleaving hedges,
-        # and costs nothing to be wrong about: arrivals are filtered on the track's own year anyway.
-        dated = musicbrainz.tag_artists(genre, decade=decade, limit=limit * 2)
-        agreed = {n.lower() for n in dated}
-        both = [n for n in ranked if n.lower() in agreed]
-        rest_ranked = [n for n in ranked if n.lower() not in agreed]
-        rest_dated = [n for n in dated if n.lower() not in {b.lower() for b in both}]
-        names = both + [n for pair in zip_longest(rest_ranked, rest_dated) for n in pair if n]
-    else:
-        names = ranked or musicbrainz.tag_artists(genre, limit=limit)
-    out, seen = [], set()
-    for n in names:
-        low = (n or "").strip().lower()
-        if not low or low in seen or low in _NOT_AN_ARTIST:
-            continue
-        seen.add(low)
-        out.append(n.strip())
-    out = out[:limit]
-    _GENRE_ARTIST_CACHE[ck] = out
-    return out
-
-
-def other_input_songs(client, kind, name, cap, store=None, decade=None):
-    """The YouTube rows for ONE input of a recipe (an artist or a genre), capped per artist. Returns
-    (rows, related_artist_names) - `related` is only non-empty for an artist input, and is how a thin
-    pool widens one hop out.
-
-    A genre resolves to its top ARTISTS first (genre_artists), and each of those to their top tracks
-    off YouTube's own artist page, which is properly popularity-ranked. A bare YouTube song search
-    for the genre name is the last resort, for a genre no database recognizes.
-
-    One input is the unit of incremental building: the draft grows by a chunk per input, so the
-    playlist starts filling in as soon as the first artist resolves rather than after all of them."""
-    if kind == "artist":
-        page, _ = _artist_page(client, name)
-        return _cap_per_artist(_page_songs(page, name), cap), _related_names(page)
-    rows, artists = [], genre_artists(store, name, decade)
-    per_artist = max(2, math.ceil(cap / max(1, min(len(artists), GENRE_ARTISTS))))
-    for artist in artists:
-        if len(rows) >= cap:
-            break
-        for row in _cap_per_artist(_artist_songs(client, artist), per_artist):
-            row["genre"] = row["genre"] or name       # the genre that brought this artist here
-            rows.append(row)
-    if not rows:
-        rows = _cap_per_artist(_genre_songs(client, name), cap)
-    return rows[:cap], []
-
-
-def to_candidates(rows, store=None):
-    """Turn raw YouTube rows into pool candidates, filling genre/year/duration in. This is the
-    network-heavy step: one Deezer lookup per row (memoized), which is why their pool is capped.
-
-    Genre, best source first: Last.fm's whitelisted artist genre (specific enough to steer by -
-    "Alternative Rock"), then the search term that found the track, then Deezer's album genre."""
-    out = []
-    for r in rows:
-        facts = _facts(r["title"], r["artist"])
-        genre = artist_genre(store, r["artist"]) or r["genre"] or facts.get("genre") or ""
-        cand = _candidate(
-            r["video_id"], r["title"], r["artist"], r["album"], r["thumbnail"],
-            r["duration"] or facts.get("duration"), "theirs", genre, facts.get("year"))
-        cand["input"] = r.get("input")
-        out.append(cand)
-    return out
-
 
 def _remember_artist_context(state, name, candidates, related):
     """The seed's genre and representative era come from its own top songs, not the whole genre."""
@@ -461,9 +154,9 @@ def _ensure_artist_contexts(state, store, client):
     for name in state.get("inputs", {}).get("artists", []):
         if name in state.get("artist_contexts", {}):
             continue
-        page, _ = _artist_page(client, name)
-        songs = to_candidates(_page_songs(page, name, limit=5), store)
-        _remember_artist_context(state, name, songs, _related_names(page, limit=GENRE_ARTISTS))
+        page, _ = candidates._artist_page(client, name)
+        songs = candidates.to_candidates(candidates._page_songs(page, name, limit=5), store)
+        _remember_artist_context(state, name, songs, candidates._related_names(page, limit=GENRE_ARTISTS))
 
 
 def _cluster_anchors(candidate, contexts):
@@ -515,9 +208,9 @@ def _cluster_candidates(state, store, client, genre, cap):
     for name in names[:GENRE_ARTISTS]:
         if name in state["inputs"]["artists"] and name not in contexts:
             continue  # another selected seed keeps its own genre, even if a peer list includes it
-        rows = [r for r in _artist_songs(client, name) if r["video_id"] not in known]
+        rows = [r for r in candidates._artist_songs(client, name) if r["video_id"] not in known]
         accepted = 0
-        for candidate in to_candidates(rows[:per_artist * 3], store):
+        for candidate in candidates.to_candidates(rows[:per_artist * 3], store):
             anchors = _cluster_anchors(candidate, contexts)
             compatible = (not candidate["genre"] or candidate["genre"] == genre
                           or (family and candidate["family"] == family))
@@ -534,75 +227,6 @@ def _cluster_candidates(state, store, client, genre, cap):
     return out
 
 
-def rank_other(cands):
-    """(Re)rank their side by Deezer popularity. Popularity is the signal for BOTH scores here:
-    their pool has no play history, so "familiar" means "a hit" and "lesser listen" means "a deeper
-    cut" - the same slider, applied to their taste instead of yours. Candidates Deezer doesn't know
-    keep YouTube's own order, itself a popularity proxy."""
-    pop = lambda c: _facts(c["title"], c["artist"]).get("popularity")   # noqa: E731
-    return _rank_scores(sorted(cands, key=lambda c: -(pop(c) or 0)), pop)
-
-
-def other_cap(artists, genres, limit):
-    """How many tracks one input may contribute. SCALES WITH DEMAND (limit / number of inputs): a
-    fixed small cap is what made a 50% "theirs" mix silently collapse into an almost entirely "mine"
-    playlist when the recipe named only one or two artists - there were never enough of their tracks
-    to fill the half."""
-    inputs = [a for a in (artists or []) if a] + [g for g in (genres or []) if g]
-    return max(MIN_ARTIST_CAP, math.ceil(limit / max(1, len(inputs))))
-
-
-def build_other_pool(client, artists, genres, limit, store=None):
-    """Popular tracks for other people's artists/genres, deduped, capped so no one artist dominates,
-    and widened to related artists when the listed inputs can't fill the pool. The all-at-once form,
-    used when nothing is watching the build progress."""
-    cap = other_cap(artists, genres, limit)
-    rows, seen, related = [], set(), []
-
-    def _take(candidates):
-        for c in candidates:
-            if c["video_id"] not in seen:
-                seen.add(c["video_id"])
-                rows.append(c)
-
-    for kind, names in (("artist", artists or []), ("genre", genres or [])):
-        for name in names:
-            chunk, more = other_input_songs(client, kind, name, cap, store)
-            for row in chunk:
-                row["input"] = name       # which recipe input put it here (see apply_recipe)
-            _take(chunk)
-            related += more
-
-    for name in related:                       # widen: one hop out to related artists
-        if len(rows) >= limit:
-            break
-        _take(_cap_per_artist(_artist_songs(client, name), max(2, cap // 2)))
-
-    return rank_other(to_candidates(rows[:limit], store))
-
-
-def _resolve_durations(store, client, pool, cap=DURATION_LOOKUPS):
-    """Best-effort duration (seconds) for pool entries nothing knows the length of: a duration known
-    for the same song under any videoId, else one live lookup (capped, since a wrong estimate only
-    costs a slightly-off target length). Done once at build time so every later re-pick can budget
-    the mix by duration without touching the network."""
-    spent = 0
-    for c in pool:
-        if c["duration"] is not None:
-            continue
-        c["duration"] = store.tracks.known_duration(c["title"], c["artist"])
-        if c["duration"] is not None or spent >= cap or client is None:
-            continue
-        spent += 1
-        try:
-            details = (client.get_song(c["video_id"]) or {}).get("videoDetails") or {}
-            secs = details.get("lengthSeconds")
-            c["duration"] = int(secs) if secs not in (None, "") else None
-        except Exception:  # noqa: BLE001 - duration is a nicety; never block generation
-            c["duration"] = None
-    return pool
-
-
 # --------------------------------------------------------------------------- picking
 
 def _pool_targets(recipe):
@@ -613,267 +237,6 @@ def _pool_targets(recipe):
     slots = max(8, math.ceil(recipe["target_minutes"] * 60 / AVG_TRACK_S))
     return (min(140, max(16, int(slots * POOL_SLACK))),
             min(MAX_OTHER_POOL, max(12, int(slots * POOL_SLACK * 0.6))))
-
-
-def _weight(cand, familiarity, penalized):
-    """Draw weight for one candidate: its base rank score, narrowed to the familiarity band the
-    slider asks for, and docked if the previous build already used it. Genre and era steering is NOT
-    a weight - it's a quota applied at fill time (see _quotas)."""
-    w = cand["score"]
-    w *= math.exp(-((cand["fam"] - familiarity) ** 2) / (2 * FAMILIARITY_SIGMA ** 2)) + 0.05
-    if cand["video_id"] in penalized:
-        w *= REPEAT_PENALTY
-    return max(w, 0.0)
-
-
-def _sample_order(cands, rng, weight_of):
-    """Weighted random order without replacement (Efraimidis-Spirakis: key = u**(1/w), descending).
-    Zero-weight candidates drop out entirely."""
-    keyed = []
-    for c in cands:
-        w = weight_of(c)
-        if w <= 0:
-            continue
-        keyed.append((rng.random() ** (1.0 / w), c))
-    keyed.sort(key=lambda t: -t[0])
-    return [c for _, c in keyed]
-
-
-def _artist_cap(cands, needed):
-    """How many slots one artist may take. Adapts to the pool: with twenty artists available this is
-    2, with a single named artist it is however many the mix needs - the cap exists to stop one
-    artist crowding out a broad pool, not to starve a deliberately narrow recipe."""
-    artists = {c["artist"] for c in cands if c["artist"]}
-    return max(2, math.ceil(needed / max(1, len(artists))) + 1)
-
-
-def _axis_genre(cand):
-    """The genre a candidate is filed under on the sliders: its SPECIFIC genre ("Alternative Rock")
-    where one is known, falling back to the coarse family. Specific is the point - "alt rock" is a
-    thing people ask for, and a bar labelled with the family it collapses into ("rock-indie") can't
-    be asked for at all. Empty string when nothing is tagged."""
-    return cand.get("cluster_genre") or cand["genre"] or cand["family"] or ""
-
-
-def _bucket(cand, kind, quota):
-    """Which quota bucket a candidate falls in for `kind`: its own pinned axis, else the shared
-    remainder (""). A track with no genre/decade at all always lands in the remainder."""
-    key = ("genre:" + _axis_genre(cand)) if kind == "genre" else ("era:" + cand["decade"])
-    return key if key in quota else ""
-
-
-def _prefer_seed_artists(order, artists):
-    """Within each genre, offer two named-artist tracks for each discovery track.
-
-    Keep the sampled genre order and each artist's familiarity-weighted track order. Rotate
-    between named artists so a large catalogue does not consume another selected artist's share.
-    When either group runs out, use the other group's remaining tracks.
-    """
-    groups = {}
-    for candidate in order:
-        groups.setdefault(_axis_genre(candidate), []).append(candidate)
-    queues = {}
-    for genre, rows in groups.items():
-        named, related = {}, []
-        for candidate in rows:
-            artist = candidate["artist"].casefold()
-            if artist in artists:
-                named.setdefault(artist, []).append(candidate)
-            else:
-                related.append(candidate)
-        seeds = [c for group in zip_longest(*named.values()) for c in group if c]
-        queues[genre] = deque(c for group in zip_longest(seeds[::2], seeds[1::2], related)
-                              for c in group if c)
-    return [queues[_axis_genre(c)].popleft() for c in order]
-
-
-def _quota_weights(state, party, cands, conditional=False):
-    """Requested genre/year shares, optionally conditioned on a library subpool.
-
-    Blend and Yours contain different slices of the library. A 34% Rock library request must not
-    cap a Rock-only Blend pool to 34% of its reserved slots. Redistribute absent buckets among the
-    available ones, retaining explicit zeroes and the unpinned remainder. Passenger quotas remain
-    absolute: a thin requested genre still needs discovery, rather than being silently turned down.
-    """
-    targets = (state.get("targets") or {}).get(party) or {}
-    out = {}
-    for kind in ("genre", "era"):
-        pins = {k: v for k, v in targets.items() if k.startswith(kind + ":")}
-        if not pins:
-            continue
-        claimed = sum(pins.values())
-        if claimed > 1.0:
-            pins = {k: v / claimed for k, v in pins.items()}
-        out[kind] = {**pins, "": max(0, 1 - claimed)}
-    if conditional:
-        # Intersect the genre and era restrictions before finding which buckets are available.
-        eligible = [c for c in cands if all(q[_bucket(c, kind, q)] > 0
-                                           for kind, q in out.items())]
-        for kind, weights in out.items():
-            available = {_bucket(c, kind, weights) for c in eligible}
-            weights.update({k: 0 for k in weights if k not in available})
-    return out
-
-
-def _quotas(state, party, slots, cands, conditional=False):
-    """How many of `party`'s tracks each pinned genre/era gets, plus the "" bucket every unpinned
-    track shares. Only kinds with at least one pinned slider get a quota; the rest stay free.
-
-    This is what makes a slider mean what it says, in BOTH directions. As a ceiling it holds the
-    others back (drag one decade to 100% and the rest empty out). As a floor it is filled first, so
-    asking for 40% rock gets 40% rock - weighting alone would just re-order the draw and hand back
-    whatever proportion the pool happened to hold, which is not what the number on screen says."""
-    return {kind: (_apportion_percentages(weights, slots) if any(weights.values())
-                   else dict.fromkeys(weights, 0))
-            for kind, weights in _quota_weights(state, party, cands, conditional).items()}
-
-
-def _fill(order, slots, cap, quotas=None, preferred_artists=()):
-    """Fill song slots from a sampled order, honouring artist and genre/era quotas.
-
-    Pinned buckets are filled FIRST, up to their count - a quota is a floor as much as a ceiling.
-    Then the remaining slots are filled in sampled order, with every ceiling still enforced.
-    Returns the chosen tracks and their duration, which _pick_mix uses to fit the whole trip."""
-    quotas = quotas or {}
-    picked, per, taken = [], Counter(), set()
-    spent = {kind: Counter() for kind in quotas}
-    total = 0.0
-
-    def blocked(c):
-        if len(picked) >= slots:
-            return True
-        # Named artists are the core of the genre. The discovery artist cap must not prevent
-        # their larger share; _prefer_seed_artists already rotates fairly between them.
-        if c["artist"] and c["artist"].casefold() not in preferred_artists and per[c["artist"]] >= cap:
-            return True
-        return any(spent[kind][_bucket(c, kind, q)] + 1 > q.get(_bucket(c, kind, q), 0)
-                   for kind, q in quotas.items())
-
-    def take(c):
-        nonlocal total
-        for kind, q in quotas.items():
-            spent[kind][_bucket(c, kind, q)] += 1
-        per[c["artist"]] += 1
-        taken.add(c["video_id"])
-        picked.append(c)
-        total += c["duration"] or AVG_TRACK_S
-
-    for kind, quota in quotas.items():          # the floor pass
-        for key, want in quota.items():
-            if not key:
-                continue
-            for c in order:
-                if spent[kind][key] >= want:
-                    break
-                if c["video_id"] in taken or _bucket(c, kind, quota) != key or blocked(c):
-                    continue
-                take(c)
-    for c in order:                             # then everything else, ceilings still on
-        if c["video_id"] not in taken and not blocked(c):
-            take(c)
-    return picked, total
-
-
-def _feat(item):
-    return {"artist": item.get("artist") or "", "genre": item.get("genre") or "",
-            "source": item.get("source") or "theirs"}
-
-
-def _is_overlap(candidate, state):
-    """Whether one of the user's tracks also matches the passengers' explicit taste inputs."""
-    inputs = state.get("inputs") or {}
-    artists = {a.strip().lower() for a in inputs.get("artists", []) if a}
-    if (candidate.get("artist") or "").strip().lower() in artists:
-        return True
-    wanted = {genre_map.family(g) for g in inputs.get("genres", []) if g}
-    return bool(wanted and genre_map.family(candidate.get("genre")) in wanted)
-
-
-def _mix_source(candidate, state):
-    """The three visible pools; shared library tracks still use the library's picking rules."""
-    if candidate.get("source") != "mine":
-        return "theirs"
-    return "blend" if _is_overlap(candidate, state) else "yours"
-
-
-def _mix_weights(state):
-    blend = 1 / 3 if state.get("blend_available") else 0
-    own = state.get("own_pct", 50) / 100
-    return {"yours": (1 - blend) * own, "theirs": (1 - blend) * (1 - own), "blend": blend}
-
-
-def _pick_mix(state, groups, orders, target_s):
-    """Reserve whole-song shares for all three pools, then fit the trip's duration.
-
-    Estimate the total song count, draw that many in the requested proportions, and refine the
-    count using the chosen tracks' actual lengths. Separate minute budgets would give a pool of
-    long songs fewer slots than its displayed percentage. Keep Blend separate during shortfall
-    replacement too, so a thin passenger pool doesn't erase the shared reservation.
-    """
-    weights = _mix_weights(state)
-    artists = {a.casefold() for a in state.get("inputs", {}).get("artists", [])}
-    orders["theirs"] = _prefer_seed_artists(orders["theirs"], artists)
-    averages = {side: (sum(c["duration"] or AVG_TRACK_S for c in rows) / len(rows)
-                       if rows else AVG_TRACK_S) for side, rows in groups.items()}
-
-    def fill(side, count):
-        party = "theirs" if side == "theirs" else "mine"
-        quotas = _quotas(state, party, count, groups[side],
-                         conditional=party == "mine" and state["blend_available"])
-        return _fill(orders[side], count, _artist_cap(groups[side], count), quotas,
-                     artists if side == "theirs" else ())
-
-    attempts = {}
-
-    def draw(count):
-        if count in attempts:
-            return attempts[count]
-        wanted = _apportion_percentages(weights, count)
-        picked, seconds, short = {}, {}, {}
-        expected_s = 0
-        for side, slots in wanted.items():
-            picked[side], seconds[side] = fill(side, slots)
-            avg = seconds[side] / len(picked[side]) if picked[side] else averages[side]
-            missing_s = (slots - len(picked[side])) * avg
-            expected_s += seconds[side] + missing_s
-            if missing_s:
-                short["mine" if side == "yours" else side] = round(missing_s / 60)
-        if not state.get("building"):
-            # Cover missing slots with the outer pools first. Only expand Blend when neither can
-            # supply them; its reserved third remains intact when either outer pool runs short.
-            gap = count - sum(map(len, picked.values()))
-            for side in ("yours", "theirs", "blend"):
-                if not gap:
-                    break
-                replacement, secs = fill(side, len(picked[side]) + gap)
-                added = len(replacement) - len(picked[side])
-                if added > 0:
-                    picked[side], seconds[side] = replacement, secs
-                    gap -= added
-        secs = sum(seconds.values())
-        # While discovery is running, include its still-empty slots in the duration estimate.
-        # Otherwise every progress refresh would temporarily replace them with library songs.
-        fitted_s = expected_s if state.get("building") else secs
-        attempts[count] = (picked, short, fitted_s)
-        return attempts[count]
-
-    avg = sum(weights[side] * averages[side] for side in weights)
-    count = max(1, round(target_s / max(avg, 60)))
-    capacity = max(count, sum(map(len, groups.values())))
-    for _ in range(8):
-        picked, _, secs = draw(count)
-        if not secs:
-            break
-        next_count = max(1, min(capacity, round(count * target_s / secs)))
-        if next_count in attempts:
-            break
-        count = next_count
-    best = min(attempts, key=lambda n: abs(attempts[n][2] - target_s))
-    for count in (best - 1, best + 1):
-        if 1 <= count <= capacity:
-            draw(count)
-    picked, short, _ = min(attempts.values(), key=lambda attempt: abs(attempt[2] - target_s))
-    return picked, short
 
 
 def repick(state, store, now=0.0):
@@ -887,21 +250,17 @@ def repick(state, store, now=0.0):
     _repair_artist_clusters(state)
     _normalize_balances(state)
     pool = own_candidates(store, now, state) + [c for c in state["pool"] if c["source"] != "mine"]
-    rng = random.Random(state["seed"])
-    banned = set(state["banned"])
-    penalized = set(state.get("prev") or [])
-    fam = state["familiarity_pct"] / 100.0
-    target_s = state["target_minutes"] * 60
-    groups = {"yours": [], "theirs": [], "blend": []}
-    for candidate in pool:
-        if candidate["video_id"] not in banned:
-            groups[_mix_source(candidate, state)].append(candidate)
-    state["blend_available"] = bool(groups["blend"])
-    orders = {side: _sample_order(cands, rng, lambda c: _weight(c, fam, penalized))
-              for side, cands in groups.items()}
-    picked, short = _pick_mix(state, groups, orders, target_s)
+    result = road_trip_mix.construct(road_trip_mix.MixRequest(
+        candidates=pool, own_pct=state["own_pct"], familiarity_pct=state["familiarity_pct"],
+        target_minutes=state["target_minutes"], seed=state["seed"],
+        artists=state.get("inputs", {}).get("artists", []), genres=state.get("inputs", {}).get("genres", []),
+        targets=state.get("targets") or {}, banned=state["banned"], previous=state.get("prev") or [],
+        building=bool(state.get("building"))),
+        random.Random(state["seed"]))
+    groups, picked, short = result.groups, result.picked, result.short
+    state["blend_available"] = result.blend_available
     mine, theirs = picked["yours"] + picked["blend"], picked["theirs"]
-    ordered = journey_order(mine + theirs, "road_trip", state["seed"], _feat)
+    ordered = result.ordered
     # The chosen rows are stored in full, not as ids into a pool: your side isn't kept anywhere, and
     # rendering the playlist (or saving it to YouTube) shouldn't have to reconstruct it.
     state["picked"] = [{k: c[k] for k in _ROW_FIELDS} for c in ordered]
@@ -1093,10 +452,11 @@ def add_other_input(state, store, client, item):
     # A track can be in your library AND on their artist's page; it is already yours, so their side
     # doesn't get to claim it twice.
     if fresh is None:
-        rows, related = other_input_songs(client, kind, name, state["other_cap"], store, decade)
+        batch = candidates.acquire_input(client, store, candidates.InputRequest(kind, name, state["other_cap"], decade))
+        rows, related = batch.rows, batch.related
         for row in rows:
             row["input"] = name        # so removing that artist/genre can take its tracks with it
-        fresh = to_candidates([r for r in rows if r["video_id"] not in known][:room], store)
+        fresh = candidates.to_candidates([r for r in rows if r["video_id"] not in known][:room], store)
         if kind == "genre":
             origin = _genre_input(state, genre)
             for candidate in fresh:
@@ -1120,8 +480,8 @@ def add_other_input(state, store, client, item):
         # This search was run to feed one pinned slider: keep only what actually belongs on it, or
         # widening for "alternative rock" would quietly stuff the mix with whatever else ranked.
         fresh = [c for c in fresh if _matches_axis(c, item["want"])]
-    _resolve_durations(store, client, fresh, cap=2)
-    state["pool"] = [c for c in state["pool"] if c["source"] == "mine"] + rank_other(theirs + fresh)
+    candidates._resolve_durations(store, client, fresh, cap=2)
+    state["pool"] = [c for c in state["pool"] if c["source"] == "mine"] + candidates.rank_other(theirs + fresh)
     state["done_inputs"].append(name)
     if item.get("widen_key"):
         state.setdefault("done_widening", []).append(item["widen_key"])
@@ -1209,7 +569,7 @@ def fill_own_facts(state, store, now=0.0, count=OWN_FACT_LOOKUPS):
     bare = [c for c in own_candidates(store, now, state) if not (c["genre"] and c["year"])]
     bare.sort(key=lambda c: -c["engagement"])
     for c in bare[:count]:
-        facts = _facts(c["title"], c["artist"])
+        facts = candidates._facts(c["title"], c["artist"])
         got = {"genre": c["genre"] or facts.get("genre") or "",
                "year": c["year"] or facts.get("year")}
         if got["genre"] or got["year"]:
@@ -1331,20 +691,6 @@ def _widen_terms(state, axis):
             seen.add(g)
             terms.append(f"{g} {name}s")
     return terms[:3] or [f"{name}s music"]
-
-
-def _apportion_percentages(weights, total=100):
-    """Scale a group together and allocate rounding leftovers without losing percentage points."""
-    if not weights:
-        return {}
-    weight_sum = sum(weights.values())
-    raw = {k: total * (v / weight_sum if weight_sum else 1 / len(weights))
-           for k, v in weights.items()}
-    allocated = {k: math.floor(v) for k, v in raw.items()}
-    remaining = total - sum(allocated.values())
-    for key in sorted(raw, key=lambda k: -(raw[k] - allocated[k]))[:remaining]:
-        allocated[key] += 1
-    return allocated
 
 
 def _normalize_balances(state):

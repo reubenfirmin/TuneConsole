@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import road_trip as road_trip_rec
+from yt_playlist.rec import road_trip_candidates as candidates
 from yt_playlist.web.routes import road_trip as road_trip_route
 from yt_playlist.repos.rec_query import GENERATED_GROUP
 from yt_playlist.web.app import create_app
@@ -40,8 +41,8 @@ def _stub_pools(monkeypatch, store=None, own_count=20, other_count=20):
                 for i in range(other_count)]
         return rows[:cap], []
 
-    monkeypatch.setattr(road_trip_rec, "other_input_songs", songs_fn)
-    monkeypatch.setattr(road_trip_rec, "_facts",
+    monkeypatch.setattr(candidates, "other_input_songs", songs_fn)
+    monkeypatch.setattr(candidates, "_facts",
                         lambda title, artist: {"popularity": 900 - int(title.split()[-1]),
                                                "year": 1980, "genre": "synthpop", "duration": 300})
 
@@ -90,10 +91,10 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
     state.update(building=False, pending=[], artist_contexts={})
     for name, genre in zip(seeds, ["Alternative Rock", "Indie Rock", "Alternative Rock"]):
         state["artist_contexts"][name] = {"genre": genre, "year": None, "related": []}
-        candidate = road_trip_rec._candidate(name, name, name, "", None, 300, "theirs", genre, None)
+        candidate = candidates._candidate(name, name, name, "", None, 300, "theirs", genre, None)
         candidate.update(input=name, cluster_genre="Alternative Rock", anchors=seeds, score=1)
         state["pool"].append(candidate)
-    stale = road_trip_rec._candidate("old", "Old singer song", "Old Singer", "", None, 300,
+    stale = candidates._candidate("old", "Old singer song", "Old Singer", "", None, 300,
                                      "theirs", "Singer-Songwriter", None)
     stale["input"] = "Removed Artist"
     state["pool"].append(stale)
@@ -302,7 +303,7 @@ def test_added_genre_is_balanced_before_discovery_and_can_grow_a_full_pool(store
     genres = ["Rock", "Pop", "Jazz"]
     rid = _recipe(store, own_pct=0, artists=[], genres=genres, target_minutes=100)
     state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
-    state["pool"] = [road_trip_rec._candidate(
+    state["pool"] = [candidates._candidate(
         f"old-{i}", f"Old {i}", f"Old Artist {i}", "", None, 300, "theirs", genres[i % 3], 1995)
         for i in range(state["other_limit"])]
     for row in state["pool"]:
@@ -313,9 +314,9 @@ def test_added_genre_is_balanced_before_discovery_and_can_grow_a_full_pool(store
     store.road_trip.save_road_trip_draft(rid, state, 1000)
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
-    monkeypatch.setattr(road_trip_rec, "artist_genre", lambda *args: None)
-    monkeypatch.setattr(road_trip_rec, "_facts", lambda *args: {"popularity": 500, "year": 1995})
-    monkeypatch.setattr(road_trip_rec, "other_input_songs", lambda *args: ([
+    monkeypatch.setattr(candidates, "artist_genre", lambda *args: None)
+    monkeypatch.setattr(candidates, "_facts", lambda *args: {"popularity": 500, "year": 1995})
+    monkeypatch.setattr(candidates, "other_input_songs", lambda *args: ([
         {"video_id": f"funk-{i}", "title": f"Funk {i}", "artist": f"Funk Artist {i}", "album": "",
          "thumbnail": None, "duration": 300, "genre": "Funk"} for i in range(8)], []))
     data = {"id": str(rid), "name": "Beach Run", "own_pct": "0", "target_minutes": "100",
@@ -350,7 +351,7 @@ def test_adding_an_artist_automatically_adds_and_balances_its_genre(store, monke
     c.post(f"/road_trip/recipes/{rid}/build")
     held = []
     monkeypatch.setattr(road_trip_route, "_spawn", held.append)
-    monkeypatch.setattr(road_trip_rec, "artist_genre",
+    monkeypatch.setattr(candidates, "artist_genre",
                         lambda store, name: "Alternative Rock" if name == "Weezer" else None)
     data = {"id": str(rid), "name": "Beach Run", "own_pct": "50", "target_minutes": "30",
             "artists": json.dumps(["Tame Impala", "Weezer"]), "genres": "[]"}
@@ -572,7 +573,7 @@ def test_autocomplete_artists(store):
 
 def test_artist_genre_lookup_feeds_the_form(store, monkeypatch):
     """Adding an artist pre-fills their genre, so the mix reaches past that one artist."""
-    monkeypatch.setattr(road_trip_rec, "artist_genre",
+    monkeypatch.setattr(candidates, "artist_genre",
                         lambda s, name: "Alternative Rock" if name == "Weezer" else None)
     c, _ = _app(store)
 

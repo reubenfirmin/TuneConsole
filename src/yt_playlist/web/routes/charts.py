@@ -126,6 +126,7 @@ def build(ctx) -> APIRouter:
             ya["saved"] = ya.get("browse_id") in saved_ids
         return templates.TemplateResponse(request, "artist.html", {
             "artist": name, "songs": songs, "collection": collection, "yt_albums": yt_albums,
+            "saved_owners": store.collection.saved_album_owners(),
             "total_plays": sum(s["plays"] for s in songs), "info": info,
         })
 

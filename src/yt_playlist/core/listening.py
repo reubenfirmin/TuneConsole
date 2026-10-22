@@ -50,7 +50,8 @@ def calendar(conn,identity_id,source_timezone=None):
         for event in conn.execute('SELECT id,played_at FROM play_events WHERE identity_id=?',
                                   (identity_id,)).fetchall():
             project_event(conn,event['id'],identity_id,event['played_at'],timezone=name)
-        conn.execute('UPDATE listening_observations SET day=CASE WHEN timezone=? THEN source_day END WHERE identity_id=?',
+        conn.execute('UPDATE listening_observations SET day=CASE WHEN timezone=? THEN source_day END '
+                     "WHERE identity_id=? AND precision='calendar_day'",
                      (name,identity_id))
         reconcile_foreign_days(conn,identity_id)
         first_play.invalidate(conn)
@@ -95,7 +96,8 @@ def observe_day(conn,identity_id,key,source_day,source,timezone,observed_at):
 def reconcile_foreign_days(conn,identity_id):
     """An exact event can anchor a foreign-calendar date; ambiguity remains unknown."""
     rows = conn.execute('SELECT o.* FROM listening_observations o JOIN listening_calendars c '
-                        'ON c.identity_id=o.identity_id WHERE o.identity_id=? AND o.timezone<>c.timezone',
+                        'ON c.identity_id=o.identity_id WHERE o.identity_id=? '
+                        "AND o.precision='calendar_day' AND o.timezone<>c.timezone",
                         (identity_id,)).fetchall()
     for row in rows:
         matches = {
@@ -121,8 +123,6 @@ def remove_source(conn,source,identity_id=None):
     scope = '' if identity_id is None else ' AND identity_id=?'
     args = (source,) if identity_id is None else (source,identity_id)
     conn.execute('DELETE FROM listening_observations WHERE source=?'+scope,args)
-    conn.execute('DELETE FROM history_items WHERE source=? AND snapshot_id IN '
-                 '(SELECT id FROM history_snapshots WHERE 1=1'+scope+')',args)
     conn.execute('DELETE FROM play_event_sources WHERE source=? AND event_id IN '
                  '(SELECT id FROM play_events WHERE 1=1'+scope+')',args)
     conn.execute('DELETE FROM play_events WHERE NOT EXISTS '

@@ -1,26 +1,32 @@
 {% from "_partials/song_menu_button.html" import song_menu %}
 {% if session.local_id %}
 <div class="card library-table-card radio-track-scroll">
+  {% include "_partials/radio_drawing.html" %}
   <table class="track-table" aria-label="{{ session.title }}">
     <thead><tr><th class="num radio-col-number">#</th><th class="col-thumb"></th><th class="liked-col"></th>
-      <th>Song</th><th class="radio-col-artist">Artist</th><th class="radio-col-album">Album</th><th class="num col-length">Length</th><th class="col-action"></th>
+      <th>Song</th><th class="radio-col-artist">Artist</th><th class="radio-col-album">Album</th>
+      <th class="num radio-col-year">Year</th><th class="radio-col-genre">Genre</th><th class="num col-length">Length</th><th class="col-action"></th>
     </tr></thead>
-    <tbody>
+    <tbody class="radio-history-space" aria-hidden="true"></tbody>
+    <tbody class="radio-history">
     {% for t in tracks[:session.history_count] %}
+      {% set play_url = 'https://music.youtube.com/watch?v=' ~ (t.video_id|urlencode) ~ '&list=' ~ (session.playlist_id|urlencode) %}
       <tr class="srow" data-vid="{{ t.video_id }}">
-        <td class="num"><span class="rownum">{{ loop.index }}</span></td>
-        <td><span class="pl-cover">
+        <td class="num"><div class="track-cell"><span class="rownum">{{ loop.index }}</span></div></td>
+        <td><div class="track-cell"><span class="pl-cover">
           {% if t.thumbnail %}<img class="pl-thumb" src="{{ t.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
-          <a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}&amp;list={{ session.playlist_id }}"
+          <a class="pl-play" href="{{ play_url }}"
              target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
-        </span></td>
+        </span></div></td>
         {% with video_id=t.video_id, liked=t.liked %}{% include "_partials/liked_cell.html" %}{% endwith %}
-        <td class="t-wrap" title="{{ t.title }}"><a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}&amp;list={{ session.playlist_id }}"
-            target="_blank" rel="noopener" data-yt-info>{{ t.title }}</a></td>
-        <td class="t-wrap" title="{{ t.artist }}"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
-        <td class="t-wrap" title="{{ t.album }}">{% if t.album_browse %}<a class="alink" href="/album?browse={{ t.album_browse }}">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</td>
-        <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
-        <td class="rowmenu">{{ song_menu(t) }}</td>
+        <td class="t-wrap" title="{{ t.title }}"><div class="track-cell track-cell--text"><a class="ptitle" href="{{ play_url }}"
+            target="_blank" rel="noopener" data-yt-info>{{ t.title }}</a></div></td>
+        <td class="t-wrap" title="{{ t.artist }}"><div class="track-cell track-cell--text"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></div></td>
+        <td class="t-wrap" title="{{ t.album }}"><div class="track-cell track-cell--text">{% if t.album_browse %}<a class="alink" href="/album?browse={{ t.album_browse }}">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</div></td>
+        <td class="num mono"><div class="track-cell">{{ t.year or '—' }}</div></td>
+        <td class="t-wrap" title="{{ t.genre or '' }}"><div class="track-cell track-cell--text">{% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted">—</span>{% endif %}</div></td>
+        <td class="num mono"><div class="track-cell">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</div></td>
+        <td class="rowmenu"><div class="track-cell">{{ song_menu(t, {"play_url": play_url}) }}</div></td>
       </tr>
     {% endfor %}
     </tbody>

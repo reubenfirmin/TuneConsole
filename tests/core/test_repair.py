@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from tests.historical_captures import retained_capture
 from yt_playlist.core import repair
 from yt_playlist.core.store import Store
 
@@ -26,7 +27,7 @@ def store():
 
 
 def _hist(store, ident, day, keys, source="ytm_history"):
-    store.history.add_history_snapshot(ident, day * DAY + 43200, keys, source=source)
+    retained_capture(store.conn, ident, day * DAY + 43200, keys, source=source)
 
 
 def _coverage(store, lo=10, hi=19, ident=1, **overrides):
@@ -49,7 +50,8 @@ def _ev(store, ident, key, day, source="takeout", sec=100):
 
 
 def _keys(store):
-    return sorted(r[0] for r in store.conn.execute("SELECT identity_key FROM history_items"))
+    return sorted(r[0] for r in store.conn.execute(
+        "SELECT identity_key FROM listening_observations WHERE precision='legacy_unknown'"))
 
 
 # --- the Takeout-authoritative window -------------------------------------------------------------
@@ -190,8 +192,8 @@ def test_the_lingering_window_pattern_is_removed(store, tmp_path):
         _hist(store, 1, d, ["hum"])
     assert repair.purge_phantom_history(store.conn, tmp_path / 'backup.jsonl') == 5
     remaining = [r[0] for r in store.conn.execute(
-        "SELECT CAST(hs.taken_at/86400 AS INT) FROM history_items hi "
-        "JOIN history_snapshots hs ON hs.id=hi.snapshot_id")]
+        "SELECT CAST(c.captured_at/86400 AS INT) FROM listening_observations o "
+        "JOIN listening_capture_receipts c ON c.id=o.capture_id")]
     assert sorted(remaining) == [10, 11]
 
 
@@ -207,8 +209,9 @@ def test_deleted_rows_are_backed_up(store, tmp_path):
     rows = [json.loads(line) for line in p.read_text().splitlines()]
     row, = rows
     assert row['identity_id'] == 1 and row['identity_key'] == 'phantom'
-    assert row['taken_at'] == 15 * DAY + 43200 and row['source'] == 'ytm_history'
-    assert row['snapshot_id'] and row['rid'] and 'raw_identity_key' in row
+    assert row['captured_at'] == 15 * DAY + 43200 and row['source'] == 'ytm_history'
+    assert row['capture_id'] and row['capture_item_id'] and row['id'] and 'raw_identity_key' in row
+    assert row['precision'] == 'legacy_unknown' and row['timezone'] is None
 
 
 def test_no_backup_file_when_nothing_is_deleted(store, tmp_path):
@@ -306,8 +309,7 @@ def test_exact_events_and_coverage_are_scoped_to_their_account(store, tmp_path):
     _ev(store, 2, 'same-song', 15)
     assert repair.purge_phantom_history(store.conn, tmp_path / 'backup.jsonl') == 1
     assert [row[0] for row in store.conn.execute(
-        'SELECT hs.identity_id FROM history_items hi '
-        'JOIN history_snapshots hs ON hs.id=hi.snapshot_id')] == [2]
+        "SELECT identity_id FROM listening_observations WHERE precision='legacy_unknown'")] == [2]
 
 
 @pytest.mark.parametrize('flags', [dict(account_verified=0), dict(complete=0),
@@ -331,7 +333,7 @@ def test_unknown_and_independent_observations_survive_complete_coverage(store, t
 @pytest.mark.parametrize('writer', ['live', 'import'])
 def test_independent_observation_protects_an_existing_daily_row(store, writer):
     _coverage(store)
-    store.history.add_history_snapshot(1,15*DAY+43200,['song'],source='ytm_history')
+    retained_capture(store.conn,1,15*DAY+43200,['song'],source='ytm_history')
     if writer == 'live':
         store.history.record_history_plays(1, 15 * DAY + 43200, ['song'], source_timezone='UTC')
     else:
@@ -407,7 +409,7 @@ def test_failed_delete_rolls_back_prior_deletions_and_leaves_complete_backup(sto
     import sqlite3
     _coverage(store)
     _hist(store, 1, 15, ['a', 'b'])
-    store.conn.execute("CREATE TRIGGER fail_repair BEFORE DELETE ON history_items "
+    store.conn.execute("CREATE TRIGGER fail_repair BEFORE DELETE ON listening_observations "
                        "WHEN OLD.identity_key='b' BEGIN SELECT RAISE(ABORT,'injected deletion failure'); END")
     backup = tmp_path / 'backup.jsonl'
     with pytest.raises(sqlite3.IntegrityError, match='injected deletion failure'):

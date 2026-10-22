@@ -1,65 +1,140 @@
-# On a `v*` tag, build the release artifacts and attach them to the GitHub Release:
-#   - the Python wheel (also what the CLI/uv install and the Flathub manifest use)
-#   - a single-file Flatpak bundle (TuneConsole.flatpak) for the self-hosted Linux install
-# The macOS .dmg is produced separately by macos.yml.
-name: Release artifacts
-
+name: Release coordinator
 on:
   push:
-    tags: ["v*"]
-
+    tags: ['v*']
 permissions:
-  contents: write
-
+  contents: read
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.policy.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: policy
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 packaging/release_policy.py "$RELEASE_TAG"
+  checks:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+  containers:
+    needs: version
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/container.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+  macos:
+    needs: version
+    uses: ./.github/workflows/macos.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.version.outputs.version }}
+      tag: ${{ github.ref_name }}
   wheel:
+    needs: version
     runs-on: ubuntu-latest
+    env:
+      SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }          # full history + tags so hatch-vcs derives the version
       - uses: astral-sh/setup-uv@v5
-      - name: Build wheel
-        run: uv build --wheel
-      - name: Attach wheel to the release
-        uses: softprops/action-gh-release@v2
+      - run: uv sync --locked --only-group build --no-install-project
+      - run: uv build --wheel --no-build-isolation --python .venv/bin/python
+      - uses: actions/upload-artifact@v4
         with:
-          files: dist/*.whl
-
+          name: release-wheel
+          path: dist/*.whl
+          if-no-files-found: error
   flatpak:
-    runs-on: ubuntu-latest
+    needs: [version, wheel]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x86_64, runner: ubuntu-latest}
+          - {arch: aarch64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }          # hatch-vcs needs the tag
-      - uses: astral-sh/setup-uv@v5
-      - name: Build the wheel the manifest globs from dist/
-        run: uv build --wheel
-      - name: Install flatpak + flatpak-builder
+      - uses: actions/download-artifact@v4
+        with: {name: release-wheel, path: dist}
+      - name: Install Flatpak tools
         run: |
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-      - name: Import the repo signing key
+      - name: Build signed candidate and check packaged startup and bridge
+        env:
+          FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
+          VERSION: ${{ needs.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        working-directory: packaging/flatpak
+        run: |
+          printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
+          fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse \
+            --repo=repo --gpg-sign="$fpr" --force-clean build-dir com.tuneconsole.TuneConsole.yaml
+          flatpak build-update-repo repo --gpg-sign="$fpr"
+          gpg --batch --export "$fpr" > repo-key.gpg
+          python3 bundle.py repo "TuneConsole-$ARCH.flatpak" repo-key.gpg
+          flatpak install --user --noninteractive "TuneConsole-$ARCH.flatpak"
+          python3 smoke.py "$VERSION"
+          tar -cf "flatpak-repo-$ARCH.tar" repo
+          if [[ "$ARCH" == x86_64 ]]; then cp "TuneConsole-$ARCH.flatpak" TuneConsole.flatpak; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-flatpak-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            packaging/flatpak/TuneConsole*.flatpak
+            packaging/flatpak/flatpak-repo-*.tar
+  promote:
+    needs: [version, checks, wheel, flatpak, macos, containers]
+    runs-on: ubuntu-latest
+    # All tags share this owner. Do not cancel a promotion already changing channels.
+    concurrency:
+      group: release-production
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: candidate
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble the exact signed repositories from both architectures
         env:
           FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
         run: |
-          echo "$FLATPAK_GPG_KEY" | gpg --batch --import
-          echo "FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')" >> "$GITHUB_ENV"
-      - name: Build + GPG-sign the auto-update repo (pruned to latest) and a one-shot bundle
-        working-directory: packaging/flatpak
-        run: |
-          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse \
-            --repo=repo --gpg-sign="$FPR" --force-clean build-dir com.tuneconsole.TuneConsole.yaml
-          flatpak build-update-repo repo --gpg-sign="$FPR" --prune --prune-depth=0
-          flatpak build-bundle repo ../../TuneConsole.flatpak com.tuneconsole.TuneConsole \
-            --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
-          cp tuneconsole.flatpakrepo repo/tuneconsole.flatpakrepo
-      - name: Publish the repo to Cloudflare Pages (this is the flatpak update channel)
-        working-directory: packaging/flatpak
+          sudo apt-get update
+          sudo apt-get install -y flatpak ostree
+          printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
+          fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
+          ostree --repo=candidate/flatpak-repo init --mode=archive-z2
+          for arch in x86_64 aarch64; do
+            mkdir -p "candidate/$arch"
+            tar -xf "candidate/flatpak-repo-$arch.tar" -C "candidate/$arch"
+            ostree --repo=candidate/flatpak-repo pull-local "candidate/$arch/repo"
+          done
+          flatpak build-update-repo candidate/flatpak-repo --gpg-sign="$fpr"
+          cp packaging/flatpak/tuneconsole.flatpakrepo candidate/flatpak-repo/
+      - name: Validate all assets and promote with rollback and version ordering
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx -y wrangler pages deploy repo --project-name tuneconsole-flatpak --branch production
-      - name: Attach the one-shot bundle to the release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: TuneConsole.flatpak
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 packaging/promote_release.py candidate "$RELEASE_TAG"

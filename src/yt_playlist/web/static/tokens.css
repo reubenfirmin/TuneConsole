@@ -278,6 +278,10 @@
   --glyph-ink: var(--p-slate-900);
   --status-light: var(--p-mist);
   --chart-album: var(--p-tan-400);
+  --radio-queue-0: var(--accent);
+  --radio-queue-1: var(--p-violet-400);
+  --radio-queue-2: var(--p-cyan-400);
+  --radio-queue-3: var(--p-tan-400);
 
   /* ---- brand accents ---- */
   --accent:      var(--p-blue-500);

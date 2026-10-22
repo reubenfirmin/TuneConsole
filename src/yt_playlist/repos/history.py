@@ -3,7 +3,7 @@ import datetime
 import logging
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from yt_playlist.core import catalog, first_play, listening
+from yt_playlist.core import artists, catalog, discovery_sources, first_play, listening
 from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized
 
 logger = logging.getLogger(__name__)
@@ -74,20 +74,6 @@ def _parse_played_date(played, taken_at, source_timezone=None):
 
 class HistoryRepo(Repo):
     @synchronized
-    def add_history_snapshot(self, identity_id, taken_at, item_keys, *, source="unknown") -> int:
-        """Record a raw snapshot: every key becomes a history_item. The plays model uses
-        record_history_plays (which dedups); this stays raw for tests and explicit callers."""
-        cur = self.conn.execute(
-            "INSERT INTO history_snapshots(identity_id,taken_at) VALUES (?,?)",
-            (identity_id, taken_at))
-        sid = cur.lastrowid
-        self.conn.executemany(
-            "INSERT INTO history_items(snapshot_id,identity_key,source) VALUES (?,?,?)",
-            [(sid, k, source) for k in item_keys])
-        self.conn.commit()
-        return sid
-
-    @synchronized
     def record_history_plays(self, identity_id, taken_at, items, *, source_timezone=None) -> int:
         """Retain dated sync evidence, returning newly observed account/recording days.
 
@@ -119,17 +105,14 @@ class HistoryRepo(Repo):
         Scoped to one account, or all when None. Exact plays continue to contribute
         listening days; a history-window reset does not delete timestamped evidence.
         """
-        if identity_id is None:
-            self.conn.execute('DELETE FROM listening_observations')
-            self.conn.execute("DELETE FROM history_items")
-            self.conn.execute("DELETE FROM history_snapshots")
-        else:
-            self.conn.execute('DELETE FROM listening_observations WHERE identity_id=?',(identity_id,))
-            self.conn.execute("DELETE FROM history_items WHERE snapshot_id IN "
-                              "(SELECT id FROM history_snapshots WHERE identity_id=?)", (identity_id,))
-            self.conn.execute("DELETE FROM history_snapshots WHERE identity_id=?", (identity_id,))
-        first_play.invalidate(self.conn)
-        self.conn.commit()
+        with self.conn:
+            if identity_id is None:
+                self.conn.execute('DELETE FROM listening_observations')
+                self.conn.execute('DELETE FROM listening_capture_receipts')
+            else:
+                self.conn.execute('DELETE FROM listening_observations WHERE identity_id=?',(identity_id,))
+                self.conn.execute('DELETE FROM listening_capture_receipts WHERE identity_id=?', (identity_id,))
+            first_play.invalidate(self.conn)
 
     @synchronized
     def get_recent_history_keys(self, since_ts) -> set[str]:
@@ -199,7 +182,8 @@ class HistoryRepo(Repo):
             ph = ",".join("?" * len(excl))
             q = ("WITH kept AS (SELECT pe.identity_id,pe.identity_key,pe.played_at,c.day "
                  "FROM play_events pe JOIN play_event_calendar c ON c.event_id=pe.id "
-                 f"WHERE COALESCE(pe.is_generated,0)=0 AND (pe.playlist_ytm_id IS NULL OR pe.playlist_ytm_id NOT IN ({ph}))) "
+                 f"WHERE COALESCE(pe.is_generated,0)=0 AND (pe.playlist_ytm_id IS NULL OR pe.playlist_ytm_id NOT IN ({ph}))"
+                 ") "
                  "SELECT k, MAX(ts) ts FROM ("
                  "  SELECT identity_key k, played_at ts FROM kept"
                  "  UNION ALL"
@@ -380,3 +364,97 @@ class HistoryRepo(Repo):
     def remove_listening_source(self, source, identity_id=None):
         with self.conn:
             listening.remove_source(self.conn,source,identity_id)
+
+    @synchronized
+    def import_spotify_listens(self, identity_id, rows):
+        """Retain stable Spotify occurrence IDs, independent of changing display metadata.
+
+        Rows contain (URI, end timestamp, unmatched artist name, matched key).
+        Unmatched receipts let overlapping files accumulate artist interest once;
+        they can be matched later if the user adds that music to the library.
+        """
+        with self.conn:
+            listening.calendar(self.conn,identity_id)
+            before = listening.day_count(self.conn,identity_id)
+            added = 0
+            artist_ids = {}
+            listens_added = 0
+            for uri, timestamp, artist, key in rows:
+                receipt = self.conn.execute(
+                    'SELECT event_id FROM spotify_history_listens WHERE identity_id=? AND track_uri=? AND ended_at=?',
+                    (identity_id,uri,timestamp)).fetchone()
+                if receipt and (receipt['event_id'] is not None or not key):
+                    continue
+                listens_added += receipt is None
+                event_id, aid = None, None
+                if not key:
+                    if artist not in artist_ids:
+                        artist_ids[artist] = artists.state_id(self.conn,artist)
+                    aid = artist_ids[artist]
+                if key:
+                    subject = catalog.play_key(self.conn,key,None)
+                    event = self._matching_event(identity_id,subject,None,timestamp)
+                    if event is None:
+                        event_id = self.conn.execute(
+                            'INSERT INTO play_events(identity_id,identity_key,played_at,source) '
+                            "VALUES (?,?,?,'spotify_export')", (identity_id,key,timestamp)).lastrowid
+                        added += 1
+                        event_time = timestamp
+                    else:
+                        event_id, event_time = event['id'], event['played_at']
+                    listening.project_event(self.conn,event_id,identity_id,event_time,source='spotify_export')
+                self.conn.execute('INSERT INTO spotify_history_listens VALUES (?,?,?,?,?) '
+                    'ON CONFLICT(identity_id,track_uri,ended_at) DO UPDATE SET '
+                    'event_id=excluded.event_id,artist_id=COALESCE(spotify_history_listens.artist_id,excluded.artist_id)',
+                    (identity_id,uri,timestamp,event_id,aid))
+            listening.reconcile_foreign_days(self.conn,identity_id)
+            first_play.invalidate(self.conn)
+            return max(0,listening.day_count(self.conn,identity_id)-before), added, listens_added
+
+    @synchronized
+    def spotify_unmatched_artists(self, identity_id):
+        return {r['name']: r['plays'] for r in self.conn.execute(
+            'SELECT a.name,COUNT(*) plays FROM spotify_history_listens s JOIN artists a ON a.id=s.artist_id '
+            'WHERE s.identity_id=? AND s.event_id IS NULL GROUP BY a.id', (identity_id,))}
+
+    @synchronized
+    def spotify_history_stats(self):
+        """Source attribution, counting shared events once rather than claiming ownership."""
+        row = self.conn.execute(
+            'SELECT COUNT(*) events,COUNT(DISTINCT pe.identity_key) tracks,MIN(pe.played_at) first_at,'
+            'MAX(pe.played_at) last_at FROM play_events pe WHERE EXISTS ('
+            "SELECT 1 FROM play_event_sources s WHERE s.event_id=pe.id AND s.source IN ('spotify','spotify_export'))"
+        ).fetchone()
+        days = self.conn.execute(
+            'SELECT COUNT(*) FROM (SELECT DISTINCT identity_id,identity_key,day FROM eligible_listening_evidence '
+            "WHERE source IN ('spotify','spotify_export'))").fetchone()[0]
+        artists = self.conn.execute(
+            'SELECT COUNT(DISTINCT d.artist_id) FROM discovered_artists d JOIN discovery_artist_sources s '
+            "ON s.artist_id=d.artist_id WHERE s.source LIKE 'spotify_export:%' OR s.source='spotify_model'").fetchone()[0]
+        receipts = self.conn.execute('SELECT COUNT(*) FROM spotify_history_listens').fetchone()[0]
+        unresolved = self.conn.execute('SELECT COUNT(*) FROM listening_observations '
+            "WHERE day IS NULL AND source IN ('spotify','spotify_export')").fetchone()[0]
+        return {**dict(row), 'days': days, 'artists': artists, 'listens': receipts,
+                'unresolved_days': unresolved}
+
+    @synchronized
+    def remove_spotify_history(self):
+        """Remove Spotify evidence and invalidate learned caches in one transaction.
+
+        Shared events, independent suggestions, library curation and explicit user
+        feedback survive. Model rollback snapshots must not restore deleted evidence.
+        The caller serializes imports/model work and schedules the fresh build.
+        """
+        with self.conn:
+            before = self.spotify_history_stats()
+            self.conn.execute('DELETE FROM spotify_history_listens')
+            for source in ('spotify_export','spotify'):
+                listening.remove_source(self.conn,source)
+            artists_removed = discovery_sources.remove_spotify_artists(self.conn)
+            for table in ('rec_proposals','rec_vectors','rec_artist_vectors','rec_artist_content_vectors',
+                          'rec_model_previous_vectors','rec_model_forecasts','rec_model_selection_runs'):
+                self.conn.execute(f'DELETE FROM {table}')
+            self.conn.execute("DELETE FROM settings WHERE key IN ('spotify_imported_at','spotify_import_report',"
+                              "'rec_selection_active_run','rec_selection_display_run','rec_selection_restore',"
+                              "'rec_artist_content_model','rec_autotune_result','trend_spotlight_review_month')")
+            return {**before, 'artists_removed': artists_removed}

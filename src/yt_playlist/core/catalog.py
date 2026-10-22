@@ -12,6 +12,7 @@ from yt_playlist.core.catalog_identity import ITEM_FIELDS, RECORDING_FIELDS, unr
 from yt_playlist.core.catalog_state import rekey_state as rekey_serialized_state
 from yt_playlist.core.discovery_sources import prepare_reassociation, finish_reassociation
 from yt_playlist.core import metadata, artists, albums
+from yt_playlist.core import rating_feedback
 from yt_playlist.util.thumbnails import is_placeholder_art
 
 
@@ -130,18 +131,21 @@ def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=N
     """Move only established associations; raw observations and unknown aliases stay intact."""
     subject = previous_recording_id or recording_id
     conn.execute('UPDATE album_tracks SET recording_id=? WHERE entry_id IS NULL AND recording_id=?', (recording_id,subject))
-    for table in ('play_events','history_items','rec_served_impressions','rec_lane_impressions'):
+    for table in ('play_events','rec_served_impressions','rec_lane_impressions'):
         conn.execute(f'UPDATE {table} SET identity_key=?,recording_id=? WHERE recording_id=?', (new_key,recording_id,subject))
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='listening_observations'").fetchone():
-        conn.execute('UPDATE listening_observations SET identity_key=?,recording_id=? WHERE recording_id=?',
-                     (new_key,recording_id,subject))
-        from .listening import reconcile_foreign_days
-        for row in conn.execute('SELECT identity_id FROM listening_calendars'):
-            reconcile_foreign_days(conn,row[0])
+    conn.execute('UPDATE listening_observations SET identity_key=?,recording_id=? WHERE recording_id=?',
+                 (new_key,recording_id,subject))
+    from .listening import reconcile_foreign_days
+    for row in conn.execute('SELECT identity_id FROM listening_calendars'):
+        reconcile_foreign_days(conn,row[0])
     for row in conn.execute('SELECT rowid,* FROM rec_feedback WHERE recording_id=?', (subject,)).fetchall():
         payload = json.dumps(dict(row))
         conn.execute("INSERT OR IGNORE INTO identity_state_archive VALUES ('feedback_reassociation',?,?,?)", (f'{subject}:{row["rowid"]}:{old_key}',payload,'verified association or alias disambiguation; learning is not replayed'))
         conn.execute('DELETE FROM rec_feedback WHERE rowid=?', (row['rowid'],))
+        if previous_recording_id is not None and row['kind'] in ('like', 'dislike', 'like_grad'):
+            # Association rating feedback and guards have one owner: the projector
+            # below reconciles the retained contributions using the pre-merge rows.
+            continue
         conn.execute('INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at,target_type,recording_id) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(surface,item_key,scope) DO UPDATE SET kind=excluded.kind,reason=excluded.reason,until=excluded.until,created_at=excluded.created_at,target_type=excluded.target_type,recording_id=excluded.recording_id WHERE excluded.created_at>=COALESCE(rec_feedback.created_at,0)', (row['surface'],new_key,row['kind'],row['reason'],row['scope'],row['until'],row['created_at'],row['target_type'],recording_id))
     for row in conn.execute('SELECT * FROM rec_impressions WHERE item_key=?', (old_key,)).fetchall():
         conn.execute('INSERT INTO rec_impressions VALUES (?,?,?,?) ON CONFLICT(surface,item_key) DO UPDATE SET views=views+excluded.views,last_shown=MAX(COALESCE(last_shown,0),COALESCE(excluded.last_shown,0))', (row['surface'],new_key,row['views'],row['last_shown']))
@@ -176,6 +180,9 @@ def associate_item(conn, video_id, recording_id, *, source, evidence, now):
         return
     payload = json.dumps(evidence,sort_keys=True)
     previous_key = conn.execute('SELECT identity_key FROM recordings WHERE id=?', (previous,)).fetchone()[0]
+    rating_keys = {previous_key, target[0]}
+    prior_ratings = rating_feedback.aggregate(conn, rating_keys)
+    feedback_before = rating_feedback.feedback_rows(conn, rating_keys)
     association_id = conn.execute('INSERT INTO item_recording_associations(video_id,recording_id,previous_recording_id,source,evidence,at) VALUES (?,?,?,?,?,?)', (video_id,recording_id,previous,source,payload,now)).lastrowid
     member, remaining = prepare_reassociation(conn,video_id,previous)
     conn.execute('UPDATE youtube_items SET recording_id=? WHERE video_id=?', (recording_id,video_id))
@@ -194,13 +201,22 @@ def associate_item(conn, video_id, recording_id, *, source, evidence, now):
         for row in conn.execute('SELECT DISTINCT identity_id FROM play_events WHERE video_id=?',(video_id,)).fetchall():
             reconcile_foreign_days(conn,row[0])
     conn.execute('UPDATE recordings SET provisional=0 WHERE id=?', (recording_id,))
-    if not conn.execute('SELECT 1 FROM catalog_entries WHERE recording_id=?', (previous,)).fetchone():
+    retired = not conn.execute('SELECT 1 FROM catalog_entries WHERE recording_id=?', (previous,)).fetchone()
+    if retired:
         rekey_state(conn,previous_key,target[0],recording_id,previous_recording_id=previous)
         conn.execute('INSERT OR REPLACE INTO recording_redirects VALUES (?,?,?,?)', (previous,recording_id,source,payload))
         conn.execute('UPDATE recording_redirects SET recording_id=? WHERE recording_id=?', (recording_id,previous))
         for row in conn.execute('SELECT alias,source FROM recording_aliases WHERE recording_id=?', (previous,)).fetchall():
             conn.execute('INSERT OR IGNORE INTO recording_aliases VALUES (?,?,?)', (row['alias'],recording_id,row['source']))
         conn.execute('DELETE FROM recording_aliases WHERE recording_id=?', (previous,))
+    combined = rating_feedback.aggregate(conn, rating_keys)
+    # An exact upload's contribution follows its corrected recording, including partial
+    # reassociation. Do not leave feedback on the old recording or replay its learning.
+    for key in prior_ratings.keys() - combined.keys():
+        combined[key] = rating_feedback.Rating('INDIFFERENT', now)
+    rating_feedback.apply(conn, combined, prior_feedback={
+        previous_key: [] if retired else [row for row in feedback_before if row['item_key'] == previous_key],
+        target[0]: feedback_before})
     invalidate_derived(conn)
 
 

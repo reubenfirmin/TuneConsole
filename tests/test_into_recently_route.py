@@ -101,3 +101,29 @@ def test_card_hidden_when_no_thumbnail_anywhere(store, monkeypatch):
                         lambda kind, display: {"display": "Ghost", "title": "Ghost",
                                                "extract": "Spooky.", "thumbnail": None, "url": "u"})
     assert "You're into" not in _client(store).get("/home/into-recently").text
+
+
+def test_refresh_failure_preserves_stale_card_and_retries(store, monkeypatch):
+    subj = {"kind": "artist", "subject": "artist:Khruangbin", "display": "Khruangbin"}
+    monkeypatch.setattr(into_recently, "subjects_for_epoch", lambda *a, **kw: [subj])
+    store.wiki.put(subj["subject"], "artist", "Khruangbin",
+                   {"extract": "A trio.", "thumbnail": "http://img", "url": "http://wiki"}, 0)
+    calls = []
+
+    def failed(*args):
+        calls.append(args)
+        raise wikipedia.LookupUnavailable("offline")
+
+    monkeypatch.setattr(wikipedia, "fetch_summary", failed)
+    client = _client(store)
+    assert "A trio." in client.get("/home/into-recently").text
+    assert "A trio." in client.get("/home/into-recently").text
+    assert len(calls) == 1
+    assert store.wiki.get(subj["subject"])["fetched_at"] == 0
+    deadline = store.wiki._retry_after[subj["subject"]]
+    assert not store.wiki.should_refresh(subj["subject"], store.wiki.get(subj["subject"]), deadline - 1)
+    assert store.wiki.should_refresh(subj["subject"], store.wiki.get(subj["subject"]), deadline)
+    into_recently.refresh_summary(store, subj, deadline,
+                                  lambda *a: {"extract": "Recovered", "thumbnail": "http://new"})
+    assert store.wiki.get(subj["subject"])["extract"] == "Recovered"
+    assert subj["subject"] not in store.wiki._retry_after

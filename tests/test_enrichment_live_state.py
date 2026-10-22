@@ -1,6 +1,7 @@
 """Enrichment delivery and replay invalidate a row; historical events cannot restore old facts."""
 import asyncio
 import json
+import re
 
 import pytest
 from starlette.requests import Request
@@ -8,6 +9,7 @@ from starlette.requests import Request
 from tests.conftest import FakeClient
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.playlists import build
+from yt_playlist.web.routes.songs import build as song_routes
 
 
 @pytest.mark.parametrize("scope", ["playlist", "album", "generated"])
@@ -30,6 +32,8 @@ def test_delivery_and_reconnect_render_current_authoritative_row(store, scope):
     job.events.append({"type": "info", "text": "started"})
     endpoint = next(route.endpoint for route in build(app.state.ctx).routes
                     if getattr(route, "path", "") == "/playlist/enrich/events/{job_id}")
+    metadata = next(route.endpoint for route in song_routes(app.state.ctx).routes
+                    if route.path == '/songs/metadata' and 'GET' in route.methods)
     request = Request({"type": "http", "app": app, "headers": []})
 
     async def scenario():
@@ -45,17 +49,19 @@ def test_delivery_and_reconnect_render_current_authoritative_row(store, scope):
         store.rec_surface.record_mood([key], 1, now=1000)
         job.events.append({"type": "track", "video_id": "video", "genre": "Old genre", "year": "2000"})
         job.done = True
-        delivered = json.loads((await anext(response.body_iterator))[6:])
+        delivered = json.loads((await anext(response.body_iterator)).splitlines()[0][6:])
+        delivered_metadata = metadata('video')['metadata']
         await response.body_iterator.aclose()
         # A subsequent user choice wins over replay of the same historical event on reconnect.
         store.tracks.set_track_genre(entry, "Newest genre")
         store.tracks.set_track_year(entry, "2001")
         replay = await endpoint(request, job.id)
-        events = [json.loads(chunk[6:]) async for chunk in replay.body_iterator]
-        return delivered, next(e for e in events if e["type"] == "track")
+        events = [json.loads(chunk.splitlines()[0][6:]) async for chunk in replay.body_iterator]
+        replayed = next(e for e in events if e["type"] == "track")
+        return (delivered, delivered_metadata), (replayed, metadata('video')['metadata'])
 
     delivered, replayed = asyncio.run(scenario())
-    for event, genre, year in ((delivered, "Chosen genre", "1999"), (replayed, "Newest genre", "2001")):
+    for (event, current), genre, year in ((delivered, "Chosen genre", "1999"), (replayed, "Newest genre", "2001")):
         html = event["row_html"]
         assert event["genre"] == genre and event["year"] == year
         assert 'data-title="edited title"' in html and 'data-artist="edited artist"' in html
@@ -63,8 +69,15 @@ def test_delivery_and_reconnect_render_current_authoritative_row(store, scope):
         assert "Old title" not in html and "Old genre" not in html
         assert "Edited title" in html and "Edited artist" in html
         assert 'class="like-btn on"' in html and 'aria-pressed="true"' in html
-        if scope != "album":
-            assert "Restore original title" in html and "Restore original artist" in html
+        launcher = json.loads(re.search(r"data-song='([^']*)'", html).group(1))
+        assert (launcher['video_id'], launcher['title'], launcher['artist']) == (
+            'video', 'Edited title', 'Edited artist')
+        # Restoration lives in the shared metadata dialog, which reads current
+        # values and retained originals using the row launcher's exact video ID.
+        assert current == {
+            'track_id': entry, 'title': 'Edited title', 'artist': 'Edited artist',
+            'genre': genre, 'year': year, 'orig_title': 'Old title', 'orig_artist': 'Old artist',
+        }
         if scope == "generated":
             assert 'x-data="{ mood: 1 }"' in html
 
@@ -77,13 +90,13 @@ def test_replayed_event_for_removed_track_cannot_restore_a_row(store):
     app = create_app(store, lambda: {}, now_fn=lambda: 1000)
     job = app.state.ctx.jobs.create()
     job.playlist_id = pid
-    job.events = [{"type": "track", "video_id": "video", "row_html": "obsolete fragment"}]
+    job.events.append({"type": "track", "video_id": "video", "row_html": "obsolete fragment"})
     job.done = True
     store.playlists.set_playlist_tracks(pid, [])
     endpoint = next(route.endpoint for route in build(app.state.ctx).routes
                     if getattr(route, "path", "") == "/playlist/enrich/events/{job_id}")
     async def read():
         response = await endpoint(Request({"type": "http", "app": app, "headers": []}), job.id)
-        return [json.loads(chunk[6:]) async for chunk in response.body_iterator]
+        return [json.loads(chunk.splitlines()[0][6:]) async for chunk in response.body_iterator]
     events = asyncio.run(read())
     assert "row_html" not in events[0]

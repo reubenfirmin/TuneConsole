@@ -1,7 +1,5 @@
 """Tools › Enrichment: corpus coverage charts + worker state/pause, all served from the store's
 enrichment stats. The page polls /enrich/stats so the bars advance live as the worker drains."""
-import asyncio
-import json
 import math
 from yt_playlist.core.activity import activity_for
 
@@ -172,22 +170,10 @@ def build(ctx) -> APIRouter:
     async def genre_lookup_events(request: Request, job_id: int):
         job = ctx.jobs.get(job_id)
         if job is None or job.source != "genre-dialog":
-            raise HTTPException(status_code=404, detail="no such genre lookup")
+            raise HTTPException(status_code=404, detail="Genre lookup is missing or expired.")
 
-        async def events():
-            sent = 0
-            while True:
-                while sent < len(job.events):
-                    yield f"data: {json.dumps(job.events[sent])}\n\n"
-                    sent += 1
-                if job.done:
-                    yield f"data: {json.dumps({'type': 'end', 'error': job.error})}\n\n"
-                    return
-                if await request.is_disconnected():
-                    return
-                await asyncio.sleep(.1)
-
-        return StreamingResponse(events(), media_type="text/event-stream")
+        from yt_playlist.web.job_events import stream_job
+        return StreamingResponse(stream_job(job, request), media_type="text/event-stream")
 
     @router.post("/track/{track_id}/genre-candidates")
     async def choose_genre_candidate(request: Request, track_id: int):

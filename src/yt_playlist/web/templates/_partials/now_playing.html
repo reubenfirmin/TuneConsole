@@ -4,6 +4,7 @@
 <section class="home-status card card--status is-live global-now-playing" x-data="playerStatus()"
          x-init="init(); $nextTick(() => mountNowPlayingDock())"
          @bridge-status.window="apply($event.detail)"
+         @hashchange.window="currentLocation = location.href"
          @track-like-requested.window="requestLike($event)"
          x-show="connected && nowPlaying && (nowPlaying.title || nowPlaying.artist)" x-cloak>
   <div class="hs-main">
@@ -19,12 +20,12 @@
         </span>
         <template x-if="sourceLinkVisible()">
           <a class="hs-source" :href="nowPlaying.source.url"
-             :title="'Back to ' + nowPlaying.source.kind + ': ' + nowPlaying.source.title"
-             :aria-label="'Back to ' + nowPlaying.source.kind + ': ' + nowPlaying.source.title">
+             :title="'Back to ' + sourceName() + ': ' + nowPlaying.source.title"
+             :aria-label="'Back to ' + sourceName() + ': ' + nowPlaying.source.title">
             <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
               <path d="M11 3 2 12l9 9 3-3-4-4h12v-4H10l4-4z"/>
             </svg>
-            <span x-text="'Back to ' + nowPlaying.source.kind"></span>
+            <span x-text="'Back to ' + sourceName()"></span>
           </a>
         </template>
         <span class="hs-rate-group">

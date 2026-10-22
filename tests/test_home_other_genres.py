@@ -8,7 +8,7 @@ from tests.test_mode_cards_route import _client
 from yt_playlist.rec import home_themes, mode_surfaces
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
-from yt_playlist.web.routes import home
+from yt_playlist.rec import home_cards as home
 
 
 def seed_genres(store):
@@ -229,6 +229,6 @@ def test_available_genres_prioritize_listening_over_alphabet_and_candidate_volum
         tid = store.tracks.upsert_track(genre, genre, "Artist", None, None)
         store.tracks.set_track_genre(tid, genre)
         for day in range(count):
-            store.history.add_history_snapshot(iid, day * 86400.0, [identity_key(genre, "Artist")])
+            store.history.record_history_plays(iid, day * 86400.0, [identity_key(genre, "Artist")], source_timezone="UTC")
     options = home_themes.genre_options(store)
     assert [option["label"] for option in options[:3]] == ["trance", "techno", "jazz"]

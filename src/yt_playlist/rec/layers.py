@@ -100,7 +100,7 @@ def now_mode_posterior(store, now) -> dict | None:
 
     Returns None when: there are no active taste modes; no content vector model has been built; or
     fewer than `now_min_events` distinct played keys in the window have a content vector. Plays are
-    read from play_events ONLY (real timestamps), never the day-granular history_items model: a
+    read from play_events ONLY (real timestamps), never coarse listening observations: a
     noon-bucket history row happening to fall inside the window carries no real-time information and
     must not count toward "right now".
     """

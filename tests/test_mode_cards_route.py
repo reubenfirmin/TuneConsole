@@ -89,7 +89,7 @@ def test_cards_route_ok_when_empty(store):
 def test_cards_fallback_with_object_tracks_does_not_500(store, monkeypatch):
     # Regression: with no mode_bundles the route falls back to _one_card, whose tracks are ForYouItem
     # OBJECTS (not dicts). The offered-count loop must read .key from either shape, not 500 the row.
-    from yt_playlist.web.routes import home as home_mod
+    from yt_playlist.rec import home_cards as home_mod
     from yt_playlist.rec.surfaces import ForYouItem
     proto = {"lane": "wheelhouse", "label": "More in your wheelhouse", "name": "Mix", "note": "",
              "tracks": [ForYouItem("Song", "Artist", "", "v1", None, 0, "reason", key="k1")],

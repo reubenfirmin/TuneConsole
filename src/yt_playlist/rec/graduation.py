@@ -5,6 +5,7 @@ import math
 import time
 
 from yt_playlist.rec import mix_tuning, rec_params, transient
+from yt_playlist.core.rating_feedback import Rating
 
 
 def apply_dislikes(store, status_map, now, provenance="sync") -> None:
@@ -24,32 +25,20 @@ def apply_dislikes(store, status_map, now, provenance="sync") -> None:
     Graduation is additionally gated by a once-EVER per-key stamp (mark_graduated_once) that
     survives clear/re-record cycles: without it, a likeStatus flap deleted the like row and let the
     next sync re-graduate the same like daily, ratcheting artist weights to the cap."""
-    existing_dis = store.rec_model.disliked_identity_keys()
-    existing_like = set(store.rec_model.recent_liked_keys())
-    until = now + rec_params.get_param(store, "dislike_suppress_days") * 86400
-    for key, status in status_map.items():
-        if not key:
-            continue
-        if status == "DISLIKE":
-            store.rec_model.record_dislike(key, until, now)
-            if key in existing_like:
-                store.rec_model.clear_like(key)                       # a dislike supersedes a prior like
-        elif status == "LIKE":
-            # record_like handles idempotency itself (and upgrades sync->action provenance on a
-            # re-observation without returning True), so no existing_like pre-check here.
-            if store.rec_model.record_like(key, now, provenance=provenance) \
-                    and store.rec_model.mark_graduated_once(key, "like_grad", now):
-                w_param = "source_w_like" if provenance == "action" else "source_w_like_synced"
-                graduate_moods(store, [key], 1.0, now,
-                               source=rec_params.get_param(store, w_param),
-                               source_label="like")
-            if key in existing_dis:
-                store.rec_model.clear_dislike(key)                    # a like clears a prior dislike (preserved)
-        elif status == "INDIFFERENT":
-            if key in existing_dis:
-                store.rec_model.clear_dislike(key)
-            if key in existing_like:
-                store.rec_model.clear_like(key)
+    apply_ratings(store, {key: Rating(status, now, provenance) for key, status in status_map.items()})
+
+
+def apply_ratings(store, states):
+    """Project combined recording evidence, graduating a positive contribution at most once."""
+    with store._lock:
+        new_likes = store.rec_model.apply_rating_feedback(
+            states, dislike_seconds=rec_params.get_param(store, "dislike_suppress_days") * 86400)
+        for key, rating in new_likes.items():
+            if store.rec_model.mark_graduated_once(key, "like_grad", rating.observed_at):
+                w_param = ("source_w_like" if rating.provenance == "action"
+                           else "source_w_like_synced")
+                graduate_moods(store, [key], 1.0, rating.observed_at,
+                               source=rec_params.get_param(store, w_param), source_label="like")
 
 
 def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -> None:

@@ -1,6 +1,6 @@
 """RecQueryRepo: read-only library queries and recommendation candidate generators.
 
-These are the rec engine's reads over the library (tracks / playlist_tracks / history_items):
+These are the rec engine's reads over the library and reconciled listening evidence:
 library primitives (keys, genres, distributions), the generated-playlist quarantine, and the
 candidate-surface generators (comfort / rotation / deep cuts / completion / enrichment). They're
 grouped here because the generators all depend on the same exclusion logic (excluded_playlist_ids).
@@ -92,7 +92,7 @@ class RecQueryRepo(Repo):
             return {}
         qs = ",".join("?" * len(keys))
         return {r["identity_key"]: r["genre"] for r in self.conn.execute(
-            f"SELECT identity_key, genre FROM tracks WHERE identity_key IN ({qs}) AND genre<>''", keys)}
+            f"SELECT identity_key, genre FROM catalog_tracks WHERE identity_key IN ({qs}) AND genre<>''", keys)}
 
     @synchronized
     def track_decades(self, keys) -> dict:
@@ -103,7 +103,7 @@ class RecQueryRepo(Repo):
         qs = ",".join("?" * len(keys))
         out = {}
         for r in self.conn.execute(
-            f"SELECT identity_key k, MIN(mb_year) y FROM tracks "
+            f"SELECT identity_key k, MIN(mb_year) y FROM catalog_tracks "
             f"WHERE identity_key IN ({qs}) AND mb_year<>'' GROUP BY identity_key", keys):
             d = _decade(r["y"], as_str=True)
             if d is not None:
@@ -131,7 +131,7 @@ class RecQueryRepo(Repo):
             return {}
         qs = ",".join("?" * len(keys))
         return {r["identity_key"]: r["artist"] for r in self.conn.execute(
-            f"SELECT identity_key, MIN(artist) artist FROM tracks "
+            f"SELECT identity_key, MIN(artist) artist FROM catalog_tracks "
             f"WHERE identity_key IN ({qs}) AND artist<>'' GROUP BY identity_key", keys)}
 
     @synchronized

@@ -11,11 +11,14 @@ document.addEventListener('click', event => {
 
 function songActions() {
   // Keep DOM nodes and the originating Alpine scope outside reactive data.
-  let trigger = null, owner = null, request = 0;
+  let trigger = null, owner = null, request = 0, lookupStream = null;
   return {
     song: {}, context: {}, mode: 'create', name: '', query: '', selected: '',
     playlists: [], multipleIdentities: false, loading: false, busy: false, error: '', result: null,
     artworkFailed: false,
+    metadata: { title: '', artist: '', genre: '', year: '' }, initialMetadata: {}, originals: {},
+    metadataLoaded: false, trackId: null, genreOptions: [], genres: [],
+    lookupRunning: false, lookupStatus: '',
     reasons: [['vibe', 'Wrong vibe'], ['era', 'Wrong era'], ['mainstream', 'Too mainstream'],
               ['own_it', 'Already know it'], ['artist', 'Not this artist']],
     show(detail) {
@@ -64,7 +67,8 @@ function songActions() {
     },
     play() {
       this.closeMenu();
-      tcPlay('https://music.youtube.com/watch?v=' + encodeURIComponent(this.song.video_id));
+      tcPlay(this.context.play_url ||
+        'https://music.youtube.com/watch?v=' + encodeURIComponent(this.song.video_id));
     },
     similar() {
       this.closeMenu();
@@ -92,35 +96,91 @@ function songActions() {
       if (reason === 'artist') values.axis = 'artist:' + this.song.artist;
       htmx.ajax('POST', '/recs/feedback', { values, target: trigger.closest('.tile'), swap: 'outerHTML' });
     },
-    async openPlaylist(mode) {
+    destroy() { request++; lookupStream?.close(); },
+    async openDialog(mode) {
       this.closeMenu();
       this.mode = mode;
       this.name = this.song.title;
       this.query = ''; this.selected = ''; this.playlists = [];
       this.error = ''; this.result = null; this.busy = false;
-      this.loading = mode === 'add';
+      this.metadata = { title: this.song.title, artist: this.song.artist || '', genre: '', year: '' };
+      this.originals = {}; this.metadataLoaded = false; this.trackId = null;
+      this.genreOptions = []; this.genres = []; this.lookupStatus = ''; this.lookupRunning = false;
+      this.loading = mode !== 'create';
       const current = ++request;
       this.$refs.dialog.showModal();
-      this.focusDialog(mode === 'create' ? 'name' : 'search');
-      if (mode !== 'add') return;
+      const focus = mode === 'metadata' ? 'metadataTitle' : mode === 'create' ? 'name' : 'search';
+      this.focusDialog(focus);
+      if (mode === 'create') return;
       try {
-        const data = await this.json('/songs/playlists?video_id=' + encodeURIComponent(this.song.video_id));
+        const data = await this.json('/songs/' + (mode === 'metadata' ? 'metadata' : 'playlists') +
+          '?video_id=' + encodeURIComponent(this.song.video_id));
         if (current !== request) return;
-        this.playlists = data.playlists;
-        this.multipleIdentities = data.multiple_identities;
+        if (mode === 'metadata') {
+          if (data.metadata) {
+            const { title, artist, genre, year, orig_title, orig_artist, track_id } = data.metadata;
+            this.metadata = { title, artist: artist || '', genre, year: String(year) };
+            this.originals = { title: orig_title, artist: orig_artist };
+            this.trackId = track_id;
+          }
+          this.initialMetadata = { ...this.metadata };
+          this.genreOptions = data.genre_options; this.genres = data.genres;
+          this.metadataLoaded = true;
+        } else {
+          this.playlists = data.playlists;
+          this.multipleIdentities = data.multiple_identities;
+        }
       } catch (error) {
         if (current === request) this.error = error.message;
       } finally {
         if (current === request) {
           this.loading = false;
-          this.focusDialog('search');
+          this.focusDialog(focus);
         }
+      }
+    },
+    async lookupGenres() {
+      if (this.lookupRunning || !this.trackId) return;
+      const current = request;
+      this.lookupRunning = true; this.lookupStatus = 'Looking up genres…';
+      try {
+        const job = await this.json(`/track/${this.trackId}/genre-lookup`, {});
+        if (current !== request) return;
+        const stream = lookupStream = new EventSource(`/track/genre-lookup/events/${job.job_id}`);
+        stream.onmessage = async message => {
+          if (current !== request) { stream.close(); return; }
+          const event = JSON.parse(message.data);
+          if (event.text) this.lookupStatus = event.text;
+          if (event.type !== 'end') return;
+          stream.close(); this.lookupRunning = false;
+          if (event.error) return;
+          try {
+            const data = await this.json('/songs/metadata?video_id=' + encodeURIComponent(this.song.video_id));
+            if (current === request) {
+              this.genreOptions = data.genre_options;
+              this.lookupStatus = data.genre_options.length ? 'Choose a suggestion or enter your own genre.' : 'No genre suggestions found.';
+            }
+          } catch (error) { if (current === request) this.lookupStatus = error.message; }
+        };
+        stream.onerror = () => {
+          stream.close();
+          if (current === request) {
+            this.lookupRunning = false; this.lookupStatus = 'Lookup progress is unavailable. Try again.';
+          }
+        };
+      } catch (error) {
+        if (current === request) { this.lookupRunning = false; this.lookupStatus = error.message; }
       }
     },
     focusDialog(ref) {
       // Alpine reveals x-show elements on the next frame, after its reactive tick.
+      const current = request;
       this.$nextTick(() => requestAnimationFrame(() => {
-        if (!this.$refs.dialog.open) return;
+        if (request !== current || !this.$refs.dialog.open) return;
+        const active = document.activeElement;
+        // A delayed load must not move focus after the user starts editing a field.
+        if (active?.matches('input') && active !== this.$refs[ref] &&
+            this.$refs.dialog.contains(active) && active.getClientRects().length) return;
         this.$refs[ref].focus();
         if (ref === 'name') {
           this.$refs.name.select();
@@ -131,6 +191,7 @@ function songActions() {
     closeDialog() {
       if (this.busy) return;
       request++;
+      lookupStream?.close();
       this.$refs.dialog.close();
       trigger?.focus();
       if (this.result?.url === location.pathname) location.reload();
@@ -168,6 +229,16 @@ function songActions() {
       if (this.busy || this.loading) return;
       this.busy = true; this.error = '';
       try {
+        if (this.mode === 'metadata') {
+          if (!this.metadataLoaded) return;
+          const changes = Object.fromEntries(Object.entries(this.metadata)
+            .filter(([field, value]) => value !== this.initialMetadata[field]));
+          await this.json('/songs/metadata', { song: this.song, ...changes });
+          lookupStream?.close();
+          this.$refs.dialog.close();
+          location.reload();
+          return;
+        }
         this.result = await this.json('/songs/' + (this.mode === 'create' ? 'create-playlist' : 'add-to-playlist'), {
           song: this.song, ...(this.mode === 'create' ? { name: this.name.trim() } : { playlist_id: Number(this.selected) })
         });

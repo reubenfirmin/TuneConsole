@@ -141,3 +141,34 @@ def test_cancelled_import_request_remains_owned_until_worker_finishes(store, mon
         assert imports.status('takeout')['outcome'] == 'complete'
 
     asyncio.run(run())
+
+
+def test_removal_waits_for_model_publication_without_blocking_requests(store):
+    ctx = context(store)
+    model_lock = threading.Lock()
+    triggered = threading.Event()
+    ctx.rec_worker = SimpleNamespace(model_lock=model_lock,trigger=triggered.set)
+    app = FastAPI()
+    app.include_router(setup.build(ctx))
+    @app.get('/responsive')
+    async def responsive():
+        return {'ok':True}
+    with ThreadPoolExecutor(max_workers=2) as callers, TestClient(app) as client:
+        model_lock.acquire()
+        try:
+            removal = callers.submit(client.post,'/import/spotify/remove')
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                status = client.get('/import/history/status?source=spotify',
+                                    headers={'accept':'application/json'}).json()
+                if status['job_id'] is not None:
+                    break
+                time.sleep(.01)
+            assert status['job_id'] is not None and not status['done']
+            assert not removal.done() and not triggered.is_set()
+            assert client.get('/responsive').json() == {'ok':True}
+            assert ctx.work.active
+        finally:
+            model_lock.release()
+        assert 'Spotify history removed' in removal.result(timeout=3).text
+        assert triggered.is_set() and ctx.work.wait(2)

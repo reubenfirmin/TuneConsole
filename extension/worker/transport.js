@@ -1,0 +1,34 @@
+// Owns the WebSocket and its reconnect timer. Request dispatch is supplied by the bootstrap.
+function createBridgeTransport({url, dispatch, onOpen, onStatus}) {
+  let socket = null;
+
+  function send(frame) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    socket.send(JSON.stringify(frame));
+    return true;
+  }
+
+  function connect() {
+    if (socket && socket.readyState !== WebSocket.CLOSED) return;
+    const sock = new WebSocket(url);
+    socket = sock;
+    sock.onopen = async () => { onStatus(); await onOpen(); };
+    sock.onmessage = async event => {
+      const frame = JSON.parse(event.data);
+      if (frame && frame.ping) return;
+      const reply = await dispatch(frame);
+      // Reply on the socket which received the request, even if it was replaced meanwhile.
+      if (reply) { try { sock.send(JSON.stringify(reply)); } catch (e) {} }
+    };
+    sock.onclose = () => {
+      if (socket === sock) {
+        socket = null;
+        onStatus();
+        setTimeout(connect, 3000);
+      }
+    };
+    sock.onerror = () => { try { sock.close(); } catch (e) {} };
+  }
+
+  return {connect, send, get connected() { return !!socket && socket.readyState === WebSocket.OPEN; }};
+}

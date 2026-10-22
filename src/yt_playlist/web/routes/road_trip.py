@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 
 from yt_playlist.library import executor
 from yt_playlist.rec import measurement, road_trip as road_trip_rec
+from yt_playlist.rec import road_trip_candidates as candidates
 from yt_playlist.util.matching import identity_key
 from yt_playlist.core.activity import activity_for
 from yt_playlist.core.accounts import client_for
@@ -160,7 +161,7 @@ def build(ctx) -> APIRouter:
         for artist in artists:
             if artist.casefold() in previous_artists:
                 continue
-            genre = road_trip_rec._canon_genre(road_trip_rec.artist_genre(store, artist))
+            genre = candidates._canon_genre(candidates.artist_genre(store, artist))
             if genre and genre not in known_genres:
                 genres.append(genre)
                 known_genres.add(genre)
@@ -393,7 +394,7 @@ def build(ctx) -> APIRouter:
         beats making the user name it themselves. One memoized Last.fm call; silently empty without
         an API key, in which case the form just adds the artist."""
         name = name.strip()
-        return JSONResponse({"genre": (road_trip_rec.artist_genre(store, name) or "") if name
+        return JSONResponse({"genre": (candidates.artist_genre(store, name) or "") if name
                              else ""})
 
     @router.get("/road_trip/autocomplete/artists")

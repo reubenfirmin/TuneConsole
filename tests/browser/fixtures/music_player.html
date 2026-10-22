@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Music player fixture</title>
+<ytmusic-player></ytmusic-player>
+<ytmusic-player-bar>
+  <span class="title ytmusic-player-bar">First song</span>
+  <span class="byline ytmusic-player-bar">Recording artist • Album</span>
+  <img class="image ytmusic-player-bar" src="https://lh3.googleusercontent.com/album-art">
+  <a class="album" href="/browse/MPRE_fixture">Album</a>
+  <ytmusic-like-button-renderer like-status="INDIFFERENT">
+    <span id="button-shape-like"><button aria-pressed="false">Like</button></span>
+    <span id="button-shape-dislike"><button aria-pressed="false">Dislike</button></span>
+  </ytmusic-like-button-renderer>
+  <span id="play-pause-button"><button>Play or pause</button></span>
+</ytmusic-player-bar>
+<video loop src="/fixture.wav"></video>
+<script>
+  // Real DOM, MediaSession, media playback, and browser message delivery. Only Music's
+  // private player/config APIs and its remote responses are fixtures.
+  const params = new URL(location.href).searchParams;
+  const bar = document.querySelector('ytmusic-player-bar');
+  const rating = document.querySelector('ytmusic-like-button-renderer');
+  const video = document.querySelector('video');
+  window.fixture = {
+    videoId: params.get('v') || 'first', title: 'First song', playlist: params.get('list') || 'PL_fixture',
+    brand: params.get('brand') || 'brand-A', known: params.get('known') !== 'false',
+    clicks: [], requests: [], pageLoads: 1,
+    setBar() {
+      bar.data = {videoId: this.videoId};
+      bar.querySelector('.title').textContent = this.title;
+    },
+    setRating(status = 'INDIFFERENT') {
+      rating.data = {target: {videoId: this.videoId}};
+      rating.setAttribute('like-status', status);
+      rating.querySelector('#button-shape-like button').setAttribute('aria-pressed', String(status === 'LIKE'));
+      rating.querySelector('#button-shape-dislike button').setAttribute('aria-pressed', String(status === 'DISLIKE'));
+    },
+    setMedia() {
+      navigator.mediaSession.metadata = new MediaMetadata({title: this.title, artist: 'Recording artist',
+        album: 'Fixture album', artwork: [{src: 'https://lh3.googleusercontent.com/album-art'}]});
+    },
+    sample() { window.postMessage({__tcSensorProbe: {version: 4, id: 'fixture'}}, '*'); },
+  };
+  window.ytcfg = {get(key) {
+    if (!fixture.known) return undefined;
+    if (key === 'LOGGED_IN') return true;
+    if (key === 'DELEGATED_SESSION_ID') return fixture.brand;
+  }};
+  document.querySelector('ytmusic-player').playerApi = {
+    getVideoData: () => ({video_id: fixture.videoId, title: fixture.title, author: 'Uploader'}),
+    getPlaylistId: () => fixture.playlist,
+  };
+  document.querySelector('#play-pause-button button').onclick = () => {
+    fixture.clicks.push('playpause');
+    if (video.paused) video.play(); else video.pause();
+  };
+  for (const action of ['like', 'dislike']) {
+    document.querySelector(`#button-shape-${action} button`).onclick = async () => {
+      fixture.clicks.push(action);
+      const desired = action === 'like' ? 'LIKE' : 'DISLIKE';
+      const status = rating.getAttribute('like-status') === desired ? 'INDIFFERENT' : desired;
+      const endpoint = status === 'INDIFFERENT' ? 'removelike' : action;
+      const response = await fetch(`/youtubei/v1/like/${endpoint}`, {
+        method: 'POST', body: JSON.stringify({target: {videoId: fixture.videoId}}),
+      });
+      if (response.ok) { fixture.setRating(status); fixture.sample(); }
+    };
+  }
+  fixture.setBar(); fixture.setRating(); fixture.setMedia();
+  if (params.get('playing') === 'true') video.play();
+</script>

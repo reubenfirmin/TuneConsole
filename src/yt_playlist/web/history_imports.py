@@ -1,5 +1,7 @@
 """Tracked local history processing, serialized with library history refreshes."""
 import threading
+import json
+from contextlib import nullcontext
 
 from yt_playlist.core.activity import WorkClosing, activity_for
 from yt_playlist.library import spotify_data, takeout
@@ -30,7 +32,7 @@ class HistoryImports:
         store = self.ctx.store
         progress = lambda text: job.events.append({'text': text})
         try:
-            with self.ctx.sync_lock:
+            with self.ctx.sync_lock, getattr(self.ctx.rec_worker, 'model_lock', nullcontext()):
                 importer = takeout.import_takeout if source == 'takeout' else spotify_data.import_spotify_data
                 report = importer(store, raw, on_progress=progress)
                 if 'error' in report:
@@ -47,11 +49,24 @@ class HistoryImports:
                 elif source == 'takeout':
                     store.settings.set_setting('takeout_nag_dismissed_at', str(self.ctx.now_fn()))
                 progress('Adding unmatched artists to Discovery…')
-                seeded = takeout.seed_discovery_from_unmatched(
-                    store, report['unmatched_artists'], self.ctx.now_fn(),
-                    min_plays=max(3, round(report['span_days'] / 365)))
-                if (report['plays_added'] or report['events_added']) and self.ctx.rec_worker:
+                min_plays = max(3, round(report['span_days'] / 365))
+                if source == 'spotify':
+                    identity_id = report.get('identity_id')
+                    if identity_id is None:
+                        identity_id = spotify_data.resolve_import_identity(store)
+                    seeded = store.discovery.seed_spotify_artists(
+                        identity_id,
+                        report['unmatched_artists'], self.ctx.now_fn(), min_plays=min_plays)
+                    # Persist only aggregate reporting, never the uploaded file or its metadata.
+                    summary = {k: v for k, v in report.items() if isinstance(v, (int, float))}
+                    store.settings.set_setting('spotify_import_report', json.dumps(summary))
+                else:
+                    seeded = takeout.seed_discovery_from_unmatched(
+                        store, report['unmatched_artists'], self.ctx.now_fn(), min_plays=min_plays)
+                if (report['plays_added'] or report['events_added'] or report.get('listens_added') or seeded) and self.ctx.rec_worker:
                     self.ctx.rec_worker.trigger()
+                if source == 'spotify':
+                    report = {k: v for k, v in report.items() if k != 'unmatched_artists'}
                 job.result = {'report': report, 'seeded': seeded}
                 job.outcome = 'complete'
                 progress('Import complete.')
@@ -60,6 +75,36 @@ class HistoryImports:
             job.error = str(exc) or type(exc).__name__
             job.outcome = 'failed'
             progress('Import failed: ' + job.error)
+            raise
+        finally:
+            job.done = True
+
+    async def remove_spotify(self):
+        job = self.ctx.jobs.create(kind='history_import')
+        job.parameters = {'source': 'spotify'}
+        job.events.append({'text': 'Waiting for history and model work…'})
+        try:
+            return await activity_for(self.ctx).to_thread(self._remove_spotify, job)
+        except WorkClosing:
+            job.error = 'TuneConsole is closing. Try removal again after reopening.'
+            job.outcome, job.done = 'failed', True
+            raise
+
+    def _remove_spotify(self, job):
+        worker = self.ctx.rec_worker
+        try:
+            with self.ctx.sync_lock, getattr(worker, 'model_lock', nullcontext()):
+                report = self.ctx.store.history.remove_spotify_history()
+                if worker:
+                    worker.trigger()
+                job.result = report
+                job.outcome = 'complete'
+                job.events.append({'text': 'Spotify history removed. Model refresh requested.'})
+                return report
+        except Exception as exc:
+            job.error = str(exc) or type(exc).__name__
+            job.outcome = 'failed'
+            job.events.append({'text': 'Removal failed: ' + job.error})
             raise
         finally:
             job.done = True

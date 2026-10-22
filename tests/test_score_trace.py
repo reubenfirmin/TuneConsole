@@ -1,6 +1,6 @@
 import pytest
 
-from yt_playlist.rec import embed, scoring, surfaces
+from yt_playlist.rec import embed, graduation, scoring, surfaces
 
 
 def _model(store, album=None, thumbnail=None):
@@ -13,7 +13,7 @@ def _model(store, album=None, thumbnail=None):
         store.tracks.set_track_genre(track, "Folk")
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "Night drive", 8, "a", 1.0), a)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "Sunday", 8, "b", 1.0), b)
-    store.history.add_history_snapshot(iid, 100.0, [f"a{i}|alpha" for i in range(4)])
+    store.history.record_history_plays(iid, 100.0, [f"a{i}|alpha" for i in range(4)], source_timezone="UTC")
     embed.build_and_store(store, dim=4)
     keys, V, idx = embed.load_vectors(store)
     return scoring.playlist_taste(store), keys, V, idx
@@ -21,6 +21,7 @@ def _model(store, album=None, thumbnail=None):
 
 def test_trace_final_scores_equal_production_scores(store):
     taste, keys, V, idx = _model(store)
+    graduation.apply_dislikes(store, {keys[0]: "DISLIKE"}, now=1.0)
     store.rec_model.set_weight("genre:techno", 1.4, now=100.0)
 
     served = surfaces._score_candidates(store, taste, keys, V, idx, now=100.0)
@@ -28,6 +29,7 @@ def test_trace_final_scores_equal_production_scores(store):
         store, taste, keys, V, idx, now=100.0, include_traces=True)
 
     assert traced == pytest.approx(served)
+    assert traces[keys[0]]["negative_delta"] < 0
     assert set(traces) == set(keys)
     for key, trace in traces.items():
         assert trace["final"] == pytest.approx(served[key])

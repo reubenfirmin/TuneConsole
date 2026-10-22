@@ -23,6 +23,7 @@ class RecWorker:
         self.gc_tick_s = gc_tick_s                 # generated-playlist GC cadence (daily)
         self.gc_initial_s = gc_initial_s           # first GC pass shortly after start (catches restarts)
         self._lock = threading.Lock()
+        self.model_lock = threading.RLock()
         self._pending = False
         self._modes_pending = False
         self._ratings_pending = False
@@ -67,7 +68,8 @@ class RecWorker:
         from yt_playlist.rec import discover
         while not self._stop.wait(self.discovery_tick_s):
             try:
-                self.work.wrap("discovery", discover.run_discovery, self.ctx, self.ctx.now_fn())()
+                with self.model_lock:
+                    self.work.wrap("discovery", discover.run_discovery, self.ctx, self.ctx.now_fn())()
             except WorkClosing:
                 return
             except Exception:  # noqa: BLE001 - a scan failure must never crash the ticker
@@ -197,7 +199,8 @@ class RecWorker:
             if keys:
                 try:
                     from yt_playlist.rec import content_updates
-                    content_updates.update_tracks(self.ctx.store, keys, self.ctx.now_fn())
+                    with self.model_lock:
+                        content_updates.update_tracks(self.ctx.store, keys, self.ctx.now_fn())
                 except Exception:
                     self.ctx.logger.warning("rec incremental update failed: tracks=%d", len(keys), exc_info=True)
         self._running = False
@@ -225,6 +228,10 @@ class RecWorker:
             return target(*args, **kwargs)
 
     def _do_mode_refresh(self):
+        with self.model_lock:
+            self._refresh_modes()
+
+    def _refresh_modes(self):
         """Initialize absent models/groups; ordinary startup reuses the prepared structures."""
         from yt_playlist.rec import mode_surfaces, taste_modes
         store = self.ctx.store
@@ -241,6 +248,12 @@ class RecWorker:
         self.ctx.logger.info("rec initialization: missing genre groups and Home bundles prepared")
 
     def _do_rebuild(self):
+        # Source removal waits for publication, then clears every derived cache
+        # before scheduling a build from the remaining evidence.
+        with self.model_lock:
+            self._rebuild()
+
+    def _rebuild(self):
         """Rebuild vectors and materialize the heavy proposal surfaces.
 
         Surfaces go through a small table so adding more later stays uniform. Each is built in its own

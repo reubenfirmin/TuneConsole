@@ -25,7 +25,7 @@ def test_artist_page_includes_album_tracks_when_following_artist_index_link(stor
     store.collection.add_saved_album({"browse": "B1", "title": "Second", "artist": "Artist"})
     store.tracks.upsert_track("v2", "Album song", "Artist", "Second", 180, album_browse_id="B1",
                              artist_browse_id='UC_artist')
-    store.history.add_history_snapshot(iid, 1.0, ["playlist song|artist", "album song|artist"])
+    store.history.record_history_plays(iid, 1.0, ["playlist song|artist", "album song|artist"], source_timezone="UTC")
     client = TestClient(create_app(store, lambda: {}, now_fn=lambda: 1.0),
                         base_url="http://127.0.0.1")
 

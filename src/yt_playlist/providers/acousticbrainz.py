@@ -3,7 +3,7 @@ recording MBID.
 
 AcousticBrainz is a frozen (2022) but still-served CC0 dataset of Essentia acoustic descriptors. It
 has no name-based lookup (every query is by MusicBrainz *recording* MBID) so for a track without a
-stored MBID we resolve one live via the MusicBrainz provider, persist it, then query two endpoints:
+stored MBID we resolve one live via the MusicBrainz provider, then query two endpoints:
 low-level (rhythm.bpm) and high-level (mood/danceability classifiers). AcousticBrainz has no native
 "energy" scalar, so we derive one from its mood models (see derive_energy). A 404 means "no data for
 this MBID" (common, given frozen coverage): a clean miss, not an outage. Failures degrade to Nones.
@@ -14,9 +14,7 @@ import urllib.request
 
 from yt_playlist.util import net
 from yt_playlist.providers import musicbrainz
-from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
-from yt_playlist.providers.enrich_queue import PriorityGate
-from yt_playlist.providers.enrichment import apply_findings
+from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +51,6 @@ _USER_AGENT = "yt-playlist/0.1 ( https://github.com/yt-playlist ; rf@4rc.io )"
 _MIN_INTERVAL = 0.5                         # be a good citizen of a free community dataset
 _HTTP_TIMEOUT_S = 20                        # cap each request so a stalled socket can't wedge a run
 _pacer = RateLimiter(_MIN_INTERVAL)
-_gate = PriorityGate()
 _breaker = net.CircuitBreaker()
 
 
@@ -145,42 +142,3 @@ def enrich(mbid):
     return feat
 
 
-def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, mbid_fn=None,
-                    should_stop=None, pending=None):
-    """Fill missing audio features for a track set from AcousticBrainz (fill-only). For tracks
-    without a stored MusicBrainz MBID, resolve one via mbid_fn (default: musicbrainz.recording_mbid)
-    and persist it. Scope is a playlist or an explicit `pending` list."""
-    enrich_fn = enrich_fn or enrich
-    mbid_fn = mbid_fn or musicbrainz.recording_mbid
-    pending = store.tracks.tracks_missing_audio(playlist_id) if pending is None else pending
-
-    def _per_item(i, total, t):
-        mbid = t.get("mb_recording_id")
-        if not mbid:
-            mbid = mbid_fn(t["title"], t["artist"])
-            if mbid:
-                apply_findings(store,t['id'],'musicbrainz',{'mb_recording_id':mbid})
-        feat = enrich_fn(mbid) if mbid else _empty()
-        if _breaker.tripped():
-            on_progress({"type": "err", "text": "AcousticBrainz looks unreachable. Stopped. "
-                         "The remaining tracks will retry next time."})
-            return False
-        apply_findings(store,t['id'],name,feat)
-        bits = []
-        if feat["bpm"]:
-            bits.append(f"{feat['bpm']:.0f} BPM")
-        if feat["energy"] is not None:
-            bits.append(f"energy {feat['energy']:.2f}")
-        if feat["music_key"]:
-            bits.append(f"{feat['music_key']} {feat['music_scale'] or ''}".strip())
-        shown = " · ".join(bits) or "no data"
-        on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "text": f"{i}/{total} {t['title']}: {shown}"})
-
-    run_enrich_loop(
-        store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
-        empty_text="Every track already has audio features.",
-        start_text=lambda n: f"Fetching audio features for {n} track(s) from AcousticBrainz…",
-        done_text=lambda n: f"Fetched {n} track(s).",
-        wait_text="Waiting: a newer playlist is looking up first…",
-        per_item=_per_item)

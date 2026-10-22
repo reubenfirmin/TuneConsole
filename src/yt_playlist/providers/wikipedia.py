@@ -2,15 +2,16 @@
 
 Resolve a page for an artist or genre (search, biased with a little context so 'Mercury' lands on
 the band, not the planet), then fetch the REST summary. Only a real article (type 'standard' with a
-non-empty extract) counts; disambiguation pages, empty extracts, and any network failure are a miss
-(return None) so the card simply does not show rather than breaking the page.
+non-empty extract) counts. Confirmed misses return None; request/parse failures raise
+LookupUnavailable so callers can retain stale content and retry shortly.
 """
 import json
 import re
 import urllib.parse
 import urllib.request
+import urllib.error
 
-from yt_playlist.providers.base import RateLimiter
+from yt_playlist.providers.base import LookupUnavailable, RateLimiter
 from yt_playlist.util import net
 
 name = "wikipedia"
@@ -66,17 +67,26 @@ def _search_titles(kind, display):
     params = {"action": "query", "format": "json", "list": "search",
               "srlimit": str(_MAX_CANDIDATES), "srsearch": term}
     data = _get_json(_SEARCH + "?" + urllib.parse.urlencode(params))
-    hits = (((data or {}).get("query") or {}).get("search")) or []
-    return [h.get("title") for h in hits if h.get("title")]
+    hits = data["query"]["search"]
+    if not isinstance(hits, list):
+        raise ValueError("Invalid Wikipedia search response")
+    if any(not isinstance(h, dict) or not isinstance(h.get("title"), str) for h in hits):
+        raise ValueError("Invalid Wikipedia search titles")
+    return [h["title"] for h in hits if h["title"]]
 
 
 def _summary(title):
     url = _SUMMARY + urllib.parse.quote(title.replace(" ", "_")) + "?redirect=true"
-    return _get_json(url)
+    try:
+        return _get_json(url)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (404, 410):
+            return {"type": "absent"}
+        raise
 
 
 def fetch_summary(kind, display):
-    """Resolve and fetch a Wikipedia summary for an artist/genre, or None on any miss/failure.
+    """Return a summary or confirmed miss; raise LookupUnavailable on retryable failures.
 
     Walks the top search candidates and accepts the first that is a real article (type 'standard',
     non-empty extract) AND actually relates to the subject (an identity token of the name appears in
@@ -85,25 +95,35 @@ def fetch_summary(kind, display):
     want = _tokens(display)
     try:
         titles = _search_titles(kind, display)
-    except Exception:                     # network / parse failure: treat as a miss, never raise
-        return None
+    except Exception as exc:
+        raise LookupUnavailable("Wikipedia search unavailable") from exc
+    failed = False
     for title in titles:
         if not _relates(want, title):     # cheap title prefilter: skip obvious mismatches
             continue
         try:
             s = _summary(title)
+            if not isinstance(s, dict) or "type" not in s:
+                raise ValueError("Invalid Wikipedia summary response")
+            extract = (s.get("extract") or "").strip()
+            if s.get("title") is not None and not isinstance(s["title"], str):
+                raise ValueError("Invalid Wikipedia title")
+            thumbnail = (s.get("thumbnail") or {}).get("source")
+            page_url = ((s.get("content_urls") or {}).get("desktop") or {}).get("page")
         except Exception:
+            failed = True
             continue
         if not s or s.get("type") != "standard":
             continue
-        extract = (s.get("extract") or "").strip()
         if not extract or not _relates(want, s.get("title"), extract):
             continue
         return {
             "display": display,
             "title": s.get("title") or title,
             "extract": extract,
-            "thumbnail": ((s.get("thumbnail") or {}).get("source")),
-            "url": (((s.get("content_urls") or {}).get("desktop") or {}).get("page")),
+            "thumbnail": thumbnail,
+            "url": page_url,
         }
+    if failed:
+        raise LookupUnavailable("Wikipedia summaries unavailable")
     return None

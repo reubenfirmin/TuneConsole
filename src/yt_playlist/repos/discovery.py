@@ -120,15 +120,56 @@ class DiscoveryRepo(Repo):
             self.conn.execute('INSERT INTO album_discovery_memberships(album_id,found_at) VALUES (?,?) ON CONFLICT(album_id) DO NOTHING', (album_id,now))
 
     @synchronized
-    def upsert_discovered_artist(self, artist, score, because, fits, thumbnail, now, genre=None, *, artist_id=None) -> None:
+    def upsert_discovered_artist(self, artist, score, because, fits, thumbnail, now, genre=None, *, artist_id=None,
+                                 source='discovery') -> None:
         aid = artists.state_id(self.conn,artist_id if artist_id is not None else artist)
-        self.conn.execute(
-            "INSERT INTO discovered_artists(artist, score, because, fits, thumbnail, found_at, genre,artist_id) "
-            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(artist_id) DO UPDATE SET score=excluded.score, "
-            "because=excluded.because, fits=excluded.fits, thumbnail=excluded.thumbnail, "
-            "genre=COALESCE(excluded.genre, discovered_artists.genre)",
-            (artists.token(aid), score, json.dumps(because or []), json.dumps(fits or []), thumbnail, now, genre,aid))
-        self.conn.commit()
+        from yt_playlist.core.discovery_sources import retain_artist
+        with self.conn:
+            retain_artist(self.conn,aid,source,score)
+            self.conn.execute(
+                "INSERT INTO discovered_artists(artist, score, because, fits, thumbnail, found_at, genre,artist_id) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(artist_id) DO UPDATE SET score=excluded.score, "
+                "because=excluded.because, fits=excluded.fits, thumbnail=excluded.thumbnail, "
+                "genre=COALESCE(excluded.genre, discovered_artists.genre)",
+                (artists.token(aid), score, json.dumps(because or []), json.dumps(fits or []), thumbnail, now, genre,aid))
+
+    @synchronized
+    def retain_discovered_artist(self, artist, score):
+        """Retain independent interest without overwriting an existing suggestion's metadata."""
+        from yt_playlist.core.discovery_sources import retain_artist
+        aid = artists.lookup(self.conn,artist,exact=True)
+        if aid is not None and self.conn.execute(
+                'SELECT 1 FROM discovered_artists WHERE artist_id=?', (aid,)).fetchone():
+            with self.conn:
+                if not self.conn.execute("SELECT 1 FROM sqlite_master WHERE name='discovery_artist_sources'").fetchone():
+                    return
+                # When an independent import adopts a Spotify-only suggestion,
+                # its score must also survive without retaining Spotify's count.
+                self.conn.execute('UPDATE discovered_artists SET score=? WHERE artist_id=? '
+                    'AND NOT EXISTS (SELECT 1 FROM discovery_artist_sources WHERE artist_id=? '
+                    "AND source NOT LIKE 'spotify_export:%' AND source<>'spotify_model')", (score,aid,aid))
+                retain_artist(self.conn,aid,'discovery',score)
+
+    @synchronized
+    def seed_spotify_artists(self, identity_id, counts, now, *, min_plays=3):
+        """Retain import provenance even when an artist was independently discovered."""
+        from yt_playlist.core.discovery_sources import retain_artist
+        seeded = 0
+        with self.conn:
+            for name, plays in counts.items():
+                if plays < min_plays:
+                    continue
+                aid = artists.state_id(self.conn,name)
+                retain_artist(self.conn,aid,f'spotify_export:{identity_id}',float(plays),identity_id)
+                seeded += self.conn.execute(
+                    'INSERT INTO discovered_artists(artist,artist_id,score,found_at,because,fits) '
+                    "VALUES (?,?,?,?, '[]','[]') ON CONFLICT(artist_id) DO NOTHING",
+                    (artists.token(aid),aid,float(plays),now)).rowcount
+                self.conn.execute('UPDATE discovered_artists SET score=('
+                    'SELECT MAX(score) FROM discovery_artist_sources WHERE artist_id=?) WHERE artist_id=? '
+                    'AND NOT EXISTS (SELECT 1 FROM discovery_artist_sources WHERE artist_id=? '
+                    "AND source NOT LIKE 'spotify_export:%')", (aid,aid,aid))
+        return seeded
 
     @synchronized
     def get_discovered_albums(self) -> list:

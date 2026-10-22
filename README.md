@@ -43,6 +43,11 @@ b) And I find YouTube's discovery and playlist management to be pretty bad
    to the app automatically, there is nothing to paste (see `extension/README.md`).
 3. **Open `https://music.youtube.com` signed in**. The app pairs with the extension and starts syncing your library in the background.
 
+HTTP access logs are disabled by default. To include request logs in `app.log` and terminal
+output, start with `YT_PLAYLIST_ACCESS_LOG=1 uv run yt-playlist` (also works with `--reload`).
+Packaged apps and containers use the same environment variable. Application messages and
+server error tracebacks remain enabled regardless of this setting.
+
 ### Docker / Podman
 
 With Docker or Podman installed on the same computer as your browser:

@@ -3,7 +3,7 @@ import re
 import sqlite3
 from contextlib import closing
 
-from .legacy_schema import SCHEMA
+from .historical.v001_schema import SCHEMA
 from .runner import MigrationError
 
 # Only these historically optional columns can be added to an existing table.

@@ -196,14 +196,14 @@ def test_album_with_real_cover_keeps_the_single_cover(store):
     assert "pl-art-mosaic" not in html
 
 
-def test_song_title_links_are_informational_but_play_buttons_are_not(store):
-    """#107(b): a song title is opened to LOOK at it, so it must escape the app.js interceptor that
-    hijacks the playing YouTube Music tab. The row's play button must NOT escape it."""
+def test_song_titles_are_plain_text_and_play_buttons_still_play(store):
+    """The play overlay is the row's playback affordance; titles remain plain text."""
     c, _fc = _upload_client(store)
     html = c.get(f"/album?browse={UPLOAD_ID}").text
     # Match the whole <a ...> tag: these anchors wrap across lines, so a line-wise check would miss
     # an attribute that landed on the second line.
-    assert "data-yt-info" in _anchor(html, "ptitle")
+    assert not re.search(r'<a[^>]*class="ptitle"[^>]*>', html)
+    assert '<span class="ptitle">' in html
     assert "data-yt-info" not in _anchor(html, "pl-play")
 
 

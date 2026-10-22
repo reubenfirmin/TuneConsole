@@ -20,6 +20,9 @@ class FakeWiki:
     def is_fresh(self, row, now):
         return row["subject"] in self.fresh
 
+    def should_refresh(self, subject, row, now):
+        return row is None or not self.is_fresh(row, now)
+
 
 class FakeStore:
     """Just enough surface for ranked_subjects: monkeypatch transient.facet_leans separately."""

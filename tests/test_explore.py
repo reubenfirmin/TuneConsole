@@ -13,7 +13,7 @@ def test_catalog_ranks_under_played_first_weighted_not_filtered(store):
     unplayed = [store.tracks.upsert_track(f"u{i}", f"U{i}", "Art", None, None) for i in range(6)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "P", "P", 12, "h", 0.0), played + unplayed)
     for k in [f"p{i}|art" for i in range(6)]:
-        store.history.add_history_snapshot(iid, 1.0, [k])      # the P set has plays; the U set has none
+        store.history.record_history_plays(iid, 1.0, [k], source_timezone="UTC")
     # Truncated SVD of this symmetric catalog can choose different bases across
     # BLAS implementations. Equal vectors hold taste fit constant for this test.
     vector = np.array([1, 0, 0, 0], dtype=np.float32).tobytes()

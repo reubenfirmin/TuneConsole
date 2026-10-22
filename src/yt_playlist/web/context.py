@@ -101,7 +101,8 @@ class Ctx:
 
     def ops(self) -> PlaylistOps:
         """A PlaylistOps bound to this context's store, client provider, and clock."""
-        return PlaylistOps(self.store, self.client_provider, self.now_fn)
+        return PlaylistOps(self.store, self.client_provider, self.now_fn,
+                           rating_updated=self.rec_worker.trigger_rating_update if self.rec_worker else None)
 
     def playlist_by_id(self, pid):
         pl = self.store.playlists.get_playlist(pid)

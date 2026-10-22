@@ -156,7 +156,7 @@ def play_facet_leans(store, now) -> dict:
 
     `facet_leans` blends every transient source (mood, plays, likes, dislikes). The play-exposure
     graduation funnel (graduation.graduate_play_exposure) must graduate plays SPECIFICALLY, because
-    likes / dislikes / vibe taps already graduate at event time and would otherwise double-count. So
+    likes / positive vibe taps already graduate at event time; negative signals must not graduate. So
     this returns only the positive, wall-clock-decayed push from recent plays (#85: per-event age, no
     rank, no separate staleness relax). When listening stops the recent window drains and each play
     ages out on its own, so this falls to {} over time, which is the funnel's natural off-switch.

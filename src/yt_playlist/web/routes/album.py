@@ -77,8 +77,10 @@ def build(ctx) -> APIRouter:
         # The editable "folded-in library" table is only for library albums (whose full track list has
         # been materialized for enrichment). For any other album, regular sync may still have stamped
         # one incidental track with this album_browse_id (because it's in one of your playlists). That
-        # partial subset must NOT shadow the full live-fetched album, so only read it when in-library.
-        tracks = store.charts.album_tracks_detail(browse_id) if (browse_id and in_library) else []
+        # partial subset must NOT shadow the full live-fetched album. Count it for
+        # the library-status note, but only display it for saved or uploaded albums.
+        library_tracks = store.charts.album_tracks_detail(browse_id) if browse_id else []
+        tracks = library_tracks if in_library else []
         # Fold a library album's tracks in ON DEMAND (using the tracks we just fetched live), so
         # enrichment is available the moment you open it, no waiting for a full sync. Fold whenever
         # the live album has more than we hold: an upload typically arrives as a PARTIAL subset (sync
@@ -100,6 +102,7 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "album.html", {
             "album": album, "browse_id": browse_id, "tracks": tracks, "saved": saved,
             "is_upload": upload, "in_library": in_library,
+            "library_track_count": len({t["track_id"] for t in library_tracks}),
             "cover": cover, "mosaic": mosaic,
             "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,

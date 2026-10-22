@@ -34,8 +34,8 @@ def test_for_you_prefers_higher_weighted_lane(store):
     # a rotation neighbour (rotation lane): shares a playlist with your most-played, barely played
     nb = store.tracks.upsert_track("n", "Neighbour", "Other", None, None)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PL", "Mix", 2, "h", 0.0), [hit, nb])
-    store.history.add_history_snapshot(iid, now - 2 * day, ["hit|fav"])
-    store.history.add_history_snapshot(iid, now - 1 * day, ["hit|fav"])
+    store.history.record_history_plays(iid, now - 2 * day, ["hit|fav"], source_timezone="UTC")
+    store.history.record_history_plays(iid, now - 1 * day, ["hit|fav"], source_timezone="UTC")
 
     store.rec_model.set_weight("lane:deep_cut", 3.0, now=now)      # strongly prefer the deep-cut lane over rotation
     top = surfaces.for_you(store, now=now, limit=1)

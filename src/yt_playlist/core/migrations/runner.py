@@ -125,9 +125,31 @@ def validate_catalog(conn, version):
     if version >= 30:
         from . import v030_account_scope_preservation
         v030_account_scope_preservation.validate(conn)
+    if version >= 31:
+        from . import v031_spotify_history
+        v031_spotify_history.validate(conn)
     if version == 22:
         from . import v022_artist_references
         v022_artist_references.validate(conn)
+
+
+def validate_version(conn, version):
+    """Use the current contract at its floor; frozen validators serve older upgrades."""
+    from . import current
+    if version >= current.CONTRACT_FLOOR:
+        current.validate(conn, min(version, current.VERSION))
+        return
+    from .v001_baseline import validate
+    if version < 8:
+        validate(conn, legacy=version == 0)
+        return
+    from . import v008_recordings, v023_albums, v024_account_scope, v025_relationships
+    replaced = set(v008_recordings.REPLACED)
+    for floor, module in ((23, v023_albums), (24, v024_account_scope), (25, v025_relationships)):
+        if version >= floor:
+            replaced.update(module.REPLACED)
+    validate(conn, legacy=False, replaced=replaced)
+    validate_catalog(conn, version)
 
 
 def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, clock=time.time):
@@ -153,24 +175,14 @@ def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, c
             current = history(conn, registry)
             if fresh is None:
                 fresh = not bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone())
+            if production and fresh and current == 0:
+                from . import current as current_schema
+                current_schema.bootstrap(conn, registry, clock())
+                conn.commit()
+                log.info('Initialized current schema at version %s', current_schema.VERSION)
+                continue
             if production:
-                from .v001_baseline import validate
-                if current >= 8:
-                    from . import v008_recordings
-                    replaced = set(v008_recordings.REPLACED)
-                    if current >= 23:
-                        from . import v023_albums
-                        replaced.update(v023_albums.REPLACED)
-                    if current >= 24:
-                        from . import v024_account_scope
-                        replaced.update(v024_account_scope.REPLACED)
-                    if current >= 25:
-                        from . import v025_relationships
-                        replaced.update(v025_relationships.REPLACED)
-                    validate(conn, legacy=False, replaced=replaced)
-                    validate_catalog(conn, current)
-                else:
-                    validate(conn, legacy=current == 0)
+                validate_version(conn, current)
             if current == len(registry):
                 conn.rollback()
                 return
@@ -185,22 +197,7 @@ def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, c
             if not conn.in_transaction:
                 raise MigrationError('Migration committed outside the runner')
             if production:
-                if migration.version >= 8:
-                    from . import v008_recordings
-                    replaced = set(v008_recordings.REPLACED)
-                    if migration.version >= 23:
-                        from . import v023_albums
-                        replaced.update(v023_albums.REPLACED)
-                    if migration.version >= 24:
-                        from . import v024_account_scope
-                        replaced.update(v024_account_scope.REPLACED)
-                    if migration.version >= 25:
-                        from . import v025_relationships
-                        replaced.update(v025_relationships.REPLACED)
-                    validate(conn, legacy=False, replaced=replaced)
-                    validate_catalog(conn, migration.version)
-                else:
-                    validate(conn, legacy=False)
+                validate_version(conn, migration.version)
             conn.execute('INSERT INTO schema_migrations VALUES (?,?,?)', (migration.version, migration.name, clock()))
             conn.commit()
             log.info('Applied migration %s: %s', migration.version, migration.name)

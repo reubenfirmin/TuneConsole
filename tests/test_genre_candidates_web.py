@@ -24,12 +24,14 @@ def _seed(store, iid):
     return pid, tid
 
 
-def test_playlist_genre_cell_links_to_candidate_inspector(store):
+def test_playlist_genre_cell_is_display_only_with_metadata_in_song_menu(store):
     client, iid = _client(store)
     pid, tid = _seed(store, iid)
     html = client.get(f"/playlist/{pid}").text
-    assert f'hx-get="/track/{tid}/genre-candidates"' in html
-    assert 'hx-target="#genre-candidates-modal"' in html
+    assert f'hx-get="/track/{tid}/genre-candidates"' not in html
+    assert 'Edit Metadata' in html
+    data = client.get('/songs/metadata', params={'video_id': 'v1'}).json()
+    assert {o['value'] for o in data['genre_options']} == {'Electronic', 'Art Pop'}
 
 
 def test_candidate_inspector_shows_sources_and_current_value(store):

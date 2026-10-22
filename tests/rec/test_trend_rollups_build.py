@@ -21,14 +21,8 @@ def toy_genres(monkeypatch):
 
 
 def _snap(store, day, keys):
-    """One history snapshot at taken_at = day*86400 containing `keys`. Returns snapshot id."""
-    cur = store.conn.execute("INSERT INTO history_snapshots(identity_id, taken_at) VALUES (1, ?)",
-                             (day * 86400.0,))
-    sid = cur.lastrowid
-    for k in keys:
-        store.conn.execute("INSERT INTO history_items(snapshot_id, identity_key) VALUES (?, ?)", (sid, k))
-    store.conn.commit()
-    return sid
+    """Record independent observations on an explicit UTC calendar date."""
+    store.history.record_history_plays(1, day * 86400.0, keys, source_timezone="UTC")
 
 
 @pytest.mark.parametrize("now, expected", [
@@ -147,26 +141,17 @@ def test_spotlight_month_rollover_fires_once(store, monkeypatch):
     assert again["spotlight"] is None or not again["spotlight"]["signature"].startswith("month_review:")
 
 
-def test_takeout_reimport_resets_first_play_watermark(store):
-    """A Takeout re-import can wipe + rebuild history_snapshots, reusing low rowids that would fall
-    behind the stored watermark. build() must detect the takeout_imported_at bump, clear the first-play
-    index, and rescan from watermark 0 -- otherwise the earlier backfilled day would be silently missed
-    because history_track_first(wm) only looks at snapshot ids > wm."""
+def test_reset_and_earlier_backfill_rebuild_first_play(store):
+    """Resetting observations and backfilling an earlier day invalidates derived first play."""
     _track(store, "k1", "A1", "house")
-    _snap(store, 5, ["k1"])                      # snapshot id=1
+    _snap(store, 5, ["k1"])
     tr.build(store, now=6 * 86400.0)
     assert store.trends.first_play_map("track")["k1"] == 5
-    assert store.settings.get_setting("trend_first_play_watermark") == "1"
-
-    # Simulate a full Takeout re-import: wipe history and reinsert with reused (low) rowids.
-    store.conn.execute("DELETE FROM history_items")
-    store.conn.execute("DELETE FROM history_snapshots")
-    store.conn.commit()
-    _snap(store, 2, ["k1"])                       # reused snapshot id=1 (table was emptied)
+    store.history.reset_play_history(1)
+    _snap(store, 2, ["k1"])
     store.settings.set_setting("takeout_imported_at", "12345")
 
     payload = tr.build(store, now=6 * 86400.0)
-    # Without the reset this would incorrectly stay at 5 (id=1 is not > old watermark=1).
     assert store.trends.first_play_map("track")["k1"] == 2
     assert payload["first_play_floor_day"] == 2
     assert store.settings.get_setting("trend_first_play_takeout_seen") == "12345"

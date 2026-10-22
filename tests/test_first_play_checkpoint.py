@@ -10,14 +10,15 @@ DAY = 86400
 
 
 def _history(store, key, day):
-    return store.history.add_history_snapshot(1, day * DAY, [key])
+    return store.history.record_history_plays(1, day * DAY, [key], source_timezone="UTC")
 
 
 def _assert_first(store, key, artist, day):
     _build_first_play_index(store)
     assert store.trends.first_play_map("track")[key] == day
     assert store.trends.first_play_map("artist")[artist] == day
-    assert int(store.settings.get_setting("trend_first_play_watermark")) == store.trends.max_snapshot_id()
+    assert store.settings.get_setting('trend_first_play_watermark') is None
+    assert store.settings.get_setting('trend_first_play_source') == 'listening_v33'
 
 
 @pytest.mark.parametrize("old_version", [7, 15])
@@ -50,7 +51,7 @@ def test_upgrade_rebuilds_populated_history_only_checkpoint(tmp_path, old_versio
     store.conn.close()
     reopened = Store(path); reopened.init_schema()
     _assert_first(reopened, key, "Artist", 10)
-    assert reopened.conn.execute("SELECT COUNT(*) FROM history_items").fetchone()[0] == 2
+    assert reopened.conn.execute("SELECT COUNT(*) FROM listening_observations WHERE precision='legacy_unknown'").fetchone()[0] == 2
     assert reopened.conn.execute("SELECT COUNT(*) FROM play_events").fetchone()[0] == 0
     reopened.conn.close()
 
@@ -67,7 +68,7 @@ def test_alias_disambiguation_rebuilds_renamed_history(store):
     assert store.settings.get_setting("trend_first_play_watermark") is None
     _assert_first(store, renamed, "Artist", 10)
     assert old not in store.trends.first_play_map("track")
-    assert store.conn.execute("SELECT COUNT(*) FROM history_items").fetchone()[0] == 2
+    assert store.conn.execute("SELECT COUNT(*) FROM listening_observations").fetchone()[0] == 2
 
 
 def test_verified_reassociation_preserves_earliest_history(store):
@@ -81,7 +82,7 @@ def test_verified_reassociation_preserves_earliest_history(store):
         source="verified", evidence={"review": "same recording"}, now=100)
     _assert_first(store, key, "Artist B", 10)
     assert old not in store.trends.first_play_map("track")
-    assert store.conn.execute("SELECT COUNT(*) FROM history_items").fetchone()[0] == 2
+    assert store.conn.execute("SELECT COUNT(*) FROM listening_observations").fetchone()[0] == 2
 
 
 def test_interruption_rolls_back_index_and_checkpoint(store, monkeypatch):
@@ -89,9 +90,11 @@ def test_interruption_rolls_back_index_and_checkpoint(store, monkeypatch):
     store.tracks.upsert_track("a", "Song", "Artist", None, 200)
     key = store.tracks.identity_key_for_video("a")
     _history(store, key, 20); _assert_first(store, key, "Artist", 20)
+    _history(store, key, 10)
+    # Current ingestion invalidates the published index before a refresh starts.
+    assert store.trends.first_play_map("track") == {}
     watermark = store.settings.get_setting("trend_first_play_watermark")
     before = list(map(tuple, store.conn.execute("SELECT * FROM trend_first_play")))
-    _history(store, key, 10)
     original = store.trends._rebuild_artist_first_play
     def interrupted():
         original()

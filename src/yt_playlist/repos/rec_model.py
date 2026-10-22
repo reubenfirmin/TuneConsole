@@ -183,9 +183,17 @@ class RecModelRepo(Repo):
 
     # --- YouTube dislikes (captured during sync; global long suppression, idempotent) ---
     @synchronized
+    def apply_rating_feedback(self, states, *, dislike_seconds):
+        from yt_playlist.core import rating_feedback
+
+        with self.conn:
+            return rating_feedback.apply(self.conn, states, dislike_seconds=dislike_seconds)
+
+    @synchronized
     def record_dislike(self, identity_key, until, now) -> bool:
         """Persist a thumbs-down as a long global suppression (surface='sync'). Returns True iff newly
-        created, so the caller feeds transient/graduation exactly once. Idempotent on re-sync."""
+        created. The row feeds transient facets and durable negative vectors; re-sync never
+        refreshes its evidence time or creates permanent genre/era preference changes."""
         return self._record_once("sync", identity_key, "dislike", until, now)
 
     @synchronized

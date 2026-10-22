@@ -2,6 +2,7 @@
 {% block title %}Home - TuneConsole{% endblock %}
 {% block page_class %}page-home{% endblock %}
 {% block page_styles %}
+<link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
 <link rel="stylesheet" href="/static/radio.css?v={{ asset_v }}">
 <script src="/static/radio.js?v={{ asset_v }}"></script>
 {% endblock %}
@@ -84,7 +85,8 @@
   <div class="home-dashboard"
        :class="{'is-radio': panel === 'radio'}"
        x-data="{ panel: location.hash.slice(1) || '{{ dash_default }}',
-                 go(p) { this.panel = p; history.replaceState(null, '', '#' + p); } }"
+                 go(p) { this.panel = p; history.replaceState(null, '', '#' + p); window.dispatchEvent(new Event('hashchange')); } }"
+       @hashchange.window="panel = location.hash.slice(1) || '{{ dash_default }}'"
        x-init='$nextTick(() => { if (!$el.querySelector(`[data-dash="${panel}"]`)) go({{ dash_default|tojson }}) })'>
     <nav class="dash-nav" aria-label="Home areas" role="tablist"
          @keydown.right.prevent="$event.target.nextElementSibling?.focus()"

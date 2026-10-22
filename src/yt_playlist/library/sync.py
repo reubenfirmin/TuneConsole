@@ -4,7 +4,8 @@ from yt_playlist.util.matching import identity_key, track_artist, track_album
 from yt_playlist.util.retry import error_summary, with_retry
 from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.library.playlist_metadata import content_hash, is_generated_description
-from yt_playlist.rec.graduation import apply_dislikes
+from yt_playlist.library.playlist_snapshot import is_complete_playlist, validate_playlist
+from yt_playlist.library import ratings
 from yt_playlist.library.playlist_positions import retry_insertions
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.library.sync_outcomes import (begin_attempt, combined_status, finish_attempt,
@@ -33,18 +34,9 @@ def _album_id(t):
 _STATUS_PRIORITY = {"INDIFFERENT": 0, "LIKE": 1, "DISLIKE": 2}
 
 
-def _complete_playlist_context(detail):
-    """Both continuation forms indicate unread pages, even without a reported count."""
-    tracks = detail["tracks"]
-    count = detail.get("trackCount")
-    return (not detail.get("continuation")
-            and not detail.get("continuations")
-            and (count is None or (isinstance(count, int) and count == len(tracks))))
-
-
 def _complete_rating_context(detail):
     """Missing pages or unpopulated ratings leave this playlist's evidence unknown."""
-    return (_complete_playlist_context(detail)
+    return (is_complete_playlist(detail)
             and all(t.get("likeStatus") in _STATUS_PRIORITY for t in detail["tracks"]))
 
 
@@ -147,20 +139,35 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
             _emit(on_progress, "info", f"{label} › skipped {pl.get('title', '')} (couldn't read)")
             continue
         ratings_complete = ratings_complete and _complete_rating_context(detail)
-        if not _complete_playlist_context(detail):
+        complete = is_complete_playlist(detail)
+        if not complete:
             incomplete += 1
         track_ids, keys = [], []
         for t in detail.get("tracks", []):
-            tid = store.tracks.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
-                                     _album(t), t.get("duration_seconds"), t.get("isAvailable"),
-                                     t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")),
-                                     credits=t.get('artists'))
-            track_ids.append(tid)
+            if complete:
+                tid = store.tracks.upsert_track(
+                    t.get("videoId"), t.get("title", ""), _artist(t),
+                    _album(t), t.get("duration_seconds"), t.get("isAvailable"),
+                    t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")),
+                    credits=t.get('artists'))
+                track_ids.append(tid)
+            else:
+                # Retain positive catalog/rating evidence without turning a page
+                # into library membership, including for a newly discovered list.
+                store.tracks.observe_track_entry(t.get("videoId"), t.get("title", ""), _artist(t),
+                                                 now=now, album=_album(t), album_browse_id=_album_id(t),
+                                                 credits=t.get('artists'))
             status = t.get("likeStatus")
             if status in _STATUS_PRIORITY and t.get("videoId"):
                 rk = t["videoId"]
                 if rk not in rated or _STATUS_PRIORITY[status] > _STATUS_PRIORITY[rated[rk]]:
                     rated[rk] = status
+        if not complete:
+            _sync_generated_group(store, pid, detail.get("description"), groups, identity_id)
+            logger.warning("incomplete %s; keeping any cached playlist/tracks until a complete read", context)
+            _emit(on_progress, "info", f"{label} › {pl.get('title', '')} (incomplete; waiting for a complete read)",
+                  i=i, total=total)
+            continue
         track_ids = list(dict.fromkeys(track_ids))   # de-dupe (YouTube can repeat a video; see set_playlist_tracks)
         keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in track_ids]
         chash = content_hash(keys)
@@ -198,11 +205,13 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         _emit(on_progress, "auth_expired",
               f"{label}: returned no playlists. Session may have expired, re-authenticate", label=label)
 
+    incomplete_summary = f", {incomplete} incomplete" if incomplete else ""
+    playlist_summary = f"{refreshed} refreshed, {skipped} skipped{incomplete_summary}"
     resources["playlists"] = resource(
-        "failed" if auth_bad or (skipped and not refreshed) else
+        "failed" if auth_bad or (skipped and not refreshed and not incomplete) else
         "partial" if skipped or incomplete else "complete",
-        "No playlist snapshot" if auth_bad else f"{refreshed} refreshed, {skipped} skipped",
-        refreshed=refreshed, skipped=skipped)
+        "No playlist snapshot" if auth_bad else playlist_summary,
+        refreshed=refreshed, skipped=skipped, incomplete=incomplete)
     rating_status = ("complete" if ratings_complete and not auth_bad else
                      "partial" if any(s != "INDIFFERENT" for s in rated.values()) else "skipped")
     resources["ratings"] = resource(rating_status,
@@ -213,12 +222,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     # INDIFFERENT. Apply the same trustworthy evidence to account ratings and model feedback.
     if not ratings_complete:
         rated = {video_id: status for video_id, status in rated.items() if status != "INDIFFERENT"}
-    # provenance='sync': bulk-discovered statuses carry no real action time, so their likes stay out
-    # of the transient model and graduate at the low sync-like weight (see graduation.apply_dislikes).
-    for video_id, status in rated.items():
-        store.tracks.record_item_rating(identity_id, video_id, status, source="sync", now=now)
-    apply_dislikes(store, {store.tracks.identity_key_for_video(v): s for v,s in rated.items()},
-                   now, provenance="sync")
+    ratings.record_observations(store, identity_id, rated, source="sync", now=now)
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history(),
@@ -246,23 +250,24 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
             if on_auth_expired:
                 on_auth_expired(identity_id, label)
     if not auth_bad:
-        from yt_playlist.library import ratings
         ratings.reconcile_pending(store, identity_id, client)
         if on_auth_ok:
             on_auth_ok(identity_id)   # genuine success -> clear any "expired" flag
-        logger.info("synced identity %s (%s): %d playlists listed, %d refreshed, %d skipped",
-                    identity_id, label, len(playlists), refreshed, skipped)
+        logger.info("synced identity %s (%s): %d playlists listed, %d refreshed, %d skipped, %d incomplete",
+                    identity_id, label, len(playlists), refreshed, skipped, incomplete)
         status = result()["status"]
         _emit(on_progress, "done" if status == "complete" else "info",
-              f"{label}: {status} ({refreshed} playlists refreshed, {skipped} skipped)", outcome=status)
+              f"{label}: {status} ({refreshed} playlists refreshed, {skipped} skipped{incomplete_summary})",
+              outcome=status)
     return result()
 
 def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now, *, snapshot=None) -> None:
     """Re-fetch a single playlist's tracks into the store, fast post-merge refresh (no full sync)."""
     if snapshot is None:
         detail = with_retry(lambda: client.get_playlist(ytm_playlist_id, limit=None))
+        if not is_complete_playlist(detail):
+            raise ValueError("YouTube did not return a complete playlist; cached membership preserved")
     else:
-        from yt_playlist.library.playlist_snapshot import validate_playlist
         detail = validate_playlist(snapshot)
     track_ids, keys = [], []
     for t in detail.get("tracks", []):
