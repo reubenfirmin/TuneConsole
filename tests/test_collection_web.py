@@ -63,7 +63,7 @@ def test_save_album_likes_and_refreshes(store):
 def test_unsave_album_unlikes_and_refreshes(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     store.collection.add_saved_album({"browse": "MPREb_x", "title": "The Album", "artist": "Artist X",
-                           "year": "2001", "thumbnail": ""})
+                           "year": "2001", "thumbnail": ""},identity_id=iid)
     fc = AlbumClient()
     c = _client(store, lambda: {iid: fc})
 

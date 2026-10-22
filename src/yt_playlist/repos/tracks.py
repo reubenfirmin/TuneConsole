@@ -29,11 +29,17 @@ class TrackRepo(Repo):
         return self.track_for_waterfall(track_id)
 
     @synchronized
-    def observe_track(self, video_id, title, artist, *, now=None, album=None, album_browse_id=None):
+    def observe_track(self, video_id, title, artist, *, now=None, album=None, album_browse_id=None, credits=None):
+        entry_id = self.observe_track_entry(video_id,title,artist,now=now,album=album,
+                                           album_browse_id=album_browse_id,credits=credits)
+        return self.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?', (entry_id,)).fetchone()[0]
+
+    @synchronized
+    def observe_track_entry(self, video_id, title, artist, *, now=None, album=None, album_browse_id=None, credits=None):
+        """Retain an exact source entry without acquiring library membership."""
         with self.conn:
-            entry_id = catalog.upsert(self.conn,video_id,title,artist,album=album,
-                                      album_browse_id=album_browse_id,created_at=now,library=False)
-            return self.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?', (entry_id,)).fetchone()[0]
+            return catalog.upsert(self.conn,video_id,title,artist,album=album,
+                                      album_browse_id=album_browse_id,created_at=now,library=False,credits=credits)
 
     @synchronized
     def record_item_rating(self, identity_id, video_id, status, *, source, now):
@@ -43,12 +49,12 @@ class TrackRepo(Repo):
     @synchronized
     def upsert_track(self, video_id, title, artist, album, duration_s, available=None,
                      video_type=None, artist_browse_id=None, album_browse_id=None, thumbnail=None,
-                     created_at=None, *, source_ref=None) -> int:
+                     created_at=None, *, source_ref=None, credits=None) -> int:
         with self.conn:
             return catalog.upsert(
                 self.conn, video_id, title, artist, album, duration_s, available,
                 video_type, artist_browse_id, album_browse_id, thumbnail, created_at,
-                library=True, source_ref=source_ref)
+                library=True, source_ref=source_ref,credits=credits)
 
     @synchronized
     def identity_key_for_video(self, video_id) -> str | None:
@@ -293,7 +299,6 @@ class TrackRepo(Repo):
 
     @synchronized
     def materialized_album_ids(self) -> set:
-        """browse_ids of saved albums whose tracks we've already folded into the library, so sync
-        only fetches an album's track list once, not on every pass."""
+        """Releases with any library track. This does not prove full materialization."""
         return {r["browse_id"] for r in self.conn.execute(
             "SELECT DISTINCT a.browse_id FROM album_track_links a JOIN library_memberships m ON m.entry_id=a.entry_id")}

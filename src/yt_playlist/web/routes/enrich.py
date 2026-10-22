@@ -199,7 +199,7 @@ def build(ctx) -> APIRouter:
         if not value or len(value) > 80:
             return Response(status_code=400)
         store.tracks.set_track_genre(track_id, value)
-        ctx.rec_worker.trigger_mode_refresh()
+        ctx.rec_worker.trigger_content_update(video_ids=[track["video_id"]])
         # The same track can occur on several visible rows. A reload updates all of them and their
         # sort data consistently; candidate choice is rare enough that a partial multi-row swap is
         # needless complexity.

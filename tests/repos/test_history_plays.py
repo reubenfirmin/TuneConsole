@@ -33,8 +33,7 @@ def _store():
 
 
 def _counts(s):
-    return {r[0]: r[1] for r in s.conn.execute(
-        "SELECT identity_key, COUNT(*) FROM history_items GROUP BY identity_key")}
+    return s.history.listening_day_counts()
 
 
 # --- _parse_played_date ---

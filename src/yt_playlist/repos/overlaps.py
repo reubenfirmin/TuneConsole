@@ -2,6 +2,7 @@
 playlists, kept pairs, plus the category-scoped cleanup ignores (per-playlist empty/tiny dismissals
 and per-merge dismissals)."""
 import json
+from yt_playlist.core.playlist_scopes import ensure
 
 from yt_playlist.repos.base import Repo, synchronized
 
@@ -9,6 +10,7 @@ from yt_playlist.repos.base import Repo, synchronized
 class OverlapRepo(Repo):
     @synchronized
     def suppress_overlap(self, ytm_a, ytm_b, now) -> None:
+        ytm_a,ytm_b = ensure(self.conn,ytm_a),ensure(self.conn,ytm_b)
         a, b = sorted((ytm_a, ytm_b))  # normalize order so the pair is unordered
         self.conn.execute("INSERT OR IGNORE INTO suppressed_overlaps(a,b,created_at) VALUES (?,?,?)",
                           (a, b, now))
@@ -16,6 +18,7 @@ class OverlapRepo(Repo):
 
     @synchronized
     def unsuppress_overlap(self, ytm_a, ytm_b) -> None:
+        ytm_a,ytm_b = ensure(self.conn,ytm_a),ensure(self.conn,ytm_b)
         a, b = sorted((ytm_a, ytm_b))
         self.conn.execute("DELETE FROM suppressed_overlaps WHERE a=? AND b=?", (a, b))
         self.conn.commit()
@@ -33,11 +36,13 @@ class OverlapRepo(Repo):
 
     @synchronized
     def ignore_overlap_playlist(self, ytm, now) -> None:
+        ytm = ensure(self.conn,ytm)
         self.conn.execute("INSERT OR IGNORE INTO overlap_ignored(ytm,created_at) VALUES (?,?)", (ytm, now))
         self.conn.commit()
 
     @synchronized
     def unignore_overlap_playlist(self, ytm) -> None:
+        ytm = ensure(self.conn,ytm)
         self.conn.execute("DELETE FROM overlap_ignored WHERE ytm=?", (ytm,))
         self.conn.commit()
 
@@ -47,6 +52,7 @@ class OverlapRepo(Repo):
 
     @synchronized
     def keep_overlap_pair(self, ytm_a, ytm_b, now) -> None:
+        ytm_a,ytm_b = ensure(self.conn,ytm_a),ensure(self.conn,ytm_b)
         a, b = sorted((ytm_a, ytm_b))   # pair the user wants to keep visible despite ignoring a playlist
         self.conn.execute("INSERT OR IGNORE INTO overlap_kept(a,b,created_at) VALUES (?,?,?)", (a, b, now))
         self.conn.commit()
@@ -61,12 +67,14 @@ class OverlapRepo(Repo):
     def ignore_cleanup(self, ytm, category, now) -> None:
         """Dismiss one playlist from ONE cleanup category (e.g. 'this is empty, stop suggesting it').
         Scoped: it stays eligible in every other category."""
+        ytm = ensure(self.conn,ytm)
         self.conn.execute("INSERT OR IGNORE INTO cleanup_ignored(ytm,category,created_at) VALUES (?,?,?)",
                           (ytm, category, now))
         self.conn.commit()
 
     @synchronized
     def unignore_cleanup(self, ytm, category) -> None:
+        ytm = ensure(self.conn,ytm)
         self.conn.execute("DELETE FROM cleanup_ignored WHERE ytm=? AND category=?", (ytm, category))
         self.conn.commit()
 
@@ -84,9 +92,12 @@ class OverlapRepo(Repo):
     # membership later changes, the signature changes and the (now genuinely different) merge returns.
     @synchronized
     def ignore_merge(self, signature, members, now) -> None:
+        members = sorted({ensure(self.conn,m) for m in members})
+        signature = '|'.join(members)
         self.conn.execute(
             "INSERT OR IGNORE INTO ignored_merges(signature,members,created_at) VALUES (?,?,?)",
             (signature, json.dumps(list(members)), now))
+        self.conn.executemany('INSERT OR IGNORE INTO ignored_merge_members VALUES (?,?)', [(signature,m) for m in members])
         self.conn.commit()
 
     @synchronized

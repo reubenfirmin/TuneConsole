@@ -349,7 +349,8 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
     parsed = prepared if prepared is not None else prepare_spotify_library(load_spotify_library(raw), client)
     _, playlist_state = _playlist_transfers(store, identity_id)
     legacy_state = _load_state(store, _PLAYLIST_STATE)
-    album_state = _load_state(store, _ALBUM_STATE)
+    album_state_key = f'{_ALBUM_STATE}:{identity_id}'
+    album_state = _load_state(store, album_state_key)
     report = {"playlists_found": len(parsed["playlists"]), "playlists_imported": 0,
               "playlists_skipped": 0, "playlists_failed": 0, "tracks_imported": 0, "tracks_unmatched": 0,
               "albums_found": len(parsed["albums"]), "albums_imported": 0,
@@ -363,7 +364,7 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
     for existing in store.playlists.get_playlists():
         if (existing.identity_id != identity_id or existing.ytm_playlist_id == "LM"
                 or existing.ytm_playlist_id.startswith("RD")
-                or store.playlists.is_quarantined_playlist(existing.ytm_playlist_id)):
+                or store.playlists.is_quarantined_playlist(existing.scope_ref)):
             continue
         rows = store.playlists.get_playlist_tracks_with_meta(existing.id)
         keys = frozenset(_song_key(t[2], t[3]) for t in rows)
@@ -470,7 +471,7 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
             existing_playlists.add(source_signature)
 
     saved = {(normalize(a.get("title")), normalize(a.get("artist")))
-             for a in store.collection.get_saved_albums()}
+             for a in store.collection.get_saved_albums(identity_id=identity_id)}
     saved_editions = {(_album_title(title), _album_artist(artist)) for title, artist in saved}
     for source in parsed["albums"]:
         key = (normalize(source["title"]), normalize(source["artist"]))
@@ -512,7 +513,8 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
             artist = ", ".join(a.get("name", "") for a in (album.get("artists") or []) if a.get("name"))
             store.collection.add_saved_album({"browse": match["browse_id"], "title": album.get("title") or source["title"],
                                    "artist": artist or source["artist"], "year": album.get("year"),
-                                   "type": album.get("type"), "thumbnail": best_thumb(album.get("thumbnails"))})
+                                   "type": album.get("type"), "thumbnail": best_thumb(album.get("thumbnails")),
+                                   "credits": album.get('artists')}, identity_id=identity_id)
         except Exception:  # an optional album must not hide completed playlist results
             logger.exception("Spotify saved-album transfer failed")
             report["albums_unmatched"] += 1
@@ -523,7 +525,7 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
         saved.add(key)
         saved_editions.add(edition_key)
         album_state.add(fingerprint)
-        _save_state(store, _ALBUM_STATE, album_state)
+        _save_state(store, album_state_key, album_state)
         report["albums_imported"] += 1
         report["details"]["albums"].append({
             **source_detail, "status": "imported",
@@ -531,12 +533,14 @@ def import_spotify_library(store, raw, client, identity_id, now, *, prepared=Non
     return report
 
 
-def save_selected_album(store, client, item, browse_id):
+def save_selected_album(store, client, item, browse_id, *, identity_id):
     """Save one user-selected candidate and record its Spotify source for future idempotence."""
     candidate = next((c for c in item.get("candidates") or [] if c.get("browse_id") == browse_id), None)
     if candidate is None:
         raise ValueError("candidate is not part of this report")
-    already_saved = browse_id in {a.get("browse") for a in store.collection.get_saved_albums()}
+    if identity_id not in {i.id for i in store.identities.get_identities()}:
+        raise ValueError('Unknown or inactive destination account')
+    already_saved = browse_id in {a.get("browse") for a in store.collection.get_saved_albums(identity_id=identity_id)}
     album = with_retry(lambda: client.get_album(browse_id)) or {}
     audio_id = album.get("audioPlaylistId")
     if not audio_id:
@@ -549,12 +553,14 @@ def save_selected_album(store, client, item, browse_id):
             "artist": artist or candidate.get("artist") or item.get("artist") or "",
             "year": album.get("year"), "type": album.get("type"),
             "thumbnail": best_thumb(album.get("thumbnails")) or candidate.get("thumbnail"),
-        })
+            "credits": album.get('artists'),
+        }, identity_id=identity_id)
     source = item.get("source_uri") or "|".join((
         normalize(item.get("title")), normalize(item.get("artist"))))
-    state = _load_state(store, _ALBUM_STATE)
+    state_key = f'{_ALBUM_STATE}:{identity_id}'
+    state = _load_state(store, state_key)
     state.add(_fingerprint("album", source))
-    _save_state(store, _ALBUM_STATE, state)
+    _save_state(store, state_key, state)
     return {"status": "skipped" if already_saved else "imported",
             "reason": "already_in_library" if already_saved else "saved_by_user",
             "browse_id": browse_id}

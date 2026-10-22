@@ -61,12 +61,12 @@ def test_legacy_discovery_stamps_are_requeued_once_without_metadata_changes(tmp_
     s.conn.close()
     repaired = Store(path)
     repaired.init_schema()
-    assert repaired.queue_remaining() == 2
-    row = repaired.discovered_tracks_by_keys(["cold"])["cold"]
+    assert repaired.enrichment.queue_remaining() == 2
+    row = repaired.discovery.discovered_tracks_by_keys(["cold"])["cold"]
     assert row["last_enriched"] is None
     assert (row["genre"], row["year"], row["audio"]) == ("House", "2020", {"bpm": 128.0})
-    repaired.record_enrichment_attempt("cold", "deezer", {}, now=300)
-    repaired.mark_discovered_enriched(["cold"], 300)
+    repaired.enrichment.record_enrichment_attempt("cold", "deezer", {}, now=300)
+    repaired.discovery.mark_discovered_enriched(["cold"], 300)
     repaired.conn.close()
     reopened = Store(path)
     reopened.init_schema()

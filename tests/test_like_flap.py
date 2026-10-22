@@ -156,6 +156,41 @@ def test_incomplete_rating_context_is_unknown(store, monkeypatch, detail):
     assert KEY in store.rec_model.recent_liked_keys()
 
 
+@pytest.mark.parametrize("pages", [
+    {"continuation": "unread-page"},
+    {"continuations": [{"nextContinuationData": {"continuation": "unread-page"}}]},
+])
+@pytest.mark.parametrize("status", ["LIKE", "DISLIKE"])
+def test_unread_pages_preserve_ratings_until_complete_recovery(store, monkeypatch, pages, status):
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    client = _client("indifferent_last")
+    client._tracks["A"] = [_t(status)]
+    sync.sync_identity(store, iid, client, now=1000.0)
+    fetch = client.get_playlist
+
+    # No trackCount is supplied: pagination alone must prevent a neutral first page
+    # from disproving the rating on the unread page.
+    monkeypatch.setattr(client, "get_playlist", lambda pid, limit=None:
+                        {"tracks": [_t("INDIFFERENT")], **pages} if pid == "A"
+                        else fetch(pid, limit=limit))
+    result = sync.sync_identity(store, iid, client, now=2000.0)
+    assert result["resources"]["playlists"]["status"] == "partial"
+    assert _item_rating(store, iid) == (status, 1000.0)
+    assert (KEY in store.rec_model.recent_liked_keys()) == (status == "LIKE")
+    assert (KEY in store.rec_model.disliked_identity_keys()) == (status == "DISLIKE")
+
+    theme = store.rec_surface.get_theme("artist:Band")
+    monkeypatch.setattr(client, "get_playlist", fetch)
+    sync.sync_identity(store, iid, client, now=3000.0)
+    assert _item_rating(store, iid) == (status, 3000.0)
+    assert store.rec_surface.get_theme("artist:Band") == theme
+    client._tracks["A"] = [_t("INDIFFERENT")]
+    sync.sync_identity(store, iid, client, now=4000.0)
+    assert _item_rating(store, iid) == ("INDIFFERENT", 4000.0)
+    assert KEY not in store.rec_model.recent_liked_keys()
+    assert KEY not in store.rec_model.disliked_identity_keys()
+
+
 def _ctx(s):
     return type("C", (), {"store": s})()
 

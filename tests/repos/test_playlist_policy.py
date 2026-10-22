@@ -21,7 +21,7 @@ def test_group_names_cannot_adopt_or_quarantine_and_stale_sync_cannot_revoke_ado
     assert store.rec_query.excluded_playlist_ids() == {pid}
     store.playlists.reconcile_playlist_provenance('PL', None)
     assert store.rec_query.excluded_playlist_ids() == {pid}
-    store.history.record_play_event(iid, 'song', 'video', 10, playlist_ytm_id='PL')
+    store.history.record_play_event(iid, 'song', 'video', 10, playlist_ytm_id='PL', source_timezone='UTC')
     store.playlists.adopt_generated_playlist('PL')
     store.playlists.reconcile_playlist_provenance('PL', GENERATED_DESCRIPTION)
     assert store.rec_query.excluded_playlist_ids() == set()

@@ -126,12 +126,13 @@ def playlist_taste(store) -> PlaylistTaste:
     return PlaylistTaste(titles, cents, w, list(pt.pids) + [None])
 
 
-def content_taste(store) -> PlaylistTaste:
+def content_taste(store, *, snapshot=None) -> PlaylistTaste:
     """The content-space (genre/era + audio) sibling of playlist_taste (#38). Builds per-playlist taste
     centroids over the CONTENT vectors, so genre/era-described tracks that have no co-occurrence vector
     can still be ranked by how well they fit the contexts you actually play, no projection needed.
-    Empty until content vectors are built."""
-    ckeys, CV, cidx = embed.load_content_vectors(store)
+    Empty until content vectors are built. Pass the candidate generation's snapshot when scoring
+    vectors that were loaded separately, so a concurrent rebuild cannot change column meanings."""
+    ckeys, CV, cidx = embed.load_content_vectors(store, snapshot=snapshot)
     if CV is None:
         return PlaylistTaste([], np.zeros((0, 0)), np.zeros(0))
     return _playlist_centroids(store, CV, cidx)

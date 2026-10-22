@@ -20,7 +20,7 @@ def test_radio_playlist_play_is_quarantined_by_real_list_id(store):
     store.playlists.set_playlist_group("PLRADIO", GENERATED_GROUP)
     store.playlists.mark_generated_playlist('PLRADIO')
     # A play carrying the playlist's REAL ytm id as provenance. UTC day int(100000//86400) == 1.
-    store.history.record_play_event(ident, "k1", "v1", 100000.0, playlist_ytm_id="PLRADIO")
+    store.history.record_play_event(ident, "k1", "v1", 100000.0, playlist_ytm_id="PLRADIO", source_timezone='UTC')
     assert (1, "k1") in store.rec_query.generated_only_play_days()
     assert "k1" in store.rec_query.generated_only_keys_since(0.0)
 

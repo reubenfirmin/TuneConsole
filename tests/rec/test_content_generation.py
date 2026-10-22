@@ -3,10 +3,11 @@ import json
 import sqlite3
 import threading
 
+import numpy as np
 import pytest
 
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embed
+from yt_playlist.rec import embed, layers, mode_surfaces, ppr, rec_params, surfaces, taste_modes
 
 
 def _seed(store):
@@ -82,13 +83,13 @@ def test_reader_sees_old_then_new_complete_generation_during_publication(tmp_pat
     thread.start()
     try:
         assert writing.wait(5)
-        assert reader.content_generation() == before
+        assert reader.rec_model.content_generation() == before
     finally:
         release.set()
         thread.join(5)
     try:
         assert not thread.is_alive() and not errors
-        after = reader.content_generation()
+        after = reader.rec_model.content_generation()
         assert after["generation"] != before["generation"]
         assert (after["model"], after["revision"], after["inputs"]) == ("new model", "revision", "inputs")
         assert after["library"] == [("new|artist", b"new library")]
@@ -96,3 +97,95 @@ def test_reader_sees_old_then_new_complete_generation_during_publication(tmp_pat
     finally:
         writer.conn.close()
         reader.conn.close()
+
+
+def _seed_remappable_space(store):
+    """Two equal-size spaces whose categorical columns have opposite meanings."""
+    entries = [store.tracks.upsert_track(key, key.upper(), "Artist", None, None)
+               for key in ("a", "b", "c")]
+    keys = ["a|artist", "b|artist", "c|artist"]
+    vectors = np.array([[1., 0.], [0., 1.], [1., 0.]], dtype=np.float32)
+    model = {"cat": {"genre:a": 0, "genre:b": 1}, "ncat": 2, "cont": []}
+    assert store.rec_model.publish_content_generation(
+        list(zip(keys, (v.tobytes() for v in vectors))), [], json.dumps(model), "rev", "old", "")
+    store.modes.replace_modes([
+        {"mode_id": i + 1, "label": key, "families": [], "centroid": vectors[i],
+         "size": 1, "rep_keys": [key], "space": embed.content_model_fingerprint(model)}
+        for i, key in enumerate(keys[:2])
+    ], retired_ids=[], now=1)
+
+    def remap():
+        new_model = {**model, "cat": {"genre:a": 1, "genre:b": 0}}
+        generation = store.rec_model.content_generation()["generation"]
+        assert store.rec_model.publish_content_generation(
+            list(zip(keys, (v.tobytes() for v in vectors[:, ::-1]))), [],
+            json.dumps(new_model), "rev", "new", generation)
+
+    return entries, keys, remap
+
+
+def test_ppr_keeps_generation_when_rebuild_happens_during_graph_read(store, monkeypatch):
+    _entries, keys, remap = _seed_remappable_space(store)
+
+    def build_transition(_store):
+        remap()
+        return keys, np.eye(len(keys)), {key: i for i, key in enumerate(keys)}
+
+    monkeypatch.setattr(ppr, "build_transition", build_transition)
+    rankings = ppr.mode_rankings(store, alpha=.85, iters=5, tol=0., depth=2)
+    assert rankings[1][0] == keys[0]
+    assert rankings[2][0] == keys[1]
+
+
+def test_bundles_keep_ppr_in_candidate_generation_during_pool_rebuild(store, monkeypatch):
+    _entries, keys, remap = _seed_remappable_space(store)
+
+    def rebuild_while_ranking(*args, **kwargs):
+        remap()
+        return []
+
+    monkeypatch.setattr(surfaces, "for_you", rebuild_while_ranking)
+    for name in ("explore_for_you", "comfort_listening", "cold_candidates"):
+        monkeypatch.setattr(surfaces, name, lambda *args, **kwargs: [])
+    monkeypatch.setattr(ppr, "build_transition", lambda _store: (
+        keys, np.eye(len(keys)), {key: i for i, key in enumerate(keys)}))
+
+    payload = mode_surfaces.prepare_bundles(store, 100_000)
+    assert payload["_ppr"]["1"][0] == keys[0]
+    assert payload["_ppr"]["2"][0] == keys[1]
+
+
+@pytest.mark.parametrize("classifier", [layers.now_mode_mix, layers.session_mode_mix])
+def test_mode_classification_keeps_generation_during_rebuild(store, monkeypatch, classifier):
+    _entries, keys, remap = _seed_remappable_space(store)
+    identity = store.identities.upsert_identity("main", "cred", None, True)
+    store.history.import_play_events(identity, [(keys[0], "a", 100_000), (keys[2], "c", 100_000)])
+    rec_params.set_param(store, "now_min_events", 2)
+    live_modes = taste_modes.live_modes
+
+    def modes_then_rebuild(*args, **kwargs):
+        modes = live_modes(*args, **kwargs)
+        remap()
+        return modes
+
+    monkeypatch.setattr(taste_modes, "live_modes", modes_then_rebuild)
+    shares, count, _modes = classifier(store, 100_000)
+    assert count == 2
+    assert shares == {1: pytest.approx(1.)}
+
+
+def test_catalog_scores_keep_generation_when_rebuild_follows_taste_read(store, monkeypatch):
+    entries, keys, remap = _seed_remappable_space(store)
+    identity = store.identities.upsert_identity("main", "cred", None, True)
+    playlist = store.playlists.upsert_playlist(identity, "P", "A context", 1, "h", 0.)
+    store.playlists.set_playlist_tracks(playlist, [entries[0]])
+    content_taste = surfaces.content_taste
+
+    def taste_then_rebuild(*args, **kwargs):
+        taste = content_taste(*args, **kwargs)
+        remap()
+        return taste
+
+    monkeypatch.setattr(surfaces, "content_taste", taste_then_rebuild)
+    scores = surfaces._content_only_scores(store, {}, 100_000)
+    assert scores[keys[0]] > scores[keys[1]]

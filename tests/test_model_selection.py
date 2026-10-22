@@ -133,7 +133,7 @@ def test_forecast_has_same_universe_and_does_not_replace_live_vectors(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     tracks = [store.tracks.upsert_track(str(i), f"Song{i}", "Artist", None, None, created_at=0) for i in range(40)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PL", "Mix", 40, "h", 0), tracks)
-    store.history.add_history_snapshot(iid, 100, ["song0|artist"])
+    store.history.record_play_event(iid,'song0|artist','0',100)
     store.rec_model.replace_rec_vectors([("unchanged", b"original")])
     forecast = ms._forecast(store, {"method": "svd", "dim": 4}, {"method": "svd", "dim": 8}, 1000)
     assert "song0|artist" not in forecast["eligible"]
@@ -147,13 +147,14 @@ def test_startup_recovers_interrupted_comparison_and_worker_checks_automatically
     worker = RecWorker(SimpleNamespace(store=store, now_fn=lambda: 1000, logger=logging.getLogger("test")))
     assert store.model_selection.selection_runs()[0]["status"] == "failed"
     calls = []
-    monkeypatch.setattr(ms, "readiness", lambda *a: {"state": "ready"})
-    monkeypatch.setattr(worker, "trigger", lambda: calls.append("comparison queued"))
-    monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", lambda *a: False)
-    from yt_playlist.rec import taste_modes
-    monkeypatch.setattr(taste_modes, "needs_refresh", lambda *a: False)
-    worker._do_mode_refresh()
-    assert calls == ["comparison queued"]
+    def stage(name,fn,*args,**kwargs):
+        if name=='model comparison':
+            calls.append(fn)
+            assert args==(store,1000)
+        return {'count':0,'scanned':0} if name in {'playlist cleanup','discovery'} else 0
+    monkeypatch.setattr(worker,'_stage',stage)
+    worker._do_rebuild()
+    assert calls == [ms.maintain]
 
 
 def test_real_history_drives_automatic_comparison_without_manual_action(store, monkeypatch):

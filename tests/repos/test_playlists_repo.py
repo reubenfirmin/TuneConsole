@@ -79,7 +79,7 @@ def test_remove_playlist_prunes_links_keeps_group(store):
     assert store.playlists.get_playlist_groups() == {"PX": "Faves"}               # group survives
 
 
-def test_remove_playlist_prunes_cleanup_dismissals(store):
+def test_remove_playlist_retains_cleanup_dismissals(store):
     iid = store.identities.upsert_identity("me", "c", None, True)
     p = store.playlists.upsert_playlist(iid, "PX", "Gone", 0, "h", 0.0)
     store.overlaps.ignore_cleanup("PX", "empty", 1.0)
@@ -87,8 +87,8 @@ def test_remove_playlist_prunes_cleanup_dismissals(store):
     store.overlaps.ignore_merge("sig-px", ["PX", "PY"], 1.0)
     store.overlaps.ignore_merge("sig-other", ["PY", "PZ"], 1.0)         # doesn't involve PX, must survive
     store.playlists.remove_playlist(p)
-    assert store.overlaps.get_cleanup_ignored() == {"tiny": {"PY"}}
-    assert store.overlaps.get_ignored_merge_sigs() == {"sig-other"}
+    assert store.overlaps.get_cleanup_ignored() == {"empty":{"PX"},"tiny": {"PY"}}
+    assert store.overlaps.get_ignored_merge_sigs() == {"PX|PY","PY|PZ"}
 
 
 def test_hide_and_groups(store):

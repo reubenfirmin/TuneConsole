@@ -71,7 +71,10 @@ def verified_backup(conn, source_version, target_version, backup_dir=None):
 
 def validate_catalog(conn, version):
     from . import v008_recordings, v010_play_event_subjects
-    if version >= 18:
+    if version >= 23:
+        from . import v023_albums
+        validator = v023_albums
+    elif version >= 18:
         from . import v018_discovery_sources
         validator = v018_discovery_sources
     else:
@@ -92,12 +95,36 @@ def validate_catalog(conn, version):
     if version >= 15:
         from . import v015_album_shares
         v015_album_shares.validate(conn)
-    if version >= 19:
+    if version >= 24:
+        from . import v024_account_scope
+        v024_account_scope.validate(conn)
+    elif version >= 19:
         from . import v019_playlist_provenance
         v019_playlist_provenance.validate(conn)
     if version >= 20:
         from . import v020_metadata_selections
         v020_metadata_selections.validate(conn)
+    if version >= 25:
+        from . import v025_relationships
+        v025_relationships.validate(conn)
+    if version >= 26:
+        from . import v026_listening_observations
+        v026_listening_observations.validate(conn)
+    if version >= 27:
+        from . import v027_artist_identity_redirects
+        v027_artist_identity_redirects.validate(conn)
+    if version >= 28:
+        from . import v028_discovery_representatives
+        v028_discovery_representatives.validate(conn)
+    if version >= 29:
+        from . import v029_artist_provisional_names
+        v029_artist_provisional_names.validate(conn)
+    elif version >= 21:
+        from . import v021_artists
+        v021_artists.validate(conn)
+    if version == 22:
+        from . import v022_artist_references
+        v022_artist_references.validate(conn)
 
 
 def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, clock=time.time):
@@ -127,7 +154,17 @@ def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, c
                 from .v001_baseline import validate
                 if current >= 8:
                     from . import v008_recordings
-                    validate(conn, legacy=False, replaced=v008_recordings.REPLACED)
+                    replaced = set(v008_recordings.REPLACED)
+                    if current >= 23:
+                        from . import v023_albums
+                        replaced.update(v023_albums.REPLACED)
+                    if current >= 24:
+                        from . import v024_account_scope
+                        replaced.update(v024_account_scope.REPLACED)
+                    if current >= 25:
+                        from . import v025_relationships
+                        replaced.update(v025_relationships.REPLACED)
+                    validate(conn, legacy=False, replaced=replaced)
                     validate_catalog(conn, current)
                 else:
                     validate(conn, legacy=current == 0)
@@ -147,7 +184,17 @@ def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, c
             if production:
                 if migration.version >= 8:
                     from . import v008_recordings
-                    validate(conn, legacy=False, replaced=v008_recordings.REPLACED)
+                    replaced = set(v008_recordings.REPLACED)
+                    if migration.version >= 23:
+                        from . import v023_albums
+                        replaced.update(v023_albums.REPLACED)
+                    if migration.version >= 24:
+                        from . import v024_account_scope
+                        replaced.update(v024_account_scope.REPLACED)
+                    if migration.version >= 25:
+                        from . import v025_relationships
+                        replaced.update(v025_relationships.REPLACED)
+                    validate(conn, legacy=False, replaced=replaced)
                     validate_catalog(conn, migration.version)
                 else:
                     validate(conn, legacy=False)

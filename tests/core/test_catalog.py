@@ -192,9 +192,7 @@ def test_alias_disambiguation_and_verified_association_preserve_event_counts_and
     store.history.record_play_event(iid,original,'a',10)
     store.history.record_history_plays(iid,10,[original])
     store.rec_model.record_feedback('for_you',original,'less',now=11)
-    store.conn.execute("INSERT INTO cluster_canvas(playlist_ytm,state) VALUES ('saved',?)",
-                       (json.dumps({'nodes':[{'id':1,'keys':[original]}],'label':original}),))
-    store.conn.commit()
+    store.rec_surface.set_cluster_canvas('saved',json.dumps({'nodes':[{'id':1,'keys':[original]}],'label':original}))
     b = store.tracks.upsert_track('b','Song','Artist',None,200)
     key = store.tracks.catalog_subject(a)['identity_key']
     assert key != original
@@ -204,7 +202,7 @@ def test_alias_disambiguation_and_verified_association_preserve_event_counts_and
     store.tracks.associate_youtube_item('b',store.tracks.catalog_subject(a)['recording_id'],
                                 source='verified',evidence={'review':'same recording'},now=12)
     assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == 1
-    assert store.conn.execute('SELECT COUNT(*) FROM history_items').fetchone()[0] == 1
+    assert store.conn.execute('SELECT COUNT(*) FROM listening_observations').fetchone()[0] == 1
     saved = json.loads(store.rec_surface.get_cluster_canvas('saved'))
     assert saved['nodes'][0]['keys'] == [key] and saved['label'] == original
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
@@ -261,8 +259,9 @@ def test_retired_keys_deduplicate_ingestion_without_losing_exact_upload_plays(st
     assert store.history.import_plays(iid,[(retired,86400)]) == 1
     assert store.history.import_plays(iid,[(retired,86400)]) == 0
     assert store.history.record_history_plays(iid,86400,[retired],source_timezone='UTC') == 0
-    assert store.conn.execute('SELECT raw_identity_key FROM history_items').fetchone()[0] == retired
-    assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == 3
+    assert store.conn.execute('SELECT raw_identity_key FROM listening_observations').fetchone()[0] == retired
+    assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == 4
+    assert store.history.listening_day_counts()=={store.tracks.catalog_subject(a)['identity_key']:2}
 
 
 @pytest.mark.parametrize('video_id',[None,'',' ','unknown-upload'])

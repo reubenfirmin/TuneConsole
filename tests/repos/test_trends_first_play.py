@@ -154,17 +154,17 @@ def test_clear_first_play_empties_table_and_rebuild_is_idempotent(store):
     assert store.trends.first_play_map("artist") == artists_before
 
 
-def test_history_track_first_after_id_window(store):
+def test_history_track_first_rescans_evidence_despite_old_snapshot_checkpoint(store):
     sid1 = _snap(store, 2, ["k1", "k2"])   # snapshot 1: day 2
     sid2 = _snap(store, 5, ["k3"])         # snapshot 2: day 5
 
-    # Window strictly after sid1 -> only snapshot 2's rows are visible, even though sid1 still exists.
+    # A checkpoint from the old snapshot model cannot hide earlier daily evidence.
     windowed = store.trends.history_track_first(sid1)
-    assert set(windowed) == {"k3"}
-    assert windowed["k3"] == (5, 5 * 86400.0)
+    assert set(windowed) == {"k1","k2","k3"}
+    assert windowed["k3"] == (5,5*86400.0+43200)
 
-    # Window after sid2 -> nothing newer than the latest snapshot.
-    assert store.trends.history_track_first(sid2) == {}
+    _snap(store,1,['k1'])
+    assert store.trends.history_track_first(sid2)['k1']==(1,86400.0+43200)
 
     # Window before both (after_id=0) -> sees everything.
     full = store.trends.history_track_first(0)

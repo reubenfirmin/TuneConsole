@@ -32,14 +32,7 @@ def test_bridge_status_reports_connection():
     client = TestClient(app)
     assert client.get("/bridge/status").json() == {"connected": False, "now_playing": None,
                                                    "sensor_health": None,
-                                                   "radio": False, "radio_waiting": False,
-                                                   # #93 radio flag rides along; waiting-state net.
-                                                   # Visibility wave: mode transparency + fallback
-                                                   # diagnostics + "Up next" keys, always present
-                                                   # (radio is absent from this bare ctx entirely).
-                                                   "radio_dual": False, "radio_fallback_reason": None,
-                                                   "radio_upcoming": [], "radio_apply": None,
-                                                   "radio_deck_apply": {}}
+                                                   "radio": False}
 
 
 def test_bridge_status_true_while_extension_connected():
@@ -52,10 +45,7 @@ def test_bridge_status_true_while_extension_connected():
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}):
         assert client.get("/bridge/status").json() == {"connected": True, "now_playing": None,
                                                        "sensor_health": None,
-                                                       "radio": False, "radio_waiting": False,
-                                                       "radio_dual": False, "radio_fallback_reason": None,
-                                                       "radio_upcoming": [], "radio_apply": None,
-                                                       "radio_deck_apply": {}}
+                                                       "radio": False}
 
 
 def test_extension_connect_marks_bridge_paired():

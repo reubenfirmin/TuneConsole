@@ -32,7 +32,7 @@ def test_play_persists_event_day_model_and_freshness():
     evs = s.history.play_events_since(0)
     assert [e["identity_key"] for e in evs] == [key]
     # the (track, day) model saw the play too (bare key resolves to the event's day)
-    n = s.conn.execute("SELECT COUNT(*) FROM history_items WHERE identity_key=?", (key,)).fetchone()[0]
+    n = s.history.listening_day_counts().get(key,0)
     assert n == 1
     assert s.settings.get_setting("last_plays_sync_at") == "1000.0"
 
@@ -65,7 +65,7 @@ def test_rereport_does_not_double_count_or_restamp():
     assert live_plays.handle_play_event(_ctx(s), _msg(likeStatus="LIKE"), 1030.0) is False
     key = identity_key("Song", "Artist")
     assert len(s.history.play_events_since(0)) == 1
-    n = s.conn.execute("SELECT COUNT(*) FROM history_items WHERE identity_key=?", (key,)).fetchone()[0]
+    n = s.history.listening_day_counts().get(key,0)
     assert n == 1
     assert s.settings.get_setting("last_plays_sync_at") == "1000.0"
 
@@ -82,15 +82,14 @@ def test_like_status_feeds_like_channel():
     assert identity_key("Song", "Artist") in set(s.rec_model.recent_liked_keys())
 
 
-def test_brand_id_selects_matching_identity_else_master():
+def test_brand_id_selects_matching_identity_and_unknown_reports_are_skipped():
     s = _store(with_brand=True)
     ids = {i.brand_account_id: i.id for i in s.identities.get_identities()}
-    master = s.identities.get_master_identity().id
     live_plays.handle_play_event(_ctx(s), _msg(brandId="10345"), 1000.0)
-    live_plays.handle_play_event(_ctx(s), _msg(title="Other", brandId="nope"), 2000.0)
+    assert not live_plays.handle_play_event(_ctx(s), _msg(title="Other", brandId="nope"), 2000.0)
     evs = s.history.play_events_since(0)
     assert evs[0]["identity_id"] == ids["10345"]
-    assert evs[1]["identity_id"] == master
+    assert len(evs)==1
 
 
 def test_untitled_or_unconfigured_is_skipped():
@@ -107,7 +106,7 @@ def test_playlist_provenance_recorded():
     assert s.history.play_events_since(0)[0]["playlist_ytm_id"] == "PLabc"
 
 
-def test_no_master_falls_back_to_first_identity():
+def test_main_remote_account_matches_without_a_configured_master():
     s = Store(":memory:"); s.init_schema()
     s.identities.upsert_identity("only", "bridge", None, False)     # configured, but nothing is master
     ident = s.identities.get_identities()[0].id
@@ -124,5 +123,5 @@ def test_live_play_and_history_backfill_share_browser_date():
     assert s.history.record_history_plays(1, now + 3600, [("song|artist", "Today")],
                                   source_timezone="America/Costa_Rica") == 0
     want = datetime.datetime(2026, 10, 20, 12, tzinfo=datetime.timezone.utc).timestamp()
-    assert s.conn.execute("SELECT taken_at FROM history_snapshots").fetchone()[0] == want
+    assert s.conn.execute("SELECT day_ts FROM listening_days").fetchone()[0] == want
     assert s.history.play_events_since(0)[0]["played_at"] == now

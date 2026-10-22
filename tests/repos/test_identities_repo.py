@@ -4,10 +4,12 @@ import pytest
 
 def test_upsert_is_idempotent_on_label(store):
     a = store.identities.upsert_identity("me", "cred-1", "BA1", True)
-    b = store.identities.upsert_identity("me", "cred-2", "BA2", True)   # same label → updates in place
+    b = store.identities.upsert_identity("me", "cred-2", "BA1", True)
     assert a == b
     ids = store.identities.get_identities()
-    assert len(ids) == 1 and ids[0].credential_ref == "cred-2" and ids[0].brand_account_id == "BA2"
+    assert len(ids) == 1 and ids[0].credential_ref == "cred-2" and ids[0].brand_account_id == "BA1"
+    with pytest.raises(ValueError,match='cannot be retargeted'):
+        store.identities.upsert_identity('me','cred-2','BA2',True)
 
 
 def test_get_master_identity(store):

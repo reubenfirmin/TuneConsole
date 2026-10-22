@@ -73,8 +73,8 @@ def test_failed_delivery_keeps_editor_and_source(live_merge_app, page, monkeypat
     expect(page).to_have_url(url)
     expect(page.locator("#merge-body")).to_be_visible()
     assert client.deleted == []
-    assert live_merge_app["store"].get_draft(live_merge_app["ids"]) is not None
-    assert live_merge_app["store"].get_playlist(int(live_merge_app["ids"].split(",")[1])) is not None
+    assert live_merge_app["store"].actions.get_draft(live_merge_app["ids"]) is not None
+    assert live_merge_app["store"].playlists.get_playlist(int(live_merge_app["ids"].split(",")[1])) is not None
 
 
 def test_merge_returns_to_the_cleanup_list_before_and_after_applying(live_merge_app, page):

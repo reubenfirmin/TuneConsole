@@ -11,8 +11,8 @@ def test_breadth_palette_are_play_weighted(store):
     for f in folk:
         store.tracks.set_track_genre(f, "Folk")                  # owned but barely played
     for i in range(6):                                    # heavy techno plays
-        for _ in range(10):
-            store.history.add_history_snapshot(iid, 1.0, [f"t{i}|a"])
+        for day in range(10):
+            store.history.add_history_snapshot(iid, day * 86400.0, [f"t{i}|a"])
 
     bd = taste_analysis.taste_breadth(store)
     techno_fam, folk_fam = genre_map.family("Techno"), genre_map.family("Folk")

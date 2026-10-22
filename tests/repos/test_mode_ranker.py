@@ -2,12 +2,14 @@ import sqlite3
 
 import pytest
 from yt_playlist.core.store import Store
+from tests.mode_fixtures import seed_modes
 
 
 @pytest.fixture
 def store():
     s = Store(":memory:")
     s.init_schema()
+    seed_modes(s,1,2)
     return s
 
 

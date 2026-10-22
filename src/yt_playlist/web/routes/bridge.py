@@ -1,7 +1,7 @@
 """Extension transport, browser-origin authentication, and playback HTTP endpoints.
 
-The browser stamps extension origins; web pages cannot forge them. Radio orchestration lives in
-RadioController, whose serial remote writes never block this socket's response pump.
+The browser stamps extension origins; web pages cannot forge them. Saved-playlist
+radio observes playback separately, so its writes never block this response pump.
 """
 import asyncio
 import json
@@ -13,9 +13,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from yt_playlist.core.activity import activity_for
 from yt_playlist.library import live_plays, player_events
-from yt_playlist.rec import measurement, radio as radio_mod, rec_params, taste_analysis
-from yt_playlist.web.context import form_float
-from yt_playlist.web.radio_controller import RadioController
+from yt_playlist.rec import measurement
 
 logger = logging.getLogger(__name__)
 EXTENSION_ID = "opmmbolbdgdkphfocffpjpgmelkkjkcn"  # Chrome Web Store build
@@ -40,20 +38,10 @@ def _now_playing_snapshot(msg, previous=None):
 def build(ctx) -> APIRouter:
     router = APIRouter()
     bridge = ctx.bridge
-    templates = getattr(ctx, "templates", None)
-    controller = RadioController(ctx)
 
     @router.get("/bridge/status")
     def bridge_status():
         radio = getattr(ctx, "radio", None)
-        dual, fallback, upcoming, apply_result = False, None, [], None
-        deck_results = {}
-        if radio is not None:
-            with radio.lock:
-                dual, fallback = bool(radio.dual_deck), radio.fallback_reason
-                upcoming = radio_mod.upcoming_picks(radio)
-                apply_result = getattr(radio, "apply_result", None)
-                deck_results = {label: deck.get("apply_result") for label, deck in radio.decks.items()}
         now_playing = bridge.now_playing
         seen_at = getattr(bridge, "now_playing_seen_at", None)
         if now_playing is not None and seen_at is not None and time.monotonic() - seen_at > 8:
@@ -71,48 +59,7 @@ def build(ctx) -> APIRouter:
             now_playing = {**now_playing, "source": source}
         return {"connected": bridge.connected, "now_playing": now_playing,
                 "sensor_health": getattr(bridge, "sensor_health", None),
-                "radio": bool(radio is not None and radio.active),
-                "radio_waiting": bool(radio is not None and radio.waiting),
-                "radio_dual": dual, "radio_fallback_reason": fallback, "radio_upcoming": upcoming,
-                "radio_apply": apply_result, "radio_deck_apply": deck_results}
-
-    @router.post("/radio/start")
-    async def radio_start():
-        return await controller.start()
-
-    @router.post("/radio/stop")
-    def radio_stop():
-        return controller.stop()
-
-    @router.post("/radio/populate")
-    async def radio_populate():
-        return await controller.populate()
-
-    def _radio_customize_ctx():
-        store = getattr(ctx, "store", None)
-        fingerprint = taste_analysis.taste_fingerprint(store, controller.now()) if store is not None else {"families": [], "eras": []}
-        radio = getattr(ctx, "radio", None)
-        return {"fingerprint": fingerprint, "tilts": (getattr(radio, "tilts", None) or {})}
-
-    @router.post("/radio/steer")
-    async def radio_steer(request: Request):
-        form = await request.form()
-        axis, weight = (form.get("axis") or "").strip(), form_float(form.get("weight"))
-        radio = getattr(ctx, "radio", None)
-        if radio is not None and axis and weight is not None and axis.split(":", 1)[0] in ("genre", "era", "artist"):
-            with radio.lock:
-                radio.tilts[axis] = max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, weight))
-            controller.steer()
-        return templates.TemplateResponse(request, "_partials/radio_customize.html", _radio_customize_ctx())
-
-    @router.post("/radio/steer/reset")
-    def radio_steer_reset(request: Request):
-        radio = getattr(ctx, "radio", None)
-        if radio is not None:
-            with radio.lock:
-                radio.tilts = {}
-            controller.steer()
-        return templates.TemplateResponse(request, "_partials/radio_customize.html", _radio_customize_ctx())
+                "radio": bool(radio is not None and radio.active)}
 
     @router.post("/play")
     async def play(request: Request):
@@ -143,18 +90,32 @@ def build(ctx) -> APIRouter:
         try:
             data = await request.json()
             action, video_id = data.get("action"), data.get("videoId")
+            like_status = data.get("likeStatus")
         except Exception:
             action = video_id = None
+            like_status = None
         if action not in ("like", "dislike"):
             return {"ok": False, "error": "action must be 'like' or 'dislike'"}
         if not isinstance(video_id, str) or not video_id:
             return {"ok": False, "error": "displayed video ID is required"}
+        if like_status is not None and like_status not in ("LIKE", "DISLIKE", "INDIFFERENT"):
+            return {"ok": False, "error": "invalid rating state"}
         try:
-            status, body = await bridge.request_control({"type": "rate", "action": action, "videoId": video_id})
+            logger.info("rating requested: video=%s action=%s desired=%s connected=%s",
+                        video_id, action, like_status, bridge.connected)
+            control = {"type": "rate", "action": action, "videoId": video_id}
+            if like_status is not None:
+                control["likeStatus"] = like_status
+            status, body = await bridge.request_control(control)
             result = json.loads(body)
-            return {"ok": status == 200 and result.get("ok") is True,
+            ok = status == 200 and result.get("ok") is True
+            logger.log(logging.INFO if ok else logging.WARNING,
+                       "rating result: video=%s desired=%s status=%s ok=%s error=%s",
+                       video_id, like_status, status, ok, result.get("error", ""))
+            return {"ok": ok,
                     "error": result.get("error", "")}
         except Exception as exc:
+            logger.warning("rating failed: video=%s desired=%s", video_id, like_status, exc_info=True)
             return {"ok": False, "error": str(exc)}
 
     @router.post("/now-playing/toggle")
@@ -204,12 +165,6 @@ def build(ctx) -> APIRouter:
                     logger.warning("malformed bridge frame, ignoring: %r", msg)
                     continue
                 kind = msg.get("type")
-                if kind == "deck-ready":
-                    controller.deck_ready(msg)
-                    continue
-                if kind == "deck-toggled":
-                    controller.deck_toggled(msg)
-                    continue
                 if kind == "sensor-health":
                     try:
                         counts = {key: max(0, int(msg.get(field) or 0)) for key, field in (
@@ -222,39 +177,26 @@ def build(ctx) -> APIRouter:
                         "recovering": bool(msg.get("recovering")), "error": str(msg.get("error") or "")[:500]}
                     continue
                 if kind == "now-heartbeat":
-                    if msg.get("deck") != "standby":
-                        if msg.get("title"):
-                            bridge.now_playing = _now_playing_snapshot(msg, bridge.now_playing)
-                        if bridge.now_playing is not None:
-                            bridge.now_playing_seen_at = time.monotonic()
+                    if msg.get("title"):
+                        bridge.now_playing = _now_playing_snapshot(msg, bridge.now_playing)
+                    if bridge.now_playing is not None:
+                        bridge.now_playing_seen_at = time.monotonic()
                     continue
                 if kind == "play":
-                    if msg.get("deck") == "standby":
-                        continue
                     bridge.now_playing = _now_playing_snapshot(msg)
                     bridge.now_playing_seen_at = time.monotonic()
                     if (msg.get("paused") or msg.get("muted") or msg.get("tabMuted")
                             or msg.get("volume") == 0):
                         continue
-                    now = controller.now()
+                    now = getattr(ctx, "now_fn", time.time)()
                     if store is not None:
                         try:
                             await activity_for(ctx).to_thread(live_plays.handle_play_event, ctx, msg, now)
                         except Exception:
                             logger.warning("failed to persist play event", exc_info=True)
-                    try:
-                        # Only compute and queue here. Remote applies need this response pump.
-                        await activity_for(ctx).to_thread(controller.played, msg, now)
-                    except Exception:
-                        logger.warning("radio on_play failed", exc_info=True)
                     continue
                 if kind == "pevent":
-                    now = controller.now()
-                    if msg.get("kind") == "deck-waiting":
-                        controller.reacted(msg, now)
-                        continue
-                    if msg.get("deck") == "standby":
-                        continue
+                    now = getattr(ctx, "now_fn", time.time)()
                     if msg.get("kind") == "state" and bridge.now_playing is not None:
                         sv, nv = msg.get("videoId"), bridge.now_playing.get("video_id")
                         if not sv or not nv or sv == nv:
@@ -267,10 +209,6 @@ def build(ctx) -> APIRouter:
                             await activity_for(ctx).to_thread(player_events.handle_player_event, ctx, msg, now)
                         except Exception:
                             logger.warning("failed to persist player event", exc_info=True)
-                    try:
-                        await activity_for(ctx).to_thread(controller.reacted, msg, now)
-                    except Exception:
-                        logger.warning("radio react failed", exc_info=True)
                     continue
                 try:
                     req_id, status, body = int(msg["id"]), int(msg["status"]), msg["body"]
@@ -287,9 +225,10 @@ def build(ctx) -> APIRouter:
             bridge.now_playing_seen_at = None
             bridge.sensor_health = None
             try:
-                controller.stop(send=False)
+                if getattr(ctx, "radio", None):
+                    getattr(ctx.radio, "suspend", ctx.radio.stop)()
             except Exception:
-                logger.warning("failed to clear radio_active on disconnect", exc_info=True)
+                logger.warning("failed to stop Radio Session on disconnect", exc_info=True)
             logger.info("extension bridge disconnected")
 
     return router

@@ -32,7 +32,7 @@ def test_prepare_stashes_ppr_order(monkeypatch, store):
         monkeypatch.setattr(surfaces, fn, lambda s, n, limit=0: [_Item("k1"), _Item("k2")])
     monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [])
     # Stub the PPR ranking so the assertion is exact and independent of the graph internals.
-    monkeypatch.setattr(ppr, "mode_rankings", lambda s: {1: ["k2", "k1"]})
+    monkeypatch.setattr(ppr, "mode_rankings", lambda s, **kw: {1: ["k2", "k1"]})
 
     payload = ms.prepare_bundles(store, now=10.0)
     assert payload["_ppr"] == {"1": ["k2", "k1"]}
@@ -50,7 +50,7 @@ def test_prepare_ppr_failopen(monkeypatch, store):
         monkeypatch.setattr(surfaces, fn, lambda s, n, limit=0: [])
     monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [])
 
-    def _boom(s):
+    def _boom(s, **kw):
         raise RuntimeError("ppr blew up")
     monkeypatch.setattr(ppr, "mode_rankings", _boom)
 

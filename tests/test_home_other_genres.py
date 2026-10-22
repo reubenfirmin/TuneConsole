@@ -228,6 +228,7 @@ def test_available_genres_prioritize_listening_over_alphabet_and_candidate_volum
     for genre, count in {"Trance": 100, "Techno": 60, "Jazz": 20, "Ambient": 1}.items():
         tid = store.tracks.upsert_track(genre, genre, "Artist", None, None)
         store.tracks.set_track_genre(tid, genre)
-        store.history.add_history_snapshot(iid, 1.0, [identity_key(genre, "Artist")] * count)
+        for day in range(count):
+            store.history.add_history_snapshot(iid, day * 86400.0, [identity_key(genre, "Artist")])
     options = home_themes.genre_options(store)
     assert [option["label"] for option in options[:3]] == ["trance", "techno", "jazz"]

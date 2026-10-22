@@ -374,7 +374,7 @@ def gc_generated_playlists(store, clients, now, grace_days=None) -> list[dict]:
     recency = store.charts.get_playlist_track_recency()         # pid -> [per-track last-played ts | None, ...]
     collected = []
     for pl in store.playlists.get_playlists():
-        if not store.playlists.is_quarantined_playlist(pl.ytm_playlist_id):
+        if not store.playlists.is_quarantined_playlist(pl.scope_ref):
             continue
         created = pl.first_seen or now
         if now - created < grace_s:                      # still inside its grace window, leave it

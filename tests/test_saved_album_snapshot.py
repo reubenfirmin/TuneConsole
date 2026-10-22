@@ -1,4 +1,4 @@
-"""Replacing shared saved-album membership requires complete snapshots from every account."""
+"""Complete saved-album snapshots replace their owner; unavailable accounts retain evidence."""
 import json
 from types import SimpleNamespace
 
@@ -44,13 +44,15 @@ class AlbumClient:
     ([], {'albums': [], 'continuation': 'next'}),
     ([], [{'title': 'missing album id'}]),
 ], ids=['one-account-failed', 'all-accounts-failed', 'unavailable', 'incomplete', 'unidentified'])
-def test_failed_or_incomplete_account_preserves_the_shared_mirror(mirror, responses):
+def test_failed_or_incomplete_account_retains_its_previous_evidence(mirror, responses):
     events = []
     sync._sync_saved_albums(mirror.store, dict(zip(
         (mirror.first, mirror.second), map(AlbumClient, responses))), events.append)
-    assert mirror.store.collection.get_saved_albums() == mirror.before
-    assert mirror.materialized == []
-    assert 'unchanged' in events[-1]['text']
+    expected = {'OLD','NEW'} if isinstance(responses[0],list) and responses[0] else {'OLD'}
+    assert mirror.store.collection.saved_album_ids()==expected
+    if not isinstance(responses[0],list):
+        assert mirror.materialized==[]
+        assert 'unchanged' in events[-1]['text']
 
 
 @pytest.mark.parametrize('skipped', ['one', 'all'])
@@ -64,6 +66,18 @@ def test_verified_empty_libraries_clear_the_previous_mirror(mirror):
     sync._sync_saved_albums(mirror.store,
                             {mirror.first: AlbumClient([]), mirror.second: AlbumClient([])}, None)
     assert mirror.store.collection.get_saved_albums() == []
+
+
+def test_successful_account_refresh_preserves_failed_accounts_snapshot(mirror):
+    mirror.store.collection.replace_saved_album_snapshots({
+        mirror.first:[{'browse':'FIRST','title':'First'}],
+        mirror.second:[{'browse':'SECOND','title':'Second'}]},now=1)
+    outcomes,summary,_ = sync._sync_saved_albums(mirror.store,{
+        mirror.first:AlbumClient([_album('NEW')]),
+        mirror.second:AlbumClient(TimeoutError('offline'))},None)
+    assert mirror.store.collection.saved_album_ids()=={'NEW','SECOND'}
+    assert {a['browse'] for a in mirror.store.collection.get_saved_albums(identity_id=mirror.second)}=={'SECOND'}
+    assert summary['status']=='partial'
 
 
 def test_all_accounts_are_fetched_without_the_old_500_album_limit(mirror):
@@ -148,7 +162,7 @@ def test_partial_production_pagination_never_replaces_saved_membership(mirror, l
                             {mirror.first: client, mirror.second: AlbumClient([])}, events.append)
     assert len(bridge.calls) == 2
     assert mirror.store.collection.get_saved_albums() == mirror.before
-    assert 'unchanged' in events[-1]['text']
+    assert mirror.store.conn.execute('SELECT identity_id FROM album_library_snapshots').fetchone()[0]==mirror.second
 
 
 @pytest.mark.parametrize('response', [{}, {'contents': {}},

@@ -126,12 +126,3 @@ def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(monkeypatch, st
     assert len(payload["2"]["wheelhouse"]) >= ms.PROTO_SIZE
     assert len(payload["all"]["wheelhouse"]) == 500
     assert len(payload["all"]["temporal"]) == 500
-
-
-def test_rebuild_wires_prepare_bundles_and_drops_fresh_songs():
-    import inspect
-    from yt_playlist.rec import rec_worker
-    src = inspect.getsource(rec_worker.RecWorker._do_rebuild)
-    assert "mode_surfaces.prepare_bundles" in src
-    assert "try:" in src and src.index("try:") < src.index("mode_surfaces.prepare_bundles")
-    assert "fresh_songs" not in src

@@ -410,8 +410,7 @@ def import_takeout(store, raw, *, on_progress=None) -> dict:
             continue
         matched_rows.append((key, p["video_id"], p["ts"]))
     progress(f'Saving {len(matched_rows):,} matched plays…')
-    plays_added = store.history.import_plays(ident, [(k, ts) for k, _v, ts in matched_rows])
-    events_added = store.history.import_play_events(ident, matched_rows)
+    plays_added,events_added = store.history.import_listening_events(ident,matched_rows)
     data = raw.encode() if isinstance(raw, str) else raw
     import_id = store.history.record_takeout_import(
         hashlib.sha256(data).hexdigest(), ident, time.time(), parsed, unparsed_dates)

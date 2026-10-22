@@ -121,5 +121,5 @@ def test_radio_play_lean_stays_zero_after_history_sync_shadow(store):
     store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
     day = 100 * 86400
     store.history.record_play_event(iid, k, "v1", day + 61000, playlist_ytm_id="PLRADIO")
-    store.history.record_history_plays(iid, day + 70000, [k])          # the post-sync shadow
+    store.history.record_history_plays(iid, day + 70000, [(k, "Today")])
     assert transient.play_facet_leans(store, now=day + 80000) == {}

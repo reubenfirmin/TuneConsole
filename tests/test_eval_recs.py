@@ -1,3 +1,5 @@
+import pytest
+
 from yt_playlist.rec import embed, eval_recs
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
@@ -48,16 +50,18 @@ def test_temporal_recall_recovers_recent_plays_from_history(store):
     assert res["recall"] == 1.0               # all recovered in the top-8 by the context centroid
 
 
-def test_temporal_recall_excludes_generated_only_held_plays(store):
+@pytest.mark.parametrize("source", ["ytm_history", "unknown"])
+def test_temporal_recall_excludes_generated_only_held_plays(store, source):
     # #83 closing the last circular path: a held-out play the app CAUSED (played only from a
     # quarantined generated playlist, per play_events provenance) must not count as a successful
-    # prediction. Keys with organic evidence in the window (mixed, or no play_events rows at all,
-    # since day-model rows carry no provenance) stay: same conservatism as the baskets filter.
+    # prediction. Keys with organic evidence in the window (mixed, or no play_events rows at all)
+    # stay. Unknown coarse evidence is independent and also prevents exclusion.
     from yt_playlist.repos.rec_query import GENERATED_GROUP
     iid = _two_cluster_playlists(store)
     day, t_recent = 86400, 1_000_000.0
     store.history.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.history.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+    store.history.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)],
+                                     source=source)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     store.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)
     store.playlists.mark_generated_playlist('PLGEN')
@@ -71,19 +75,21 @@ def test_temporal_recall_excludes_generated_only_held_plays(store):
 
     res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
 
-    assert res["generated_excluded"] == 2     # A6, A7 dropped
-    assert res["trials"] == 2                 # A4 (no provenance rows) and A5 (mixed) remain
+    assert res["generated_excluded"] == (2 if source == "ytm_history" else 0)
+    assert res["trials"] == (2 if source == "ytm_history" else 4)
     assert res["recall"] == 1.0
 
 
-def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store):
+@pytest.mark.parametrize("source", ["ytm_history", "unknown"])
+def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store, source):
     # When EVERY held-out play is app-caused, the honest answer is "no usable split", never a
     # recall score computed over zero real plays.
     from yt_playlist.repos.rec_query import GENERATED_GROUP
     iid = _two_cluster_playlists(store)
     day, t_recent = 86400, 1_000_000.0
     store.history.add_history_snapshot(iid, t_recent - 10 * day, [identity_key(f"A{i}", "AB") for i in range(4)])
-    store.history.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)])
+    store.history.add_history_snapshot(iid, t_recent, [identity_key(f"A{i}", "AB") for i in range(4, 8)],
+                                     source=source)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     store.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)
     store.playlists.mark_generated_playlist('PLGEN')
@@ -93,9 +99,13 @@ def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store):
 
     res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
 
-    assert res["recall"] is None
-    assert res["generated_excluded"] == 4
-    assert res["reason"] == "insufficient temporal split"
+    if source == "ytm_history":
+        assert res["recall"] is None
+        assert res["trials"] == 0 and res["generated_excluded"] == 4
+        assert res["reason"] == "insufficient temporal split"
+    else:
+        assert res["recall"] == 1.0
+        assert res["trials"] == 4 and res["generated_excluded"] == 0
 
 
 def test_temporal_recall_none_without_vectors(store):

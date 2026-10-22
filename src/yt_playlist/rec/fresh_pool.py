@@ -1,5 +1,6 @@
 """On-demand discovery for a Fresh card whose requested genres have too few candidates."""
 from collections import Counter, deque
+from yt_playlist.core.accounts import catalog_client
 
 from yt_playlist.rec import embed, home_themes, home_vibe, measurement, mode_surfaces, rec_params, road_trip, surfaces
 from yt_playlist.util import genre_map
@@ -8,7 +9,7 @@ from yt_playlist.util.matching import identity_key
 
 def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message: None):
     store = ctx.store
-    client = next(iter((ctx.client_provider() or {}).values()), None)
+    client = catalog_client(ctx.client_provider())
     if client is None:
         raise ValueError("Connect YouTube Music to find fresh songs.")
     options = home_themes.genre_options(store)

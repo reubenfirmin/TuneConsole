@@ -1,7 +1,8 @@
 """#76-#80 Trends rollups: precompute the weekly/monthly listening rollup, the last-month recap, the
 library-health snapshot, and (at most one) Home spotlight candidate, materialized via put_proposals.
-Runs in the rec worker only. All play counts use the day model (history_snapshots + history_items);
-play_events is used ONLY in the first-play index (a MIN), never as an added play count.
+Runs in the rec worker only. Play counts prefer the exact-event ledger, falling back
+to distinct account listening days when no ledger exists. First-play derivation
+retains earlier coarse evidence even after exact events arrive.
 
 Thresholds below are EDITORIAL (when to interrupt the user), not model knobs, so they are constants
 here, not rec_params."""
@@ -212,7 +213,7 @@ def compute_months(day_counts, meta, artist_first, catalog_artists=frozenset()) 
 
 
 def _build_first_play_index(store):
-    """Exact play events take precedence over coarse history; publish the fold atomically."""
+    """Reconcile exact and coarse evidence; publish the fold atomically."""
     store.trends.refresh_first_play()
 
 
@@ -478,11 +479,10 @@ def day_counts_source(store) -> list:
     provenance, and which therefore honours the GENERATED_GROUP quarantine (repos/base.py): the app's
     own recommendations, played back, are not evidence of the user's taste.
 
-    Falls back to the history day model only when no ledger exists at all, which is the fresh-install
-    case (no extension, no Takeout import). The history model cannot be trusted where a ledger exists:
-    it counts snapshot appearances, so a track lingering in YouTube's recently-played window is
-    recorded as played again on every sync. On the reference database 79% of its sync-era rows have no
-    corresponding real play, and it reports 3524 "plays" where 1235 happened.
+    Falls back to distinct account listening days only when no ledger exists at all,
+    which is the fresh-install case (no extension, no Takeout import). Historical
+    capture dates retain unknown precision, so they cannot establish actual repeat
+    counts when an exact ledger is available.
     """
     if store.trends.has_play_ledger():
         return store.trends.ledger_day_counts()

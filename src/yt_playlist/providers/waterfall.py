@@ -50,14 +50,14 @@ class TrackSink:
                                                    providers=self.providers)
 
     def set_enrichment(self, genre, year):
-        self.store.tracks.set_track_enrichment(self.track["id"], genre, year)
+        self.apply_fields('provider',{'genre':genre,'year':year})
 
     def set_mbid(self, mbid):
-        self.store.tracks.set_track_mbid(self.track["id"], mbid)
+        self.apply_fields('provider',{'mb_recording_id':mbid})
         self.track["mb_recording_id"] = self.track.get("mb_recording_id") or mbid
 
     def set_audio(self, **audio):
-        self.store.tracks.set_track_audio(self.track["id"], **audio)
+        self.apply_fields('provider',audio)
 
     def set_art(self, url, *, source='provider'):
         self.store.tracks.set_track_art(self.track["id"], url, source=source)

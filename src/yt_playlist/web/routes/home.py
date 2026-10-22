@@ -1,6 +1,7 @@
 """Home tab: the default landing page: Sync control, Take-Action triage, and For-You recs."""
 import asyncio
 from yt_playlist.core.activity import activity_for
+from yt_playlist.core.accounts import client_for,main_client
 import json
 import time
 import uuid
@@ -315,7 +316,13 @@ def build(ctx) -> APIRouter:
         spotify_library_job = current_spotify_import_job(ctx)
         if spotify_library_job and spotify_library_job.get("dismissed"):
             spotify_library_job = None
+        radio_bootstrap = ctx.radio.bootstrap()
+        radio_state = radio_bootstrap["state"]
+        radio_tracks = (store.charts.playlist_tracks_detail(radio_state["local_id"])
+                        if radio_state.get("active") and radio_state.get("local_id") else [])
         return templates.TemplateResponse(request, "home.html", {
+            "radio_bootstrap": radio_bootstrap,
+            "radio_tracks": radio_tracks,
             "actions": actions.take_action(store, now, ctx.auth_expired),
             "sync": actions.sync_status(store, now),
             "muted_count": len(store.rec_model.muted_artists()),   # transparency: what's being hidden
@@ -351,12 +358,6 @@ def build(ctx) -> APIRouter:
             # Persisted background-import state. Completion stays in Needs attention with its full
             # report until explicitly dismissed, including across app/browser restarts.
             "spotify_library_job": spotify_library_job,
-            # #93 Task 9: the radio launch card's customize panel is seeded server-side with the
-            # current SESSION tilts (never rec_weights) so a reload shows what's actually steering.
-            "tilts": (getattr(getattr(ctx, "radio", None), "tilts", None) or {}),
-            # Owner-parked (2026-07-05): the radio card only renders when the page is loaded with
-            # ?radio=true (or ?radio=1). The feature and its endpoints stay intact underneath.
-            "show_radio": request.query_params.get("radio") in ("true", "1"),
             **_feed_context(now),
         })
 
@@ -406,7 +407,7 @@ def build(ctx) -> APIRouter:
     @router.get("/home/onboard/radio")
     def home_onboard_radio(request: Request):
         now = now_fn()
-        client = next(iter((ctx.client_provider() or {}).values()), None)
+        client = main_client(store,ctx.client_provider())
         tracks = onboarding.radio_sample(store, client, now, n=PROTO_SIZE)
         proto = _proto(store, "onboard_radio", "YouTube radio for you", tracks, now) if tracks else None
         return templates.TemplateResponse(request, "_partials/onboard_playlist.html", {"proto": proto})
@@ -925,10 +926,14 @@ def build(ctx) -> APIRouter:
             recipe = json.loads(form.get("recipe") or "null")
         except (ValueError, TypeError):
             recipe = None
-        identity_id, client = next(iter((ctx.client_provider() or {}).items()), (None, None))
+        account_error = None
+        try:
+            identity_id,client = client_for(store,ctx.client_provider())
+        except ValueError as exc:
+            identity_id,client,account_error = None,None,str(exc)
         result = {"name": name}
         if client is None or not tracks:
-            result["error"] = "Couldn't create it - connect an account and keep at least one track."
+            result["error"] = account_error or "Keep at least one track to create a playlist."
         else:
             try:
                 res = await activity_for(ctx).to_thread(

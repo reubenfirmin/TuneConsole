@@ -174,20 +174,41 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
     app, monitor = idle_app
     from yt_playlist.web import jobs
     ctx = SimpleNamespace(updater=None, work=Activity(), sync_lock=threading.Lock(),
-        spotify_import_lock=threading.Lock(), jobs=SyncJobs(), store=SimpleNamespace(),
+        spotify_import_lock=threading.Lock(), jobs=SyncJobs(),
+        store=SimpleNamespace(tracks=SimpleNamespace()), templates=SimpleNamespace(),
         logger=SimpleNamespace(warning=lambda *a, **kw: None))
     app.state.ctx = ctx
     started, finish = threading.Event(), threading.Event()
+    pending = [{"id": 42}]
+    client = TestClient(app)
+    clock[0] = 160
+    assert client.post("/heartbeat?page=working").status_code == 204
 
     def blocking(*args, **kwargs):
+        if kind in ("playlist_enrichment", "album_enrichment"):
+            assert args[0] is ctx.store and args[1] == pending
         started.set()
         assert finish.wait(5)
 
     if kind in ("playlist_enrichment", "album_enrichment"):
-        ctx.store.tracks.tracks_for_waterfall = lambda pid: []
+        def pending_for(scope):
+            assert scope == (1 if kind == "playlist_enrichment" else "BID")
+            return pending
+
         monkeypatch.setattr(jobs.enrichment, "load_config", lambda store: {})
         monkeypatch.setattr(jobs.waterfall, "run_waterfall", blocking)
-        job = jobs.start_playlist_enrichment(ctx, 1 if kind == "playlist_enrichment" else 2)
+        if kind == "playlist_enrichment":
+            ctx.store.tracks.tracks_for_waterfall = pending_for
+            job = jobs.start_playlist_enrichment(ctx, 1)
+            assert job.playlist_id == 1
+        else:
+            from yt_playlist.web.routes import album
+            ctx.store.tracks.album_tracks_for_waterfall = pending_for
+            app.include_router(album.build(ctx))
+            response = client.post("/album/BID/enrich")
+            assert response.status_code == 200
+            job = ctx.jobs.get(response.json()["job_id"])
+            assert job.album_browse == "BID" and job.playlist_id is None
     elif kind == "fresh_pool":
         from yt_playlist.rec import fresh_pool
         monkeypatch.setattr(fresh_pool, "populate", blocking)
@@ -199,6 +220,8 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
         ctx.work.start_thread(blocking, name="enrichment batch")
         job = None
     assert started.wait(5)
+    assert ctx.work.active
+    assert client.post("/goodbye?page=working").status_code == 204
     clock[0] = 200
     kills = []
 
@@ -206,13 +229,16 @@ def test_last_tab_close_drains_owned_work_then_exits(idle_app, clock, monkeypatc
         clock[0] += 1
         if clock[0] == 202:
             assert not kills and not ctx.work.accepting
+            assert ctx.work.active
+            if job:
+                assert not job.done
             with pytest.raises(WorkClosing):
                 ctx.work.admit("replacement work")
         if clock[0] == 203:
             finish.set()
             assert ctx.work.wait(5)
             if job:
-                assert job.done
+                assert job.done and job.error is None
 
     web_app.time.sleep = sleep
     monkeypatch.setattr(web_app.os, "kill", lambda pid, sig: kills.append((clock[0], sig)))

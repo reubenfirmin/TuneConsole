@@ -10,8 +10,8 @@ import time
 from yt_playlist.util.matching import identity_key, normalize
 from yt_playlist.core.catalog_identity import ITEM_FIELDS, RECORDING_FIELDS, unresolved_ref
 from yt_playlist.core.catalog_state import rekey_state as rekey_serialized_state
-from yt_playlist.core.discovery_sources import retain as retain_discovery_source
-from yt_playlist.core import metadata
+from yt_playlist.core.discovery_sources import prepare_reassociation, finish_reassociation
+from yt_playlist.core import metadata, artists, albums
 from yt_playlist.util.thumbnails import is_placeholder_art
 
 
@@ -50,6 +50,13 @@ def choose_field(conn, entry_id, field, value, source='user', *, now=None):
     if field not in (*ITEM_FIELDS,*RECORDING_FIELDS):
         raise ValueError(f'Unknown metadata field: {field}')
     metadata.record_choice(conn,entry_id,field,value,source,now=now)
+    if field == 'artist' and value:
+        credits = conn.execute('SELECT artist_id FROM track_artists WHERE entry_id=?', (entry_id,)).fetchall()
+        if len(credits) == 1:
+            conn.execute("INSERT OR IGNORE INTO artist_aliases VALUES (?,?,'user_correction')",
+                         (credits[0][0],value))
+        elif not credits:
+            artists.observe(conn,entry_id,value,source='user_correction',now=now)
     conn.execute('INSERT INTO entry_field_choices VALUES (?,?,?,?) ON CONFLICT(entry_id,field) DO UPDATE SET value_json=excluded.value_json,source=excluded.source', (entry_id,field,json.dumps(value),source))
 
 
@@ -122,8 +129,15 @@ def invalidate_derived(conn):
 def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=None):
     """Move only established associations; raw observations and unknown aliases stay intact."""
     subject = previous_recording_id or recording_id
+    conn.execute('UPDATE album_tracks SET recording_id=? WHERE entry_id IS NULL AND recording_id=?', (recording_id,subject))
     for table in ('play_events','history_items','rec_served_impressions','rec_lane_impressions'):
         conn.execute(f'UPDATE {table} SET identity_key=?,recording_id=? WHERE recording_id=?', (new_key,recording_id,subject))
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='listening_observations'").fetchone():
+        conn.execute('UPDATE listening_observations SET identity_key=?,recording_id=? WHERE recording_id=?',
+                     (new_key,recording_id,subject))
+        from .listening import reconcile_foreign_days
+        for row in conn.execute('SELECT identity_id FROM listening_calendars'):
+            reconcile_foreign_days(conn,row[0])
     for row in conn.execute('SELECT rowid,* FROM rec_feedback WHERE recording_id=?', (subject,)).fetchall():
         payload = json.dumps(dict(row))
         conn.execute("INSERT OR IGNORE INTO identity_state_archive VALUES ('feedback_reassociation',?,?,?)", (f'{subject}:{row["rowid"]}:{old_key}',payload,'verified association or alias disambiguation; learning is not replayed'))
@@ -139,7 +153,7 @@ def rekey_state(conn, old_key, new_key, recording_id, *, previous_recording_id=N
                 conn.execute('UPDATE rec_mood SET keys=? WHERE rowid=?', (json.dumps(list(dict.fromkeys(new_key if k==old_key else k for k in keys))),row['migration_rowid']))
         except (ValueError,TypeError):
             pass
-    for table,idcol,column in [('album_tracklists','browse_id','track_keys'),('taste_modes','mode_id','rep_keys'),('cluster_canvas','playlist_ytm','state'),('road_trip_drafts','recipe_id','state'),('rec_recipes','playlist_ytm','recipe')]:
+    for table,idcol,column in [('taste_modes','mode_id','rep_keys'),('cluster_canvas','playlist_ytm','state'),('road_trip_drafts','recipe_id','state'),('rec_recipes','playlist_ytm','recipe')]:
         for row in conn.execute(f'SELECT * FROM {table}').fetchall():
             try:
                 value = rekey_serialized_state(json.loads(row[column]),{old_key:new_key})
@@ -162,10 +176,12 @@ def associate_item(conn, video_id, recording_id, *, source, evidence, now):
         return
     payload = json.dumps(evidence,sort_keys=True)
     previous_key = conn.execute('SELECT identity_key FROM recordings WHERE id=?', (previous,)).fetchone()[0]
-    conn.execute('INSERT INTO item_recording_associations(video_id,recording_id,previous_recording_id,source,evidence,at) VALUES (?,?,?,?,?,?)', (video_id,recording_id,previous,source,payload,now))
+    association_id = conn.execute('INSERT INTO item_recording_associations(video_id,recording_id,previous_recording_id,source,evidence,at) VALUES (?,?,?,?,?,?)', (video_id,recording_id,previous,source,payload,now)).lastrowid
+    member, remaining = prepare_reassociation(conn,video_id,previous)
     conn.execute('UPDATE youtube_items SET recording_id=? WHERE video_id=?', (recording_id,video_id))
     conn.execute('UPDATE catalog_entries SET recording_id=? WHERE video_id=?', (recording_id,video_id))
-    conn.execute('UPDATE album_track_links SET recording_id=? WHERE video_id=?', (recording_id,video_id))
+    finish_reassociation(conn,video_id,previous,recording_id,member,remaining,now,association_id=association_id)
+    # Release occurrences retain their exact entry; its current recording resolves at read time.
     conn.execute('UPDATE legacy_track_refs SET recording_id=? WHERE video_id=?', (recording_id,video_id))
     # Verified musical identity permits reuse of recording facts, never item/release fields.
     for field in RECORDING_FIELDS:
@@ -173,6 +189,10 @@ def associate_item(conn, video_id, recording_id, *, source, evidence, now):
                      f"WHERE id=? AND ({field} IS NULL OR {field}='')", (previous,recording_id))
     # Exact-video observations can follow the corrected association without changing raw evidence.
     conn.execute('UPDATE play_events SET recording_id=?,identity_key=? WHERE video_id=?', (recording_id,target[0],video_id))
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='listening_observations'").fetchone():
+        from .listening import reconcile_foreign_days
+        for row in conn.execute('SELECT DISTINCT identity_id FROM play_events WHERE video_id=?',(video_id,)).fetchall():
+            reconcile_foreign_days(conn,row[0])
     conn.execute('UPDATE recordings SET provisional=0 WHERE id=?', (recording_id,))
     if not conn.execute('SELECT 1 FROM catalog_entries WHERE recording_id=?', (previous,)).fetchone():
         rekey_state(conn,previous_key,target[0],recording_id,previous_recording_id=previous)
@@ -181,14 +201,6 @@ def associate_item(conn, video_id, recording_id, *, source, evidence, now):
         for row in conn.execute('SELECT alias,source FROM recording_aliases WHERE recording_id=?', (previous,)).fetchall():
             conn.execute('INSERT OR IGNORE INTO recording_aliases VALUES (?,?,?)', (row['alias'],recording_id,row['source']))
         conn.execute('DELETE FROM recording_aliases WHERE recording_id=?', (previous,))
-        member = conn.execute('SELECT * FROM discovery_memberships WHERE recording_id=?', (previous,)).fetchone()
-        if member:
-            conn.execute('INSERT INTO discovery_memberships VALUES (?,?,?,?,?,?) ON CONFLICT(recording_id) DO UPDATE SET found_at=MIN(found_at,excluded.found_at),offered_count=offered_count+excluded.offered_count,first_shown=MIN(COALESCE(first_shown,excluded.first_shown),COALESCE(excluded.first_shown,first_shown)),last_shown=MAX(COALESCE(last_shown,excluded.last_shown),COALESCE(excluded.last_shown,last_shown))', (recording_id,member['entry_id'],member['found_at'],member['first_shown'],member['last_shown'],member['offered_count']))
-            conn.execute('DELETE FROM discovery_memberships WHERE recording_id=?', (previous,))
-        for row in conn.execute('SELECT * FROM discovery_sources WHERE recording_id=?', (previous,)).fetchall():
-            retain_discovery_source(conn, recording_id, row['source_token'], row['input_video_id'],
-                                    row['last_found_at'], first_found_at=row['found_at'])
-        conn.execute('DELETE FROM discovery_sources WHERE recording_id=?', (previous,))
     invalidate_derived(conn)
 
 
@@ -213,7 +225,7 @@ def add_alias(conn, alias, recording_id, source):
 
 def upsert(conn, video_id, title, artist, album=None, duration_s=None, available=None,
            video_type=None, artist_browse_id=None, album_browse_id=None, thumbnail=None,
-           created_at=None, *, library=False, source_ref=None, preferred_key=None):
+           created_at=None, *, library=False, source_ref=None, preferred_key=None, credits=None):
     video_id = video_id if video_id and video_id.strip() else None
     source_ref = None if video_id else (source_ref or unresolved_ref(album_browse_id or album,title,artist))
     row = conn.execute('SELECT * FROM catalog_entries WHERE video_id=?' if video_id else 'SELECT * FROM catalog_entries WHERE source_ref=?', (video_id or source_ref,)).fetchone()
@@ -252,9 +264,10 @@ def upsert(conn, video_id, title, artist, album=None, duration_s=None, available
     for field,value in (('title',title),('artist',artist),('orig_title',title),('orig_artist',artist)):
         if metadata.selected_source(conn,entry_id,field) is None:
             metadata.select(conn,entry_id,field,value,'youtube',now=now)
+    artists.observe(conn,entry_id,artist,credits,browse_id=artist_browse_id,now=now)
     update_artwork(conn, entry_id, thumbnail, source='youtube')
     if library:
         conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'observed',?)", (entry_id,now))
-    if album_browse_id:
-        conn.execute("INSERT OR IGNORE INTO album_track_links(browse_id,recording_id,entry_id,video_id,source) VALUES (?,?,?,?,'youtube')", (album_browse_id,rid,entry_id,video_id))
+    if album_browse_id or album:
+        albums.link(conn,entry_id,album_browse_id,title=album,artist=artist)
     return entry_id

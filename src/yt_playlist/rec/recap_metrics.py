@@ -68,7 +68,7 @@ def profile(month, events, meta, spans, playlists):
     for p in rows:
         key = p["identity_key"]
         card = meta.get(key, {})
-        if card.get("album_browse_id"):
+        if card.get("album_browse_ids") or card.get("album_browse_id"):
             result.album_covered_plays += 1
         day = int(p["played_at"] // 86400)
         result.tracks[key] += 1
@@ -89,7 +89,7 @@ def profile(month, events, meta, spans, playlists):
     sessions = []
     for rows in by_identity.values():
         rows.sort(key=lambda p: p["played_at"])
-        session, run = [], []
+        session, run, run_albums = [], [], set()
 
         def finish_run():
             if len({p["identity_key"] for p in run}) >= 3:
@@ -102,12 +102,15 @@ def profile(month, events, meta, spans, playlists):
                 if session:
                     sessions.append(len(session))
                 session = []
-            album = meta.get(p["identity_key"], {}).get("album_browse_id")
-            prev_album = meta.get(run[-1]["identity_key"], {}).get("album_browse_id") if run else None
-            if gap > SESSION_GAP or not album or album != prev_album:
+            card = meta.get(p['identity_key'],{})
+            albums = card.get('album_browse_ids') or ({card['album_browse_id']} if card.get('album_browse_id') else set())
+            common = run_albums & albums
+            if gap > SESSION_GAP or not common:
                 finish_run()
                 run = []
-            if album:
+                common = albums
+            run_albums = common
+            if albums:
                 run.append(p)
             session.append(p)
         finish_run()

@@ -145,12 +145,13 @@ def test_genre_badge_itself_opens_candidate_dialog(live_playlist_app, page):
     expect(page.get_by_role("heading", name="Genre for “Song A”")).to_be_visible()
 
 
-def test_now_playing_heart_immediately_updates_matching_playlist_row(live_playlist_app, page):
+@pytest.mark.parametrize("initial_status", ["INDIFFERENT", "LIKE"])
+def test_now_playing_heart_immediately_updates_matching_playlist_row(live_playlist_app, page, initial_status):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     page.route("**/bridge/status", lambda route: route.fulfill(json={
         "connected": True,
         "now_playing": {"title": "Song A", "artist": "Artist X", "thumbnail": "",
-                        "likeStatus": "INDIFFERENT", "video_id": "v0", "paused": False},
+                        "likeStatus": initial_status, "video_id": "v0", "paused": False},
         "sensor_health": {"healthy": True, "ytm_tabs": 1, "responding_tabs": 1,
                           "reinjected_tabs": 0, "error": ""},
         "radio": False, "radio_waiting": False, "radio_dual": False,
@@ -159,9 +160,12 @@ def test_now_playing_heart_immediately_updates_matching_playlist_row(live_playli
     page.route("**/now-playing/rate", lambda route: route.fulfill(json={"ok": True}))
     page.goto(f"{base}/playlist/{pid}")
     row = page.get_by_role("row").filter(has_text="Song A")
-    expect(row.locator(".like-btn")).not_to_have_class(re.compile(r".*\bon\b.*"))
-    page.locator(".global-now-playing .hs-heart").click()
-    expect(row.locator(".like-btn")).to_have_class(re.compile(r".*\bon\b.*"))
+    expect(row.locator(".like-btn")).to_have_attribute("aria-pressed", str(initial_status == "LIKE").lower())
+    desired_status = "INDIFFERENT" if initial_status == "LIKE" else "LIKE"
+    with page.expect_request(lambda request: request.url.endswith("/now-playing/rate")) as request:
+        page.locator(".global-now-playing .hs-heart").click()
+    assert request.value.post_data_json == {"action": "like", "videoId": "v0", "likeStatus": desired_status}
+    expect(row.locator(".like-btn")).to_have_attribute("aria-pressed", str(desired_status == "LIKE").lower())
 
 
 @pytest.mark.parametrize("initial_status", ["INDIFFERENT", "LIKE"])
@@ -188,6 +192,7 @@ def test_playing_track_table_heart_survives_status_polls(live_playlist_app, page
                 frame = json.loads(extension.recv(timeout=5))
             assert {k: frame[k] for k in ("type", "action", "videoId")} == {
                 "type": "rate", "action": "like", "videoId": "v0"}
+            assert frame["likeStatus"] == desired_status
             extension.send(json.dumps({"id": frame["id"], "status": 200,
                                        "body": json.dumps({"ok": True})}))
         expect(heart).to_have_attribute("aria-pressed", pressed)
@@ -288,7 +293,7 @@ def test_find_and_add_alternate_version(live_playlist_app, page, indexing_lag):
         retry.click()
     expect(retry).to_have_count(0)
     assert [t["videoId"] for t in client._tracks["PL1"]] == ["v0", "valt", "v1"]
-    assert [t["video_id"] for t in live_playlist_app["store"].playlist_tracks_detail(pid)] == ["v0", "valt", "v1"]
+    assert [t["video_id"] for t in live_playlist_app["store"].charts.playlist_tracks_detail(pid)] == ["v0", "valt", "v1"]
     assert client.added == [("PL1", ["valt"])]
 
 

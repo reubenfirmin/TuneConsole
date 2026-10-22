@@ -21,9 +21,7 @@ def test_runtime_operations_do_not_import_historical_catalog_helpers(store, monk
     assert store.tracks.upsert_track(None, 'Song', 'Artist', 'Album', 200) == missing
     first = store.tracks.upsert_track('a', 'Song', 'Artist', 'Album', 200)
     old = store.tracks.catalog_subject(first)['identity_key']
-    store.conn.execute("INSERT INTO cluster_canvas(playlist_ytm,state) VALUES ('saved',?)",
-                       (json.dumps({'nodes': [{'key': old}], 'label': old}),))
-    store.conn.commit()
+    store.rec_surface.set_cluster_canvas('saved',json.dumps({'nodes': [{'key': old}], 'label': old}))
     second = store.tracks.upsert_track('b', 'Song', 'Artist', 'Other', 200)
     store.tracks.set_track_audio(first, bpm=120)
     store.tracks.associate_youtube_item('b', store.tracks.catalog_subject(first)['recording_id'],
@@ -61,8 +59,7 @@ def test_unknown_runtime_state_format_is_preserved_on_live_rekey(store):
     first = store.tracks.upsert_track('a', 'Song', 'Artist', None, 200)
     old = store.tracks.catalog_subject(first)['identity_key']
     future = json.dumps({'catalog_state_version': 999, 'nodes': [{'key': old}]})
-    store.conn.execute("INSERT INTO cluster_canvas(playlist_ytm,state) VALUES ('future',?)", (future,))
-    store.conn.commit()
+    store.rec_surface.set_cluster_canvas('future',future)
     store.tracks.upsert_track('b', 'Song', 'Artist', None, 200)
     assert store.rec_surface.get_cluster_canvas('future') == future
     with pytest.raises(ValueError, match='Unsupported'):

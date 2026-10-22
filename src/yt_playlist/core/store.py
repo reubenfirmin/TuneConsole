@@ -3,6 +3,7 @@ import threading
 
 # Store owns the connection, schema lifecycle, and explicitly named repositories.
 from yt_playlist.repos.actions import ActionRepo
+from yt_playlist.repos.artists import ArtistRepo
 from yt_playlist.repos.base import synchronized as _synchronized
 from yt_playlist.repos.charts import ChartsRepo
 from yt_playlist.repos.collection import CollectionRepo
@@ -46,6 +47,7 @@ class Store:
         self.genres = GenreRepo(self)
         self.settings = SettingsRepo(self)
         self.actions = ActionRepo(self)
+        self.artists = ArtistRepo(self)
         self.identities = IdentityRepo(self)
         self.history = HistoryRepo(self)
         self.collection = CollectionRepo(self)

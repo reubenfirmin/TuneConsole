@@ -47,7 +47,7 @@ def test_never_played_and_last(store):
     # 2 tracks total, k2 never played -> 1
     assert store.trends.never_played() == (2, 1)
     last = dict(store.trends.track_last_play())
-    assert last["k1"] == 5 * 86400.0 and last["k2"] is None
+    assert last["k1"] == 5*86400.0+43200 and last["k2"] is None
 
 
 def test_dead_playlists_threshold_and_order(store):
@@ -55,16 +55,9 @@ def test_dead_playlists_threshold_and_order(store):
     _track(store, "kb", "A2")
     _track(store, "kc", "A3")
 
-    pid_zeta = store.conn.execute(
-        "INSERT INTO playlists(identity_id, ytm_playlist_id, title) VALUES (1, ?, ?)",
-        ("pl_zeta", "Zeta")).lastrowid
-    pid_alpha = store.conn.execute(
-        "INSERT INTO playlists(identity_id, ytm_playlist_id, title) VALUES (1, ?, ?)",
-        ("pl_alpha", "Alpha")).lastrowid
-    pid_beta = store.conn.execute(
-        "INSERT INTO playlists(identity_id, ytm_playlist_id, title) VALUES (1, ?, ?)",
-        ("pl_beta", "Beta")).lastrowid
-    store.conn.commit()
+    pid_zeta = store.playlists.upsert_playlist(1,'pl_zeta','Zeta',1,'h',0)
+    pid_alpha = store.playlists.upsert_playlist(1,'pl_alpha','Alpha',1,'h',0)
+    pid_beta = store.playlists.upsert_playlist(1,'pl_beta','Beta',1,'h',0)
 
     store.conn.execute(
         "INSERT INTO playlist_tracks(playlist_id, track_id, position) VALUES (?, ?, 0)",
@@ -92,7 +85,7 @@ def test_dead_playlists_threshold_and_order(store):
     full = store.trends.dead_playlists(3)
     assert [(d["title"], d["listens"]) for d in full] == [("Alpha", 0), ("Zeta", 0), ("Beta", 3)]
     beta = next(d for d in full if d["title"] == "Beta")
-    assert beta["last_listen"] == 7 * 86400.0
+    assert beta["last_listen"] == 7*86400.0+43200
     assert beta["playlist_id"] == pid_beta
 
 

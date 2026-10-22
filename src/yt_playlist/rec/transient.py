@@ -11,14 +11,14 @@ Lifecycle (#85): every event decays on the wall clock with a per-source half-lif
 *_halflife_d params); nothing is rank-decayed and there is no separate staleness relax. An event
 fades the same way whether or not anything newer arrived.
 """
+import json
+
 import numpy as np
 
 from yt_playlist.util import genre_map
 from yt_playlist.rec import embed, rec_params
 
-# Settings keys holding the radio playlists' ytm ids (radio.py: RADIO_PLAYLIST_SETTING,
-# RADIO_DECK_SETTING). Duplicated here rather than imported to avoid a rec.transient -> rec.radio
-# dependency; these three strings are the stable contract between the two modules.
+# Historical generated radio playlist IDs remain provenance after the deck controller's removal.
 _RADIO_SETTING_KEYS = ("radio_playlist_ytm", "radio_playlist_a_ytm", "radio_playlist_b_ytm")
 
 
@@ -37,7 +37,8 @@ def radio_list_ids(store) -> list[str]:
     deliberate user action, not continuous machine playback. Trends/stats keep counting radio plays
     (descriptive, a different pipeline)."""
     ids = [store.settings.get_setting(k) for k in _RADIO_SETTING_KEYS]
-    return [i for i in ids if i]
+    sessions = json.loads(store.settings.get_setting("radio_session_playlist_ids") or "[]")
+    return list(dict.fromkeys(i for i in ids + sessions if i))
 
 
 def evidence_plays(store, limit):

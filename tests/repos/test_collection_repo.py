@@ -39,11 +39,11 @@ def test_saved_albums_recency_newest_play_per_album(store):
     # HOT: two tracks, played at 100 and 300 -> album's newest play is 300
     store.tracks.upsert_track("vh1", "H1", "AH", None, None, album_browse_id="HOT")
     store.tracks.upsert_track("vh2", "H2", "AH", None, None, album_browse_id="HOT")
-    store.history.add_history_snapshot(iid, 100.0, [identity_key("H1", "AH")])
-    store.history.add_history_snapshot(iid, 300.0, [identity_key("H2", "AH")])
+    store.history.import_listening_events(iid,[(identity_key('H1','AH'),'vh1',100.0),
+                                             (identity_key('H2','AH'),'vh2',300.0)])
     # COLD: one track, played once long ago
     store.tracks.upsert_track("vc1", "C1", "AC", None, None, album_browse_id="COLD")
-    store.history.add_history_snapshot(iid, 50.0, [identity_key("C1", "AC")])
+    store.history.import_listening_events(iid,[(identity_key('C1','AC'),'vc1',50.0)])
     # NEVER: a track exists in the library but was never played
     store.tracks.upsert_track("vn1", "N1", "AN", None, None, album_browse_id="NEVER")
 
@@ -81,7 +81,7 @@ def test_collection_artists_includes_saved_album_tracks_without_playlists(store)
     store.history.add_history_snapshot(iid, 1.0, ["song|artist", "song|artist"])
 
     assert store.collection.collection_artists() == [{
-        "artist": "Artist", "browse": None, "songs": 1, "plays": 2,
+        "artist": "Artist", "artist_id":store.artists.resolve('Artist'), "browse": None, "songs": 1, "plays": 1,
         "n_albums": 1, "n_pls": 0, "thumbnail": "/cover.png"}]
 
 
@@ -93,11 +93,13 @@ def test_collection_artists_merges_saved_albums_without_double_counting_songs(st
                                artist_browse_id="UC_artist", album_browse_id="B1")
     store.playlists.set_playlist_tracks(p1, [track])
     store.playlists.set_playlist_tracks(p2, [track])
-    # Album sync doesn't always have the artist ID; a second release can contain the same song.
-    other = store.tracks.upsert_track("v2", "Song", "Artist", "Compilation", 200, album_browse_id="B2")
+    # A verified second release can contain the same song, with the same credited provider artist.
+    other = store.tracks.upsert_track("v2", "Song", "Artist", "Compilation", 200, album_browse_id="B2",
+                                     artist_browse_id='UC_artist')
     store.tracks.associate_youtube_item('v2',store.tracks.catalog_subject(track)['recording_id'],
                                 source='fixture_verified',evidence={'recording':'same performance'},now=1)
-    store.tracks.upsert_track("v3", "Album only", "Artist", "Compilation", 200, album_browse_id="B2")
+    store.tracks.upsert_track("v3", "Album only", "Artist", "Compilation", 200, album_browse_id="B2",
+                             artist_browse_id='UC_artist')
     store.collection.add_saved_album(_album("B1", title="Original", artist="Artist"))
     store.collection.add_saved_album(_album("B2", title="Compilation", artist="Artist"))
     store.history.add_history_snapshot(iid, 1.0, [store.tracks.catalog_subject(track)['identity_key'], "album only|artist"])
@@ -114,7 +116,7 @@ def test_collection_artists_includes_saved_album_metadata_before_tracks_arrive(s
     store.collection.add_saved_album(_album("B4", artist=None))
 
     assert store.collection.collection_artists() == [{
-        "artist": "Artist", "browse": None, "songs": 0, "plays": 0,
+        "artist": "Artist", "artist_id":store.artists.resolve('Artist'), "browse": None, "songs": 0, "plays": 0,
         "n_albums": 2, "n_pls": 0, "thumbnail": "/cover.png"}]
 
 
@@ -151,12 +153,14 @@ def test_collection_artists_keeps_same_named_artists_and_releases_distinct(store
     assert (artists["UC_second"]["songs"], artists["UC_second"]["n_albums"]) == (1, 1)
 
 
-def test_artist_browse_id_picks_most_common(store):
+def test_artist_browse_id_requires_unambiguous_identity(store):
     store.identities.upsert_identity("me", "c", None, True)
     store.tracks.upsert_track("v1", "S1", "Artist", "Al", 100, artist_browse_id="CH_A")
     store.tracks.upsert_track("v2", "S2", "Artist", "Al", 100, artist_browse_id="CH_A")
     store.tracks.upsert_track("v3", "S3", "Artist", "Al", 100, artist_browse_id="CH_B")
-    assert store.collection.artist_browse_id("Artist") == "CH_A"
+    assert store.collection.artist_browse_id("Artist") is None
+    aid = store.conn.execute("SELECT artist_id FROM artist_provider_ids WHERE provider_id='CH_A'").fetchone()[0]
+    assert store.collection.artist_browse_id(aid) == 'CH_A'
     assert store.collection.artist_browse_id("Nobody") is None
 
 

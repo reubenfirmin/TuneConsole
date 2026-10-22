@@ -90,3 +90,32 @@ def test_setup_form_carries_stable_identity_on_rename(store, tmp_path):
             "brand_account_id": ["", brand.brand_account_id], "master": "0"})
         assert response.status_code == 200
     assert [(i.id, i.label) for i in store.identities.get_identities()] == [(main.id, "New main"), (brand.id, "New brand")]
+
+
+def test_label_swap_and_reuse_keep_account_history_separate(store,tmp_path):
+    rt = _configured(store,tmp_path)
+    main,brand = store.identities.get_identities()
+    for account in (main,brand):
+        store.history.add_history_snapshot(account.id,1,['song|artist'])
+        store.playlists.upsert_playlist(account.id,'LM',account.label,0,'h',1)
+    rt.apply_setup([dict(id=main.id,label=brand.label,credential_ref=main.credential_ref,is_master=True),
+                    dict(id=brand.id,label=main.label,credential_ref=brand.credential_ref,
+                         brand_account_id=brand.brand_account_id)])
+    assert {i.id:i.label for i in store.identities.get_identities()}=={main.id:brand.label,brand.id:main.label}
+    rt.apply_setup([dict(label=main.label,credential_ref='browser.json',brand_account_id='NEW',is_master=True)])
+    new = store.identities.get_master_identity()
+    assert new.id not in {main.id,brand.id}
+    assert {r[0] for r in store.conn.execute('SELECT identity_id FROM history_snapshots')}=={main.id,brand.id}
+    assert {r[0] for r in store.conn.execute('SELECT scope_ref FROM playlists')}=={
+        f'@account:{main.id}:LM',f'@account:{brand.id}:LM'}
+
+
+@pytest.mark.parametrize('submitted_id,brand',[(999,'UC9'),(2,'OTHER')])
+def test_unknown_or_retargeted_submitted_id_does_not_change_setup(store,tmp_path,submitted_id,brand):
+    rt = _configured(store,tmp_path)
+    before,contents = list(store.conn.iterdump()),rt.config_path.read_bytes()
+    with pytest.raises(ValueError,match='not saved'):
+        rt.apply_setup([dict(id=submitted_id,label='name',credential_ref='browser.json',
+                             brand_account_id=brand,is_master=True)])
+    assert list(store.conn.iterdump())==before
+    assert rt.config_path.read_bytes()==contents

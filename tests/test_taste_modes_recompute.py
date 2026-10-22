@@ -70,18 +70,6 @@ def test_recompute_cold_start_no_crash(monkeypatch, store):
     assert store.modes.list_modes() == []
 
 
-def test_rebuild_wires_recompute_under_a_guard():
-    # The heavy end-to-end rebuild needs YouTube clients (covered elsewhere), so pin the wiring
-    # structurally: _do_rebuild must call taste_modes.recompute, and the call must sit inside a
-    # try/except so a mode failure cannot break the rebuild.
-    import inspect
-    from yt_playlist.rec import rec_worker
-    src = inspect.getsource(rec_worker.RecWorker._do_rebuild)
-    assert "taste_modes.recompute" in src
-    # the recompute call appears after a `try:` (guarded), not at the top level of the method
-    assert src.index("try:") < src.index("taste_modes.recompute")
-
-
 # --- content-space rebuild -----------------------------------------------------------------------
 # Regression: rec_worker rebuilds the content space and then immediately recomputes modes, so the
 # persisted centroids are from the previous space. Reconciling across the two raised

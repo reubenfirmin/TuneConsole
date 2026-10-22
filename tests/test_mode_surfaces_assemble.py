@@ -243,7 +243,7 @@ def test_thin_mix_exhausts_deeper_family_before_adjacent_tracks(store, monkeypat
         assert limit >= 500
         return [SimpleNamespace(**d) for d in deep]
 
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (list(range(500)), None, {}))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (list(range(500)), None, {}))
     monkeypatch.setattr(surfaces, "for_you", ranked_library)
 
     cards = ms.assemble_cards(store, 10.0, 0, include_genres=["soul-funk", "electro-synth"])

@@ -7,7 +7,7 @@ scanning) is computed live from your library: play counts, playlist participatio
 import json
 
 from yt_playlist.repos.base import Repo, synchronized
-from yt_playlist.core import catalog
+from yt_playlist.core import catalog, artists, albums
 from yt_playlist.core.discovery_sources import retain as retain_source
 
 # Audio/content columns persisted per discovered track (mirrors the library `tracks` audio set).
@@ -28,26 +28,30 @@ class DiscoveryRepo(Repo):
         """Engaged artists, highest interest first. `limit` (#52) keeps only the top-N so discovery
         scans a focused set instead of every artist you have ever touched."""
         rows = self.conn.execute(
-            "WITH plays AS (SELECT t.artist a, COUNT(*) n FROM history_items hi "
+            "WITH plays AS (SELECT ta.artist_id a,COUNT(DISTINCT hi.rowid) n FROM listening_daily_items hi "
             "                 JOIN tracks t ON t.identity_key=hi.identity_key "
-            "                 WHERE t.artist<>'' GROUP BY t.artist), "
-            "     pls AS (SELECT t.artist a, COUNT(DISTINCT pt.playlist_id) n "
+            "                 JOIN track_artists ta ON ta.entry_id=t.id GROUP BY ta.artist_id), "
+            "     pls AS (SELECT ta.artist_id a, COUNT(DISTINCT pt.playlist_id) n "
             "               FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
+            "               JOIN track_artists ta ON ta.entry_id=t.id "
             "               JOIN playlists p ON p.id=pt.playlist_id "
-            f"              WHERE t.artist<>'' AND p.ytm_playlist_id NOT IN {_GENERATED_PL} "
-            "               GROUP BY t.artist), "
-            "     sv AS (SELECT artist a, COUNT(*) n FROM saved_albums WHERE artist<>'' GROUP BY artist), "
+            f"              WHERE p.scope_ref NOT IN {_GENERATED_PL} "
+            "               GROUP BY ta.artist_id), "
+            "     sv AS (SELECT aa.artist_id a,COUNT(DISTINCT m.album_id) n FROM album_library_memberships m "
+            "            JOIN album_artists aa ON aa.album_id=m.album_id GROUP BY aa.artist_id), "
             "     arts AS (SELECT a FROM plays UNION SELECT a FROM pls UNION SELECT a FROM sv) "
-            "SELECT arts.a artist, "
+            "SELECT a.name artist,a.id artist_id,ap.provider_id browse_id, "
             "       COALESCE(plays.n,0)*1.0 + COALESCE(pls.n,0)*2.0 + COALESCE(sv.n,0)*3.0 score "
-            "FROM arts LEFT JOIN plays ON plays.a=arts.a LEFT JOIN pls ON pls.a=arts.a "
+            "FROM arts JOIN artists a ON a.id=arts.a LEFT JOIN artist_provider_ids ap "
+            "ON ap.artist_id=a.id AND ap.provider='youtube' "
+            "LEFT JOIN plays ON plays.a=arts.a LEFT JOIN pls ON pls.a=arts.a "
             "LEFT JOIN sv ON sv.a=arts.a ORDER BY score DESC"
             + (" LIMIT ?" if limit is not None else ""),
             (limit,) if limit is not None else ()).fetchall()
-        return [{"artist": r["artist"], "score": r["score"]} for r in rows]
+        return [dict(r) for r in rows]
 
     @synchronized
-    def artists_due_for_scan(self, now, ttl_days=5, budget=25, artist_limit=None) -> list:
+    def artists_due_for_scan(self, now, ttl_days=5, budget=25, artist_limit=None, *, with_ids=False) -> list:
         """Interested artists not scanned within ttl_days (never-scanned first, then oldest), capped
         at budget, exactly which artists the next worker pass should hit the network for. `artist_limit`
         (#52) restricts the universe to your top-N most-engaged artists, so discovery stays focused.
@@ -55,18 +59,19 @@ class DiscoveryRepo(Repo):
         ttl_days=5 re-scans an artist about weekly (their catalogue changes slowly); budget=25 rate-
         limits each pass so we don't burst the Last.fm/MusicBrainz APIs."""
         cutoff = now - ttl_days * 86400
-        scanned = {r["artist"]: r["scanned_at"] for r in
-                   self.conn.execute("SELECT artist, scanned_at FROM artist_scans")}
+        scanned = {r["artist_id"]: r["scanned_at"] for r in
+                   self.conn.execute("SELECT artist_id, scanned_at FROM artist_scans")}
         due = [a for a in self.interested_artists(limit=artist_limit)
-               if a["artist"] not in scanned or (scanned[a["artist"]] or 0.0) < cutoff]
-        due.sort(key=lambda a: (scanned.get(a["artist"], float("-inf")), -a["score"]))  # never/oldest first
-        return [a["artist"] for a in due[:budget]]
+               if a["artist_id"] not in scanned or (scanned[a["artist_id"]] or 0.0) < cutoff]
+        due.sort(key=lambda a: (scanned.get(a["artist_id"]) or float("-inf"), -a["score"]))
+        return due[:budget] if with_ids else [a['artist'] for a in due[:budget]]
 
     @synchronized
     def discovered_albums_for_artist(self, artist) -> dict:
         """{browse_id: offered_count} for one artist's pooled albums (#52 rotation input)."""
+        aid = artists.lookup(self.conn,artist)
         return {r["browse_id"]: (r["offered_count"] or 0) for r in self.conn.execute(
-            "SELECT browse_id, offered_count FROM discovered_albums WHERE artist=?", (artist,))}
+            "SELECT browse_id, offered_count FROM discovered_albums WHERE artist_id=?", (aid,))}
 
     @synchronized
     def delete_discovered_albums(self, browse_ids) -> int:
@@ -97,36 +102,37 @@ class DiscoveryRepo(Repo):
 
     @synchronized
     def mark_scanned(self, artist, now) -> None:
-        self.conn.execute("INSERT INTO artist_scans(artist, scanned_at) VALUES (?,?) "
-                          "ON CONFLICT(artist) DO UPDATE SET scanned_at=excluded.scanned_at", (artist, now))
+        aid = artists.state_id(self.conn,artist)
+        self.conn.execute("INSERT INTO artist_scans(artist, scanned_at,artist_id) VALUES (?,?,?) "
+                          "ON CONFLICT(artist_id) DO UPDATE SET scanned_at=excluded.scanned_at",
+                          (artists.token(aid),now,aid))
         self.conn.commit()
 
     # --- the accumulating pools ---
     @synchronized
-    def upsert_discovered_album(self, browse_id, artist, title, year, thumbnail, now, genre=None) -> None:
+    def upsert_discovered_album(self, browse_id, artist, title, year, thumbnail, now, genre=None, *, artist_id=None) -> None:
         """Add an album to the pool (first-seen found_at is preserved on re-discovery). `genre` is the
         candidate genre for the #18 facet overlay; a later re-discovery with a genre fills it in."""
-        self.conn.execute(
-            "INSERT INTO discovered_albums(browse_id, artist, title, year, thumbnail, found_at, genre) "
-            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(browse_id) DO UPDATE SET "
-            "artist=excluded.artist, title=excluded.title, year=excluded.year, "
-            "thumbnail=excluded.thumbnail, genre=COALESCE(excluded.genre, discovered_albums.genre)",
-            (browse_id, artist, title, year, thumbnail, now, genre))
-        self.conn.commit()
+        aid = artists.state_id(self.conn,artist_id if artist_id is not None else artist)
+        with self.conn:
+            album_id = albums.observe(self.conn,browse_id,title=title,artist=artist,year=year,
+                                      thumbnail=thumbnail,genre=genre,artist_id=aid,rank=1)
+            self.conn.execute('INSERT INTO album_discovery_memberships(album_id,found_at) VALUES (?,?) ON CONFLICT(album_id) DO NOTHING', (album_id,now))
 
     @synchronized
-    def upsert_discovered_artist(self, artist, score, because, fits, thumbnail, now, genre=None) -> None:
+    def upsert_discovered_artist(self, artist, score, because, fits, thumbnail, now, genre=None, *, artist_id=None) -> None:
+        aid = artists.state_id(self.conn,artist_id if artist_id is not None else artist)
         self.conn.execute(
-            "INSERT INTO discovered_artists(artist, score, because, fits, thumbnail, found_at, genre) "
-            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(artist) DO UPDATE SET score=excluded.score, "
+            "INSERT INTO discovered_artists(artist, score, because, fits, thumbnail, found_at, genre,artist_id) "
+            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(artist_id) DO UPDATE SET score=excluded.score, "
             "because=excluded.because, fits=excluded.fits, thumbnail=excluded.thumbnail, "
             "genre=COALESCE(excluded.genre, discovered_artists.genre)",
-            (artist, score, json.dumps(because or []), json.dumps(fits or []), thumbnail, now, genre))
+            (artists.token(aid), score, json.dumps(because or []), json.dumps(fits or []), thumbnail, now, genre,aid))
         self.conn.commit()
 
     @synchronized
     def get_discovered_albums(self) -> list:
-        return [{"browse_id": r["browse_id"], "artist": r["artist"], "title": r["title"],
+        return [{"browse_id": r["browse_id"], "artist": r["artist"], "artist_id":r['artist_id'], "title": r["title"],
                  "year": r["year"], "thumbnail": r["thumbnail"], "found_at": r["found_at"],
                  "last_shown": r["last_shown"], "genre": r["genre"],
                  "first_shown": r["first_shown"], "offered_count": r["offered_count"]}
@@ -134,20 +140,20 @@ class DiscoveryRepo(Repo):
 
     @synchronized
     def get_discovered_artists(self) -> list:
-        return [{"artist": r["artist"], "score": r["score"], "because": json.loads(r["because"] or "[]"),
+        return [{"artist": r["display_artist"], "artist_id":r['artist_id'], "score": r["score"], "because": json.loads(r["because"] or "[]"),
                  "fits": json.loads(r["fits"] or "[]"), "thumbnail": r["thumbnail"],
                  "found_at": r["found_at"], "last_shown": r["last_shown"], "genre": r["genre"],
                  "first_shown": r["first_shown"], "offered_count": r["offered_count"]}
-                for r in self.conn.execute("SELECT * FROM discovered_artists")]
+                for r in self.conn.execute("SELECT d.*,a.name display_artist FROM discovered_artists d JOIN artists a ON a.id=d.artist_id")]
 
     # --- #13 Phase 2: out-of-corpus candidate tracks (for the Clusters "reach for new music" mode) ---
     @synchronized
     def upsert_discovered_track(self, identity_key, video_id, title, artist, album, thumbnail,
-                                genre, year, source_browse_id, now, audio=None) -> str:
+                                genre, year, source_browse_id, now, audio=None, *, credits=None) -> str:
         with self.conn:
             entry_id = catalog.upsert(self.conn, video_id, title, artist, album,
                                       thumbnail=thumbnail, created_at=now, library=False,
-                                      preferred_key=identity_key)
+                                      preferred_key=identity_key,credits=credits)
             row = self.conn.execute("SELECT recording_id,identity_key FROM catalog_tracks WHERE id=?", (entry_id,)).fetchone()
             rid = row["recording_id"]
             catalog.add_alias(self.conn, identity_key, rid, "discovery")
@@ -157,9 +163,7 @@ class DiscoveryRepo(Repo):
             if source_browse_id:
                 retain_source(self.conn, rid, source_browse_id, video_id or None, now)
                 if self.conn.execute("SELECT 1 FROM discovered_albums WHERE browse_id=?", (source_browse_id,)).fetchone():
-                    self.conn.execute(
-                        "INSERT OR IGNORE INTO album_track_links(browse_id,recording_id,entry_id,video_id,source) "
-                        "VALUES (?,?,?,?,'discovery')", (source_browse_id,rid,entry_id,video_id or None))
+                    albums.link(self.conn,entry_id,source_browse_id,source='discovery')
             self.conn.execute(
                 "UPDATE catalog_tracks SET genre=COALESCE(genre,?),mb_year=COALESCE(mb_year,?) WHERE id=?",
                 (genre,year,entry_id))
@@ -237,6 +241,9 @@ class DiscoveryRepo(Repo):
         tbl, col = {"album": ("discovered_albums", "browse_id"),
                     "artist": ("discovered_artists", "artist"),
                     "track": ("discovered_tracks", "identity_key")}[kind]
+        if kind == 'artist':
+            col = 'artist_id'
+            ids = [artists.lookup(self.conn,i,exact=True) for i in ids]
         self.conn.executemany(
             f"UPDATE {tbl} SET last_shown=?, first_shown=COALESCE(first_shown, ?), "
             f"offered_count=offered_count+1 WHERE {col}=?", [(now, now, i) for i in ids])
@@ -247,6 +254,9 @@ class DiscoveryRepo(Repo):
         """Count each visible Home Discover tile once per page visit, including across poll retries."""
         tbl, col = {"album": ("discovered_albums", "browse_id"),
                     "artist": ("discovered_artists", "artist")}[kind]
+        if kind == 'artist':
+            col = 'artist_id'
+            ids = [artists.lookup(self.conn,i,exact=True) for i in ids]
         shown = []
         for item_id in dict.fromkeys(ids):
             if not self.conn.execute(f"SELECT 1 FROM {tbl} WHERE {col}=?", (item_id,)).fetchone():
@@ -328,7 +338,7 @@ class DiscoveryRepo(Repo):
         count, saved metadata, and expiry (using found_at until shown). Newest first."""
         rows = self.conn.execute(
             "SELECT dt.*, "
-            "  (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key=dt.identity_key) plays, "
+            "  (SELECT COUNT(*) FROM listening_days hi WHERE hi.identity_key=dt.identity_key) plays, "
             "  (SELECT COUNT(DISTINCT pt.playlist_id) FROM tracks t "
             "     JOIN playlist_tracks pt ON pt.track_id=t.id WHERE t.identity_key=dt.identity_key) playlists "
             "FROM discovered_tracks dt ORDER BY dt.found_at DESC").fetchall()
@@ -350,8 +360,8 @@ class DiscoveryRepo(Repo):
 
     @synchronized
     def discovery_artist_view(self, now, gc_days) -> list:
-        rows = self.conn.execute("SELECT * FROM discovered_artists ORDER BY found_at DESC").fetchall()
-        return [{**{k: r[k] for k in ("artist", "score", "thumbnail", "genre",
+        rows = self.conn.execute("SELECT d.*,a.name display_artist FROM discovered_artists d JOIN artists a ON a.id=d.artist_id ORDER BY found_at DESC").fetchall()
+        return [{"artist":r['display_artist'],'artist_id':r['artist_id'], **{k: r[k] for k in ("score", "thumbnail", "genre",
                                       "found_at", "first_shown", "offered_count", "legacy_offered_count")},
                  "gc_at": self._gc_at(r["first_shown"], gc_days)} for r in rows]
 
@@ -365,9 +375,10 @@ class DiscoveryRepo(Repo):
         cutoff = now - gc_days * 86400
         out = {}
         for key, tbl in (("albums", "discovered_albums"), ("artists", "discovered_artists")):
+            count = self.conn.execute(f'SELECT COUNT(*) FROM {tbl} WHERE first_shown IS NOT NULL AND first_shown < ?', (cutoff,)).fetchone()[0]
             cur = self.conn.execute(
                 f"DELETE FROM {tbl} WHERE first_shown IS NOT NULL AND first_shown < ?", (cutoff,))
-            out[key] = cur.rowcount
+            out[key] = count
         held = set(held_track_keys or ())
         rows = self.conn.execute(
             "SELECT identity_key,recording_id FROM discovered_tracks "
@@ -405,11 +416,11 @@ class DiscoveryRepo(Repo):
     def prune_discovered(self, owned_albums, saved_browse_ids, owned_artists) -> None:
         """Drop pool entries you've since acquired: albums you now own/saved, artists now in library."""
         for r in self.conn.execute("SELECT browse_id, title FROM discovered_albums").fetchall():
-            if r["browse_id"] in saved_browse_ids or (r["title"] or "").lower() in owned_albums:
+            if r["browse_id"] in saved_browse_ids or albums.lookup(self.conn,r['browse_id']) in owned_albums:
                 self.conn.execute("DELETE FROM discovered_albums WHERE browse_id=?", (r["browse_id"],))
         if owned_artists:
             from yt_playlist.util.matching import normalize
-            for r in self.conn.execute("SELECT artist FROM discovered_artists").fetchall():
-                if normalize(r["artist"]) in owned_artists:
+            for r in self.conn.execute("SELECT d.artist,d.artist_id,a.name FROM discovered_artists d JOIN artists a ON a.id=d.artist_id").fetchall():
+                if artists.token(r['artist_id']) in owned_artists or artists.public_key(self.conn,r['artist_id']) in owned_artists:
                     self.conn.execute("DELETE FROM discovered_artists WHERE artist=?", (r["artist"],))
         self.conn.commit()

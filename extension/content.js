@@ -6,8 +6,6 @@
 
 if (!window.__tcBridgeLoaded) {
   window.__tcBridgeLoaded = true;
-  // Build-time flag, kept in sync with the service worker by scripts/build-extension.sh.
-  const RADIO_ENABLED = false;
   const SENSOR_VERSION = 4;
   let mainFrameAt = null;
   let sensorProbeSerial = 0;
@@ -66,18 +64,26 @@ if (!window.__tcBridgeLoaded) {
     if (dislike && dislike.getAttribute("aria-pressed") === "true") return "DISLIKE";
     return "INDIFFERENT";
   };
-  const clickRate = (action, videoId, snapshot) => {
+  const clickRate = (action, videoId, snapshot, desiredStatus) => {
     const bar = domNowPlaying();
+    // A native button click only needs a fresh, matching player/control identity.
+    // Missing recording credits or account metadata must not disable the heart.
+    // History ingestion keeps its own stricter metadata/account checks.
     if (!["like", "dislike"].includes(action) || !videoId || !snapshot ||
-        !snapshot.brandKnown || snapshot.metadataVerified !== true ||
         snapshot.videoId !== videoId || !snapshot.playerBar ||
         snapshot.playerBar.videoId !== videoId || !snapshot.playerBar.likeStatus ||
-        !bar || bar.videoId !== videoId) {
-      return {ok: false, error: "The playing song changed. Refresh and try again."};
+        (bar?.videoId && bar.videoId !== videoId)) {
+      const error = `Rating identity mismatch: requested=${videoId || ''}, player=${snapshot?.videoId || ''}, ` +
+        `control=${snapshot?.playerBar?.videoId || ''}, dom=${bar?.videoId || ''}, probe=${!!snapshot}`;
+      return {ok: false, error};
     }
     const r = likeRenderer();
     if (!r) return {ok: false, error: "Player rating control is unavailable"};
-    const id = action === "like" ? "#button-shape-like" : "#button-shape-dislike";
+    const current = readLikeStatus() || snapshot.playerBar.likeStatus;
+    if (desiredStatus === current) return {ok: true};
+    const buttonAction = desiredStatus === 'LIKE' ? 'like' : desiredStatus === 'DISLIKE' ? 'dislike' :
+      desiredStatus === 'INDIFFERENT' ? (current === 'LIKE' ? 'like' : 'dislike') : action;
+    const id = buttonAction === "like" ? "#button-shape-like" : "#button-shape-dislike";
     const btn = r.querySelector(id + " button") || r.querySelector(id);
     if (!btn) return {ok: false, error: "Player rating button is unavailable"};
     btn.click();
@@ -87,10 +93,9 @@ if (!window.__tcBridgeLoaded) {
   // Drive YouTube Music's own play/pause control in the player bar, same shape as clickRate.
   const clickPlayPause = () => {
     const btn = document.querySelector("ytmusic-player-bar #play-pause-button");
-    if (!btn) { console.warn("[TuneConsole] playpause: player-bar control not found"); return; }
+    if (!btn) return;
     const inner = btn.querySelector("button") || btn;
     inner.click();
-    console.log("[TuneConsole] toggled play/pause");
   };
 
   // Start the requested queue on browse pages, or resume the player on watch pages. A global
@@ -136,48 +141,6 @@ if (!window.__tcBridgeLoaded) {
     return { playing: playbackStarted() };
   };
 
-  // Waiting-state net: report a blocked deck-play as a "deck-waiting" pevent (background relays it
-  // and focuses the radio window) and arm a ONE-TIME user-activation retry: whichever of click/
-  // keydown fires first satisfies Chrome's gesture requirement and retries play(). Shared by both
-  // the "no <video> yet" case (F1: previously a silent no-op) and a play() rejection.
-  //
-  // waitingRetryHandler tracks the currently-armed pair so a later call (a new deck-play arrival, OR
-  // the retry itself failing, F2) removes the previous un-fired pair before installing a new one:
-  // un-fired pairs must not accumulate across episodes.
-  let waitingRetryHandler = null;
-  const clearWaitingRetry = () => {
-    if (!waitingRetryHandler) return;
-    document.removeEventListener("click", waitingRetryHandler);
-    document.removeEventListener("keydown", waitingRetryHandler);
-    waitingRetryHandler = null;
-  };
-  const armWaitingRetry = (errName) => {
-    try {
-      chrome.runtime.sendMessage({ type: "pevent", kind: "deck-waiting", detail: { err: errName } });
-    } catch (e2) {}
-    clearWaitingRetry();
-    let fired = false;
-    const retryPlay = () => {
-      if (fired) return;
-      fired = true;
-      clearWaitingRetry();
-      try {
-        const v2 = document.querySelector("video");
-        if (!v2) { armWaitingRetry("no-video"); return; }
-        v2.play().catch((e3) => {
-          // F2: the retry's own play() can fail too. Do not spend the episode silently -- re-report
-          // deck-waiting and re-install a fresh listener pair so the NEXT click/keydown retries
-          // again. Only re-arms once THIS pair has actually fired (clearWaitingRetry above already
-          // removed it), so pairs cannot stack.
-          armWaitingRetry(e3 && e3.name);
-        });
-      } catch (e3) {}
-    };
-    waitingRetryHandler = retryPlay;
-    document.addEventListener("click", retryPlay, { once: true });
-    document.addEventListener("keydown", retryPlay, { once: true });
-  };
-
   const sensorStatus = () => {
     const v = document.querySelector("video");
     return { ok: true, hasVideo: !!v, paused: !!(v && v.paused), url: location.href,
@@ -209,7 +172,7 @@ if (!window.__tcBridgeLoaded) {
         if (!sensorProbes.has(id)) return;
         sensorProbes.delete(id);
         clearTimeout(timer);
-        try { sendResponse(clickRate(msg.action, msg.videoId, snapshot)); }
+        try { sendResponse(clickRate(msg.action, msg.videoId, snapshot, msg.likeStatus)); }
         catch (e) { sendResponse({ok: false, error: String(e)}); }
       };
       sensorProbes.set(id, finish);
@@ -222,51 +185,11 @@ if (!window.__tcBridgeLoaded) {
       ensurePlaying().then(sendResponse, () => sendResponse({ playing: false }));
       return true; // keep the response channel open until playback has been checked
     }
-    if (msg.type === "radio-prime") {
-      if (!RADIO_ENABLED) return;
-      // #93 a null/absent url means "clear the stored prime" (sent by /radio/stop), never a URL to
-      // navigate to: without this, a stale prime from a stopped radio would hijack the tab on the
-      // next organic track end.
-      primedUrl = msg.url || null;
-      return;
-    }
-    if (msg.type === "radio-boundary") {
-      if (!RADIO_ENABLED) return;
-      // #93 v3 dual-deck (T7j/T7k): background arms/disarms this deck's boundary vid. Ending it is
-      // the toggle trigger (see the `ended` handoff below). A falsy videoId clears it (deck-stop).
-      boundaryVid = msg.videoId || null;
-      return;
-    }
-    if (msg.type === "deck-pause-mute" || msg.type === "deck-pause") {
-      if (!RADIO_ENABLED && msg.type === "deck-pause-mute") return;
-      // #93 v3 dual-deck: keep a standby tab silent -- pause it the instant it (re)loads, and pause
-      // the old live tab right after a toggle. Drive the player-bar control only if actually
-      // playing, so this never flips an already-paused tab into playing.
+    if (msg.type === "pause") {
+      // Pause only a playing tab, so this never resumes an already-paused player.
       try {
         const v = document.querySelector("video");
         if (v && !v.paused) clickPlayPause();
-      } catch (e) {}
-      return;
-    }
-    if (msg.type === "deck-play") {
-      if (!RADIO_ENABLED) return;
-      // #93 v3 dual-deck: the newly-live tab must call play() while the TAB IS STILL MUTED (the
-      // probe-verified order); background unmutes at the tab level right after this resolves.
-      //
-      // Owner-reported gap: play() can still be rejected even while muted (autoplay policy / MEI),
-      // and the old silent catch swallowed that -- the deck window opened with nothing audible and no
-      // signal anywhere that anything was wrong. F1: a missing <video> element (SPA player not yet
-      // constructed despite the tab reporting complete) used to no-op the same way -- silent, no
-      // play(), no report. Both paths now go through armWaitingRetry, which reports "deck-waiting"
-      // (with a distinguishing err -- "no-video" for the missing-element case, e.name for a play()
-      // rejection) and arms the one-time activation retry. Never throws either way.
-      try {
-        const v = document.querySelector("video");
-        if (!v) {
-          armWaitingRetry("no-video");
-        } else if (v.paused) {
-          v.play().catch((e) => armWaitingRetry(e && e.name));
-        }
       } catch (e) {}
       return;
     }
@@ -320,10 +243,6 @@ if (!window.__tcBridgeLoaded) {
   // also poll the player-bar DOM as a fallback. Either source feeds report(); dedup keeps it quiet.
   let lastNowPlaying = "";
   let lastAccount = null; // null means unknown; an empty brandId means the verified main account.
-  let primedUrl = null;  // #93 dynamic radio: the next track's watch URL, handed off on track end.
-                          // A plain in-scope let: a hard navigation reloads the content script and
-                          // this is wiped for free, so a stale prime cannot survive across pages.
-  let boundaryVid = null;  // #93 v3 dual-deck: this deck's last track; ending it toggles decks.
   const report = (np) => {
     if (!np || !np.title) return;
     const vid = np.videoId || "";
@@ -354,7 +273,6 @@ if (!window.__tcBridgeLoaded) {
       return;
     }
     lastNowPlaying = key;
-    console.log("[TuneConsole] now playing:", np.title, "-", np.artist, likeStatus);
     chrome.runtime.sendMessage({
       type: "play", title: np.title, artist: np.artist, thumbnail: np.thumbnail,
       metadataVerified: np.metadataVerified === true,
@@ -376,25 +294,6 @@ if (!window.__tcBridgeLoaded) {
       if (!p.brandKnown) return; // Unknown account must not become main-account playback history.
       lastPlayer = { videoId: p.videoId, position: p.position, duration: p.duration, brandId: p.brandId };
       try { chrome.runtime.sendMessage(Object.assign({ type: "pevent" }, p)); } catch (e) {}
-      // #93 the instant the track ends, hand off to the primed radio track before YouTube Music
-      // autoplays its own next. suppress_unload_main.js already neutralized the unload prompt.
-      if (p.kind === "ended") {
-        if (!RADIO_ENABLED) return;
-        // #93 v3: at the live deck's boundary, toggle decks (background owns the tab swap: it
-        // plays the standby tab while still muted, then unmutes, per the probe-verified order).
-        // Otherwise fall back to the v2 re-sync: navigate ONLY to a playlist watch url (carries
-        // list=), never a bare url that would hand off to YouTube Music's own radio.
-        if (boundaryVid && p.videoId === boundaryVid) {
-          // L9 (final review): one boundary, one toggle. Clear before firing so a re-delivered
-          // `ended` for the same track cannot trigger a second deck-boundary; background re-arms
-          // this deck's boundary explicitly when it should fire again.
-          const bv = boundaryVid; boundaryVid = null;
-          try { chrome.runtime.sendMessage({ type: "deck-boundary", videoId: bv }); } catch (e) {}
-        } else if (primedUrl && primedUrl.includes("list=")) {
-          const u = primedUrl; primedUrl = null;
-          try { location.href = u; } catch (e) {}
-        }
-      }
       return;
     }
     if (ev.data.__tcCuration) {
@@ -425,25 +324,6 @@ if (!window.__tcBridgeLoaded) {
       if (lastPlayer) chrome.runtime.sendMessage(Object.assign({ type: "pevent", kind: "bye" }, lastPlayer));
     } catch (e) {}
   });
-  // #93 v3 dual-deck S1 (skip-at-boundary): the live deck's own "next" control would hand off to
-  // YouTube Music's own radio past our last queued track. While parked at the boundary track,
-  // intercept it (capture phase, ahead of YTM's own handler) and toggle decks ourselves instead.
-  document.addEventListener("click", (ev) => {
-    if (!RADIO_ENABLED || !boundaryVid) return;
-    try {
-      const next = ev.target.closest &&
-        ev.target.closest("ytmusic-player-bar .next-button, tp-yt-paper-icon-button.next-button");
-      const u = new URL(location.href);
-      if (next && u.searchParams.get("v") === boundaryVid) {
-        ev.preventDefault();
-        ev.stopImmediatePropagation();
-        // L9: same clear-before-fire as the `ended` handoff above, so a double click cannot send a
-        // second deck-boundary for the same toggle.
-        const bv = boundaryVid; boundaryVid = null;
-        chrome.runtime.sendMessage({ type: "deck-boundary", videoId: bv });
-      }
-    } catch (e) {}
-  }, true);
   const domNowPlaying = () => {
     const t = document.querySelector(".title.ytmusic-player-bar") ||
               document.querySelector("ytmusic-player-bar .title");

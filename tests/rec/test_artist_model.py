@@ -22,7 +22,7 @@ def test_artist_baskets_reduce_to_distinct_artists():
     b = s.tracks.upsert_track("v2", "S2", "Beta", None, None)
     _playlist(s, iid, "P", [a, b])
     baskets = artist_model.artist_baskets(s)
-    assert any({"alpha", "beta"} <= set(bk) for bk in baskets)   # a playlist basket relates the two artists
+    assert any({s.artists.key('Alpha'), s.artists.key('Beta')} <= set(bk) for bk in baskets)
     assert all(len(set(bk)) == len(bk) for bk in baskets)        # distinct artists per basket
     assert all(len(bk) >= 2 for bk in baskets)                   # single-artist baskets dropped (no self-relate)
 
@@ -90,7 +90,7 @@ def test_content_places_out_of_corpus_artist():
     s.tracks.set_track_genre(t, "Techno")
     profiles = artist_model.artist_content_profiles(s)
     model = artist_model.build_artist_content_model(profiles)
-    owned = artist_model.encode_artist_content(model, profiles["owned"])
+    owned = artist_model.encode_artist_content(model, profiles[s.artists.key('Owned')])
     oop = artist_model.encode_artist_content(model, {"families": {genre_map.family("Techno")}})
     assert owned is not None and oop is not None
     assert float(oop @ owned) > 0.0      # same family -> related in the content space
@@ -129,7 +129,7 @@ def test_edges_connect_out_of_corpus_artist():
         _playlist(s, iid, f"PA{p}", clusterA)
     artist_model.build_collab_and_store(s, dim=4)
     # Gamma is out of corpus (no track, no vector) but Last.fm relates A0 -> Gamma strongly.
-    s.rec_surface.cache_similar(normalize("A0"), [["Gamma", 0.9]], now=1.0)
+    s.rec_surface.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)
     nbrs = [a for a, _ in artist_model.artist_neighbors(s, "A0", topn=10)]
     assert normalize("Gamma") in nbrs        # edge-only candidate is reachable
 
@@ -187,7 +187,7 @@ def test_track_candidates_include_out_of_corpus():
     for p in range(3):
         _playlist(s, iid, f"PA{p}", clusterA)
     artist_model.build_collab_and_store(s, dim=4)
-    s.rec_surface.cache_similar(normalize("A0"), [["Gamma", 0.9]], now=1.0)        # A0 -> Gamma edge
+    s.rec_surface.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)        # A0 -> Gamma edge
     s.discovery.upsert_discovered_track("song x|gamma", "vg", "Song X", "Gamma", "", None, "Techno", None, "src", 1.0)
     cands = artist_model.artist_track_candidates(s, ["A0"], topn=10)
     arts = {normalize(c["artist"]) for c in cands}
@@ -227,7 +227,7 @@ def test_related_artist_suggestions_pulls_out_of_corpus():
     s.playlists.set_playlist_tracks(target, [cluster[0]])               # playlist of just A0
     s.tracks.set_track_genre(cluster[0], "Techno")
     artist_model.build_collab_and_store(s, dim=4)
-    s.rec_surface.cache_similar(normalize("A0"), [["Gamma", 0.9]], now=1.0)
+    s.rec_surface.cache_similar(s.artists.key("A0"), [["Gamma", 0.9]], now=1.0)
     s.discovery.upsert_discovered_track("song x|gamma", "vg", "Song X", "Gamma", "", None, "Techno", None, "src", 1.0)
 
     sugg = surfaces.related_artist_suggestions(s, target, now=1.0)

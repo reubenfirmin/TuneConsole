@@ -107,7 +107,7 @@ def test_113_later_impression_outside_report_owns_the_outcome(db):
 
 def test_113_generated_provenance_survives_playlist_promotion(db):
     db.tracks.upsert_track("vid", "song", "artist", None, None)
-    db.conn.execute("INSERT INTO playlist_group(ytm,name) VALUES ('PLGEN','Generated')")
+    db.playlists.set_playlist_group('PLGEN','Generated')
     db.playlists.mark_generated_playlist('PLGEN')
     db.conn.commit()
     shown(db, "one", 100)

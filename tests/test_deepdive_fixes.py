@@ -19,11 +19,12 @@ def test_normalize_non_latin_stays_distinct():
 # --- X recent-mood: ordered-by-recency keys ---
 def test_recent_keys_ordered_returns_latest_first(store):
     iid = store.identities.upsert_identity("me", "c", None, True)
-    store.history.add_history_snapshot(iid, 1000.0, ["old1", "old2"])
-    store.history.add_history_snapshot(iid, 2000.0, ["new1"])
-    assert store.history.recent_keys_ordered(0, limit=2) == ["new1"] or \
-           store.history.recent_keys_ordered(0)[0] == "new1"     # newest snapshot first
-    assert store.history.recent_keys_ordered(1500.0) == ["new1"]  # window cutoff respected
+    day = 86400.0
+    store.history.add_history_snapshot(iid, day, ["old1", "old2"])
+    store.history.add_history_snapshot(iid, 3 * day, ["new1"])
+    recent = store.history.recent_keys_ordered(0, limit=2)
+    assert recent[0] == "new1" and len(recent) == 2
+    assert store.history.recent_keys_ordered(2 * day) == ["new1"]
 
 
 # --- Z set_weight is clamped like nudge_weight ---

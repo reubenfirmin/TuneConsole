@@ -1,5 +1,6 @@
 """Albums and Artists tabs (playlists and saved albums) + save/unsave album."""
 from yt_playlist.core.activity import activity_for
+from yt_playlist.core.accounts import client_for
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
@@ -36,27 +37,25 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "artists.html", {"artists": store.collection.collection_artists()})
 
     def _album_and_client(browse_id):
-        clients = ctx.client_provider() or {}
-        client = next(iter(clients.values()), None)
-        if client is None:
-            raise ValueError("no client available")
+        identity_id,client = client_for(store,ctx.client_provider())
         album = client.get_album(browse_id)
         if not album.get("audioPlaylistId"):
             raise ValueError("album has no playlist")
-        return client, album
+        return identity_id,client,album
 
     def _save_album(browse_id):
-        client, album = _album_and_client(browse_id)
+        identity_id,client,album = _album_and_client(browse_id)
         client.rate_playlist(album["audioPlaylistId"], "LIKE")
         store.collection.add_saved_album({
             "browse": browse_id, "title": album.get("title"), "type": album.get("type"),
             "artist": ", ".join(x.get("name", "") for x in (album.get("artists") or [])),
-            "year": album.get("year"), "thumbnail": best_thumb(album.get("thumbnails"))})
+            "year": album.get("year"), "thumbnail": best_thumb(album.get("thumbnails")),
+            "credits":album.get('artists')},identity_id=identity_id)
 
     def _unsave_album(browse_id):
-        client, album = _album_and_client(browse_id)
+        identity_id,client,album = _album_and_client(browse_id)
         client.rate_playlist(album["audioPlaylistId"], "INDIFFERENT")
-        store.collection.remove_saved_album(browse_id)
+        store.collection.remove_saved_album(browse_id,identity_id=identity_id)
 
     @router.post("/collection/save-album")
     async def save_album(request: Request):

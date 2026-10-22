@@ -4,7 +4,10 @@ from . import (v001_baseline, v002_enrichment, v003_discovery_audit, v004_playli
                v009_served_outcomes, v010_play_event_subjects, v011_takeout_coverage,
                v012_enrichment_retries, v013_provider_coverage, v014_artwork_retries,
                v015_album_shares, v016_first_play_checkpoint, v017_retire_lane_log,
-               v018_discovery_sources, v019_playlist_provenance, v020_metadata_selections)
+               v018_discovery_sources, v019_playlist_provenance, v020_metadata_selections,
+               v021_artists, v022_artist_references, v023_albums, v024_account_scope,
+               v025_relationships,v026_listening_observations,v027_artist_identity_redirects,
+               v028_discovery_representatives,v029_artist_provisional_names)
 
 MIGRATIONS = (
     Migration(1, 'legacy_baseline', v001_baseline.apply),
@@ -27,4 +30,13 @@ MIGRATIONS = (
     Migration(18, 'typed_discovery_sources', v018_discovery_sources.apply),
     Migration(19, 'playlist_generation_and_adoption', v019_playlist_provenance.apply),
     Migration(20, 'metadata_choices_and_selected_sources', v020_metadata_selections.apply),
+    Migration(21, 'canonical_artists_and_ordered_credits', v021_artists.apply),
+    Migration(22, 'artist_feedback_album_and_impression_references', v022_artist_references.apply),
+    Migration(23, 'canonical_releases_and_album_memberships', v023_albums.apply),
+    Migration(24, 'durable_playlist_account_scope', v024_account_scope.apply),
+    Migration(25, 'constrained_catalog_relationships', v025_relationships.apply),
+    Migration(26, 'listening_observations', v026_listening_observations.apply),
+    Migration(27, 'artist_identity_redirects', v027_artist_identity_redirects.apply),
+    Migration(28, 'discovery_representatives', v028_discovery_representatives.apply),
+    Migration(29, 'artist_provisional_names', v029_artist_provisional_names.apply),
 )

@@ -54,14 +54,14 @@ def test_create_seeds_an_ordinary_playlist_on_main_account(songs):
     data = response.json()
     assert data["message"] == "Playlist created."
     assert data["added"] is True
-    playlist = songs["store"].get_playlist(int(data["url"].split("/")[-1]))
+    playlist = songs["store"].playlists.get_playlist(int(data["url"].split("/")[-1]))
     assert playlist.title == "Soul favorites" and playlist.identity_id == songs["main_id"]
     assert playlist.created_at == 100.0
     assert playlist.thumbnail == SONG["thumbnail"]
-    assert next(p for p in songs["store"].get_playlists() if p.id == playlist.id).thumbnail == SONG["thumbnail"]
-    tracks = songs["store"].playlist_tracks_detail(playlist.id)
+    assert next(p for p in songs["store"].playlists.get_playlists() if p.id == playlist.id).thumbnail == SONG["thumbnail"]
+    tracks = songs["store"].charts.playlist_tracks_detail(playlist.id)
     assert [(t["video_id"], t["duration"], t["album_browse"]) for t in tracks] == [(SONG["video_id"], 225, "MPRE_new")]
-    assert playlist.ytm_playlist_id not in songs["store"].get_playlist_groups()
+    assert playlist.ytm_playlist_id not in songs["store"].playlists.get_playlist_groups()
     assert songs["main"].added == [(playlist.ytm_playlist_id, [SONG["video_id"]])]
     assert not songs["other"].created
 
@@ -101,7 +101,7 @@ def test_invalid_create_does_not_write(songs, body):
 def test_disconnected_main_cannot_create(songs):
     songs["clients"].pop(songs["main_id"])
     response = songs["http"].post("/songs/create-playlist", json={"name": "Mix", "song": SONG})
-    assert response.status_code == 422 and "isn't connected" in response.json()["detail"]
+    assert response.status_code == 422 and "not connected" in response.json()["detail"]
     assert not songs["main"].created and not songs["other"].created
 
 
@@ -109,10 +109,10 @@ def test_remote_create_failure_is_reported_without_local_playlist(songs, monkeyp
     def fail(*args):
         raise RuntimeError("Remote unavailable")
     monkeypatch.setattr(songs["main"], "create_playlist", fail)
-    before = songs["store"].get_playlists()
+    before = songs["store"].playlists.get_playlists()
     response = songs["http"].post("/songs/create-playlist", json={"name": "Mix", "song": SONG})
     assert response.status_code == 502
-    assert songs["store"].get_playlists() == before
+    assert songs["store"].playlists.get_playlists() == before
 
 
 def test_rejected_song_reports_partial_creation_and_failed_add(songs, monkeypatch):
@@ -125,9 +125,9 @@ def test_rejected_song_reports_partial_creation_and_failed_add(songs, monkeypatc
     assert "couldn't add" in response.json()["message"]
     assert response.json()["added"] is False
     assert len(songs["main"].created) == 1
-    playlist = songs["store"].get_playlist(int(response.json()["url"].split("/")[-1]))
+    playlist = songs["store"].playlists.get_playlist(int(response.json()["url"].split("/")[-1]))
     assert playlist.title == "Mix" and playlist.track_count == 0
     assert playlist.thumbnail is None  # A rejected song must not become the cover.
     response = songs["http"].post("/songs/add-to-playlist", json={"playlist_id": songs["destination"], "song": SONG})
     assert response.status_code == 422 and "couldn't add" in response.json()["detail"]
-    assert not songs["store"].get_playlist_track_ids(songs["destination"])
+    assert not songs["store"].playlists.get_playlist_track_ids(songs["destination"])

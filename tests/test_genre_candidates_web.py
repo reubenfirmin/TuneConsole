@@ -1,5 +1,6 @@
 """#103 per-song genre candidate provenance and selection."""
 import time
+from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 
@@ -93,10 +94,13 @@ def test_empty_dialog_offers_single_track_lookup(store, monkeypatch):
 def test_candidate_choice_updates_canonical_genre_and_refreshes(store):
     client, iid = _client(store)
     _pid, tid = _seed(store, iid)
+    update = Mock()
+    client.app.state.ctx.rec_worker.trigger_content_update = update
     response = client.post(f"/track/{tid}/genre-candidates", data={"genre": "Art Pop"})
     assert response.status_code == 204
     assert response.headers["HX-Refresh"] == "true"
     assert store.enrichment.genre_provenance(tid)["current"] == "Art Pop"
+    update.assert_called_once_with(video_ids=["v1"])
 
 
 def test_custom_genre_is_accepted_and_empty_value_rejected(store):

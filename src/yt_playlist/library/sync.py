@@ -33,17 +33,24 @@ def _album_id(t):
 _STATUS_PRIORITY = {"INDIFFERENT": 0, "LIKE": 1, "DISLIKE": 2}
 
 
-def _complete_rating_context(detail):
-    """Missing pages or unpopulated ratings leave this playlist's evidence unknown."""
+def _complete_playlist_context(detail):
+    """Both continuation forms indicate unread pages, even without a reported count."""
     tracks = detail["tracks"]
     count = detail.get("trackCount")
     return (not detail.get("continuation")
-            and (count is None or (isinstance(count, int) and count == len(tracks)))
-            and all(t.get("likeStatus") in _STATUS_PRIORITY for t in tracks))
+            and not detail.get("continuations")
+            and (count is None or (isinstance(count, int) and count == len(tracks))))
 
 
-def _sync_generated_group(store, ytm, description, groups):
+def _complete_rating_context(detail):
+    """Missing pages or unpopulated ratings leave this playlist's evidence unknown."""
+    return (_complete_playlist_context(detail)
+            and all(t.get("likeStatus") in _STATUS_PRIORITY for t in detail["tracks"]))
+
+
+def _sync_generated_group(store, ytm, description, groups, identity_id=None):
     """Reconcile explicit remote policy while preserving the user's display group."""
+    ytm = store.playlists.playlist_reference(ytm,identity_id)
     store.playlists.reconcile_playlist_provenance(ytm, description)
     marked = is_generated_description(description)
     current = groups.get(ytm)
@@ -140,14 +147,14 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
             _emit(on_progress, "info", f"{label} › skipped {pl.get('title', '')} (couldn't read)")
             continue
         ratings_complete = ratings_complete and _complete_rating_context(detail)
-        count = detail.get("trackCount")
-        if detail.get("continuation") or (count is not None and count != len(detail["tracks"])):
+        if not _complete_playlist_context(detail):
             incomplete += 1
         track_ids, keys = [], []
         for t in detail.get("tracks", []):
             tid = store.tracks.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
                                      _album(t), t.get("duration_seconds"), t.get("isAvailable"),
-                                     t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")))
+                                     t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")),
+                                     credits=t.get('artists'))
             track_ids.append(tid)
             status = t.get("likeStatus")
             if status in _STATUS_PRIORITY and t.get("videoId"):
@@ -163,7 +170,7 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         store.playlists.set_playlist_tracks(db_pid, track_ids)
         retry_insertions(store, db_pid, client, now, attempts=1)
         store.playlists.ensure_playlist_thumbnail(db_pid)
-        _sync_generated_group(store, pid, detail.get("description"), groups)
+        _sync_generated_group(store, pid, detail.get("description"), groups,identity_id)
         refreshed += 1
         _emit(on_progress, "step", f"{label} › {pl.get('title', '')} ({len(track_ids)} tracks)",
               i=i, total=total)
@@ -259,7 +266,8 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now, *,
     for t in detail.get("tracks", []):
         tid = store.tracks.upsert_track(t.get("videoId"), t.get("title", ""), _artist(t),
                                  _album(t), t.get("duration_seconds"), t.get("isAvailable"),
-                                 t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")))
+                                 t.get("videoType"), _artist_id(t), _album_id(t), best_thumb(t.get("thumbnails")),
+                                 credits=t.get('artists'))
         track_ids.append(tid)
     track_ids = list(dict.fromkeys(track_ids))   # de-dupe repeated videos
     keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in track_ids]
@@ -269,11 +277,11 @@ def refresh_playlist(store, identity_id, client, ytm_playlist_id, title, now, *,
     retry_insertions(store, db_pid, client, now, attempts=1)
     store.playlists.ensure_playlist_thumbnail(db_pid)
     _sync_generated_group(store, ytm_playlist_id, detail.get('description'),
-                          store.playlists.get_playlist_groups())
+                          store.playlists.get_playlist_groups(),identity_id)
 
 def _sync_saved_albums(store, clients, on_progress):
-    """Replace the shared mirror only when every account supplies a complete snapshot."""
-    saved = {}
+    """Refresh each complete account snapshot without deleting another account's evidence."""
+    saved, snapshots = {}, {}
     configured = {identity.id for identity in store.identities.get_identities()}
     complete = bool(clients) and configured <= clients.keys()
     outcomes = {str(i): resource("skipped", "Account unavailable") for i in configured - clients.keys()}
@@ -282,35 +290,40 @@ def _sync_saved_albums(store, clients, on_progress):
             albums = with_retry(lambda: client.get_library_albums(limit=None))
             if not isinstance(albums, list):
                 raise ValueError("saved-album snapshot is unavailable")
+            account = []
             for a in albums:
                 bid = a.get("browseId")
                 if not isinstance(bid, str) or not bid.strip():
                     raise ValueError("saved-album snapshot contains an unidentified album")
-                saved[bid] = {"browse": bid, "title": a.get("title"),
+                account.append({"browse": bid, "title": a.get("title"),
                               "artist": ", ".join(x.get("name", "") for x in (a.get("artists") or [])),
+                              "credits": a.get('artists'),
                               "year": a.get("year"), "type": a.get("type"),
-                              "thumbnail": best_thumb(a.get("thumbnails"))}
+                              "thumbnail": best_thumb(a.get("thumbnails"))})
+            snapshots[identity_id] = account
             outcomes[str(identity_id)] = resource("complete", refreshed=len(albums))
         except Exception as e:  # noqa: BLE001
             complete = False
             logger.warning("saved-albums fetch failed: %s", e)
             outcomes[str(identity_id)] = resource("skipped" if isinstance(e, BridgeError) else "failed",
                                                   error_summary(e))
-    if not complete:
-        _emit(on_progress, "info", "saved albums unchanged: complete snapshots unavailable for some accounts")
+    if not snapshots:
+        _emit(on_progress, "info", "saved albums unchanged: no complete account snapshots")
         return outcomes, resource("skipped", "Complete account snapshots unavailable"), resource(
             "skipped", "Saved-album mirror unchanged")
-    store.collection.replace_saved_albums(list(saved.values()))
+    store.collection.replace_saved_album_snapshots(snapshots)
+    saved = {a['browse']:a for a in store.collection.get_saved_albums()}
     _emit(on_progress, "info", f"saved albums: {len(saved)}")
     tracks = _materialize_album_tracks(store, clients, saved, on_progress)
-    return outcomes, resource("complete", refreshed=len(saved)), tracks
+    return outcomes, resource("complete" if complete else "partial", refreshed=len(saved)), tracks
 
 
 def _materialize_album_tracks(store, clients, saved, on_progress):
     """Fold each saved album's TRACKS into the library so they count in the taste corpus (the model
     is built from your tracks; metadata alone doesn't). Incremental: a cached full track list
     proves materialization. An incidental playlist track cannot stand in for a complete album."""
-    client = next(iter(clients.values()), None)
+    from yt_playlist.core.accounts import catalog_client
+    client = catalog_client(clients)
     if client is None:
         return resource("skipped", "Account unavailable")
     cached = store.collection.complete_album_tracklist_ids()
@@ -339,7 +352,7 @@ def _materialize_album_tracks(store, clients, saved, on_progress):
                 continue
             artist = ", ".join(x.get("name", "") for x in (t.get("artists") or [])) or meta["artist"]
             store.tracks.upsert_track(t.get("videoId"), t.get("title"), artist, meta["title"], None,
-                               album_browse_id=bid, thumbnail=meta["thumbnail"])
+                               album_browse_id=bid, thumbnail=meta["thumbnail"],credits=t.get('artists') or album.get('artists'))
             added += 1
         remember_album(store, bid, album, meta)
         if bid not in store.collection.complete_album_tracklist_ids():

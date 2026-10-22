@@ -61,10 +61,6 @@ body:has(.page-clusters) .global-now-playing-slot { display: none; }
 .home-status.is-down .hs-dot { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
 .hs-state { font-weight: 600; color: var(--text); }
 .hs-now { display: flex; align-items: center; gap: .75rem; min-width: 0; flex-wrap: wrap; }
-/* #93 Task 9: the migrated radio customize panel (x-teleport'ed here while radio is active) takes
-   the full card width on its own row, rather than squeezing into the now-playing flex row. Empty
-   (radio off, or panel collapsed) contributes nothing, so the row height is unaffected. */
-#radio-steer-slot:not(:empty) { flex-basis: 100%; }
 .hs-art { width: 3.4rem; height: 3.4rem; border-radius: 7px; object-fit: cover; flex: none;
   box-shadow: 0 2px 8px color-mix(in srgb, var(--shadow-ink) 40%, transparent); }
 .hs-rate-group { display: inline-flex; align-items: center; gap: 0.15rem; margin-left: 0.35rem; flex: none; }
@@ -102,41 +98,6 @@ body:has(.page-clusters) .global-now-playing-slot { display: none; }
 .home-footer { margin-top: 2rem; padding-top: .9375rem; border-top: 1px solid var(--border);
   text-align: center; font-size: var(--type-ui); }
 .home-footer a { color: var(--dim); }
-
-/* #93 Task 9: the radio launch card - its own card, not a status-strip button. Off: Start radio +
-   collapsed Customize. On (.is-active): Stop + Customize, and the customize panel has migrated up
-   into the now-playing card (see #radio-steer-slot above), so this card shows just the toggle row. */
-.radio-launch { margin-bottom: 1.375rem; }
-.rl-top { display: flex; align-items: center; gap: .875rem; flex-wrap: wrap; }
-.radio-label { display: inline-flex; align-items: center; gap: 0.45rem; font-weight: 650; color: var(--text); }
-.rl-dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--faint); flex: none; }
-.radio-launch.is-active .rl-dot { background: var(--control-selected-border); box-shadow: 0 0 0 3px color-mix(in srgb, var(--control-selected-border) 18%, transparent);
-  animation: rl-pulse 2.4s ease-in-out infinite; }
-@keyframes rl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-.rl-actions { display: inline-flex; align-items: center; gap: 0.5rem; margin-left: auto; }
-.rl-customize-toggle { background: none; border: 1px solid var(--border-2); color: var(--dim);
-  border-radius: 999px; padding: 0.3rem .75rem; font-size: var(--type-sm); font-weight: 600; cursor: pointer; }
-.rl-customize-toggle:hover { color: var(--text); border-color: var(--text); }
-.rl-sub { color: var(--dim); font-size: var(--type-ui); margin: 0.5rem 0 0; }
-.rl-reason { display: inline-block; margin-top: 0.4rem; }
-.rl-customize-inline, .rl-customize-teleported { margin-top: .875rem; }
-.rl-customize-teleported .radio-customize { padding-top: 0.2rem; }
-
-/* Mode transparency (visibility wave): a small, unobtrusive line, never alarming even when a
-   fallback hint is appended -- the full reason lives in the title tooltip, not the visible text. */
-.rl-mode { font-size: var(--type-sm); opacity: 0.85; }
-
-/* "Up next" feedback loop (visibility wave): one row of compact chips, wraps rather than scrolls so
-   nothing is hidden. This is the only place a Populate-tail / steer tweak is visibly confirmed in
-   dual mode (the live deck's own queue is a frozen YTM snapshot until the next toggle). */
-.rl-upcoming { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.4rem 0.5rem;
-  margin-top: 0.6rem; }
-.rl-upcoming-label { color: var(--dim); font-size: var(--type-xs); font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.03em; flex: none; }
-.rl-upcoming-chip { background: var(--accent-soft); border-radius: 999px; padding: 0.15rem 0.65rem;
-  font-size: var(--type-sm); color: var(--text); white-space: nowrap; }
-.rl-upcoming-artist { color: var(--dim); }
-.rl-upcoming-artist::before { content: " \00b7 "; }
 
 /* Poster action cards: a big cover across the top, minimal orienting text, then the CTA.
    Keep four desktop columns so fewer notices leave empty space instead of stretching. */

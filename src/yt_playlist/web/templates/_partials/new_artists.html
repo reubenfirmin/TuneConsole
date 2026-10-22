@@ -12,8 +12,8 @@
   {% for a in artists %}
   {{ tile('artist', a.thumbnail, a.artist,
           ('because you play ' ~ a.because|join(', ')) if a.because else none,
-          "/artist?name=" ~ a.artist|urlencode, none,
-          ('fits your ' ~ a.fits|join(', ')) if a.fits else none, discovery_id=a.artist) }}
+          "/artist?name=" ~ a.artist|urlencode ~ ("&artist_id=" ~ a.artist_id if a.artist_id else ""), none,
+          ('fits your ' ~ a.fits|join(', ')) if a.fits else none, discovery_id=('@artist:' ~ a.artist_id) if a.artist_id else a.artist) }}
   {% endfor %}
 </div>
 {# Always 2 rows tall: columns flow with the viewport (capped at 5), anything past row 2 is hidden. #}

@@ -4,10 +4,13 @@ def test_play_provenance_upgrade_preserves_unknown_history_and_reopens(tmp_path,
 
     store = legacy_store
     path = tmp_path / "legacy.db"
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    store.playlists.set_playlist_group("PLGEN", "Generated")
-    store.playlists.mark_generated_playlist('PLGEN')
+    iid = 1
     with store.conn:
+        # Current repositories require account scopes and provenance tables absent in v7.
+        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (?,'main','cred',1)", (iid,))
+        store.conn.execute("INSERT INTO playlists(identity_id,ytm_playlist_id,title) VALUES (?,'PLGEN','Generated')", (iid,))
+        store.conn.execute("INSERT INTO playlist_group VALUES ('PLGEN','Generated')")
+        store.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key) VALUES ('vid','Song','Artist','song|artist')")
         store.conn.execute("INSERT INTO play_events(identity_id,identity_key,video_id,played_at,playlist_ytm_id) VALUES (?,'song|artist','vid',120,'RDAMPLPLGEN')", (iid,))
         store.conn.execute("ALTER TABLE play_events DROP COLUMN is_generated")
         store.conn.execute("DROP TABLE schema_migrations")
@@ -16,7 +19,9 @@ def test_play_provenance_upgrade_preserves_unknown_history_and_reopens(tmp_path,
     store = Store(path)
     store.init_schema()
     assert store.conn.execute("SELECT is_generated FROM play_events").fetchone()[0] is None
-    store.history.record_play_event(iid, "new|artist", "new", 5000, playlist_ytm_id="PLGEN")
+    store.tracks.upsert_track("new", "New", "Artist", None, 200)
+    key = store.tracks.identity_key_for_video("new")
+    store.history.record_play_event(iid, key, "new", 5000, playlist_ytm_id="PLGEN")
     store.playlists.set_playlist_group("PLGEN", "")
     store.conn.close()
 
@@ -51,18 +56,18 @@ def test_playlist_creation_date_migration_backfills_only_known_dates(legacy_stor
     import json
     from yt_playlist.util.action_kinds import COPY_PLAYLIST, MOVE_IDENTITY
 
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    for ytm in ("song", "generated", "303", "Brexit List", "planned", "moved"):
-        store.playlists.upsert_playlist(iid, ytm, ytm, 0, "", 9000)
-    for kind, ytm, status, at in ((COPY_PLAYLIST, "song", "executed", 100),
-                                  (COPY_PLAYLIST, "song", "executed", 200),
-                                  (COPY_PLAYLIST, "planned", "planned", 300),
-                                  (MOVE_IDENTITY, "moved", "executed", 400)):
-        store.actions.record_action(kind, "{}", "{}", status, json.dumps({"new_ytm": ytm}), at)
-    store.actions.record_action(COPY_PLAYLIST, "{}", "{}", "executed", "invalid legacy payload", 500)
-    store.rec_surface.set_recipe("generated", {"theme": "mix"}, 50)
     # Recreate the previous schema, then exercise the real startup migration.
     with store.conn:
+        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','cred',1)")
+        for ytm in ("song", "generated", "303", "Brexit List", "planned", "moved"):
+            store.conn.execute("INSERT INTO playlists(identity_id,ytm_playlist_id,title,track_count,content_hash,first_seen,last_seen,last_changed) VALUES (1,?,?,0,'',9000,9000,9000)", (ytm, ytm))
+        for kind, ytm, status, at in ((COPY_PLAYLIST, "song", "executed", 100),
+                                      (COPY_PLAYLIST, "song", "executed", 200),
+                                      (COPY_PLAYLIST, "planned", "planned", 300),
+                                      (MOVE_IDENTITY, "moved", "executed", 400)):
+            store.conn.execute("INSERT INTO actions(kind,params_json,plan_json,status,undo_json,created_at) VALUES (?,'{}','{}',?,?,?)", (kind, status, json.dumps({"new_ytm": ytm}), at))
+        store.conn.execute("INSERT INTO actions(kind,status,undo_json,created_at) VALUES (?,'executed','invalid legacy payload',500)", (COPY_PLAYLIST,))
+        store.conn.execute("INSERT INTO rec_recipes VALUES ('generated',?,50)", (json.dumps({"theme": "mix"}),))
         store.conn.execute("ALTER TABLE playlists DROP COLUMN created_at")
         store.conn.execute("DELETE FROM settings WHERE key='playlist_created_at_backfilled'")
         store.conn.execute("DROP TABLE schema_migrations")
@@ -97,8 +102,8 @@ def test_upsert_playlist_tracks_seen_and_changed(store):
     assert pl.last_changed == 3000.0
 
 def test_upsert_identity_is_idempotent(store):
-    a = store.identities.upsert_identity("main", "cred", None, True)
-    b = store.identities.upsert_identity("main", "cred2", "B1", True)  # same label
+    a = store.identities.upsert_identity("main", "cred", "B1", True)
+    b = store.identities.upsert_identity("main", "cred2", "B1", True)  # same account, rotated credential
     assert a == b
     ids = store.identities.get_identities()
     assert len(ids) == 1
@@ -139,9 +144,10 @@ def test_upsert_track_backfills_duration_on_resync(store):
 
 def test_history_keys_window(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
-    store.history.add_history_snapshot(iid, 5000.0, ["song a|artist", "song c|artist"])
-    assert store.history.get_recent_history_keys(4000.0) == {"song a|artist", "song c|artist"}
-    assert store.history.get_recent_history_keys(6000.0) == set()
+    day = 86400
+    store.history.add_history_snapshot(iid, 5 * day, ["song a|artist", "song c|artist"])
+    assert store.history.get_recent_history_keys(4 * day) == {"song a|artist", "song c|artist"}
+    assert store.history.get_recent_history_keys(6 * day) == set()
 
 def test_get_action_roundtrip(store):
     aid = store.actions.record_action("plan", '{"a":1}', '{"b":2}', "planned", "{}", 10.0)

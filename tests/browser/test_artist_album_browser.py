@@ -62,7 +62,7 @@ def live_artist_app():
     thread.start()
     while not server.started:
         time.sleep(0.02)
-    yield {"base": f"http://127.0.0.1:{port}", "store": s}
+    yield {"base": f"http://127.0.0.1:{port}", "store": s, "iid": iid}
     server.should_exit = True
     thread.join(timeout=5)
 
@@ -77,9 +77,9 @@ def test_save_album_flips_to_unsave_after_reload(live_artist_app, page):
 
 def test_unsave_album_flips_to_save_after_reload(live_artist_app, page):
     # start from a saved album so the button reads "Unsave"
-    live_artist_app["store"].add_saved_album({
+    live_artist_app["store"].collection.add_saved_album({
         "browse": "MPREb_x", "title": "The Album", "artist": "Artist X",
-        "year": "2001", "thumbnail": ""})
+        "year": "2001", "thumbnail": ""}, identity_id=live_artist_app["iid"])
     page.goto(f"{live_artist_app['base']}/artist?name=Artist%20X")
     unsave = page.get_by_role("button", name="Unsave", exact=True)
     expect(unsave).to_be_visible()

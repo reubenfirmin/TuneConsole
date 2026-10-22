@@ -83,7 +83,7 @@ def test_delete_hides_system_playlist_and_refreshes(store, monkeypatch, tmp_path
     r = c.post("/playlists/delete", data={"ids": str(lm)})
     assert _refreshes(r)
     assert store.playlists.get_playlist(lm) is not None          # survives on YouTube
-    assert "LM" in store.playlists.get_hidden_playlists()        # just hidden from the tab
+    assert f"@account:{iid}:LM" in store.playlists.get_hidden_playlists()
 
 
 def test_copy_creates_playlist_and_refreshes(store, monkeypatch, tmp_path):

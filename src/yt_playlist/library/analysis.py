@@ -50,7 +50,7 @@ def merge_signature(ytms) -> str:
 
 
 def _group_sig(playlists) -> str:
-    return merge_signature(p.ytm_playlist_id for p in playlists)
+    return merge_signature(p.scope_ref for p in playlists)
 
 
 def find_identical_groups(store, ignored_sigs=None):
@@ -123,7 +123,7 @@ def find_empty_playlists(store, ignored=None):
     ignored = ignored or set()
     excluded = _cleanup_excluded(store)
     return sorted((p for p in store.playlists.get_playlists()
-                   if _manageable(p) and p.id not in excluded and p.ytm_playlist_id not in ignored
+                   if _manageable(p) and p.id not in excluded and p.scope_ref not in ignored
                    and not store.playlists.get_playlist_track_keys(p.id)),
                   key=lambda p: p.title.lower())
 
@@ -134,7 +134,7 @@ def find_tiny_playlists(store, max_tracks=3, ignored=None):
     excluded = _cleanup_excluded(store)
     out = []
     for p in store.playlists.get_playlists():
-        if not _manageable(p) or p.id in excluded or p.ytm_playlist_id in ignored:
+        if not _manageable(p) or p.id in excluded or p.scope_ref in ignored:
             continue
         n = len(store.playlists.get_playlist_track_keys(p.id))
         if 1 <= n <= max_tracks:
@@ -164,13 +164,13 @@ def find_dupes(store, threshold=0.70):
     return sorted(out, key=lambda f: f.similarity, reverse=True)
 
 def _overlap_visible(pa, pb, suppressed, ignored_ytm, kept):
-    pair = frozenset((pa.ytm_playlist_id, pb.ytm_playlist_id))
+    pair = frozenset((pa.scope_ref, pb.scope_ref))
     if suppressed and pair in suppressed:
         return False
     if kept and pair in kept:
         return True
-    return not ignored_ytm or (pa.ytm_playlist_id not in ignored_ytm
-                               and pb.ytm_playlist_id not in ignored_ytm)
+    return not ignored_ytm or (pa.scope_ref not in ignored_ytm
+                               and pb.scope_ref not in ignored_ytm)
 
 def near_duplicate_pairs(store, groups, suppressed=None, ignored_ytm=None, kept=None,
                          threshold=0.70):

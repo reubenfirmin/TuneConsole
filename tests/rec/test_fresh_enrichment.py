@@ -1,4 +1,4 @@
-"""Saved discovery metadata changes the songs selected for a generated Fresh playlist."""
+"""Saved discovery metadata updates cluster placement without refitting or reranking the corpus."""
 import logging
 from types import SimpleNamespace
 
@@ -55,9 +55,9 @@ def test_fresh_waits_for_metadata_then_generates_a_playlist_without_a_model(stor
 
 
 @pytest.mark.parametrize("signal", ["genre", "year", "audio"])
-def test_enrichment_updates_fresh_ranking_modes_and_generated_playlist(store, monkeypatch, signal):
+def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatch, signal):
     # Fit the real projection on two playlist clusters. Only the named metadata field
-    # separates them, so a ranking/mode change cannot come from another signal.
+    # separates them, so a placement change cannot come from another signal.
     a = {"genre": "Techno", "year": "2024", "audio": {}}
     b = dict(a)
     if signal == "genre":
@@ -117,6 +117,15 @@ def test_enrichment_updates_fresh_ranking_modes_and_generated_playlist(store, mo
     embed.build_discovered_content_vectors(store)
     fresh_pool.prepare(store, 200)
     assert [t["key"] for t in fresh_pool.pick(store, 200, size=4)] == reference
+    old_order = [t["key"] for t in store.rec_surface.get_proposals("fresh_pool")]
+    model = store.settings.get_setting("rec_content_model")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("An enrichment batch must reuse saved models and rankings")
+
+    monkeypatch.setattr(embed, "build_and_store", forbidden)
+    monkeypatch.setattr(embed, "build_content_and_store", forbidden)
+    monkeypatch.setattr(fresh_pool, "prepare", forbidden)
 
     def waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None, **kwargs):
         for track in batch:
@@ -129,8 +138,9 @@ def test_enrichment_updates_fresh_ranking_modes_and_generated_playlist(store, mo
     worker = EnrichWorker(SimpleNamespace(store=store, now_fn=lambda: 500,
                                          logger=logging.getLogger(__name__)), waterfall_fn=waterfall)
     assert worker.drain_once(limit=4) == 4
-    picked = fresh_pool.pick(store, 500, size=4)
-    assert {t["key"] for t in picked} == set(changed)
+    assert [t["key"] for t in store.rec_surface.get_proposals("fresh_pool")] == old_order
+    assert store.settings.get_setting("rec_content_model") == model
+    assert [t["key"] for t in fresh_pool.pick(store, 500, size=4)] == reference
     bundles = store.rec_surface.get_proposals("mode_bundles")
     assert {t["key"] for t in bundles["1"]["fresh"]} == set(changed)
     assert {t["key"] for t in bundles["2"]["fresh"]} == set(reference)
@@ -145,6 +155,7 @@ def test_enrichment_updates_fresh_ranking_modes_and_generated_playlist(store, mo
         assert {t["key"] for t in ordered[:4]} == set(changed)
 
     client = FakeClient()
+    picked = fresh["tracks"][:4]
     result = executor.create_generated_playlist(store, "Fresh songs", picked, client, 500, iid,
                                                 recipe={"model": "fresh"})
     assert result["added"] == 4

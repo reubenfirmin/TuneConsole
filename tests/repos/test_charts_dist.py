@@ -3,14 +3,14 @@ listen_distribution (plays per category in a time window) and corpus_distributio
 (library composition per category), across genre / year / album / playlist dimensions.
 """
 
-NOW = 1_000_000.0
+NOW = 11*86400.0+43200
 
 
 def _seed(store):
-    """Three songs, two playlists, two history snapshots (one recent, one ~100d old).
+    """Three songs, two playlists, two recent days and one ~100d old.
 
     techno appears twice in the corpus (Alpha + Gamma); house once (Beta).
-    Recent snapshot: Alpha x2, Beta x1. Old snapshot: Gamma x1.
+    Recent days: Alpha on both, Beta on one. Old day: Gamma.
     """
     iid = store.identities.upsert_identity("me", "c", None, True)
     a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200)
@@ -28,7 +28,8 @@ def _seed(store):
         return store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (tid,)).fetchone()["k"]
 
     ka, kb, kg = key(a), key(b), key(g)
-    store.history.add_history_snapshot(iid, NOW, [ka, ka, kb])              # recent: Alpha x2, Beta x1
+    store.history.add_history_snapshot(iid, NOW, [ka, ka, kb])              # repeated capture does not inflate
+    store.history.add_history_snapshot(iid, NOW-86400, [ka])
     store.history.add_history_snapshot(iid, NOW - 100 * 86400, [kg])        # ~100d old: Gamma x1
     return iid
 
@@ -46,11 +47,16 @@ def test_listen_distribution_genre_alltime_includes_old(store):
     assert store.charts.listen_distribution("genre", since=None) == {"techno": 3, "house": 1}
 
 
-def test_album_browse_ids_maps_title_to_browse(store):
+def test_album_browse_ids_maps_release_key_to_browse(store):
     store.identities.upsert_identity("me", "c", None, True)
     store.tracks.upsert_track("v1", "Song", "Art", "Cool Album", 200, album_browse_id="MPREb_X")
     store.tracks.upsert_track("v2", "Single", "Art", "Loose Single", 200)   # no browse -> excluded
-    assert store.charts.album_browse_ids() == {"Cool Album": "MPREb_X"}
+    ids = store.charts.album_browse_ids()
+    assert len(ids) == 1
+    key = next(iter(ids))
+    assert key.startswith('@album:')
+    assert ids[key] == 'MPREb_X'
+    assert store.charts.album_labels()[key] == 'Cool Album'
 
 
 def test_history_bounds_spans_earliest_to_latest(store):
@@ -79,7 +85,8 @@ def test_listen_distribution_year_buckets_by_decade(store):
 
 def test_listen_distribution_album(store):
     _seed(store)
-    assert store.charts.listen_distribution("album", since=None) == {"Album A": 3, "Album B": 1}
+    labels = store.charts.album_labels()
+    assert {labels[k]:v for k,v in store.charts.listen_distribution("album", since=None).items()} == {"Album A": 3, "Album B": 1}
 
 
 def test_listen_distribution_playlist_counts_per_membership(store):
@@ -112,7 +119,8 @@ def test_corpus_distribution_year_decades(store):
 
 def test_corpus_distribution_album(store):
     _seed(store)
-    assert store.charts.corpus_distribution("album") == {"Album A": 2, "Album B": 1}
+    labels = store.charts.album_labels()
+    assert {labels[k]:v for k,v in store.charts.corpus_distribution("album").items()} == {"Album A": 2, "Album B": 1}
 
 
 def test_corpus_distribution_playlist_distinct_tracks(store):

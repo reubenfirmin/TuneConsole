@@ -38,6 +38,8 @@ def test_home_is_default_route(store):
 
 
 def test_next_home_visit_expires_a_day_old_theme_menu(store):
+    from tests.mode_fixtures import seed_modes
+    seed_modes(store,1)
     from yt_playlist.rec import rec_params
     from yt_playlist.web.routes import home
     rec_params.set_param(store, "erosion_view_cap", 10)

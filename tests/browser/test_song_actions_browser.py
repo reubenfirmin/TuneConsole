@@ -120,9 +120,9 @@ def test_long_song_title_and_artwork_survive_creation(song_app, page, width, tmp
     title = "Checker Wrecker (feat. Jungle Boogie & Big Tony)"
     # Exercise both real image loading and a failed image's fallback.
     thumbnail = "/missing-cover.jpg" if width == 320 else "/static/road-trip-hero.png"
-    track = song_app["store"].upsert_track("checker-wrecker", title, "Lettuce", "Elevate", 300,
+    track = song_app["store"].tracks.upsert_track("checker-wrecker", title, "Lettuce", "Elevate", 300,
                                           thumbnail=thumbnail)
-    song_app["store"].set_playlist_tracks(song_app["source"], [track])
+    song_app["store"].playlists.set_playlist_tracks(song_app["source"], [track])
     page.set_viewport_size({"width": width, "height": 740})
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
     trigger = page.get_by_role("button", name=f"More actions for {title}")
@@ -149,7 +149,7 @@ def test_long_song_title_and_artwork_survive_creation(song_app, page, width, tmp
     page.screenshot(path=tmp_path / f"long-song-created-{width}.png", animations="disabled")
     page.keyboard.press("Escape")
     expect(trigger).to_be_focused()
-    saved = next(p for p in song_app["store"].get_playlists() if p.title == title)
+    saved = next(p for p in song_app["store"].playlists.get_playlists() if p.title == title)
     assert saved.thumbnail == thumbnail
     page.goto(f"{song_app['base']}/playlists")
     cover = page.locator(f'#new-playlists tr[data-playlist-id="{saved.id}"] img.pl-thumb')
@@ -283,7 +283,7 @@ def test_library_views_share_song_actions(song_app, page, surface):
 
 
 def test_generated_playlist_keeps_contextual_mood_actions(song_app, page):
-    song_app["store"].set_playlist_group("SOURCE", "Generated")
+    song_app["store"].playlists.set_playlist_group("SOURCE", "Generated")
     song_app['store'].playlists.mark_generated_playlist('SOURCE')
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
     row = page.get_by_role("row").filter(has_text="Owned Song")

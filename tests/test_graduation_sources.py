@@ -135,8 +135,8 @@ def test_radio_only_listening_day_graduates_nothing():
         s.tracks.set_track_genre(tid, "Techno")
         k = identity_key(f"song{i}", "band")
         keys.append(k)
-        s.history.record_play_event(iid, k, f"v{i}", now + i * 4000, playlist_ytm_id="PLRADIO")
-    s.history.record_history_plays(iid, now + 50000, keys)             # the same plays, post-sync shadows
+        s.history.record_play_event(iid, k, f"v{i}", now + i * 4000, playlist_ytm_id="PLRADIO", source_timezone='UTC')
+    s.history.record_history_plays(iid,now+50000,[(key,'Today') for key in keys],source_timezone='UTC')
     rec_params.set_param(s, "source_w_play", 0.5)              # same fast lane as the positive test
     axis = f"genre:{genre_map.family('Techno')}"
     day = 86400

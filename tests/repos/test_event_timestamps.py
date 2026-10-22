@@ -53,22 +53,27 @@ def test_radio_play_stays_excluded_when_history_shadow_lands_same_day():
     s = _store()
     day = 100 * 86400
     s.history.record_play_event(1, "radio|x", "v1", day + 61000, playlist_ytm_id="PLRADIO")
-    s.history.record_history_plays(1, day + 70000, ["radio|x"])        # the post-sync shadow, same UTC day
+    s.history.record_history_plays(1,day+70000,[("radio|x","Today")])
     assert s.history.recent_plays_with_ts(exclude_list_ids={"PLRADIO"}) == []
 
 
-def test_radio_play_stays_excluded_when_shadow_lands_one_day_off():
-    # M1 timezone edge: YTM buckets plays by the account's LOCAL day, but _parse_played_date anchors
-    # 'Today'/'Yesterday' on the UTC sync day, so a non-UTC evening radio play's history shadow can
-    # land one UTC day off in EITHER direction. The adjacent-day (+/- 1) widening must suppress both.
-    for shadow_day_offset in (-1, +1):
+def test_radio_exclusion_uses_account_calendar_on_both_sides_of_utc():
+    for zone,seconds in [('America/Costa_Rica',3600),('Pacific/Kiritimati',61000)]:
         s = _store()
         day = 100 * 86400
-        s.history.record_play_event(1, "radio|x", "v1", day + 61000, playlist_ytm_id="PLRADIO")
-        # the shadow bucketed to the adjacent UTC day (record_history_plays keys on the sync day)
-        s.history.record_history_plays(1, day + shadow_day_offset * 86400 + 70000, ["radio|x"])
-        assert s.history.recent_plays_with_ts(exclude_list_ids={"PLRADIO"}) == [], \
-            f"shadow at day offset {shadow_day_offset:+d} must stay suppressed"
+        s.history.record_play_event(1,'radio|x','v1',day+seconds,playlist_ytm_id='PLRADIO',source_timezone=zone)
+        s.history.record_history_plays(1,day+seconds+60,[('radio|x','Today')],source_timezone=zone)
+        assert s.history.recent_plays_with_ts(exclude_list_ids={'PLRADIO'})==[]
+
+
+def test_independent_adjacent_day_is_not_guessed_to_be_a_radio_shadow():
+    for offset in (-1,1):
+        s = _store()
+        day = 100*86400
+        s.history.record_play_event(1,'radio|x','v1',day+61000,playlist_ytm_id='PLRADIO')
+        s.history.record_history_plays(1,day+offset*86400+70000,['radio|x'])
+        assert s.history.recent_plays_with_ts(exclude_list_ids={'PLRADIO'})==[
+            ('radio|x',day+offset*86400+43200)]
 
 
 def test_play_events_identity_key_index_exists():
@@ -95,7 +100,7 @@ def test_shadow_suppression_is_day_scoped_not_key_global():
     s = _store()
     s.history.record_history_plays(1, 100 * 86400 + 50000, ["song|a"])   # organic, day 100
     s.history.record_play_event(1, "song|a", "v1", 102 * 86400 + 61000, playlist_ytm_id="PLRADIO")
-    s.history.record_history_plays(1, 102 * 86400 + 70000, ["song|a"])   # day-102 shadow of the radio play
+    s.history.record_history_plays(1,102*86400+70000,[("song|a","Today")])
     out = s.history.recent_plays_with_ts(exclude_list_ids={"PLRADIO"})
     assert out == [("song|a", 100 * 86400 + 43200)]              # day-100 noon ts, not day 102's
 

@@ -117,6 +117,39 @@ def test_resource_freshness_advances_independently(store, failed_resource):
     assert json.loads(store.settings.get_setting("library_sync_state")) == result
 
 
+@pytest.mark.parametrize("pages", [
+    {"continuation": "unread-page"},
+    {"continuations": [{"nextContinuationData": {"continuation": "unread-page"}}]},
+])
+def test_unread_playlist_pages_preserve_freshness_and_retry_immediately(store, monkeypatch, pages):
+    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    client = Client()
+    assert sync.sync_all(store, {iid: client}, 100)["status"] == "complete"
+    fetch = client.get_playlist
+    monkeypatch.setattr(client, "get_playlist", lambda *a, **kw: {**fetch(*a, **kw), **pages})
+    events = []
+    result = sync.sync_all(store, {iid: client}, 200, on_progress=events.append)
+    account = result["accounts"][str(iid)]
+    assert result["status"] == account["status"] == "partial"
+    assert account["resources"]["playlists"]["status"] == "partial"
+    assert account["resources"]["ratings"]["status"] == "skipped"
+    for name in ("playlists", "ratings"):
+        assert account["resources"][name]["last_success_at"] == 100
+        assert account["resources"][name]["last_attempt_at"] == 200
+    assert account["last_success_at"] == 100
+    assert account["resources"]["history"]["last_success_at"] == 200
+    assert store.settings.get_setting("last_sync_at") == "100"
+    assert store.settings.get_setting("last_sync_attempt_at") == "200"
+    assert sync_due(store, 201, 86400)
+    assert events[-1]["final"] and events[-1]["outcome"] == "partial"
+    assert sync_status(store, 201).stale
+
+    monkeypatch.setattr(client, "get_playlist", fetch)
+    assert sync.sync_all(store, {iid: client}, 201)["status"] == "complete"
+    assert store.settings.get_setting("last_sync_at") == "201"
+    assert not sync_due(store, 202, 86400)
+
+
 def test_no_clients_is_skipped_and_an_interrupted_attempt_is_due(store):
     iid = store.identities.upsert_identity("Main", "bridge", None, True)
     assert sync.sync_all(store, {}, 100)["status"] == "skipped"

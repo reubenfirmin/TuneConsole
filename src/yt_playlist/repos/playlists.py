@@ -1,5 +1,5 @@
 """PlaylistRepo: playlists, their track membership/ordering, groups, and hidden flags."""
-import json
+from yt_playlist.core.playlist_scopes import ensure,resolve
 
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.models import Playlist
@@ -14,14 +14,20 @@ _FIRST_TRACK_THUMBNAIL = (
 
 class PlaylistRepo(Repo):
     @synchronized
-    def playlist_provenance(self, ytm) -> dict:
+    def playlist_reference(self, ytm, identity_id=None):
+        return resolve(self.conn,ytm,identity_id)
+
+    @synchronized
+    def playlist_provenance(self, ytm, *, identity_id=None) -> dict:
+        ytm = resolve(self.conn,ytm,identity_id)
         row = self.conn.execute('SELECT origin,adopted,description FROM playlist_provenance WHERE ytm=?',
                                 (ytm,)).fetchone()
         return dict(row) if row else {'origin': 'ordinary', 'adopted': 1, 'description': None}
 
     @synchronized
-    def set_playlist_provenance(self, ytm, *, origin, adopted, description=None) -> None:
+    def set_playlist_provenance(self, ytm, *, origin, adopted, description=None, identity_id=None) -> None:
         with self.conn:
+            ytm = ensure(self.conn,ytm,identity_id)
             self.conn.execute('INSERT INTO playlist_provenance VALUES (?,?,?,?) '
                               'ON CONFLICT(ytm) DO UPDATE SET origin=excluded.origin,'
                               'adopted=excluded.adopted,description=excluded.description',
@@ -37,16 +43,19 @@ class PlaylistRepo(Repo):
     def adopt_generated_playlist(self, ytm) -> None:
         from yt_playlist.library.playlist_metadata import PROMOTED_DESCRIPTION
         with self.conn:
+            ytm = ensure(self.conn,ytm)
             self.conn.execute("UPDATE playlist_provenance SET adopted=1,description=? WHERE ytm=? "
                               "AND origin='tuneconsole'", (PROMOTED_DESCRIPTION, ytm))
 
     @synchronized
-    def is_quarantined_playlist(self, ytm) -> bool:
+    def is_quarantined_playlist(self, ytm, *, identity_id=None) -> bool:
+        ytm = resolve(self.conn,ytm,identity_id)
         return self.conn.execute('SELECT 1 FROM quarantined_playlists WHERE ytm=?', (ytm,)).fetchone() is not None
 
     @synchronized
-    def reconcile_playlist_provenance(self, ytm, description) -> None:
+    def reconcile_playlist_provenance(self, ytm, description, *, identity_id=None) -> None:
         from yt_playlist.library.playlist_metadata import is_generated_description, PROMOTED_DESCRIPTION
+        ytm = resolve(self.conn,ytm,identity_id)
         current = self.playlist_provenance(ytm)
         promoted = PROMOTED_DESCRIPTION.casefold() in (description or '').casefold()
         generated = is_generated_description(description)
@@ -83,18 +92,22 @@ class PlaylistRepo(Repo):
     def upsert_playlist(self, identity_id, ytm_playlist_id, title, track_count, content_hash, now,
                         thumbnail=None, *, created_at=None) -> int:
         """Sync metadata, preserving the actual creation date when one is known."""
+        ref = ensure(self.conn,ytm_playlist_id,identity_id)
         row = self.conn.execute(
             "SELECT id, first_seen, content_hash, last_changed FROM playlists "
             "WHERE identity_id=? AND ytm_playlist_id=?", (identity_id, ytm_playlist_id)).fetchone()
         if row is None:
-            cur = self.conn.execute(
-                "INSERT INTO playlists(identity_id,ytm_playlist_id,title,track_count,"
-                "content_hash,first_seen,last_seen,last_changed,thumbnail,created_at,created_at_source) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (identity_id, ytm_playlist_id, title, track_count, content_hash, now, now, now, thumbnail,
-                 created_at, "local" if created_at is not None else None))
-            self.conn.commit()
-            return cur.lastrowid
+            with self.conn:
+                membership_id = self.conn.execute(
+                    'INSERT INTO playlist_membership_refs(scope_ref,identity_id) VALUES (?,?)',
+                    (ref,identity_id)).lastrowid
+                self.conn.execute(
+                    "INSERT INTO playlists(id,identity_id,ytm_playlist_id,title,track_count,"
+                    "content_hash,first_seen,last_seen,last_changed,thumbnail,created_at,created_at_source,scope_ref) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (membership_id,identity_id, ytm_playlist_id, title, track_count, content_hash, now, now, now, thumbnail,
+                     created_at, "local" if created_at is not None else None,ref))
+            return membership_id
         last_changed = now if row["content_hash"] != content_hash else row["last_changed"]
         self.conn.execute(
             "UPDATE playlists SET title=?, track_count=?, content_hash=?, last_seen=?, last_changed=?, "
@@ -172,36 +185,10 @@ class PlaylistRepo(Repo):
 
     @synchronized
     def remove_playlist(self, playlist_id) -> None:
-        """Drop a playlist, its track links, and any cleanup/overlap prefs that referenced it.
-
-        Pruning the suppress/ignore/keep rows keeps stale pairs (one side deleted) from
-        lingering in the Hidden/Ignored sections. The same goes for the cleanup dismissals:
-        a per-playlist empty/tiny ignore is meaningless once the playlist is gone, and an
-        ignored merge that lost a member can never match its signature again (the cleanup
-        page would hide it forever with no way to restore it).
-
-        We deliberately KEEP the playlist's group assignment (playlist_group, keyed by the YouTube
-        id): groups are user curation that can't be reconstructed from YouTube, and a playlist that
-        disappears (a transient sync, or one re-added later) should get its group back automatically.
-        An orphaned group row is harmless. It just isn't shown until a matching playlist exists.
-        """
+        """Remove this account membership. Durable scope and curation survive reappearance."""
         with self.conn:
-            row = self.conn.execute("SELECT ytm_playlist_id FROM playlists WHERE id=?",
-                                    (playlist_id,)).fetchone()
-            ytm = row["ytm_playlist_id"] if row else None
             self.conn.execute("DELETE FROM playlist_tracks WHERE playlist_id=?", (playlist_id,))
             self.conn.execute("DELETE FROM playlists WHERE id=?", (playlist_id,))
-            if ytm is not None:
-                self.conn.execute("DELETE FROM suppressed_overlaps WHERE a=? OR b=?", (ytm, ytm))
-                self.conn.execute("DELETE FROM overlap_ignored WHERE ytm=?", (ytm,))
-                self.conn.execute("DELETE FROM overlap_kept WHERE a=? OR b=?", (ytm, ytm))
-                self.conn.execute("DELETE FROM cleanup_ignored WHERE ytm=?", (ytm,))
-                # members is a JSON list of ytm ids, so match in Python rather than by signature
-                stale = [r["signature"]
-                         for r in self.conn.execute("SELECT signature, members FROM ignored_merges")
-                         if ytm in json.loads(r["members"])]
-                for sig in stale:
-                    self.conn.execute("DELETE FROM ignored_merges WHERE signature=?", (sig,))
 
     @synchronized
     def get_playlists(self) -> list[Playlist]:
@@ -257,7 +244,8 @@ class PlaylistRepo(Repo):
                 for r in rows]
 
     @synchronized
-    def set_playlist_group(self, ytm, name) -> None:
+    def set_playlist_group(self, ytm, name, *, identity_id=None) -> None:
+        ytm = ensure(self.conn,ytm,identity_id)
         name = (name or "").strip()
         if name:
             self.conn.execute("INSERT OR REPLACE INTO playlist_group(ytm,name) VALUES (?,?)", (ytm, name))
@@ -266,12 +254,14 @@ class PlaylistRepo(Repo):
         self.conn.commit()
 
     @synchronized
-    def hide_playlist(self, ytm) -> None:
+    def hide_playlist(self, ytm, *, identity_id=None) -> None:
+        ytm = ensure(self.conn,ytm,identity_id)
         self.conn.execute("INSERT OR IGNORE INTO hidden_playlists(ytm) VALUES (?)", (ytm,))
         self.conn.commit()
 
     @synchronized
-    def unhide_playlist(self, ytm) -> None:
+    def unhide_playlist(self, ytm, *, identity_id=None) -> None:
+        ytm = ensure(self.conn,ytm,identity_id)
         self.conn.execute("DELETE FROM hidden_playlists WHERE ytm=?", (ytm,))
         self.conn.commit()
 

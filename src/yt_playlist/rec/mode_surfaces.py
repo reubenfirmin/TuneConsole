@@ -164,7 +164,7 @@ def prepare_bundles(store, now) -> dict:
     # cards on the existing ranker (assemble_cards falls back when a mode has no _ppr entry).
     try:
         from yt_playlist.rec import ppr
-        rankings = ppr.mode_rankings(store)
+        rankings = ppr.mode_rankings(store, snapshot=snapshot)
         payload["_ppr"] = {str(mid): rankings.get(mid, []) for mid in mode_ids}
         payload["_meta"]["ppr_policy"] = {
             "algorithm": "basket-ppr-v1", "built_at": now,

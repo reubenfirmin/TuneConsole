@@ -9,6 +9,7 @@ Methods raise ValueError for expected/user-facing problems (missing playlist, no
 callers turn those into messages and let unexpected exceptions bubble to their own handlers.
 """
 import logging
+from yt_playlist.core.accounts import client_for
 
 from yt_playlist.library import analysis
 from yt_playlist.library import sync as sync_mod
@@ -34,7 +35,10 @@ class PlaylistOps:
         return self._client_provider()
 
     def _client_for(self, playlist):
-        return self._clients().get(playlist.identity_id)
+        try:
+            return client_for(self.store,self._clients(),playlist_id=playlist.id)[1]
+        except ValueError:
+            return None
 
     # --- merge / duplicate resolution ---------------------------------------
     def apply_merge(self, playlist_ids, result_video_ids, keep) -> dict:
@@ -100,19 +104,13 @@ class PlaylistOps:
         """Create a new playlist from an album's tracks, under the master account."""
         if not browse_id:
             raise ValueError("no album given")
-        identity = self.store.identities.get_master_identity()
-        client = self._clients().get(identity.id)
-        if client is None:
-            raise ValueError("the master account isn't connected")
-        return create_playlist_from_album(self.store, browse_id, name, client, self.now_fn(), identity.id)
+        identity_id,client = client_for(self.store,self._clients())
+        return create_playlist_from_album(self.store, browse_id, name, client, self.now_fn(), identity_id)
 
     # --- shared song actions ------------------------------------------------
     def create_playlist_from_song(self, name, track) -> dict:
-        identity = self.store.identities.get_master_identity()
-        client = self._clients().get(identity.id)
-        if client is None:
-            raise ValueError("Your main account isn't connected.")
-        return create_playlist_from_song(self.store, name, track, client, self.now_fn(), identity.id)
+        identity_id,client = client_for(self.store,self._clients())
+        return create_playlist_from_song(self.store, name, track, client, self.now_fn(), identity_id)
 
     def add_song_to_playlist(self, playlist_id, track) -> dict:
         pl = self.store.playlists.get_playlist(playlist_id)
@@ -180,13 +178,8 @@ class PlaylistOps:
         # The like-button path: like/unlike a song in your main account's Liked Music (LM is
         # per-account; we target master). Resolve the master client here, then hand the rate+mirror
         # to LikedMusic so all LM membership changes go through one primitive.
-        master = next((i for i in self.store.identities.get_identities() if i.is_master), None)
-        if master is None:
-            raise ValueError("no main account configured")
-        client = self._clients().get(master.id)
-        if client is None:
-            raise ValueError("your main account isn’t connected")
-        LikedMusic(self.store).set_rating(master.id, video_id, on, client)
+        identity_id,client = client_for(self.store,self._clients())
+        LikedMusic(self.store).set_rating(identity_id, video_id, on, client)
         return {"liked": bool(on)}
 
     def _require_client(self, playlist_id):

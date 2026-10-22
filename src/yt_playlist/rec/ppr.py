@@ -51,17 +51,19 @@ def ppr_rank(W, seed_idx, alpha=_ALPHA, iters=_ITERS, tol=0.0):
     return r
 
 
-def mode_rankings(store, alpha=None, iters=None, tol=None, depth=None) -> dict:
+def mode_rankings(store, alpha=None, iters=None, tol=None, depth=None, *, snapshot=None) -> dict:
     """{mode_id: [key, ...]} - per active taste mode, the co-listen PPR order of the graph's tracks,
     walk restarted uniformly over that mode's member tracks (library tracks nearest the mode centroid).
     Truncated to `depth`. {} when the graph or content space is missing; a mode with no member present
     in the co-listen vocab maps to []. Precompute only (called from the rec worker); None args fall back
-    to the ppr_* knobs so a tuner can sweep alpha/tolerance without code changes."""
-    modes = taste_modes.live_modes(store)
+    to the ppr_* knobs so a tuner can sweep alpha/tolerance without code changes. A bundle caller can
+    supply its snapshot to keep these rankings in the same content space as its candidate buckets."""
+    snapshot = snapshot if snapshot is not None else store.rec_model.content_generation()
+    modes = taste_modes.live_modes(store, snapshot=snapshot)
     if not modes:
         return {}
     keys, W, idx = build_transition(store)
-    lkeys, LV, lidx = embed.load_content_vectors(store)
+    lkeys, LV, lidx = embed.load_content_vectors(store, snapshot=snapshot)
     if W is None or LV is None or not lkeys:
         return {}
     if alpha is None:

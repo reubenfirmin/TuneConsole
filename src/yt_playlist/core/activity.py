@@ -6,6 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from yt_playlist.core.work_diagnostics import work_span
+
 _CURRENT_WORK = ContextVar("tuneconsole_activity", default=None)
 
 
@@ -80,7 +82,7 @@ class Activity:
 
         def run():
             try:
-                with self.entered(release):
+                with self.entered(release), work_span(name):
                     return target(*args, **kwargs)
             finally:
                 release()

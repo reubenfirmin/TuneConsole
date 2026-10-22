@@ -21,6 +21,11 @@ class Playlist:
     created_at: float | None = None
     created_at_source: str | None = None
 
+    @property
+    def scope_ref(self):
+        from yt_playlist.core.playlist_scopes import key
+        return key(self.identity_id,self.ytm_playlist_id)
+
 
 @dataclass
 class Track:

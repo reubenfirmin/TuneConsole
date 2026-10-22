@@ -21,7 +21,7 @@ def _install_now_modes(store):
 def _install_now_content_vectors(store, monkeypatch, keys, V):
     V = V / np.linalg.norm(V, axis=1, keepdims=True)
     idx = {k: i for i, k in enumerate(keys)}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (keys, V, idx))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
     return V, idx
 
 
@@ -226,10 +226,11 @@ def test_artists_populate_from_play_history(store):
     iid = store.identities.upsert_identity("main", "cred", None, True)
     store.tracks.upsert_track("va", "ASong", "Alice", None, None)
     store.tracks.upsert_track("vb", "BSong", "Bob", None, None)
-    for ts in (10.0, 20.0, 30.0):
-        store.history.add_history_snapshot(iid, ts, ["asong|alice"])      # Alice played more
-    store.history.add_history_snapshot(iid, 40.0, ["bsong|bob"])
-    arts = {r["name"]: r for r in taste_viz.model_transparency(store, now=100.0)["artists"]}
+    day = 86400.0
+    for ts in (day, 2 * day, 3 * day):
+        store.history.add_history_snapshot(iid, ts, ["asong|alice"])
+    store.history.add_history_snapshot(iid, 4 * day, ["bsong|bob"])
+    arts = {r["name"]: r for r in taste_viz.model_transparency(store, now=5 * day)["artists"]}
     assert "Alice" in arts and "Bob" in arts
     assert arts["Alice"]["share"] > arts["Bob"]["share"]
     assert abs(arts["Alice"]["share"] + arts["Bob"]["share"] - 1.0) < 1e-9
@@ -435,7 +436,7 @@ def test_playlist_influence_preserves_whole_blend_and_listening_evidence(store):
         key = f"track {i}|artist"
         vectors.append((key, np.array([1, i + 1], dtype=np.float32).tobytes()))
         for j in range(plays):
-            store.history.add_history_snapshot(iid, i * 10 + j, [key])
+            store.history.add_history_snapshot(iid, j * 86400.0, [key])
     store.rec_model.replace_rec_vectors(vectors)
     store.settings.set_setting("rec_dim", "2")
 
@@ -503,12 +504,11 @@ def test_breadth_word_thresholds():
 
 
 def test_recent_play_counts_are_frequency_weighted(store):
-    # A replayed track counts more than once (unlike the deduped recent_keys_ordered).
+    # Exact replay events count individually; repeated coarse captures of a day do not.
     iid = store.identities.upsert_identity("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Hit", "Star", None, None)
     store.tracks.upsert_track("v2", "Bsong", "Other", None, None)
-    for ts in (10.0, 20.0, 30.0):
-        store.history.add_history_snapshot(iid, ts, ["hit|star"])        # played 3 times
-    store.history.add_history_snapshot(iid, 40.0, ["bsong|other"])
+    store.history.import_play_events(iid, [("hit|star", "v1", ts) for ts in (10.0, 20.0, 30.0)])
+    store.history.import_play_events(iid, [("bsong|other", "v2", 40.0)])
     counts = store.history.recent_play_counts(1000)
     assert counts["hit|star"] == 3 and counts["bsong|other"] == 1

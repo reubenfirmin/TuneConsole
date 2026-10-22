@@ -13,6 +13,7 @@ import random
 from urllib.parse import quote
 
 from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized
+from yt_playlist.core.catalog_query import playable_tracks_sql
 
 MIN_QUERY = 2                   # shorter queries are too noisy to bother
 CANDIDATE_CAP = 50              # rows fetched per section before the seeded sample
@@ -70,10 +71,10 @@ class SearchRepo(Repo):
         name = primary["name"]
         shown_keys = set()
 
+        eligible = playable_tracks_sql('SELECT * FROM tracks WHERE artist=?')
         trows = self.conn.execute(
-            "SELECT MIN(title) title, identity_key key, MIN(video_id) vid, MIN(thumbnail) thumb "
-            "FROM tracks WHERE artist=? AND video_id IS NOT NULL "
-            "GROUP BY identity_key LIMIT ?", (name, CANDIDATE_CAP)).fetchall()
+            "SELECT title, identity_key key, video_id vid, thumbnail thumb "
+            f"FROM ({eligible}) LIMIT ?", (name, CANDIDATE_CAP)).fetchall()
         picked = _sample(trows, q, per_section)
         if picked:
             shown_keys = {r["key"] for r in picked}
@@ -84,9 +85,10 @@ class SearchRepo(Repo):
 
         arows = self.conn.execute(
             "SELECT album, browse, MIN(thumb) thumb FROM ("
-            "  SELECT album, MIN(album_browse_id) browse, MIN(thumbnail) thumb FROM tracks "
-            "  WHERE artist=? AND album<>'' AND album_browse_id IS NOT NULL AND album_browse_id<>'' "
-            "  GROUP BY album "
+            "  SELECT a.title album,p.provider_id browse,COALESCE(a.thumbnail,MIN(t.thumbnail)) thumb "
+            "  FROM albums a JOIN album_tracks at ON at.album_id=a.id JOIN tracks t ON t.id=at.entry_id "
+            "  JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
+            "  WHERE t.artist=? AND NULLIF(a.title,'') IS NOT NULL GROUP BY a.id "
             "  UNION ALL "
             "  SELECT title album, browse_id browse, thumbnail thumb FROM saved_albums WHERE artist=?"
             ") WHERE browse IS NOT NULL AND browse<>'' GROUP BY browse LIMIT ?",
@@ -102,7 +104,7 @@ class SearchRepo(Repo):
             "SELECT p.id pid, p.title title, p.thumbnail thumb "
             "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
             "JOIN tracks t ON t.id=pt.track_id "
-            "LEFT JOIN quarantined_playlists g ON g.ytm=p.ytm_playlist_id "
+            "LEFT JOIN quarantined_playlists g ON g.ytm=p.scope_ref "
             "WHERE t.artist=? AND (g.name IS NULL OR g.name<>?) "
             "GROUP BY p.id LIMIT ?", (name, GENERATED_GROUP, CANDIDATE_CAP)).fetchall()
         picked = _sample(prows, q, per_section)
@@ -118,11 +120,10 @@ class SearchRepo(Repo):
 
     # --- direct song-title matches, minus anything already under Tracks by <artist> ---
     def _songs_section(self, like, q, per_section, shown_keys, sections):
+        eligible = playable_tracks_sql("SELECT * FROM tracks WHERE title LIKE ? ESCAPE '\\'")
         rows = self.conn.execute(
-            "SELECT MIN(title) title, MIN(artist) artist, identity_key key, MIN(video_id) vid, "
-            "MIN(thumbnail) thumb FROM tracks "
-            "WHERE title LIKE ? ESCAPE '\\' AND video_id IS NOT NULL "
-            "GROUP BY identity_key LIMIT ?", (like, CANDIDATE_CAP)).fetchall()
+            "SELECT title, artist, identity_key key, video_id vid, thumbnail thumb "
+            f"FROM ({eligible}) LIMIT ?", (like, CANDIDATE_CAP)).fetchall()
         rows = [r for r in rows if r["key"] not in shown_keys]
         picked = _sample(rows, q, per_section)
         if picked:
@@ -135,7 +136,7 @@ class SearchRepo(Repo):
     def _playlists_section(self, like, q, per_section, shown_pids, sections):
         rows = self.conn.execute(
             "SELECT p.id pid, p.title title, p.thumbnail thumb "
-            "FROM playlists p LEFT JOIN quarantined_playlists g ON g.ytm=p.ytm_playlist_id "
+            "FROM playlists p LEFT JOIN quarantined_playlists g ON g.ytm=p.scope_ref "
             "WHERE p.title LIKE ? ESCAPE '\\' AND (g.name IS NULL OR g.name<>?) "
             "GROUP BY p.id LIMIT ?", (like, GENERATED_GROUP, CANDIDATE_CAP)).fetchall()
         rows = [r for r in rows if r["pid"] not in shown_pids]

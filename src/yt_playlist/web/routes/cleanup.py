@@ -37,8 +37,8 @@ def build(ctx) -> APIRouter:
         overlaps = analysis.find_overlaps(store, exclude_playlist_ids=dupe_ids,
                                           suppressed=suppressed, ignored_ytm=ignored_ytm, kept=kept_pairs)
         playlists = store.playlists.get_playlists()
-        pl_by_ytm = {p.ytm_playlist_id: p for p in playlists}
-        kinds = {p.ytm_playlist_id: store.playlists.playlist_kind(p.id) for p in playlists}   # audio/video/mixed
+        pl_by_ytm = {p.scope_ref: p for p in playlists}
+        kinds = {p.scope_ref: store.playlists.playlist_kind(p.id) for p in playlists}   # audio/video/mixed
         # Only surface prefs whose playlists still exist: a deleted side leaves a stale pair.
         hidden = [{"a": a, "b": b, "a_title": pl_by_ytm[a].title, "b_title": pl_by_ytm[b].title}
                   for a, b, _ in store.overlaps.get_suppressed_overlaps()

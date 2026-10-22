@@ -18,7 +18,7 @@ def best_holdout(store, cap_days=30) -> int:
 
     A holdout bigger than a third of the span starves the context side of sufficient history
     to learn from, so we size the window proportionally to how much history exists."""
-    lo, hi = store.charts.history_bounds()
+    lo, hi = store.rec_query.evaluation_history_bounds()
     if lo is None or hi is None:
         return 1
     span_s = hi - lo
@@ -68,8 +68,9 @@ def artist_recall_at_k(store, k=10, min_size=3, seed=0) -> dict:
     rng = np.random.default_rng(seed)
     hits = trials = 0
     n = len(artists)
+    refs = store.artists.track_keys(library=True)
     for p in store.playlists.get_playlists():
-        pa = sorted({artist_model._artist_of(m) for m in store.playlists.get_playlist_track_keys(p.id)} & set(idx))
+        pa = sorted({a for m in store.playlists.get_playlist_track_keys(p.id) for a in refs.get(m,())} & set(idx))
         if len(pa) < min_size:
             continue
         held = pa[int(rng.integers(len(pa)))]
@@ -104,15 +105,17 @@ def temporal_recall(store, holdout_days=30, k=20) -> dict:
     keys, V, idx = embed.load_vectors(store)
     if V is None:
         return {"recall": None, "trials": 0, "reason": "no vectors built"}
-    _, hi = store.charts.history_bounds()
+    _, hi = store.rec_query.evaluation_history_bounds()
     if hi is None:
         return {"recall": None, "trials": 0, "reason": "no history"}
     cutoff = hi - holdout_days * 86400
     before = store.history.history_keys_before(cutoff)
     after = store.history.get_recent_history_keys(cutoff)
     context = [key for key in before if key in idx]
-    held = [key for key in after if key in idx and key not in before]   # new plays to predict
     gen_only = store.rec_query.generated_only_keys_since(cutoff)
+    # The daily projection already suppresses known sync shadows. Include the excluded
+    # event keys for accounting, then remove them before calculating any score.
+    held = [key for key in after | gen_only if key in idx and key not in before]
     generated_excluded = sum(1 for key in held if key in gen_only)
     held = [key for key in held if key not in gen_only]
     if not context or not held:
@@ -156,8 +159,8 @@ def _causal_window(store, cutoff, end, k, dim, method) -> dict:
     before = store.history.history_keys_before(cutoff)
     after = store.history.history_keys_between(cutoff, end)
     context = [key for key in before if key in idx]
-    held = [key for key in after if key in idx and key not in before]
     gen_only = store.rec_query.generated_only_keys_between(cutoff, end)
+    held = [key for key in after | gen_only if key in idx and key not in before]
     generated_excluded = sum(key in gen_only for key in held)
     held = [key for key in held if key not in gen_only]
     if not context or not held:
@@ -187,7 +190,7 @@ def rolling_temporal_recall(store, holdout_days=None, k=20, windows=3, dim=None,
     """
     if holdout_days is None:
         holdout_days = best_holdout(store)
-    _lo, hi = store.charts.history_bounds()
+    _lo, hi = store.rec_query.evaluation_history_bounds()
     if hi is None:
         return {"recall": None, "trials": 0, "windows": [], "viable_windows": 0,
                 "holdout_days": holdout_days, "reason": "no history"}

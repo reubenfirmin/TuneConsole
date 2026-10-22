@@ -321,6 +321,8 @@ class RecSurfaceRepo(Repo):
     # --- recipes: the exact theme/params a generated playlist was made from (legible + re-runnable) ---
     @synchronized
     def set_recipe(self, playlist_ytm, recipe, now=None) -> None:
+        from yt_playlist.core.playlist_scopes import ensure
+        playlist_ytm = ensure(self.conn,playlist_ytm)
         self.conn.execute(
             "INSERT INTO rec_recipes(playlist_ytm, recipe, created_at) VALUES (?,?,?) "
             "ON CONFLICT(playlist_ytm) DO UPDATE SET recipe=excluded.recipe, created_at=excluded.created_at",
@@ -329,6 +331,8 @@ class RecSurfaceRepo(Repo):
 
     @synchronized
     def get_recipe(self, playlist_ytm):
+        from yt_playlist.core.playlist_scopes import resolve
+        playlist_ytm = resolve(self.conn,playlist_ytm)
         row = self.conn.execute("SELECT recipe FROM rec_recipes WHERE playlist_ytm=?",
                                 (playlist_ytm,)).fetchone()
         return json.loads(row["recipe"]) if row else None
@@ -337,6 +341,8 @@ class RecSurfaceRepo(Repo):
     #     regrown a different way (#48). `state` is the client's serialized canvas blob, stored verbatim. ---
     @synchronized
     def set_cluster_canvas(self, playlist_ytm, state, now=None) -> None:
+        from yt_playlist.core.playlist_scopes import ensure
+        playlist_ytm = ensure(self.conn,playlist_ytm)
         self.conn.execute(
             "INSERT INTO cluster_canvas(playlist_ytm, state, created_at) VALUES (?,?,?) "
             "ON CONFLICT(playlist_ytm) DO UPDATE SET state=excluded.state, created_at=excluded.created_at",
@@ -345,12 +351,16 @@ class RecSurfaceRepo(Repo):
 
     @synchronized
     def get_cluster_canvas(self, playlist_ytm):
+        from yt_playlist.core.playlist_scopes import resolve
+        playlist_ytm = resolve(self.conn,playlist_ytm)
         row = self.conn.execute("SELECT state FROM cluster_canvas WHERE playlist_ytm=?",
                                 (playlist_ytm,)).fetchone()
         return row["state"] if row else None
 
     @synchronized
     def delete_cluster_canvas(self, playlist_ytm) -> None:
+        from yt_playlist.core.playlist_scopes import resolve
+        playlist_ytm = resolve(self.conn,playlist_ytm)
         self.conn.execute("DELETE FROM cluster_canvas WHERE playlist_ytm=?", (playlist_ytm,))
         self.conn.commit()
 
@@ -469,8 +479,10 @@ class RecSurfaceRepo(Repo):
     @synchronized
     def cached_similar(self, artist, now, ttl_days=14):
         """Cached Last.fm similar-artist list, or None if missing/expired."""
+        from yt_playlist.core import artists
+        aid = artists.lookup(self.conn,artist)
         row = self.conn.execute(
-            "SELECT payload, fetched_at FROM rec_artist_similar WHERE artist=?", (artist,)).fetchone()
+            "SELECT payload, fetched_at FROM rec_artist_similar WHERE artist_id=?", (aid,)).fetchone()
         if row is None or row["fetched_at"] is None or now - row["fetched_at"] > ttl_days * 86400:
             return None
         return json.loads(row["payload"])
@@ -480,16 +492,23 @@ class RecSurfaceRepo(Repo):
         """Cached Last.fm similar pairs [[name, match], ...] for an artist, ignoring TTL ([] if none).
         Used by the #28 artist model's §C edge block, where a slightly-stale relatedness hint is fine
         (the model rebuilds periodically and new_artists keeps the cache warm)."""
-        row = self.conn.execute(
-            "SELECT payload FROM rec_artist_similar WHERE artist=?", (artist,)).fetchone()
-        return json.loads(row["payload"]) if row and row["payload"] else []
+        from yt_playlist.core import artists
+        aid = artists.lookup(self.conn,artist)
+        return [(artists.token(r[0]),r[1]) for r in self.conn.execute(
+            'SELECT target_artist_id,weight FROM artist_similarity_targets WHERE source_artist_id=?', (aid,))]
 
     @synchronized
     def cache_similar(self, artist, pairs, now) -> None:
+        from yt_playlist.core import artists
+        aid = artists.state_id(self.conn,artist)
         self.conn.execute(
-            "INSERT INTO rec_artist_similar(artist, payload, fetched_at) VALUES (?,?,?) "
-            "ON CONFLICT(artist) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
-            (artist, json.dumps(pairs), now))
+            "INSERT INTO rec_artist_similar(artist, payload, fetched_at,artist_id) VALUES (?,?,?,?) "
+            "ON CONFLICT(artist_id) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
+            (artists.token(aid), json.dumps(pairs), now,aid))
+        self.conn.execute('DELETE FROM artist_similarity_targets WHERE source_artist_id=?', (aid,))
+        for name,weight in pairs:
+            target = artists.state_id(self.conn,name)
+            self.conn.execute('INSERT OR REPLACE INTO artist_similarity_targets VALUES (?,?,?)', (aid,target,weight))
         self.conn.commit()
 
     # --- graduation ledger (interaction-driven; no wall-clock decay) ---

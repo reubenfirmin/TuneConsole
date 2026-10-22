@@ -294,41 +294,6 @@ PARAMS = [
               "for all cards with shadow replay; 1 retains experimental ranking for all. The default "
               "0.5 is a live experiment. Recorded retirement disables shadow replay at 0.",
               0.0, 1.0, 0.05, 0.5, advanced=True),
-    # --- Dynamic radio (#93). Session-scoped reactivity for the primed-handoff radio. All advanced
-    # (a tuner sweeps them; hand-setting only shifts feel, never correctness). ---
-    ParamSpec("radio_artist_cap", "Radio artist cap", "discovery",
-              "Maximum tracks by one artist during a radio session.",
-              1, 10, 1, 3, integer=True, advanced=True),
-    ParamSpec("radio_candidate_pool", "Radio candidate pool", "discovery",
-              "Top-scoring tracks considered for the next radio pick. Higher includes more variety; "
-              "lower stays closer to your strongest matches.",
-              10, 500, 10, 60, integer=True, advanced=True),
-    ParamSpec("radio_skip_artist_penalty", "Radio skip artist penalty", "discovery",
-              "How much skipping a radio track reduces other picks by that artist during the session.",
-              0.0, 2.0, 0.05, 0.5, advanced=True),
-    ParamSpec("radio_skip_mode_penalty", "Radio skip style penalty", "discovery",
-              "How much skipping a radio track reduces picks with a similar listening style during the session.",
-              0.0, 2.0, 0.05, 0.25, advanced=True),
-    ParamSpec("radio_skip_halflife_h", "Radio skip half-life (hours)", "discovery",
-              "Hours until a radio skip penalty has half its original strength.",
-              0.25, 24.0, 0.25, 2.0, advanced=True),
-    ParamSpec("radio_volume_floor", "Radio volume floor", "discovery",
-              "Volume at or below this fraction counts as negative feedback during radio. "
-              "Radio recommends less similar music while the current song keeps playing.",
-              0.0, 0.5, 0.01, 0.1, advanced=True),
-    ParamSpec("radio_seed_depth", "Radio queue length", "discovery",
-              "Unplayed tracks radio keeps queued ahead. Higher gives you more upcoming tracks to skip to.",
-              1, 10, 1, 6, integer=True, advanced=True),
-    ParamSpec("radio_deck_size", "Radio update interval (tracks)", "discovery",
-              "Tracks in each radio batch. Your skips and adjustments affect the next batch, "
-              "so lower values make radio respond sooner.",
-              2, 6, 1, 3, integer=True, advanced=True),
-    ParamSpec("radio_variety", "Radio variety", "discovery",
-              "0 always picks your strongest match. Higher gives less familiar tracks more chances to play.",
-              0.0, 0.9, 0.05, 0.5, advanced=True),
-    ParamSpec("radio_freshness_days", "Radio freshness (days)", "discovery",
-              "Days before radio can repeat a track in a new session. 0 allows immediate repeats.",
-              0.0, 14.0, 0.5, 3.0, advanced=True),
 ]
 
 PARAMS_BY_NAME = {p.name: p for p in PARAMS}

@@ -3,6 +3,7 @@ and grow a tree outward. Each node's next ring = library tracks nearest its PINN
 tilted away from the PRUNED set (the per-cluster "negative model"). Saving reuses POST /home/generate
 (materialize a Generated playlist + open it on YouTube); the client decides which tracks to send."""
 from yt_playlist.core.activity import activity_for
+from yt_playlist.core.accounts import client_for
 import json
 import random
 
@@ -193,10 +194,14 @@ def build(ctx) -> APIRouter:
                    "artist": meta[k]["artist"], "album": meta[k]["album"],
                    "thumbnail": meta[k]["thumbnail"]}
                   for k in order if k in meta and meta[k].get("video_id")]
-        identity_id, client = next(iter((ctx.client_provider() or {}).items()), (None, None))
+        account_error = None
+        try:
+            identity_id,client = client_for(store,ctx.client_provider())
+        except ValueError as exc:
+            identity_id,client,account_error = None,None,str(exc)
         result = {"name": name}
         if client is None or not tracks:
-            result["error"] = "Couldn't create it. Connect an account and keep at least one track."
+            result["error"] = account_error or "Keep at least one track to create a playlist."
         else:
             try:
                 res = await activity_for(ctx).to_thread(

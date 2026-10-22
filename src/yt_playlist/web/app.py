@@ -21,9 +21,10 @@ from yt_playlist.web.icons import arrow_icon
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core import updatecheck
 from yt_playlist.core.activity import WorkClosing
+from yt_playlist.core.work_diagnostics import CpuDiagnostics
 from yt_playlist.core.update_lifecycle import acquire_restart_locks
 from yt_playlist.rec.journeys import JOURNEY_LABELS
-from yt_playlist.rec.radio import RadioSession
+from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.context import Ctx
 from yt_playlist.web.jobs import SyncJobs
 from yt_playlist.web.provider_links import provider_search_url
@@ -212,8 +213,11 @@ def create_app(store, client_provider, *, now_fn=time.time,
         stop.clear()
         ctx.work.start_executor()
         threads = []
+        diagnostics = CpuDiagnostics(ctx.work)
         try:
             if background_work:
+                diagnostics.start()
+                ctx.radio.prepare()
                 ctx.rec_worker.start_ticker()
                 ctx.enrich_worker.start_ticker()
                 ctx.rec_worker.trigger_mode_refresh()
@@ -226,6 +230,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
             yield
         finally:
             ctx.work.close_admission()
+            diagnostics.stop()
             stop.set()
             ctx.rec_worker.shutdown()
             ctx.enrich_worker.shutdown()
@@ -319,8 +324,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
     genre_lib.configure(store)                                 # load (and seed) the genre whitelist
 
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
-              templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge,
-              radio=RadioSession())
+              templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge)
+    ctx.radio = PlaylistRadio(ctx)
     if updater is None and updatecheck.install_kind() == "flatpak":
         from yt_playlist.core.flatpak_update import FlatpakUpdater
         updater = FlatpakUpdater()

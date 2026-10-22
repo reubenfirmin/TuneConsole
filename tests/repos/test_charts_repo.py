@@ -11,7 +11,8 @@ def _seed(store):
     store.playlists.set_playlist_tracks(lm, [a])                     # Alpha is liked (in LM)
     ka = store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (a,)).fetchone()["k"]
     kb = store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (b,)).fetchone()["k"]
-    store.history.add_history_snapshot(iid, 1000.0, [ka, ka, kb])  # Alpha 2 plays, Beta 1
+    store.history.add_history_snapshot(iid, 1000.0, [ka, ka, kb])  # duplicate capture is still one day
+    store.history.add_history_snapshot(iid, 86400+1000.0, [ka])   # Alpha on another day
     return iid, pl
 
 
@@ -37,10 +38,11 @@ def test_ticker_artwork_uses_saved_album_cover_and_ignores_empty_thumbnails(stor
                            "thumbnail": "/album-art.png"})
 
     assert store.charts.ticker_thumbnails("artist") == {"Artist A": "/track-art.png"}
-    assert store.charts.ticker_thumbnails("album") == {"Album A": "/album-art.png"}
+    key = next(k for k,v in store.charts.album_browse_ids().items() if v=='MPRE_a')
+    assert store.charts.ticker_thumbnails("album") == {key: "/album-art.png"}
 
     store.collection.remove_saved_album("MPRE_a")
-    assert store.charts.ticker_thumbnails("album") == {"Album A": "/track-art.png"}
+    assert store.charts.ticker_thumbnails("album") == {key: "/album-art.png"}
 
 
 def test_playlist_ticker_artwork_prefers_cover_and_falls_back_to_track_art(store):
@@ -86,13 +88,13 @@ def test_artist_songs_can_disambiguate_same_name_by_browse_id(store):
     assert [s["title"] for s in store.charts.artist_songs("Shared Name", "UC_first")] == ["First act"]
 
 
-def test_artist_songs_includes_album_tracks_missing_an_unambiguous_artist_id(store):
+def test_artist_songs_keeps_unidentified_credit_separate_from_provider_identity(store):
     store.tracks.upsert_track("v1", "One", "Artist", "First", 180, artist_browse_id="UC_artist")
     store.collection.add_saved_album({"browse": "B1", "title": "Second", "artist": "Artist"})
     store.tracks.upsert_track("v2", "Two", "Artist", "Second", 180, album_browse_id="B1")
 
     songs = store.charts.artist_songs("Artist", "UC_artist")
-    assert {s["title"] for s in songs} == {"One", "Two"}
+    assert {s["title"] for s in songs} == {"One"}
     assert all(s["playlists"] == [] for s in songs)
     assert store.charts.artist_songs("Artist", "UC_unrelated") == []
 

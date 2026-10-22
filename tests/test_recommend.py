@@ -93,7 +93,7 @@ def test_comfort_candidates_scores_plays_times_recency(store):
     store.tracks.upsert_track("v2", "HeavyRecent", "X", None, None)    # key "heavyrecent|x"
     store.tracks.upsert_track("v3", "Barely", "X", None, None)         # key "barely|x"
     day = 86400.0
-    now = 400 * day
+    now = 400 * day + day / 2  # Coarse observations use a noon date key.
     for d in (300, 250, 200, 120):                              # 4 plays, last 120d ago -> factor 1.0
         store.history.add_history_snapshot(iid, now - d * day, ["dormant|x"])
     for d in (40, 35, 30, 25, 20, 15, 10, 1):                  # 8 plays, last yesterday -> factor ~1/30
@@ -432,7 +432,7 @@ def test_rediscover_one_fresh_track_does_not_unstale_a_cold_playlist(store):
     # ago". With median-of-tracks it stays cold, because most of it is cold.
     iid = store.identities.upsert_identity("main", "cred", None, True)
     day = 86400.0
-    now = 300 * day
+    now = 300 * day + day / 2
     # "Decoy": 7 cold tracks (180d) + 1 fresh (1d). MAX would say ~1 day; median says ~180 days.
     _seed_pl(store, iid, "PD", "Decoy", 8, now, play_each_at=[now - 1 * day] + [now - 180 * day] * 7)
     _seed_pl(store, iid, "PW", "Warm", 8, now, play_each_at=[now - 20 * day] * 8)

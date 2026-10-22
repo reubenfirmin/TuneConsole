@@ -34,7 +34,7 @@ def _install_modes(store):
 def _install_content_vectors(store, monkeypatch, keys, V):
     V = V / np.linalg.norm(V, axis=1, keepdims=True)
     idx = {k: i for i, k in enumerate(keys)}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (keys, V, idx))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
     return V, idx
 
 
@@ -145,7 +145,7 @@ def test_no_active_modes_returns_none(store, monkeypatch):
 
 def test_no_content_vectors_returns_none(store, monkeypatch):
     _install_modes(store)
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: ([], None, {}))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: ([], None, {}))
     iid = _identity(store)
     now = 100_000.0
     keys = ["a1", "a2", "a3"]

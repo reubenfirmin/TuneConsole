@@ -46,7 +46,7 @@ def _request_frame(ws):
 def test_album_operation_round_trips_through_live_bridge_without_blocking_loop(store, monkeypatch, saved, failure):
     iid = store.identities.upsert_identity('main', 'bridge', None, True)
     if not saved:
-        store.collection.add_saved_album({'browse': 'MPREb_x', 'title': 'The Album'})
+        store.collection.add_saved_album({'browse': 'MPREb_x', 'title': 'The Album'},identity_id=iid)
     before = store.collection.get_saved_albums()
     bridge = Bridge()
     original_execute = bridge.execute

@@ -2,6 +2,7 @@
 (for saved albums folded into the library) genre/year enrichment with the same live flow as playlists."""
 import re
 from yt_playlist.core.activity import activity_for
+from yt_playlist.core.accounts import catalog_client,main_client
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
@@ -51,7 +52,8 @@ def build(ctx) -> APIRouter:
         browse_id = (request.query_params.get("browse") or "").strip()
         album = None
         try:
-            client = next(iter((ctx.client_provider() or {}).values()), None)
+            clients = ctx.client_provider()
+            client = main_client(store,clients) if is_upload_album(browse_id) else catalog_client(clients)
             if client and browse_id:
                 a = fetch_album(client, browse_id)
                 remember_album(store, browse_id, a)
@@ -113,7 +115,8 @@ def build(ctx) -> APIRouter:
         if not vids:
             problem = "The full album could not be fetched. Reconnect to YouTube Music and try sharing again."
             try:
-                client = next(iter((ctx.client_provider() or {}).values()), None)
+                clients = ctx.client_provider()
+                client = main_client(store,clients) if is_upload_album(browse) else catalog_client(clients)
                 a = fetch_album(client, browse) if client else {}
                 tracks = shareable_album_tracks(a)
                 title = a.get("title")
@@ -148,7 +151,7 @@ def build(ctx) -> APIRouter:
         if tid is None:
             return _toast(request, "track not found")
         store.tracks.set_track_genre(tid, genre)
-        ctx.rec_worker.trigger_mode_refresh()
+        ctx.rec_worker.trigger_content_update(video_ids=[vid])
         return _album_row(request, browse, vid)
 
     @router.post("/album/{browse}/track-year")
@@ -161,7 +164,7 @@ def build(ctx) -> APIRouter:
         if tid is None:
             return _toast(request, "track not found")
         store.tracks.set_track_year(tid, year)
-        ctx.rec_worker.trigger_mode_refresh()
+        ctx.rec_worker.trigger_content_update(video_ids=[vid])
         return _album_row(request, browse, vid)
 
     @router.post("/album/create-playlist")

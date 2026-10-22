@@ -80,7 +80,9 @@ def test_add_tracks_to_liked_music_likes_each_song(store):
 
 
 def test_track_like_without_master_returns_toast(store):
-    store.identities.upsert_identity("alt", "cred", None, False)             # no master configured
-    c = _client(store, lambda: {})
+    iid = store.identities.upsert_identity("alt", "cred", None, False)       # no main configured
+    other_account = FakeClient()
+    c = _client(store, lambda: {iid: other_account})
     r = c.post("/track/like", data={"video_id": "v1", "on": "1"})
-    assert r.status_code == 422 and "main account" in r.text
+    assert r.status_code == 422 and "Choose a main account in Setup" in r.text
+    assert other_account.rated == []

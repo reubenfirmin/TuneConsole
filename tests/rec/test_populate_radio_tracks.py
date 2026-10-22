@@ -14,7 +14,8 @@ class _Client:
 
 
 def _ctx(store):
-    return SimpleNamespace(store=store, client_provider=lambda: {"yt": _Client()},
+    identity_id = store.identities.upsert_identity('main', 'c', None, True)
+    return SimpleNamespace(store=store, client_provider=lambda: {identity_id: _Client()},
                            now_fn=lambda: 1000.0,
                            logger=SimpleNamespace(info=lambda *a, **k: None))
 

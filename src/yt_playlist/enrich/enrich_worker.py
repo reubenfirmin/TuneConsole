@@ -152,22 +152,14 @@ class EnrichWorker:
                     track["provider_jobs"] = store.enrichment.enrichment_provider_jobs(track["recording_id"])
         completed = self._run_batch(batch, scope)
         if completed:
-            try:                                  # never let a rebuild crash the drain
-                from yt_playlist.rec import embed, fresh_pool
-                memberships = store.enrichment.enrichment_memberships(completed)
-                if 'library' in memberships:
-                    rec_worker = getattr(self.ctx, "rec_worker", None)
-                    if rec_worker is not None:
-                        rec_worker.trigger_mode_refresh()
-                    else:
-                        embed.maybe_rebuild_content_vectors(store)
-                if 'discovery' in memberships:
-                    rec_worker = getattr(self.ctx, "rec_worker", None)
-                    if rec_worker is not None:
-                        rec_worker.trigger_mode_refresh(force=True)
-                    else:
-                        embed.build_discovered_content_vectors(store)
-                        fresh_pool.prepare(store, self.ctx.now_fn())
+            try:                                  # metadata placement must never crash the drain
+                keys = {t["identity_key"] for t in batch if t["job_id"] in completed}
+                rec_worker = getattr(self.ctx, "rec_worker", None)
+                if rec_worker is not None:
+                    rec_worker.trigger_content_update(keys)
+                else:
+                    from yt_playlist.rec import content_updates
+                    content_updates.update_tracks(store, keys, self.ctx.now_fn())
             except Exception:  # noqa: BLE001
                 self.ctx.logger.warning("recommendation refresh after enrich batch failed", exc_info=True)
         return len(completed) + art_completed

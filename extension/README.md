@@ -27,8 +27,8 @@ WebSocket only from that `chrome-extension://` origin, which a web page cannot f
 
 ## What you should see
 
-- The service worker console (`chrome://extensions` > this extension > "service worker") logs
-  "connected" once the WebSocket to the backend is up.
+- The app shows the extension connection status. Routine connection and playback activity
+  stays quiet in the browser console.
 - When the app makes a request (for example, a sync), the request appears in the YTM tab's
   DevTools **Network** tab, filtered for `youtubei`, right alongside YouTube Music's own API
   calls. That visibility is the whole point: nothing is hidden in the service worker.
@@ -97,6 +97,36 @@ All events are stored locally in the app's database.
 - The fetch observer never alters or blocks requests; it only observes them. The app's own API
   calls run in the extension's isolated world, so they are structurally excluded from observation.
 
+## Radio Session console
+
+Home's Radio tab (`/#radio`) injects `radio_session.js` on demand.
+It reads Music's native playback store, turns the identified Autoplay switch off, and revisits
+the saved playlist after each confirmed change. Once the sidebar page contains the saved tracks,
+it follows the current song's native watch endpoint with the current playback position. The
+session starts with three songs, then keeps one song saved
+ahead; the four continuations on Home are proposals, and selecting one replaces only the
+unplayed playlist suffix. Opening Radio reattaches to the current session without restarting it.
+It confirms adoption against Music's actual upcoming tracks, separately from the embedded video
+player and the browse page. A native navigation request alone does not confirm a direction switch.
+Navigation is attempted once per saved version and current song, preserving the paused state.
+The observer never dispatches native queue edits or sends a track array to the player.
+
+After reloading the unpacked extension, start a session and open the **YouTube Music tab's**
+DevTools console (page context). To copy the compact live playback report:
+
+```js
+copy(JSON.stringify(window.__tcRadioSession.inspect(), null, 2))
+```
+
+`window.__tcRadioSession.inspect({methods: true})` includes native method sources when needed.
+`window.__tcRadioSession.source(owner, method)` returns one full native method, including
+owners `ytmusic-app.navigator` and `ytmusic-app.playlistPollingHandler`.
+Routine playback, connection, and Radio activity do not print to the browser console. Radio keeps
+a bounded native-event trace for the inspection report. Unexpected service worker failures print
+at most once per failure type per minute. Backend `Radio playback:` lines report saved, native,
+and embedded-player upcoming IDs when those states change. The probe does not include cookies
+or request headers.
+
 ## If it fails
 
 Check the service worker console for the reason:
@@ -131,12 +161,6 @@ Set a version in `manifest.json` higher than the last uploaded version, then run
 `dist/tuneconsole-extension-<version>.zip` to the existing store listing.
 The package omits the development `key`, README, hidden files, and source maps.
 
-Radio is unreleased and disabled at build time in normal packages and unpacked source loads.
-Those builds ignore radio commands and skip radio storage recovery; normal playback, library
-requests, and listening sensors remain available. To make an internal radio preview, run
-`scripts/build-extension.sh --enable-radio`. It produces
-`dist/tuneconsole-extension-<version>-radio-preview.zip`, marks the extension name as a radio
-preview, and adds the `storage` permission needed to recover radio decks after a worker restart.
-It retains the development `key`, so you can extract it and load the directory unpacked for
-local preview use. Do not upload the preview package to the public listing. The app's radio
-controls are available at `http://127.0.0.1:8765/?radio=true`.
+Radio Sessions use a saved playlist in the existing YouTube Music tab. Open
+`http://127.0.0.1:8765/#radio` to choose a starting song. Reload the extension after
+updating its source so the playlist observer is available.

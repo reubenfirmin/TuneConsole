@@ -38,8 +38,8 @@ def test_cleanup_drops_non_top_artists_caps_and_prunes_orphans(monkeypatch):
         s.discovery.upsert_discovered_album(f"d{i}", "Drop", f"T{i}", "2000", None, 0.0)
     s.discovery.upsert_discovered_track("t|d", "v", "T", "Drop", "Al", None, None, None, "d0", 0.0)   # orphaned after cleanup
     s.discovery.upsert_discovered_track("r|x", "v-radio", "R", "A", None, None, None, None, "radio:v", 0.0)  # radio, kept
-    monkeypatch.setattr(type(s), "interested_artists",
-                        lambda self, limit=None: [{"artist": "Keep", "score": 9.0}], raising=False)
+    monkeypatch.setattr(s.discovery, "interested_artists",
+                        lambda limit=None: [{"artist": "Keep", "artist_id":s.artists.resolve('Keep'), "score": 9.0}])
     rec_params.set_param(s, "discovery_albums_per_artist", 2)
     out = discover.cleanup_discovery_pool(s, rng=random.Random(0))
     albums = s.discovery.get_discovered_albums()

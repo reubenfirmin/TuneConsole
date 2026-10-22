@@ -83,7 +83,7 @@ def build(ctx):
         playlist = store.playlists.get_playlist(body.playlist_id)
         if result["added"] and not result.get("already_present"):
             measurement.record_action(store, "save", ctx.now_fn(), video_id=body.song.video_id,
-                                      generated=store.playlists.is_quarantined_playlist(playlist.ytm_playlist_id))
+                                      generated=store.playlists.is_quarantined_playlist(playlist.scope_ref))
         try:
             ctx.bridge.send_control({"type": "refresh-view", "playlist": playlist.ytm_playlist_id})
         except Exception:  # noqa: BLE001 - a disconnected player must not undo a successful add

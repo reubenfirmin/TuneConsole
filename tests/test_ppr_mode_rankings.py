@@ -36,7 +36,7 @@ def test_mode_rankings_orders_by_per_mode_ppr(monkeypatch, store):
     lkeys = ["a", "b", "c"]
     LV = np.array([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     lidx = {"a": 0, "b": 1, "c": 2}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (lkeys, LV, lidx))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (lkeys, LV, lidx))
     store.modes.replace_modes([
         {"mode_id": 1, "label": "m1", "families": [["house", 1]],
          "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 50, "rep_keys": []},
@@ -69,7 +69,7 @@ def test_mode_rankings_stale_centroid_dim_returns_empty(monkeypatch, store):
     lkeys = ["a", "b", "c"]
     LV = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)   # 3-D
     lidx = {"a": 0, "b": 1, "c": 2}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (lkeys, LV, lidx))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (lkeys, LV, lidx))
     store.modes.replace_modes([
         {"mode_id": 1, "label": "m1", "families": [["house", 1]],
          "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 50, "rep_keys": []},   # 2-D

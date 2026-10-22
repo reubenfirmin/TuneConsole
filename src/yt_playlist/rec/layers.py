@@ -46,10 +46,11 @@ def now_mode_mix(store, now):
     gate isn't cleared. Public (not `_`-prefixed): taste_viz needs the full mix, not just the reduced
     readings the other two callers take from it.
     """
-    modes = taste_modes.live_modes(store)
+    snapshot = store.rec_model.content_generation()
+    modes = taste_modes.live_modes(store, snapshot=snapshot)
     if not modes:
         return None, 0, modes
-    _ckeys, CV, cidx = embed.load_content_vectors(store)
+    _ckeys, CV, cidx = embed.load_content_vectors(store, snapshot=snapshot)
     if CV is None:
         return None, 0, modes
 
@@ -196,10 +197,11 @@ def session_mode_mix(store, now):
     contributed (unweighted, matching `now_mode_mix`'s `n`); `modes` is the active mode list. Below the
     gate this returns None, never a weak guess, mirroring every other layer in this module.
     """
-    modes = taste_modes.live_modes(store)
+    snapshot = store.rec_model.content_generation()
+    modes = taste_modes.live_modes(store, snapshot=snapshot)
     if not modes:
         return None, 0, modes
-    _ckeys, CV, cidx = embed.load_content_vectors(store)
+    _ckeys, CV, cidx = embed.load_content_vectors(store, snapshot=snapshot)
     if CV is None:
         return None, 0, modes
 

@@ -52,7 +52,7 @@ def fuzzy_ratio(a: str, b: str) -> float:
 
 def track_artist(track: dict) -> str:
     artists = track.get("artists") or []
-    return artists[0].get("name") or "" if artists else ""
+    return ", ".join(a['name'] for a in artists if isinstance(a,dict) and a.get('name'))
 
 def track_album(track: dict):
     alb = track.get("album")

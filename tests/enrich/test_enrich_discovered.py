@@ -1,4 +1,4 @@
-"""One enrichment queue can mix library and discovery tracks and refresh Fresh's ranking."""
+"""One queue enriches library and discovery tracks, then places only completed recordings."""
 from functools import partial
 import logging
 from types import SimpleNamespace
@@ -30,7 +30,7 @@ def test_drain_processes_discovered(store):
 
 
 def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store):
-    from yt_playlist.rec import embed, fresh_pool
+    from yt_playlist.rec import content_updates
 
     store.settings.set_setting("enrich_caught_up_at", "50")
     store.tracks.upsert_track("older", "Older library song", "Artist", None, 200, created_at=1.0)
@@ -38,10 +38,11 @@ def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store
     store.discovery.upsert_discovered_track("new|artist", "new", "New", "Artist", None, None,
                                   None, None, "radio:seed", 100.0)
     seen, prepared = [], []
-    monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", lambda s: None)
-    monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: None)
-    monkeypatch.setattr(fresh_pool, "prepare", lambda s, now: prepared.append(
-        s.discovery.discovered_tracks_by_keys(["new|artist"])["new|artist"]))
+    def update(s, keys, now):
+        prepared.append((set(keys), now,
+            s.discovery.discovered_tracks_by_keys(["new|artist"])["new|artist"]))
+
+    monkeypatch.setattr(content_updates, "update_tracks", update)
 
     def waterfall(s, batch, cfg, on_progress, should_stop=None, sink_for=None, **kwargs):
         seen.append([track["title"] for track in batch])
@@ -56,10 +57,13 @@ def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store
     assert seen == [["Newest library song", "New"]]
     assert store.enrichment.queue_remaining() == 1
     assert store.tracks.get_track_enrichment(newest) == ("techno", "2024")
-    assert prepared[0]["genre"] == "techno" and prepared[0]["year"] == "2024"
-    assert prepared[0]["audio"] == {"bpm": 128.0, "energy": .8, "danceability": .7}
+    keys, now, discovery = prepared[0]
+    assert keys == {"newest library song|artist", "new|artist"} and now == 500.0
+    assert discovery["genre"] == "techno" and discovery["year"] == "2024"
+    assert discovery["audio"] == {"bpm": 128.0, "energy": .8, "danceability": .7}
     assert worker.drain_once(limit=1) == 1
     assert seen[-1] == ["Older library song"]
+    assert prepared[1][0] == {"older library song|artist"}
     assert store.enrichment.queue_remaining() == 0
 
 

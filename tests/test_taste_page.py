@@ -698,7 +698,7 @@ def test_taste_page_shows_now_reading_with_live_posterior(store, monkeypatch):
     V = np.array([[1.0, 0.02], [1.0, 0.03], [1.0, 0.01]], dtype=np.float32)
     V = V / np.linalg.norm(V, axis=1, keepdims=True)
     idx = {k: i for i, k in enumerate(keys)}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (keys, V, idx))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
     iid = store.identities.upsert_identity("main", "cred", None, True)
     now = 100_000.0
     rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]

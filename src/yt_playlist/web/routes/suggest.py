@@ -181,7 +181,7 @@ def build(ctx) -> APIRouter:
         except (TypeError, ValueError):
             return HTMLResponse("", status_code=422)
         pl = store.playlists.get_playlist(pid)
-        recipe = store.rec_surface.get_recipe(pl.ytm_playlist_id) if pl else None
+        recipe = store.rec_surface.get_recipe(pl.scope_ref) if pl else None
         journey = (recipe or {}).get("journey")
         if journey:
             graduation.graduate_facet(store, f"journey:{journey}", 1 if direction >= 0 else -1, now_fn())

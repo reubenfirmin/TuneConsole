@@ -132,9 +132,6 @@ const next = 'https://music.youtube.com/watch?list=PL_new';
     await report(3, {type: 'pevent', kind: 'bye'});
     assert.equal(frames.length, count, 'a paused/browsed tab cannot replace or clear Now Playing');
     await report(2, {type: 'now-heartbeat', title: 'Autoplay', paused: true});
-    vm.runInContext('liveTabId = 2; standbyTabId = 3;', context);
-    await report(3, {type: 'now-heartbeat', title: 'Standby', paused: false});
-    assert.equal((await context.pickYtmTab()).id, 2, 'standby cannot take playback ownership');
   }
   if(scenario==='rating_handoff') {
     old.mutedInfo={muted:true};browsing.audible=true;
@@ -217,7 +214,7 @@ const next = 'https://music.youtube.com/watch?list=PL_new';
   assert.equal(tabs.find(t => t.id === 2).url, next);
   assert(updated.every(change => !change.active), 'keep the owner on TuneConsole');
   if (scenario !== 'pending') {
-    assert(messages.some(m => m.id === 3 && m.type === 'deck-pause'), 'silence the other music tab');
+    assert(messages.some(m => m.id === 3 && m.type === 'pause'), 'silence the other music tab');
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """

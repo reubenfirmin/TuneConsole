@@ -202,19 +202,40 @@ def test_click_save_returns_confirmation_and_allows_another_choice(store):
         assert store.enrichment.outstanding_conflicts() == 0
 
 
-def test_current_value_outside_provider_candidates_can_be_kept(store):
-    tid, _ = _seed(store)
-    store.tracks.set_track_genre(tid, "My own genre")
+def _keep_current_value(store, tid, *, user_choice):
+    assert store.enrichment.metadata_provenance(tid)['fields']['genre'] == {
+        'value':'My own genre','override':user_choice,
+        'source':'user' if user_choice else 'legacy_unknown'}
     store.enrichment.upsert_conflict(tid, "genre", [{"provider": "musicbrainz", "value": "Rock"},
                                          {"provider": "discogs", "value": "Pop"}])
     c = _client(store)
     body = c.get("/enrich/conflicts").text
     assert 'value="My own genre"' in body
-    assert "Saved locally; original source not recorded" in body
+    assert ("Your choice" if user_choice else "Saved locally; original source not recorded") in body
     response = c.post(f"/enrich/conflicts/{tid}/genre", data={"value": "My own genre"},
                       headers={"HX-Request": "true"})
     assert response.status_code == 200 and "Saved" in response.text
+    assert "Your choice" in response.text
     assert store.tracks.get_track_enrichment(tid)[0] == "My own genre"
+    assert store.enrichment.metadata_provenance(tid)['fields']['genre'] == {
+        'value':'My own genre','override':True,'source':'conflict_resolution'}
+    assert store.enrichment.outstanding_conflicts() == 0
+
+
+def test_current_value_outside_provider_candidates_can_be_kept(store):
+    tid, _ = _seed(store)
+    store.tracks.set_track_genre(tid, "My own genre")
+    _keep_current_value(store, tid, user_choice=True)
+
+
+def test_legacy_current_value_can_be_kept_after_populated_upgrade(legacy_store):
+    store = legacy_store
+    with store.conn:
+        tid = store.conn.execute(
+            "INSERT INTO tracks(video_id,title,artist,identity_key,genre) "
+            "VALUES ('v','Song','Artist','song|artist','My own genre')").lastrowid
+    store.init_schema()
+    _keep_current_value(store, tid, user_choice=False)
 
 
 def test_conflict_review_is_paginated(store):

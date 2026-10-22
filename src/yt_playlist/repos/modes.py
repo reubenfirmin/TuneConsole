@@ -53,9 +53,11 @@ class ModesRepo(Repo):
                 "SELECT first_seen FROM taste_modes WHERE mode_id=?", (u["mode_id"],)).fetchone()
             first_seen = existing["first_seen"] if existing is not None else now
             self.conn.execute(
-                "INSERT OR REPLACE INTO taste_modes"
+                "INSERT INTO taste_modes"
                 "(mode_id, label, families, centroid, size, rep_keys, active, first_seen, last_seen, space) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?) ON CONFLICT(mode_id) DO UPDATE SET "
+                "label=excluded.label,families=excluded.families,centroid=excluded.centroid,"
+                "size=excluded.size,rep_keys=excluded.rep_keys,active=1,last_seen=excluded.last_seen,space=excluded.space",
                 (u["mode_id"], u["label"], fam, blob, int(u["size"]), reps, first_seen, now,
                  u.get("space") or ""))
         for mid in retired_ids:
@@ -121,10 +123,13 @@ class ModesRepo(Repo):
         Do not "fix" this by excluding generated playlists here. Every row in this table is, by
         construction, a play of a generated playlist. Quarantining it would delete the signal entirely.
         """
-        self.conn.execute(
-            "INSERT OR IGNORE INTO rec_mode_picks(playlist_id, mode_id, ranker, created_at) "
-            "VALUES (?, ?, ?, ?)", (int(playlist_id), int(mode_id), ranker, float(now)))
-        self.conn.commit()
+        with self.conn:
+            # A historical caller may only retain the local handle. Keep its context
+            # unknown; allocating future memberships must never reuse that handle.
+            self.conn.execute('INSERT OR IGNORE INTO playlist_membership_refs(id) VALUES (?)',(int(playlist_id),))
+            self.conn.execute(
+                "INSERT OR IGNORE INTO rec_mode_picks(playlist_id, mode_id, ranker, created_at) "
+                "VALUES (?, ?, ?, ?)", (int(playlist_id), int(mode_id), ranker, float(now)))
 
     @synchronized
     def epoch_started_at(self, epoch):
@@ -136,7 +141,7 @@ class ModesRepo(Repo):
 
     @synchronized
     def impression_counts(self, since=None, *, before=None) -> dict:
-        sql = "SELECT mode_id, COUNT(*) c FROM rec_mode_impressions WHERE 1=1"
+        sql = "SELECT mode_id, COUNT(*) c FROM rec_mode_impressions WHERE mode_id IS NOT NULL"
         args = []
         if since is not None:
             sql += " AND created_at >= ?"
@@ -149,7 +154,7 @@ class ModesRepo(Repo):
 
     @synchronized
     def pick_rows(self, since=None, *, before=None) -> list:
-        sql = "SELECT playlist_id, mode_id FROM rec_mode_picks WHERE 1=1"
+        sql = "SELECT playlist_id, mode_id FROM rec_mode_picks WHERE mode_id IS NOT NULL"
         args = []
         if since is not None:
             sql += " AND created_at >= ?"
@@ -168,20 +173,20 @@ class ModesRepo(Repo):
         Exits remain raw; skips/completions are classified at read time with the shared rules.
         Plays and exits are queried separately so joining them cannot multiply either count.
         """
-        cohort = "FROM rec_mode_picks mp JOIN playlists p ON p.id=mp.playlist_id "
+        cohort = "FROM rec_mode_picks mp JOIN playlist_membership_refs m ON m.id=mp.playlist_id JOIN playlist_scopes s ON s.ref=m.scope_ref "
         bounds = "(:since IS NULL OR mp.created_at>=:since)"
         args = {"since": since}
         rows = self.conn.execute(
-            "SELECT p.id, COUNT(pe.id) plays, MAX(pe.played_at) last_play " + cohort +
-            "LEFT JOIN play_events pe ON pe.playlist_ytm_id=p.ytm_playlist_id "
-            "AND pe.identity_id=p.identity_id AND pe.played_at>=mp.created_at "
-            f"WHERE {bounds} GROUP BY p.id", args).fetchall()
+            "SELECT mp.playlist_id id, COUNT(pe.id) plays, MAX(pe.played_at) last_play " + cohort +
+            "LEFT JOIN play_events pe ON pe.playlist_ytm_id=s.provider_id "
+            "AND pe.identity_id=m.identity_id AND pe.played_at>=mp.created_at "
+            f"WHERE {bounds} GROUP BY mp.playlist_id", args).fetchall()
         stats = {r["id"]: {"plays": r["plays"], "last_play": r["last_play"],
                             "skips": 0, "completions": 0} for r in rows}
         exits = self.conn.execute(
-            "SELECT p.id, pe.position, pe.duration " + cohort +
-            "JOIN player_events pe ON pe.playlist_ytm_id=p.ytm_playlist_id "
-            "AND pe.identity_id=p.identity_id AND pe.at>=mp.created_at "
+            "SELECT mp.playlist_id id, pe.position, pe.duration " + cohort +
+            "JOIN player_events pe ON pe.playlist_ytm_id=s.provider_id "
+            "AND pe.identity_id=m.identity_id AND pe.at>=mp.created_at "
             f"WHERE {bounds} AND pe.kind IN ('track_exit', 'bye')", args).fetchall()
         for event in exits:
             verdict = classify_exit(event["position"], event["duration"])

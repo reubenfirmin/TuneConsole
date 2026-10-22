@@ -1,5 +1,6 @@
 """Setup wizard: identities, provider configuration, and local import connections."""
 from yt_playlist.core.activity import activity_for
+from yt_playlist.core.accounts import client_for
 from urllib.parse import quote
 from html import escape
 
@@ -223,9 +224,10 @@ def build(ctx) -> APIRouter:
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Choose a destination identity") from None
         identity = next((i for i in store.identities.get_identities() if i.id == identity_id), None)
-        client = (ctx.client_provider() or {}).get(identity_id) if identity else None
-        if client is None:
-            raise HTTPException(status_code=409, detail="Connect the selected YouTube Music identity")
+        try:
+            _,client = client_for(store,ctx.client_provider(),identity_id=identity_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="Connect the selected YouTube Music identity") from exc
         return identity, client
 
     def _snapshot(token, stage, *, consume=False):
@@ -385,16 +387,15 @@ def build(ctx) -> APIRouter:
             raise HTTPException(status_code=409, detail="album outcome is already resolved")
         return item
 
-    def _spotify_client():
+    def _spotify_destination():
         job = current_job(ctx)
         if job and job.get("identity_id") is not None:
-            return _destination(job["identity_id"])[1]
-        identities = store.identities.get_identities()
-        identity = next((i for i in identities if i.is_master), identities[0] if identities else None)
-        client = (ctx.client_provider() or {}).get(identity.id) if identity else None
-        if client is None:
-            raise HTTPException(status_code=409, detail="YouTube Music is not connected")
-        return client
+            identity,remote = _destination(job["identity_id"])
+            return identity.id,remote
+        try:
+            return client_for(store,ctx.client_provider())
+        except ValueError as exc:
+            raise HTTPException(status_code=409,detail=str(exc)) from exc
 
     @router.post("/import/spotify-library/find-album-candidates")
     async def spotify_library_find_candidates(request: Request):
@@ -407,7 +408,7 @@ def build(ctx) -> APIRouter:
             # Bridge-backed YTMusic calls wait for replies delivered by this app's
             # WebSocket handler. Running them on the event loop deadlocks that reply.
             item["candidates"] = await activity_for(ctx).to_thread(
-                find_album_candidates, _spotify_client(), item)
+                find_album_candidates, _spotify_destination()[1], item)
             save_job(store, job)
         except Exception:  # noqa: BLE001 - a failed lookup leaves the report intact
             ctx.logger.exception("Spotify import candidate lookup failed")
@@ -424,9 +425,10 @@ def build(ctx) -> APIRouter:
         form = await request.form()
         item = _report_album(job, form.get("album_index"))
         try:
+            identity_id,remote = _spotify_destination()
             outcome = await activity_for(ctx).to_thread(
-                save_selected_album, store, _spotify_client(), item,
-                (form.get("browse_id") or "").strip())
+                save_selected_album, store, remote, item,
+                (form.get("browse_id") or "").strip(), identity_id=identity_id)
         except (ValueError, HTTPException) as exc:
             message = quote(str(exc.detail if isinstance(exc, HTTPException) else exc))
             return RedirectResponse(f"/import/spotify-library/report?spotify_error={message}", status_code=303)

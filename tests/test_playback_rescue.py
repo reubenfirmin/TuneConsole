@@ -240,9 +240,3 @@ def test_ensure_playing_clicks_the_page_play_button_as_a_fallback():
     rejected or there is no <video> yet."""
     src = _content()
     assert "ytmusic-play-button-renderer" in src
-    """The radio decks have their own waiting-state net (deckWaitingFocused + deck-waiting pevents).
-    The rescue is for the plain play path only, and must not double up on deck tabs."""
-    src = _bg()
-    rescue = src[src.index("async function runPlaybackRescue"):]
-    rescue = rescue[:rescue.index("\n}")]
-    assert "deckWindowId" not in rescue and "toggleDecks" not in rescue

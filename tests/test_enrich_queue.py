@@ -8,14 +8,10 @@ def _track(store, vid, title, artist, **kw):
 
 
 def _play(store, identity_key, n=1):
-    # record n plays for a song (history_items rows under a snapshot); playcount = COUNT(*) by key
+    # Enrichment uses listening-day counts, independently of exact replay frequency.
     iid = store.identities.upsert_identity("main", "cred", None, True)
-    sid = store.conn.execute("INSERT INTO history_snapshots(identity_id, taken_at) "
-                             "VALUES (?, 1.0)", (iid,)).lastrowid
-    for _ in range(n):
-        store.conn.execute("INSERT INTO history_items(snapshot_id, identity_key) VALUES (?,?)",
-                           (sid, identity_key))
-    store.conn.commit()
+    for day in range(n):
+        store.history.record_history_plays(iid,day*86400+43200,[identity_key],source_timezone='UTC')
 
 
 def _names(batch):

@@ -258,10 +258,10 @@ def test_build_emits_ranked_insights_and_spotlight(store):
       one_song    event_day=119 rec=1-7/42=0.8333  mag=1.3/4=0.325  rarity=0.60 -> score=0.1625
     -> rank order: emergence, song_of_week, one_song. Rank-1 (emergence) becomes the spotlight."""
     _track(store, "k1", "A1", "house")
-    _snap(store, 50, ["k1"])                      # floor_day=50 (k1's first play)
     _track(store, "k2", "B1", "house")
-    _snap(store, 98, ["k2"])                       # week 98: 1 play
-    _snap(store, 119, ["k2"] * 12)                 # week 119: 12 plays, latest full week (119+7<=126)
+    store.history.import_listening_events(1,
+        [('k1','vk1',50*86400+43200),('k2','vk2',98*86400+43200)] +
+        [('k2','vk2',119*86400+43200+i*300) for i in range(12)],source_timezone='UTC')
     payload = tr.build(store, now=126 * 86400.0)
     insights = payload["insights"]
     assert [i["signature"] for i in insights] == ["emergence:B1:119", "song_of_week:119:k2",

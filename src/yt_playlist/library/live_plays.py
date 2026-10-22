@@ -21,17 +21,10 @@ _STATUSES = {"LIKE", "DISLIKE"}
 
 def resolve_identity(store, brand_id):
     """Map a report's brand id (ytcfg DELEGATED_SESSION_ID; empty on the main account) to an
-    identity id: exact brand_account_id match, else the master identity, else the first configured
-    identity. None when no identities exist yet (pre-setup: nothing to attribute the play to)."""
-    idents = store.identities.get_identities()
-    if not idents:
-        return None
-    if brand_id:
-        for i in idents:
-            if i.brand_account_id == brand_id:
-                return i.id
-    master = next((i for i in idents if i.is_master), None)
-    return master.id if master else idents[0].id
+    identity id. Unknown or ambiguous remote accounts cannot be attributed safely."""
+    matches = [i.id for i in store.identities.get_identities()
+               if (i.brand_account_id or '') == (brand_id or '')]
+    return matches[0] if len(matches)==1 else None
 
 
 def handle_play_event(ctx, msg, now) -> bool:
@@ -52,9 +45,8 @@ def handle_play_event(ctx, msg, now) -> bool:
     status = (msg.get("likeStatus") or "").strip()
     new = store.history.record_play_event(ident, key, (msg.get("videoId") or None), now,
                                   playlist_ytm_id=(msg.get("playlist") or None),
-                                  like_status=(status or None))
+                                  like_status=(status or None),source_timezone=msg.get('timeZone'))
     if new:
-        store.history.record_history_plays(ident, now, [key], source_timezone=msg.get("timeZone"))
         store.settings.set_setting("last_plays_sync_at", str(now))   # plays-freshness for the sync-status badge
     if status in _STATUSES:
         if msg.get('videoId'):

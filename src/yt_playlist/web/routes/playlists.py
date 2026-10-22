@@ -59,7 +59,7 @@ def build(ctx) -> APIRouter:
 
     def _is_generated(pid):
         pl = store.playlists.get_playlist(pid)
-        return pl is not None and store.playlists.is_quarantined_playlist(pl.ytm_playlist_id)
+        return pl is not None and store.playlists.is_quarantined_playlist(pl.scope_ref)
 
     def _record_alt_version_events(pid, old_video_id, tracks):
         # #95: choosing an alternate version off the alternates modal is the user saying "these two
@@ -129,14 +129,14 @@ def build(ctx) -> APIRouter:
         cutoff = now - 7 * 86400
         rows = []
         for p in store.playlists.get_playlists():
-            if p.ytm_playlist_id in hidden:
+            if p.scope_ref in hidden:
                 continue
             last, listens = stats.get(p.id, (None, 0))
-            group = groups.get(p.ytm_playlist_id, "")
-            quarantined = store.playlists.is_quarantined_playlist(p.ytm_playlist_id)
+            group = groups.get(p.scope_ref, "")
+            quarantined = store.playlists.is_quarantined_playlist(p.scope_ref)
             generated_created = p.created_at
             if quarantined and generated_created is None:
-                generated_created = recipe_dates.get(p.ytm_playlist_id)
+                generated_created = recipe_dates.get(p.scope_ref)
                 # Another install's generated playlists have no local creation timestamp.
                 # Use their dated title for ordering only; keep actual creation metadata unknown.
                 if generated_created is None:
@@ -182,8 +182,8 @@ def build(ctx) -> APIRouter:
         tracks = store.charts.playlist_tracks_detail(pid)
         from yt_playlist.rec import measurement
         measurement.record_action(store, "open", now_fn(), playlist_id=pid)
-        is_generated = store.playlists.is_quarantined_playlist(pl.ytm_playlist_id)
-        recipe = store.rec_surface.get_recipe(pl.ytm_playlist_id) if is_generated else None
+        is_generated = store.playlists.is_quarantined_playlist(pl.scope_ref)
+        recipe = store.rec_surface.get_recipe(pl.scope_ref) if is_generated else None
         return templates.TemplateResponse(request, "playlist.html", {
             "pl": pl, "tracks": tracks, "identity": labels.get(pl.identity_id, "?"),
             "show_identity": len(labels) > 1,
@@ -193,7 +193,7 @@ def build(ctx) -> APIRouter:
             "mood_states": taste_analysis.track_mood_states(store, now_fn()) if is_generated else {},
             "recipe": recipe,
             # #48: a cluster-derived playlist whose canvas we saved can be reopened and regrown
-            "has_cluster_canvas": bool(store.rec_surface.get_cluster_canvas(pl.ytm_playlist_id)) if is_generated else False,
+            "has_cluster_canvas": bool(store.rec_surface.get_cluster_canvas(pl.scope_ref)) if is_generated else False,
             "journey_label": journeys.JOURNEY_LABELS.get((recipe or {}).get("journey")) if is_generated else None,
             "journey_desc": journeys.JOURNEY_DESCRIPTIONS.get((recipe or {}).get("journey")) if is_generated else None,
             "kind": store.playlists.playlist_kind(pid), "total_plays": sum(t["plays"] for t in tracks),
@@ -420,7 +420,7 @@ def build(ctx) -> APIRouter:
         if tid is None:
             return _toast(request, "track not found")
         store.tracks.set_track_genre(tid, genre)
-        ctx.rec_worker.trigger_mode_refresh()
+        ctx.rec_worker.trigger_content_update(video_ids=[vid])
         return _track_row(request, pid, vid)
 
     @router.post("/playlist/{pid}/track-year")
@@ -434,7 +434,7 @@ def build(ctx) -> APIRouter:
         if tid is None:
             return _toast(request, "track not found")
         store.tracks.set_track_year(tid, year)
-        ctx.rec_worker.trigger_mode_refresh()
+        ctx.rec_worker.trigger_content_update(video_ids=[vid])
         return _track_row(request, pid, vid)
 
     @router.post("/playlist/{pid}/track-title")
@@ -524,10 +524,10 @@ def build(ctx) -> APIRouter:
         pl = store.playlists.get_playlist(pid)
         if pl is None:
             return _refresh()
-        was_generated = store.playlists.is_quarantined_playlist(pl.ytm_playlist_id)
-        store.playlists.adopt_generated_playlist(pl.ytm_playlist_id)
-        if store.playlists.get_playlist_groups().get(pl.ytm_playlist_id) == GENERATED_GROUP:
-            store.playlists.set_playlist_group(pl.ytm_playlist_id, "")
+        was_generated = store.playlists.is_quarantined_playlist(pl.scope_ref)
+        store.playlists.adopt_generated_playlist(pl.scope_ref)
+        if store.playlists.get_playlist_groups().get(pl.scope_ref) == GENERATED_GROUP:
+            store.playlists.set_playlist_group(pl.scope_ref, "")
         if was_generated:
             from yt_playlist.rec import measurement
             measurement.record_action(store, "promotion", now_fn(), playlist_id=pid,
@@ -549,7 +549,7 @@ def build(ctx) -> APIRouter:
         for pid in _ids(form):
             pl = store.playlists.get_playlist(pid)
             if pl is not None:
-                store.playlists.set_playlist_group(pl.ytm_playlist_id, name)
+                store.playlists.set_playlist_group(pl.scope_ref, name)
         return _refresh()
 
     @router.post("/playlists/copy")
@@ -600,7 +600,7 @@ def build(ctx) -> APIRouter:
                 continue
             if pl.ytm_playlist_id in SYSTEM_PLAYLIST_IDS:
                 # undeletable system playlists (Liked Music, Episodes for Later) -> just hide locally
-                store.playlists.hide_playlist(pl.ytm_playlist_id)
+                store.playlists.hide_playlist(pl.scope_ref)
                 items.append({"id": pid, "title": pl.title, "status": "hidden",
                               "detail": "Hidden from TuneConsole; system playlist kept on YouTube."})
                 continue

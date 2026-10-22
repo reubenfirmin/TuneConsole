@@ -271,7 +271,8 @@ class EnrichmentRepo(Repo):
                 options.append(option)
             if candidate["provider"] not in option["providers"]:
                 option["providers"].append(candidate["provider"])
-        return {"track_id": track["id"], "title": track["title"], "artist": track["artist"],
+        return {"track_id": track["id"], "video_id": track["video_id"],
+                "title": track["title"], "artist": track["artist"],
                 "current": track["genre"], "candidates": candidates, "options": options}
 
     @synchronized
@@ -420,7 +421,8 @@ class EnrichmentRepo(Repo):
         row = self.conn.execute(
             "SELECT COUNT(*) n FROM enrichment_conflict c "
             "JOIN catalog_tracks t ON t.id=c.track_id "
-            "WHERE t.album_browse_id=? AND c.resolved=0", (album_browse_id,)).fetchone()
+            "WHERE EXISTS(SELECT 1 FROM album_track_links a WHERE a.entry_id=t.id AND a.browse_id=?) "
+            "AND c.resolved=0", (album_browse_id,)).fetchone()
         return row["n"]
 
     def _conflicts(self, rows) -> list:
@@ -444,7 +446,8 @@ class EnrichmentRepo(Repo):
         rows = self.conn.execute(
             "SELECT c.track_id, c.field, c.candidates, t.title, t.artist, t.video_id, t.mb_recording_id "
             "FROM enrichment_conflict c JOIN catalog_tracks t ON t.id=c.track_id "
-            "WHERE t.album_browse_id=? AND c.resolved=0 ORDER BY t.title, c.field",
+            "WHERE EXISTS(SELECT 1 FROM album_track_links a WHERE a.entry_id=t.id AND a.browse_id=?) "
+            "AND c.resolved=0 ORDER BY t.title, c.field",
             (album_browse_id,)).fetchall()
         return self._conflicts(rows)
 
@@ -463,15 +466,15 @@ class EnrichmentRepo(Repo):
     # Per-track song plays + the play sums of the containers it belongs to (playlist / album / artist).
     # Reused by the priority queue. `tp` = track plays; the three container CTEs aggregate over members.
     _QUEUE_CTES = """
-        WITH plays AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key),
+        WITH plays AS (SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key),
         tp AS (SELECT t.id,t.recording_id, COALESCE(p.c,0) sp FROM catalog_tracks t
                LEFT JOIN plays p ON p.identity_key=t.identity_key),
         pl_plays AS (SELECT playlist_id,SUM(sp) c FROM (
                      SELECT DISTINCT pt.playlist_id,tp.recording_id,tp.sp FROM playlist_tracks pt
                      JOIN tp ON tp.id=pt.track_id) GROUP BY playlist_id),
-        al_plays AS (SELECT ab,SUM(sp) c FROM (
-                     SELECT DISTINCT t.album_browse_id ab,tp.recording_id,tp.sp FROM catalog_tracks t
-                     JOIN tp ON tp.id=t.id WHERE t.album_browse_id IS NOT NULL) GROUP BY ab),
+        al_plays AS (SELECT album_id,SUM(sp) c FROM (
+                     SELECT DISTINCT at.album_id,tp.recording_id,tp.sp FROM album_tracks at
+                     JOIN tp ON tp.id=at.entry_id) GROUP BY album_id),
         ar_plays AS (SELECT ar,SUM(sp) c FROM (
                      SELECT DISTINCT t.artist ar,tp.recording_id,tp.sp FROM catalog_tracks t
                      JOIN tp ON tp.id=t.id WHERE t.artist IS NOT NULL AND t.artist<>'') GROUP BY ar)
@@ -490,7 +493,8 @@ class EnrichmentRepo(Repo):
             SELECT t.*, COALESCE(p.c, 0) sp,
               MAX(COALESCE((SELECT MAX(plp.c) FROM playlist_tracks pt JOIN pl_plays plp
                             ON plp.playlist_id=pt.playlist_id WHERE pt.track_id=t.id), 0),
-                  COALESCE((SELECT c FROM al_plays WHERE ab=t.album_browse_id), 0),
+                  COALESCE((SELECT MAX(ap.c) FROM al_plays ap JOIN album_tracks at ON at.album_id=ap.album_id
+                            JOIN catalog_entries e ON e.id=at.entry_id WHERE e.recording_id=t.recording_id), 0),
                   COALESCE((SELECT c FROM ar_plays WHERE ar=t.artist), 0)) AS best
             FROM enrichment_tracks t LEFT JOIN plays p ON p.identity_key=t.identity_key
             WHERE (t.first_enriched_at IS NULL OR """ + self._pending_coverage() + ") AND " + self._eligible_providers(coverage=True) + """

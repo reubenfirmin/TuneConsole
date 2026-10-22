@@ -21,6 +21,65 @@ def _imports(tree):
             yield from (f"{node.module}.{alias.name}" for alias in node.names)
 
 
+def _flat_repository_references(tree, methods):
+    # Known fixture/context names remain useful, but constructor assignments and
+    # aliases must also work for reader/writer/repaired and fixture dictionaries.
+    stores = {"store", "s", "db", "reopened", "store2", "ctx.store", "self.store", "self.ctx.store"}
+    constructors = {"Store", "yt_playlist.core.store.Store"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "yt_playlist.core.store":
+            constructors.update(a.asname or a.name for a in node.names if a.name == "Store")
+
+    def is_store(node):
+        return (ast.unparse(node) in stores
+                or (isinstance(node, ast.Call) and ast.unparse(node.func) in constructors)
+                or (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+                    and node.slice.value == "store"))
+
+    assignments = [node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))]
+    while True:
+        before = len(stores)
+        for node in assignments:
+            if node.value is not None and is_store(node.value):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                stores.update(ast.unparse(t) for t in targets if isinstance(t, (ast.Name, ast.Attribute)))
+        if len(stores) == before:
+            break
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in methods - {"get"} and is_store(node.value):
+            yield node.lineno, ast.unparse(node)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "setattr" and len(node.args) > 1
+                and isinstance(node.args[1], ast.Constant) and node.args[1].value in methods):
+            target = node.args[0]
+            if (isinstance(target, ast.Call) and isinstance(target.func, ast.Name)
+                    and target.func.id == "type" and len(target.args) == 1):
+                target = target.args[0]
+            if is_store(target):
+                yield node.lineno, "patch repository directly"
+
+
+def test_repository_guard_finds_store_aliases_and_fixture_lookups():
+    tree = ast.parse('''
+from yt_playlist.core.store import Store as CatalogStore
+reader = CatalogStore("data.db")
+writer = reader
+repaired = writer
+reader.content_generation()
+writer.content_generation()
+repaired.queue_remaining()
+songs["store"].get_playlist(1)
+monkeypatch.setattr(type(writer), "generated_track_keys", lambda: set())
+reader.rec_model.content_generation()
+''')
+    methods = {"content_generation", "queue_remaining", "get_playlist", "generated_track_keys"}
+    assert {reference for _, reference in _flat_repository_references(tree, methods)} == {
+        "reader.content_generation", "writer.content_generation", "repaired.queue_remaining",
+        "songs['store'].get_playlist", "patch repository directly",
+    }
+
+
 def test_application_import_graph_is_acyclic_including_local_imports():
     modules = _modules()
     graph = {name: set(_imports(tree)) & modules.keys() for name, tree in modules.items()}
@@ -46,7 +105,6 @@ def test_callers_name_repository_owners_and_retired_modules_stay_retired():
                for cls in tree.body if isinstance(cls, ast.ClassDef)
                for node in cls.body if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")}
     retired = {"yt_playlist.repos.rec", "yt_playlist.rec.rec_dao", "yt_playlist.rec.recommend"}
-    store_names = {"store", "s", "db", "reopened", "store2", "ctx.store", "self.store", "self.ctx.store"}
     violations = []
     files = [*(SOURCE / "yt_playlist").rglob("*.py"), *(ROOT / "tests").rglob("*.py")]
     for path in files:
@@ -54,15 +112,8 @@ def test_callers_name_repository_owners_and_retired_modules_stay_retired():
         for dependency in _imports(tree):
             if dependency in retired:
                 violations.append(f"{path.relative_to(ROOT)} imports {dependency}")
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Attribute) and node.attr in methods - {"get"}
-                    and ast.unparse(node.value) in store_names):
-                violations.append(f"{path.relative_to(ROOT)}:{node.lineno}: {ast.unparse(node)}")
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in {"setattr", "object"} and len(node.args) > 1
-                    and ast.unparse(node.args[0]) in store_names
-                    and isinstance(node.args[1], ast.Constant) and node.args[1].value in methods):
-                violations.append(f"{path.relative_to(ROOT)}:{node.lineno}: patch repository directly")
+        violations.extend(f"{path.relative_to(ROOT)}:{line}: {reference}"
+                          for line, reference in _flat_repository_references(tree, methods))
     assert not violations, "\n".join(violations)
 
 

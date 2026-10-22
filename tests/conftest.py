@@ -59,6 +59,8 @@ def seed_catalog_track(store, key, title, artist, *, video_id=None, track_id=Non
             assert metadata.keys() <= columns
             store.conn.execute('UPDATE catalog_tracks SET '+','.join(f'{field}=?' for field in metadata)+' WHERE id=?',
                                [*metadata.values(),rid])
+        from yt_playlist.core import artists
+        artists.observe(store.conn,rid,artist,browse_id=metadata.get('artist_browse_id'))
     return rid
 
 

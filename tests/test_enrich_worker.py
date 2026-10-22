@@ -79,15 +79,15 @@ def test_enrichment_fills_via_waterfall_are_persisted(store):
     assert store.enrichment.coverage_stats()["genre"] == 1
 
 
-def test_library_enrichment_schedules_genre_group_catchup(store, monkeypatch):
+def test_library_enrichment_schedules_changed_recordings(store, monkeypatch):
     from yt_playlist.rec import embed
     _unprocessed(store)
     worker = make_worker(store)
-    worker.ctx.rec_worker = SimpleNamespace(trigger_mode_refresh=Mock())
+    worker.ctx.rec_worker = SimpleNamespace(trigger_content_update=Mock())
     rebuild = Mock()
     monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", rebuild)
     assert worker.drain_once() == 1
-    worker.ctx.rec_worker.trigger_mode_refresh.assert_called_once_with()
+    worker.ctx.rec_worker.trigger_content_update.assert_called_once_with({"s|a"})
     rebuild.assert_not_called()
 
 

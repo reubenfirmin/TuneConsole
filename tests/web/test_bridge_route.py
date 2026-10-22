@@ -300,30 +300,24 @@ def test_sensor_health_is_observable_and_clears_on_disconnect():
     assert bridge.sensor_health is None
 
 
-def test_ws_disconnect_resets_radio_session_and_clears_setting():
-    # #93 defect 1: the WS dropping is the real "tab gone" signal (unlike a pagehide "bye", which
-    # also fires on the radio's own hard navigation and must NOT reset the session, see
-    # tests/test_radio_react.py). Disconnecting the socket must reset the radio and flip the
-    # persisted radio_active setting off.
-    from yt_playlist.rec.radio import RadioSession
-
+def test_ws_disconnect_stops_playlist_radio():
     bridge = Bridge()
     store = _FakeStore()
-    radio = RadioSession()
+    class Radio:
+        active = True
+
+        def stop(self):
+            self.active = False
+
+    radio = Radio()
     app = FastAPI()
     ctx = type("C", (), {"bridge": bridge, "store": store, "radio": radio})()
     app.include_router(build_bridge_route(ctx))
     client = TestClient(app)
-    with radio.lock:
-        radio.active = True
-        radio.dispatched_keys.add("k")
-    store.settings.set_setting("radio_active", "1")
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}):
         assert radio.active is True   # still active while the socket is up
     # Socket closed on exiting the `with` block; the route's `finally` block has run.
     assert radio.active is False
-    assert radio.dispatched_keys == set()
-    assert store.settings.get_setting("radio_active") == "0"
 
 
 def test_play_frame_includes_paused_false():
@@ -350,22 +344,14 @@ def test_play_frame_carries_true_paused_state():
         assert bridge.now_playing["paused"] is True
 
 
-def test_repeated_paused_play_frames_only_refresh_presence(monkeypatch, caplog):
+def test_repeated_paused_play_frames_only_refresh_presence(caplog):
     from yt_playlist.core.store import Store
-    from yt_playlist.rec import radio as radio_mod
-    from yt_playlist.rec.radio import RadioSession
 
     store = Store(":memory:"); store.init_schema()
     store.identities.upsert_identity("main", "bridge", None, True)
     bridge = Bridge()
-    radio = RadioSession()
-    with radio.lock:
-        radio.active = True
-        radio.waiting = True
-    on_play_calls = []
-    monkeypatch.setattr(radio_mod, "on_play", lambda *a, **k: on_play_calls.append(1))
     app = FastAPI()
-    ctx = type("C", (), {"bridge": bridge, "store": store, "radio": radio})()
+    ctx = type("C", (), {"bridge": bridge, "store": store})()
     app.include_router(build_bridge_route(ctx))
     with TestClient(app).websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
         for _ in range(2):
@@ -379,9 +365,7 @@ def test_repeated_paused_play_frames_only_refresh_presence(monkeypatch, caplog):
             assert bridge.now_playing_seen_at != previous_seen_at
             assert bridge.now_playing["video_id"] == "v1"
             assert bridge.now_playing["paused"] is True
-            assert radio.waiting is True
             assert store.history.play_events_since(0) == []
-            assert on_play_calls == []
         assert "Received play notification" not in caplog.text
 
 
@@ -405,17 +389,25 @@ def test_now_playing_toggle_returns_ok_false_when_not_connected():
 
 
 @pytest.mark.parametrize("ok", [True, False])
-def test_rate_target_and_result_round_trip_without_blocking_socket(ok):
+@pytest.mark.parametrize("like_status", [None, "LIKE", "INDIFFERENT", "DISLIKE"])
+def test_rate_target_and_result_round_trip_without_blocking_socket(ok, like_status):
     bridge = Bridge()
     client = TestClient(_app(bridge))
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
         result = []
+        payload = {"action": "like", "videoId": "A"}
+        if like_status is not None:
+            payload["likeStatus"] = like_status
         worker = threading.Thread(target=lambda: result.append(client.post("/now-playing/rate",
-            json={"action": "like", "videoId": "A"}).json()))
+            json=payload).json()))
         worker.start()
         frame = ws.receive_json()
         assert {k: frame[k] for k in ("type", "action", "videoId")} == {
             "type": "rate", "action": "like", "videoId": "A"}
+        if like_status is not None:
+            assert frame["likeStatus"] == like_status
+        else:
+            assert "likeStatus" not in frame
         ws.send_json({"id": frame["id"], "status": 200,
                       "body": json.dumps({"ok": ok, "error": "" if ok else "song changed"})})
         worker.join(timeout=5)
@@ -449,40 +441,6 @@ def test_pevent_frame_persists_raw_event():
     assert len(evs) == 1 and evs[0]["kind"] == "track_exit" and evs[0]["at"] == 1234.0
 
 
-def test_standby_play_frame_is_ignored(monkeypatch):
-    # T7f: dual-deck mode runs the content script in BOTH tabs, so the standby deck's play frame
-    # must never register a play, persist, or advance the radio, only the live deck's frames count.
-    from yt_playlist.core.store import Store
-    from yt_playlist.rec import radio as radio_mod
-    from yt_playlist.rec.radio import RadioSession
-    s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("main", "bridge", None, True)
-    bridge = Bridge()
-    radio = RadioSession()
-    with radio.lock:
-        radio.active = True
-    on_play_calls = []
-    # A stub that raises would be indistinguishable from "never called": the play branch already
-    # wraps radio_mod.on_play in a bare except, so an unreached raise and a swallowed raise look
-    # identical from here. Count calls instead so "not called" is the only way to pass.
-    monkeypatch.setattr(radio_mod, "on_play", lambda *a, **k: on_play_calls.append(1))
-    app = FastAPI()
-    ctx = type("C", (), {"bridge": bridge, "store": s, "radio": radio,
-                         "now_fn": staticmethod(lambda: 1234.0)})()
-    app.include_router(build_bridge_route(ctx))
-    client = TestClient(app)
-    with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
-        ws.send_json({"type": "play", "deck": "standby", "title": "Song", "artist": "Artist",
-                      "thumbnail": "", "likeStatus": "INDIFFERENT", "videoId": "v1",
-                      "playlist": "PLabc", "brandId": ""})
-        time.sleep(0.3)   # give the socket loop a chance to (not) act on it; no event to poll for
-        # Assert while the socket is still open: on disconnect the route's `finally` block resets
-        # bridge.now_playing on its own, which would mask what we're testing here.
-        assert bridge.now_playing is None
-        assert on_play_calls == []
-    assert s.history.play_events_since(0) == []
-
-
 def test_live_play_frame_is_processed():
     # Regression: the same frame tagged deck:"live" must still set now_playing and persist, exactly
     # as an untagged frame did before deck attribution existed (see test_play_frame_persists_event).
@@ -507,49 +465,6 @@ def test_live_play_frame_is_processed():
         assert bridge.now_playing is not None and bridge.now_playing["video_id"] == "v1"
     evs = s.history.play_events_since(0)
     assert len(evs) == 1 and evs[0]["video_id"] == "v1" and evs[0]["playlist_ytm_id"] == "PLabc"
-
-
-def test_standby_pevent_frame_is_ignored(monkeypatch):
-    # T7f: a standby deck's pevent (fired by loading or pausing the background tab) must not flip
-    # now_playing, persist, or reach the radio reactor.
-    from yt_playlist.rec import radio as radio_mod
-    from yt_playlist.rec.radio import RadioSession
-    from yt_playlist.library import player_events
-    bridge = Bridge()
-    radio = RadioSession()   # active stays False until right before the standby pevent: the setup
-                             # play frame above is untagged/irrelevant to this test and must not
-                             # exercise the real (unmocked) radio_mod.on_play against a fake store.
-    react_calls = []
-    persist_calls = []
-    # Call-counting stubs, not raising ones: the pevent branch already wraps both persistence and
-    # radio_mod.react in bare excepts, so a raise-based "was it called" spy can't tell "called and
-    # swallowed" from "never called" (the lesson from earlier raise-guard defeats).
-    monkeypatch.setattr(radio_mod, "react", lambda *a, **k: react_calls.append(1))
-    monkeypatch.setattr(player_events, "handle_player_event",
-                        lambda *a, **k: persist_calls.append(1))
-    app = FastAPI()
-    ctx = type("C", (), {"bridge": bridge, "store": _FakeStore(), "radio": radio,
-                         "now_fn": staticmethod(lambda: 1234.0)})()
-    app.include_router(build_bridge_route(ctx))
-    client = TestClient(app)
-    with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
-        ws.send_json({"type": "play", "title": "Song", "artist": "Artist", "thumbnail": "",
-                      "likeStatus": "INDIFFERENT", "videoId": "v1"})
-        deadline = time.time() + 5
-        while time.time() < deadline and bridge.now_playing is None:
-            time.sleep(0.05)
-        assert bridge.now_playing["paused"] is False
-
-        with radio.lock:
-            radio.active = True
-        ws.send_json({"type": "pevent", "deck": "standby", "kind": "state", "state": "paused",
-                      "videoId": "v1", "position": 1.0, "duration": 2.0, "playlist": "", "brandId": ""})
-        time.sleep(0.3)   # give the socket loop a chance to (not) act on it; no event to poll for
-        # Assert while the socket is still open: on disconnect the route's `finally` block resets
-        # bridge.now_playing and the radio session, which would mask what we're testing here.
-        assert bridge.now_playing["paused"] is False   # standby pevent must not flip the live bar
-        assert react_calls == []
-        assert persist_calls == []
 
 
 def test_live_and_unknown_deck_pevent_still_processed():

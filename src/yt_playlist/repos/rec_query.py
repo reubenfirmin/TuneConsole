@@ -6,6 +6,7 @@ candidate-surface generators (comfort / rotation / deep cuts / completion / enri
 grouped here because the generators all depend on the same exclusion logic (excluded_playlist_ids).
 """
 from collections import Counter
+from yt_playlist.core import artists
 
 from yt_playlist.rec import rec_params
 from yt_playlist.repos.base import (  # noqa: F401  (GENERATED_GROUP re-exported)
@@ -118,9 +119,8 @@ class RecQueryRepo(Repo):
             return {}
         qs = ",".join("?" * len(keys))
         rows = self.conn.execute(
-            f"SELECT hi.identity_key k, MAX(hs.taken_at) last FROM history_items hi "
-            f"JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
-            f"WHERE hi.identity_key IN ({qs}) GROUP BY hi.identity_key", keys).fetchall()
+            f"SELECT identity_key k,MAX(at) last FROM listening_activity "
+            f"WHERE identity_key IN ({qs}) GROUP BY identity_key", keys).fetchall()
         return {r["k"]: r["last"] for r in rows}
 
     @synchronized
@@ -150,7 +150,7 @@ class RecQueryRepo(Repo):
     def era_play_distribution(self) -> dict:
         """{decade: Σ(1 + play_count)} over dated tracks, deduped per song (mirrors genre version)."""
         rows = self.conn.execute(
-            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key), "
+            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key), "
             "     songs AS (SELECT DISTINCT identity_key, mb_year FROM tracks WHERE mb_year<>'') "
             "SELECT s.mb_year y, SUM(1 + COALESCE(tp.c, 0)) w FROM songs s "
             "LEFT JOIN tp ON tp.identity_key = s.identity_key GROUP BY s.identity_key, s.mb_year").fetchall()
@@ -168,10 +168,10 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def owned_albums(self) -> set:
-        """Lowercased album titles already in the library or saved, to filter outward discovery."""
+        """Canonical release IDs represented in the library or saved."""
         rows = self.conn.execute(
-            "SELECT LOWER(album) a FROM tracks WHERE album<>'' "
-            "UNION SELECT LOWER(title) FROM saved_albums").fetchall()
+            "SELECT at.album_id a FROM album_tracks at JOIN tracks t ON t.id=at.entry_id "
+            "UNION SELECT album_id FROM album_library_memberships").fetchall()
         return {r["a"] for r in rows if r["a"]}
 
     @synchronized
@@ -183,23 +183,27 @@ class RecQueryRepo(Repo):
     @synchronized
     def library_artists(self) -> set:
         """Normalized artist names already in the library, to exclude from new-artist discovery."""
-        rows = self.conn.execute("SELECT DISTINCT artist FROM tracks WHERE artist<>''").fetchall()
-        return {normalize(r["artist"]) for r in rows}
+        from yt_playlist.core import artists
+        rows = self.conn.execute('SELECT DISTINCT ta.artist_id FROM track_artists ta JOIN tracks t ON t.id=ta.entry_id')
+        return {artists.public_key(self.conn,r[0]) for r in rows}
 
     @synchronized
     def tracks_by_artists(self, artists) -> list:
         """Owned track dicts (one per identity_key) whose normalized artist is in `artists` (a set of
         normalized names). Powers the #28 artist model's track-candidate expansion. The identity_key's
         artist segment is already normalized, so it is matched directly."""
-        want = set(artists)
+        from yt_playlist.core import artists as artist_catalog
+        want = {artist_catalog.lookup(self.conn,a) for a in artists}
+        want.discard(None)
         if not want:
             return []
         out = []
         for r in self.conn.execute(
-                "SELECT identity_key k, MIN(title) title, MIN(artist) artist, MIN(album) album, "
-                "MIN(video_id) vid, MIN(thumbnail) thumb, MIN(NULLIF(genre,'')) genre "
-                "FROM playable_library_tracks WHERE title<>'' GROUP BY identity_key"):
-            if r["k"].rsplit("|", 1)[-1] in want:
+                "SELECT t.identity_key k, MIN(title) title, MIN(artist) artist, MIN(album) album, "
+                "MIN(video_id) vid, MIN(thumbnail) thumb, MIN(NULLIF(genre,'')) genre,ta.artist_id "
+                "FROM playable_library_tracks t JOIN track_artists ta ON ta.entry_id=t.id WHERE title<>'' "
+                "GROUP BY identity_key,ta.artist_id"):
+            if r['artist_id'] in want and not any(o['key']==r['k'] for o in out):
                 out.append({"key": r["k"], "title": r["title"], "artist": r["artist"],
                             "album": r["album"] or "", "video_id": r["vid"], "thumbnail": r["thumb"],
                             "genre": r["genre"] or ""})
@@ -223,15 +227,58 @@ class RecQueryRepo(Repo):
                   "music_key", "music_scale")
 
     @synchronized
-    def artist_genres(self) -> dict:
+    def content_inputs_by_keys(self, keys) -> dict:
+        """Content-model inputs for changed recordings, without reading the vector corpus."""
+        keys = list(dict.fromkeys(keys))
+        if not keys:
+            return {}
+        qs = ",".join("?" * len(keys))
+        audio = ", ".join(f"MIN({c}) AS {c}" for c in self.AUDIO_COLS)
+        return {r["identity_key"]: {
+            "genre": r["genre"], "year": r["year"],
+            "audio": {c: r[c] for c in self.AUDIO_COLS if r[c] not in (None, "")},
+        } for r in self.conn.execute(
+            f"SELECT identity_key, MIN(NULLIF(genre,'')) AS genre, MIN(NULLIF(mb_year,'')) AS year, "
+            f"{audio} FROM tracks WHERE identity_key IN ({qs}) GROUP BY identity_key", keys)}
+
+    @synchronized
+    def suppressed_candidate_keys(self, keys, now) -> set:
+        """Track/artist bans for a bounded candidate set; genre bans use its loaded metadata."""
+        keys = list(dict.fromkeys(keys))
+        if not keys:
+            return set()
+        qs = ",".join("?" * len(keys))
+        blocked = {r[0] for r in self.conn.execute(
+            f"SELECT item_key FROM rec_feedback WHERE item_key IN ({qs}) "
+            "AND ((surface='for_you' AND scope='' AND kind IN ('dismiss','mute','not_now')) "
+            "OR kind='dislike') AND (until IS NULL OR until>?)", [*keys, now])}
+        blocked.update(r[0] for r in self.conn.execute(
+            "SELECT DISTINCT r.identity_key FROM rec_feedback f "
+            "JOIN track_artists ta ON ta.artist_id=f.artist_id "
+            "JOIN catalog_entries e ON e.id=ta.entry_id JOIN recordings r ON r.id=e.recording_id "
+            f"WHERE r.identity_key IN ({qs}) AND f.kind='mute' AND (f.until IS NULL OR f.until>?)",
+            [*keys, now]))
+        excluded = self.excluded_playlist_ids()
+        if excluded:
+            pqs = ",".join("?" * len(excluded))
+            blocked.update(r[0] for r in self.conn.execute(
+                "SELECT t.identity_key FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
+                f"WHERE t.identity_key IN ({qs}) GROUP BY t.identity_key "
+                f"HAVING SUM(CASE WHEN pt.playlist_id IN ({pqs}) THEN 0 ELSE 1 END)=0",
+                [*keys, *excluded]))
+        return blocked
+
+    @synchronized
+    def artist_genres(self, *, canonical=False) -> dict:
         """{artist: dominant genre} over the library, the most common non-empty genre per artist.
         Lets outward discovery tag a new ALBUM by its (owned) artist's known genre, no network."""
         rows = self.conn.execute(
-            "SELECT artist, genre, COUNT(*) c FROM tracks WHERE artist<>'' AND genre<>'' "
-            "GROUP BY artist, genre").fetchall()
+            "SELECT a.id artist_id,a.name artist,t.genre, COUNT(DISTINCT t.identity_key) c "
+            "FROM tracks t JOIN track_artists ta ON ta.entry_id=t.id JOIN artists a ON a.id=ta.artist_id "
+            "WHERE t.genre<>'' GROUP BY a.id,t.genre").fetchall()
         best = {}
         for r in rows:
-            a = r["artist"]
+            a = artists.token(r['artist_id']) if canonical or artists.lookup(self.conn,r['artist']) is None else r['artist']
             if a not in best or r["c"] > best[a][1]:
                 best[a] = (r["genre"], r["c"])
         return {a: g for a, (g, _) in best.items()}
@@ -345,20 +392,22 @@ class RecQueryRepo(Repo):
     def _fact_album(self, key, path, qs):
         """Shared album with another branch track."""
         row = self.conn.execute(
-            f"SELECT t2.album al, t2.artist ar FROM tracks t1 JOIN tracks t2 "
-            f"ON LOWER(t2.album)=LOWER(t1.album) "
-            f"WHERE t1.identity_key=? AND TRIM(t1.album)<>'' AND t2.identity_key IN ({qs}) "
+            f"SELECT a.title al,t2.artist ar FROM tracks t1 JOIN album_tracks a1 ON a1.entry_id=t1.id "
+            f"JOIN album_tracks a2 ON a2.album_id=a1.album_id JOIN albums a ON a.id=a1.album_id "
+            f"JOIN tracks t2 ON t2.id=a2.entry_id "
+            f"WHERE t1.identity_key=? AND NULLIF(a.title,'') IS NOT NULL AND t2.identity_key IN ({qs}) "
             f"AND t2.identity_key<>? LIMIT 1", [key, *path, key]).fetchone()
         return ({"kind": "album", "text": f"From the album “{row['al']}”, with {row['ar']}."}
                 if row else None)
 
     def _fact_session(self, key, path, qs):
-        """Played in the same listening session (a shared history snapshot)."""
+        """Observed on the same account listening day; this does not prove a session."""
         hit = self.conn.execute(
-            f"SELECT 1 FROM history_items h1 JOIN history_items h2 ON h2.snapshot_id=h1.snapshot_id "
+            f"SELECT 1 FROM listening_days h1 JOIN listening_days h2 "
+            f"ON h2.identity_id=h1.identity_id AND h2.day=h1.day "
             f"WHERE h1.identity_key=? AND h2.identity_key IN ({qs}) LIMIT 1",
             [key, *path]).fetchone()
-        return ({"kind": "session", "text": "You played them in the same listening session."}
+        return ({"kind": "session", "text": "You played them on the same day."}
                 if hit else None)
 
     def _fact_genre(self, crow, path, qs):
@@ -468,7 +517,7 @@ class RecQueryRepo(Repo):
                 "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
                 "JOIN tracks t ON t.id=pt.track_id "
                 "JOIN rec_vectors rv ON rv.identity_key=t.identity_key "
-                "LEFT JOIN quarantined_playlists g ON g.ytm=p.ytm_playlist_id "
+                "LEFT JOIN quarantined_playlists g ON g.ytm=p.scope_ref "
                 "WHERE searchnorm(p.title) LIKE ? AND (g.name IS NULL OR g.name<>?) "
                 "GROUP BY p.id ORDER BY n DESC LIMIT ?", (like, GENERATED_GROUP, limit)):
             out.append({"kind": "playlist", "label": r["label"],
@@ -491,17 +540,17 @@ class RecQueryRepo(Repo):
     def top_played_keys(self, limit=10) -> list[str]:
         """Identity keys of your most-played songs (for seeding taste-neighbourhood recs)."""
         rows = self.conn.execute(
-            "SELECT identity_key k, COUNT(*) c FROM history_items GROUP BY identity_key "
+            "SELECT identity_key k, COUNT(*) c FROM listening_days GROUP BY identity_key "
             "ORDER BY c DESC LIMIT ?", (limit,)).fetchall()
         return [r["k"] for r in rows]
 
     @synchronized
     def play_counts(self) -> dict:
-        """{identity_key: total play count} from listening history. A key absent from the map has
+        """{identity_key: account listening-day count}. A key absent from the map has
         never been played (count 0), the primary signal for the Catalog card (your under-played
         catalog)."""
         return {r["identity_key"]: r["c"] for r in self.conn.execute(
-            "SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key")}
+            "SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key")}
 
     @synchronized
     def library_songs(self) -> list[dict]:
@@ -571,7 +620,7 @@ class RecQueryRepo(Repo):
         # (same identity_key, different video_id uploads). Without the DISTINCT, the LEFT JOIN below
         # would add (1 + plays) once per upload, multiplying a song's weight by its duplicate count.
         rows = self.conn.execute(
-            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key), "
+            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key), "
             "     songs AS (SELECT DISTINCT identity_key, genre FROM tracks WHERE genre <> '') "
             "SELECT s.genre g, SUM(1 + COALESCE(tp.c, 0)) w FROM songs s "
             "LEFT JOIN tp ON tp.identity_key = s.identity_key GROUP BY s.genre").fetchall()
@@ -615,7 +664,7 @@ class RecQueryRepo(Repo):
         """Generated playlists remain excluded until explicit adoption, regardless of group."""
         rows = self.conn.execute(
             "SELECT p.id id FROM playlists p "
-            "JOIN quarantined_playlists g ON g.ytm=p.ytm_playlist_id WHERE g.name=:grp",
+            "JOIN quarantined_playlists g ON g.ytm=p.scope_ref WHERE g.name=:grp",
             {"grp": group}).fetchall()
         return {r["id"] for r in rows}
 
@@ -627,7 +676,7 @@ class RecQueryRepo(Repo):
         return {r["identity_key"] for r in self.conn.execute(
             "SELECT DISTINCT t.identity_key FROM playlist_tracks pt "
             "JOIN tracks t ON t.id=pt.track_id JOIN playlists p ON p.id=pt.playlist_id "
-            "JOIN quarantined_playlists g ON g.ytm=p.ytm_playlist_id WHERE g.name=?", (group,))}
+            "JOIN quarantined_playlists g ON g.ytm=p.scope_ref WHERE g.name=?", (group,))}
 
     @synchronized
     def generated_only_keys(self, group=GENERATED_GROUP) -> set:
@@ -648,21 +697,30 @@ class RecQueryRepo(Repo):
 
     @synchronized
     def generated_only_play_days(self, group=GENERATED_GROUP) -> set[tuple[int, str]]:
-        """#83 (utc_day, identity_key) pairs where EVERY play_events row for that key on that UTC
-        day carries generated-playlist provenance, so rec_baskets can drop that day's session
-        basket for that key instead of learning co-occurrence from a suggestion the app made to
-        itself. "Generated provenance" = playlist_ytm_id equal to a quarantined generated
-        playlist's ytm id, or that playlist's radio ("RDAMPL" + ytm id). A NULL-playlist play or a
-        play from an ordinary playlist is real listening evidence, so a key/day mixing that with
-        generated plays is conservatively kept OUT of the set (mixed evidence stays, since it's
-        not purely self-generated). UTC day = int(played_at // 86400), matching the store's other
-        day bucketing. Independent of graduation: promoting the playlist stops new generated plays
-        from accruing, but does not retroactively change quarantined history."""
+        """Account-calendar day/key pairs supported only by generated events.
+
+        This global reporting shape merges accounts. Independent evidence from any
+        account prevents a global exclusion; daily baskets apply account policy directly.
+        """
         rows = self.conn.execute(
-            "SELECT identity_key k, CAST(played_at / 86400 AS INTEGER) day, "
-            "SUM(CASE WHEN is_generated=1 THEN 0 ELSE 1 END) non_generated "
-            "FROM play_events GROUP BY identity_key, day").fetchall()
+            "SELECT pe.identity_key k,CAST(julianday(c.day)-julianday('1970-01-01') AS INTEGER) day,"
+            "SUM(CASE WHEN pe.is_generated=1 THEN 0 ELSE 1 END) non_generated "
+            "FROM play_events pe JOIN play_event_calendar c ON c.event_id=pe.id "
+            "GROUP BY pe.identity_key,c.day HAVING NOT EXISTS "
+            "(SELECT 1 FROM listening_days d WHERE d.identity_key=pe.identity_key AND d.day=c.day)").fetchall()
         return {(r["day"], r["k"]) for r in rows if r["non_generated"] == 0}
+
+    @synchronized
+    def evaluation_history_bounds(self) -> tuple:
+        """Observed activity extent, including generated events for the evaluation clock.
+
+        Filtering machine-caused outcomes must not move the holdout window back to
+        older organic listening when all the newest plays were generated.
+        """
+        row = self.conn.execute(
+            "SELECT MIN(at),MAX(at) FROM (SELECT at FROM listening_activity "
+            "UNION ALL SELECT played_at FROM play_events WHERE is_generated=1)").fetchone()
+        return tuple(row)
 
     @synchronized
     def generated_only_keys_since(self, since_ts, group=GENERATED_GROUP) -> set[str]:
@@ -674,20 +732,20 @@ class RecQueryRepo(Repo):
         set (day-model rows carry no provenance, so there is no evidence to condemn them:
         conservatively kept, matching the per-day helper's mixed-evidence rule)."""
         rows = self.conn.execute(
-            "SELECT identity_key k, "
-            "SUM(CASE WHEN is_generated=1 THEN 0 ELSE 1 END) non_generated "
-            "FROM play_events WHERE played_at >= ? GROUP BY identity_key",
-            (since_ts,)).fetchall()
+            "SELECT pe.identity_key k,SUM(CASE WHEN pe.is_generated=1 THEN 0 ELSE 1 END) non_generated "
+            "FROM play_events pe WHERE pe.played_at>=? GROUP BY pe.identity_key HAVING NOT EXISTS "
+            "(SELECT 1 FROM listening_days d WHERE d.identity_key=pe.identity_key AND d.day_ts>=?)",
+            (since_ts,since_ts)).fetchall()
         return {r["k"] for r in rows if r["non_generated"] == 0}
 
     @synchronized
     def generated_only_keys_between(self, start_ts, end_ts, group=GENERATED_GROUP) -> set[str]:
         """Windowed generated-only provenance for causal evaluation's [start, end) interval."""
         rows = self.conn.execute(
-            "SELECT identity_key k, "
-            "SUM(CASE WHEN is_generated=1 THEN 0 ELSE 1 END) non_generated "
-            "FROM play_events WHERE played_at>=? AND played_at<? GROUP BY identity_key",
-            (start_ts, end_ts)).fetchall()
+            "SELECT pe.identity_key k,SUM(CASE WHEN pe.is_generated=1 THEN 0 ELSE 1 END) non_generated "
+            "FROM play_events pe WHERE pe.played_at>=? AND pe.played_at<? GROUP BY pe.identity_key "
+            "HAVING NOT EXISTS (SELECT 1 FROM listening_days d WHERE d.identity_key=pe.identity_key "
+            "AND d.day_ts>=? AND d.day_ts<?)",(start_ts,end_ts,start_ts,end_ts)).fetchall()
         return {r["k"] for r in rows if r["non_generated"] == 0}
 
     @synchronized
@@ -744,8 +802,8 @@ class RecQueryRepo(Repo):
         out += [list(s) for s in pbuckets.values() if len(s) > 1]
         # album / artist baskets keep their size caps (an over-cap album is noise).
         for grp, cap in (
-            ("SELECT album g, identity_key k FROM tracks WHERE album<>''", max_album),
-            ("SELECT artist g, identity_key k FROM tracks WHERE artist<>''", _ARTIST_BASKET_CAP)):
+            ("SELECT at.album_id g,t.identity_key k FROM tracks t JOIN album_tracks at ON at.entry_id=t.id", max_album),
+            ("SELECT ta.artist_id g, t.identity_key k FROM tracks t JOIN track_artists ta ON ta.entry_id=t.id", _ARTIST_BASKET_CAP)):
             buckets = {}
             for r in self.conn.execute(grp):
                 if r["k"] in good:
@@ -755,14 +813,10 @@ class RecQueryRepo(Repo):
         # when that (day, key) is generated-only -- the app never gets to learn co-occurrence from
         # a suggestion it made to itself. Fetched once, up front, rather than per basket. The day
         # comes off the snapshot's own taken_at (joined in), not a second table scan for a map.
-        gen_only_days = self.generated_only_play_days()
         sbuckets: dict = {}
         for r in self.conn.execute(
-                "SELECT hi.snapshot_id g, hi.identity_key k, hs.taken_at t FROM history_items hi "
-                "JOIN history_snapshots hs ON hs.id=hi.snapshot_id"):
+                "SELECT snapshot_id g,identity_key k FROM listening_daily_items"):
             if r["k"] not in good:
-                continue
-            if (int(r["t"] // 86400), r["k"]) in gen_only_days:
                 continue
             sbuckets.setdefault(r["g"], set()).add(r["k"])
         out += [list(s) for s in sbuckets.values() if 1 < len(s) <= max_session]
@@ -825,20 +879,18 @@ class RecQueryRepo(Repo):
                     pbuckets.setdefault(r["g"], set()).add(r["k"])
         out += [list(s) for s in pbuckets.values() if len(s) > 1]
 
-        for sql, cap in (("SELECT album g, identity_key k FROM tracks WHERE album<>''", max_album),
-                         ("SELECT artist g, identity_key k FROM tracks WHERE artist<>''", _ARTIST_BASKET_CAP)):
+        for sql, cap in (("SELECT at.album_id g,t.identity_key k FROM tracks t JOIN album_tracks at ON at.entry_id=t.id", max_album),
+                         ("SELECT ta.artist_id g,t.identity_key k FROM tracks t JOIN track_artists ta ON ta.entry_id=t.id", _ARTIST_BASKET_CAP)):
             buckets = {}
             for r in self.conn.execute(sql):
                 if r["k"] in good:
                     buckets.setdefault(r["g"], set()).add(r["k"])
             out += [list(s) for s in buckets.values() if 1 < len(s) <= cap]
 
-        gen_only_days = self.generated_only_play_days()
         sbuckets = {}
         for r in self.conn.execute(
-                "SELECT hi.snapshot_id g, hi.identity_key k, hs.taken_at t FROM history_items hi "
-                "JOIN history_snapshots hs ON hs.id=hi.snapshot_id WHERE hs.taken_at<?", (cutoff,)):
-            if r["k"] in good and (int(r["t"] // 86400), r["k"]) not in gen_only_days:
+                "SELECT DISTINCT identity_id||':'||day g,identity_key k FROM listening_activity WHERE at<?", (cutoff,)):
+            if r["k"] in good:
                 sbuckets.setdefault(r["g"], set()).add(r["k"])
         out += [list(s) for s in sbuckets.values() if 1 < len(s) <= max_session]
 
@@ -863,8 +915,8 @@ class RecQueryRepo(Repo):
         """
         full_secs = max(1.0, recency_full_days * 86400.0)
         rows = self.conn.execute(
-            "WITH plays AS (SELECT hi.identity_key, COUNT(*) c, MAX(hs.taken_at) last "
-            "  FROM history_items hi JOIN history_snapshots hs ON hs.id=hi.snapshot_id "
+            "WITH plays AS (SELECT hi.identity_key,COUNT(*) c,MAX(hi.day_ts) last "
+            "  FROM listening_days hi "
             "  GROUP BY hi.identity_key), "
             "     names AS (SELECT identity_key, MIN(title) title, MIN(artist) artist, "
             "               MIN(album) album, MIN(video_id) vid, MIN(thumbnail) thumb "
@@ -889,7 +941,7 @@ class RecQueryRepo(Repo):
         excl = self.excluded_playlist_ids()
         seed_excl = _exclude_clause("pt.playlist_id", excl)
         rows = self.conn.execute(
-            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key), "
+            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key), "
             " seeds AS (SELECT identity_key k FROM tp ORDER BY c DESC LIMIT :seed_limit), "
             " seedpl AS (SELECT DISTINCT pt.playlist_id pid FROM playlist_tracks pt "
             "            JOIN tracks t ON t.id=pt.track_id JOIN seeds s ON s.k=t.identity_key"
@@ -918,7 +970,7 @@ class RecQueryRepo(Repo):
         surfaces each one's most-neglected track. Works on day one.
         """
         rows = self.conn.execute(
-            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM history_items GROUP BY identity_key), "
+            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key), "
             " trk AS (SELECT t.identity_key key, MIN(t.title) title, MIN(t.artist) artist, "
             "                MIN(t.album) album, MIN(t.video_id) vid, MIN(t.thumbnail) thumb, "
             "                COALESCE(MAX(tp.c),0) plays "

@@ -29,12 +29,20 @@ def test_upgrade_rebuilds_populated_history_only_checkpoint(tmp_path, old_versio
     if old_version < 8:
         store.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key) VALUES ('v','Song','Artist','song|artist')")
     else:
-        store._bind_repositories()
-        store.tracks.upsert_track("v", "Song", "Artist", None, 200)
+        # Seed version 15 using its own schema. Today's repositories require metadata
+        # provenance tables introduced later, so they cannot construct this fixture.
+        store.conn.execute("INSERT INTO recordings(id,identity_key,title,artist) VALUES (1,'song|artist','Song','Artist')")
+        store.conn.execute("INSERT INTO youtube_items(video_id,recording_id,title,artist,duration_s,available) VALUES ('v',1,'Song','Artist',200,1)")
+        store.conn.execute("INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (1,1,'v')")
+        store.conn.execute("INSERT INTO library_memberships(entry_id,origin) VALUES (1,'legacy_library')")
+        store.conn.execute("INSERT INTO recording_aliases(alias,recording_id,source) VALUES ('song|artist',1,'legacy_library')")
     store.conn.execute("INSERT INTO history_snapshots(id,identity_id,taken_at) VALUES (1,1,?)", (10 * DAY,))
     store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'song|artist')")
+    store.conn.execute("INSERT INTO history_snapshots(id,identity_id,taken_at) VALUES (2,1,?)", (20 * DAY,))
+    store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (2,'song|artist')")
     store.conn.execute("INSERT INTO trend_first_play VALUES ('track','song|artist',10,?,'history')", (10 * DAY,))
-    store.conn.execute("INSERT INTO settings VALUES ('trend_first_play_watermark','1')")
+    store.conn.execute("INSERT INTO trend_first_play VALUES ('artist','Artist',10,?,'history')", (10 * DAY,))
+    store.conn.execute("INSERT INTO settings VALUES ('trend_first_play_watermark','2')")
     store.conn.commit()
     store.init_schema()
     key = store.tracks.identity_key_for_video("v")
@@ -42,7 +50,7 @@ def test_upgrade_rebuilds_populated_history_only_checkpoint(tmp_path, old_versio
     store.conn.close()
     reopened = Store(path); reopened.init_schema()
     _assert_first(reopened, key, "Artist", 10)
-    assert reopened.conn.execute("SELECT COUNT(*) FROM history_items").fetchone()[0] == 1
+    assert reopened.conn.execute("SELECT COUNT(*) FROM history_items").fetchone()[0] == 2
     assert reopened.conn.execute("SELECT COUNT(*) FROM play_events").fetchone()[0] == 0
     reopened.conn.close()
 
@@ -97,10 +105,10 @@ def test_interruption_rolls_back_index_and_checkpoint(store, monkeypatch):
     _assert_first(store, key, "Artist", 10)
 
 
-def test_exact_ledger_replaces_previously_cached_coarse_history(store):
+def test_exact_ledger_preserves_earlier_coarse_evidence(store):
     store.identities.upsert_identity("main", "bridge", None, True)
     store.tracks.upsert_track("a", "Song", "Artist", None, 200)
     key = store.tracks.identity_key_for_video("a")
     _history(store, key, 10); _assert_first(store, key, "Artist", 10)
     store.history.record_play_event(1, key, "a", 20 * DAY)
-    _assert_first(store, key, "Artist", 20)
+    _assert_first(store, key, "Artist", 10)

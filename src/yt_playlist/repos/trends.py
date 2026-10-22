@@ -7,11 +7,11 @@ from yt_playlist.repos.base import Repo, synchronized, GENERATED_GROUP
 class TrendsRepo(Repo):
     # -- the play ledger -----------------------------------------------------------------------
     # play_events is one row per REAL play, with a real timestamp and (for live-captured rows) the
-    # playlist it was played from. It is the only source that can honour the GENERATED_GROUP
-    # quarantine (see repos/base.py), because the history day model carries no provenance at all.
+    # playlist it was played from. Generation policy is retained on each event;
+    # dated sync shadows are reconciled separately in listening_days.
     #
     # Everything below returns the same shapes the history queries return, so the rollup consumes
-    # either. The difference is what a count MEANS: a real play here, a snapshot appearance there.
+    # either. The difference is what a count means: a real event here, an account listening day there.
 
     def _generated_filter(self, exclude_generated):
         """(sql_fragment, args) restricting play_events (aliased `pe`) to non-generated plays.
@@ -21,20 +21,15 @@ class TrendsRepo(Repo):
         """
         if not exclude_generated:
             return "", []
-        rows = self.conn.execute(
-            "SELECT ytm FROM quarantined_playlists").fetchall()
-        gen = sorted(r["ytm"] for r in rows)
-        if not gen:
-            return ' AND COALESCE(pe.is_generated,0)=0', []
-        ph = ",".join("?" * len(gen))
-        return f" AND COALESCE(pe.is_generated,0)=0 AND (pe.playlist_ytm_id IS NULL OR pe.playlist_ytm_id NOT IN ({ph}))", gen
+        return " AND COALESCE(pe.is_generated,0)=0", []
 
     @synchronized
     def generated_ytm_ids(self) -> set[str]:
         """The ytm ids of playlists this app generated. Plays sourced from these are the app's own
         recommendations echoed back, not listening the user chose."""
         rows = self.conn.execute(
-            "SELECT ytm FROM quarantined_playlists").fetchall()
+            "SELECT s.provider_id ytm FROM quarantined_playlists q "
+            "JOIN playlist_scopes s ON s.ref=q.ytm WHERE s.kind='shared'").fetchall()
         return {r["ytm"] for r in rows}
 
     @synchronized
@@ -59,7 +54,7 @@ class TrendsRepo(Repo):
             "SELECT DISTINCT t.artist a FROM playlist_tracks pt "
             "JOIN tracks t ON t.id = pt.track_id "
             "JOIN playlists p ON p.id = pt.playlist_id "
-            "WHERE t.artist <> '' AND p.ytm_playlist_id NOT IN "
+            "WHERE t.artist <> '' AND p.scope_ref NOT IN "
             "  (SELECT ytm FROM quarantined_playlists)").fetchall()
         return {r["a"] for r in rows}
 
@@ -70,7 +65,7 @@ class TrendsRepo(Repo):
             "SELECT DISTINCT t.identity_key k FROM playlist_tracks pt "
             "JOIN tracks t ON t.id = pt.track_id "
             "JOIN playlists p ON p.id = pt.playlist_id "
-            "WHERE p.ytm_playlist_id NOT IN "
+            "WHERE p.scope_ref NOT IN "
             "  (SELECT ytm FROM quarantined_playlists)").fetchall()
         return {r["k"] for r in rows}
 
@@ -82,9 +77,9 @@ class TrendsRepo(Repo):
 
     @synchronized
     def ledger_day_counts(self, exclude_generated=True) -> list:
-        """[(day, identity_key, plays)] from the play ledger: one row per (UTC day, track), plays =
+        """[(day, identity_key, plays)] from the play ledger: one row per (account day, track), plays =
         the number of REAL plays that day. Same shape as play_day_counts(), so the rollup consumes it
-        unchanged, but the number means plays rather than snapshot appearances.
+        unchanged, but the number means events rather than distinct account listening days.
 
         Identities are merged, not distinguished. The history day model keyed its dedupe on
         (identity, date), which double-counted a track played on two accounts the same day.
@@ -92,8 +87,8 @@ class TrendsRepo(Repo):
         frag, args = self._generated_filter(exclude_generated)
         where = f"WHERE 1=1{frag}" if frag else ""
         rows = self.conn.execute(
-            f"SELECT CAST(pe.played_at / 86400 AS INTEGER) day, pe.identity_key k, COUNT(*) c "
-            f"FROM play_events pe {where} GROUP BY day, k", args).fetchall()
+            f"SELECT CAST(julianday(c.day)-julianday('1970-01-01') AS INTEGER) day,pe.identity_key k,COUNT(*) c "
+            f"FROM play_events pe JOIN play_event_calendar c ON c.event_id=pe.id {where} GROUP BY c.day,k", args).fetchall()
         return [(r["day"], r["k"], r["c"]) for r in rows]
 
     @synchronized
@@ -146,7 +141,7 @@ class TrendsRepo(Repo):
             [since, until, *args]).fetchall()
         return {r["artist"]: r["c"] for r in rows}
 
-    # -- the history day model (fallback; no provenance) ---------------------------------------
+    # -- the reconciled daily model ------------------------------------------------------------
     @synchronized
     def max_snapshot_id(self) -> int:
         r = self.conn.execute("SELECT MAX(id) m FROM history_snapshots").fetchone()
@@ -154,12 +149,13 @@ class TrendsRepo(Repo):
 
     @synchronized
     def history_track_first(self, after_id) -> dict:
-        """{identity_key: (first_day, first_ts)} earliest snapshot appearance among snapshots with
-        id > after_id (the incremental window). day = int(taken_at // 86400)."""
+        """Earliest listening day per recording. Retain the old argument for callers.
+
+        A snapshot watermark cannot bound late imports, calendar changes, or
+        recording reassociation, so this projection always scans all daily evidence.
+        """
         rows = self.conn.execute(
-            "SELECT hi.identity_key k, MIN(hs.taken_at) ts "
-            "FROM history_items hi JOIN history_snapshots hs ON hs.id = hi.snapshot_id "
-            "WHERE hs.id > ? GROUP BY hi.identity_key", (int(after_id),)).fetchall()
+            "SELECT identity_key k,MIN(day_ts) ts FROM listening_days GROUP BY identity_key").fetchall()
         return {r["k"]: (int(r["ts"] // 86400), r["ts"]) for r in rows}
 
     @synchronized
@@ -215,8 +211,8 @@ class TrendsRepo(Repo):
     def refresh_first_play(self):
         """Fold observations and publish track/artist indexes plus checkpoints in one transaction.
 
-        Exact events remain authoritative whenever a ledger exists. A changed source/import or
-        invalidated catalog requires a complete rescan rather than reusing a history checkpoint.
+        An exact ledger cannot erase older coarse evidence. Late evidence and
+        account-calendar changes require a full rescan, not a snapshot-id checkpoint.
         """
         def setting(key):
             row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
@@ -225,14 +221,12 @@ class TrendsRepo(Repo):
         self.conn.execute("SAVEPOINT first_play_refresh")
         try:
             imported = setting("takeout_imported_at")
-            source = "play_event" if self.has_play_ledger() else "history"
-            reset = (source != setting("trend_first_play_source") or
-                     imported != setting("trend_first_play_takeout_seen"))
-            watermark = 0 if reset else int(setting("trend_first_play_watermark") or 0)
-            if reset:
-                self.conn.execute("DELETE FROM trend_first_play")
-            first = self.play_event_track_first() if source == "play_event" else self.history_track_first(watermark)
-            self._upsert_first_play_min(("track", key, day, ts, source) for key, (day, ts) in first.items())
+            source = 'listening_v26'
+            self.conn.execute('DELETE FROM trend_first_play')
+            rows = self.conn.execute(
+                "SELECT identity_key,CAST(julianday(MIN(day))-julianday('1970-01-01') AS INTEGER) day,"
+                'MIN(at) ts FROM listening_activity GROUP BY identity_key').fetchall()
+            self._upsert_first_play_min(('track',r['identity_key'],r['day'],r['ts'],source) for r in rows)
             self._rebuild_artist_first_play()
             self.conn.executemany("INSERT INTO settings(key,value) VALUES (?,?) "
                                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", [
@@ -263,12 +257,13 @@ class TrendsRepo(Repo):
 
     @synchronized
     def play_day_counts(self) -> list:
-        """[(day, identity_key, count)] one row per (UTC day, key), count = history-item appearances
-        that day. Day-model semantics, matching listen_distribution."""
+        """[(day, identity_key, count)] grouped by calendar date and recording.
+
+        Count is distinct account listening days, matching listen_distribution.
+        """
         rows = self.conn.execute(
-            "SELECT CAST(hs.taken_at / 86400 AS INTEGER) day, hi.identity_key k, COUNT(*) c "
-            "FROM history_items hi JOIN history_snapshots hs ON hs.id = hi.snapshot_id "
-            "GROUP BY day, hi.identity_key").fetchall()
+            "SELECT CAST(day_ts/86400 AS INTEGER) day,identity_key k,COUNT(*) c "
+            "FROM listening_days GROUP BY day,identity_key").fetchall()
         return [(r["day"], r["k"], r["c"]) for r in rows]
 
     @synchronized
@@ -286,7 +281,7 @@ class TrendsRepo(Repo):
         row = self.conn.execute(
             "SELECT COUNT(*) total, SUM(CASE WHEN plays = 0 THEN 1 ELSE 0 END) never FROM ("
             "  SELECT t.identity_key, "
-            "    (SELECT COUNT(*) FROM history_items hi WHERE hi.identity_key = t.identity_key) plays "
+            "    (SELECT COUNT(*) FROM listening_days hi WHERE hi.identity_key=t.identity_key) plays "
             "  FROM tracks t GROUP BY t.identity_key)").fetchone()
         return (row["total"] or 0, row["never"] or 0)
 
@@ -294,9 +289,8 @@ class TrendsRepo(Repo):
     def track_last_play(self) -> list:
         """[(identity_key, last_ts_or_None)] newest snapshot per distinct track (None = never played)."""
         rows = self.conn.execute(
-            "SELECT t.identity_key k, MAX(hs.taken_at) last FROM tracks t "
-            "LEFT JOIN history_items hi ON hi.identity_key = t.identity_key "
-            "LEFT JOIN history_snapshots hs ON hs.id = hi.snapshot_id "
+            "SELECT t.identity_key k,MAX(hi.at) last FROM tracks t "
+            "LEFT JOIN listening_activity hi ON hi.identity_key=t.identity_key "
             "GROUP BY t.identity_key").fetchall()
         return [(r["k"], r["last"]) for r in rows]
 
@@ -305,15 +299,14 @@ class TrendsRepo(Repo):
         """[{playlist_id, title, last_listen, listens}] for playlists whose tracks were listened to at
         most max_listens times across history (LEFT JOIN keeps never-listened playlists), listens asc."""
         rows = self.conn.execute(
-            "SELECT p.id pid, p.title title, "
-            "  (SELECT MAX(hs.taken_at) FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id "
-            "     JOIN history_items hi ON hi.identity_key = t.identity_key "
-            "     JOIN history_snapshots hs ON hs.id = hi.snapshot_id WHERE pt.playlist_id = p.id) last, "
-            "  (SELECT COUNT(hi.identity_key) FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id "
-            "     JOIN history_items hi ON hi.identity_key = t.identity_key WHERE pt.playlist_id = p.id) cnt "
-            "FROM playlists p "
+            "WITH membership AS (SELECT DISTINCT pt.playlist_id pid,t.identity_key k "
+            "FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id),"
+            "stats AS (SELECT m.pid,MAX(a.at) last,COUNT(*) cnt FROM membership m "
+            "JOIN listening_activity a ON a.identity_key=m.k GROUP BY m.pid) "
+            "SELECT p.id pid,p.title,s.last,COALESCE(s.cnt,0) cnt FROM playlists p "
+            "LEFT JOIN stats s ON s.pid=p.id "
             "WHERE p.id NOT IN (SELECT p2.id FROM playlists p2 "
-            "  JOIN quarantined_playlists g ON g.ytm = p2.ytm_playlist_id WHERE g.name = :grp)",
+            "  JOIN quarantined_playlists g ON g.ytm = p2.scope_ref WHERE g.name = :grp)",
             {"grp": GENERATED_GROUP}).fetchall()
         out = [{"playlist_id": r["pid"], "title": r["title"], "last_listen": r["last"],
                 "listens": r["cnt"] or 0} for r in rows]
@@ -341,10 +334,10 @@ class TrendsRepo(Repo):
         """[{identity_key, title, artist, thumbnail, plays, last_play}] owned tracks with the most
         lifetime day-model plays whose newest play is < before_ts, plays desc."""
         rows = self.conn.execute(
-            "SELECT t.identity_key k, MIN(t.title) title, MIN(t.artist) artist, "
-            "  MIN(NULLIF(t.thumbnail,'')) thumb, COUNT(hi.identity_key) plays, MAX(hs.taken_at) last "
-            "FROM tracks t JOIN history_items hi ON hi.identity_key = t.identity_key "
-            "JOIN history_snapshots hs ON hs.id = hi.snapshot_id "
+            "WITH names AS (SELECT identity_key,MIN(title) title,MIN(artist) artist,"
+            "MIN(NULLIF(thumbnail,'')) thumb FROM tracks GROUP BY identity_key) "
+            "SELECT t.identity_key k,t.title,t.artist,t.thumb,COUNT(*) plays,MAX(hi.day_ts) last "
+            "FROM names t JOIN listening_days hi ON hi.identity_key=t.identity_key "
             "GROUP BY t.identity_key HAVING plays > 0 AND last < ? "
             "ORDER BY plays DESC, last ASC LIMIT ?", (before_ts, int(limit))).fetchall()
         return [{"identity_key": r["k"], "title": r["title"], "artist": r["artist"] or "",
@@ -361,8 +354,7 @@ class TrendsRepo(Repo):
         has_play_ledger() is False.
         """
         rows = self.conn.execute(
-            "SELECT hi.identity_key k, COUNT(*) c FROM history_items hi "
-            "JOIN history_snapshots hs ON hs.id = hi.snapshot_id "
-            "WHERE hs.taken_at >= ? AND hs.taken_at < ? GROUP BY hi.identity_key",
+            "SELECT identity_key k,COUNT(*) c FROM listening_days "
+            "WHERE day_ts>=? AND day_ts<? GROUP BY identity_key",
             (since, until)).fetchall()
         return {r["k"]: r["c"] for r in rows}

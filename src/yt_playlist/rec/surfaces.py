@@ -213,7 +213,7 @@ def rediscover_playlists(store, now, count=2, per=5, epoch=0, pool=8) -> list[di
     candidates = []
     for p in store.playlists.get_playlists():
         if (p.ytm_playlist_id in analysis.SYSTEM_PLAYLIST_IDS
-                or store.playlists.is_quarantined_playlist(p.ytm_playlist_id)
+                or store.playlists.is_quarantined_playlist(p.scope_ref)
                 or not p.track_count):
             continue
         # Never-played tracks count as cold: a 0.0 sentinel sorts older than any real timestamp.
@@ -479,10 +479,11 @@ def _content_only_scores(store, plays, now) -> dict:
     vector (#38). Scored by content-space taste fit (then the permanent x transient genre/era facet
     overlay, so mutes/steering still apply) x novelty, the same shape as the collaborative Catalog score
     so they interleave. Empty when content vectors or the content-taste model are absent."""
-    ct = content_taste(store)
+    snapshot = store.rec_model.content_generation()
+    ct = content_taste(store, snapshot=snapshot)
     if not ct:
         return {}
-    ckeys, CV, _cidx = embed.load_content_vectors(store)
+    ckeys, CV, _cidx = embed.load_content_vectors(store, snapshot=snapshot)
     if CV is None:
         return {}
     _keys, _V, idx = embed.load_vectors(store)
@@ -578,8 +579,8 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
     scope = str(playlist_id)
     suppressed = store.rec_model.suppressed_keys("suggest", now or 0, scope=scope)
     muted = store.rec_model.muted_artists()
-    member_meta = store.rec_query.tracks_by_keys(members)
-    seed_artists = {normalize(m["artist"]) for m in member_meta.values() if m.get("artist")}
+    artist_refs = store.artists.track_keys()
+    seed_artists = {a for key in members for a in artist_refs.get(key,())}
     dao = store.rec_query
     member_genres = [g for g in dao.track_genres(members).values() if g]
     families = {genre_map.family(g) for g in member_genres}
@@ -587,8 +588,8 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
     if not seed_artists or not families:
         return []
 
-    related = dict(artist_model.related_artists(
-        store, seed_artists, topn=limit * 8, exclude_owned=False))
+    related = {store.artists.key(a):score for a,score in artist_model.related_artists(
+        store, seed_artists, topn=limit * 8, exclude_owned=False)}
     candidates = artist_model.artist_track_candidates(
         store, seed_artists, topn=limit * 8, include_out_of_corpus=True)
     # Same-artist catalog tracks are relevant without asking the model to rediscover the seed itself.
@@ -602,7 +603,6 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
     seen = set()
     for c in candidates:
         key, artist, genre = c.get("key"), c.get("artist") or "", c.get("genre") or ""
-        norm_artist = normalize(artist)
         family = genre_map.family(genre) if genre else None
         if (not key or key in members or key in seen or key in suppressed or artist in muted
                 or family not in families):
@@ -610,8 +610,9 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
         seen.add(key)
         sub = genre_map.subgenre(genre)
         exact = int(bool(sub and sub in subgenres))
-        score = float(c.get("artist_score", related.get(norm_artist, 0.0)))
-        ranked.append((exact, score, key, artist, family, c, norm_artist in seed_artists))
+        score = float(c.get("artist_score", max((related.get(a,0.0) for a in artist_refs.get(key,())),default=0.0)))
+        ranked.append((exact, score, key, artist, family, c,
+                       bool(set(artist_refs.get(key,())) & seed_artists)))
 
     ranked.sort(key=lambda r: (-r[0], -r[1], r[3].lower(), r[2]))
     # Preserve relevance within each artist, then deal one card per artist per round. A plain global
@@ -619,7 +620,7 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
     # candidate set and per-artist ranking while making the grid useful at a glance.
     by_artist = {}
     for row in ranked:
-        artist_key = normalize(row[3])
+        artist_key = tuple(sorted(artist_refs.get(row[2],())))
         bucket = by_artist.setdefault(artist_key, [])
         if len(bucket) < per_artist_cap:
             bucket.append(row)

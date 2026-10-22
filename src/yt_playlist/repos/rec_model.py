@@ -8,7 +8,7 @@ import time
 import uuid
 
 from yt_playlist.repos.base import Repo, synchronized
-from yt_playlist.core import catalog
+from yt_playlist.core import artists, catalog
 from yt_playlist.util import genre_map
 
 # Learned blend weights live in [_WEIGHT_MIN, _WEIGHT_MAX] around the 1.0 prior: the floor stops a run
@@ -122,11 +122,19 @@ class RecModelRepo(Repo):
     def record_feedback(self, surface, item_key, kind, reason=None, scope="", until=None, now=None) -> None:
         """Persist a feedback event (dismiss/less/more/mute/not_now). Upserts per (surface,item,scope)."""
         item_key = catalog.resolve_key(self.conn,item_key) or item_key
+        artist_id = None
+        if item_key.startswith('artist:'):
+            artist_id = artists.state_id(self.conn,item_key[7:])
+        elif surface in ('artist','new_artists'):
+            artist_id = artists.state_id(self.conn,item_key)
         self.conn.execute(
-            "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) "
-            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(surface,item_key,scope) DO UPDATE SET "
-            "kind=excluded.kind, reason=excluded.reason, until=excluded.until, created_at=excluded.created_at",
-            (surface, item_key, kind, reason, scope or "", until, now))
+            "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at,artist_id,target_type) "
+            "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(surface,item_key,scope) DO UPDATE SET "
+            "kind=excluded.kind, reason=excluded.reason, until=excluded.until, created_at=excluded.created_at, "
+            "artist_id=excluded.artist_id,target_type=CASE WHEN excluded.artist_id IS NOT NULL "
+            "THEN 'artist' ELSE rec_feedback.target_type END",
+            (surface, item_key, kind, reason, scope or "", until, now, artist_id,
+             'artist' if artist_id is not None else 'legacy_unresolved'))
         self.conn.commit()
 
     @synchronized
@@ -144,6 +152,11 @@ class RecModelRepo(Repo):
             "AND (until IS NULL OR until>?)",
             (surface, scope or "", now)).fetchall()
         blocked = {r["item_key"] for r in rows}
+        blocked.update(r[0] for r in self.conn.execute(
+            "SELECT DISTINCT r.identity_key FROM rec_feedback f "
+            "JOIN track_artists ta ON ta.artist_id=f.artist_id "
+            "JOIN catalog_entries e ON e.id=ta.entry_id JOIN recordings r ON r.id=e.recording_id "
+            "WHERE f.kind='mute' AND (f.until IS NULL OR f.until>?)", (now,)))
         muted_genres = {r["axis"][6:] for r in self.conn.execute(
             "SELECT axis FROM rec_weights WHERE axis LIKE 'genre:%' AND weight=0")}
         if muted_genres:
@@ -356,8 +369,19 @@ class RecModelRepo(Repo):
     @synchronized
     def muted_artists(self) -> set:
         """Artist names the user has muted (stored as item_key 'artist:<name>')."""
-        rows = self.conn.execute("SELECT item_key FROM rec_feedback WHERE kind='mute'").fetchall()
-        return {r["item_key"][7:] for r in rows if r["item_key"].startswith("artist:")}
+        rows = self.conn.execute("SELECT item_key,artist_id FROM rec_feedback WHERE kind='mute'").fetchall()
+        result = set()
+        for row in rows:
+            if row['artist_id']:
+                ref = artists.token(row['artist_id'])
+                name = self.conn.execute('SELECT name FROM artists WHERE id=?', (row['artist_id'],)).fetchone()[0]
+                if artists.lookup(self.conn,name) == row['artist_id']:
+                    result.add(name)
+                else:
+                    result.add(ref)
+            elif row['item_key'].startswith('artist:'):
+                result.add(row['item_key'][7:])
+        return result
 
     @synchronized
     def feedback_summary(self) -> dict:
@@ -435,6 +459,50 @@ class RecModelRepo(Repo):
             self.conn.executemany("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)", [
                 ("rec_content_model", model), ("rec_content_genre_revision", revision),
                 ("rec_content_inputs", inputs or ""), ("rec_content_generation", generation)])
+        return True
+
+    @synchronized
+    def content_vectors_by_keys(self, keys) -> dict:
+        """Read a bounded neighbourhood; prefer library vectors for overlapping recordings."""
+        keys = list(dict.fromkeys(keys))
+        if not keys:
+            return {}
+        qs = ",".join("?" * len(keys))
+        result = {}
+        for table in ("rec_discovered_content_vectors", "rec_content_vectors"):
+            result.update((r["identity_key"], r["vec"]) for r in self.conn.execute(
+                f"SELECT identity_key,vec FROM {table} WHERE identity_key IN ({qs})", keys))
+        return result
+
+    @synchronized
+    def update_content_vectors(self, library, discovered, *, expected_generation):
+        """Patch only changed keys in the existing encoding; never replace either vector pool.
+
+        A concurrent full model publication invalidates the calculation. Bumping the generation
+        also prevents a previously started full publisher from overwriting these newer inputs.
+        None removes a key that no longer has any feature in the saved model.
+        """
+        with self.conn:
+            self.conn.execute("UPDATE settings SET value=value WHERE key='rec_content_generation'")
+            current = self.conn.execute(
+                "SELECT value FROM settings WHERE key='rec_content_generation'").fetchone()
+            if (current[0] if current else "") != expected_generation:
+                return False
+            changed = False
+            for table, vectors in (("rec_content_vectors", library),
+                                   ("rec_discovered_content_vectors", discovered)):
+                for key, blob in vectors.items():
+                    if blob is None:
+                        result = self.conn.execute(f"DELETE FROM {table} WHERE identity_key=?", (key,))
+                    else:
+                        result = self.conn.execute(
+                            f"INSERT INTO {table}(identity_key,vec) VALUES (?,?) "
+                            "ON CONFLICT(identity_key) DO UPDATE SET vec=excluded.vec WHERE vec<>excluded.vec",
+                            (key, blob))
+                    changed |= result.rowcount > 0
+            if changed:
+                self.conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)",
+                                  ("rec_content_generation", uuid.uuid4().hex))
         return True
 
     @synchronized

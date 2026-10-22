@@ -1,7 +1,7 @@
 """#28 Artist-relationship model: relate artists by this user's co-curation (+ content + Last.fm edges).
 
-Mirrors the track model (embed.py) at the artist level; the vocabulary is normalized artist names
-(util.matching.normalize), the same keying new_artists already uses for the Last.fm cache. So far this
+Mirrors the track model (embed.py) at the artist level; the vocabulary uses canonical artist IDs.
+Names are resolved only at display and provider boundaries. So far this
 module implements the collaborative (co-occurrence) block (spec §A): reduce the track model's baskets to
 distinct-artist sets and run them through the same PPMI + truncated SVD (embed._svd).
 
@@ -18,19 +18,15 @@ from yt_playlist.util.matching import normalize
 _ARTIST_CONTENT_MODEL_SETTING = "rec_artist_content_model"
 
 
-def _artist_of(identity_key):
-    """The (already-normalized) artist portion of an identity_key ('title|artist')."""
-    return identity_key.rsplit("|", 1)[-1]
-
-
 def artist_baskets(store):
     """Reduce the track model's co-occurrence baskets (playlists / albums / sessions / genre family /
     decade) to distinct-artist sets, so two artists relate when their tracks repeatedly co-occur.
     Baskets that collapse to a single artist (the per-artist basket, or a one-artist playlist) are
     dropped: they would only self-relate an artist. Returns a list of distinct normalized-artist lists."""
     out = []
+    refs = store.artists.track_keys(library=True)
     for basket in store.rec_query.rec_baskets():
-        artists = {_artist_of(k) for k in basket if k}
+        artists = {a for k in basket for a in refs.get(k,())}
         artists.discard("")
         if len(artists) >= 2:
             out.append(sorted(artists))
@@ -67,27 +63,30 @@ def artist_content_profiles(store):
     artist (already normalized), so it shares the §A vocabulary. The artist analogue of track_content."""
     dao = store.rec_query
     prof: dict = {}
+    refs = store.artists.track_keys(library=True)
 
     def _p(artist):
         return prof.setdefault(artist, {"families": set(), "subs": set(), "decades": set(), "audio": {}})
 
     for k, (genre, year) in dao.track_content().items():
-        p = _p(_artist_of(k))
-        if genre:
-            p["families"].add(genre_map.family(genre))
-            sub = genre_map.subgenre(genre)
-            if sub:
-                p["subs"].add(sub)
-        if year and str(year)[:4].isdigit():
-            p["decades"].add(int(str(year)[:4]) // 10 * 10)
+        for artist in refs.get(k,()):
+            p = _p(artist)
+            if genre:
+                p["families"].add(genre_map.family(genre))
+                sub = genre_map.subgenre(genre)
+                if sub:
+                    p["subs"].add(sub)
+            if year and str(year)[:4].isdigit():
+                p["decades"].add(int(str(year)[:4]) // 10 * 10)
 
     accum: dict = {}   # artist -> {feat: [sum, count]}, for the per-artist audio mean
     for k, d in dao.track_audio_features().items():
-        ac = accum.setdefault(_artist_of(k), {})
-        for f in embed.CONTINUOUS_AUDIO:
-            v = d.get(f)
-            if v is not None:
-                s = ac.setdefault(f, [0.0, 0]); s[0] += float(v); s[1] += 1
+        for artist in refs.get(k,()):
+            ac = accum.setdefault(artist, {})
+            for f in embed.CONTINUOUS_AUDIO:
+                v = d.get(f)
+                if v is not None:
+                    s = ac.setdefault(f, [0.0, 0]); s[0] += float(v); s[1] += 1
     for artist, ac in accum.items():
         _p(artist)["audio"] = {f: s[0] / s[1] for f, s in ac.items() if s[1]}
     return prof
@@ -147,7 +146,7 @@ def _discovered_artist_profiles(store):
     `genre` field), so OOC artists encode into the SAME artist-content space and become placeable."""
     out = {}
     for a in store.discovery.get_discovered_artists():
-        artist, genre = normalize(a.get("artist") or ""), a.get("genre")
+        artist, genre = store.artists.key(a.get('artist_id') or a.get('artist')), a.get("genre")
         if artist and genre:
             out[artist] = {"families": {genre_map.family(genre)}, "subs": set(), "decades": set(), "audio": {}}
     return out
@@ -209,7 +208,7 @@ def _blended_set_scores(store, seeds):
     if w_edge > 0.0:
         for seed in seeds:
             for name, match in store.rec_surface.artist_similar_edges(seed):
-                cand = normalize(name)
+                cand = store.artists.key(name)
                 if cand and cand not in seeds:
                     blended[cand] = blended.get(cand, 0.0) + w_edge * float(match)
     return blended
@@ -231,19 +230,23 @@ def artist_neighbors(store, artist, topn=12, exclude=None):
     """Artists most related to one seed by the blended (§A co-curation + §B content + §C edges) score.
     `artist` may be any casing; it is normalized to the model's vocabulary. Empty if the seed is in no
     space and has no edges (model unbuilt or seed unknown)."""
-    seed = normalize(artist)
-    return _ranked(_blended_set_scores(store, {seed}), (exclude or set()) | {seed}, topn)
+    seed = store.artists.key(artist)
+    excluded = {store.artists.key(a) for a in (exclude or ())} | {seed}
+    return [(store.artists.public_key(a),score) for a,score in
+            _ranked(_blended_set_scores(store, {seed}), excluded, topn)] if seed else []
 
 
 def related_artists(store, seed_artists, topn=12, exclude_owned=True):
     """Artists related to a SET of seeds (e.g. a playlist's artists), by the blended seed-centroid
     score. `exclude_owned` drops artists already in the library, biasing toward discovery (#18); pass
     False for completion (#24), where owned related artists are exactly what you want."""
-    seeds = {normalize(a) for a in seed_artists if a}
+    seeds = {store.artists.key(a) for a in seed_artists if a}
+    seeds.discard(None)
     excl = set(seeds)
     if exclude_owned:
-        excl |= store.rec_query.library_artists()
-    return _ranked(_blended_set_scores(store, seeds), excl, topn)
+        excl |= {a for refs in store.artists.track_keys(library=True).values() for a in refs}
+    return [(store.artists.public_key(a),score) for a,score in
+            _ranked(_blended_set_scores(store, seeds), excl, topn)]
 
 
 def artist_track_candidates(store, seed_artists, topn=24, include_out_of_corpus=True):
@@ -257,16 +260,18 @@ def artist_track_candidates(store, seed_artists, topn=24, include_out_of_corpus=
     if not scores:
         return []
     out = list(store.rec_query.tracks_by_artists(scores))
+    refs = store.artists.track_keys()
+    scores = {store.artists.key(a):score for a,score in scores.items()}
     for row in out:
-        row["artist_score"] = scores.get(normalize(row.get("artist") or ""), 0.0)
+        row["artist_score"] = max((scores.get(a,0) for a in refs.get(row['key'],())),default=0)
     if include_out_of_corpus:
         for r in store.discovery.get_discovered_tracks():
-            artist = normalize(r.get("artist") or "")
-            if artist in scores:
+            matches = [a for a in refs.get(r['identity_key'],()) if a in scores]
+            if matches:
                 out.append({"key": r.get("identity_key"), "title": r.get("title"),
                             "artist": r.get("artist"), "album": r.get("album") or "",
                             "video_id": r.get("video_id"), "thumbnail": r.get("thumbnail"),
-                            "genre": r.get("genre") or "", "artist_score": scores[artist],
+                            "genre": r.get("genre") or "", "artist_score": max(scores[a] for a in matches),
                             "out_of_corpus": True})
     return out
 

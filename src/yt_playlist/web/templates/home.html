@@ -1,6 +1,10 @@
 {% extends "base.html" %}{% from "_macros.html" import banner %}
 {% block title %}Home - TuneConsole{% endblock %}
 {% block page_class %}page-home{% endblock %}
+{% block page_styles %}
+<link rel="stylesheet" href="/static/radio.css?v={{ asset_v }}">
+<script src="/static/radio.js?v={{ asset_v }}"></script>
+{% endblock %}
 {# Transient success toast (e.g. re-authed with auto-sync on, nothing for them to do). Mirrors the
    OOB error toast: Alpine auto-dismisses after 5s. Renders into base.html's #toasts container. #}
 {% block toasts %}{% if toast %}
@@ -53,15 +57,6 @@
       </span>
     </section>
 
-    {# #93 Task 9: the radio launch card, its own card (not a status-strip button). Off: Start radio +
-       collapsed Customize. On: Stop + Customize, and the customize panel migrates up into the
-       now-playing card's #radio-steer-slot above (Alpine x-teleport).
-       Owner-parked (2026-07-05): hidden unless the page is loaded with ?radio=true (or ?radio=1)
-       while the feature bakes; every /radio/* endpoint stays live underneath. #}
-    {% if show_radio %}
-    {% include "_partials/radio_launch.html" %}
-    {% endif %}
-
     {# First-run only: progress is useful while the initial library is being assembled. Once Home is
        established, background syncing is an implementation detail and stays out of the interface. #}
     {% if not sync.last_synced_ago %}
@@ -87,6 +82,7 @@
   {% set has_notices = show_takeout_nag or actions or show_intro or show_lastfm_nudge or
       show_identities_nudge or show_backend_update or recap or spotify_library_job %}
   <div class="home-dashboard"
+       :class="{'is-radio': panel === 'radio'}"
        x-data="{ panel: location.hash.slice(1) || '{{ dash_default }}',
                  go(p) { this.panel = p; history.replaceState(null, '', '#' + p); } }"
        x-init='$nextTick(() => { if (!$el.querySelector(`[data-dash="${panel}"]`)) go({{ dash_default|tojson }}) })'>
@@ -100,6 +96,8 @@
       <button type="button" role="tab" :class="{ on: panel === 'directions' }" :aria-selected="panel === 'directions'"
               @click="go('directions')">Listen</button>
       {% endif %}
+      <button type="button" role="tab" :class="{ on: panel === 'radio' }" :aria-selected="panel === 'radio'"
+              @click="go('radio')">Radio</button>
       {% if not onboarding and (rediscover_albums or rediscover) %}
       <button type="button" role="tab" :class="{ on: panel === 'rediscover' }" :aria-selected="panel === 'rediscover'"
               @click="go('rediscover')">Revisit</button>
@@ -115,6 +113,10 @@
               @click="go('notices')">Needs attention <span class="dash-attention-dot" aria-hidden="true"></span></button>
       {% endif %}
     </nav>
+
+    <section class="dash-panel dash-radio" data-dash="radio" role="tabpanel" x-show="panel === 'radio'" x-cloak>
+      {% include "_partials/radio.html" %}
+    </section>
 
     {% if onboarding %}
     <section class="dash-panel dash-onboarding" data-dash="start" role="tabpanel" x-show="panel === 'start'" x-cloak>

@@ -289,7 +289,7 @@ def test_repo_preserves_true_counts_with_video_variants_and_snapshot_familiarity
                            "VALUES (1,?,?,'live')", [(key, since + i) for i in range(4)])
     material = RecapRepo(store).snapshot(since, until)
     assert len(material["plays"]) == 4
-    assert material["first"][key] == since - 86400
+    assert material["first"][key] == since - 86400 + 43200  # a coarse date, not an exact midnight play
 
 
 def test_worker_bakes_all_three_screens_and_replaces_overlapping_old_beats(store, data):

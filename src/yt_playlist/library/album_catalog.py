@@ -19,12 +19,19 @@ def remember_album(store, browse_id, album, fallback=None):
     title = album.get("title") or fallback.get("title")
     if not title or not artist or any(not t.get("title") for t in tracks):
         return
-    keys = sorted({store.tracks.observe_track(t.get("videoId"), t["title"], artists(t) or artist,
-                                      album=title,album_browse_id=browse_id) for t in tracks})
+    def positive(value):
+        return int(value) if str(value).isdigit() and int(value)>0 else None
+
+    entries = [dict(entry_id=store.tracks.observe_track_entry(
+        t.get('videoId'),t['title'],artists(t) or artist,album=title,
+        album_browse_id=browse_id,credits=t.get('artists') or album.get('artists')),
+        disc_number=positive(t.get('discNumber',t.get('disc_number'))),
+        track_number=positive(t.get('trackNumber',t.get('track_number')))) for t in tracks]
     try:
         video_ids = [track["videoId"] for track in shareable_album_tracks(album)]
     except ValueError:
         video_ids = None
     store.collection.cache_album_tracklist(
-        browse_id, title, artist, best_thumb(album.get("thumbnails")) or fallback.get("thumbnail"), keys,
-        video_ids=video_ids)
+        browse_id, title, artist, best_thumb(album.get("thumbnails")) or fallback.get("thumbnail"), [],
+        video_ids=video_ids,entries=entries,credits=album.get('artists'),
+        year=album.get('year'),album_type=album.get('type'))

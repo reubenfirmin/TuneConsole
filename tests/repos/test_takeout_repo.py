@@ -16,14 +16,14 @@ def test_import_plays_day_model_and_dedup():
              ("a|x", 101 * DAY + 3600), ("b|y", 100 * DAY + 7200)]
     assert s.history.import_plays(1, plays) == 3
     assert s.history.import_plays(1, plays) == 0                              # idempotent
-    counts = {r[0]: r[1] for r in s.conn.execute(
-        "SELECT identity_key, COUNT(*) FROM history_items GROUP BY identity_key")}
+    counts = s.history.listening_day_counts()
     assert counts == {"a|x": 2, "b|y": 1}
+    assert s.history.event_play_counts()=={'a|x':3,'b|y':1}
 
 
 def test_import_plays_coexists_with_live_recording():
     s = _store()
-    s.history.record_history_plays(1, 100 * DAY + 50000, ["a|x"])             # live capture already saw it
+    s.history.record_history_plays(1, 100 * DAY + 50000, ["a|x"], source_timezone='UTC')
     assert s.history.import_plays(1, [("a|x", 100 * DAY + 3600)]) == 0        # same day: no double count
 
 

@@ -106,8 +106,7 @@ def import_spotify_data(store, raw, *, on_progress=None) -> dict:
         # Spotify ids are intentionally not put in the YouTube video_id column.
         matched.append((key, None, row["ts"]))
     progress(f'Saving {len(matched):,} matched plays…')
-    plays_added = store.history.import_plays(ident, [(key, ts) for key, _vid, ts in matched])
-    events_added = store.history.import_play_events(ident, matched, source="spotify")
+    plays_added,events_added = store.history.import_listening_events(ident,matched,source='spotify')
     span_days = int((parsed[-1]["ts"] - parsed[0]["ts"]) // 86400) if parsed else 0
     return {"matched": len(matched), "unmatched": sum(unmatched.values()),
             "plays_added": plays_added, "events_added": events_added, "span_days": span_days,

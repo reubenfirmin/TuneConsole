@@ -74,7 +74,7 @@ def test_equal_timestamp_outcome_belongs_to_last_served_impression(store):
 
 def test_generated_response_is_not_organic_and_underpowered_has_no_verdict(store):
     iid = _seed_track(store)
-    store.conn.execute("INSERT INTO playlist_group(ytm,name) VALUES ('PLGEN','Generated')")
+    store.playlists.set_playlist_group('PLGEN','Generated')
     store.playlists.mark_generated_playlist('PLGEN')
     store.conn.commit()
     _shown(store, "one", 100)
@@ -103,10 +103,16 @@ def test_play_time_provenance_survives_promotion_and_sensor_rereports(store, pla
     assert store.rec_surface.recommendation_scorecard(90, 200) == before
     assert before["generated"] == 1 and before["organic"] == 0
 
-    # Explicit adoption changes future plays, while preserving the original event's policy.
+    # A later play after a group change is still quarantined until explicit adoption.
     assert store.history.record_play_event(iid, "song|artist", "vid", 5000, playlist_ytm_id=playlist) is True
+    assert store.rec_surface.recommendation_scorecard(90, 200) == before
+
+    # Explicit adoption changes future plays, while preserving the original event's policy.
+    store.playlists.adopt_generated_playlist('PLGEN')
+    assert store.history.record_play_event(iid, "song|artist", "vid", 10000, playlist_ytm_id=playlist) is True
     score = store.rec_surface.recommendation_scorecard(90, 200)
     assert score["generated"] == score["organic"] == 1
+    assert [r[0] for r in store.conn.execute('SELECT is_generated FROM play_events ORDER BY id')]==[1,1,0]
 
 
 def test_imported_historical_play_is_response_with_unknown_provenance(store):

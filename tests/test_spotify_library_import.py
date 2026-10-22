@@ -61,6 +61,19 @@ class LibraryClient(FakeClient):
         self.album_ratings.append((playlist_id, rating))
 
 
+def test_album_import_membership_and_markers_are_scoped_to_destination(store):
+    first = store.identities.upsert_identity('first','c','brand',False)
+    main = store.identities.upsert_identity('main','c',None,True)
+    raw = _zip({'YourLibrary.json':{'albums':[
+        {'artist':'Album Artist','album':'Saved Record','uri':'spotify:album:1'}]}})
+    a,b = LibraryClient(),LibraryClient()
+    assert import_spotify_library(store,raw,a,first,1)['albums_imported']==1
+    assert import_spotify_library(store,raw,b,main,2)['albums_imported']==1
+    assert a.album_ratings==b.album_ratings==[('OLAK1','LIKE')]
+    assert import_spotify_library(store,raw,b,main,3)['albums_skipped']==1
+    assert {r[0] for r in store.conn.execute('SELECT identity_id FROM album_library_memberships')}=={first,main}
+
+
 def test_account_data_parser_reads_playlists_and_albums_and_ignores_episodes():
     parsed = load_spotify_library(_account_zip())
     assert parsed["playlists"][0]["name"] == "Road songs"

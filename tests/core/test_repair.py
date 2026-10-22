@@ -331,9 +331,7 @@ def test_unknown_and_independent_observations_survive_complete_coverage(store, t
 @pytest.mark.parametrize('writer', ['live', 'import'])
 def test_independent_observation_protects_an_existing_daily_row(store, writer):
     _coverage(store)
-    sid = store.history._snapshot_for_date(1, 15 * DAY + 43200)
-    store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key,source) VALUES (?,'song','ytm_history')", (sid,))
-    store.conn.commit()
+    store.history.add_history_snapshot(1,15*DAY+43200,['song'],source='ytm_history')
     if writer == 'live':
         store.history.record_history_plays(1, 15 * DAY + 43200, ['song'], source_timezone='UTC')
     else:

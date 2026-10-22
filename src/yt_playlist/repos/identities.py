@@ -2,6 +2,7 @@
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.models import Identity
 from contextlib import contextmanager
+from uuid import uuid4
 
 
 _UPSERT = (
@@ -15,6 +16,9 @@ _UPSERT = (
 class IdentityRepo(Repo):
     @synchronized
     def upsert_identity(self, label, credential_ref, brand_account_id, is_master):
+        existing = self.conn.execute('SELECT brand_account_id FROM identities WHERE label=?', (label,)).fetchone()
+        if existing and (existing[0] or None)!=(brand_account_id or None):
+            raise ValueError('An existing account cannot be retargeted; add the other account separately')
         self.conn.execute(
             _UPSERT,
             (label, credential_ref, brand_account_id, int(is_master)))
@@ -40,8 +44,13 @@ class IdentityRepo(Repo):
                 selected, used = [], set()
                 for cfg in configs:
                     row = next((r for r in existing if r["id"] == cfg.identity_id), None) if cfg.identity_id else None
+                    if cfg.identity_id is not None and row is None:
+                        raise ValueError('Unknown identity ID')
+                    if row is not None and (row['brand_account_id'] or None)!=(cfg.brand_account_id or None):
+                        raise ValueError('An existing account cannot be retargeted; add the other account separately')
                     if row is None and cfg.identity_id is None:
-                        row = next((r for r in existing if r["label"] == cfg.label), None)
+                        row = next((r for r in existing if r["label"] == cfg.label
+                                    and (r['brand_account_id'] or None)==(cfg.brand_account_id or None)), None)
                     if row is None and cfg.identity_id is None:
                         matches = [r for r in existing if r["credential_ref"] == cfg.credential_ref
                                    and (r["brand_account_id"] or None) == (cfg.brand_account_id or None)
@@ -54,10 +63,18 @@ class IdentityRepo(Repo):
                         used.add(iid)
                     selected.append((cfg, iid))
                 self.conn.execute("UPDATE identities SET active=0, is_master=0")
+                labels = {cfg.label for cfg,_ in selected}
+                for old in existing:
+                    if old['id'] not in used and old['label'] in labels:
+                        # Reusing a label for a new remote account must not reuse its local ID.
+                        retired = f"@inactive:{old['id']}:{old['label']}"
+                        while self.conn.execute('SELECT 1 FROM identities WHERE label=?', (retired,)).fetchone():
+                            retired += ':'
+                        self.conn.execute('UPDATE identities SET label=? WHERE id=?', (retired,old['id']))
                 # Temporary labels allow two existing accounts to exchange display labels.
                 for _, iid in selected:
                     if iid is not None:
-                        self.conn.execute("UPDATE identities SET label=? WHERE id=?", (f"@setup:{iid}", iid))
+                        self.conn.execute("UPDATE identities SET label=? WHERE id=?", (f"@setup:{iid}:{uuid4().hex}", iid))
                 ids = {}
                 for cfg, iid in selected:
                     if iid is None:

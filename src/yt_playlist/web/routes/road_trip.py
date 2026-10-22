@@ -25,6 +25,7 @@ from yt_playlist.library import executor
 from yt_playlist.rec import measurement, road_trip as road_trip_rec
 from yt_playlist.util.matching import identity_key
 from yt_playlist.core.activity import activity_for
+from yt_playlist.core.accounts import client_for
 
 MIN_TARGET_MINUTES = 15
 MAX_TARGET_MINUTES = 12 * 60
@@ -109,7 +110,10 @@ def build(ctx) -> APIRouter:
                                            "form_recipe": form_recipe or BLANK_RECIPE})
 
     def _client():
-        return next(iter((ctx.client_provider() or {}).items()), (None, None))
+        try:
+            return client_for(store,ctx.client_provider())
+        except ValueError:
+            return None,None
 
     @router.get("/road_trip")
     def road_trip_page(request: Request):
@@ -352,7 +356,7 @@ def build(ctx) -> APIRouter:
         identity_id, client = _client()
         tracks = road_trip_rec.draft_tracks(state)
         if client is None or not tracks:
-            return response("Couldn't save it - connect an account and keep at least one track.")
+            return response("Couldn't save it - connect the main account and keep at least one track.")
         stats = state["stats"]
         try:
             saved = await activity_for(ctx).to_thread(

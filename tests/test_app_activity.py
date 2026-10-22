@@ -99,8 +99,43 @@ def test_lifespan_owns_executor_cancels_pending_work_and_supports_restart(store)
         assert not ctx.rec_worker._threads and ctx.enrich_worker._thread is None
 
 
+def test_radio_preparation_starts_inside_lifespan_after_work_opens(store, monkeypatch):
+    from yt_playlist.web import app as web_app
+
+    started, finish = threading.Event(), threading.Event()
+
+    class Radio:
+        def __init__(self, ctx):
+            self.ctx = ctx
+
+        def prepare(self):
+            def warm():
+                started.set()
+                assert finish.wait(5)
+            self.ctx.work.start_thread(warm, name="radio-prepare")
+
+    monkeypatch.setattr(web_app, "PlaylistRadio", Radio)
+    monkeypatch.setattr(web_app, "_background_sync_loop", lambda *a, **kw: None)
+    app = create_app(store, lambda: {}, background_work=True)
+    ctx = app.state.ctx
+    assert not started.is_set() and not ctx.work.active
+    worker = SimpleNamespace(start_ticker=lambda: None, trigger_mode_refresh=lambda: None,
+                             shutdown=lambda: None, join=lambda timeout: None)
+    ctx.rec_worker = ctx.enrich_worker = worker
+    try:
+        with TestClient(app):
+            assert started.wait(5)
+            assert "radio-prepare" in ctx.work.active
+            assert ctx.work.accepting
+            finish.set()
+    finally:
+        finish.set()
+    assert ctx.work.wait(5) and not ctx.work.accepting
+
+
 def test_restart_waits_for_a_generated_playlist_save(store, monkeypatch):
-    app = create_app(store, lambda: {1: object()}, background_work=False)
+    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    app = create_app(store, lambda: {iid: object()}, background_work=False)
     ctx = app.state.ctx
     started, release = threading.Event(), threading.Event()
 
