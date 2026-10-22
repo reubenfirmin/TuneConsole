@@ -1,0 +1,29 @@
+{% from "_partials/song_menu_button.html" import song_menu %}
+{% if session.local_id %}
+<div class="card library-table-card radio-track-scroll">
+  <table class="track-table" aria-label="{{ session.title }}">
+    <thead><tr><th class="num radio-col-number">#</th><th class="col-thumb"></th><th class="liked-col"></th>
+      <th>Song</th><th class="radio-col-artist">Artist</th><th class="radio-col-album">Album</th><th class="num col-length">Length</th><th class="col-action"></th>
+    </tr></thead>
+    <tbody>
+    {% for t in tracks[:session.history_count] %}
+      <tr class="srow" data-vid="{{ t.video_id }}">
+        <td class="num"><span class="rownum">{{ loop.index }}</span></td>
+        <td><span class="pl-cover">
+          {% if t.thumbnail %}<img class="pl-thumb" src="{{ t.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+          <a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}&amp;list={{ session.playlist_id }}"
+             target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
+        </span></td>
+        {% with video_id=t.video_id, liked=t.liked %}{% include "_partials/liked_cell.html" %}{% endwith %}
+        <td class="t-wrap" title="{{ t.title }}"><a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}&amp;list={{ session.playlist_id }}"
+            target="_blank" rel="noopener" data-yt-info>{{ t.title }}</a></td>
+        <td class="t-wrap" title="{{ t.artist }}"><a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a></td>
+        <td class="t-wrap" title="{{ t.album }}">{% if t.album_browse %}<a class="alink" href="/album?browse={{ t.album_browse }}">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</td>
+        <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
+        <td class="rowmenu">{{ song_menu(t) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

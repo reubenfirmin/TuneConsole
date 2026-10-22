@@ -1,0 +1,51 @@
+<div class="radio-home" x-data="radioHome({{ radio_bootstrap|default({})|tojson|forceescape }})" x-effect="setVisible(panel === 'radio')"
+     @resize.window.debounce.100ms="fitSpace()" @bridge-status.window="playbackChanged($event.detail)">
+  <header class="radio-heading" x-show="state.active" x-cloak>
+    <button type="button" class="btn-ghost radio-stop" x-show="state.active" :disabled="busy" @click="stop()" x-cloak>Stop radio</button>
+  </header>
+  <div class="radio-seeds" x-ref="seeds" x-show="!state.active" :aria-busy="busy || loading">
+    <template x-for="song in seeds" :key="song.video_id">
+      <button type="button" class="radio-seed" :disabled="busy" @click="start(song)"
+              :aria-label="'Click to start radio with ' + song.title + ' by ' + song.artist">
+        <span class="radio-seed-art">
+          <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="24"/><circle cx="32" cy="32" r="8"/></svg>
+          <template x-if="song.thumbnail"><img :src="song.thumbnail" alt="" referrerpolicy="no-referrer" loading="lazy" @error="$el.remove()"></template>
+          <span class="radio-seed-play" aria-hidden="true">▶</span>
+        </span>
+        <span class="radio-seed-info">
+          <strong x-text="song.title" :title="song.title"></strong>
+          <span x-text="song.artist" :title="song.artist"></span>
+        </span>
+      </button>
+    </template>
+  </div>
+  <div class="radio-session" x-ref="session" x-show="state.local_id && !showSeeds" x-cloak>
+    <div class="radio-playlist" x-ref="playlist">{% if radio_bootstrap and radio_bootstrap.state.active and radio_bootstrap.state.local_id %}{% with session=radio_bootstrap.state, tracks=radio_tracks %}{% include "_partials/radio_playlist.html" %}{% endwith %}{% endif %}</div>
+    <div class="radio-directions" aria-label="Possible radio directions">
+      <template x-for="branch in state.directions || []" :key="branch.slot">
+        <section class="radio-direction" :class="{'is-active': branch.active}">
+          <button type="button" class="radio-direction-heading" @click="select(branch)"
+                  :disabled="busy || !state.active || branch.active || !branch.tracks.length"
+                  :aria-pressed="branch.active" :aria-label="(branch.active ? 'Active direction: ' : 'Switch direction to ') + branch.label">
+            <svg class="radio-connector" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21V4M5 11l7-7 7 7"/></svg>
+            <span class="radio-direction-label">
+              <strong x-text="branch.label"></strong>
+            </span>
+          </button>
+          <ol class="radio-direction-tracks">
+            <template x-for="(song, index) in branch.tracks" :key="song.video_id">
+              <li class="radio-proposed-track" :title="song.title + ' · ' + song.artist">
+                <span class="radio-proposed-art">
+                  <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="24"/><circle cx="32" cy="32" r="8"/></svg>
+                  <template x-if="song.thumbnail"><img :src="song.thumbnail" alt="" referrerpolicy="no-referrer" loading="lazy" @error="$el.remove()"></template>
+                </span>
+                <span class="radio-proposed-info"><strong x-text="song.title"></strong><span x-text="song.artist"></span></span>
+                <span class="radio-saved-dot" x-show="branch.active && index === 0" title="Up next" aria-label="Up next"></span>
+              </li>
+            </template>
+          </ol>
+        </section>
+      </template>
+    </div>
+  </div>
+</div>
