@@ -3,12 +3,14 @@
 {% block body %}
 <h1>Preview Spotify import</h1>
 <p>Destination: <strong>{{ identity.label }}</strong></p>
-<p class="section-note">Source: Spotify Account Data export. Source song metadata is held temporarily
-  on this machine and discarded after the transfer. Only the matched YouTube Music recordings below
-  will be added. Ambiguous, unavailable, unmatched, and failed lookups are skipped.</p>
+<p class="section-note">Source: Spotify Account Data export. Review the YouTube Music matches below.
+  Nothing is added until you confirm. Albums with several matching releases need your choice.</p>
 {% set labels = {'matched': 'Confident match', 'ambiguous': 'Ambiguous — skipped',
   'unavailable': 'Unavailable — skipped', 'unmatched': 'Unmatched — skipped',
   'lookup_failed': 'Lookup failed — retry needed'} %}
+<form method="post" action="/import/spotify-library/confirm"
+      x-data="{ saving: false }" @submit="saving = true">
+  <input type="hidden" name="preview_token" value="{{ preview_token }}">
 {% for playlist in prepared.playlists %}
 <section class="card">
   <h2>{{ playlist.name }}</h2>
@@ -32,16 +34,52 @@
 {% if prepared.albums %}
 <section class="card">
   <h2>Saved albums</h2>
-  <p>{{ prepared.albums|length }} saved albums will also be matched and saved to {{ identity.label }}.
-    Unmatched albums can be reviewed in the report afterward.</p>
+  <p>Choose the release for each album. Saving an album is the default; creating a playlist
+    is an optional choice for that album. Leave a release unselected to review it later.</p>
+  {% for album in prepared.albums %}
+  {% set index = loop.index0 %}
+  {% set resolution = album.resolution %}
+  <article class="card" aria-labelledby="album-title-{{ index }}">
+    <h3 id="album-title-{{ index }}">{{ album.title }}</h3>
+    <p>{{ album.artist }} · Spotify Account Data export</p>
+    {% if resolution.status == 'skipped' %}
+    <p>{{ 'Previously imported to this account' if resolution.reason == 'previously_imported' else 'Already saved in this account' }}</p>
+    {% else %}
+    <p>{{ {'matched': 'Confident album match', 'ambiguous': 'Several releases match — choose a release',
+      'unmatched': 'No confident match — inspect a candidate or leave unselected',
+      'lookup_failed': 'Lookup failed — upload the same ZIP to retry'}.get(resolution.status) }}</p>
+    <label for="album-choice-{{ index }}">YouTube Music release for {{ album.title }}</label>
+    <select id="album-choice-{{ index }}" name="album_choice_{{ index }}">
+      <option value="" {% if not resolution.match %}selected{% endif %}>Leave unselected</option>
+      {% for candidate in resolution.candidates %}
+      <option value="{{ candidate.browse_id }}"
+        {% if resolution.match and resolution.match.browse_id == candidate.browse_id %}selected{% endif %}>
+        {{ candidate.title }} · {{ candidate.artist }}{% if candidate.year %} · {{ candidate.year }}{% endif %}
+      </option>
+      {% endfor %}
+    </select>
+    {% if resolution.candidates %}
+    <ul>
+      {% for candidate in resolution.candidates %}
+      <li><a href="https://music.youtube.com/browse/{{ candidate.browse_id|urlencode }}"
+        target="_blank" rel="noopener">Inspect {{ candidate.title }}{% if candidate.year %} ({{ candidate.year }}){% endif %}</a></li>
+      {% endfor %}
+    </ul>
+    <label for="album-action-{{ index }}">Import action for {{ album.title }}</label>
+    <select id="album-action-{{ index }}" name="album_action_{{ index }}">
+      <option value="save" selected>Save album to {{ identity.label }}</option>
+      <option value="playlist">Create a playlist from this album</option>
+      <option value="skip">Skip this album</option>
+    </select>
+    {% endif %}
+    {% endif %}
+  </article>
+  {% endfor %}
 </section>
 {% endif %}
 <p class="section-note">Existing identical playlists are skipped. Interrupted transfers resume their
   existing YouTube Music playlist. Failed playlists can be retried by uploading the same ZIP.
   This preview expires after two hours.</p>
-<form method="post" action="/import/spotify-library/confirm"
-      x-data="{ saving: false }" @submit="saving = true">
-  <input type="hidden" name="preview_token" value="{{ preview_token }}">
   <div class="btn-row">
     <button type="submit" class="btn-primary" :disabled="saving">Confirm import to {{ identity.label }}</button>
     <button type="submit" class="btn-ghost" formaction="/import/spotify-library/cancel">Cancel</button>

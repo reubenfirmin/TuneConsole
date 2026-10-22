@@ -10,7 +10,7 @@ import time
 import traceback
 
 from yt_playlist.rec import actions, artist_model, embed, model_selection, surfaces
-from yt_playlist.core.activity import activity_for, WorkClosing
+from yt_playlist.core.activity import activity_for, cancellable_work, check_stopping, WorkClosing
 from yt_playlist.core.work_diagnostics import work_span
 
 
@@ -29,6 +29,7 @@ class RecWorker:
         self._ratings_pending = False
         self._content_pending = set()
         self._running = False
+        self._discovering = False
         self._ticker_started = False
         self.enabled = enabled
         self._stop = threading.Event()
@@ -65,15 +66,28 @@ class RecWorker:
         self._ticker_started = False
 
     def _tick_loop(self):
-        from yt_playlist.rec import discover
         while not self._stop.wait(self.discovery_tick_s):
             try:
                 with self.model_lock:
-                    self.work.wrap("discovery", discover.run_discovery, self.ctx, self.ctx.now_fn())()
+                    self.work.wrap("discovery", self._discover, self.ctx.now_fn())()
             except WorkClosing:
                 return
             except Exception:  # noqa: BLE001 - a scan failure must never crash the ticker
                 self.ctx.logger.warning("discovery tick failed", exc_info=True)
+
+    def _discover(self, now):
+        from yt_playlist.rec import discover, fresh_pool
+        self._discovering = True
+        try:
+            with cancellable_work(self._stop.is_set):
+                result = discover.run_discovery(self.ctx, now)
+                # The scan runs after the rebuild's earlier Home bundles. Publish the new songs now,
+                # rather than waiting for another rebuild or making a page request rank them.
+                check_stopping()
+                fresh_pool.prepare(self.ctx.store, now)
+                return result
+        finally:
+            self._discovering = False
 
     def _gc_loop(self):
         """Daily sweep that deletes generated playlists you never played. An initial pass runs soon
@@ -111,6 +125,11 @@ class RecWorker:
     def busy(self):
         """True while a rebuild is scheduled or running, driving the 'refreshing…' UI state."""
         return self._running
+
+    @property
+    def discovery_busy(self):
+        """Include independent discovery ticks while keeping their last prepared picks visible."""
+        return self.busy or self._discovering
 
     def trigger(self):
         """Request a rebuild. Coalesces: if one is already scheduled/running, just mark pending."""
@@ -167,6 +186,14 @@ class RecWorker:
             raise
 
     def _loop(self):
+        try:
+            self._run_pending()
+        except WorkClosing:
+            with self._lock:
+                self._running = False
+            self.ctx.logger.info("rec worker stopped for shutdown")
+
+    def _run_pending(self):
         while not self._stop.wait(self.debounce_s):
             with self._lock:
                 if not (self._pending or self._modes_pending or self._content_pending or self._ratings_pending):
@@ -185,6 +212,8 @@ class RecWorker:
                     for identity in self.ctx.store.identities.get_identities():
                         keys.update(ratings.reconcile_pending(
                             self.ctx.store, identity.id, clients.get(identity.id)))
+                except WorkClosing:
+                    raise
                 except Exception:
                     self.ctx.logger.warning("rating subject update failed", exc_info=True)
             try:
@@ -192,6 +221,8 @@ class RecWorker:
                     self._do_rebuild()           # includes genre groups and Home bundles
                 elif modes:
                     self._do_mode_refresh()
+            except WorkClosing:
+                raise
             except Exception:  # noqa: BLE001 - never let rec work crash the app
                 self.ctx.logger.warning("rec worker rebuild failed", exc_info=True)
                 if full and modes:              # a failed full rebuild must not swallow local repair
@@ -199,8 +230,10 @@ class RecWorker:
             if keys:
                 try:
                     from yt_playlist.rec import content_updates
-                    with self.model_lock:
+                    with self.model_lock, cancellable_work(self._stop.is_set):
                         content_updates.update_tracks(self.ctx.store, keys, self.ctx.now_fn())
+                except WorkClosing:
+                    raise
                 except Exception:
                     self.ctx.logger.warning("rec incremental update failed: tracks=%d", len(keys), exc_info=True)
         self._running = False
@@ -224,7 +257,7 @@ class RecWorker:
                 self._start_loop()
 
     def _stage(self, name, target, *args, **kwargs):
-        with work_span("rec: " + name, announce=True):
+        with cancellable_work(self._stop.is_set), work_span("rec: " + name, announce=True):
             return target(*args, **kwargs)
 
     def _do_mode_refresh(self):
@@ -233,10 +266,12 @@ class RecWorker:
 
     def _refresh_modes(self):
         """Initialize absent models/groups; ordinary startup reuses the prepared structures."""
-        from yt_playlist.rec import mode_surfaces, taste_modes
+        from yt_playlist.rec import fresh_pool, mode_surfaces, taste_modes
         store = self.ctx.store
         if (store.settings.get_setting("rec_content_model") and not taste_modes.needs_refresh(store)
                 and store.rec_surface.get_proposals("mode_bundles")):
+            if not store.rec_surface.get_proposals("fresh_pool"):
+                self._stage("initial discovery songs", fresh_pool.prepare, store, self.ctx.now_fn())
             self.ctx.logger.info("rec initialization: reused saved model, clusters and candidate pools")
             return
         if not store.settings.get_setting("rec_content_model"):
@@ -261,7 +296,6 @@ class RecWorker:
         must leave that surface's last-good proposals in place rather than wiping its card to empty.
         Today the only such surface is Fresh songs; outward album discovery now accumulates separately
         in the discovery pool (see discover.pick_discovered_albums), refreshed by the discovery tick."""
-        from yt_playlist.rec import discover
         log = self.ctx.logger
         store = self.ctx.store
         now = self.ctx.now_fn()
@@ -277,6 +311,8 @@ class RecWorker:
         log.info("rec rebuild: embedded %d vectors in %.1fs", n, time.monotonic() - t0)
         try:
             self._stage("model comparison", model_selection.maintain, store, now, now_fn=self.ctx.now_fn)
+        except WorkClosing:
+            raise
         except Exception:  # comparison failures must leave the regular rebuild usable
             log.warning("automatic model comparison failed", exc_info=True)
         # Keep the content (genre/era) space + its model in step with the collaborative rebuild, so the
@@ -286,6 +322,8 @@ class RecWorker:
         # failure never breaks the rebuild.
         try:
             self._stage("content vectors", embed.maybe_rebuild_content_vectors, store)
+        except WorkClosing:
+            raise
         except Exception:  # noqa: BLE001 - content space is best-effort; don't fail the rebuild
             log.warning("rec rebuild: content-vector refresh failed", exc_info=True)
         # Taste modes (#60): cluster the freshly-rebuilt content space into the user's distinct taste
@@ -295,6 +333,8 @@ class RecWorker:
             from yt_playlist.rec import taste_modes
             nm = self._stage("taste clusters", taste_modes.recompute, store, now)
             log.info("rec rebuild: taste modes -> %d active", nm)
+        except WorkClosing:
+            raise
         except Exception:  # noqa: BLE001 - modes are best-effort; don't fail the rebuild
             log.warning("rec rebuild: taste-modes recompute failed", exc_info=True)
         # Part B (#60): bucket every Home surface's pool by mode so the request can assemble distinct,
@@ -303,6 +343,8 @@ class RecWorker:
             from yt_playlist.rec import mode_surfaces
             self._stage("cluster surfaces and PPR", mode_surfaces.prepare_bundles, store, now)
             log.info("rec rebuild: mode bundles prepared")
+        except WorkClosing:
+            raise
         except Exception:  # noqa: BLE001 - mode bundles are best-effort; don't fail the rebuild
             log.warning("rec rebuild: mode-bundle prep failed", exc_info=True)
         # #76-#80 Trends rollups: first-play index + weekly/monthly rollup + spotlight candidate,
@@ -312,6 +354,8 @@ class RecWorker:
             from yt_playlist.rec import trend_rollups
             self._stage("trend rollups", trend_rollups.build, store, now)
             log.info("rec rebuild: trend rollups built")
+        except WorkClosing:
+            raise
         except Exception:  # noqa: BLE001 - trend rollups are best-effort; don't fail the rebuild
             log.warning("rec rebuild: trend-rollup build failed", exc_info=True)
         # #28 artist-relationship model, built alongside the track embedding. Guarded: an artist-model
@@ -320,6 +364,8 @@ class RecWorker:
             ta = time.monotonic()
             na = self._stage("artist model", artist_model.build_artist_model_and_store, store)
             log.info("rec rebuild: artist model %d artists in %.1fs", na, time.monotonic() - ta)
+        except WorkClosing:
+            raise
         except Exception:  # noqa: BLE001 - artist model is best-effort; don't fail the rebuild
             log.warning("rec rebuild: artist model failed", exc_info=True)
         # Wikipedia 'into recently' cards: pre-fetch the whole fresh-subject pool so the Home card
@@ -330,6 +376,8 @@ class RecWorker:
             from yt_playlist.rec import into_recently
             warmed = self._stage("wiki prewarm", into_recently.prewarm_pool, store, now)
             log.info("rec rebuild: warmed %d wiki card(s)", warmed)
+        except WorkClosing:
+            raise
         except Exception:  # noqa: BLE001 - wiki prewarm is best-effort; never fail the rebuild
             log.warning("rec rebuild: wiki prewarm failed", exc_info=True)
         # Playlist-cleanup summary: a local-only O(n²) scan we keep OFF the home request path by
@@ -338,13 +386,17 @@ class RecWorker:
         try:
             payload = self._stage("playlist cleanup", actions.refresh_cleanup, store, now)
             log.info("rec rebuild: cleanup → %d playlist(s)", payload["count"])
+        except WorkClosing:
+            raise
         except Exception:  # noqa: BLE001 - never let the cleanup scan crash a rebuild
             log.warning("rec rebuild: cleanup summary failed", exc_info=True)
         # Outward discovery (new albums + new artists) is now an accumulating, scan-ledger-backed pass
         # over ALL interested artists, a budgeted batch at a time, not a top-10 overwrite each sync.
         try:
-            res = self._stage("discovery", discover.run_discovery, self.ctx, now)
+            res = self._stage("discovery", self._discover, now)
             log.info("rec rebuild: discovery scanned %d artists", res.get("scanned", 0))
+        except WorkClosing:
+            raise
         except Exception:  # noqa: BLE001
             log.warning("rec rebuild: discovery pass failed", exc_info=True)
         log.info("rec rebuild: done in %.1fs", time.monotonic() - t0)

@@ -284,3 +284,41 @@ def test_automatic_loop_retries_partial_on_next_tick(store, monkeypatch):
     assert ctx.jobs.get(2).outcome == "complete"
     assert not ctx.jobs.has_active()
     assert ctx.work.wait(0)
+
+
+def test_shutdown_stops_automatic_sync_after_inflight_disconnect(store, monkeypatch):
+    from yt_playlist.util.retry import with_retry
+
+    monkeypatch.setattr(sync, "with_retry", with_retry)
+    monkeypatch.setattr("yt_playlist.web.app._maybe_check_update", lambda ctx: None)
+    entered, release = threading.Event(), threading.Event()
+    reads = []
+
+    class Disconnected(Client):
+        def get_playlist(self, playlist_id, limit=None):
+            reads.append(playlist_id)
+            entered.set()
+            assert release.wait(5)
+            raise BridgeError("no extension connected")
+
+    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    client = Disconnected()
+    client._playlists = [{"playlistId": f"PL-{n}", "title": str(n)} for n in range(100)]
+    app = create_app(store, lambda: {iid: client}, now_fn=lambda: 200, background_work=False)
+    ctx = app.state.ctx
+    worker = threading.Thread(target=automatic_sync, args=(ctx, None, SimpleNamespace(connected=True)),
+                              kwargs={"stop": Ticks(2)}, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        ctx.work.close_admission()
+        release.set()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert reads == ["PL-0"]
+        assert ctx.jobs.get(1).done and not ctx.jobs.has_active()
+        assert ctx.work.wait(0)
+        assert store.settings.get_setting("last_sync_at") is None
+    finally:
+        release.set()
+        worker.join(timeout=5)

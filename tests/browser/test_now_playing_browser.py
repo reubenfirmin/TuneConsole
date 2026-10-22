@@ -60,12 +60,12 @@ def test_now_playing_returns_to_radio_and_switches_home_tabs(live_app, store, pa
     expect(link).to_have_text("Back to Radio")
     link.click()
     expect(page).to_have_url(f"{live_app}/#radio")
-    expect(page.get_by_role("tab", name="Radio", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(page.get_by_role("tab", name="On air", exact=True)).to_have_attribute("aria-selected", "true")
     expect(widget.locator(".hs-source")).to_have_count(0)
-    page.get_by_role("tab", name="Listen", exact=True).click()
+    page.get_by_role("tab", name="Mix tapes", exact=True).click()
     expect(link).to_be_visible()
     link.click()
-    expect(page.get_by_role("tab", name="Radio", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(page.get_by_role("tab", name="On air", exact=True)).to_have_attribute("aria-selected", "true")
     expect(widget.locator(".hs-source")).to_have_count(0)
     assert requests == []
 

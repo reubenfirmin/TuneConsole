@@ -1,6 +1,6 @@
 <h3>Choose what to import</h3>
-<p class="section-note">Source: Spotify Account Data export. Its song metadata stays in memory for this
-  transfer and is discarded afterward. YouTube Music is searched to find matching recordings.</p>
+<p class="section-note">Source: Spotify Account Data export. Choose playlists, saved albums, or both.
+  YouTube Music is searched to find matching recordings and releases.</p>
 <p class="section-note">Retrying an incomplete transfer uses the same playlist and restores Spotify’s
   song order. Other songs you add directly to that playlist keep their positions. Removed imported
   songs are restored while the transfer is incomplete.</p>
@@ -19,8 +19,8 @@
   {% endfor %}
   {% if parsed.albums %}
   <p><label><input type="checkbox" name="include_albums" checked>
-    Also import {{ parsed.albums|length }} saved albums</label></p>
+    Import {{ parsed.albums|length }} saved albums</label></p>
   {% endif %}
-  <p class="section-note">The next step previews song matches. Nothing is added to YouTube Music until you confirm.</p>
+  <p class="section-note">The next step previews song and album matches. Nothing is added to YouTube Music until you confirm.</p>
   <button type="submit" class="btn-primary btn-sm">Prepare preview</button>
 </form>

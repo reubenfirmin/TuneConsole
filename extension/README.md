@@ -212,6 +212,12 @@ MAIN and isolated scripts on Music, and the public-site script on the two TuneCo
 Run checks serially using the repository's shared pytest lock. A busy lock identifies its owner;
 wait with `--test-lock-wait=60` or hand the request to that owner. Do not launch a second test process.
 
+- Live Radio acceptance: start a signed-in session under Home's **On air** tab, then run
+  `uv run pytest --test-lock-wait=60 --run-live-radio --live-radio-trace=/tmp/tuneconsole-radio-live.json -s tests/test_radio_live.py`.
+  This resumes playback if paused and changes one continuation in the running session. It records the saved playlist,
+  native playback and sidebar-refreshed page agreeing on the replacement, checks the current song
+  and history survive, then waits for natural playback of the new song. Playback remains running.
+  Normal test runs skip this check; mocked native/page tests do not establish this live acceptance.
 - Focused behavioral checks: `uv run pytest tests/test_extension_*.py tests/test_playback_rescue.py`. Node executes the actual
   imported worker modules and sensors with explicit Chrome/page doubles. Cases cover both sensor
   worlds, partial injection, invalid/stale samples, repair, update safety, uncertain delivery,

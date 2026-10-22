@@ -1,18 +1,28 @@
 """Application work admission and draining, shared by every shutdown path."""
 import asyncio
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Callable
 
 from yt_playlist.core.work_diagnostics import work_span
 
 _CURRENT_WORK = ContextVar("tuneconsole_activity", default=None)
+_CANCELLATION = ContextVar("tuneconsole_cancellation", default=None)
 
 
 class WorkClosing(RuntimeError):
     pass
+
+
+@dataclass
+class _CancellationState:
+    should_stop: Callable[[], bool]
+    interrupted: bool = False
 
 
 class Activity:
@@ -149,3 +159,53 @@ def activity_for(ctx):
     if not hasattr(ctx, "work"):
         ctx.work = Activity()
     return ctx.work
+
+
+def check_stopping():
+    """Cooperative boundary for read-only work; admitted mutations still drain normally."""
+    current = _CURRENT_WORK.get()
+    cancellation = _CANCELLATION.get()
+    if ((current is not None and current[0].closing_reason == "shutdown")
+            or (cancellation is not None and cancellation.should_stop())):
+        raise WorkClosing("TuneConsole is shutting down; background work stopped.")
+
+
+@contextmanager
+def cancellable_work(should_stop):
+    """Allow disposable background calculations to stop, including inside SQLite.
+
+    Cancellation is local to this thread/context. Other admitted work, especially
+    remote mutations and their local bookkeeping, keeps draining normally.
+    """
+    token = _CANCELLATION.set(_CancellationState(should_stop))
+    try:
+        check_stopping()
+        try:
+            yield
+        except sqlite3.OperationalError:
+            check_stopping()
+            raise
+        check_stopping()
+    finally:
+        _CANCELLATION.reset(token)
+
+
+def check_cancellable_work():
+    if _CANCELLATION.get() is not None:
+        check_stopping()
+
+
+def interrupt_query():
+    """SQLite progress callback: interrupt only the current cancellable calculation.
+
+    Fire once per scope so transaction cleanup can execute after interruption.
+    Further repository calls encounter check_cancellable_work before executing SQL.
+    """
+    cancellation = _CANCELLATION.get()
+    if cancellation is not None and not cancellation.interrupted:
+        try:
+            check_stopping()
+        except WorkClosing:
+            cancellation.interrupted = True
+            return 1
+    return 0

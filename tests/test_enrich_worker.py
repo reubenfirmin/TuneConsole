@@ -58,6 +58,39 @@ def test_paused_drain_does_not_mark(store):
     assert store.enrichment.queue_remaining() == 1                    # left for next time, not marked
 
 
+def test_visible_radio_metadata_uses_shared_worker_before_bulk_queue(store):
+    _unprocessed(store, "old", "Old")
+    shown = _unprocessed(store, "shown", "Shown")
+    key = store.tracks.catalog_subject(shown)["identity_key"]
+    w = make_worker(store)
+    w.ctx.rec_worker = SimpleNamespace(trigger_content_update=Mock())
+    w.prioritize([key, key])
+    assert w.drain_once(limit=1) == 1
+    assert w.calls == [[shown]]
+    assert not w._priority
+
+
+def test_radio_priority_respects_pause_and_recent_attempts(store):
+    tid = _unprocessed(store)
+    key = store.tracks.catalog_subject(tid)["identity_key"]
+    w = make_worker(store)
+    w.prioritize([key])
+    store.settings.set_setting("enrich_worker_enabled", "0")
+    assert w.drain_once() == 0
+    assert not w.calls
+    store.settings.set_setting("enrich_worker_enabled", "1")
+    store.enrichment.mark_enriched([tid], now=999.)
+    assert store.enrichment.priority_enrich_batch([key], 24, stale_before=900, now=1000) == []
+
+
+def test_radio_priority_preserves_provider_retry_deadline(store):
+    tid = _unprocessed(store)
+    key = store.tracks.catalog_subject(tid)["identity_key"]
+    store.enrichment.record_enrichment_attempt(key, "test", {}, retry=True, now=1000)
+    assert store.enrichment.priority_enrich_batch([key], 24, 0, providers=["test"], now=1001) == []
+    assert len(store.enrichment.priority_enrich_batch([key], 24, 0, providers=["test"], now=1031)) == 1
+
+
 def test_resweep_reprocesses_stale_incomplete(store):
     t = store.tracks.upsert_track("v1", "S", "A", None, 200, created_at=1.0)
     store.settings.set_setting("enrich_caught_up_at", "100")

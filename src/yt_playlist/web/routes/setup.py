@@ -208,6 +208,7 @@ def build(ctx) -> APIRouter:
     @router.post("/import/spotify-library/v3")
     @router.post("/import/spotify-library/v4")
     @router.post("/import/spotify-library/v5")
+    @router.post("/import/spotify-library/v6")
     async def import_spotify_library_route(request: Request):
         form = await request.form()
         up = form.get("file")
@@ -283,7 +284,7 @@ def build(ctx) -> APIRouter:
 
         def prepare():
             try:
-                prepared = prepare_spotify_library(selected, client)
+                prepared = prepare_spotify_library(selected, client, store=store, identity_id=identity.id)
                 token = previews.put({"stage": "ready", "prepared": prepared,
                                       "identity_id": identity.id}, ctx.now_fn())
                 save_job(store, {**job, "status": "preview", "preview_token": token})
@@ -311,6 +312,21 @@ def build(ctx) -> APIRouter:
         token = form.get("preview_token")
         snapshot = _snapshot(token, "ready")
         identity, client = _destination(snapshot["identity_id"])
+        albums = []
+        for index, source in enumerate(snapshot["prepared"]["albums"]):
+            resolution = source["resolution"]
+            action = form.get(f"album_action_{index}", "save")
+            if action not in ("save", "playlist", "skip"):
+                raise HTTPException(status_code=400, detail="Invalid album action")
+            selected = form.get(f"album_choice_{index}")
+            match = resolution["match"] if selected is None else next(
+                (candidate for candidate in resolution["candidates"] if candidate["browse_id"] == selected), None)
+            if selected and match is None:
+                raise HTTPException(status_code=400, detail="Choose an album from this preview")
+            if action == "playlist" and match is None:
+                raise HTTPException(status_code=400, detail="Choose a release to create as a playlist")
+            albums.append({**source, "action": action, "resolution": {**resolution, "match": match}})
+        prepared = {**snapshot["prepared"], "albums": albums}
         if not ctx.spotify_import_lock.acquire(blocking=False):
             raise HTTPException(status_code=409, detail="Another Spotify import is running")
         try:
@@ -320,13 +336,13 @@ def build(ctx) -> APIRouter:
             raise
         job = {"status": "running", "phase": "import", "started_at": ctx.now_fn(),
                "identity_id": identity.id, "identity_label": identity.label,
-               "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(snapshot["prepared"])}
+               "report_schema": SPOTIFY_REPORT_SCHEMA, **estimate(prepared)}
         save_job(store, job)
 
         def run_import():
             try:
                 report = import_spotify_library(store, None, client, identity.id, ctx.now_fn(),
-                                                 prepared=snapshot["prepared"])
+                                                 prepared=prepared)
                 if report["tracks_imported"] or report["albums_imported"]:
                     store.settings.set_setting("spotify_library_imported_at", str(ctx.now_fn()))
                 save_job(store, {**job, "status": "done", "finished_at": ctx.now_fn(), "report": report})
@@ -480,6 +496,16 @@ def build(ctx) -> APIRouter:
             else:
                 store.settings.delete_setting(JOB_KEY)
         return Response(status_code=200)
+
+    @router.post("/import/spotify-library/delete-report")
+    def delete_spotify_library_report():
+        if not ctx.spotify_import_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Wait for the Spotify import to finish")
+        try:
+            store.settings.delete_setting(JOB_KEY)
+        finally:
+            ctx.spotify_import_lock.release()
+        return RedirectResponse("/setup?tab=import", status_code=303)
 
     @router.post("/import/takeout")
     async def import_takeout_route(request: Request):

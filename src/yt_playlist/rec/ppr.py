@@ -6,6 +6,7 @@ in the local recommendation ledger. Only displayed cards receive observed outcom
 """
 import numpy as np
 
+from yt_playlist.core.activity import check_stopping
 from yt_playlist.rec import embed, rec_params, taste_modes
 
 _ALPHA = 0.85          # walk weight; restart probability is (1 - alpha)
@@ -44,6 +45,7 @@ def ppr_rank(W, seed_idx, alpha=_ALPHA, iters=_ITERS, tol=0.0):
     p[list(seed_idx)] = 1.0 / len(seed_idx)
     r = p.copy()
     for _ in range(iters):
+        check_stopping()
         nxt = (1.0 - alpha) * p + alpha * (W @ r)
         if tol > 0.0 and np.abs(nxt - r).sum() < tol:
             return nxt
@@ -83,6 +85,7 @@ def mode_rankings(store, alpha=None, iters=None, tol=None, depth=None, *, snapsh
     near = (LV.astype(np.float64) @ C.T).argmax(axis=1)          # each library track -> nearest mode
     out = {}
     for j, m in enumerate(modes):
+        check_stopping()
         members = [lkeys[i] for i in np.where(near == j)[0]]
         seed = [idx[k] for k in members if k in idx]             # members present in the co-listen vocab
         if not seed:

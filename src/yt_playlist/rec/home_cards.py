@@ -166,12 +166,11 @@ def _record_served_cards(store, protos, now):
                 policy_kind="counterfactual", propensity=0.0, provenance={"recipe": proto.get("recipe", {})})
 
 
-def _one_card(store, card, now, *, avoid_genres=(), include_genres=()):
+def _one_card(store, card, now, *, avoid_genres=(), include_genres=(), exclude_keys=()):
     if card == "wheelhouse":
         pool = list(surfaces.for_you(store, now, limit=ROTATION_POOL))
     elif card == "explore":
-        fy = {i.key for i in surfaces.for_you(store, now, limit=ROTATION_POOL)}
-        pool = [i for i in surfaces.explore_for_you(store, now, limit=ROTATION_POOL) if i.key not in fy]
+        pool = list(surfaces.explore_for_you(store, now, limit=ROTATION_POOL + len(exclude_keys)))
     elif card == "comfort":
         pool = list(surfaces.comfort_listening(store, now, limit=ROTATION_POOL))
     elif card == "fresh":
@@ -179,6 +178,9 @@ def _one_card(store, card, now, *, avoid_genres=(), include_genres=()):
         pool = fresh_pool.pick(store, now, include_genres, avoid_genres, size=ROTATION_POOL)
     else:
         return None
+    if exclude_keys:
+        excluded = set(exclude_keys)
+        pool = [i for i in pool if ordering._field(i, "key") not in excluded]
     if avoid_genres or include_genres:
         pool = home_themes.matching_genres(store, pool, avoid=avoid_genres, include=include_genres)
     if not pool or ((avoid_genres or include_genres) and len(pool) < 4):
@@ -240,7 +242,13 @@ class HomeCards:
         elif filters and store.rec_surface.get_proposals("mode_bundles") and store.modes.list_modes(active_only=True):
             protos = []
         else:
-            protos = [p for p in (_one_card(store, name, now, **filters) for name in _ROW_LANES) if p]
+            protos = []
+            for name in _ROW_LANES:
+                options = dict(filters)
+                if name == "explore":
+                    options["exclude_keys"] = [ordering._field(t, "key") for p in protos for t in p["tracks"]]
+                if proto := _one_card(store, name, now, **options):
+                    protos.append(proto)
         if filters and not protos and not include:
             return self.cards(CardsRequest(now, request.regenerating, False,
                               "No other genre themes are ready yet. Here are your usual mixes."))

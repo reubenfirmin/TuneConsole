@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
@@ -43,5 +44,43 @@ def test_home_discover_serves_cached(store):
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     assert "Cached LP" in c.get("/home/discover").text     # served from materialized proposals, no fetch
+
+
+def test_discovery_pass_publishes_new_songs_before_the_next_rebuild(store, monkeypatch):
+    from yt_playlist.rec import discover, fresh_pool
+
+    _, ctx = _ctx(store, FakeClient())
+    monkeypatch.setattr(discover, "new_artists", lambda ctx: [])
+
+    def populate(ctx, now):
+        for i in range(12):
+            store.discovery.upsert_discovered_track(f"new {i}|artist {i}", f"v{i}", f"New {i}",
+                f"Artist {i}", None, None, "Jazz", "2020", "radio:seed", now)
+
+    monkeypatch.setattr(discover, "populate_discovered_tracks", populate)
+    monkeypatch.setattr(discover, "populate_radio_tracks", lambda *a: None)
+    RecWorker(ctx)._discover(10)
+    assert len(fresh_pool.pick(store, 11)) == 12
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_periodic_discovery_refresh_state_clears_after_success_or_failure(store, monkeypatch, fails):
+    from yt_playlist.rec import discover
+    _, ctx = _ctx(store, FakeClient())
+    worker = RecWorker(ctx)
+
+    def scan(*args):
+        assert worker.discovery_busy and not worker.busy
+        if fails:
+            raise RuntimeError("Offline")
+        return {}
+
+    monkeypatch.setattr(discover, "run_discovery", scan)
+    if fails:
+        with pytest.raises(RuntimeError, match="Offline"):
+            worker._discover(10)
+    else:
+        worker._discover(10)
+    assert not worker.discovery_busy
 
 

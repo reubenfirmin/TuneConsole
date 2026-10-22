@@ -95,7 +95,7 @@ def test_cards_fallback_with_object_tracks_does_not_500(store, monkeypatch):
              "tracks": [ForYouItem("Song", "Artist", "", "v1", None, 0, "reason", key="k1")],
              "feedback_surface": None}
     monkeypatch.setattr(home_mod, "_one_card",
-                        lambda store, card, now: proto if card == "wheelhouse" else None)
+                        lambda store, card, now, **kw: proto if card == "wheelhouse" else None)
     r = _client(store).get("/home/cards")
     assert r.status_code == 200
     assert "Song" in r.text and "Mix" in r.text    # fallback card rendered, no 500 on object tracks

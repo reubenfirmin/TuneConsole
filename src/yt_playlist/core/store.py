@@ -1,6 +1,7 @@
 import sqlite3
 import threading
 
+from yt_playlist.core.activity import interrupt_query
 # Store owns the connection, schema lifecycle, and explicitly named repositories.
 from yt_playlist.repos.actions import ActionRepo
 from yt_playlist.repos.artists import ArtistRepo
@@ -34,6 +35,7 @@ class Store:
         self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.set_progress_handler(interrupt_query, 1000)
         # Punctuation/space/accent-insensitive search key (see matching.search_squash): lets
         # cluster_search match 'LSD' against a title stored as 'L.S.D.' (#48).
         from yt_playlist.util.matching import search_squash

@@ -16,14 +16,19 @@ def error_summary(exc) -> str:
     return f"{type(exc).__name__}: {message}"
 
 
-def with_retry(fn, *, attempts=3, base_delay=0.5, sleep=time.sleep, operation=None):
+def with_retry(fn, *, attempts=3, base_delay=0.5, sleep=time.sleep, operation=None,
+               check_cancelled=None):
     if attempts < 1:
         raise ValueError("attempts must be >= 1")
     last = None
     for i in range(attempts):
+        if check_cancelled is not None:
+            check_cancelled()
         try:
             return fn()
         except Exception as e:  # unofficial API: retry transient failures
+            if check_cancelled is not None:
+                check_cancelled()
             last = e
             context = f"{operation}: " if operation else ""
             logger.debug("%sattempt %d/%d failed", context, i + 1, attempts, exc_info=True)

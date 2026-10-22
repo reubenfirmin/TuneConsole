@@ -1,14 +1,5 @@
 <div class="radio-home" x-data="radioHome({{ radio_bootstrap|default({})|tojson|forceescape }})" x-effect="setVisible(panel === 'radio')"
      @resize.window.debounce.100ms="fitSpace()">
-  <header class="radio-heading" x-show="state.active && !launching" x-cloak>
-    <details class="radio-menu" x-ref="menu" @click.outside="$el.removeAttribute('open')"
-             @keydown.escape.prevent="$el.removeAttribute('open'); $refs.options.focus()">
-      <summary class="dots" x-ref="options" aria-label="Radio options" title="Radio options">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
-      </summary>
-      <div class="radio-menu-pop"><button type="button" :disabled="busy" @click="$refs.menu.removeAttribute('open'); newRadio()">New radio</button></div>
-    </details>
-  </header>
   <div class="gen-stage radio-launch" x-ref="launch" x-show="launching" x-cloak role="status" aria-live="polite" aria-label="Starting radio">
     <div class="radio-launch-graph" aria-hidden="true">
       <template x-for="(song, index) in launchTracks" :key="song.video_id">
@@ -59,18 +50,25 @@
   </div>
   <div class="radio-session" x-ref="session" x-show="state.active && state.local_id && !launching" x-cloak>
     <div class="radio-playlist" x-ref="playlist">{% if radio_bootstrap and radio_bootstrap.state.active and radio_bootstrap.state.local_id %}{% with session=radio_bootstrap.state, tracks=radio_tracks %}{% include "_partials/radio_playlist.html" %}{% endwith %}{% endif %}</div>
-    <svg class="radio-junction" x-ref="junction" viewBox="0 0 1000 112" preserveAspectRatio="none" aria-hidden="true"
+    <div class="radio-junction-space">
+      <button class="radio-tune" type="button" @click="openTuning()" aria-label="Tune streams" title="Tune streams"
+              aria-haspopup="dialog" aria-controls="radio-tuning-dialog">
+        <svg viewBox="0 0 32 24" aria-hidden="true"><path d="M3 5h26M3 12h26M3 19h26"/><circle cx="11" cy="5" r="3"/><circle cx="22" cy="12" r="3"/><circle cx="14" cy="19" r="3"/></svg>
+      </button>
+      <svg class="radio-junction" x-ref="junction" viewBox="0 0 1000 112" preserveAspectRatio="none" aria-hidden="true"
          :style="'--queue-color: ' + queueColor(connectedSlot)">
       <defs>
         <linearGradient id="radio-junction-wash" x2="0" y2="1"><stop stop-color="var(--queue-color)" stop-opacity=".03"/><stop offset="1" stop-color="var(--queue-color)" stop-opacity=".23"/></linearGradient>
         <pattern id="radio-junction-hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(30)"><path d="M0 0V7"/></pattern>
       </defs>
       <path class="radio-junction-rest" x-show="connectedSlot !== activeSlot" :style="junctionStyle(activeSlot) + '; color:' + queueColor(activeSlot)"></path>
+      <path class="radio-junction-backing" :style="junctionStyle(connectedSlot)"></path>
       <path class="radio-junction-fill" :style="junctionStyle(connectedSlot)"></path>
       <path class="radio-junction-texture" :style="junctionStyle(connectedSlot)"></path>
       <path class="radio-junction-line" :style="junctionStyle(connectedSlot)"></path>
       <path class="radio-junction-flow" :style="junctionStyle(connectedSlot, true)"></path>
-    </svg>
+      </svg>
+    </div>
     <div class="radio-directions" x-ref="directions" aria-label="Possible radio directions" @scroll.passive="measureQueues()"
          @mouseleave="hoveredSlot = null" @focusout="if (!$el.contains($event.relatedTarget)) focusedSlot = null">
       <template x-for="branch in state.directions || []" :key="branch.slot">
@@ -101,13 +99,29 @@
                   <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="24"/><circle cx="32" cy="32" r="8"/></svg>
                   <template x-if="song.thumbnail"><img :src="song.thumbnail" alt="" referrerpolicy="no-referrer" loading="lazy" @error="$el.remove()"></template>
                 </span>
-                <span class="radio-proposed-info"><strong x-text="song.title"></strong><span x-text="song.artist"></span></span>
+                <span class="radio-proposed-info"><strong x-text="song.title"></strong><span x-text="song.artist"></span>
+                  <small class="radio-proposed-meta" x-text="[song.genre, song.year].filter(Boolean).join(' · ')"></small>
+                </span>
                 <span class="radio-saved-dot" x-show="branch.active && index === 0" title="Up next" aria-label="Up next"></span>
               </li>
             </template>
           </ol>
+          <div class="radio-decay" :class="{'is-playing': branch.active}" role="progressbar"
+               :aria-label="branch.active ? 'Playing stream ' + (branch.slot + 1) : 'Stream ' + (branch.slot + 1) + ' refreshes after song changes'"
+               aria-valuemin="0" :aria-valuemax="branch.decay_total || 3"
+               :aria-valuenow="branch.decay_remaining ?? 3"
+               :aria-valuetext="branch.active ? 'Playing' : (branch.decay_remaining ?? 3) + ' song changes until refresh'">
+            <svg viewBox="0 0 300 12" preserveAspectRatio="none" aria-hidden="true">
+              <path class="radio-decay-bed" d="M2 6H298"/>
+              <path class="radio-decay-ticks" d="M2 4v4m98-3v2m98-2v2m100-3v4"/>
+              <path class="radio-decay-ink" pathLength="100" d="M2 6H298"
+                    :style="'stroke-dashoffset:' + (100 * (1 - Math.min(1, (branch.decay_remaining ?? 3) / (branch.decay_total || 3))))"/>
+              <circle class="radio-decay-tip" cy="6" r="2" :cx="2 + 296 * Math.min(1, (branch.decay_remaining ?? 3) / (branch.decay_total || 3))"/>
+            </svg>
+          </div>
         </section>
       </template>
     </div>
   </div>
+  {% include "_partials/radio_tuner.html" %}
 </div>

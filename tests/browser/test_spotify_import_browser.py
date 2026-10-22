@@ -19,11 +19,16 @@ pytestmark = pytest.mark.browser
 
 
 @pytest.fixture
-def spotify_app(store):
+def spotify_app(store, request):
     first = store.identities.upsert_identity("First account", "first", None, True)
     second = store.identities.upsert_identity("Destination account", "second", None, False)
     first_client = FakeClient(search_results=[_track("first-song", "Song", "Artist")])
     second_client = FakeClient(search_results=[_track("chosen-song", "Song", "Artist")])
+    if getattr(request, "param", None) == "albums":
+        from tests.test_spotify_album_import import AlbumClient
+        second_client = AlbumClient()
+        second_client.results["One Artist"].append({
+            **second_client.results["One Artist"][0], "browseId": "MPRE-alternate"})
     app = create_app(store, lambda: {first: first_client, second: second_client}, now_fn=lambda: 1000)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -73,6 +78,42 @@ def test_zip_import_waits_for_confirmation_and_uses_selected_destination(spotify
     assert spotify_app.first.created == []
     assert spotify_app.second.added == [(spotify_app.second.created[0][0], ["chosen-song"])]
     assert spotify_app.store.playlists.get_playlists()[0].identity_id == spotify_app.destination
+
+
+@pytest.mark.parametrize("spotify_app", ["albums"], indirect=True)
+def test_album_only_preview_choice_save_and_explicit_playlist(spotify_app, page):
+    from tests.test_spotify_album_import import album_zip
+
+    page.goto(f"{spotify_app.base}/setup?tab=import")
+    page.locator('input[type="file"][accept=".zip,application/zip"]').set_input_files({
+        "name": "albums.zip", "mimeType": "application/zip", "buffer": album_zip("One", "Two")})
+    page.get_by_role("button", name="Choose playlists and destination").click()
+    expect(page.get_by_role("heading", name="Choose what to import")).to_be_visible()
+    page.get_by_label("YouTube Music destination").select_option(str(spotify_app.destination))
+    page.get_by_label("Import 2 saved albums").check()
+    page.get_by_role("button", name="Prepare preview").click()
+    page.wait_for_function("""() => location.pathname.includes('/preview/') ||
+        !!document.querySelector('a[href*="/import/spotify-library/preview/"]')""")
+    if "/preview/" not in page.url:
+        page.get_by_role("link", name="Review matches and confirm").click()
+    expect(page.get_by_role("heading", name="Saved albums", exact=True)).to_be_visible()
+    expect(page.get_by_label("YouTube Music release for One", exact=True)).to_have_value("")
+    expect(page.get_by_text("Several releases match", exact=False)).to_be_visible()
+    assert not spotify_app.second.album_ratings and not spotify_app.second.created
+    page.get_by_label("YouTube Music release for One", exact=True).select_option("MPRE-One")
+    page.get_by_label("Import action for Two", exact=True).select_option("playlist")
+    page.get_by_role("button", name="Confirm import to Destination account").click()
+    expect(page.get_by_text("Spotify import complete.", exact=True)).to_be_visible(timeout=15000)
+    assert spotify_app.second.album_ratings == [("OLAK-One", "LIKE")]
+    assert spotify_app.second.added == [(spotify_app.second.created[0][0], ["yt-Two"])]
+    assert spotify_app.first.created == []
+    assert [a['browse'] for a in spotify_app.store.collection.get_saved_albums(
+        identity_id=spotify_app.destination)] == ['MPRE-One']
+    page.get_by_role("link", name="View report", exact=True).click()
+    expect(page.get_by_role("button", name="Delete this report")).to_be_visible()
+    page.get_by_role("button", name="Delete this report").click()
+    expect(page.get_by_role("heading", name="Set up TuneConsole", exact=True)).to_be_visible()
+    assert spotify_app.store.settings.get_setting('spotify_library_import_job') is None
 
 
 def test_history_upload_health_learning_and_removal(spotify_app, page):

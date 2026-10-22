@@ -6,6 +6,7 @@ techno next to ambient, so they sit together there), while content vectors keep 
 Fully automatic, no seeded genres."""
 import numpy as np
 
+from yt_playlist.core.activity import check_stopping
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.util import genre_map
 
@@ -24,6 +25,7 @@ def _kmeanspp(X, k, seed):
     centers = [X[first]]
     d2 = ((X - centers[0]) ** 2).sum(axis=1)
     for _ in range(1, k):
+        check_stopping()
         total = d2.sum()
         if total <= 0:
             centers.append(X[int(rng.integers(n))])
@@ -34,6 +36,7 @@ def _kmeanspp(X, k, seed):
     C = np.array(centers, dtype=X.dtype)
     labels = np.zeros(n, dtype=int)
     for _ in range(_MAX_ITERS):
+        check_stopping()
         # Assign by nearest center (cosine == dot here is not safe once centroids drift off the unit
         # sphere, so use euclidean, which is monotonic with cosine on normalized inputs anyway).
         dist = ((X[:, None, :] - C[None, :, :]) ** 2).sum(axis=2)

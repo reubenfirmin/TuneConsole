@@ -182,7 +182,8 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
             job = ctx.jobs.create(kind="library")
             try:
                 from yt_playlist.web.jobs import run_library_sync
-                run_library_sync(ctx, job)
+                with ctx.work.entered(release):
+                    run_library_sync(ctx, job)
             finally:
                 ctx.sync_lock.release()
         except Exception:  # noqa: BLE001 - a sync failure must never crash the daemon

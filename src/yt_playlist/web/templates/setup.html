@@ -109,7 +109,7 @@
             Extended Streaming History and Technical Log Information are different packages.</li>
         </ul>
       </details>
-      <form hx-post="/import/spotify-library/v5" hx-target="#spotify-library-import-result"
+      <form hx-post="/import/spotify-library/v6" hx-target="#spotify-library-import-result"
             hx-swap="innerHTML" hx-encoding="multipart/form-data" hx-disabled-elt="find button"
             hx-on::response-error="document.getElementById('spotify-library-import-result').textContent = 'TuneConsole was updated while it was running. Restart TuneConsole, then try the import again.'">
         <div class="takeout-file" x-data="{ fname: '' }">

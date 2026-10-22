@@ -99,7 +99,7 @@ def test_radio_creation_uses_the_main_account(store,monkeypatch,order):
     monkeypatch.setattr(radio,'join',lambda:None)
     song = dict(video_id='song',title='Song',artist='Artist')
     monkeypatch.setattr(radio_session,'RadioCandidates',lambda *args:SimpleNamespace(
-        by_video={'song':song},seed_offer=lambda n:[song]))
+        by_video={'song':song},seed_offer=lambda n:[song], tuning=radio_session.radio_tuning.DEFAULTS.copy()))
     monkeypatch.setattr(radio,'_pick',lambda session:song)
     writes = []
     def create(store,title,tracks,client,now,identity):

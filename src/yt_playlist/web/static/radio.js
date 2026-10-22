@@ -13,6 +13,29 @@ function radioHome(initial = {}) {
     launchPlaylist: initial.launchPlaylist || null,
     selectedSlot: null, switchChoice: null, switchSending: false, switchSerial: 0,
     hoveredSlot: null, focusedSlot: null, queueCenters: {},
+    tuningDraft: {comfort: 50, theme: 50, energy: 50}, tuningBusy: false,
+    tuningAxes: [
+      {key: 'comfort', low: 'Discovery', high: 'Comfort', color: 'var(--radio-queue-1)'},
+      {key: 'theme', low: 'Eclectic', high: 'Themed', color: 'var(--radio-queue-2)'},
+      {key: 'energy', low: 'Chill', high: 'Full On', color: 'var(--radio-queue-3)'},
+    ],
+    openTuning() {
+      const values = this.state.tuning || {comfort: .5, theme: .5, energy: .5};
+      this.tuningDraft = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, Math.round(value * 100)]));
+      this.$refs.tuningDialog.showModal();
+    },
+    resetTuning() { this.tuningDraft = {comfort: 50, theme: 50, energy: 50}; },
+    async applyTuning() {
+      if (this.tuningBusy) return;
+      this.tuningBusy = true;
+      try {
+        const result = await this.json('tune', {method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(Object.fromEntries(Object.entries(this.tuningDraft).map(([key, value]) => [key, value / 100])))});
+        if (this.destroyed) return;
+        if (result.ok) { this.applyState(result); this.$refs.tuningDialog.close(); }
+      } catch (error) { console.debug('[Radio] tuning deferred', error); }
+      finally { this.tuningBusy = false; }
+    },
     get activeSlot() { return this.state.directions?.find(branch => branch.active)?.slot ?? 0; },
     get previewSlot() { return this.hoveredSlot ?? this.focusedSlot; },
     get connectedSlot() { return this.previewSlot ?? this.activeSlot; },
@@ -46,8 +69,7 @@ function radioHome(initial = {}) {
       const headerHeight = scroller.querySelector('thead')?.getBoundingClientRect().height || 0;
       const rowHeight = history.querySelector('tr')?.getBoundingClientRect().height || 48;
       const height = Math.max(0, scroller.clientHeight - headerHeight - history.getBoundingClientRect().height);
-      scroller.style.setProperty('--radio-space-height', height + 'px');
-      scroller.style.setProperty('--radio-table-head', headerHeight + 'px');
+      this.$refs.playlist.style.setProperty('--radio-table-head', headerHeight + 'px');
       const layoutKey = [scroller.clientWidth, scroller.clientHeight, height, history.lastElementChild?.dataset.vid].join(':');
       if (space.dataset.layout === layoutKey) return;
       space.dataset.layout = layoutKey;
@@ -75,9 +97,14 @@ function radioHome(initial = {}) {
       return {x: 50 + 38 * Math.cos(angle), y: 50 + 34 * Math.sin(angle)};
     },
     tableKey(state) {
-      return JSON.stringify([state.local_id, (state.tracks || []).slice(0, state.history_count || 0).map(t => t.video_id)]);
+      return JSON.stringify([state.local_id, state.metadata_revision || 0,
+        (state.tracks || []).slice(0, state.history_count || 0).map(t => t.video_id)]);
     },
     applyState(state) {
+      const changed = (state.directions || []).filter(branch => {
+        const old = this.state.directions?.find(previous => previous.slot === branch.slot);
+        return old && old.id !== branch.id;
+      }).map(branch => branch.slot);
       if (!state.active || state.playlist_id !== this.state.playlist_id) this.selectedSlot = null;
       if (this.selectedSlot != null) {
         const slot = this.selectedSlot;
@@ -88,6 +115,14 @@ function radioHome(initial = {}) {
           ({...branch, active: branch.slot === slot}))};
       }
       this.state = state;
+      if (changed.length && !matchMedia('(prefers-reduced-motion: reduce)').matches) this.$nextTick(() => {
+        for (const slot of changed) {
+          const card = this.$refs.directions?.querySelector(`[data-slot="${slot}"]`);
+          for (const element of card?.querySelectorAll('.radio-queue-art, .radio-direction-tracks') || [])
+            element.animate([{opacity: .15, filter: 'blur(4px)', transform: 'translateY(8px)'},
+              {opacity: 1, filter: 'blur(0)', transform: 'translateY(0)'}], {duration: 650, easing: 'cubic-bezier(.2,.8,.2,1)'});
+        }
+      });
       if (state.active && state.starting && !this.launchSong) this.launchSong = state.tracks?.[0] || {};
     },
     finishLaunch() {
@@ -229,6 +264,7 @@ function radioHome(initial = {}) {
           console.debug('[Radio] launch returned to song choices', result.reason);
           this.launchSong = null;
           this.launchPlaylist = null;
+          if (result.refresh_seeds) { this.loaded = false; this.loadSeeds(); }
           return;
         }
         this.applyState(result);

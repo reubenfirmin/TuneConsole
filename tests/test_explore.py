@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from yt_playlist.rec import surfaces
 
@@ -30,3 +31,26 @@ def test_catalog_ranks_under_played_first_weighted_not_filtered(store):
 def test_explore_empty_without_vectors(store):
     store.identities.upsert_identity("main", "cred", None, True)
     assert surfaces.explore_for_you(store, now=1.0) == []
+
+
+@pytest.mark.parametrize("partial_model", [False, True])
+def test_catalog_includes_owned_tracks_without_model_coverage(store, partial_model):
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    keys = []
+    for i in range(40):
+        tid = store.tracks.upsert_track(f"v{i}", f"Song {i}", f"Artist {i}", None, None,
+                                        available=i != 0)
+        store.tracks.set_track_genre(tid, "Jazz" if i < 30 else "Techno")
+        keys.append(f"song {i}|artist {i}")
+    store.rec_model.record_feedback("for_you", keys[1], "dismiss", now=1)
+    store.rec_model.record_feedback("for_you", "artist:Artist 2", "mute", now=1)
+    store.rec_model.set_weight("genre:techno", 0, lo=0, now=1)
+    store.history.record_history_plays(iid, 1, [keys[3]], source_timezone="UTC")
+    if partial_model:
+        store.rec_model.replace_rec_vectors([(keys[4], np.array([1, 0], dtype=np.float32).tobytes())])
+
+    result = surfaces.explore_for_you(store, now=2, limit=40)
+
+    assert {t.key for t in result} == set(keys[3:30])
+    assert result[-1].key == keys[3]  # Even unmodeled tracks are ranked by lack of plays.
+    assert all(t.video_id and t.lane == "explore" for t in result)

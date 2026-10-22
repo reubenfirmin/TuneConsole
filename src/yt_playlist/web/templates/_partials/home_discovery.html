@@ -1,0 +1,32 @@
+{# Last prepared recommendations are present before the tab opens. A single visible poll keeps
+   them in place during background work; empty album/artist pools do not create duplicate waits. #}
+<div id="home-discovery"{% if discovery_busy %} hx-get="/home/discovery" hx-trigger="intersect once delay:3s" hx-swap="outerHTML"{% endif %}>
+  <div>
+    {% with albums=discovery_albums, building=false, stale=false %}
+      {% include "_partials/discover.html" %}
+    {% endwith %}
+  </div>
+  <div>
+    {% with artists=discovery_artists, building=false, stale=false %}
+      {% include "_partials/new_artists.html" %}
+    {% endwith %}
+  </div>
+  {% if discovery_tracks %}
+  {% from "_macros.html" import tile %}
+  <h2 class="section">Songs to discover</h2>
+  <p class="section-note">New songs picked for you.</p>
+  <div class="tile-grid" id="discovery-track-grid">
+    {% for t in discovery_tracks %}
+    {{ tile('track', t.thumbnail, t.title, t.artist,
+            "https://music.youtube.com/watch?v=" ~ t.video_id|urlencode, discovery_id=t.key) }}
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if not discovery_albums and not discovery_artists and not discovery_tracks %}
+  <h2 class="section">Discover new music</h2>
+  <p class="section-note" role="status">{% if discovery_busy %}Finding new music for you…{% else %}New recommendations will appear as your library is explored.{% endif %}</p>
+  <a class="btn" href="/discovery">Browse your discovery pool</a>
+  {% elif discovery_busy %}
+  <p class="section-note" role="status">Updating your recommendations…</p>
+  {% endif %}
+</div>

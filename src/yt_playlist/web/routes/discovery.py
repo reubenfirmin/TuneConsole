@@ -51,7 +51,7 @@ def track_pool_summary(tracks):
 
 
 class VisibleImpressions(BaseModel):
-    kind: Literal["album", "artist"]
+    kind: Literal["album", "artist", "track"]
     ids: list[str] = Field(max_length=100)
     view_id: UUID
 

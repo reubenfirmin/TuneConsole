@@ -20,7 +20,10 @@ def radio_ui(live_app, store, page):
                  "directions": [{"slot": i, "id": f"direction{i}", "active": i == 0,
                                  "label": ["Stay here", "Deeper", "Brighter", "Further"][i],
                                  "tracks": tracks[i + 1:i + 4]} for i in range(4)]}
-    api.playlist = '<div class="radio-track-scroll"><table><tbody><tr data-vid="radio0"><td>Night frequency 1</td></tr></tbody></table></div>'
+    templates = Jinja2Templates(directory='src/yt_playlist/web/templates')
+    options = templates.get_template('_partials/radio_options.html').render()
+    api.playlist = ('<div class="radio-track-scroll"><table><thead><tr><th>Song</th><th>' + options +
+                    '</th></tr></thead><tbody><tr data-vid="radio0"><td>Night frequency 1</td></tr></tbody></table></div>')
 
     def playlist(route):
         if api.hold_playlist:
@@ -98,10 +101,12 @@ def test_active_session_ignores_bridge_gaps_and_new_radio_is_in_options(page, ra
         expect(page.locator(".radio-session")).to_be_visible()
         expect(page.locator(".radio-seeds")).to_be_hidden()
     page.get_by_role("tab").first.click()
-    page.get_by_role("tab", name="Radio", exact=True).click()
+    page.get_by_role("tab", name="On air", exact=True).click()
     expect(page.locator(".radio-session")).to_be_visible()
     expect(page.get_by_role("button", name="New radio", exact=True)).to_be_hidden()
     options = page.locator(".radio-menu > summary")
+    expect(page.locator("thead .radio-menu > summary")).to_have_count(1)
+    expect(page.locator(".radio-heading")).to_have_count(0)
     options.press("Enter")
     expect(page.get_by_role("button", name="New radio", exact=True)).to_be_visible()
     options.press("Escape")
@@ -110,6 +115,89 @@ def test_active_session_ignores_bridge_gaps_and_new_radio_is_in_options(page, ra
     page.get_by_role("button", name="New radio", exact=True).click()
     expect(page.locator(".radio-seeds")).to_be_visible()
     assert api.stops == ["POST"]
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_tune_streams_modal_applies_all_axes_and_keeps_selected_stream_lit(page, radio_ui, width):
+    api = radio_ui
+    page.set_viewport_size({"width": width, "height": 1000})
+    api.state = {**api.ready, "tuning": {"comfort": .3, "theme": .7, "energy": .2}}
+    expect(page.locator(".radio-session")).to_be_visible(timeout=6000)
+    selected = page.locator(".radio-direction.is-active")
+    before = selected.evaluate("el => getComputedStyle(el).boxShadow")
+    assert before != "none"
+    selected.hover()
+    selected.evaluate("el => Promise.all(el.getAnimations().map(a => a.finished))")
+    assert selected.evaluate("el => getComputedStyle(el).boxShadow") == before
+    button = page.get_by_role("button", name="Tune streams", exact=True)
+    expect(button).to_have_text("")
+    expect(button).to_have_css("width", "64px")
+    expect(button).to_have_css("height", "64px")
+    expect(button).to_have_css("border-radius", "50%")
+    expect(button).to_have_css("z-index", "0")
+    backing = page.locator(".radio-junction-backing")
+    expect(backing).to_have_css("fill-opacity", "1")
+    assert backing.evaluate("el => getComputedStyle(el).fill") == page.locator("body").evaluate("el => getComputedStyle(el).backgroundColor")
+    button.hover()
+    expect(button).to_have_css("z-index", "2")
+    button.click()
+    dialog = page.get_by_role("dialog", name="Tune streams")
+    expect(dialog).to_be_visible()
+    expect(dialog).to_have_css("opacity", "1")
+    expect(dialog.locator("p, small, .radio-tuning-drawing")).to_have_count(0)
+    comfort = dialog.get_by_role("slider", name="Discovery to Comfort")
+    theme = dialog.get_by_role("slider", name="Eclectic to Themed")
+    energy = dialog.get_by_role("slider", name="Chill to Full On")
+    expect(comfort).to_have_value("30")
+    expect(theme).to_have_value("70")
+    expect(energy).to_have_value("20")
+    expect(comfort).to_have_css("background-image", "none")
+    assert dialog.bounding_box()["width"] <= width
+    page.screenshot(path=f"/tmp/tuneconsole-radio-tuning-{width}.png")
+    dialog.get_by_role("button", name="Reset", exact=True).click()
+    expect(comfort).to_have_value("50")
+    comfort.focus()
+    comfort.press("Home")
+    expect(comfort).to_have_value("0")
+    comfort.press("End")
+    expect(comfort).to_have_value("100")
+    expect(comfort).to_have_css("background-image", "none")
+    comfort.fill("10")
+    theme.fill("90")
+    energy.fill("80")
+    sent = []
+    def tune(route):
+        sent.append(route.request.post_data_json)
+        api.state = {**api.state, "tuning": sent[-1]}
+        route.fulfill(json={"ok": True, **api.state})
+    page.route("**/radio/tune", tune)
+    dialog.get_by_role("button", name="Apply", exact=True).click()
+    expect(dialog).to_be_hidden()
+    assert sent == [{"comfort": .1, "theme": .9, "energy": .8}]
+    expect(page.locator(".radio-session")).to_be_visible()
+    button.click()
+    expect(comfort).to_have_value("10")
+    page.keyboard.press("Escape")
+    expect(dialog).to_be_hidden()
+    expect(button).to_be_focused()
+
+
+def test_decay_and_metadata_refresh_without_switching_streams(page, radio_ui):
+    api = radio_ui
+    api.state = {**api.ready, "directions": [
+        {**b, "decay_total": 3, "decay_remaining": 3 if b["active"] else b["slot"],
+         "tracks": [{**t, "genre": "ambient", "year": "2001"} for t in b["tracks"]]}
+        for b in api.ready["directions"]]}
+    expect(page.locator(".radio-session")).to_be_visible(timeout=6000)
+    expect(page.locator(".radio-proposed-meta").first).to_contain_text("ambient · 2001")
+    bars = page.get_by_role("progressbar")
+    expect(bars).to_have_count(4)
+    expect(bars.nth(1)).to_have_attribute("aria-valuenow", "1")
+    api.state = {**api.state, "directions": [
+        {**b, "decay_remaining": 0} if b["slot"] == 1 else b for b in api.state["directions"]]}
+    page.evaluate("() => Alpine.$data(document.querySelector('.radio-home')).poll()")
+    expect(bars.nth(1)).to_have_attribute("aria-valuenow", "0")
+    expect(page.locator(".radio-direction.is-active")).to_have_attribute("data-slot", "0")
 
 
 def test_launch_failure_returns_to_song_choices_quietly(page, radio_ui):
@@ -315,7 +403,9 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
     drawing = session.locator('.radio-history-art')
     expect(drawing).to_be_visible()
     assert drawing.bounding_box()['height'] > 80
-    assert drawing.bounding_box()['y'] + drawing.bounding_box()['height'] <= rows.first.bounding_box()['y'] + 2
+    assert abs(drawing.bounding_box()['y'] + drawing.bounding_box()['height'] - (rows.last.bounding_box()['y'] + rows.last.bounding_box()['height'])) < 3
+    expect(session.locator('.track-table')).to_have_css('opacity', '1')
+    assert '.85' in rows.first.evaluate('el => getComputedStyle(el).backgroundColor')
     expect(drawing.locator('.radio-record-cover')).to_have_attribute('href', api.tracks[0]['thumbnail'])
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.screenshot(path=f'/tmp/tuneconsole-radio-drawing-{width}.png')
@@ -349,7 +439,8 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
     expect(rows).to_have_count(12, timeout=6000)
     expect(rows.last).to_have_attribute('aria-current', 'true')
     expect(session.locator('.radio-empty-row')).to_have_count(0)
-    expect(drawing).to_be_hidden()
+    expect(drawing).to_be_visible()
+    assert drawing.bounding_box()['height'] > 80
     assert scroller.evaluate('el => el.scrollTop') > 0
     assert abs(rows.last.bounding_box()['y'] + rows.last.bounding_box()['height'] - (height / 2 - 16)) < 3
     # Polling must leave the user free to scroll back through earlier tracks.

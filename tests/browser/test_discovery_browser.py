@@ -14,7 +14,7 @@ def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page
     page.on("request", lambda request: requests.append(request.url))
     page.set_viewport_size({"width": width, "height": 1000})
     page.goto(f"{live_app}/")
-    expect(page.get_by_role("tab", name="Listen", exact=True)).to_be_visible()
+    expect(page.get_by_role("tab", name="Mix tapes", exact=True)).to_be_visible()
     page.wait_for_timeout(1100)  # Exceeds the exposure interval while Discover stays hidden.
     assert not any(url.endswith("/home/discover") for url in requests)
     assert all(a["offered_count"] == 0 for a in store.discovery.get_discovered_albums())
@@ -32,7 +32,7 @@ def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page
         assert hidden_ids  # The mobile grid crops rows that must never count as viewed.
 
     page.evaluate("""() => htmx.ajax('GET', '/home/discover', {
-        target: '[data-dash="discover"] > div:first-child', swap: 'innerHTML'})""")
+        target: '#home-discovery > div:first-child', swap: 'innerHTML'})""")
     expect(tiles).to_have_count(15)
     page.wait_for_timeout(1300)
     assert max(a["offered_count"] for a in store.discovery.get_discovered_albums()) == 1
@@ -67,3 +67,38 @@ def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, t
     page.screenshot(path=tmp_path / f"discovery-pool-metadata-{width}.png", full_page=True)
     page.get_by_role("button", name="Albums (0)").click()
     expect(overview).to_be_hidden()
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, width, tmp_path):
+    from yt_playlist.rec import fresh_pool
+
+    store.settings.set_setting("last_sync_at", "1")
+    store.settings.set_setting("onboard_dismissed", "1")
+    for i in range(40):
+        store.discovery.upsert_discovered_track(f"new {i}|artist {i}", f"v{i}", f"New song {i}",
+            f"Artist {i}", None, None, "Jazz", "2020", "radio:seed", 1)
+    fresh_pool.prepare(store, 2)
+    # Opening the tab must not need a lazy fragment or a recommendation request to succeed.
+    page.route("**/home/discovery", lambda route: route.abort())
+    page.set_viewport_size({"width": width, "height": 1000})
+    page.goto(f"{live_app}/")
+    tiles = page.locator("#discovery-track-grid > [data-discovery-id]")
+    expect(tiles).to_have_count(10)
+    expect(tiles.first).to_be_hidden()
+    page.wait_for_timeout(1100)
+    # Some songs also appear in Mix tapes; their existing offers belong to that surface.
+    before = {row["identity_key"]: row["offered_count"] for row in store.discovery.get_discovered_tracks()}
+    assert store.conn.execute("SELECT COUNT(*) FROM discovery_visible_impressions WHERE kind='track'").fetchone()[0] == 0
+
+    page.get_by_role("tab", name="Discover", exact=True).click()
+    expect(page.get_by_role("heading", name="Songs to discover")).to_be_visible()
+    expect(tiles.first).to_be_visible()
+    expect(page.get_by_text("Finding new music for you…", exact=True)).to_have_count(0)
+    expect(tiles.first.locator("a")).to_have_attribute("href", "https://music.youtube.com/watch?v=v0")
+    tiles.first.scroll_into_view_if_needed()
+    page.wait_for_timeout(1300)
+    deltas = [row["offered_count"] - before[row["identity_key"]] for row in store.discovery.get_discovered_tracks()]
+    assert max(deltas) == 1
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    page.screenshot(path=tmp_path / f"discovery-ready-songs-{width}.png", full_page=True)

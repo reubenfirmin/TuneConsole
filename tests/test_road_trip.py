@@ -492,6 +492,32 @@ def test_build_draft_honours_the_requested_mix(store, monkeypatch):
     assert 55 <= stats["minutes"] <= 65
 
 
+@pytest.mark.parametrize("library_at_acquisition", [False, True])
+def test_passenger_overlap_uses_current_library_once(store, monkeypatch, library_at_acquisition):
+    library = [{"key": "shared|guest artist", "video_id": "shared-video", "title": "Shared",
+                "artist": "Guest Artist", "album": "Album", "thumbnail": None, "duration": 240,
+                "genre": "Rock", "year": 1995, "liked": False}]
+    songs = list(library) if library_at_acquisition else []
+    monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
+    monkeypatch.setattr(candidates, "other_input_songs", lambda *args, **kwargs: ([{
+        "video_id": "shared-video", "title": "Shared", "artist": "Guest Artist", "album": "Album",
+        "thumbnail": None, "duration": 240, "genre": "Rock"}], []))
+    state = road_trip.start_draft(store, _recipe(artists=["Guest Artist"], target_minutes=8), 1000, seed=7)
+    item = state["pending"].pop(0)
+    road_trip.add_other_input(state, store, FakeClient(), item)
+    if not library_at_acquisition:
+        songs.extend(library)  # A sync/save after acquisition changes the owner at the next pick.
+    state["building"] = False
+    road_trip.repick(state, store, 1000)
+    rows = road_trip.draft_tracks(state)
+    assert [row["video_id"] for row in rows] == ["shared-video"]
+    assert rows[0]["source"] == "mine" and rows[0]["mix_source"] == "blend"
+    assert state["stats"]["minutes"] == state["stats"]["own_minutes"] == state["stats"]["blend_minutes"] == 4
+    assert state["stats"]["own_count"] == state["stats"]["blend_count"] == 1
+    assert state["stats"]["their_count"] == state["stats"]["their_minutes"] == 0
+    assert sum(state["stats"]["mix_targets"].values()) == len(rows)
+
+
 def test_default_mix_identifies_yours_theirs_and_blend_through_swaps_and_reload(store, monkeypatch):
     _stub_pools(monkeypatch, store, own_genre=lambda i: "Rock" if i % 2 == 0 else "Jazz")
 

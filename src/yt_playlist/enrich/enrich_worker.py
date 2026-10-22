@@ -27,6 +27,7 @@ class EnrichWorker:
         self._shutdown = False
         self._activity = {}
         self._thread = None
+        self._priority = {}
         self.work = activity_for(ctx)
 
     # --- settings (re-read each cycle so changes take effect on the next batch) ------------------
@@ -82,6 +83,15 @@ class EnrichWorker:
         """Wake the drain loop (e.g. after a sync adds tracks). Coalesces: a no-op if already awake."""
         self._wake.set()
 
+    def prioritize(self, keys):
+        """Bound and coalesce rendered radio requests; the one worker owns all lookups."""
+        with self._lock:
+            for key in keys:
+                self._priority[key] = None
+            while len(self._priority) > 96:
+                self._priority.pop(next(iter(self._priority)))
+        self.trigger()
+
     def shutdown(self):
         self._shutdown = True
         self._wake.set()
@@ -116,6 +126,8 @@ class EnrichWorker:
         """Process one batch from the shared queue, then re-sweep stale tracks once it is empty.
         Completed tracks remain stamped even if a later lookup is interrupted."""
         store = self.ctx.store
+        if self._stop():
+            return 0
         limit = limit or self._batch_size()
         from yt_playlist.enrich import artwork
         self._busy = True
@@ -130,7 +142,15 @@ class EnrichWorker:
         configuration = enrichment.provider_configuration(store, registry, config)
         store.enrichment.reconcile_provider_configuration(configuration)
         providers = [name for name, p in configuration.items() if p["status"] == "available"]
-        batch = store.enrichment.next_enrich_batch(limit, providers=providers, now=self.ctx.now_fn())
+        with self._lock:
+            priority = list(self._priority)
+        stale_before = self.ctx.now_fn() - self._resweep_days() * 86400
+        batch = store.enrichment.priority_enrich_batch(priority, min(limit, 24), stale_before,
+            providers=providers, now=self.ctx.now_fn()) if priority else []
+        if batch:
+            scope = "radio"
+        else:
+            batch = store.enrichment.next_enrich_batch(limit, providers=providers, now=self.ctx.now_fn())
         if batch:
             self._had_work = True
         else:
@@ -151,6 +171,11 @@ class EnrichWorker:
                 if track.get("last_enriched_at") is not None:
                     track["provider_jobs"] = store.enrichment.enrichment_provider_jobs(track["recording_id"])
         completed = self._run_batch(batch, scope)
+        if completed:
+            with self._lock:
+                for track in batch:
+                    if track["job_id"] in completed:
+                        self._priority.pop(track["identity_key"], None)
         if completed:
             try:                                  # metadata placement must never crash the drain
                 keys = {t["identity_key"] for t in batch if t["job_id"] in completed}

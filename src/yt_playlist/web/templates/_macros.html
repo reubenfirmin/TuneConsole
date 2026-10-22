@@ -51,7 +51,8 @@
   'deep_cut': ('Deep cut', 'b-teal'), 'comfort': ('Comfort', 'b-amber'),
   'explore': ('New to you', 'b-pink'), 'album': ('New album', 'b-violet'),
   'revisit': ('Revisit', 'b-violet'),
-  'fresh': ('Fresh', 'b-cyan'), 'artist': ('New artist', 'b-pink'), 'fit': ('Fits here', 'b-teal')
+  'fresh': ('Fresh', 'b-cyan'), 'artist': ('New artist', 'b-pink'), 'fit': ('Fits here', 'b-teal'),
+  'track': ('New song', 'b-cyan')
 }.get(source, (source, 'b-indigo')) -%}
 <div class="tile"{% if discovery_id %} data-discovery-kind="{{ source }}" data-discovery-id="{{ discovery_id }}"{% endif %}>
   <a class="tile-cover{{ ' no-art' if not cover }}" href="{{ land }}"{% if land.startswith('http') %} target="_blank" rel="noopener"{% endif %}>

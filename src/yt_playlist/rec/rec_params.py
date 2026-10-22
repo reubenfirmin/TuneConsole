@@ -180,7 +180,8 @@ PARAMS = [
               "Distinct recent plays with enough track information required before choosing a current listening style.",
               2, 10, 1, 3, integer=True, advanced=True),
     ParamSpec("now_gain", "Current listening: influence", "transient",
-              "How strongly your current listening style affects Home once enough plays are available.",
+              "How strongly your current listening style affects Home and Radio once enough plays are available. "
+              "Radio's stream controls and explicit stream choices take precedence.",
               0.0, 2.0, 0.05, 0.6),
     ParamSpec("session_halflife_h", "Session memory half-life (hours)", "transient",
               "Hours until this session's influence halves. Higher keeps it active across longer breaks.", 0.5, 24, 0.5, 4),

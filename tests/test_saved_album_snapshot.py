@@ -17,7 +17,7 @@ def mirror(store, monkeypatch):
     first = store.identities.upsert_identity('main', 'bridge', None, True)
     second = store.identities.upsert_identity('brand', 'bridge', 'brand-id', False)
     store.collection.add_saved_album({'browse': 'OLD', 'title': 'Previously saved', 'artist': 'Artist'})
-    monkeypatch.setattr(sync, 'with_retry', lambda fn: fn())
+    monkeypatch.setattr(sync, 'with_retry', lambda fn, **kwargs: fn())
     materialized = []
     monkeypatch.setattr(sync, '_materialize_album_tracks',
                         lambda store, clients, saved, progress: materialized.append(saved))

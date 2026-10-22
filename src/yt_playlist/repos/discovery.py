@@ -294,7 +294,8 @@ class DiscoveryRepo(Repo):
     def record_discovery_impressions(self, kind, ids, view_id, now) -> None:
         """Count each visible Home Discover tile once per page visit, including across poll retries."""
         tbl, col = {"album": ("discovered_albums", "browse_id"),
-                    "artist": ("discovered_artists", "artist")}[kind]
+                    "artist": ("discovered_artists", "artist"),
+                    "track": ("discovered_tracks", "identity_key")}[kind]
         if kind == 'artist':
             col = 'artist_id'
             ids = [artists.lookup(self.conn,i,exact=True) for i in ids]

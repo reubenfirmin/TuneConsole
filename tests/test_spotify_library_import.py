@@ -99,7 +99,7 @@ def test_library_import_creates_matches_and_is_idempotent():
         "playlists_found": 1, "playlists_imported": 1, "playlists_skipped": 0, "playlists_failed": 0,
         "tracks_imported": 1, "tracks_unmatched": 1,
         "albums_found": 2, "albums_imported": 1, "albums_skipped": 0,
-        "albums_unmatched": 1,
+        "albums_unmatched": 1, "albums_as_playlists": 0,
     }
     assert report["details"]["playlists"] == [{
         "name": "Road songs", "status": "imported", "reason": "created",

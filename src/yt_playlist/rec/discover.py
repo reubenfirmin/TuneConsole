@@ -9,6 +9,7 @@ it, and which of your playlists it fits. Runs in the background worker; Last.fm 
 """
 import random
 from yt_playlist.core.accounts import catalog_client,main_client
+from yt_playlist.core.activity import check_stopping
 
 import numpy as np
 
@@ -26,6 +27,7 @@ def fetch_artist_info(ctx, name, browse_id=None):
 
     Lives here (not in the web layer) so outward discovery can reach it without a rec -> web import; the
     artist page in web/routes/charts imports it from here. Module-level so tests can patch it."""
+    check_stopping()
     try:
         client = catalog_client(ctx.client_provider())
         if client is None:
@@ -229,6 +231,7 @@ def new_artists(ctx, limit=15, max_anchors=30):
     # Keep a display map for candidates that still lack a provider identity.
     display = {}
     for name, _, _ in anchors:
+        check_stopping()
         ref = store.artists.get_artist(name)
         api_name = ref['name'] if ref else name
         nkey = name
@@ -244,6 +247,7 @@ def new_artists(ctx, limit=15, max_anchors=30):
     # taste-fit / because / fits ranking below is kept exactly as before.
     bridges = {}   # candidate -> [(anchor_unit_vec, edge_weight, anchor_name), ...]
     for name, weight, vec in anchors:
+        check_stopping()
         ref = store.artists.get_artist(name)
         label = ref['name'] if ref else name
         for cand, match in artist_model.artist_neighbors(store, name, topn=50):
@@ -261,6 +265,7 @@ def new_artists(ctx, limit=15, max_anchors=30):
                     'artist_id':ref['id'] if ref else None,'score':c['score'],
                     'because':c['because'],'fits':c['fits']})
     for c in out:                                       # enrich the shown few with an artist image
+        check_stopping()
         c["thumbnail"] = _artist_thumb(ctx, c["artist"])
         c["genre"] = lastfm.artist_genre(c["artist"], key)   # #18: tag for the facet overlay
     return out
@@ -282,6 +287,7 @@ def run_discovery(ctx, now, budget=25) -> dict:
     rng = random.Random(int(now))                         # varies per pass so the rotation moves over time
     due = store.discovery.artists_due_for_scan(now, budget=budget, artist_limit=artist_limit,with_ids=True)
     for ref in due:
+        check_stopping()
         artist = ref['artist']
         try:
             info = fetch_artist_info(ctx, artist,ref.get('browse_id'))

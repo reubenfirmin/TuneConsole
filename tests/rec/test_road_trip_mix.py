@@ -61,6 +61,26 @@ def test_bans_zero_weights_and_duplicate_rows_do_not_fill_slots():
     assert not {"0", "1", "unranked"} & set(ids)
 
 
+@pytest.mark.parametrize("library_first", [False, True])
+def test_cross_group_duplicates_belong_to_library_before_shares_and_quotas(library_first):
+    library = [track("shared", genre="Rock"), track("own", genre="Jazz")]
+    passenger = [{**track("shared", source="theirs", genre="Pop"), "duration": 600},
+                 track("guest", source="theirs", genre="Pop")]
+    rows = library + passenger if library_first else passenger + library
+    spec = request(rows, genres=["Rock"], target_minutes=12,
+                   targets={"mine": {"genre:Rock": .5, "genre:Jazz": .5}})
+    before = deepcopy(spec)
+    result = mix(spec)
+    grouped = [row for group in result.groups.values() for row in group]
+    assert Counter(row["video_id"] for row in grouped) == {"shared": 1, "own": 1, "guest": 1}
+    assert result.groups["blend"] == [library[0]]
+    assert result.groups["theirs"] == [passenger[1]]
+    assert Counter(row["video_id"] for row in result.ordered) == {"shared": 1, "own": 1, "guest": 1}
+    assert {side: len(rows) for side, rows in result.picked.items()} == {"yours": 1, "blend": 1, "theirs": 1}
+    assert sum(row["duration"] for row in result.ordered) == 12 * 60
+    assert spec == before
+
+
 @pytest.mark.parametrize("building,expected_count,missing_minutes", [(True, 5, 21), (False, 10, 18)])
 def test_missing_side_reports_shortfall_and_final_mix_fills_from_available_side(building, expected_count, missing_minutes):
     rows = [track(i, source="theirs") for i in range(20)]

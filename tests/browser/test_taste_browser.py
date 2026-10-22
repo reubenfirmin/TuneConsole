@@ -1082,7 +1082,7 @@ def test_feature_settings_select_features_and_preserve_saved_edits(live_app, sto
 def test_radio_settings_are_absent_even_with_the_old_opt_in(live_app, page, query):
     page.goto(live_app + "/taste" + query + "#recommendations/features")
     expect(page.locator("#taste-feature-home")).to_be_visible()
-    expect(page.get_by_role("tab", name="Radio", exact=True)).to_have_count(0)
+    expect(page.get_by_role("tab", name="On air", exact=True)).to_have_count(0)
     expect(page.locator("#taste-feature-radio, [data-param^=radio_]")).to_have_count(0)
 
 

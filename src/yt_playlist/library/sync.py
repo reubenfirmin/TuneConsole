@@ -1,5 +1,6 @@
 import logging
 from yt_playlist.core.bridge import BridgeError
+from yt_playlist.core.activity import WorkClosing, check_stopping
 from yt_playlist.util.matching import identity_key, track_artist, track_album
 from yt_playlist.util.retry import error_summary, with_retry
 from yt_playlist.util.thumbnails import best_thumb
@@ -54,6 +55,7 @@ def _sync_generated_group(store, ytm, description, groups, identity_id=None):
 
 def _emit(on_progress, type, text, **extra):
     """Report a progress event to an optional callback (used to stream sync to the browser)."""
+    check_stopping()
     if on_progress is not None:
         on_progress({"type": type, "text": text, **extra})
 
@@ -87,10 +89,13 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     _emit(on_progress, "info", f"{label}: fetching playlists…")
     try:
         playlists = with_retry(lambda: client.get_library_playlists(limit=None),
-                               operation=f"fetch library for {label!r} (identity {identity_id})")
+                               operation=f"fetch library for {label!r} (identity {identity_id})",
+                               check_cancelled=check_stopping)
         if (not isinstance(playlists, list)
                 or any(not isinstance(p, dict) or not p.get("playlistId") for p in playlists)):
             raise ValueError("playlist snapshot is unavailable")
+    except WorkClosing:
+        raise
     except BridgeError as e:
         # The extension is disconnected / no signed-in tab / a bridge timeout: a CONNECTION problem,
         # not a dead session. Skip this identity quietly, do NOT flag re-auth, do NOT raise. The
@@ -116,16 +121,20 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     refreshed = skipped = incomplete = 0
     auth_bad = False
     for i, pl in enumerate(playlists, 1):
+        check_stopping()
         pid = pl["playlistId"]
         context = f"playlist {pl.get('title', '')!r} ({pid}), account {label!r} (identity {identity_id})"
         seen_ytm.add(pid)  # mark seen before fetch so a transient read failure doesn't prune it
         try:
-            detail = with_retry(lambda: client.get_playlist(pid, limit=None), operation=f"fetch {context}")
+            detail = with_retry(lambda: client.get_playlist(pid, limit=None), operation=f"fetch {context}",
+                                check_cancelled=check_stopping)
             if (not isinstance(detail, dict) or not isinstance(detail.get("tracks"), list)
                     or any(not isinstance(t, dict) for t in detail["tracks"])
                     or detail.get("error")
                     or ("status" in detail and detail["status"] != "STATUS_SUCCEEDED")):
                 raise ValueError("playlist tracks unavailable")
+        except WorkClosing:
+            raise
         except Exception as e:  # noqa: BLE001 - one bad/just-deleted playlist must not abort the sync
             skipped += 1
             ratings_complete = False
@@ -226,7 +235,8 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
     _emit(on_progress, "info", f"{label}: fetching history…")
     try:  # history is best-effort (powers stale detection); never let it fail the whole sync
         history = with_retry(lambda: client.get_history(),
-                             operation=f"fetch history for {label!r} (identity {identity_id})")
+                             operation=f"fetch history for {label!r} (identity {identity_id})",
+                             check_cancelled=check_stopping)
         if not isinstance(history, list) or any(not isinstance(t, dict) for t in history):
             raise ValueError("history snapshot is unavailable")
         hist = [(store.tracks.observe_track(t["videoId"], t.get("title", ""), _artist(t), now=now)
@@ -241,6 +251,8 @@ def sync_identity(store, identity_id, client, now, on_progress=None, label=None,
         store.history.record_history_plays(identity_id, now, hist,
                                    source_timezone=getattr(client, "history_timezone", None))
         resources["history"] = resource("complete", refreshed=len(hist))
+    except WorkClosing:
+        raise
     except Exception as e:  # noqa: BLE001
         logger.warning("history fetch failed for %s: %s", identity_id, e)
         _emit(on_progress, "info", f"{label}: history unavailable (skipped)")
@@ -293,9 +305,10 @@ def _sync_saved_albums(store, clients, on_progress):
     complete = bool(clients) and configured <= clients.keys()
     outcomes = {str(i): resource("skipped", "Account unavailable") for i in configured - clients.keys()}
     for identity_id, client in clients.items():
+        check_stopping()
         try:
             revisions[identity_id] = store.collection.saved_album_revision(identity_id)
-            albums = with_retry(lambda: client.get_library_albums(limit=None))
+            albums = with_retry(lambda: client.get_library_albums(limit=None), check_cancelled=check_stopping)
             if not isinstance(albums, list):
                 raise ValueError("saved-album snapshot is unavailable")
             account = []
@@ -310,6 +323,8 @@ def _sync_saved_albums(store, clients, on_progress):
                               "thumbnail": best_thumb(a.get("thumbnails"))})
             snapshots[identity_id] = account
             outcomes[str(identity_id)] = resource("complete", refreshed=len(albums))
+        except WorkClosing:
+            raise
         except Exception as e:  # noqa: BLE001
             complete = False
             logger.warning("saved-albums fetch failed: %s", e)
@@ -319,6 +334,7 @@ def _sync_saved_albums(store, clients, on_progress):
         _emit(on_progress, "info", "saved albums unchanged: no complete account snapshots")
         return outcomes, resource("skipped", "Complete account snapshots unavailable"), resource(
             "skipped", "Saved-album mirror unchanged")
+    check_stopping()
     accepted = store.collection.replace_saved_album_snapshots(snapshots, expected_revisions=revisions)
     for identity_id in snapshots.keys()-accepted:
         complete = False
@@ -355,9 +371,11 @@ def _materialize_album_tracks(store, clients, saved, on_progress):
               f"albums › {i}/{len(todo)} {meta.get('title') or '(album)'}, {meta.get('artist') or '?'}",
               count=len(todo), index=i)
         try:
-            album = with_retry(lambda: client.get_album(bid))
+            album = with_retry(lambda: client.get_album(bid), check_cancelled=check_stopping)
             if not isinstance(album, dict) or not isinstance(album.get("tracks"), list):
                 raise ValueError("album track list unavailable")
+        except WorkClosing:
+            raise
         except Exception as e:  # noqa: BLE001 - one album's failure shouldn't abort the rest
             logger.warning("album-tracks fetch failed for %s: %s", bid, e)
             failed += 1
@@ -385,10 +403,13 @@ def sync_all(store, clients, now, on_progress=None, on_auth_expired=None, on_aut
         name: resource("skipped", "Account unavailable") for name in ("playlists", "ratings", "history")}}
         for i, label in labels.items() if i not in clients}
     for identity_id, client in clients.items():
+        check_stopping()
         try:
             accounts[str(identity_id)] = sync_identity(
                 store, identity_id, client, now, on_progress=on_progress, label=labels.get(identity_id),
                 on_auth_expired=on_auth_expired, on_auth_ok=on_auth_ok)
+        except WorkClosing:
+            raise
         except Exception as e:  # keep healthy accounts usable when another account fails
             detail = error_summary(e)
             _emit(on_progress, "err", f"{labels.get(identity_id, identity_id)}: sync failed: {detail}")

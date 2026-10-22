@@ -136,3 +136,29 @@ def test_temporal_pool_keeps_its_date_band_and_live_feedback(store):
     library_pool.prepare(store, 1, parameters)
     store.rec_model.record_feedback("for_you", keys[3], "dismiss", now=2)
     assert [t["year"] for t in library_pool.pick(store, 3, parameters)] == [1995, 2010]
+
+
+def test_catalog_build_reaches_unmodeled_library_beyond_other_genres(store):
+    # A large library need not have vectors for every track. The requested genre is deep in
+    # the catalog, and sibling cards already use some of it; neither condition makes it empty.
+    keys = []
+    for i in range(340):
+        title, artist = f"Song {i}", f"Artist {i}"
+        tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
+        store.tracks.set_track_genre(tid, "Jazz" if i >= 310 else "Techno")
+        keys.append(identity_key(title, artist))
+    parameters = {"lane": "explore", "epoch": "0", "include_genres": ["jazz"],
+                  "exclude_keys": json.dumps(keys[310:322])}
+    client = _client(store)
+    response = client.post("/home/library-pool", data=parameters)
+    for _ in range(200):
+        match = re.search(r'hx-get="(/home/library-pool/\d+)"', response.text)
+        if not match:
+            break
+        response = client.get(match[1])
+        time.sleep(.01)
+    assert response.status_code == 200
+    assert response.text.count('class="gen-row"') == 12
+    assert "Not enough matching songs" not in response.text
+    for title in re.findall(r'data-title="Song (\d+)"', response.text):
+        assert 322 <= int(title) < 340

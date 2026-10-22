@@ -2,7 +2,7 @@
 import logging
 from types import SimpleNamespace
 
-from yt_playlist.rec import home_cards, mode_surfaces
+from yt_playlist.rec import home_cards, mode_surfaces, surfaces
 
 
 class Jobs:
@@ -91,10 +91,28 @@ def test_pool_failure_and_polling_do_not_admit_jobs_or_record_offers(store, monk
 
 def test_measurement_failure_keeps_offers_available(store, monkeypatch):
     home = service(store)
-    monkeypatch.setattr(home_cards, "_one_card", lambda store, lane, now: proto() if lane == "wheelhouse" else None)
+    monkeypatch.setattr(home_cards, "_one_card", lambda store, lane, now, **kw: proto() if lane == "wheelhouse" else None)
 
     def unavailable(*args, **kwargs):
         raise OSError("measurement unavailable")
 
     monkeypatch.setattr(home_cards, "_record_served_cards", unavailable)
     assert home.cards(home_cards.CardsRequest(1000)).protos[0]["tracks"][0]["key"] == "a|b"
+
+
+def test_catalog_excludes_only_displayed_wheelhouse_tracks(store, monkeypatch):
+    shared = []
+    for i in range(60):
+        title, artist = f"Song {i}", f"Artist {i}"
+        store.tracks.upsert_track(f"v{i}", title, artist, None, None)
+        shared.append(surfaces.ForYouItem(title, artist, "", f"v{i}", None, 0, "",
+                                         key=f"song {i}|artist {i}"))
+    monkeypatch.setattr(surfaces, "for_you", lambda *a, **kw: shared)
+
+    result = service(store).cards(home_cards.CardsRequest(1000))
+    by_lane = {p["lane"]: p["tracks"] for p in result.protos}
+
+    wheelhouse = {t.key for t in by_lane["wheelhouse"]}
+    catalog = {t.key for t in by_lane["explore"]}
+    assert len(wheelhouse) == len(catalog) == 12
+    assert wheelhouse.isdisjoint(catalog)

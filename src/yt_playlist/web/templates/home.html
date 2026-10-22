@@ -96,10 +96,10 @@
               @click="go('start')">Start here</button>
       {% else %}
       <button type="button" role="tab" :class="{ on: panel === 'directions' }" :aria-selected="panel === 'directions'"
-              @click="go('directions')">Listen</button>
+              @click="go('directions')">Mix tapes</button>
       {% endif %}
       <button type="button" role="tab" :class="{ on: panel === 'radio' }" :aria-selected="panel === 'radio'"
-              @click="go('radio')">Radio</button>
+              @click="go('radio')">On air</button>
       {% if not onboarding and (rediscover_albums or rediscover) %}
       <button type="button" role="tab" :class="{ on: panel === 'rediscover' }" :aria-selected="panel === 'rediscover'"
               @click="go('rediscover')">Revisit</button>
@@ -137,8 +137,7 @@
       <div hx-get="/home/into-recently" hx-trigger="load" hx-swap="innerHTML"></div>
     </section>
     <section class="dash-panel dash-async" data-dash="discover" role="tabpanel" x-show="panel === 'discover'" x-cloak>
-      <div hx-get="/home/discover" hx-trigger="intersect once" hx-swap="innerHTML"></div>
-      <div hx-get="/home/new-artists" hx-trigger="intersect once" hx-swap="innerHTML"></div>
+      {% include "_partials/home_discovery.html" %}
     </section>
     {% if muted_count %}
     <p class="section-note muted-note" x-show="panel === 'directions'" x-cloak>

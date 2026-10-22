@@ -116,6 +116,15 @@ def build(ctx) -> APIRouter:
                 "vibe_presets": home_vibe.PRESETS, "vibe": home_vibe.current(store, now),
                 "has_modes": bool(store.modes.list_modes(active_only=True))}
 
+    def _discovery_context(now):
+        # These are selections from persisted pools. Provider discovery, projection and scoring
+        # belong to the worker, so opening this tab never starts a recommendation build.
+        from yt_playlist.rec import discover, fresh_pool
+        return {"discovery_albums": discover.pick_discovered_albums(store, ALBUMS_PER_CARD, now),
+                "discovery_artists": discover.pick_discovered_artists(store, ARTISTS_PER_CARD, now),
+                "discovery_tracks": fresh_pool.pick(store, now, size=10, minimum=1),
+                "discovery_busy": _busy()}
+
     @router.get("/")
     def home_page(request: Request):
         now = now_fn()
@@ -191,6 +200,7 @@ def build(ctx) -> APIRouter:
             # Persisted background-import state. Completion stays in Needs attention with its full
             # report until explicitly dismissed, including across app/browser restarts.
             "spotify_library_job": spotify_library_job,
+            **_discovery_context(now),
             **_feed_context(now),
         })
 
@@ -631,7 +641,12 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "_partials/generated_result.html", result)
 
     def _busy():
-        return bool(ctx.rec_worker and ctx.rec_worker.busy)
+        return bool(ctx.rec_worker and ctx.rec_worker.discovery_busy)
+
+    @router.get("/home/discovery")
+    def home_discovery(request: Request):
+        return templates.TemplateResponse(request, "_partials/home_discovery.html",
+                                          _discovery_context(now_fn()))
 
     @router.get("/home/discover")
     def home_discover(request: Request):

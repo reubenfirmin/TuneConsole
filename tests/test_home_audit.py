@@ -82,7 +82,7 @@ def test_single_card_refresh_is_audited_and_audit_failure_does_not_break_home(st
     from tests.test_mode_cards_route import _client
     proto = home._proto(store, "wheelhouse", "More in your wheelhouse",
                         [{"key": "a|b", "title": "A", "artist": "B", "genre": "Jazz"}], 1000)
-    monkeypatch.setattr(home, "_one_card", lambda *_: proto)
+    monkeypatch.setattr(home, "_one_card", lambda *_, **kw: proto)
     client = _client(store)
     assert client.post("/home/refresh-card/wheelhouse").status_code == 200
     row = _rows(audit_path)[0]

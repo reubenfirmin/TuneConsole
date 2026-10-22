@@ -1,3 +1,6 @@
+import logging
+from types import SimpleNamespace
+
 from starlette.testclient import TestClient
 from fastapi import FastAPI
 
@@ -17,13 +20,12 @@ class FakeStore:
 
 
 def _home_app(store):
-    # Build only the home router with a minimal ctx. Match the ctx attributes home.build reads;
-    # if home.build needs more of ctx than store/now_fn, extend this stub to supply them.
+    # The router constructs its recommendation service with a logger even though these
+    # dismissal endpoints only use settings. Keep the context's required dependencies explicit.
     from yt_playlist.web.routes import home
     app = FastAPI()
-    # home.build destructures ctx.templates at build time (store, now_fn, templates), even though
-    # the dismiss route under test never touches it, so it must be present or build() raises.
-    ctx = type("C", (), {"store": store, "now_fn": lambda: 1000.0, "templates": None})()
+    ctx = SimpleNamespace(store=store, now_fn=lambda: 1000.0, templates=None,
+                          logger=logging.getLogger(__name__))
     app.include_router(home.build(ctx))
     return app
 

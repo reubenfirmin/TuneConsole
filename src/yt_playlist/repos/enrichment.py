@@ -481,6 +481,26 @@ class EnrichmentRepo(Repo):
     """
 
     @synchronized
+    def priority_enrich_batch(self, keys, limit, stale_before, *, providers=None, now=None):
+        """Visible radio songs join the existing worker, with provider retry gates intact."""
+        rows = self.conn.execute(
+            "WITH " + self._TRACKS_CTE + " SELECT * FROM enrichment_tracks t "
+            "WHERE identity_key IN (SELECT value FROM json_each(:keys)) "
+            "AND (genre IS NULL OR genre='' OR mb_year IS NULL OR mb_year='') "
+            "AND (first_enriched_at IS NULL OR last_enriched_at<:stale_before OR " +
+            self._pending_coverage() + ") AND " + self._eligible_providers() +
+            " ORDER BY queue_order LIMIT :limit",
+            {"keys": json.dumps(list(dict.fromkeys(keys))[:96]), "limit": limit,
+             "stale_before": stale_before, "providers": json.dumps(providers) if providers is not None else None,
+             "now": time.time() if now is None else now}).fetchall()
+        result = [self._queue_track(row) for row in rows]
+        for row, track in zip(rows, result):
+            jobs = self.enrichment_provider_jobs(track["recording_id"])
+            if jobs and row["first_enriched_at"] is not None:
+                track["provider_jobs"] = jobs
+        return result
+
+    @synchronized
     def next_enrich_batch(self, limit, offset=0, *, providers=None, now=None) -> list:
         """One priority queue across library and discovery tracks, ordered by tier:
         (0) new arrivals (created after the worker last caught up), (1) played songs by playcount,

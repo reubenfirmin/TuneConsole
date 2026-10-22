@@ -6,6 +6,8 @@ serves sync routes from a threadpool, so every DB call serializes on that one lo
 """
 from functools import wraps
 
+from yt_playlist.core.activity import check_cancellable_work
+
 # Default display group for generated playlists. Policy lives in playlist_provenance;
 # changing a group never changes taste eligibility. Only explicit adoption lifts quarantine.
 #
@@ -41,6 +43,7 @@ def synchronized(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
         with self._lock:
+            check_cancellable_work()
             return method(self, *args, **kwargs)
     return wrapper
 

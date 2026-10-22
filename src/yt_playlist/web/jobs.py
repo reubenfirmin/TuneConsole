@@ -38,7 +38,7 @@ def run_library_sync(ctx, job):
             "resources": {name: resource("failed", detail)
                           for name in ("saved_album_mirror", "album_tracks")}}, now)
     finally:
-        for worker in (ctx.rec_worker, ctx.enrich_worker):
+        for worker in (ctx.rec_worker, ctx.enrich_worker) if activity_for(ctx).accepting else ():
             if worker:
                 try:
                     worker.trigger()

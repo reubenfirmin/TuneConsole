@@ -1,0 +1,38 @@
+<dialog id="radio-tuning-dialog" class="radio-tuning-dialog" x-ref="tuningDialog" aria-labelledby="radio-tuning-title"
+        @click="if ($event.target === $el) $el.close()">
+  <form class="radio-tuning-panel" @submit.prevent="applyTuning()">
+    <button class="radio-tuning-close" type="button" @click="$refs.tuningDialog.close()" aria-label="Close stream tuning">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+    </button>
+    <h2 id="radio-tuning-title">Tune streams</h2>
+    <div class="radio-tuning-controls">
+      <template x-for="axis in tuningAxes" :key="axis.key">
+        <div class="radio-tuning-axis" :style="'--dial-color:' + axis.color + ';--dial-value:' + tuningDraft[axis.key] + '%;--dial-turn:' + (tuningDraft[axis.key] * .2 - 10) + 'deg'">
+          <label :for="'radio-tune-' + axis.key"><span x-text="axis.low"></span><span x-text="axis.high"></span></label>
+          <div class="radio-tuning-fader">
+            <div class="radio-tuning-scale" aria-hidden="true">
+              <svg viewBox="0 0 400 48" preserveAspectRatio="none">
+                <path class="radio-tuning-rail" d="M0 24H400"/>
+                <path class="radio-tuning-ticks" d="M0 18v12m40-10v8m40-8v8m40-8v8m40-8v8m80-8v8m40-8v8m40-8v8m40-8v8m40-10v12"/>
+                <path class="radio-tuning-center" d="M200 8v7m0 18v7"/>
+              </svg>
+              <span class="radio-tuning-thumb">
+                <svg viewBox="0 0 32 32">
+                  <g x-show="axis.key === 'comfort'"><path d="m16 4 3.5 8.5L28 16l-8.5 3.5L16 28l-3.5-8.5L4 16l8.5-3.5Z"/><circle cx="16" cy="16" r="3"/></g>
+                  <g x-show="axis.key === 'theme'"><path d="M5 11c7-10 15 20 22 10M5 21c7 10 15-20 22-10M5 16h22"/></g>
+                  <path x-show="axis.key === 'energy'" d="m18 3-11 15h8l-1 11 11-16h-8Z"/>
+                </svg>
+              </span>
+            </div>
+            <input type="range" min="0" max="100" step="1" :id="'radio-tune-' + axis.key"
+                   :aria-label="axis.low + ' to ' + axis.high" x-model.number="tuningDraft[axis.key]">
+          </div>
+        </div>
+      </template>
+    </div>
+    <footer class="radio-tuning-actions">
+      <button type="button" class="radio-tuning-reset" @click="resetTuning()">Reset</button>
+      <button type="submit" class="btn btn-primary" :disabled="tuningBusy" x-text="tuningBusy ? 'Tuning…' : 'Apply'"></button>
+    </footer>
+  </form>
+</dialog>

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from yt_playlist.core.activity import Activity, WorkClosing
+from yt_playlist.core.activity import Activity, WorkClosing, check_stopping
 from yt_playlist.core.update_lifecycle import acquire_restart_locks
 from yt_playlist.library import executor
 from yt_playlist.rec.rec_worker import RecWorker
@@ -41,6 +41,23 @@ def test_restart_closes_admission_before_the_activity_check():
     assert locks is not None
     for lock in locks:
         lock.release()
+
+
+@pytest.mark.parametrize("reason", ["shutdown", "idle", "update"])
+def test_sync_cooperative_stop_only_interrupts_shutdown(reason):
+    work = Activity()
+    release = work.admit("library sync")
+    try:
+        with work.entered(release):
+            work.close_admission(reason)
+            if reason == "shutdown":
+                with pytest.raises(WorkClosing):
+                    check_stopping()
+            else:
+                check_stopping()
+    finally:
+        release()
+    assert work.wait(0)
 
 
 def test_cancelled_request_keeps_running_mutation_visible():

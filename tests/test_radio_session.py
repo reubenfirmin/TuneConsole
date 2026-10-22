@@ -88,11 +88,22 @@ def poc(monkeypatch, store):
         track["key"] = store.tracks.catalog_subject(tid)["identity_key"]
 
     class Candidates:
-        def __init__(self, *args):
+        def __init__(self, store, now, tuning=None):
+            self.tuning = radio_session.radio_tuning.controls(tuning or radio_session.radio_tuning.DEFAULTS)
+            self.now_sampled_at = now
             self.by_video = {t["video_id"]: t for t in pool}
             self.by_key = {t["key"]: t for t in pool}
             self.fingerprint = "fixed-test-candidates"
             self.modes = {}
+
+        def refresh_now(self, now):
+            self.now_sampled_at = now
+
+        def refresh_metadata(self, tracks):
+            return False
+
+        def fits(self, track, anchor=None):
+            return True
 
         def retain(self, tracks):
             self.by_video.update((t["video_id"], t) for t in tracks)
@@ -109,7 +120,8 @@ def poc(monkeypatch, store):
 
         def next_track(self, history, *, target=None, feedback=None, excluded=()):
             used = {t["video_id"] for t in history} | set(excluded)
-            return next((t for t in pool if t["video_id"] not in used), None)
+            ordered = list(reversed(pool)) if self.tuning["comfort"] < .5 else pool
+            return next((t for t in ordered if t["video_id"] not in used), None)
 
         def direction_anchor(self, history, anchors, *, excluded=(), feedback=None):
             return self.next_track(history + anchors, excluded=excluded)
@@ -153,10 +165,12 @@ def test_three_to_start_then_one_append_per_song_and_no_playback_queue_commands(
     assert remote.adds == []
     assert c.status()["ahead"] == 1
     for i in range(3, 8):
-        play(c, f"v{i}")
-        assert remote.ids == [f"v{j}" for j in range(1, i + 2)]
+        video, previous = remote.ids[-1], list(remote.ids)
+        play(c, video)
+        assert remote.ids[:-1] == previous
+        assert len(set(remote.ids)) == i + 1
         assert c.status()["ahead"] == 1
-        play(c, f"v{i}")  # Duplicate observations cannot append extra songs.
+        play(c, video)  # Duplicate observations cannot append extra songs.
         assert len(remote.adds) == i - 2
     assert len(frames) == 1  # Playback navigation happens only at explicit start.
     assert all(frame["type"] == "radio-session" for frame in c.ctx.bridge.requests)
@@ -510,20 +524,148 @@ def test_stop_during_append_prevents_the_next_addition(poc):
     assert not c.status()["active"]
 
 
-def test_external_edits_halt_monitor_without_overwriting_playlist(poc):
+def test_external_edits_pause_writes_and_preserve_confirmed_radio_view(poc, monkeypatch):
     c, remote, *_ = poc
     c.start()
+    play(c, "v1")
     remote.ids.append("manual-song")
     c.ctx.bridge.now_playing = {"video_id": "v3", "playlist_ytm_id": "PLSESSION"}
+    tick = [100.]
     class ImmediateEvent(threading.Event):
+        calls = 0
         def wait(self, timeout=None):
-            return self.is_set()
+            self.calls += 1
+            tick[0] += 40
+            return self.calls > 3 or self.is_set()
+    monkeypatch.setattr(radio_session.time, "monotonic", lambda: tick[0])
     c.session.stop = ImmediateEvent()
     c._monitor(c.session)
-    assert not c.status()["active"]
-    assert "changed elsewhere" in c.status()["error"]
+    assert c.status()["active"]
+    assert c.session.halted
     assert remote.ids == ["v1", "v2", "v3", "manual-song"]
     assert remote.adds == []
+
+
+def test_transient_wrong_playlist_context_on_owned_song_keeps_radio(poc):
+    c, *_ = poc
+    c.start()
+    play(c, "v1")
+    c.ctx.bridge.now_playing["playlist_ytm_id"] = "PREVIOUS"
+    assert c.status()["active"]
+    c.ctx.bridge.now_playing["video_id"] = "another-song"
+    assert not c.status()["active"]
+
+
+def test_seed_outside_prepared_pool_resolves_exact_library_upload(poc):
+    c, remote, *_ = poc
+    c.ctx.store.tracks.upsert_track("v40", "Outside", "Artist", "", 200)
+    result = c.start("v40")
+    assert result["ok"]
+    assert remote.ids[0] == "v40"
+
+
+def test_expired_seed_falls_back_to_current_offer(poc):
+    c, remote, *_ = poc
+    result = c.start("expired-upload")
+    assert result["ok"]
+    assert remote.ids == ["v1", "v2", "v3"]
+
+
+def test_tuning_preserves_history_and_waits_for_native_future_ack(poc):
+    c, remote, frames, *_ = poc
+    c.start()
+    play(c, "v2")
+    s, bridge = c.session, c.ctx.bridge
+    bridge.auto_adopt = False
+    history = list(s.heard)
+    choices = dict(s.choices)
+    controls = {"comfort": .1, "theme": .9, "energy": .2}
+    result = c.tune(controls)
+    assert result["ok"] and result["updating"]
+    assert s.candidates is s.directions.candidates
+    assert result["tuning"] == controls
+    assert s.heard == history and s.choices == choices
+    assert remote.ids == ["v1", "v2", "v3"]
+    assert remote.adds == remote.removes == []
+    requested = s.requested_direction["tracks"][0]["video_id"]
+    c.advance(s)
+    assert remote.ids == ["v1", "v2", requested]
+    assert c.status()["updating"]
+    assert bridge.now_playing["video_id"] == "v2"
+    bridge.native_ids = list(remote.ids)
+    c.advance(s)
+    assert not c.status()["updating"]
+    assert s.heard == history
+    assert requested not in s.choices  # Slider changes aren't explicit song choices.
+    assert len(frames) == 1
+    saved = json.loads(c.ctx.store.settings.get_setting("radio_current_session"))
+    assert saved["tuning"] == controls
+    assert len(set(saved["directions"]["decay"].values())) == 3
+
+
+def test_tuning_honors_a_pending_explicit_stream_selection(poc):
+    c, *_ = poc
+    c.start()
+    play(c, "v2")
+    branch = c.status()["directions"][2]
+    c.select(branch["id"], c.status()["menu_id"])
+    choice = dict(c.session.requested_direction["choice"])
+    result = c.tune({"comfort": .1, "theme": .9, "energy": .2})
+    assert result["ok"] and result["pending_slot"] == 2
+    assert c.session.requested_direction["choice"] == choice
+    c.advance(c.session)
+    assert c.session.directions.active == 2
+    assert c.ctx.bridge.now_playing["video_id"] == "v2"
+
+
+def test_temporary_unrecognized_readback_retries_without_writing_over_it(poc):
+    c, remote, *_ = poc
+    c.start()
+    play(c, "v2")
+    remote.ids.append("temporary-extra")
+    c.ctx.bridge.now_playing["video_id"] = "v3"
+    c._browser(c.session)
+    with pytest.raises(PlaylistPending):
+        c.advance(c.session)
+    assert c.status()["active"] and not c.session.halted
+    assert not remote.adds
+    remote.ids.remove("temporary-extra")
+    c.advance(c.session)
+    assert remote.ids == ["v1", "v2", "v3", "v4"]
+    assert remote.adds == [["v4"]]
+
+
+def test_metadata_enrichment_is_requested_only_after_render_and_bad_fit_is_replaced(poc, monkeypatch):
+    c, *_ = poc
+    requests = []
+    c.ctx.enrich_worker = SimpleNamespace(prioritize=lambda keys: requests.append(set(keys)))
+    c.start()
+    play(c, "v1")
+    assert not requests
+    s = c.session
+    c.seen(s.directions.menu_id)
+    c.seen(s.directions.menu_id)
+    assert len(requests) == 1
+    old = s.directions.slots[1]["tracks"][0]
+    monkeypatch.setattr(s.candidates, "refresh_metadata", lambda tracks: old.update(genre="Metal", year="2000") or True)
+    monkeypatch.setattr(s.candidates, "fits", lambda track, anchor: track["video_id"] != old["video_id"])
+    c._refresh_metadata(s)
+    assert s.metadata_revision == 1
+    c.advance(s)
+    assert all(old["video_id"] not in [t["video_id"] for t in b["tracks"]] for b in s.directions.slots)
+    assert s.observed_video == "v1"
+
+
+@pytest.mark.parametrize("values", [{}, {"comfort": 2, "theme": .5, "energy": .5},
+                                   {"comfort": True, "theme": .5, "energy": .5}, []])
+def test_tune_route_rejects_invalid_controls_without_changing_session(poc, values):
+    c, remote, *_ = poc
+    c.start()
+    app = FastAPI()
+    app.include_router(radio_routes.build(c.ctx))
+    with TestClient(app) as client:
+        assert client.post("/radio/tune", json=values).json() == {"ok": False}
+    assert remote.ids == ["v1", "v2", "v3"]
 
 
 def test_stop_preserves_playlist_and_prevents_future_appends(poc):

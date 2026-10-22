@@ -234,8 +234,10 @@ class TrendsRepo(Repo):
                                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (imported,))
             self.conn.execute("RELEASE first_play_refresh")
         except BaseException:
-            self.conn.execute("ROLLBACK TO first_play_refresh")
-            self.conn.execute("RELEASE first_play_refresh")
+            # SQLite may already have rolled back the transaction on interruption.
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK TO first_play_refresh")
+                self.conn.execute("RELEASE first_play_refresh")
             raise
 
     @synchronized

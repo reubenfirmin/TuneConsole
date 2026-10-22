@@ -21,6 +21,8 @@ class RadioDirections:
         self.revision = 0
         self.menu_id = uuid4().hex
         self.context = None
+        self.decay = {}
+        self.transition = 0
 
     def _allowed(self, track):
         return track["video_id"] not in self.blocked
@@ -53,6 +55,23 @@ class RadioDirections:
                    frozenset(self.blocked), frozenset(self.retired))
         if not force and context == self.context:
             return False
+        self.transition = transition
+        if force:
+            self.decay.clear()
+        self.decay.pop(self.active, None)
+        # Preserve the other deadlines when switching streams. A demoted active
+        # stream takes the vacant beat; it does not reset all three timers.
+        occupied = set(self.decay.values())
+        for slot in range(4):
+            if slot == self.active or slot in self.decay:
+                continue
+            deadline = transition + 1
+            while deadline in occupied:
+                deadline += 1
+            self.decay[slot] = deadline
+            occupied.add(deadline)
+        expired = [slot for slot, deadline in self.decay.items() if deadline <= transition]
+        refresh_slot = min(expired, key=lambda slot: self.decay[slot]) if expired else None
         changed = False
         played = {t["video_id"] for t in history}
         active = self.slots[self.active]
@@ -63,7 +82,11 @@ class RadioDirections:
         if not force:
             prefix += [t for t in old if t["video_id"] not in played | scheduled_ids | self.retired
                        and self._allowed(t)]
-        proposal = self._extend(history, prefix[:DEPTH], anchor, ())
+        reserved = {t["video_id"] for slot, branch in enumerate(self.slots)
+                    if slot != self.active and branch and not force for t in branch["tracks"]}
+        proposal = self._extend(history, prefix[:DEPTH], anchor, reserved)
+        if len(proposal) < DEPTH:
+            proposal = self._extend(history, proposal, anchor, ())
         if active is None or [t["video_id"] for t in old] != [t["video_id"] for t in proposal] or force:
             self.slots[self.active] = self._proposal(anchor, proposal, transition)
             changed = True
@@ -73,14 +96,16 @@ class RadioDirections:
             if slot == self.active:
                 continue
             old = self.slots[slot]
-            stale = (old is None or force or transition - old["born"] >= DECAY_TRANSITIONS
+            stale = (old is None or force or slot == refresh_slot
                      or any(t["video_id"] in played | self.retired or not self._allowed(t)
                             for t in old["tracks"])
                      or changed and any(t["video_id"] in used for t in old["tracks"]))
             if stale:
-                target = self.candidates.direction_anchor(history, anchors, excluded=used | self.blocked,
+                reserved = {t["video_id"] for other, branch in enumerate(self.slots)
+                            if other not in (slot, self.active) and branch and not force for t in branch["tracks"]}
+                target = self.candidates.direction_anchor(history, anchors, excluded=used | self.blocked | reserved,
                                                            feedback=self.feedback)
-                exclusions = used
+                exclusions = used | reserved
                 if target is None:
                     # A small library can share songs across alternatives; each
                     # individual continuation still contains no repeats.
@@ -93,6 +118,10 @@ class RadioDirections:
                 else:
                     tracks = self._extend(history, [target], target, exclusions)
                 self.slots[slot] = self._proposal(target, tracks, transition)
+                if old is not None and not force:
+                    occupied = {deadline for other, deadline in self.decay.items() if other != slot}
+                    self.decay[slot] = max(deadline for deadline in
+                        range(transition + 1, transition + DECAY_TRANSITIONS + 1) if deadline not in occupied)
                 changed = True
             branch = self.slots[slot]
             anchors.append(branch["anchor"])
@@ -124,6 +153,9 @@ class RadioDirections:
         saved = {t["video_id"] for t in scheduled}
         return [{"id": branch["id"], "slot": slot, "active": slot == self.active,
                  "cluster_id": branch.get("cluster_id"),
+                 "decay_remaining": (DECAY_TRANSITIONS if slot == self.active else
+                     max(0, self.decay.get(slot, self.transition + DECAY_TRANSITIONS) - self.transition)),
+                 "decay_total": DECAY_TRANSITIONS,
                  "label": branch["label"], "artists": branch["artists"],
                  "tracks": [{**t, "saved": t["video_id"] in saved} for t in branch["tracks"]]}
                 for slot, branch in enumerate(self.slots) if branch]

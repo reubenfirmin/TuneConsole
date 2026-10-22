@@ -12,6 +12,7 @@ import math
 
 import numpy as np
 
+from yt_playlist.core.activity import check_stopping
 from yt_playlist.util import genre_catalog, genre_map
 from yt_playlist.rec import rec_params
 
@@ -58,6 +59,7 @@ def build_vectors_from_baskets(baskets, dim=DIM, method="svd", weights=None):
     The offline evaluator uses this seam to fit an as-of model.  Keeping the vectors in memory is
     important: a backtest must neither read the current persisted vectors nor replace the live model.
     """
+    check_stopping()
     keys = sorted({k for b in baskets for k in b})
     if len(keys) < dim + _MIN_VOCAB_MARGIN:
         return [], np.zeros((0, dim), dtype=np.float32)
@@ -92,9 +94,12 @@ def _cooc_matrix(baskets, keys, weights=None):
     g = None if weights is None else np.array([float(weights.get(k, 1.0)) for k in keys])
     C = np.zeros((n, n), dtype=np.float64)
     for b in baskets:
+        check_stopping()
         ii = [idx[k] for k in b]
         w = 1.0 / (len(ii) - 1)
         for a in range(len(ii)):
+            if a % 64 == 0:
+                check_stopping()
             ia = ii[a]
             for c in range(a + 1, len(ii)):
                 ic = ii[c]
@@ -127,8 +132,11 @@ def _svd(baskets, keys, dim, weights=None):
     # only, vs a full dense SVD. Fixed seed → identical vectors across rebuilds when the data is unchanged.
     rng = np.random.default_rng(0)
     om = rng.standard_normal((n, dim + _SVD_OVERSAMPLE))
+    check_stopping()
     Q, _ = np.linalg.qr(ppmi @ om)
+    check_stopping()
     Ub, S, _ = np.linalg.svd(Q.T @ ppmi, full_matrices=False)
+    check_stopping()
     V = (Q @ Ub)[:, :dim] * np.sqrt(S[:dim])           # project back into track space, scale by sqrt(singular value)
     V /= np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS
     return keys, V.astype(np.float32)
@@ -155,8 +163,10 @@ def _item2vec(baskets, keys, dim, epochs=5, neg=5, lr=0.025, seed=0):
     idx = {k: i for i, k in enumerate(keys)}
     pairs = []
     for b in baskets:
+        check_stopping()
         ii = [idx[k] for k in b]
         for a in range(len(ii)):
+            check_stopping()
             for c in range(len(ii)):
                 if a != c:
                     pairs.append((ii[a], ii[c]))
@@ -177,6 +187,7 @@ def _item2vec(baskets, keys, dim, epochs=5, neg=5, lr=0.025, seed=0):
     for _ in range(epochs):
         perm = rng.permutation(len(pairs))
         for s in range(0, len(pairs), bs):
+            check_stopping()
             bp = pairs[perm[s:s + bs]]
             ci, cj = bp[:, 0], bp[:, 1]
             m = len(bp)
@@ -200,6 +211,7 @@ def build_and_store(store, dim=None) -> int:
     if dim is None:
         dim = int(store.settings.get_setting("rec_dim") or DIM)
     keys, V = build_vectors(store, dim)
+    check_stopping()
     store.rec_model.replace_rec_vectors([(k, V[i].tobytes()) for i, k in enumerate(keys)])
     return len(keys)
 

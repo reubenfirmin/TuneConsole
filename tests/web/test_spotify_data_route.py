@@ -59,7 +59,7 @@ def _wait_for_library_job(store, timeout=2.0):
 
 
 def _select_library(web, payload=None):
-    response = web.post("/import/spotify-library/v5", files={
+    response = web.post("/import/spotify-library/v6", files={
         "file": ("spotify-account-data.zip", payload or _library_payload(), "application/zip")})
     assert response.status_code == 200
     return re.search(r'name="selection_token" value="([^"]+)"', response.text)[1], response
@@ -86,7 +86,7 @@ def test_setup_offers_local_export_upload_without_oauth(store):
     assert "Import Spotify playlists and albums" in body
     assert "Be prepared to wait several days" in body
     assert "Playlist1.json" in body and "YourLibrary.json" in body
-    assert 'hx-post="/import/spotify-library/v5"' in body
+    assert 'hx-post="/import/spotify-library/v6"' in body
     assert "Restart TuneConsole" in body
     assert 'hx-post="/import/spotify/v2"' in body
     assert "Client ID" not in body and "/spotify/connect" not in body
@@ -229,12 +229,12 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
 
     job = _wait_for_library_job(store)
     assert job["status"] == "done"
-    assert job["report_schema"] == 5
+    assert job["report_schema"] == 6
     assert {k: v for k, v in job["report"].items() if k != "details"} == {
         "playlists_found": 1, "playlists_imported": 1, "playlists_skipped": 0, "playlists_failed": 0,
         "tracks_imported": 1, "tracks_unmatched": 1,
         "albums_found": 1, "albums_imported": 0, "albums_skipped": 0,
-        "albums_unmatched": 1,
+        "albums_unmatched": 1, "albums_as_playlists": 0,
     }
     assert job["report"]["details"]["playlists"][0]["name"] == "Imported mix"
     assert job["report"]["details"]["playlists"][0]["status"] == "imported"

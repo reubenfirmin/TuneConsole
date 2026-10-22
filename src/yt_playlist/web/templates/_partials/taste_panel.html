@@ -33,7 +33,7 @@
 
 <div {{ tt.panel('main', prefix='taste-recommendation', state='recommendationTab', extra_class='taste-recommendation-panel') }}>
 <section class="taste-settings-section" id="taste-main-controls">
-<p class="section-note">These controls shape Home’s <strong>Listen</strong> suggestions; recent plays, likes, and sound also influence other recommendations. For the three <strong>Follow recent</strong> controls, <strong>0% is off and 100% is the strongest influence</strong>. This measures strength, not the percentage of matching songs. <strong>Reset</strong> returns each control to its marked default.</p>
+<p class="section-note">These controls shape Home’s <strong>Mix tapes</strong> suggestions; recent plays, likes, and sound also influence other recommendations. For the three <strong>Follow recent</strong> controls, <strong>0% is off and 100% is the strongest influence</strong>. This measures strength, not the percentage of matching songs. <strong>Reset</strong> returns each control to its marked default.</p>
 <div class="card knob-list semantic-controls">
   {% for p in semantic_params %}{% include "_partials/taste_knob.html" %}{% endfor %}
 </div>

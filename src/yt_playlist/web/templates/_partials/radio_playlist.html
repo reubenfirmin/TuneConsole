@@ -1,11 +1,12 @@
 {% from "_partials/song_menu_button.html" import song_menu %}
 {% if session.local_id %}
+{% include "_partials/radio_drawing.html" %}
 <div class="card library-table-card radio-track-scroll">
-  {% include "_partials/radio_drawing.html" %}
   <table class="track-table" aria-label="{{ session.title }}">
     <thead><tr><th class="num radio-col-number">#</th><th class="col-thumb"></th><th class="liked-col"></th>
       <th>Song</th><th class="radio-col-artist">Artist</th><th class="radio-col-album">Album</th>
-      <th class="num radio-col-year">Year</th><th class="radio-col-genre">Genre</th><th class="num col-length">Length</th><th class="col-action"></th>
+      <th class="num radio-col-year">Year</th><th class="radio-col-genre">Genre</th><th class="num col-length">Length</th>
+      <th class="col-action radio-options-cell">{% include "_partials/radio_options.html" %}</th>
     </tr></thead>
     <tbody class="radio-history-space" aria-hidden="true"></tbody>
     <tbody class="radio-history">

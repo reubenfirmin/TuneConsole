@@ -449,8 +449,8 @@ def add_other_input(state, store, client, item):
     known = {c["video_id"] for c in state["pool"]}
     theirs = [c for c in state["pool"] if c["source"] != "mine"]
     room = max(0, state["other_limit"] - len(theirs))
-    # A track can be in your library AND on their artist's page; it is already yours, so their side
-    # doesn't get to claim it twice.
+    # Cache passenger results independently of the live library. Construction assigns each upload
+    # one owner when merging these results with the current library on every re-pick.
     if fresh is None:
         batch = candidates.acquire_input(client, store, candidates.InputRequest(kind, name, state["other_cap"], decade))
         rows, related = batch.rows, batch.related

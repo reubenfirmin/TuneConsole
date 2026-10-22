@@ -498,15 +498,15 @@ def _content_only_scores(store, plays, now) -> dict:
 
 # HOME CARD: "Catalog" ("From your catalog"). Own-but-under-played tracks, the edge of your palette.
 # This powers the Catalog card, NOT a separate "Explore" surface; the internal lane name 'explore' is
-# the source of the naming confusion. The home page dedups this pool against the Wheelhouse pool
-# (see web/routes/home.py), so Catalog displays only what Wheelhouse didn't. When naming new
+# the source of the naming confusion. Home excludes tracks actually shown in Wheelhouse,
+# leaving the rest of this ranked pool available for Catalog. When naming new
 # code/vars, prefer the home heading "catalog" over "explore".
 def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     """Catalog: your OWN under-played tracks, surfaced primarily by LACK OF PLAYS and *weighted*
     (never filtered) by the taste model. So a never-played track that fits your taste tops the card,
     an off-taste never-played track still appears (just lower), and a heavily-played track stays low
-    no matter how well it fits. That's the Wheelhouse's job, not Catalog's. Empty until the
-    embedding model is built. Distinct from Wheelhouse by signal (plays vs taste), not by a filter.
+    no matter how well it fits. That's the Wheelhouse's job, not Catalog's. Owned tracks without
+    vectors remain eligible, ranked by novelty after the model-ranked candidates.
     """
     plays = store.rec_query.play_counts()                                  # {key: count}; absent = never played
     pt = playlist_taste(store)
@@ -525,21 +525,28 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     # fill every slot. The two lists are each ranked internally; interleaving leaves the collaborative
     # order (and the warm path) untouched.
     content = _content_only_scores(store, plays, now)
-    if not collab and not content:
-        return []
     order = _interleave(sorted(collab, key=lambda k: -collab[k]),
                         sorted(content, key=lambda k: -content[k]), CATALOG_CONTENT_FRAC)
     dao = store.rec_query
+    # Model coverage is not library membership. New imports, sparse playlists and untagged tracks
+    # may have neither vector type; they can still make a catalog mix before the next rebuild.
+    missing = dao.library_keys() - collab.keys() - content.keys()
+    order.extend(sorted(missing, key=lambda k: (plays.get(k, 0), k)))
     suppressed = store.rec_model.suppressed_keys("for_you", now) | dao.generated_track_keys()
     muted = store.rec_model.muted_artists()
-    meta = store.rec_query.tracks_by_keys(order[:limit * 8])
+    weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
+    genres = dao.track_genres(order)
+    order = [k for k in order if k not in suppressed
+             and weights.get(f"genre:{genre_map.family(genres.get(k))}", 1.0) != 0]
+    meta = store.rec_query.tracks_by_keys(order)
     out: list[ForYouItem] = []
-    for k in order[:limit * 8]:
+    for k in order:
         m = meta.get(k)
-        if not m or k in suppressed or m["artist"] in muted:
+        if not m or m["artist"] in muted:
             continue
         p = plays.get(k, 0)
-        reason = "Never played, sits near your taste" if p == 0 else f"Barely played ({p}×), worth another spin"
+        reason = (("Never played, from your library" if k in missing else "Never played, sits near your taste")
+                  if p == 0 else f"Barely played ({p}×), worth another spin")
         out.append(ForYouItem(m["title"], m["artist"], m["album"], m["video_id"], m["thumbnail"],
                               p, reason, k, "explore", score=collab.get(k, content.get(k))))
         if len(out) >= limit:

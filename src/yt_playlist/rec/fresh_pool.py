@@ -61,12 +61,13 @@ def prepare(store, now):
     mode_surfaces.refresh_fresh(store, pool, now)
 
 
-def pick(store, now, include_genres=(), avoid_genres=(), size=12):
+def pick(store, now, include_genres=(), avoid_genres=(), size=12, *, minimum=4):
     """A balanced Fresh preview from already ranked candidates.
 
     Do not roll another single-genre theme over the user's selection. Each requested family must
     have candidates before the preview is ready; missing families keep the discovery slot visible.
     Reading a page or choosing genres must never fit a projection or score the discovery pool.
+    Individual discovery tiles can use a smaller minimum than a saveable mix.
     """
     bundles = store.rec_surface.get_proposals("mode_bundles") or {}
     candidates = list(store.rec_surface.get_proposals("fresh_pool") or [])
@@ -83,7 +84,7 @@ def pick(store, now, include_genres=(), avoid_genres=(), size=12):
     unique = {}
     for track in candidates:
         key = track.get("key")
-        if key and key not in blocked and track.get("artist") not in muted:
+        if key and track.get("video_id") and key not in blocked and track.get("artist") not in muted:
             unique.setdefault(key, track)
     pool = (home_themes.matching_genres(store, list(unique.values()), include=include_genres, avoid=avoid_genres)
             if include_genres or avoid_genres else home_themes.resolved_genres(store, list(unique.values())))
@@ -107,6 +108,6 @@ def pick(store, now, include_genres=(), avoid_genres=(), size=12):
                 break
             if len(picked) >= size:
                 break
-    if len(picked) < 4 or not set(include_genres) <= {genre_map.family(t["genre"]) for t in picked}:
+    if len(picked) < minimum or not set(include_genres) <= {genre_map.family(t["genre"]) for t in picked}:
         return []
     return picked

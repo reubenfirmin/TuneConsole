@@ -264,9 +264,19 @@ def construct(request: MixRequest, rng: RandomSource) -> MixResult:
              "inputs": {"artists": request.artists, "genres": request.genres}}
     groups = {"yours": [], "theirs": [], "blend": []}
     banned, penalized = set(request.banned), set(request.previous)
+    unique = {}
     for candidate in request.candidates:
-        if candidate["video_id"] not in banned:
-            groups[_mix_source(candidate, state)].append(candidate)
+        video = candidate["video_id"]
+        if video in banned:
+            continue
+        # The current library owns an upload also found in the cached passenger pool.
+        # Resolve ownership before group sizes, durations and quota allocation are computed.
+        # This also handles songs saved after passenger acquisition, in either input order.
+        previous = unique.get(video)
+        if previous is None or (candidate["source"] == "mine" and previous["source"] != "mine"):
+            unique[video] = candidate
+    for candidate in unique.values():
+        groups[_mix_source(candidate, state)].append(candidate)
     state["blend_available"] = bool(groups["blend"])
     orders = {side: _sample_order(rows, rng, lambda c: _weight(c, request.familiarity_pct / 100, penalized))
               for side, rows in groups.items()}

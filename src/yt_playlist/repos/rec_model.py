@@ -438,9 +438,11 @@ class RecModelRepo(Repo):
                 "discovered": self.get_rec_discovered_content_vectors(),
             }
         except BaseException:
-            self.conn.execute("ROLLBACK TO content_snapshot")
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK TO content_snapshot")
+                self.conn.execute("RELEASE content_snapshot")
             raise
-        finally:
+        else:
             self.conn.execute("RELEASE content_snapshot")
         return result
 

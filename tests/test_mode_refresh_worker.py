@@ -147,6 +147,28 @@ def test_current_groups_are_not_recomputed_at_every_startup(store, library, monk
         assert bundles == saved
 
 
+@pytest.mark.parametrize("cached", [None, []], ids=["absent", "empty"])
+def test_startup_repairs_absent_discovery_songs_while_reusing_saved_groups(store, library, monkeypatch, cached):
+    from yt_playlist.rec import fresh_pool
+    mode_surfaces.prepare_bundles(store, 1000)
+    for i in range(12):
+        store.discovery.upsert_discovered_track(f"new {i}|new artist {i}", f"v{i}", f"New {i}",
+            f"New artist {i}", None, None, "Jazz", "2020", "radio:seed", 1001)
+    store.conn.execute("DELETE FROM rec_proposals WHERE surface='fresh_pool'")
+    store.conn.commit()
+    if cached is not None:
+        store.rec_surface.put_proposals("fresh_pool", cached, 1000)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Discovery repair must reuse the saved groups and model")
+
+    monkeypatch.setattr(mode_surfaces, "prepare_bundles", forbidden)
+    monkeypatch.setattr(taste_modes, "recompute", forbidden)
+    monkeypatch.setattr(embed, "build_and_store", forbidden)
+    _worker(store)._do_mode_refresh()
+    assert len(fresh_pool.pick(store, 2001)) == 12
+
+
 @pytest.fixture
 def scheduled(store, monkeypatch):
     targets = []

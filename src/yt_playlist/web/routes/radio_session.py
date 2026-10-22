@@ -57,6 +57,14 @@ def build(ctx):
         except ValueError as exc:
             return {"ok": False, "reason": str(exc)}
 
+    @router.post("/radio/tune")
+    async def tune(request: Request):
+        try:
+            values = await request.json()
+            return await radio.work.to_thread(radio.tune, values)
+        except (ValueError, TypeError):
+            return {"ok": False}
+
     @router.post("/radio/seen")
     async def seen(request: Request):
         try:

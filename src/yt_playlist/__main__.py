@@ -14,6 +14,17 @@ from yt_playlist.core.config import credential_path
 from yt_playlist.core.runtime import Runtime
 from yt_playlist.web.app import create_app
 
+
+class AppServer(uvicorn.Server):
+    def handle_exit(self, sig, frame):
+        # Stop read-only workers before Uvicorn waits for SSE requests and closes
+        # the extension socket. Already-running mutations retain normal draining.
+        ctx = getattr(getattr(self.config.app, "state", None), "ctx", None)
+        if ctx is not None:
+            ctx.work.close_admission()
+        super().handle_exit(sig, frame)
+
+
 def sync_identities_into_store(store, identity_configs):
     """Ensure each configured identity exists in the store; return {label: id}."""
     return {cfg.label: store.identities.upsert_identity(cfg.label, cfg.credential_ref, cfg.brand_account_id, cfg.is_master)
@@ -175,7 +186,7 @@ def main(argv=None, *, updater=None, server_callback=None):
         app = build_app(updater=updater)
         _print_bridge_banner(args.host, args.port)
         # bound graceful shutdown so a Ctrl-C lands promptly even with an open sync SSE stream
-        server = uvicorn.Server(uvicorn.Config(
+        server = AppServer(uvicorn.Config(
             app, host=args.host, port=args.port, timeout_graceful_shutdown=2, log_config=None))
         if server_callback is not None:
             server_callback(server)
