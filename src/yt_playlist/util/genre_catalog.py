@@ -320,5 +320,37 @@ def canonical_name(name):
     return records[label[0]]["name"] if label else (name or "").strip()
 
 
+@functools.lru_cache(maxsize=1)
+def _parents():
+    """Documented genre ancestry, separate from the looser recommendation families."""
+    _, labels = catalog()
+    parents = defaultdict(set)
+    data = json.loads((_DATA / "musicbrainz_genre_parents.json").read_text())
+    for child, parent in data['parents']:
+        child_label, parent_label = labels.get(normalize(child)), labels.get(normalize(parent))
+        if child_label and parent_label and child_label[0] != parent_label[0]:
+            parents[child_label[0]].add(parent_label[0])
+    return parents
+
+
+@functools.lru_cache(maxsize=4096)
+def _ancestors(key):
+    parents = _parents()
+    pending, visited = list(parents.get(key, ())), set()
+    while pending:
+        parent = pending.pop()
+        if parent not in visited:
+            visited.add(parent)
+            pending.extend(parents.get(parent, ()))
+    return frozenset(visited)
+
+
+def is_subgenre(child, parent):
+    """True only for a strict, documented descendant; siblings and cycles cannot refine a tag."""
+    child, parent = normalize(canonical_name(child)), normalize(canonical_name(parent))
+    return bool(child and parent and child != parent and parent in _ancestors(child)
+                and child not in _ancestors(parent))
+
+
 def builtin_names():
     return sorted((record["name"] for record in catalog()[0].values()), key=str.casefold)

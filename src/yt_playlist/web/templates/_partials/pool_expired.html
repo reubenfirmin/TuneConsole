@@ -1,0 +1,16 @@
+<section class="gen-card card fresh-pool" aria-busy="false" x-init="focus = null">
+  <div class="fresh-pool-shell">
+    <button type="button" class="fresh-pool-action" aria-label="Refresh mixes"
+            hx-post="/home/refresh-cards" hx-target="#home-mode-cards"
+            hx-swap="outerHTML settle:0ms" hx-disabled-elt="this">
+      <span class="fresh-pool-art" aria-hidden="true">
+        {% for i in range(4) %}<span class="fresh-pool-tile"><span></span><span></span><span></span></span>{% endfor %}
+      </span>
+      <span class="fresh-pool-copy">
+        <span class="gen-direction">Refresh mixes</span>
+        <span class="gen-theme">Mix build expired</span>
+        <span class="fresh-pool-status" role="status">This build is no longer available. Refresh your mixes to try again.</span>
+      </span>
+    </button>
+  </div>
+</section>

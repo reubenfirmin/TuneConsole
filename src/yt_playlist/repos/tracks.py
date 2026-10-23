@@ -1,7 +1,6 @@
 """TrackRepo: track rows and their genre/year enrichment."""
 from yt_playlist.util.matching import identity_key, normalize, recording_title
 from yt_playlist.core import catalog
-from yt_playlist.util.thumbnails import is_placeholder_art
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -30,26 +29,96 @@ class TrackRepo(Repo):
         return self.track_for_waterfall(track_id)
 
     @synchronized
-    def observe_track(self, video_id, title, artist, *, now=None, album=None, album_browse_id=None):
+    def observe_track(self, video_id, title, artist, *, now=None, album=None, album_browse_id=None, credits=None):
+        entry_id = self.observe_track_entry(video_id,title,artist,now=now,album=album,
+                                           album_browse_id=album_browse_id,credits=credits)
+        return self.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?', (entry_id,)).fetchone()[0]
+
+    @synchronized
+    def observe_track_entry(self, video_id, title, artist, *, now=None, album=None, album_browse_id=None, credits=None):
+        """Retain an exact source entry without acquiring library membership."""
         with self.conn:
-            entry_id = catalog.upsert(self.conn,video_id,title,artist,album=album,
-                                      album_browse_id=album_browse_id,created_at=now,library=False)
-            return self.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?', (entry_id,)).fetchone()[0]
+            return catalog.upsert(self.conn,video_id,title,artist,album=album,
+                                      album_browse_id=album_browse_id,created_at=now,library=False,credits=credits)
 
     @synchronized
     def record_item_rating(self, identity_id, video_id, status, *, source, now):
-        self.conn.execute('INSERT INTO item_ratings VALUES (?,?,?,?,?) ON CONFLICT(identity_id,video_id) DO UPDATE SET status=excluded.status,source=excluded.source,observed_at=excluded.observed_at', (identity_id,video_id,status,source,now))
-        self.conn.commit()
+        self.record_item_ratings(identity_id, {video_id: status}, source=source, now=now)
+
+    @synchronized
+    def record_item_ratings(self, identity_id, statuses, *, source, now):
+        """A sync confirmation retains the real time/provenance of an unchanged live action."""
+        retain_action = ("excluded.source='sync' AND item_ratings.status=excluded.status "
+                         "AND item_ratings.source IN ('api','action')")
+        with self.conn:
+            self.conn.executemany(
+                'INSERT INTO item_ratings VALUES (?,?,?,?,?) '
+                'ON CONFLICT(identity_id,video_id) DO UPDATE SET '
+                f'source=CASE WHEN {retain_action} THEN item_ratings.source ELSE excluded.source END,'
+                f'observed_at=CASE WHEN {retain_action} THEN item_ratings.observed_at ELSE excluded.observed_at END,'
+                'status=excluded.status',
+                [(identity_id, video_id, status, source, now) for video_id, status in statuses.items()])
+
+    @synchronized
+    def item_rating(self, identity_id, video_id):
+        row = self.conn.execute(
+            "SELECT status,source,observed_at FROM item_ratings WHERE identity_id=? AND video_id=?",
+            (identity_id, video_id)).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def recording_ratings(self, keys):
+        from yt_playlist.core import rating_feedback
+
+        return rating_feedback.aggregate(self.conn, keys)
+
+    @synchronized
+    def pending_action_ratings(self, identity_id):
+        """Unresolved actions or combined feedback still awaiting projection.
+
+        An account's like suppressed by another contribution's dislike is reconciled,
+        not an endlessly pending like. The same holds for a neutral contribution while
+        another account/upload still supplies explicit feedback.
+        """
+        from yt_playlist.core import rating_feedback
+
+        rows = self.conn.execute(
+            "SELECT ir.video_id,ir.status,ir.observed_at,r.identity_key FROM item_ratings ir "
+            "LEFT JOIN youtube_items y ON y.video_id=ir.video_id "
+            "LEFT JOIN recordings r ON r.id=y.recording_id "
+            "WHERE ir.identity_id=? AND ir.source IN ('api','action') "
+            "ORDER BY ir.observed_at,ir.video_id", (identity_id,)).fetchall()
+        keys = {row['identity_key'] for row in rows if row['identity_key']}
+        combined = rating_feedback.aggregate(self.conn, keys)
+        feedback = {}
+        for row in rating_feedback.feedback_rows(self.conn, keys):
+            if row['kind'] in ('like', 'dislike'):
+                feedback.setdefault(row['item_key'], {})[row['kind']] = row['reason']
+        pending = []
+        for row in rows:
+            key = row['identity_key']
+            if key is None:
+                needs_projection = row['status'] in ('LIKE', 'DISLIKE')
+            else:
+                expected = combined[key]
+                actual = feedback.get(key, {})
+                expected_kinds = set() if expected.status == 'INDIFFERENT' else {expected.status.lower()}
+                needs_projection = (set(actual) != expected_kinds or
+                                    (expected.status == 'LIKE' and expected.provenance == 'action'
+                                     and actual.get('like') != 'action'))
+            if needs_projection:
+                pending.append({name: row[name] for name in ('video_id', 'status', 'observed_at')})
+        return pending
 
     @synchronized
     def upsert_track(self, video_id, title, artist, album, duration_s, available=None,
                      video_type=None, artist_browse_id=None, album_browse_id=None, thumbnail=None,
-                     created_at=None, *, source_ref=None) -> int:
+                     created_at=None, *, source_ref=None, credits=None) -> int:
         with self.conn:
             return catalog.upsert(
                 self.conn, video_id, title, artist, album, duration_s, available,
                 video_type, artist_browse_id, album_browse_id, thumbnail, created_at,
-                library=True, source_ref=source_ref)
+                library=True, source_ref=source_ref,credits=credits)
 
     @synchronized
     def identity_key_for_video(self, video_id) -> str | None:
@@ -57,6 +126,15 @@ class TrackRepo(Repo):
         row = self.conn.execute(
             "SELECT identity_key FROM catalog_tracks WHERE video_id=? LIMIT 1", (video_id,)).fetchone()
         return row["identity_key"] if row else None
+
+    @synchronized
+    def thumbnail_for_video(self, video_id) -> str | None:
+        """Cached artwork for this exact upload, including tracks outside the library."""
+        row = self.conn.execute(
+            "SELECT thumbnail FROM catalog_tracks WHERE video_id=? "
+            "AND thumbnail IS NOT NULL AND thumbnail != '' ORDER BY id DESC LIMIT 1",
+            (video_id,)).fetchone()
+        return row["thumbnail"] if row else None
 
     @synchronized
     def known_duration(self, title, artist):
@@ -119,7 +197,7 @@ class TrackRepo(Repo):
         track_id = catalog.resolve_entry(self.conn, track_id)
         """One track for an explicit user-requested lookup, even if other metadata is complete."""
         row = self.conn.execute(
-            "SELECT id, recording_id, identity_key, video_id, title, artist, mb_recording_id, thumbnail FROM catalog_tracks WHERE id=?",
+            "SELECT id, recording_id, identity_key, video_id, title, artist, mb_recording_id, thumbnail, duration_s FROM catalog_tracks WHERE id=?",
             (track_id,)).fetchone()
         return dict(row) if row is not None else None
 
@@ -134,18 +212,10 @@ class TrackRepo(Repo):
         return [dict(r) for r in rows]
 
     @synchronized
-    def set_track_art(self, track_id, url) -> None:
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        """Fill-only cover art from a provider. YouTube's own cover is authoritative and is never
-        overwritten, but its generic grey disc (served whenever it has no art, which for an upload is
-        always) counts as no art, so a real cover may replace it."""
-        if not url:
-            return
-        row = self.conn.execute("SELECT thumbnail FROM catalog_tracks WHERE id=?", (track_id,)).fetchone()
-        if row is None or (row["thumbnail"] and not is_placeholder_art(row["thumbnail"])):
-            return
-        self.conn.execute("UPDATE catalog_tracks SET thumbnail=? WHERE id=?", (url, track_id))
-        self.conn.commit()
+    def set_track_art(self, track_id, url, *, source='provider') -> None:
+        """Persist provider fallback using the same artwork precedence as ingestion."""
+        with self.conn:
+            catalog.update_artwork(self.conn, track_id, url, source=source)
 
     @synchronized
     def set_track_genre(self, track_id, genre) -> None:
@@ -153,6 +223,39 @@ class TrackRepo(Repo):
         # manual override: set exactly what the user chose (may be blank to clear)
         catalog.choose_field(self.conn,track_id,'genre',genre or '')
         self.conn.commit()
+
+    @synchronized
+    def metadata_for_video(self, video_id) -> dict | None:
+        row = self.conn.execute(
+            "SELECT id track_id, title, artist, COALESCE(genre, '') genre, "
+            "COALESCE(mb_year, '') year, orig_title, orig_artist "
+            "FROM catalog_tracks WHERE video_id=?", (video_id,)).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def update_metadata(self, video_id, values, *, observation) -> None:
+        """Save the dialog as one transaction without overriding unchanged provider values.
+
+        Songs discovered outside the library become catalog observations, never library members.
+        Restoring an original title or artist removes its manual override.
+        """
+        with self.conn:
+            current = self.metadata_for_video(video_id)
+            if current is None:
+                catalog.upsert(self.conn, video_id, **observation, library=False)
+                current = self.metadata_for_video(video_id)
+            entry_id = current['track_id']
+            for field in ('title', 'artist', 'genre', 'year'):
+                if field not in values:
+                    continue
+                value = values[field]
+                column = 'mb_year' if field == 'year' else field
+                if field in ('title', 'artist') and value == current['orig_' + field]:
+                    self.conn.execute('DELETE FROM entry_field_choices WHERE entry_id=? AND field=?',
+                                      (entry_id, field))
+                    self.conn.execute(f'UPDATE catalog_tracks SET {column}=? WHERE id=?', (value, entry_id))
+                elif value != current[field]:
+                    catalog.choose_field(self.conn, entry_id, column, value)
 
     @synchronized
     def set_track_year(self, track_id, year) -> None:
@@ -168,7 +271,6 @@ class TrackRepo(Repo):
         title = (title or "").strip()
         if not title:
             return
-        self.conn.execute("UPDATE catalog_tracks SET title=? WHERE id=?", (title, track_id))
         catalog.choose_field(self.conn,track_id,'title',title)
         self.conn.commit()
 
@@ -179,7 +281,6 @@ class TrackRepo(Repo):
         artist = (artist or "").strip()
         if not artist:
             return
-        self.conn.execute("UPDATE catalog_tracks SET artist=? WHERE id=?", (artist, track_id))
         catalog.choose_field(self.conn,track_id,'artist',artist)
         self.conn.commit()
 
@@ -304,7 +405,6 @@ class TrackRepo(Repo):
 
     @synchronized
     def materialized_album_ids(self) -> set:
-        """browse_ids of saved albums whose tracks we've already folded into the library, so sync
-        only fetches an album's track list once, not on every pass."""
+        """Releases with any library track. This does not prove full materialization."""
         return {r["browse_id"] for r in self.conn.execute(
             "SELECT DISTINCT a.browse_id FROM album_track_links a JOIN library_memberships m ON m.entry_id=a.entry_id")}

@@ -8,7 +8,7 @@ class IdentityClient(Protocol):
     def get_playlist(self, playlistId: str, limit: int = ...) -> dict: ...
     def get_history(self) -> list: ...
     def create_playlist(self, title: str, description: str) -> str: ...
-    def add_playlist_items(self, playlistId: str, videoIds: list) -> None: ...
+    def add_playlist_items(self, playlistId: str, videoIds: list, *, duplicates: bool = False) -> dict: ...
     def remove_playlist_items(self, playlistId: str, videos: list) -> None: ...
     def delete_playlist(self, playlistId: str) -> None: ...
     def search(self, query: str, filter: str = ...) -> list: ...
@@ -31,6 +31,28 @@ STUB_AUTH = {
 
 
 class BridgeClient(YTMusic):
+    def get_history(self):
+        from yt_playlist.core.history_snapshot import history_snapshot
+        return history_snapshot(self)
+
+    def get_playlist(self, playlistId, limit=100, related=False, suggestions_limit=0):
+        if limit is not None or related or suggestions_limit:
+            return super().get_playlist(playlistId, limit, related, suggestions_limit)
+        from yt_playlist.core.playlist_snapshot import complete_playlist
+        return complete_playlist(self, playlistId)
+
+    def get_library_playlists(self, limit=25):
+        if limit is not None:
+            return super().get_library_playlists(limit=limit)
+        from yt_playlist.core.album_snapshot import complete_library_playlists
+        return complete_library_playlists(self)
+
+    def get_library_albums(self, limit=25, order=None):
+        if limit is not None:
+            return super().get_library_albums(limit=limit, order=order)
+        from yt_playlist.core.album_snapshot import complete_library_albums
+        return complete_library_albums(self, order)
+
     @property
     def history_timezone(self):
         return self._session._bridge.source_timezone

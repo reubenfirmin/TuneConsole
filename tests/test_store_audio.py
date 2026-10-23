@@ -31,31 +31,31 @@ def test_migration_adds_audio_columns_to_old_db(tmp_path):
 
 
 def _seed_playlist(store, titles):
-    iid = store.upsert_identity("main", "cred", None, True)
-    tids = [store.upsert_track(f"v:{t}", t, "Artist", "Alb", 200) for t in titles]
-    pid = store.upsert_playlist(iid, "PL1", "Mix", len(tids), "h", 1000.0)
-    store.set_playlist_tracks(pid, tids)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    tids = [store.tracks.upsert_track(f"v:{t}", t, "Artist", "Alb", 200) for t in titles]
+    pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", len(tids), "h", 1000.0)
+    store.playlists.set_playlist_tracks(pid, tids)
     return pid, tids
 
 
 def test_set_and_get_track_audio_fill_only(store):
     pid, (t1,) = _seed_playlist(store, ["A"])
-    store.set_track_audio(t1, bpm=128.0, energy=0.7, danceability=0.9)
-    assert store.get_track_audio(t1) == (128.0, 0.7, 0.9)
+    store.tracks.set_track_audio(t1, bpm=128.0, energy=0.7, danceability=0.9)
+    assert store.tracks.get_track_audio(t1) == (128.0, 0.7, 0.9)
     # fill-only: a second call must NOT overwrite existing values
-    store.set_track_audio(t1, bpm=999.0, energy=0.1, danceability=0.1)
-    assert store.get_track_audio(t1) == (128.0, 0.7, 0.9)
+    store.tracks.set_track_audio(t1, bpm=999.0, energy=0.1, danceability=0.1)
+    assert store.tracks.get_track_audio(t1) == (128.0, 0.7, 0.9)
     # but it fills a still-null column
     _, (t2,) = _seed_playlist(store, ["B"])
-    store.set_track_audio(t2, bpm=120.0)
-    assert store.get_track_audio(t2) == (120.0, None, None)
-    store.set_track_audio(t2, energy=0.5)
-    assert store.get_track_audio(t2) == (120.0, 0.5, None)
+    store.tracks.set_track_audio(t2, bpm=120.0)
+    assert store.tracks.get_track_audio(t2) == (120.0, None, None)
+    store.tracks.set_track_audio(t2, energy=0.5)
+    assert store.tracks.get_track_audio(t2) == (120.0, 0.5, None)
 
 
 def test_set_track_audio_fills_new_fields(store):
     pid, (t1,) = _seed_playlist(store, ["A"])
-    store.set_track_audio(t1, bpm=128.0, music_key="A", music_scale="minor",
+    store.tracks.set_track_audio(t1, bpm=128.0, music_key="A", music_scale="minor",
                           mood_happy=0.7, mood_sad=0.2, mood_relaxed=0.6, mood_acoustic=0.3,
                           instrumental=0.1, loudness=0.9, dynamic_complexity=3.2,
                           popularity=856376, gain=-7.0, label="Because Music")
@@ -71,7 +71,7 @@ def test_set_track_audio_fills_new_fields(store):
     assert row["gain"] == -7.0
     assert row["label"] == "Because Music"
     # fill-only: a second call must not overwrite an already-set new field
-    store.set_track_audio(t1, music_key="Z", label="Other")
+    store.tracks.set_track_audio(t1, music_key="Z", label="Other")
     row2 = store.conn.execute("SELECT music_key, label FROM tracks WHERE id=?", (t1,)).fetchone()
     assert row2["music_key"] == "A"
     assert row2["label"] == "Because Music"
@@ -79,14 +79,14 @@ def test_set_track_audio_fills_new_fields(store):
 
 def test_set_track_mbid_fill_only(store):
     pid, (t1,) = _seed_playlist(store, ["A"])
-    store.set_track_mbid(t1, "mbid-1")
-    store.set_track_mbid(t1, "mbid-2")
-    rows = list(store.tracks_missing_audio(pid))
+    store.tracks.set_track_mbid(t1, "mbid-1")
+    store.tracks.set_track_mbid(t1, "mbid-2")
+    rows = list(store.tracks.tracks_missing_audio(pid))
     assert rows[0]["mb_recording_id"] == "mbid-1"
 
 
 def test_tracks_missing_audio_lists_incomplete_tracks(store):
     pid, (t1, t2) = _seed_playlist(store, ["A", "B"])
-    store.set_track_audio(t1, bpm=128.0, energy=0.7, danceability=0.9)  # fully populated
-    missing = [r["id"] for r in store.tracks_missing_audio(pid)]
+    store.tracks.set_track_audio(t1, bpm=128.0, energy=0.7, danceability=0.9)  # fully populated
+    missing = [r["id"] for r in store.tracks.tracks_missing_audio(pid)]
     assert missing == [t2]

@@ -1,12 +1,13 @@
-{# One menu and one playlist dialog per page, shared by every song launcher. #}
+{# One menu and one action dialog per page, shared by every song launcher. #}
 <div x-data="songActions()" @song-menu-open.window="show($event.detail)">
   <div id="song-action-menu" class="song-action-menu" x-ref="menu" popover="auto"
        role="menu" aria-label="Song actions" @toggle="menuToggled($event)"
        @keydown="menuKey($event)">
     <button type="button" role="menuitem" @click="play()">Play on YouTube Music</button>
     <button type="button" role="menuitem" @click="similar()">Songs like this</button>
-    <button type="button" role="menuitem" @click="openPlaylist('create')">Create playlist from song</button>
-    <button type="button" role="menuitem" @click="openPlaylist('add')">Add song to playlist</button>
+    <button type="button" role="menuitem" @click="openDialog('create')">Create playlist from song</button>
+    <button type="button" role="menuitem" @click="openDialog('add')">Add song to playlist</button>
+    <button type="button" role="menuitem" @click="openDialog('metadata')">Edit Metadata</button>
     <template x-if="context.playlist">
       <div role="group" aria-label="This playlist">
         <button type="button" role="menuitem" @click="localAction('findAlternates')">Find alternate versions</button>
@@ -35,13 +36,13 @@
           @click="backdropClick($event)">
     <form @submit.prevent="submit()" :aria-busy="busy">
       <header class="song-dialog-head">
-        <h2 id="song-playlist-title" x-show="!result" x-text="mode === 'create' ? 'Create playlist' : 'Add to playlist'"></h2>
-        <p class="song-dialog-status" role="status" x-show="result" :class="{ 'is-incomplete': result?.added === false }">
-          <svg x-show="result?.added !== false" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></svg>
-          <svg x-show="result?.added === false" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 3v1"/></svg>
+        <h2 id="song-playlist-title" x-show="!result" x-text="mode === 'metadata' ? 'Edit Metadata' : mode === 'create' ? 'Create playlist' : 'Add to playlist'"></h2>
+        <p class="song-dialog-status" role="status" x-show="result" :class="{ 'is-incomplete': result?.status === 'partial' || result?.added === false }">
+          <svg x-show="result?.status !== 'partial' && result?.added !== false" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></svg>
+          <svg x-show="result?.status === 'partial' || result?.added === false" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 3v1"/></svg>
           <span x-text="result?.message"></span>
         </p>
-        <button type="button" class="song-dialog-close" aria-label="Close playlist dialog" @click="closeDialog()" :disabled="busy">
+        <button type="button" class="song-dialog-close" :aria-label="mode === 'metadata' ? 'Close metadata dialog' : 'Close playlist dialog'" @click="closeDialog()" :disabled="busy">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg>
         </button>
       </header>
@@ -60,6 +61,45 @@
         </div>
       </div>
       <div class="song-dialog-fields" x-show="!result">
+        <fieldset class="song-metadata-fields" x-show="mode === 'metadata'" :disabled="busy || loading || !metadataLoaded">
+          <label class="song-dialog-label">Title
+            <input type="text" x-ref="metadataTitle" x-model="metadata.title" maxlength="1000"
+                   :required="mode === 'metadata'" autocomplete="off">
+          </label>
+          <button type="button" class="song-metadata-restore"
+                  x-show="originals.title != null && metadata.title !== originals.title"
+                  @click="metadata.title = originals.title">Restore original title</button>
+          <label class="song-dialog-label">Artist
+            <input type="text" x-model="metadata.artist" maxlength="1000" autocomplete="off">
+          </label>
+          <button type="button" class="song-metadata-restore"
+                  x-show="originals.artist != null && metadata.artist !== originals.artist"
+                  @click="metadata.artist = originals.artist">Restore original artist</button>
+          <div class="song-metadata-pair">
+            <label class="song-dialog-label">Genre
+              <input type="text" x-model="metadata.genre" maxlength="80" list="song-metadata-genres" autocomplete="off">
+            </label>
+            <label class="song-dialog-label">Year
+              <input type="text" x-model="metadata.year" inputmode="numeric" pattern="[0-9]{4}"
+                     maxlength="4" placeholder="YYYY" autocomplete="off">
+            </label>
+          </div>
+          <datalist id="song-metadata-genres">
+            <template x-for="genre in genres" :key="genre"><option :value="genre"></option></template>
+          </datalist>
+          <div class="song-metadata-suggestions" x-show="genreOptions.length" role="group" aria-label="Genre suggestions">
+            <template x-for="option in genreOptions" :key="option.value">
+              <button type="button" :class="{ 'is-selected': metadata.genre === option.value }"
+                      :aria-pressed="metadata.genre === option.value" @click="metadata.genre = option.value">
+                <span x-text="option.value"></span><small x-text="option.providers.join(', ')"></small>
+              </button>
+            </template>
+          </div>
+          <button type="button" class="song-metadata-restore" x-show="trackId"
+                  :disabled="lookupRunning" @click="lookupGenres()">Look up genres</button>
+          <p class="song-dialog-note" x-show="lookupStatus" role="status" x-text="lookupStatus"></p>
+        </fieldset>
+        <p class="song-dialog-note" x-show="mode === 'metadata' && loading" role="status">Loading metadata…</p>
         <label class="song-dialog-label" x-show="mode === 'create'">Playlist name
           <input type="text" x-ref="name" x-model="name" maxlength="200" :required="mode === 'create'" :disabled="busy" autocomplete="off">
         </label>
@@ -86,13 +126,15 @@
         </div>
       </div>
       <p class="song-action-error" role="alert" x-show="error" x-text="error"></p>
+      <p class="song-dialog-note" x-show="result?.guidance" x-text="result?.guidance"></p>
       <footer class="song-dialog-actions">
         <button type="button" class="btn-ghost" @click="closeDialog()" :disabled="busy" x-text="result ? 'Done' : 'Cancel'"></button>
         <button type="submit" class="btn-primary" x-show="!result"
-                :disabled="busy || loading || (mode === 'create' ? !name.trim() : !selected)"
-                x-text="busy ? 'Saving…' : (mode === 'create' ? 'Create playlist' : 'Add song')"></button>
+                :disabled="busy || loading || (mode === 'metadata' ? !metadataLoaded || !metadata.title.trim() : mode === 'create' ? !name.trim() : !selected)"
+                x-text="busy ? 'Saving…' : mode === 'metadata' ? 'Save changes' : mode === 'create' ? 'Create playlist' : 'Add song'"></button>
+        <a class="btn-ghost" x-show="result?.recovery_url" :href="result?.recovery_url">Action Log and recovery</a>
         <a class="btn btn-primary" x-show="result" x-ref="resultLink" :href="result?.url">
-          Open playlist
+          <span x-text="result?.status === 'partial' ? 'Review playlist' : 'Open playlist'"></span>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h16m-6-6 6 6-6 6"/></svg>
         </a>
       </footer>

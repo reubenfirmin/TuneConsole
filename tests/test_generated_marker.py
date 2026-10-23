@@ -6,7 +6,7 @@ Which group a playlist is in lives in the local database, so it doesn't exist on
 as ordinary library playlists, and start reading its suggestions back as your taste. The YouTube
 account is the one thing every install shares, so the marker lives there and sync reconciles from it.
 """
-from yt_playlist.library import executor, sync
+from yt_playlist.library import executor, sync, playlist_metadata
 from yt_playlist.core.store import Store
 from yt_playlist.repos.base import GENERATED_GROUP
 from tests.conftest import FakeClient, _track
@@ -32,7 +32,7 @@ class _DescClient(FakeClient):
 
 
 def _sync(store, client):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     sync.sync_identity(store, iid, client, now=1000.0)
     return iid
 
@@ -45,11 +45,11 @@ def test_a_generated_playlist_syncs_into_quarantine_on_a_fresh_machine():
         playlists=[{"playlistId": "PLGEN", "title": "Road Trip: Beach Run", "count": 1},
                    {"playlistId": "PLMINE", "title": "My Mix", "count": 1}],
         tracks={"PLGEN": [_track("v1", "A", "X")], "PLMINE": [_track("v2", "B", "Y")]},
-        descriptions={"PLGEN": executor.GENERATED_DESCRIPTION, "PLMINE": "my own playlist"})
+        descriptions={"PLGEN": playlist_metadata.GENERATED_DESCRIPTION, "PLMINE": "my own playlist"})
 
     _sync(s, client)
 
-    groups = s.get_playlist_groups()
+    groups = s.playlists.get_playlist_groups()
     assert groups.get("PLGEN") == GENERATED_GROUP     # recognised from the account, not local state
     assert groups.get("PLMINE") is None               # an ordinary playlist is left alone
 
@@ -57,29 +57,29 @@ def test_a_generated_playlist_syncs_into_quarantine_on_a_fresh_machine():
 def test_promoting_elsewhere_releases_it_here():
     """Promotion rewrites the description upstream, so the next sync on any other machine agrees."""
     s = _store()
-    s.set_playlist_group("PLGEN", GENERATED_GROUP)
+    s.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)
     client = _DescClient(
         playlists=[{"playlistId": "PLGEN", "title": "Road Trip: Beach Run", "count": 1}],
         tracks={"PLGEN": [_track("v1", "A", "X")]},
-        descriptions={"PLGEN": executor.PROMOTED_DESCRIPTION})
+        descriptions={"PLGEN": playlist_metadata.PROMOTED_DESCRIPTION})
 
     _sync(s, client)
 
-    assert s.get_playlist_groups().get("PLGEN") is None
+    assert s.playlists.get_playlist_groups().get("PLGEN") is None
 
 
 def test_a_group_you_chose_is_never_overwritten():
     """Only the Generated group is managed from the marker; your own filing is yours."""
     s = _store()
-    s.set_playlist_group("PLGEN", "Road trips")
+    s.playlists.set_playlist_group("PLGEN", "Road trips")
     client = _DescClient(
         playlists=[{"playlistId": "PLGEN", "title": "Road Trip: Beach Run", "count": 1}],
         tracks={"PLGEN": [_track("v1", "A", "X")]},
-        descriptions={"PLGEN": executor.GENERATED_DESCRIPTION})
+        descriptions={"PLGEN": playlist_metadata.GENERATED_DESCRIPTION})
 
     _sync(s, client)
 
-    assert s.get_playlist_groups().get("PLGEN") == "Road trips"
+    assert s.playlists.get_playlist_groups().get("PLGEN") == "Road trips"
 
 
 def test_a_playlist_with_no_description_is_left_alone():
@@ -91,12 +91,12 @@ def test_a_playlist_with_no_description_is_left_alone():
 
     _sync(s, client)
 
-    assert s.get_playlist_groups() == {}
+    assert s.playlists.get_playlist_groups() == {}
 
 
 def test_creating_a_generated_playlist_writes_the_marker():
     s = _store()
-    iid = s.upsert_identity("main", "cred", None, True)
+    iid = s.identities.upsert_identity("main", "cred", None, True)
     client = FakeClient()
 
     executor.create_generated_playlist(
@@ -104,6 +104,6 @@ def test_creating_a_generated_playlist_writes_the_marker():
         [{"video_id": "v1", "title": "A", "artist": "X", "album": "", "thumbnail": None,
           "duration": 200}], client, 1000.0, iid)
 
-    assert client.created[0][2] == executor.GENERATED_DESCRIPTION
-    assert executor.is_generated_description(client.created[0][2])
-    assert not executor.is_generated_description(executor.PROMOTED_DESCRIPTION)
+    assert client.created[0][2] == playlist_metadata.GENERATED_DESCRIPTION
+    assert playlist_metadata.is_generated_description(client.created[0][2])
+    assert not playlist_metadata.is_generated_description(playlist_metadata.PROMOTED_DESCRIPTION)

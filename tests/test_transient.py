@@ -6,15 +6,15 @@ from yt_playlist.util.matching import identity_key
 
 
 def _jazz_track(store, vid, title, artist="A", year="1960"):
-    tid = store.upsert_track(vid, title, artist, None, None, 1)
-    store.set_track_genre(tid, "jazz")
-    store.set_track_year(tid, year)
+    tid = store.tracks.upsert_track(vid, title, artist, None, None, 1)
+    store.tracks.set_track_genre(tid, "jazz")
+    store.tracks.set_track_year(tid, year)
     return identity_key(title, artist)
 
 
 def test_mood_event_moves_facet_lean(store):
     k = _jazz_track(store, "v1", "S")
-    store.record_mood([k], -1, now=10.0)                       # "less" this jazz vibe
+    store.rec_surface.record_mood([k], -1, now=10.0)                       # "less" this jazz vibe
     leans = transient.facet_leans(store, now=10.0)
     assert any(f.startswith("genre:") and v < 0 for f, v in leans.items())
     assert leans.get("artist:A", 0.0) < 0
@@ -22,16 +22,16 @@ def test_mood_event_moves_facet_lean(store):
 
 def test_recent_play_moves_lean_positive(store):
     k = _jazz_track(store, "v1", "S")
-    # Seed a play using the real API (history_items has no played_at column)
-    iid = store.upsert_identity("main", "c", None, True)
-    store.add_history_snapshot(iid, 5.0, [k])
+    # This assertion concerns a recent timestamped play, rather than a capture date.
+    iid = store.identities.upsert_identity("main", "c", None, True)
+    store.history.record_play_event(iid, k, "v1", 5.0, source_timezone="UTC")
     leans = transient.facet_leans(store, now=10.0)
     assert leans.get("artist:A", 0.0) > 0                      # a recent play pushes its facets up
 
 
 def test_dislike_moves_lean_negative(store):
     k = _jazz_track(store, "v1", "S")
-    store.record_dislike(k, until=9e9, now=5.0)
+    store.rec_model.record_dislike(k, until=9e9, now=5.0)
     leans = transient.facet_leans(store, now=10.0)
     # #54: a dislike must NOT push the artist negative (one stinker can't mute the whole artist),
     assert leans.get("artist:A", 0.0) >= 0
@@ -61,8 +61,8 @@ def test_facet_multiplier_uses_params(store):
 
 def test_centroid_tilt_newest_dominates_and_persists(store):
     V, idx = np.array([[1.0, 0.0]]), {"a|x": 0}
-    store.record_mood(["a|x"], 1, now=1000.0)
-    store.record_mood(["a|x"], -1, now=1001.0)                 # newest: away
+    store.rec_surface.record_mood(["a|x"], 1, now=1000.0)
+    store.rec_surface.record_mood(["a|x"], -1, now=1001.0)                 # newest: away
     assert transient.centroid_tilt(store, 1001.0, V, idx)[0] < 0
     # #85: this used to assert no wall-clock decay; now a single event fades on the clock (mood_halflife_d)
     # Its fading magnitude stays defined 30d out, rather than being normalized back to full strength.
@@ -73,9 +73,9 @@ def test_centroid_tilt_newest_dominates_and_persists(store):
 def test_centroid_tilt_includes_recent_plays():
     s = Store(":memory:")
     s.init_schema()
-    iid = s.upsert_identity("m", "c", None, True)
-    s.upsert_track("v1", "s", "band", None, None)
-    s.add_history_snapshot(iid, 1.0, ["s|band"])
+    iid = s.identities.upsert_identity("m", "c", None, True)
+    s.tracks.upsert_track("v1", "s", "band", None, None)
+    s.history.record_play_event(iid, "s|band", "v1", 1.0, source_timezone="UTC")
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
     idx = {"s|band": 0, "other|x": 1}
     tilt = transient.centroid_tilt(s, 1000.0, V, idx)
@@ -95,9 +95,9 @@ def test_centroid_tilt_includes_recent_plays():
 
 def test_radio_provenance_plays_produce_no_play_lean(store):
     k = _jazz_track(store, "v1", "RadioSong", artist="RadioBand")
-    iid = store.upsert_identity("main", "c", None, True)
-    store.set_setting("radio_playlist_ytm", "PLRADIO")
-    store.record_play_event(iid, k, "v1", 5.0, playlist_ytm_id="PLRADIO")
+    iid = store.identities.upsert_identity("main", "c", None, True)
+    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
+    store.history.record_play_event(iid, k, "v1", 5.0, playlist_ytm_id="PLRADIO")
     assert transient.play_facet_leans(store, now=10.0) == {}
     # And the blended facet_leans view sees no play push either (no other sources are seeded).
     assert transient.facet_leans(store, now=10.0) == {}
@@ -105,9 +105,9 @@ def test_radio_provenance_plays_produce_no_play_lean(store):
 
 def test_organic_plays_still_produce_play_lean(store):
     k = _jazz_track(store, "v1", "OrganicSong", artist="OrganicBand")
-    iid = store.upsert_identity("main", "c", None, True)
-    store.set_setting("radio_playlist_ytm", "PLRADIO")
-    store.record_play_event(iid, k, "v1", 5.0, playlist_ytm_id=None)   # no provenance = user-driven
+    iid = store.identities.upsert_identity("main", "c", None, True)
+    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
+    store.history.record_play_event(iid, k, "v1", 5.0, playlist_ytm_id=None)   # no provenance = user-driven
     leans = transient.play_facet_leans(store, now=10.0)
     assert leans.get("artist:OrganicBand", 0.0) > 0
 
@@ -117,9 +117,9 @@ def test_radio_play_lean_stays_zero_after_history_sync_shadow(store):
     # a provenance-free noon-bucket history row the SAME day. The lean must stay zero, or radio
     # plays graduate into permanent weights one sync later.
     k = _jazz_track(store, "v1", "RadioSong", artist="RadioBand")
-    iid = store.upsert_identity("main", "c", None, True)
-    store.set_setting("radio_playlist_ytm", "PLRADIO")
+    iid = store.identities.upsert_identity("main", "c", None, True)
+    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
     day = 100 * 86400
-    store.record_play_event(iid, k, "v1", day + 61000, playlist_ytm_id="PLRADIO")
-    store.record_history_plays(iid, day + 70000, [k])          # the post-sync shadow
+    store.history.record_play_event(iid, k, "v1", day + 61000, playlist_ytm_id="PLRADIO")
+    store.history.record_history_plays(iid, day + 70000, [(k, "Today")])
     assert transient.play_facet_leans(store, now=day + 80000) == {}

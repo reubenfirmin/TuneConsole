@@ -1,3 +1,5 @@
+import pytest
+
 from yt_playlist.rec import journeys
 
 
@@ -130,3 +132,46 @@ def test_odyssey_maximizes_genre_jumps():
     odyssey = journeys.journey_order(items, "odyssey", seed=5, feat=_feat)
     smooth = journeys.journey_order(items, "smooth_segue", seed=5, feat=_feat)
     assert _adj_total(odyssey) > _adj_total(smooth)
+
+
+@pytest.mark.parametrize("journey", journeys.JOURNEYS + ["road_trip", "unknown"])
+def test_journeys_detach_opaque_key_features_once_and_keep_seed_determinism(journey):
+    keys = [f"key-{i}" for i in range(24)]
+    features = {key: {"artist": str(i % 8), "genre": "techno" if i % 2 else "folk",
+                      "energy": i / 24, "decade": 1980 + 10 * (i % 4), "plays": i,
+                      "recency": float(i), "source": "mine" if i % 2 else "theirs"}
+                for i, key in enumerate(keys)}
+    calls = []
+
+    def feat(key):
+        calls.append(key)
+        return features[key]
+
+    out = journeys.journey_order(iter(keys), journey, seed=13, feat=feat)
+    assert calls == keys
+    assert sorted(out) == sorted(keys)
+    assert out == journeys.journey_order(keys, journey, seed=13, feat=features.__getitem__)
+    if journey in ("shuffle", "unknown"):
+        assert all(features[a]["artist"] != features[b]["artist"] for a, b in zip(out, out[1:]))
+
+
+@pytest.mark.parametrize("journey", ["smooth_segue", "odyssey"])
+def test_segue_reuses_distances_for_large_repeated_genres(monkeypatch, journey):
+    from yt_playlist.util import genre_map
+
+    items = _items([(str(i % 8), .5, None, 0, 0.0, "techno" if i % 2 else "folk")
+                    for i in range(512)])
+    calls = []
+    distance = genre_map.family_distance
+
+    def measured(a, b):
+        calls.append((a, b))
+        return distance(a, b)
+
+    monkeypatch.setattr(genre_map, "family_distance", measured)
+    out = journeys.journey_order(items, journey, seed=7, feat=_feat)
+    assert len(calls) <= 4
+    assert sorted(map(id, out)) == sorted(map(id, items))
+    for i in range(1, len(out)):
+        if out[i - 1]["artist"] == out[i]["artist"]:
+            assert all(row["artist"] == out[i]["artist"] for row in out[i:])

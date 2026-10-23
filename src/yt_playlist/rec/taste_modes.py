@@ -6,6 +6,7 @@ techno next to ambient, so they sit together there), while content vectors keep 
 Fully automatic, no seeded genres."""
 import numpy as np
 
+from yt_playlist.core.activity import check_stopping
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.util import genre_map
 
@@ -24,6 +25,7 @@ def _kmeanspp(X, k, seed):
     centers = [X[first]]
     d2 = ((X - centers[0]) ** 2).sum(axis=1)
     for _ in range(1, k):
+        check_stopping()
         total = d2.sum()
         if total <= 0:
             centers.append(X[int(rng.integers(n))])
@@ -34,6 +36,7 @@ def _kmeanspp(X, k, seed):
     C = np.array(centers, dtype=X.dtype)
     labels = np.zeros(n, dtype=int)
     for _ in range(_MAX_ITERS):
+        check_stopping()
         # Assign by nearest center (cosine == dot here is not safe once centroids drift off the unit
         # sphere, so use euclidean, which is monotonic with cosine on normalized inputs anyway).
         dist = ((X[:, None, :] - C[None, :, :]) ** 2).sum(axis=2)
@@ -61,7 +64,7 @@ def mode_label(families) -> str:
     return top_fam
 
 
-def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED) -> list[dict]:
+def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED, snapshot=None) -> list[dict]:
     """Cluster the library content vectors and return the dense clusters as taste modes. Each mode is
     {centroid, space, size, families, rep_keys, label}. `space` fingerprints the content space the
     centroid lives in, so reconcile can tell a stale centroid from a comparable one. Empty list when
@@ -70,8 +73,9 @@ def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED) -> l
         k = rec_params.get_param(store, "modes_k")
     if min_members is None:
         min_members = rec_params.get_param(store, "modes_min_members")
-    space = embed.content_space_id(store)
-    keys, V, _idx = embed.load_content_vectors(store)
+    snapshot = snapshot if snapshot is not None else store.rec_model.content_generation()
+    space = embed.content_space_id(store, snapshot=snapshot)
+    keys, V, _idx = embed.load_content_vectors(store, snapshot=snapshot)
     if V is None or len(keys) < max(int(min_members), _MIN_CORPUS):
         return []
     Vf = V.astype(np.float64)
@@ -111,7 +115,7 @@ def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED) -> l
     return modes
 
 
-def live_modes(store):
+def live_modes(store, *, snapshot=None):
     """Active modes whose centroids live in the CURRENT content space.
 
     The one safe way to read persisted centroids. `enrich_worker` can rebuild the content space
@@ -120,17 +124,8 @@ def live_modes(store):
     against live content vectors must go through here, not `store.modes.list_modes`, or they are one
     enrichment batch away from either a shape error or a silently wrong cosine.
     """
-    space = embed.content_space_id(store)
+    space = embed.content_space_id(store, snapshot=snapshot)
     return [m for m in store.modes.list_modes(active_only=True) if (m.get("space") or "") == space]
-
-
-def needs_refresh(store) -> bool:
-    """Whether saved genre groups are missing or belong to an older content model."""
-    space = embed.content_space_id(store)
-    if not space:
-        return False
-    modes = store.modes.list_modes(active_only=True)
-    return not modes or any((m.get("space") or "") != space for m in modes)
 
 
 REP_MATCH_THRESHOLD = 0.5    # Fraction of an existing mode's representative tracks that must land
@@ -215,15 +210,14 @@ def reconcile(existing, discovered, *, threshold):
     return upserts, retired_ids
 
 
-def recompute(store, now, *, k=None, min_members=None) -> int:
-    """Discover modes, reconcile against the persisted active modes, write the result. Returns the
-    number of active modes written. k/min_members override the params (used by tests)."""
-    discovered = discover_modes(store, k=k, min_members=min_members)
+def prepare_modes(store, now, *, k=None, min_members=None, snapshot=None):
+    """Calculate reconciled clusters without writing; a model batch supplies its new content space."""
+    discovered = discover_modes(store, k=k, min_members=min_members, snapshot=snapshot)
     if not discovered:
         # Nothing to cluster this pass (too few content vectors, or every cluster fell below
         # min_members). Keep the existing modes rather than reconcile-retiring ALL of them, which would
         # wipe the model and cascade to the bundles/cards. A genuinely empty library just stays empty.
-        return len(store.modes.list_modes(active_only=True))
+        return None
     existing = store.modes.list_modes(active_only=True)
     threshold = rec_params.get_param(store, "modes_match_threshold")
     upserts, retired = reconcile(existing, discovered, threshold=threshold)
@@ -234,5 +228,14 @@ def recompute(store, now, *, k=None, min_members=None) -> int:
         if u["mode_id"] is None:
             u["mode_id"] = nid
             nid += 1
+    return upserts, retired
+
+
+def recompute(store, now, *, k=None, min_members=None) -> int:
+    """Discover and persist modes, preserving stable IDs across content generations."""
+    prepared = prepare_modes(store, now, k=k, min_members=min_members)
+    if prepared is None:
+        return len(store.modes.list_modes(active_only=True))
+    upserts, retired = prepared
     store.modes.replace_modes(upserts, retired, now)
     return len(upserts)

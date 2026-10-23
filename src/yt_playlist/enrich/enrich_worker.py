@@ -7,11 +7,13 @@ later arrivals count as "new", then re-sweeps stale, incomplete tracks or idles 
 Mirrors RecWorker's shape (daemon thread off ctx, coalescing trigger, a `busy` flag). The drain step
 is exposed synchronously as drain_once() so it can be tested without threads or network.
 """
-import os
 import threading
 
 from yt_playlist.providers import enrichment
-from yt_playlist.providers.waterfall import run_waterfall, TrackSink
+from yt_playlist.providers.waterfall import run_waterfall, TrackSink, REGISTRY
+from yt_playlist.core.activity import activity_for, WorkClosing
+
+RADIO_RETRY_SECONDS = 3600
 
 
 class EnrichWorker:
@@ -26,20 +28,24 @@ class EnrichWorker:
         self._had_work = False
         self._shutdown = False
         self._activity = {}
+        self._thread = None
+        self._priority = {}
+        self._priority_revision = 0
+        self.work = activity_for(ctx)
 
     # --- settings (re-read each cycle so changes take effect on the next batch) ------------------
     def _enabled(self) -> bool:
-        return self.ctx.store.get_setting("enrich_worker_enabled", "1") == "1"
+        return self.ctx.store.settings.get_setting("enrich_worker_enabled", "1") == "1"
 
     def _batch_size(self) -> int:
         try:
-            return max(1, int(self.ctx.store.get_setting("enrich_batch_size", "40")))
+            return max(1, int(self.ctx.store.settings.get_setting("enrich_batch_size", "40")))
         except (TypeError, ValueError):
             return 40
 
     def _resweep_days(self) -> float:
         try:
-            return float(self.ctx.store.get_setting("enrich_resweep_days", "30"))
+            return float(self.ctx.store.settings.get_setting("enrich_resweep_days", "30"))
         except (TypeError, ValueError):
             return 30.0
 
@@ -69,21 +75,43 @@ class EnrichWorker:
             if self._started:
                 return
             self._started = True
-        # Don't launch the draining thread under pytest: it would call the real (network-hitting)
-        # waterfall from the background. Tests drive drain_once() directly instead.
-        if os.environ.get("PYTEST_CURRENT_TEST"):
-            return
-        if not self.ctx.store.get_setting("enrich_caught_up_at"):
-            self.ctx.store.set_setting("enrich_caught_up_at", str(self.ctx.now_fn()))
-        threading.Thread(target=self._loop, daemon=True).start()
+            self._shutdown = False
+            self._wake.clear()
+        if not self.ctx.store.settings.get_setting("enrich_caught_up_at"):
+            self.ctx.store.settings.set_setting("enrich_caught_up_at", str(self.ctx.now_fn()))
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
 
     def trigger(self):
         """Wake the drain loop (e.g. after a sync adds tracks). Coalesces: a no-op if already awake."""
         self._wake.set()
 
+    def prioritize(self, keys):
+        """Put the current radio view first; yield bulk work at the next track boundary."""
+        with self._lock:
+            priority = list(dict.fromkeys([*keys, *self._priority]))[:96]
+            if priority != list(self._priority):
+                self._priority = dict.fromkeys(priority)
+                self._priority_revision += 1
+        self.trigger()
+
+    def _batch_stopped(self, revision):
+        if self._stop():
+            return True
+        with self._lock:
+            return revision != self._priority_revision
+
     def shutdown(self):
         self._shutdown = True
         self._wake.set()
+
+    def join(self, timeout):
+        if self._thread is not None:
+            self._thread.join(timeout)
+            if self._thread.is_alive():
+                raise RuntimeError("Enrichment worker did not stop")
+        self._thread = None
+        self._started = False
 
     def _loop(self):
         while not self._shutdown:
@@ -92,7 +120,9 @@ class EnrichWorker:
                 self._wake.clear()
                 continue
             try:
-                n = self.drain_once()
+                n = self.work.wrap("enrichment", self.drain_once)()
+            except WorkClosing:
+                return
             except Exception:  # noqa: BLE001 - a batch failure must never crash the worker
                 self.ctx.logger.warning("enrich worker batch failed", exc_info=True)
                 n = 0
@@ -105,40 +135,73 @@ class EnrichWorker:
         """Process one batch from the shared queue, then re-sweep stale tracks once it is empty.
         Completed tracks remain stamped even if a later lookup is interrupted."""
         store = self.ctx.store
+        if self._stop():
+            return 0
         limit = limit or self._batch_size()
+        art_completed = 0
         scope = "queue"
-        batch = store.next_enrich_batch(limit)
+        config = enrichment.load_config(store)
+        registry = getattr(self.waterfall_fn, "keywords", {}).get("registry", REGISTRY)
+        configuration = enrichment.provider_configuration(store, registry, config)
+        store.enrichment.reconcile_provider_configuration(configuration)
+        providers = [name for name, p in configuration.items() if p["status"] == "available"]
+        with self._lock:
+            priority = list(self._priority)
+            priority_revision = self._priority_revision
+        stale_before = self.ctx.now_fn() - self._resweep_days() * 86400
+        radio_stale_before = max(stale_before, self.ctx.now_fn() - RADIO_RETRY_SECONDS)
+        batch = store.enrichment.priority_enrich_batch(priority, min(limit, 24), radio_stale_before,
+            providers=providers, now=self.ctx.now_fn()) if priority else []
+        if batch:
+            scope = "radio"
+        else:
+            from yt_playlist.enrich import artwork
+            self._busy = True
+            try:
+                art_completed = artwork.retry_due(store, self.ctx.now_fn,
+                    should_stop=lambda: self._batch_stopped(priority_revision),
+                    on_progress=lambda event: self._record_activity(warning=event["text"]))
+            finally:
+                self._busy = False
+            batch = store.enrichment.next_enrich_batch(limit, providers=providers, now=self.ctx.now_fn())
         if batch:
             self._had_work = True
         else:
-            if self._had_work:               # just drained the primary queue. Mark the catch-up point
-                store.set_setting("enrich_caught_up_at", str(self.ctx.now_fn()))
+            if self._had_work and not store.enrichment.queue_remaining():
+                store.settings.set_setting("enrich_caught_up_at", str(self.ctx.now_fn()))
                 self._had_work = False
             stale_before = self.ctx.now_fn() - self._resweep_days() * 86400
-            batch = store.resweep_batch(limit, stale_before)
+            batch = store.enrichment.resweep_batch(limit, stale_before, providers=providers, now=self.ctx.now_fn())
             scope = "refresh"
         if not batch:
             with self._lock:
-                self._activity = {}
-            return 0
-        completed = self._run_batch(batch, scope)
+                self._activity = ({**self._activity, "state": "waiting",
+                                   "text": "Pending provider retries are deferred; other eligible work continues."}
+                                  if store.enrichment.queue_remaining() else {})
+            return art_completed
+        if scope == "queue":
+            for track in batch:
+                if track.get("last_enriched_at") is not None:
+                    track["provider_jobs"] = store.enrichment.enrichment_provider_jobs(track["recording_id"])
+        completed = self._run_batch(batch, scope, priority_revision)
         if completed:
-            try:                                  # never let a rebuild crash the drain
-                from yt_playlist.rec import embed, fresh_pool
-                memberships = store.enrichment_memberships(completed)
-                if 'library' in memberships:
-                    rebuilt = embed.maybe_rebuild_content_vectors(store)
-                    rec_worker = getattr(self.ctx, "rec_worker", None)
-                    if rec_worker is not None:
-                        rec_worker.trigger_mode_refresh(force=rebuilt)
-                if 'discovery' in memberships:
-                    embed.build_discovered_content_vectors(store)
-                    fresh_pool.prepare(store, self.ctx.now_fn())
+            with self._lock:
+                for track in batch:
+                    if track["job_id"] in completed:
+                        self._priority.pop(track["identity_key"], None)
+        if completed:
+            try:                                  # metadata placement must never crash the drain
+                keys = {t["identity_key"] for t in batch if t["job_id"] in completed}
+                rec_worker = getattr(self.ctx, "rec_worker", None)
+                if rec_worker is not None:
+                    rec_worker.trigger_content_update(keys)
+                else:
+                    store.rec_refresh.enqueue()
             except Exception:  # noqa: BLE001
                 self.ctx.logger.warning("recommendation refresh after enrich batch failed", exc_info=True)
-        return len(completed)
+        return len(completed) + art_completed
 
-    def _run_batch(self, batch, scope):
+    def _run_batch(self, batch, scope, priority_revision):
         """Commit each completed track, so a slow/failed/paused batch cannot hide or lose progress.
 
         A provider breaker may skip some tracks: only fully attempted events may leave the queue.
@@ -148,7 +211,7 @@ class EnrichWorker:
         batch_keys = {t['job_id'] for t in batch}
 
         def mark(keys):
-            self.ctx.store.mark_recordings_enriched(keys, self.ctx.now_fn())
+            self.ctx.store.enrichment.mark_recordings_enriched(keys, self.ctx.now_fn())
 
         def sink_for(track):
             return TrackSink(self.ctx.store, track)
@@ -172,11 +235,16 @@ class EnrichWorker:
             self._record_activity(state=state, text=event.get("text", ""))
 
         try:
+            should_stop = lambda: self._batch_stopped(priority_revision)
             attempted = self.waterfall_fn(
                 self.ctx.store, batch, enrichment.load_config(self.ctx.store),
-                on_progress=progress, should_stop=self._stop, sink_for=sink_for)
+                on_progress=progress, should_stop=should_stop, sink_for=sink_for,
+                now_fn=self.ctx.now_fn, reuse_completed=True)
             if not self._stop():
-                attempted = batch_keys if attempted is None else set(attempted) & batch_keys
+                if attempted is None:
+                    attempted = set() if should_stop() else batch_keys
+                else:
+                    attempted = set(attempted) & batch_keys
                 pending = attempted - completed
                 mark(pending)
                 completed.update(pending)

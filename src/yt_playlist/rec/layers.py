@@ -38,6 +38,14 @@ from yt_playlist.rec import embed, rec_params, taste_modes, transient
 _radio_list_ids = transient.radio_list_ids
 
 
+def _plays(store, since):
+    return store.history.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
+
+
+def _snapshot(store):
+    return store.rec_model.content_generation(keys=[r['identity_key'] for r in _plays(store, 0)])
+
+
 def now_mode_mix(store, now):
     """Shared internals for `now_mode_posterior` and the taste_viz NOW ribbon: the {mode_id: share}
     posterior, `n` (the count of distinct played keys that fed it), and the active mode list used to
@@ -46,17 +54,18 @@ def now_mode_mix(store, now):
     gate isn't cleared. Public (not `_`-prefixed): taste_viz needs the full mix, not just the reduced
     readings the other two callers take from it.
     """
-    modes = taste_modes.live_modes(store)
+    snapshot = _snapshot(store)
+    modes = taste_modes.live_modes(store, snapshot=snapshot)
     if not modes:
         return None, 0, modes
-    _ckeys, CV, cidx = embed.load_content_vectors(store)
+    _ckeys, CV, cidx = embed.load_content_vectors(store, snapshot=snapshot)
     if CV is None:
         return None, 0, modes
 
     window_h = rec_params.get_param(store, "now_window_h")
     min_events = int(rec_params.get_param(store, "now_min_events"))
     since = now - window_h * 3600.0
-    rows = store.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
+    rows = _plays(store, since)
 
     # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
     # overwrite lands on the latest occurrence of each key).
@@ -99,7 +108,7 @@ def now_mode_posterior(store, now) -> dict | None:
 
     Returns None when: there are no active taste modes; no content vector model has been built; or
     fewer than `now_min_events` distinct played keys in the window have a content vector. Plays are
-    read from play_events ONLY (real timestamps), never the day-granular history_items model: a
+    read from play_events ONLY (real timestamps), never coarse listening observations: a
     noon-bucket history row happening to fall inside the window carries no real-time information and
     must not count toward "right now".
     """
@@ -113,12 +122,11 @@ def evidence_coverage(store, now) -> dict:
     `total` is distinct eligible real-time plays after radio provenance exclusion; `mapped` is the
     subset with a content vector and therefore able to vote in the mode posterior.
     """
-    _keys, CV, cidx = embed.load_content_vectors(store)
+    _keys, CV, cidx = embed.load_content_vectors(store, snapshot=_snapshot(store))
     cidx = cidx if CV is not None else {}
 
     def one(window_h):
-        rows = store.play_events_since(now - window_h * 3600.0,
-                                       exclude_list_ids=_radio_list_ids(store))
+        rows = _plays(store, now - window_h * 3600.0)
         latest = {r["identity_key"]: r["played_at"] for r in rows}
         mapped = sum(k in cidx for k in latest)
         total = len(latest)
@@ -146,7 +154,7 @@ def session_tilt(store, now, V, idx) -> np.ndarray | None:
     min_events = int(rec_params.get_param(store, "now_min_events"))
     session_hl_h = rec_params.get_param(store, "session_halflife_h")
     since = now - 24 * 3600.0
-    rows = store.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
+    rows = _plays(store, since)
 
     # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
     # overwrite lands on the latest occurrence of each key).
@@ -196,17 +204,18 @@ def session_mode_mix(store, now):
     contributed (unweighted, matching `now_mode_mix`'s `n`); `modes` is the active mode list. Below the
     gate this returns None, never a weak guess, mirroring every other layer in this module.
     """
-    modes = taste_modes.live_modes(store)
+    snapshot = _snapshot(store)
+    modes = taste_modes.live_modes(store, snapshot=snapshot)
     if not modes:
         return None, 0, modes
-    _ckeys, CV, cidx = embed.load_content_vectors(store)
+    _ckeys, CV, cidx = embed.load_content_vectors(store, snapshot=snapshot)
     if CV is None:
         return None, 0, modes
 
     min_events = int(rec_params.get_param(store, "now_min_events"))
     session_hl_h = rec_params.get_param(store, "session_halflife_h")
     since = now - 24 * 3600.0
-    rows = store.play_events_since(since, exclude_list_ids=_radio_list_ids(store))
+    rows = _plays(store, since)
 
     # Dedup per key, keeping the latest timestamp in the window (rows arrive oldest-first, so a plain
     # overwrite lands on the latest occurrence of each key).

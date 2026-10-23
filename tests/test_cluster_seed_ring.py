@@ -12,10 +12,10 @@ from yt_playlist.web.app import create_app
 
 
 def _track(store, title, artist, angle=0, album="", genre=""):
-    tid = store.upsert_track(title, title, artist, album, 180, thumbnail="/static/nag/intro.png")
+    tid = store.tracks.upsert_track(title, title, artist, album, 180, thumbnail="/static/nag/intro.png")
     key = identity_key(title, artist)
     if genre:
-        store.set_track_genre(tid, genre)
+        store.tracks.set_track_genre(tid, genre)
     v = np.array([math.cos(math.radians(angle)), math.sin(math.radians(angle))], dtype=np.float32)
     store.conn.execute("INSERT INTO rec_vectors(identity_key, vec) VALUES (?,?)", (key, v.tobytes()))
     store.conn.commit()
@@ -23,7 +23,7 @@ def _track(store, title, artist, angle=0, album="", genre=""):
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                       base_url="http://127.0.0.1")
 
@@ -76,8 +76,8 @@ def test_each_artist_offers_songs_most_like_the_other_artist(store, space):
     a += [a_middle, a_cross]
     b += [b_middle, b_cross]
     if space == "content":
-        store.replace_rec_content_vectors(store.get_rec_vectors())
-        store.replace_rec_vectors([(k, np.array([1, 0], dtype=np.float32).tobytes()) for k in a + b])
+        store.rec_model.replace_rec_content_vectors(store.rec_model.get_rec_vectors())
+        store.rec_model.replace_rec_vectors([(k, np.array([1, 0], dtype=np.float32).tobytes()) for k in a + b])
         rec_params.set_param(store, "cluster_content_weight", 1.0)
     else:
         rec_params.set_param(store, "cluster_content_weight", 0.0)

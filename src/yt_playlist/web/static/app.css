@@ -89,6 +89,8 @@ a:has(> .ui-arrow--external) {
 }
 .topbar nav a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
 .topbar nav a.active { color: var(--light-source); background: var(--control-primary); border-color: var(--control-selected-border); }
+.sidebar-privacy { flex: none; color: var(--faint); font-size: var(--type-xs); }
+.sidebar-privacy:hover, .sidebar-privacy:focus-visible { color: var(--text); }
 
 /* Tools dropdown (cleanup / move / actions / setup) at the right of the nav */
 .tools-menu { position: relative; display: flex; }
@@ -680,7 +682,7 @@ tr:hover .pl-play, .pl-play:focus-visible { opacity: 1; text-decoration: none; }
   padding: 0; background: none; border: 0; box-shadow: none; cursor: pointer; color: var(--faint);
   transition: color .12s ease, filter .12s ease, transform .08s ease; }
 .like-btn svg { width: 1.2rem; height: 1.2rem; display: block; }
-.like-btn:hover { color: var(--danger-2); transform: scale(1.12); }
+.like-btn:hover { background: none; color: var(--danger-2); transform: scale(1.12); }
 .like-btn.on { color: var(--danger-2); filter: drop-shadow(0 0 5px color-mix(in srgb, var(--danger-2) 70%, transparent)); }
 /* the Liked Music playlist is all-liked, so per-row hearts are redundant: hide the column;
    a single heart sits in the header instead (.lm-heart). */
@@ -688,18 +690,10 @@ tr:hover .pl-play, .pl-play:focus-visible { opacity: 1; text-decoration: none; }
 .lm-heart { width: .875rem; height: .875rem; color: var(--danger-2); vertical-align: -1px; margin-right: .15rem;
   filter: drop-shadow(0 0 4px color-mix(in srgb, var(--danger-2) 45%, transparent)); }
 
-/* click-to-edit genre cell */
-.gdisplay { cursor: pointer; display: inline-flex; align-items: center; min-height: 1.5rem; }
-.gdisplay .ghint { opacity: 0; transition: opacity 0.12s ease; font-weight: 700; }
-tr.srow:hover .gdisplay .ghint { opacity: 0.55; }
-.genre-display-wrap:hover .gtag { box-shadow: inset 0 0 0 1px var(--accent); }
+/* Genre display and metadata suggestions. */
 .mb-genre { position: relative; }
 .genre-display-wrap { display: inline-flex; align-items: center; flex-wrap: nowrap; white-space: nowrap;
-  padding: 0; border: 0; background: transparent; box-shadow: none; color: inherit; cursor: pointer; }
-.genre-display-wrap:hover { background: transparent; box-shadow: none; }
-.genre-info { padding: 0 .15rem; margin-left: .15rem; border: 0; background: transparent; box-shadow: none;
-  color: var(--faint); font-size: var(--type-xs); opacity: .45; cursor: pointer; vertical-align: middle; }
-.genre-info:hover { color: var(--accent-2); opacity: 1; background: transparent; box-shadow: none; }
+  color: inherit; }
 .genre-candidates { width: min(28rem, calc(100vw - 2rem)); max-width: none; }
 .genre-track-artist { margin-top: -.3rem; }
 .genre-picker { margin-top: .9rem; }
@@ -743,31 +737,13 @@ tr.srow:hover .gdisplay .ghint { opacity: 0.55; }
   box-shadow: none; color: var(--text); font-size: var(--type-sm); padding: 0.34rem 0.55rem; border-radius: 6px;
   cursor: pointer; white-space: nowrap; }
 .genre-opt:hover, .genre-opt.sel { background: var(--accent-soft); box-shadow: none; }
-/* click-to-edit year cell */
-.ydisplay { cursor: pointer; display: inline-flex; align-items: center; justify-content: flex-end;
+/* Read-only table metadata; editing lives in the song menu. */
+.ydisplay { display: inline-flex; align-items: center; justify-content: flex-end;
   min-height: 1.5rem; min-width: 2.5rem; }
-.ydisplay .ghint { opacity: 0; transition: opacity 0.12s ease; font-weight: 700; }
-tr.srow:hover .ydisplay .ghint { opacity: 0.55; }
 /* Tight horizontal chrome so all four year digits fit the narrow year column (4rem on albums). */
 td.mb-year { padding-left: 0.25rem; padding-right: 0.3rem; }
-.yinput { box-sizing: border-box; width: 100%; min-width: 0; padding: 0.12rem 0.1rem;
-  font-size: var(--type-sm); font-family: var(--font-mono); text-align: right; line-height: 1.2;
-  background: var(--bg-2); border: 1px solid var(--accent); border-radius: 4px; color: var(--text); }
 .gtag { display: inline-block; font-size: var(--type-xs); padding: 0.08rem 0.4rem; border-radius: 999px;
   background: var(--surface-2); border: 1px solid var(--border-2); color: var(--dim); white-space: nowrap; }
-
-/* inline edit affordances for title/artist: pencil hidden until row hover; reset (override marker)
-   stays faintly visible so a manual fix is discoverable. */
-.editpen, .resetpen { cursor: pointer; opacity: 0; margin-left: 0.35em; font-size: 0.85em; transition: opacity 0.12s ease; }
-tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
-.editpen:hover, .resetpen:hover { opacity: 1; }
-.resetpen { opacity: 0.5; }
-.resetpen { display: inline-flex; align-items: center; justify-content: center;
-  min-width: 1.75rem; min-height: 1.75rem; padding: .2rem; border: 0;
-  background: transparent; color: var(--dim); box-shadow: none; }
-.tinput, .ainput { box-sizing: border-box; width: 100%; min-width: 0; padding: 0.12rem 0.3rem;
-  font-size: var(--type-sm); line-height: 1.2; background: var(--bg-2); border: 1px solid var(--accent);
-  border-radius: 4px; color: var(--text); }
 
 /* dismissible banners (flash notices + the session-expired bar) */
 .notice.banner { display: flex; align-items: center; gap: .8125rem; margin-bottom: 1.375rem; }
@@ -933,6 +909,16 @@ tr.srow:hover .editpen, tr.srow:hover .resetpen { opacity: 0.55; }
 .song-playlist-option small { color: var(--faint); font-size: var(--type-xs); }
 .song-playlist-option:has(input:disabled) { opacity: .5; cursor: default; background: transparent; }
 .song-dialog-note { margin: .75rem 0 0; color: var(--faint); font-size: var(--type-ui); }
+.song-metadata-fields { display: grid; gap: 1rem; margin: 0; padding: 0; border: 0; min-width: 0; }
+.song-metadata-pair { display: grid; grid-template-columns: minmax(0, 1fr) 7rem; gap: 1rem; }
+.song-metadata-restore { justify-self: start; padding: 0; border: 0; background: transparent;
+  color: var(--accent-2); box-shadow: none; font-size: var(--type-ui); }
+.song-metadata-restore:hover { background: transparent; box-shadow: none; text-decoration: underline; }
+.song-metadata-suggestions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.song-metadata-suggestions button { display: grid; gap: .2rem; text-align: left; padding: .5rem .7rem;
+  background: var(--surface-2); border: 1px solid var(--border-2); box-shadow: none; }
+.song-metadata-suggestions button.is-selected { border-color: var(--accent-2); }
+.song-metadata-suggestions small { color: var(--faint); font-size: var(--type-xs); }
 .song-action-error { margin: 0; color: var(--danger); font-size: var(--type-ui); }
 .song-dialog-status { display: flex; align-items: center; gap: .55rem; margin: .2rem 0 0;
   color: var(--teal-pale); font-size: var(--type-ui); line-height: 1.5; }
@@ -1129,3 +1115,227 @@ main:not(.page-clusters) .section.toggle:focus-visible { border-radius: var(--ra
     min-height: 2.75rem;
   }
 }
+/* Shared page headings.
+   Art direction comes from composition, scale and rhythm—not a palette swap. Ordinary page heads
+   become ruled editorial blocks; dense application content below retains its familiar order. */
+main:not(.page-clusters) .page-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(15rem, 0.7fr);
+  align-items: end;
+  gap: var(--sp-3) var(--sp-6);
+  padding-block: var(--sp-4);
+  border-block: 1px solid var(--border-strong);
+}
+main:not(.page-clusters) .page-head h1 {
+  font-size: clamp(2.8rem, 6vw, 4.6rem);
+  line-height: 0.9;
+  letter-spacing: -0.055em;
+  max-width: 13ch;
+}
+main:not(.page-clusters) .page-head p {
+  padding-block-end: 0.25rem;
+}
+@media (max-width: 45rem) {
+  main:not(.page-clusters) .page-head { grid-template-columns: 1fr; }
+  main:not(.page-clusters) .page-head h1 { font-size: clamp(2.6rem, 13vw, 4rem); }
+}
+
+/* Shared surface geometry.
+   The shared tokens carry this geometry across ordinary pages. Clusters restores its established
+   radii in clusters.css; these selectors deliberately exclude it as a second boundary. */
+main:not(.page-clusters) .card--featured {
+  box-shadow: none;
+}
+
+/* Decorative artwork panels stay square. Entity thumbnails use artwork.css shapes. */
+main:not(.page-clusters) :where(.hs-art, .fy-cover, .tile-cover, .gen-th, .album-thumb,
+  .pl-art, .pl-cover, .pl-thumb) {
+  border-radius: 0;
+}
+
+/* Shared controls and modal surfaces. */
+body:not(:has(.page-clusters)) :where(.tools-btn, .tools-pop, .tools-pop a, .omni-results,
+  .omni-row, .seg, .editable-title, .title-input, .head-icon, .modal, .modal-input,
+  .tag, .count, .kind, .gtag, .scope-tag, .tab-btn) {
+  border-radius: 2px;
+}
+body:not(:has(.page-clusters)) :where(.sim-bar > i, .bar > i, .enrich-bar, .enrich-bar > i) {
+  border-radius: 0;
+  background-image: none;
+}
+body:not(:has(.page-clusters)) :where(.sim-bar > i, .bar > i, .enrich-bar > i) {
+  background-color: var(--accent);
+}
+body:not(:has(.page-clusters)) .modal {
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: min(44rem, calc(100dvh - 2rem));
+  overflow-y: auto;
+}
+
+/* Desktop side rail.
+   The selected application shell. Compact screens retain the responsive top bar, while Clusters
+   removes application chrome entirely and supplies its own small exit control. */
+@media (min-width: 65rem) {
+  body:not(:has(.page-clusters)) {
+    /* Centre content on the window with symmetric clearance for the overlaid rail. */
+    padding-inline-start: 0;
+  }
+  body:not(:has(.page-clusters)) .topbar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 13.5rem;
+    padding: 1.5rem 1rem;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1.5rem;
+    border-inline-end: 1px solid var(--border-strong);
+    border-block-end: 0;
+  }
+  body:not(:has(.page-clusters)) .topbar .brand {
+    min-height: 2rem;
+    justify-content: flex-start;
+    padding-block-end: 1rem;
+    border-block-end: 1px solid var(--border-strong);
+  }
+  body:not(:has(.page-clusters)) .topbar .brand-name {
+    font-size: 1.35rem;
+  }
+  body:not(:has(.page-clusters)) .topbar .omni {
+    flex: none;
+    width: 100%;
+  }
+  body:not(:has(.page-clusters)) .topbar .omni-box {
+    max-width: none;
+  }
+  body:not(:has(.page-clusters)) .topbar .omni-input {
+    padding-inline: 0.65rem;
+    font-size: var(--type-ui);
+  }
+  body:not(:has(.page-clusters)) .topbar nav {
+    width: 100%;
+    margin: 0;
+    flex: 1 1 auto;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1.1rem;
+    overflow: visible;
+  }
+  body:not(:has(.page-clusters)) .topbar .nav-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+  body:not(:has(.page-clusters)) .topbar .nav-group-label {
+    display: block;
+    margin: 0 0 0.3rem 0.65rem;
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    font-weight: 650;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  body:not(:has(.page-clusters)) .topbar nav a,
+  body:not(:has(.page-clusters)) .topbar .tools-btn {
+    width: 100%;
+    justify-content: flex-start;
+    padding: 0.48rem 0.65rem;
+    border-radius: 2px;
+  }
+  body:not(:has(.page-clusters)) .topbar nav a.active,
+  body:not(:has(.page-clusters)) .topbar .tools-btn.active {
+    border-inline-start: 3px solid var(--control-selected-border);
+  }
+  body:not(:has(.page-clusters)) .topbar .tools-menu {
+    width: 100%;
+    margin-top: auto;
+  }
+  body:not(:has(.page-clusters)) .topbar .tools-pop {
+    position: absolute;
+    left: calc(100% + .5rem);
+    right: auto;
+    top: auto;
+    bottom: 0;
+  }
+  body:not(:has(.page-clusters)) .sidebar-privacy {
+    align-self: flex-start;
+    margin-inline-start: .65rem;
+  }
+  body:not(:has(.page-clusters)) main {
+    width: min(var(--maxw), calc(100vw - 27rem));
+    margin-inline: auto;
+  }
+  /* Taste's charts and settings use the space beside the rail, including the right edge. */
+  body:not(:has(.page-clusters)) main.page-taste {
+    width: calc(100% - 13.5rem);
+    max-width: none;
+    margin-inline: 13.5rem 0;
+  }
+  body:not(:has(.page-clusters)) .authbar {
+    position: relative;
+  }
+}
+/* ===== Playlist track table (was an inline <style> in playlist.html) =========================
+   Fixed layout so a wide playlist can't push columns past the card. Scoped to this table so other
+   tables and the genre/⋯ popups (which need visible overflow) are unaffected, and the sticky header
+   is preserved (no scroll/overflow context is introduced). */
+.track-table { table-layout: fixed; --track-row-height: 2rem; --track-row-padding: .6rem; }
+/* The first line shares the artwork's height; additional lines continue below it. */
+.track-table tbody td { vertical-align: top; padding-block: var(--track-row-padding); }
+.track-cell { display: flex; align-items: center; min-height: var(--track-row-height); }
+.track-cell--text { display: block; box-sizing: border-box;
+  padding-block: max(0px, calc((var(--track-row-height) - 1lh) / 2)); }
+.track-table :is(.num, .rowmenu) > .track-cell { justify-content: flex-end; }
+.track-table .liked-col > .track-cell { justify-content: center; }
+/* free-text columns wrap to as many lines as needed (never cropped); fixed layout keeps the
+   column widths bounded so the table still fits the card. break long unspaced tokens too. */
+.track-table td.t-wrap { white-space: normal; overflow-wrap: anywhere; }
+/* Natural mobile column widths keep a title and its external-link icon readable together. */
+@media (max-width: 720px) { .track-table { table-layout: auto; } }
+
+/* Taste-viz floating tooltip - a formatted readout: composed inputs above a hairline,
+   the effective result emphasized below. Reuses the brand palette; mono for figures. */
+.viz-tip {
+  position: fixed; z-index: 80; max-width: 17.5rem; pointer-events: none;
+  opacity: 0; transform: translateY(3px);
+  background: var(--surface-raised);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow); padding: 0.6rem 0.7rem;
+  font-family: var(--font-sans); font-size: var(--type-xs); line-height: 1.35; color: var(--text);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.viz-tip.on { opacity: 1; transform: none; pointer-events: auto; }   /* clickable when shown */
+.vt-copy {
+  position: absolute; top: 0.4rem; right: 0.4rem; display: inline-flex;
+  align-items: center; justify-content: center; width: 1.375rem; height: 1.375rem; padding: 0;
+  border: 1px solid var(--border-2); border-radius: 5px; background: color-mix(in srgb, var(--light-source) 4%, transparent);
+  color: var(--dim); cursor: pointer; transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.vt-copy:hover { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
+.vt-copy.done { color: var(--teal); border-color: var(--teal); }
+.vt-copy.done svg { display: none; }
+.vt-copy.done::after { content: "✓"; font-size: var(--type-ui); line-height: 1; }
+.vt-title {
+  display: flex; align-items: center; gap: 0.42rem; padding-right: 1.5rem;   /* clear the copy btn */
+  font-weight: 700; font-size: var(--type-ui); letter-spacing: -0.01em; margin-bottom: 0.45rem;
+}
+.vt-title::before {
+  content: ""; width: 0.5rem; height: 0.5rem; border-radius: 2px; flex: none;
+  background: var(--dot, var(--accent));   /* genre/decade color when provided (matches the petal) */
+}
+.vt-title.pos::before { background: var(--dot, var(--teal)); }
+.vt-title.neg::before { background: var(--dot, var(--danger)); }
+.vt-row { display: flex; justify-content: space-between; align-items: baseline; gap: 1.1rem; }
+.vt-l { color: var(--dim); white-space: nowrap; }
+.vt-v { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--text); white-space: nowrap; text-align: right; }
+.vt-v.pos { color: var(--teal); }
+.vt-v.neg { color: var(--danger); }
+.vt-v.strong { color: var(--light-source); font-weight: 700; }
+.vt-n { color: var(--faint); font-size: 0.69rem; line-height: 1.3; margin: 0 0 0.28rem; }
+.vt-n:last-child { margin-bottom: 0; }
+.vt-div { margin-top: 0.42rem; padding-top: 0.42rem; border-top: 1px solid var(--border); }
+
+/* Tooltip description paragraph (e.g. a candidate lane's "what it finds"). */
+.vt-desc { color: var(--dim); font-size: 0.73rem; line-height: 1.35; margin: -0.1rem 0 0.45rem;
+  padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
+

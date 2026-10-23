@@ -2,6 +2,13 @@
   <strong>Spotify import complete.</strong>
   <span>{{ report.matched }} plays matched your library; {{ report.unmatched }} were not in your library.</span>
   <span>{{ report.plays_added }} new track-days and {{ report.events_added }} timestamped plays were added.</span>
-  {% if report.skipped %}<span>Skipped {{ report.skipped }} non-music or unreadable entries.</span>{% endif %}
+  {% if report.invalid %}<span>Ignored {{ report.invalid }} non-music or unreadable entries.</span>{% endif %}
+  {% if report.duplicates %}<span>Merged {{ report.duplicates }} duplicate entries, including
+    {{ report.conflicting_duplicates }} conflicting copies. The longest listen counts; any private copy excludes the listen.</span>{% endif %}
+  {% if report.short %}<span>Excluded {{ report.short }} listens under 30 seconds.</span>{% endif %}
+  {% if report.private %}<span>Excluded {{ report.private }} private-session listens.</span>{% endif %}
+  {% if report.unknown_duration %}<span>Excluded {{ report.unknown_duration }} entries without a valid listening duration.</span>{% endif %}
   {% if seeded %}<span>Added {{ seeded }} artists to use for discovery.</span>{% endif %}
 </div>
+{% include "_partials/spotify_history_controls.html" %}
+<p class="section-note"><a href="/setup?tab=import">Import another history file</a></p>

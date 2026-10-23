@@ -19,7 +19,7 @@
       <tr class="srow" data-artist="{{ a.artist|lower }}" data-songs="{{ a.songs }}"
           data-albums="{{ a.n_albums }}" data-pls="{{ a.n_pls }}" data-plays="{{ a.plays }}">
         <td>{% if a.thumbnail %}<img class="artist-avatar art-artist" src="{{ a.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}</td>
-        <td><a class="ptitle alink" href="/artist?name={{ a.artist|urlencode }}{% if a.browse %}&amp;browse={{ a.browse|urlencode }}{% endif %}">{{ a.artist }}</a></td>
+        <td><a class="ptitle alink" href="/artist?name={{ a.artist|urlencode }}{% if a.artist_id %}&amp;artist_id={{ a.artist_id }}{% endif %}{% if a.browse %}&amp;browse={{ a.browse|urlencode }}{% endif %}">{{ a.artist }}</a></td>
         <td class="num mono">{{ a.songs }}</td>
         <td class="num mono">{{ a.n_albums }}</td>
         <td class="num mono">{{ a.n_pls }}</td>

@@ -11,7 +11,7 @@ def store():
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fake = FakeClient()
     return fake, TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: 1000.0),
                             base_url="http://127.0.0.1")
@@ -22,7 +22,7 @@ def _synced_thin(store):
     seed_catalog_track(store,'a|x','T','A',video_id='v1')
     store.conn.execute("UPDATE tracks SET first_enriched_at=1 WHERE identity_key='a|x'")
     store.conn.commit()
-    store.set_setting("last_sync_at", "999")   # makes sync.last_synced_ago truthy so home enters the synced branch
+    store.settings.set_setting("last_sync_at", "999")   # makes sync.last_synced_ago truthy so home enters the synced branch
 
 
 def test_home_shows_onboarding_when_thin(store):
@@ -43,7 +43,7 @@ def test_onboard_done_dismisses(store):
     _synced_thin(store)
     _, c = _client(store)
     assert c.post("/onboard/done").status_code in (200, 204)
-    assert store.get_setting("onboard_dismissed") == "1"
+    assert store.settings.get_setting("onboard_dismissed") == "1"
 
 
 def test_onboarding_hides_taste_panel_and_mode_cards(store):

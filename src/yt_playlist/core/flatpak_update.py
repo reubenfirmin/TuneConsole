@@ -10,6 +10,7 @@ import uuid
 PORTAL = "org.freedesktop.portal.Flatpak"
 PORTAL_PATH = "/org/freedesktop/portal/Flatpak"
 MONITOR = PORTAL + ".UpdateMonitor"
+_START_CHECK_TIMEOUT_S = 15
 log = logging.getLogger(__name__)
 
 
@@ -35,6 +36,8 @@ class FlatpakUpdater:
         self._connected = False
         self._installed_update = False
         self._disconnect_task = None
+        self._spawn_exits = {}
+        self._spawn_waiters = {}
 
     @property
     def busy(self):
@@ -102,6 +105,17 @@ class FlatpakUpdater:
 
     def _signal(self, message):
         from dbus_next import MessageType
+        if (message.message_type == MessageType.SIGNAL and message.sender == self._owner
+                and message.path == PORTAL_PATH and message.interface == PORTAL
+                and message.member == "SpawnExited" and len(message.body) == 2):
+            pid, status = message.body
+            waiter = self._spawn_waiters.get(pid)
+            if waiter is not None and not waiter.done():
+                waiter.set_result(status)
+            elif len(self._spawn_exits) < 16:
+                # Exit can arrive before the Spawn reply that tells us the child's PID.
+                self._spawn_exits[pid] = status
+            return
         if (message.message_type != MessageType.SIGNAL or message.path != self._path
                 or message.interface != MONITOR or len(message.body) != 1):
             return
@@ -164,7 +178,7 @@ class FlatpakUpdater:
 
     async def install(self):
         await self.status()
-        if self.busy or self.phase in ("ready", "unavailable") or self._bus is None:
+        if self.busy or self.phase in ("ready", "manual_restart", "unavailable") or self._bus is None:
             return self.snapshot()
         self._installing = True
         self.phase, self.progress = "installing", None
@@ -178,11 +192,36 @@ class FlatpakUpdater:
             self._error(exc)
         return self.snapshot()
 
+    async def _can_start_installed(self):
+        # The portal retains the caller's runtime branch, even with LATEST_VERSION.
+        # Check imports in that exact sandbox before giving up the working server.
+        reply = await self._call("Spawn", signature="ayaaya{uh}a{ss}ua{sv}",
+                                 body=[b"/\0", [b"/app/bin/yt-playlist\0", b"--help\0"],
+                                       {}, {}, 2 | 16, {}])  # LATEST_VERSION | WATCH_BUS
+        pid = reply.body[0]
+        waiter = asyncio.get_running_loop().create_future()
+        self._spawn_waiters[pid] = waiter
+        if pid in self._spawn_exits:
+            waiter.set_result(self._spawn_exits.pop(pid))
+        try:
+            return await asyncio.wait_for(waiter, _START_CHECK_TIMEOUT_S) == 0
+        except TimeoutError:
+            # Stop only our probe; the working application must stay available.
+            await self._call("SpawnSignal", signature="uub", body=[pid, 15, True])
+            return False
+        finally:
+            self._spawn_waiters.pop(pid, None)
+
     async def restart(self, host, port):
         if self.phase != "ready":
             raise ValueError("Install the update before restarting.")
         self.phase = "restarting"
         try:
+            if not await self._can_start_installed():
+                self.phase = "manual_restart"
+                self.message = ("Update installed. This update needs a fresh launch. Close all "
+                                "TuneConsole tabs, then open TuneConsole again from your applications menu.")
+                return self.snapshot()
             # The new sandbox survives our exit (no WATCH_BUS flag). Its launcher waits
             # for the old listener to disappear before binding, and doesn't open another tab.
             argv = ["/app/bin/yt-playlist", "--exit-on-idle", "--wait-for-port",
@@ -200,6 +239,7 @@ class FlatpakUpdater:
         self._connected = False
         self._owner, self._path = None, None
         self._early_signals = []
+        self._spawn_exits.clear()
         if bus is not None:
             bus.disconnect()
         task, self._disconnect_task = self._disconnect_task, None

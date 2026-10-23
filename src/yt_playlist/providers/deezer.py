@@ -1,19 +1,21 @@
 """Deezer enrichment: tempo (BPM) for a track, free and without authentication.
 
-Deezer's public API needs no API key for catalog reads. We resolve a track in two calls: an
-advanced track search (artist + title) to get its id, then a track lookup whose object carries the
+Deezer's public API needs no API key for catalog reads. We search several candidates, verify their
+recording identity, then use a track lookup whose object carries the
 `bpm` field (search/listing responses omit it). Deezer reports bpm=0 for tracks it hasn't analysed,
 which we treat as unknown. Deezer also signals quota/errors via an {"error": ...} body on an HTTP
 200, so we check for that explicitly. Failures degrade to None so one bad track never stops a run.
 """
 import json
 import logging
+import math
+import re
 import urllib.parse
 import urllib.request
 
 from yt_playlist.util import net
-from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
-from yt_playlist.providers.enrich_queue import PriorityGate
+from yt_playlist.util.matching import normalize, recording_title
+from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +35,12 @@ def reset() -> None:
 
 
 def probe(track, store=None) -> EnrichmentResult:
-    """Read-only lookup: bpm, popularity, gain, label."""
-    feat = enrich(track["title"], track["artist"])     # {bpm, popularity, gain, label}
-    fields = {k: v for k, v in feat.items() if v is not None}
+    """Expose supported catalogue facts from the same lookup, preserving the legacy audio API."""
+    feat = lookup(track["title"], track["artist"], duration=track.get("duration_s"),
+                  isrc=track.get("isrc"))
+    fields = {k: feat[k] for k in (*_FIELDS, "genre", "year") if feat.get(k) is not None}
+    if "year" in fields:
+        fields["year"] = str(fields["year"])  # same discrete value type as the other providers
     return EnrichmentResult("deezer", fields)
 
 _API = "https://api.deezer.com"
@@ -43,7 +48,6 @@ _USER_AGENT = "yt-playlist/0.1 +https://4rc.io"
 _MIN_INTERVAL = 0.15                       # ~50 req / 5s soft limit -> stay well under
 _HTTP_TIMEOUT_S = 20                        # cap each request so a stalled socket can't wedge a run
 _pacer = RateLimiter(_MIN_INTERVAL)
-_gate = PriorityGate()
 _breaker = net.CircuitBreaker()
 
 
@@ -90,13 +94,84 @@ def enrich(title, artist):
     return {k: feat[k] for k in _FIELDS}
 
 
-def lookup(title, artist):
-    """Every catalogue fact the track+album lookups yield: _FIELDS plus _EXTRA_FIELDS. Same two (or
-    three) requests enrich() has always made; the extra keys are free."""
+def _title(track):
+    title = recording_title(track.get("title"))
+    version = recording_title(f"({track.get('title_version') or ''})")
+    # Deezer can put the qualifier in a separate field instead of the displayed title. Unlike
+    # search normalization, recording_title retains live/remix/edit qualifiers and folds remasters.
+    if version and not title.endswith(version):
+        title = f"{title} {version}"
+    return title
+
+
+def _matches(track, title, artist):
+    wanted = normalize(artist)
+    if not wanted or not recording_title(title) or _title(track) != recording_title(title):
+        return False
+    names = [(track.get("artist") or {}).get("name") or ""]
+    names.extend(c.get("name") or "" for c in track.get("contributors") or [])
+    # Deezer supplies individual contributor names, without MusicBrainz's aliases/join phrases.
+    return wanted in {normalize(n) for n in (*names, " & ".join(names[1:]))}
+
+
+def _seconds(value):
+    try:
+        number = float(value)
+        return number if number > 0 and math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _isrcs(value):
+    values = [value] if isinstance(value, str) else (value or [])
+    return {re.sub(r"[^A-Z0-9]", "", str(v).upper()) for v in values if v}
+
+
+def _select_track(data, title, artist, duration, isrc):
+    matches, seen = [], set()
+    wanted_duration, wanted_isrc = _seconds(duration), _isrcs(isrc)
+    for candidate in data[:10]:
+        track_id = candidate.get("id")
+        if track_id is None or track_id in seen or _title(candidate) != recording_title(title):
+            continue
+        seen.add(track_id)
+        try:
+            track = _get_json(_API + f"/track/{track_id}")
+        except Exception as exc:
+            logger.warning("Deezer track lookup failed for %s: %s", track_id, exc)
+            return None  # an unread candidate cannot establish an unambiguous selection
+        if not isinstance(track, dict) or track.get("error"):
+            return None
+        if track.get("id") != track_id or not _matches(track, title, artist):
+            continue
+        if wanted_isrc and not wanted_isrc.intersection(_isrcs(track.get("isrc"))):
+            continue
+        seconds = _seconds(track.get("duration"))
+        if wanted_duration and seconds and abs(wanted_duration - seconds) > max(3, wanted_duration * .02):
+            continue
+        matches.append(track)
+    if len(matches) == 1:
+        return matches[0]
+    # Different releases with the same explicit recording identifier are equivalent here.
+    # Equal titles/durations alone cannot disambiguate distinct recordings or missing evidence.
+    identifiers = [_isrcs(track.get("isrc")) for track in matches]
+    if identifiers and all(identifiers) and set.intersection(*identifiers):
+        return matches[0]
+    return None
+
+
+def lookup(title, artist, *, duration=None, isrc=None):
+    """Verified catalogue facts, or unknown values if identity is missing or ambiguous.
+
+    Duration (seconds) supports the title/artist check; it never overrides a version mismatch.
+    A supplied ISRC must match. Legacy callers without either still require explicit artist/title.
+    """
     feat = _empty(_FIELDS + _EXTRA_FIELDS)
+    if not recording_title(title) or not normalize(artist):
+        return feat
     q = " ".join(p for p in (f'artist:"{artist}"' if artist else "",
                              f'track:"{title}"' if title else "") if p)
-    search_url = _API + "/search/track?" + urllib.parse.urlencode({"q": q, "limit": "1"})
+    search_url = _API + "/search/track?" + urllib.parse.urlencode({"q": q, "limit": "10"})
     try:
         res = _get_json(search_url)
     except Exception as e:  # noqa: BLE001
@@ -108,15 +183,8 @@ def lookup(title, artist):
     data = (res or {}).get("data") or []
     if not data:
         return feat
-    track_id = data[0].get("id")
-    if track_id is None:
-        return feat
-    try:
-        track = _get_json(_API + f"/track/{track_id}")
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Deezer track lookup failed for %s: %s", track_id, e)
-        return feat
-    if isinstance(track, dict) and track.get("error"):
+    track = _select_track(data, title, artist, duration, isrc)
+    if track is None:
         return feat
     try:
         bpm = float(track.get("bpm"))
@@ -156,33 +224,3 @@ def lookup(title, artist):
     return feat
 
 
-def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop=None, pending=None):
-    """Fill missing BPM for a track set from Deezer (fill-only). Scope is a playlist or an explicit
-    `pending` list. on_progress(event_dict) feeds the SSE stream."""
-    enrich_fn = enrich_fn or enrich
-    pending = store.tracks_missing_audio(playlist_id) if pending is None else pending
-
-    def _per_item(i, total, t):
-        feat = enrich_fn(t["title"], t["artist"])
-        if _breaker.tripped():
-            on_progress({"type": "err", "text": "Deezer looks unreachable. Stopped. "
-                         "The remaining tracks will retry next time."})
-            return False
-        # Art is not an audio feature: it has its own fill-only rule, so it never reaches
-        # set_track_audio (whose kwargs are the audio columns).
-        art = feat.pop("art", None)
-        store.set_track_audio(t["id"], **feat)
-        store.set_track_art(t["id"], art)
-        shown = f"{feat['bpm']:.0f} BPM" if feat["bpm"] else "no BPM"
-        if feat["popularity"]:
-            shown += f" · pop {feat['popularity']}"
-        on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "text": f"{i}/{total} {t['title']}: {shown}"})
-
-    run_enrich_loop(
-        store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
-        empty_text="Every track already has audio features.",
-        start_text=lambda n: f"Looking up BPM for {n} track(s) on Deezer…",
-        done_text=lambda n: f"Looked up {n} track(s).",
-        wait_text="Waiting: a newer playlist is looking up first…",
-        per_item=_per_item)

@@ -15,7 +15,7 @@ DAY = 86400.0
 def _store():
     s = Store(":memory:")
     s.init_schema()
-    s.upsert_identity("main", "bridge", None, True)
+    s.identities.upsert_identity("main", "bridge", None, True)
     return s
 
 
@@ -25,15 +25,15 @@ def _track(s, key, genre="techno", duration=200.0):
     easy to construct: position=20 -> ratio 0.1, well inside the skip band and above the 3s bounce
     floor."""
     title, artist = key.split("|")
-    t = s.upsert_track(f"v_{key}", title, artist, "", duration)
-    s.set_track_genre(t, genre)
+    t = s.tracks.upsert_track(f"v_{key}", title, artist, "", duration)
+    s.tracks.set_track_genre(t, genre)
     return t
 
 
 def _skip(s, key, ts, position=20.0, duration=200.0):
     """A track_exit row shaped as a skip (verified by hand against classify_exit: ratio=20/200=0.1
     <= 0.30, position=20 <= 120, position=20 >= 3 (not a bounce) -> "skip")."""
-    s.record_player_event(1, "track_exit", f"v_{key}", position, duration, None, None, ts)
+    s.player_events.record_player_event(1, "track_exit", f"v_{key}", position, duration, None, None, ts)
 
 
 def test_fresh_skip_pushes_genre_lean_negative_artist_untouched():
@@ -90,9 +90,9 @@ def test_centroid_tilt_cosine_to_skipped_track_decreases():
 
     s_no_skip = _store()
     _track(s_no_skip, "base|artist", genre="jazz")
-    iid = s_no_skip.upsert_identity("main2", "bridge2", None, True)
+    iid = s_no_skip.identities.upsert_identity("main2", "bridge2", None, True)
     now = 1000 * DAY
-    s_no_skip.add_history_snapshot(iid, now, ["base|artist"])
+    s_no_skip.history.record_play_event(iid, "base|artist", "v_base|artist", now, source_timezone="UTC")
     tilt_no_skip = transient.centroid_tilt(s_no_skip, now, V, idx)
     assert tilt_no_skip is not None
     cos_no_skip = float(np.dot(tilt_no_skip, skip_dir))
@@ -100,8 +100,8 @@ def test_centroid_tilt_cosine_to_skipped_track_decreases():
     s_skip = _store()
     _track(s_skip, "base|artist", genre="jazz")
     _track(s_skip, "skip|artist", genre="techno")
-    iid2 = s_skip.upsert_identity("main2", "bridge2", None, True)
-    s_skip.add_history_snapshot(iid2, now, ["base|artist"])
+    iid2 = s_skip.identities.upsert_identity("main2", "bridge2", None, True)
+    s_skip.history.record_play_event(iid2, "base|artist", "v_base|artist", now, source_timezone="UTC")
     _skip(s_skip, "skip|artist", now)
     tilt_with_skip = transient.centroid_tilt(s_skip, now, V, idx)
     assert tilt_with_skip is not None
@@ -137,8 +137,8 @@ def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch):
 
     s_no_skip = _store()
     _track(s_no_skip, "base|artist", genre="jazz")
-    iid = s_no_skip.upsert_identity("main2", "bridge2", None, True)
-    s_no_skip.add_history_snapshot(iid, now, ["base|artist"])
+    iid = s_no_skip.identities.upsert_identity("main2", "bridge2", None, True)
+    s_no_skip.history.record_play_event(iid, "base|artist", "v_base|artist", now, source_timezone="UTC")
     tilt_no_skip = transient.audio_centroid_tilt(s_no_skip, now)
     assert tilt_no_skip is not None
     cos_no_skip = float(np.dot(tilt_no_skip, skip_dir))
@@ -146,8 +146,8 @@ def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch):
     s_skip = _store()
     _track(s_skip, "base|artist", genre="jazz")
     _track(s_skip, "skip|artist", genre="techno")
-    iid2 = s_skip.upsert_identity("main2", "bridge2", None, True)
-    s_skip.add_history_snapshot(iid2, now, ["base|artist"])
+    iid2 = s_skip.identities.upsert_identity("main2", "bridge2", None, True)
+    s_skip.history.record_play_event(iid2, "base|artist", "v_base|artist", now, source_timezone="UTC")
     _skip(s_skip, "skip|artist", now)
     tilt_with_skip = transient.audio_centroid_tilt(s_skip, now)
     assert tilt_with_skip is not None
@@ -159,16 +159,16 @@ def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch):
 def test_play_facet_leans_unaffected_by_skips():
     s_no_skip = _store()
     _track(s_no_skip, "played|artist", genre="jazz")
-    iid = s_no_skip.upsert_identity("main2", "bridge2", None, True)
+    iid = s_no_skip.identities.upsert_identity("main2", "bridge2", None, True)
     now = 1000 * DAY
-    s_no_skip.add_history_snapshot(iid, now, ["played|artist"])
+    s_no_skip.history.record_play_event(iid, "played|artist", "v_played|artist", now, source_timezone="UTC")
     leans_no_skip = transient.play_facet_leans(s_no_skip, now)
 
     s_skip = _store()
     _track(s_skip, "played|artist", genre="jazz")
     _track(s_skip, "skipped|artist", genre="techno")
-    iid2 = s_skip.upsert_identity("main2", "bridge2", None, True)
-    s_skip.add_history_snapshot(iid2, now, ["played|artist"])
+    iid2 = s_skip.identities.upsert_identity("main2", "bridge2", None, True)
+    s_skip.history.record_play_event(iid2, "played|artist", "v_played|artist", now, source_timezone="UTC")
     _skip(s_skip, "skipped|artist", now)                # a fresh skip, same store otherwise
     leans_with_skip = transient.play_facet_leans(s_skip, now)
 

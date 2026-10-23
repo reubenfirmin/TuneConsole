@@ -152,3 +152,10 @@
 .takeout-file-label { cursor: pointer; margin: 0; }
 .visually-hidden-file { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
 .flush-margin { margin: 0; }
+/* Setup's title and instructions use the available content width. */
+main.page-setup .page-head {
+  grid-template-columns: minmax(0, 1fr);
+}
+main.page-setup .page-head :is(h1, p) {
+  max-width: none;
+}

@@ -15,7 +15,7 @@ PACKAGE = "yt-playlist"
 
 _RELEASES_URL = "https://api.github.com/repos/reubenfirmin/TuneConsole/releases/latest"
 _HTTP_TIMEOUT_S = 8
-_CHECK_INTERVAL_S = 86400          # once a day; well under GitHub's 60 req/hr unauth limit
+_CHECK_INTERVAL_S = 4 * 3600       # every four hours
 _USER_AGENT = "yt-playlist-updatecheck"
 
 # (button label, optional link) per install kind. Flatpak and macOS have in-app controls;
@@ -81,8 +81,8 @@ def _fetch_latest_release():
 
 def check_latest(store, now, *, interval_s=_CHECK_INTERVAL_S):
     """At most once per interval_s, refresh the cached latest release. Always stamps the check time
-    (so a persistent failure retries at most daily, never hammering GitHub). Fail-silent."""
-    last = store.get_setting("latest_version_checked_at")
+    (so a persistent failure retries at most once per interval, never hammering GitHub). Fail-silent."""
+    last = store.settings.get_setting("latest_version_checked_at")
     if last is not None:
         try:
             if now - float(last) < interval_s:
@@ -93,9 +93,9 @@ def check_latest(store, now, *, interval_s=_CHECK_INTERVAL_S):
         latest = _fetch_latest_release()
     except Exception:                       # noqa: BLE001 - offline/HTTP/parse must not surface
         latest = None
-    store.set_setting("latest_version_checked_at", str(now))
+    store.settings.set_setting("latest_version_checked_at", str(now))
     if latest:
-        store.set_setting("latest_version_seen", latest)
+        store.settings.set_setting("latest_version_seen", latest)
 
 
 def install_kind() -> str:
@@ -141,13 +141,13 @@ def update_nudge(store):
     behind, reinstall a release' would be both wrong and unactionable."""
     if is_dev_install():
         return None
-    latest = store.get_setting("latest_version_seen")
+    latest = store.settings.get_setting("latest_version_seen")
     if not latest:
         return None
     current = current_version()
     if not _out_of_date(current, latest):
         return None
-    if store.get_setting("backend_update_dismissed_version") == latest:
+    if store.settings.get_setting("backend_update_dismissed_version") == latest:
         return None
     kind = install_kind()
     command, link = update_instruction(kind)

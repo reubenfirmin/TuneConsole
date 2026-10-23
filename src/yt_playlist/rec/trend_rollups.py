@@ -1,7 +1,8 @@
 """#76-#80 Trends rollups: precompute the weekly/monthly listening rollup, the last-month recap, the
 library-health snapshot, and (at most one) Home spotlight candidate, materialized via put_proposals.
-Runs in the rec worker only. All play counts use the day model (history_snapshots + history_items);
-play_events is used ONLY in the first-play index (a MIN), never as an added play count.
+Runs in the rec worker only. Play counts prefer the exact-event ledger, falling back
+to distinct account listening days when no ledger exists. First-play derivation
+retains earlier coarse evidence even after exact events arrive.
 
 Thresholds below are EDITORIAL (when to interrupt the user), not model knobs, so they are constants
 here, not rec_params."""
@@ -212,34 +213,8 @@ def compute_months(day_counts, meta, artist_first, catalog_artists=frozenset()) 
 
 
 def _build_first_play_index(store):
-    """Incremental fold of the first-play index. Snapshots normally only accrue forward, so an existing
-    first_day can only be lowered by a Takeout backfill; that case clears + full-rescans."""
-    ti = store.get_setting("takeout_imported_at")
-    if ti is not None and ti != store.get_setting("trend_first_play_takeout_seen"):
-        store.trends.clear_first_play()
-        store.set_setting("trend_first_play_watermark", "0")
-        store.set_setting("trend_first_play_takeout_seen", str(ti))
-    wm = int(store.get_setting("trend_first_play_watermark") or 0)
-    plays = store.trends.play_event_track_first()
-    # The history day model is evidence of a first play ONLY when there is no ledger. Where a ledger
-    # exists it is complete (Takeout backfills the past, the extension records the present), and the
-    # history rows are a lingering recently-played window that would drag first-seen days earlier and
-    # fabricate a discovery spike on whatever day the sync happened to run. On the reference database
-    # that put 131 tracks and 32 artists on 2026-06-20 alone.
-    hist = {} if store.trends.has_play_ledger() else store.trends.history_track_first(wm)
-    rows = []
-    for key in set(hist) | set(plays):
-        cands = []
-        if key in hist:
-            cands.append((hist[key][1], hist[key][0], "history"))
-        if key in plays:
-            cands.append((plays[key][1], plays[key][0], "play_event"))
-        ts, day, src = min(cands)
-        rows.append(("track", key, day, ts, src))
-    if rows:
-        store.trends.upsert_first_play_min(rows)
-    store.trends.rebuild_artist_first_play()
-    store.set_setting("trend_first_play_watermark", str(store.trends.max_snapshot_id()))
+    """Reconcile exact and coarse evidence; publish the fold atomically."""
+    store.trends.refresh_first_play()
 
 
 def month_day_counts(day_counts, month) -> list:
@@ -390,7 +365,7 @@ def detect_spotlight(weeks, months, review, floor_day, store, now, days=(), insi
         return {"signature": top["signature"], "anchor": "insights",
                 "headline": top["headline"], "detail": top["detail"]}
     # 1. Month rollover: a new full-month recap became available.
-    if review is not None and review["month"] != store.get_setting("trend_spotlight_review_month"):
+    if review is not None and review["month"] != store.settings.get_setting("trend_spotlight_review_month"):
         return {"signature": f"month_review:{review['month']}", "anchor": "review",
                 "headline": "Your month in review is ready",
                 "detail": f"{review['plays']} plays across {review['listen_days']} days last month."}
@@ -504,11 +479,10 @@ def day_counts_source(store) -> list:
     provenance, and which therefore honours the GENERATED_GROUP quarantine (repos/base.py): the app's
     own recommendations, played back, are not evidence of the user's taste.
 
-    Falls back to the history day model only when no ledger exists at all, which is the fresh-install
-    case (no extension, no Takeout import). The history model cannot be trusted where a ledger exists:
-    it counts snapshot appearances, so a track lingering in YouTube's recently-played window is
-    recorded as played again on every sync. On the reference database 79% of its sync-era rows have no
-    corresponding real play, and it reports 3524 "plays" where 1235 happened.
+    Falls back to distinct account listening days only when no ledger exists at all,
+    which is the fresh-install case (no extension, no Takeout import). Historical
+    capture dates retain unknown precision, so they cannot establish actual repeat
+    counts when an exact ledger is available.
     """
     if store.trends.has_play_ledger():
         return store.trends.ledger_day_counts()
@@ -546,9 +520,32 @@ def compute_overlay_series(day_counts, meta, weeks, top_artists=8, top_genres=6)
                        for f in top_g]}
 
 
-def build(store, now) -> dict:
-    """Precompute the whole Trends rollup + spotlight candidate and materialize it. Rec-worker only."""
-    _build_first_play_index(store)
+def build(store, now) -> dict | None:
+    """Calculate on a private read snapshot and publish matching output atomically.
+
+    Return None when concurrent source changes require another worker pass. The last published
+    rollup and index remain intact; a stale calculation must not undo source removal or a reset.
+    """
+    import json
+
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
+        first_play = reader.trends.prepare_first_play()
+        imported = reader.settings.get_setting("takeout_imported_at")
+        payload = _calculate(reader, now)
+        review, spotlight = payload["review"], payload["spotlight"]
+        # Only consume a review when it won the spotlight cascade.
+        review_month = (review["month"] if review is not None and spotlight is not None
+                        and spotlight["signature"] == f"month_review:{review['month']}" else None)
+        encoded = json.dumps(payload)
+        if not snapshot.publish(lambda: store.trends.publish_rollup(
+                first_play, encoded, now, imported, review_month)):
+            return None
+        return payload
+
+
+def _calculate(store, now) -> dict:
+    """Read and compute only; the caller supplies its privately prepared first-play index."""
     day_counts = day_counts_source(store)
     meta = store.trends.track_meta()
     artist_first = store.trends.first_play_map("artist")
@@ -573,15 +570,6 @@ def build(store, now) -> dict:
                "overlays": compute_overlay_series(day_counts, meta, weeks),
                "insights": insights, "review": review, "health": health_snapshot(store, now),
                "story": story, "spotlight": spotlight}
-    store.put_proposals("trend_rollups", payload, now)
-    # Only mark the review month "consumed" when its month-rollover candidate is the one that actually
-    # won the spotlight cascade. detect_spotlight lets insights (priority 0) outrank the month-rollover
-    # detector, so on a week where an insight fires, the review would otherwise be silently burned
-    # without ever reaching Home -- the review keeps re-competing for the spotlight on every subsequent
-    # build until a build finally has no higher-priority insight to beat it.
-    if (review is not None and spotlight is not None
-            and spotlight["signature"] == f"month_review:{review['month']}"):
-        store.set_setting("trend_spotlight_review_month", review["month"])
     return payload
 
 

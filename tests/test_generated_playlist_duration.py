@@ -11,37 +11,37 @@ from tests.conftest import FakeClient
 def test_generated_playlist_reuses_known_duration(store):
     # A library track already has a time under one videoId; a recommendation surfaces the same song
     # under a different videoId with no duration. We reuse the known time. No network call needed.
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_track("vOLD", "Song", "Artist", "Alb", 240, 1)   # known time, different videoId
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.tracks.upsert_track("vOLD", "Song", "Artist", "Alb", 240, 1)   # known time, different videoId
     fc = FakeClient()                                             # get_song would return no length
     res = create_generated_playlist(
         store, "Gen", [{"video_id": "vNEW", "title": "Song", "artist": "Artist"}],
         fc, 1.0, identity_id=iid)
-    row = next(t for t in store.playlist_tracks_detail(res["pid"]) if t["video_id"] == "vNEW")
+    row = next(t for t in store.charts.playlist_tracks_detail(res["pid"]) if t["video_id"] == "vNEW")
     assert row["duration"] == 240
 
 
 def test_generated_playlist_fetches_missing_duration_for_fresh_track(store):
     # A 'fresh song' not in the library and with no known time gets its duration fetched at
     # materialization, so the generated playlist row isn't left blank.
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = FakeClient(song_durations={"v1": 222})
     res = create_generated_playlist(
         store, "Gen", [{"video_id": "v1", "title": "New Tune", "artist": "Nobody"}],
         fc, 1.0, identity_id=iid)
-    row = next(t for t in store.playlist_tracks_detail(res["pid"]) if t["video_id"] == "v1")
+    row = next(t for t in store.charts.playlist_tracks_detail(res["pid"]) if t["video_id"] == "v1")
     assert row["duration"] == 222
 
 
 def test_generated_playlist_survives_unfetchable_duration(store):
     # If the time is unknown everywhere and the fetch comes back empty, the track still lands.
     # A missing duration must never block playlist creation.
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fc = FakeClient()                                            # no known time, get_song empty
     res = create_generated_playlist(
         store, "Gen", [{"video_id": "v9", "title": "Mystery", "artist": "Ghost"}],
         fc, 1.0, identity_id=iid)
-    row = next(t for t in store.playlist_tracks_detail(res["pid"]) if t["video_id"] == "v9")
+    row = next(t for t in store.charts.playlist_tracks_detail(res["pid"]) if t["video_id"] == "v9")
     assert row["duration"] is None and res["added"] == 1
 
 
@@ -49,7 +49,7 @@ def test_generated_playlist_survives_unfetchable_duration(store):
 @pytest.mark.parametrize("source", ["supplied", "cached", "fetched"])
 @pytest.mark.parametrize("materialize", [False, True])
 def test_duration_limit_filters_before_remote_writes(store, minutes, source, materialize):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     if minutes != 20:
         rec_params.set_param(store, "max_track_minutes", minutes)
     lengths = {"short": 200, "boundary": minutes * 60, "long": minutes * 60 + 1, "unknown": None}
@@ -59,7 +59,7 @@ def test_duration_limit_filters_before_remote_writes(store, minutes, source, mat
     elif source == "cached":
         for video, duration in lengths.items():
             if duration is not None:
-                store.upsert_track("old_" + video, video, "Artist", None, duration)
+                store.tracks.upsert_track("old_" + video, video, "Artist", None, duration)
     tracks.append(dict(tracks[0]))    # deduplication must happen before lookups
     original = [dict(t) for t in tracks]
     lookups = []
@@ -78,7 +78,7 @@ def test_duration_limit_filters_before_remote_writes(store, minutes, source, mat
     assert lookups == (list(lengths) if source == "fetched" else ["unknown"])
     assert tracks == original
     if materialize:
-        rows = store.playlist_tracks_detail(result["pid"])
+        rows = store.charts.playlist_tracks_detail(result["pid"])
         assert [(r["video_id"], r["duration"]) for r in rows] == [
             ("short", 200), ("boundary", minutes * 60), ("unknown", None)]
     else:
@@ -86,19 +86,19 @@ def test_duration_limit_filters_before_remote_writes(store, minutes, source, mat
 
 
 def test_all_overlong_tracks_do_not_create_an_empty_remote_playlist(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     client = FakeClient(song_durations={"mix": 7200})
     with pytest.raises(ValueError, match="maximum track length set in Taste Model"):
         create_generated_playlist(store, "Gen", [{"video_id": "mix", "title": "Concert"}],
                                   client, 100, identity_id=iid)
     assert not client.created and not client.added
-    assert store.get_playlists() == []
+    assert store.playlists.get_playlists() == []
 
 
 def test_failed_duration_lookup_still_allows_generation(store, monkeypatch):
     from yt_playlist.library import executor
 
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     calls = []
 
     class UnavailableClient(FakeClient):
@@ -112,4 +112,4 @@ def test_failed_duration_lookup_still_allows_generation(store, monkeypatch):
                                        identity_id=iid)
     assert result["added"] == 1
     assert calls == ["unknown"]
-    assert store.playlist_tracks_detail(result["pid"])[0]["duration"] is None
+    assert store.charts.playlist_tracks_detail(result["pid"])[0]["duration"] is None

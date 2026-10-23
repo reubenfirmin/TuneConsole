@@ -6,19 +6,13 @@ from yt_playlist.core.store import Store
 def store():
     s = Store(":memory:")
     s.init_schema()
-    s.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history/playlist FKs
+    s.identities.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history/playlist FKs
     return s
 
 
 def _snap(store, day, keys):
-    """One history snapshot at taken_at = day*86400 containing `keys`. Returns snapshot id."""
-    cur = store.conn.execute("INSERT INTO history_snapshots(identity_id, taken_at) VALUES (1, ?)",
-                             (day * 86400.0,))
-    sid = cur.lastrowid
-    for k in keys:
-        store.conn.execute("INSERT INTO history_items(snapshot_id, identity_key) VALUES (?, ?)", (sid, k))
-    store.conn.commit()
-    return sid
+    """Record independent observations on an explicit UTC calendar date."""
+    store.history.record_history_plays(1, day * 86400.0, keys, source_timezone="UTC")
 
 
 def _track(store, key, artist, genre=""):
@@ -47,7 +41,22 @@ def test_never_played_and_last(store):
     # 2 tracks total, k2 never played -> 1
     assert store.trends.never_played() == (2, 1)
     last = dict(store.trends.track_last_play())
-    assert last["k1"] == 5 * 86400.0 and last["k2"] is None
+    assert last["k1"] == 5*86400.0+43200 and last["k2"] is None
+
+
+def test_never_played_reads_history_once_for_all_owned_tracks(store):
+    for i in range(30):
+        _track(store, f"k{i}", "Artist")
+    calls = []
+    store.conn.create_function("count_history_read", 1,
+                               lambda key: (calls.append(key), key)[1])
+    store.conn.execute("CREATE TEMP TABLE history_probe(identity_key TEXT)")
+    store.conn.executemany("INSERT INTO history_probe VALUES (?)", [(f"k{i}",) for i in range(20)])
+    store.conn.execute("CREATE TEMP VIEW listening_days AS "
+                       "SELECT count_history_read(identity_key) identity_key FROM history_probe")
+    store.conn.commit()
+    assert store.trends.never_played() == (30, 10)
+    assert len(calls) == 20
 
 
 def test_dead_playlists_threshold_and_order(store):
@@ -55,16 +64,9 @@ def test_dead_playlists_threshold_and_order(store):
     _track(store, "kb", "A2")
     _track(store, "kc", "A3")
 
-    pid_zeta = store.conn.execute(
-        "INSERT INTO playlists(identity_id, ytm_playlist_id, title) VALUES (1, ?, ?)",
-        ("pl_zeta", "Zeta")).lastrowid
-    pid_alpha = store.conn.execute(
-        "INSERT INTO playlists(identity_id, ytm_playlist_id, title) VALUES (1, ?, ?)",
-        ("pl_alpha", "Alpha")).lastrowid
-    pid_beta = store.conn.execute(
-        "INSERT INTO playlists(identity_id, ytm_playlist_id, title) VALUES (1, ?, ?)",
-        ("pl_beta", "Beta")).lastrowid
-    store.conn.commit()
+    pid_zeta = store.playlists.upsert_playlist(1,'pl_zeta','Zeta',1,'h',0)
+    pid_alpha = store.playlists.upsert_playlist(1,'pl_alpha','Alpha',1,'h',0)
+    pid_beta = store.playlists.upsert_playlist(1,'pl_beta','Beta',1,'h',0)
 
     store.conn.execute(
         "INSERT INTO playlist_tracks(playlist_id, track_id, position) VALUES (?, ?, 0)",
@@ -92,7 +94,7 @@ def test_dead_playlists_threshold_and_order(store):
     full = store.trends.dead_playlists(3)
     assert [(d["title"], d["listens"]) for d in full] == [("Alpha", 0), ("Zeta", 0), ("Beta", 3)]
     beta = next(d for d in full if d["title"] == "Beta")
-    assert beta["last_listen"] == 7 * 86400.0
+    assert beta["last_listen"] == 7*86400.0+43200
     assert beta["playlist_id"] == pid_beta
 
 

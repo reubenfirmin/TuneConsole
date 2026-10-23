@@ -1,5 +1,6 @@
 """Public-site connection changes, setup instructions, and keyboard access."""
 from pathlib import Path
+import time
 
 import pytest
 from playwright.sync_api import expect
@@ -114,18 +115,8 @@ def test_real_extension_reuses_player_tab_in_another_window(playwright, browser_
         site = new_page.value
         site.goto("https://tuneconsole.com/")
         worker.evaluate("""async () => {
-            if (ws) ws.close();
-            ws = {readyState: WebSocket.OPEN, send() {}};
-            await publishLocalPlayerStatus();
-            // Observe completion of the real click handler, including window focus.
-            self.playerOpened = new Promise(resolve => {
-                const open = openLocalPlayer;
-                openLocalPlayer = () => {
-                    const request = open();
-                    request.then(resolve);
-                    return request;
-                };
-            });
+            Object.defineProperty(tuneConsole.transport, 'connected', {get: () => true});
+            await tuneConsole.site.publish();
         }""")
         badge = site.get_by_role("link", name="Local Player, running", exact=True)
         expect(badge).to_be_visible()
@@ -133,8 +124,16 @@ def test_real_extension_reuses_player_tab_in_another_window(playwright, browser_
         player_tab = next(tab for tab in before if tab.get("url") == player.url)
         assert not player_tab["active"]
         badge.click()
-        assert worker.evaluate("self.playerOpened") == {"opened": True, "connected": True}
-        after = worker.evaluate("chrome.tabs.query({})")
+        # Observe the real handler's result without invoking a second open request in the test.
+        deadline = time.monotonic() + 5
+        while True:
+            after = worker.evaluate("chrome.tabs.query({})")
+            active = next(tab for tab in after if tab["id"] == player_tab["id"])["active"]
+            focused = browser_type_launch_args.get("headless", True) or (
+                worker.evaluate("chrome.windows.getLastFocused()")["id"] == player_tab["windowId"])
+            if (active and focused) or time.monotonic() >= deadline:
+                break
+            site.wait_for_timeout(25)
         assert {tab["id"] for tab in after} == {tab["id"] for tab in before}
         assert next(tab for tab in after if tab["id"] == player_tab["id"])["active"]
         # Headless Chromium reports every window focused; OS focus needs a headed run.

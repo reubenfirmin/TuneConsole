@@ -1,30 +1,32 @@
 """Discovery counts require exposure, including when tabs, polls, and grid clamps hide tiles."""
 import pytest
 from playwright.sync_api import expect
+from yt_playlist.rec import home_prepared
 
 
 @pytest.mark.parametrize("width", [1440, 390])
 def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page, width, tmp_path):
-    store.set_setting("last_sync_at", "1")
-    store.set_setting("onboard_dismissed", "1")
+    store.settings.set_setting("last_sync_at", "1")
+    store.settings.set_setting("onboard_dismissed", "1")
     for i in range(15):
-        store.upsert_discovered_album(f"album{i}", f"Artist {i}", f"Album {i}", "2026", None, 1.0)
-    store.upsert_discovered_artist("New artist", 1.0, [], [], None, 1.0)
+        store.discovery.upsert_discovered_album(f"album{i}", f"Artist {i}", f"Album {i}", "2026", None, 1.0)
+    store.discovery.upsert_discovered_artist("New artist", 1.0, [], [], None, 1.0)
+    assert home_prepared.prepare(store, 1) is not None
     requests = []
     page.on("request", lambda request: requests.append(request.url))
     page.set_viewport_size({"width": width, "height": 1000})
     page.goto(f"{live_app}/")
-    expect(page.get_by_role("tab", name="Listen", exact=True)).to_be_visible()
+    expect(page.get_by_role("tab", name="Mix tapes", exact=True)).to_be_visible()
     page.wait_for_timeout(1100)  # Exceeds the exposure interval while Discover stays hidden.
     assert not any(url.endswith("/home/discover") for url in requests)
-    assert all(a["offered_count"] == 0 for a in store.get_discovered_albums())
+    assert all(a["offered_count"] == 0 for a in store.discovery.get_discovered_albums())
 
     page.get_by_role("tab", name="Discover", exact=True).click()
     tiles = page.locator("#album-grid > [data-discovery-id]")
     expect(tiles).to_have_count(15)
     tiles.first.scroll_into_view_if_needed()
     page.wait_for_timeout(1300)
-    shown = {a["browse_id"]: a["offered_count"] for a in store.get_discovered_albums()}
+    shown = {a["browse_id"]: a["offered_count"] for a in store.discovery.get_discovered_albums()}
     assert any(shown.values()) and max(shown.values()) == 1
     hidden_ids = tiles.evaluate_all("tiles => tiles.filter(t => !t.getClientRects().length).map(t => t.dataset.discoveryId)")
     assert all(shown[item_id] == 0 for item_id in hidden_ids)
@@ -32,25 +34,25 @@ def test_only_visible_discovery_tiles_count_once_per_visit(live_app, store, page
         assert hidden_ids  # The mobile grid crops rows that must never count as viewed.
 
     page.evaluate("""() => htmx.ajax('GET', '/home/discover', {
-        target: '[data-dash="discover"] > div:first-child', swap: 'innerHTML'})""")
+        target: '#home-discovery > div:first-child', swap: 'innerHTML'})""")
     expect(tiles).to_have_count(15)
     page.wait_for_timeout(1300)
-    assert max(a["offered_count"] for a in store.get_discovered_albums()) == 1
+    assert max(a["offered_count"] for a in store.discovery.get_discovered_albums()) == 1
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     page.screenshot(path=tmp_path / f"discovery-{width}.png", full_page=True)
     page.locator("#new-artist-grid [data-discovery-id]").first.scroll_into_view_if_needed()
     page.wait_for_timeout(1300)
-    assert store.get_discovered_artists()[0]["offered_count"] == 1
+    assert store.discovery.get_discovered_artists()[0]["offered_count"] == 1
 
 
 @pytest.mark.parametrize("width", [1440, 390])
 def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, tmp_path):
-    store.upsert_discovered_track("cold", "v1", "Cold Song", "Artist", "Album", None,
+    store.discovery.upsert_discovered_track("cold", "v1", "Cold Song", "Artist", "Album", None,
                                   "House", "2020", "album", 1,
                                   audio={"bpm": 128.0, "energy": .8, "danceability": .7})
-    store.record_enrichment_attempt("cold", "musicbrainz", {"genre": "House"}, now=100)
-    store.record_enrichment_attempt("cold", "deezer", {}, retry=True, now=101)
-    store.upsert_discovered_track("unknown", "v2", "Unknown Song", "Artist", None, None,
+    store.enrichment.record_enrichment_attempt("cold", "musicbrainz", {"genre": "House"}, now=100)
+    store.enrichment.record_enrichment_attempt("cold", "deezer", {}, retry=True, now=101)
+    store.discovery.upsert_discovered_track("unknown", "v2", "Unknown Song", "Artist", None, None,
                                   None, None, "radio:v", 2)
     page.set_viewport_size({"width": width, "height": 1000})
     page.goto(f"{live_app}/discovery")
@@ -67,3 +69,77 @@ def test_pool_shows_metadata_charts_above_tracks(live_app, store, page, width, t
     page.screenshot(path=tmp_path / f"discovery-pool-metadata-{width}.png", full_page=True)
     page.get_by_role("button", name="Albums (0)").click()
     expect(overview).to_be_hidden()
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_prepared_songs_are_ready_when_discover_opens(live_app, store, page, width, tmp_path):
+    from yt_playlist.rec import fresh_pool
+
+    store.settings.set_setting("last_sync_at", "1")
+    store.settings.set_setting("onboard_dismissed", "1")
+    for i in range(40):
+        store.discovery.upsert_discovered_track(f"new {i}|artist {i}", f"v{i}", f"New song {i}",
+            f"Artist {i}", None, None, "Jazz", "2020", "radio:seed", 1)
+    fresh_pool.prepare(store, 2)
+    assert home_prepared.prepare(store, 2) is not None
+    # Opening the tab must not need a lazy fragment or a recommendation request to succeed.
+    page.route("**/home/discovery", lambda route: route.abort())
+    page.set_viewport_size({"width": width, "height": 1000})
+    page.goto(f"{live_app}/")
+    tiles = page.locator("#discovery-track-grid > [data-discovery-id]")
+    expect(tiles).to_have_count(10)
+    expect(tiles.first).to_be_hidden()
+    page.wait_for_timeout(1100)
+    # Some songs also appear in Mix tapes; their existing offers belong to that surface.
+    before = {row["identity_key"]: row["offered_count"] for row in store.discovery.get_discovered_tracks()}
+    assert store.conn.execute("SELECT COUNT(*) FROM discovery_visible_impressions WHERE kind='track'").fetchone()[0] == 0
+
+    page.get_by_role("tab", name="Discover", exact=True).click()
+    expect(page.get_by_role("heading", name="Songs to discover")).to_be_visible()
+    expect(tiles.first).to_be_visible()
+    expect(page.get_by_text("Finding new music for you…", exact=True)).to_have_count(0)
+    expect(tiles.first.locator("a")).to_have_attribute("href", "https://music.youtube.com/watch?v=v0")
+    tiles.first.scroll_into_view_if_needed()
+    page.wait_for_timeout(1300)
+    deltas = [row["offered_count"] - before[row["identity_key"]] for row in store.discovery.get_discovered_tracks()]
+    assert max(deltas) == 1
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    page.screenshot(path=tmp_path / f"discovery-ready-songs-{width}.png", full_page=True)
+
+
+def test_missing_artist_art_appears_on_the_existing_discover_page(live_app, store, page, monkeypatch):
+    from types import SimpleNamespace
+    from yt_playlist.rec import discover
+    from yt_playlist.rec.rec_worker import RecWorker
+
+    store.settings.set_setting('last_sync_at', '1')
+    store.settings.set_setting('onboard_dismissed', '1')
+    store.discovery.upsert_discovered_artist('New artist', 1, [], [], None, 1)
+    assert home_prepared.prepare(store, 1) is not None
+    queued = []
+
+    def queue(worker, ids):
+        queued.append((worker, ids))
+        worker._model_active = True
+
+    monkeypatch.setattr(RecWorker, 'trigger_artist_images', queue)
+    page.goto(live_app + '/')
+    page.get_by_role('tab', name='Discover', exact=True).click()
+    tile = page.locator('#new-artist-grid .tile')
+    tile.scroll_into_view_if_needed()
+    expect(tile.locator('img')).to_have_count(0)
+    assert queued
+    worker, ids = queued[-1]
+    client = SimpleNamespace(search=lambda name, filter: [
+        {'thumbnails': [{'url': live_app + '/static/favicon.svg'}]}])
+    ctx = SimpleNamespace(store=store, client_provider=lambda: {1: client})
+    discover.repair_artist_images(ctx, ids, 1)
+    worker._model_active = False
+
+    expect(tile.locator('img')).to_have_count(1, timeout=10000)
+    expect(tile.locator('.tile-cover')).not_to_have_class('tile-cover no-art')
+    page.wait_for_function("""() => {
+        const image = document.querySelector('#new-artist-grid img');
+        return image && image.complete && image.naturalWidth > 0;
+    }""")
+    assert store.discovery.get_discovered_artists()[0]['thumbnail'].endswith('/static/favicon.svg')

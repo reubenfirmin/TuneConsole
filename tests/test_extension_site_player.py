@@ -55,7 +55,7 @@ const chrome = {
   windows: {onRemoved: event(), update: async (id, props) => focused.push({id, focused: props.focused})},
   alarms: {create() {}, onAlarm: event()},
 };
-vm.runInNewContext(fs.readFileSync('extension/background.js', 'utf8'), {
+require('./tests/extension_worker.cjs').loadWorker({
   chrome, WebSocket: Socket, URL, console: {log() {}, warn() {}}, setTimeout() {}, clearTimeout() {},
 });
 function status(url) {

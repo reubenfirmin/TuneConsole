@@ -8,15 +8,15 @@
       <th></th>
     </tr></thead>
     {% for o in pairs %}
-    {% set ay = o.playlist_a.ytm_playlist_id %}{% set by = o.playlist_b.ytm_playlist_id %}
+    {% set ay = o.playlist_a.scope_ref %}{% set by = o.playlist_b.scope_ref %}
     <tbody class="ov-row" data-a="{{ o.playlist_a.title|lower }}" data-b="{{ o.playlist_b.title|lower }}"
-           data-shared="{{ o.shared|length }}" data-ay="{{ ay }}" data-by="{{ by }}"
+           data-shared="{{ o.shared_count }}" data-ay="{{ ay }}" data-by="{{ by }}"
            x-data="{ open: false, mx: 0, my: 0 }">
       <tr>
         <td><span class="abx">A</span>{{ pllink(ay, o.playlist_a.title, o.count_a) }}</td>
         <td><span class="abx">B</span>{{ pllink(by, o.playlist_b.title, o.count_b) }}</td>
         <td>
-          <span class="mono">{{ o.shared|length }}</span> shared
+          <span class="mono">{{ o.shared_count }}</span> shared
           <span class="pid">{{ o.pct_a() }}% of A<br>{{ o.pct_b() }}% of B</span>
         </td>
         <td class="cell-actions">

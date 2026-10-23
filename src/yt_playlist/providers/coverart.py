@@ -42,6 +42,21 @@ class _CachedCover:
     url: str | None
     expires_at: float
     failures: int = 0
+    error: str = ""
+
+
+class _Retry(Exception):
+    def __init__(self, error, retry_in):
+        super().__init__(error)
+        self.retry_in = retry_in
+
+
+@dataclass(frozen=True)
+class CoverResult:
+    status: str                         # found, absent, retry
+    url: str | None = None
+    retry_in: float = 0
+    error: str = ""
 
 
 _cache: OrderedDict[str, _CachedCover] = OrderedDict()
@@ -83,22 +98,28 @@ def _release_cover(rid):
         cached = _cache.get(rid)
         if cached and time.monotonic() < cached.expires_at:
             _cache.move_to_end(rid)
+            if cached.failures:
+                net.record_probe_failure(_Retry(cached.error, cached.expires_at - time.monotonic()))
             return cached.url
 
         failures = 0
         ttl = _MISS_TTL_S
         url = None
+        error = ""
         try:
             data = _get_json(f"{_API}/release/{rid}")
             url = _front_url(data)
         except urllib.error.HTTPError as e:
-            _breaker.record(e)
+            _breaker.record() if e.code in (404, 400) else _breaker.record(e)
             if e.code not in (404, 400):
+                error = str(e)
                 failures = min((cached.failures if cached else 0) + 1, 5)
-                ttl = min(_ERROR_RETRY_S * 2 ** (failures - 1), _MAX_ERROR_RETRY_S)
+                ttl = max(min(_ERROR_RETRY_S * 2 ** (failures - 1), _MAX_ERROR_RETRY_S),
+                          net.retry_after(e, time.time()) - time.time())
                 logger.info("Cover Art Archive error for %s: %s; retrying in %ss", rid, e, ttl)
         except Exception as e:  # noqa: BLE001 - network/parse: degrade to no art
             _breaker.record(e)
+            error = str(e) or type(e).__name__
             failures = min((cached.failures if cached else 0) + 1, 5)
             ttl = min(_ERROR_RETRY_S * 2 ** (failures - 1), _MAX_ERROR_RETRY_S)
             logger.info("Cover Art Archive failed for %s: %s; retrying in %ss", rid, e, ttl)
@@ -108,7 +129,9 @@ def _release_cover(rid):
                 ttl = _COVER_TTL_S
 
         # Start the TTL after the response, not before a potentially slow network request.
-        _cache[rid] = _CachedCover(url, time.monotonic() + ttl, failures)
+        _cache[rid] = _CachedCover(url, time.monotonic() + ttl, failures, error)
+        if failures:
+            net.record_probe_failure(_Retry(error, ttl))
         _cache.move_to_end(rid)
         while len(_cache) > _CACHE_SIZE:
             _cache.popitem(last=False)
@@ -126,3 +149,21 @@ def front_cover(release_ids):
         if url:
             return url
     return None
+
+
+def lookup(release_ids):
+    """Retain the distinction between a confirmed miss and a deferred archive request."""
+    with net.probe_errors() as errors:
+        try:
+            url = front_cover(release_ids)
+        except Exception as exc:
+            net.record_probe_failure(exc)
+            url = None
+    if url:
+        return CoverResult("found", url)
+    if errors:
+        now = time.time()
+        delay = max([_ERROR_RETRY_S, *(getattr(e, "retry_in", 0) for e in errors),
+                     *(net.retry_after(e, now) - now for e in errors)])
+        return CoverResult("retry", retry_in=delay, error=str(errors[-1]))
+    return CoverResult("absent")

@@ -16,6 +16,18 @@ from yt_playlist.repos.base import Repo, synchronized
 
 class ModesRepo(Repo):
     @synchronized
+    def publish_generation(self, rows, retired):
+        """Apply prepared stable mode identities within the model publication transaction."""
+        if not self.conn.in_transaction:
+            raise RuntimeError('Mode publication requires an outer transaction')
+        self.conn.executemany(
+            'INSERT INTO taste_modes(mode_id,label,families,centroid,size,rep_keys,first_seen,last_seen,space,active) '
+            'VALUES (?,?,?,?,?,?,?,?,?,1) ON CONFLICT(mode_id) DO UPDATE SET '
+            'label=excluded.label,families=excluded.families,centroid=excluded.centroid,size=excluded.size,'
+            'rep_keys=excluded.rep_keys,last_seen=excluded.last_seen,space=excluded.space,active=1', rows)
+        self.conn.executemany('UPDATE taste_modes SET active=0 WHERE mode_id=?', [(mid,) for mid in retired])
+
+    @synchronized
     def list_modes(self, active_only=True) -> list[dict]:
         sql = "SELECT * FROM taste_modes"
         if active_only:
@@ -53,9 +65,11 @@ class ModesRepo(Repo):
                 "SELECT first_seen FROM taste_modes WHERE mode_id=?", (u["mode_id"],)).fetchone()
             first_seen = existing["first_seen"] if existing is not None else now
             self.conn.execute(
-                "INSERT OR REPLACE INTO taste_modes"
+                "INSERT INTO taste_modes"
                 "(mode_id, label, families, centroid, size, rep_keys, active, first_seen, last_seen, space) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?) ON CONFLICT(mode_id) DO UPDATE SET "
+                "label=excluded.label,families=excluded.families,centroid=excluded.centroid,"
+                "size=excluded.size,rep_keys=excluded.rep_keys,active=1,last_seen=excluded.last_seen,space=excluded.space",
                 (u["mode_id"], u["label"], fam, blob, int(u["size"]), reps, first_seen, now,
                  u.get("space") or ""))
         for mid in retired_ids:
@@ -121,10 +135,13 @@ class ModesRepo(Repo):
         Do not "fix" this by excluding generated playlists here. Every row in this table is, by
         construction, a play of a generated playlist. Quarantining it would delete the signal entirely.
         """
-        self.conn.execute(
-            "INSERT OR IGNORE INTO rec_mode_picks(playlist_id, mode_id, ranker, created_at) "
-            "VALUES (?, ?, ?, ?)", (int(playlist_id), int(mode_id), ranker, float(now)))
-        self.conn.commit()
+        with self.conn:
+            # A historical caller may only retain the local handle. Keep its context
+            # unknown; allocating future memberships must never reuse that handle.
+            self.conn.execute('INSERT OR IGNORE INTO playlist_membership_refs(id) VALUES (?)',(int(playlist_id),))
+            self.conn.execute(
+                "INSERT OR IGNORE INTO rec_mode_picks(playlist_id, mode_id, ranker, created_at) "
+                "VALUES (?, ?, ?, ?)", (int(playlist_id), int(mode_id), ranker, float(now)))
 
     @synchronized
     def epoch_started_at(self, epoch):
@@ -136,7 +153,7 @@ class ModesRepo(Repo):
 
     @synchronized
     def impression_counts(self, since=None, *, before=None) -> dict:
-        sql = "SELECT mode_id, COUNT(*) c FROM rec_mode_impressions WHERE 1=1"
+        sql = "SELECT mode_id, COUNT(*) c FROM rec_mode_impressions WHERE mode_id IS NOT NULL"
         args = []
         if since is not None:
             sql += " AND created_at >= ?"
@@ -149,7 +166,7 @@ class ModesRepo(Repo):
 
     @synchronized
     def pick_rows(self, since=None, *, before=None) -> list:
-        sql = "SELECT playlist_id, mode_id FROM rec_mode_picks WHERE 1=1"
+        sql = "SELECT playlist_id, mode_id FROM rec_mode_picks WHERE mode_id IS NOT NULL"
         args = []
         if since is not None:
             sql += " AND created_at >= ?"
@@ -168,20 +185,20 @@ class ModesRepo(Repo):
         Exits remain raw; skips/completions are classified at read time with the shared rules.
         Plays and exits are queried separately so joining them cannot multiply either count.
         """
-        cohort = "FROM rec_mode_picks mp JOIN playlists p ON p.id=mp.playlist_id "
+        cohort = "FROM rec_mode_picks mp JOIN playlist_membership_refs m ON m.id=mp.playlist_id JOIN playlist_scopes s ON s.ref=m.scope_ref "
         bounds = "(:since IS NULL OR mp.created_at>=:since)"
         args = {"since": since}
         rows = self.conn.execute(
-            "SELECT p.id, COUNT(pe.id) plays, MAX(pe.played_at) last_play " + cohort +
-            "LEFT JOIN play_events pe ON pe.playlist_ytm_id=p.ytm_playlist_id "
-            "AND pe.identity_id=p.identity_id AND pe.played_at>=mp.created_at "
-            f"WHERE {bounds} GROUP BY p.id", args).fetchall()
+            "SELECT mp.playlist_id id, COUNT(pe.id) plays, MAX(pe.played_at) last_play " + cohort +
+            "LEFT JOIN play_events pe ON pe.playlist_ytm_id=s.provider_id "
+            "AND pe.identity_id=m.identity_id AND pe.played_at>=mp.created_at "
+            f"WHERE {bounds} GROUP BY mp.playlist_id", args).fetchall()
         stats = {r["id"]: {"plays": r["plays"], "last_play": r["last_play"],
                             "skips": 0, "completions": 0} for r in rows}
         exits = self.conn.execute(
-            "SELECT p.id, pe.position, pe.duration " + cohort +
-            "JOIN player_events pe ON pe.playlist_ytm_id=p.ytm_playlist_id "
-            "AND pe.identity_id=p.identity_id AND pe.at>=mp.created_at "
+            "SELECT mp.playlist_id id, pe.position, pe.duration " + cohort +
+            "JOIN player_events pe ON pe.playlist_ytm_id=s.provider_id "
+            "AND pe.identity_id=m.identity_id AND pe.at>=mp.created_at "
             f"WHERE {bounds} AND pe.kind IN ('track_exit', 'bye')", args).fetchall()
         for event in exits:
             verdict = classify_exit(event["position"], event["duration"])
@@ -211,24 +228,3 @@ class ModesRepo(Repo):
             "WHERE m.active=1 AND (o.n IS NOT NULL OR p.n IS NOT NULL) "
             "ORDER BY updated_at DESC, m.mode_id").fetchall()
         return [dict(row) for row in rows]
-
-    @synchronized
-    def ranker_impression_counts(self, since=None) -> dict:
-        """#57 {ranker: impressions}; NULL (pre-#57 rows) counts as 'cosine'."""
-        sql = "SELECT COALESCE(ranker, 'cosine') r, COUNT(*) c FROM rec_mode_impressions"
-        args = []
-        if since is not None:
-            sql += " WHERE created_at >= ?"
-            args.append(float(since))
-        sql += " GROUP BY r"
-        return {row["r"]: row["c"] for row in self.conn.execute(sql, args).fetchall()}
-
-    @synchronized
-    def ranker_pick_rows(self, since=None) -> list:
-        """#57 [(playlist_id, ranker)]; NULL counts as 'cosine'."""
-        sql = "SELECT playlist_id, COALESCE(ranker, 'cosine') r FROM rec_mode_picks"
-        args = []
-        if since is not None:
-            sql += " WHERE created_at >= ?"
-            args.append(float(since))
-        return [(row["playlist_id"], row["r"]) for row in self.conn.execute(sql, args).fetchall()]

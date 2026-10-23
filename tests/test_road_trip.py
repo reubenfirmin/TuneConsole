@@ -2,21 +2,33 @@ from collections import Counter
 
 import pytest
 
-from yt_playlist.rec import journeys, road_trip
+from yt_playlist.rec import journeys, road_trip, road_trip_candidates as candidates
 from yt_playlist.rec.surfaces import ForYouItem
 from tests.conftest import FakeClient
 
 # Captured before the autouse no_network fixture stubs it out, for the one test that exercises the
 # real genre -> artists resolution rather than mocking past it.
-_real_genre_artists = road_trip.genre_artists
+_real_genre_artists = candidates.genre_artists
+
+
+@pytest.mark.parametrize("kind", ["artist", "genre"])
+def test_candidate_acquisition_failure_returns_empty_batch(monkeypatch, store, kind):
+    client = FakeClient()
+
+    def unavailable(*args, **kwargs):
+        raise OSError("provider unavailable")
+
+    monkeypatch.setattr(client, "search", unavailable)
+    batch = candidates.acquire_input(client, store, candidates.InputRequest(kind, "Unavailable", 8))
+    assert batch == candidates.CandidateBatch([], [])
 
 
 def test_road_trip_recipe_crud(store):
-    rid = store.save_road_trip_recipe(None, "Beach Run", 60, ["Tame Impala"], ["synthpop"],
+    rid = store.road_trip.save_road_trip_recipe(None, "Beach Run", 60, ["Tame Impala"], ["synthpop"],
                                        240, 1000.0, familiarity_pct=80)
     assert isinstance(rid, int)
 
-    recipes = store.list_road_trip_recipes()
+    recipes = store.road_trip.list_road_trip_recipes()
     assert len(recipes) == 1
     r = recipes[0]
     assert r == {"id": rid, "name": "Beach Run", "own_pct": 60, "artists": ["Tame Impala"],
@@ -25,13 +37,13 @@ def test_road_trip_recipe_crud(store):
                 "familiarity_pct": 80, "last_playlist_id": None, "created_at": 1000.0,
                 "updated_at": 1000.0}
 
-    got = store.get_road_trip_recipe(rid)
+    got = store.road_trip.get_road_trip_recipe(rid)
     assert got["name"] == "Beach Run"
-    assert store.get_road_trip_recipe(rid + 1) is None
+    assert store.road_trip.get_road_trip_recipe(rid + 1) is None
 
-    store.save_road_trip_recipe(rid, "Beach Run 2", 70, ["Tame Impala", "MGMT"], ["synthpop"],
+    store.road_trip.save_road_trip_recipe(rid, "Beach Run 2", 70, ["Tame Impala", "MGMT"], ["synthpop"],
                                 300, 2000.0)
-    updated = store.get_road_trip_recipe(rid)
+    updated = store.road_trip.get_road_trip_recipe(rid)
     assert updated["name"] == "Beach Run 2"
     assert updated["own_pct"] == 70
     assert updated["artists"] == ["Tame Impala", "MGMT"]
@@ -39,28 +51,28 @@ def test_road_trip_recipe_crud(store):
     assert updated["familiarity_pct"] == 50           # default when the caller doesn't pass one
     assert updated["updated_at"] == 2000.0
 
-    store.set_road_trip_last_playlist(rid, "PL_NEW_0")
-    assert store.get_road_trip_recipe(rid)["last_playlist_id"] == "PL_NEW_0"
+    store.road_trip.set_road_trip_last_playlist(rid, "PL_NEW_0")
+    assert store.road_trip.get_road_trip_recipe(rid)["last_playlist_id"] == "PL_NEW_0"
 
-    store.delete_road_trip_recipe(rid)
-    assert store.list_road_trip_recipes() == []
+    store.road_trip.delete_road_trip_recipe(rid)
+    assert store.road_trip.list_road_trip_recipes() == []
 
 
 def test_road_trip_draft_crud_and_recipe_delete_cascade(store):
-    rid = store.save_road_trip_recipe(None, "Beach Run", 60, [], [], 60, 1000.0)
-    assert store.get_road_trip_draft(rid) is None
-    assert store.latest_road_trip_draft() is None
+    rid = store.road_trip.save_road_trip_recipe(None, "Beach Run", 60, [], [], 60, 1000.0)
+    assert store.road_trip.get_road_trip_draft(rid) is None
+    assert store.road_trip.latest_road_trip_draft() is None
 
-    store.save_road_trip_draft(rid, {"picks": ["v1", "v2"], "seed": 7}, 1000.0)
-    assert store.get_road_trip_draft(rid) == {"picks": ["v1", "v2"], "seed": 7}
-    assert store.latest_road_trip_draft() == {"recipe_id": rid,
+    store.road_trip.save_road_trip_draft(rid, {"picks": ["v1", "v2"], "seed": 7}, 1000.0)
+    assert store.road_trip.get_road_trip_draft(rid) == {"picks": ["v1", "v2"], "seed": 7}
+    assert store.road_trip.latest_road_trip_draft() == {"recipe_id": rid,
                                               "state": {"picks": ["v1", "v2"], "seed": 7}}
 
-    store.save_road_trip_draft(rid, {"picks": ["v3"], "seed": 8}, 2000.0)     # upsert, not insert
-    assert store.get_road_trip_draft(rid)["picks"] == ["v3"]
+    store.road_trip.save_road_trip_draft(rid, {"picks": ["v3"], "seed": 8}, 2000.0)     # upsert, not insert
+    assert store.road_trip.get_road_trip_draft(rid)["picks"] == ["v3"]
 
-    store.delete_road_trip_recipe(rid)                # deleting the recipe takes its draft with it
-    assert store.get_road_trip_draft(rid) is None
+    store.road_trip.delete_road_trip_recipe(rid)                # deleting the recipe takes its draft with it
+    assert store.road_trip.get_road_trip_draft(rid) is None
 
 
 # --------------------------------------------------------------------------- pools
@@ -77,22 +89,22 @@ def no_network(monkeypatch):
     and a test that forgets one silently makes real network calls (it did).
 
     Popularity descends with the title length, so 'ArtistA Song 0' is the biggest hit."""
-    monkeypatch.setattr(road_trip, "_facts",
+    monkeypatch.setattr(candidates, "_facts",
                         lambda title, artist: {"popularity": 1000 - len(title), "year": 1995,
                                                "genre": "synthpop", "duration": 300})
-    monkeypatch.setattr(road_trip, "artist_genre", lambda store, artist: None)
-    monkeypatch.setattr(road_trip, "genre_artists",
+    monkeypatch.setattr(candidates, "artist_genre", lambda store, artist: None)
+    monkeypatch.setattr(candidates, "genre_artists",
                         lambda store, genre, decade=None, limit=12: [])
     return None
 
 
 def _library(monkeypatch, store, songs):
     """Stand in for the whole collection. `songs` are (key, video_id, title, artist, plays, liked)."""
-    monkeypatch.setattr(store, "library_songs", lambda: [
+    monkeypatch.setattr(store.rec_query, "library_songs", lambda: [
         {"key": k, "video_id": v, "title": ti, "artist": ar, "album": "Alb", "thumbnail": None,
          "duration": 300, "genre": "", "year": None, "liked": liked}
         for k, v, ti, ar, plays, liked in songs])
-    monkeypatch.setattr(store, "play_counts", lambda: {
+    monkeypatch.setattr(store.rec_query, "play_counts", lambda: {
         k: plays for k, v, ti, ar, plays, liked in songs})
 
 
@@ -104,32 +116,32 @@ def test_own_side_is_the_whole_collection_ranked_by_engagement(store, monkeypatc
         ("k_b", "v_b", "Favorite", "Artist B", 40, False),
         ("k_c", "v_c", "Liked But Unplayed", "Artist C", 0, True)])
 
-    pool = road_trip.own_candidates(store, 1000.0)
+    pool = candidates.own_candidates(store, 1000.0)
 
     assert {c["video_id"] for c in pool} == {"v_a", "v_b", "v_c"}
     assert all(c["source"] == "mine" for c in pool)
     by_id = {c["video_id"]: c for c in pool}
     assert by_id["v_b"]["fam"] > by_id["v_c"]["fam"] > by_id["v_a"]["fam"]
-    assert by_id["v_c"]["engagement"] == road_trip.LIKE_BONUS   # a like counts as listening
+    assert by_id["v_c"]["engagement"] == candidates.LIKE_BONUS   # a like counts as listening
 
 
 def test_own_side_honours_the_taste_models_exclusions(store, monkeypatch):
     _library(monkeypatch, store, [("k_a", "v_a", "Keep", "Artist A", 1, False),
                                   ("k_b", "v_b", "Dismissed", "Artist B", 1, False),
                                   ("k_c", "v_c", "Muted", "Muted Artist", 1, False)])
-    monkeypatch.setattr(store, "suppressed_keys", lambda surface, now: {"k_b"})
-    monkeypatch.setattr(store, "muted_artists", lambda: {"Muted Artist"})
+    monkeypatch.setattr(store.rec_model, "suppressed_keys", lambda surface, now: {"k_b"})
+    monkeypatch.setattr(store.rec_model, "muted_artists", lambda: {"Muted Artist"})
 
-    assert [c["video_id"] for c in road_trip.own_candidates(store, 1000.0)] == ["v_a"]
+    assert [c["video_id"] for c in candidates.own_candidates(store, 1000.0)] == ["v_a"]
 
 
 def test_own_side_honours_recipe_genre_blacklist(store, monkeypatch):
     _library(monkeypatch, store, [("k_a", "v_a", "Keep", "Artist A", 1, False),
                                   ("k_b", "v_b", "Blocked", "Artist B", 1, False)])
-    monkeypatch.setattr(store, "keys_in_genre_selection", lambda genres: {"k_b"})
+    monkeypatch.setattr(store.rec_query, "keys_in_genre_selection", lambda genres: {"k_b"})
 
     state = {"blacklist_genres": ["Metal"]}
-    assert [c["video_id"] for c in road_trip.own_candidates(store, 1000.0, state)] == ["v_a"]
+    assert [c["video_id"] for c in candidates.own_candidates(store, 1000.0, state)] == ["v_a"]
 
 
 def test_artist_songs_resolves_via_search_then_get_artist():
@@ -145,7 +157,7 @@ def test_artist_songs_resolves_via_search_then_get_artist():
              "album": {"name": "Lonerism", "id": "MPRE2"}},
         ]}}})
 
-    songs = road_trip._artist_songs(client, "Tame Impala")
+    songs = candidates._artist_songs(client, "Tame Impala")
 
     assert [s["video_id"] for s in songs] == ["v1", "v2"]
     assert songs[0]["artist"] == "Tame Impala"
@@ -155,7 +167,7 @@ def test_artist_songs_resolves_via_search_then_get_artist():
 
 
 def test_artist_songs_unresolvable_artist_returns_empty():
-    assert road_trip._artist_songs(FakeClient(search_results=[]), "Nobody Band") == []
+    assert candidates._artist_songs(FakeClient(search_results=[]), "Nobody Band") == []
 
 
 def test_genre_songs_keeps_the_search_term_as_the_genre():
@@ -164,7 +176,7 @@ def test_genre_songs_keeps_the_search_term_as_the_genre():
          "album": {"name": "Genre Alb"}, "duration_seconds": 210, "thumbnails": []},
     ])
 
-    songs = road_trip._genre_songs(client, "synthpop")
+    songs = candidates._genre_songs(client, "synthpop")
 
     assert songs == [{"video_id": "g1", "title": "Genre Hit", "artist": "Genre Artist",
                       "album": "Genre Alb", "thumbnail": None, "duration": 210,
@@ -175,15 +187,15 @@ def test_a_genre_resolves_to_its_top_artists_then_their_youtube_tracks(monkeypat
     """A genre input goes through the music databases, not a YouTube text search: ask who plays the
     genre, then ask YouTube for those artists' biggest tracks. Searching YouTube for a genre STRING
     returns mixes, karaoke and "top 100" uploads."""
-    monkeypatch.setattr(road_trip, "genre_artists",
+    monkeypatch.setattr(candidates, "genre_artists",
                         lambda store, genre, decade=None, limit=12: ["Weezer", "Pixies"])
-    monkeypatch.setattr(road_trip, "_artist_songs",
+    monkeypatch.setattr(candidates, "_artist_songs",
                         lambda client, name, limit=30: _fake_artist_songs(4)(None, name))
     searched = []
-    monkeypatch.setattr(road_trip, "_genre_songs",
+    monkeypatch.setattr(candidates, "_genre_songs",
                         lambda client, genre, limit=30: searched.append(genre) or [])
 
-    rows, related = road_trip.other_input_songs(None, "genre", "Alternative Rock", cap=8)
+    rows, related = candidates.other_input_songs(None, "genre", "Alternative Rock", cap=8)
 
     assert {r["artist"] for r in rows} == {"Weezer", "Pixies"}
     assert all(r["genre"] == "Alternative Rock" for r in rows)   # tagged with what brought them in
@@ -191,12 +203,12 @@ def test_a_genre_resolves_to_its_top_artists_then_their_youtube_tracks(monkeypat
 
 
 def test_a_genre_no_database_knows_falls_back_to_searching_youtube(monkeypatch):
-    monkeypatch.setattr(road_trip, "genre_artists", lambda store, genre, decade=None, limit=12: [])
-    monkeypatch.setattr(road_trip, "_genre_songs", lambda client, genre, limit=30: [
+    monkeypatch.setattr(candidates, "genre_artists", lambda store, genre, decade=None, limit=12: [])
+    monkeypatch.setattr(candidates, "_genre_songs", lambda client, genre, limit=30: [
         {"video_id": "g1", "title": "Hit", "artist": "Someone", "album": "", "thumbnail": None,
          "duration": 200, "genre": genre}])
 
-    rows, _ = road_trip.other_input_songs(None, "genre", "bagpipe funk", cap=8)
+    rows, _ = candidates.other_input_songs(None, "genre", "bagpipe funk", cap=8)
 
     assert [r["video_id"] for r in rows] == ["g1"]
 
@@ -217,12 +229,12 @@ def test_passenger_genre_grows_the_seed_artists_neighborhood_and_era(store, monk
                  "artists": [{"name": name}], "duration_seconds": 240}]},
                 "related": {"results": [{"title": n} for n in catalog[name][2]]}}, name
 
-    monkeypatch.setattr(road_trip, "_artist_page", page)
-    monkeypatch.setattr(road_trip, "_facts", lambda title, artist: {
+    monkeypatch.setattr(candidates, "_artist_page", page)
+    monkeypatch.setattr(candidates, "_facts", lambda title, artist: {
         "year": catalog[artist][0], "genre": catalog[artist][1], "popularity": 500, "duration": 240})
-    monkeypatch.setattr(road_trip, "artist_genre", lambda store, artist: catalog[artist][1])
-    monkeypatch.setattr(road_trip, "genre_artists", lambda *a, **kw: pytest.fail("Broad genre lookup"))
-    monkeypatch.setattr(road_trip, "_genre_songs", lambda *a, **kw: pytest.fail("Broad genre search"))
+    monkeypatch.setattr(candidates, "artist_genre", lambda store, artist: catalog[artist][1])
+    monkeypatch.setattr(candidates, "genre_artists", lambda *a, **kw: pytest.fail("Broad genre lookup"))
+    monkeypatch.setattr(candidates, "_genre_songs", lambda *a, **kw: pytest.fail("Broad genre search"))
 
     state = road_trip.build_draft(store, FakeClient(), _recipe(
         own_pct=0, artists=["Weezer", "Staind"], genres=["Alternative Rock"]), 1000, seed=7)
@@ -235,7 +247,7 @@ def test_passenger_genre_grows_the_seed_artists_neighborhood_and_era(store, monk
     # Older drafts can contain a broad genre pool. The next slider move replaces those results
     # with the same seed neighborhood, even if there are already enough generic tracks.
     for name in ("Unrelated", "Modern Revival"):
-        candidate = road_trip._candidate(name, name, name, "", None, 240, "theirs",
+        candidate = candidates._candidate(name, name, name, "", None, 240, "theirs",
                                          "Alternative Rock", catalog[name][0])
         candidate["input"] = "Alternative Rock"
         state["pool"].append(candidate)
@@ -273,11 +285,11 @@ def test_passenger_sliders_keep_each_seeds_genre_and_repair_old_assignments(stor
                  "artists": [{"name": name}], "duration_seconds": 240}]},
                 "related": {"results": [{"title": n} for n in catalog[name][1]]}}, name
 
-    monkeypatch.setattr(road_trip, "_artist_page", page)
-    monkeypatch.setattr(road_trip, "_facts", lambda title, artist: {"popularity": 500})
-    monkeypatch.setattr(road_trip, "artist_genre", lambda store, artist: catalog[artist][0])
-    monkeypatch.setattr(road_trip, "genre_artists", lambda *a, **kw: pytest.fail("Broad genre lookup"))
-    monkeypatch.setattr(road_trip, "_genre_songs", lambda *a, **kw: pytest.fail("Broad genre search"))
+    monkeypatch.setattr(candidates, "_artist_page", page)
+    monkeypatch.setattr(candidates, "_facts", lambda title, artist: {"popularity": 500})
+    monkeypatch.setattr(candidates, "artist_genre", lambda store, artist: catalog[artist][0])
+    monkeypatch.setattr(candidates, "genre_artists", lambda *a, **kw: pytest.fail("Broad genre lookup"))
+    monkeypatch.setattr(candidates, "_genre_songs", lambda *a, **kw: pytest.fail("Broad genre search"))
     state = road_trip.build_draft(store, FakeClient(), _recipe(
         own_pct=0, artists=seeds, genres=["alt rock", "indie rock"]), 1000, seed=7)
     expected = {"Alternative Rock": ["Weezer", "Staind"], "Indie Rock": [seeds[1]]}
@@ -287,12 +299,12 @@ def test_passenger_sliders_keep_each_seeds_genre_and_repair_old_assignments(stor
     # Reproduce cached cross-family cluster assignments and a removed artist's lingering genre.
     for candidate in state["pool"]:
         candidate["cluster_genre"] = "Alternative Rock"
-    extra = road_trip._candidate("old-peer", "Old peer track", "Alt Peer", "", None, 240,
+    extra = candidates._candidate("old-peer", "Old peer track", "Alt Peer", "", None, 240,
                                  "theirs", "Alternative Rock", None)
     extra.update(cluster_genre="Post-Punk", input="Post-Punk", anchors=seeds)
     state["pool"].append(extra)
     for name, origin in (("Ben Folds", "Ben Folds Five"), ("Generic Singer", "Singer-Songwriter")):
-        candidate = road_trip._candidate(name, name, name, "", None, 240,
+        candidate = candidates._candidate(name, name, name, "", None, 240,
                                          "theirs", "Singer-Songwriter", None)
         candidate["input"] = origin
         state["pool"].append(candidate)
@@ -337,7 +349,7 @@ def test_an_explicit_passenger_genre_keeps_its_origin_when_widened(store, monkey
         return ([{"video_id": f"post-{len(calls)}", "title": "Post song", "artist": "Post Band",
                   "album": "", "thumbnail": None, "duration": 300, "genre": "Post-Punk"}], [])
 
-    monkeypatch.setattr(road_trip, "other_input_songs", songs)
+    monkeypatch.setattr(candidates, "other_input_songs", songs)
     road_trip.add_other_input(state, store, FakeClient(), {"kind": "genre", "name": "post-rock"})
     road_trip.finish_draft(state, store, 1000)
     assert state["axes"]["theirs"][0]["artists"] == []
@@ -358,8 +370,8 @@ def test_an_explicit_passenger_genre_keeps_its_origin_when_widened(store, monkey
 
 
 def test_genre_artists_prefers_lastfm_and_uses_musicbrainz_for_a_decade(monkeypatch):
-    monkeypatch.setattr(road_trip.lastfm, "api_key", lambda store=None: "k")
-    monkeypatch.setattr(road_trip.lastfm, "tag_top_artists",
+    monkeypatch.setattr(candidates.lastfm, "api_key", lambda store=None: "k")
+    monkeypatch.setattr(candidates.lastfm, "tag_top_artists",
                         lambda tag, key, limit=25: ["Weezer", "Pixies"])
     mb_calls = []
 
@@ -367,13 +379,13 @@ def test_genre_artists_prefers_lastfm_and_uses_musicbrainz_for_a_decade(monkeypa
         mb_calls.append((tag, decade))
         return ["Pixies", "Interpol", "Various Artists"] if decade else ["Filler"]
 
-    monkeypatch.setattr(road_trip.musicbrainz, "tag_artists", mb)
-    road_trip._GENRE_ARTIST_CACHE.clear()
+    monkeypatch.setattr(candidates.musicbrainz, "tag_artists", mb)
+    candidates._GENRE_ARTIST_CACHE.clear()
 
     assert _real_genre_artists(None, "Alternative Rock") == ["Weezer", "Pixies"]
     assert mb_calls == []                          # Last.fm answered; no need to ask further
 
-    road_trip._GENRE_ARTIST_CACHE.clear()
+    candidates._GENRE_ARTIST_CACHE.clear()
     got = _real_genre_artists(None, "Alternative Rock", decade="2000")
 
     assert mb_calls == [("Alternative Rock", "2000")]   # only MB can filter on a decade
@@ -383,55 +395,25 @@ def test_genre_artists_prefers_lastfm_and_uses_musicbrainz_for_a_decade(monkeypa
 
 
 def _fake_artist_songs(count, prefix="ArtistA"):
-    def fake(client_, name, limit=road_trip.ARTIST_SONGS_LIMIT):
+    def fake(client_, name, limit=candidates.ARTIST_SONGS_LIMIT):
         return [{"video_id": f"{name}_{i}", "title": f"{name} Song {i}", "artist": name,
                  "album": "", "thumbnail": None, "duration": 300, "genre": ""}
                 for i in range(count)]
     return fake
 
 
-def test_build_other_pool_cap_scales_with_demand(monkeypatch):
+def test_artist_input_cap_scales_with_demand(monkeypatch):
     """A single named artist must be able to fill their whole half. A fixed per-artist cap is what
     made a 50% "theirs" recipe come back almost entirely "mine"."""
-    monkeypatch.setattr(road_trip, "_page_songs",
+    monkeypatch.setattr(candidates, "_page_songs",
                         lambda page, name, limit=30: _fake_artist_songs(25)(None, name))
-    monkeypatch.setattr(road_trip, "_artist_page", lambda client, name: ({}, "UC1"))
+    monkeypatch.setattr(candidates, "_artist_page", lambda client, name: ({}, "UC1"))
 
-    pool = road_trip.build_other_pool(FakeClient(), ["ArtistA"], [], limit=20)
+    cap = candidates.other_cap(['ArtistA'], [], limit=20)
+    batch = candidates.acquire_input(FakeClient(), None, candidates.InputRequest('artist', 'ArtistA', cap))
 
-    assert len(pool) == 20
-    assert all(t["source"] == "theirs" for t in pool)
-
-
-def test_build_other_pool_dedupes_and_spreads_across_inputs(monkeypatch):
-    monkeypatch.setattr(road_trip, "_page_songs",
-                        lambda page, name, limit=30: _fake_artist_songs(6)(None, name))
-    monkeypatch.setattr(road_trip, "_artist_page", lambda client, name: ({}, "UC1"))
-    monkeypatch.setattr(road_trip, "_genre_songs", lambda client, genre, limit=30: [
-        {"video_id": "ArtistA_0", "title": "ArtistA Song 0", "artist": "ArtistA",     # a dup
-         "album": "", "thumbnail": None, "duration": 300, "genre": genre},
-        {"video_id": "syn_1", "title": "Synth Song", "artist": "Synth Band", "album": "",
-         "thumbnail": None, "duration": 300, "genre": genre}])
-
-    pool = road_trip.build_other_pool(FakeClient(), ["ArtistA", "ArtistB"], ["synthpop"], limit=12)
-
-    ids = [t["video_id"] for t in pool]
-    assert len(ids) == len(set(ids))
-    assert ids.count("ArtistA_0") == 1
-    assert {"ArtistA", "ArtistB", "Synth Band"} <= {t["artist"] for t in pool}
-
-
-def test_build_other_pool_widens_to_related_artists_when_thin(monkeypatch):
-    page = {"related": {"results": [{"title": "Cousin Band"}]}}
-    monkeypatch.setattr(road_trip, "_artist_page", lambda client, name: (page, "UC1"))
-    monkeypatch.setattr(road_trip, "_page_songs",
-                        lambda p, name, limit=30: _fake_artist_songs(2)(None, name))
-    monkeypatch.setattr(road_trip, "_artist_songs",
-                        lambda client, name, limit=30: _fake_artist_songs(6)(None, name))
-
-    pool = road_trip.build_other_pool(FakeClient(), ["ArtistA"], [], limit=8)
-
-    assert "Cousin Band" in {t["artist"] for t in pool}
+    assert len(batch.rows) == 20
+    assert {row['artist'] for row in batch.rows} == {'ArtistA'}
 
 
 # --------------------------------------------------------------------------- draft picking
@@ -452,8 +434,8 @@ def _stub_pools(monkeypatch, store=None, own_count=40, other_count=40, own_plays
               "genre": own_genre(i), "year": own_year(i), "liked": False}
              for i in range(own_count)]
     if store is not None:
-        monkeypatch.setattr(store, "library_songs", lambda: songs)
-        monkeypatch.setattr(store, "play_counts",
+        monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
+        monkeypatch.setattr(store.rec_query, "play_counts",
                             lambda: {f"k{i}": (own_plays or (lambda i: i))(i) for i in range(own_count)})
 
     def songs_fn(client, kind, name, cap, store=None, decade=None):
@@ -462,8 +444,8 @@ def _stub_pools(monkeypatch, store=None, own_count=40, other_count=40, own_plays
                 for i in range(other_count)]
         return rows[:cap], []
 
-    monkeypatch.setattr(road_trip, "other_input_songs", songs_fn)
-    monkeypatch.setattr(road_trip, "_facts",
+    monkeypatch.setattr(candidates, "other_input_songs", songs_fn)
+    monkeypatch.setattr(candidates, "_facts",
                         lambda title, artist: {"popularity": 900 - int(title.split()[-1]),
                                                "year": 1980, "genre": "synthpop", "duration": 300})
 
@@ -478,6 +460,32 @@ def test_build_draft_honours_the_requested_mix(store, monkeypatch):
     assert stats["own_count"] == stats["their_count"] == 6      # 60 min of 5-minute tracks
     assert stats["short"] == {}
     assert 55 <= stats["minutes"] <= 65
+
+
+@pytest.mark.parametrize("library_at_acquisition", [False, True])
+def test_passenger_overlap_uses_current_library_once(store, monkeypatch, library_at_acquisition):
+    library = [{"key": "shared|guest artist", "video_id": "shared-video", "title": "Shared",
+                "artist": "Guest Artist", "album": "Album", "thumbnail": None, "duration": 240,
+                "genre": "Rock", "year": 1995, "liked": False}]
+    songs = list(library) if library_at_acquisition else []
+    monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
+    monkeypatch.setattr(candidates, "other_input_songs", lambda *args, **kwargs: ([{
+        "video_id": "shared-video", "title": "Shared", "artist": "Guest Artist", "album": "Album",
+        "thumbnail": None, "duration": 240, "genre": "Rock"}], []))
+    state = road_trip.start_draft(store, _recipe(artists=["Guest Artist"], target_minutes=8), 1000, seed=7)
+    item = state["pending"].pop(0)
+    road_trip.add_other_input(state, store, FakeClient(), item)
+    if not library_at_acquisition:
+        songs.extend(library)  # A sync/save after acquisition changes the owner at the next pick.
+    state["building"] = False
+    road_trip.repick(state, store, 1000)
+    rows = road_trip.draft_tracks(state)
+    assert [row["video_id"] for row in rows] == ["shared-video"]
+    assert rows[0]["source"] == "mine" and rows[0]["mix_source"] == "blend"
+    assert state["stats"]["minutes"] == state["stats"]["own_minutes"] == state["stats"]["blend_minutes"] == 4
+    assert state["stats"]["own_count"] == state["stats"]["blend_count"] == 1
+    assert state["stats"]["their_count"] == state["stats"]["their_minutes"] == 0
+    assert sum(state["stats"]["mix_targets"].values()) == len(rows)
 
 
 def test_default_mix_identifies_yours_theirs_and_blend_through_swaps_and_reload(store, monkeypatch):
@@ -546,7 +554,7 @@ def test_blend_reserves_song_slots_with_library_genre_and_era_targets(
         # Blend songs take ten minutes; Theirs takes three. The source percentages still refer
         # to song counts, and Yours' absent genres/years must not consume Blend's reserved slots.
         durations = {"Rock": 600, "Pop": 240, "Trance": 480, "Deep House": 360}
-        for candidate in store.library_songs():
+        for candidate in store.rec_query.library_songs():
             candidate["duration"] = durations[candidate["genre"]]
         for candidate in state["pool"]:
             candidate["duration"] = 180
@@ -687,8 +695,8 @@ def test_asking_for_more_of_a_genre_than_the_pool_has_goes_and_finds_it(store, m
         return ([{"video_id": f"w{i}", "title": f"Wide {i}", "artist": f"Wide Artist {i}",
                   "album": "", "thumbnail": None, "duration": 300,
                   "genre": "synthpop" if i % 2 == 0 else "polka"} for i in range(6)], [])
-    monkeypatch.setattr(road_trip, "other_input_songs", songs)
-    monkeypatch.setattr(road_trip, "_facts", lambda t, a: {"popularity": 500, "year": 1985,
+    monkeypatch.setattr(candidates, "other_input_songs", songs)
+    monkeypatch.setattr(candidates, "_facts", lambda t, a: {"popularity": 500, "year": 1985,
                                                            "genre": "synthpop" if "0" in t or "2" in t
                                                            or "4" in t else "polka", "duration": 300})
     while state["pending"]:
@@ -785,7 +793,7 @@ def test_named_artists_lead_each_genre_with_related_tracks_filling_the_rest(stor
         catalog += [(f"{genre} Peer {i}", 4, 1) for i in range(12)]
         for name, count, score in catalog:
             for i in range(count):
-                candidate = road_trip._candidate(f"{name}-{i}", f"Song {i}", name, "", None,
+                candidate = candidates._candidate(f"{name}-{i}", f"Song {i}", name, "", None,
                                                  300, "theirs", genre, 1995)
                 candidate["score"] = score
                 state["pool"].append(candidate)
@@ -870,9 +878,9 @@ def _mixed_library(monkeypatch, store, rock=4, other=36):
     songs += [{"key": f"kp{i}", "video_id": f"p{i}", "title": f"Pop {i}",
                "artist": f"Pop Artist {i}", "album": "", "thumbnail": None, "duration": 300,
                "genre": "Pop", "year": 2000, "liked": False} for i in range(other)]
-    monkeypatch.setattr(store, "library_songs", lambda: songs)
-    monkeypatch.setattr(store, "play_counts", lambda: {s["key"]: i for i, s in enumerate(songs)})
-    monkeypatch.setattr(road_trip, "other_input_songs", lambda *a, **k: ([], []))
+    monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
+    monkeypatch.setattr(store.rec_query, "play_counts", lambda: {s["key"]: i for i, s in enumerate(songs)})
+    monkeypatch.setattr(candidates, "other_input_songs", lambda *a, **k: ([], []))
 
 
 def _genre_share(state, genre):
@@ -925,10 +933,10 @@ def test_a_barely_played_song_is_still_reachable_when_its_genre_is_asked_for(sto
 def test_one_genre_gets_one_bar_whatever_spelled_it(store, monkeypatch):
     """The same genre arrives as "Alternative Rock" (Last.fm), "alternative rock" (typed into the
     recipe) and "ALT ROCK". Three bars would each hold a quota the other two ignore."""
-    assert (road_trip._canon_genre("alternative rock") == road_trip._canon_genre("ALT ROCK")
-            == road_trip._canon_genre("Alternative Rock") == "Alternative Rock")
-    assert road_trip._canon_genre("bagpipe funk") == "Bagpipe Funk"    # unknown: just tidied
-    assert road_trip._canon_genre("  ") == ""
+    assert (candidates._canon_genre("alternative rock") == candidates._canon_genre("ALT ROCK")
+            == candidates._canon_genre("Alternative Rock") == "Alternative Rock")
+    assert candidates._canon_genre("bagpipe funk") == "Bagpipe Funk"    # unknown: just tidied
+    assert candidates._canon_genre("  ") == ""
 
 
 def test_a_bar_the_pool_can_no_longer_fill_goes_away(store, monkeypatch):

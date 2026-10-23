@@ -7,7 +7,6 @@ from collections import Counter
 from yt_playlist.util import genre_map
 from yt_playlist.rec import arc_energy, embed, journeys, rec_params, transient
 from yt_playlist.rec.ordering import _field
-from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.rec.taste_analysis import era_distribution, taste_breadth
 
 
@@ -62,13 +61,14 @@ def theme_counts(store, items):
             # untagged tracks by artists you already own - and an artist's genre is a fair thing to
             # attribute to their song, where inventing one wouldn't be.
             if by_artist is None:
-                by_artist = store.artist_genre_years()
+                by_artist = store.rec_query.artist_genre_years_for(
+                    [_field(item, 'artist') or '' for item in items if not _field(item, 'genre')])
             g = (by_artist.get(_field(it, "artist") or "") or {}).get("genre") or ""
         if g:
             genres[g.strip().lower()] += 1
     # Decades come from the library, except for tracks that aren't IN the library: the Fresh card's
     # proposals carry their own year, and are the whole reason that fallback exists.
-    from_library = RecDao(store).track_decades(keys)
+    from_library = store.rec_query.track_decades(keys)
     decades = Counter()
     for it in items:
         own = _field(it, "year")
@@ -131,7 +131,7 @@ def pool_facets(store, items, min_tracks=3):
     return _shares(fams), _shares(eras)
 
 
-def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None) -> dict:
+def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None, leans=None) -> dict:
     """Roll a per-playlist theme. Preference-weighted by your play distribution × permanent axis
     weights × the live transient facet leans, so common facets come up often, a muted facet never
     rolls, and a fresh 'less house' makes house roll less in the very next generation.
@@ -147,8 +147,9 @@ def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None) -> di
     preference, not a rule: if it would leave nothing to roll, the facet rolls unrestricted."""
     rng = random.Random(seed)
     avoid = avoid or {}
-    weights = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-    leans = transient.facet_leans(store, now) if now is not None else {}
+    weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
+    if leans is None:
+        leans = transient.facet_leans(store, now) if now is not None else {}
     fgain = rec_params.get_param(store, "facet_gain")
     fmin = rec_params.get_param(store, "facet_mult_min")
     fmax = rec_params.get_param(store, "facet_mult_max")
@@ -173,9 +174,10 @@ def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None) -> di
                 return k
         return items[-1][0]
 
-    genre_dist, era_dist = dists or (None, None)
-    genre = pick(genre_dist or taste_breadth(store)["families"], "genre")
-    era = pick(era_dist or dict(era_distribution(store)), "era")
+    genre_dist, era_dist = dists if dists is not None else (taste_breadth(store)["families"],
+                                                           dict(era_distribution(store)))
+    genre = pick(genre_dist, "genre")
+    era = pick(era_dist, "era")
     # Fresh playlists are unowned proposals with no plays/recency, so data-dependent journeys
     # (rediscovery, deep dive, eras…) have no signal to order by. Keep them a straight shuffle.
     journey = "shuffle" if model == "fresh" else (pick(dict.fromkeys(journeys.JOURNEYS, 1.0), "journey") or "shuffle")
@@ -201,10 +203,10 @@ def cluster_recipe(store, keep_keys, seed_labels=(), allow_families=(), journey=
     cluster IS. Returns (recipe, ordered_keys); ordering is deterministic so a re-save lands the same."""
     journey = journey if journey in journeys.JOURNEYS else "energy_arc"
     keys = [k for k in dict.fromkeys(keep_keys) if k]
-    dao = RecDao(store)
+    dao = store.rec_query
     genres, decades = dao.track_genres(keys), dao.track_decades(keys)
-    lastp, plays = dao.track_last_played(keys), store.play_counts()
-    meta = store.tracks_by_keys(keys)
+    lastp, plays = dao.track_last_played(keys), store.rec_query.play_counts()
+    meta = store.rec_query.tracks_by_keys(keys)
     arc = arc_energy.arc_energies(keys, genres, dao.track_audio_features())   # real-audio energy (#37)
     fam_count, era_count = {}, {}
     for k in keys:
@@ -250,7 +252,7 @@ def theme_filter(store, items, facets, limit=None):
     if not fam_want and not era_want:
         return list(items)
     keys = [k for k in (_field(i, "key") or "" for i in items) if k]
-    dao = RecDao(store)
+    dao = store.rec_query
     genres, decades = dao.track_genres(keys), dao.track_decades(keys)
 
     def facets_of(i):
@@ -268,10 +270,3 @@ def theme_filter(store, items, facets, limit=None):
     miss = [i for i in items if not matches(i)]
     out = hit + miss
     return out[:limit] if limit else out
-
-
-def versioned_title(store, prefix) -> str:
-    """'{prefix} #{n}', where n increments over existing playlists sharing that prefix, so every
-    regenerate of a type that day gets its own version (e.g. 'Fresh songs - June 21 2026 #2')."""
-    n = 1 + sum(1 for p in store.get_playlists() if p.title.startswith(prefix))
-    return f"{prefix} #{n}"

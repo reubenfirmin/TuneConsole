@@ -11,13 +11,15 @@ import json
 import math
 
 import numpy as np
+from scipy.sparse import csr_array
 
-from yt_playlist.util import genre_catalog, genre_map
+from yt_playlist.core.activity import check_stopping
+from yt_playlist.rec.pair_stream import PairStream
+from yt_playlist.util import genre_map
 from yt_playlist.rec import rec_params
-from yt_playlist.rec.rec_dao import RecDao
 
-# Default embedding dimensionality. 48 is the recall@k-tuned default for manual builds; Auto-tune
-# (eval_recs) may override it via the `rec_dim` setting. Not user-exposed (see rec_params docstring).
+# Default embedding dimensionality. Automatic model selection may override it through `rec_dim`.
+# Not user-exposed (see rec_params docstring).
 DIM = 48
 # A truncated SVD needs more tracks than output dims to be well-posed; require a small margin above
 # `dim` so the randomised solver has rank to work with (below this we return an empty model).
@@ -33,6 +35,8 @@ _NORM_EPS = 1e-9
 _NEG_SAMPLE_SMOOTH = 0.75
 _INIT_SCALE = 0.01
 _SGNS_BATCH = 2048
+# Bound temporary basket incidence storage and keep cancellation responsive during accumulation.
+_COOC_BASKET_BATCH = 256
 
 
 def _normalize(v):
@@ -45,11 +49,11 @@ def _normalize(v):
 def build_vectors(store, dim=DIM):
     """Return (keys, V), L2-normalised per-track embeddings. Method ('svd' default, or 'item2vec')
     comes from the recall@k-tuned `rec_embed_method` setting."""
-    baskets = store.rec_baskets()
+    baskets = store.rec_query.rec_baskets()
     return build_vectors_from_baskets(
         baskets, dim=dim,
-        method=store.get_setting("rec_embed_method") or "svd",
-        weights=_cooc_weights(store) if store.get_setting("rec_cooc_weighting") == "1" else None,
+        method=store.settings.get_setting("rec_embed_method") or "svd",
+        weights=_cooc_weights(store) if store.settings.get_setting("rec_cooc_weighting") == "1" else None,
     )
 
 
@@ -59,6 +63,7 @@ def build_vectors_from_baskets(baskets, dim=DIM, method="svd", weights=None):
     The offline evaluator uses this seam to fit an as-of model.  Keeping the vectors in memory is
     important: a backtest must neither read the current persisted vectors nor replace the live model.
     """
+    check_stopping()
     keys = sorted({k for b in baskets for k in b})
     if len(keys) < dim + _MIN_VOCAB_MARGIN:
         return [], np.zeros((0, dim), dtype=np.float32)
@@ -74,13 +79,13 @@ def _cooc_weights(store):
     Recency weighting is a natural extension; playcount is the signal available without a history join.
 
     VERDICT (measured 2026-06-26 on the real library: 4303 vectors, ~5.7 days of retained history): this
-    does NOT help, so `rec_cooc_weighting` ships OFF by default. A/B'd via eval_recs.cooc_weighting_ab on
+    does NOT help, so `rec_cooc_weighting` ships OFF by default. The retired manual harness compared
     temporal_recall (predict-your-next-plays): binary membership beat or tied playcount-weighting at every
     holdout window tested (0.5d..3d; deltas -0.045 .. 0.000, weighting never ahead). In-sample recall@k
     slightly favored weighting (0.768 -> 0.777), but that is exactly the overfit-to-heavy-tracks artifact
     temporal_recall is there to expose. Only flip the setting on if a future re-run on more retained
-    history reverses this; the toggle and harness are kept so that re-test is one call."""
-    return {k: 1.0 + math.log1p(c) for k, c in store.play_counts().items() if c}
+    history reverses this using isolated candidate fitting, without mutating the serving model."""
+    return {k: 1.0 + math.log1p(c) for k, c in store.rec_query.play_counts().items() if c}
 
 
 def _cooc_matrix(baskets, keys, weights=None):
@@ -91,45 +96,64 @@ def _cooc_matrix(baskets, keys, weights=None):
     n = len(keys)
     idx = {k: i for i, k in enumerate(keys)}
     g = None if weights is None else np.array([float(weights.get(k, 1.0)) for k in keys])
-    C = np.zeros((n, n), dtype=np.float64)
-    for b in baskets:
-        ii = [idx[k] for k in b]
-        w = 1.0 / (len(ii) - 1)
-        for a in range(len(ii)):
-            ia = ii[a]
-            for c in range(a + 1, len(ii)):
-                ic = ii[c]
-                pw = w if g is None else w * g[ia] * g[ic]
-                C[ia, ic] += pw
-                C[ic, ia] += pw
+    C = csr_array((n, n), dtype=np.float64)
+    for start in range(0, len(baskets), _COOC_BASKET_BATCH):
+        check_stopping()
+        indices, indptr, gains = [], [0], []
+        for b in baskets[start:start + _COOC_BASKET_BATCH]:
+            check_stopping()
+            ii = [idx[k] for k in dict.fromkeys(b)]
+            if len(ii) < 2:
+                continue
+            indices.extend(ii)
+            indptr.append(len(indices))
+            gains.append(1.0 / (len(ii) - 1))
+        if not gains:
+            continue
+        incidence = csr_array((np.ones(len(indices)), np.asarray(indices, dtype=np.int64),
+                               np.asarray(indptr, dtype=np.int64)), shape=(len(gains), n))
+        block = (incidence.T @ incidence.multiply(np.asarray(gains)[:, None])).tocsr()
+        block.setdiag(0)
+        block.eliminate_zeros()
+        C = C + block
+    check_stopping()
+    if g is not None:
+        C = C.multiply(g[:, None]).multiply(g[None, :]).tocsr()
+        C.eliminate_zeros()
     return C
 
 
+def _positive_pmi(C):
+    """PPMI has no entries where co-occurrence is zero; never form the dense marginal product."""
+    total = float(C.sum())
+    if total <= 0:
+        return csr_array(C.shape, dtype=np.float64)
+    row = np.asarray(C.sum(axis=1)).ravel()
+    entries = C.tocoo(copy=False)
+    values = np.maximum(np.log((entries.data / row[entries.row])
+                               * (total / row[entries.col])), 0.0)
+    ppmi = csr_array((values, (entries.row, entries.col)), shape=C.shape)
+    ppmi.eliminate_zeros()
+    return ppmi
+
+
 def _svd(baskets, keys, dim, weights=None):
-    """PPMI co-occurrence + randomised truncated SVD (numpy only). #38 §4c: optional per-track
+    """Sparse PPMI + the existing randomised truncated SVD. #38 §4c: optional per-track
     co-occurrence weighting via `weights` (None = binary membership, the default)."""
     n = len(keys)
-    C = _cooc_matrix(baskets, keys, weights)
-    tot = C.sum()
-    if tot <= 0:
+    ppmi = _positive_pmi(_cooc_matrix(baskets, keys, weights))
+    if not ppmi.nnz:
         return [], np.zeros((0, dim), dtype=np.float32)
-    # Positive PMI: log( P(i,j) / [P(i)P(j)] ), floored at 0. P is the joint (C/tot); `exp` is the
-    # independence expectation (outer product of marginals). PPMI keeps only above-chance co-occurrence
-    # (negative PMI is unreliable on sparse counts), giving the SVD a denser, better-conditioned input.
-    row = C.sum(1)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        P = C / tot                                      # joint P(i,j)
-        exp = np.outer(row, row) / (tot * tot)           # independence expectation P(i)P(j)
-        # ratio = P(i,j) / [P(i)P(j)] where both are defined, else 1.0 so its log floors to 0.
-        ratio = np.where((P > 0) & (exp > 0), P / np.where(exp > 0, exp, 1.0), 1.0)
-        ppmi = np.maximum(np.log(ratio), 0.0)            # PPMI: keep only above-chance co-occurrence
     # Randomised truncated SVD (Halko 2011): project PPMI through a Gaussian sketch of dim+oversample
-    # columns, orthonormalise (QR), then do an exact small SVD in that subspace. O(n^2·dim) and numpy-
-    # only, vs a full dense SVD. Fixed seed → identical vectors across rebuilds when the data is unchanged.
+    # columns, orthonormalise (QR), then do an exact small SVD in that subspace. Only n-by-sketch
+    # working arrays are dense. Preserve the original sketch width for small libraries too.
     rng = np.random.default_rng(0)
     om = rng.standard_normal((n, dim + _SVD_OVERSAMPLE))
+    check_stopping()
     Q, _ = np.linalg.qr(ppmi @ om)
-    Ub, S, _ = np.linalg.svd(Q.T @ ppmi, full_matrices=False)
+    check_stopping()
+    Ub, S, _ = np.linalg.svd((ppmi.T @ Q).T, full_matrices=False)
+    check_stopping()
     V = (Q @ Ub)[:, :dim] * np.sqrt(S[:dim])           # project back into track space, scale by sqrt(singular value)
     V /= np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS
     return keys, V.astype(np.float32)
@@ -153,22 +177,13 @@ def _item2vec(baskets, keys, dim, epochs=5, neg=5, lr=0.025, seed=0):
     """
     rng = np.random.default_rng(seed)
     n = len(keys)
-    idx = {k: i for i, k in enumerate(keys)}
-    pairs = []
-    for b in baskets:
-        ii = [idx[k] for k in b]
-        for a in range(len(ii)):
-            for c in range(len(ii)):
-                if a != c:
-                    pairs.append((ii[a], ii[c]))
-    if not pairs:
+    pairs = PairStream(baskets, keys)
+    if not pairs.count:
         return keys, np.zeros((n, dim), dtype=np.float32)
-    pairs = np.asarray(pairs, dtype=np.int64)
     # Negative-sampling distribution, smoothed by the ^0.75 exponent from word2vec (Mikolov 2013):
     # flattens the unigram frequencies so popular tracks are still over-sampled as negatives but don't
     # swamp the long tail. +1.0 keeps every track sampleable.
-    counts = np.bincount(pairs[:, 1], minlength=n).astype(np.float64) + 1.0
-    pdist = counts ** _NEG_SAMPLE_SMOOTH
+    pdist = (pairs.context_counts + 1.0) ** _NEG_SAMPLE_SMOOTH
     pdist /= pdist.sum()
     # Small random init (standard SGNS): break symmetry while keeping initial dot-products near 0 so
     # early sigmoids sit in their linear region. Batch the pair stream for vectorised SGD updates.
@@ -176,11 +191,9 @@ def _item2vec(baskets, keys, dim, epochs=5, neg=5, lr=0.025, seed=0):
     Cm = rng.standard_normal((n, dim)) * _INIT_SCALE
     bs = _SGNS_BATCH
     for _ in range(epochs):
-        perm = rng.permutation(len(pairs))
-        for s in range(0, len(pairs), bs):
-            bp = pairs[perm[s:s + bs]]
-            ci, cj = bp[:, 0], bp[:, 1]
-            m = len(bp)
+        for ci, cj in pairs.batches(rng, bs):
+            check_stopping()
+            m = len(ci)
             negs = rng.choice(n, size=(m, neg), p=pdist)
             wi = W[ci]                                   # (m, dim) center vectors for this batch
             gp = (_sigmoid((wi * Cm[cj]).sum(1)) - 1.0)[:, None]          # positive grad: (m,1)
@@ -194,30 +207,26 @@ def _item2vec(baskets, keys, dim, epochs=5, neg=5, lr=0.025, seed=0):
     return keys, V.astype(np.float32)
 
 
-def build_and_store(store, dim=None) -> int:
-    """Build embeddings and persist them. Returns the number of tracks embedded.
-
-    dim defaults to the recall@k-tuned `rec_dim` setting (or DIM if unset/untuned)."""
-    if dim is None:
-        dim = int(store.get_setting("rec_dim") or DIM)
-    keys, V = build_vectors(store, dim)
-    store.replace_rec_vectors([(k, V[i].tobytes()) for i, k in enumerate(keys)])
-    return len(keys)
-
-
 def _load_vector_rows(rows):
     """Unpack persisted (key, float32-bytes) rows into (keys, V, idx); ([], None, {}) when empty.
     Shared by the collaborative, content, and discovered-content vector loaders."""
     if not rows:
         return [], None, {}
+    check_stopping()
     keys = [k for k, _ in rows]
-    V = np.stack([np.frombuffer(v, dtype=np.float32) for _, v in rows])
+    vectors = []
+    for i, (_, vector) in enumerate(rows):
+        if i % 256 == 0:
+            check_stopping()
+        vectors.append(np.frombuffer(vector, dtype=np.float32))
+    V = np.stack(vectors)
+    check_stopping()
     return keys, V, {k: i for i, k in enumerate(keys)}
 
 
 def load_vectors(store):
     """Return (keys, V, idx) from persisted vectors, or ([], None, {}) if none built yet."""
-    return _load_vector_rows(store.get_rec_vectors())
+    return _load_vector_rows(store.rec_model.get_rec_vectors())
 
 
 # === Content vectors: a "what a track IS" space (genre/era + audio), parallel to the collaborative one.
@@ -236,15 +245,16 @@ def content_features(content):
 
     rows = []
     for k, (genre, year) in content.items():
-        if not genre:
-            continue
-        active = [col(f"fam:{genre_map.family(genre)}")]
-        sub = genre_map.subgenre(genre)
-        if sub:
-            active.append(col(f"sub:{sub}"))
+        active = []
+        if genre:
+            active.append(col(f"fam:{genre_map.family(genre)}"))
+            sub = genre_map.subgenre(genre)
+            if sub:
+                active.append(col(f"sub:{sub}"))
         if year and str(year)[:4].isdigit():
             active.append(col(f"dec:{int(str(year)[:4]) // 10 * 10}"))
-        rows.append((k, active))
+        if active:
+            rows.append((k, active))
     return feats, rows
 
 
@@ -319,10 +329,18 @@ def encode_content(model, genre, year, audio):
     return (vec / n).astype(np.float32) if n > 0 else None
 
 
-def _build_library_content(store):
+def _content_inputs(store):
+    dao = store.rec_query
+    return sorted(dao.library_keys()), dao.track_content(), dao.track_audio_features()
+
+
+def _content_input_fingerprint(inputs):
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+
+def _build_library_content(store, *, inputs=None):
     """Return (keys, V, model) for the library's content vectors, all in one freshly-built space."""
-    dao = RecDao(store)
-    content, audio = dao.track_content(), dao.track_audio_features()
+    _, content, audio = inputs if inputs is not None else _content_inputs(store)
     model = build_content_model(content, audio)
     keys, vecs = [], []
     for k in sorted(set(content) | set(audio)):
@@ -355,9 +373,9 @@ def content_model_fingerprint(model) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def content_space_id(store) -> str:
+def content_space_id(store, *, snapshot=None) -> str:
     """Fingerprint of the currently-persisted content model, or "" when none is built yet."""
-    raw = store.get_setting("rec_content_model")
+    raw = snapshot["model"] if snapshot is not None else store.settings.get_setting("rec_content_model")
     return content_model_fingerprint(json.loads(raw)) if raw else ""
 
 
@@ -367,73 +385,37 @@ def build_content_vectors(store, dim=None):  # dim kept for signature symmetry; 
     return keys, V
 
 
-def build_content_and_store(store) -> int:
-    """Build library content vectors + the shared model, persist both, and re-encode the out-of-corpus
-    pool into the (just-rebuilt) space so the two stay comparable. Returns the library count."""
-    keys, V, model = _build_library_content(store)
-    store.replace_rec_content_vectors([(k, V[i].tobytes()) for i, k in enumerate(keys)])
-    store.set_setting("rec_content_model", json.dumps(model))
-    build_discovered_content_vectors(store, model)
-    store.set_setting("rec_content_genre_revision", genre_catalog.REVISION)
-    return len(keys)
-
-
-def build_discovered_content_vectors(store, model=None) -> int:
-    """Encode the out-of-corpus discovered-track pool into the shared content space (Phase 2). Uses the
-    persisted model unless one is passed. Returns how many tracks got a vector."""
-    if model is None:
-        raw = store.get_setting("rec_content_model")
-        if not raw:
-            return 0
-        model = json.loads(raw)
+def _encode_discovered(rows, model):
     out = []
-    for r in store.get_discovered_tracks():
+    for r in rows:
         v = encode_content(model, r.get("genre"), r.get("year"), r.get("audio"))
         if v is not None:
             out.append((r["identity_key"], v.tobytes()))
-    store.replace_rec_discovered_content_vectors(out)
-    return len(out)
+    return out
 
 
-def load_content_vectors(store):
+def build_discovered_content_vectors(store) -> int:
+    """Encode the out-of-corpus discovered-track pool into the shared content space (Phase 2). Uses the
+    persisted model. A competing model publication forces a fresh encoding, never a mixed pool."""
+    for _ in range(3):
+        snapshot = store.rec_model.content_generation()
+        if not snapshot["model"]:
+            return 0
+        out = _encode_discovered(store.discovery.get_discovered_tracks(), json.loads(snapshot["model"]))
+        if store.rec_model.publish_content_generation(snapshot["library"], out, snapshot["model"],
+                snapshot["revision"] or "", snapshot["inputs"], snapshot["generation"]):
+            return len(out)
+    raise RuntimeError("Content generation changed during discovery encoding; retry the refresh")
+
+
+def load_content_vectors(store, *, snapshot=None):
     """Return (keys, V, idx) from persisted content vectors, or ([], None, {}) if none built."""
-    return _load_vector_rows(store.get_rec_content_vectors())
+    return _load_vector_rows(snapshot["library"] if snapshot is not None else store.rec_model.get_rec_content_vectors())
 
 
-def load_discovered_content_vectors(store):
+def load_discovered_content_vectors(store, *, snapshot=None):
     """Return (keys, V, idx) of out-of-corpus content vectors, or ([], None, {}) if none built."""
-    return _load_vector_rows(store.get_rec_discovered_content_vectors())
-
-
-def maybe_rebuild_content_vectors(store, step=0.05) -> bool:
-    """Rebuild content vectors when genre coverage crosses into a higher `step` bucket (and on the
-    first call or after a genre catalog update). Coverage = (distinct tracks with a genre) /
-    (distinct tracks). Bounds coverage-triggered rebuilds to
-    ~1/step over the library's enrichment lifetime while keeping the content space current as
-    enrichment fills in. Returns True iff it rebuilt."""
-    dao = RecDao(store)
-    total = len(dao.library_keys())
-    if total == 0:
-        return False
-    coverage = len(dao.track_content()) / total
-    bucket = int(coverage // step)
-    try:
-        prev = int(store.get_setting("rec_content_cov_bucket", "-1"))
-    except (TypeError, ValueError):
-        prev = -1
-    # The bucket gate bounds full rebuilds, but it must NOT short-circuit while the model itself is
-    # missing: a build under older code persisted the vectors + bucket but not rec_content_model, which
-    # left the gate permanently shut (bucket never re-crosses once coverage plateaus) and the discovered
-    # pool unencodable forever, so "reach for new music" surfaced nothing (#48). A missing model always
-    # forces a rebuild, which re-persists it and re-encodes the out-of-corpus pool in the same space.
-    # Family and alias changes also change the encoding of already-tagged tracks. Refresh both
-    # pools once per catalog revision even when coverage has stopped growing.
-    current_genres = store.get_setting("rec_content_genre_revision") == genre_catalog.REVISION
-    if bucket <= prev and store.get_setting("rec_content_model") and current_genres:
-        return False
-    build_content_and_store(store)
-    store.set_setting("rec_content_cov_bucket", str(bucket))
-    return True
+    return _load_vector_rows(snapshot["discovered"] if snapshot is not None else store.rec_model.get_rec_discovered_content_vectors())
 
 
 # === Ranking & neighbours: query the built vector space (taste neighbours, centroids, bridges) ===
@@ -516,42 +498,6 @@ def _centroid(V, idx, seed_groups):
     return target / n if n > 0 else None
 
 
-def sims_for(store, seed_groups, keys):
-    """Cosine similarity of each given key to the weighted taste centroid (for Tier-2 re-ranking).
-    Returns {key: sim}; empty if no vectors. Spec §8 'refined by Tier-2'."""
-    allkeys, V, idx = load_vectors(store)
-    if V is None:
-        return {}
-    target = _centroid(V, idx, seed_groups)
-    if target is None:
-        return {}
-    return {k: float(V[idx[k]] @ target) for k in keys if k in idx}
-
-
-def blended_neighbors(store, seed_groups, topn=12, exclude=None):
-    """Rank by a weighted blend of several seed centroids.
-
-    seed_groups = [(keys, weight), ...]: e.g. slow all-time taste at 0.6 + fast recent-mood at
-    0.4. Each group's centroid is normalised before weighting, so a small recent set still counts.
-    """
-    keys, V, idx = load_vectors(store)
-    if V is None:
-        return []
-    target = np.zeros(V.shape[1], dtype=np.float64)
-    excl = set(exclude or set())
-    for ks, w in seed_groups:
-        si = [idx[k] for k in ks if k in idx]
-        excl |= set(ks)
-        if si:
-            c = V[si].mean(0)
-            n = np.linalg.norm(c)
-            if n > 0:
-                target += w * (c / n)
-    if not np.any(target):
-        return []
-    return _rank(keys, V, _normalize(target), excl, topn)
-
-
 # === Cluster expansion: blended collaborative + content rings for the Clusters canvas ===
 CLUSTER_BETA = 0.6   # how hard a pruned ("negative model") track pushes a branch's ring away
 SEED_FANOUT = 0.5    # for a MULTI-seed node, how much the ring is drawn to the NEAREST single seed
@@ -620,9 +566,10 @@ def _content_space(store, include_new):
     """Load the content (genre/era) vector space for cluster_expand. When include_new (Phase 2),
     widen it with the OUT-OF-CORPUS discovered-track pool, but only when they share the same model
     space (same column count). Returns (keys, V, idx)."""
-    ckeys, CV, cidx = load_content_vectors(store)
+    snapshot = store.rec_model.content_generation()
+    ckeys, CV, cidx = load_content_vectors(store, snapshot=snapshot)
     if include_new:
-        dkeys, DV, _ = load_discovered_content_vectors(store)
+        dkeys, DV, _ = load_discovered_content_vectors(store, snapshot=snapshot)
         if DV is not None:
             if CV is None:
                 ckeys, CV = list(dkeys), DV
@@ -702,6 +649,7 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=Non
         beta = float(rec_params.get_param(store, "cluster_beta"))
     fanout = float(rec_params.get_param(store, "cluster_seed_spread"))
     ckeys, CV, cidx = _content_space(store, include_new)
+    check_stopping()
 
     # Genre-only seed: a genre picked with no artist/song seed (empty pos_keys) seeds a cluster FROM the
     # genre itself: the centroid is the genre's own tracks, and we KEEP those tracks as candidates (don't
@@ -714,12 +662,15 @@ def cluster_expand(store, pos_keys, neg_keys=(), exclude=None, topn=12, beta=Non
                  else (_branch_scores(src, neg_keys, beta, ckeys, CV, cidx, fanout, groups=seed_groups,
                                       artist_groups=artist_groups) or {}))
     blended = _blend_spaces(collab_s, content_s, w)
+    check_stopping()
 
     preferred = set(candidate_seed_keys)
     excl = set(exclude or ()) | set(neg_keys) | (set() if seed_only else set(pos_keys) - preferred)
     allow = None if allow is None else set(allow)
     out = []
-    for k in sorted(blended, key=lambda k: (k not in preferred, -blended[k], k)):
+    for i, k in enumerate(sorted(blended, key=lambda k: (k not in preferred, -blended[k], k))):
+        if i % 256 == 0:
+            check_stopping()
         if k in excl or (allow is not None and k not in allow):
             continue
         out.append((k, blended[k]))
@@ -748,23 +699,13 @@ def connection_geometry(store, key, path_keys, exclude=()):
     c = V[idx[key]]
     score = float(c @ p)
     both = np.minimum(V @ c, V @ p)                  # close to child AND to the path
+    check_stopping()
     excl = set(path_keys) | {key} | set(exclude)
     bridge = None
-    for j in np.argsort(-both):
+    for i, j in enumerate(np.argsort(-both)):
+        if i % 256 == 0:
+            check_stopping()
         if keys[j] not in excl:
             bridge = keys[j]
             break
     return {"score": score, "bridge": bridge}
-
-
-def centroid_neighbors(store, seed_keys, topn=12, exclude=None):
-    """Tracks most similar to the centroid of a set of seeds (e.g. a playlist's vibe)."""
-    keys, V, idx = load_vectors(store)
-    if V is None:
-        return []
-    si = [idx[k] for k in seed_keys if k in idx]
-    if not si:
-        return []
-    centroid = V[si].mean(0)
-    centroid = _normalize(centroid)
-    return _rank(keys, V, centroid, set(exclude or set()) | set(seed_keys), topn)

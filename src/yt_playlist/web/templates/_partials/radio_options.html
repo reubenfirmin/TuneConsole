@@ -1,0 +1,7 @@
+<details class="radio-menu" x-ref="menu" @click.outside="$el.removeAttribute('open')"
+         @keydown.escape.prevent="$el.removeAttribute('open'); $refs.options.focus()">
+  <summary class="dots" x-ref="options" aria-label="Radio options" title="Radio options">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+  </summary>
+  <div class="radio-menu-pop"><button type="button" :disabled="busy" @click="$refs.menu.removeAttribute('open'); newRadio()">New radio</button></div>
+</details>

@@ -11,8 +11,14 @@ and filled but never conflict-checked (e.g. single-source audio features can't d
 """
 import threading
 import time
+import math
 from dataclasses import dataclass, field
 from typing import Protocol
+from yt_playlist.util import genre_catalog
+
+
+class LookupUnavailable(Exception):
+    """Optional metadata could not be checked; this is not a confirmed absence."""
 
 
 @dataclass
@@ -61,20 +67,22 @@ class Numeric:
 
     def agree(self, a, b) -> bool:
         try:
-            return abs(float(a) - float(b)) <= self.tol
+            difference = abs(float(a) - float(b))
+            return difference <= self.tol or math.isclose(difference, self.tol,
+                                                         rel_tol=1e-12, abs_tol=1e-12)
         except (TypeError, ValueError):
             return a == b
 
-    def key(self, v):
-        try:
-            return round(float(v) / (self.tol or 1.0))
-        except (TypeError, ValueError):
-            return v
 
+class Genre(Discrete):
+    """A parent and its subgenre are compatible; unrelated styles still disagree."""
+    def agree(self, a, b) -> bool:
+        return (super().agree(genre_catalog.canonical_name(a), genre_catalog.canonical_name(b))
+                or genre_catalog.is_subgenre(a, b) or genre_catalog.is_subgenre(b, a))
 
 # Only fields that >=2 providers can supply ever actually conflict; the rest are harmless to list.
 FIELD_SPECS = {
-    "genre": Discrete(),
+    "genre": Genre(),
     "year": Discrete(),
     "music_key": Discrete(),
     "music_scale": Discrete(),
@@ -95,6 +103,7 @@ def detect_conflicts(results) -> dict:
 
     `candidates` is a list of {"provider", "value"} for all providers that had a value for the field
     (in result order), so the resolver UI can show every option, not just the disagreeing ones.
+    Every pair must agree: a numeric chain whose endpoints exceed tolerance remains a conflict.
     """
     conflicts = {}
     for fname, spec in FIELD_SPECS.items():
@@ -102,8 +111,8 @@ def detect_conflicts(results) -> dict:
                 if fname in r.fields and not _empty(r.fields[fname])]
         if len(seen) < 2:
             continue
-        groups = {spec.key(v) for _, v in seen}
-        if len(groups) >= 2:                       # genuine disagreement
+        if any(not spec.agree(value, other)
+               for index, (_, value) in enumerate(seen) for _, other in seen[index + 1:]):
             conflicts[fname] = [{"provider": p, "value": v} for p, v in seen]
     return conflicts
 
@@ -131,28 +140,3 @@ class RateLimiter:
             self._last_call = time.monotonic()
 
 
-def run_enrich_loop(store, on_progress, pending, *, gate, breaker, start_text, empty_text,
-                    done_text, wait_text, per_item, should_stop=None):
-    """Shared skeleton for every provider's enrich_playlist(): short-circuit an empty set, announce
-    the run, reset the circuit breaker, enter the priority gate, then walk `pending` (honouring
-    should_stop and yielding to newer jobs) calling per_item(i, total, track) for the provider's
-    own per-track work. A per_item returning False stops the run early (used when the breaker trips
-    mid-run). start_text/done_text are called with the track count; empty_text/wait_text are strings."""
-    total = len(pending)
-    if not total:
-        on_progress({"type": "done", "text": empty_text, "total": 0})
-        return
-    on_progress({"type": "info", "text": start_text(total), "total": total})
-    breaker.reset()                            # fresh chance each run: a past outage shouldn't pre-trip it
-    seq = gate.enter()
-    try:
-        for i, t in enumerate(pending, 1):
-            if should_stop and should_stop():
-                on_progress({"type": "info", "text": "Stopped."})
-                return
-            gate.wait_turn(seq, on_wait=lambda: on_progress({"type": "info", "text": wait_text}))
-            if per_item(i, total, t) is False:     # provider signals a hard stop (host unreachable)
-                return
-        on_progress({"type": "done", "text": done_text(total), "total": total})
-    finally:
-        gate.leave(seq)

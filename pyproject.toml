@@ -3,7 +3,7 @@ name = "yt-playlist"
 dynamic = ["version"]   # derived from the git tag by hatch-vcs (see [tool.hatch.version]); releasing is
                         # just `git tag vX.Y.Z && git push` — no version lives in a file.
 description = "Local web tool to dedupe, merge, and prune YouTube Music playlists across identities"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     # Major-capped: the egress guard (yt_playlist.egress) patches the requests/urllib
     # contract, not ytmusicapi internals, so the security guarantee survives upgrades —
@@ -18,8 +18,10 @@ dependencies = [
     "jinja2>=3.1",
     "python-multipart>=0.0.9",
     "rapidfuzz>=3.6",
-    "tomli>=2.0; python_version < '3.11'",
     "numpy>=1.26",
+    "scipy>=1.11",
+    # Bound native numerical pools through their runtime APIs, including background threads.
+    "threadpoolctl>=3.6,<4",
     # Persistent session-bus connection for Flatpak's update/restart portal.
     "dbus-next>=0.2.3,<0.3; sys_platform == 'linux'",
 ]
@@ -29,6 +31,11 @@ yt-playlist = "yt_playlist.__main__:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "httpx>=0.27", "watchfiles>=0.21", "pytest-playwright>=0.5"]  # watchfiles powers `yt-playlist --reload`
+build = ["hatchling==1.29.0", "hatch-vcs==0.5.0", "packaging==26.2"]
+macos = [
+    "pyinstaller==6.22.3; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa==12.0; sys_platform == 'darwin'",
+]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]

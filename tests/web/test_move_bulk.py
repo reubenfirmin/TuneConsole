@@ -13,18 +13,18 @@ from yt_playlist.web.app import create_app
 @pytest.fixture
 def transfers(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    source = store.upsert_identity("Main", "c1", None, True)
-    target = store.upsert_identity("Alt", "c2", None, False)
+    source = store.identities.upsert_identity("Main", "c1", None, True)
+    target = store.identities.upsert_identity("Alt", "c2", None, False)
     playlists = []
     tracks = {}
     for n, title in enumerate(("Evening", "Mix", "Weekend")):
         ytm = f"PL{n}"
-        pid = store.upsert_playlist(source, ytm, title, 1, "h", 1.0)
-        tid = store.upsert_track(f"v{n}", f"Song {n}", "Artist", None, 200, 1)
-        store.set_playlist_tracks(pid, [tid])
+        pid = store.playlists.upsert_playlist(source, ytm, title, 1, "h", 1.0)
+        tid = store.tracks.upsert_track(f"v{n}", f"Song {n}", "Artist", None, 200, 1)
+        store.playlists.set_playlist_tracks(pid, [tid])
         tracks[ytm] = [_track(f"v{n}", f"Song {n}", "Artist")]
         playlists.append(pid)
-    other = store.upsert_playlist(target, "PL_ALT", "Already here", 0, "h", 1.0)
+    other = store.playlists.upsert_playlist(target, "PL_ALT", "Already here", 0, "h", 1.0)
     src_client = FakeClient(tracks=tracks)
     tgt_client = FakeClient(catalog={t[0]["videoId"]: t[0] for t in tracks.values()})
     clients = {source: src_client, target: tgt_client}
@@ -50,8 +50,8 @@ def test_bulk_copy_keeps_separate_playlists_and_originals(transfers):
     assert response.status_code == 200
     assert "Copied 2 playlists." in response.text
     assert [p[1] for p in t.tgt_client.created] == ["Evening", "Weekend"]
-    assert all(t.store.get_playlist(pid) for pid in t.playlists)
-    copies = [p for p in t.store.get_playlists() if p.identity_id == t.target and p.id != t.other]
+    assert all(t.store.playlists.get_playlist(pid) for pid in t.playlists)
+    copies = [p for p in t.store.playlists.get_playlists() if p.identity_id == t.target and p.id != t.other]
     assert [(p.title, p.track_count) for p in copies] == [("Evening", 1), ("Weekend", 1)]
     assert t.src_client.deleted == []
     assert t.refreshes == []
@@ -62,11 +62,11 @@ def test_bulk_move_deletes_only_selected_and_backs_up_each(transfers):
     response = _transfer(t, t.playlists[:2])
 
     assert "Moved 2 playlists." in response.text
-    assert all(t.store.get_playlist(pid) is None for pid in t.playlists[:2])
-    assert t.store.get_playlist(t.playlists[2]) is not None
+    assert all(t.store.playlists.get_playlist(pid) is None for pid in t.playlists[:2])
+    assert t.store.playlists.get_playlist(t.playlists[2]) is not None
     assert t.src_client.deleted == ["PL0", "PL1"]
     assert t.refreshes == [{"type": "refresh-view", "playlist": pid} for pid in ("PL0", "PL1")]
-    actions = t.store.get_actions()
+    actions = t.store.actions.get_actions()
     assert len(actions) == 2
     for action in actions:
         backup = json.loads(action.undo_json)["backup"]
@@ -117,20 +117,20 @@ def test_one_failure_does_not_hide_or_prevent_other_results(transfers, monkeypat
     assert "Moved 2 playlists. 1 failed." in response.text
     assert "This playlist could not be created." in response.text
     assert '<details open>' in response.text
-    assert t.store.get_playlist(t.playlists[1]) is not None
+    assert t.store.playlists.get_playlist(t.playlists[1]) is not None
     assert t.src_client.deleted == ["PL0", "PL2"]
 
 
 def test_incomplete_move_keeps_source_and_reports_copy(transfers):
     t = transfers
-    missing = t.store.upsert_track(None, "Unfindable song", "Unknown artist", None, 200, 1)
-    t.store.set_playlist_tracks(t.playlists[1], [missing])
+    missing = t.store.tracks.upsert_track(None, "Unfindable song", "Unknown artist", None, 200, 1)
+    t.store.playlists.set_playlist_tracks(t.playlists[1], [missing])
     response = _transfer(t, t.playlists[:2])
 
     assert "Moved 1 playlist. Copied 1 playlist." in response.text
     assert "1 couldn’t be matched" in response.text
     assert "Source kept" in response.text
-    assert t.store.get_playlist(t.playlists[1]) is not None
+    assert t.store.playlists.get_playlist(t.playlists[1]) is not None
     assert t.src_client.deleted == ["PL0"]
 
 
@@ -143,7 +143,43 @@ def test_delete_failure_reports_kept_source_without_losing_copy(transfers, monke
     monkeypatch.setattr(t.src_client, "delete_playlist", refuse_delete)
     response = _transfer(t, t.playlists[:1])
     assert "Copied 1 playlist." in response.text
-    assert "Source kept: YouTube couldn’t delete the original." in response.text
-    assert t.store.get_playlist(t.playlists[0]) is not None
+    assert "Source kept: YouTube refused" in response.text
+    assert t.store.playlists.get_playlist(t.playlists[0]) is not None
     assert len(t.tgt_client.created) == 1
     assert not t.refreshes
+
+
+@pytest.mark.parametrize("failure", ["rejected", "partial_delivery", "unreadable_destination"])
+def test_incomplete_delivery_keeps_source_and_explains_why(transfers, monkeypatch, failure):
+    t = transfers
+    add = t.tgt_client.add_playlist_items
+    get = t.tgt_client.get_playlist
+
+    def fail_add(playlist, videos):
+        if failure == "rejected":
+            return {"status": "STATUS_FAILED"}
+        if failure == "partial_delivery":
+            return {"status": "STATUS_SUCCEEDED"}
+        return add(playlist, videos)
+
+    def read(playlist, limit=None):
+        if failure == "unreadable_destination":
+            return {}  # a malformed response cannot confirm delivery, even after a successful add
+        return get(playlist, limit)
+
+    monkeypatch.setattr(t.tgt_client, "add_playlist_items", fail_add)
+    monkeypatch.setattr(t.tgt_client, "get_playlist", read)
+    response = _transfer(t, t.playlists[:1])
+
+    assert "Source kept" in response.text
+    assert '<details open>' in response.text
+    if failure == "rejected":
+        assert "1 couldn’t be added" in response.text
+        assert "Copied 0 tracks" in response.text
+    else:
+        assert "Refusing to delete" in response.text
+        assert "Copied 1 track." not in response.text
+    assert t.store.playlists.get_playlist(t.playlists[0]) is not None
+    assert not t.src_client.deleted
+    assert not t.refreshes
+    assert any(p.ytm_playlist_id == "PL_NEW_0" for p in t.store.playlists.get_playlists())

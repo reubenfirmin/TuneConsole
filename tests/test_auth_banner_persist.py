@@ -19,7 +19,7 @@ def test_flag_persists_and_reseeds_across_restart():
     ctx = _ctx(store)
     ctx.flag_auth_expired(7, "flavor8100")
     assert ctx.auth_expired == {7: "flavor8100"}
-    assert store.get_setting(AUTH_EXPIRED_KEY)                 # written through
+    assert store.settings.get_setting(AUTH_EXPIRED_KEY)                 # written through
 
     fresh = _ctx(store)                                        # simulate a restart: brand-new Ctx, same store
     assert fresh.auth_expired == {7: "flavor8100"}            # int key, so on_auth_ok's pop(iid) matches
@@ -43,7 +43,7 @@ def test_clear_one_removes_and_persists():
 
     ctx.clear_auth_expired(2)
     assert ctx.auth_expired == {}
-    assert store.get_setting(AUTH_EXPIRED_KEY) is None         # setting deleted when empty
+    assert store.settings.get_setting(AUTH_EXPIRED_KEY) is None         # setting deleted when empty
 
 
 def test_clear_all_wipes_banner():
@@ -58,5 +58,5 @@ def test_clear_all_wipes_banner():
 
 def test_corrupt_setting_is_ignored():
     store = _store()
-    store.set_setting(AUTH_EXPIRED_KEY, "not json{")
+    store.settings.set_setting(AUTH_EXPIRED_KEY, "not json{")
     assert _ctx(store).auth_expired == {}                      # tolerated, not a crash

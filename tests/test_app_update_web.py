@@ -16,6 +16,10 @@ class FakeUpdater:
         self.fail_restart = fail_restart
         self.calls = []
 
+    @property
+    def busy(self):
+        return self.phase in {"installing", "restarting"}
+
     def snapshot(self):
         return {"instance": "before", "phase": self.phase, "message": "", "progress": None}
 
@@ -101,6 +105,24 @@ def test_failed_launch_keeps_current_server_and_releases_work_locks(update_app):
     assert client.post("/app-update/restart").status_code == 503
     assert not stopped
     assert not ctx.sync_lock.locked() and not ctx.spotify_import_lock.locked()
+
+
+def test_manual_relaunch_keeps_server_available_and_reopens_work(update_app):
+    client, ctx, stopped = update_app
+
+    async def manual_restart(host, port):
+        ctx.updater.phase = "manual_restart"
+        return {**ctx.updater.snapshot(), "message": "Close TuneConsole and open it again."}
+
+    ctx.updater.phase = "ready"
+    ctx.updater.restart = manual_restart
+    response = client.post("/app-update/restart")
+    assert response.status_code == 200
+    assert response.json()["phase"] == "manual_restart"
+    assert "open it again" in response.json()["message"]
+    assert not stopped
+    assert not ctx.sync_lock.locked() and not ctx.spotify_import_lock.locked()
+    assert ctx.work.accepting
 
 
 def test_development_install_has_no_update_operations(update_app):

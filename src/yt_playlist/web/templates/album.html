@@ -32,7 +32,7 @@
       <span class="stat"><strong>{{ album.tracks|length }}</strong>&nbsp;track{{ '' if album.tracks|length == 1 else 's' }}</span>
     </p>
     <div class="pl-actions">
-      <a class="cta" href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">▶ Play on YouTube Music {{ arrow_icon('external') }}</a>
+      <a class="cta" href="https://music.youtube.com/browse/{{ browse_id }}" target="_blank" rel="noopener">▶ Play on YouTube Music</a>
       {% if saved %}<span class="tag teal">✓ In your library</span>
       {% elif is_upload %}
       {# Your own upload: it is already in your library, and there is no audio playlist to like, so
@@ -41,9 +41,12 @@
       {% else %}
       <form hx-post="/collection/save-album" hx-swap="none" class="inline">
         <input type="hidden" name="browse_id" value="{{ browse_id }}">
-        <button type="submit" class="btn-ghost">Save to library</button>
+        <button type="submit" class="btn-ghost">Save Album to Library</button>
       </form>{% endif %}
     </div>
+    {% if not in_library and library_track_count %}
+    <p class="section-note">{{ library_track_count }} of {{ album.tracks|length }} tracks in your library. The album is not saved.</p>
+    {% endif %}
   </div>
   {# Enrichment runs over the album's tracks once they're folded into the library, which happens when
      you save it (or immediately, if it's your own upload), so the icons are always shown (parity
@@ -117,9 +120,8 @@
 
 <div class="card library-table-card">
   {% if tracks %}
-  {# Folded-in library tracks: genre/year columns that fill in live as enrichment runs, and are
-     click-to-edit by hand (same flow as playlists, scoped to this album). #}
-  <table class="track-table" x-data="rowSort(0, '/album/{{ browse_id }}')">
+  {# Folded-in library tracks: genre/year fill in live; edits use the shared song menu. #}
+  <table class="track-table" x-data="rowSort(0)">
     <thead><tr>
       <th class="num col-thumb">#</th>
       <th class="col-thumb"></th>
@@ -148,21 +150,22 @@
     <tbody>
     {% for t in album.tracks %}
     <tr class="srow">
-      <td class="num"><span class="rownum">{{ loop.index }}</span></td>
+      <td class="num"><div class="track-cell"><span class="rownum">{{ loop.index }}</span></div></td>
       <td>
+        <div class="track-cell">
         <span class="pl-cover">
           {% if album.thumbnail %}<img class="pl-thumb" src="{{ album.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
           {% if t.video_id %}<a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}"
              target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>{% endif %}
         </span>
+        </div>
       </td>
       <td class="t-wrap" title="{{ t.title }}">
-        {% if t.video_id %}<a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-           target="_blank" rel="noopener" data-yt-info>{{ t.title }} {{ arrow_icon('external') }}</a>
-        {% else %}{{ t.title }}{% endif %}</td>
-      <td class="t-wrap" title="{{ t.artist or album.artist }}">{{ t.artist or album.artist }}</td>
-      <td class="num mono">{{ t.duration or '' }}</td>
-      <td class="rowmenu">{{ song_menu(dict(t, artist=t.artist or album.artist, album=album.title, thumbnail=album.thumbnail, album_browse=browse_id)) }}</td>
+        <div class="track-cell track-cell--text"><span class="ptitle">{{ t.title }}</span></div></td>
+      <td class="t-wrap" title="{{ t.artist or album.artist }}"><div class="track-cell track-cell--text">{% if t.artist or album.artist %}<a class="alink"
+          href="/artist?name={{ (t.artist or album.artist)|urlencode }}">{{ t.artist or album.artist }}</a>{% endif %}</div></td>
+      <td class="num mono"><div class="track-cell">{{ t.duration or '' }}</div></td>
+      <td class="rowmenu"><div class="track-cell">{{ song_menu(dict(t, artist=t.artist or album.artist, album=album.title, thumbnail=album.thumbnail, album_browse=browse_id)) }}</div></td>
     </tr>
     {% else %}
       <tr><td colspan="6" class="empty">This album has no listed tracks.</td></tr>

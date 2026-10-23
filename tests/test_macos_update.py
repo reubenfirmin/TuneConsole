@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from yt_playlist.core.activity import Activity, WorkClosing
 from yt_playlist.core.macos_update import MacOSUpdater, launch_arguments
 from yt_playlist.web.jobs import SyncJobs
 
@@ -53,29 +54,42 @@ def test_browser_queues_one_native_update_and_allows_retry_after_cancel_or_failu
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("busy", ["sync", "import", "job"])
-def test_native_quit_waits_for_work_then_stops_server_and_blocks_new_work(busy):
-    ctx = SimpleNamespace(sync_lock=threading.Lock(), spotify_import_lock=threading.Lock(), jobs=SyncJobs())
+@pytest.mark.parametrize("phase", ["available", "installing"])
+@pytest.mark.parametrize("busy", [None, "sync", "import", "job", "activity"])
+def test_native_quit_waits_for_work_then_stops_server_and_blocks_new_work(busy, phase):
+    updater = MacOSUpdater()
+    updater.set_state(phase)
+    ctx = SimpleNamespace(updater=updater, work=Activity(), sync_lock=threading.Lock(),
+                          spotify_import_lock=threading.Lock(), jobs=SyncJobs())
     server = SimpleNamespace(config=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx))),
                              should_exit=False)
-    updater = MacOSUpdater()
     updater.attach(server)
     if busy == "job":
         job = ctx.jobs.create()
-    else:
+    elif busy == "activity":
+        release = ctx.work.admit("playlist save")
+    elif busy is not None:
         lock = ctx.sync_lock if busy == "sync" else ctx.spotify_import_lock
         lock.acquire()
     updater.request_quit()
-    updater.poll_quit()
-    assert updater.busy
-    assert not server.should_exit
-    assert "Waiting" in updater.snapshot()["message"]
-    if busy == "job":
-        job.done = True
-    else:
-        lock.release()
+    if busy is not None:
+        updater.poll_quit()
+        assert updater.busy
+        assert not server.should_exit
+        assert not ctx.work.accepting
+        with pytest.raises(WorkClosing):
+            ctx.work.admit("new mutation")
+        assert "Waiting" in updater.snapshot()["message"]
+        if busy == "job":
+            job.done = True
+        elif busy == "activity":
+            release()
+        else:
+            lock.release()
     updater.poll_quit()
     assert server.should_exit
+    assert updater.busy
+    assert not ctx.work.accepting
     assert ctx.sync_lock.locked() and ctx.spotify_import_lock.locked()
     assert updater.phase == "restarting"
     updater.set_state("available")  # an outstanding Sparkle callback must not undo shutdown

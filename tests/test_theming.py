@@ -116,11 +116,15 @@ def test_tokens_css_loads_before_the_stylesheets_that_use_it(template):
 
 @pytest.mark.parametrize("template", ["base.html", "story_reel.html", "generating.html"])
 def test_application_stylesheets_keep_cascade_order(template):
-    expected = ["tokens.css", "app.css", "home.css", "clusters.css", "onboarding.css",
-                "analytics.css", "page-overrides.css"]
+    expected = ["tokens.css", "app.css"]
     text = (WEB / "templates" / template).read_text()
     sheets = re.findall(r'<link[^>]+href="/static/([a-z_-]+\.css)', text)
     assert sheets[:len(expected)] == expected, f"{template} stylesheet order changed: {sheets}"
+    assert "page-overrides.css" not in sheets
+    if template == "story_reel.html":
+        assert sheets == ["tokens.css", "app.css", "story.css"]
+    if template == "generating.html":
+        assert sheets == ["tokens.css", "app.css", "clusters.css", "generating.css"]
 
 
 def test_no_inline_style_blocks_in_templates():
@@ -146,7 +150,7 @@ def test_elements_do_not_repeat_style_attributes():
 
 def test_generating_takeover_title_is_scoped():
     """The takeover heading must not override dashboard playlist-row song titles."""
-    css = (WEB / "static" / "page-overrides.css").read_text()
+    css = (WEB / "static" / "generating.css").read_text()
     assert ".gen-stage .gen-title" in css
     assert not re.search(r"(?m)^\.gen-title\s*\{", css)
 
@@ -220,13 +224,13 @@ def test_neon_green_is_reserved_for_explicit_primary_actions():
 def test_serif_is_limited_to_the_generating_takeover():
     offenders = {}
     for path in (WEB / "static").glob("*.css"):
-        if path.name in {"tokens.css", "page-overrides.css"}:
+        if path.name in {"tokens.css", "generating.css"}:
             continue
         if "var(--font-display)" in path.read_text():
             offenders[path.name] = True
     assert not offenders, f"routine application CSS still uses the serif face: {offenders}"
 
-    overrides = (WEB / "static" / "page-overrides.css").read_text()
+    overrides = (WEB / "static" / "generating.css").read_text()
     uses = re.findall(r"font-family:\s*var\(--font-display\)", overrides)
     assert len(uses) == 1
     assert ".gen-stage .gen-title" in overrides
@@ -254,9 +258,10 @@ def test_shared_typography_uses_the_application_scale():
         rules = re.findall(rf"(?s){re.escape(selector)}\s*\{{(.*?)\}}", app)
         assert rules and any(f"var({role})" in rule for rule in rules), selector
 
+    # Home's display treatments are page-owned; shared controls keep the application scale.
     ordinary = "\n".join(
         (WEB / "static" / name).read_text()
-        for name in ("app.css", "home.css", "onboarding.css", "analytics.css", "setup.css")
+        for name in ("app.css", "onboarding.css", "analytics.css", "setup.css")
     )
     assert not re.search(
         r"font-size:\s*(?:\.7[24568]|\.8(?:0|2|4|5|6|8)?|\.9(?:0|2|5|8)?|1\.(?:05|1|12|15))rem",
@@ -365,7 +370,7 @@ def test_final_style_foundation_has_no_obsolete_layout_aliases():
 def test_selected_controls_use_the_flat_blue_application_signal():
     tokens = TOKENS.read_text()
     app = (WEB / "static" / "app.css").read_text()
-    merge = (WEB / "static" / "page-overrides.css").read_text()
+    merge = (WEB / "static" / "merge.css").read_text()
     assert "--control-selected:      var(--p-blue-600)" in tokens
     assert "--control-primary:       var(--control-selected)" in tokens
     assert "--accent:      var(--p-blue-500)" in tokens
@@ -386,7 +391,7 @@ def test_selected_controls_use_the_flat_blue_application_signal():
 
     assert "--accent: var(--immersive-accent)" in (WEB / "static" / "clusters.css").read_text()
     assert "--accent: var(--immersive-accent)" in (WEB / "static" / "story.css").read_text()
-    assert "--accent: var(--immersive-accent)" in (WEB / "static" / "page-overrides.css").read_text()
+    assert "--accent: var(--immersive-accent)" in (WEB / "static" / "generating.css").read_text()
 
 
 def test_python_returns_token_references_not_colours():

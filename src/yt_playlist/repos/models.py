@@ -1,8 +1,7 @@
 """Row dataclasses shared by the Store and its DAOs.
 
 Kept in their own module so DAOs can return typed rows without importing Store (which would create
-a Store <-> repo import cycle). Store re-exports these, so ``from yt_playlist.core.store import Playlist``
-keeps working for existing callers.
+a Store/repository import cycle). Consumers import these row types directly.
 """
 from dataclasses import dataclass
 
@@ -21,6 +20,29 @@ class Playlist:
     thumbnail: str | None = None
     created_at: float | None = None
     created_at_source: str | None = None
+
+    @property
+    def scope_ref(self):
+        from yt_playlist.core.playlist_scopes import key
+        return key(self.identity_id,self.ytm_playlist_id)
+
+
+@dataclass
+class PlaylistMemberships:
+    """A detached read model; recording keys and upload kinds share one snapshot."""
+    playlists: list[Playlist]
+    keys: dict[int, frozenset[str]]
+    kinds: dict[str, str]
+    excluded: set[int]
+
+
+@dataclass
+class CleanupPreferences:
+    ignored: dict[str, set[str]]
+    suppressed: list[tuple[str, str, float]]
+    ignored_ytm: set[str]
+    kept: set[frozenset[str]]
+    merges: list[dict]
 
 
 @dataclass

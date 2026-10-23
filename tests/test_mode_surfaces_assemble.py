@@ -31,7 +31,7 @@ def _seed(store, n_modes=4):
         for m in range(1, n_modes + 1):
             payload[str(m)][surf] = items(f"{surf}-m{m}-")
     payload["_meta"] = {"comfort_pool": 100, "year_cuts": None}   # comfort credible -> it holds the 4th slot
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
 
 
 def test_temporal_card_when_comfort_not_credible(store):
@@ -47,7 +47,7 @@ def test_temporal_card_when_comfort_not_credible(store):
     payload = {"1": {"wheelhouse": [], "explore": [], "fresh": [], "comfort": [],
                      "temporal": t("old", 1990) + t("new", 2020)}}
     payload["_meta"] = {"comfort_pool": 0, "year_cuts": [2000, 2010]}     # comfort not credible
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
     # band 0 (epoch 0) -> Throwback, only the <=2000 tracks
     cards = ms.assemble_cards(store, now=10.0, epoch=0)
     assert len(cards) == 1
@@ -72,7 +72,7 @@ def test_comfort_not_backfilled(store):
             "thumbnail": None, "plays": 0, "reason": "", "lane": "", "genre": "house"} for i in range(20)]
     payload = {"1": {"wheelhouse": [], "explore": [], "fresh": [], "comfort": thin},
                "all": {"comfort": fat}, "_meta": {"comfort_pool": 100, "year_cuts": None}}
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
     cards = ms.assemble_cards(store, now=10.0, epoch=0)
     comfort = [c for c in cards if c["lane"] == "comfort"]
     # 2 thin tracks, < _MIN_CARD, and NO backfill -> comfort is dropped rather than padded from 'all'
@@ -103,7 +103,7 @@ def test_comfort_thin_rotates_to_temporal(store):
                "3": {"fresh": items("f", 20)},
                "4": {"comfort": items("c", 2), "temporal": items("t", 8, year=1990)}}
     payload["_meta"] = {"comfort_pool": 100, "year_cuts": [2000, 2010]}   # comfort credible; year data present
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
 
     cards = ms.assemble_cards(store, now=10.0, epoch=0)
     lanes = [c["lane"] for c in cards]
@@ -130,15 +130,45 @@ def test_assemble_empty_without_bundles(store):
     assert ms.assemble_cards(store, now=10.0, epoch=0) == []
 
 
+@pytest.mark.parametrize("ppr_share", [0, 1])
+def test_cached_cards_respond_to_durable_dislikes_and_clear_without_rebuild(store, monkeypatch, ppr_share):
+    from yt_playlist.rec import graduation, rec_params
+
+    _seed(store)
+    rec_params.set_param(store, "ppr_ab_share", ppr_share)
+    monkeypatch.setattr(ms, "select_modes", lambda *args, **kwargs: [1, 2, 3, 4])
+    payload = store.rec_surface.get_proposals("mode_bundles")
+    keys = [item["key"] for bucket in payload.values() if isinstance(bucket, dict)
+            for items in bucket.values() if isinstance(items, list) for item in items]
+    vectors = np.array([[1., 0.] if key.endswith("-0") else [0., 1.] for key in keys] + [[1., 0.]],
+                       dtype=np.float32)
+    store.rec_model.replace_rec_vectors([(key, vector.tobytes())
+                                        for key, vector in zip(keys + ["disliked-seed"], vectors)])
+    payload["_ppr"] = {str(mid): [item["key"] for surf in ms.CARD_SURFACES
+                                for item in payload[str(mid)][surf]] for mid in range(1, 5)}
+    store.rec_surface.put_proposals("mode_bundles", payload, 1)
+    before = ms.assemble_cards(store, now=100, epoch=0)
+    graduation.apply_dislikes(store, {"disliked-seed": "DISLIKE"}, now=1)
+    # Outlive the 365-day ban and every transient layer. The prepared payload stays unchanged.
+    after = ms.assemble_cards(store, now=1000 * 86400, epoch=0)
+    assert all(card["tracks"][0]["key"].endswith("-0") for card in before)
+    assert all(not card["tracks"][0]["key"].endswith("-0") for card in after)
+    graduation.apply_dislikes(store, {"disliked-seed": "INDIFFERENT"}, now=1000 * 86400)
+    cleared = ms.assemble_cards(store, now=1000 * 86400, epoch=0)
+    assert [[t["key"] for t in c["tracks"]] for c in cleared] == [
+        [t["key"] for t in c["tracks"]] for c in before]
+    assert store.rec_surface.get_proposals("mode_bundles") == payload
+
+
 def test_full_buckets_do_not_pin_a_theme_to_one_framing(store):
     _seed(store)
-    payload = store.get_proposals("mode_bundles")
+    payload = store.rec_surface.get_proposals("mode_bundles")
     # One theme has the deepest pool in every framing. All the others can fill a
     # complete card too; raw pool depth must not undo the model's theme rotation.
     for mid in (2, 3, 4):
         for surf in ms.CARD_SURFACES:
             payload[str(mid)][surf] = payload[str(mid)][surf][:12]
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
     menus = [ms.assemble_cards(store, now=10.0, epoch=e) for e in range(30)]
     wheelhouse = [next(c["mode_id"] for c in cards if c["lane"] == "wheelhouse") for cards in menus]
     assert len(set(wheelhouse)) >= 3
@@ -159,13 +189,13 @@ def test_logging_this_menu_does_not_change_its_themes_on_rerender(store):
 def test_assignment_preserves_the_only_mode_that_can_fill_a_lane(store, monkeypatch,
                                                                restricted_lane, available):
     _seed(store)
-    payload = store.get_proposals("mode_bundles")
+    payload = store.rec_surface.get_proposals("mode_bundles")
     # The preferred mode can fill any lane, but is the only source for this one.
     # Spending it on Wheelhouse loses a card, even when four cards are feasible.
     payload["1"][restricted_lane] = payload["1"][restricted_lane][:available]
     for mid in (2, 3, 4):
         payload[str(mid)][restricted_lane] = []
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
     monkeypatch.setattr(ms, "select_modes", lambda *args, **kwargs: [1, 2, 3, 4])
 
     cards = ms.assemble_cards(store, now=10.0, epoch=0)
@@ -203,7 +233,7 @@ def test_thin_bucket_backfilled_from_general_pool(store):
     for surf in ms.CARD_SURFACES:
         payload["1"][surf] = list(thin)
         payload["all"][surf] = list(general)
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
     cards = ms.assemble_cards(store, now=10.0, epoch=0)
     assert len(cards) == 1                                      # one mode -> one card
     card = cards[0]
@@ -222,7 +252,8 @@ def _genre_items(prefix, genre, count):
 @pytest.mark.parametrize("prepared", [False, True])
 def test_thin_mix_exhausts_deeper_family_before_adjacent_tracks(store, monkeypatch, prepared):
     from types import SimpleNamespace
-    from yt_playlist.rec import embed, recommend
+    from tests.conftest import seed_catalog_track
+    from yt_playlist.rec import embed, surfaces
 
     store.modes.replace_modes([
         {"mode_id": 1, "label": "Soul", "families": [["soul-funk", 100]],
@@ -234,17 +265,21 @@ def test_thin_mix_exhausts_deeper_family_before_adjacent_tracks(store, monkeypat
     payload = {"1": {"wheelhouse": core},
                "all": {"wheelhouse": unrelated + nearby + (deep if prepared else [])},
                "_meta": {"full_pools": prepared}}
-    store.put_proposals("mode_bundles", payload, 1.0)
-    store.record_dislike("deep0", until=None, now=1.0)
-    monkeypatch.setattr(ms, "RecDao", lambda s: SimpleNamespace(generated_track_keys=lambda: {"deep1"}))
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_model.record_dislike("deep0", until=None, now=1.0)
+    entry = seed_catalog_track(store, "deep1", "deep1", "deep artist 1", video_id="vdeep1")
+    identity = store.identities.upsert_identity("test", "cred", None, True)
+    playlist = store.playlists.upsert_playlist(identity, "GENERATED", "Generated", 1, "hash", 1)
+    store.playlists.set_playlist_tracks(playlist, [entry])
+    store.playlists.mark_generated_playlist("GENERATED")
 
     def ranked_library(s, now, limit):
         assert not prepared  # full bundles serve without reranking
         assert limit >= 500
         return [SimpleNamespace(**d) for d in deep]
 
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (list(range(500)), None, {}))
-    monkeypatch.setattr(recommend, "for_you", ranked_library)
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (list(range(500)), None, {}))
+    monkeypatch.setattr(surfaces, "for_you", ranked_library)
 
     cards = ms.assemble_cards(store, 10.0, 0, include_genres=["soul-funk", "electro-synth"])
 
@@ -253,7 +288,7 @@ def test_thin_mix_exhausts_deeper_family_before_adjacent_tracks(store, monkeypat
     assert len(tracks) == len({d["key"] for d in tracks}) == 12
     assert all(d["genre"] in {"Soul", "Funk"} for d in tracks)
     assert not {"deep0", "deep1"} & {d["key"] for d in tracks}
-    assert store.get_proposals("mode_bundles") == payload
+    assert store.rec_surface.get_proposals("mode_bundles") == payload
 
 
 @pytest.mark.parametrize("lane", ["wheelhouse", "fresh"])
@@ -268,7 +303,7 @@ def test_thin_mix_uses_close_neighbors_but_never_avoided_or_unrelated_genres(sto
     payload = {"1": {lane: core},
                "all": {lane: unrelated + avoided + nearby + core},
                "_meta": {"full_pools": True}}
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
 
     cards = ms.assemble_cards(store, 10.0, 0, include_genres=["soul-funk"], avoid_genres=["jazz"])
 

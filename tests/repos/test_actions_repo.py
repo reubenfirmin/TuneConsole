@@ -22,6 +22,6 @@ def test_get_action_missing_returns_none(store):
     assert store.actions.get_action(999) is None
 
 
-def test_facade_delegates(store):
-    aid = store.record_action("merge", "{}", "[]", "executed", "{}", 1.0)   # legacy store.x() call site
-    assert store.get_action(aid).kind == "merge"
+def test_store_binding(store):
+    aid = store.actions.record_action("merge", "{}", "[]", "executed", "{}", 1.0)
+    assert store.actions.get_action(aid).kind == "merge"

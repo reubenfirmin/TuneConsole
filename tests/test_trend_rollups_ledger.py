@@ -28,27 +28,30 @@ def store():
 def _ev(store, key, when, playlist=None):
     ts = when.timestamp() if isinstance(when, dt.datetime) else float(when)
     store.conn.execute(
-        "INSERT INTO play_events(identity_id,identity_key,video_id,played_at,playlist_ytm_id) "
-        "VALUES (1,?,?,?,?)", (key, "v" + key, ts, playlist))
+        "INSERT INTO play_events(identity_id,identity_key,video_id,played_at,playlist_ytm_id,is_generated) "
+        "VALUES (1,?,?,?,?,?)", (key, "v" + key, ts, playlist,
+                                  int(bool(playlist) and store.playlists.is_quarantined_playlist(playlist))))
     store.conn.commit()
 
 
 def _generated(store, pid, ytm, title="Radio"):
-    store.conn.execute("INSERT INTO playlists(id,identity_id,ytm_playlist_id,title) VALUES (?,1,?,?)",
-                       (pid, ytm, title))
-    store.conn.execute("INSERT INTO playlist_group(ytm,name) VALUES (?,'Generated')", (ytm,))
+    from yt_playlist.core.playlist_scopes import ensure
+    store.conn.execute("INSERT INTO playlists(id,identity_id,ytm_playlist_id,title,scope_ref) VALUES (?,1,?,?,?)",
+                       (pid, ytm, title,ensure(store.conn,ytm,1)))
+    store.playlists.set_playlist_group(ytm,'Generated',identity_id=1)
+    store.playlists.mark_generated_playlist(ytm)
     store.conn.commit()
 
 
 # --- Task 2.1: day_counts_source ------------------------------------------------------------------
 
 def test_day_counts_source_uses_history_when_no_ledger(store):
-    store.history.add_history_snapshot(1, 10 * DAY, ["a", "a", "b"])
-    assert sorted(tr.day_counts_source(store)) == [(10, "a", 2), (10, "b", 1)]
+    store.history.record_history_plays(1, 10 * DAY, ["a", "a", "b"], source_timezone="UTC")
+    assert sorted(tr.day_counts_source(store)) == [(10, "a", 1), (10, "b", 1)]
 
 
 def test_day_counts_source_prefers_the_ledger(store):
-    store.history.add_history_snapshot(1, 10 * DAY, ["phantom"])
+    store.history.record_history_plays(1, 10 * DAY, ["phantom"], source_timezone="UTC")
     _ev(store, "real", 10 * DAY + 5)
     assert tr.day_counts_source(store) == [(10, "real", 1)]   # the phantom history row is ignored
 
@@ -62,16 +65,15 @@ def test_day_counts_source_applies_the_generated_quarantine(store):
 
 # --- Task 2.2: the first-play index ---------------------------------------------------------------
 
-def test_first_play_index_ignores_history_when_a_ledger_exists(store):
-    """A phantom history row must not drag a track's first-seen day earlier and fake a discovery."""
-    store.history.add_history_snapshot(1, 10 * DAY, ["a"])
+def test_first_play_index_retains_earlier_coarse_evidence_when_a_ledger_exists(store):
+    store.history.record_history_plays(1, 10 * DAY, ["a"], source_timezone="UTC")
     _ev(store, "a", 20 * DAY)
     tr._build_first_play_index(store)
-    assert store.trends.first_play_map("track")["a"] == 20
+    assert store.trends.first_play_map("track")["a"] == 10
 
 
 def test_first_play_index_uses_history_without_a_ledger(store):
-    store.history.add_history_snapshot(1, 10 * DAY, ["a"])
+    store.history.record_history_plays(1, 10 * DAY, ["a"], source_timezone="UTC")
     tr._build_first_play_index(store)
     assert store.trends.first_play_map("track")["a"] == 10
 
@@ -115,7 +117,8 @@ def test_month_review_falls_back_to_history_without_a_ledger(store):
     from tests.conftest import seed_catalog_track
     seed_catalog_track(store,'a','T','Ben',track_id=1,video_id='va')
     store.conn.commit()
-    store.history.add_history_snapshot(1, int(dt.datetime(2026, 6, 3, 12, tzinfo=dt.UTC).timestamp()), ["a"])
+    store.history.record_history_plays(1, dt.datetime(2026, 6, 3, 12, tzinfo=dt.UTC).timestamp(),
+                                       ["a"], source_timezone="UTC")
     now = dt.datetime(2026, 7, 9, tzinfo=dt.UTC).timestamp()
     review = tr.month_review(_months(store), store, now, tr.day_counts_source(store),
                              store.trends.track_meta())
@@ -129,10 +132,12 @@ def test_month_review_falls_back_to_history_without_a_ledger(store):
 # reports them "discovering" their own collection.
 
 def _owned(store, pid, tid, key, artist, ytm="PL_own", generated=False):
-    store.conn.execute("INSERT OR IGNORE INTO playlists(id,identity_id,ytm_playlist_id,title) "
-                       "VALUES (?,1,?,'p')", (pid, ytm))
+    from yt_playlist.core.playlist_scopes import ensure
+    store.conn.execute("INSERT OR IGNORE INTO playlists(id,identity_id,ytm_playlist_id,title,scope_ref) "
+                       "VALUES (?,1,?,'p',?)", (pid, ytm,ensure(store.conn,ytm,1)))
     if generated:
-        store.conn.execute("INSERT OR IGNORE INTO playlist_group(ytm,name) VALUES (?,'Generated')", (ytm,))
+        store.playlists.set_playlist_group(ytm,'Generated',identity_id=1)
+        store.playlists.mark_generated_playlist(ytm)
     from tests.conftest import seed_catalog_track
     seed_catalog_track(store,key,'t',artist,track_id=tid,video_id='v'+key)
     store.conn.execute("INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES (?,?,0)",

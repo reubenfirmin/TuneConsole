@@ -9,9 +9,9 @@ from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
 
-def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
+def _client(store, *, now=1.0):
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                       base_url="http://127.0.0.1")
 
 
@@ -19,12 +19,12 @@ def test_retired_source_weight_cannot_be_saved_or_learned(store):
     client = _client(store)
     response = client.post("/taste/weight", data={"axis": "lane:explore", "weight": "1.3"})
     assert response.status_code == 400
-    assert store.get_setting("taste_settings_checkpoint_v1") is None
+    assert store.settings.get_setting("taste_settings_checkpoint_v1") is None
     for kind in ("more", "less", "dismiss", "not_now"):
         response = client.post("/recs/feedback", data={"item": "old catalog track|artist",
                                                      "kind": kind, "lane": "explore"})
         assert response.status_code == 200
-    assert "lane:explore" not in store.weight_records()
+    assert "lane:explore" not in store.rec_model.weight_records()
 
 
 def test_taste_page_renders_status_and_controls(store):
@@ -42,7 +42,7 @@ def test_taste_shell_and_overview_do_not_compute_hidden_tabs(store, monkeypatch)
     def unexpected(*args, **kwargs):
         raise AssertionError("Hidden tab data was loaded")
 
-    monkeypatch.setattr(store, "rec_baskets", unexpected)
+    monkeypatch.setattr(store.rec_query, "rec_baskets", unexpected)
     monkeypatch.setattr(taste_viz, "model_transparency", unexpected)
     monkeypatch.setattr(taste_viz, "generated_playlists", unexpected)
     monkeypatch.setattr(embed, "load_vectors", unexpected)
@@ -66,14 +66,68 @@ def test_taste_shell_and_overview_do_not_compute_hidden_tabs(store, monkeypatch)
     assert c.get("/taste/panels/unknown").status_code == 404
 
 
+@pytest.mark.parametrize("source,explanation", [
+    ("radio", "Recent radio listening is recorded."),
+    ("dated", "precise times aren’t available for this comparison."),
+    ("unmapped", "Recent listening is recorded, but there isn’t enough comparable music yet"),
+    ("quiet", "A recent listening comparison isn’t available yet."),
+])
+def test_overview_shows_weekly_model_inputs_when_the_play_comparison_is_unavailable(store, source, explanation):
+    now = 20 * 86400.0
+    client = _client(store, now=now)
+    iid = store.identities.get_identities()[0].id
+    store.modes.replace_modes([
+        {"mode_id": 1, "label": "Jazz", "families": [["jazz", 1]],
+         "centroid": np.ones(1, dtype=np.float32), "size": 3, "rep_keys": []},
+    ], retired_ids=[], now=now)
+    store.settings.set_setting("radio_session_playlist_ids", '["radio"]')
+    if source in ("radio", "unmapped"):
+        store.history.record_play_event(iid, "song|artist", "v1", now,
+                                        playlist_ytm_id="radio" if source == "radio" else None,
+                                        source_timezone="UTC")
+    elif source == "dated":
+        store.history.record_history_plays(iid, now, ["song|artist"], source_timezone="UTC")
+    store.rec_model.record_like("liked|artist", now - 6 * 86400, provenance="action")
+    store.rec_model.record_like("synced|artist", now, provenance="sync")
+    store.rec_model.record_dislike("disliked|artist", now + 86400, now - 2 * 86400)
+    store.rec_surface.log_graduation("era:1990", "like", 2, 1.1, 1.1, now - 5 * 86400)
+
+    html = client.get("/taste/panels/overview").text
+
+    assert explanation in html
+    assert "last 7 days" in html
+    assert "Like recorded<small>From your ratings</small>" in html
+    assert "Existing like<small>Found by sync</small>" in html
+    assert "their original rating dates aren’t known." in html
+    assert "Dislike added</dt><dd>1</dd>" in html
+    assert "<strong>1990s</strong>" in html and '>Increased</span>' in html
+    assert 'class="taste-preference-axis">Era</span>' in html
+    assert html.index('Saved preference changes') < html.index('Feedback added to your model') < html.index('Listening balance')
+    assert '<details class="taste-feedback-note">' in html
+    assert "Ratings on radio songs count too." in html
+    assert "matched tracks" not in html
+    assert "At least 3" not in html
+    assert 'href="#learning"' in html
+
+
+def test_overview_shows_feedback_even_without_a_content_model_or_music_groups(store):
+    store.rec_model.record_like("liked|artist", 1, provenance="action")
+
+    html = _client(store).get("/taste/panels/overview").text
+
+    assert "Like recorded<small>From your ratings</small>" in html
+    assert "This comparison appears once your library has been grouped" in html
+    assert "matched tracks" not in html
+
+
 def test_genre_coverage_counts_tracks_instead_of_weighted_plays(store):
     c = _client(store)
-    iid = store.get_identities()[0].id
-    tagged = store.upsert_track("tagged", "Tagged", "Artist", None, None)
-    store.set_track_genre(tagged, "Jazz")
-    store.upsert_track("untagged", "Untagged", "Artist", None, None)
+    iid = store.identities.get_identities()[0].id
+    tagged = store.tracks.upsert_track("tagged", "Tagged", "Artist", None, None)
+    store.tracks.set_track_genre(tagged, "Jazz")
+    store.tracks.upsert_track("untagged", "Untagged", "Artist", None, None)
     for day in range(4):
-        store.add_history_snapshot(iid, day * 86400.0, ["tagged|artist"])
+        store.history.record_history_plays(iid, day * 86400.0, ["tagged|artist"], source_timezone="UTC")
 
     html = c.get("/taste/model-status").text
 
@@ -192,14 +246,7 @@ def test_taste_page_empty_autotune_state(store):
 
 
 def test_taste_page_renders_autotune_result_panel(store):
-    from yt_playlist.rec import autotune_run
-    iid = store.upsert_identity("main", "cred", None, True)
-    A = [store.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(40)]
-    B = [store.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(40)]
-    for j in range(6):
-        store.set_playlist_tracks(store.upsert_playlist(iid, f"PA{j}", "PA", 8, f"ha{j}", 0.0), A[j*5:j*5+8])
-        store.set_playlist_tracks(store.upsert_playlist(iid, f"PB{j}", "PB", 8, f"hb{j}", 0.0), B[j*5:j*5+8])
-    autotune_run.run_and_record(store, now=1000.0)
+    _set_autotune_result(store, metric="recall_at_k", in_sample=True)
     client = _client(store)
     main = client.get("/taste/autotune-status").text
     assert "Earlier manual Auto-tune result" not in main
@@ -209,7 +256,7 @@ def test_taste_page_renders_autotune_result_panel(store):
     assert "Playlist patterns (SVD)" in html
     assert "Selected model" in html and "Previous model" in html
     assert "percentage points" in html
-    # No history was recorded, so the sweep judged itself in-sample: the panel must say so.
+    # Historical reports must retain the original evaluation's in-sample warning.
     assert "This test used your existing playlists" in html
 
 
@@ -227,7 +274,7 @@ def _set_autotune_result(store, **overrides):
         "recs": {"dropped": [], "added": [], "compared": 0},
     }
     payload.update(overrides)
-    store.set_setting(autotune_run.RESULT_SETTING, json.dumps(payload))
+    store.settings.set_setting(autotune_run.RESULT_SETTING, json.dumps(payload))
 
 
 def test_taste_page_autotune_temporal_result_has_no_in_sample_warning(store):
@@ -276,7 +323,7 @@ def test_autotune_report_explains_historical_test_and_recommendation_changes(sto
 
 
 def test_taste_page_uses_sliders_not_number_fields(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     html = c.get("/taste/panels/recommendations").text
@@ -288,10 +335,10 @@ def test_taste_page_uses_sliders_not_number_fields(store):
 
 
 def test_taste_page_renders_genre_slider_for_tagged_library(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    t = store.upsert_track("v1", "Song", "Band", None, None)
-    store.set_track_genre(t, "Techno")
-    store.add_history_snapshot(iid, 1.0, ["song|band"])    # play it so it counts toward the mix
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
+    store.tracks.set_track_genre(t, "Techno")
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     html = c.get("/taste/panels/recommendations").text
@@ -301,12 +348,12 @@ def test_taste_page_renders_genre_slider_for_tagged_library(store):
 def test_taste_controls_round_trip(store):
     c = _client(store)
     assert c.post("/taste/weight", data={"axis": "lane:deep_cut", "weight": "0.5"}).status_code == 200
-    assert store.get_weights(now=1.0)["lane:deep_cut"] == 0.5
+    assert store.rec_model.get_weights(now=1.0)["lane:deep_cut"] == 0.5
     assert c.post("/taste/reset-weights").status_code == 200
-    assert store.get_weights() == {}
-    store.record_feedback("for_you", "a|b", "dismiss", now=1.0)
+    assert store.rec_model.get_weights() == {}
+    store.rec_model.record_feedback("for_you", "a|b", "dismiss", now=1.0)
     assert c.post("/taste/clear-feedback").status_code == 200
-    assert store.suppressed_keys("for_you", now=2.0) == set()
+    assert store.rec_model.suppressed_keys("for_you", now=2.0) == set()
 
 
 def test_taste_recall_fragment(store):
@@ -335,7 +382,7 @@ def test_taste_genre_weight_uses_genre_band(store):
     c = _client(store)
     # a genre axis may be muted to 0 (band [0,2]); the lane band [0.2,3.0] must not floor it
     assert c.post("/taste/weight", data={"axis": "genre:rock", "weight": "0"}).status_code == 200
-    assert store.get_weights(now=1.0)["genre:rock"] == 0.0
+    assert store.rec_model.get_weights(now=1.0)["genre:rock"] == 0.0
 
 
 def test_taste_reset_param_restores_default(store):
@@ -347,10 +394,10 @@ def test_taste_reset_param_restores_default(store):
 
 def test_taste_reset_all_clears_weights_and_params(store):
     c = _client(store)
-    store.set_weight("lane:deep_cut", 0.5)
+    store.rec_model.set_weight("lane:deep_cut", 0.5)
     rec_params.set_param(store, "comfort_min_plays", 3)
     assert c.post("/taste/reset-all").status_code == 200
-    assert store.get_weights() == {}
+    assert store.rec_model.get_weights() == {}
     assert rec_params.get_param(store, "comfort_min_plays") == 4
 
 
@@ -372,28 +419,29 @@ def test_taste_preview_explains_scope_sources_and_two_different_samples(store):
 
 
 def test_taste_preview_explains_production_score_trace_in_plain_language(store, monkeypatch):
-    from yt_playlist.rec import recommend
+    from yt_playlist.rec import surfaces
     trace = {"durable": 0.4, "transient_delta": 0.1, "session_delta": -0.02,
-             "audio_delta": 0.03, "combined": 0.51, "rank_base": 0.8,
+             "audio_delta": 0.03, "negative_delta": -0.05, "combined": 0.46, "rank_base": 0.8,
              "axes": {"genre": 1.2, "era": 1.0},
              "axis_labels": {"genre": "electronic", "era": "2010s"},
              "axis_product": 1.2, "axis_applied": 1.2, "axis_cap": 1.4,
              "final": 0.96, "contexts": [{"name": "Night drive", "contribution": 0.3}]}
-    item = recommend.ForYouItem("Track", "Artist", "", "v", None, 0, "reason",
+    item = surfaces.ForYouItem("Track", "Artist", "", "v", None, 0, "reason",
                                 key="track|artist", lane="neighbourhood", trace=trace)
-    monkeypatch.setattr(recommend, "taste_sample", lambda *a, **kw: [item])
+    monkeypatch.setattr(surfaces, "taste_sample", lambda *a, **kw: [item])
 
     html = _client(store).get("/taste/preview").text
 
     assert "Why this pick" in html
     assert "Night drive" in html and "recent listening favors it" in html
     assert "This session makes it a weaker match" in html
+    assert "It resembles music you disliked" in html
     assert "genre preference favors it (electronic)" in html
     assert "<details" not in html
 
 
 def test_taste_comparison_keeps_fixed_baseline_and_shows_delta(store, monkeypatch):
-    from yt_playlist.rec import recommend
+    from yt_playlist.rec import surfaces
     calls = []
 
     def comparison(_store, _now, keys=None, limit=24):
@@ -407,7 +455,7 @@ def test_taste_comparison_keeps_fixed_baseline_and_shows_delta(store, monkeypatc
                  "lane": "neighbourhood", "lane_weight": 1.0,
                  "eligible": True, "eligibility_reason": None}]
 
-    monkeypatch.setattr(recommend, "taste_comparison", comparison)
+    monkeypatch.setattr(surfaces, "taste_comparison", comparison)
     c = _client(store)
     assert c.post("/taste/comparison/baseline").status_code == 200
     html = c.get("/taste/comparison").text
@@ -454,12 +502,12 @@ def test_recommendation_controls_are_all_available_and_rendered_once(store):
 
 def test_first_change_saves_recovery_point_and_later_changes_keep_it(store):
     client = _client(store)
-    store.set_weight("genre:rock", 0, lo=0, now=-1000)
-    store.set_weight("era:1990s", 1.7, now=-500)
-    original_weights = store.weight_records()
+    store.rec_model.set_weight("genre:rock", 0, lo=0, now=-1000)
+    store.rec_model.set_weight("era:1990s", 1.7, now=-500)
+    original_weights = store.rec_model.weight_records()
     rec_params.set_param(store, "breadth_bias", -0.25)
     rec_params.set_param(store, "source_w_play", 0.12)
-    store.set_setting("unrelated_setting", "keep me")
+    store.settings.set_setting("unrelated_setting", "keep me")
     assert "automatically saves" in client.get("/taste/checkpoint").text
 
     client.post("/taste/param", data={"name": "breadth_bias", "value": "0.8"})
@@ -467,17 +515,17 @@ def test_first_change_saves_recovery_point_and_later_changes_keep_it(store):
     client.post("/taste/weight", data={"axis": "genre:jazz", "weight": "0"})
     client.post("/taste/param", data={"name": "comfort_min_plays", "value": "12"})
     client.post("/taste/param", data={"name": "source_w_play", "value": "0.2"})
-    store.record_feedback("for_you", "song|artist", "dismiss", now=1)
-    store.replace_rec_vectors([("song|artist", np.array([1., 0.], dtype=np.float32).tobytes())])
+    store.rec_model.record_feedback("for_you", "song|artist", "dismiss", now=1)
+    store.rec_model.replace_rec_vectors([("song|artist", np.array([1., 0.], dtype=np.float32).tobytes())])
 
     assert client.post("/taste/checkpoint/restore").headers["HX-Refresh"] == "true"
     assert rec_params.get_param(store, "breadth_bias") == -0.25
     assert rec_params.get_param(store, "source_w_play") == 0.12
-    assert store.get_setting("rec_param:comfort_min_plays") is None
-    assert store.weight_records() == original_weights  # includes zero and original fade timestamps
-    assert store.get_setting("unrelated_setting") == "keep me"
-    assert store.suppressed_keys("for_you", now=1) == {"song|artist"}
-    assert store.rec_vectors_count() == 1
+    assert store.settings.get_setting("rec_param:comfort_min_plays") is None
+    assert store.rec_model.weight_records() == original_weights  # includes zero and original fade timestamps
+    assert store.settings.get_setting("unrelated_setting") == "keep me"
+    assert store.rec_model.suppressed_keys("for_you", now=1) == {"song|artist"}
+    assert store.rec_model.rec_vectors_count() == 1
     # Reopening the page/app does not discard the checkpoint.
     assert "Starting point saved" in _client(store).get("/taste/checkpoint").text
 
@@ -494,16 +542,16 @@ def test_checkpoint_can_be_replaced_and_survives_reset_all(store):
 
 def test_reset_all_itself_saves_a_recovery_point(store):
     client = _client(store)
-    store.set_weight("artist:someone", 1.6, now=None)
+    store.rec_model.set_weight("artist:someone", 1.6, now=None)
     rec_params.set_param(store, "comfort_min_plays", 9)
     client.post("/taste/reset-all")
     client.post("/taste/checkpoint/restore")
     assert rec_params.get_param(store, "comfort_min_plays") == 9
-    assert store.weight_records()["artist:someone"]["weight"] == 1.6
+    assert store.rec_model.weight_records()["artist:someone"]["weight"] == 1.6
 
 
 def test_taste_comparison_labels_entries_exits_and_exclusions(store, monkeypatch):
-    from yt_playlist.rec import recommend
+    from yt_playlist.rec import surfaces
 
     trace = {"durable": 0.4, "transient_delta": 0.0, "session_delta": 0.0,
              "audio_delta": 0.0, "rank_base": 0.7, "axes": {}, "axis_applied": 1.0}
@@ -522,7 +570,7 @@ def test_taste_comparison_labels_entries_exits_and_exclusions(store, monkeypatch
              "lane_weight": None, "eligible": False, "eligibility_reason": "dismissed or snoozed"},
         ]
 
-    monkeypatch.setattr(recommend, "taste_comparison", comparison)
+    monkeypatch.setattr(surfaces, "taste_comparison", comparison)
     client = _client(store)
     client.post("/taste/comparison/baseline")
     html = client.get("/taste/comparison").text
@@ -532,9 +580,9 @@ def test_taste_comparison_labels_entries_exits_and_exclusions(store, monkeypatch
 
 
 def test_taste_page_lists_and_clears_bans(store):
-    store.upsert_track("banned-video", "Song", "Band", "An Album", None,
+    store.tracks.upsert_track("banned-video", "Song", "Band", "An Album", None,
                        thumbnail="/static/banned-cover.jpg")
-    store.record_dislike("song|band", until=99999.0, now=1.0)
+    store.rec_model.record_dislike("song|band", until=99999.0, now=1.0)
     c = _client(store)
     html = c.get("/taste/panels/feedback").text
     assert '<table class="taste-feedback-table"' in html
@@ -542,15 +590,15 @@ def test_taste_page_lists_and_clears_bans(store):
     assert 'src="/static/banned-cover.jpg"' in html
     assert "https://music.youtube.com/watch?v=banned-video" in html
     assert c.post("/taste/unban", data={"key": "song|band"}).status_code == 200
-    assert store.disliked_identity_keys() == set()
+    assert store.rec_model.disliked_identity_keys() == set()
     assert "No banned tracks." in c.get("/taste/panels/feedback").text
 
 
 def test_feedback_tracks_resolve_discovery_and_keep_missing_metadata_manageable(store):
-    store.upsert_discovered_track("new song|new artist", "discovered-video", "New Song", "New Artist",
+    store.discovery.upsert_discovered_track("new song|new artist", "discovered-video", "New Song", "New Artist",
                                   "New Album", "/static/discovered-cover.jpg", None, None, "", now=1.0)
-    store.record_dislike("new song|new artist", until=None, now=2.0)
-    store.record_dislike("removed song|former artist", until=0.0, now=3.0)
+    store.rec_model.record_dislike("new song|new artist", until=None, now=2.0)
+    store.rec_model.record_dislike("removed song|former artist", until=0.0, now=3.0)
     response = _client(store).get("/taste/panels/feedback")
     assert response.status_code == 200
     tracks = response.context["bans"]
@@ -574,22 +622,22 @@ def test_feedback_unban_preserves_quoted_track_keys(store):
                 self.values.append(json.loads(attrs["hx-vals"]))
 
     key = '''song "live" & <rare>|artist's band'''
-    store.record_dislike(key, until=None, now=1.0)
-    store.record_dislike("other|artist", until=None, now=2.0)
+    store.rec_model.record_dislike(key, until=None, now=1.0)
+    store.rec_model.record_dislike("other|artist", until=None, now=2.0)
     client = _client(store)
     buttons = UnbanButtons()
     buttons.feed(client.get("/taste/panels/feedback").text)
     assert {"key": key} in buttons.values
     response = client.post("/taste/unban", data={"key": key})
     assert response.status_code == 200 and response.headers["HX-Refresh"] == "true"
-    assert store.disliked_identity_keys() == {"other|artist"}
+    assert store.rec_model.disliked_identity_keys() == {"other|artist"}
 
 
 def test_feedback_summary_explains_signals_and_excludes_learning_markers(store):
-    store.record_like("liked|artist", now=1.0)
-    store.rec.model.mark_graduated_once("liked|artist", "like_grad", now=1.0)
-    store.record_feedback("for_you", "later|artist", "not_now", until=100.0, now=1.0)
-    store.record_feedback("for_you", "artist:Band", "mute", now=1.0)
+    store.rec_model.record_like("liked|artist", now=1.0)
+    store.rec_model.mark_graduated_once("liked|artist", "like_grad", now=1.0)
+    store.rec_model.record_feedback("for_you", "later|artist", "not_now", until=100.0, now=1.0)
+    store.rec_model.record_feedback("for_you", "artist:Band", "mute", now=1.0)
     html = _client(store).get("/taste/panels/feedback").text
     assert "Liked tracks" in html and "help the model learn what you enjoy" in html
     assert "Snoozed suggestions" in html and "when the snooze expires" in html
@@ -600,7 +648,7 @@ def test_feedback_summary_explains_signals_and_excludes_learning_markers(store):
 
 
 def test_taste_page_has_one_bar_of_section_tabs(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
     html = c.get("/taste").text
@@ -627,7 +675,7 @@ def test_learning_tab_does_not_load_style_or_similarity_models(store, monkeypatc
     monkeypatch.setattr(taste_viz, "model_transparency", unexpected)
     monkeypatch.setattr(embed, "load_content_vectors", unexpected)
     monkeypatch.setattr(embed, "load_vectors", unexpected)
-    store.bump_theme("artist:AC:DC", .6, 1.0)
+    store.rec_surface.bump_theme("artist:AC:DC", .6, 1.0)
     response = _client(store).get("/taste/panels/learning")
     assert response.status_code == 200
     assert "AC:DC" in response.text
@@ -643,8 +691,8 @@ def test_model_health_kpis_render_without_loading_listening_models(store, monkey
     monkeypatch.setattr(taste_viz, "centroid_tilt_panel", unexpected)
     monkeypatch.setattr(taste_viz, "playlist_influence_panel", unexpected)
     monkeypatch.setattr(embed, "load_vectors", unexpected)
-    store.set_setting("rec_embed_method", "item2vec")
-    store.set_setting("rec_dim", "64")
+    store.settings.set_setting("rec_embed_method", "item2vec")
+    store.settings.set_setting("rec_dim", "64")
     c = _client(store)
     for path in ("/taste/panels/health", "/taste/model-status"):
         r = c.get(path)
@@ -698,11 +746,11 @@ def test_taste_page_shows_now_reading_with_live_posterior(store, monkeypatch):
     V = np.array([[1.0, 0.02], [1.0, 0.03], [1.0, 0.01]], dtype=np.float32)
     V = V / np.linalg.norm(V, axis=1, keepdims=True)
     idx = {k: i for i, k in enumerate(keys)}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (keys, V, idx))
-    iid = store.upsert_identity("main", "cred", None, True)
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     now = 100_000.0
     rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.import_play_events(iid, rows)
+    store.history.import_play_events(iid, rows)
 
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                    base_url="http://127.0.0.1")
@@ -724,10 +772,10 @@ def test_taste_page_hides_now_and_session_reading_when_quiet(store):
 def test_taste_page_draws_the_full_chain_on_a_facet_axis(store):
     # #88: wherever the page contrasts permanent and transient it must draw every layer that exists
     # on that axis - here, the whole multiplier chain, not just a share and a shrug.
-    iid = store.upsert_identity("main", "cred", None, True)
-    t = store.upsert_track("vj", "Song", "Band", None, None)
-    store.set_track_genre(t, "Jazz")
-    store.add_history_snapshot(iid, 1.0, ["song|band"])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    t = store.tracks.upsert_track("vj", "Song", "Band", None, None)
+    store.tracks.set_track_genre(t, "Jazz")
+    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     html = _client(store).get("/taste/panels/profile").text
     assert "Genre families" in html
     for cap in ("What you play", "Saved", "Recent", "Combined"):

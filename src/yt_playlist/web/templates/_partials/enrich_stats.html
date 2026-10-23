@@ -9,6 +9,7 @@
     {% if state == 'running' %}Enriching{% elif state == 'paused' %}Paused
     {% elif state == 'queued' %}Queued{% elif state == 'waiting' %}Waiting for another lookup
     {% elif state == 'blocked' %}Needs setup{% elif state == 'error' %}Retrying after an error
+    {% elif state == 'retry' %}Waiting to retry
     {% else %}Caught up{% endif %}
   </span>
   </div>
@@ -23,12 +24,17 @@
   {% elif state in ['running', 'waiting', 'blocked', 'error'] %}
   <p>{{ activity.text }}{% if state == 'running' %} <span class="section-note">Updated {{ activity_age }}.</span>{% endif %}</p>
   {% if activity.scope == 'refresh' %}<p class="section-note">Refreshing older tracks with missing metadata.</p>{% endif %}
+  {% elif state == 'retry' %}
+  <p>{{ retry.count }} provider lookup(s) await retry. Next attempt in {{ retry_seconds }} seconds.</p>
+  {% if retry.error %}<p class="enrich-warning">{{ retry.error }}</p>{% endif %}
   {% elif state == 'queued' %}
   <p>Waiting for the worker to start its next lookup.</p>
   {% else %}
   <p>Every track has had a provider pass. Missing metadata is retried periodically.</p>
   {% endif %}
   {% if activity.warning and enabled %}<p class="enrich-warning">{{ activity.warning }}</p>{% endif %}
+  {% if art_retry.count %}<p class="section-note">Artwork retries: {{ art_retry.count }}.
+    Next attempt in {{ art_retry_seconds }} seconds. Artwork retries run separately from metadata.</p>{% endif %}
   <p class="section-note">
     {% if progress.latest is not none %}Last track completed {{ age(progress.latest) }}.{% else %}No tracks completed yet.{% endif %}
     {{ '{:,}'.format(progress.recent) }} tracks checked in the past 15 minutes.
@@ -39,13 +45,10 @@
 </section>
 <section class="card workflow-console enrich-coverage-card" aria-label="Enrichment coverage">
 <div class="enrich-tiles">
-  <a class="metric" href="/enrich/queue"><span class="v">{{ '{:,}'.format(remaining) }}</span><span class="l">In queue {{ arrow_icon('right') }}</span><span class="section-note">Tracks awaiting a provider pass</span></a>
+  <a class="metric" href="/enrich/queue"><span class="v">{{ '{:,}'.format(remaining) }}</span><span class="l">In queue {{ arrow_icon('right') }}</span><span class="section-note">{{ '{:,}'.format(queue.first_pass) }} awaiting first enrichment<br>{{ '{:,}'.format(queue.refresh) }} queued for re-enrichment</span></a>
   <a class="metric" href="/enrich/processed"><span class="v">{{ '%g'|format(pct.processed) }}%</span><span class="l">Processed {{ arrow_icon('right') }}</span><span class="section-note">{{ '{:,}'.format(cov.processed) }} of {{ '{:,}'.format(cov.total) }} tracks checked</span></a>
   <a class="metric" href="/enrich/conflicts"><span class="v">{{ '{:,}'.format(conflicts) }}</span><span class="l">Open conflicts {{ arrow_icon('right') }}</span><span class="section-note">Field disagreements to review</span></a>
 </div>
-<p class="section-note">Library and discovery tracks share this queue. Discovery metadata helps choose songs for Fresh playlists.</p>
-<p class="section-note">Processed means checked, even when providers have no match. Conflicts do not block the queue.</p>
-
 <p class="section-note">Metadata coverage</p>
 <div class="cov-grid">
   {% for key, label in [('processed','Processed'), ('genre','Genre'), ('year','Year'),
@@ -60,14 +63,15 @@
 </div>
 
 <div class="cov-trend">
-  <span class="section-note">Tracks processed over time</span>
+  <div class="enrich-chart-legend section-note"><span>First enrichment</span><span>Latest re-enrichment</span></div>
   {% if spark.path %}
   <svg viewBox="0 0 520 90" preserveAspectRatio="none" class="spark">
     <path d="{{ spark.path }}" class="spark-area"/>
+    <path d="{{ refresh_spark.path }}" class="spark-area spark-refresh"/>
     {# Invisible full-height bands, one per point, carry the shared [data-tip] tooltip (date + count). #}
     {% for b in spark.bands %}
     <rect x="{{ b.x }}" y="0" width="{{ b.w }}" height="90" fill="transparent" pointer-events="all"
-          {{ tip(b.label, [{"l": "Processed", "v": b.n, "n": "cumulative by this point"}]) }}/>
+          {{ tip(b.label, [{"l": "First enrichment", "v": b.n}, {"l": "Latest re-enrichment", "v": b.refresh}]) }}/>
     {% endfor %}
   </svg>
   {% else %}

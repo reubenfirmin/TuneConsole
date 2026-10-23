@@ -33,6 +33,14 @@ def test_complete_architecture_specific_feed_returns_signature_for_crypto_verifi
     assert appcast.verify(feed, archive, "v0.2.0", "arm64") == enclosure.get(appcast.SPARKLE + "edSignature")
 
 
+def test_prerelease_feed_uses_normalized_package_version_and_original_tag_url(update_feed):
+    feed, archive, root, item, enclosure = update_feed
+    item.find(appcast.SPARKLE + "version").text = "0.2.0rc1"
+    enclosure.set("url", enclosure.get("url").replace("v0.2.0/", "v0.2.0-rc.1/"))
+    ET.ElementTree(root).write(feed)
+    assert appcast.verify(feed, archive, "v0.2.0-rc.1", "arm64")
+
+
 @pytest.mark.parametrize("problem", ["missing-signature", "truncated-signature", "wrong-arch", "mutable-url",
                                      "wrong-version", "changed-archive", "empty-feed"])
 def test_bad_or_incomplete_feed_prevents_release(update_feed, problem):

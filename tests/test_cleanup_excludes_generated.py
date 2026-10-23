@@ -9,18 +9,19 @@ from yt_playlist.repos.rec_query import GENERATED_GROUP
 
 
 def _pl(store, iid, ytm, title, track_ids, *, generated=False):
-    pid = store.upsert_playlist(iid, ytm, title, len(track_ids), "h", 1.0)
-    store.set_playlist_tracks(pid, track_ids)
+    pid = store.playlists.upsert_playlist(iid, ytm, title, len(track_ids), "h", 1.0)
+    store.playlists.set_playlist_tracks(pid, track_ids)
     if generated:
-        store.set_playlist_group(ytm, GENERATED_GROUP)
+        store.playlists.set_playlist_group(ytm, GENERATED_GROUP)
+        store.playlists.mark_generated_playlist(ytm)
     return pid
 
 
 def _seed(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    t1 = store.upsert_track("v1", "S1", "X", None, 1)
-    t2 = store.upsert_track("v2", "S2", "X", None, 1)
-    t3 = store.upsert_track("v3", "S3", "X", None, 1)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    t1 = store.tracks.upsert_track("v1", "S1", "X", None, 1)
+    t2 = store.tracks.upsert_track("v2", "S2", "X", None, 1)
+    t3 = store.tracks.upsert_track("v3", "S3", "X", None, 1)
     return iid, (t1, t2, t3)
 
 
@@ -45,7 +46,7 @@ def test_generated_excluded_from_dupes_and_identical_groups(store):
 
 def test_generated_excluded_from_near_dupes(store):
     iid, (t1, t2, t3) = _seed(store)
-    t4 = store.upsert_track("v4", "S4", "X", None, 1)
+    t4 = store.tracks.upsert_track("v4", "S4", "X", None, 1)
     a = _pl(store, iid, "PLA", "User A", [t1, t2, t3, t4])
     g = _pl(store, iid, "PLGEN", "Gen mix", [t1, t2, t3], generated=True)   # ~0.75 similar, not identical
     near = analysis.find_near_duplicate_groups(store)

@@ -12,9 +12,8 @@ import urllib.parse
 import urllib.request
 
 from yt_playlist.util import net
-from yt_playlist.util.matching import normalize, recording_title
-from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
-from yt_playlist.providers.enrich_queue import PriorityGate
+from yt_playlist.util.matching import is_remix, normalize, recording_title
+from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 from yt_playlist.providers import genres
 
 logger = logging.getLogger(__name__)
@@ -59,7 +58,6 @@ _USER_AGENT = "yt-playlist/0.1 ( https://github.com/yt-playlist ; rf@4rc.io )"
 _MIN_INTERVAL = 1.1                       # seconds between requests (just over the 1/s limit)
 _HTTP_TIMEOUT_S = 20                      # cap each request so a stalled socket can't wedge a run
 _pacer = RateLimiter(_MIN_INTERVAL)
-_gate = PriorityGate()                    # newest enrichment job preempts older ones
 _breaker = net.CircuitBreaker()           # stop a run once the host looks unreachable
 
 
@@ -133,12 +131,12 @@ def _earliest_year(recordings):
 
 
 def _top_label(obj):
-    """Highest-voted enabled genre, then recognized tags, using the shared canonical labels."""
+    """Vote order chooses the style; a documented child tag can refine its broad parent."""
+    tags = []
     for field in ("genres", "tags"):
         items = sorted(obj.get(field) or [], key=lambda x: int(x.get("count") or 0), reverse=True)
-        if genre := genres.pick_genre(item.get("name") for item in items):
-            return genre
-    return None
+        tags.extend(item.get('name') for item in items)
+    return genres.pick_genre(tags)
 
 
 _artist_genre_cache = {}
@@ -228,10 +226,10 @@ def _matches_recording(recording, title, artist):
 def enrich(title, artist):
     """Return (genre, year) for a track, or (None, None) on no match / error.
 
-    Genre falls back from recording -> artist level, because recording-level genres are sparse in
-    MusicBrainz while artist-level ones are well populated. Year comes from the earliest release.
+    Unremixed recordings may fall back to artist tags. A remix needs its own genre evidence.
+    Year comes from the earliest release.
     """
-    return _genre_year(_recording_search(title, artist))
+    return _genre_year(_recording_search(title, artist), title=title)
 
 
 def _release_ids(recordings):
@@ -249,19 +247,19 @@ def _release_ids(recordings):
 
 def enrich_full(title, artist, *, include_identifiers=False):
     """(genre, year, mb_recording_id, release_ids) from a SINGLE recording search. Callers that also
-    want the MBID (the enrichment waterfall, the playlist runner) use this instead of enrich() plus a
+    want the MBID (the enrichment waterfall) use this instead of enrich() plus a
     separate recording_mbid(), so a track costs one search rather than two.
 
     release_ids keys Cover Art Archive (which is keyed by release, not recording). It rides along
     here rather than in its own function so the cover fallback costs no extra search, and so this
     stays the single seam where MusicBrainz touches the network."""
     recs = _recording_search(title, artist)
-    genre, year = _genre_year(recs)
+    genre, year = _genre_year(recs, title=title)
     result = (genre, year, (recs[0].get("id") if recs else None), _release_ids(recs))
     return (*result, (recs[0].get("isrcs") or []) if recs else []) if include_identifiers else result
 
 
-def _genre_year(recordings):
+def _genre_year(recordings, *, title=""):
     """Derive (genre, year) from a recordings list (best match first), or (None, None) if empty."""
     if not recordings:
         return (None, None)
@@ -280,37 +278,8 @@ def _genre_year(recordings):
             year = year or _earliest_year([full])
         except Exception as e:  # noqa: BLE001
             logger.debug("MB lookup failed for %s: %s", mbid, e)
-    if not genre:                              # recording had no genre/tag, so use the artist's
+    if not genre and not is_remix(title or rec.get("title")):
         genre = _artist_genre(artist_mbid)
     return (genre, year)
 
 
-def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, should_stop=None, pending=None):
-    """Walk a track set's not-yet-enriched tracks, fetch genre+year for each, persist, and report
-    progress. Scope is a playlist (playlist_id) or an explicit `pending` list (e.g. an album's tracks).
-    `on_progress(event_dict)` receives info/track/done events for the SSE stream."""
-    enrich_fn = enrich_fn or enrich_full   # resolved here so tests can monkeypatch module-level enrich_full
-    pending = store.tracks_to_enrich(playlist_id) if pending is None else pending
-
-    def _per_item(i, total, t):
-        genre, year, mbid, _rel = enrich_fn(t["title"], t["artist"])   # one search: genre, year, MBID
-        if _breaker.tripped():             # host unreachable, so the rest would all fail too: stop
-            on_progress({"type": "err", "text": "MusicBrainz looks unreachable; enrichment stopped. "
-                         "The remaining tracks will retry next time."})
-            return False
-        if mbid:
-            store.set_track_mbid(t["id"], mbid)
-        store.set_track_enrichment(t["id"], genre, year)
-        eff_genre, eff_year = store.get_track_enrichment(t["id"])    # report what actually stuck
-        bits = " · ".join(x for x in (genre, year) if x) or "no match"
-        on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "genre": eff_genre, "year": eff_year,
-                     "text": f"{i}/{total} {t['title']}: {bits}"})
-
-    run_enrich_loop(
-        store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
-        empty_text="Everything is already enriched.",
-        start_text=lambda n: f"Enriching {n} track(s) via MusicBrainz…",
-        done_text=lambda n: f"Enriched {n} track(s).",
-        wait_text="Waiting: a newer playlist is enriching first…",
-        per_item=_per_item)

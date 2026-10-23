@@ -1,36 +1,29 @@
 """Home tab: the default landing page: Sync control, Take-Action triage, and For-You recs."""
-import asyncio
+from yt_playlist.core.activity import activity_for
+from yt_playlist.core.accounts import client_for,main_client
 import json
-import threading
 import time
-from datetime import datetime
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from yt_playlist.core import updatecheck
 from yt_playlist.library import executor
+from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.util import genre_map
-from yt_playlist.rec import arc_energy, embed, home_audit, home_themes, home_vibe, journeys, mix_tuning, onboarding, rec_params, recipes, recommend, into_recently
-from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.rec import actions, home_cards, home_prepared, home_vibe, mix_tuning, onboarding, rec_params, surfaces, into_recently
 from yt_playlist.rec import measurement
+from yt_playlist.rec.home_cards import _epoch, _proto
 from yt_playlist.rec.trend_rollups import last_complete_month
-from yt_playlist.providers import wikipedia, lastfm
-from yt_playlist.web.context import form_float
+from yt_playlist.providers import lastfm
+from yt_playlist.web.context import form_float, request_form
 from yt_playlist.web.jobs import start_fresh_pool, start_library_pool, start_playlist_enrichment
 from yt_playlist.web.spotify_import import current_job as current_spotify_import_job
 from yt_playlist.web.theme import genre_tint
 
 # How many tracks each generated proto-playlist offers.
-PROTO_SIZE = 12
-# How deep each card fetches. This is the card's ENTIRE universe: the theme picks from it and every
-# refresh draws its 12 tracks from it, so at PROTO_SIZE * 5 = 60 a card cycled the same 60 tracks
-# forever (28 artists / 11 genres on a 4k-track library) and refreshes felt like variations on one
-# card. Depth is close to free here - the surfaces score every modelled track regardless of `limit`,
-# so the query cost is flat (measured: explore 194ms at 60, 202ms at 300) - and it buys the variety
-# back: 142 artists and 35 genres at 300. Not deeper still only because a card should be drawn from
-# tracks that genuinely fit, and the tail of a taste ranking stops being that.
-ROTATION_POOL = PROTO_SIZE * 25
+PROTO_SIZE = home_cards.PROTO_SIZE
 ARTISTS_PER_CARD = 10              # new-artist tiles fetched per epoch (grid caps 5 cols, clamps to 2 rows)
 ALBUMS_PER_CARD = 15               # discover album tiles fetched per epoch (grid caps 5 cols, clamps to 3 rows)
 # Home cards that rotate. Each holds its content for erosion_view_cap real Home visits, then advances
@@ -49,12 +42,16 @@ LASTFM_NUDGE_COVERAGE = 0.90
 LASTFM_NUDGE_SNOOZE_S = 30 * 86400   # dismissing snoozes the nudge 30 days, not forever
 
 
+class StoryImpressions(BaseModel):
+    subjects: list[str] = Field(max_length=into_recently.MAX_STORIES)
+
+
 def lastfm_nudge_due(store, now=None) -> bool:
     """True when no Last.fm key is set and the nudge isn't snoozed. Dismissing snoozes it for 30 days
     (records a timestamp) so a long-lived install is reminded again instead of never seeing it."""
     if lastfm.available(store):
         return False
-    dismissed_at = store.get_setting("lastfm_nudge_dismissed_at")
+    dismissed_at = store.settings.get_setting("lastfm_nudge_dismissed_at")
     if dismissed_at is not None:
         try:
             if (now if now is not None else time.time()) - float(dismissed_at) < LASTFM_NUDGE_SNOOZE_S:
@@ -72,9 +69,9 @@ def takeout_nag_due(store, now=None) -> bool:
     Terminal (never due again) once takeout_imported_at is set. No last_sync gate: importing early
     is exactly the point, so this can be due on a fresh install. Dismissing snoozes it for 90 days
     (records a timestamp) so a long-lived install that never imports is reminded again."""
-    if store.get_setting("takeout_imported_at") is not None:
+    if store.settings.get_setting("takeout_imported_at") is not None:
         return False
-    dismissed_at = store.get_setting("takeout_nag_dismissed_at")
+    dismissed_at = store.settings.get_setting("takeout_nag_dismissed_at")
     if dismissed_at is not None:
         try:
             if (now if now is not None else time.time()) - float(dismissed_at) < TAKEOUT_NAG_SNOOZE_S:
@@ -84,191 +81,61 @@ def takeout_nag_due(store, now=None) -> bool:
     return True
 
 
-def _proto(store, lane, label, items, now):
-    """Shape a recommendation lane into a dated, saveable proto-playlist card.
-
-    The note describes THIS card's actual mix (recipes.theme_sentence), not just its lane: each card
-    also rolls a theme, so two cards from one lane can be different music entirely and a fixed
-    per-lane line ("Deeper into what you already love") described neither of them."""
-    when = datetime.fromtimestamp(now).strftime("%B %-d %Y")   # e.g. "June 21 2026"
-    tracks = items[:PROTO_SIZE]
-    genres, _ = recipes.theme_counts(store, tracks)
-    return {"lane": lane, "label": label, "name": f"{label} - {when}",
-            "note": recommend.theme_sentence(store, lane, tracks), "tracks": tracks,
-            "genres": list(genres),
-            # #50: only the Fresh (out-of-corpus discovery) card carries persistent per-row feedback.
-            # Owned-track proto cards stay curate-before-listen (client-side remove only).
-            "feedback_surface": "for_you" if lane == "fresh" else None}
-
-
-def _order_by_journey(store, items, journey, seed):
-    """Order proto-card items (ForYouItem objects in preview, plain dicts on the mode path) by the
-    rolled DJ JOURNEY, attaching the per-track features journey_order needs (genre, real-audio energy,
-    decade, plays, recency). Ordering happens here, not at save, so the preview IS the playlist
-    (WYSIWYG): a Save keeps the rows you didn't prune, in the order you see."""
-    items = recommend.attach_genres(store, items)
-    _f = recommend._field
-    keys = [_f(it, "key") or "" for it in items]
-    dao = RecDao(store)
-    decades, lastp, plays = dao.track_decades(keys), dao.track_last_played(keys), store.play_counts()
-    genres = {(_f(it, "key") or ""): (_f(it, "genre") or "") for it in items}
-    arc = arc_energy.arc_energies(keys, genres, dao.track_audio_features())   # real-audio energy (#37)
-
-    def feat(it):
-        k, g = _f(it, "key") or "", _f(it, "genre") or ""
-        return {"artist": _f(it, "artist") or "", "genre": g, "energy": arc.get(k, genre_map.energy(g)),
-                "decade": decades.get(k), "plays": plays.get(k, 0), "recency": lastp.get(k, 0.0)}
-
-    return journeys.journey_order(items, journey, seed, feat)
-
-
-# The order the four cards roll their themes in. Each avoids what the ones before it took, so the
-# row explores four corners of your taste instead of four views of one - which is the whole point of
-# offering four: which card you reach for only means something if they differ.
-_ROW_LANES = ("wheelhouse", "explore", "comfort", "fresh")
-
-
-def _rolled_theme(store, lane, pool, now):
-    """This lane's theme, rolled from what its own pool holds and away from its siblings' themes.
-
-    Seeded per (lane, epoch): with the epoch alone every card in the row drew the SAME random
-    sequence and so the same genre, era and journey. The avoidance set is rebuilt by re-rolling the
-    earlier lanes, which is deterministic, so a single-card refresh lands the same theme it would
-    have had in a full render. Siblings are rolled against the library distribution (their own pools
-    aren't in hand here) purely to know what to steer clear of."""
-    dists = recommend.pool_facets(store, pool)
-    avoid = {"genres": set(), "eras": set()}
-    for other in _ROW_LANES:
-        this_one = other == lane
-        recipe = recommend.roll_recipe(store, other, seed=f"{other}:{_epoch(store, other)}",
-                                       now=now, avoid=avoid, dists=dists if this_one else None)
-        if this_one:
-            return recipe
-        avoid["genres"] |= set(recipe.get("facets", {}).get("genres", []))
-        avoid["eras"] |= set(recipe.get("facets", {}).get("eras", []))
-    return recommend.roll_recipe(store, lane, seed=f"{lane}:{_epoch(store, lane)}", now=now,
-                                 dists=dists)
-
-
-def _carded(store, lane, label, pool, now):
-    """A proto-card built from a rolled recipe: roll the theme + journey (seeded by the card's lane
-    and rotation epoch so it's stable across steer/stance previews), focus the POOL on the theme,
-    take the card's slice from what's left, then order it by the rolled JOURNEY (energy arc, eras,
-    deep dive…). Recipes predating journeys fall back to 'shuffle'.
-
-    The slice is taken AFTER the theme, not before. Rotating first and theming the twelve tracks that
-    came out let the theme reorder a card it could not change - so every refresh returned the pool's
-    dominant genre no matter what rolled."""
-    pool = recommend.attach_genres(store, list(pool))     # the theme is rolled from these genres
-    recipe = _rolled_theme(store, lane, pool, now)
-    focused = recommend.theme_filter(store, pool, recipe.get("facets", {}))
-    # Rotate within the themed head of the pool: still a fresh slice each epoch, but one drawn from
-    # the tracks that match, rather than from the whole pool.
-    focused = home_vibe.rank(store, now, focused)
-    items = (focused[:PROTO_SIZE] if home_vibe.current(store, now) else
-             recommend.rotate_sample(focused[:PROTO_SIZE * 2], PROTO_SIZE, _epoch(store, lane)))
-    # roll_recipe forces Fresh to journey="shuffle" (unowned proposals have no plays/recency signal),
-    # so the stored recipe and this preview ordering agree. Owned lanes order by their rolled journey.
-    items = _order_by_journey(store, items, recipe.get("journey", "shuffle"),
-                              recipe.get("dj", {}).get("seed", 0))
-    p = _proto(store, lane, label, items, now)
-    p["recipe"] = recipe
-    if vibe := home_vibe.current(store, now):
-        p["recipe"]["vibe"] = vibe
-    return p
-
-
-# Labels for the four refreshable Home cards, by their internal lane name.
-_CARD_LABELS = {"wheelhouse": "More in your wheelhouse", "explore": "From your catalog",
-                "comfort": "Comfort listening", "fresh": "Fresh songs"}
-
-# #87 retention only needs to outlive the future lane-bandit's evidence window, not forever.
-_LANE_IMPRESSION_RETAIN_D = 30
-
-
-def _record_lane_impressions(store, items, now):
-    """#87 pure instrumentation: log which lane served each item actually rendered on a Home card, for
-    a future lane bandit. Never affects lane selection/weighting. Items are ForYouItem (wheelhouse/
-    explore/comfort) or the Fresh dict shape, both of which carry lane + key."""
-    if not items:
-        return
-    pairs = [((it.get("lane") if isinstance(it, dict) else it.lane),
-              (it.get("key") if isinstance(it, dict) else it.key)) for it in items]
-    store.record_lane_impressions(pairs, now,
-                                  prune_before=now - _LANE_IMPRESSION_RETAIN_D * 86400)
-
-
-def _served_model_version(store, ranker, now=None):
-    return measurement.serving_policy(store, time.time() if now is None else now, ranker or "lane")[0]
-
-
-def _record_served_cards(store, protos, now):
-    """#113 log only the final twelve-track cards handed to the template."""
-    rows = []
-    rank = 0
-    for card_position, proto in enumerate(protos, 1):
-        ranker = proto.get("ranker") or "lane"
-        for track_position, track in enumerate(proto["tracks"], 1):
-            rank += 1
-            key = track.get("key") if isinstance(track, dict) else getattr(track, "key", None)
-            details = dict(track) if isinstance(track, dict) else vars(track).copy()
-            rows.append({**details, "key": key, "rank": rank, "lane": proto["lane"],
-                         "mode_id": proto.get("mode_id"),
-                         "serving_context": {**details.get("serving_context", {}),
-                                        "ranker": ranker, "card_position": card_position,
-                                        "track_position": track_position,
-                                        "recipe": proto.get("recipe", {})}})
-    measurement.record_recommendations(store, "home", rows, now,
-                                       ranker="assembled-cards")
-
-
-def _one_card(store, card, now, *, avoid_genres=(), include_genres=()):
-    """Build a single Home card's proto from its full candidate POOL. Used by the per-card Refresh
-    route after the rotation has been advanced. Returns None if the card is empty.
-
-    The pool is handed over whole: _carded rolls the theme from it and takes the card's slice after
-    focusing on that theme. Slicing here first (as this used to) left the theme nothing to choose
-    from - it could only reorder twelve tracks that were picked before it was known."""
-    if card == "wheelhouse":
-        pool = list(recommend.for_you(store, now, limit=ROTATION_POOL))
-    elif card == "explore":
-        fy = {i.key for i in recommend.for_you(store, now, limit=ROTATION_POOL)}
-        pool = [i for i in recommend.explore_for_you(store, now, limit=ROTATION_POOL) if i.key not in fy]
-    elif card == "comfort":
-        pool = list(recommend.comfort_listening(store, now, limit=ROTATION_POOL))
-    elif card == "fresh":
-        from yt_playlist.rec import fresh_pool
-        # Use the worker/job's prepared ranking. A missing pool renders a clickable skeleton;
-        # scoring thousands of discoveries here would stall page loads and genre selection.
-        pool = fresh_pool.pick(store, now, include_genres, avoid_genres, size=ROTATION_POOL)
-        # NB: #53 offered-count is stamped by the CALLER (the /home/cards loop or the per-card refresh
-        # route), not here, so the cold-start fallback path doesn't double-count fresh tracks.
-    else:
-        return None
-    if avoid_genres or include_genres:
-        pool = home_themes.matching_genres(store, pool, avoid=avoid_genres, include=include_genres)
-    if not pool or ((avoid_genres or include_genres) and len(pool) < 4):
-        return None
-    p = _carded(store, card, _CARD_LABELS[card], pool, now)
-    _record_lane_impressions(store, p["tracks"], now)   # #87: log what was actually rendered
-    return p
-
-
-def _epoch(store, card):
-    """The card's current rotation epoch: it holds content for erosion_view_cap views, then advances.
-    Read-only. The view tick happens in GET / so previews/re-renders don't churn the cards."""
-    cap = max(1, rec_params.get_param(store, "erosion_view_cap"))
-    return max(0, RecDao(store).card_views(card) - 1) // cap
-
-
 def build(ctx) -> APIRouter:
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
 
+    class PoolJobsAdapter:
+        def latest(self, kind, parameters):
+            return ctx.jobs.latest(kind, parameters)
+
+        def start(self, kind, parameters, excluded):
+            return (start_fresh_pool(ctx, parameters) if kind == "fresh_pool"
+                    else start_library_pool(ctx, parameters, excluded))
+
+    recommendations = home_cards.HomeCards(store, PoolJobsAdapter(), ctx.logger)
+
+    def _schedule_home():
+        if ctx.rec_worker:
+            ctx.rec_worker.trigger_home_refresh()
+
+    def _prepared(now, request=None):
+        if request is not None and hasattr(request.state, "prepared_home"):
+            return request.state.prepared_home
+        payload = home_prepared.load(store, now, _schedule_home)
+        if request is not None:
+            request.state.prepared_home = payload
+        return payload
+
+    def _card_context(request, now, *, live=False, **options):
+        payload = _prepared(now, request)
+        if live:
+            # Explicit tuning may regenerate; the next ordinary read reuses it.
+            result = recommendations.cards(home_cards.CardsRequest(now, record=False, **options))
+            home_prepared.remember(store, payload, result, now)
+            _schedule_home()
+        else:
+            record = request.url.path in ("/", "/home/cards", "/home/refresh-cards")
+            if request.url.path == "/":
+                record = (onboarding._has_synced(store)
+                          and not onboarding.onboarding_active(store, now))
+            result = home_prepared.cards(store, payload, now, recommendations, _schedule_home,
+                record=record)
+        context = vars(result).copy()
+        try:
+            attempt = max(0, int(request.query_params.get("prepare_attempt", "0")))
+        except ValueError:
+            attempt = 0
+        context["prepare_attempt"] = attempt + 1 if not live and payload is None and attempt < 10 else None
+        context["genre_options"] = [option | {"tint": genre_tint(option["family"])}
+                                    for option in result.genre_options]
+        _audit_cards(request, result.protos, now)
+        return context
+
     def _tuning_active():
-        genres = store.get_proposals("home_genre_request") or {}
-        return (bool(store.get_leans()) or bool(store.hidden_facets())
-                or bool(store.get_setting(home_vibe.SETTING))
+        genres = store.rec_surface.get_proposals("home_genre_request") or {}
+        return (bool(store.rec_model.get_leans()) or bool(store.rec_model.hidden_facets())
+                or bool(store.settings.get_setting(home_vibe.SETTING))
                 or rec_params.get_param(store, "breadth_bias") != 0
                 or (genres.get("epoch") == _epoch(store, "cards")
                     and bool(genres.get("include_genres") or genres.get("avoid_genres"))))
@@ -279,27 +146,31 @@ def build(ctx) -> APIRouter:
         return response
 
     def _audit_cards(request, protos, now):
-        try:
-            home_audit.record(store, protos, now, source=request.url.path,
-                              epoch=_epoch(store, "cards"),
-                              card_epochs={p["lane"]: _epoch(store, p["lane"]) for p in protos})
-        except Exception:  # diagnostics must not prevent serving a card
-            ctx.logger.warning("Home offer audit failed", exc_info=True)
+        recommendations.audit(protos, now, request.url.path)
 
-    def _feed_context(now):
-        # Bake held slider exposure + sustained listening into the graduation ledger (idempotent per
-        # UTC day). The cards themselves now load lazily via /home/cards from the worker's bundles.
-        recommend.graduate_slider_exposure(store, now)
-        recommend.graduate_play_exposure(store, now)
-        return {"fingerprint": recommend.taste_fingerprint(store, now),
+    def _feed_context(request, now):
+        return {"fingerprint": home_prepared.fingerprint(store, _prepared(now, request), now),
                 "tuning_active": _tuning_active(),
                 "vibe_presets": home_vibe.PRESETS, "vibe": home_vibe.current(store, now),
-                "has_modes": bool(store.modes.list_modes(active_only=True))}
+                "has_modes": bool(store.modes.list_modes(active_only=True)),
+                **_card_context(request, now)}
+
+    def _discovery_context(now, request=None):
+        # These are selections from persisted pools. Provider discovery, projection and scoring
+        # belong to the worker, so opening this tab never starts a recommendation build.
+        selection = home_prepared.discovery(store, _prepared(now, request), now)
+        _queue_artist_images(selection, now)
+        return {**selection, "discovery_busy": _busy()}
+
+    def _queue_artist_images(selection, now):
+        ids = [a['artist_id'] for a in selection.get('discovery_artists', []) if not a.get('thumbnail')]
+        if ctx.rec_worker and ids:
+            ctx.rec_worker.trigger_artist_images([a['artist_id'] for a in store.discovery.artist_images_due(ids, now)])
 
     @router.get("/")
     def home_page(request: Request):
         now = now_fn()
-        dao = RecDao(store)
+        dao = store.rec_surface
         for card in ROTATING_CARDS:   # one tick per genuine Home visit -> per-card rotation advances
             if card == "cards":
                 started = store.modes.epoch_started_at(_epoch(store, card))
@@ -312,24 +183,36 @@ def build(ctx) -> APIRouter:
         # a nag card (gated on a completed first sync) that links into the full-screen reel. Shown
         # until viewed or dismissed for that month; next month's recap re-shows. Expire a cached story
         # at the next rollover even if the worker has not rebuilt yet, or recent listening data is missing.
-        _story = (store.get_proposals("trend_rollups") or {}).get("story")
+        _story = (store.rec_surface.get_proposals("trend_rollups") or {}).get("story")
         recap = ({"month": _story["month"], "month_name": _story["month_name"]}
                  if (_story and _story.get("month") == last_complete_month(now)
-                     and store.get_setting("last_sync_at") is not None
-                     and store.get_setting("recap_viewed_month") != _story.get("month")
-                     and store.get_setting("recap_dismissed_month") != _story.get("month"))
+                     and store.settings.get_setting("last_sync_at") is not None
+                     and store.settings.get_setting("recap_viewed_month") != _story.get("month")
+                     and store.settings.get_setting("recap_dismissed_month") != _story.get("month"))
                  else None)
         spotify_library_job = current_spotify_import_job(ctx)
         if spotify_library_job and spotify_library_job.get("dismissed"):
             spotify_library_job = None
+        radio_bootstrap = ctx.radio.bootstrap()
+        launch_id = request.query_params.get("radio_playlist")
+        if launch_id is not None:
+            source = store.playlists.get_playlist(int(launch_id)) if launch_id.isdecimal() and len(launch_id) < 16 else None
+            if source is not None:
+                radio_bootstrap["launchPlaylist"] = {"id": source.id, "title": source.title,
+                    "tracks": [track for track in store.charts.playlist_tracks_detail(source.id)
+                               if track.get("video_id") and track.get("available") != 0][:8]}
+        radio_state = radio_bootstrap["state"]
+        radio_tracks = (store.charts.video_tracks_detail([t["video_id"] for t in radio_state["history"]])
+                        if radio_state.get("active") and radio_state.get("local_id") else [])
+        collections = home_prepared.collections(store, _prepared(now, request), now)
+        _queue_artist_images(collections, now)
         return templates.TemplateResponse(request, "home.html", {
-            "actions": recommend.take_action(store, now, ctx.auth_expired),
-            "sync": recommend.sync_status(store, now),
-            "muted_count": len(store.muted_artists()),   # transparency: what's being hidden
-            "rediscover": recommend.rediscover_playlists(store, now, epoch=_epoch(store, "rediscover")),
-            # Saved albums you haven't played lately, rendered above the playlists in the same
-            # section, rotating on the same "rediscover" epoch so the whole block advances together.
-            "rediscover_albums": recommend.rediscover_albums(store, now, epoch=_epoch(store, "rediscover")),
+            "radio_bootstrap": radio_bootstrap,
+            "radio_tracks": radio_tracks,
+            "actions": actions.take_action(store, now, ctx.auth_expired),
+            "sync": actions.sync_status(store, now),
+            "muted_count": len(store.rec_model.muted_artists()),   # transparency: what's being hidden
+            **collections,
             "flash": request.query_params.get("flash"),
             "toast": request.query_params.get("toast"),   # transient success (e.g. re-auth w/ auto-sync)
             # Sparsity nudge: when metadata is genre-thin and no Last.fm key is set, point the user
@@ -337,8 +220,8 @@ def build(ctx) -> APIRouter:
             # there is no manual-enrichment nag anymore.
             # Welcome nag shown once the first sync lands (dismissable, persists): sets expectations
             # that the model keeps learning over the next week.
-            "show_intro": (store.get_setting("last_sync_at") is not None
-                           and store.get_setting("intro_dismissed") != "1"),
+            "show_intro": (store.settings.get_setting("last_sync_at") is not None
+                           and store.settings.get_setting("intro_dismissed") != "1"),
             "show_lastfm_nudge": lastfm_nudge_due(store, now),
             # Takeout import nag: no last_sync gate (importing early is exactly the point), terminal
             # once takeout_imported_at is set by a successful import.
@@ -347,9 +230,9 @@ def build(ctx) -> APIRouter:
             "show_backend_update": backend_update is not None,
             # Once the library has synced and the user still has only the default identity, offer the
             # multi-identity merge (dismissable, persists). Skipped as soon as they add a second one.
-            "show_identities_nudge": (store.get_setting("last_sync_at") is not None
-                                      and len(store.get_identities()) <= 1
-                                      and store.get_setting("identities_nudge_dismissed") != "1"),
+            "show_identities_nudge": (store.settings.get_setting("last_sync_at") is not None
+                                      and len(store.identities.get_identities()) <= 1
+                                      and store.settings.get_setting("identities_nudge_dismissed") != "1"),
             "onboarding": onboarding.onboarding_active(store, now),
             "onboard_library": onboarding.library_size(store) >= rec_params.get_param(store, "onboard_library_min"),
             "cleanup_count": onboarding.cleanup_count(store),   # CACHED read, never the O(n^2) scan
@@ -358,39 +241,34 @@ def build(ctx) -> APIRouter:
             # Persisted background-import state. Completion stays in Needs attention with its full
             # report until explicitly dismissed, including across app/browser restarts.
             "spotify_library_job": spotify_library_job,
-            # #93 Task 9: the radio launch card's customize panel is seeded server-side with the
-            # current SESSION tilts (never rec_weights) so a reload shows what's actually steering.
-            "tilts": (getattr(getattr(ctx, "radio", None), "tilts", None) or {}),
-            # Owner-parked (2026-07-05): the radio card only renders when the page is loaded with
-            # ?radio=true (or ?radio=1). The feature and its endpoints stay intact underneath.
-            "show_radio": request.query_params.get("radio") in ("true", "1"),
-            **_feed_context(now),
+            "discovery_busy": _busy(),
+            **_feed_context(request, now),
         })
 
     @router.post("/onboard/lastfm/dismiss")
     def dismiss_lastfm_nudge():
         """Snooze the Home Last.fm-key nudge for 30 days (records the dismissal time). Empty 200 so
         HTMX swaps it out."""
-        store.set_setting("lastfm_nudge_dismissed_at", str(now_fn()))
+        store.settings.set_setting("lastfm_nudge_dismissed_at", str(now_fn()))
         return Response(status_code=200)
 
     @router.post("/onboard/takeout/dismiss")
     def dismiss_takeout_nag():
         """Snooze the Home Takeout-import nag for 90 days (records the dismissal time). Empty 200 so
         HTMX swaps it out."""
-        store.set_setting("takeout_nag_dismissed_at", str(now_fn()))
+        store.settings.set_setting("takeout_nag_dismissed_at", str(now_fn()))
         return Response(status_code=200)
 
     @router.post("/onboard/identities/dismiss")
     def dismiss_identities_nudge():
         """Permanently dismiss the multi-identity merge nudge. Empty 200 so HTMX swaps it out."""
-        store.set_setting("identities_nudge_dismissed", "1")
+        store.settings.set_setting("identities_nudge_dismissed", "1")
         return Response(status_code=200)
 
     @router.post("/onboard/intro/dismiss")
     def dismiss_intro_nudge():
         """Permanently dismiss the post-first-sync welcome nag. Empty 200 so HTMX swaps it out."""
-        store.set_setting("intro_dismissed", "1")
+        store.settings.set_setting("intro_dismissed", "1")
         return Response(status_code=200)
 
     @router.post("/onboard/recap/dismiss")
@@ -398,22 +276,22 @@ def build(ctx) -> APIRouter:
         """Dismiss the monthly-recap nag for the given month; next month's recap re-shows. Empty 200 so
         HTMX swaps it out."""
         if month:
-            store.set_setting("recap_dismissed_month", month)
+            store.settings.set_setting("recap_dismissed_month", month)
         return Response(status_code=200)
 
     @router.post("/onboard/update/dismiss")
     def dismiss_update_nudge(v: str = ""):
         """Dismiss the backend-update nag for the version the user saw (passed as ?v=). Falls back to
         the currently-cached latest. A newer release re-shows it. Empty 200 so HTMX swaps it out."""
-        dismissed = v or store.get_setting("latest_version_seen")
+        dismissed = v or store.settings.get_setting("latest_version_seen")
         if dismissed:
-            store.set_setting("backend_update_dismissed_version", dismissed)
+            store.settings.set_setting("backend_update_dismissed_version", dismissed)
         return Response(status_code=200)
 
     @router.get("/home/onboard/radio")
     def home_onboard_radio(request: Request):
         now = now_fn()
-        client = next(iter((ctx.client_provider() or {}).values()), None)
+        client = main_client(store,ctx.client_provider())
         tracks = onboarding.radio_sample(store, client, now, n=PROTO_SIZE)
         proto = _proto(store, "onboard_radio", "YouTube radio for you", tracks, now) if tracks else None
         return templates.TemplateResponse(request, "_partials/onboard_playlist.html", {"proto": proto})
@@ -427,7 +305,7 @@ def build(ctx) -> APIRouter:
 
     @router.post("/onboard/done")
     def onboard_done():
-        store.set_setting("onboard_dismissed", "1")
+        store.settings.set_setting("onboard_dismissed", "1")
         return Response(status_code=200, headers={"HX-Refresh": "true"})
 
     @router.get("/privacy")
@@ -442,53 +320,44 @@ def build(ctx) -> APIRouter:
 
     @router.get("/home/feed")
     def home_feed(request: Request):
-        return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(now_fn()))
+        return templates.TemplateResponse(request, "_partials/home_feed.html", _feed_context(request, now_fn()))
 
     @router.get("/home/into-recently")
     def home_into_recently(request: Request):
-        """The 'You're into [X] recently' card: a Wikipedia summary for the freshest, least-obvious
-        artist/genre in the transient model. Lazy HTMX fragment; empty body when there is nothing
-        fresh or no usable page (the card is then simply absent)."""
+        """Read worker-prepared stories; the request only rotates the already decorated pool."""
         now = now_fn()
-        # Walk the epoch-ordered pool and render up to three usable subjects. A single card was too
-        # slight to justify a whole dashboard area; a small editorial stack makes the transient model
-        # legible without stretching one Wikipedia extract beyond its value. Misses are negative-cached.
-        cards = []
-        for subj in into_recently.subjects_for_epoch(store, now, epoch=_epoch(store, "into_recently")):
-            row = store.wiki.get(subj["subject"])
-            if row is None or not store.wiki.is_fresh(row, now):
-                payload = wikipedia.fetch_summary(subj["kind"], subj["display"])
-                store.wiki.put(subj["subject"], subj["kind"], subj["display"], payload, now)
-                row = store.wiki.get(subj["subject"])
-            if not row or not row["found"] or not row["extract"]:
-                continue
-            extras = into_recently.decorate(store, subj)
-            thumbnail = row["thumbnail"] or extras["thumbnail"]
-            if not thumbnail:                          # the card always wants a thumbnail
-                continue
-            card = {**row, "thumbnail": thumbnail, "color": extras["color"],
-                    "seed": extras["seed"], "genre": extras["genre"], "depth": into_recently.CLUSTER_DEPTH}
-            cards.append(card)
-            if len(cards) == 3:
-                break
-        if cards:
+        schedule = ctx.rec_worker.trigger_story_refresh if ctx.rec_worker else lambda: None
+        cards, preparing = into_recently.load(store, now, epoch=_epoch(store, "into_recently"), schedule=schedule)
+        if cards or preparing:
+            groups = into_recently.story_groups(cards)
             return templates.TemplateResponse(request, "_partials/into_recently.html",
-                                              {"cards": cards, "card": cards[0]})
+                                              {"cards": cards, "groups": groups,
+                                               "spreads": into_recently.editorial_spreads(groups),
+                                               "preparing": preparing})
         return Response(status_code=200)
+
+    @router.post("/home/into-recently/impressions", status_code=204)
+    def story_impressions(visible: StoryImpressions):
+        payload = store.rec_surface.get_proposals(into_recently.SURFACE) or {}
+        known = {card['subject'] for card in payload.get('cards', [])}
+        store.rec_surface.record_story_views(known.intersection(visible.subjects), now_fn())
+        return Response(status_code=204)
 
     @router.post("/home/refresh-card/{card}")
     def home_refresh_card(request: Request, card: str):
-        """Refresh one Home card: advance its rotation to a fresh, unseen slice, rerun that card's
-        model, and re-render just that card in place."""
-        if card not in _CARD_LABELS:
+        """Advance the choice window and select one already prepared card."""
+        if card not in (*home_cards._CARD_LABELS, "temporal"):
             return Response(status_code=404)
         now = now_fn()
-        RecDao(store).refresh_card(card, max(1, rec_params.get_param(store, "erosion_view_cap")), now)
-        p = _one_card(store, card, now)
+        cap = max(1, rec_params.get_param(store, "erosion_view_cap"))
+        store.rec_surface.refresh_card(card, cap, now)
+        store.rec_surface.refresh_card("cards", cap, now)
+        result = home_prepared.cards(store, _prepared(now), now, recommendations, _schedule_home, record=False)
+        p = next((p for p in result.protos if p["lane"] == card), None)
         if p is None:
             return Response(status_code=204)
-        keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None)) for t in p["tracks"]]
-        store.mark_offered("track", [k for k in keys if k], now)   # #53: this route is the sole counter here
+        recommendations.record_modes([p], result.epoch, now)
+        recommendations.record_offer([p], now, epoch=result.epoch)
         response = templates.TemplateResponse(request, "_partials/generated_playlist.html",
                                                {"p": p, "regenerating": True})
         _audit_cards(request, [p], now)
@@ -496,229 +365,63 @@ def build(ctx) -> APIRouter:
 
     def _cards_fragment(request, now, *, regenerating=False, use_genre_request=True, genre_notice=None,
                         swap_oob=False):
-        from yt_playlist.rec import mode_surfaces
-        mix_tuning.expire(store, now)
-        epoch = _epoch(store, "cards")
-        genre_request = store.get_proposals("home_genre_request") or {}
-        avoid = (set(genre_request.get("avoid_genres", []))
-                 if use_genre_request and genre_request.get("epoch") == epoch else set())
-        include = (set(genre_request.get("include_genres", []))
-                   if use_genre_request and genre_request.get("epoch") == epoch else set())
-        filters = {}
-        if avoid:
-            filters["avoid_genres"] = avoid
-        if include:
-            filters["include_genres"] = include
-        cards = mode_surfaces.assemble_cards(store, now, epoch, **filters)
-        if include:
-            cards = [c for c in cards if c["lane"] != "fresh"]
-        if cards:
-            protos = []
-            for c in cards:
-                # Roll a DJ journey for this card so the saved playlist carries a Flow (parity with the
-                # per-lane _carded cards). Seed per (epoch, mode) so each of the 4 cards rolls its OWN
-                # journey, stable across re-renders of the same epoch. We keep only the rolled journey
-                # + dj seed: the mode already defines the theme, so its facets/weights are not re-rolled.
-                rolled = recommend.roll_recipe(store, c["lane"], seed=f"{epoch}:{c['mode_id']}", now=now)
-                journey, dj = rolled.get("journey", "shuffle"), rolled.get("dj", {})
-                tracks = _order_by_journey(store, c["tracks"], journey, dj.get("seed", 0))
-                protos.append(_proto(store, c["lane"], c["label"], tracks, now)
-                              | {"mode_id": c["mode_id"], "ranker": c["ranker"],
-                                 "recipe": {"model": "mode", "lane": c["lane"], "mode_id": c["mode_id"],
-                                            "ranker": c["ranker"],
-                                            "journey": journey, "dj": dj}})
-            try:
-                store.modes.log_impressions(
-                    epoch, [(c["lane"], c["mode_id"], c["ranker"]) for c in cards], now)
-            except Exception:  # noqa: BLE001 - logging must never break the card render
-                ctx.logger.warning("mode-impression log failed", exc_info=True)
-            # #87 lane impressions for the PRIMARY serving path too (the _one_card hook only covers
-            # per-card refresh and the pre-rebuild fallback); without this, the future lane bandit's
-            # evidence would be skewed toward refresh clicks.
-            for p in protos:
-                _record_lane_impressions(store, p["tracks"], now)
-        elif filters and store.get_proposals("mode_bundles") and store.modes.list_modes(active_only=True):
-            protos = []  # no qualifying mode; explain and retain the usual menu below
-        else:
-            # Fallback before the first rebuild: the pre-B per-card builders, so the row is never empty.
-            protos = [p for p in (_one_card(store, name, now, **filters) for name in
-                                  ("wheelhouse", "explore", "comfort", "fresh")) if p]
-        if filters and not protos and not include:
-            return _cards_fragment(request, now, regenerating=regenerating, use_genre_request=False,
-                                   genre_notice="No other genre themes are ready yet. Here are your usual mixes.")
-        parameters = {"include_genres": sorted(include), "avoid_genres": sorted(avoid)}
-        pool_job = ctx.jobs.latest("fresh_pool", parameters)
-        if include:
-            protos = [p for p in protos if p["lane"] != "fresh"]
-        if not any(p["lane"] == "fresh" for p in protos):
-            fresh = _built_fresh(parameters, now)
-            if fresh:
-                protos.append(fresh)
-        meta = (store.get_proposals("mode_bundles") or {}).get("_meta", {})
-        fourth = ("comfort" if meta.get("comfort_pool", 0) >= rec_params.get_param(store, "comfort_min_pool")
-                  or not meta.get("year_cuts") else "temporal")
-        fourth = next((p["lane"] for p in protos if p["lane"] in ("comfort", "temporal")), fourth)
-        slots = []
-        for lane in ("wheelhouse", "explore", "fresh", fourth):
-            p = next((p for p in protos if p["lane"] == lane), None)
-            scoped = parameters if lane == "fresh" else {**parameters, "lane": lane, "epoch": epoch}
-            if p is None and lane != "fresh":
-                excluded = [recommend._field(t, "key") for proto in protos for t in proto["tracks"]]
-                p = _built_library(scoped, now, excluded)
-                if p:
-                    protos.append(p)
-                    _record_lane_impressions(store, p["tracks"], now)
-            job = pool_job if lane == "fresh" else ctx.jobs.latest("library_pool", scoped)
-            slots.append({"proto": p, "pool": None if p else _pool_view(scoped, job)})
-        if filters:
-            genre_notice = ("Your chosen genres, just for this set." if include
-                            else "Different genres for this set of mixes.")
-            recipe_request = ({"kind": "chosen_genres", "include": sorted(include)} if include
-                              else {"kind": "other_genres", "avoid": sorted(avoid)})
-            for p in protos:
-                p["recipe"] = {**(p.get("recipe") or {}),
-                               "genre_request": recipe_request}
-        vibe = home_vibe.current(store, now)
-        for p in protos:
-            if vibe:
-                p["recipe"] = {**(p.get("recipe") or {}), "vibe": vibe}
-        for p in protos:                                   # #53 offered-count parity
-            # tracks are dicts on the mode path but ForYouItem objects on the _one_card fallback,
-            # so read the key from either shape (a bare t.get here 500s the whole card row).
-            keys = [(t.get("key") if isinstance(t, dict) else getattr(t, "key", None))
-                    for t in p["tracks"]]
-            store.mark_offered("track", [k for k in keys if k], now)
-        try:
-            _record_served_cards(store, protos, now)
-        except Exception:  # noqa: BLE001 - measurement must never break recommendation serving
-            ctx.logger.warning("served-impression log failed", exc_info=True)
+        live = request.method == "POST" and request.url.path != "/home/refresh-cards"
+        context = _card_context(request, now, live=live, regenerating=regenerating,
+                                use_genre_request=use_genre_request, genre_notice=genre_notice)
         response = templates.TemplateResponse(request, "_partials/mode_cards.html",
-                                               {"protos": protos, "regenerating": regenerating,
-                                                "genre_notice": genre_notice,
-                                                "genre_warning": genre_notice if not filters else None,
-                                                "genre_options": [option | {"tint": genre_tint(option["family"])}
-                                                                  for option in home_themes.genre_options(store)],
-                                                "slots": slots,
-                                                "requested_genres": sorted(include), "epoch": epoch,
-                                                "vibe": vibe,
-                                                "swap_oob": swap_oob})
-        _audit_cards(request, protos, now)
+                                               {**context, "regenerating": regenerating, "swap_oob": swap_oob})
         return _tuning_response(response, now)
 
-    def _pool_view(parameters, job=None):
-        lane = parameters.get("lane", "fresh")
-        fresh = lane == "fresh"
-        building = job is not None and not job.done
-        message = (job.events[-1]["text"] if building and job.events else "Finding matching songs…")
-        if job and job.done:
-            message = job.error or ("Not enough matching songs yet. Try another search or adjust your genres."
-                                    if fresh else "Not enough matching songs in your library. Try adjusting your genres.")
-        labels = {o["family"]: o["label"] for o in home_themes.genre_options(store)}
-        label = _pool_label(parameters)
-        return {"parameters": parameters, "job": job, "building": building, "message": message,
-                "lane": lane, "label": label,
-                "action": "Find fresh songs" if fresh else f"Build {label.lower()}",
-                "title": "Discover a fresh mix" if fresh else "Build this mix",
-                "building_title": "Building your fresh mix" if fresh else "Building your mix",
-                "description": ("Find new songs for these genres. Click to start." if fresh
-                                else "Find matching songs in your library. Click to start."),
-                "url": "/home/fresh-pool" if fresh else "/home/library-pool",
-                "genre_labels": [labels.get(g, g) for g in parameters["include_genres"]]}
-
-    def _pool_label(parameters):
-        lane = parameters.get("lane", "fresh")
-        return (_CARD_LABELS[lane] if lane != "temporal"
-                else {0: "Throwback", 1: "Time Flies", 2: "Recent Picks"}[parameters["epoch"] % 3])
-
-    def _built_library(parameters, now, exclude_keys):
-        from yt_playlist.rec import library_pool
-        tracks = library_pool.pick(store, now, parameters, exclude_keys)
-        if len(tracks) < 4:
-            return None
-        lane = parameters["lane"]
-        p = _carded(store, lane, _pool_label(parameters), tracks, now)
-        if len(p["tracks"]) < 4:
-            return None
-        # A full-menu regeneration can change the fourth slot between Comfort and Temporal.
-        p["mode_id"] = None
-        include, avoid = parameters["include_genres"], parameters["avoid_genres"]
-        if include or avoid:
-            p["recipe"]["genre_request"] = ({"kind": "chosen_genres", "include": include} if include
-                                            else {"kind": "other_genres", "avoid": avoid})
-        return p
-
-    def _built_fresh(parameters, now):
-        include, avoid = parameters["include_genres"], parameters["avoid_genres"]
-        if include:
-            from yt_playlist.rec import fresh_pool
-            tracks = fresh_pool.pick(store, now, include, avoid)
-            if not tracks:
-                return None
-            p = _proto(store, "fresh", _CARD_LABELS["fresh"], tracks, now)
-            p["recipe"] = recommend.roll_recipe(store, "fresh", seed=f"fresh:{_epoch(store, 'fresh')}", now=now)
-            p["recipe"]["facets"] = {"genres": include}
-            _record_lane_impressions(store, tracks, now)
-        else:
-            p = _one_card(store, "fresh", now, **({"avoid_genres": avoid} if avoid else {}))
-        if p is not None:
-            # A partial themed slice must meet the same credibility floor as a mode card.
-            if len(p["tracks"]) < 4:
-                return None
-            if include or avoid:
-                p["recipe"]["genre_request"] = ({"kind": "chosen_genres", "include": include} if include
-                                                else {"kind": "other_genres", "avoid": avoid})
-            if vibe := home_vibe.current(store, now):
-                p["recipe"]["vibe"] = vibe
-        return p
-
     def _pool_fragment(request, job):
-        p = _built_fresh(job.parameters, now_fn()) if job.done and not job.error else None
-        if p:
-            store.mark_offered("track", [t["key"] for t in p["tracks"] if t.get("key")], now_fn())
-            _record_served_cards(store, [p], now_fn())
-            _audit_cards(request, [p], now_fn())
-            return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": p})
+        now = now_fn()
+        result = recommendations.pool(job, now, request.url.path)
+        if result.proto:
+            payload = _prepared(now)
+            menu = home_prepared.cards(store, payload, now, recommendations, _schedule_home, record=False)
+            lane = result.proto["lane"]
+            menu.protos = [p for p in menu.protos if p["lane"] != lane] + [result.proto]
+            slots = [{"proto": result.proto, "pool": None} if
+                     (s["proto"]["lane"] if s["proto"] else s["pool"]["lane"]) == lane else s
+                     for s in menu.slots]
+            menu.slots = slots or [{"proto": result.proto, "pool": None}]
+            home_prepared.remember(store, payload, menu, now)
+            return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": result.proto})
         return templates.TemplateResponse(request, "_partials/pool_card.html",
-                                          {"pool": _pool_view(job.parameters, job)})
+                                          {"pool": result.pool})
 
     @router.post("/home/fresh-pool")
-    async def home_fresh_pool(request: Request):
-        form = await request.form()
+    def home_fresh_pool(request: Request, form=Depends(request_form)):
         parameters = {key: sorted(set(form.getlist(key))) for key in ("include_genres", "avoid_genres")}
-        available = {o["family"] for o in home_themes.genre_options(store)}
+        available = {o["family"] for o in (_prepared(now_fn()) or {}).get("genre_options", [])}
         if any(len(form.getlist(key)) > 100 or any(g not in available for g in values)
                for key, values in parameters.items()):
             return Response(status_code=400)
-        return await asyncio.to_thread(_pool_fragment, request, start_fresh_pool(ctx, parameters))
+        return _pool_fragment(request, recommendations.start_pool("fresh_pool", parameters, []))
 
     @router.get("/home/fresh-pool/{job_id}")
     def home_fresh_pool_status(request: Request, job_id: int):
         job = ctx.jobs.get(job_id)
         if job is None or job.kind != "fresh_pool":
-            return Response(status_code=404)
+            return _expired_pool_fragment(request)
         return _pool_fragment(request, job)
 
-    def _library_pool_fragment(request, job):
-        p = _built_library(job.parameters, now_fn(), job.exclude_keys) if job.done and not job.error else None
-        if p:
-            _record_lane_impressions(store, p["tracks"], now_fn())
-            store.mark_offered("track", [t["key"] for t in p["tracks"]], now_fn())
-            _record_served_cards(store, [p], now_fn())
-            _audit_cards(request, [p], now_fn())
-            return templates.TemplateResponse(request, "_partials/generated_playlist.html", {"p": p})
-        return templates.TemplateResponse(request, "_partials/pool_card.html",
-                                          {"pool": _pool_view(job.parameters, job)})
+    def _expired_pool_fragment(request):
+        # HTMX leaves error responses unswapped, so polling needs a successful terminal
+        # fragment. The registry no longer has the original parameters; offer a new menu
+        # rather than retaining expired jobs for retries.
+        return templates.TemplateResponse(
+            request, "_partials/pool_expired.html", {},
+            status_code=200 if request.headers.get("HX-Request") == "true" else 404)
 
     @router.post("/home/library-pool")
-    async def home_library_pool(request: Request):
-        form = await request.form()
+    def home_library_pool(request: Request, form=Depends(request_form)):
         try:
             parameters = {key: sorted(set(form.getlist(key))) for key in ("include_genres", "avoid_genres")}
             parameters.update(lane=form.get("lane"), epoch=int(form.get("epoch", "-1")))
             excluded = json.loads(form.get("exclude_keys") or "[]")
         except (TypeError, ValueError):
             return Response(status_code=400)
-        available = {o["family"] for o in home_themes.genre_options(store)}
+        available = {o["family"] for o in (_prepared(now_fn()) or {}).get("genre_options", [])}
         if (parameters["lane"] not in ("wheelhouse", "explore", "comfort", "temporal")
                 or parameters["epoch"] != _epoch(store, "cards")
                 or any(len(form.getlist(key)) > 100 or any(g not in available for g in parameters[key])
@@ -726,19 +429,17 @@ def build(ctx) -> APIRouter:
                 or not isinstance(excluded, list) or len(excluded) > 200
                 or any(not isinstance(k, str) or len(k) > 1000 for k in excluded)):
             return Response(status_code=400)
-        return await asyncio.to_thread(_library_pool_fragment, request, start_library_pool(ctx, parameters, excluded))
+        return _pool_fragment(request, recommendations.start_pool("library_pool", parameters, excluded))
 
     @router.get("/home/library-pool/{job_id}")
     def home_library_pool_status(request: Request, job_id: int):
         job = ctx.jobs.get(job_id)
         if job is None or job.kind != "library_pool":
-            return Response(status_code=404)
-        return _library_pool_fragment(request, job)
+            return _expired_pool_fragment(request)
+        return _pool_fragment(request, job)
 
     def _cards_safe(request, now, *, swap_oob=False):
-        # The row loads via hx-trigger=load with the spinner as placeholder content: a 500 here leaves
-        # the spinner up forever (HTMX does not swap on error). So never raise out of this surface,
-        # render an empty row on any unexpected failure (logged) so the spinner always clears.
+        # Keep fragment refreshes usable even if a disposable prepared result is damaged.
         try:
             return _cards_fragment(request, now, swap_oob=swap_oob)
         except Exception:  # noqa: BLE001 - a render failure must not strand the home page on a spinner
@@ -747,16 +448,15 @@ def build(ctx) -> APIRouter:
                                                {"protos": [], "swap_oob": swap_oob})
 
     @router.get("/home/cards")
-    def home_cards(request: Request):
-        """The mode-driven card row: 4 distinct taste-mode variations from the worker's prepared
-        bundles. Lazy fragment (spinner) so live mood tilt runs off the main render."""
+    def home_cards_fragment(request: Request):
+        """The completed card row, selected from the worker's prepared collections."""
         return _cards_safe(request, now_fn())
 
     @router.post("/home/refresh-cards")
     def home_refresh_cards(request: Request):
         """Re-roll the whole mode-card row (advance its shared rotation epoch)."""
         now = now_fn()
-        RecDao(store).refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+        store.rec_surface.refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
         try:
             return _cards_fragment(request, now, regenerating=True)
         except Exception:  # noqa: BLE001 - preserve the same safe-fragment contract as the GET
@@ -764,11 +464,11 @@ def build(ctx) -> APIRouter:
             return templates.TemplateResponse(request, "_partials/mode_cards.html", {"protos": []})
 
     @router.post("/home/other-genres")
-    async def home_other_genres(request: Request):
+    def home_other_genres(request: Request, form=Depends(request_form)):
         """One-menu request based on the genres in this browser's currently displayed cards.
         Expires with the next rotation; no lean, permanent weight or dislike is written."""
         try:
-            genres = json.loads((await request.form()).get("genres") or "[]")
+            genres = json.loads(form.get("genres") or "[]")
         except (TypeError, ValueError):
             return Response(status_code=400)
         if not isinstance(genres, list) or not genres or len(genres) > 100 or any(
@@ -776,112 +476,110 @@ def build(ctx) -> APIRouter:
             return Response(status_code=400)
         now = now_fn()
         with mix_tuning.adjusting(store, now):
-            RecDao(store).refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
-            store.put_proposals("home_genre_request", {
+            store.rec_surface.refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+            store.rec_surface.put_proposals("home_genre_request", {
                 "epoch": _epoch(store, "cards"),
                 "avoid_genres": sorted({genre_map.family(g) for g in genres}),
             }, now)
-        return await asyncio.to_thread(_cards_safe, request, now)
+        return _cards_safe(request, now)
 
     @router.post("/home/mix-genres")
-    async def home_mix_genres(request: Request):
+    def home_mix_genres(request: Request, form=Depends(request_form)):
         """Choose genre families for one menu, without teaching a lasting preference."""
-        genres = (await request.form()).getlist("genres")
-        available = {option["family"] for option in home_themes.genre_options(store)}
+        genres = form.getlist("genres")
+        available = {option["family"] for option in (_prepared(now_fn()) or {}).get("genre_options", [])}
         if not genres or len(genres) > 100 or any(not isinstance(g, str) or g not in available for g in genres):
             return Response(status_code=400)
         now = now_fn()
         with mix_tuning.adjusting(store, now):
-            RecDao(store).refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
-            store.put_proposals("home_genre_request", {
+            store.rec_surface.refresh_card("cards", max(1, rec_params.get_param(store, "erosion_view_cap")), now)
+            store.rec_surface.put_proposals("home_genre_request", {
                 "epoch": _epoch(store, "cards"), "include_genres": sorted(set(genres)),
             }, now)
-        return await asyncio.to_thread(_cards_safe, request, now)
+        return _cards_safe(request, now)
 
     @router.post("/home/vibe")
-    async def home_vibe_change(request: Request):
-        vibe = (await request.form()).get("vibe", "")
+    def home_vibe_change(request: Request, form=Depends(request_form)):
+        vibe = form.get("vibe", "")
         if vibe and vibe not in home_vibe.PRESETS:
             return Response(status_code=400)
         now = now_fn()
         with mix_tuning.adjusting(store, now):
             if vibe:
-                store.set_setting(home_vibe.SETTING, vibe)
+                store.settings.set_setting(home_vibe.SETTING, vibe)
             else:
-                store.delete_setting(home_vibe.SETTING)
-        return await asyncio.to_thread(_cards_safe, request, now)
+                store.settings.delete_setting(home_vibe.SETTING)
+        return _cards_safe(request, now)
 
     @router.post("/home/breadth")
-    async def home_breadth(request: Request):
+    def home_breadth(request: Request, form=Depends(request_form)):
         # Drag the Breadth bar -> persist the focused<->eclectic bias and return only the re-ranked
         # four-card board. The bias is a scalar param (not a per-axis weight),
         # so it gets its own route; set_param clamps it to the spec range [-1, 1]. Center (0) is neutral.
-        bias = (await request.form()).get("breadth_bias")
+        bias = form.get("breadth_bias")
         now = now_fn()
         if bias is not None:
             with mix_tuning.adjusting(store, now):
                 rec_params.set_param(store, "breadth_bias", bias)
-        return await asyncio.to_thread(_cards_safe, request, now)
+        return _cards_safe(request, now)
 
     @router.post("/home/steer")
-    async def home_steer(request: Request):
+    def home_steer(request: Request, form=Depends(request_form)):
         # Drag a fingerprint bar -> set a temporary lean and return
         # only the re-ranked four-card board. The bar shows the EFFECTIVE multiplier (permanent x lean);
         # we store the lean so permanent x lean == the dragged target. Long-term taste is edited only
         # on the Taste Model page. These adjustments expire after four hours.
-        form = await request.form()
         axis, weight = form.get("axis"), form.get("weight")
         target = form_float(weight)
         if axis and target is not None and axis.split(":", 1)[0] in ("genre", "era", "artist"):
             now = now_fn()
             with mix_tuning.adjusting(store, now):
-                perm = store.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(axis, 1.0)
+                perm = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d")).get(axis, 1.0)
                 lean = target / perm if perm > 0 else target
                 lo, hi = rec_params.GENRE_MIN, rec_params.GENRE_MAX
                 lean = max(lo, min(hi, lean))
-                store.set_lean(axis, lean, now)
-        return await asyncio.to_thread(_cards_safe, request, now_fn())
+                store.rec_model.set_lean(axis, lean, now)
+        return _cards_safe(request, now_fn())
 
     @router.post("/home/fingerprint/add")
-    async def fingerprint_add(request: Request):
+    def fingerprint_add(request: Request, form=Depends(request_form)):
         """Pin an axis (e.g. 'genre:gqom') so it appears as a steerable bar even with zero plays. Writes
         a neutral lean (1.0) so it persists, then returns ONLY the re-rendered genre bars (server-
         authoritative, so dedup/ordering are correct). The client swaps #fp-genre-bars with this and
         leaves the live genre picker untouched. A neutral add doesn't change rankings, so there's no
         need to re-render the whole feed (and re-rendering it would churn the picker)."""
-        form = await request.form()
         axis = (form.get("axis") or "").strip()
         now = now_fn()
         if axis and axis.split(":", 1)[0] in ("genre", "era", "artist"):
             with mix_tuning.adjusting(store, now):
-                store.unhide_facet(axis)              # re-adding an axis un-hides it
+                store.rec_model.unhide_facet(axis)              # re-adding an axis un-hides it
                 # Only write if not already present. Don't overwrite a user-set lean.
-                if store.get_lean(axis) == 1.0 and axis not in store.get_leans():
-                    store.set_lean(axis, 1.0, now)
+                if store.rec_model.get_lean(axis) == 1.0 and axis not in store.rec_model.get_leans():
+                    store.rec_model.set_lean(axis, 1.0, now)
         return _tuning_response(templates.TemplateResponse(
             request, "_partials/fingerprint_genre_bars.html",
-            {"fingerprint": recommend.taste_fingerprint(store, now)}), now)
+            {"fingerprint": home_prepared.fingerprint(store, _prepared(now), now)}), now)
 
     @router.post("/home/fingerprint/remove")
-    async def fingerprint_remove(request: Request):
+    def fingerprint_remove(request: Request, form=Depends(request_form)):
         """Remove one bar from the Home panel: hide the axis (display-only) AND clear any standing lean
         so it stops steering. Works for ANY bar: a top played family, a steered family, or an added
         niche, all simply disappear. Returns the re-rendered bars (#fp-genre-bars swap, picker left
         alive). Permanent taste (the Taste page) is untouched; the genre picker re-adds it any time."""
-        axis = ((await request.form()).get("axis") or "").strip()
+        axis = (form.get("axis") or "").strip()
         now = now_fn()
         if axis:
             with mix_tuning.adjusting(store, now):
-                store.hide_facet(axis)
-                store.clear_lean(axis)
+                store.rec_model.hide_facet(axis)
+                store.rec_model.clear_lean(axis)
         return _tuning_response(templates.TemplateResponse(
             request, "_partials/fingerprint_genre_bars.html",
-            {"fingerprint": recommend.taste_fingerprint(store, now)}), now)
+            {"fingerprint": home_prepared.fingerprint(store, _prepared(now), now)}), now)
 
     def _tuning_fragment(request, now):
         controls = templates.TemplateResponse(
             request, "_partials/taste_fingerprint.html",
-            {"fingerprint": recommend.taste_fingerprint(store, now), "tuning_active": _tuning_active(),
+            {"fingerprint": home_prepared.fingerprint(store, _prepared(now), now), "tuning_active": _tuning_active(),
              "vibe_presets": home_vibe.PRESETS, "vibe": home_vibe.current(store, now)})
         cards = _cards_safe(request, now, swap_oob=True)
         return _tuning_response(Response(controls.body + cards.body, media_type="text/html"), now)
@@ -912,7 +610,9 @@ def build(ctx) -> APIRouter:
         seen = set(fams)
         options = [{"name": f, "kind": "family"} for f in fams]
         options += [{"name": g, "kind": "genre"} for g in genre_map.all_genres() if g not in seen]
-        plays = {g.lower(): count for g, count in RecDao(store).genre_play_distribution().items()}
+        prepared = _prepared(now_fn()) or {}
+        plays = {g.lower(): count for g, count in
+                 (prepared.get("fingerprint") or {}).get("genre_plays", {}).items()}
         family_plays = {}
         for genre, count in plays.items():
             family = genre_map.family(genre)
@@ -922,10 +622,9 @@ def build(ctx) -> APIRouter:
         return JSONResponse({"options": options})
 
     @router.post("/home/generate")
-    async def home_generate(request: Request):
+    def home_generate(request: Request, form=Depends(request_form)):
         """Materialize a proto-playlist as a real YouTube playlist, auto-grouped 'Generated' so the
         rec engine ignores it until it's played. The card's surviving rows are posted as `tracks`."""
-        form = await request.form()
         name = (form.get("name") or "").strip()
         try:
             tracks = json.loads(form.get("tracks") or "[]")
@@ -935,15 +634,19 @@ def build(ctx) -> APIRouter:
             recipe = json.loads(form.get("recipe") or "null")
         except (ValueError, TypeError):
             recipe = None
-        identity_id, client = next(iter((ctx.client_provider() or {}).items()), (None, None))
+        account_error = None
+        try:
+            identity_id,client = client_for(store,ctx.client_provider())
+        except ValueError as exc:
+            identity_id,client,account_error = None,None,str(exc)
         result = {"name": name}
         if client is None or not tracks:
-            result["error"] = "Couldn't create it - connect an account and keep at least one track."
+            result["error"] = account_error or "Keep at least one track to create a playlist."
         else:
             try:
-                res = await asyncio.to_thread(
-                    executor.create_generated_playlist, store, name, tracks, client, now_fn(),
-                    identity_id, recipe=recipe)
+                res = activity_for(ctx).wrap(
+                    "create generated playlist", executor.create_generated_playlist,
+                    store, name, tracks, client, now_fn(), identity_id, recipe=recipe)()
                 if (res.get("pid") and isinstance(recipe, dict)
                         and (recipe.get("model") == "fresh" or recipe.get("lane") == "fresh")):
                     start_playlist_enrichment(ctx, res["pid"])
@@ -955,9 +658,8 @@ def build(ctx) -> APIRouter:
                 watch_url = f"https://music.youtube.com/watch?list={res['new_ytm']}"
                 bridge = getattr(ctx, "bridge", None)
                 if bridge is not None and getattr(bridge, "connected", False):
-                    threading.Thread(
-                        target=executor.navigate_when_ready,
-                        args=(client, bridge, res["new_ytm"], watch_url), daemon=True).start()
+                    activity_for(ctx).start_thread(executor.navigate_when_ready,
+                        args=(client, bridge, res["new_ytm"], watch_url))
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
                 if res.get("pid") and res.get("added"):
                     measurement.record_action(store, "save", now_fn(), playlist_id=res["pid"],
@@ -968,20 +670,27 @@ def build(ctx) -> APIRouter:
                                              ranker=recipe.get("ranker"))
                     except Exception:  # noqa: BLE001 - logging must never break playlist creation
                         pass
+            except PlaylistAddUncertain as exc:
+                result.update(error=str(exc), partial_ytm=exc.playlist_id)
             except Exception:  # noqa: BLE001 - surface a friendly card, log the detail
                 ctx.logger.exception("generate playlist %r failed", name)
                 result["error"] = "YouTube returned an unexpected response."
         return templates.TemplateResponse(request, "_partials/generated_result.html", result)
 
     def _busy():
-        return bool(ctx.rec_worker and ctx.rec_worker.busy)
+        return bool(ctx.rec_worker and ctx.rec_worker.discovery_busy)
+
+    @router.get("/home/discovery")
+    def home_discovery(request: Request):
+        return templates.TemplateResponse(request, "_partials/home_discovery.html",
+                                          _discovery_context(now_fn()))
 
     @router.get("/home/discover")
     def home_discover(request: Request):
         # From the accumulating discovery pool: recency-biased, repeat-aware, filled in by the
         # background scan of every artist you're interested in (not a top-10 overwrite).
-        from yt_playlist.rec import discover
-        albums = discover.pick_discovered_albums(store, ALBUMS_PER_CARD, now_fn())
+        now = now_fn()
+        albums = home_prepared.discovery(store, _prepared(now), now)["discovery_albums"]
         return templates.TemplateResponse(request, "_partials/discover.html",
                                           {"albums": albums,
                                            "building": not albums and _busy(),
@@ -990,8 +699,9 @@ def build(ctx) -> APIRouter:
     @router.get("/home/new-artists")
     def home_new_artists(request: Request):
         # From the accumulating new-artist pool: best taste-fit first, de-prioritizing recently-shown.
-        from yt_playlist.rec import discover
-        artists = discover.pick_discovered_artists(store, ARTISTS_PER_CARD, now_fn())
+        now = now_fn()
+        artists = home_prepared.discovery(store, _prepared(now), now)["discovery_artists"]
+        _queue_artist_images({'discovery_artists': artists}, now)
         return templates.TemplateResponse(request, "_partials/new_artists.html",
                                           {"artists": artists,
                                            "building": not artists and _busy(),

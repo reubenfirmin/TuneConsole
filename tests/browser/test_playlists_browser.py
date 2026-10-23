@@ -6,7 +6,7 @@ these lock the CURRENT Alpine behavior (select -> modal -> confirm -> reload) an
 must keep passing after the bulk actions move to htmx. The client-side list (sort,
 multi-select, split, prefs) is unchanged Alpine and is exercised incidentally here.
 """
-import os
+import math
 import re
 import socket
 import threading
@@ -17,6 +17,7 @@ import uvicorn
 from playwright.sync_api import expect
 
 from yt_playlist.core.store import Store
+from yt_playlist.core import paths
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
 
@@ -32,20 +33,19 @@ def _free_port():
 
 
 @pytest.fixture
-def live_pl_data(tmp_path):
-    # delete backs up to disk first, so point YT_PLAYLIST_HOME at a temp dir for this server.
-    old_home = os.environ.get("YT_PLAYLIST_HOME")
-    os.environ["YT_PLAYLIST_HOME"] = str(tmp_path)
+def live_pl_data(tmp_path, monkeypatch):
+    # Delete backs up to disk first; isolate its data directory without changing the environment.
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
 
     s = Store(":memory:")
     s.init_schema()
-    iid = s.upsert_identity("Main", "cred", None, True)
-    a = s.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
-    b = s.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
-    g = s.upsert_playlist(iid, "PLG", "Gamma", 1, "h", 1.0)
-    s.set_playlist_tracks(a, [s.upsert_track("v1", "SongA", "X", None, None, 1)])
-    s.set_playlist_tracks(b, [s.upsert_track("v2", "SongB", "Y", None, None, 1)])
-    s.set_playlist_tracks(g, [s.upsert_track("v3", "SongC", "Z", None, None, 1)])
+    iid = s.identities.upsert_identity("Main", "cred", None, True)
+    a = s.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
+    b = s.playlists.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
+    g = s.playlists.upsert_playlist(iid, "PLG", "Gamma", 1, "h", 1.0)
+    s.playlists.set_playlist_tracks(a, [s.tracks.upsert_track("v1", "SongA", "X", None, None, 1)])
+    s.playlists.set_playlist_tracks(b, [s.tracks.upsert_track("v2", "SongB", "Y", None, None, 1)])
+    s.playlists.set_playlist_tracks(g, [s.tracks.upsert_track("v3", "SongC", "Z", None, None, 1)])
     client = FakeClient(tracks={"PLA": [_track("v1", "SongA", "X")],
                                 "PLB": [_track("v2", "SongB", "Y")],
                                 "PLG": [_track("v3", "SongC", "Z")]})
@@ -60,10 +60,6 @@ def live_pl_data(tmp_path):
     yield {"base": f"http://127.0.0.1:{port}", "store": s, "identity": iid}
     server.should_exit = True
     thread.join(timeout=5)
-    if old_home is None:
-        os.environ.pop("YT_PLAYLIST_HOME", None)
-    else:
-        os.environ["YT_PLAYLIST_HOME"] = old_home
 
 
 @pytest.fixture
@@ -83,12 +79,13 @@ def recent_pl_app(live_pl_data):
         ("HIDDEN", "Hidden draft", 60),
         ("LM", "Liked Music", 60),
     ]:
-        store.upsert_playlist(iid, ytm, title, 0, "", 2_000_000, created_at=2_000_000 - age)
+        store.playlists.upsert_playlist(iid, ytm, title, 0, "", 2_000_000, created_at=2_000_000 - age)
     for title in ("303", "Brexit List"):
-        store.upsert_playlist(iid, title, title, 0, "", 2_000_000)
-    store.set_playlist_group("GENERATED", "Generated")
-    store.set_playlist_group("PLA", "Faves")
-    store.hide_playlist("HIDDEN")
+        store.playlists.upsert_playlist(iid, title, title, 0, "", 2_000_000)
+    store.playlists.set_playlist_group("GENERATED", "Generated")
+    store.playlists.mark_generated_playlist('GENERATED')
+    store.playlists.set_playlist_group("PLA", "Faves")
+    store.playlists.hide_playlist("HIDDEN")
     return live_pl_data["base"]
 
 
@@ -159,17 +156,16 @@ class _SlowDeleteClient(FakeClient):
 
 
 @pytest.fixture
-def live_slow_delete_app(tmp_path):
-    old_home = os.environ.get("YT_PLAYLIST_HOME")
-    os.environ["YT_PLAYLIST_HOME"] = str(tmp_path)
+def live_slow_delete_app(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
 
     s = Store(":memory:")
     s.init_schema()
-    iid = s.upsert_identity("Main", "cred", None, True)
-    a = s.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
-    b = s.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
-    s.set_playlist_tracks(a, [s.upsert_track("v1", "SongA", "X", None, None, 1)])
-    s.set_playlist_tracks(b, [s.upsert_track("v2", "SongB", "Y", None, None, 1)])
+    iid = s.identities.upsert_identity("Main", "cred", None, True)
+    a = s.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
+    b = s.playlists.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
+    s.playlists.set_playlist_tracks(a, [s.tracks.upsert_track("v1", "SongA", "X", None, None, 1)])
+    s.playlists.set_playlist_tracks(b, [s.tracks.upsert_track("v2", "SongB", "Y", None, None, 1)])
     client = _SlowDeleteClient(tracks={"PLA": [_track("v1", "SongA", "X")],
                                        "PLB": [_track("v2", "SongB", "Y")]})
     app = create_app(s, lambda: {iid: client}, now_fn=lambda: 1.0)
@@ -183,10 +179,6 @@ def live_slow_delete_app(tmp_path):
     yield f"http://127.0.0.1:{port}"
     server.should_exit = True
     thread.join(timeout=5)
-    if old_home is None:
-        os.environ.pop("YT_PLAYLIST_HOME", None)
-    else:
-        os.environ["YT_PLAYLIST_HOME"] = old_home
 
 
 def test_delete_shows_spinner_while_batch_is_in_flight(live_slow_delete_app, page):
@@ -231,15 +223,16 @@ def test_copy_into_appends_songs_to_existing_playlist(live_pl_app, page):
 def test_generated_playlists_sort_by_creation_date_descending(live_app, store, page):
     from datetime import datetime
 
-    iid = store.get_identities()[0].id
+    iid = store.identities.get_identities()[0].id
     for ytm, title, created in [
         ("older", "Zulu - October 19 2026 #1", None),
         ("newer", "Beta - October 20 2026 #1", None),
         ("latest", "Alpha", datetime(2026, 10, 20, 12).timestamp()),
         ("unknown", "Unknown creation date", None),
     ]:
-        store.upsert_playlist(iid, ytm, title, 0, "h", 1, created_at=created)
-        store.set_playlist_group(ytm, "Generated")
+        store.playlists.upsert_playlist(iid, ytm, title, 0, "h", 1, created_at=created)
+        store.playlists.set_playlist_group(ytm, "Generated")
+        store.playlists.mark_generated_playlist(ytm)
     page.goto(f"{live_app}/playlists")
     page.get_by_role("button", name="Generated playlists", exact=False).click()
     generated = page.locator("#generated-playlists .ptitle")
@@ -330,3 +323,51 @@ def test_recent_and_generated_layout_and_promotion(recent_pl_app, page, width, t
 def test_no_recent_playlists_hides_the_section(live_pl_app, page):
     page.goto(f"{live_pl_app}/playlists")
     expect(page.get_by_role("region", name="New playlists")).to_be_hidden()
+
+
+def test_activity_normalization_is_linear_and_tracks_live_changes(recent_pl_app, page):
+    page.goto(f"{recent_pl_app}/playlists")
+    result = page.evaluate("""() => {
+        let reads = 0;
+        const rows = Array.from({ length: 10000 }, (_, index) => ({
+            id: index, title: String(index),
+            get listens() { reads++; return index % 1000; }
+        }));
+        const component = playlistsTab(rows);
+        component.$watch = () => {};
+        component.init();
+        const values = rows.map(row => component.activity(row));
+        return { reads, values };
+    }""")
+    assert result["reads"] <= 4 * 10000
+    assert result["values"] == pytest.approx([
+        math.log1p(index % 1000) / math.log1p(999) for index in range(10000)
+    ])
+
+    page.evaluate("""() => {
+        const state = Alpine.$data(document.querySelector('[x-data^="playlistsTab"]'));
+        state.rows.find(row => row.title.startsWith('Zulu')).listens = 9;
+        state.rows.find(row => row.title === 'Alpha').listens = 99;
+    }""")
+    meters = page.locator('tr').filter(has=page.get_by_role("link", name="Zulu work in progress")).locator('.pl-activity i')
+    expect(meters).to_have_count(2)
+    for meter in meters.all():
+        expect(meter).to_have_attribute("style", "--heat: 0.5;")
+    page.evaluate("""() => {
+        const state = Alpine.$data(document.querySelector('[x-data^="playlistsTab"]'));
+        state.rows.find(row => row.title === 'Alpha').listens = 999;
+    }""")
+    for meter in meters.all():
+        expect(meter).to_have_attribute("style", "--heat: 0.33333333333333337;")
+    page.evaluate("""() => {
+        const state = Alpine.$data(document.querySelector('[x-data^="playlistsTab"]'));
+        state.rows = state.rows.map(row => ({ ...row, listens: 0 }));
+    }""")
+    for meter in meters.all():
+        expect(meter).to_have_attribute("style", "--heat: 0;")
+    assert page.evaluate("""() => {
+        const empty = playlistsTab([]);
+        empty.$watch = () => {};
+        empty.init();
+        return empty.activity({ listens: 0 });
+    }""") == 0

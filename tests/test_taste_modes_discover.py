@@ -33,7 +33,7 @@ def _planted(n_per=50, d=6):
 
 def test_discover_modes_finds_planted(monkeypatch, store):
     keys, V, idx, blocks = _planted()
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (keys, V, idx))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
     # genres_for returns the planted family as the genre; genre_map.family maps a genre to its family.
     monkeypatch.setattr(store.modes, "genres_for",
                         lambda ks: {k: k.split("|")[0] for k in ks})
@@ -54,5 +54,5 @@ def test_discover_modes_finds_planted(monkeypatch, store):
 
 def test_discover_modes_cold_start(monkeypatch, store):
     monkeypatch.setattr(embed, "load_content_vectors",
-                        lambda s: (["a|1"], np.ones((1, 4), dtype=np.float32), {"a|1": 0}))
+                        lambda s, **kw: (["a|1"], np.ones((1, 4), dtype=np.float32), {"a|1": 0}))
     assert tm.discover_modes(store) == []

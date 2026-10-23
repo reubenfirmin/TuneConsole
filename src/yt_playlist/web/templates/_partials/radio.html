@@ -1,0 +1,143 @@
+<div class="radio-home" x-ref="fieldContent" x-data="radioHome({{ radio_bootstrap|default({})|tojson|forceescape }})" x-effect="setVisible(panel === 'radio')"
+     :class="{'is-artwork-paused': !artworkRunning}"
+     @bridge-status.window="syncRecordPlayback($event.detail)"
+     @playback-requested.window="previewRecord($event.detail)"
+     @playback-settled.window="settleRecord($event.detail)"
+     @resize.window.debounce.100ms="fitSpace()" @scroll.window.throttle.100ms="measureQueues()">
+  {% include "_partials/radio_field.html" %}
+  <div class="gen-stage radio-launch" x-ref="launch" x-show="launching" x-cloak role="status" aria-live="polite" aria-label="Starting radio">
+    <div class="radio-launch-graph" aria-hidden="true">
+      <template x-for="(song, index) in launchTracks" :key="song.video_id">
+        <svg class="radio-launch-links" viewBox="0 0 100 100" preserveAspectRatio="none">
+          <line x1="50" y1="50" :x2="launchPosition(index).x" :y2="launchPosition(index).y" :style="'animation-delay: -' + index * .3 + 's'"/>
+        </svg>
+      </template>
+      <template x-for="(song, index) in launchTracks" :key="song.video_id">
+        <span class="gen-node radio-launch-node" :style="'left:' + launchPosition(index).x + '%;top:' + launchPosition(index).y + '%;animation-delay:-' + index * .5 + 's'">
+          <template x-if="song.thumbnail"><img :src="song.thumbnail" alt="" referrerpolicy="no-referrer" @error="$el.remove()"></template>
+        </span>
+      </template>
+      <div class="gen-hub">
+        <span class="gen-hub-ring"></span>
+        <svg class="brand-eq" viewBox="0 0 28 24" aria-hidden="true">
+          <rect class="eqbar gen-eq-1" x="0" y="9" width="4" height="15" rx="2"/>
+          <rect class="eqbar gen-eq-2" x="6" y="3" width="4" height="21" rx="2"/>
+          <rect class="eqbar gen-eq-3" x="12" y="12" width="4" height="12" rx="2"/>
+          <rect class="eqbar gen-eq-4" x="18" y="6" width="4" height="18" rx="2"/>
+          <rect class="eqbar gen-eq-5" x="24" y="14" width="4" height="10" rx="2"/>
+        </svg>
+      </div>
+    </div>
+    <div class="gen-copy">
+      <span class="gen-status"><span class="gen-dot"></span><span x-text="restoring ? 'returning to your frequency' : busyAction === 'start' ? 'finding your frequency' : 'connecting to youtube music'"></span><span class="gen-cursor"></span></span>
+      <h2 class="gen-title" x-text="restoring ? 'Your radio' : 'Tuning your radio'">Tuning your radio</h2>
+      <p class="gen-sub" x-show="!restoring" x-text="launchSong?.title ? 'Starting with ' + launchSong.title + (launchSong.artist ? ' · ' + launchSong.artist : '') : 'Finding the next songs for you.'"></p>
+    </div>
+  </div>
+  <div class="radio-seeds" x-ref="seeds" x-show="showSeeds" :aria-busy="busy || loading">
+    <template x-for="song in seeds" :key="song.video_id">
+      <button type="button" class="radio-seed" :disabled="busy" @click="start(song)"
+              :aria-label="'Start radio with ' + song.title + ' by ' + song.artist">
+        <span class="radio-seed-art">
+          <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="24"/><circle cx="32" cy="32" r="8"/></svg>
+          <template x-if="song.thumbnail"><img :src="song.thumbnail" alt="" referrerpolicy="no-referrer" loading="lazy" @error="$el.remove()"></template>
+        </span>
+        <span class="radio-seed-launch" aria-hidden="true">
+          <span class="radio-seed-play"><svg viewBox="0 0 24 24"><path d="M8 4.5a1 1 0 0 1 1.5-.86l11 6.5a1 1 0 0 1 0 1.72l-11 6.5A1 1 0 0 1 8 17.5z"/></svg></span>
+          <span>Start radio</span>
+        </span>
+        <span class="radio-seed-info">
+          <strong x-text="song.title" :title="song.title"></strong>
+          <span x-text="song.artist" :title="song.artist"></span>
+        </span>
+      </button>
+    </template>
+  </div>
+  <div class="radio-session" x-ref="session" x-show="state.active && state.local_id && !state.starting" x-cloak
+       :class="{'is-preparing': launching}" :aria-hidden="launching.toString()" :aria-busy="launching.toString()">
+    <div class="radio-playlist" x-ref="playlist">{% if radio_bootstrap and radio_bootstrap.state.active and radio_bootstrap.state.local_id %}{% with session=radio_bootstrap.state, tracks=radio_tracks %}{% include "_partials/radio_playlist.html" %}{% endwith %}{% endif %}</div>
+    <div class="radio-junction-space">
+      <button class="radio-tune" x-ref="tuningControl" type="button" @click="openTuning()" aria-label="Tune streams" title="Tune streams"
+              :style="'--queue-color: ' + queueColor(activeSlot)"
+              :disabled="tuningBusy" aria-haspopup="dialog" aria-controls="radio-tuning-dialog">
+        <svg viewBox="0 0 32 24" aria-hidden="true"><path d="M3 5h5m6 0h15M3 12h16m6 0h4M3 19h8m6 0h12"/><circle cx="11" cy="5" r="3"/><circle cx="22" cy="12" r="3"/><circle cx="14" cy="19" r="3"/></svg>
+      </button>
+      <svg class="radio-junction" x-ref="junction" viewBox="0 0 1000 112" preserveAspectRatio="none" aria-hidden="true"
+         :style="'--queue-color: ' + queueColor(connectedSlot)">
+      <defs>
+        <linearGradient id="radio-junction-wash" x2="0" y2="1"><stop stop-color="var(--queue-color)" stop-opacity=".03"/><stop offset="1" stop-color="var(--queue-color)" stop-opacity=".23"/></linearGradient>
+        <pattern id="radio-junction-hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(30)"><path d="M0 0V7"/></pattern>
+        <clipPath id="radio-junction-clearance"><path :d="junctionClearance" clip-rule="evenodd"/></clipPath>
+        <clipPath id="radio-junction-weave"><path :style="junctionStyle(connectedSlot)"></path></clipPath>
+      </defs>
+      <g clip-path="url(#radio-junction-clearance)">
+      <path class="radio-junction-rest" x-show="connectedSlot !== activeSlot" :style="junctionStyle(activeSlot) + '; color:' + queueColor(activeSlot)"></path>
+      <path class="radio-junction-backing" :style="junctionStyle(connectedSlot)"></path>
+      <path class="radio-junction-fill" :style="junctionStyle(connectedSlot)"></path>
+      <path class="radio-junction-texture" :style="junctionStyle(connectedSlot)"></path>
+      <path class="radio-junction-line" :style="junctionStyle(connectedSlot)"></path>
+      <path class="radio-junction-flow" :style="junctionStyle(connectedSlot, true)"></path>
+      <g class="radio-junction-weave" clip-path="url(#radio-junction-weave)">
+        <g :transform="landscapeToJunction">
+          {% for i in [8, 10, 12] %}<use href="#radio-landscape-{{ i }}"/>{% endfor %}
+        </g>
+      </g>
+      </g>
+      </svg>
+    </div>
+    <div class="radio-directions" x-ref="directions" aria-label="Possible radio directions" @scroll.passive="measureQueues()"
+         :class="{'is-tuning': tuningBusy}" :aria-busy="tuningBusy.toString()"
+         @mouseleave="hoveredSlot = null" @focusout="if (!$el.contains($event.relatedTarget)) focusedSlot = null">
+      <template x-for="branch in state.directions || []" :key="branch.slot">
+        <section class="radio-direction" :class="{'is-active': branch.active, 'is-preview': previewSlot === branch.slot && !branch.active}"
+                 :data-slot="branch.slot" :style="'--queue-color: ' + queueColor(branch.slot)"
+                 @mouseenter="hoveredSlot = branch.slot" @focusin="focusedSlot = branch.slot">
+          <button type="button" class="radio-direction-heading" @click="select(branch)"
+                  :disabled="busy || tuningBusy || !state.active || !branch.tracks.length"
+                  :aria-pressed="branch.active" :aria-label="(branch.active ? 'Active stream ' : 'Change to this stream, ') + (branch.slot + 1) + (branch.tracks[0] ? ', starting with ' + branch.tracks[0].title : '')">
+            <svg class="radio-queue-drawing" viewBox="0 0 300 90" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M-20 26C52-24 90 82 170 37S265 5 320 30M-20 34C52-16 90 90 170 45S265 13 320 38M-20 42C52-8 90 98 170 53S265 21 320 46M-20 50C52 0 90 106 170 61S265 29 320 54M-20 58C52 8 90 114 170 69S265 37 320 62"/>
+              <circle cx="252" cy="22" r="11"/><path d="M22 12h12m-6-6v12m236 56h12m-6-6v12"/>
+            </svg>
+            <span class="radio-queue-art" aria-hidden="true">
+              <template x-for="(song, index) in branch.tracks.slice(0, 3)" :key="song.video_id">
+                <span :style="'--cover: ' + index"><svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="23"/><circle cx="32" cy="32" r="7"/></svg>
+                  <template x-if="song.thumbnail"><img :src="song.thumbnail" alt="" referrerpolicy="no-referrer" @error="$el.remove()"></template>
+                </span>
+              </template>
+            </span>
+            <span class="radio-queue-number" x-text="String(branch.slot + 1).padStart(2, '0')"></span>
+            <span class="radio-queue-status" x-text="branch.active ? 'Up next' : 'Change to this stream'"></span>
+          </button>
+          <ol class="radio-direction-tracks">
+            <template x-for="(song, index) in branch.tracks" :key="song.video_id">
+              <li class="radio-proposed-track" :title="song.title + ' · ' + song.artist">
+                <span class="radio-proposed-art">
+                  <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="24"/><circle cx="32" cy="32" r="8"/></svg>
+                  <template x-if="song.thumbnail"><img :src="song.thumbnail" alt="" referrerpolicy="no-referrer" loading="lazy" @error="$el.remove()"></template>
+                </span>
+                <span class="radio-proposed-info"><strong x-text="song.title"></strong><span x-text="song.artist"></span>
+                </span>
+                <span class="radio-saved-dot" x-show="branch.active && index === 0" title="Up next" aria-label="Up next"></span>
+              </li>
+            </template>
+          </ol>
+          <div class="radio-decay" :class="{'is-playing': branch.active}" role="progressbar"
+               :aria-label="branch.active ? 'Playing stream ' + (branch.slot + 1) : 'Stream ' + (branch.slot + 1) + ' refreshes after song changes'"
+               aria-valuemin="0" :aria-valuemax="branch.decay_total || 3"
+               :aria-valuenow="branch.decay_remaining ?? 3"
+               :aria-valuetext="branch.active ? 'Playing' : (branch.decay_remaining ?? 3) + ' song changes until refresh'">
+            <svg viewBox="0 0 300 12" preserveAspectRatio="none" aria-hidden="true">
+              <path class="radio-decay-bed" d="M2 6H298"/>
+              <path class="radio-decay-ticks" d="M2 4v4m98-3v2m98-2v2m100-3v4"/>
+              <path class="radio-decay-ink" pathLength="100" d="M2 6H298"
+                    :style="'stroke-dashoffset:' + (100 * (1 - Math.min(1, (branch.decay_remaining ?? 3) / (branch.decay_total || 3))))"/>
+              <circle class="radio-decay-tip" cy="6" r="2" :cx="2 + 296 * Math.min(1, (branch.decay_remaining ?? 3) / (branch.decay_total || 3))"/>
+            </svg>
+          </div>
+        </section>
+      </template>
+    </div>
+  </div>
+  {% include "_partials/radio_tuner.html" %}
+</div>

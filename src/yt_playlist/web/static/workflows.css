@@ -1,0 +1,385 @@
+/* Workflow pages: control desks, working sheets and decision cases. */
+.page-workflow .page-head p,
+.page-workflow .section-note {
+  max-width: 68ch;
+}
+.page-workflow .workflow-control {
+  padding: clamp(1rem, 2.5vw, 1.5rem);
+  background: var(--surface-subtle);
+  border: 0;
+  box-shadow: none;
+}
+.page-workflow .workflow-console {
+  padding: clamp(1rem, 3vw, 1.8rem);
+  background: var(--surface-inset);
+  border-color: var(--border-strong);
+  box-shadow: none;
+}
+.page-workflow .workflow-sheet {
+  padding-inline: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+.page-workflow .workflow-sheet thead th {
+  color: color-mix(in srgb, var(--text) 58%, transparent);
+  background: var(--canvas);
+}
+.page-workflow .workflow-sheet tbody tr:hover {
+  background: var(--surface-raised);
+}
+.page-workflow .workflow-case {
+  padding: clamp(1rem, 2.5vw, 1.4rem);
+  background: var(--surface-subtle);
+  border: 0;
+  box-shadow: none;
+}
+.page-workflow .workflow-case .group-head {
+  margin-block-end: .8rem;
+  font-size: clamp(1.05rem, 2vw, 1.25rem);
+}
+.page-workflow .workflow-case tbody tr:last-child td {
+  border-block-end: 0;
+}
+.page-workflow .workflow-metrics {
+  gap: clamp(1rem, 3vw, 2rem);
+  margin-block-end: var(--sp-6);
+}
+.page-workflow .workflow-metrics .metric {
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.page-workflow .workflow-metrics .metric::after {
+  content: none;
+}
+.page-workflow .workflow-metrics .metric .n {
+  font-size: clamp(2.4rem, 5vw, 3.8rem);
+  line-height: .9;
+  letter-spacing: -.055em;
+  color: var(--text);
+}
+.page-workflow .workflow-metrics .metric .l {
+  margin-block-start: .55rem;
+  color: color-mix(in srgb, var(--text) 62%, transparent);
+}
+.page-workflow .workflow-metrics a.metric:hover {
+  transform: none;
+}
+.page-workflow .workflow-metrics a.metric:hover .n {
+  color: var(--accent-2);
+}
+
+/* Merge is a dense editor: keep source colours, but let the choices and song ledger occupy their
+   own clear planes. */
+.page-merge .merge-control .cfg {
+  align-items: stretch;
+}
+.page-merge .merge-control .cfg > div:first-child {
+  max-width: 48rem;
+}
+.page-merge .merge-control .cfg > .text-end {
+  min-width: 9rem;
+  padding-inline-start: var(--sp-4);
+  border-inline-start: 1px solid var(--border-strong);
+}
+.page-merge .merge-sheet .col-head {
+  margin-block-end: .8rem;
+}
+.page-merge .merge-sheet .seg {
+  border: 0;
+  border-radius: 0;
+}
+.page-merge .merge-sheet .seg button.on {
+  background: transparent;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Move's identity selection is the main decision, not a small form floating in a card. */
+.page-move .workflow-control .cluster {
+  gap: clamp(.8rem, 3vw, 1.6rem);
+}
+.page-move .workflow-control .opt {
+  display: grid;
+  gap: .4rem;
+  color: color-mix(in srgb, var(--text) 62%, transparent);
+  font-size: var(--type-xs);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.page-move .workflow-control .inline-control {
+  min-width: min(15rem, 70vw);
+  color: var(--text);
+  font-size: var(--type-body);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.page-move .move-help {
+  margin-block-start: 1rem;
+  color: var(--dim);
+  font-size: var(--type-sm);
+}
+.page-move summary { cursor: pointer; }
+.page-move .move-help p { max-width: 76ch; margin-block-end: 0; }
+.page-move .move-sheet { padding-block: 0; margin-block-end: 6rem; }
+.page-move .move-sheet table { table-layout: fixed; }
+.page-move .move-sheet .selcell { width: 3rem; }
+.page-move .move-sheet .num { width: 6rem; white-space: nowrap; }
+.page-move .move-sheet td { padding-block: .75rem; }
+.page-move .move-title a { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-move .move-count { margin-inline-start: .4rem; font-weight: normal; }
+.page-move .move-results { padding: 1rem; background: var(--surface-subtle); }
+.page-move .move-results p { margin-block-start: 0; }
+.page-move .move-results .ok { color: var(--teal); }
+.page-move .move-results .err { color: var(--danger); }
+.page-move .move-results ul { padding-inline-start: 1.25rem; margin-block-end: 0; }
+.page-move .move-results li + li { margin-block-start: .5rem; }
+.page-move .move-results li strong { margin-inline-end: .5rem; }
+.move-actionbar { max-width: calc(100vw - 2rem); }
+.move-actionbar .spinner { flex-shrink: 0; }
+@media (max-width: 540px) {
+  .page-move .workflow-control .opt { flex: 1; min-width: 0; }
+  .page-move .workflow-control .inline-control { min-width: 0; width: 100%; }
+  .page-move .move-sheet .num { width: 4.5rem; }
+  .move-actionbar { width: max-content; flex-wrap: wrap; justify-content: center; }
+}
+
+/* Keep worker status and metadata coverage in separate cards. */
+.page-enrich #enrich-stats {
+  display: grid;
+  gap: var(--sp-5);
+  margin-block-end: var(--sp-5);
+}
+.page-enrich .enrich-head {
+  margin-block-end: var(--sp-5);
+}
+.page-enrich .enrich-state {
+  padding: 0;
+}
+.page-enrich .enrich-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-4);
+  margin-block-end: var(--sp-6);
+}
+.page-enrich .enrich-tiles .metric {
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.page-enrich .enrich-tiles .metric::after {
+  content: none;
+}
+.page-enrich .enrich-tiles .metric .v {
+  font-size: clamp(1.8rem, 4vw, 2.8rem);
+  font-weight: 720;
+  letter-spacing: -.04em;
+}
+.page-enrich .cov-bar,
+.page-enrich .cov-bar > i {
+  border-radius: 0;
+}
+
+.page-network .section-note {
+  max-width: none;
+}
+.page-network .network-policy code {
+  color: var(--accent-2);
+}
+.genre-editor p {
+  max-width: 76ch;
+}
+.genre-editor .genre-add {
+  align-items: stretch;
+}
+.genre-editor .genre-add input {
+  min-height: 2.75rem;
+  font-size: var(--type-body);
+}
+.genre-editor .genre-chips {
+  gap: .4rem;
+}
+.genre-editor .genre-chip,
+.genre-editor .chip-x {
+  border-radius: 2px;
+}
+.genre-editor .genre-chip { max-width: 100%; }
+.genre-editor .genre-chip > span { min-width: 0; overflow-wrap: anywhere; }
+.genre-editor .chip-x { flex-shrink: 0; }
+.genre-list-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  margin-block: 1rem .5rem;
+}
+.genre-list-summary .genre-count {
+  margin-inline-start: 0;
+}
+.genre-family {
+  padding-block: .5rem;
+  border-block-start: 1px solid var(--border);
+}
+.genre-family > details > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-block: .5rem;
+  cursor: pointer;
+  list-style: none;
+}
+.genre-family > details > summary::-webkit-details-marker { display: none; }
+.genre-family > details[open] > summary .genre-chevron { transform: rotate(180deg); }
+.genre-filter { display: block; margin-block: 1rem .4rem; }
+.genre-editor #genre-filter {
+  box-sizing: border-box;
+  width: min(100%, 30rem);
+  min-height: 2.75rem;
+  padding: .65rem .75rem;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+.genre-aliases { position: relative; font-size: .85em; }
+.genre-aliases summary { cursor: pointer; color: var(--dim); }
+.genre-aliases p {
+  position: absolute;
+  z-index: 2;
+  inset-inline-start: 0;
+  width: min(16rem, 65vw);
+  padding: .75rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  white-space: normal;
+}
+.genre-family h3 {
+  margin: 0;
+  font-size: var(--type-ui);
+}
+.genre-family h3 small {
+  margin-inline-start: .3rem;
+  font-weight: normal;
+}
+.genre-family .genre-chips {
+  align-content: start;
+  margin: .5rem 0;
+  padding: 0 0 0 1rem;
+  border-inline-start: 2px solid var(--border);
+  list-style: none;
+}
+.genre-family .section-note {
+  margin-block: .5rem 0;
+}
+
+@media (max-width: 45rem) {
+  .page-merge .merge-control .cfg > .text-end {
+    width: 100%;
+    padding: var(--sp-3) 0 0;
+    border-inline-start: 0;
+    border-block-start: 1px solid var(--border-strong);
+    text-align: start;
+  }
+  .page-enrich .enrich-tiles {
+    grid-template-columns: 1fr;
+  }
+  .genre-family {
+    grid-template-columns: minmax(0, 1fr);
+    gap: .5rem;
+  }
+}
+
+/* Secondary analytical/settings pages inherit the same bare tab and working-sheet language. */
+.page-taste > div > .tabs,
+.page-discovery .tabs {
+  border-block-end: 0;
+  gap: .2rem;
+}
+.page-taste > div > .tabs .tab-btn,
+.page-discovery .tabs .tab-btn {
+  color: color-mix(in srgb, var(--text) 64%, transparent);
+  background: transparent;
+  border: 0;
+  border-block-end: 2px solid transparent;
+  box-shadow: none;
+}
+.page-taste > div > .tabs .tab-btn.active,
+.page-discovery .tabs .tab-btn.active {
+  color: var(--text);
+  background: transparent;
+  border-block-end-color: var(--accent);
+  box-shadow: none;
+}
+.page-discovery .discovery-sheet {
+  padding-inline: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  overflow-x: auto;
+}
+.page-discovery .discovery-sheet thead th {
+  color: color-mix(in srgb, var(--text) 58%, transparent);
+  background: var(--canvas);
+}
+.page-discovery .pool-table td:first-child {
+  min-width: 18rem;
+  max-width: 34rem;
+  overflow-wrap: anywhere;
+}
+.discovery-charts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-6); margin: var(--sp-6) 0; }
+.discovery-chart { min-width: 0; margin: 0; }
+.discovery-chart figcaption { font-size: var(--type-ui); font-weight: 650; margin-bottom: 1rem; }
+.discovery-chart-total { font-size: 1.8rem; margin: 0; font-variant-numeric: tabular-nums; }
+.discovery-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .3rem .7rem; margin: .7rem 0; font-size: var(--type-ui); }
+.discovery-bar-count { font-variant-numeric: tabular-nums; color: var(--dim); }
+.discovery-bar-track { grid-column: 1 / -1; height: .4rem; background: var(--surface-2); }
+.discovery-bar-track i { display: block; height: 100%; background: var(--accent); width: var(--share); }
+.discovery-bar.is-unknown .discovery-bar-track i { background: var(--dim); }
+@media (max-width: 45rem) {
+  .discovery-charts { grid-template-columns: 1fr; }
+}
+.page-taste .scope-tag {
+  border-radius: 2px;
+}
+
+@media (max-width: 45rem) {
+  main:not(.page-clusters) .page-head h1 {
+    overflow-wrap: anywhere;
+  }
+  .page-artists .library-index-card th:nth-child(n + 4),
+  .page-artists .library-index-card td:nth-child(n + 4) {
+    display: none;
+  }
+  .page-actions .workflow-sheet,
+  .page-network .workflow-sheet,
+  .page-discovery .discovery-sheet {
+    margin-inline: calc(-1 * var(--sp-3));
+    padding-inline: var(--sp-3);
+  }
+  .page-charts .chart-context-actions {
+    width: 100%;
+    margin-inline-start: 0;
+  }
+  .page-charts .chart-key {
+    align-items: flex-start;
+  }
+  .page-charts .chart-key-item {
+    flex-basis: calc(50% - .7rem);
+  }
+}
+@media (max-width: 32rem) {
+  .page-charts .chart-key-item {
+    flex-basis: 100%;
+  }
+  .page-move .workflow-control .inline-control {
+    width: 100%;
+    min-width: 0;
+  }
+  .page-move .workflow-control .opt {
+    flex: 1 1 100%;
+  }
+}
+

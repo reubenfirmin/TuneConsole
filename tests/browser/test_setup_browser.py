@@ -74,7 +74,7 @@ def test_setup_identities_tab_accepts_manual_label(live_setup_app, page):
 def live_identity_setup(tmp_path, monkeypatch):
     store = Store(":memory:")
     store.init_schema()
-    store.set_setting("last_sync_at", "1.0")  # previously made any identity edit claim reauthentication
+    store.settings.set_setting("last_sync_at", "1.0")  # previously made any identity edit claim reauthentication
     runtime = Runtime(store, tmp_path / "config.toml", tmp_path)
     clients = {"main": CheckedClient("Main account"), "Brand": CheckedClient("My brand", handle="@mybrand")}
     monkeypatch.setattr("yt_playlist.core.runtime.build_client", lambda cfg, bridge: clients[cfg.label])
@@ -175,15 +175,15 @@ def test_invalid_identity_stays_editable_and_explains_how_to_fix_it(live_identit
     expect(help_panel.get_by_role("button")).to_have_count(0)
     expect(page.get_by_role("link", name="Open Pairing", exact=True)).to_have_count(0)
     expect(page.get_by_label("Brand account ID for identity 2", exact=True)).to_have_value("123456789012345678901")
-    # Editing hides the previous result; leaving the field saves and checks the correction.
+    # Editing hides the previous result; saving cannot retarget the stored account.
     page.get_by_label("Brand account ID for identity 2", exact=True).fill("99999")
     expect(page.get_by_text("Cannot access this brand account", exact=True)).to_be_hidden()
     expect(page.get_by_role("button", name="Brand: authentication updates after editing", exact=True)).to_be_disabled()
     expect(page.get_by_role("button", name="Save and check", exact=True)).to_have_count(0)
-    t.clients["Brand"].error = None
     page.get_by_label("Brand account ID for identity 2", exact=True).blur()
-    expect(page.locator(".identity-auth--valid")).to_have_count(2)
-    assert next(i for i in t.store.get_identities() if i.label == "Brand").brand_account_id == "99999"
+    expect(page.get_by_role("alert")).to_contain_text(
+        "An existing account cannot be retargeted; add the other account separately")
+    assert next(i for i in t.store.identities.get_identities() if i.label == "Brand").brand_account_id == "123456789012345678901"
 
 
 def test_disconnected_identity_is_checked_automatically_after_reconnecting(live_identity_setup, page):
@@ -232,7 +232,7 @@ def test_successful_check_clears_expired_banner_without_reload(live_identity_set
     t = live_identity_setup
     errors = []
     page.on("pageerror", lambda error: errors.append(error))
-    identity = t.store.get_identities()[0]
+    identity = t.store.identities.get_identities()[0]
     t.ctx.flag_auth_expired(identity.id, identity.label)
     t.clients["main"].error = RuntimeError("Server returned HTTP 401: Unauthorized")
     page.goto(f"{t.base}/setup?tab=identities")
@@ -280,7 +280,7 @@ def test_remove_is_immediate_with_deletion_message_and_no_checks(live_identity_s
     expect(page.get_by_role("status")).to_contain_text('Removed identity "Brand".')
     expect(page.get_by_role("button", name="Save and check", exact=True)).to_be_hidden()
     expect(page.locator('.tools-pop a[href="/move"]')).to_have_count(0)
-    assert [i.label for i in t.store.get_identities()] == ["main"]
+    assert [i.label for i in t.store.identities.get_identities()] == ["main"]
     assert {name: client.checks for name, client in t.clients.items()} == checks_before
     page.reload()
     expect(page.get_by_role("tab", name="Identities", exact=True)).to_have_attribute("aria-selected", "true")
@@ -299,7 +299,7 @@ def test_remove_finishes_pending_edits_without_an_extra_click(live_identity_setu
     expect(page.locator('input[name="label"]')).to_have_count(1)
     expect(page.get_by_label("Label for identity 1", exact=True)).to_have_value("Still editing")
     expect(page.get_by_role("button", name="Save and check", exact=True)).to_have_count(0)
-    assert [i.label for i in t.store.get_identities()] == ["Still editing"]
+    assert [i.label for i in t.store.identities.get_identities()] == ["Still editing"]
 
 
 def test_failed_removal_keeps_the_row_and_can_be_retried(live_identity_setup, page):
@@ -311,7 +311,7 @@ def test_failed_removal_keeps_the_row_and_can_be_retried(live_identity_setup, pa
     page.get_by_role("button", name="Remove Brand", exact=True).click()
     expect(page.get_by_role("alert")).to_have_text("Could not remove this identity. Try again.")
     expect(page.locator('input[name="label"]')).to_have_count(2)
-    assert len(t.store.get_identities()) == 2
+    assert len(t.store.identities.get_identities()) == 2
     page.unroute("**/setup/identities/*/remove")
     page.get_by_role("button", name="Remove Brand", exact=True).click()
     expect(page.locator('input[name="label"]')).to_have_count(1)
@@ -324,7 +324,7 @@ def test_discarding_an_unsaved_row_needs_no_save(live_identity_setup, page):
     page.get_by_role("button", name="Remove identity 2", exact=True).click()
     expect(page.locator('input[name="label"]')).to_have_count(1)
     expect(page.get_by_role("button", name="Save and check", exact=True)).to_be_hidden()
-    assert [i.label for i in t.store.get_identities()] == ["main"]
+    assert [i.label for i in t.store.identities.get_identities()] == ["main"]
 
 
 def test_main_choice_saves_immediately_without_auth_checks(live_identity_setup, page):
@@ -334,7 +334,7 @@ def test_main_choice_saves_immediately_without_auth_checks(live_identity_setup, 
     checks_before = {name: client.checks for name, client in t.clients.items()}
     page.get_by_label("Use Brand as main identity", exact=True).check()
     expect(page.locator('form[x-ref="form"]')).to_have_attribute("aria-busy", "false")
-    assert t.store.get_master_identity().label == "Brand"
+    assert t.store.identities.get_master_identity().label == "Brand"
     assert {name: client.checks for name, client in t.clients.items()} == checks_before
     page.reload()
     expect(page.get_by_label("Use Brand as main identity", exact=True)).to_be_checked()
@@ -345,6 +345,8 @@ def test_changes_during_an_autosave_are_saved_in_order(live_identity_setup, page
     t = live_identity_setup
     _add_identity(page, t.base)
     expect(page.locator(".identity-auth--valid")).to_have_count(2)
+    original = next(i for i in t.store.identities.get_identities() if i.label == "Brand")
+    t.clients["First label"] = t.clients["Second label"] = t.clients["Brand"]
     held = []
 
     def hold_first(route):
@@ -354,20 +356,21 @@ def test_changes_during_an_autosave_are_saved_in_order(live_identity_setup, page
             route.continue_()
 
     page.route("**/setup?tab=identities", hold_first)
-    brand = page.get_by_label("Brand account ID for identity 2", exact=True)
-    brand.fill("11111")
-    brand.blur()
+    label = page.get_by_label("Label for identity 2", exact=True)
+    label.fill("First label")
+    label.blur()
     expect(page.locator('form[x-ref="form"]')).to_have_attribute("aria-busy", "true")
     assert len(held) == 1
-    brand.fill("22222")
-    brand.blur()
+    label.fill("Second label")
+    label.blur()
     if first_fails:
         held[0].fulfill(status=503, content_type="application/json", body='{"error":"Temporary failure"}')
     else:
         held[0].fulfill(response=held[0].fetch())
     expect(page.locator('form[x-ref="form"]')).to_have_attribute("aria-busy", "false")
-    assert next(i for i in t.store.get_identities() if i.label == "Brand").brand_account_id == "22222"
-    expect(brand).to_have_value("22222")
+    saved = next(i for i in t.store.identities.get_identities() if i.label == "Second label")
+    assert (saved.id, saved.brand_account_id) == (original.id, original.brand_account_id)
+    expect(label).to_have_value("Second label")
     expect(page.locator(".identity-auth--valid")).to_have_count(2)
     expect(page.get_by_role("alert")).to_have_count(0)
 
@@ -380,7 +383,7 @@ def test_removing_main_selects_remaining_main_without_saving(live_identity_setup
     expect(page.locator('input[name="label"]')).to_have_count(1)
     expect(page.get_by_label("Use Brand as main identity", exact=True)).to_be_checked()
     expect(page.get_by_role("button", name="Save and check", exact=True)).to_be_hidden()
-    assert t.store.get_master_identity().label == "Brand"
+    assert t.store.identities.get_master_identity().label == "Brand"
 
 
 def test_form_error_keeps_identity_tab_and_all_entered_values(live_identity_setup, page):

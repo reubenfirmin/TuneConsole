@@ -1,0 +1,20 @@
+{% if spotify_history is defined and (spotify_history.events or spotify_history.days or spotify_history.artists or spotify_history.listens or spotify_history.unresolved_days) %}
+<p class="section-note">Spotify history contributes {{ spotify_history.events }} timestamped plays,
+  {{ spotify_history.days }} track-days and {{ spotify_history.artists }} artist suggestions.</p>
+{% if spotify_history.unresolved_days %}
+<p class="section-note">{{ spotify_history.unresolved_days }} older listening records have no confirmed
+  local date and are excluded from recommendations.</p>
+{% endif %}
+<form hx-post="/import/spotify/remove" hx-target="#spotify-import-block" hx-swap="innerHTML"
+      hx-disabled-elt="find button">
+  <p class="section-note">Remove Spotify history from every account and refresh the model.
+    Independently recorded plays, independently discovered artists, saved music, your ratings
+    and saved taste preferences stay.</p>
+  <button type="submit" class="btn-ghost btn-sm">Remove Spotify history</button>
+</form>
+{% endif %}
+{% if spotify_legacy_unattributed %}
+<p class="section-note">Older imports did not retain listening duration or artist-suggestion provenance.
+  Remove Spotify history and import again to apply the new listening filters. Existing artist suggestions
+  and permanent taste updates without source attribution will be kept.</p>
+{% endif %}

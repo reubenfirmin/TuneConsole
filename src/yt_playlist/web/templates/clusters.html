@@ -87,6 +87,10 @@
       <button type="button" class="cluster-reset" x-show="nodes.length" x-cloak
               @click="reset()" title="Reset: clear the whole canvas">{{ cluster_arrow('restore') }} Reset</button>
     </div>
+    <div class="cluster-error" x-show="clusterError" x-cloak role="alert">
+      <span x-text="clusterError"></span>
+      <button type="button" @click="retryCluster()" :disabled="seedBusy">Try again</button>
+    </div>
     <section class="cluster-seed-editor" id="cluster-seed-editor" x-show="editingSeeds" x-cloak
              aria-label="Edit central cluster" :aria-busy="seedBusy ? 'true' : 'false'">
       <div class="cse-heading">

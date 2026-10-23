@@ -36,6 +36,11 @@ class Bridge:
     def connected(self) -> bool:
         return self._send is not None
 
+    @property
+    def connection_id(self):
+        """Changes on reconnect so failed reads can retry before their backoff expires."""
+        return self._conn_id
+
     def connect(self, send_coro_fn, loop) -> int:
         with self._lock:
             self._conn_id = next(self._conn_ids)
@@ -97,3 +102,22 @@ class Bridge:
                 raise BridgeError("no extension connected")
             send, loop = self._send, self._loop
         asyncio.run_coroutine_threadsafe(send(payload), loop)
+
+    async def request_control(self, payload: dict, timeout: float = 5.0):
+        """Await a control acknowledgement while leaving the WebSocket response pump free."""
+        with self._lock:
+            if self._send is None:
+                raise BridgeError("no extension connected")
+            send, loop = self._send, self._loop
+            req_id = next(self._ids)
+            fut = Future()
+            self._pending[req_id] = fut
+        try:
+            sending = asyncio.run_coroutine_threadsafe(send({**payload, "id": req_id}), loop)
+            await asyncio.wait_for(asyncio.wrap_future(sending), timeout)
+            return await asyncio.wait_for(asyncio.wrap_future(fut), timeout)
+        except asyncio.TimeoutError:
+            raise BridgeError("player command timed out") from None
+        finally:
+            with self._lock:
+                self._pending.pop(req_id, None)

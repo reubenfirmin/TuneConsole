@@ -224,16 +224,17 @@ def test_new_album_metadata_cannot_fabricate_a_change_in_album_listening(data):
 
 
 def test_repo_excludes_generated_plays_and_requires_real_playlist_dates(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     since, until = month_bounds("2026-09")
     for ytm, date, source, generated in (("real", since, "youtube", False),
                                          ("unknown", None, None, False),
                                          ("generated", since, "local", True)):
-        pid = store.upsert_playlist(iid, ytm, ytm, 0, "h", since)
+        pid = store.playlists.upsert_playlist(iid, ytm, ytm, 0, "h", since)
         store.conn.execute("UPDATE playlists SET created_at=?, created_at_source=? WHERE id=?",
                            (date, source, pid))
         if generated:
-            store.set_playlist_group(ytm, "Generated")
+            store.playlists.set_playlist_group(ytm, "Generated")
+            store.playlists.mark_generated_playlist(ytm)
     store.conn.executemany(
         "INSERT INTO play_events(identity_id, identity_key, played_at, source, playlist_ytm_id) "
         "VALUES (1,?,?,?,?)", [("real", since + 1, "live", "real"),
@@ -251,8 +252,8 @@ def test_repo_excludes_generated_plays_and_requires_real_playlist_dates(store):
 def test_new_playlist_counts_do_not_multiply_copies_or_attribute_song_matches(store):
     since, until = month_bounds("2026-09")
     for label in ("main", "other"):
-        iid = store.upsert_identity(label, "cred", None, label == "main")
-        store.upsert_playlist(iid, "real", "New mix", 4, "h", since, created_at=since)
+        iid = store.identities.upsert_identity(label, "cred", None, label == "main")
+        store.playlists.upsert_playlist(iid, "real", "New mix", 4, "h", since, created_at=since)
     # The same song can be played from another playlist or with no known playlist.
     # Only the two events attributed to this list during the recap month count.
     store.conn.executemany(
@@ -276,24 +277,23 @@ def test_new_playlist_distinguishes_unknown_size_from_no_recorded_plays(data, so
     assert beat["groups"][0]["entries"][0]["detail"] == expected
 
 
-def test_repo_preserves_true_counts_with_video_variants_and_snapshot_familiarity(store):
-    store.upsert_identity("main", "cred", None, True)
+def test_repo_preserves_true_counts_with_video_variants_and_coarse_familiarity(store):
+    store.identities.upsert_identity("main", "cred", None, True)
     key = identity_key("Song", "Artist")
     for video in ("v1", "v2"):
-        store.upsert_track(video, "Song", "Artist", "Release", 100)
+        store.tracks.upsert_track(video, "Song", "Artist", "Release", 100)
     since, until = month_bounds("2026-09")
-    store.conn.execute("INSERT INTO history_snapshots(identity_id,taken_at) VALUES (1,?)", (since - 86400,))
-    store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,?)", (key,))
-    store.conn.executemany("INSERT INTO play_events(identity_id,identity_key,played_at,source) "
-                           "VALUES (1,?,?,'live')", [(key, since + i) for i in range(4)])
+    store.history.record_history_plays(1, since - 86400, [key], source_timezone="UTC")
+    store.history.import_listening_events(1, [(key, None, since + i * 3600) for i in range(4)],
+                                         source_timezone="UTC")
     material = RecapRepo(store).snapshot(since, until)
     assert len(material["plays"]) == 4
-    assert material["first"][key] == since - 86400
+    assert material["first"][key] == since - 86400 + 43200  # a coarse date, not an exact midnight play
 
 
 def test_worker_bakes_all_three_screens_and_replaces_overlapping_old_beats(store, data):
     from yt_playlist.rec import trend_rollups
-    store.upsert_identity("main", "cred", None, True)
+    store.identities.upsert_identity("main", "cred", None, True)
     familiar_months(data)
     add_plays(data, "2026-09", per_day=12, artist="New artist", genre="jazz", album="MPRE")
     for key, card in data["meta"].items():
@@ -310,4 +310,4 @@ def test_worker_bakes_all_three_screens_and_replaces_overlapping_old_beats(store
     kinds = [b["kind"] for b in payload["story"]["beats"]]
     assert {"new_this_month", "different", "same"} <= set(kinds)
     assert not {"new", "diversity", "revival"} & set(kinds)
-    assert store.get_proposals("trend_rollups")["story"] == payload["story"]
+    assert store.rec_surface.get_proposals("trend_rollups")["story"] == payload["story"]

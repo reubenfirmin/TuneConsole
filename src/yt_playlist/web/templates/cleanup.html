@@ -23,7 +23,7 @@
 <p class="section-note">Each group contains identical playlists. Choose the copy to <strong>keep</strong>;
    the others are backed up, checked on YouTube, and deleted.</p>
 {% for g in groups %}
-  {% set member_ytms = g.playlists | map(attribute='ytm_playlist_id') | join(',') %}
+  {% set member_ytms = g.playlists | map(attribute='scope_ref') | join(',') %}
   <div class="card group section-block workflow-case">
     <div class="group-head cluster">
       <strong>{{ g.playlists|length }} identical copies</strong>
@@ -93,7 +93,7 @@
         <td class="num mono">{{ p.track_count }}</td>
         <td class="cell-actions">
           <button type="button" class="btn-ghost btn-sm"
-                  hx-post="/cleanup/ignore" hx-vals='{"ytm": "{{ p.ytm_playlist_id }}", "category": "tiny"}'
+                  hx-post="/cleanup/ignore" hx-vals='{"ytm": "{{ p.scope_ref }}", "category": "tiny"}'
                   title="Keep this playlist; stop listing it here">Ignore</button>
         </td>
       </tr>

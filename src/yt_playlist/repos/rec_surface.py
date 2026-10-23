@@ -4,17 +4,53 @@ erosion), materialized last-good proposals, and the Last.fm similar-artist cache
 Tables are created by numbered migrations before repositories are bound.
 """
 import json
+import math
 import statistics
 
 from yt_playlist.library.listen_derive import classify_exit
 
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read
+from yt_playlist.repos.scorecard_attribution import Attribution
 
 MOOD_EVENT_CAP = 200   # bound the rec_mood table (count, not age); this repo owns that table
 RESPONSE_RETAIN_DAYS = 90
+RETENTION_BATCH_SIZE = 256
+POLICY_RETENTION_CURSOR = 'rec_policy_retention_cursor'
+MIN_EXPERIMENT_CLUSTERS = 100
+
+
+def _wilson(hits, n):
+    if not n:
+        return None
+    z = 1.96
+    p = hits / n
+    center = (p + z * z / (2 * n)) / (1 + z * z / n)
+    radius = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return [max(0, center - radius), min(1, center + radius)]
 
 
 class RecSurfaceRepo(Repo):
+    @synchronized
+    def claim_home_offers(self, epoch, signatures, now):
+        """Deduplicate rendered choices within the hold window, across cache rebuilds/restarts."""
+        row = self.conn.execute("SELECT payload FROM rec_proposals WHERE surface='home_shown'").fetchone()
+        try:
+            previous = json.loads(row[0]) if row else {}
+        except (ValueError, TypeError):
+            previous = {}
+        if not isinstance(previous, dict):
+            previous = {}
+        shown = set(previous.get("signatures", [])) if previous.get("epoch") == epoch else set()
+        unseen = set(signatures) - shown
+        if unseen:
+            # Only the current window is retained; a new window is a new actual opportunity.
+            self.conn.execute(
+                "INSERT INTO rec_proposals(surface,payload,built_at) VALUES ('home_shown',?,?) "
+                "ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at",
+                (json.dumps({"epoch": epoch, "signatures": sorted(shown | unseen)[-100:]}), now))
+            self.conn.commit()
+        return unseen
+
     # --- #113 served recommendation -> observed outcome ledger -------------------------------
     @synchronized
     def record_serving_policy(self, version, configuration, now) -> None:
@@ -24,6 +60,21 @@ class RecSurfaceRepo(Repo):
         self.conn.commit()
 
     @synchronized
+    def record_prepared_policies(self, rows) -> None:
+        """Store policy JSON that was calculated and encoded off the serving connection."""
+        self.conn.executemany("INSERT OR IGNORE INTO rec_serving_policies VALUES (?,?,?)", rows)
+        self.conn.commit()
+
+    @synchronized
+    def publish_prepared_bundles(self, bundles_json, fresh_json, policies, now) -> None:
+        """Write already encoded output; the snapshot publisher owns validation and commit."""
+        self.conn.executemany("INSERT OR IGNORE INTO rec_serving_policies VALUES (?,?,?)", policies)
+        self.conn.executemany(
+            "INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) "
+            "ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at",
+            [("mode_bundles", bundles_json, now), ("fresh_pool", fresh_json, now)])
+
+    @snapshot_read
     def served_recommendation(self, impression_id):
         row = self.conn.execute(
             "SELECT i.*,p.configuration FROM rec_served_impressions i "
@@ -38,28 +89,32 @@ class RecSurfaceRepo(Repo):
         pool_row = self.conn.execute("SELECT configuration FROM rec_serving_policies WHERE model_version=?",
                                      (pool,)).fetchone() if pool else None
         result["pool_configuration"] = json.loads(pool_row[0]) if pool_row else None
-        result["outcomes"] = self.recommendation_scorecard(result["served_at"], result["served_at"] + 1,
-                                                          impression_id=impression_id)
+        result["outcomes"] = (None if result["provenance"].get("policy_kind") == "counterfactual" else
+            self.recommendation_scorecard(result["served_at"], result["served_at"] + 1,
+                                         impression_id=impression_id))
         return result
 
-    @synchronized
     def record_recommendation_outcomes(self, event_id, kind, keys, now, generated=False) -> None:
         if kind not in {"open", "start", "save", "promotion"}:
             raise ValueError("unsupported recommendation response")
-        self.conn.executemany(
-            "INSERT OR IGNORE INTO rec_response_events(event_id,kind,identity_key,at,is_generated) "
-            "VALUES (?,?,?,?,?)", [(event_id, kind, key, now, int(generated)) for key in set(keys) if key])
-        self.conn.execute("DELETE FROM rec_response_events WHERE at < ?",
-                          (now - RESPONSE_RETAIN_DAYS * 86400,))
-        self.conn.commit()
+        rows = [(event_id, kind, key, now, int(generated)) for key in set(keys) if key]
+        self._insert_recommendation_outcomes(rows)
+        self._prune_response_batch(now - RESPONSE_RETAIN_DAYS * 86400)
 
     @synchronized
+    def _insert_recommendation_outcomes(self, rows):
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO rec_response_events(event_id,kind,identity_key,at,is_generated) "
+            "VALUES (?,?,?,?,?)", rows)
+        self.conn.commit()
+
     def record_served_impressions(self, request_id, surface, items, now, prune_before=None) -> None:
-        """Persist final rendered order, not the larger candidate set.
+        """Persist final live order or an explicitly marked counterfactual replay.
 
         ``items`` are dictionaries containing lane/key/rank plus optional mode_id, score and
         provenance. The request/rank uniqueness key makes an HTMX retry idempotent. Instrumentation
-        is fail-open at route call sites and bounded by ``prune_before``.
+        is fail-open at route call sites. Retention catches up in bounded batches,
+        releasing the serving lock between insertion and each cleanup transaction.
         """
         rows = []
         for item in items:
@@ -69,24 +124,78 @@ class RecSurfaceRepo(Repo):
             rows.append((request_id, surface, item.get("lane") or "", item.get("mode_id"), key,
                          int(item["rank"]), item.get("score"), item.get("model_version") or "unknown",
                          json.dumps(item.get("provenance") or {}, sort_keys=True), now))
+        self._insert_served_impressions(rows)
+        if prune_before is not None:
+            self._prune_impression_batch(prune_before)
+            self._prune_response_batch(prune_before)
+            self._prune_policy_batch(prune_before)
+
+    @synchronized
+    def _insert_served_impressions(self, rows):
         if rows:
             self.conn.executemany(
                 "INSERT OR IGNORE INTO rec_served_impressions("
                 "request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
-        if prune_before is not None:
-            self.conn.execute("DELETE FROM rec_served_impressions WHERE served_at < ?", (prune_before,))
-            self.conn.execute("DELETE FROM rec_response_events WHERE at < ?", (prune_before,))
-            self.conn.execute("DELETE FROM rec_serving_policies WHERE created_at < ? AND model_version NOT IN "
-                              "(SELECT DISTINCT model_version FROM rec_served_impressions) "
-                              "AND model_version NOT IN (SELECT json_extract(provenance,'$.pool_policy') "
-                              "FROM rec_served_impressions WHERE json_extract(provenance,'$.pool_policy') IS NOT NULL)",
-                              (prune_before,))
         self.conn.commit()
 
     @synchronized
+    def _prune_impression_batch(self, before):
+        self.conn.execute(
+            "DELETE FROM rec_served_impressions WHERE id IN ("
+            "SELECT id FROM rec_served_impressions WHERE served_at<? ORDER BY served_at,id LIMIT ?)",
+            (before, RETENTION_BATCH_SIZE))
+        self.conn.commit()
+
+    @synchronized
+    def _prune_response_batch(self, before):
+        self.conn.execute(
+            "DELETE FROM rec_response_events WHERE id IN ("
+            "SELECT id FROM rec_response_events WHERE at<? ORDER BY at,id LIMIT ?)",
+            (before, RETENTION_BATCH_SIZE))
+        self.conn.commit()
+
+    @synchronized
+    def _prune_policy_batch(self, before):
+        row = self.conn.execute('SELECT value FROM settings WHERE key=?', (POLICY_RETENTION_CURSOR,)).fetchone()
+        try:
+            cursor = json.loads(row[0]) if row else None
+        except (ValueError, TypeError):
+            cursor = None
+        if not (isinstance(cursor, list) and len(cursor) == 2
+                and isinstance(cursor[0], (float, int)) and isinstance(cursor[1], str)):
+            cursor = None
+        after = ' AND (created_at,model_version)>(?,?)' if cursor else ''
+        candidates = self.conn.execute(
+            'SELECT created_at,model_version FROM rec_serving_policies WHERE created_at<?' + after +
+            ' ORDER BY created_at,model_version LIMIT ?',
+            (before, *cursor, RETENTION_BATCH_SIZE) if cursor else (before, RETENTION_BATCH_SIZE)).fetchall()
+        if candidates:
+            # Indexed existence checks retain both immutable policy references.
+            # Do not scan JSON across the ledger or delete a policy still needed
+            # by an expired impression that hasn't reached its cleanup batch yet.
+            placeholders = ','.join('?' for _ in candidates)
+            self.conn.execute(
+                f'DELETE FROM rec_serving_policies WHERE model_version IN ({placeholders}) '
+                'AND NOT EXISTS (SELECT 1 FROM rec_served_impressions i '
+                'WHERE i.model_version=rec_serving_policies.model_version) '
+                'AND NOT EXISTS (SELECT 1 FROM rec_served_impressions i '
+                "WHERE CAST(json_extract(i.provenance,'$.pool_policy') AS TEXT)=rec_serving_policies.model_version)",
+                [r['model_version'] for r in candidates])
+        if len(candidates) == RETENTION_BATCH_SIZE:
+            # Persist the scan position so referenced old policies cannot starve
+            # later orphans, including when the app restarts during catch-up.
+            last = candidates[-1]
+            self.conn.execute('INSERT INTO settings(key,value) VALUES (?,?) '
+                              'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                              (POLICY_RETENTION_CURSOR, json.dumps([last['created_at'], last['model_version']])))
+        elif row:
+            self.conn.execute('DELETE FROM settings WHERE key=?', (POLICY_RETENTION_CURSOR,))
+        self.conn.commit()
+
+    @snapshot_read
     def recommendation_scorecard(self, start, end, outcome_window_h=24, min_impressions=100,
-                                 impression_id=None) -> dict:
+                                 impression_id=None, experiments_only=False) -> dict:
         """Attribute subsequent play/exit events to the nearest preceding rendered opportunity.
 
         The impression range is bounded to ``[start, end)``; outcomes may arrive for
@@ -97,8 +206,10 @@ class RecSurfaceRepo(Repo):
         """
         impressions = [dict(r) for r in self.conn.execute(
             "SELECT * FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
+            "AND COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live' "
+            "AND (?=0 OR json_extract(provenance,'$.experiment.comparison_id') IS NOT NULL) "
             "AND (? IS NULL OR id=?) ORDER BY served_at,id",
-            (start, end, impression_id, impression_id)).fetchall()]
+            (start, end, experiments_only, impression_id, impression_id)).fetchall()]
         horizon = max(0.0, float(outcome_window_h)) * 3600.0
         states = {r["id"]: {"played": False, "organic": False, "generated": False,
                              "unknown_provenance": False, "skip": False,
@@ -107,21 +218,9 @@ class RecSurfaceRepo(Repo):
                              "play_depth": None} for r in impressions}
         candidates = {r["id"]: json.loads(r["provenance"]).get("candidate", {}) for r in impressions}
 
-        report_keys = {r["identity_key"] for r in impressions}
-
-        def nearest(key, at):
-            if key not in report_keys:
-                return None
-            owner = self.conn.execute(
-                "SELECT id FROM rec_served_impressions WHERE identity_key=? "
-                "AND served_at>=? AND served_at<=? ORDER BY served_at DESC,id DESC LIMIT 1",
-                (key, at - horizon, at)).fetchone()
-            return owner["id"] if owner else None
-
-        for play in self.conn.execute(
-                "SELECT identity_key,played_at,is_generated FROM play_events "
-                "WHERE played_at>=? AND played_at<=? ORDER BY played_at,id", (start, end + horizon)):
-            state = states.get(nearest(play["identity_key"], play["played_at"]))
+        attribution = Attribution(self.conn, {r['identity_key'] for r in impressions}, start, end, horizon)
+        for play in attribution.plays:
+            state = states.get(attribution.nearest(play["identity_key"], play["played_at"]))
             if state is None:
                 continue
             state["played"] = True
@@ -132,10 +231,8 @@ class RecSurfaceRepo(Repo):
             else:
                 state["unknown_provenance"] = True
 
-        for event in self.conn.execute(
-                "SELECT * FROM rec_response_events WHERE at>=? AND at<=? ORDER BY at,id",
-                (start, end + horizon)):
-            owner = nearest(event["identity_key"], event["at"])
+        for event in attribution.responses:
+            owner = attribution.nearest(event["identity_key"], event["at"])
             state = states.get(owner)
             if state is None:
                 continue
@@ -145,16 +242,14 @@ class RecSurfaceRepo(Repo):
                          or event["kind"] == "save" and not event["is_generated"])):
                 state["conversion"] = True
 
-        exits = self.conn.execute(
-            "SELECT pe.video_id,pe.position,pe.duration,pe.at,"
-            "COALESCE((SELECT identity_key FROM tracks WHERE video_id=pe.video_id LIMIT 1),"
-            "(SELECT identity_key FROM discovered_tracks WHERE video_id=pe.video_id LIMIT 1)) identity_key "
-            "FROM player_events pe WHERE pe.kind IN ('track_exit','bye','ended') "
-            "AND pe.at>=? AND pe.at<=? ORDER BY pe.at,pe.id", (start, end + horizon)).fetchall()
-        for event in exits:
-            if event["identity_key"] is None:
+        # Resolve video-only events from the identity saved when the recommendation was offered.
+        # Discovery GC and later catalog edits must not erase or reassign historical responses.
+        # Older impressions have no snapshot, so retain their catalog lookup as a fallback.
+        for event in attribution.exits:
+            key = attribution.exit_key(event['video_id'], event['at'])
+            if key is None:
                 continue
-            state = states.get(nearest(event["identity_key"], event["at"]))
+            state = states.get(attribution.nearest(key, event["at"]))
             if state is None:
                 continue
             outcome = classify_exit(event["position"], event["duration"])
@@ -203,6 +298,25 @@ class RecSurfaceRepo(Repo):
                 bucket["never_played"] = sum(c.get("last_played") is None and "last_played" in c for c in metadata)
                 bucket["powered"] = bucket["impressions"] >= int(min_impressions)
                 bucket["verdict"] = None
+                clusters = {}
+                opportunities = set()
+                for row in rows:
+                    experiment = json.loads(row["provenance"]).get("experiment") or {}
+                    if not experiment:
+                        continue
+                    opportunities.add(experiment["comparison_id"])
+                    cluster = clusters.setdefault(experiment["cluster"],
+                        {"played": False, "completion": False, "skip": False})
+                    for metric in cluster:
+                        cluster[metric] |= states[row["id"]][metric]
+                bucket["opportunities"] = len(opportunities)
+                bucket["clusters"] = len(clusters)
+                bucket["cluster_rates"] = {}
+                bucket["cluster_ci95"] = {}
+                for metric in ("played", "completion", "skip"):
+                    hits = sum(cluster[metric] for cluster in clusters.values())
+                    bucket["cluster_rates"][metric] = hits / len(clusters) if clusters else None
+                    bucket["cluster_ci95"][metric] = _wilson(hits, len(clusters))
             return groups
 
         unique_keys = {r["identity_key"] for r in impressions}
@@ -239,6 +353,10 @@ class RecSurfaceRepo(Repo):
             "by_surface": breakdown(lambda r: r["surface"]),
             "by_lane": breakdown(lambda r: r["lane"]),
             "by_mode": breakdown(lambda r: str(r["mode_id"]) if r["mode_id"] is not None else "unknown"),
+            "by_ranker": breakdown(lambda r: json.loads(r["provenance"]).get("ranker")),
+            "by_experiment": breakdown(lambda r:
+                ((json.loads(r["provenance"]).get("experiment") or {}).get("cohort", "unknown") + ":" +
+                 json.loads(r["provenance"]).get("ranker", "unknown"))),
             "by_ownership": breakdown(lambda r: candidates[r["id"]].get("ownership")),
             "by_metadata": {axis: breakdown(lambda r, axis=axis:
                 ("present" if candidates[r["id"]]["coverage"].get(axis) else "missing")
@@ -249,9 +367,33 @@ class RecSurfaceRepo(Repo):
             "verdict": None,
         }
 
+    @snapshot_read
+    def experiment_report(self, start, end, now):
+        """Mature live cohorts only; a replay is a hypothetical ranking, never outcome evidence."""
+        mature_end = min(end, now - 24 * 3600)
+        report = self.recommendation_scorecard(start, max(start, mature_end), experiments_only=True)
+        for bucket in report["by_experiment"].values():
+            bucket["powered"] = bucket["clusters"] >= MIN_EXPERIMENT_CLUSTERS
+        shadows = self.conn.execute(
+            "SELECT json_extract(provenance,'$.ranker') ranker,COUNT(*) rows,"
+            "COUNT(DISTINCT json_extract(provenance,'$.experiment.comparison_id')) opportunities "
+            "FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
+            "AND json_extract(provenance,'$.policy_kind')='counterfactual' GROUP BY ranker",
+            (start, end)).fetchall()
+        return {"schema": 1, "start": start, "end": end, "mature_before": mature_end,
+                "live": report["by_experiment"], "counterfactual": [dict(r) for r in shadows],
+                "by_lane": report["by_lane"], "by_mode": report["by_mode"],
+                "min_clusters_per_arm": MIN_EXPERIMENT_CLUSTERS,
+                "uncertainty": "Wilson 95% intervals on epoch/mode clusters, repeated views pooled",
+                "promotion_rule": "100 mature clusters per arm; disjoint acceptance intervals; "
+                                  "no worse sustained-listening or skip intervals",
+                "counterfactual_outcomes": None}
+
     # --- recipes: the exact theme/params a generated playlist was made from (legible + re-runnable) ---
     @synchronized
     def set_recipe(self, playlist_ytm, recipe, now=None) -> None:
+        from yt_playlist.core.playlist_scopes import ensure
+        playlist_ytm = ensure(self.conn,playlist_ytm)
         self.conn.execute(
             "INSERT INTO rec_recipes(playlist_ytm, recipe, created_at) VALUES (?,?,?) "
             "ON CONFLICT(playlist_ytm) DO UPDATE SET recipe=excluded.recipe, created_at=excluded.created_at",
@@ -260,6 +402,8 @@ class RecSurfaceRepo(Repo):
 
     @synchronized
     def get_recipe(self, playlist_ytm):
+        from yt_playlist.core.playlist_scopes import resolve
+        playlist_ytm = resolve(self.conn,playlist_ytm)
         row = self.conn.execute("SELECT recipe FROM rec_recipes WHERE playlist_ytm=?",
                                 (playlist_ytm,)).fetchone()
         return json.loads(row["recipe"]) if row else None
@@ -268,6 +412,8 @@ class RecSurfaceRepo(Repo):
     #     regrown a different way (#48). `state` is the client's serialized canvas blob, stored verbatim. ---
     @synchronized
     def set_cluster_canvas(self, playlist_ytm, state, now=None) -> None:
+        from yt_playlist.core.playlist_scopes import ensure
+        playlist_ytm = ensure(self.conn,playlist_ytm)
         self.conn.execute(
             "INSERT INTO cluster_canvas(playlist_ytm, state, created_at) VALUES (?,?,?) "
             "ON CONFLICT(playlist_ytm) DO UPDATE SET state=excluded.state, created_at=excluded.created_at",
@@ -276,12 +422,16 @@ class RecSurfaceRepo(Repo):
 
     @synchronized
     def get_cluster_canvas(self, playlist_ytm):
+        from yt_playlist.core.playlist_scopes import resolve
+        playlist_ytm = resolve(self.conn,playlist_ytm)
         row = self.conn.execute("SELECT state FROM cluster_canvas WHERE playlist_ytm=?",
                                 (playlist_ytm,)).fetchone()
         return row["state"] if row else None
 
     @synchronized
     def delete_cluster_canvas(self, playlist_ytm) -> None:
+        from yt_playlist.core.playlist_scopes import resolve
+        playlist_ytm = resolve(self.conn,playlist_ytm)
         self.conn.execute("DELETE FROM cluster_canvas WHERE playlist_ytm=?", (playlist_ytm,))
         self.conn.commit()
 
@@ -324,35 +474,35 @@ class RecSurfaceRepo(Repo):
         persistent API. Time-window args are ignored; all stored events are returned newest-first."""
         return self.recent_mood_events()
 
-    # --- #87 lane impressions: pure instrumentation for a future lane bandit (rec_lane_impressions,
-    #     created by the schema baseline since it's a plain append-only log) ---
-    @synchronized
-    def record_lane_impressions(self, items, now, prune_before=None) -> None:
-        """Log which lane served each rendered item: items is [(lane, identity_key), ...]. One
-        executemany insert; when prune_before is set, rows with at < prune_before are deleted in the
-        same transaction. No-op on an empty items list. Read by lane_impression_counts."""
-        items = list(items)
-        if not items:
-            return
-        self.conn.executemany(
-            "INSERT INTO rec_lane_impressions(lane, identity_key, at) VALUES (?,?,?)",
-            [(lane, key, now) for lane, key in items])
-        if prune_before is not None:
-            self.conn.execute("DELETE FROM rec_lane_impressions WHERE at < ?", (prune_before,))
-        self.conn.commit()
-
     @synchronized
     def lane_impression_counts(self, since=None) -> dict:
-        """{lane: count} of logged impressions, optionally restricted to at >= since. The future
-        lane-bandit's read side; also proof the data lands."""
-        if since is None:
-            rows = self.conn.execute(
-                "SELECT lane, COUNT(*) c FROM rec_lane_impressions GROUP BY lane").fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT lane, COUNT(*) c FROM rec_lane_impressions WHERE at >= ? GROUP BY lane",
-                (since,)).fetchall()
+        """Actual exposure counts from the unified ledger, excluding replay rows."""
+        rows = self.conn.execute(
+            "SELECT lane,COUNT(*) c FROM rec_served_impressions WHERE (? IS NULL OR served_at>=?) "
+            "AND COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live' GROUP BY lane",
+            (since, since)).fetchall()
         return {r["lane"]: r["c"] for r in rows}
+
+    @synchronized
+    def story_views(self) -> dict:
+        """Actual visible story appearances, separate from Home visits and prefetches."""
+        return {row['item_key']: {'views': row['views'], 'last_shown': row['last_shown']}
+                for row in self.conn.execute(
+                    "SELECT item_key,views,last_shown FROM rec_impressions WHERE surface='into_recently'")}
+
+    @synchronized
+    def record_story_views(self, subjects, now) -> bool:
+        """Collapse fragment replacements, retries and repeated visits within six hours."""
+        changed = False
+        for subject in set(subjects):
+            cursor = self.conn.execute(
+                "INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
+                "VALUES ('into_recently',?,1,?) ON CONFLICT(surface,item_key) DO UPDATE "
+                "SET views=rec_impressions.views+1,last_shown=excluded.last_shown "
+                "WHERE rec_impressions.last_shown<=excluded.last_shown-21600", (subject, now))
+            changed |= cursor.rowcount > 0
+        self.conn.commit()
+        return changed
 
     # --- per-card rotation (the rec_impressions table, surface='card') ---
     @synchronized
@@ -402,6 +552,19 @@ class RecSurfaceRepo(Repo):
 
     # --- materialized proposals (rec worker writes, routes read last-good) ---
     @synchronized
+    def publish_prepared_home(self, payload, now, *, surface="home_prepared") -> None:
+        """Publish pre-encoded Home output; the snapshot publisher owns the transaction."""
+        self.conn.execute(
+            "INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) "
+            "ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at",
+            (surface, payload, now))
+
+    @synchronized
+    def remember_home(self, payload, now) -> None:
+        self.publish_prepared_home(payload, now, surface="home_tuned")
+        self.conn.commit()
+
+    @synchronized
     def put_proposals(self, surface, data, now=None) -> None:
         """Materialize a surface's proposals as JSON (the rec worker writes; routes read last-good)."""
         self.conn.execute(
@@ -410,19 +573,29 @@ class RecSurfaceRepo(Repo):
             (surface, json.dumps(data), now))
         self.conn.commit()
 
-    @synchronized
     def get_proposals(self, surface):
         """Last materialized proposals for a surface, or None if never built."""
-        row = self.conn.execute(
-            "SELECT payload FROM rec_proposals WHERE surface=?", (surface,)).fetchone()
-        return json.loads(row["payload"]) if row else None
+        payload = self._proposal_json(surface)
+        # Large disposable collections are decoded after releasing the serving connection.
+        return json.loads(payload) if payload is not None else None
+
+    @synchronized
+    def _proposal_json(self, surface):
+        from yt_playlist.core.db_revisions import keyed_reads
+
+        with keyed_reads(self._store, "rec_proposals", (surface,)):
+            row = self.conn.execute(
+                "SELECT payload FROM rec_proposals WHERE surface=?", (surface,)).fetchone()
+        return row["payload"] if row else None
 
     # --- Last.fm similar-artist cache (14-day TTL) ---
     @synchronized
     def cached_similar(self, artist, now, ttl_days=14):
         """Cached Last.fm similar-artist list, or None if missing/expired."""
+        from yt_playlist.core import artists
+        aid = artists.lookup(self.conn,artist)
         row = self.conn.execute(
-            "SELECT payload, fetched_at FROM rec_artist_similar WHERE artist=?", (artist,)).fetchone()
+            "SELECT payload, fetched_at FROM rec_artist_similar WHERE artist_id=?", (aid,)).fetchone()
         if row is None or row["fetched_at"] is None or now - row["fetched_at"] > ttl_days * 86400:
             return None
         return json.loads(row["payload"])
@@ -432,16 +605,23 @@ class RecSurfaceRepo(Repo):
         """Cached Last.fm similar pairs [[name, match], ...] for an artist, ignoring TTL ([] if none).
         Used by the #28 artist model's §C edge block, where a slightly-stale relatedness hint is fine
         (the model rebuilds periodically and new_artists keeps the cache warm)."""
-        row = self.conn.execute(
-            "SELECT payload FROM rec_artist_similar WHERE artist=?", (artist,)).fetchone()
-        return json.loads(row["payload"]) if row and row["payload"] else []
+        from yt_playlist.core import artists
+        aid = artists.lookup(self.conn,artist)
+        return [(artists.token(r[0]),r[1]) for r in self.conn.execute(
+            'SELECT target_artist_id,weight FROM artist_similarity_targets WHERE source_artist_id=?', (aid,))]
 
     @synchronized
     def cache_similar(self, artist, pairs, now) -> None:
+        from yt_playlist.core import artists
+        aid = artists.state_id(self.conn,artist)
         self.conn.execute(
-            "INSERT INTO rec_artist_similar(artist, payload, fetched_at) VALUES (?,?,?) "
-            "ON CONFLICT(artist) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
-            (artist, json.dumps(pairs), now))
+            "INSERT INTO rec_artist_similar(artist, payload, fetched_at,artist_id) VALUES (?,?,?,?) "
+            "ON CONFLICT(artist_id) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
+            (artists.token(aid), json.dumps(pairs), now,aid))
+        self.conn.execute('DELETE FROM artist_similarity_targets WHERE source_artist_id=?', (aid,))
+        for name,weight in pairs:
+            target = artists.state_id(self.conn,name)
+            self.conn.execute('INSERT OR REPLACE INTO artist_similarity_targets VALUES (?,?,?)', (aid,target,weight))
         self.conn.commit()
 
     # --- graduation ledger (interaction-driven; no wall-clock decay) ---
@@ -483,18 +663,24 @@ class RecSurfaceRepo(Repo):
         self.conn.commit()
 
     @synchronized
-    def recent_graduations(self, limit=50) -> list:
+    def recent_graduations(self, limit=50, *, since=None, until=None) -> list:
         """The most recent graduation events, newest-first: rows of
         {id, axis, source, score, factor, new_weight, created_at}."""
+        conditions, args = [], []
+        if since is not None:
+            conditions.append("created_at>=?")
+            args.append(since)
+        if until is not None:
+            conditions.append("created_at<=?")
+            args.append(until)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
         return self.conn.execute(
             "SELECT id, axis, source, score, factor, new_weight, created_at FROM rec_grad_log "
-            "ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)).fetchall()
+            f"{where} ORDER BY created_at DESC, id DESC LIMIT ?", [*args, limit]).fetchall()
 
     @synchronized
     def graduation_audit_rows(self) -> list:
-        """Every graduation log row's (axis, source, factor), oldest-first. Powers the one-shot
-        like-ratchet repair's entitlement audit (rec/repair.py): per-axis like-source counts and
-        the non-like factor product that floors the correction."""
+        """Every graduation log row's (axis, source, factor), oldest-first, for source audits."""
         return self.conn.execute(
             "SELECT axis, source, factor FROM rec_grad_log ORDER BY id").fetchall()
 

@@ -1,0 +1,21 @@
+{% macro album_save_control(browse_id, saved, owners=[]) %}
+{% if saved %}
+  {% for owner in owners %}
+    {% if owner.identity_id is not none %}
+    <form hx-post="/collection/unsave-album" hx-swap="none" hx-disabled-elt="find button" class="inline">
+      <input type="hidden" name="browse_id" value="{{ browse_id }}">
+      <input type="hidden" name="identity_id" value="{{ owner.identity_id }}">
+      <button type="submit" class="btn-ghost btn-sm"
+              {% if not owner.active %}disabled{% endif %}
+              title="{% if owner.active %}Remove from {{ owner.label }}'s YouTube library{% else %}Reconnect {{ owner.label }} to remove this album{% endif %}">{% if owners|length > 1 %}Unsave from {{ owner.label }}{% else %}Unsave{% endif %}</button>
+      {% if owners|length == 1 %}<span class="muted">{{ owner.label }}</span>{% endif %}
+    </form>
+    {% else %}<span class="muted">Sync accounts to confirm ownership</span>{% endif %}
+  {% else %}<span class="muted">Sync accounts to confirm ownership</span>{% endfor %}
+{% else %}
+  <form hx-post="/collection/save-album" hx-swap="none" hx-disabled-elt="find button" class="inline">
+    <input type="hidden" name="browse_id" value="{{ browse_id }}">
+    <button type="submit" class="btn-ghost btn-sm" title="Save to your YouTube library">Save</button>
+  </form>
+{% endif %}
+{% endmacro %}

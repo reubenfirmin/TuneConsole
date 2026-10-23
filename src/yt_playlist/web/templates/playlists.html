@@ -1,6 +1,7 @@
 {% extends "base.html" %}{% from "_macros.html" import banner, library_icon, sort_indicator %}{% block title %}Playlists · TuneConsole{% endblock %}{% block page_class %}page-playlists{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% if flash_pl %}
   &nbsp;<a href="https://music.youtube.com/playlist?list={{ flash_pl }}" target="_blank" rel="noopener">Open in YouTube Music {{ arrow_icon('external') }}</a>{% endif %}{% endcall %}{% endif %}
+{% if action_result %}{% include "_partials/playlist_action_result.html" %}{% endif %}
 <div x-data='playlistsTab({{ rows|tojson }})'{% if not has_groups %} class="playlists-no-groups"{% endif %}>
 <div class="page-head library-page-head">
   <div class="library-page-title">{{ library_icon('playlists') }}<h1>Playlists</h1></div>
@@ -58,7 +59,7 @@
     <td>
       {% if promote %}<div class="generated-title-actions">{% endif %}
         <a class="ptitle" :href="'/playlist/' + r.id" x-text="r.title" title="Open in TuneConsole"></a>
-        {% if promote %}<button type="button" class="promote-btn" x-show="r.group === 'Generated'" @click.stop="promote(r)"
+        {% if promote %}<button type="button" class="promote-btn" x-show="r.is_generated" @click.stop="promote(r)"
                 title="Keep this playlist in your library and use it to shape your recommendations">Promote to library</button>
       </div>{% endif %}
     </td>

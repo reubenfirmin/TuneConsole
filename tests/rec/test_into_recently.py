@@ -1,4 +1,5 @@
 from yt_playlist.rec import into_recently
+from types import SimpleNamespace
 from yt_playlist.web import theme
 
 
@@ -19,13 +20,30 @@ class FakeWiki:
     def is_fresh(self, row, now):
         return row["subject"] in self.fresh
 
+    def should_refresh(self, subject, row, now):
+        return row is None or not self.is_fresh(row, now)
+
 
 class FakeStore:
     """Just enough surface for ranked_subjects: monkeypatch transient.facet_leans separately."""
-    def __init__(self, favorites, corpus, wiki=None):
+    def __init__(self, favorites, corpus, wiki=None, recent=None):
         self._favorites = favorites      # [artist names], all-time order
         self._corpus = corpus            # {genre: count}
         self.wiki = wiki
+        self.recent = recent
+        self.charts = SimpleNamespace(top_artists=self.top_artists,
+                                      corpus_distribution=self.corpus_distribution,
+                                      story_activity=self.story_activity)
+
+    def story_activity(self, since):
+        if self.recent is not None:
+            return self.recent
+        result = {'artist': {}, 'genre': {}}
+        for facet in into_recently.transient.facet_leans(self, since + into_recently.RECENT_WINDOW_S):
+            kind, _, name = facet.partition(':')
+            if kind in result:
+                result[kind][name.removeprefix('other:')] = {'plays': 1, 'last_played': since + 1}
+        return result
 
     def top_artists(self, limit=100, since=None):
         return [{"artist": a, "plays": 0, "thumbnail": None} for a in self._favorites[:limit]]
@@ -47,23 +65,83 @@ def test_excludes_settled_favorite_artist(monkeypatch):
 
 
 def test_suppresses_broad_staple_genre(monkeypatch):
-    store = FakeStore(favorites=[], corpus={"rock": 800, "jazz": 50, "ambient": 150})
-    _leans(monkeypatch, {"genre:rock": 3.0, "genre:jazz": 1.0})
+    store = FakeStore(favorites=[], corpus={"shoegaze": 800, "dub techno": 50, "ambient": 150})
+    _leans(monkeypatch, {"genre:shoegaze": 3.0, "genre:dub techno": 1.0})
     out = into_recently.ranked_subjects(store, now=0.0)[0]
-    assert out["display"] == "jazz"
+    assert out["display"] == "dub techno"
     assert out["kind"] == "genre"
 
 
-def test_returns_none_when_everything_obvious(monkeypatch):
+def test_common_genre_remains_eligible_as_context(monkeypatch):
     store = FakeStore(favorites=["Radiohead"], corpus={"rock": 1000})
     _leans(monkeypatch, {"artist:Radiohead": 4.0, "genre:rock": 4.0})
-    assert into_recently.ranked_subjects(store, now=0.0) == []
+    subjects = into_recently.ranked_subjects(store, now=0.0)
+    assert subjects == [{'kind': 'genre', 'subject': 'genre:rock', 'display': 'rock'}]
+    assert not into_recently._specific_genre_card(subjects[0])
 
 
 def test_ignores_era_facets_and_negative_leans(monkeypatch):
     store = FakeStore(favorites=[], corpus={"jazz": 10})
     _leans(monkeypatch, {"era:1990s": 9.0, "artist:Boards of Canada": -2.0})
     assert into_recently.ranked_subjects(store, now=0.0) == []
+
+
+def test_specific_genres_win_over_catch_all_electronic(monkeypatch):
+    store = FakeStore(favorites=[], corpus={})
+    _leans(monkeypatch, {"genre:electronic": 10, "genre:other:electronic": 8,
+                         "genre:electronic music": 6, "genre:shoegaze": 1})
+    assert [s['display'] for s in into_recently.ranked_subjects(store, 0)] == ['shoegaze']
+
+
+def test_common_genres_can_supply_context_but_cannot_lead(monkeypatch):
+    store = FakeStore(favorites=[], corpus={})
+    _leans(monkeypatch, {
+        'genre:techno': 100, 'genre:other:Techno': 90, 'genre:house': 80,
+        'genre:rock': 70, 'genre:jazz': 60, 'genre:ambient': 50,
+        'genre:indie rock': 45, 'genre:alternative': 44, 'genre:classic rock': 43,
+        'genre:indie pop': 42, 'genre:other:Indie Rock': 41,
+        'genre:Indie & Alternative Rock': 40,
+        'genre:heavy metal': 39, 'genre:punk rock': 38,
+        'genre:dub techno': 2, 'genre:shoegaze': 1, 'artist:New band': 3,
+    })
+    subjects = into_recently.ranked_subjects(store, 0)
+    by_name = {s['display']: s for s in subjects}
+    assert {'New band', 'dub techno', 'shoegaze', 'indie rock', 'indie pop', 'techno'} <= by_name.keys()
+    assert all(not into_recently._specific_genre_card(by_name[name])
+               for name in ('indie rock', 'indie pop', 'techno', 'house', 'rock', 'jazz'))
+    assert all(into_recently._specific_genre_card(by_name[name]) for name in ('dub techno', 'shoegaze'))
+
+
+def test_lingering_positive_lean_does_not_make_an_old_artist_recent(monkeypatch):
+    recent = {'artist': {'Current artist': {'plays': 1}}, 'genre': {}}
+    store = FakeStore(favorites=[], corpus={}, recent=recent)
+    _leans(monkeypatch, {'artist:Marc Almond': 100, 'artist:Current artist': .1})
+    assert [s['display'] for s in into_recently.ranked_subjects(store, 100_000_000)] == ['Current artist']
+
+
+def test_unseen_recent_subjects_precede_top_artists_shown_a_few_days_ago():
+    now = 100 * 86400
+    subjects = [{'kind': 'artist', 'subject': f'artist:{name}', 'display': name}
+                for name in ['Top one', 'Top two', 'Less familiar', 'Another direction']]
+    appearances = {subject['subject']: {'views': 10, 'last_shown': now - 2 * 86400}
+                   for subject in subjects[:2]}
+    order = into_recently._variety_order(subjects, appearances, now)
+    assert [s['display'] for s in order] == ['Less familiar', 'Another direction', 'Top one', 'Top two']
+
+
+def test_thin_pool_uses_least_recently_seen_subjects_without_hiding_everything():
+    now = 100 * 86400
+    subjects = [{'kind': 'artist', 'subject': f'artist:{i}', 'display': str(i)} for i in range(3)]
+    appearances = {s['subject']: {'views': 4, 'last_shown': now - (i + 1) * 86400}
+                   for i, s in enumerate(subjects)}
+    assert [s['display'] for s in into_recently._variety_order(subjects, appearances, now)] == ['2', '1', '0']
+
+
+def test_an_unseen_artist_can_lead_a_cluster_instead_of_repeating_its_longest_artist():
+    cards = [{'kind': 'artist', 'subject': f'artist:{name}', 'display': name, 'group': 'artist:Seen',
+              'thumbnail': 'portrait', 'extract': 'word ' * words, 'recently_shown': seen}
+             for name, words, seen in [('Seen', 150, True), ('Unseen', 50, False)]]
+    assert [card['display'] for card in into_recently.story_groups(cards)[0]] == ['Unseen', 'Seen']
 
 
 def test_subject_color_genre_maps_to_family_else_accent():
@@ -163,3 +241,29 @@ def test_prewarm_respects_limit(monkeypatch):
     n = into_recently.prewarm_pool(store, now=10.0, fetch_fn=_hit, limit=2)
     assert n == 2
     assert set(wiki.rows) == {"artist:Alpha", "artist:Bravo"}
+
+
+def test_story_connections_follow_specific_equivalent_genres_and_recent_rank():
+    from types import SimpleNamespace
+
+    subjects = [{'kind': kind, 'subject': f'{kind}:{name}', 'display': name}
+                for kind, name in [('artist', 'Minimal artist'), ('artist', 'Acid artist'),
+                                   ('genre', 'minimal'), ('artist', 'Second minimal artist'),
+                                   ('artist', 'Third minimal artist'), ('genre', 'shoegaze'),
+                                   ('artist', 'IDM artist'), ('genre', 'idm')]]
+    metadata = {'Minimal artist': {'genre': 'MINIMAL'},
+                'Acid artist': {'genre': 'Acid'},
+                'Second minimal artist': {'genre': 'Minimal'},
+                'Third minimal artist': {'genre': 'minimal'},
+                'IDM artist': {'genre': 'Intelligent Dance Music'}}
+    recordings = {name: [{'title': 'A song', **values}] for name, values in metadata.items()}
+    store = SimpleNamespace(charts=SimpleNamespace(story_activity=lambda since: {'recordings': recordings}),
+                            wiki=SimpleNamespace(get=lambda subject: None))
+
+    groups = into_recently._connected_subjects(store, subjects)
+    assert [[s['display'] for s in group] for group in groups] == [
+        ['minimal', 'Minimal artist', 'Second minimal artist'], ['Acid artist'],
+        ['Third minimal artist'], ['shoegaze'], ['idm', 'IDM artist']]
+    # A shared techno family did not attach the acid artist to the minimal story.
+    # The group has at most two companions and introduces no extra artists.
+    assert sorted(s['subject'] for group in groups for s in group) == sorted(s['subject'] for s in subjects)

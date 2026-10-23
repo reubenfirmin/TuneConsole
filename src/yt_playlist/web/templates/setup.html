@@ -109,7 +109,7 @@
             Extended Streaming History and Technical Log Information are different packages.</li>
         </ul>
       </details>
-      <form hx-post="/import/spotify-library/v5" hx-target="#spotify-library-import-result"
+      <form hx-post="/import/spotify-library/v6" hx-target="#spotify-library-import-result"
             hx-swap="innerHTML" hx-encoding="multipart/form-data" hx-disabled-elt="find button"
             hx-on::response-error="document.getElementById('spotify-library-import-result').textContent = 'TuneConsole was updated while it was running. Restart TuneConsole, then try the import again.'">
         <div class="takeout-file" x-data="{ fname: '' }">
@@ -135,9 +135,18 @@
     <div class="card">
       <h2 class="section section-flush">Import Spotify listening history</h2>
       <div id="spotify-import-block">
+      {% if spotify_history is not defined %}
+      <p class="section-note">Restart TuneConsole to use the updated Spotify history import.</p>
+      {% else %}
       <p class="section-note">Upload your Spotify Extended Streaming History to fold past Spotify
         listening into TuneConsole’s taste model. Everything is processed locally on this machine:
-        the file never leaves it.</p>
+        the file never leaves it. History is added to your main TuneConsole identity.
+        Matching library tracks contribute listening days, recent taste,
+        and listening patterns used by recommendations. Frequently heard artists outside your
+        library can appear in Discovery. New imports exclude private sessions and listens under
+        30 seconds; skip flags do not create dislikes. Like other listening history, eligible
+        plays can gradually update saved taste preferences.</p>
+      {% include "_partials/spotify_history_controls.html" %}
       <details class="advanced advanced-spaced">
         <summary>How to export</summary>
         <ul class="section-note takeout-steps">
@@ -154,7 +163,7 @@
             form above for the Account Data zip.</li>
         </ul>
       </details>
-      <form hx-post="/import/spotify" hx-target="#spotify-import-result" hx-swap="innerHTML"
+      <form hx-post="/import/spotify/v2" hx-target="#spotify-import-result" hx-swap="innerHTML"
             hx-encoding="multipart/form-data" hx-disabled-elt="find button">
         <div class="takeout-file" x-data="{ fname: '' }">
           <label class="btn-ghost btn-sm takeout-file-label">
@@ -170,6 +179,8 @@
         </div>
       </form>
       <div id="spotify-import-result"></div>
+      <div hx-get="/import/history/status?source=spotify" hx-trigger="every 1s" aria-live="polite"></div>
+      {% endif %}
       </div>
     </div>
     <div class="card">
@@ -216,13 +227,15 @@
         </div>
       </form>
       <div id="takeout-import-result"></div>
+      <div hx-get="/import/history/status?source=takeout" hx-trigger="every 1s" aria-live="polite"></div>
       </div>
     </div>
   </div>
 
   {# ── Tab 4: Identities ────────────────────────────────────────────────────────────── #}
   <form method="post" action="/setup?tab=identities" x-ref="form"
-        @change="saveIdentities()" @submit.prevent="saveIdentities()" :aria-busy="String(saving)">
+        @change="if ($event.target.type === 'radio') saveIdentities()"
+        @submit.prevent="saveIdentities()" :aria-busy="String(saving)">
     <div class="tab-panel" role="tabpanel" x-show="tab === 'identities'" x-cloak>
       <div class="card" x-ref="identityCard">
         <h2 class="section section-flush">Your identities</h2>
@@ -267,7 +280,7 @@
           </span></th><th class="col-master">Main identity</th><th class="col-actions"></th></tr></thead>
           <tbody>
             <template x-for="(row, i) in rows" :key="i">
-              <tr>
+              <tr @focusout="saveIdentityOnBlur(row, $event)">
                 <td>
                   <input type="hidden" name="identity_id" :value="row.id || ''">
                   <div class="identity-label">
@@ -402,6 +415,12 @@ function setupForm(rows, masterIdx, configured, savedIdentities, initialMessage,
       guide.style.top = top + 'px';
       guide.style.bottom = 'auto';
       guide.style.maxHeight = height + 'px';
+    },
+    saveIdentityOnBlur(row, event) {
+      // Finish a new row's account fields before saving its immutable account identity.
+      if (!row.id && event.target.name === 'label' && event.relatedTarget?.name === 'brand_account_id'
+          && event.currentTarget.contains(event.relatedTarget)) return;
+      this.saveIdentities();
     },
     saveIdentities() {
       if (this.removingIdentity) return Promise.resolve();

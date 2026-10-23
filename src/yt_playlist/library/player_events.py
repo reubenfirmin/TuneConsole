@@ -1,14 +1,16 @@
 """#91 Ingest raw player/curation events pushed by the extension ({type:'pevent'} bridge frames).
 
 Everything lands append-only in player_events; the ONLY consumer wired here is an observed rate
-action on a known track feeding the like/dislike model (off-player likes, the #39 gap). All other
+action feeding the like/dislike model (off-player likes, the #39 gap). Unseen uploads retain their
+exact-video rating while the recommendation worker resolves metadata. All other
 interpretation (skip vs completion, sessions, curation signals) happens later, at read time, so
 thresholds stay server-tunable without extension releases."""
 import json
 from urllib.parse import urlsplit
 
 from yt_playlist.library.live_plays import resolve_identity
-from yt_playlist.rec import graduation
+from yt_playlist.library import ratings
+from yt_playlist.util.curation import confirmed_rate
 
 PLAYBACK_KINDS = {"track_exit", "ended", "state", "tick", "volume", "bye"}
 CURATION_KINDS = {"rate", "playlist_edit", "feedback", "subscription", "share_intent"}
@@ -20,11 +22,9 @@ CURATION_KINDS = {"rate", "playlist_edit", "feedback", "subscription", "share_in
 # dedupe/preference evidence). Payload: {"old": <old video_id>, "new": <new video_id>}.
 
 _BODY_CAP = 4096
-# Observed rate actions that may act on the like/dislike model. 'removelike' is deliberately NOT
-# mapped: only LIKE/DISLIKE may act from the player pipeline; the authoritative un-like is the
-# library sync's whole-run INDIFFERENT (see live_plays._STATUSES for the flap this prevents). The
-# raw removelike event is still persisted in player_events for later interpretation.
-_RATE_STATUS = {"like": "LIKE", "dislike": "DISLIKE"}
+# A successful request is authoritative, including an explicit unlike. Player-bar readouts
+# remain untrusted for clearing a rating (see live_plays._STATUSES).
+_RATE_STATUS = {"like": "LIKE", "dislike": "DISLIKE", "removelike": "INDIFFERENT"}
 _PAYLOAD_EXTRAS = ("state", "volume", "shuffle", "repeat")
 
 
@@ -82,13 +82,12 @@ def handle_player_event(ctx, msg, now) -> bool:
                    "href": msg.get("href")}
         if action:
             payload["action"] = action
-    store.record_player_event(ident, kind, video_id, position, duration, playlist,
+        payload.update({k: msg[k] for k in ("phase", "success", "httpStatus", "error") if k in msg})
+    store.player_events.record_player_event(ident, kind, video_id, position, duration, playlist,
                               json.dumps(payload) if payload else None, now)
-    if kind == "rate" and video_id and action in _RATE_STATUS:
-        store.record_item_rating(ident,video_id,_RATE_STATUS[action],source='action',now=now)
-        key = store.identity_key_for_video(video_id)
-        if key:
-            # provenance='action': an observed rate call is a real-time user action, so the like
-            # keeps full transient participation (unlike sync-discovered likes).
-            graduation.apply_dislikes(store, {key: _RATE_STATUS[action]}, now, provenance="action")
+    if kind == "rate" and confirmed_rate(msg) and video_id and action in _RATE_STATUS:
+        ratings.record_confirmed(store, ident, video_id, _RATE_STATUS[action], now)
+        worker = getattr(ctx, "rec_worker", None)
+        if worker is not None:
+            worker.trigger_rating_update()
     return True

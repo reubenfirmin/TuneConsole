@@ -10,6 +10,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from yt_playlist.rec import measurement, rec_params
+from yt_playlist.core.accounts import client_for
 
 
 def track_pool_summary(tracks):
@@ -50,7 +51,7 @@ def track_pool_summary(tracks):
 
 
 class VisibleImpressions(BaseModel):
-    kind: Literal["album", "artist"]
+    kind: Literal["album", "artist", "track"]
     ids: list[str] = Field(max_length=100)
     view_id: UUID
 
@@ -63,19 +64,19 @@ def build(ctx) -> APIRouter:
     def discovery(request: Request):
         days = rec_params.get_param(store, "discovery_gc_days")
         now = ctx.now_fn()
-        tracks = store.discovery_track_view(now, days)
+        tracks = store.discovery.discovery_track_view(now, days)
         return templates.TemplateResponse(request, "discovery.html", {
             "gc_days": days,
             "tracks": tracks,
             "track_summary": track_pool_summary(tracks),
-            "albums": store.discovery_album_view(now, days),
-            "artists": store.discovery_artist_view(now, days),
+            "albums": store.discovery.discovery_album_view(now, days),
+            "artists": store.discovery.discovery_artist_view(now, days),
             "now": now,
         })
 
     @router.post("/discovery/impressions", status_code=204)
     def discovery_impressions(visible: VisibleImpressions):
-        store.record_discovery_impressions(visible.kind, visible.ids, str(visible.view_id), ctx.now_fn())
+        store.discovery.record_discovery_impressions(visible.kind, visible.ids, str(visible.view_id), ctx.now_fn())
         return Response(status_code=204)
 
     @router.post("/discovery/add")
@@ -83,11 +84,12 @@ def build(ctx) -> APIRouter:
         """Add a discovered item to your collection. Tracks Like into Liked Music (the container-free
         library add); on the next sync the track becomes a library track and the pool prune removes it.
         Returns an empty 200 so the row is swapped out client-side. Best-effort: no client -> 503."""
-        client = next(iter((ctx.client_provider() or {}).values()), None)
-        if client is None:
-            return Response(status_code=503)
+        try:
+            identity_id,client = client_for(store,ctx.client_provider())
+        except ValueError as exc:
+            return Response(str(exc),status_code=503)
         if kind == "track":
-            row = store.discovered_tracks_by_keys([id]).get(id)
+            row = store.discovery.discovered_tracks_by_keys([id]).get(id)
             vid = row.get("video_id") if row else None
             if vid:
                 try:
@@ -95,6 +97,9 @@ def build(ctx) -> APIRouter:
                 except Exception:  # noqa: BLE001 - a failed like must not 500 the page
                     ctx.logger.warning("discovery add (like) failed for %s", id, exc_info=True)
                     return Response(status_code=502)
+                store.tracks.upsert_track(vid,row['title'],row['artist'],row.get('album'),None)
+                store.playlists.set_song_liked(identity_id,vid,True)
+                store.tracks.record_item_rating(identity_id,vid,'LIKE',source='action',now=ctx.now_fn())
                 measurement.record_action(store, "save", ctx.now_fn(), keys=[id],
                                           event_id=f"discovery-save:{id}")
         return Response(status_code=200)

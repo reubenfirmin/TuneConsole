@@ -7,19 +7,13 @@ from yt_playlist.core.store import Store
 def store():
     s = Store(":memory:")
     s.init_schema()
-    s.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history/play_events FKs
+    s.identities.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history/play_events FKs
     return s
 
 
 def _snap(store, day, keys):
-    """One history snapshot at taken_at = day*86400 containing `keys`. Returns snapshot id."""
-    cur = store.conn.execute("INSERT INTO history_snapshots(identity_id, taken_at) VALUES (1, ?)",
-                             (day * 86400.0,))
-    sid = cur.lastrowid
-    for k in keys:
-        store.conn.execute("INSERT INTO history_items(snapshot_id, identity_key) VALUES (?, ?)", (sid, k))
-    store.conn.commit()
-    return sid
+    """Record independent observations on an explicit UTC calendar date."""
+    store.history.record_history_plays(1, day * 86400.0, keys, source_timezone="UTC")
 
 
 def _track(store, key, artist, genre=""):
@@ -28,7 +22,7 @@ def _track(store, key, artist, genre=""):
 
 def _build(store):
     """Mirror trend_rollups' incremental fold: history + play_events, then artist derivation."""
-    hist = store.trends.history_track_first(0)
+    hist = store.trends.history_track_first()
     plays = store.trends.play_event_track_first()
     rows = []
     for k in set(hist) | set(plays):
@@ -119,18 +113,6 @@ def test_upsert_first_play_min_conflict_keeps_lower_ts_artist_kind(store):
     assert store.trends.first_play_map("artist") == {"A1": 2}
 
 
-def test_max_snapshot_id_empty_and_after_inserts(store):
-    # Contract (see trends.py): 0 when history_snapshots has no rows, not None.
-    assert store.trends.max_snapshot_id() == 0
-
-    sid1 = _snap(store, 2, ["k1"])
-    assert store.trends.max_snapshot_id() == sid1
-
-    sid2 = _snap(store, 5, ["k2"])
-    assert sid2 > sid1
-    assert store.trends.max_snapshot_id() == sid2
-
-
 def test_clear_first_play_empties_table_and_rebuild_is_idempotent(store):
     for k, a in [("k1", "A1"), ("k2", "A2")]:
         _track(store, k, a)
@@ -154,21 +136,18 @@ def test_clear_first_play_empties_table_and_rebuild_is_idempotent(store):
     assert store.trends.first_play_map("artist") == artists_before
 
 
-def test_history_track_first_after_id_window(store):
-    sid1 = _snap(store, 2, ["k1", "k2"])   # snapshot 1: day 2
-    sid2 = _snap(store, 5, ["k3"])         # snapshot 2: day 5
+def test_history_track_first_rescans_evidence_despite_old_snapshot_checkpoint(store):
+    _snap(store, 2, ["k1", "k2"])
+    _snap(store, 5, ["k3"])
 
-    # Window strictly after sid1 -> only snapshot 2's rows are visible, even though sid1 still exists.
-    windowed = store.trends.history_track_first(sid1)
-    assert set(windowed) == {"k3"}
-    assert windowed["k3"] == (5, 5 * 86400.0)
+    # A checkpoint from the old snapshot model cannot hide earlier daily evidence.
+    store.settings.set_setting('trend_first_play_watermark', '999')
+    first = store.trends.history_track_first()
+    assert set(first) == {"k1","k2","k3"}
+    assert first["k3"] == (5,5*86400.0+43200)
 
-    # Window after sid2 -> nothing newer than the latest snapshot.
-    assert store.trends.history_track_first(sid2) == {}
-
-    # Window before both (after_id=0) -> sees everything.
-    full = store.trends.history_track_first(0)
-    assert set(full) == {"k1", "k2", "k3"}
+    _snap(store,1,['k1'])
+    assert store.trends.history_track_first()['k1']==(1,86400.0+43200)
 
 
 def test_takeout_backfill_moves_first_play_earlier(store):
@@ -197,3 +176,19 @@ def test_takeout_backfill_moves_first_play_earlier(store):
     assert backfilled == {"k1": 1}
     assert backfilled["k1"] < recent["k1"]
     assert store.trends.first_play_map("artist") == {"A1": 1}
+
+
+def test_artist_derivation_reads_track_credits_once_instead_of_once_per_artist(store):
+    for i in range(60):
+        _track(store, f"k{i}", f"Artist {i // 3}")
+    store.trends.upsert_first_play_min(
+        [("track", f"k{i}", i + 1, (i + 1) * 86400, f"source-{i}") for i in range(60)])
+    reads = []
+    store.conn.create_function("observe_credit", 1, lambda artist: (reads.append(artist), artist)[1])
+    store.conn.execute("CREATE TEMP VIEW tracks AS SELECT identity_key,observe_credit(artist) artist "
+                       "FROM main.tracks")
+    store.trends.rebuild_artist_first_play()
+    assert len(reads) <= 60 * 4
+    assert store.trends.first_play_map("artist") == {f"Artist {i}": i * 3 + 1 for i in range(20)}
+    assert store.conn.execute("SELECT source FROM trend_first_play WHERE kind='artist' "
+                              "AND id_key='Artist 2'").fetchone()[0] == "source-6"

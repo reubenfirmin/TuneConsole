@@ -1,4 +1,4 @@
-from yt_playlist.rec import rec_params, recommend, transient
+from yt_playlist.rec import actions, rec_params, transient
 from yt_playlist.core.store import Store
 from yt_playlist.util.matching import identity_key
 
@@ -11,10 +11,10 @@ def _store_with_play_history(genre="Techno", n=10, now=1000.0):
     iid = s.identities.upsert_identity("me", "cred", None, True)
     keys = []
     for i in range(n):
-        tid = s.upsert_track(f"v{i}", f"song{i}", "band", None, None)
-        s.set_track_genre(tid, genre)
+        tid = s.tracks.upsert_track(f"v{i}", f"song{i}", "band", None, None)
+        s.tracks.set_track_genre(tid, genre)
         keys.append(identity_key(f"song{i}", "band"))
-    s.add_history_snapshot(iid, now, keys)
+    s.history.record_history_plays(iid, now, keys, source_timezone="UTC")
     return s, now
 
 
@@ -30,7 +30,7 @@ def test_transient_constants_present():
     assert rec_params.THEME_THRESHOLD == 1.2
     assert rec_params.GRADUATE_UP == 1.05 and rec_params.GRADUATE_DOWN == 0.95
     assert rec_params.SYNC_STALE_S == 24 * 3600
-    assert recommend.SYNC_STALE_S == rec_params.SYNC_STALE_S      # back-compat re-export
+    assert actions.SYNC_STALE_S == rec_params.SYNC_STALE_S      # status and parameter registry use the same duration
 
 
 def test_play_facet_leans_isolates_plays():

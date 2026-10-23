@@ -11,15 +11,14 @@ Lifecycle (#85): every event decays on the wall clock with a per-source half-lif
 *_halflife_d params); nothing is rank-decayed and there is no separate staleness relax. An event
 fades the same way whether or not anything newer arrived.
 """
+import json
+
 import numpy as np
 
 from yt_playlist.util import genre_map
 from yt_playlist.rec import embed, rec_params
-from yt_playlist.rec.rec_dao import RecDao
 
-# Settings keys holding the radio playlists' ytm ids (radio.py: RADIO_PLAYLIST_SETTING,
-# RADIO_DECK_SETTING). Duplicated here rather than imported to avoid a rec.transient -> rec.radio
-# dependency; these three strings are the stable contract between the two modules.
+# Historical generated radio playlist IDs remain provenance after the deck controller's removal.
 _RADIO_SETTING_KEYS = ("radio_playlist_ytm", "radio_playlist_a_ytm", "radio_playlist_b_ytm")
 
 
@@ -37,8 +36,9 @@ def radio_list_ids(store) -> list[str]:
     Plays from any OTHER generated playlist still count: pressing play on a non-radio playlist is a
     deliberate user action, not continuous machine playback. Trends/stats keep counting radio plays
     (descriptive, a different pipeline)."""
-    ids = [store.get_setting(k) for k in _RADIO_SETTING_KEYS]
-    return [i for i in ids if i]
+    ids = [store.settings.get_setting(k) for k in _RADIO_SETTING_KEYS]
+    sessions = json.loads(store.settings.get_setting("radio_session_playlist_ids") or "[]")
+    return list(dict.fromkeys(i for i in ids + sessions if i))
 
 
 def evidence_plays(store, limit):
@@ -58,9 +58,9 @@ def evidence_plays(store, limit):
     deliberate act that makes it evidence - the rule generated_only_keys already states: plays don't
     lift the quarantine, promotion does. The user's own signals on those tracks (likes, dislikes,
     skips, steering) flow through their own channels and are untouched."""
-    quarantined = store.generated_only_keys()
+    quarantined = store.rec_query.generated_only_keys()
     return [(k, ts) for k, ts in
-            store.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store))
+            store.history.recent_plays_with_ts(limit=limit, exclude_list_ids=radio_list_ids(store))
             if k not in quarantined]
 
 
@@ -81,7 +81,7 @@ def facets_for(store, keys) -> dict:
     keys = list(dict.fromkeys(keys))
     if not keys:
         return {}
-    dao = RecDao(store)
+    dao = store.rec_query
     genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
     out: dict = {}
     for k in keys:
@@ -126,7 +126,7 @@ def facet_leans(store, now) -> dict:
                 continue
             leans[f] = leans.get(f, 0.0) + signed * (len(fk) / n)
 
-    for ts, direction, keys in store.recent_mood_events():
+    for ts, direction, keys in store.rec_surface.recent_mood_events():
         add(keys, direction * decay_weight(now - ts, mood_hl))
     for k, ts in evidence_plays(store, limit):
         add([k], play_w * decay_weight(now - ts, play_hl))
@@ -134,19 +134,19 @@ def facet_leans(store, now) -> dict:
     # observed live has a real event time and belongs at the top of the model stack. A like the
     # library sync merely discovered has no reliable time (its created_at is first-sight), so it
     # never reaches the transient model; it shapes the permanent model only, via graduation.
-    for k, ts in store.recent_liked_with_ts(limit=limit):
+    for k, ts in store.rec_model.recent_liked_with_ts(limit=limit):
         add([k], like_w * decay_weight(now - ts, like_hl))
     # #54: a dislike is a verdict on THAT track, not the artist (the track itself is hard-suppressed
     # via suppressed_keys). Genre/era leans stay, but #85 they now FADE by age instead of pressing at
     # full strength forever.
-    for k, ts in store.disliked_with_ts():
+    for k, ts in store.rec_model.disliked_with_ts():
         add([k], -dislike_w * decay_weight(now - ts, dislike_hl), drop_artist=True)
     # #84: extends #54's rationale one step further. A skip is a verdict on THAT track in THAT
     # moment (could be mood, could be context, could just be an accident of the queue), even weaker
     # evidence against the artist than a dislike is, so the artist axis never sees it either
     # (drop_artist=True). Lookback is a generous 4 half-lives (mirrors the mood-prune rationale) so
     # the read only asks the store for skips that could still matter, not the whole history.
-    for k, ts in store.recent_skips_with_ts(now - 4 * skip_hl * 86400):
+    for k, ts in store.player_events.recent_skips_with_ts(now - 4 * skip_hl * 86400):
         add([k], -skip_w * decay_weight(now - ts, skip_hl), drop_artist=True)
     return leans
 
@@ -156,7 +156,7 @@ def play_facet_leans(store, now) -> dict:
 
     `facet_leans` blends every transient source (mood, plays, likes, dislikes). The play-exposure
     graduation funnel (graduation.graduate_play_exposure) must graduate plays SPECIFICALLY, because
-    likes / dislikes / vibe taps already graduate at event time and would otherwise double-count. So
+    likes / positive vibe taps already graduate at event time; negative signals must not graduate. So
     this returns only the positive, wall-clock-decayed push from recent plays (#85: per-event age, no
     rank, no separate staleness relax). When listening stops the recent window drains and each play
     ages out on its own, so this falls to {} over time, which is the funnel's natural off-switch.
@@ -191,10 +191,10 @@ def centroid_tilt(store, now, V, idx):
     gp = rec_params.get_param
     limit = gp(store, "recent_play_limit")
     skip_hl, skip_w = gp(store, "skip_halflife_d"), gp(store, "skip_transient_w")
-    events = store.recent_mood_events()
+    events = store.rec_surface.recent_mood_events()
     plays = evidence_plays(store, limit)
-    likes = store.recent_liked_with_ts(limit=limit)
-    skips = store.recent_skips_with_ts(now - 4 * skip_hl * 86400)     # #84: same lookback as facet_leans
+    likes = store.rec_model.recent_liked_with_ts(limit=limit)
+    skips = store.player_events.recent_skips_with_ts(now - 4 * skip_hl * 86400)     # #84: same lookback as facet_leans
     if not events and not plays and not likes and not skips:
         return None
     mood_hl = gp(store, "mood_halflife_d")
@@ -236,7 +236,7 @@ def centroid_tilt(store, now, V, idx):
     return tilt / weight if weight > 0 and np.any(tilt) else None
 
 
-def audio_centroid_tilt(store, now):
+def audio_centroid_tilt(store, now, *, content_vecs=None):
     """Bounded tilt in the audio-aware CONTENT vector space toward recent listening, so ranking can
     lean to the SOUND of what you have been playing (tempo / energy / mood), not just its genre/era/
     artist facets or its co-occurrence neighbours. The content-space sibling of `centroid_tilt`: same
@@ -254,7 +254,7 @@ def audio_centroid_tilt(store, now):
     This is the producer only. The scorer applies it (a content-space alignment term parallel to the
     collaborative `_apply_mood`); see the wiring note that ships with this change.
     """
-    _ckeys, CV, cidx = embed.load_content_vectors(store)
+    _ckeys, CV, cidx = embed.load_content_vectors(store) if content_vecs is None else content_vecs
     if CV is None:
         return None
     return centroid_tilt(store, now, CV, cidx)

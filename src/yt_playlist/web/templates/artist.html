@@ -1,5 +1,6 @@
 {% extends "base.html" %}{% from "_macros.html" import sort_indicator %}{% block title %}{{ artist }} · TuneConsole{% endblock %}{% block page_class %}page-artist{% endblock %}{% block body %}
 {% from "_partials/song_menu_button.html" import song_menu %}
+{% from "_album_actions.html" import album_save_control %}
 <div class="artist-head library-hero artist-hero artist-release-hero">
   <span class="artist-art-strip" aria-hidden="true">
     {% set art = namespace(count=0, seen=[]) %}
@@ -59,8 +60,7 @@
           </span>
         </td>
         <td class="liked-col">{% if s.liked %}<span class="liked-heart" title="In your Liked Music">♥</span>{% endif %}</td>
-        <td><a class="ptitle" href="https://music.youtube.com/watch?v={{ s.video_id }}"
-               target="_blank" rel="noopener" data-yt-info>{{ s.title }} {{ arrow_icon('external') }}</a></td>
+        <td><span class="ptitle">{{ s.title }}</span></td>
         <td>{% if s.album_browse %}<a class="alink" href="/album?browse={{ s.album_browse }}">{{ s.album }}</a>{% else %}<span class="muted">{{ s.album }}</span>{% endif %}</td>
         <td class="small">{% for p in s.playlists %}<a class="alink"
               href="https://music.youtube.com/playlist?list={{ p.ytm }}" target="_blank" rel="noopener">{{ p.title }}</a>{{ ', ' if not loop.last }}{% endfor %}</td>
@@ -76,8 +76,8 @@
 </div>
 
 {% if collection %}
-<h2 class="section">Albums in your collection <span class="count">{{ collection|length }}</span></h2>
-<p class="section-note">Albums from your playlists and your saved YouTube albums.</p>
+<h2 class="section">Albums represented in your library <span class="count">{{ collection|length }}</span></h2>
+<p class="section-note">Includes albums with tracks in your playlists. Track counts show songs in your library; the Saved column shows whether the whole album is saved.</p>
 <div class="card library-table-card">
   <table x-data="rowSort()">
     <colgroup class="artist-album-columns">
@@ -105,10 +105,7 @@
         <td class="num mono">{{ al.songs or '' }}</td>
         <td class="num mono">{{ al.n_pls or '' }}</td>
         <td class="num mono">{{ al.plays or '' }}</td>
-        <td class="text-end">{% if al.browse %}<button type="button" class="btn-ghost btn-sm" hx-disabled-elt="this"
-              hx-post="/collection/{{ 'unsave-album' if al.saved else 'save-album' }}"
-              hx-vals='{"browse_id": {{ al.browse|tojson }}}'
-              title="{{ 'Remove from your YouTube library' if al.saved else 'Save to your YouTube library' }}">{{ 'Unsave' if al.saved else 'Save' }}</button>{% elif al.saved %}<span class="kind kind-audio" title="Saved in your YouTube library">✓</span>{% endif %}</td>
+        <td class="text-end">{% if al.browse %}{{ album_save_control(al.browse, al.saved, saved_owners.get(al.browse, [])) }}{% elif al.saved %}<span class="kind kind-audio" title="Saved in your YouTube library">✓</span>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -142,10 +139,7 @@
         <td>{% if al.browse_id %}<a class="ptitle" href="/album?browse={{ al.browse_id }}">{{ al.title }}</a>{% else %}<span class="ptitle">{{ al.title }}</span>{% endif %}</td>
         <td class="num mono">{{ al.year or '' }}</td>
         <td colspan="3"></td>
-        <td class="text-end">{% if al.browse_id %}<button type="button" class="btn-ghost btn-sm" hx-disabled-elt="this"
-              hx-post="/collection/{{ 'unsave-album' if al.saved else 'save-album' }}"
-              hx-vals='{"browse_id": {{ al.browse_id|tojson }}}'
-              title="{{ 'Remove from your YouTube library' if al.saved else 'Save to your YouTube library' }}">{{ 'Unsave' if al.saved else 'Save' }}</button>{% endif %}</td>
+        <td class="text-end">{% if al.browse_id %}{{ album_save_control(al.browse_id, al.saved, saved_owners.get(al.browse_id, [])) }}{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>

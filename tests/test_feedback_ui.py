@@ -2,16 +2,17 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.test_mode_cards_route import prepare_home
 
 
 def _seed(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_track("v1", "Hit", "Fav", None, None)
-    store.upsert_track("v2", "Bench", "Fav", None, None)   # deep cut -> appears in for_you
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.tracks.upsert_track("v1", "Hit", "Fav", None, None)
+    store.tracks.upsert_track("v2", "Bench", "Fav", None, None)   # deep cut -> appears in for_you
     now = 1000.0
-    store.add_history_snapshot(iid, now - 100, ["hit|fav"])
-    store.add_history_snapshot(iid, now - 50, ["hit|fav"])
-    store.set_setting("last_sync_at", str(now))     # synced -> Home renders the rec feed
+    store.history.record_history_plays(iid, now - 100, ["hit|fav"], source_timezone="UTC")
+    store.history.record_history_plays(iid, now - 50, ["hit|fav"], source_timezone="UTC")
+    store.settings.set_setting("last_sync_at", str(now))     # synced -> Home renders the rec feed
     return iid, TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                            base_url="http://127.0.0.1")
 
@@ -29,10 +30,11 @@ def test_home_proto_curation_not_pre_listen_taste_chips(store):
     ], retired_ids=[], now=1000.0)
     payload = {"1": {}}
     for surf in ms.CARD_SURFACES:
-        payload["1"][surf] = [{"key": f"{surf}k", "video_id": "v", "title": f"Song {surf}",
-                               "artist": "Art", "album": "", "thumbnail": None,
-                               "plays": 0, "reason": "", "lane": "", "genre": ""}]
-    store.put_proposals("mode_bundles", payload, 1000.0)
+        payload["1"][surf] = [{"key": f"{surf}{i}", "video_id": f"{surf}{i}", "title": f"Song {surf} {i}",
+                               "artist": f"Art {i}", "album": "", "thumbnail": None,
+                               "plays": 0, "reason": "", "lane": "", "genre": ""} for i in range(4)]
+    store.rec_surface.put_proposals("mode_bundles", payload, 1000.0)
+    prepare_home(store)
     html = c.get("/home/cards").text
     assert "gen-rm" in html and "Remove from this playlist" in html
     for chip in ("More like this", "Not the vibe", "Wrong era", "Too mainstream", "Already know it"):
@@ -43,8 +45,8 @@ def test_own_it_suppresses_without_taste_penalty(store):
     _, c = _seed(store)
     c.post("/recs/feedback", data={"item": "bench|fav", "surface": "for_you",
                                    "kind": "dismiss", "reason": "own_it", "lane": "deep_cut"})
-    assert "bench|fav" in store.suppressed_keys("for_you", now=1001.0)   # suppressed
-    assert "lane:deep_cut" not in store.get_weights()                    # but NO penalty
+    assert "bench|fav" in store.rec_model.suppressed_keys("for_you", now=1001.0)   # suppressed
+    assert "lane:deep_cut" not in store.rec_model.get_weights()                    # but NO penalty
 
 
 def test_less_nudges_lane_down(store):
@@ -53,17 +55,17 @@ def test_less_nudges_lane_down(store):
                                    "kind": "less", "reason": "vibe", "lane": "deep_cut"})
     # #85 _seed's now_fn is fixed at 1000.0; read at the same `now` so reversion (vs real wall-clock
     # time) doesn't erase the nudge before the assertion runs.
-    assert store.get_weights(now=1000.0).get("lane:deep_cut", 1.0) < 1.0
+    assert store.rec_model.get_weights(now=1000.0).get("lane:deep_cut", 1.0) < 1.0
 
 
 def test_mute_artist_via_chip(store):
     _, c = _seed(store)
     c.post("/recs/feedback", data={"item": "artist:Fav", "surface": "for_you", "kind": "mute"})
-    assert "Fav" in store.muted_artists()
+    assert "Fav" in store.rec_model.muted_artists()
 
 
 def test_feedback_axis_routes_through_graduation_and_eventually_moves_weight(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     from fastapi.testclient import TestClient
     from yt_playlist.web.app import create_app
     from tests.conftest import FakeClient
@@ -73,16 +75,16 @@ def test_feedback_axis_routes_through_graduation_and_eventually_moves_weight(sto
     # Why-chip steering goes through the graduation ledger now (#43 / §4b), not a direct nudge: a single
     # event moves the ledger but leaves the permanent weight neutral (it is below THEME_THRESHOLD).
     c.post("/recs/feedback", data={"item": "a|b", "kind": "less", "axis": "era:1990"})
-    assert store.get_weights(now=1.0).get("era:1990", 1.0) == 1.0     # one event: ledger only, weight untouched
-    assert (store.get_theme("era:1990") or 0) < 0
+    assert store.rec_model.get_weights(now=1.0).get("era:1990", 1.0) == 1.0     # one event: ledger only, weight untouched
+    assert (store.rec_surface.get_theme("era:1990") or 0) < 0
 
     # Sustained feedback crosses the threshold and graduates the weight.
     for _ in range(3):
         c.post("/recs/feedback", data={"item": "a|b", "kind": "less", "axis": "era:1990"})
     # #85 the route's now_fn is fixed at 1.0; read at the same `now` so reversion (vs real wall-clock
     # time) doesn't erase the graduation before the assertion runs.
-    assert store.get_weights(now=1.0)["era:1990"] < 1.0               # 'less' graduates it down
+    assert store.rec_model.get_weights(now=1.0)["era:1990"] < 1.0               # 'less' graduates it down
 
     for _ in range(4):
         c.post("/recs/feedback", data={"item": "c|d", "kind": "more", "axis": "artist:Foo"})
-    assert store.get_weights(now=1.0)["artist:Foo"] > 1.0            # 'more' graduates it up
+    assert store.rec_model.get_weights(now=1.0)["artist:Foo"] > 1.0            # 'more' graduates it up

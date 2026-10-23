@@ -7,13 +7,14 @@ ENV UV_PYTHON_DOWNLOADS=never \
     UV_LINK_MODE=copy
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --group build --no-install-project
 COPY src/ ./src/
 COPY README.md LICENSE ./
 # Git metadata never enters the build context. Release CI passes the tag's version;
 # an ordinary local build remains a development build without release update notices.
 ARG VERSION=0.0.0.dev0
-RUN SETUPTOOLS_SCM_PRETEND_VERSION="$VERSION" uv build --wheel --out-dir /wheels \
+RUN SETUPTOOLS_SCM_PRETEND_VERSION="$VERSION" uv build --wheel --no-build-isolation --python /opt/venv/bin/python --out-dir /wheels \
+    && uv sync --frozen --no-dev --no-install-project \
     && uv pip install --python /opt/venv/bin/python --no-deps /wheels/*.whl
 
 FROM base AS runtime

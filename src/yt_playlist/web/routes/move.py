@@ -8,9 +8,9 @@ def build(ctx) -> APIRouter:
     store, templates, logger = ctx.store, ctx.templates, ctx.logger
 
     def _panel_context(*, source=None, target=None, results=None, error=None):
-        idents = store.get_identities()
+        idents = store.identities.get_identities()
         labels = {i.id: i.label for i in idents}
-        rows = sorted((p for p in store.get_playlists() if p.identity_id in labels),
+        rows = sorted((p for p in store.playlists.get_playlists() if p.identity_id in labels),
                       key=lambda p: (labels[p.identity_id], p.title.lower()))
         if source not in labels:
             source = idents[0].id if idents else None
@@ -38,7 +38,7 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "_partials/move_panel.html", _panel_context(**kwargs))
 
     def _move_row(request, playlist_id, *, message=None, error=None):
-        p = store.get_playlist(playlist_id)
+        p = store.playlists.get_playlist(playlist_id)
         if p is None:
             return HTMLResponse("")   # the playlist is gone (deleted elsewhere) -> drop the row
         return templates.TemplateResponse(request, "_partials/move_row.html",
@@ -63,7 +63,7 @@ def build(ctx) -> APIRouter:
             logger.debug("refresh-view control not sent for %s", ytm_id, exc_info=True)
 
     def _transfer(playlist, target_identity, copy_only):
-        src = store.get_playlist(playlist)
+        src = store.playlists.get_playlist(playlist)
         result = {"title": src.title if src else "Unavailable playlist", "warning": False}
         try:
             res = ctx.ops().move(playlist, target_identity, copy_only=bool(copy_only))
@@ -78,13 +78,15 @@ def build(ctx) -> APIRouter:
             _refresh_deleted_source(src.ytm_playlist_id)
             return {**result, "state": "moved", "message": f"Moved {tracks}."}
         extra = f"; {res['unresolved']} couldn’t be matched" if res["unresolved"] else ""
+        if res.get("skipped"):
+            extra += f"; {res['skipped']} couldn’t be added"
         msg = f"Copied {tracks}{extra}."
-        if res.get("delete_error"):  # copy succeeded but the original couldn't be deleted
-            msg += " Source kept: YouTube couldn’t delete the original."
+        if res.get("delete_error"):
+            msg = f"Copy created. Source kept: {res['delete_error']}"
         elif not copy_only:  # move requested but some tracks couldn't be recreated -> kept the source
             msg += " Source kept because some tracks couldn’t be recreated."
         return {**result, "state": "copied", "message": msg,
-                "warning": bool(res["unresolved"] or res.get("delete_error"))}
+                "warning": bool(res["unresolved"] or res.get("skipped") or res.get("delete_error"))}
 
     @router.post("/move/run")
     def move_run(request: Request, playlist: int = Form(...), target_identity: int = Form(...),
@@ -101,7 +103,7 @@ def build(ctx) -> APIRouter:
         def rejected(message):
             return _panel(request, source=source_identity, target=target_identity, error=message)
 
-        active = {i.id for i in store.get_identities()}
+        active = {i.id for i in store.identities.get_identities()}
         if source_identity not in active or target_identity not in active:
             return rejected("An identity has been removed. Choose identities again.")
         if source_identity == target_identity:
@@ -114,7 +116,7 @@ def build(ctx) -> APIRouter:
             return rejected("Select at least one playlist.")
         # Validate the entire selection before making any remote changes, including stale tabs.
         for pid in playlist_ids:
-            playlist = store.get_playlist(pid)
+            playlist = store.playlists.get_playlist(pid)
             if playlist is None or playlist.identity_id != source_identity:
                 return rejected("The playlist selection has changed. Select playlists again.")
         results = [_transfer(pid, target_identity, bool(copy_only)) for pid in playlist_ids]

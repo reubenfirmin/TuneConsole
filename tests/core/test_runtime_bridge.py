@@ -13,5 +13,5 @@ def test_provider_builds_bridge_clients(store, tmp_path):
     rt.load()
     assert rt.configured
     clients = rt.clients()
-    assert set(clients) == {store.get_master_identity().id}
+    assert set(clients) == {store.identities.get_master_identity().id}
     assert all(isinstance(client._session, BridgeSession) for client in clients.values())

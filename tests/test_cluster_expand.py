@@ -18,7 +18,7 @@ def _put(store, vecs):
         v = np.asarray(xy, dtype=np.float32)
         v /= np.linalg.norm(v) + 1e-9
         rows.append((k, v.tobytes()))
-    store.replace_rec_vectors(rows)
+    store.rec_model.replace_rec_vectors(rows)
 
 
 def _unit(deg):

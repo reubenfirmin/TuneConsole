@@ -5,11 +5,15 @@ you have been playing, not only its genre/era/artist facets. This is the produce
 import numpy as np
 
 from yt_playlist.rec import embed, rec_params, scoring, transient
+from tests import model_support
 
 
 class _FakeDao:
     def __init__(self, content, audio):
         self._c, self._a = content, audio
+
+    def library_keys(self):
+        return set(self._c) | set(self._a)
 
     def track_content(self):
         return self._c
@@ -22,8 +26,9 @@ def _store_with_content(tmp_path, monkeypatch, content, audio):
     from yt_playlist.core.store import Store
     s = Store(str(tmp_path / "t.db"))
     s.init_schema()
-    monkeypatch.setattr(embed, "RecDao", lambda store: _FakeDao(content, audio))
-    embed.build_content_and_store(s)            # persist audio-aware content vectors
+    for method in ("library_keys", "track_content", "track_audio_features"):
+        monkeypatch.setattr(s.rec_query, method, getattr(_FakeDao(content, audio), method))
+    model_support.build_content_model(s)       # persist audio-aware content vectors
     return s
 
 
@@ -44,8 +49,8 @@ def test_tilt_leans_toward_the_sound_of_recent_plays(tmp_path, monkeypatch):
         "lo|b":  {"energy": 0.08, "bpm": 88.0,  "danceability": 0.20},
     }
     s = _store_with_content(tmp_path, monkeypatch, content, audio)
-    iid = s.upsert_identity("main", "cred", None, True)
-    s.add_history_snapshot(iid, 1000.0, ["hi1|a"])      # recently played a high-energy track
+    iid = s.identities.upsert_identity("main", "cred", None, True)
+    s.history.record_play_event(iid, "hi1|a", None, 1000.0, source_timezone="UTC")
 
     tilt = transient.audio_centroid_tilt(s, now=1000.0)
     assert tilt is not None
@@ -61,8 +66,8 @@ def test_tilt_degrades_gracefully_when_recent_track_has_no_content_vector(tmp_pa
     content = {"hi|a": ("Techno", "2000")}
     audio = {"hi|a": {"energy": 0.9}}
     s = _store_with_content(tmp_path, monkeypatch, content, audio)
-    iid = s.upsert_identity("main", "cred", None, True)
-    s.add_history_snapshot(iid, 1000.0, ["unknown|x"])     # no content vector for this key
+    iid = s.identities.upsert_identity("main", "cred", None, True)
+    s.history.record_play_event(iid, "unknown|x", None, 1000.0, source_timezone="UTC")
     assert transient.audio_centroid_tilt(s, now=1000.0) is None   # no contribution, no error
 
 
@@ -70,8 +75,8 @@ def test_tilt_is_none_when_content_model_unbuilt(tmp_path):
     from yt_playlist.core.store import Store
     s = Store(str(tmp_path / "t.db"))
     s.init_schema()
-    iid = s.upsert_identity("main", "cred", None, True)
-    s.add_history_snapshot(iid, 1000.0, ["hi|a"])
+    iid = s.identities.upsert_identity("main", "cred", None, True)
+    s.history.record_play_event(iid, "hi|a", None, 1000.0, source_timezone="UTC")
     assert transient.audio_centroid_tilt(s, now=1000.0) is None   # no content vectors at all
 
 
@@ -85,8 +90,8 @@ def _store_three_tracks_with_recent_play(tmp_path, monkeypatch):
         "lo|b":  {"energy": 0.08, "bpm": 88.0,  "danceability": 0.20},
     }
     s = _store_with_content(tmp_path, monkeypatch, content, audio)
-    iid = s.upsert_identity("main", "cred", None, True)
-    s.add_history_snapshot(iid, 1000.0, ["hi1|a"])              # recent high-energy play
+    iid = s.identities.upsert_identity("main", "cred", None, True)
+    s.history.record_play_event(iid, "hi1|a", None, 1000.0, source_timezone="UTC")
     return s
 
 

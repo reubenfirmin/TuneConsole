@@ -24,6 +24,9 @@
   'previously_imported': 'Previously imported by TuneConsole',
   'already_in_library': 'Already in your YouTube Music library',
   'no_confident_match': 'No confident catalog match',
+  'ambiguous': 'Several releases match; choose the right release',
+  'not_selected': 'You chose to skip this album',
+  'created_as_playlist': 'Created as a playlist at your request',
   'not_saveable': 'Catalog result had no saveable album',
   'lookup_or_save_failed': 'Lookup or save failed; retry this album',
   'saved_by_user': 'You selected and saved this match'
@@ -49,7 +52,8 @@
       {% if added %}
       <h2 id="report-outcome">Your YouTube Music library was updated.</h2>
       <p>TuneConsole created {{ report.playlists_imported }} playlists, added
-        {{ report.tracks_imported }} tracks, and saved {{ report.albums_imported }} albums.</p>
+        {{ report.tracks_imported }} tracks, and saved {{ report.albums_imported }} albums.
+        {% if report.albums_as_playlists %}{{ report.albums_as_playlists }} albums were imported as playlists at your request.{% endif %}</p>
       {% else %}
       <h2 id="report-outcome">{{ 'The import needs attention.' if report.playlists_failed else 'No new library items were needed.' }}</h2>
       <p>{% if report.playlists_failed %}Some playlist transfers failed. Review their outcomes below.{% else %}The export was processed successfully. Its playlists and most saved albums were already
@@ -91,6 +95,7 @@
       <dl>
         <div><dt>Found in export</dt><dd>{{ report.albums_found }}</dd></div>
         <div><dt>Already in your library</dt><dd>{{ report.albums_skipped }}</dd></div>
+        {% if report.albums_as_playlists %}<div><dt>Created as playlists</dt><dd>{{ report.albums_as_playlists }}</dd></div>{% endif %}
         <div><dt>Could not be matched</dt><dd>{{ report.albums_unmatched }}</dd></div>
       </dl>
     </article>
@@ -240,7 +245,9 @@
               <td>{{ item.artist }}</td>
               <td><span class="tag {{ 'teal' if item.status == 'imported' else ('red' if item.status == 'unmatched' else 'amber') }}">{{ item.status }}</span></td>
               <td>{{ album_reasons.get(item.reason, item.reason) }}</td>
-              <td class="text-end">{% if item.browse_id %}<a href="/album?browse={{ item.browse_id }}">Open {{ arrow_icon('right') }}</a>{% endif %}</td>
+              <td class="text-end">{% if item.ytm_playlist_id %}<a href="https://music.youtube.com/playlist?list={{ item.ytm_playlist_id|urlencode }}"
+                target="_blank" rel="noopener">Open playlist {{ arrow_icon('external') }}</a>
+                {% elif item.browse_id %}<a href="/album?browse={{ item.browse_id }}">Open {{ arrow_icon('right') }}</a>{% endif %}</td>
             </tr>
           {% endfor %}
           </tbody>
@@ -271,5 +278,11 @@
       <a class="btn-primary" href="/setup?tab=import">Import another export</a>
     </div>
   </section>
+  <p class="section-note">The latest report, including source album names and links for resolving
+    matches, stays on this machine until another import replaces it or you delete it. Deleting
+    the report keeps your YouTube Music library and completed-transfer records used for retries.</p>
+  <form method="post" action="/import/spotify-library/delete-report">
+    <button type="submit" class="btn-ghost">Delete this report</button>
+  </form>
 </div>
 {% endblock %}

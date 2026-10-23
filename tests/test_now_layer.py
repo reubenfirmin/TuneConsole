@@ -15,7 +15,7 @@ def store():
 
 
 def _identity(store):
-    return store.upsert_identity("main", "cred", None, True)
+    return store.identities.upsert_identity("main", "cred", None, True)
 
 
 def _install_modes(store):
@@ -31,7 +31,7 @@ def _install_modes(store):
 def _install_content_vectors(store, monkeypatch, keys, V):
     V = V / np.linalg.norm(V, axis=1, keepdims=True)
     idx = {k: i for i, k in enumerate(keys)}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (keys, V, idx))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
     return V, idx
 
 
@@ -43,7 +43,7 @@ def test_recent_plays_near_one_mode_yield_near_certain_posterior(store, monkeypa
     iid = _identity(store)
     now = 100_000.0
     rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.import_play_events(iid, rows)
+    store.history.import_play_events(iid, rows)
 
     posterior = layers.now_mode_posterior(store, now)
     assert posterior is not None
@@ -59,7 +59,7 @@ def test_mixed_plays_split_proportionally_by_count(store, monkeypatch):
     iid = _identity(store)
     now = 100_000.0
     rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.import_play_events(iid, rows)
+    store.history.import_play_events(iid, rows)
 
     posterior = layers.now_mode_posterior(store, now)
     assert posterior is not None
@@ -75,7 +75,7 @@ def test_below_min_events_returns_none(store, monkeypatch):
     iid = _identity(store)
     now = 100_000.0
     rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.import_play_events(iid, rows)
+    store.history.import_play_events(iid, rows)
 
     assert layers.now_mode_posterior(store, now) is None
 
@@ -91,7 +91,7 @@ def test_plays_older_than_window_are_excluded(store, monkeypatch):
     # 3 plays well outside the 6h window, 2 plays inside it -> only 2 count, below the gate of 3
     old_rows = [(keys[i], "v" + keys[i], now - window_s - 3600 - i * 60) for i in range(3)]
     new_rows = [(keys[i], "v" + keys[i], now - i * 60) for i in range(3, 5)]
-    store.import_play_events(iid, old_rows + new_rows)
+    store.history.import_play_events(iid, old_rows + new_rows)
 
     assert layers.now_mode_posterior(store, now) is None
 
@@ -103,19 +103,19 @@ def test_no_active_modes_returns_none(store, monkeypatch):
     iid = _identity(store)
     now = 100_000.0
     rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.import_play_events(iid, rows)
+    store.history.import_play_events(iid, rows)
 
     assert layers.now_mode_posterior(store, now) is None
 
 
 def test_no_content_vectors_returns_none(store, monkeypatch):
     _install_modes(store)
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: ([], None, {}))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: ([], None, {}))
     iid = _identity(store)
     now = 100_000.0
     keys = ["a1", "a2", "a3"]
     rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.import_play_events(iid, rows)
+    store.history.import_play_events(iid, rows)
 
     assert layers.now_mode_posterior(store, now) is None
 
@@ -131,9 +131,9 @@ def test_history_day_noon_bucket_does_not_count_toward_now_layer(store, monkeypa
     now = 100_000.0
     # only 2 real play_events rows -> below now_min_events=3 on their own
     rows = [(keys[i], "v" + keys[i], now - i * 60) for i in range(2)]
-    store.import_play_events(iid, rows)
+    store.history.import_play_events(iid, rows)
     # a history-day noon bucket for the third key, timestamped inside the NOW window
-    store.record_history_plays(iid, now, [keys[2]])
+    store.history.record_history_plays(iid, now, [keys[2]])
 
     assert layers.now_mode_posterior(store, now) is None
 
@@ -152,13 +152,13 @@ def test_radio_provenance_plays_are_excluded_from_now_layer_mood_evidence(store,
     _install_content_vectors(store, monkeypatch, keys, V)
     iid = _identity(store)
     now = 100_000.0
-    store.set_setting("radio_playlist_ytm", "PLRADIO")
+    store.settings.set_setting("radio_playlist_ytm", "PLRADIO")
     # Radio-queued plays (mode 1 / "X"): carry the radio playlist's own ytm id as provenance.
     for i, k in enumerate(["x1", "x2", "x3"]):
-        store.record_play_event(iid, k, "v" + k, now - i * 60, playlist_ytm_id="PLRADIO")
+        store.history.record_play_event(iid, k, "v" + k, now - i * 60, playlist_ytm_id="PLRADIO")
     # Organic plays (mode 2 / "Y"): no provenance, e.g. a direct search/album play.
     for i, k in enumerate(["y1", "y2", "y3"]):
-        store.record_play_event(iid, k, "v" + k, now - 200 - i * 60, playlist_ytm_id=None)
+        store.history.record_play_event(iid, k, "v" + k, now - 200 - i * 60, playlist_ytm_id=None)
 
     posterior = layers.now_mode_posterior(store, now)
     assert posterior is not None
@@ -175,6 +175,6 @@ def test_stale_mode_centroids_dim_mismatch_reads_as_quiet(store, monkeypatch):
     _install_content_vectors(store, monkeypatch, keys, V)
     iid = _identity(store)
     now = 100_000.0
-    store.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
+    store.history.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
 
     assert layers.now_mode_posterior(store, now) is None

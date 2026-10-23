@@ -6,14 +6,14 @@ import time
 
 from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import _client
-from yt_playlist.rec import library_pool, mode_surfaces, recommend, surfaces
+from yt_playlist.rec import library_pool, mode_surfaces, surfaces
 from yt_playlist.util.matching import identity_key
 
 
 def two_ready_cards(store, monkeypatch):
     """The screenshot case: ready Wheelhouse and Fresh, with no assigned Catalog or Comfort."""
     seed_genres(store)
-    tracks = store.get_proposals("mode_bundles")["0"]["wheelhouse"][:12]
+    tracks = store.rec_surface.get_proposals("mode_bundles")["0"]["wheelhouse"][:12]
     monkeypatch.setattr(mode_surfaces, "assemble_cards", lambda *a, **kw: [
         {"lane": "wheelhouse", "label": "More in your wheelhouse", "mode_id": 0,
          "ranker": "cosine", "tracks": tracks}])
@@ -25,7 +25,7 @@ def test_two_ready_mixes_keep_all_four_slots_without_starting_work(store, monkey
     def unexpected(*args, **kwargs):
         raise AssertionError("Only a click may rank the missing pools")
     monkeypatch.setattr(library_pool, "prepare", unexpected)
-    monkeypatch.setattr(recommend, "explore_for_you", unexpected)
+    monkeypatch.setattr(surfaces, "explore_for_you", unexpected)
     client = _client(store)
     for response in (client.post("/home/mix-genres", data={"genres": ["jazz", "techno", "trance"]}),
                      client.get("/home/cards")):
@@ -45,8 +45,8 @@ def test_catalog_skeleton_click_ranks_once_preserves_genres_and_survives_restart
     for i in range(30):
         title, artist = f"Catalog song {i}", f"Catalog artist {i}"
         key, genre = identity_key(title, artist), "Jazz" if i < 15 else "Classical"
-        tid = store.upsert_track(f"v{i}", title, artist, None, None)
-        store.set_track_genre(tid, genre)
+        tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
+        store.tracks.set_track_genre(tid, genre)
         rows.append(surfaces.ForYouItem(title, artist, "", f"v{i}", None, 0, "", key=key, genre=genre))
     calls = []
     def rank(store, now, limit):
@@ -54,7 +54,7 @@ def test_catalog_skeleton_click_ranks_once_preserves_genres_and_survives_restart
         started.set()
         release.wait(5)
         return rows
-    monkeypatch.setattr(recommend, "explore_for_you", rank)
+    monkeypatch.setattr(surfaces, "explore_for_you", rank)
     client = _client(store)
     client.post("/home/mix-genres", data={"genres": ["jazz", "techno", "trance"]})
     parameters = {"lane": "explore", "epoch": "1", "include_genres": ["jazz", "techno", "trance"]}
@@ -125,14 +125,43 @@ def test_temporal_pool_keeps_its_date_band_and_live_feedback(store):
     keys = []
     for i, year in enumerate([1960, 1980, 1995, 2005, 2010, 2020]):
         title, artist = f"Song {year}", f"Artist {i}"
-        tid = store.upsert_track(f"v{i}", title, artist, None, None)
-        store.set_track_genre(tid, "Jazz")
-        store.set_track_year(tid, str(year))
+        tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
+        store.tracks.set_track_genre(tid, "Jazz")
+        store.tracks.set_track_year(tid, str(year))
         keys.append(identity_key(title, artist))
-    bundles = store.get_proposals("mode_bundles")
+    bundles = store.rec_surface.get_proposals("mode_bundles")
     bundles["_meta"]["year_cuts"] = [1990, 2010]
-    store.put_proposals("mode_bundles", bundles, 1)
+    store.rec_surface.put_proposals("mode_bundles", bundles, 1)
     parameters = {"lane": "temporal", "epoch": 1, "include_genres": ["jazz"], "avoid_genres": []}
     library_pool.prepare(store, 1, parameters)
-    store.record_feedback("for_you", keys[3], "dismiss", now=2)
+    store.rec_model.record_feedback("for_you", keys[3], "dismiss", now=2)
     assert [t["year"] for t in library_pool.pick(store, 3, parameters)] == [1995, 2010]
+
+
+def test_catalog_build_reaches_unmodeled_library_beyond_other_genres(store):
+    # A large library need not have vectors for every track. The requested genre is deep in
+    # the catalog, and sibling cards already use some of it; neither condition makes it empty.
+    keys = []
+    for i in range(340):
+        title, artist = f"Song {i}", f"Artist {i}"
+        tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
+        store.tracks.set_track_genre(tid, "Jazz" if i >= 310 else "Techno")
+        keys.append(identity_key(title, artist))
+    parameters = {"lane": "explore", "epoch": "0", "include_genres": ["jazz"],
+                  "exclude_keys": json.dumps(keys[310:322])}
+    # Ordinary Home waits for candidate dependencies; model the worker's pass
+    # before exercising the explicit library-pool request.
+    assert mode_surfaces.prepare_bundles(store, 1000) is not None
+    client = _client(store)
+    response = client.post("/home/library-pool", data=parameters)
+    for _ in range(200):
+        match = re.search(r'hx-get="(/home/library-pool/\d+)"', response.text)
+        if not match:
+            break
+        response = client.get(match[1])
+        time.sleep(.01)
+    assert response.status_code == 200
+    assert response.text.count('class="gen-row"') == 12
+    assert "Not enough matching songs" not in response.text
+    for title in re.findall(r'data-title="Song (\d+)"', response.text):
+        assert 322 <= int(title) < 340

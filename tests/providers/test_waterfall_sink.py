@@ -16,14 +16,14 @@ class _FakeProvider:
 
 def test_catalog_sink_retains_discovery_findings_and_full_answers():
     s = Store(":memory:"); s.init_schema()
-    s.upsert_discovered_track("a|x", "v1", "A", "X", None, None, None, None, "radio:s", 100.0)
+    s.discovery.upsert_discovered_track("a|x", "v1", "A", "X", None, None, None, None, "radio:s", 100.0)
     cfg = [{"name": "fake", "enabled": True, "label": "Fake"}]
     completed = waterfall.run_waterfall(
-        s, s.next_enrich_batch(10), cfg, on_progress=lambda e: None,
+        s, s.enrichment.next_enrich_batch(10), cfg, on_progress=lambda e: None,
         registry={"fake": _FakeProvider()})
-    row = s.discovered_tracks_by_keys(["a|x"])["a|x"]
+    row = s.discovery.discovered_tracks_by_keys(["a|x"])["a|x"]
     assert row["genre"] == "techno" and row["year"] == "2019"
     assert row["audio"]["bpm"] == 128.0
-    assert completed == [s.catalog_subject(1)["recording_id"]]
-    assert s.enrichment_attempts("a|x")["fake"]["fields"]["label"] == "x"
+    assert completed == [s.tracks.catalog_subject(1)["recording_id"]]
+    assert s.enrichment.enrichment_attempts("a|x")["fake"]["fields"]["label"] == "x"
     assert s.conn.execute("SELECT label FROM catalog_tracks").fetchone()[0] == "x"

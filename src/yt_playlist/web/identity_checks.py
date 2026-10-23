@@ -4,7 +4,7 @@ from yt_playlist.library.sync import _is_auth_error
 
 
 def check_identities(ctx, identity_id=None):
-    identities = ctx.store.get_identities()
+    identities = ctx.store.identities.get_identities()
     if identity_id is not None:
         identities = [i for i in identities if i.id == identity_id]
     try:

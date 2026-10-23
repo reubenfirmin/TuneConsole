@@ -11,7 +11,7 @@ def store():
 
 def _synced_thin(store):
     # a sync has run (so onboarding applies) but the model is thin: low coverage, no modes
-    store.set_setting("last_sync_at", "999")
+    store.settings.set_setting("last_sync_at", "999")
     from tests.conftest import seed_catalog_track
     seed_catalog_track(store,'a|x','T','A')
     store.conn.execute("UPDATE tracks SET first_enriched_at=1 WHERE identity_key='a|x'")
@@ -29,7 +29,7 @@ def test_inactive_before_any_sync(store):
 
 def test_inactive_when_dismissed(store):
     _synced_thin(store)
-    store.set_setting("onboard_dismissed", "1")
+    store.settings.set_setting("onboard_dismissed", "1")
     assert onboarding.onboarding_active(store, now=10.0) is False
 
 

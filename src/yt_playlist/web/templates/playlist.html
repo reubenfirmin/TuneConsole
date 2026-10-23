@@ -19,7 +19,14 @@
     </p>
     <div class="pl-actions">
       <a class="cta" href="https://music.youtube.com/playlist?list={{ pl.ytm_playlist_id }}"
-         target="_blank" rel="noopener">▶ Play on YouTube Music {{ arrow_icon('external') }}</a>
+         target="_blank" rel="noopener">▶ Play on YouTube Music</a>
+      <a class="playlist-radio" href="/?radio_playlist={{ pl.id }}#radio"
+         title="Start radio from this playlist" aria-label="Start radio from this playlist">
+        <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="9" r="2"/><path d="m12 11-4 10m4-10 4 10M10 16h4M6.3 3.3a8 8 0 0 0 0 11.4M17.7 3.3a8 8 0 0 1 0 11.4M9.2 6.2a4 4 0 0 0 0 5.6M14.8 6.2a4 4 0 0 1 0 5.6"/>
+        </svg>
+      </a>
     </div>
   </div>
   <div class="head-tools" aria-label="Playlist tools">

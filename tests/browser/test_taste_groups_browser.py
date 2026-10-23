@@ -13,16 +13,16 @@ def test_mix_groups_explain_composition_and_choice_uncertainty(live_app, store, 
     keys = []
     vector = np.eye(5, dtype=np.float32)[2]
     for i in range(12):
-        tid = store.upsert_track(f"techno-{i}", f"Techno track {i}", "Artist", None, None)
-        store.set_track_genre(tid, "Techno")
-        store.set_track_year(tid, 2015)
+        tid = store.tracks.upsert_track(f"techno-{i}", f"Techno track {i}", "Artist", None, None)
+        store.tracks.set_track_genre(tid, "Techno")
+        store.tracks.set_track_year(tid, 2015)
         keys.append(f"techno track {i}|artist")
     modes = store.modes.list_modes()
     modes.append({"mode_id": 3, "label": "techno", "families": [["techno", 12]],
                   "size": 12, "centroid": vector, "rep_keys": keys[:3],
                   "space": embed.content_space_id(store)})
     store.modes.replace_modes(modes, [], 1)
-    store.replace_rec_content_vectors(store.get_rec_content_vectors() + [(k, vector.tobytes()) for k in keys])
+    store.rec_model.replace_rec_content_vectors(store.rec_model.get_rec_content_vectors() + [(k, vector.tobytes()) for k in keys])
     for epoch in range(61):
         store.modes.log_impressions(epoch, [("fresh", 3)], 1)
     for pid in range(22):

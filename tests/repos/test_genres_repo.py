@@ -19,6 +19,6 @@ def test_all_genres_empty_without_track_genres(store):
     assert store.genres.all_genres() == []
 
 
-def test_facade_delegates(store):
-    store.add_genre("Jazz")                                           # legacy store.x() call site
-    assert store.get_genre_whitelist() == ["Jazz"]
+def test_store_binding(store):
+    store.genres.add_genre("Jazz")
+    assert store.genres.get_genre_whitelist() == ["Jazz"]

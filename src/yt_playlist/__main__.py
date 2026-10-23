@@ -10,27 +10,19 @@ from pathlib import Path
 from yt_playlist.core import logsetup, paths
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core.store import Store
-from yt_playlist.core.config import credential_path
 from yt_playlist.core.runtime import Runtime
 from yt_playlist.web.app import create_app
 
-def sync_identities_into_store(store, identity_configs):
-    """Ensure each configured identity exists in the store; return {label: id}."""
-    return {cfg.label: store.upsert_identity(cfg.label, cfg.credential_ref, cfg.brand_account_id, cfg.is_master)
-            for cfg in identity_configs}
 
-def validate_credentials(identity_configs, base_dir=None):
-    """Check that each identity's credential file exists; raise SystemExit if any are missing."""
-    if base_dir is None:
-        base_dir = paths.config_path().parent
-    base_dir = Path(base_dir)
-    for cfg in identity_configs:
-        try:
-            path = credential_path(base_dir, cfg.credential_ref)
-        except ValueError as e:
-            raise SystemExit(f"Identity '{cfg.label}': {e}")
-        if not path.exists():
-            raise SystemExit(f"Identity '{cfg.label}': credential file not found at {path}")
+class AppServer(uvicorn.Server):
+    def handle_exit(self, sig, frame):
+        # Stop read-only workers before Uvicorn waits for SSE requests and closes
+        # the extension socket. Already-running mutations retain normal draining.
+        ctx = getattr(getattr(self.config.app, "state", None), "ctx", None)
+        if ctx is not None:
+            ctx.work.close_admission()
+        super().handle_exit(sig, frame)
+
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
@@ -79,12 +71,6 @@ def build_app(*, updater=None):
     # handler, which is /dev/null in the packaged builds. Declining that config lets them reach
     # the root handlers logsetup installs, so they land in app.log.
     logsetup.configure()
-    # The home card polls GET /bridge/status every few seconds; drop those access-log lines so they
-    # do not drown the log. The endpoint still works, it just is not logged.
-    class _QuietPolls(logging.Filter):
-        def filter(self, record):
-            return "/bridge/status" not in record.getMessage()
-    logging.getLogger("uvicorn.access").addFilter(_QuietPolls())
     # Install the egress guard before anything can make a network call: from here on every
     # server-side HTTP request is allowlisted and logged (see yt_playlist.egress, read at /network).
     from yt_playlist import egress
@@ -181,7 +167,7 @@ def main(argv=None, *, updater=None, server_callback=None):
         app = build_app(updater=updater)
         _print_bridge_banner(args.host, args.port)
         # bound graceful shutdown so a Ctrl-C lands promptly even with an open sync SSE stream
-        server = uvicorn.Server(uvicorn.Config(
+        server = AppServer(uvicorn.Config(
             app, host=args.host, port=args.port, timeout_graceful_shutdown=2, log_config=None))
         if server_callback is not None:
             server_callback(server)

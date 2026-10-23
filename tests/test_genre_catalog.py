@@ -59,19 +59,19 @@ def test_full_musicbrainz_snapshot_and_sourced_database_joins(store):
 
 
 def test_legacy_upgrade_preserves_additions_removals_and_splits_disabled_aliases(store):
-    store.set_genres([n for n in catalog.legacy_names() if n not in ("Rock", "Electronic")]
+    store.genres.set_genres([n for n in catalog.legacy_names() if n not in ("Rock", "Electronic")]
                      + ["Whack-a-doodle", "hip-hop"])
-    store.set_setting("genres_seeded", "1")
-    track = store.upsert_track("v", "song", "artist", None, None)
-    store.set_track_genre(track, "hip-hop")
+    store.settings.set_setting("genres_seeded", "1")
+    track = store.tracks.upsert_track("v", "song", "artist", None, None)
+    store.tracks.set_track_genre(track, "hip-hop")
     genres.configure(store)
-    names = store.get_genre_whitelist()
+    names = store.genres.get_genre_whitelist()
     assert "Rock" not in names and "Electronic" not in names
     assert "Electro" not in names and "Electronica" not in names
     assert "Phonk" in names and "Whack-a-doodle" in names
     assert names.count("Hip Hop") == 1 and "hip-hop" not in names
     assert store.conn.execute("SELECT genre FROM tracks WHERE id=?", (track,)).fetchone()[0] == "hip-hop"
-    store.remove_genre("Phonk")
+    store.genres.remove_genre("Phonk")
     genres.configure(store)
     assert genres.match_tag("phonk") is None
     genres.reset(store)
@@ -81,36 +81,36 @@ def test_legacy_upgrade_preserves_additions_removals_and_splits_disabled_aliases
 
 
 def test_explicitly_empty_legacy_list_stays_empty(store):
-    store.set_setting("genres_seeded", "1")
+    store.settings.set_setting("genres_seeded", "1")
     genres.configure(store)
-    assert store.get_genre_whitelist() == []
+    assert store.genres.get_genre_whitelist() == []
     assert genres.match_tag("rock") is None
 
 
 def test_later_snapshot_adds_only_new_defaults(store):
     genres.configure(store)
-    store.remove_genre("Rock")
+    store.genres.remove_genre("Rock")
     # Simulate an older baseline that did not include Phonk, with a user who removed Jazz.
-    store.remove_genre("Phonk")
-    store.remove_genre("Jazz")
+    store.genres.remove_genre("Phonk")
+    store.genres.remove_genre("Jazz")
     baseline = [n for n in catalog.builtin_names() if n != "Phonk"]
-    store.set_setting("genre_defaults", json.dumps(baseline))
-    store.set_setting("genre_catalog_revision", "older")
+    store.settings.set_setting("genre_defaults", json.dumps(baseline))
+    store.settings.set_setting("genre_catalog_revision", "older")
     genres.configure(store)
-    assert "Phonk" in store.get_genre_whitelist()
-    assert "Rock" not in store.get_genre_whitelist()
-    assert "Jazz" not in store.get_genre_whitelist()
+    assert "Phonk" in store.genres.get_genre_whitelist()
+    assert "Rock" not in store.genres.get_genre_whitelist()
+    assert "Jazz" not in store.genres.get_genre_whitelist()
 
 
 def test_failed_upgrade_rolls_back_catalog_enabled_list_and_revision(store):
-    store.set_genres(["Jazz", "Whack-a-doodle"])
-    store.set_setting("genres_seeded", "1")
+    store.genres.set_genres(["Jazz", "Whack-a-doodle"])
+    store.settings.set_setting("genres_seeded", "1")
     store.conn.execute("CREATE TRIGGER reject_catalog BEFORE INSERT ON genre_alias "
                        "BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match="injected failure"):
         genres.configure(store)
-    assert store.get_genre_whitelist() == ["Jazz", "Whack-a-doodle"]
-    assert store.get_setting("genre_catalog_revision") is None
+    assert store.genres.get_genre_whitelist() == ["Jazz", "Whack-a-doodle"]
+    assert store.settings.get_setting("genre_catalog_revision") is None
     assert store.conn.execute("SELECT count(*) FROM genre_catalog").fetchone()[0] == 0
 
 
@@ -136,6 +136,28 @@ def test_musicbrainz_cached_artist_rechecks_edited_vocabulary(monkeypatch):
     genres.set_active(["Jazz"])
     assert musicbrainz._artist_genre("artist") == "Jazz"
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('tags,expected', [
+    (['Rock', 'Psychedelic Rock'], 'Psychedelic Rock'),
+    (['Techno', 'Dub Techno'], 'Dub Techno'),
+    (['Rock', 'Jazz', 'Indie Rock'], 'Indie Rock'),
+    (['Jazz', 'Rock', 'Psychedelic Rock'], 'Jazz'),
+    (['Rock', 'Rocksteady'], 'Rock'),
+    (['Acid Techno', 'Dub Techno'], 'Acid Techno'),
+])
+def test_provider_tags_refine_the_chosen_genre_without_switching_to_an_unrelated_style(tags, expected):
+    assert genres.pick_genre(tags) == expected
+
+
+def test_disabled_specific_tag_cannot_refine_an_enabled_parent():
+    genres.set_active(['Rock'])
+    assert genres.pick_genre(['Rock', 'Psychedelic Rock']) == 'Rock'
+
+
+def test_recording_tags_can_refine_musicbrainz_broad_genre():
+    assert musicbrainz._top_label({'genres': [{'name': 'rock', 'count': 100}],
+                                   'tags': [{'name': 'psychedelic rock', 'count': 5}]}) == 'Psychedelic Rock'
 
 
 def test_imported_children_use_the_same_family_in_matching_and_recommendations():
@@ -166,6 +188,8 @@ def test_parent_projection_handles_depth_ties_cycles_and_order(tmp_path, monkeyp
             (tmp_path / "musicbrainz_genres.json").write_text(json.dumps({"genres": genres_rows}))
             (tmp_path / "musicbrainz_genre_parents.json").write_text(json.dumps({"parents": parent_edges}))
             catalog.catalog.cache_clear()
+            catalog._parents.cache_clear()
+            catalog._ancestors.cache_clear()
             records, labels = catalog.catalog()
             assert "shared" not in labels                 # ambiguous equivalent name
             assert labels["metal"][0] == "metal"          # primary beats another genre's alias
@@ -175,7 +199,12 @@ def test_parent_projection_handles_depth_ties_cycles_and_order(tmp_path, monkeyp
             assert assignments["nearest child"] == "metal"
             assert assignments["cycle a"] is None
             assert assignments["cycle b"] is None
+            assert catalog.is_subgenre('deep child', 'metal')
+            assert not catalog.is_subgenre('cycle a', 'cycle b')
+            assert not catalog.is_subgenre('cycle b', 'cycle a')
             results.append(assignments)
         assert results[0] == results[1]
     finally:
         catalog.catalog.cache_clear()
+        catalog._parents.cache_clear()
+        catalog._ancestors.cache_clear()

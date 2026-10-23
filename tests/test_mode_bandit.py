@@ -1,5 +1,6 @@
 """#87 Thompson sampling over mode pick-through: the posterior sample IS the rotation."""
 import random
+from tests.mode_fixtures import seed_modes
 
 from yt_playlist.core.store import Store
 from yt_playlist.rec.mode_eval import mode_bandit_stats
@@ -34,6 +35,7 @@ def test_unknown_mode_gets_wide_uniform_prior():
 def test_mode_bandit_stats_counts():
     s = Store(":memory:")
     s.init_schema()
+    seed_modes(s,1,2)
     s.modes.log_impressions(100, [(0, 1), (1, 1)], 100.0)
     s.modes.log_impressions(101, [(0, 2)], 101.0)
     s.modes.log_pick(77, 1, 102.0)
@@ -91,6 +93,7 @@ def test_ignored_theme_loses_exposure_across_the_whole_menu():
 def test_theme_feedback_pools_choices_across_framings():
     s = Store(":memory:")
     s.init_schema()
+    seed_modes(s,1,2)
     for epoch, lane in enumerate(("fresh", "wheelhouse", "comfort")):
         s.modes.log_impressions(epoch, [(lane, 1), ("explore", 2)], float(epoch))
     s.modes.log_pick(77, 2, 4.0)
@@ -100,6 +103,7 @@ def test_theme_feedback_pools_choices_across_framings():
 def test_current_menu_feedback_waits_until_the_next_rotation():
     s = Store(":memory:")
     s.init_schema()
+    seed_modes(s,1,2)
     s.modes.log_impressions(0, [("fresh", 1)], 1.0)
     s.modes.log_pick(76, 1, 2.0)
     s.modes.log_impressions(1, [("comfort", 1), ("fresh", 2)], 10.0)

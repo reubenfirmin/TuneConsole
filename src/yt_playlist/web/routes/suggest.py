@@ -1,12 +1,12 @@
 """Recommendation-serving endpoints, returned as lazy htmx fragments."""
 import json
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from yt_playlist.rec import embed, rec_params, recommend, scoring
-from yt_playlist.rec.rec_dao import RecDao
+from yt_playlist.rec import embed, graduation, rec_params, scoring, surfaces
 from yt_playlist.util import genre_map
+from yt_playlist.web.context import request_form
 
 # feedback kinds that suppress an item (vs 'more'/'less' which only nudge future weights)
 _SNOOZE_DAYS = 14
@@ -21,7 +21,7 @@ def _feedback_axis(store, form, reason, item):
     axis = form.get("axis")
     if axis and axis.split(":", 1)[0] in ("genre", "era", "artist", "pop"):
         return axis
-    dao = RecDao(store)
+    dao = store.rec_query
     if reason == "vibe":
         g = dao.track_genres([item]).get(item)
         return f"genre:{genre_map.family(g)}" if g else None
@@ -44,10 +44,10 @@ def build(ctx) -> APIRouter:
 
     @router.get("/playlist/{pid}/suggestions")
     def playlist_suggestions(request: Request, pid: int):
-        if store.get_playlist(pid) is None:
+        if store.playlists.get_playlist(pid) is None:
             raise HTTPException(status_code=404, detail="playlist not found")
         now = now_fn()
-        suggestions = recommend.complete_playlist(store, pid, now=now)
+        suggestions = surfaces.complete_playlist(store, pid, now=now)
         from yt_playlist.rec import measurement
         measurement.record_recommendations(store, "playlist_completion", suggestions, now,
                                            lane="complete", ranker="artist-genre", provenance={"playlist_id": pid})
@@ -61,7 +61,7 @@ def build(ctx) -> APIRouter:
         """'Songs like this': embedding neighbours of one track, rendered as a modal fragment. When
         `pid` is given (the playlist the track was opened from) the modal lets you add any neighbour
         into that playlist, slotted just below `vid`."""
-        dao = RecDao(store)
+        dao = store.rec_query
         key = dao.key_for_video(vid)
         nbrs = embed.neighbors_blended(store, key, topn=12) if key else []
         if not nbrs and key:                              # new/quarantined track: proxy via its artist
@@ -70,8 +70,8 @@ def build(ctx) -> APIRouter:
         # resolve against both. A discovered row carries the same video_id/title/artist/album/thumbnail
         # the modal renders and posts, so the two kinds are interchangeable from here on.
         keys = [k for k, _ in nbrs]
-        meta = store.tracks_by_keys(keys + ([key] if key else []))
-        pool = store.discovered_tracks_by_keys([k for k in keys if k not in meta])
+        meta = store.rec_query.tracks_by_keys(keys + ([key] if key else []))
+        pool = store.discovery.discovered_tracks_by_keys([k for k in keys if k not in meta])
         items = [meta.get(k) or pool[k] for k in keys if k in meta or k in pool]
         from yt_playlist.rec import measurement
         scores = dict(nbrs)
@@ -81,32 +81,30 @@ def build(ctx) -> APIRouter:
             lane="similar", ranker="blended-neighbors", provenance={"seed": key})
         return templates.TemplateResponse(request, "_partials/similar_modal.html",
                                           {"items": items, "seed": meta.get(key, {}),
-                                           "have_model": store.rec_vectors_count() > 0,
+                                           "have_model": store.rec_model.rec_vectors_count() > 0,
                                            "pid": pid, "seed_vid": vid})
 
     @router.post("/recs/rebuild")
     def recs_rebuild():
         """Kick off a model rebuild + proposal materialization. Dispatched to the background worker
-        (coalesced) so a hung YTM/Last.fm call during materialization can't tie up a request worker;
-        falls back to a synchronous rebuild only when no worker is configured."""
+        (coalesced) so a hung YTM/Last.fm call during materialization can't tie up a request worker."""
         if ctx.rec_worker:
             ctx.rec_worker.trigger()
         else:
-            embed.build_and_store(store)
+            return JSONResponse({'ok': False, 'queued': False, 'error': 'Recommendation worker unavailable'}, status_code=503)
         return JSONResponse({"ok": True, "queued": bool(ctx.rec_worker),
-                             "count": store.rec_vectors_count()})
+                             "count": store.rec_model.rec_vectors_count()})
 
     @router.post("/recs/feedback")
-    async def recs_feedback(request: Request):
+    def recs_feedback(request: Request, form=Depends(request_form)):
         """Persist a feedback event. htmx removes the card by swapping in the empty response."""
-        form = await request.form()
         item = form.get("item")
         if not item:
             return HTMLResponse("", status_code=422)
         kind, reason = form.get("kind", "dismiss"), form.get("reason")
         now = now_fn()
         until = now + _SNOOZE_DAYS * 86400 if kind == "not_now" else None
-        store.record_feedback(form.get("surface", "for_you"), item, kind,
+        store.rec_model.record_feedback(form.get("surface", "for_you"), item, kind,
                               reason=reason, scope=form.get("scope", ""), until=until, now=now)
         # Taste steering goes THROUGH the graduation ledger, never a direct permanent nudge: the funnel
         # owns permanent weights (#43 / §4b, the old leak). Each reason maps to the axis its label
@@ -116,7 +114,7 @@ def build(ctx) -> APIRouter:
             axis = _feedback_axis(store, form, reason, item)
             if axis:
                 signed = 1.0 if kind == "more" else -1.0
-                recommend.graduate_facet(store, axis, signed, now,
+                graduation.graduate_facet(store, axis, signed, now,
                                          source=rec_params.get_param(store, "source_w_feedback"),
                                          source_label="feedback")
         # Lane balance stays a direct nudge: it is a UI mechanic (which lane fills the feed), not a
@@ -125,20 +123,19 @@ def build(ctx) -> APIRouter:
         if lane in rec_params.LANE_NAMES and reason != "own_it":
             halflife = rec_params.get_param(store, "weight_revert_halflife_d")
             if kind in ("dismiss", "less", "not_now"):
-                store.nudge_weight(f"lane:{lane}", 0.85, now=now, revert_halflife_d=halflife)
+                store.rec_model.nudge_weight(f"lane:{lane}", 0.85, now=now, revert_halflife_d=halflife)
             elif kind == "more":
-                store.nudge_weight(f"lane:{lane}", 1.15, now=now, revert_halflife_d=halflife)
+                store.rec_model.nudge_weight(f"lane:{lane}", 1.15, now=now, revert_halflife_d=halflife)
         return HTMLResponse("")
 
     @router.post("/recs/mood")
-    async def recs_mood(request: Request):
+    def recs_mood(request: Request, form=Depends(request_form)):
         """Transient mood feedback: tilts the Home lanes toward (+) or away (-) from a vibe. #85: it
         fades on the wall clock (mood_halflife_d), reactive, but NOT a permanent taste signal. Two
         shapes:
           - whole-mix (simple panel): `pid` -> seeds with the whole playlist; swaps in a confirmation.
           - facet/track levers: explicit `keys` (JSON list) of just that subset; returns a light ack.
         `intensity=lot` doubles the magnitude (a stronger tilt)."""
-        form = await request.form()
         try:
             direction = int(form.get("dir", 1))
         except (TypeError, ValueError):
@@ -154,38 +151,37 @@ def build(ctx) -> APIRouter:
                 now = now_fn()
                 halflife_d = rec_params.get_param(store, "mood_halflife_d")
                 prune_before = now - 4 * halflife_d * 86400
-                store.record_mood(keys, signed, now, prune_before=prune_before)
-                recommend.graduate_moods(store, keys, signed, now, source=rec_params.get_param(store, "source_w_vibe"))
+                store.rec_surface.record_mood(keys, signed, now, prune_before=prune_before)
+                graduation.graduate_moods(store, keys, signed, now, source=rec_params.get_param(store, "source_w_vibe"))
             return HTMLResponse("")
         try:                                          # whole-mix simple buttons
             pid = int(form.get("pid"))
         except (TypeError, ValueError):
             return HTMLResponse("", status_code=422)
-        keys = store.get_playlist_track_keys(pid)
+        keys = store.playlists.get_playlist_track_keys(pid)
         if keys:
             now = now_fn()
             halflife_d = rec_params.get_param(store, "mood_halflife_d")
             prune_before = now - 4 * halflife_d * 86400
-            store.record_mood(keys, signed, now, prune_before=prune_before)
-            recommend.graduate_moods(store, list(keys), signed, now, source=rec_params.get_param(store, "source_w_vibe"))
+            store.rec_surface.record_mood(keys, signed, now, prune_before=prune_before)
+            graduation.graduate_moods(store, list(keys), signed, now, source=rec_params.get_param(store, "source_w_vibe"))
         return HTMLResponse("")                        # no swap: the panel stays put (Advanced reachable)
 
     @router.post("/recs/journey")
-    async def recs_journey(request: Request):
+    def recs_journey(request: Request, form=Depends(request_form)):
         """Permanent feedback on a generated mix's JOURNEY (its ordering shape). 👍/👎 nudges that
         journey's weight via the same graduation ledger as genres/eras, so preferred flows roll more
         often. Reads the journey from the playlist's stored recipe."""
-        form = await request.form()
         try:
             pid = int(form.get("pid"))
             direction = int(form.get("dir", 1))
         except (TypeError, ValueError):
             return HTMLResponse("", status_code=422)
-        pl = store.get_playlist(pid)
-        recipe = store.get_recipe(pl.ytm_playlist_id) if pl else None
+        pl = store.playlists.get_playlist(pid)
+        recipe = store.rec_surface.get_recipe(pl.scope_ref) if pl else None
         journey = (recipe or {}).get("journey")
         if journey:
-            recommend.graduate_facet(store, f"journey:{journey}", 1 if direction >= 0 else -1, now_fn())
+            graduation.graduate_facet(store, f"journey:{journey}", 1 if direction >= 0 else -1, now_fn())
         return HTMLResponse("")
 
     return router

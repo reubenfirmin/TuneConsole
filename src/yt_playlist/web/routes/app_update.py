@@ -60,9 +60,15 @@ def build(ctx):
             if host not in ("127.0.0.1", "localhost") or not 0 < port < 65536:
                 raise ValueError("Restart needs the local app address.")
             result = await updater.restart(host, port)
+            if result.get("phase") != "restarting":
+                for held in acquired:
+                    held.release()
+                ctx.work.open()
+                return response(result)
         except Exception:
             for held in acquired:
                 held.release()
+            ctx.work.open()
             ctx.logger.warning("could not launch updated TuneConsole", exc_info=True)
             return response({**updater.snapshot(),
                              "message": "Couldn't restart TuneConsole. Please try again."}, 503)

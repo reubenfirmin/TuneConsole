@@ -29,21 +29,29 @@ def _seed_bundles(store):
     for surf in ms.CARD_SURFACES:
         payload["1"][surf] = items(f"{surf}h", "house")
         payload["2"][surf] = items(f"{surf}t", "techno")
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
 
 
 def _client(store, now=1000.0):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                       base_url="http://127.0.0.1")
 
 
 def test_cards_render_logs_impressions(store):
-    _seed_bundles(store)
-    r = _client(store).get("/home/cards")
+    from tests.rec.test_home_prepared import seed
+    from yt_playlist.rec import home_prepared
+
+    seed(store)
+    assert home_prepared.prepare(store, 1000) is not None
+    client = _client(store)
+    r = client.get("/home/cards")
     assert r.status_code == 200
-    assert sum(store.modes.impression_counts().values()) >= 1
+    impressions = store.modes.impression_counts()
+    assert sum(impressions.values()) >= 1
     assert "mode_id" in r.text       # the recipe carrying mode_id is embedded for Save & play
+    assert client.get("/home/cards").status_code == 200
+    assert store.modes.impression_counts() == impressions
 
 
 def test_generate_logs_pick(store):

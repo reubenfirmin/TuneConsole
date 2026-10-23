@@ -1,17 +1,16 @@
 """Album landing page: cover, track table, save/open, "create a playlist from this album", and
 (for saved albums folded into the library) genre/year enrichment with the same live flow as playlists."""
-import asyncio
 import re
-import threading
+from yt_playlist.core.activity import activity_for
+from yt_playlist.core.accounts import catalog_client,main_client
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from yt_playlist.library.album_fetch import fetch_album, is_upload_album
+from yt_playlist.library.album_fetch import fetch_album, is_upload_album, shareable_album_tracks
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.providers import enrichment, lastfm, waterfall
-from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.thumbnails import best_thumb, is_placeholder_art
 
@@ -53,7 +52,8 @@ def build(ctx) -> APIRouter:
         browse_id = (request.query_params.get("browse") or "").strip()
         album = None
         try:
-            client = next(iter((ctx.client_provider() or {}).values()), None)
+            clients = ctx.client_provider()
+            client = main_client(store,clients) if is_upload_album(browse_id) else catalog_client(clients)
             if client and browse_id:
                 a = fetch_album(client, browse_id)
                 remember_album(store, browse_id, a)
@@ -68,7 +68,7 @@ def build(ctx) -> APIRouter:
                 }
         except Exception:  # noqa: BLE001 - no client / network / parse all degrade gracefully
             ctx.logger.info("album fetch failed for %r (non-fatal)", browse_id, exc_info=True)
-        saved = browse_id in RecDao(store).saved_album_ids()
+        saved = browse_id in store.collection.saved_album_ids()
         upload = is_upload_album(browse_id)
         # An album is "in your library" when you saved it, or when it IS your library: an upload
         # (privately owned release) is yours by definition, and can never appear in saved_albums
@@ -77,8 +77,10 @@ def build(ctx) -> APIRouter:
         # The editable "folded-in library" table is only for library albums (whose full track list has
         # been materialized for enrichment). For any other album, regular sync may still have stamped
         # one incidental track with this album_browse_id (because it's in one of your playlists). That
-        # partial subset must NOT shadow the full live-fetched album, so only read it when in-library.
-        tracks = store.album_tracks_detail(browse_id) if (browse_id and in_library) else []
+        # partial subset must NOT shadow the full live-fetched album. Count it for
+        # the library-status note, but only display it for saved or uploaded albums.
+        library_tracks = store.charts.album_tracks_detail(browse_id) if browse_id else []
+        tracks = library_tracks if in_library else []
         # Fold a library album's tracks in ON DEMAND (using the tracks we just fetched live), so
         # enrichment is available the moment you open it, no waiting for a full sync. Fold whenever
         # the live album has more than we hold: an upload typically arrives as a PARTIAL subset (sync
@@ -87,12 +89,12 @@ def build(ctx) -> APIRouter:
         if in_library and album and album.get("tracks") and len(tracks) < len(album["tracks"]):
             for t in album["tracks"]:
                 if t.get("video_id") and t.get("title"):
-                    store.upsert_track(t["video_id"], t["title"], t.get("artist") or album.get("artist") or "",
+                    store.tracks.upsert_track(t["video_id"], t["title"], t.get("artist") or album.get("artist") or "",
                                        album.get("title") or "", parse_duration(t.get("duration")),
                                        album_browse_id=browse_id, thumbnail=album.get("thumbnail"))
-            tracks = store.album_tracks_detail(browse_id)
+            tracks = store.charts.album_tracks_detail(browse_id)
         if tracks and not (album and album.get("title")):   # live fetch missing/empty but it's in our library
-            meta = next((a for a in store.get_saved_albums() if a["browse"] == browse_id), {})
+            meta = next((a for a in store.collection.get_saved_albums() if a["browse"] == browse_id), {})
             album = {"title": meta.get("title") or tracks[0]["album"] or "Album",
                      "artist": meta.get("artist") or tracks[0]["artist"], "year": meta.get("year"),
                      "thumbnail": meta.get("thumbnail") or tracks[0]["thumbnail"], "tracks": tracks}
@@ -100,34 +102,35 @@ def build(ctx) -> APIRouter:
         return templates.TemplateResponse(request, "album.html", {
             "album": album, "browse_id": browse_id, "tracks": tracks, "saved": saved,
             "is_upload": upload, "in_library": in_library,
+            "library_track_count": len({t["track_id"] for t in library_tracks}),
             "cover": cover, "mosaic": mosaic,
-            "genres": sorted(set(store.get_genre_whitelist()) | set(store.all_genres()), key=str.lower),
+            "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()), key=str.lower),
             "lastfm_configured": lastfm.api_key(store) is not None,
-            "conflict_count": store.conflict_count_for_album(browse_id)})
+            "conflict_count": store.enrichment.conflict_count_for_album(browse_id)})
 
     @router.get("/album/{browse}/share.txt")
     def album_share(browse: str):
-        """Download the album as a plain .txt (one song URL per line) for easy sharing. Uses the
-        folded-in library tracks when saved, else the live album fetch (so unsaved albums share too)."""
+        """Download a verified complete, ordered album, including offline cached snapshots."""
         title, vids = None, []
-        # Only trust the library track list for SAVED albums (whose full track list is materialized).
-        # For an unsaved album, album_tracks_detail may hold a single incidental track stamped with
-        # this browse_id by playlist sync. Sharing that would drop the rest of the album, so fetch live.
-        if browse in RecDao(store).saved_album_ids():
-            tracks = store.album_tracks_detail(browse)
-            vids = [t["video_id"] for t in tracks if t.get("video_id")]
-            meta = next((a for a in store.get_saved_albums() if a["browse"] == browse), {})
-            title = meta.get("title") or (tracks[0]["album"] if tracks else None)
+        cached = store.collection.cached_album_share(browse)
+        if cached:
+            title, vids = cached["title"], cached["video_ids"]
         if not vids:
+            problem = "The full album could not be fetched. Reconnect to YouTube Music and try sharing again."
             try:
-                client = next(iter((ctx.client_provider() or {}).values()), None)
+                clients = ctx.client_provider()
+                client = main_client(store,clients) if is_upload_album(browse) else catalog_client(clients)
                 a = fetch_album(client, browse) if client else {}
-                title = title or a.get("title")
-                vids = [t.get("videoId") for t in (a.get("tracks") or []) if t.get("videoId")]
-            except Exception:  # noqa: BLE001 - no client / network all degrade to a 404
+                tracks = shareable_album_tracks(a)
+                title = a.get("title")
+                vids = [track["videoId"] for track in tracks]
+                remember_album(store, browse, a)
+            except ValueError as exc:
+                problem = str(exc)
+            except Exception:
                 ctx.logger.info("album share fetch failed for %r (non-fatal)", browse)
-        if not vids:
-            raise HTTPException(status_code=404, detail="album not found")
+            if not vids:
+                raise HTTPException(status_code=503, detail=problem)
         lines = [f"https://music.youtube.com/watch?v={v}" for v in vids]
         safe = re.sub(r'[\\/:*?"<>|]', "_", title or "album").strip() or "album"
         ascii_name = safe.encode("ascii", "ignore").decode() or "album"
@@ -136,7 +139,7 @@ def build(ctx) -> APIRouter:
                                    f"filename*=UTF-8''{quote(safe)}.txt"})
 
     def _album_row(request, browse, vid):
-        for i, t in enumerate(store.album_tracks_detail(browse), start=1):
+        for i, t in enumerate(store.charts.album_tracks_detail(browse), start=1):
             if t["video_id"] == vid:
                 return templates.TemplateResponse(request, "_partials/album_track_row.html", {"t": t, "idx": i})
         return Response(status_code=204)
@@ -147,10 +150,11 @@ def build(ctx) -> APIRouter:
         vid, genre = (form.get("video_id") or "").strip(), (form.get("genre") or "").strip()
         if not vid:
             return _toast(request, "no track given")
-        tid = store.track_ids_for_videos([vid]).get(vid)
+        tid = store.tracks.track_ids_for_videos([vid]).get(vid)
         if tid is None:
             return _toast(request, "track not found")
-        store.set_track_genre(tid, genre)
+        store.tracks.set_track_genre(tid, genre)
+        ctx.rec_worker.trigger_content_update(video_ids=[vid])
         return _album_row(request, browse, vid)
 
     @router.post("/album/{browse}/track-year")
@@ -159,10 +163,11 @@ def build(ctx) -> APIRouter:
         vid, year = (form.get("video_id") or "").strip(), (form.get("year") or "").strip()
         if not vid:
             return _toast(request, "no track given")
-        tid = store.track_ids_for_videos([vid]).get(vid)
+        tid = store.tracks.track_ids_for_videos([vid]).get(vid)
         if tid is None:
             return _toast(request, "track not found")
-        store.set_track_year(tid, year)
+        store.tracks.set_track_year(tid, year)
+        ctx.rec_worker.trigger_content_update(video_ids=[vid])
         return _album_row(request, browse, vid)
 
     @router.post("/album/create-playlist")
@@ -173,7 +178,7 @@ def build(ctx) -> APIRouter:
         if not browse_id:
             return _toast(request, "No album to create from.")
         try:
-            res = await asyncio.to_thread(ctx.ops().create_playlist_from_album, browse_id, name)
+            res = await activity_for(ctx).to_thread(ctx.ops().create_playlist_from_album, browse_id, name)
         except ValueError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
@@ -188,7 +193,7 @@ def build(ctx) -> APIRouter:
         job = ctx.jobs.create()
         job.album_browse = browse
         job.source = "waterfall"
-        pending = store.album_tracks_for_waterfall(browse)
+        pending = store.tracks.album_tracks_for_waterfall(browse)
 
         def run():
             try:
@@ -201,15 +206,15 @@ def build(ctx) -> APIRouter:
             finally:
                 job.done = True
 
-        threading.Thread(target=run, daemon=True).start()
+        activity_for(ctx).start_thread(run)
         return JSONResponse({"job_id": job.id})
 
     @router.get("/album/{browse}/conflicts")
     def album_conflicts(request: Request, browse: str):
         return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
-            "conflicts": store.unresolved_conflicts_for_album(browse),
+            "conflicts": store.enrichment.unresolved_conflicts_for_album(browse),
             "resolve_url": f"/album/{browse}/conflicts/resolve",
-            "count_left": store.conflict_count_for_album(browse)})
+            "count_left": store.enrichment.conflict_count_for_album(browse)})
 
     @router.post("/album/{browse}/conflicts/resolve")
     async def album_resolve_conflicts(request: Request, browse: str):
@@ -220,12 +225,12 @@ def build(ctx) -> APIRouter:
             tid, _, field = key.partition(":")
             if tid.isdigit():
                 try:
-                    store.resolve_conflict(int(tid), field, value)
+                    store.enrichment.resolve_conflict(int(tid), field, value)
                 except ValueError:
                     pass
         return templates.TemplateResponse(request, "_partials/conflicts_modal.html", {
-            "conflicts": store.unresolved_conflicts_for_album(browse),
+            "conflicts": store.enrichment.unresolved_conflicts_for_album(browse),
             "resolve_url": f"/album/{browse}/conflicts/resolve",
-            "count_left": store.conflict_count_for_album(browse)})
+            "count_left": store.enrichment.conflict_count_for_album(browse)})
 
     return router

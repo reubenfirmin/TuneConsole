@@ -5,7 +5,7 @@ import pytest
 
 from tests.conftest import FakeClient, _track
 from yt_playlist.core.store import Store
-from yt_playlist.library import executor, sync
+from yt_playlist.library import executor, playlist_positions, sync
 
 
 class LaggingClient(FakeClient):
@@ -22,7 +22,7 @@ class LaggingClient(FakeClient):
 
     def add_playlist_items(self, playlistId, videoIds):
         result = super().add_playlist_items(playlistId, videoIds)
-        return result if self.return_handles else None
+        return result if self.return_handles else "STATUS_SUCCEEDED"
 
     def edit_playlist(self, playlistId, **kw):
         if self.fail_moves:
@@ -31,13 +31,13 @@ class LaggingClient(FakeClient):
 
 
 def seed(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     tracks = [_track(vid, title, "Artist", set_video_id="set_" + vid)
               for vid, title in (("anchor", "Original"), ("next", "Next"),
                                  ("alt1", "Alternate one"), ("alt2", "Alternate two"))]
-    tids = [store.upsert_track(t["videoId"], t["title"], "Artist", "Alb", 200) for t in tracks[:2]]
-    pid = store.upsert_playlist(iid, "PL", "Mix", 2, "hash", 1)
-    store.set_playlist_tracks(pid, tids)
+    tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", "Alb", 200) for t in tracks[:2]]
+    pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 2, "hash", 1)
+    store.playlists.set_playlist_tracks(pid, tids)
     client = LaggingClient(playlists=[{"playlistId": "PL", "title": "Mix"}],
                            tracks={"PL": tracks[:2]}, catalog={t["videoId"]: t for t in tracks})
     chosen = [{"videoId": t["videoId"], "title": t["title"], "artist": "Artist", "duration": 200}
@@ -46,7 +46,7 @@ def seed(store):
 
 
 def local(store, pid):
-    return [t["video_id"] for t in store.playlist_tracks_detail(pid)]
+    return [t["video_id"] for t in store.charts.playlist_tracks_detail(pid)]
 
 
 def remote(client):
@@ -61,7 +61,7 @@ def test_add_positions_multiple_alternates_despite_lag(store, return_handles):
     result = executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
     assert result["position_pending"] == 0
     assert local(store, pid) == remote(client) == ["anchor", "alt1", "alt2", "next"]
-    assert store.get_actions()[0].status == "executed"
+    assert store.actions.get_actions()[0].status == "executed"
     assert client.added == [("PL", ["alt1", "alt2"])]
 
 
@@ -76,7 +76,7 @@ def test_pending_move_survives_restart_and_sync_without_adding_again(tmp_path):
     assert result["position_pending"] == 1
     assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]
     assert remote(client) == ["anchor", "next", "alt1", "alt2"]
-    action = store.get_actions()[0]
+    action = store.actions.get_actions()[0]
     assert action.status == "pending"
     assert json.loads(action.plan_json)["after_video_id"] == "anchor"
     store.conn.close()
@@ -86,11 +86,11 @@ def test_pending_move_survives_restart_and_sync_without_adding_again(tmp_path):
     # A sync during the lag must preserve the requested tracks and their pending move.
     sync.sync_identity(store, iid, client, 101)
     assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]
-    assert store.get_action(action.id).status == "pending"
+    assert store.actions.get_action(action.id).status == "pending"
     client.hidden_reads = 0
     sync.sync_identity(store, iid, client, 102)
     assert local(store, pid) == remote(client) == ["anchor", "alt1", "alt2", "next"]
-    assert store.get_action(action.id).status == "executed"
+    assert store.actions.get_action(action.id).status == "executed"
     sync.refresh_playlist(store, iid, client, "PL", "Mix", 103)
     assert local(store, pid) == remote(client)
     assert client.added == [("PL", ["alt1", "alt2"])]
@@ -102,11 +102,43 @@ def test_failed_move_remains_pending_until_targeted_refresh(store):
     client.fail_moves = True
     result = executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
     assert result["position_pending"] == 1
-    assert store.get_actions()[0].status == "pending"
+    assert store.actions.get_actions()[0].status == "pending"
     client.fail_moves = False
     sync.refresh_playlist(store, iid, client, "PL", "Mix", 101)
     assert local(store, pid) == remote(client) == ["anchor", "alt1", "alt2", "next"]
-    assert store.get_actions()[0].status == "executed"
+    assert store.actions.get_actions()[0].status == "executed"
+    assert client.added == [("PL", ["alt1", "alt2"])]
+
+
+@pytest.mark.parametrize("partial", [
+    {"continuation": "next"}, {"continuations": ["next"]}, {"trackCount": 4},
+])
+def test_partial_read_cannot_complete_pending_move_or_replace_its_cached_order(store, monkeypatch, partial):
+    iid, pid, client, chosen = seed(store)
+    client.fail_moves = True
+    assert executor.add_tracks_to_playlist(store, pid, chosen, client, 100,
+                                           after_video_id="anchor")["position_pending"] == 1
+    action, = store.actions.get_actions()
+    client.fail_moves = False
+    read = client.get_playlist
+    # Seeing only the anchor used to look like an already-correct append at the
+    # end, clearing the pending action without ever moving the remote songs.
+    monkeypatch.setattr(client, "get_playlist", lambda *a, **kw: {
+        "tracks": [client._tracks["PL"][0]], **partial})
+    assert playlist_positions.retry_insertions(store, pid, client, 101, attempts=1) == 1
+    assert store.actions.get_action(action.id).status == "pending"
+    assert client.edited == []
+    before = store.playlists.get_playlist(pid)
+    result = sync.sync_identity(store, iid, client, 102)
+    assert result["resources"]["playlists"]["status"] == "partial"
+    assert store.playlists.get_playlist(pid) == before
+    assert store.actions.get_action(action.id).status == "pending"
+    assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]
+    assert remote(client) == ["anchor", "next", "alt1", "alt2"]
+    monkeypatch.setattr(client, "get_playlist", read)
+    sync.sync_identity(store, iid, client, 103)
+    assert store.actions.get_action(action.id).status == "executed"
+    assert local(store, pid) == remote(client) == ["anchor", "alt1", "alt2", "next"]
     assert client.added == [("PL", ["alt1", "alt2"])]
 
 
@@ -116,7 +148,7 @@ def test_missing_successor_handle_does_not_move_alternates_to_end(store):
     result = executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
     assert result["position_pending"] == 1
     assert client.edited == []
-    assert store.get_actions()[0].status == "pending"
+    assert store.actions.get_actions()[0].status == "pending"
 
 
 def test_last_track_anchor_needs_no_move(store):
@@ -132,7 +164,7 @@ def test_later_explicit_edit_cancels_pending_placement(store, edit):
     iid, pid, client, chosen = seed(store)
     client.fail_moves = True
     executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
-    action = store.get_actions()[0]
+    action = store.actions.get_actions()[0]
     assert action.status == "pending"
     client.fail_moves = False
     if edit == "remove":
@@ -143,4 +175,4 @@ def test_later_explicit_edit_cancels_pending_placement(store, edit):
         expected = ["alt1", "anchor", "next", "alt2"]
     sync.refresh_playlist(store, iid, client, "PL", "Mix", 102)
     assert local(store, pid) == remote(client) == expected
-    assert store.get_action(action.id).status == "cancelled"
+    assert store.actions.get_action(action.id).status == "cancelled"

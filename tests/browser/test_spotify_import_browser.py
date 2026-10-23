@@ -12,17 +12,23 @@ import uvicorn
 from playwright.sync_api import expect
 
 from tests.conftest import FakeClient, _track
+from yt_playlist.rec import mode_surfaces, rec_params
 from yt_playlist.web.app import create_app
 
 pytestmark = pytest.mark.browser
 
 
 @pytest.fixture
-def spotify_app(store):
-    first = store.upsert_identity("First account", "first", None, True)
-    second = store.upsert_identity("Destination account", "second", None, False)
+def spotify_app(store, request):
+    first = store.identities.upsert_identity("First account", "first", None, True)
+    second = store.identities.upsert_identity("Destination account", "second", None, False)
     first_client = FakeClient(search_results=[_track("first-song", "Song", "Artist")])
     second_client = FakeClient(search_results=[_track("chosen-song", "Song", "Artist")])
+    if getattr(request, "param", None) == "albums":
+        from tests.test_spotify_album_import import AlbumClient
+        second_client = AlbumClient()
+        second_client.results["One Artist"].append({
+            **second_client.results["One Artist"][0], "browseId": "MPRE-alternate"})
     app = create_app(store, lambda: {first: first_client, second: second_client}, now_fn=lambda: 1000)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -36,7 +42,8 @@ def spotify_app(store):
         time.sleep(.02)
     try:
         yield SimpleNamespace(base=f"http://127.0.0.1:{port}", store=store,
-                              first=first_client, second=second_client, destination=second)
+                              first=first_client, second=second_client, destination=second,
+                              worker=app.state.ctx.rec_worker)
     finally:
         server.should_exit = True
         thread.join(timeout=5)
@@ -71,4 +78,94 @@ def test_zip_import_waits_for_confirmation_and_uses_selected_destination(spotify
     expect(page.get_by_text("Spotify import complete.", exact=True)).to_be_visible(timeout=15000)
     assert spotify_app.first.created == []
     assert spotify_app.second.added == [(spotify_app.second.created[0][0], ["chosen-song"])]
-    assert spotify_app.store.get_playlists()[0].identity_id == spotify_app.destination
+    assert spotify_app.store.playlists.get_playlists()[0].identity_id == spotify_app.destination
+
+
+@pytest.mark.parametrize("spotify_app", ["albums"], indirect=True)
+def test_album_only_preview_choice_save_and_explicit_playlist(spotify_app, page):
+    from tests.test_spotify_album_import import album_zip
+
+    page.goto(f"{spotify_app.base}/setup?tab=import")
+    page.locator('input[type="file"][accept=".zip,application/zip"]').set_input_files({
+        "name": "albums.zip", "mimeType": "application/zip", "buffer": album_zip("One", "Two")})
+    page.get_by_role("button", name="Choose playlists and destination").click()
+    expect(page.get_by_role("heading", name="Choose what to import")).to_be_visible()
+    page.get_by_label("YouTube Music destination").select_option(str(spotify_app.destination))
+    page.get_by_label("Import 2 saved albums").check()
+    page.get_by_role("button", name="Prepare preview").click()
+    page.wait_for_function("""() => location.pathname.includes('/preview/') ||
+        !!document.querySelector('a[href*="/import/spotify-library/preview/"]')""")
+    if "/preview/" not in page.url:
+        page.get_by_role("link", name="Review matches and confirm").click()
+    expect(page.get_by_role("heading", name="Saved albums", exact=True)).to_be_visible()
+    expect(page.get_by_label("YouTube Music release for One", exact=True)).to_have_value("")
+    expect(page.get_by_text("Several releases match", exact=False)).to_be_visible()
+    assert not spotify_app.second.album_ratings and not spotify_app.second.created
+    page.get_by_label("YouTube Music release for One", exact=True).select_option("MPRE-One")
+    page.get_by_label("Import action for Two", exact=True).select_option("playlist")
+    page.get_by_role("button", name="Confirm import to Destination account").click()
+    expect(page.get_by_text("Spotify import complete.", exact=True)).to_be_visible(timeout=15000)
+    assert spotify_app.second.album_ratings == [("OLAK-One", "LIKE")]
+    assert spotify_app.second.added == [(spotify_app.second.created[0][0], ["yt-Two"])]
+    assert spotify_app.first.created == []
+    assert [a['browse'] for a in spotify_app.store.collection.get_saved_albums(
+        identity_id=spotify_app.destination)] == ['MPRE-One']
+    page.get_by_role("link", name="View report", exact=True).click()
+    expect(page.get_by_role("button", name="Delete this report")).to_be_visible()
+    page.get_by_role("button", name="Delete this report").click()
+    expect(page.get_by_role("heading", name="Set up TuneConsole", exact=True)).to_be_visible()
+    assert spotify_app.store.settings.get_setting('spotify_library_import_job') is None
+
+
+def test_history_upload_health_learning_and_removal(spotify_app, page):
+    store = spotify_app.store
+    tid = store.tracks.upsert_track('history-song', 'Song', 'Artist', None, 180)
+    store.tracks.set_track_genre(tid, 'Techno')
+    key = store.tracks.identity_key_for_video('history-song')
+    iid = store.identities.get_identities()[0].id
+    store.history.import_listening_events(iid, [(key, None, 1000)], source='takeout')
+    rec_params.set_param(store, 'source_w_play', 1.0)
+    rec_params.set_param(store, 'theme_threshold', 0.2)
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, 'w') as archive:
+        archive.writestr('Streaming_History_Audio_1970.json', json.dumps([{
+            'ts': '1970-01-01T00:16:40Z', 'master_metadata_track_name': 'Song',
+            'master_metadata_album_artist_name': 'Artist', 'spotify_track_uri': 'spotify:track:one',
+            'ms_played': 180000}]))
+
+    page.goto(f'{spotify_app.base}/setup?tab=import')
+    form = page.locator('form[hx-post="/import/spotify/v2"]')
+    form.locator('input[type="file"]').set_input_files({
+        'name': 'spotify-history.zip', 'mimeType': 'application/zip', 'buffer': payload.getvalue()})
+    form.get_by_role('button', name='Import Spotify history', exact=True).click()
+    expect(page.get_by_text('Spotify import complete.', exact=True)).to_be_visible()
+    expect(page.get_by_role('button', name='Remove Spotify history', exact=True)).to_be_visible()
+    assert store.history.spotify_history_stats()['events'] == 1
+    assert len(store.history.play_events_since(0)) == 1
+
+    page.goto(f'{spotify_app.base}/')
+    assert store.rec_model.get_weights(now=1000) == {}
+    # The worker prepares candidates before Home and applies imported listening evidence.
+    assert mode_surfaces.prepare_bundles(store, 1000) is not None
+    spotify_app.worker.enabled = True
+    spotify_app.worker.debounce_s = 0
+    spotify_app.worker.trigger_home_refresh(force=True)
+    spotify_app.worker.join(5)
+    weights = store.rec_model.get_weights(now=1000)
+    assert weights and all(weight > 1.0 for weight in weights.values())
+    page.goto(f'{spotify_app.base}/taste#health')
+    health = page.locator('#taste-health-panel')
+    expect(health.get_by_role('heading', name='Spotify listening history')).to_be_visible()
+    expect(health.get_by_text('1 timestamped plays across 1 library tracks;', exact=False)).to_be_visible()
+    expect(health.get_by_text('gradually update saved taste preferences.', exact=False)).to_be_visible()
+    health.get_by_role('link', name='Manage or remove Spotify history').click()
+    expect(page.get_by_role('button', name='Remove Spotify history', exact=True)).to_be_visible()
+    page.reload()
+    page.get_by_role('button', name='Remove Spotify history', exact=True).click()
+    expect(page.get_by_text('Spotify history removed.', exact=True)).to_be_visible()
+    expect(page.get_by_text('Saved taste preferences were kept.', exact=True)).to_be_visible()
+    assert store.history.spotify_history_stats()['events'] == 0
+    assert len(store.history.play_events_since(0)) == 1
+    assert store.history.recent_plays_with_ts() == [(key, 1000.0)]
+    page.reload()
+    expect(page.get_by_role('button', name='Remove Spotify history', exact=True)).to_have_count(0)

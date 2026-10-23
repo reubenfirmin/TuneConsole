@@ -31,7 +31,10 @@ class AlbumClient(FakeClient):
 
     def get_album(self, browse_id):
         return {"audioPlaylistId": "PLAUDIO", "title": "The Album", "type": "Album",
-                "artists": [{"name": "Artist X"}], "year": "2001", "thumbnails": []}
+                "artists": [{"name": "Artist X"}], "year": "2001", "thumbnails": [],
+                "tracks": [{"videoId": "v1", "title": "SongA", "duration": "3:20",
+                            "artists": [{"name": "Artist X"}]},
+                           {"videoId": "v2", "title": "SongB", "duration": "3:00"}]}
 
     def rate_playlist(self, playlist_id, rating):
         self.rated.append((playlist_id, rating))
@@ -49,20 +52,22 @@ def _free_port():
 def live_artist_app():
     s = Store(":memory:")
     s.init_schema()
-    iid = s.upsert_identity("Main", "cred", None, True)
-    pid = s.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
+    iid = s.identities.upsert_identity("Main", "cred", None, True)
+    other = s.identities.upsert_identity("Other", "cred", "other", False)
+    pid = s.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     # a track with an album browse id -> the collection table renders a Save button for that album
-    t = s.upsert_track("v1", "SongA", "Artist X", "The Album", 200, 1, album_browse_id="MPREb_x")
-    s.set_playlist_tracks(pid, [t])
+    t = s.tracks.upsert_track("v1", "SongA", "Artist X", "The Album", 200, 1, album_browse_id="MPREb_x")
+    s.playlists.set_playlist_tracks(pid, [t])
     client = AlbumClient()
-    app = create_app(s, lambda: {iid: client}, now_fn=lambda: 1.0)
+    clients = {iid: client, other: AlbumClient()}
+    app = create_app(s, lambda: clients, now_fn=lambda: 1.0, background_work=False)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     while not server.started:
         time.sleep(0.02)
-    yield {"base": f"http://127.0.0.1:{port}", "store": s}
+    yield {"base": f"http://127.0.0.1:{port}", "store": s, "iid": iid, "other": other, "clients": clients}
     server.should_exit = True
     thread.join(timeout=5)
 
@@ -75,13 +80,85 @@ def test_save_album_flips_to_unsave_after_reload(live_artist_app, page):
     expect(page.get_by_role("button", name="Unsave", exact=True)).to_be_visible()   # now saved
 
 
+@pytest.mark.parametrize('width', [1440, 390])
+def test_album_status_track_links_and_save_from_artist(live_artist_app, page, width):
+    base = live_artist_app['base']
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(f'{base}/album?browse=MPREb_x')
+    save = page.get_by_role('button', name='Save Album to Library', exact=True)
+    expect(save).to_be_visible()
+    expect(save).to_be_in_viewport(ratio=1)
+    expect(page.get_by_text('1 of 2 tracks in your library. The album is not saved.', exact=True)).to_be_visible()
+    rows = page.locator('.track-table tbody tr.srow')
+    expect(rows).to_have_count(2)
+    expect(rows.locator('a.ptitle')).to_have_count(0)
+    expect(rows.locator('.ui-arrow--external')).to_have_count(0)
+    expect(rows.locator('a.pl-play')).to_have_count(2)
+    expect(rows.locator('a.alink')).to_have_count(2)
+    expect(rows.locator('a.alink').last).to_have_attribute('href', '/artist?name=Artist%20X')
+    page.screenshot(path=f'/tmp/tuneconsole-album-preview-{width}.png')
+    rows.locator('a.alink').first.click()
+    expect(page.get_by_role('heading', name='Artist X', exact=True)).to_be_visible()
+    albums = page.locator('table:has(colgroup.artist-album-columns) tbody > tr')
+    expect(albums).to_have_count(1)
+    expect(albums.get_by_role('link', name='The Album', exact=True)).to_have_attribute('href', '/album?browse=MPREb_x')
+    expect(page.locator('a.ptitle[href*="watch?v="]')).to_have_count(0)
+    page.get_by_role('button', name='Save', exact=True).click()
+    expect(page.get_by_role('button', name='Unsave', exact=True)).to_be_visible()
+    page.goto(f'{base}/album?browse=MPREb_x')
+    expect(page.get_by_role('button', name='Save Album to Library', exact=True)).to_have_count(0)
+    expect(page.get_by_text('✓ In your library', exact=True)).to_be_visible()
+    expect(page.locator('.track-table tbody tr.srow')).to_have_count(2)
+    expect(page.locator('.track-table a.ptitle')).to_have_count(0)
+    expect(page.locator('.track-table a.alink')).to_have_count(2)
+
+
 def test_unsave_album_flips_to_save_after_reload(live_artist_app, page):
     # start from a saved album so the button reads "Unsave"
-    live_artist_app["store"].add_saved_album({
+    live_artist_app["store"].collection.add_saved_album({
         "browse": "MPREb_x", "title": "The Album", "artist": "Artist X",
-        "year": "2001", "thumbnail": ""})
+        "year": "2001", "thumbnail": ""}, identity_id=live_artist_app["iid"])
     page.goto(f"{live_artist_app['base']}/artist?name=Artist%20X")
     unsave = page.get_by_role("button", name="Unsave", exact=True)
     expect(unsave).to_be_visible()
     unsave.click()
     expect(page.get_by_role("button", name="Save", exact=True)).to_be_visible()      # now unsaved
+
+
+def test_non_main_album_owner_is_removed_from_collection(live_artist_app, page):
+    app = live_artist_app
+    app['store'].collection.add_saved_album({
+        'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}, identity_id=app['other'])
+    page.goto(f"{app['base']}/albums")
+    expect(page.get_by_role('button', name='Unsave', exact=True)).to_be_visible()
+    expect(page.get_by_text('Other', exact=True)).to_be_visible()
+    page.get_by_role('button', name='Unsave', exact=True).click()
+    expect(page.get_by_text('No saved albums found in your YouTube library.')).to_be_visible()
+    assert app['clients'][app['iid']].rated == []
+    assert app['clients'][app['other']].rated == [('PLAUDIO', 'INDIFFERENT')]
+
+
+def test_multiple_owners_offer_explicit_account_actions(live_artist_app, page):
+    app = live_artist_app
+    for owner in (app['iid'], app['other']):
+        app['store'].collection.add_saved_album({
+            'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}, identity_id=owner)
+    page.goto(f"{app['base']}/artist?name=Artist%20X")
+    expect(page.get_by_role('button', name='Unsave from Main', exact=True)).to_be_visible()
+    page.get_by_role('button', name='Unsave from Other', exact=True).click()
+    expect(page.get_by_role('button', name='Unsave', exact=True)).to_be_visible()
+    assert app['store'].collection.get_saved_albums(identity_id=app['other']) == []
+    assert app['store'].collection.get_saved_albums(identity_id=app['iid'])
+    assert app['clients'][app['iid']].rated == []
+
+
+def test_unavailable_album_owner_shows_error_and_retains_membership(live_artist_app, page):
+    app = live_artist_app
+    app['store'].collection.add_saved_album({
+        'browse': 'MPREb_x', 'title': 'The Album', 'artist': 'Artist X'}, identity_id=app['other'])
+    app['clients'].pop(app['other'])
+    page.goto(f"{app['base']}/albums")
+    page.get_by_role('button', name='Unsave', exact=True).click()
+    expect(page.get_by_text('The required account is not connected')).to_be_visible()
+    assert app['store'].collection.get_saved_albums(identity_id=app['other'])
+    assert app['clients'][app['iid']].rated == []

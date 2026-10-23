@@ -10,7 +10,7 @@ from yt_playlist.util import genre_map
 def store():
     s = Store(":memory:")
     s.init_schema()
-    s.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history_snapshots FK
+    s.identities.upsert_identity("me", "c", None, True)   # identity id=1, referenced by history_snapshots FK
     return s
 
 
@@ -21,14 +21,8 @@ def toy_genres(monkeypatch):
 
 
 def _snap(store, day, keys):
-    """One history snapshot at taken_at = day*86400 containing `keys`. Returns snapshot id."""
-    cur = store.conn.execute("INSERT INTO history_snapshots(identity_id, taken_at) VALUES (1, ?)",
-                             (day * 86400.0,))
-    sid = cur.lastrowid
-    for k in keys:
-        store.conn.execute("INSERT INTO history_items(snapshot_id, identity_key) VALUES (?, ?)", (sid, k))
-    store.conn.commit()
-    return sid
+    """Record independent observations on an explicit UTC calendar date."""
+    store.history.record_history_plays(1, day * 86400.0, keys, source_timezone="UTC")
 
 
 @pytest.mark.parametrize("now, expected", [
@@ -47,12 +41,12 @@ def test_build_drops_stale_recap_when_previous_month_has_no_data(store):
     for month in (7, 10):
         day = int(datetime(2026, month, 10, tzinfo=timezone.utc).timestamp() // 86400)
         _snap(store, day, ["k1"])
-    store.put_proposals("trend_rollups", {"story": {"month": "2026-07"}})
+    store.rec_surface.put_proposals("trend_rollups", {"story": {"month": "2026-07"}})
     now = datetime(2026, 10, 19, tzinfo=timezone.utc).timestamp()
     payload = tr.build(store, now)
     assert payload["review"] is None
     assert payload["story"] is None
-    assert store.get_proposals("trend_rollups")["story"] is None
+    assert store.rec_surface.get_proposals("trend_rollups")["story"] is None
 
 
 def test_build_recaps_september_in_october(store):
@@ -77,7 +71,7 @@ def test_build_materializes_payload(store):
     _snap(store, 5, ["k1"])
     payload = tr.build(store, now=6 * 86400.0)
     # persisted under the rec_proposals surface and readable back
-    assert store.get_proposals("trend_rollups")["weeks"][0]["plays"] == 2
+    assert store.rec_surface.get_proposals("trend_rollups")["weeks"][0]["plays"] == 2
     assert payload["first_play_floor_day"] == 2
     assert payload["health"]["total_tracks"] == 1
 
@@ -140,36 +134,27 @@ def test_spotlight_month_rollover_fires_once(store, monkeypatch):
     assert review["faller"] == {"artist": "A1", "delta": -3}
     # M1: since the review candidate is the one that actually won the spotlight cascade here (no
     # insights fired), build() itself must have stamped the review month as consumed -- no manual
-    # store.set_setting needed.
-    assert store.get_setting("trend_spotlight_review_month") == "1970-02"
+    # store.settings.set_setting needed.
+    assert store.settings.get_setting("trend_spotlight_review_month") == "1970-02"
     # Once the review month is recorded, the rollover no longer fires (detector 1 is gated) on a rebuild.
     again = tr.build(store, now)
     assert again["spotlight"] is None or not again["spotlight"]["signature"].startswith("month_review:")
 
 
-def test_takeout_reimport_resets_first_play_watermark(store):
-    """A Takeout re-import can wipe + rebuild history_snapshots, reusing low rowids that would fall
-    behind the stored watermark. build() must detect the takeout_imported_at bump, clear the first-play
-    index, and rescan from watermark 0 -- otherwise the earlier backfilled day would be silently missed
-    because history_track_first(wm) only looks at snapshot ids > wm."""
+def test_reset_and_earlier_backfill_rebuild_first_play(store):
+    """Resetting observations and backfilling an earlier day invalidates derived first play."""
     _track(store, "k1", "A1", "house")
-    _snap(store, 5, ["k1"])                      # snapshot id=1
+    _snap(store, 5, ["k1"])
     tr.build(store, now=6 * 86400.0)
     assert store.trends.first_play_map("track")["k1"] == 5
-    assert store.get_setting("trend_first_play_watermark") == "1"
-
-    # Simulate a full Takeout re-import: wipe history and reinsert with reused (low) rowids.
-    store.conn.execute("DELETE FROM history_items")
-    store.conn.execute("DELETE FROM history_snapshots")
-    store.conn.commit()
-    _snap(store, 2, ["k1"])                       # reused snapshot id=1 (table was emptied)
-    store.set_setting("takeout_imported_at", "12345")
+    store.history.reset_play_history(1)
+    _snap(store, 2, ["k1"])
+    store.settings.set_setting("takeout_imported_at", "12345")
 
     payload = tr.build(store, now=6 * 86400.0)
-    # Without the reset this would incorrectly stay at 5 (id=1 is not > old watermark=1).
     assert store.trends.first_play_map("track")["k1"] == 2
     assert payload["first_play_floor_day"] == 2
-    assert store.get_setting("trend_first_play_takeout_seen") == "12345"
+    assert store.settings.get_setting("trend_first_play_takeout_seen") == "12345"
 
     # Idempotent: a second build with the same takeout_imported_at does not re-clear / regress.
     payload2 = tr.build(store, now=6 * 86400.0)
@@ -258,10 +243,10 @@ def test_build_emits_ranked_insights_and_spotlight(store):
       one_song    event_day=119 rec=1-7/42=0.8333  mag=1.3/4=0.325  rarity=0.60 -> score=0.1625
     -> rank order: emergence, song_of_week, one_song. Rank-1 (emergence) becomes the spotlight."""
     _track(store, "k1", "A1", "house")
-    _snap(store, 50, ["k1"])                      # floor_day=50 (k1's first play)
     _track(store, "k2", "B1", "house")
-    _snap(store, 98, ["k2"])                       # week 98: 1 play
-    _snap(store, 119, ["k2"] * 12)                 # week 119: 12 plays, latest full week (119+7<=126)
+    store.history.import_listening_events(1,
+        [('k1','vk1',50*86400+43200),('k2','vk2',98*86400+43200)] +
+        [('k2','vk2',119*86400+43200+i*300) for i in range(12)],source_timezone='UTC')
     payload = tr.build(store, now=126 * 86400.0)
     insights = payload["insights"]
     assert [i["signature"] for i in insights] == ["emergence:B1:119", "song_of_week:119:k2",
@@ -285,7 +270,7 @@ def test_build_emits_ranked_insights_and_spotlight(store):
     # the review month -- it needs to stay available so "Your month in review is ready" can still reach
     # Home on a later build once nothing outranks it.
     assert payload["review"] is not None and payload["review"]["month"] == "1970-04"
-    assert store.get_setting("trend_spotlight_review_month") is None
+    assert store.settings.get_setting("trend_spotlight_review_month") is None
 
 
 def test_bake_art_names_track_in_repetition_and_song_of_week_headline(store):

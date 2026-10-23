@@ -37,12 +37,12 @@ def set_active(names):
 def configure(store):
     """Atomically upgrade the catalog and defaults, then publish the enabled matcher."""
     store.genres.configure_catalog()
-    set_active(store.get_genre_whitelist())
+    set_active(store.genres.get_genre_whitelist())
 
 
 def reset(store):
     store.genres.configure_catalog(reset=True)
-    set_active(store.get_genre_whitelist())
+    set_active(store.genres.get_genre_whitelist())
 
 
 @functools.lru_cache(maxsize=1)
@@ -63,5 +63,10 @@ def match_tag(tag):
 
 
 def pick_genre(tags):
-    """The first recognized genre from tags supplied in provider relevance order."""
-    return next((genre for tag in tags if (genre := match_tag(tag))), None)
+    """Refine the first recognized tag when the provider also supplies a documented subgenre."""
+    selected = None
+    for tag in tags:
+        genre = match_tag(tag)
+        if genre and (selected is None or genre_catalog.is_subgenre(genre, selected)):
+            selected = genre
+    return selected

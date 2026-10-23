@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import _client
-from yt_playlist.rec import embed, fresh_pool, mode_surfaces, road_trip, surfaces
+from yt_playlist.rec import embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
 from yt_playlist.util.matching import identity_key
 
 
@@ -14,7 +14,7 @@ def test_fresh_card_waits_for_metadata_then_renders_discoveries(store):
     for i in range(12):
         title, artist = f"Unenriched {i}", f"Unknown artist {i}"
         key = identity_key(title, artist)
-        store.upsert_discovered_track(key, f"new{i}", title, artist,
+        store.discovery.upsert_discovered_track(key, f"new{i}", title, artist,
                                       None, None, None, None, None, 100)
         keys.append(key)
     mode_surfaces.prepare_bundles(store, 200)
@@ -26,8 +26,12 @@ def test_fresh_card_waits_for_metadata_then_renders_discoveries(store):
         assert "Discover a fresh mix" in waiting.text
 
         for key in keys:
-            store.set_discovered_enrichment(key, "House", None)
+            store.discovery.set_discovered_enrichment(key, "House", None)
         fresh_pool.prepare(store, 250)
+        from yt_playlist.rec import home_prepared
+        payload = home_prepared.prepare(store, 250)
+        assert payload is not None
+        assert all(any(p['lane'] == 'fresh' for p in menu['protos']) for menu in payload['menus'])
         response = client.get("/home/cards")
     assert response.status_code == 200
     assert 'data-title="Unenriched ' in response.text
@@ -49,9 +53,9 @@ def test_populate_searches_each_selected_genre_and_keeps_only_new_matching_songs
         return [dict(video_id=artist, title="New song", artist=artist, genre=""),
                 dict(video_id="owned", title="Owned", artist="Owned artist", genre="House"),
                 dict(video_id="wrong", title="Wrong", artist="Other", genre="Classical")], []
-    store.upsert_track("owned", "Owned", "Owned artist", None, None)
-    monkeypatch.setattr(road_trip, "genre_artists", artists)
-    monkeypatch.setattr(road_trip, "other_input_songs", songs)
+    store.tracks.upsert_track("owned", "Owned", "Owned artist", None, None)
+    monkeypatch.setattr(road_trip_candidates, "genre_artists", artists)
+    monkeypatch.setattr(road_trip_candidates, "other_input_songs", songs)
     encoded = []
     monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: encoded.append(s))
     messages = []
@@ -59,22 +63,22 @@ def test_populate_searches_each_selected_genre_and_keeps_only_new_matching_songs
 
     assert fresh_pool.populate(ctx, genres, on_progress=messages.append) == 3
     assert requested == ["drum & bass", "house", "pop"]
-    rows = store.get_discovered_tracks()
+    rows = store.discovery.get_discovered_tracks()
     assert {r["genre"] for r in rows} == {"house", "drum & bass", "pop"}
     assert all(r["source_browse_id"].startswith("genre:") for r in rows)
     assert encoded == [store] and messages
     # A repeat does not erase metadata already enriched on a discovered song.
-    store.set_discovered_enrichment(rows[0]["identity_key"], rows[0]["genre"], "2020")
+    store.discovery.set_discovered_enrichment(rows[0]["identity_key"], rows[0]["genre"], "2020")
     assert fresh_pool.populate(ctx, genres) == 0
-    assert store.discovered_tracks_by_keys([rows[0]["identity_key"]])[rows[0]["identity_key"]]["year"] == "2020"
-    store.prune_orphan_discovered_tracks()
-    assert len(store.get_discovered_tracks()) == 3
+    assert store.discovery.discovered_tracks_by_keys([rows[0]["identity_key"]])[rows[0]["identity_key"]]["year"] == "2020"
+    store.discovery.prune_orphan_discovered_tracks()
+    assert len(store.discovery.get_discovered_tracks()) == 3
 
 
 def test_populate_respects_genres_to_avoid(store, monkeypatch):
     seed_genres(store)
     requested = []
-    monkeypatch.setattr(road_trip, "genre_artists", lambda s, genre, limit: requested.append(genre) or [])
+    monkeypatch.setattr(road_trip_candidates, "genre_artists", lambda s, genre, limit: requested.append(genre) or [])
     monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: None)
     ctx = SimpleNamespace(store=store, client_provider=lambda: {1: object()}, now_fn=lambda: 1000)
     fresh_pool.populate(ctx, avoid_genres=["jazz", "techno"])
@@ -88,21 +92,21 @@ def test_selected_fresh_mix_balances_all_three_genres_and_requires_missing_famil
     tracks = [surfaces.ForYouItem(f"Song {genre} {i}", f"Artist {genre} {i}", "", f"{genre}{i}",
                                 None, 0, "", key=f"{genre}{i}|artist{i}", genre=genre)
               for genre in ("House", "Drum & Bass", "Pop") for i in range(20)]
-    store.put_proposals("mode_bundles", {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}, 1)
+    store.rec_surface.put_proposals("mode_bundles", {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}, 1)
     chosen = fresh_pool.pick(store, 1000, ["house", "dnb", "pop"])
     assert Counter(genre_map.family(t["genre"]) for t in chosen) == {"house": 4, "dnb": 4, "pop": 4}
     tracks[:] = [t for t in tracks if t.genre == "House"]
-    store.put_proposals("mode_bundles", {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}, 2)
+    store.rec_surface.put_proposals("mode_bundles", {"all": {"fresh": [surfaces._item_to_fresh_dict(t) for t in tracks]}}, 2)
     assert fresh_pool.pick(store, 1000, ["house", "dnb", "pop"]) == []
 
 
 def _without_fresh(store):
     seed_genres(store)
-    bundles = store.get_proposals("mode_bundles")
+    bundles = store.rec_surface.get_proposals("mode_bundles")
     for bucket in bundles.values():
         if isinstance(bucket, dict):
             bucket.pop("fresh", None)
-    store.put_proposals("mode_bundles", bundles, 1)
+    store.rec_surface.put_proposals("mode_bundles", bundles, 1)
 
 
 def _job_id(response):
@@ -130,13 +134,14 @@ def test_genre_selection_leaves_other_requests_responsive(store, monkeypatch):
     from yt_playlist.rec import mode_surfaces
 
     _without_fresh(store)
+    client = _client(store)
     started, release = threading.Event(), threading.Event()
     def assemble(*args, **kwargs):
         started.set()
         release.wait(5)
         return []
     monkeypatch.setattr(mode_surfaces, "assemble_cards", assemble)
-    with _client(store) as client, ThreadPoolExecutor(max_workers=2) as requests:
+    with client, ThreadPoolExecutor(max_workers=2) as requests:
         making = requests.submit(client.post, "/home/mix-genres", data={"genres": ["jazz", "techno"]})
         try:
             assert started.wait(2)
@@ -150,10 +155,10 @@ def test_genre_selection_leaves_other_requests_responsive(store, monkeypatch):
 def test_prepared_fresh_tracks_honor_feedback_and_library_changes(store):
     tracks = [dict(key=identity_key(f"New {i}", f"Artist {i}"), title=f"New {i}", artist=f"Artist {i}",
                    video_id=f"v{i}", genre="House" if i < 12 else "Techno") for i in range(24)]
-    store.put_proposals("fresh_pool", tracks, 1)
-    store.upsert_track("v0", "New 0", "Artist 0", None, None)
-    store.record_feedback("for_you", tracks[1]["key"], "dismiss", now=2)
-    store.set_weight("genre:techno", 0.0, lo=0, now=2)
+    store.rec_surface.put_proposals("fresh_pool", tracks, 1)
+    store.tracks.upsert_track("v0", "New 0", "Artist 0", None, None)
+    store.rec_model.record_feedback("for_you", tracks[1]["key"], "dismiss", now=2)
+    store.rec_model.set_weight("genre:techno", 0.0, lo=0, now=2)
     chosen = fresh_pool.pick(store, 3, ["house"])
     assert len(chosen) == 10
     assert not {tracks[0]["key"], tracks[1]["key"]} & {t["key"] for t in chosen}
@@ -194,6 +199,9 @@ def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(stor
                                         key=identity_key(f"New {i}", f"Artist {i}"),
                                         genre="Jazz" if i % 2 else "Techno")
                       for i in range(12))
+        for track in tracks:
+            store.discovery.upsert_discovered_track(track.key, track.video_id, track.title, track.artist,
+                "", None, track.genre, None, None, 1000)
     finally:
         release.set()
     deadline = time.monotonic() + 3

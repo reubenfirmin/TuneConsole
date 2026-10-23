@@ -1,7 +1,7 @@
 """Why is this Clusters edge here? Grounded co-occurrence facts + an embedding 'bridge' fallback.
 
-`connection_facts` reads the same baskets that fed the taste embedding (shared playlists, album,
-session, same artist, genre family, decade) and turns them into human-readable reasons. When a link
+`connection_reasons` interprets detached playlist, album, listening-day, artist, genre, and year
+evidence and turns it into human-readable reasons. When a link
 is purely second-order (no direct shared basket), `embed.connection_geometry` names the track that
 bridges the two in taste space. The /clusters/explain route stitches them together for the green
 mid-edge dot.
@@ -12,13 +12,14 @@ import numpy as np
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import embed
+from yt_playlist.rec.cluster_explain import connection_reasons
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -28,9 +29,10 @@ def _unit(deg):
     return (math.cos(r), math.sin(r))
 
 
-def _track(store, title, artist, *, album="", genre="", year="", xy=None):
+def _track(store, title, artist, *, album="", album_browse_id=None, genre="", year="", xy=None):
     """Insert a track (optionally genre/year/vector) and return its identity_key."""
-    store.upsert_track(f"v_{title}_{artist}", title, artist, album, 200, thumbnail="t.jpg")
+    store.tracks.upsert_track(f"v_{title}_{artist}", title, artist, album, 200, thumbnail="t.jpg",
+                              album_browse_id=album_browse_id)
     k = identity_key(title, artist)
     if genre or year:
         store.conn.execute("UPDATE tracks SET genre=?, mb_year=? WHERE identity_key=?",
@@ -40,23 +42,23 @@ def _track(store, title, artist, *, album="", genre="", year="", xy=None):
 
 
 def _playlist(store, iid, title, keys, ytm=None):
-    pid = store.upsert_playlist(iid, ytm or ("PL_" + title), title, len(keys), title, 1.0)
+    pid = store.playlists.upsert_playlist(iid, ytm or ("PL_" + title), title, len(keys), title, 1.0)
     tids = [store.conn.execute("SELECT id FROM tracks WHERE identity_key=? LIMIT 1", (k,)).fetchone()["id"]
             for k in keys]
-    store.set_playlist_tracks(pid, tids)
+    store.playlists.set_playlist_tracks(pid, tids)
     return pid
 
 
-# --- connection_facts: grounded co-occurrence reasons -------------------------------------------
+# --- grounded co-occurrence reasons -------------------------------------------------------------
 
 def test_shared_playlist_names_the_co_occurring_artists(store):
-    iid = store.upsert_identity("m", "c", None, True)
+    iid = store.identities.upsert_identity("m", "c", None, True)
     child = _track(store, "Train", "Younger Brother")
     seed = _track(store, "Spektrum", "Ritmo")
     other = _track(store, "Dorset", "Ott")
     _playlist(store, iid, "Psy night", [child, seed, other])
 
-    facts = store.connection_facts(child, [seed])
+    facts = connection_reasons(store.cluster_evidence.connection(child, [seed]))
     assert facts, "a shared playlist should produce a fact"
     top = facts[0]
     assert top["kind"] == "playlist"
@@ -65,18 +67,18 @@ def test_shared_playlist_names_the_co_occurring_artists(store):
 
 
 def test_same_artist_is_reported(store):
-    store.upsert_identity("m", "c", None, True)
+    store.identities.upsert_identity("m", "c", None, True)
     a = _track(store, "Song A", "Bonobo")
     b = _track(store, "Song B", "Bonobo")
-    facts = store.connection_facts(a, [b])
+    facts = connection_reasons(store.cluster_evidence.connection(a, [b]))
     assert any(f["kind"] == "same_artist" and "Bonobo" in f["text"] for f in facts)
 
 
 def test_genre_family_and_decade_facts(store):
-    store.upsert_identity("m", "c", None, True)
+    store.identities.upsert_identity("m", "c", None, True)
     child = _track(store, "C", "AristA", genre="psytrance", year="2003")
     path = _track(store, "P", "Pista", genre="goa trance", year="2007")
-    facts = store.connection_facts(child, [path])
+    facts = connection_reasons(store.cluster_evidence.connection(child, [path]))
     kinds = {f["kind"] for f in facts}
     # only if the family map actually unifies these; decade must match regardless
     assert "decade" in kinds
@@ -84,17 +86,17 @@ def test_genre_family_and_decade_facts(store):
 
 
 def test_no_direct_basket_returns_empty(store):
-    store.upsert_identity("m", "c", None, True)
+    store.identities.upsert_identity("m", "c", None, True)
     a = _track(store, "Lonely A", "Artist X")
     b = _track(store, "Lonely B", "Artist Y")
-    assert store.connection_facts(a, [b]) == []
+    assert connection_reasons(store.cluster_evidence.connection(a, [b])) == []
 
 
 def test_child_excluded_from_its_own_path(store):
-    store.upsert_identity("m", "c", None, True)
+    store.identities.upsert_identity("m", "c", None, True)
     a = _track(store, "Solo", "Solo Artist")
     # path is just the child itself -> nothing to compare against
-    assert store.connection_facts(a, [a]) == []
+    assert connection_reasons(store.cluster_evidence.connection(a, [a])) == []
 
 
 # --- embed.connection_geometry: score + bridge --------------------------------------------------
@@ -105,7 +107,7 @@ def _put(store, vecs):
         v = np.asarray(xy, dtype=np.float32)
         v /= np.linalg.norm(v) + 1e-9
         rows.append((k, v.tobytes()))
-    store.replace_rec_vectors(rows)
+    store.rec_model.replace_rec_vectors(rows)
 
 
 def test_geometry_scores_against_path_centroid(store):

@@ -23,6 +23,18 @@ def pytest_addoption(parser):
         "--test-lock-wait", type=float, default=0, metavar="SECONDS",
         help="Wait up to SECONDS for the shared test lock (default: fail immediately).",
     )
+    parser.addoption(
+        "--run-flatpak-build", action="store_true",
+        help="Build and exercise real packaged Flatpak versions in the focused packaging tests.",
+    )
+    parser.addoption(
+        "--run-live-radio", action="store_true",
+        help="Switch one continuation in the running, signed-in Radio Session and observe playback.",
+    )
+    parser.addoption(
+        "--live-radio-trace", default=None, metavar="PATH",
+        help="Retain the live Radio acceptance trace at PATH instead of pytest's temporary directory.",
+    )
 
 
 def _owner(lock):

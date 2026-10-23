@@ -11,5 +11,23 @@
 </div>
 
 {# Keep the selected accordion section outside the content replaced when the mix updates. #}
-<div id="road-trip-body" x-data="{ activeDrawer: '{{ 'theirs' if draft else 'mix' }}' }">{% include "_partials/road_trip_body.html" %}</div>
+<div class="rt-workspace" data-road-trip-screen x-data="roadTripScreen()"
+     @road-trip-lookup="lookupChanged($event)"
+     @htmx:before-request.camel.window="requestStarted($event)"
+     @htmx:before-swap.camel.window="beforeSwap($event)"
+     @htmx:after-request.camel.window="requestFinished($event)"
+     @htmx:send-error.camel.window="requestFinished($event)"
+     @htmx:timeout.window="requestFinished($event)">
+  <p class="rt-error" role="alert" x-show="error" x-text="error" x-cloak></p>
+  <div :inert="loading" :aria-busy="loading.toString()">
+    <div id="road-trip-body" x-data="{ activeDrawer: '{{ 'theirs' if draft else 'mix' }}' }">{% include "_partials/road_trip_body.html" %}</div>
+  </div>
+  <div class="rt-loading-screen" x-show="loading" x-cloak>
+    <div class="rt-loading-message" role="status" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span>
+      <strong x-text="loadingMessage"></strong>
+      <span>This can take a moment.</span>
+    </div>
+  </div>
+</div>
 {% endblock %}

@@ -14,6 +14,7 @@ Embedding internals (dim, method, item2vec hyperparams, seeds) are deliberately 
 hand-setting them only degrades quality, so they stay managed by Auto-tune.
 """
 from dataclasses import dataclass
+from yt_playlist.core.recommendation_settings import LANES, LANE_NAMES, MAX_TRACK_MINUTES
 
 SETTING_PREFIX = "rec_param:"
 
@@ -41,7 +42,7 @@ PARAMS = [
     ParamSpec("max_track_minutes", "Maximum track length (minutes)", "discovery",
               "Longest track allowed in generated song playlists. Lower limits keep DJ mixes and "
               "concerts out. Tracks with unknown length remain eligible.",
-              1, 180, 1, 20, integer=True),
+              MAX_TRACK_MINUTES.minimum, MAX_TRACK_MINUTES.maximum, 1, MAX_TRACK_MINUTES.default, integer=True),
     ParamSpec("comfort_min_plays", "Comfort Listening: minimum plays", "discovery",
               "Minimum past plays for a forgotten favorite to appear in Comfort Listening. "
               "Raise this to include only tracks you played often.",
@@ -128,6 +129,10 @@ PARAMS = [
     ParamSpec("dislike_transient_w", "Recent dislikes: influence", "transient",
               "How much recent dislikes reduce recommendations for similar music.",
               0.0, 3.0, 0.05, 1.50),
+    ParamSpec("dislike_durable_w", "Remember disliked music", "discovery",
+              "Keep reducing matches to disliked tracks after recent feedback fades. "
+              "Removing a dislike removes this influence; genre and era preferences stay independent.",
+              0.0, 1.0, 0.05, 0.35),
     ParamSpec("audio_transient_w", "Follow recent sound", "transient",
               "Adds extra preference for similar tempo, energy, and mood. Off removes this boost. "
               "Stronger settings can make picks sound alike. Requires sound information.",
@@ -147,9 +152,9 @@ PARAMS = [
     ParamSpec("like_halflife_d", "Like memory half-life (days)", "transient",
               "Days until a like has half its original influence on current recommendations.", 1, 90, 1, 21, integer=True),
     ParamSpec("dislike_halflife_d", "Dislike fade half-life (days)", "transient",
-              "Days until a dislike has half its original effect on similar music. "
-              "The separate dislike ban still controls when the disliked track itself can return.",
-              5, 180, 5, 45, integer=True),
+              "Days until a dislike has half its original effect on recent genre and era preferences. "
+              "Remembered disliked music and the track exclusion have separate controls.",
+              5, 180, 5, 5, integer=True),
     ParamSpec("mood_alpha", "Mood choice influence", "transient",
               "How strongly a mood choice changes recommendations relative to your saved taste.",
               0.0, 1.0, 0.05, 0.35),
@@ -176,7 +181,8 @@ PARAMS = [
               "Distinct recent plays with enough track information required before choosing a current listening style.",
               2, 10, 1, 3, integer=True, advanced=True),
     ParamSpec("now_gain", "Current listening: influence", "transient",
-              "How strongly your current listening style affects Home once enough plays are available.",
+              "How strongly your current listening style affects Home and Radio once enough plays are available. "
+              "Radio's stream controls and explicit stream choices take precedence.",
               0.0, 2.0, 0.05, 0.6),
     ParamSpec("session_halflife_h", "Session memory half-life (hours)", "transient",
               "Hours until this session's influence halves. Higher keeps it active across longer breaks.", 0.5, 24, 0.5, 4),
@@ -208,8 +214,6 @@ PARAMS = [
               "are unknown, so they do not affect current mood. At the default, about three similar "
               "likes produce one saved preference update.",
               0.0, 2.0, 0.05, 0.4, advanced=True),
-    ParamSpec("source_w_dislike", "Speed: dislikes", "graduation",
-              "How quickly dislikes update saved preferences.", 0.0, 2.0, 0.05, 1.0, advanced=True),
     ParamSpec("source_w_vibe", "Speed: mood choices", "graduation",
               "How quickly mood choices update saved preferences.", 0.0, 2.0, 0.05, 1.0, advanced=True),
     ParamSpec("source_w_feedback", "Speed: suggestion feedback", "graduation",
@@ -291,43 +295,9 @@ PARAMS = [
               50, 2000, 50, 200, integer=True, advanced=True),
     ParamSpec("ppr_ab_share", "Experimental ranking: share of cards", "discovery",
               "Share of listening-style cards using experimental ranking. 0 uses standard ranking "
-              "for all cards; 1 uses experimental ranking for all. Mixed results allow comparison.",
+              "for all cards with shadow replay; 1 retains experimental ranking for all. The default "
+              "0.5 is a live experiment. Recorded retirement disables shadow replay at 0.",
               0.0, 1.0, 0.05, 0.5, advanced=True),
-    # --- Dynamic radio (#93). Session-scoped reactivity for the primed-handoff radio. All advanced
-    # (a tuner sweeps them; hand-setting only shifts feel, never correctness). ---
-    ParamSpec("radio_artist_cap", "Radio artist cap", "discovery",
-              "Maximum tracks by one artist during a radio session.",
-              1, 10, 1, 3, integer=True, advanced=True),
-    ParamSpec("radio_candidate_pool", "Radio candidate pool", "discovery",
-              "Top-scoring tracks considered for the next radio pick. Higher includes more variety; "
-              "lower stays closer to your strongest matches.",
-              10, 500, 10, 60, integer=True, advanced=True),
-    ParamSpec("radio_skip_artist_penalty", "Radio skip artist penalty", "discovery",
-              "How much skipping a radio track reduces other picks by that artist during the session.",
-              0.0, 2.0, 0.05, 0.5, advanced=True),
-    ParamSpec("radio_skip_mode_penalty", "Radio skip style penalty", "discovery",
-              "How much skipping a radio track reduces picks with a similar listening style during the session.",
-              0.0, 2.0, 0.05, 0.25, advanced=True),
-    ParamSpec("radio_skip_halflife_h", "Radio skip half-life (hours)", "discovery",
-              "Hours until a radio skip penalty has half its original strength.",
-              0.25, 24.0, 0.25, 2.0, advanced=True),
-    ParamSpec("radio_volume_floor", "Radio volume floor", "discovery",
-              "Volume at or below this fraction counts as negative feedback during radio. "
-              "Radio recommends less similar music while the current song keeps playing.",
-              0.0, 0.5, 0.01, 0.1, advanced=True),
-    ParamSpec("radio_seed_depth", "Radio queue length", "discovery",
-              "Unplayed tracks radio keeps queued ahead. Higher gives you more upcoming tracks to skip to.",
-              1, 10, 1, 6, integer=True, advanced=True),
-    ParamSpec("radio_deck_size", "Radio update interval (tracks)", "discovery",
-              "Tracks in each radio batch. Your skips and adjustments affect the next batch, "
-              "so lower values make radio respond sooner.",
-              2, 6, 1, 3, integer=True, advanced=True),
-    ParamSpec("radio_variety", "Radio variety", "discovery",
-              "0 always picks your strongest match. Higher gives less familiar tracks more chances to play.",
-              0.0, 0.9, 0.05, 0.5, advanced=True),
-    ParamSpec("radio_freshness_days", "Radio freshness (days)", "discovery",
-              "Days before radio can repeat a track in a new session. 0 allows immediate repeats.",
-              0.0, 14.0, 0.5, 3.0, advanced=True),
 ]
 
 PARAMS_BY_NAME = {p.name: p for p in PARAMS}
@@ -337,12 +307,6 @@ SEMANTIC_PARAMS = ("breadth_bias", "play_transient_w", "like_transient_w", "audi
 
 
 # Lane weights (rec_weights table, axis `lane:<name>`): labels + help for the page. Clamp [0.2, 3.0].
-LANES = [
-    ("neighbourhood", "Taste matches", "Tracks matched to your playlists, listening history, and preferences."),
-    ("deep_cut", "Deep cuts", "Overlooked tracks by artists you play often."),
-    ("rotation", "Playlist neighbors", "Tracks found in the same playlists as your favorites."),
-]
-LANE_NAMES = frozenset(name for name, _label, _help in LANES)
 LANE_MIN, LANE_MAX, LANE_DEFAULT = 0.2, 3.0, 1.0
 
 # Genre-family weights (rec_weights table, axis `genre:<family>`): 0 mutes, 1 neutral, 2 favors.
@@ -363,8 +327,13 @@ def _clamp(spec, value):
 
 def get_param(store, name):
     """Current value of a scalar knob - the stored override, clamped, or the registry default."""
+    return setting_param(store.settings, name)
+
+
+def setting_param(settings, name):
+    """Read a registered parameter through its explicit settings repository."""
     spec = PARAMS_BY_NAME[name]
-    raw = store.get_setting(SETTING_PREFIX + name)
+    raw = settings.get_setting(SETTING_PREFIX + name)
     if raw is None or raw == "":
         return spec.default
     if spec.boolean:
@@ -384,25 +353,25 @@ def set_param(store, name, value) -> None:
     """Persist a scalar knob override (clamped to its spec range)."""
     spec = PARAMS_BY_NAME[name]
     if spec.boolean:
-        store.set_setting(SETTING_PREFIX + name, "1" if _clamp(spec, value) else "0")
+        store.settings.set_setting(SETTING_PREFIX + name, "1" if _clamp(spec, value) else "0")
     else:
-        store.set_setting(SETTING_PREFIX + name, str(_clamp(spec, value)))
+        store.settings.set_setting(SETTING_PREFIX + name, str(_clamp(spec, value)))
 
 
 def reset_param(store, name) -> None:
     """Drop a scalar knob's override so it reverts to the registry default."""
     PARAMS_BY_NAME[name]   # validate the name
-    store.delete_setting(SETTING_PREFIX + name)
+    store.settings.delete_setting(SETTING_PREFIX + name)
 
 
 def reset_all_params(store) -> None:
     """Revert every scalar knob to its default."""
     for p in PARAMS:
-        store.delete_setting(SETTING_PREFIX + p.name)
+        store.settings.delete_setting(SETTING_PREFIX + p.name)
 
 
 # --- Transient model (lifecycle / recency) ---
-SYNC_STALE_S = 24 * 3600       # sync older than this is "stale" (also used by recommend.sync_status)
+SYNC_STALE_S = 24 * 3600       # sync older than this is "stale" (also used by actions.sync_status)
 # Source weights into the transient leans
 PLAY_TRANSIENT_W = 0.30        # one recent play's positive push
 LIKE_TRANSIENT_W = 0.45        # one recent like's positive push to facet leans (stronger than a play)
@@ -429,7 +398,6 @@ SOURCE_W_VIBE = 1.0       # vibe / facet lever (unchanged from today)
 SOURCE_W_LIKE = 1.0       # thumbs-up observed live in the player - strong (real action time)
 SOURCE_W_LIKE_SYNCED = 0.4  # like discovered by the library sync - low (no reliable action time;
                             # a single one must not cross THEME_THRESHOLD on its own)
-SOURCE_W_DISLIKE = 1.0    # thumbs-down (sign supplied by caller) - strong
 SOURCE_W_SLIDER = 0.5     # per held-day of a full lean (~2-3 held days -> one graduation step)
 SOURCE_W_PLAY = 0.08      # one play - weak; passive listening must not silently rewrite taste
 PLAY_GRAD_SESSION_CAP = 0.4   # max play-graduation contribution per session (a binge can't graduate)

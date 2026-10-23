@@ -13,6 +13,7 @@
     <p class="preview-explanation">
       {% if i.trace.contexts %}Matches music in {% for c in i.trace.contexts %}{{ c.name }}{% if not loop.last %}, {% else %}.{% endif %}{% endfor %}
       {% else %}Selected using your saved taste and listening preferences.{% endif %}
+      {% if i.trace.negative_delta|default(0) < 0 %}It resembles music you disliked.{% endif %}
       {% if i.trace.transient_delta > 0 %}Your recent listening favors it.{% elif i.trace.transient_delta < 0 %}Your recent listening makes it a weaker match.{% endif %}
       {% if i.trace.session_delta > 0 %}It also fits this listening session.{% elif i.trace.session_delta < 0 %}This session makes it a weaker match.{% endif %}
       {% if i.trace.audio_delta > 0 %}Its tempo, energy, or mood fits your recent listening.{% endif %}

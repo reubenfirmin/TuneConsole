@@ -14,7 +14,7 @@ from yt_playlist.providers.waterfall import run_waterfall
 def make_worker(store, now=1000.0, fill=None):
     calls = []
 
-    def fake_wf(s, tracks, config, on_progress, should_stop=None, sink_for=None):
+    def fake_wf(s, tracks, config, on_progress, should_stop=None, sink_for=None, **kwargs):
         calls.append([t["id"] for t in tracks])
         for t in tracks:
             if fill:
@@ -27,8 +27,8 @@ def make_worker(store, now=1000.0, fill=None):
 
 
 def _unprocessed(store, vid="v1", title="S", artist="A"):
-    store.set_setting("enrich_caught_up_at", "100")        # created_at below -> not "new"
-    return store.upsert_track(vid, title, artist, None, 200, created_at=1.0)
+    store.settings.set_setting("enrich_caught_up_at", "100")        # created_at below -> not "new"
+    return store.tracks.upsert_track(vid, title, artist, None, 200, created_at=1.0)
 
 
 def test_drain_processes_batch_and_marks_timestamps(store):
@@ -39,7 +39,7 @@ def test_drain_processes_batch_and_marks_timestamps(store):
     row = store.conn.execute(
         "SELECT first_enriched_at f, last_enriched_at l FROM tracks WHERE id=?", (t,)).fetchone()
     assert row["f"] == 1000.0 and row["l"] == 1000.0
-    assert store.queue_remaining() == 0                    # nothing left unprocessed
+    assert store.enrichment.queue_remaining() == 0                    # nothing left unprocessed
 
 
 def test_stamps_caught_up_after_primary_drains(store):
@@ -47,24 +47,115 @@ def test_stamps_caught_up_after_primary_drains(store):
     w = make_worker(store, now=1000.0)
     w.drain_once()                                         # drains the one track (_had_work=True)
     assert w.drain_once() == 0                             # primary empty now
-    assert float(store.get_setting("enrich_caught_up_at")) == 1000.0
+    assert float(store.settings.get_setting("enrich_caught_up_at")) == 1000.0
 
 
 def test_paused_drain_does_not_mark(store):
     t = _unprocessed(store)
-    store.set_setting("enrich_worker_enabled", "0")        # paused
+    store.settings.set_setting("enrich_worker_enabled", "0")        # paused
     w = make_worker(store, now=1000.0)
     assert w.drain_once() == 0                             # should_stop -> batch abandoned
-    assert store.queue_remaining() == 1                    # left for next time, not marked
+    assert store.enrichment.queue_remaining() == 1                    # left for next time, not marked
+
+
+def test_visible_radio_metadata_uses_shared_worker_before_bulk_queue(store, monkeypatch):
+    from yt_playlist.enrich import artwork
+    art = Mock()
+    monkeypatch.setattr(artwork, "retry_due", art)
+    _unprocessed(store, "old", "Old")
+    shown = _unprocessed(store, "shown", "Shown")
+    key = store.tracks.catalog_subject(shown)["identity_key"]
+    w = make_worker(store)
+    w.ctx.rec_worker = SimpleNamespace(trigger_content_update=Mock())
+    w.prioritize([key, key])
+    assert w.drain_once(limit=1) == 1
+    assert w.calls == [[shown]]
+    assert not w._priority
+    art.assert_not_called()
+
+
+def test_current_radio_view_moves_ahead_of_older_radio_requests(store):
+    old = _unprocessed(store, "old", "Old")
+    current = _unprocessed(store, "current", "Current")
+    keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in (current, old)]
+    worker = make_worker(store)
+    worker.prioritize(keys[1:])
+    worker.prioritize(keys)
+    assert worker.drain_once(limit=1) == 1
+    assert worker.calls == [[current]]
+
+
+def test_radio_request_interrupts_bulk_at_the_next_track_boundary(store):
+    first = _unprocessed(store, "v1", "One")
+    second = _unprocessed(store, "v2", "Two")
+    shown = _unprocessed(store, "shown", "Shown")
+    key = store.tracks.catalog_subject(shown)["identity_key"]
+    worker = make_worker(store)
+    probed = []
+
+    class Provider:
+        name = "musicbrainz"
+        def available(self, _store): return True
+        def reset(self): pass
+        def tripped(self): return False
+        def probe(self, track, _store):
+            probed.append(track["id"])
+            if track["id"] == first:
+                worker.prioritize([key])
+            return EnrichmentResult(self.name, {"genre": "Rock", "year": "1999"})
+
+    worker.waterfall_fn = partial(run_waterfall, registry={"musicbrainz": Provider()})
+    assert worker.drain_once(limit=40) == 1
+    assert probed == [first]
+    assert store.enrichment.queue_remaining() == 2
+    assert worker.drain_once(limit=40) == 1
+    assert probed == [first, shown]
+    assert worker.drain_once(limit=40) == 1
+    assert probed == [first, shown, second]
+
+
+def test_radio_priority_respects_pause_and_recent_attempts(store):
+    tid = _unprocessed(store)
+    key = store.tracks.catalog_subject(tid)["identity_key"]
+    w = make_worker(store)
+    w.prioritize([key])
+    store.settings.set_setting("enrich_worker_enabled", "0")
+    assert w.drain_once() == 0
+    assert not w.calls
+    store.settings.set_setting("enrich_worker_enabled", "1")
+    store.enrichment.mark_enriched([tid], now=999.)
+    assert store.enrichment.priority_enrich_batch([key], 24, stale_before=900, now=1000) == []
+    assert w.drain_once() == 0
+    assert not w.calls
+
+
+def test_visible_radio_retries_incomplete_tracks_before_the_bulk_resweep_window(store):
+    _unprocessed(store, "bulk", "Bulk")
+    shown = _unprocessed(store, "shown", "Shown")
+    key = store.tracks.catalog_subject(shown)["identity_key"]
+    now = 400_000.
+    store.enrichment.mark_enriched([shown], now=now - 3 * 86400)
+    worker = make_worker(store, now=now)
+    worker.prioritize([key])
+    assert worker.drain_once(limit=1) == 1
+    assert worker.calls == [[shown]]
+
+
+def test_radio_priority_preserves_provider_retry_deadline(store):
+    tid = _unprocessed(store)
+    key = store.tracks.catalog_subject(tid)["identity_key"]
+    store.enrichment.record_enrichment_attempt(key, "test", {}, retry=True, now=1000)
+    assert store.enrichment.priority_enrich_batch([key], 24, 0, providers=["test"], now=1001) == []
+    assert len(store.enrichment.priority_enrich_batch([key], 24, 0, providers=["test"], now=1031)) == 1
 
 
 def test_resweep_reprocesses_stale_incomplete(store):
-    t = store.upsert_track("v1", "S", "A", None, 200, created_at=1.0)
-    store.set_setting("enrich_caught_up_at", "100")
-    store.set_setting("enrich_resweep_days", "0")          # everything older than 'now' is stale
-    store.mark_enriched([t], now=1.0)                      # processed, still missing all fields
+    t = store.tracks.upsert_track("v1", "S", "A", None, 200, created_at=1.0)
+    store.settings.set_setting("enrich_caught_up_at", "100")
+    store.settings.set_setting("enrich_resweep_days", "0")          # everything older than 'now' is stale
+    store.enrichment.mark_enriched([t], now=1.0)                      # processed, still missing all fields
     w = make_worker(store, now=1000.0)
-    assert store.next_enrich_batch(10) == []               # not in primary (already processed)
+    assert store.enrichment.next_enrich_batch(10) == []               # not in primary (already processed)
     assert w.drain_once() == 1                             # picked up by re-sweep
     assert w.calls == [[t]]
     assert store.conn.execute(
@@ -74,25 +165,26 @@ def test_resweep_reprocesses_stale_incomplete(store):
 def test_enrichment_fills_via_waterfall_are_persisted(store):
     t = _unprocessed(store)
     # a fake waterfall that actually fills genre, like the real one would
-    w = make_worker(store, now=1000.0, fill=lambda s, tr: s.set_track_enrichment(tr["id"], "Rock", "1999"))
+    w = make_worker(store, now=1000.0, fill=lambda s, tr: s.tracks.set_track_enrichment(tr["id"], "Rock", "1999"))
     w.drain_once()
-    assert store.coverage_stats()["genre"] == 1
+    assert store.enrichment.coverage_stats()["genre"] == 1
 
 
-@pytest.mark.parametrize("rebuilt", [False, True])
-def test_library_enrichment_schedules_genre_group_catchup(store, monkeypatch, rebuilt):
-    from yt_playlist.rec import embed
+def test_library_enrichment_schedules_changed_recordings(store, monkeypatch):
+    from yt_playlist.rec import model_refresh
     _unprocessed(store)
     worker = make_worker(store)
-    worker.ctx.rec_worker = SimpleNamespace(trigger_mode_refresh=Mock())
-    monkeypatch.setattr(embed, "maybe_rebuild_content_vectors", lambda s: rebuilt)
+    worker.ctx.rec_worker = SimpleNamespace(trigger_content_update=Mock())
+    rebuild = Mock()
+    monkeypatch.setattr(model_refresh, "rebuild", rebuild)
     assert worker.drain_once() == 1
-    worker.ctx.rec_worker.trigger_mode_refresh.assert_called_once_with(force=rebuilt)
+    worker.ctx.rec_worker.trigger_content_update.assert_called_once_with({"s|a"})
+    rebuild.assert_not_called()
 
 
 def test_tracks_skipped_by_waterfall_remain_in_primary_queue(store):
     first = _unprocessed(store, "v1", "One")
-    second = store.upsert_track("v2", "Two", "A", None, 200, created_at=1.0)
+    second = store.tracks.upsert_track("v2", "Two", "A", None, 200, created_at=1.0)
     w = make_worker(store, now=1000.0)
     w.waterfall_fn = lambda *_args, **_kwargs: [first]
     assert w.drain_once(limit=10) == 1
@@ -100,7 +192,7 @@ def test_tracks_skipped_by_waterfall_remain_in_primary_queue(store):
         "SELECT first_enriched_at FROM tracks WHERE id=?", (first,)).fetchone()[0] == 1000.0
     assert store.conn.execute(
         "SELECT first_enriched_at FROM tracks WHERE id=?", (second,)).fetchone()[0] is None
-    assert [t["id"] for t in store.next_enrich_batch(10)] == [second]
+    assert [t["id"] for t in store.enrichment.next_enrich_batch(10)] == [second]
 
 
 @pytest.mark.parametrize("interrupt", [None, "pause", "error"])
@@ -118,25 +210,24 @@ def test_real_waterfall_commits_each_track_before_next_lookup(store, interrupt):
             assert worker.busy
             assert track["title"] in worker.activity["text"]
             if track["id"] == first and interrupt == "pause":
-                store.set_setting("enrich_worker_enabled", "0")
+                store.settings.set_setting("enrich_worker_enabled", "0")
             if track["id"] == second:
                 # This is still inside the waterfall: the batch hasn't returned yet.
-                assert store.queue_remaining() == 1
-                assert store.enriched_tracks()[0]["id"] == first
+                assert store.enrichment.queue_remaining() == 1
+                assert store.enrichment.enriched_tracks()[0]["id"] == first
                 if interrupt == "error":
                     raise RuntimeError("provider unavailable")
             return EnrichmentResult(self.name, {})  # no match is still a completed check
 
     worker.waterfall_fn = partial(run_waterfall, registry={"musicbrainz": Provider()})
     if interrupt == "error":
-        with pytest.raises(RuntimeError, match="provider unavailable"):
-            worker.drain_once()
-        assert worker.activity["state"] == "error"
+        assert worker.drain_once() == 1
+        assert "provider unavailable" in worker.activity["warning"]
     else:
         assert worker.drain_once() == (1 if interrupt == "pause" else 2)
     assert not worker.busy
-    assert store.queue_remaining() == (1 if interrupt else 0)
-    assert store.coverage_stats()["genre"] == 0
+    assert store.enrichment.queue_remaining() == (1 if interrupt else 0)
+    assert store.enrichment.coverage_stats()["genre"] == 0
 
 
 def test_breaker_skipped_tracks_stay_queued_with_live_warning(store):
@@ -155,6 +246,6 @@ def test_breaker_skipped_tracks_stay_queued_with_live_warning(store):
 
     worker.waterfall_fn = partial(run_waterfall, registry={"musicbrainz": Provider()})
     assert worker.drain_once() == 0
-    assert store.enriched_tracks() == []
-    assert {t["id"] for t in store.next_enrich_batch(10)} == {first, second}
+    assert store.enrichment.enriched_tracks() == []
+    assert {t["id"] for t in store.enrichment.next_enrich_batch(10)} == {first, second}
     assert "unreachable" in worker.activity["warning"]

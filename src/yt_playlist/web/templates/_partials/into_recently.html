@@ -1,28 +1,87 @@
-<section class="into-stack" aria-labelledby="into-title">
-<h2 class="section" id="into-title">Into recently</h2>
-<p class="section-note">Artists and genres you have played more lately.</p>
-<div class="into-grid">
-{% for card in cards|default([card]) %}
-<article class="card wiki-card">
-  <div class="wiki-th" style="background-image:url('{{ card.thumbnail }}')" aria-hidden="true"></div>
-  <div class="wiki-body">
-    <h2 class="wiki-title">You're into
-      <strong class="wiki-subject" style="--subj: {{ card.color }}">{{ card.display }}</strong>
-      recently</h2>
-    <p class="wiki-extract">{{ card.extract | linkify }}</p>
-    <div class="wiki-foot">
+{% macro story(card, layout, heading_id) %}
+{% set explore = '/clusters?seed=' ~ (card.seed | urlencode) ~ '&depth=' ~ card.depth ~ '&label=' ~ (card.display | urlencode) ~ ('&genre=' ~ (card.genre | urlencode) if card.genre else '') %}
+<article class="into-card into-{{ layout }}{% if not card.thumbnail %} into-text-only{% endif %}" data-kind="{{ card.kind }}" data-subject="{{ card.subject }}" style="--subj: {{ card.color }}" aria-labelledby="{{ heading_id }}">
+  {% if card.thumbnail %}
+  {% if card.url %}
+  <a class="into-art" href="{{ card.url }}" target="_blank" rel="noopener nofollow" tabindex="-1" aria-hidden="true">
+  {% else %}
+  <div class="into-art" aria-hidden="true">
+  {% endif %}
+    <img src="{{ card.thumbnail }}" alt="" loading="lazy" referrerpolicy="no-referrer" @error="$el.remove()">
+  {% if card.url %}</a>{% else %}</div>{% endif %}
+  {% endif %}
+  <div class="into-copy">
+    <div class="into-story-head">
+      <h3 id="{{ heading_id }}" data-story-subject="{{ card.subject }}">
+        {% if card.url %}
+        <a class="wiki-subject into-subject" href="{{ card.url }}" target="_blank" rel="noopener nofollow"
+           aria-label="Read about {{ card.display }} on Wikipedia">{{ card.display }}</a>
+        {% else %}
+        <strong class="wiki-subject into-subject">{{ card.display }}</strong>
+        {% endif %}
+      </h3>
       {% if card.seed %}
-      <a class="wiki-cta" style="--subj: {{ card.color }}"
-         href="/clusters?seed={{ card.seed | urlencode }}&depth={{ card.depth }}&label={{ card.display | urlencode }}{% if card.genre %}&genre={{ card.genre | urlencode }}{% endif %}">
-        Explore {{ card.display }} in your catalog {{ arrow_icon('right') }}</a>
+      <a class="into-explore" href="{{ explore }}" aria-label="Explore {{ card.display }} in your catalog" title="Explore in your catalog">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 14v-3a8 8 0 0 1 16 0v3M4 13H3v7h4v-7Zm16 0h1v7h-4v-7Z"/></svg>
+      </a>
       {% endif %}
-      {% if card.url %}
-      <a class="wiki-link" href="{{ card.url }}" target="_blank" rel="noopener nofollow">Read on Wikipedia {{ arrow_icon('external') }}</a>
-      {% endif %}
-      <span class="wiki-attr">from Wikipedia</span>
     </div>
+    <div class="into-extract">
+      {% for paragraph in card.extract.splitlines() if paragraph.strip() %}
+      <p>{{ paragraph | linkify }}</p>
+      {% endfor %}
+    </div>
+    {% if card.url %}
+    <a class="into-read" href="{{ card.url }}" target="_blank" rel="noopener nofollow"
+       aria-label="Read more about {{ card.display }} on Wikipedia">Read more</a>
+    {% endif %}
   </div>
+  {% if card.songs %}
+  <ol class="into-songs" aria-label="Songs for {{ card.display }}">
+    {% for song in card.songs %}
+    <li class="into-song">
+      <a class="into-song-play" href="https://music.youtube.com/watch?v={{ song.video_id|urlencode }}"
+         target="_blank" rel="noopener" aria-label="Play {{ song.title }} by {{ song.artist }} on YouTube Music">
+        <span class="into-song-art art-album">
+          {% if song.thumbnail %}<img src="{{ song.thumbnail }}" alt="" width="44" height="44" loading="lazy"
+               referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M8 4.5v15L20 12Z"/></svg>
+        </span>
+      </a>
+      <span class="into-song-title" title="{{ song.title }}">{{ song.title }}</span>
+      <a class="into-song-artist" href="/artist?name={{ song.artist|urlencode }}" title="{{ song.artist }}">{{ song.artist }}</a>
+    </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
 </article>
+{% endmacro %}
+<section class="into-stack" aria-label="Into recently"{% if preparing %}
+         hx-get="/home/into-recently" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+<div class="into-grid">
+{% if preparing and not cards %}
+<div class="into-wait" role="status" aria-label="Preparing your stories"><span></span><span></span><span></span></div>
+{% endif %}
+{% for spread in spreads %}
+{% set heading_id = 'into-subject-' ~ loop.index %}
+{% if spread.layout == 'cluster' %}
+{% set group = spread.groups[0] %}
+<section class="into-spread into-linked{% if group|length == 2 %} into-cluster-pair{% endif %}" aria-labelledby="{{ heading_id }}" data-thread="{{ group[0].subject }}" style="--subj: {{ group[0].color }}">
+  {{ story(group[0], 'feature', heading_id) }}
+  <div class="into-companions">
+    {% for card in group[1:] %}
+    {{ story(card, 'aside' if loop.first else 'split', heading_id ~ '-' ~ loop.index) }}
+    {% endfor %}
+  </div>
+</section>
+{% else %}
+<div class="into-spread into-{{ spread.layout }}-spread">
+  {% for group in spread.groups %}
+  {% set layout = 'feature' if spread.layout == 'feature' else ('column' if spread.layout == 'columns' else ('aside' if loop.first else 'split')) %}
+  {{ story(group[0], layout, heading_id ~ '-' ~ loop.index) }}
+  {% endfor %}
+</div>
+{% endif %}
 {% endfor %}
 </div>
 </section>

@@ -10,24 +10,19 @@ Needs a (free) Last.fm API key: set $LASTFM_API_KEY, or `lastfm_api_key = "..."`
 import json
 import logging
 import re
-import sys
+import tomllib
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from yt_playlist.providers import genres
-from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
+from yt_playlist.util.matching import is_remix
+from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 from yt_playlist.util import net
 from yt_playlist.core import paths
-from yt_playlist.providers.enrich_queue import PriorityGate
 
 name = "lastfm"
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover
-    import tomli as tomllib
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +31,6 @@ _USER_AGENT = "yt-playlist/0.1 ( https://4rc.io ; rf@4rc.io )"
 _MIN_INTERVAL = 0.25                      # Last.fm allows ~5 req/s; stay comfortably under
 _HTTP_TIMEOUT_S = 20                      # cap each request so a stalled socket can't wedge a run
 _pacer = RateLimiter(_MIN_INTERVAL)
-_gate = PriorityGate()                    # newest enrichment job preempts older ones
 _breaker = net.CircuitBreaker()           # stop a run once the host looks unreachable
 
 
@@ -52,7 +46,7 @@ def api_key(store=None, config_path=None):
     if env and env.strip():
         return env.strip()
     if store is not None:
-        saved = store.get_setting("lastfm_api_key")
+        saved = store.settings.get_setting("lastfm_api_key")
         if saved and saved.strip():
             return saved.strip()
     path = config_path or paths.config_path()
@@ -213,7 +207,7 @@ def enrich(title, artist, key):
     track = (info or {}).get("track") or {}
     track_tags = _tag_names(track)   # _tag_names guards the single-tag-as-dict case the API returns
     genre = genres.pick_genre(track_tags)
-    if not genre and artist:                      # no track-level genre. Fall back to artist tags
+    if not genre and artist and not is_remix(title):
         try:
             genre = genres.pick_genre(_tag_names(
                 _get({"method": "artist.gettoptags", "artist": artist, **common})))
@@ -231,39 +225,6 @@ def enrich(title, artist, key):
             _record_page_result(False)
             logger.debug("Last.fm album page unavailable for %s: %s", album_url, e)
     return (genre, year)
-
-
-def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, key=None, should_stop=None, pending=None):
-    """Fill missing genre and year for a track set from Last.fm (fill-only: never overwrites what's
-    already there). Scope is a playlist (playlist_id) or an explicit `pending` list (an album's
-    tracks). `on_progress` receives info/track/done events for the SSE stream."""
-    enrich_fn = enrich_fn or enrich
-    key = key or api_key(store)
-    if not key:
-        on_progress({"type": "err", "text": "No Last.fm API key. Set $LASTFM_API_KEY or "
-                                            "lastfm_api_key in config.toml."})
-        return
-    pending = store.tracks_to_enrich(playlist_id) if pending is None else pending   # missing genre OR year
-
-    def _per_item(i, total, t):
-        genre, year = enrich_fn(t["title"], t["artist"], key)
-        if _breaker.tripped():             # host unreachable. The rest would all fail too, so stop
-            on_progress({"type": "err", "text": "Last.fm looks unreachable. Stopped. "
-                         "The remaining tracks will retry next time."})
-            return False
-        store.set_track_enrichment(t["id"], genre, year)
-        eff_genre, eff_year = store.get_track_enrichment(t["id"])    # report what actually stuck
-        bits = " · ".join(x for x in (genre, year) if x) or "no tags"
-        on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']}: {bits}"})
-
-    run_enrich_loop(
-        store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
-        empty_text="Every track already has genre & year.",
-        start_text=lambda n: f"Tagging {n} track(s) via Last.fm…",
-        done_text=lambda n: f"Tagged {n} track(s).",
-        wait_text="Waiting: a newer playlist is tagging first…",
-        per_item=_per_item)
 
 
 def tag_top_artists(tag, key, limit=25):

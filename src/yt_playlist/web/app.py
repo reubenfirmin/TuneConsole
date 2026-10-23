@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 import os
@@ -19,11 +20,15 @@ from yt_playlist.web.icons import arrow_icon
 
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.core import updatecheck
+from yt_playlist.core.activity import WorkClosing
+from yt_playlist.core.work_diagnostics import CpuDiagnostics
+from yt_playlist.core.update_lifecycle import acquire_restart_locks
 from yt_playlist.rec.journeys import JOURNEY_LABELS
-from yt_playlist.rec.radio import RadioSession
+from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.context import Ctx
 from yt_playlist.web.jobs import SyncJobs
 from yt_playlist.web.provider_links import provider_search_url
+from yt_playlist.web.request_priority import RequestPriorityMiddleware
 from yt_playlist.web.routes import build_all
 from yt_playlist.web.routes.bridge import build as build_bridge_route
 
@@ -31,6 +36,8 @@ from yt_playlist.web.routes.bridge import build as build_bridge_route
 _UI_STARTUP_GRACE_S = 120.0
 _UI_CLOSE_GRACE_S = 30.0
 _UI_HEARTBEAT_TIMEOUT_S = 300.0
+BACKGROUND_WORK = True
+_DRAIN_TIMEOUT_S = 30.0
 
 
 class _UIPresence:
@@ -73,6 +80,9 @@ def _install_idle_shutdown(app, templates):
     @app.post("/heartbeat")
     def _heartbeat(page: str = ""):
         presence.heartbeat(page)
+        ctx = getattr(app.state, "ctx", None)
+        if ctx is not None and hasattr(ctx, "work"):
+            ctx.work.resume_idle()
         return Response(status_code=204)
 
     @app.post("/goodbye")
@@ -80,26 +90,30 @@ def _install_idle_shutdown(app, templates):
         presence.goodbye(page)
         return Response(status_code=204)
 
-    def _monitor():
-        while True:
-            time.sleep(1.0)
+    def _monitor(stop):
+        while not stop.wait(1.0):
             ctx = getattr(app.state, "ctx", None)
-            if ctx is not None and ctx.updater is not None and ctx.updater.busy:
-                continue                       # don't cancel an update when the UI tab closes
-            # A Spotify library import is explicitly background work. Keep the packaged process
-            # alive even if the TuneConsole UI tab is closed; the extension's YouTube Music tab can
-            # continue servicing lookups, and normal idle shutdown resumes as soon as it finishes.
-            if ctx is not None and ctx.spotify_import_lock.locked():
-                continue
             # Always allow startup to settle, even after an initial page immediately navigates
             # away. Each document has its own lease, so one closing tab cannot evict another.
             # Missing beacons expire slowly enough to tolerate background timer throttling.
             if presence.idle():
+                if ctx is not None:
+                    acquired, _ = acquire_restart_locks(ctx, reason="idle")
+                    if acquired is None:
+                        continue
+                    # A returning UI can cancel an idle drain while the last job is finishing.
+                    # Release the shutdown guards if its new lease arrived during this check.
+                    if not presence.idle() or ctx.work.accepting:
+                        for held in acquired:
+                            held.release()
+                        continue
                 break
+        if stop.is_set():
+            return
         logging.getLogger("yt_playlist").info("UI idle — shutting down server")
         os.kill(os.getpid(), signal.SIGTERM)
 
-    threading.Thread(target=_monitor, daemon=True).start()
+    return _monitor
 
 # Methods that don't change state: exempt from the cross-origin guard below.
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -133,7 +147,7 @@ _SYNC_MAX_AGE_S = 86400.0    # 24 hours: full sync is expensive, so after the in
 
 
 def _maybe_check_update(ctx):
-    """Refresh the cached latest-release version (daily-gated inside check_latest). Never raises,
+    """Refresh the cached latest-release version (interval-gated inside check_latest). Never raises,
     so a failed check can't disturb the sync daemon."""
     try:
         updatecheck.check_latest(ctx.store, ctx.now_fn())
@@ -141,21 +155,31 @@ def _maybe_check_update(ctx):
         ctx.logger.warning("update check tick failed", exc_info=True)
 
 
-def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=_SYNC_MAX_AGE_S):
-    """Keep the library fresh with no manual card: once configured and the extension is connected,
-    run a full sync when we've never synced or the last full sync is older than max_age_s. Covers
-    both the initial post-setup sync (fires as soon as the extension pairs) and periodic refresh.
-    Guarded by ctx.sync_lock so it never overlaps a manual POST /sync (or itself)."""
-    while True:
-        time.sleep(poll_s)
-        _maybe_check_update(ctx)
+def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=_SYNC_MAX_AGE_S,
+                          stop=None):
+    """Refresh due resources and retry failures with persisted backoff.
+
+    A new extension connection retries failures promptly. The shared sync lock
+    keeps automatic work from overlapping a manual POST /sync.
+    """
+    stop = stop or threading.Event()
+    last_connection = None
+    while not stop.wait(poll_s):
         try:
+            release = ctx.work.admit("automatic sync")
+        except WorkClosing:
+            return
+        try:
+            _maybe_check_update(ctx)
             if setup is not None and not setup.configured:
                 continue
             if not (bridge is not None and bridge.connected):
                 continue                       # no live extension -> nothing to reach YouTube with
-            last = ctx.store.get_setting("last_sync_at")
-            if last is not None and (ctx.now_fn() - float(last)) < max_age_s:
+            connection = getattr(bridge, "connection_id", None)
+            retry_now = connection is not None and connection != last_connection
+            from yt_playlist.library.sync_outcomes import sync_due
+            if not sync_due(ctx.store, ctx.now_fn(), max_age_s, retry_now=retry_now):
+                last_connection = connection
                 continue                       # synced recently enough
             if not ctx.sync_lock.acquire(blocking=False):
                 continue                       # a manual sync is already running; try next tick
@@ -163,28 +187,21 @@ def _background_sync_loop(ctx, setup, bridge, *, poll_s=_SYNC_POLL_S, max_age_s=
             # (not just manual POST /sync). The console discovers it via GET /sync/active.
             job = ctx.jobs.create(kind="library")
             try:
-                clients = ctx.client_provider() or {}
-                if not clients:
-                    continue
-                from yt_playlist.library import sync as sync_mod
-                sync_mod.sync_all(ctx.store, clients, ctx.now_fn(),
-                                  on_progress=job.events.append,
-                                  on_auth_expired=ctx.flag_auth_expired,
-                                  on_auth_ok=ctx.clear_auth_expired)
+                from yt_playlist.web.jobs import run_library_sync
+                with ctx.work.entered(release):
+                    last_connection = connection
+                    run_library_sync(ctx, job, automatic=True, retry_now=retry_now, max_age_s=max_age_s)
             finally:
-                job.done = True
                 ctx.sync_lock.release()
-            if ctx.rec_worker:                 # fold the freshly-synced library into the taste model
-                ctx.rec_worker.trigger()
-            if ctx.enrich_worker:              # drain any new tracks through the enrichment waterfall
-                ctx.enrich_worker.trigger()
         except Exception:  # noqa: BLE001 - a sync failure must never crash the daemon
             ctx.logger.warning("background library sync tick failed", exc_info=True)
+        finally:
+            release()
 
 
 def create_app(store, client_provider, *, now_fn=time.time,
                allowed_hosts=("localhost", "127.0.0.1"), setup=None,
-               bridge=None, updater=None) -> FastAPI:
+               bridge=None, updater=None, background_work=None) -> FastAPI:
     # setup: optional Runtime-like collaborator (.configured, .credentials_present, .apply_setup).
     # When None, the app is treated as already configured and the /setup wizard is inert. This
     # keeps the existing two-arg call sites (and their tests) working unchanged.
@@ -196,18 +213,48 @@ def create_app(store, client_provider, *, now_fn=time.time,
     web_dir = Path(__file__).parent
     static_dir = web_dir / "static"
     templates = Jinja2Templates(directory=str(web_dir / "templates"))
+    background_work = BACKGROUND_WORK if background_work is None else background_work
+    stop = threading.Event()
     @asynccontextmanager
     async def lifespan(app):
-        # Catch up older installations independently of extension connectivity or library sync.
-        # The worker checks/rebuilds local genre groups off the startup and request paths.
-        app.state.ctx.rec_worker.trigger_mode_refresh()
+        ctx.work.open()
+        stop.clear()
+        ctx.work.start_executor()
+        threads = []
+        diagnostics = CpuDiagnostics(ctx.work)
         try:
+            if background_work:
+                diagnostics.start()
+                ctx.radio.prepare()
+                ctx.rec_worker.start_ticker()
+                ctx.enrich_worker.start_ticker()
+                ctx.rec_worker.trigger_mode_refresh()
+                threads.append(threading.Thread(target=_background_sync_loop,
+                    args=(ctx, setup, bridge), kwargs={"stop": stop}, daemon=True))
+            if idle_monitor is not None:
+                threads.append(threading.Thread(target=idle_monitor, args=(stop,), daemon=True))
+            for thread in threads:
+                thread.start()
             yield
         finally:
-            if app.state.ctx.updater is not None:
-                await app.state.ctx.updater.close()
+            ctx.work.close_admission()
+            diagnostics.stop()
+            stop.set()
+            ctx.rec_worker.shutdown()
+            ctx.enrich_worker.shutdown()
+            ctx.work.stop_executor()  # cancel queued applies; running mutations drain normally
+            drained = await asyncio.to_thread(ctx.work.wait, _DRAIN_TIMEOUT_S)
+            for thread in threads:
+                await asyncio.to_thread(thread.join, 1.0)
+            await asyncio.to_thread(ctx.rec_worker.join, 1.0)
+            await asyncio.to_thread(ctx.enrich_worker.join, 1.0)
+            if not drained or any(thread.is_alive() for thread in threads):
+                raise RuntimeError(f"Application shutdown timed out: {ctx.work.active}")
+            if ctx.updater is not None:
+                await ctx.updater.close()
 
     app = FastAPI(lifespan=lifespan)
+    app.add_middleware(RequestPriorityMiddleware, priority=store.priority)
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     allowed = set(allowed_hosts)
     # Cache-bust the front-end by a CONTENT hash across ALL top-level static JS/CSS so browsers always
@@ -261,36 +308,52 @@ def create_app(store, client_provider, *, now_fn=time.time,
                     and ctx.updater.phase == "restarting"
                     and request.url.path not in ("/app-update/restart", "/heartbeat", "/goodbye")):
                 return PlainTextResponse("TuneConsole is restarting. Please wait.", status_code=503)
-        return await call_next(request)
+        ctx = getattr(app.state, "ctx", None)
+        release = None
+        if (ctx is not None and request.method not in _SAFE_METHODS
+                and request.url.path not in ("/app-update/restart", "/heartbeat", "/goodbye")):
+            try:
+                release = ctx.work.admit("request " + request.url.path)
+            except WorkClosing as error:
+                return PlainTextResponse(str(error), status_code=503)
+        try:
+            if release is not None:
+                with ctx.work.entered(release):
+                    return await call_next(request)
+            return await call_next(request)
+        finally:
+            if release is not None:
+                release()
+
+    @app.exception_handler(WorkClosing)
+    async def closing_work(request, error):
+        return PlainTextResponse(str(error), status_code=503)
 
     from yt_playlist.providers import genres as genre_lib
     genre_lib.configure(store)                                 # load (and seed) the genre whitelist
 
     ctx = Ctx(store=store, client_provider=client_provider, now_fn=now_fn,
-              templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge,
-              radio=RadioSession())
+              templates=templates, jobs=SyncJobs(), setup=setup, bridge=bridge)
+    ctx.radio = PlaylistRadio(ctx)
     if updater is None and updatecheck.install_kind() == "flatpak":
         from yt_playlist.core.flatpak_update import FlatpakUpdater
         updater = FlatpakUpdater()
     ctx.updater = updater
     app.include_router(build_bridge_route(ctx))
     from yt_playlist.rec.rec_worker import RecWorker
-    ctx.rec_worker = RecWorker(ctx)                            # decoupled rec computation
-    ctx.rec_worker.start_ticker()                             # periodic background discovery scan
+    ctx.rec_worker = RecWorker(ctx, enabled=background_work)
     from yt_playlist.enrich.enrich_worker import EnrichWorker
     ctx.enrich_worker = EnrichWorker(ctx)                      # drains the corpus through the waterfall
-    ctx.enrich_worker.start_ticker()
     templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync
     templates.env.globals["has_multiple_identities"] = (
-        lambda: len(store.get_identities()) > 1
+        lambda: len(store.identities.get_identities()) > 1
     )
     # Background library-sync daemon: runs the full sync (setup + periodic) with no manual card, so
     # the initial post-setup sync fires as soon as the extension connects and the library then
     # refreshes on its own. It gates on bridge.connected, so in tests (no live WS) it never fires.
-    threading.Thread(target=_background_sync_loop, args=(ctx, setup, bridge), daemon=True).start()
     app.state.ctx = ctx                                        # exposed for tests/introspection
     for router in build_all(ctx):
         app.include_router(router)
 
-    _install_idle_shutdown(app, templates)
+    idle_monitor = _install_idle_shutdown(app, templates)
     return app

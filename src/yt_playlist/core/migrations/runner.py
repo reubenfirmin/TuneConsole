@@ -71,8 +71,85 @@ def verified_backup(conn, source_version, target_version, backup_dir=None):
 
 def validate_catalog(conn, version):
     from . import v008_recordings, v010_play_event_subjects
-    validator = v010_play_event_subjects if version >= 10 else v008_recordings
+    if version >= 23:
+        from . import v023_albums
+        validator = v023_albums
+    elif version >= 18:
+        from . import v018_discovery_sources
+        validator = v018_discovery_sources
+    else:
+        validator = v010_play_event_subjects if version >= 10 else v008_recordings
     validator.validate(conn)
+    if version >= 11:
+        from . import v011_takeout_coverage
+        v011_takeout_coverage.validate(conn)
+    if version >= 12:
+        from . import v012_enrichment_retries
+        v012_enrichment_retries.validate(conn)
+    if version >= 13:
+        from . import v013_provider_coverage
+        v013_provider_coverage.validate(conn)
+    if version >= 14:
+        from . import v014_artwork_retries
+        v014_artwork_retries.validate(conn)
+    if version >= 15:
+        from . import v015_album_shares
+        v015_album_shares.validate(conn)
+    if version >= 24:
+        from . import v024_account_scope
+        v024_account_scope.validate(conn)
+    elif version >= 19:
+        from . import v019_playlist_provenance
+        v019_playlist_provenance.validate(conn)
+    if version >= 20:
+        from . import v020_metadata_selections
+        v020_metadata_selections.validate(conn)
+    if version >= 25:
+        from . import v025_relationships
+        v025_relationships.validate(conn)
+    if version >= 26:
+        from . import v026_listening_observations
+        v026_listening_observations.validate(conn)
+    if version >= 27:
+        from . import v027_artist_identity_redirects
+        v027_artist_identity_redirects.validate(conn)
+    if version >= 28:
+        from . import v028_discovery_representatives
+        v028_discovery_representatives.validate(conn)
+    if version >= 29:
+        from . import v029_artist_provisional_names
+        v029_artist_provisional_names.validate(conn)
+    elif version >= 21:
+        from . import v021_artists
+        v021_artists.validate(conn)
+    if version >= 30:
+        from . import v030_account_scope_preservation
+        v030_account_scope_preservation.validate(conn)
+    if version >= 31:
+        from . import v031_spotify_history
+        v031_spotify_history.validate(conn)
+    if version == 22:
+        from . import v022_artist_references
+        v022_artist_references.validate(conn)
+
+
+def validate_version(conn, version):
+    """Use the current contract at its floor; frozen validators serve older upgrades."""
+    from . import current
+    if version >= current.CONTRACT_FLOOR:
+        current.validate(conn, min(version, current.VERSION))
+        return
+    from .v001_baseline import validate
+    if version < 8:
+        validate(conn, legacy=version == 0)
+        return
+    from . import v008_recordings, v023_albums, v024_account_scope, v025_relationships
+    replaced = set(v008_recordings.REPLACED)
+    for floor, module in ((23, v023_albums), (24, v024_account_scope), (25, v025_relationships)):
+        if version >= floor:
+            replaced.update(module.REPLACED)
+    validate(conn, legacy=False, replaced=replaced)
+    validate_catalog(conn, version)
 
 
 def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, clock=time.time):
@@ -98,14 +175,14 @@ def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, c
             current = history(conn, registry)
             if fresh is None:
                 fresh = not bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone())
+            if production and fresh and current == 0:
+                from . import current as current_schema
+                current_schema.bootstrap(conn, registry, clock())
+                conn.commit()
+                log.info('Initialized current schema at version %s', current_schema.VERSION)
+                continue
             if production:
-                from .v001_baseline import validate
-                if current >= 8:
-                    from . import v008_recordings
-                    validate(conn, legacy=False, replaced=v008_recordings.REPLACED)
-                    validate_catalog(conn, current)
-                else:
-                    validate(conn, legacy=current == 0)
+                validate_version(conn, current)
             if current == len(registry):
                 conn.rollback()
                 return
@@ -120,12 +197,7 @@ def migrate(conn, *, registry=None, backup_dir=None, snapshot=verified_backup, c
             if not conn.in_transaction:
                 raise MigrationError('Migration committed outside the runner')
             if production:
-                if migration.version >= 8:
-                    from . import v008_recordings
-                    validate(conn, legacy=False, replaced=v008_recordings.REPLACED)
-                    validate_catalog(conn, migration.version)
-                else:
-                    validate(conn, legacy=False)
+                validate_version(conn, migration.version)
             conn.execute('INSERT INTO schema_migrations VALUES (?,?,?)', (migration.version, migration.name, clock()))
             conn.commit()
             log.info('Applied migration %s: %s', migration.version, migration.name)

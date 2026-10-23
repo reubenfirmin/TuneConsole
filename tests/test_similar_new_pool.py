@@ -55,12 +55,12 @@ def _eye(n):
 def test_modal_renders_a_neighbour_that_only_exists_in_the_new_pool(store, monkeypatch):
     """The end of the chain: a pool track is not in `tracks`, so resolving neighbours against the
     library alone silently dropped it even once the blend surfaced it."""
-    iid = store.upsert_identity("main", "cred", None, True)
-    tid = store.upsert_track("seedvid", "Painkiller", "Judas Priest", "Painkiller", 300)
-    store.upsert_discovered_track("overkill|motorhead", "ovk1", "Overkill", "Motorhead",
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    tid = store.tracks.upsert_track("seedvid", "Painkiller", "Judas Priest", "Painkiller", 300)
+    store.discovery.upsert_discovered_track("overkill|motorhead", "ovk1", "Overkill", "Motorhead",
                                   "Overkill (Expanded Edition)", "http://t/o.jpg", "metal", "1979",
                                   "MPREb_z", 1000.0)
-    seed_key = store.identity_key_for_video("seedvid")
+    seed_key = store.tracks.identity_key_for_video("seedvid")
     monkeypatch.setattr(embed, "neighbors_blended",
                         lambda s, k, topn=12: [("overkill|motorhead", 0.91)])
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0),

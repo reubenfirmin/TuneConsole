@@ -2,6 +2,7 @@
 import json
 import logging
 
+from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.util.action_kinds import ADD_TRACKS
 from yt_playlist.util.retry import with_retry
 
@@ -18,7 +19,7 @@ def pending_insertions(store, playlist_id):
 
 
 def _move(client, ytm_id, plan):
-    tracks = client.get_playlist(ytm_id, limit=None).get("tracks", [])
+    tracks = validate_playlist(client.get_playlist(ytm_id, limit=None))["tracks"]
     videos = plan["video_ids"]
     # Resolve the anchor's current successor, excluding the songs we are positioning. This also
     # makes a retry safe after only part of a multi-song move succeeded or the old successor went away.
@@ -44,8 +45,8 @@ def _move(client, ytm_id, plan):
 
 
 def _retain_local_order(store, playlist_id, plan, now):
-    ids = store.get_playlist_track_ids(playlist_id)
-    tmap = store.track_ids_for_videos([plan["after_video_id"], *plan["video_ids"]])
+    ids = store.playlists.get_playlist_track_ids(playlist_id)
+    tmap = store.tracks.track_ids_for_videos([plan["after_video_id"], *plan["video_ids"]])
     anchor = tmap.get(plan["after_video_id"])
     if anchor not in ids:
         return
@@ -53,13 +54,13 @@ def _retain_local_order(store, playlist_id, plan, now):
     ids = [tid for tid in ids if tid not in added]
     index = ids.index(anchor) + 1
     combined = ids[:index] + added + ids[index:]
-    store.set_playlist_tracks(playlist_id, combined)
-    store.set_playlist_track_count(playlist_id, len(combined), now)
+    store.playlists.set_playlist_tracks(playlist_id, combined)
+    store.playlists.set_playlist_track_count(playlist_id, len(combined), now)
 
 
 def retry_insertions(store, playlist_id, client, now, *, attempts=3):
     """Retry moves only; never add the tracks again. Pending actions survive process restarts."""
-    pl = store.get_playlist(playlist_id)
+    pl = store.playlists.get_playlist(playlist_id)
     if pl is None:
         return 0
     remaining = 0
@@ -72,7 +73,7 @@ def retry_insertions(store, playlist_id, client, now, *, attempts=3):
             logger.warning("alternate placement remains pending for playlist %s (action %s)",
                            playlist_id, action.id, exc_info=True)
         else:
-            store.update_action(action.id, "executed", now)
+            store.actions.update_action(action.id, "executed", now)
         # Sync can read an old append order, or omit the new items entirely. Preserve the intended
         # local order while showing it as pending, and after a successful remote move as well.
         _retain_local_order(store, playlist_id, plan, now)
@@ -82,4 +83,4 @@ def retry_insertions(store, playlist_id, client, now, *, attempts=3):
 def cancel_insertions(store, playlist_id, now):
     """A later explicit remove/reorder supersedes the earlier insertion request."""
     for action, _ in pending_insertions(store, playlist_id):
-        store.update_action(action.id, "cancelled", now)
+        store.actions.update_action(action.id, "cancelled", now)

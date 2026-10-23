@@ -8,7 +8,7 @@ from fastapi.responses import RedirectResponse
 
 from yt_playlist.util.action_kinds import (
     ADD_TRACKS, APPLY_MERGE, COPY_INTO, COPY_PLAYLIST, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED,
-    MOVE_IDENTITY, PLAN, REMOVE_TRACK, RENAME_PLAYLIST, UNDO, is_undoable)
+    MOVE_IDENTITY, PLAN, REMOVE_TRACK, REMOVE_LOCAL_PLAYLIST, RENAME_PLAYLIST, UNDO, is_undoable)
 from yt_playlist.library.executor import deserialize_plan
 
 
@@ -29,16 +29,31 @@ def build(ctx) -> APIRouter:
             kept = params.get("kept")
             deleted = params.get("deleted") or []
             members = params.get("members") or []
+            if params.get("partial"):
+                desc = f"partial merge into “{kept}”"
+                if deleted:
+                    desc += ", deleted " + ", ".join(f"“{t}”" for t in deleted)
+                if params.get("error"):
+                    desc += f". {params['error']}"
+                return desc
             if deleted:
                 return f"merged into “{kept}”, deleted " + ", ".join(f"“{t}”" for t in deleted)
             if members:
                 return "merged " + ", ".join(f"“{m}”" for m in members) + " (kept all)"
             return f"merge edit on “{kept}”" if kept else "merge edit (updated both)"
         if action.kind == MOVE_IDENTITY:
+            if params.get("partial"):
+                return f"partial copy of “{params.get('title')}”; source kept"
+            if params.get("delete_error"):
+                return f"copy of “{params.get('title')}”; source kept: {params['delete_error']}"
+            if params.get("skipped") or params.get("unresolved"):
+                return f"partial copy of “{params.get('title')}”; source kept"
             verb = "moved" if params.get("deleted") else "copied"
             return f"{verb} “{params.get('title')}” to another identity"
         if action.kind == DELETE_EMPTY:
             return f"deleted empty “{params.get('title')}”"
+        if action.kind == REMOVE_LOCAL_PLAYLIST:
+            return f"removed empty “{params.get('title')}” from TuneConsole; YouTube unchanged"
         if action.kind == DELETE_PLAYLIST:
             return f"deleted “{params.get('title')}”"
         if action.kind == GC_GENERATED:
@@ -62,8 +77,8 @@ def build(ctx) -> APIRouter:
             params = json.loads(action.params_json or "{}")
         except (ValueError, KeyError, TypeError):
             return action.kind
-        src = store.get_playlist(pe.plan.source_playlist_id)
-        tgt = store.get_playlist(pe.plan.target_playlist_id)
+        src = store.playlists.get_playlist(pe.plan.source_playlist_id)
+        tgt = store.playlists.get_playlist(pe.plan.target_playlist_id)
         src_name = params.get("source_title") or (src.title if src else None) or pe.source_ytm_playlist_id
         tgt_name = params.get("target_title") or (tgt.title if tgt else None) or "target"
         if pe.mode == "delete":
@@ -81,15 +96,34 @@ def build(ctx) -> APIRouter:
     @router.get("/actions")
     def actions(request: Request):
         # Drafts save merge-editor selections; they haven't changed any playlists.
-        rows = [{"a": a, "desc": _action_desc(a), "undoable": is_undoable(a.kind),
-                 "when": _when(a.created_at)} for a in store.get_actions() if a.status != "draft"]
+        rows = []
+        for a in store.actions.get_actions():
+            if a.status == "draft":
+                continue
+            try:
+                undo = json.loads(a.undo_json or "{}")
+                recovery = undo.get("recovery", {})
+            except (ValueError, TypeError, AttributeError):
+                undo, recovery = {}, {}
+            missing_snapshot = ((undo.get("new_ytm") and undo.get("post") is None)
+                                or any(e.get("post") is None for e in undo.get("restored", [])))
+            additions = [undo["addition"]] if undo.get("addition") else [
+                e["addition"] for e in undo.get("restored", []) if e.get("addition")]
+            steps = recovery.get("steps", [])
+            rows.append({"a": a, "desc": _action_desc(a), "undoable": is_undoable(a.kind),
+                         "when": _when(a.created_at), "recovery_error": recovery.get("error"),
+                         "missing_snapshot": missing_snapshot, "copy_ytm": undo.get("new_ytm"),
+                         "uncertain": sum(len(e.get("uncertain", [])) for e in additions),
+                         "unattempted": sum(len(e.get("unattempted", [])) for e in additions),
+                         "recovery_progress": f"{sum(s.get('phase') == 'complete' for s in steps)}/{len(steps)}",
+                         "recovered": [s["created_id"] for s in steps if s.get("created_id")]})
         return templates.TemplateResponse(request, "actions.html", {
             "rows": rows, "flash": request.query_params.get("flash"),
             "flasherr": request.query_params.get("flasherr")})
 
     @router.post("/undo/{action_id}")
     def undo(action_id: int):
-        act = store.get_action(action_id)
+        act = store.actions.get_action(action_id)
         desc = _action_desc(act) if act is not None else f"action #{action_id}"
         try:
             ctx.ops().undo(action_id)   # reverts + best-effort targeted refresh of the target

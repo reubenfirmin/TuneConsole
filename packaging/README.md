@@ -84,12 +84,34 @@ python3 packaging/container/smoke.py --engine docker --image tuneconsole:local -
 ```
 
 Use `podman build --format docker -t tuneconsole:local .` and `--engine podman` to verify Podman.
+For a disposable build and smoke check under the shared test lock, run
+`TUNECONSOLE_TEST_CONTAINER_ENGINE=podman uv run pytest tests/test_container_packaged.py`
+(or select `docker`). The check removes its own image, container and volume afterwards.
 The Docker image format preserves the health check, which Podman's default OCI build format omits.
 The multi-stage Dockerfile installs
 runtime dependencies from `uv.lock`, builds a wheel, and copies only the installed environment
 into the runtime image. Git history and local app data are excluded from the build context.
 A local build defaults to version `0.0.0.dev0`; `--build-arg VERSION=X.Y.Z` stamps a release
 version without needing Git inside the image.
+
+### Controlled dependencies
+
+`uv.lock` controls runtime versions on all shipped platforms. `packaging/platforms.toml`
+records each Python ABI and architecture. Flatpak uses Python 3.13; containers and macOS use
+3.12. Environment markers retain Linux-only D-Bus support and omit Windows-only packages;
+uvicorn's `standard` extras remain included. Platform wheels differ, while compatible
+runtime package versions come from the same resolution.
+
+The `build` and `macos` dependency groups pin the packaging tools in that lock. Wheel,
+container, and macOS builds install those groups before building without isolation, so the
+build backend cannot resolve another set of tools. macOS requires uv and Python 3.12.
+
+For an upgrade, update `pyproject.toml` as needed, run `uv lock` (or `uv lock --upgrade-package
+NAME` for a deliberate package upgrade), then `packaging/flatpak/generate-pip-sources.sh`.
+Review the lock and generated wheel URLs/hashes together. CI uses `uv sync --locked` and
+`packaging/generate_deps.py --check` to reject stale inputs. The generator consumes uv's
+marker-aware export, selects locked wheels for both Flatpak architectures, and fails if a
+compatible wheel is absent; it downloads no generator and repeats no dependency list.
 
 The smoke test uses its own disposable container, volume, and random loopback port. It checks
 the UI/static assets, installed version, non-root storage, extension WebSocket handshake,
@@ -99,8 +121,8 @@ shutdown. It removes only its own test resources afterward.
 ### Release publishing
 
 `.github/workflows/container.yml` builds and smoke-tests both architectures on pushes and pull
-requests. A pushed `vX.Y.Z` tag publishes the multi-platform image to
-`ghcr.io/reubenfirmin/tuneconsole` after both tests pass. Publishing uses the repository's
+requests. The release coordinator calls it for tags, stages the exact tested image digests,
+and publishes their multi-platform manifest after all release checks pass. Publishing uses the repository's
 `GITHUB_TOKEN` with `packages: write`; no registry password or additional secret is needed.
 The image carries source, revision, version, and license labels.
 
@@ -108,6 +130,31 @@ After the first tagged publication, set the GitHub container package's visibilit
 in its package settings and verify an unauthenticated pull before deploying the website's
 container install option. GHCR creates new packages as private even for public repositories.
 Prerelease tags get their versioned images without moving `latest`.
+
+All packaging workflows use `packaging/release_policy.py`. Supported release tags are `vX.Y.Z`,
+PEP 440 prereleases (`vX.Y.ZrcN`, `vX.Y.ZbN`, `vX.Y.ZaN`, `vX.Y.Z.devN`) and their
+`-rc.N`, `-beta.N`, `-alpha.N`, `-dev.N` equivalents. Package versions normalize to PEP 440;
+unsupported tags fail before publication. Prereleases and development builds are explicitly
+GitHub prereleases, never become GitHub/container `latest`, and never deploy the stable
+Flatpak repository. There is currently no opt-in Flatpak prerelease update channel.
+
+`release.yml` owns tag publication. It waits for source CI, the wheel, signed Flatpak bundles
+for both architectures, both macOS DMGs and signed feeds, and both container smoke checks.
+Build jobs upload Actions candidates and never change stable channels. One serialized
+promotion job validates versions, feeds, digests and the complete artifact set, uploads a
+draft GitHub release with a SHA256 manifest, and promotes the tested container digests.
+It snapshots the existing Flatpak deployment and container `latest`, deploys the candidate
+repository, moves container `latest`, then publishes GitHub latest last. Older completed
+runs publish their immutable version downloads without moving any stable channel.
+
+A failed upload leaves a draft. Failed channel promotion attempts restore the prior Pages
+deployment and container digest before failing; errors restoring either channel are explicit.
+The services do not provide a shared atomic transaction, and a forced runner termination
+or service outage can require operator recovery. Keep the preceding Pages deployment and
+container digest available. The first release has no prior channels to restore. Retry a
+failed workflow with the same candidate artifacts; a published tag accepts only an identical
+manifest and is otherwise immutable. Do not publish these candidates manually outside the
+coordinator, since its shared concurrency group owns ordering and rollback.
 
 ---
 
@@ -120,17 +167,18 @@ written by your browser, which runs outside the sandbox.
 
 ### Prerequisites
 ```sh
-flatpak install flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+flatpak install flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
 # flatpak-builder: e.g. `sudo dnf install flatpak-builder` or `flatpak install flathub org.flatpak.Builder`
 ```
 
 ### Build
 ```sh
 # from the repo root
-uv build --wheel                                   # -> dist/yt_playlist-0.1.1-py3-none-any.whl
+uv sync --locked --only-group build --no-install-project
+uv build --wheel --no-build-isolation --python .venv/bin/python
 
 cd packaging/flatpak
-./generate-pip-sources.sh                          # -> python3-requirements.json (needs network, once)
+./generate-pip-sources.sh                          # -> locked Python 3.13 wheels for both architectures
 
 flatpak-builder --user --install --force-clean build-dir com.tuneconsole.TuneConsole.yaml
 ```
@@ -142,13 +190,37 @@ flatpak run com.tuneconsole.TuneConsole --port 9000   # extra args pass through
 ```
 
 Regenerate `python3-requirements.json` whenever `[project.dependencies]` changes, and rebuild the
-wheel (`uv build --wheel`) whenever the app code changes, before re-running `flatpak-builder`.
+wheel (using that same build command) whenever the app code changes, before re-running
+`flatpak-builder`. Keep exactly one application wheel in `dist/`.
+
+To check a real local build without changing your installed app, run
+`uv run pytest --run-flatpak-build -m '' tests/test_flatpak_packaged.py`.
+The second check also needs Chromium from Playwright, GPG, D-Bus, and the host's
+`flatpak-portal`, `flatpak-session-helper`, and `xdg-permission-store` executables. It builds
+two real application versions, installs a signed bundle into a clean temporary user
+installation, and uses the Home card to update and restart. Its private session bus and
+permission store pregrant update consent without touching desktop settings. It verifies
+the new running commit, the same tab reconnecting, and preserved library, config, and
+browser pairing. It covers an automatic restart on 25.08/Python 3.13 and the safe fresh-launch
+fallback when migrating from 24.08/Python 3.12. No application repository or runtime is installed into your user account.
+It builds a wheel and the offline Flatpak inputs in temporary directories, then checks the
+supported runtime, startup, extension WebSocket origins, logs, and persisted state. The release
+workflow also installs each architecture's signed bundle and runs `flatpak/smoke.py` against it.
+
+Freedesktop 25.08 is supported through September 2027 according to the
+[upstream release timeline](https://freedesktop-sdk.gitlab.io/documentation/wiki/Releases.html).
+The repository release maintainer owns runtime support. Review the next runtime migration
+by June 2027 and complete it before September; dates are recorded in `platforms.toml`.
+Changing the runtime also requires changing its Python ABI, regenerating both wheel sets,
+and running the packaged installation/upgrade, startup, browser bridge and updater checks.
+The retired Flathub submission has no maintained manifest to migrate.
 
 ### Notes
 - The repo ships an MIT `LICENSE` at its root, matching `project_license` in the metainfo.
-- **Publishing on Flathub:** a submission-ready manifest + vendored deps + step-by-step guide live in
-  [`../flathub/`](../flathub/README.md). It fetches the wheel from a tagged GitHub Release (the
-  `release.yml` workflow attaches it) and the metainfo screenshots from the deployed site.
+- **Distribution ownership:** the repository maintainer owns the signed, self-hosted Flatpak
+  repository and release bundles. Flathub application submission is deferred; its obsolete
+  manifest and duplicated dependency snapshot have been removed. See the
+  [reopening requirements](flathub/README.md) before starting a new submission.
 
 ---
 
@@ -163,6 +235,35 @@ If an update requires additional permissions, or self-updates are denied/unavail
 to the desktop software manager. Updates installed independently by the software manager are also
 detected, so the running app can offer a restart. Published updates must be in the installed app's
 configured Flatpak repository; the GitHub release notice alone doesn't install an update.
+
+When a runtime change prevents the installed version from starting in the current sandbox,
+TuneConsole keeps the current server available and asks you to close all TuneConsole tabs,
+wait for the application to exit, and open it again from your applications menu. The Flatpak Spawn portal retains the
+caller's runtime branch even when launching the latest application commit; a fresh desktop
+launch selects the new runtime. The app checks that the replacement can start before stopping
+the current server. See the [portal implementation](https://github.com/flatpak/flatpak/blob/main/portal/flatpak-portal.c).
+
+Release bundles embed the application repository URL (`https://repo.tuneconsole.com/`) and
+its signing key, separately from the Flathub runtime repository. Installing a new bundle
+therefore configures a verified application origin automatically. See the
+[Flatpak bundle options](https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-build-bundle).
+
+For an older bundle installed without an update origin, close TuneConsole and reconnect it
+to the signed repository in the **same installation scope** (these commands use `--user`;
+use `--system` for a system installation):
+
+```sh
+flatpak remote-add --user --if-not-exists tuneconsole https://repo.tuneconsole.com/tuneconsole.flatpakrepo
+flatpak install --user --reinstall tuneconsole com.tuneconsole.TuneConsole
+flatpak info --user --show-origin com.tuneconsole.TuneConsole
+flatpak update --user com.tuneconsole.TuneConsole
+```
+
+Reinstallation preserves the app's private config and data. Do not uninstall with
+`--delete-data`. The release check must install the bundle in a clean user installation,
+inspect its origin and GPG verification, serve a newer signed commit from that origin,
+then update and restart through the Home card. Check that the version changes while the
+existing library and browser pairing remain available.
 
 To stop a packaged Linux launch normally, close all TuneConsole tabs and wait a few seconds. A
 development launch (`uv run yt-playlist`) stays running until Ctrl-C in its terminal.

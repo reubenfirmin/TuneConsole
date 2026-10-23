@@ -1,8 +1,7 @@
-"""Unit tests for the recommender parameter registry and per-genre score weighting."""
+"""Unit tests for the recommender parameter registry."""
 import pytest
 
 from yt_playlist.rec import rec_params
-from yt_playlist.rec.recommend import genre_adjusted_scores
 
 
 # --- registry / get_param ---
@@ -81,7 +80,7 @@ def test_boolean_param_roundtrip(store, monkeypatch):
     assert rec_params.get_param(store, "test_flag") is True          # default
     rec_params.set_param(store, "test_flag", False)
     assert rec_params.get_param(store, "test_flag") is False
-    assert store.get_setting("rec_param:test_flag") == "0"
+    assert store.settings.get_setting("rec_param:test_flag") == "0"
 
 
 def test_registry_has_expected_groups_and_advanced_flag():
@@ -90,30 +89,3 @@ def test_registry_has_expected_groups_and_advanced_flag():
             "candidate_pool_factor"} <= names
     advanced = {p.name for p in rec_params.PARAMS if p.advanced}
     assert "candidate_pool_factor" in advanced            # the nichest knobs are collapsed
-
-
-# --- per-genre score weighting ---
-
-def test_genre_weights_no_op_when_all_neutral():
-    scores = {"a": 0.5, "b": 0.4}
-    genre_of = {"a": "rock", "b": "jazz"}
-    assert genre_adjusted_scores(scores, genre_of, {}) == scores
-    assert genre_adjusted_scores(scores, genre_of, {"rock": 1.0}) == scores
-
-
-def test_genre_suppression_sinks_that_family():
-    # rock (a, c) suppressed to 0 -> both drop below jazz (b), even though a scored highest
-    scores = {"a": 0.5, "b": 0.4, "c": 0.3}
-    genre_of = {"a": "rock", "b": "jazz", "c": "rock"}
-    adj = genre_adjusted_scores(scores, genre_of, {"rock": 0.0})
-    assert adj["b"] > adj["a"]
-    assert adj["b"] > adj["c"]
-    assert adj["a"] == 0.0 and adj["c"] == 0.0
-
-
-def test_genre_boost_lifts_that_family_above_a_higher_neutral():
-    # jazz (b) scores just below rock (a); a 2x boost lifts it above. c is the pool's low anchor.
-    scores = {"a": 0.40, "b": 0.39, "c": 0.10}
-    genre_of = {"a": "rock", "b": "jazz", "c": "rock"}
-    adj = genre_adjusted_scores(scores, genre_of, {"jazz": 2.0})
-    assert adj["b"] > adj["a"]

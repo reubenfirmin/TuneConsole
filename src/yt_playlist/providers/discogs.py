@@ -11,23 +11,17 @@ token via $DISCOGS_TOKEN or `discogs_token` in config.toml / the settings table.
 import json
 import logging
 import re
-import sys
+import tomllib
 import urllib.parse
 import urllib.request
 
 from yt_playlist.providers import genres
-from yt_playlist.providers.base import EnrichmentResult, RateLimiter, run_enrich_loop
+from yt_playlist.providers.base import EnrichmentResult, RateLimiter
 from yt_playlist.util import net
-from yt_playlist.util.matching import normalize
+from yt_playlist.util.matching import normalize, recording_title
 from yt_playlist.core import paths
-from yt_playlist.providers.enrich_queue import PriorityGate
 
 name = "discogs"
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover
-    import tomli as tomllib
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +29,6 @@ _API = "https://api.discogs.com"
 _USER_AGENT = "yt-playlist/0.1 +https://4rc.io"
 _HTTP_TIMEOUT_S = 20                       # cap each request so a stalled socket can't wedge a run
 _pacer = RateLimiter(2.5)                  # interval is set per-call in _pace() (token-dependent)
-_gate = PriorityGate()                    # newest enrichment job preempts older ones
 _breaker = net.CircuitBreaker()           # stop a run once the host looks unreachable
 
 
@@ -46,7 +39,7 @@ def token(store=None, config_path=None):
     if env and env.strip():
         return env.strip()
     if store is not None:
-        saved = store.get_setting("discogs_token")
+        saved = store.settings.get_setting("discogs_token")
         if saved and saved.strip():
             return saved.strip()
     path = config_path or paths.config_path()
@@ -117,11 +110,11 @@ def _matches_release(result, title, artist, tok):
     """Discogs searches all release text, so even highly ranked hits can be unrelated records."""
     result_artist, separator, result_title = (result.get("title") or "").partition(" - ")
     wanted_artist = _artist_key(artist)
-    wanted_title = normalize(title)
+    wanted_title = recording_title(title)
     if not separator or not wanted_artist or not wanted_title:
         return False
     same_artist = _artist_key(result_artist) == wanted_artist
-    if same_artist and normalize(result_title) == wanted_title:
+    if same_artist and recording_title(result_title) == wanted_title:
         return True
     # Album search hits can be legitimate, but must actually contain this artist's track.
     # Only inspect plausible albums/compilations; an unrelated artist's record needs no lookup.
@@ -140,7 +133,7 @@ def _matches_release(result, title, artist, tok):
 def _has_track(tracklist, artists, wanted_title, wanted_artist):
     for track in tracklist:
         credits = track.get("artists") or artists
-        if (track.get("type_") != "heading" and normalize(track.get("title")) == wanted_title
+        if (track.get("type_") != "heading" and recording_title(track.get("title")) == wanted_title
                 and any(_artist_key(a.get("name")) == wanted_artist for a in credits)):
             return True
         if _has_track(track.get("sub_tracks") or [], credits, wanted_title, wanted_artist):
@@ -167,30 +160,3 @@ def enrich(title, artist, tok=None):
     return (genre, year)
 
 
-def enrich_playlist(store, playlist_id, on_progress, enrich_fn=None, tok=None, should_stop=None, pending=None):
-    """Fill missing genre and year for a track set from Discogs (fill-only). Scope is a playlist
-    (playlist_id) or an explicit `pending` list (an album's tracks)."""
-    enrich_fn = enrich_fn or enrich
-    tok = tok or token(store)
-    pending = store.tracks_to_enrich(playlist_id) if pending is None else pending   # missing genre OR year
-    auth = "with token" if tok else "anonymously (slower)"
-
-    def _per_item(i, total, t):
-        genre, year = enrich_fn(t["title"], t["artist"], tok)
-        if _breaker.tripped():             # host unreachable. The rest would all fail too, so stop
-            on_progress({"type": "err", "text": "Discogs looks unreachable. Stopped. "
-                         "The remaining tracks will retry next time."})
-            return False
-        store.set_track_enrichment(t["id"], genre, year)
-        eff_genre, eff_year = store.get_track_enrichment(t["id"])
-        bits = " · ".join(x for x in (genre, year) if x) or "no match"
-        on_progress({"type": "track", "i": i, "n": total, "video_id": t["video_id"],
-                     "genre": eff_genre, "year": eff_year, "text": f"{i}/{total} {t['title']}: {bits}"})
-
-    run_enrich_loop(
-        store, on_progress, pending, gate=_gate, breaker=_breaker, should_stop=should_stop,
-        empty_text="Every track already has genre & year.",
-        start_text=lambda n: f"Looking up {n} track(s) on Discogs {auth}…",
-        done_text=lambda n: f"Looked up {n} track(s).",
-        wait_text="Waiting: a newer playlist is looking up first…",
-        per_item=_per_item)

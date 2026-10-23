@@ -6,26 +6,26 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from yt_playlist.rec import measurement, recommend
+from yt_playlist.rec import measurement, surfaces
 from yt_playlist.web.app import create_app
 
 
 @pytest.fixture
 def measured(store):
-    iid = store.upsert_identity("Main", "cred", None, True)
+    iid = store.identities.upsert_identity("Main", "cred", None, True)
     ids, vectors = [], []
     for vid, title, xy in [("seed", "Seed", [1., 0.]), ("near", "Near", [.9, .1]),
                            ("far", "Far", [0., 1.])]:
-        tid = store.upsert_track(vid, title, "Artist", None, 200)
-        store.set_track_genre(tid, "Techno")
+        tid = store.tracks.upsert_track(vid, title, "Artist", None, 200)
+        store.tracks.set_track_genre(tid, "Techno")
         ids.append(tid)
         vectors.append((f"{title.lower()}|artist", np.asarray(xy, dtype=np.float32).tobytes()))
-    pid = store.upsert_playlist(iid, "PL", "Library", 1, "h", 0)
-    store.set_playlist_tracks(pid, ids[:1])
-    other = store.upsert_playlist(iid, "OTHER", "Other", 2, "h", 0)
-    store.set_playlist_tracks(other, ids)
-    store.replace_rec_vectors(vectors)
-    store.upsert_discovered_track("cold|new artist", "cold", "Cold", "New artist", "", None,
+    pid = store.playlists.upsert_playlist(iid, "PL", "Library", 1, "h", 0)
+    store.playlists.set_playlist_tracks(pid, ids[:1])
+    other = store.playlists.upsert_playlist(iid, "OTHER", "Other", 2, "h", 0)
+    store.playlists.set_playlist_tracks(other, ids)
+    store.rec_model.replace_rec_vectors(vectors)
+    store.discovery.upsert_discovered_track("cold|new artist", "cold", "Cold", "New artist", "", None,
                                   "Techno", "2000", "source", 0)
     remote, clock = FakeClient(), [100.]
     app = create_app(store, lambda: {iid: remote}, now_fn=lambda: clock[0])
@@ -42,7 +42,7 @@ def test_final_recommendations_preserve_scores_order_context_and_policy(measured
 
     fragment = http.get(f"/playlist/{pid}/suggestions")
     assert fragment.status_code == 200 and "Near" in fragment.text
-    expected = recommend.complete_playlist(store, pid, now=100)
+    expected = surfaces.complete_playlist(store, pid, now=100)
     rows = store.conn.execute("SELECT * FROM rec_served_impressions ORDER BY id").fetchall()
     assert [r["identity_key"] for r in rows] == [i.key for i in expected]
     assert [r["score"] for r in rows] == [i.score for i in expected]
@@ -66,7 +66,8 @@ def test_final_recommendations_preserve_scores_order_context_and_policy(measured
 def test_save_counts_only_successful_adoption_and_promotion_preserves_play_provenance(measured, monkeypatch, generated):
     store, http, _, remote, clock, iid, pid = measured
     if generated:
-        store.set_playlist_group("PL", "Generated")
+        store.playlists.set_playlist_group("PL", "Generated")
+        store.playlists.mark_generated_playlist('PL')
     measurement.record_recommendations(store, "home", [{"key": "cold|new artist", "score": .8}], 100)
     clock[0] = 110
     body = {"playlist_id": pid, "song": {"video_id": "cold", "title": "Cold", "artist": "New artist"}}
@@ -76,20 +77,24 @@ def test_save_counts_only_successful_adoption_and_promotion_preserves_play_prove
         raise RuntimeError("remote failed")
 
     monkeypatch.setattr(remote, "add_playlist_items", fail)
-    assert http.post("/songs/add-to-playlist", json=body).status_code == 422
+    response = http.post("/songs/add-to-playlist", json=body)
+    assert response.status_code == 200
+    assert response.json()["status"] == "partial"
+    assert response.json()["added"] is False
+    assert response.json()["uncertain"] == 1
     assert store.conn.execute("SELECT COUNT(*) FROM rec_response_events").fetchone()[0] == 0
     monkeypatch.setattr(remote, "add_playlist_items", original_add)
     assert http.post("/songs/add-to-playlist", json=body).status_code == 200
     assert http.post("/songs/add-to-playlist", json=body).status_code == 200  # already present
     assert store.conn.execute("SELECT COUNT(*) FROM rec_response_events").fetchone()[0] == 1
-    score = store.recommendation_scorecard(90, 105)
+    score = store.rec_surface.recommendation_scorecard(90, 105)
     assert score["save"] == 1 and score["conversion"] == int(not generated)
     if generated:
-        store.record_play_event(iid, "cold|new artist", "cold", 115, playlist_ytm_id="RDAMPLPL")
+        store.history.record_play_event(iid, "cold|new artist", "cold", 115, playlist_ytm_id="RDAMPLPL")
         clock[0] = 120
         assert http.post(f"/playlist/{pid}/promote").status_code == 200
         http.post(f"/playlist/{pid}/promote")
-        score = store.recommendation_scorecard(90, 105)
+        score = store.rec_surface.recommendation_scorecard(90, 105)
         assert score["promotion"] == score["conversion"] == score["generated"] == 1
         assert score["organic"] == 0
 
@@ -101,7 +106,7 @@ def test_open_start_and_scorecard_range_are_observed_without_inventing_a_play(me
     assert http.get(f"/playlist/{pid}").status_code == 200
     # A disconnected extension must not count as a successful request.
     assert http.post("/play", json={"url": "https://music.youtube.com/watch?v=seed"}).json()["ok"] is False
-    assert store.recommendation_scorecard(90, 105)["start"] == 0
+    assert store.rec_surface.recommendation_scorecard(90, 105)["start"] == 0
     monkeypatch.setattr(ctx.bridge, "send_control", lambda frame: None)
     response = http.post("/play", json={"url": "https://music.youtube.com/watch?list=RDAMPLPL"}).json()
     assert response["ok"] is True, response
@@ -123,7 +128,7 @@ def test_cluster_save_is_a_generated_response_and_not_discovery_conversion(measu
     result = http.post("/clusters/save", data={"name": "Cluster", "keep_keys": '["cold|new artist"]',
                                                "central_keys": "[]"})
     assert result.status_code == 200 and "Saved" in result.text
-    score = store.recommendation_scorecard(90, 105)
+    score = store.rec_surface.recommendation_scorecard(90, 105)
     assert score["save"] == 1 and score["conversion"] == 0
     html = http.get("/taste/recall").text
     assert "1 saved" in html and "Coverage and response samples" in html
@@ -139,16 +144,16 @@ def test_migration_from_previous_schema_preserves_old_impressions_and_new_ledger
     store = Store(path)
     migrate(store.conn, registry=MIGRATIONS[:8])
     store._bind_repositories()
-    store.record_served_impressions("legacy", "home", [{"key": "old|artist", "rank": 1}], 50)
+    store.rec_surface.record_served_impressions("legacy", "home", [{"key": "old|artist", "rank": 1}], 50)
     store.init_schema()
     measurement.record_recommendations(store, "home", [{"key": "new|artist", "score": .4}], 100)
-    store.record_recommendation_outcomes("save", "save", ["new|artist"], 110)
+    store.rec_surface.record_recommendation_outcomes("save", "save", ["new|artist"], 110)
     store.conn.close()
     reopened = Store(path)
     reopened.init_schema()
-    score = reopened.recommendation_scorecard(40, 105)
+    score = reopened.rec_surface.recommendation_scorecard(40, 105)
     assert score["impressions"] == 2 and score["save"] == 1
-    trace = reopened.served_recommendation(2)
+    trace = reopened.rec_surface.served_recommendation(2)
     assert trace["configuration"]["algorithm"] == "served-ranking-v2"
     assert score["by_ownership"]["unknown"]["impressions"] == 2
     reopened.conn.close()

@@ -12,15 +12,15 @@ SONG = {"video_id": "new-song", "title": "A song's <title>", "artist": "Artist &
 
 
 def seed_song_actions(store):
-    main_id = store.upsert_identity("Main", "main-cred", None, True)
-    other_id = store.upsert_identity("Other account", "other-cred", None, False)
-    offline_id = store.upsert_identity("Offline", "offline-cred", None, False)
-    source = store.upsert_playlist(main_id, "SOURCE", "Source mix", 1, "h", 1)
-    destination = store.upsert_playlist(other_id, "DEST", "Evening mix", 0, "", 1)
-    system = store.upsert_playlist(main_id, "LM", "Liked Music", 0, "", 1)
-    offline = store.upsert_playlist(offline_id, "OFFLINE", "Offline mix", 0, "", 1)
-    track = store.upsert_track("owned-song", "Owned Song", "Artist & Friends", "Album", 180)
-    store.set_playlist_tracks(source, [track])
+    main_id = store.identities.upsert_identity("Main", "main-cred", None, True)
+    other_id = store.identities.upsert_identity("Other account", "other-cred", None, False)
+    offline_id = store.identities.upsert_identity("Offline", "offline-cred", None, False)
+    source = store.playlists.upsert_playlist(main_id, "SOURCE", "Source mix", 1, "h", 1)
+    destination = store.playlists.upsert_playlist(other_id, "DEST", "Evening mix", 0, "", 1)
+    system = store.playlists.upsert_playlist(main_id, "LM", "Liked Music", 0, "", 1)
+    offline = store.playlists.upsert_playlist(offline_id, "OFFLINE", "Offline mix", 0, "", 1)
+    track = store.tracks.upsert_track("owned-song", "Owned Song", "Artist & Friends", "Album", 180)
+    store.playlists.set_playlist_tracks(source, [track])
     main = FakeClient(albums={"MPRE_new": {
         "title": "New Album", "artists": [{"name": "Artist & Friends"}],
         "tracks": [{"videoId": SONG["video_id"], "title": SONG["title"], "duration": "3:45"}],
@@ -54,28 +54,28 @@ def test_create_seeds_an_ordinary_playlist_on_main_account(songs):
     data = response.json()
     assert data["message"] == "Playlist created."
     assert data["added"] is True
-    playlist = songs["store"].get_playlist(int(data["url"].split("/")[-1]))
+    playlist = songs["store"].playlists.get_playlist(int(data["url"].split("/")[-1]))
     assert playlist.title == "Soul favorites" and playlist.identity_id == songs["main_id"]
     assert playlist.created_at == 100.0
     assert playlist.thumbnail == SONG["thumbnail"]
-    assert next(p for p in songs["store"].get_playlists() if p.id == playlist.id).thumbnail == SONG["thumbnail"]
-    tracks = songs["store"].playlist_tracks_detail(playlist.id)
+    assert next(p for p in songs["store"].playlists.get_playlists() if p.id == playlist.id).thumbnail == SONG["thumbnail"]
+    tracks = songs["store"].charts.playlist_tracks_detail(playlist.id)
     assert [(t["video_id"], t["duration"], t["album_browse"]) for t in tracks] == [(SONG["video_id"], 225, "MPRE_new")]
-    assert playlist.ytm_playlist_id not in songs["store"].get_playlist_groups()
+    assert playlist.ytm_playlist_id not in songs["store"].playlists.get_playlist_groups()
     assert songs["main"].added == [(playlist.ytm_playlist_id, [SONG["video_id"]])]
     assert not songs["other"].created
 
 
 def test_add_uses_destination_account_and_preserves_existing_order(songs):
     http, store, destination = songs["http"], songs["store"], songs["destination"]
-    store.set_playlist_tracks(destination, store.get_playlist_track_ids(songs["source"]))
+    store.playlists.set_playlist_tracks(destination, store.playlists.get_playlist_track_ids(songs["source"]))
     response = http.post("/songs/add-to-playlist", json={"playlist_id": destination, "song": SONG})
     assert response.status_code == 200 and response.json()["message"] == "Song added."
     assert songs["other"].added == [("DEST", [SONG["video_id"]])]
     assert not songs["main"].added
-    assert [t["video_id"] for t in store.playlist_tracks_detail(destination)] == ["owned-song", SONG["video_id"]]
-    assert store.get_playlist(destination).track_count == 2
-    assert store.get_playlist(destination).thumbnail == SONG["thumbnail"]
+    assert [t["video_id"] for t in store.charts.playlist_tracks_detail(destination)] == ["owned-song", SONG["video_id"]]
+    assert store.playlists.get_playlist(destination).track_count == 2
+    assert store.playlists.get_playlist(destination).thumbnail == SONG["thumbnail"]
     again = http.post("/songs/add-to-playlist", json={"playlist_id": destination, "song": SONG})
     assert "already" in again.json()["message"]
     assert len(songs["other"].added) == 1
@@ -101,7 +101,7 @@ def test_invalid_create_does_not_write(songs, body):
 def test_disconnected_main_cannot_create(songs):
     songs["clients"].pop(songs["main_id"])
     response = songs["http"].post("/songs/create-playlist", json={"name": "Mix", "song": SONG})
-    assert response.status_code == 422 and "isn't connected" in response.json()["detail"]
+    assert response.status_code == 422 and "not connected" in response.json()["detail"]
     assert not songs["main"].created and not songs["other"].created
 
 
@@ -109,25 +109,217 @@ def test_remote_create_failure_is_reported_without_local_playlist(songs, monkeyp
     def fail(*args):
         raise RuntimeError("Remote unavailable")
     monkeypatch.setattr(songs["main"], "create_playlist", fail)
-    before = songs["store"].get_playlists()
+    before = songs["store"].playlists.get_playlists()
     response = songs["http"].post("/songs/create-playlist", json={"name": "Mix", "song": SONG})
     assert response.status_code == 502
-    assert songs["store"].get_playlists() == before
+    assert songs["store"].playlists.get_playlists() == before
 
 
-def test_rejected_song_reports_partial_creation_and_failed_add(songs, monkeypatch):
+@pytest.mark.parametrize('unknown', [False, True])
+def test_new_song_playlist_seeds_before_first_readable_page(songs, monkeypatch, unknown):
+    import json
+    from tests.core.test_playlist_page_accounting import first
+    from tests.test_saved_album_snapshot import _production_client
+    from yt_playlist.library import executor, undo_capture
+    from yt_playlist.util.action_kinds import COPY_PLAYLIST
+
+    # Representative of the reported first-page shape: a message inside the playlist shelf,
+    # a continuation, and no verifiable zero-count header. Use the production reader/parser.
+    response = first([{'messageRenderer': {}}])
+    columns = response['contents']['twoColumnBrowseResultsRenderer']
+    header = columns['tabs'][0]['tabRenderer']['content']['sectionListRenderer']['contents'][0]
+    del header['musicResponsiveHeaderRenderer']['secondSubtitle']
+    columns['secondaryContents']['sectionListRenderer']['contents'][0]['musicPlaylistShelfRenderer'][
+        'continuations'] = [{'nextContinuationData': {'continuation': 'not-ready'}}]
+    reader, bridge = _production_client([response] * 3)
+    client, store = songs['main'], songs['store']
+    attempts = []
+
+    def seed(playlist_id, videos, **kwargs):
+        assert not bridge.calls, 'A just-created destination must not require a baseline read'
+        creation = next(a for a in store.actions.get_actions() if a.kind == COPY_PLAYLIST)
+        assert creation.status == 'pending'
+        assert json.loads(creation.undo_json)['new_ytm'] == playlist_id
+        attempts.append((playlist_id, videos))
+        if unknown:
+            raise TimeoutError('Lost seed reply')
+        return {'status': 'STATUS_SUCCEEDED'}
+
+    monkeypatch.setattr(client, 'add_playlist_items', seed)
+    monkeypatch.setattr(client, 'get_playlist', reader.get_playlist)
+    monkeypatch.setattr(executor, '_capture_post',
+                        lambda *a, **kw: undo_capture.capture_post(*a, **kw, sleep=lambda _: None))
+    result = songs['http'].post('/songs/create-playlist', json={'name': 'Mix', 'song': SONG})
+    assert result.status_code == 200
+    data = result.json()
+    assert data['added'] is (not unknown)
+    assert len(client.created) == len(attempts) == 1
+    assert len(bridge.calls) == 3
+    playlist = store.playlists.get_playlist(int(data['url'].rsplit('/', 1)[1]))
+    assert playlist.track_count == (0 if unknown else 1)
+    actions = [a for a in store.actions.get_actions() if a.kind == COPY_PLAYLIST]
+    assert len(actions) == 1 and actions[0].status == 'executed'
+    assert json.loads(actions[0].undo_json)['new_ytm'] == playlist.ytm_playlist_id
+    assert json.loads(actions[0].undo_json)['post'] is None
+    if unknown:
+        assert data['status'] == 'partial' and data['uncertain'] == 1
+        assert data['recovery_url'] == '/actions'
+    # A later successful read does not establish ownership or authorize deleting this copy.
+    from yt_playlist.library.undo_conflicts import require_unchanged_copy
+    with pytest.raises(ValueError, match='preserved'):
+        require_unchanged_copy(json.loads(actions[0].undo_json)['post'], {'videos': []})
+    assert not client.deleted and len(client.created) == 1
+
+
+def test_creation_retains_remote_destination_when_local_materialization_fails(songs, monkeypatch):
+    import json
+    from yt_playlist.util.action_kinds import COPY_PLAYLIST
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('Local materialization failed')
+
+    monkeypatch.setattr(songs['store'].playlists, 'upsert_playlist', fail)
+    response = songs['http'].post('/songs/create-playlist', json={'name': 'Mix', 'song': SONG})
+    assert response.status_code == 200
+    data = response.json()
+    assert data['status'] == 'partial' and data['recovery_url'] == '/actions'
+    assert data['url'].startswith('https://music.youtube.com/playlist?list=')
+    assert len(songs['main'].created) == 1 and not songs['main'].added
+    creation = next(a for a in songs['store'].actions.get_actions() if a.kind == COPY_PLAYLIST)
+    assert creation.status == 'executed'
+    assert json.loads(creation.undo_json)['post'] is None
+    assert json.loads(creation.params_json)['partial'] is True
+
+
+@pytest.mark.parametrize('unknown', [False, True])
+def test_song_creation_retains_destination_for_rejected_and_unconfirmed_additions(songs, monkeypatch, unknown):
     def fail(*args):
-        raise RuntimeError("Song unavailable")
+        if unknown:
+            raise RuntimeError("Song response lost")
+        return {"status": "STATUS_FAILED"}
     monkeypatch.setattr(songs["main"], "add_playlist_items", fail)
     monkeypatch.setattr(songs["other"], "add_playlist_items", fail)
     response = songs["http"].post("/songs/create-playlist", json={"name": "Mix", "song": SONG})
     assert response.status_code == 200
-    assert "couldn't add" in response.json()["message"]
-    assert response.json()["added"] is False
+    data = response.json()
+    assert ("has not confirmed" if unknown else "couldn't add") in data["message"]
+    assert data["added"] is False
+    if unknown:
+        assert data['status'] == 'partial' and data['uncertain'] == 1 and data['rejected'] == 0
+        assert data['recovery_url'] == '/actions'
+        assert 'Creating again makes another playlist' in data['guidance']
     assert len(songs["main"].created) == 1
-    playlist = songs["store"].get_playlist(int(response.json()["url"].split("/")[-1]))
+    playlist = songs["store"].playlists.get_playlist(int(response.json()["url"].split("/")[-1]))
     assert playlist.title == "Mix" and playlist.track_count == 0
-    assert playlist.thumbnail is None  # A rejected song must not become the cover.
+    assert playlist.thumbnail is None  # An undelivered song must not become the cover.
     response = songs["http"].post("/songs/add-to-playlist", json={"playlist_id": songs["destination"], "song": SONG})
-    assert response.status_code == 422 and "couldn't add" in response.json()["detail"]
-    assert not songs["store"].get_playlist_track_ids(songs["destination"])
+    if unknown:
+        assert response.status_code == 200 and response.json()['status'] == 'partial'
+        assert response.json()['uncertain'] == 1 and response.json()['rejected'] == 0
+    else:
+        assert response.status_code == 422 and "couldn't add" in response.json()["detail"]
+    assert not songs["store"].playlists.get_playlist_track_ids(songs["destination"])
+    assert len(songs['main'].created) == 1
+    assert songs['store'].actions.get_actions()
+
+
+def test_metadata_loads_current_values_originals_and_genre_sources(songs):
+    store = songs['store']
+    tid = store.playlists.get_playlist_track_ids(songs['source'])[0]
+    store.tracks.set_track_title(tid, 'Corrected title')
+    store.tracks.set_track_enrichment(tid, 'Electronic', '1995')
+    store.enrichment.log_enrichment(tid, 'run', 'discogs', 'genre', 'Art Pop', now=1)
+    data = songs['http'].get('/songs/metadata', params={'video_id': 'owned-song'}).json()
+    assert data['metadata'] == {
+        'track_id': tid, 'title': 'Corrected title', 'artist': 'Artist & Friends',
+        'genre': 'Electronic', 'year': '1995', 'orig_title': 'Owned Song', 'orig_artist': 'Artist & Friends',
+    }
+    assert data['genre_options'] == [{'value': 'Art Pop', 'providers': ['discogs']}]
+
+
+def test_metadata_saves_all_fields_and_restores_originals(songs, monkeypatch):
+    from unittest.mock import Mock
+
+    store = songs['store']
+    tid = store.playlists.get_playlist_track_ids(songs['source'])[0]
+    store.playlists.set_playlist_tracks(songs['destination'], [tid])
+    update = Mock()
+    monkeypatch.setattr(songs['app'].state.ctx.rec_worker, 'trigger_content_update', update)
+    body = {'song': {'video_id': 'owned-song', 'title': 'Stale display', 'artist': 'Stale artist'},
+            'title': ' Fixed title ', 'artist': ' Fixed artist ', 'genre': ' Art Pop ', 'year': ' 1998 '}
+    assert songs['http'].post('/songs/metadata', json=body).status_code == 200
+    for pid in (songs['source'], songs['destination']):
+        track = store.charts.playlist_tracks_detail(pid)[0]
+        assert (track['title'], track['artist'], track['genre'], track['year']) == (
+            'Fixed title', 'Fixed artist', 'Art Pop', '1998')
+    update.assert_called_once_with(video_ids=['owned-song'])
+    body.update(title='Owned Song', artist='Artist & Friends', genre='', year='')
+    assert songs['http'].post('/songs/metadata', json=body).status_code == 200
+    track = store.charts.playlist_tracks_detail(songs['source'])[0]
+    assert track['title'] == 'Owned Song' and track['artist'] == 'Artist & Friends'
+    assert not track['genre'] and not track['year']
+    assert not track['title_edited'] and not track['artist_edited']
+
+
+def test_metadata_save_preserves_unchanged_provider_selection(songs):
+    store = songs['store']
+    tid = store.playlists.get_playlist_track_ids(songs['source'])[0]
+    store.enrichment.apply_provider_fields(tid, 'discogs', {'genre': 'Electronic', 'year': '1995'})
+    body = {'song': {'video_id': 'owned-song', 'title': 'Owned Song'},
+            'title': 'Fixed title', 'artist': 'Artist & Friends', 'genre': 'Electronic', 'year': '1995'}
+    assert songs['http'].post('/songs/metadata', json=body).status_code == 200
+    fields = store.enrichment.metadata_provenance(tid)['fields']
+    assert fields['genre']['source'] == fields['mb_year']['source'] == 'discogs'
+    assert not fields['genre']['override'] and not fields['mb_year']['override']
+
+
+def test_metadata_partial_save_preserves_background_enrichment(songs):
+    store = songs['store']
+    tid = store.playlists.get_playlist_track_ids(songs['source'])[0]
+    store.enrichment.apply_provider_fields(tid, 'discogs', {'genre': 'Ambient', 'year': '2022'})
+    body = {'song': {'video_id': 'owned-song', 'title': 'Owned Song'}, 'title': 'Fixed title'}
+    assert songs['http'].post('/songs/metadata', json=body).status_code == 200
+    track = store.tracks.metadata_for_video('owned-song')
+    assert track['title'] == 'Fixed title' and track['genre'] == 'Ambient' and track['year'] == '2022'
+
+
+def test_editing_uncached_song_does_not_acquire_library_membership(songs):
+    http, store = songs['http'], songs['store']
+    before = store.conn.execute('SELECT * FROM library_memberships').fetchall()
+    assert http.get('/songs/metadata', params={'video_id': SONG['video_id']}).json()['metadata'] is None
+    body = {'song': SONG, 'title': 'Corrected title', 'artist': SONG['artist'], 'genre': 'Jazz', 'year': '2020'}
+    assert http.post('/songs/metadata', json=body).status_code == 200
+    track = store.tracks.metadata_for_video(SONG['video_id'])
+    assert track['title'] == 'Corrected title' and track['orig_title'] == SONG['title']
+    assert track['genre'] == 'Jazz' and track['year'] == '2020'
+    assert store.conn.execute('SELECT * FROM library_memberships').fetchall() == before
+    assert not songs['main'].added and not songs['other'].added
+
+
+@pytest.mark.parametrize('change', [{'title': '  '}, {'year': 'last year'}, {'year': '95'}, {'genre': 'x' * 81}])
+def test_invalid_metadata_does_not_partially_save(songs, change):
+    before = songs['store'].tracks.metadata_for_video('owned-song')
+    body = {'song': {'video_id': 'owned-song', 'title': 'Owned Song'},
+            'title': 'Updated', 'artist': 'Updated', 'genre': 'Jazz', 'year': '2000', **change}
+    assert songs['http'].post('/songs/metadata', json=body).status_code == 422
+    assert songs['store'].tracks.metadata_for_video('owned-song') == before
+
+
+@pytest.mark.parametrize('video_id', ['owned-song', 'uncached-song'])
+def test_metadata_write_failure_rolls_back_the_entire_edit(songs, monkeypatch, video_id):
+    from yt_playlist.core import catalog
+
+    before = songs['store'].tracks.metadata_for_video(video_id)
+    choose_field = catalog.choose_field
+
+    def fail_year(conn, entry_id, field, value, *args, **kwargs):
+        if field == 'mb_year':
+            raise RuntimeError('write failed')
+        return choose_field(conn, entry_id, field, value, *args, **kwargs)
+
+    monkeypatch.setattr(catalog, 'choose_field', fail_year)
+    body = {'song': {'video_id': video_id, 'title': 'Original', 'artist': 'Original artist'},
+            'title': 'Updated', 'artist': 'Updated artist', 'genre': 'Jazz', 'year': '2000'}
+    with pytest.raises(RuntimeError, match='write failed'):
+        songs['http'].post('/songs/metadata', json=body)
+    assert songs['store'].tracks.metadata_for_video(video_id) == before

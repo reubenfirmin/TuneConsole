@@ -81,6 +81,15 @@ class RoadTripRepo(Repo):
         self.conn.commit()
 
     @synchronized
+    def replace_road_trip_draft(self, recipe_id, state, now, *, expected_revision) -> bool:
+        """Publish worker results only while their exact input draft still exists."""
+        current = self.get_road_trip_draft(recipe_id)
+        if current is None or current.get('revision') != expected_revision:
+            return False
+        self.save_road_trip_draft(recipe_id, state, now)
+        return True
+
+    @synchronized
     def delete_road_trip_draft(self, recipe_id) -> None:
         self.conn.execute("DELETE FROM road_trip_drafts WHERE recipe_id=?", (recipe_id,))
         self.conn.commit()

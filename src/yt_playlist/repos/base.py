@@ -6,12 +6,11 @@ serves sync routes from a threadpool, so every DB call serializes on that one lo
 """
 from functools import wraps
 
-# Auto-assigned group for playlists this app generates from recommendations. Anything in this group
-# is quarantined from every taste signal (groupings/analysis/scores), so the engine never feeds on
-# its own suggestions. A generated playlist graduates ONLY when you promote it: move it out of this
-# group (it then counts as one of your real playlists). Playing it does not graduate it; adoption is
-# an explicit act, so a saved suggestion you never endorse can't quietly reshape your taste model.
-# The single source of truth (re-exported by rec_query for existing importers).
+from yt_playlist.core.activity import check_cancellable_work
+from yt_playlist.core.db_diagnostics import database_operation
+
+# Default display group for generated playlists. Policy lives in playlist_provenance;
+# changing a group never changes taste eligibility. Only explicit adoption lifts quarantine.
 #
 # TWO TIERS OF SIGNAL. Conflating them is the trap, in both directions:
 #
@@ -27,12 +26,14 @@ from functools import wraps
 #     Do not "fix" this tier by quarantining it: that deletes the only non-circular signal we have.
 GENERATED_GROUP = "Generated"
 
-# A track is "liked" if its song (identity_key) appears in any "Liked Music" (LM) playlist. Used as a
-# correlated subquery in the per-song views; the outer query must alias the tracks table as `t`.
-LIKED_EXISTS = ("EXISTS(SELECT 1 FROM playlist_tracks lpt "
+# Prefer the main account's recorded rating, including confirmed writes before LM has synced.
+# Otherwise use cached Liked Music membership. The outer query must alias tracks as `t`.
+LIKED_EXISTS = ("COALESCE((SELECT r.status='LIKE' FROM item_ratings r "
+                "JOIN identities i ON i.id=r.identity_id WHERE i.active=1 AND i.is_master=1 "
+                "AND r.video_id=t.video_id), EXISTS(SELECT 1 FROM playlist_tracks lpt "
                 "JOIN playlists lpl ON lpl.id = lpt.playlist_id "
                 "JOIN tracks lt ON lt.id = lpt.track_id "
-                "WHERE lpl.ytm_playlist_id = 'LM' AND lt.video_id = t.video_id)")
+                "WHERE lpl.ytm_playlist_id = 'LM' AND lt.video_id = t.video_id))")
 
 
 def synchronized(method):
@@ -42,13 +43,33 @@ def synchronized(method):
     """
     @wraps(method)
     def wrapper(self, *args, **kwargs):
-        with self._lock:
+        with database_operation(method.__qualname__), self._lock:
+            check_cancellable_work()
             return method(self, *args, **kwargs)
+    return wrapper
+
+
+def snapshot_read(method):
+    """Run a substantial read on a private snapshot, without the serving lock.
+
+    Use only for read-only operations. Nested calls reuse the same pinned reader.
+    """
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with database_operation(method.__qualname__):
+            if getattr(self._store, "_read_only", False):
+                with self._lock:
+                    check_cancellable_work()
+                    return method(self, *args, **kwargs)
+            with self._store.read_snapshot() as snapshot:
+                reader = type(self)(snapshot.store)
+                return wrapper(reader, *args, **kwargs)
     return wrapper
 
 
 class Repo:
     """Base for domain DAOs: bind the Store's connection + lock (constructor injection)."""
     def __init__(self, db):
+        self._store = db
         self.conn = db.conn
         self._lock = db._lock

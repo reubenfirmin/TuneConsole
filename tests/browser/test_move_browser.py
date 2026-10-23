@@ -27,15 +27,15 @@ def live_move_app(monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     s = Store(":memory:")
     s.init_schema()
-    i1 = s.upsert_identity("Main", "c1", None, True)
-    i2 = s.upsert_identity("Alt", "c2", None, False)
+    i1 = s.identities.upsert_identity("Main", "c1", None, True)
+    i2 = s.identities.upsert_identity("Alt", "c2", None, False)
     tracks = {}
     for n, title in enumerate(("Evening", "Mix", "Weekend")):
-        pid = s.upsert_playlist(i1, f"PL{n}", title, 1, "h", 1.0)
-        t = s.upsert_track(f"v{n}", f"Song {n}", "Artist", None, None, 1)
-        s.set_playlist_tracks(pid, [t])
+        pid = s.playlists.upsert_playlist(i1, f"PL{n}", title, 1, "h", 1.0)
+        t = s.tracks.upsert_track(f"v{n}", f"Song {n}", "Artist", None, None, 1)
+        s.playlists.set_playlist_tracks(pid, [t])
         tracks[f"PL{n}"] = [_track(f"v{n}", f"Song {n}", "Artist")]
-    s.upsert_playlist(i2, "PL_ALT", "Already here", 0, "h", 1.0)
+    s.playlists.upsert_playlist(i2, "PL_ALT", "Already here", 0, "h", 1.0)
     clients = {i1: FakeClient(tracks=tracks),
                i2: FakeClient(catalog={t[0]["videoId"]: t[0] for t in tracks.values()})}
     app = create_app(s, lambda: clients, now_fn=lambda: 1.0)

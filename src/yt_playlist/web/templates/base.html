@@ -1,45 +1,84 @@
 <!doctype html>
 <html lang="en">
 <head>
+  {% set path = request.url.path if request else "/" %}
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}TuneConsole{% endblock %}</title>
   <!-- Vendored from npm (see package.json); refresh with `npm run sync-assets`. Served locally
        so nothing is fetched from a third-party CDN at runtime. -->
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_v }}"
+        data-playing-href="/static/favicon-playing.svg?v={{ asset_v }}">
   <!-- Token layer first, then shared components and feature modules in cascade order. -->
   <link rel="stylesheet" href="/static/tokens.css?v={{ asset_v }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/playback.css?v={{ asset_v }}">
+  {% if path == '/' or path.startswith(('/playlist', '/album', '/artist', '/generated', '/taste', '/road_trip')) %}
   <link rel="stylesheet" href="/static/home.css?v={{ asset_v }}">
-  <link rel="stylesheet" href="/static/clusters.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path == '/' or path.startswith('/clusters') %}
+  <link rel="stylesheet" href="/static/genre-combo.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path == '/' or path.startswith('/setup') %}
   <link rel="stylesheet" href="/static/onboarding.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path == '/' or path.startswith(('/taste', '/charts', '/trends', '/discovery', '/enrich', '/road_trip', '/playlist', '/album', '/artist', '/generated')) %}
   <link rel="stylesheet" href="/static/analytics.css?v={{ asset_v }}">
-  <link rel="stylesheet" href="/static/page-overrides.css?v={{ asset_v }}">
-  <link rel="stylesheet" href="/static/story.css?v={{ asset_v }}">
-  {% block page_styles %}{% endblock %}
+  {% endif %}
+  {% if path == '/' or path.startswith(('/playlist', '/album', '/artist', '/charts', '/generated')) %}
+  <link rel="stylesheet" href="/static/library.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path.startswith('/charts') %}
+  <link rel="stylesheet" href="/static/charts.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path.startswith(('/cleanup', '/move', '/merge', '/compare', '/dupe', '/enrich', '/actions', '/network', '/setup', '/taste', '/discovery')) %}
+  <link rel="stylesheet" href="/static/workflows.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path.startswith(('/merge', '/compare', '/dupe')) %}
+  <link rel="stylesheet" href="/static/merge.css?v={{ asset_v }}">
+  {% endif %}
+  {% if path.startswith('/clusters') %}
+  <link rel="stylesheet" href="/static/clusters.css?v={{ asset_v }}">
+  {% endif %}
   <link rel="stylesheet" href="/static/artwork.css?v={{ asset_v }}">
+  {% block page_styles %}{% endblock %}
   <script src="/static/vendor/htmx.min.js"></script>
+  {% if path.startswith(('/playlist', '/album', '/merge', '/compare', '/dupe', '/setup', '/move')) %}
   <script src="/static/vendor/sortable.min.js"></script>
+  {% endif %}
   {# d3-force graph layout for the Clusters canvas. Order matters: d3-force reads its deps off the
      global `d3`, so dispatch/quadtree/timer must load first. #}
+  {% if path.startswith('/clusters') %}
   <script src="/static/vendor/d3-dispatch.min.js"></script>
   <script src="/static/vendor/d3-quadtree.min.js"></script>
   <script src="/static/vendor/d3-timer.min.js"></script>
   <script src="/static/vendor/d3-force.min.js"></script>
   {# Clusters canvas renderer (global `ForceGraph`); bundles its own d3-force, draws on demand. #}
   <script src="/static/vendor/force-graph.min.js"></script>
+  {% endif %}
   <!-- CSS token -> canvas bridge; must load before any script that paints. -->
   <script src="/static/theme.js?v={{ asset_v }}"></script>
+  <script src="/static/playback-status.js?v={{ asset_v }}"></script>
   <script src="/static/app.js?v={{ asset_v }}"></script>
   <script src="/static/song-actions.js?v={{ asset_v }}"></script>
+  {% if path == '/' %}
+  <script src="/static/home.js?v={{ asset_v }}"></script>
   <script src="/static/app-update.js?v={{ asset_v }}"></script>
+  {% endif %}
+  {% if path.startswith('/road_trip') %}
+  <script src="/static/road-trip.js?v={{ asset_v }}"></script>
+  {% endif %}
+  {% if path.startswith('/setup') %}
+  <script src="/static/setup.js?v={{ asset_v }}"></script>
+  {% endif %}
   {# Clusters canvas component (templates/clusters.html). Split out of app.js; a classic global script
      like app.js, so load order between them doesn't matter as long as both precede Alpine. #}
+  {% if path.startswith('/clusters') %}
   <script src="/static/cluster.js?v={{ asset_v }}"></script>
+  {% endif %}
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
 <body>
-  {% set path = request.url.path if request else "/" %}
   <header class="topbar">
     <a class="brand" href="/" aria-label="TuneConsole home">
       <img class="brand-mark" src="/static/favicon.svg?v={{ asset_v }}" width="28" height="28" alt="">
@@ -95,6 +134,7 @@
       </div>
     </nav>
     <div class="sidebar-dock-slot" aria-label="Now playing"></div>
+    <a class="sidebar-privacy" href="/privacy">Privacy</a>
   </header>
   <div class="global-now-playing-slot">
     {% include "_partials/now_playing.html" %}

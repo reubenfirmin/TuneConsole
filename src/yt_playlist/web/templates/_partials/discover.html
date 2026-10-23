@@ -11,23 +11,22 @@
 <div class="album-grid" id="album-grid">
   {% for a in albums %}
   {{ tile('album', a.thumbnail, a.title, a.artist ~ (' · ' ~ a.year if a.year else ''),
-          "/album?browse=" ~ a.browse_id, discovery_id=a.browse_id) }}
+          "/album?browse=" ~ a.browse_id, discovery_id=a.browse_id, badge=false) }}
   {% endfor %}
 </div>
 {# Always 3 rows tall: columns flow with the viewport, and anything past row 3 is hidden. #}
 <script>
 (function () {
   function clamp() {
-    var g = document.getElementById('album-grid'); if (!g) return;
+    var g = document.getElementById('album-grid'); if (!g || !g.getClientRects().length) return;
     var items = Array.prototype.slice.call(g.children); if (!items.length) return;
     var top0 = items[0].offsetTop;
     var cols = Math.max(1, items.filter(function (el) { return el.offsetTop === top0; }).length);
     items.forEach(function (el, i) { el.style.display = i < 3 * cols ? '' : 'none'; });
   }
-  if (window.__albumClamp) window.removeEventListener('resize', window.__albumClamp);
-  window.__albumClamp = clamp;
-  window.addEventListener('resize', clamp);
-  clamp();
+  if (window.__albumClamp) window.__albumClamp.disconnect();
+  window.__albumClamp = new ResizeObserver(clamp);
+  window.__albumClamp.observe(document.getElementById('album-grid'));
 })();
 </script>
 </div>

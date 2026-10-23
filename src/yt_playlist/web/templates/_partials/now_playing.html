@@ -1,50 +1,63 @@
-{# Global playback instrument. playerStatus polls on non-Home pages; on Home it consumes the existing
-   homeStatus bridge-status event so the page still has exactly one /bridge/status poller. #}
-{% from "_partials/song_menu_button.html" import song_menu %}
+{# The global instrument and Home consume the document's shared playback snapshot. #}
 <section class="home-status card card--status is-live global-now-playing" x-data="playerStatus()"
-         x-init="init(); $nextTick(() => mountNowPlayingDock())"
+         x-init="$nextTick(() => mountNowPlayingDock())"
          @bridge-status.window="apply($event.detail)"
+         @hashchange.window="currentLocation = location.href"
          @track-like-requested.window="requestLike($event)"
+         @song-metadata-updated.window="updateMetadata($event.detail)"
          x-show="connected && nowPlaying && (nowPlaying.title || nowPlaying.artist)" x-cloak>
   <div class="hs-main">
-    <span class="hs-dot" aria-hidden="true"></span>
     <template x-if="nowPlaying && (nowPlaying.title || nowPlaying.artist)">
       <div class="hs-now" :class="{ paused: nowPlaying.paused }">
-        <img class="hs-art" x-show="nowPlaying.thumbnail" :src="nowPlaying.thumbnail" alt=""
-             referrerpolicy="no-referrer">
-        <span class="hs-eq" x-show="!nowPlaying.paused" x-cloak aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="hs-cover">
+          <img class="hs-art" x-show="nowPlaying.thumbnail && artworkFailed !== nowPlaying.thumbnail" :src="nowPlaying.thumbnail" alt=""
+               @error="artworkFailed = nowPlaying.thumbnail" referrerpolicy="no-referrer">
+          <svg class="hs-art-placeholder" x-show="!nowPlaying.thumbnail || artworkFailed === nowPlaying.thumbnail" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M9 18V5l12-2v13M9 8l12-2"/><ellipse cx="6" cy="18" rx="3" ry="2.5"/><ellipse cx="18" cy="16" rx="3" ry="2.5"/>
+          </svg>
+          <span class="hs-eq" x-show="!nowPlaying.paused" x-cloak aria-hidden="true"><i></i><i></i><i></i></span>
+        </span>
         <span class="hs-now-text">
-          <span class="hs-now-title" x-text="nowPlaying.title || ''"></span>
-          <span class="hs-now-artist" x-show="nowPlaying.artist" x-text="nowPlaying.artist || ''"></span>
+          <span class="hs-now-title" x-text="nowPlaying.title || ''" :title="nowPlaying.title || ''"></span>
+          <span class="hs-now-artist" x-show="nowPlaying.artist" x-text="nowPlaying.artist || ''" :title="nowPlaying.artist || ''"></span>
         </span>
         <template x-if="sourceLinkVisible()">
           <a class="hs-source" :href="nowPlaying.source.url"
-             :title="'Back to ' + nowPlaying.source.kind + ': ' + nowPlaying.source.title"
-             :aria-label="'Back to ' + nowPlaying.source.kind + ': ' + nowPlaying.source.title">
+             :title="'Back to ' + sourceName() + ': ' + nowPlaying.source.title"
+             :aria-label="'Back to ' + sourceName() + ': ' + nowPlaying.source.title">
             <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
               <path d="M11 3 2 12l9 9 3-3-4-4h12v-4H10l4-4z"/>
             </svg>
-            <span x-text="'Back to ' + nowPlaying.source.kind"></span>
+            <span x-text="'Back to ' + sourceName()"></span>
           </a>
         </template>
-        <span class="hs-rate-group">
-          <button type="button" class="hs-rate hs-playpause" @click="toggle()"
+        <span class="hs-rate-group" role="group" aria-label="Playback and ratings">
+          <button type="button" class="hs-playpause btn-primary" @click="toggle()"
                   :title="nowPlaying.paused ? 'Play' : 'Pause'"
                   :aria-label="nowPlaying.paused ? 'Play' : 'Pause'">
-            <span x-show="!nowPlaying.paused" x-cloak>&#10074;&#10074;</span>
-            <span x-show="nowPlaying.paused" x-cloak>&#9654;</span>
+            <svg x-show="!nowPlaying.paused" x-cloak viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M6 4h4v16H6zm8 0h4v16h-4z"/>
+            </svg>
+            <svg x-show="nowPlaying.paused" x-cloak viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M8 4v16l12-8z"/>
+            </svg>
+          </button>
+          <button type="button" class="hs-next" :class="{ 'is-busy': skipping }" @click="next()" :disabled="skipping || !nowPlaying.video_id"
+                  title="Next / skip" aria-label="Next / skip">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="m3 6 6 6-6 6m7-12 6 6-6 6M20 5v14"/>
+            </svg>
           </button>
           <button type="button" class="hs-rate hs-heart" :class="{ on: nowPlaying.likeStatus === 'LIKE' }"
-                  @click="rate('like')" title="Like" aria-label="Like">
-            <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                  @click="rate('like')" :disabled="skipping" :aria-pressed="nowPlaying.likeStatus === 'LIKE'" title="Like" aria-label="Like">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
           </button>
           <button type="button" class="hs-rate hs-skull" :class="{ on: nowPlaying.likeStatus === 'DISLIKE' }"
-                  @click="rate('dislike')" title="Dislike" aria-label="Dislike">
-            <svg viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C7.58 2 4 5.58 4 10c0 2.4 1.06 4.55 2.73 6.02.17.15.27.36.27.59V19c0 .55.45 1 1 1h.5v.5a1 1 0 1 0 2 0V20h1v.5a1 1 0 1 0 2 0V20h.5c.55 0 1-.45 1-1v-2.39c0-.23.1-.44.27-.59A7.99 7.99 0 0 0 20 10c0-4.42-3.58-8-8-8ZM9 8.5A1.5 1.5 0 1 0 9 11.5 1.5 1.5 0 0 0 9 8.5Zm6 0A1.5 1.5 0 1 0 15 11.5 1.5 1.5 0 0 0 15 8.5Z"/></svg>
+                  @click="rate('dislike')" :disabled="skipping" :aria-pressed="nowPlaying.likeStatus === 'DISLIKE'" :title="nowPlaying.likeStatus === 'DISLIKE' ? 'Remove dislike' : 'Dislike and skip'"
+                  :aria-label="nowPlaying.likeStatus === 'DISLIKE' ? 'Remove dislike' : 'Dislike and skip'">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C7.58 2 4 5.58 4 10c0 2.4 1.06 4.55 2.73 6.02.17.15.27.36.27.59V19c0 .55.45 1 1 1h.5v.5a1 1 0 1 0 2 0V20h1v.5a1 1 0 1 0 2 0V20h.5c.55 0 1-.45 1-1v-2.39c0-.23.1-.44.27-.59A7.99 7.99 0 0 0 20 10c0-4.42-3.58-8-8-8ZM9 8.5A1.5 1.5 0 1 0 9 11.5 1.5 1.5 0 0 0 9 8.5Zm6 0A1.5 1.5 0 1 0 15 11.5 1.5 1.5 0 0 0 15 8.5Z"/></svg>
           </button>
-          {{ song_menu({}, dynamic='nowPlaying') }}
         </span>
-        <div id="radio-steer-slot"></div>
       </div>
     </template>
   </div>

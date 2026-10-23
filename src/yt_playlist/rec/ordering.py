@@ -1,15 +1,15 @@
 """Track-ordering primitives: arrange a chosen set of tracks into a pleasing sequence.
 
 A leaf of the rec/ layer: depends only on genre_map (genre segue distances), the library DAO (to
-fill genres), and util.matching. It must NOT import recommend or journeys, so journeys can use
-dj_order without the old circular import. `recommend` re-exports these for existing call sites.
+fill genres), and util.matching. Journeys depend on ordering; ordering does not depend on journeys
+or on recommendation assembly.
 """
 import random
 from collections import Counter
+from functools import lru_cache
 
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
-from yt_playlist.rec.rec_dao import RecDao
 
 
 def _field(item, name):
@@ -32,7 +32,7 @@ def attach_genres(store, items):
     key_of = {id(it): (_field(it, "key")
                        or identity_key(_field(it, "title") or "", _field(it, "artist") or ""))
               for it in items}
-    genres = RecDao(store).track_genres([k for k in key_of.values() if k])
+    genres = store.rec_query.track_genres([k for k in key_of.values() if k])
     for it in items:
         g = genres.get(key_of[id(it)]) or (_field(it, "genre") or "")
         if isinstance(it, dict):
@@ -42,34 +42,50 @@ def attach_genres(store, items):
     return items
 
 
-def dj_order(tracks, stickiness=0.0, seed=0):
+def dj_order(tracks, stickiness=0.0, seed=0, *, feat=None):
     """Order a chosen track set like a DJ. Start from a seeded shuffle, then greedily pick each next
     track by a lexicographic key: (a) never follow a track with the same artist unless every remaining
     track is that artist; (b) among the rest, place the artist with the MOST tracks left first: this
     schedules the heavy hitters early so they can't pile up at the end (the cause of same-artist
     clustering); (c) break ties by a `stickiness`-scaled genre segue (0 ≈ shuffle, 1 = careful genre
-    transitions via the genre map). Guarantees no back-to-back same artist whenever that's feasible.
+    transitions via the genre map). The first song also comes from a most-remaining artist, with
+    ties decided by the seeded shuffle. Guarantees no back-to-back same artist whenever feasible.
     Pure; returns a new list that is a permutation of `tracks`. Items may be track dicts or ForYouItem
     objects; both expose 'artist' and 'genre' (run attach_genres first so 'genre' is populated).
+    A feature accessor also supports opaque track keys. Features are read once, counts are updated
+    incrementally, and each next selection is a linear scan rather than a full remainder sort:
+    O(n²) time and O(n) space, with a bounded cache for genre-family distances.
     """
     items = list(tracks)
     if len(items) <= 2:
         return items
+    rows = []
+    for item in items:
+        if feat:
+            features = feat(item)
+            artist, genre = features.get("artist"), features.get("genre")
+        else:
+            artist, genre = _field(item, "artist"), _field(item, "genre")
+        rows.append((item, artist, genre_map.family(genre)))
     rng = random.Random(seed)
-    rng.shuffle(items)
-    out = [items.pop(0)]
-    while items:
-        last = out[-1]
-        remaining = Counter(_field(c, "artist") for c in items)
+    rng.shuffle(rows)
+    remaining = Counter(row[1] for row in rows)
+    first = max(range(len(rows)), key=lambda i: remaining[rows[i][1]])
+    out = [rows.pop(first)]
+    remaining[out[-1][1]] -= 1
+    distance = lru_cache(maxsize=256)(genre_map.family_distance)
+    while rows:
+        _, last_artist, last_genre = out[-1]
 
         def score(c):
-            same = bool(_field(c, "artist")) and _field(c, "artist") == _field(last, "artist")
-            lg, cg = _field(last, "genre") or "", _field(c, "genre") or ""
-            gd = genre_map.distance(lg, cg) if (lg and cg) else 0.0
+            _, artist, genre = c
+            same = bool(artist) and artist == last_artist
+            gd = distance(last_genre, genre) if (last_genre and genre) else 0.0
             seg = stickiness * gd + (1.0 - stickiness) * rng.random()
             # same-artist last (hard), then most-remaining-artist first (anti-pileup), then segue.
-            return (same, -remaining[_field(c, "artist")], seg)
+            return (same, -remaining[artist], seg)
 
-        items.sort(key=score)
-        out.append(items.pop(0))
-    return out
+        best = min(range(len(rows)), key=lambda i: score(rows[i]))
+        out.append(rows.pop(best))
+        remaining[out[-1][1]] -= 1
+    return [row[0] for row in out]

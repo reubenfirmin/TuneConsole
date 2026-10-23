@@ -5,7 +5,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from yt_playlist.library.merge_order import track_positions
-from yt_playlist.rec import recommend
+from yt_playlist.rec.actions import refresh_cleanup
 
 
 def build(ctx) -> APIRouter:
@@ -27,16 +27,16 @@ def build(ctx) -> APIRouter:
 
     def _members_tracks(ids):
         """Build members + de-duped track rows for a set of playlist ids (None if <2 exist)."""
-        pls = [p for p in (store.get_playlist(i) for i in ids) if p is not None]
+        pls = [p for p in (store.playlists.get_playlist(i) for i in ids) if p is not None]
         if len(pls) < 2:
             return None
-        idmap = {i.id: i.label for i in store.get_identities()}
+        idmap = {i.id: i.label for i in store.identities.get_identities()}
         members = [{"id": p.id, "letter": chr(65 + n), "ident": idmap.get(p.identity_id, "?"),
                     "title": p.title, "ytm": p.ytm_playlist_id} for n, p in enumerate(pls)]
         tracks = {}
         seqs = [[] for _ in pls]
         for mi, p in enumerate(pls):
-            for pos, (k, v, t, ar, d, av) in enumerate(store.get_playlist_tracks_with_meta(p.id)):
+            for pos, (k, v, t, ar, d, av) in enumerate(store.playlists.get_playlist_tracks_with_meta(p.id)):
                 tid = ("v:" + v) if v else ("k:" + k)
                 seqs[mi].append(tid)
                 row = tracks.get(tid)
@@ -83,19 +83,19 @@ def build(ctx) -> APIRouter:
 
     def _draft(ids, members, *, return_to=None):
         sig = ",".join(str(i) for i in ids)
-        draft = store.get_draft(sig)
+        draft = store.actions.get_draft(sig)
         if draft is None:
             liked = _liked_id(members)
             params = {"excluded": [], "pick": {}, "sort": "playlist", "mode": "interleaved",
                       "keep": str(liked if liked is not None else members[0]["id"]),
                       "return_to": return_to or "/cleanup"}
-            draft_id = store.record_action(
+            draft_id = store.actions.record_action(
                 "merge_draft", json.dumps(params), sig, "draft", None, now_fn())
-            draft = store.get_action(draft_id)
+            draft = store.actions.get_action(draft_id)
         elif return_to:
             params = json.loads(draft.params_json)
             params["return_to"] = return_to
-            store.update_draft(draft.id, json.dumps(params))
+            store.actions.update_draft(draft.id, json.dumps(params))
         return draft
 
     def _view(request, ids, members, tracks, draft):
@@ -160,8 +160,8 @@ def build(ctx) -> APIRouter:
                     params["pick"].pop(tid, None)        # toggle off
                 else:
                     params["pick"][tid] = i
-        store.update_draft(draft.id, json.dumps(params))
-        draft = store.get_action(draft.id)   # re-read so the re-render reflects the just-saved params
+        store.actions.update_draft(draft.id, json.dumps(params))
+        draft = store.actions.get_action(draft.id)   # re-read so the re-render reflects the just-saved params
         return templates.TemplateResponse(request, "_partials/merge_body.html",
                                           _view(request, ids, members, tracks, draft))
 
@@ -186,7 +186,7 @@ def build(ctx) -> APIRouter:
         except Exception:  # noqa: BLE001
             logger.exception("merge/apply failed")
             return _toast(request, "YouTube returned an unexpected response.")
-        store.delete_action(draft.id)
+        store.actions.delete_action(draft.id)
         parts = []
         if s["added"]:
             parts.append(f"{s['added']} added")
@@ -216,7 +216,7 @@ def build(ctx) -> APIRouter:
             logger.exception("inline dupe delete failed")
             return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response."})
         # no page reload on this path, so keep the home card's cached pending-cleanup icons honest
-        recommend.refresh_cleanup(store, now_fn())
+        refresh_cleanup(store, now_fn())
         return JSONResponse({"ok": True, "deleted": title})
 
     @router.post("/dupe/keep-one")
@@ -241,8 +241,17 @@ def build(ctx) -> APIRouter:
             logger.exception("delete-empty failed")
             return _toast(request, "YouTube returned an unexpected response.")
         # no page reload on this path, so keep the home card's cached pending-cleanup icons honest
-        recommend.refresh_cleanup(store, now_fn())
+        refresh_cleanup(store, now_fn())
         return HTMLResponse("")   # htmx fades + removes the row
+
+    @router.post("/playlist/forget-empty")
+    def forget_empty(request: Request, playlist: int = Form(...)):
+        try:
+            ctx.ops().forget_empty(playlist)
+        except ValueError as exc:
+            return _toast(request, str(exc))
+        refresh_cleanup(store, now_fn())
+        return HTMLResponse("")
 
     @router.get("/dupe/{a}/{b}")
     def dupe_detail(a: int, b: int):

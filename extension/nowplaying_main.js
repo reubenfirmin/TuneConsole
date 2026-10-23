@@ -5,8 +5,9 @@
 // classifies skips/completions/sessions from the raw stream.
 (function () {
   var SENSOR_VERSION = 4;
+  var SENSOR_REVISION = 4; // Implementation changes can replace a compatible, healthy sensor.
   var previous = window.__tcNowPoller;
-  if (previous && previous.version === SENSOR_VERSION && !previous.stopped &&
+  if (previous && previous.version === SENSOR_VERSION && previous.revision === SENSOR_REVISION && !previous.stopped &&
       previous.lastSampleAt != null && Date.now() - previous.lastSampleAt < 10000) return;
   if (previous && previous.stop) previous.stop();
 
@@ -18,7 +19,7 @@
   function playerInfo() {
     // The URL describes the page being browsed, which can differ from the playing song/queue.
     // Read both identifiers from the same player instead; unknown context stays empty.
-    var info = { videoId: "", playlist: "", title: "", artist: "" };
+    var info = { videoId: "", playlist: "", title: "", artist: "", thumbnail: "" };
     try {
       var host = document.querySelector("ytmusic-player");
       var player = document.querySelector("#movie_player");
@@ -30,6 +31,21 @@
         info.artist = data.author || "";
       }
       if (info.videoId && player.getPlaylistId) info.playlist = player.getPlaylistId() || "";
+      // Album-art URLs often have no video ID. The player response supplies that identity
+      // separately, so it can cover a stale/missing bar without trusting stale MediaSession art.
+      if (info.videoId && typeof player.getPlayerResponse === "function") {
+        var response = player.getPlayerResponse();
+        var details = response && response.videoDetails;
+        var thumbs = details && details.thumbnail && details.thumbnail.thumbnails;
+        if (details && details.videoId === info.videoId && Array.isArray(thumbs)) {
+          for (var i = thumbs.length - 1; i >= 0; i--) {
+            if (thumbs[i] && typeof thumbs[i].url === "string" && thumbs[i].url) {
+              info.thumbnail = thumbs[i].url;
+              break;
+            }
+          }
+        }
+      }
     } catch (e) {}
     return info;
   }
@@ -47,18 +63,48 @@
     } catch (e) {}
     return { brandKnown: false, brandId: "" };
   }
-  function playerBarInfo() {
-    var bar = { videoId: "", title: "", artist: "", thumbnail: "", likeStatus: "", albumBrowseId: "" };
+  function playerBarInfo(includeBinding, info) {
+    var bar = { videoId: "", ratingVideoId: "", title: "", artist: "", thumbnail: "", likeStatus: "", albumBrowseId: "" };
+    // Only correlated probes include diagnostics. Keep field names and candidate IDs bounded;
+    // never copy Polymer objects, account config, or arbitrary page data into bridge logs.
+    if (includeBinding) bar.binding = {sources: [], barIds: [], targetIds: []};
     try {
       var host = document.querySelector("ytmusic-player-bar");
       var title = document.querySelector(".title.ytmusic-player-bar") || document.querySelector("ytmusic-player-bar .title");
       var byline = document.querySelector(".byline.ytmusic-player-bar") || document.querySelector("ytmusic-player-bar .byline");
       var img = document.querySelector("img.image.ytmusic-player-bar") || document.querySelector("ytmusic-player-bar img");
       var link = document.querySelector('ytmusic-player-bar a[href*="watch?"]');
+      var rating = document.querySelector("ytmusic-player-bar ytmusic-like-button-renderer");
+      if (bar.binding) {
+        bar.binding.host = !!host;
+        bar.binding.renderer = !!rating;
+        bar.binding.likeButton = !!(rating && rating.querySelector("#button-shape-like button"));
+        bar.binding.dislikeButton = !!(rating && rating.querySelector("#button-shape-dislike button"));
+      }
+      // Music can move Polymer data onto its controller, and album artwork need not contain
+      // a video ID. The rating renderer's own target also identifies the bound song.
+      function keys(value) {
+        return value && typeof value === "object" ? Object.keys(value).slice(0, 8)
+          .map(function (key) { return key.slice(0, 32); }) : [];
+      }
+      function dataFor(element, source) {
+        var values = element ? [element.data, element.polymerController && element.polymerController.data,
+                               element.__data && element.__data.data] : [];
+        if (bar.binding) values.forEach(function (value, index) {
+          bar.binding.sources.push({source: source + [".data", ".polymerController.data", ".__data.data"][index],
+            present: !!value, keys: keys(value), targetKeys: keys(value && value.target)});
+        });
+        return values.filter(Boolean);
+      }
+      var targets = dataFor(rating, "rating").map(function (data) { return data.target && data.target.videoId; })
+        .filter(function (id) { return typeof id === "string" && id; });
+      if (bar.binding) bar.binding.targetIds = targets.map(function (id) { return id.slice(0, 64); });
       // MAIN can read Polymer's track data even when album art has no video ID and the bar has
       // no watch link. Reject conflicting identifiers while its bindings catch up to a change.
       var ids = [];
-      if (host && host.data && typeof host.data.videoId === "string" && host.data.videoId) ids.push(host.data.videoId);
+      dataFor(host, "bar").forEach(function (data) {
+        if (typeof data.videoId === "string" && data.videoId) ids.push(data.videoId);
+      });
       if (link) {
         var id = new URL(link.href, location.href).searchParams.get("v");
         if (id) ids.push(id);
@@ -69,19 +115,34 @@
         var match = /\/vi(?:_webp)?\/([^/]+)/.exec(u.pathname);
         if (u.hostname.endsWith(".ytimg.com") && match) ids.push(match[1]);
       }
+      if (bar.binding) bar.binding.barIds = ids.map(function (id) { return id.slice(0, 64); });
       if (ids.length && ids.every(function (id) { return id === ids[0]; })) bar.videoId = ids[0];
+      // Rating identity is independent of recording credits. A missing bar ID need not block
+      // a verified rating target, but that target alone cannot certify title/artist for history.
+      if (targets.length) {
+        if (targets.every(function (id) { return id === targets[0]; }) &&
+            (!ids.length || bar.videoId === targets[0])) bar.ratingVideoId = targets[0];
+      } else {
+        bar.ratingVideoId = bar.videoId;
+      }
       bar.title = title ? title.textContent.trim() : "";
       bar.artist = byline ? byline.textContent.trim().split("•")[0].trim() : "";
-      if (!bar.videoId) return bar;
-      var rating = document.querySelector("ytmusic-player-bar ytmusic-like-button-renderer");
-      var target = rating && rating.data && rating.data.target;
-      if (rating && (!target || !target.videoId || target.videoId === bar.videoId)) {
+      // Some Music layouts expose neither bar data nor a video-specific link/image. The native
+      // rating target still identifies the player. It can bind these credits only when BOTH
+      // exactly agree with that same player's fresh title/author; a target alone is insufficient.
+      // Existing conflicting bar IDs must never be bypassed by matching text.
+      if (!ids.length && info && info.videoId && bar.ratingVideoId === info.videoId &&
+          bar.title && bar.artist && bar.title === info.title && bar.artist === info.artist) {
+        bar.videoId = info.videoId;
+      }
+      if (rating && bar.ratingVideoId) {
         var like = rating.querySelector("#button-shape-like button");
         var dislike = rating.querySelector("#button-shape-dislike button");
         bar.likeStatus = rating.getAttribute("like-status") ||
           ((like && like.getAttribute("aria-pressed") === "true") ? "LIKE" :
            (dislike && dislike.getAttribute("aria-pressed") === "true") ? "DISLIKE" : "INDIFFERENT");
       }
+      if (!bar.videoId) return bar;
       var album = document.querySelector('ytmusic-player-bar a[href*="/browse/MPRE"], ' +
         'ytmusic-player-bar a[href*="/browse/FEmusic_library_privately_owned_release_detail"]');
       if (album) bar.albumBrowseId = decodeURIComponent(new URL(album.href, location.href).pathname.split("/browse/")[1] || "");
@@ -107,10 +168,10 @@
     }
     if (info.videoId && bar.videoId === info.videoId && bar.title && bar.artist) {
       return { title: bar.title, artist: bar.artist,
-               thumbnail: bar.thumbnail || art, verified: true };
+               thumbnail: bar.thumbnail || art || info.thumbnail, verified: true };
     }
     return { title: (art && md.title) || info.title,
-             artist: (art && md.artist) || info.artist, thumbnail: art,
+             artist: (art && md.artist) || info.artist, thumbnail: art || info.thumbnail,
              verified: !!(art && md.title && md.artist) };
   }
   function shuffleRepeat() {
@@ -194,11 +255,12 @@
         lastTickAt = now;
         post("tick", {});
       }
-      var bar = playerBarInfo();
+      var bar = playerBarInfo(probeId !== undefined, info);
       var meta = metadata(info, bar), identity = account();
       // Send account availability even before the player is ready, so DOM fallback can safely
       // attribute a play without borrowing identity from a previous track.
-      window.postMessage({ __tcSensorVersion: SENSOR_VERSION, __tcSensorProbeId: probeId,
+      window.postMessage({ __tcSensorVersion: SENSOR_VERSION, __tcSensorRevision: SENSOR_REVISION,
+                           __tcSensorProbeId: probeId,
                            __tcNow: { title: meta.title, artist: meta.artist, thumbnail: meta.thumbnail,
                                       metadataVerified: meta.verified,
                                       videoId: info.videoId, playlist: info.playlist,
@@ -217,7 +279,8 @@
   window.addEventListener("message", onProbe);
   // Future updates can replace this sensor without reloading a tab or leaving duplicate listeners.
   // A legacy boolean marker cannot stop its old interval; content.js ignores its unversioned frames.
-  var poller = window.__tcNowPoller = { version: SENSOR_VERSION, lastSampleAt: null, stopped: false, stop: function () {
+  var poller = window.__tcNowPoller = { version: SENSOR_VERSION, revision: SENSOR_REVISION,
+    lastSampleAt: null, stopped: false, stop: function () {
     poller.stopped = true;
     clearInterval(timer);
     window.removeEventListener("message", onProbe);

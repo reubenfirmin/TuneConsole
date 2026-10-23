@@ -25,7 +25,7 @@ def _vectors(blocks, n_per=50, d=6):
 
 
 def _wire(monkeypatch, store, keys, V, idx):
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s: (keys, V, idx))
+    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
     monkeypatch.setattr(store.modes, "genres_for", lambda ks: {k: k.split("|")[0] for k in ks})
     monkeypatch.setattr(tm.genre_map, "family", lambda g: g)
 
@@ -65,21 +65,9 @@ def test_recompute_preserves_ids_then_retires(monkeypatch, store):
 
 def test_recompute_cold_start_no_crash(monkeypatch, store):
     monkeypatch.setattr(embed, "load_content_vectors",
-                        lambda s: (["a|1"], np.ones((1, 4), dtype=np.float32), {"a|1": 0}))
+                        lambda s, **kw: (["a|1"], np.ones((1, 4), dtype=np.float32), {"a|1": 0}))
     assert tm.recompute(store, now=1000.0) == 0
     assert store.modes.list_modes() == []
-
-
-def test_rebuild_wires_recompute_under_a_guard():
-    # The heavy end-to-end rebuild needs YouTube clients (covered elsewhere), so pin the wiring
-    # structurally: _do_rebuild must call taste_modes.recompute, and the call must sit inside a
-    # try/except so a mode failure cannot break the rebuild.
-    import inspect
-    from yt_playlist.rec import rec_worker
-    src = inspect.getsource(rec_worker.RecWorker._do_rebuild)
-    assert "taste_modes.recompute" in src
-    # the recompute call appears after a `try:` (guarded), not at the top level of the method
-    assert src.index("try:") < src.index("taste_modes.recompute")
 
 
 # --- content-space rebuild -----------------------------------------------------------------------
@@ -90,7 +78,7 @@ def test_rebuild_wires_recompute_under_a_guard():
 
 def _set_model(store, cat_tokens, cont=()):
     import json
-    store.set_setting("rec_content_model", json.dumps(
+    store.settings.set_setting("rec_content_model", json.dumps(
         {"cat": {t: i for i, t in enumerate(cat_tokens)}, "ncat": len(cat_tokens),
          "cont": [[c, 0.0, 1.0] for c in cont]}))
 
@@ -199,15 +187,3 @@ def test_live_modes_on_a_store_with_no_content_model(monkeypatch, store):
     _wire(monkeypatch, store, keys, V, idx)
     tm.recompute(store, now=1000.0, k=3, min_members=20)
     assert len(tm.live_modes(store)) == 3
-
-
-def test_refresh_detection_covers_missing_groups_and_same_dimension_model_changes(monkeypatch, store):
-    assert not tm.needs_refresh(store)                       # fresh install, no model yet
-    _set_model(store, [f"g{i}" for i in range(6)])
-    assert tm.needs_refresh(store)                           # existing model, missing groups
-    keys, V, idx = _vectors([[1, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0]])
-    _wire(monkeypatch, store, keys, V, idx)
-    tm.recompute(store, now=1000.0, k=3, min_members=20)
-    assert not tm.needs_refresh(store)
-    _set_model(store, [f"g{i}" for i in reversed(range(6))])   # same width, different column meanings
-    assert tm.needs_refresh(store)

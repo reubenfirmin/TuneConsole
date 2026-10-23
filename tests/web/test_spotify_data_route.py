@@ -6,9 +6,11 @@ import threading
 import time
 import zipfile
 
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, _track
+from yt_playlist.rec import mode_surfaces, rec_params, transient
 from yt_playlist.web.app import create_app
 
 
@@ -39,8 +41,8 @@ def _library_payload():
 
 
 def _client(store):
-    store.upsert_identity("main", "bridge", None, True)
-    store.upsert_track("yt", "Song", "Artist", None, 180)
+    store.identities.upsert_identity("main", "bridge", None, True)
+    store.tracks.upsert_track("yt", "Song", "Artist", None, 180)
     return TestClient(create_app(store, lambda: {}, now_fn=lambda: 1000.0),
                       base_url="http://127.0.0.1:8123")
 
@@ -48,7 +50,7 @@ def _client(store):
 def _wait_for_library_job(store, timeout=2.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        raw = store.get_setting("spotify_library_import_job")
+        raw = store.settings.get_setting("spotify_library_import_job")
         job = json.loads(raw) if raw else None
         if job and job["status"] not in ("queued", "running"):
             return job
@@ -57,7 +59,7 @@ def _wait_for_library_job(store, timeout=2.0):
 
 
 def _select_library(web, payload=None):
-    response = web.post("/import/spotify-library/v5", files={
+    response = web.post("/import/spotify-library/v6", files={
         "file": ("spotify-account-data.zip", payload or _library_payload(), "application/zip")})
     assert response.status_code == 200
     return re.search(r'name="selection_token" value="([^"]+)"', response.text)[1], response
@@ -84,20 +86,67 @@ def test_setup_offers_local_export_upload_without_oauth(store):
     assert "Import Spotify playlists and albums" in body
     assert "Be prepared to wait several days" in body
     assert "Playlist1.json" in body and "YourLibrary.json" in body
-    assert 'hx-post="/import/spotify-library/v5"' in body
+    assert 'hx-post="/import/spotify-library/v6"' in body
     assert "Restart TuneConsole" in body
-    assert 'hx-post="/import/spotify"' in body
+    assert 'hx-post="/import/spotify/v2"' in body
     assert "Client ID" not in body and "/spotify/connect" not in body
 
 
 def test_upload_imports_history_and_replaces_form_with_report(store):
     client = _client(store)
-    response = client.post("/import/spotify", files={
+    response = client.post("/import/spotify/v2", files={
         "file": ("my_spotify_data.zip", _payload(), "application/zip")})
     assert response.status_code == 200
     assert "Spotify import complete" in response.text
     assert response.headers["HX-Retarget"] == "#spotify-import-block"
-    assert store.get_setting("spotify_imported_at") == "1000.0"
+    assert store.settings.get_setting("spotify_imported_at") == "1000.0"
+
+
+def test_history_upload_reaches_home_learning_and_requests_model_refresh(store, monkeypatch):
+    now = 1704103200.0  # The export's timestamp, so its play participates in recent taste.
+    store.identities.upsert_identity('main', 'bridge', None, True)
+    tid = store.tracks.upsert_track('yt', 'Song', 'Artist', None, 180)
+    store.tracks.set_track_genre(tid, 'Techno')
+    rec_params.set_param(store, 'source_w_play', 1.0)
+    rec_params.set_param(store, 'theme_threshold', 0.2)
+    app = create_app(store, lambda: {}, now_fn=lambda: now, background_work=False)
+    refreshes = []
+    monkeypatch.setattr(app.state.ctx.rec_worker, 'trigger', lambda: refreshes.append(True))
+    client = TestClient(app, base_url='http://127.0.0.1:8123')
+
+    # File upload alone is sufficient; no additional permission or certification fields.
+    response = client.post('/import/spotify/v2', files={
+        'file': ('history.zip', _payload(), 'application/zip')})
+    assert response.status_code == 200 and 'Spotify import complete' in response.text
+    assert refreshes == [True]
+    assert transient.play_facet_leans(store, now)
+    assert client.get('/').status_code == 200
+    assert store.rec_model.get_weights(now=now) == {}
+
+    # Candidate pools precede Home in the worker; HTTP reads must not prepare either.
+    assert mode_surfaces.prepare_bundles(store, now) is not None
+    # Daily exposure belongs to background Home preparation, including after an import.
+    worker = app.state.ctx.rec_worker
+    worker.enabled = True
+    worker.debounce_s = 0
+    worker.trigger_home_refresh(force=True)
+    worker.join(5)
+    weights = store.rec_model.get_weights(now=now)
+    assert weights and all(weight > 1.0 for weight in weights.values())
+
+    client.post('/import/spotify/v2', files={'file': ('history.zip', _payload(), 'application/zip')})
+    assert client.get('/').status_code == 200
+    worker.trigger_home_refresh(force=True)
+    worker.join(5)
+    assert store.history.spotify_history_stats()['events'] == 1
+    assert store.rec_model.get_weights(now=now) == weights
+    assert refreshes == [True]
+
+    removed = client.post('/import/spotify/remove')
+    assert 'Saved taste preferences were kept' in removed.text
+    assert refreshes == [True, True]
+    assert transient.play_facet_leans(store, now) == {}
+    assert store.rec_model.get_weights(now=now) == weights
 
 
 def test_unreadable_upload_keeps_form_for_retry(store):
@@ -108,9 +157,65 @@ def test_unreadable_upload_keeps_form_for_retry(store):
     assert "HX-Retarget" not in response.headers
 
 
+def test_history_removal_is_available_after_upload_and_on_reload(store):
+    client = _client(store)
+    response = client.post('/import/spotify', files={'file':('history.zip',_payload(),'application/zip')})
+    assert 'Remove Spotify history' in response.text
+    assert 'Remove Spotify history' in client.get('/setup?tab=import').text
+    iid = store.identities.get_identities()[0].id
+    event = store.conn.execute('SELECT * FROM play_events').fetchone()
+    store.history.import_listening_events(iid,[(event['identity_key'],None,event['played_at'])],source='takeout')
+    response = client.post('/import/spotify/remove')
+    assert response.status_code == 200
+    assert response.headers['HX-Retarget'] == '#spotify-import-block'
+    assert 'Spotify history removed' in response.text
+    assert store.history.spotify_history_stats()['events'] == 0
+    assert len(store.history.play_events_since(0)) == 1
+    assert store.settings.get_setting('spotify_imported_at') is None
+    assert 'Remove Spotify history' not in client.get('/setup?tab=import').text
+    status = client.get('/import/history/status?source=spotify',headers={'accept':'application/json'}).json()
+    assert status['done'] and status['outcome'] == 'complete'
+    assert 'removed' in status['message']
+
+
+def test_report_explains_quality_filters_without_exposing_private_fields(store):
+    client = _client(store)
+    rows = [dict(ts='2024-01-01T10:00:00Z',master_metadata_track_name='Song',
+                 master_metadata_album_artist_name='Artist',spotify_track_uri='spotify:track:x',
+                 ms_played=180000,ip_addr='PRIVATE_SENTINEL')]
+    rows.extend([{**rows[0], 'ms_played':0},
+                 {**rows[0], 'spotify_track_uri':'spotify:track:short','ms_played':1000},
+                 {**rows[0], 'spotify_track_uri':'spotify:track:private','incognito_mode':True}])
+    response = client.post('/import/spotify',files={'file':('audio.json',json.dumps(rows),'application/json')})
+    assert '1 duplicate entries' in response.text
+    assert '1 listens under 30 seconds' in response.text
+    assert '1 private-session listens' in response.text
+    assert 'PRIVATE_SENTINEL' not in response.text
+    assert 'PRIVATE_SENTINEL' not in '\n'.join(store.conn.iterdump())
+
+
+@pytest.mark.parametrize('source_timezone', ['UTC', 'America/Costa_Rica'])
+def test_daily_only_spotify_history_can_be_removed(store, source_timezone):
+    from yt_playlist.core import listening
+    client = _client(store)
+    iid = store.identities.get_identities()[0].id
+    with store.conn:
+        listening.calendar(store.conn, iid, 'UTC')
+        listening.observe_day(store.conn, iid, 'old-song', '2024-01-01', 'spotify', source_timezone, 100)
+    assert store.history.spotify_history_stats()['events'] == 0
+    assert store.history.spotify_history_stats()['days'] == int(source_timezone == 'UTC')
+    assert store.history.spotify_history_stats()['unresolved_days'] == int(source_timezone != 'UTC')
+    assert 'Remove Spotify history' in client.get('/setup?tab=import').text
+    assert client.post('/import/spotify/remove').status_code == 200
+    assert store.history.spotify_history_stats()['days'] == 0
+    assert store.history.spotify_history_stats()['unresolved_days'] == 0
+    assert 'Remove Spotify history' not in client.get('/setup?tab=import').text
+
+
 def test_account_data_requires_selection_preview_and_confirmation_before_writes(store):
-    identity = store.upsert_identity("main", "bridge", None, True)
-    client = FakeClient(search_results=[_track("yt-song", "Song", "Artist")])
+    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    client = FakeClient(search_results=[_track("yt-song", "Song", "Artist")],
+                        catalog={"yt-song": _track("yt-song", "Song", "Artist")})
     web = TestClient(create_app(store, lambda: {identity: client}, now_fn=lambda: 1000.0),
                      base_url="http://127.0.0.1:8123")
 
@@ -119,14 +224,14 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
     assert "Choose what to import" in response.text
     assert "YouTube Music destination" in response.text
     assert client.created == []
-    assert store.get_setting("spotify_library_import_job") is None
+    assert store.settings.get_setting("spotify_library_import_job") is None
     prepared = web.post("/import/spotify-library/prepare", data={
         "selection_token": token, "identity_id": str(identity), "playlist_index": "0",
         "include_albums": "on"})
     assert prepared.status_code == 200
     ready = _wait_for_library_job(store)
     assert ready["status"] == "preview"
-    assert client.created == [] and store.get_playlists() == []
+    assert client.created == [] and store.playlists.get_playlists() == []
     preview = web.get(f"/import/spotify-library/preview/{ready['preview_token']}")
     assert "Confident match" in preview.text and "Unmatched" in preview.text
     assert "Missing song" in preview.text and "Source: Spotify" in preview.text
@@ -136,17 +241,17 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
 
     job = _wait_for_library_job(store)
     assert job["status"] == "done"
-    assert job["report_schema"] == 5
+    assert job["report_schema"] == 6
     assert {k: v for k, v in job["report"].items() if k != "details"} == {
         "playlists_found": 1, "playlists_imported": 1, "playlists_skipped": 0, "playlists_failed": 0,
         "tracks_imported": 1, "tracks_unmatched": 1,
         "albums_found": 1, "albums_imported": 0, "albums_skipped": 0,
-        "albums_unmatched": 1,
+        "albums_unmatched": 1, "albums_as_playlists": 0,
     }
     assert job["report"]["details"]["playlists"][0]["name"] == "Imported mix"
     assert job["report"]["details"]["playlists"][0]["status"] == "imported"
     assert client.created[0][1] == "Imported mix"
-    assert store.get_setting("spotify_library_imported_at") == "1000.0"
+    assert store.settings.get_setting("spotify_library_imported_at") == "1000.0"
 
     status = web.get("/import/spotify-library/status", headers={"HX-Request": "true"})
     assert status.headers["HX-Redirect"] == "/#notices"
@@ -157,7 +262,7 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
     assert "The report is ready with everything added" not in import_page.text
 
     assert "Spotify import complete" in web.get("/").text
-    store.set_setting("last_sync_at", "999.0")
+    store.settings.set_setting("last_sync_at", "999.0")
     dashboard = web.get("/")
     assert "Spotify import complete" in dashboard.text
     assert "Review what was added, skipped, and unmatched" in dashboard.text
@@ -179,19 +284,19 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
     assert "Unmatched albums" in report.text and "Missing album" in report.text
     assert 'href="https://open.spotify.com/album/missingalbum"' in report.text
     assert job["report"]["details"]["unmatched_tracks"] == []
-    assert "Missing song" not in store.get_setting("spotify_library_import_job")
+    assert "Missing song" not in store.settings.get_setting("spotify_library_import_job")
     assert "Retries do not create duplicates" in report.text
 
     dismissed = web.post("/import/spotify-library/dismiss")
     assert dismissed.status_code == 200
-    saved = json.loads(store.get_setting("spotify_library_import_job"))
+    saved = json.loads(store.settings.get_setting("spotify_library_import_job"))
     assert saved["dismissed"] is True and saved["report"]["tracks_imported"] == 1
     assert "Spotify import complete" not in web.get("/").text
     assert web.get("/import/spotify-library/report").status_code == 200
 
 
 def test_account_data_upload_returns_before_youtube_matching_finishes(store):
-    identity = store.upsert_identity("main", "bridge", None, True)
+    identity = store.identities.upsert_identity("main", "bridge", None, True)
     entered, release = threading.Event(), threading.Event()
 
     class SlowClient(FakeClient):
@@ -211,7 +316,7 @@ def test_account_data_upload_returns_before_youtube_matching_finishes(store):
         assert "running in the background" in response.text
         assert "could take about 5 minutes" in response.text
         assert entered.wait(1)
-        assert json.loads(store.get_setting("spotify_library_import_job"))["status"] == "running"
+        assert json.loads(store.settings.get_setting("spotify_library_import_job"))["status"] == "running"
     finally:
         release.set()
     assert _wait_for_library_job(store)["status"] == "preview"
@@ -219,7 +324,7 @@ def test_account_data_upload_returns_before_youtube_matching_finishes(store):
 
 
 def test_technical_log_is_explained_as_the_wrong_spotify_package(store):
-    identity = store.upsert_identity("main", "bridge", None, True)
+    identity = store.identities.upsert_identity("main", "bridge", None, True)
     web = TestClient(create_app(store, lambda: {identity: FakeClient()}, now_fn=lambda: 1.0),
                      base_url="http://127.0.0.1:8123")
     wrong = io.BytesIO()
@@ -234,8 +339,8 @@ def test_technical_log_is_explained_as_the_wrong_spotify_package(store):
 
 
 def test_playlist_selection_and_preview_bind_the_destination_and_recording(store):
-    first = store.upsert_identity("first", "first-bridge", None, True)
-    second = store.upsert_identity("second", "second-bridge", None, False)
+    first = store.identities.upsert_identity("first", "first-bridge", None, True)
+    second = store.identities.upsert_identity("second", "second-bridge", None, False)
     first_client = FakeClient(search_results=[_track("wrong-account", "Song", "Artist")])
     second_client = FakeClient(search_results=[_track("chosen-recording", "Song", "Artist")])
     web = TestClient(create_app(store, lambda: {first: first_client, second: second_client}, now_fn=lambda: 1000),
@@ -257,14 +362,14 @@ def test_playlist_selection_and_preview_bind_the_destination_and_recording(store
     assert _wait_for_library_job(store)["status"] == "done"
     assert first_client.created == []
     assert second_client.added == [(second_client.created[0][0], ["chosen-recording"])]
-    assert store.get_playlists()[0].identity_id == second
+    assert store.playlists.get_playlists()[0].identity_id == second
     replay = web.post("/import/spotify-library/confirm", data={"preview_token": token})
     assert replay.status_code == 410
     assert len(second_client.created) == 1
 
 
 def test_expired_and_cancelled_previews_cannot_write(store):
-    identity = store.upsert_identity("main", "bridge", None, True)
+    identity = store.identities.upsert_identity("main", "bridge", None, True)
     client = FakeClient(search_results=[_track("yt", "Song", "Artist")])
     clock = [1000]
     web = TestClient(create_app(store, lambda: {identity: client}, now_fn=lambda: clock[0]),
@@ -277,11 +382,11 @@ def test_expired_and_cancelled_previews_cannot_write(store):
     response = web.post("/import/spotify-library/cancel", data={"preview_token": token}, follow_redirects=False)
     assert response.status_code == 303
     assert web.post("/import/spotify-library/confirm", data={"preview_token": token}).status_code == 410
-    assert client.created == [] and store.get_playlists() == []
+    assert client.created == [] and store.playlists.get_playlists() == []
 
 
 def test_invalid_selection_and_disconnected_destination_do_not_consume_upload(store):
-    identity = store.upsert_identity("main", "bridge", None, True)
+    identity = store.identities.upsert_identity("main", "bridge", None, True)
     client = FakeClient(search_results=[_track("yt", "Song", "Artist")])
     web = TestClient(create_app(store, lambda: {identity: client}, now_fn=lambda: 1000),
                      base_url="http://127.0.0.1:8123")
@@ -304,8 +409,9 @@ def test_failed_playlist_result_remains_reviewable_with_successes(store):
                 raise RuntimeError("create rejected")
             return super().create_playlist(title, description)
 
-    identity = store.upsert_identity("main", "bridge", None, True)
-    client = BrokenFirst(search_results=[_track("yt", "Song", "Artist")])
+    identity = store.identities.upsert_identity("main", "bridge", None, True)
+    client = BrokenFirst(search_results=[_track("yt", "Song", "Artist")],
+                         catalog={"yt": _track("yt", "Song", "Artist")})
     web = TestClient(create_app(store, lambda: {identity: client}, now_fn=lambda: 1000),
                      base_url="http://127.0.0.1:8123")
     payload = io.BytesIO()
@@ -326,7 +432,7 @@ def test_failed_playlist_result_remains_reviewable_with_successes(store):
 
 
 def test_legacy_report_gets_spotify_search_links_and_can_resolve_a_candidate(store):
-    identity = store.upsert_identity("main", "bridge", None, True)
+    identity = store.identities.upsert_identity("main", "bridge", None, True)
 
     class AlbumClient(FakeClient):
         def __init__(self):
@@ -360,7 +466,7 @@ def test_legacy_report_gets_spotify_search_links_and_can_resolve_a_candidate(sto
     client = AlbumClient()
     web = TestClient(create_app(store, lambda: {identity: client}, now_fn=lambda: 2000.0),
                      base_url="http://127.0.0.1:8123")
-    store.set_setting("spotify_library_import_job", json.dumps({
+    store.settings.set_setting("spotify_library_import_job", json.dumps({
         "status": "done", "report_schema": 2, "playlists_found": 0, "track_entries": 0,
         "albums_found": 1, "report": {
             "playlists_found": 0, "playlists_imported": 0, "playlists_skipped": 0,
@@ -387,10 +493,10 @@ def test_legacy_report_gets_spotify_search_links_and_can_resolve_a_candidate(sto
                      data={"album_index": "0", "browse_id": "MPRE_FAT"},
                      follow_redirects=False)
     assert saved.status_code == 303
-    job = json.loads(store.get_setting("spotify_library_import_job"))
+    job = json.loads(store.settings.get_setting("spotify_library_import_job"))
     assert job["report"]["albums_unmatched"] == 0
     assert job["report"]["albums_imported"] == 1
     assert job["report"]["details"]["albums"][0]["reason"] == "saved_by_user"
     assert client.album_ratings == [("OLAK_FAT", "LIKE")]
     assert client.bridge_calls_on_event_loop == []
-    assert store.get_saved_albums()[0]["browse"] == "MPRE_FAT"
+    assert store.collection.get_saved_albums()[0]["browse"] == "MPRE_FAT"

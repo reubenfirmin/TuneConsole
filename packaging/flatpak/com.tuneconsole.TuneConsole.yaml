@@ -8,14 +8,15 @@
 # are written by your browser, which runs outside this sandbox.
 #
 # Build (see ../README.md for detail):
-#   1. uv build --wheel                              # -> dist/*.whl  (run from repo root)
-#   2. ./generate-pip-sources.sh                     # -> python3-requirements.json  (needs network, once)
-#   3. flatpak install flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+#   1. uv sync --locked --only-group build --no-install-project
+#      uv build --wheel --no-build-isolation --python .venv/bin/python
+#   2. ./generate-pip-sources.sh                     # -> locked python3-requirements.json
+#   3. flatpak install flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
 #   4. flatpak-builder --user --install --force-clean build-dir com.tuneconsole.TuneConsole.yaml
 #   5. flatpak run com.tuneconsole.TuneConsole
 app-id: com.tuneconsole.TuneConsole
 runtime: org.freedesktop.Platform
-runtime-version: '24.08'
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 command: yt-playlist-launch
 

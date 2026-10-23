@@ -1,70 +1,51 @@
 {# One playlist track row. Rendered by the page (in the loop), by /playlist/{id}/track-genre and
    /track-year (htmx row swap after an edit), and by the enrich SSE stream (live cell updates), so
    manual edit and enrichment always render the genre/year cells identically. The whole <tr> is the
-   swap unit, keeping the data-* attributes the client sort reads in sync. Needs: t, idx. #}
+   swap unit, keeping the data-* attributes the client sort reads in sync. Needs: t, idx, pl. #}
 {% from "_partials/song_menu_button.html" import song_menu %}
+{% set play_url = 'https://music.youtube.com/watch?v=' ~ (t.video_id|urlencode) ~ '&list=' ~ (pl.ytm_playlist_id|urlencode) %}
 <tr class="srow" data-vid="{{ t.video_id }}" data-title="{{ t.title|lower }}" data-artist="{{ t.artist|lower }}"
     data-album="{{ t.album|lower }}" data-plays="{{ t.plays }}" data-len="{{ t.duration or 0 }}"
     data-year="{{ t.year or 0 }}" data-genre="{{ t.genre|lower }}" :class="{ rowdel: false }">
-  <td class="num drag-handle" title="Drag to reorder"><span class="rownum">{{ idx }}</span></td>
+  <td class="num drag-handle" title="Drag to reorder"><div class="track-cell"><span class="rownum">{{ idx }}</span></div></td>
   <td>
+    <div class="track-cell">
     <span class="pl-cover">
       {% if t.thumbnail %}<img class="pl-thumb" src="{{ t.thumbnail }}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
-      <a class="pl-play" href="https://music.youtube.com/watch?v={{ t.video_id }}"
+      <a class="pl-play" href="{{ play_url }}"
          target="_blank" rel="noopener" title="Play on YouTube Music">▶</a>
     </span>
+    </div>
   </td>
   {% with video_id = t.video_id, liked = t.liked %}{% include "_partials/liked_cell.html" %}{% endwith %}
   <td class="t-wrap" title="{{ t.title }}">
-    <span class="tdisplay" x-show="editTitleVid !== '{{ t.video_id }}'">
-      <a class="ptitle" href="https://music.youtube.com/watch?v={{ t.video_id }}"
-         target="_blank" rel="noopener" data-yt-info>{{ t.title }} {{ arrow_icon('external') }}</a>
-      {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
-      <span class="editpen" @click="startEditTitle('{{ t.video_id }}')" title="Edit title">✎</span>
-      {% if t.title_edited %}<button type="button" class="resetpen" @click="resetField('{{ t.video_id }}', 'title')" title="Restore original title" aria-label="Restore original title for {{ t.title }}">{{ arrow_icon('reset') }}</button>{% endif %}
-    </span>
-    <input class="tinput" type="text" autocomplete="off" x-cloak
-           x-show="editTitleVid === '{{ t.video_id }}'"
-           @keydown.enter.prevent="saveTitle('{{ t.video_id }}', $event.target.value)"
-           @keydown.escape="editTitleVid = null"
-           @blur="saveTitle('{{ t.video_id }}', $event.target.value)">
+    <div class="track-cell track-cell--text">
+    <a class="ptitle" href="{{ play_url }}"
+       target="_blank" rel="noopener" data-yt-info>{{ t.title }}</a>
+    {% if t.available == 0 %}<span class="unavail" title="unavailable on YouTube Music">⚠</span>{% endif %}
+    </div>
   </td>
   <td class="t-wrap" title="{{ t.artist }}">
-    <span class="adisplay" x-show="editArtistVid !== '{{ t.video_id }}'">
-      <a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a>
-      <span class="editpen" @click="startEditArtist('{{ t.video_id }}')" title="Edit artist">✎</span>
-      {% if t.artist_edited %}<button type="button" class="resetpen" @click="resetField('{{ t.video_id }}', 'artist')" title="Restore original artist" aria-label="Restore original artist for {{ t.title }}">{{ arrow_icon('reset') }}</button>{% endif %}
-    </span>
-    <input class="ainput" type="text" autocomplete="off" x-cloak
-           x-show="editArtistVid === '{{ t.video_id }}'"
-           @keydown.enter.prevent="saveArtist('{{ t.video_id }}', $event.target.value)"
-           @keydown.escape="editArtistVid = null"
-           @blur="saveArtist('{{ t.video_id }}', $event.target.value)">
+    <div class="track-cell track-cell--text">
+    <a class="alink" href="/artist?name={{ t.artist|urlencode }}">{{ t.artist }}</a>
+    </div>
   </td>
-  <td class="t-wrap" title="{{ t.album }}">{% if t.album_browse %}<a class="alink" href="/album?browse={{ t.album_browse }}">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</td>
+  <td class="t-wrap" title="{{ t.album }}"><div class="track-cell track-cell--text">{% if t.album_browse %}<a class="alink" href="/album?browse={{ t.album_browse }}">{{ t.album }}</a>{% else %}<span class="muted">{{ t.album }}</span>{% endif %}</div></td>
   <td class="num mono mb-year">
-    <span class="ydisplay" x-show="editYearVid !== '{{ t.video_id }}'"
-          @click="startEditYear('{{ t.video_id }}')" title="Click to set year">
-      {% if t.year %}{{ t.year }}{% else %}<span class="muted ghint">＋</span>{% endif %}
-    </span>
-    <input class="yinput" type="text" inputmode="numeric" autocomplete="off" x-cloak
-           x-show="editYearVid === '{{ t.video_id }}'"
-           @keydown.enter.prevent="saveYear('{{ t.video_id }}', $event.target.value)"
-           @keydown.escape="editYearVid = null"
-           @blur="saveYear('{{ t.video_id }}', $event.target.value)">
+    <div class="track-cell">
+    <span class="ydisplay">{% if t.year %}{{ t.year }}{% else %}<span class="muted ghint">—</span>{% endif %}</span>
+    </div>
   </td>
   <td class="mb-genre">
-    <button type="button" class="genre-display-wrap" title="See or change genre"
-            aria-label="See or change genre for {{ t.title }}"
-            hx-get="/track/{{ t.track_id }}/genre-candidates" hx-target="#genre-candidates-modal"
-            hx-swap="innerHTML">
-      {% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">Set genre</span>{% endif %}
-      <span class="genre-info" aria-hidden="true">ⓘ</span>
-    </button>
+    <div class="track-cell">
+    <span class="genre-display-wrap">{% if t.genre %}<span class="gtag">{{ t.genre }}</span>{% else %}<span class="muted ghint">—</span>{% endif %}</span>
+    </div>
   </td>
-  <td class="num mono">{{ t.plays or '' }}</td>
-  <td class="num mono">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</td>
+  <td class="num mono"><div class="track-cell">{{ t.plays or '' }}</div></td>
+  <td class="num mono"><div class="track-cell">{% if t.duration %}{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}{% endif %}</div></td>
   <td class="rowmenu"{% if is_generated and t.identity_key %} x-data="{ mood: {{ (mood_states|default({})).get(t.identity_key, 0) }} }"{% endif %}>
-    {{ song_menu(t, {"playlist": true, "mood_key": t.identity_key if is_generated else ''}) }}
+    <div class="track-cell">
+    {{ song_menu(t, {"playlist": true, "play_url": play_url, "mood_key": t.identity_key if is_generated else ''}) }}
+    </div>
   </td>
 </tr>

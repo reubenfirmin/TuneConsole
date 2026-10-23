@@ -3,10 +3,11 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.test_mode_cards_route import prepare_home
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     return iid, TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                            base_url="http://127.0.0.1")
 
@@ -28,7 +29,8 @@ def test_fresh_renders_as_saveable_proto(store):
               for i in range(5)]                    # enough to clear the _MIN_CARD floor
     # only the fresh surface has material, so it wins the mode
     payload = {"1": {surf: (fresh if surf == "fresh" else []) for surf in ms.CARD_SURFACES}}
-    store.put_proposals("mode_bundles", payload, 1.0)
+    store.rec_surface.put_proposals("mode_bundles", payload, 1.0)
+    prepare_home(store, 1.0)
     html = c.get("/home/cards").text
     assert 'id="gen-fresh"' in html                 # rendered as a proto-playlist card
     assert "Fresh songs -" in html                  # dated name
@@ -38,8 +40,9 @@ def test_fresh_renders_as_saveable_proto(store):
 
 def test_new_artists_render_with_thumbnail(store):
     _iid, c = _client(store)
-    store.upsert_discovered_artist("Donato Dozzy", 1.0, ["Recondite"], ["Deep Focus"],
+    store.discovery.upsert_discovered_artist("Donato Dozzy", 1.0, ["Recondite"], ["Deep Focus"],
                                   "https://img/dozzy.jpg", now=1.0)
+    prepare_home(store, 1.0)
     html = c.get("/home/new-artists").text
     assert "https://img/dozzy.jpg" in html          # graphical card uses the artist image
     assert "Donato Dozzy" in html

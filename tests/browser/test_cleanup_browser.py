@@ -28,22 +28,22 @@ def live_cleanup_app(monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     s = Store(":memory:")
     s.init_schema()
-    iid = s.upsert_identity("Main", "c1", None, True)
-    s.upsert_playlist(iid, "PLE", "Empty One", 0, "h", 1.0)   # no tracks -> an empty playlist
+    iid = s.identities.upsert_identity("Main", "c1", None, True)
+    s.playlists.upsert_playlist(iid, "PLE", "Empty One", 0, "h", 1.0)   # no tracks -> an empty playlist
     # two identical playlists -> an exact-duplicate group
-    dup_tracks = [s.upsert_track(f"d{i}", f"D{i}", "X", None, None, 1) for i in range(2)]
+    dup_tracks = [s.tracks.upsert_track(f"d{i}", f"D{i}", "X", None, None, 1) for i in range(2)]
     for ytm, title in (("PLD1", "Dup A"), ("PLD2", "Dup B")):
-        pid = s.upsert_playlist(iid, ytm, title, 2, "h", 1.0)
-        s.set_playlist_tracks(pid, dup_tracks)
+        pid = s.playlists.upsert_playlist(iid, ytm, title, 2, "h", 1.0)
+        s.playlists.set_playlist_tracks(pid, dup_tracks)
     # two playlists that share tracks but aren't identical -> an overlap pair
-    ov = [s.upsert_track(f"o{i}", f"O{i}", "X", None, None, 1) for i in range(4)]
-    oa = s.upsert_playlist(iid, "POVA", "Ov A", 3, "h", 1.0); s.set_playlist_tracks(oa, ov[0:3])
-    ob = s.upsert_playlist(iid, "POVB", "Ov B", 3, "h", 1.0); s.set_playlist_tracks(ob, ov[1:4])
+    ov = [s.tracks.upsert_track(f"o{i}", f"O{i}", "X", None, None, 1) for i in range(4)]
+    oa = s.playlists.upsert_playlist(iid, "POVA", "Ov A", 3, "h", 1.0); s.playlists.set_playlist_tracks(oa, ov[0:3])
+    ob = s.playlists.upsert_playlist(iid, "POVB", "Ov B", 3, "h", 1.0); s.playlists.set_playlist_tracks(ob, ov[1:4])
     # Three near-duplicates share seven tracks and each have a different eighth track.
-    near = [s.upsert_track(f"n{i}", f"N{i}", "X", None, None, 1) for i in range(10)]
+    near = [s.tracks.upsert_track(f"n{i}", f"N{i}", "X", None, None, 1) for i in range(10)]
     for n, ytm in enumerate(("PNEARA", "PNEARB", "PNEARC")):
-        pid = s.upsert_playlist(iid, ytm, f"Near {chr(65 + n)}", 8, "h", 1.0)
-        s.set_playlist_tracks(pid, near[:7] + [near[7 + n]])
+        pid = s.playlists.upsert_playlist(iid, ytm, f"Near {chr(65 + n)}", 8, "h", 1.0)
+        s.playlists.set_playlist_tracks(pid, near[:7] + [near[7 + n]])
     app = create_app(s, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
@@ -62,6 +62,55 @@ def test_empty_playlist_delete_removes_row(live_cleanup_app, page):
     expect(link).to_be_visible()
     page.get_by_role("row").filter(has_text="Empty One").get_by_role("button", name="Delete").click()
     link.wait_for(state="hidden", timeout=3000)
+
+
+def test_empty_playlist_failed_read_keeps_row_and_allows_retry(live_cleanup_app, page, monkeypatch):
+    from yt_playlist.library import executor
+    monkeypatch.setattr(executor, "with_retry", lambda fn: fn())
+    get_playlist = FakeClient.get_playlist
+
+    def unreadable(self, playlistId, limit=None):
+        if playlistId == "PLE":
+            raise TimeoutError("YouTube read timed out")
+        return get_playlist(self, playlistId, limit)
+
+    monkeypatch.setattr(FakeClient, "get_playlist", unreadable)
+    page.goto(f"{live_cleanup_app}/cleanup")
+    row = page.get_by_role("row").filter(has_text="Empty One")
+    row.get_by_role("button", name="Delete", exact=True).click()
+    expect(page.locator(".toast-err")).to_contain_text("empty on YouTube")
+    expect(row).to_be_visible()
+    expect(row.get_by_role("button", name="Delete", exact=True)).to_be_enabled()
+
+    monkeypatch.setattr(FakeClient, "get_playlist", get_playlist)
+    row.get_by_role("button", name="Delete", exact=True).click()
+    expect(row).to_have_count(0)
+
+
+def test_failed_remote_read_offers_local_removal(live_cleanup_app, page, monkeypatch):
+    from yt_playlist.library import executor
+    monkeypatch.setattr(executor, 'with_retry', lambda fn: fn())
+
+    def unreadable(*args, **kwargs):
+        raise KeyError('musicPlaylistShelfRenderer')
+
+    def never_delete(*args, **kwargs):
+        raise AssertionError('Local removal must not call YouTube delete')
+
+    monkeypatch.setattr(FakeClient, 'get_playlist', unreadable)
+    monkeypatch.setattr(FakeClient, 'delete_playlist', never_delete)
+    page.goto(f'{live_cleanup_app}/cleanup')
+    row = page.get_by_role('row').filter(has_text='Empty One')
+    removal = row.get_by_role('button', name='Remove from TuneConsole', exact=True)
+    expect(removal).to_be_hidden()
+    row.get_by_role('button', name='Delete', exact=True).click()
+    expect(removal).to_be_visible()
+    removal.click()
+    expect(page.get_by_text('YouTube will stay unchanged.', exact=False)).to_be_visible()
+    page.get_by_role('button', name='Confirm', exact=True).click()
+    expect(row).to_have_count(0)
+    page.goto(f'{live_cleanup_app}/actions')
+    expect(page.get_by_text('YouTube unchanged', exact=False)).to_be_visible()
 
 
 def test_keep_one_resolves_duplicate_group(live_cleanup_app, page):

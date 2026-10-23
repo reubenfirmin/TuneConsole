@@ -8,6 +8,7 @@ def disable_periodic_library_sync(monkeypatch):
     from yt_playlist.web import app as webapp
 
     monkeypatch.setattr(webapp, "_background_sync_loop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(webapp, "BACKGROUND_WORK", False)
 
 
 @pytest.fixture
@@ -58,6 +59,8 @@ def seed_catalog_track(store, key, title, artist, *, video_id=None, track_id=Non
             assert metadata.keys() <= columns
             store.conn.execute('UPDATE catalog_tracks SET '+','.join(f'{field}=?' for field in metadata)+' WHERE id=?',
                                [*metadata.values(),rid])
+        from yt_playlist.core import artists
+        artists.observe(store.conn,rid,artist,browse_id=metadata.get('artist_browse_id'))
     return rid
 
 
@@ -83,16 +86,20 @@ class FakeClient:
         playlists = list(self._playlists)
         return playlists[:limit] if limit is not None else playlists
     def get_playlist(self, playlistId, limit=100):
+        if playlistId in self.deleted:
+            from ytmusicapi.exceptions import YTMusicServerError
+            raise YTMusicServerError("Server returned HTTP 404: Not Found.")
         tracks = list(self._tracks.get(playlistId, []))
         return {"tracks": tracks[:limit] if limit is not None else tracks}
     def get_history(self): return list(self._history)
+    def get_library_albums(self, limit=25): return []
     def get_album(self, browseId): return self._albums.get(browseId, {})
     def get_library_upload_album(self, browseId): return self._uploads.get(browseId, {})
     def get_artist(self, browseId): return self._artists.get(browseId, {})
     def create_playlist(self, title, description):  # description required, matching real YTMusic API
         pid = f"PL_NEW_{len(self.created)}"; self.created.append((pid, title, description))
         self._tracks.setdefault(pid, []); return pid
-    def add_playlist_items(self, playlistId, videoIds):
+    def add_playlist_items(self, playlistId, videoIds, *, duplicates=False):
         self.added.append((playlistId, list(videoIds)))
         dst = self._tracks.setdefault(playlistId, [])
         results = []

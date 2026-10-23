@@ -3,13 +3,18 @@ import pytest
 from yt_playlist.core import updatecheck as uc
 
 
-class FakeStore:
+class FakeSettings:
     def __init__(self, settings=None):
         self.settings = dict(settings or {})
     def get_setting(self, key, default=None):
         return self.settings.get(key, default)
     def set_setting(self, key, value):
         self.settings[key] = value or ""
+
+
+class FakeStore:
+    def __init__(self, settings=None):
+        self.settings = FakeSettings(settings)
 
 
 def test_current_version_strips_dev_suffix(monkeypatch):
@@ -157,24 +162,24 @@ def test_check_latest_fetches_and_caches_when_never_checked(monkeypatch):
     monkeypatch.setattr(uc, "_fetch_latest_release", lambda: "0.2.0")
     store = FakeStore()
     uc.check_latest(store, now=1000.0)
-    assert store.get_setting("latest_version_seen") == "0.2.0"
-    assert store.get_setting("latest_version_checked_at") == "1000.0"
+    assert store.settings.get_setting("latest_version_seen") == "0.2.0"
+    assert store.settings.get_setting("latest_version_checked_at") == "1000.0"
 
 
 def test_check_latest_skips_when_checked_recently(monkeypatch):
     calls = []
     monkeypatch.setattr(uc, "_fetch_latest_release", lambda: calls.append(1) or "0.9.9")
     store = FakeStore({"latest_version_checked_at": "1000.0", "latest_version_seen": "0.2.0"})
-    uc.check_latest(store, now=1000.0 + 3600, interval_s=86400)   # only 1h later
+    uc.check_latest(store, now=1000.0 + 3600)                    # only 1h later
     assert calls == []                                            # not fetched
-    assert store.get_setting("latest_version_seen") == "0.2.0"    # unchanged
+    assert store.settings.get_setting("latest_version_seen") == "0.2.0"    # unchanged
 
 
 def test_check_latest_refetches_after_interval(monkeypatch):
     monkeypatch.setattr(uc, "_fetch_latest_release", lambda: "0.3.0")
     store = FakeStore({"latest_version_checked_at": "1000.0", "latest_version_seen": "0.2.0"})
-    uc.check_latest(store, now=1000.0 + 86400 + 1, interval_s=86400)
-    assert store.get_setting("latest_version_seen") == "0.3.0"
+    uc.check_latest(store, now=1000.0 + 4 * 3600)                # exactly 4h later
+    assert store.settings.get_setting("latest_version_seen") == "0.3.0"
 
 
 def test_check_latest_fail_silent_keeps_cached_value(monkeypatch):
@@ -183,8 +188,8 @@ def test_check_latest_fail_silent_keeps_cached_value(monkeypatch):
     monkeypatch.setattr(uc, "_fetch_latest_release", boom)
     store = FakeStore({"latest_version_seen": "0.2.0"})
     uc.check_latest(store, now=5000.0)                            # must not raise
-    assert store.get_setting("latest_version_seen") == "0.2.0"   # cached value retained
-    assert store.get_setting("latest_version_checked_at") == "5000.0"  # still stamped (bounds retries)
+    assert store.settings.get_setting("latest_version_seen") == "0.2.0"   # cached value retained
+    assert store.settings.get_setting("latest_version_checked_at") == "5000.0"  # still stamped (bounds retries)
 
 
 def test_maybe_check_update_swallows_errors(monkeypatch):

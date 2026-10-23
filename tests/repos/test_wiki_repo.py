@@ -30,3 +30,26 @@ def test_hit_ttl_expires(store):
 
 def test_get_absent_returns_none(store):
     assert store.wiki.get("artist:nobody") is None
+
+
+def test_failure_without_saved_card_is_short_lived_and_not_a_miss(store):
+    subject = "artist:offline"
+    store.wiki.defer(subject, 1000)
+    assert store.wiki.get(subject) is None
+    assert not store.wiki.should_refresh(subject, None, 1059)
+    assert store.wiki.should_refresh(subject, None, 1060)
+
+
+def test_saved_cards_and_failure_backoffs_are_bounded(store, monkeypatch):
+    from yt_playlist.repos import wiki
+    monkeypatch.setattr(wiki, "WIKI_CACHE_LIMIT", 3)
+    for i in range(5):
+        subject = f"artist:{i}"
+        store.wiki.defer(subject, i)
+        store.wiki.put(subject, "artist", str(i), {"extract": "A band."}, i)
+    assert store.wiki.get("artist:0") is None
+    assert store.wiki.get("artist:4")["extract"] == "A band."
+    assert store.conn.execute("SELECT COUNT(*) FROM wiki_cards").fetchone()[0] == 3
+    for i in range(5):
+        store.wiki.defer(f"artist:{i}", i)
+    assert len(store.wiki._retry_after) == 3

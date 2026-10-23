@@ -22,11 +22,14 @@ def store():
 
 
 def _playlist(store, pid, ytm, title, group=None, ident=1):
+    from yt_playlist.core.playlist_scopes import ensure
     store.conn.execute(
-        "INSERT INTO playlists(id, identity_id, ytm_playlist_id, title) VALUES (?,?,?,?)",
-        (pid, ident, ytm, title))
+        "INSERT INTO playlists(id, identity_id, ytm_playlist_id, title,scope_ref) VALUES (?,?,?,?,?)",
+        (pid, ident, ytm, title,ensure(store.conn,ytm,ident)))
     if group:
-        store.conn.execute("INSERT INTO playlist_group(ytm, name) VALUES (?,?)", (ytm, group))
+        store.playlists.set_playlist_group(ytm,group,identity_id=ident)
+    if group == 'Generated':
+        store.playlists.mark_generated_playlist(ytm)
     store.conn.commit()
 
 
@@ -37,8 +40,9 @@ def _track(store, tid, key, artist, title="t"):
 
 def _event(store, key, day, playlist=None, ident=1, sec=0):
     store.conn.execute(
-        "INSERT INTO play_events(identity_id, identity_key, video_id, played_at, playlist_ytm_id) "
-        "VALUES (?,?,?,?,?)", (ident, key, "v" + key, day * DAY + sec, playlist))
+        "INSERT INTO play_events(identity_id, identity_key, video_id, played_at, playlist_ytm_id,is_generated) "
+        "VALUES (?,?,?,?,?,?)", (ident, key, "v" + key, day * DAY + sec, playlist,
+                                 int(bool(playlist) and store.playlists.is_quarantined_playlist(playlist,identity_id=ident))))
     store.conn.commit()
 
 

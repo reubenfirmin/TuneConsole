@@ -1,26 +1,27 @@
 import numpy as np
+import pytest
 
-from yt_playlist.rec import recommend
+from yt_playlist.rec import surfaces
 
 
 def test_catalog_ranks_under_played_first_weighted_not_filtered(store):
     """Catalog ('explore_for_you') surfaces your under-played catalog FIRST, weighted (not filtered)
     by taste: unplayed tracks rank above played ones, and played tracks are de-ranked but NOT
     excluded (no artist filter)."""
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     # Both sets share an artist and equal taste fit; only play history differs.
-    played = [store.upsert_track(f"p{i}", f"P{i}", "Art", None, None) for i in range(6)]
-    unplayed = [store.upsert_track(f"u{i}", f"U{i}", "Art", None, None) for i in range(6)]
-    store.set_playlist_tracks(store.upsert_playlist(iid, "P", "P", 12, "h", 0.0), played + unplayed)
+    played = [store.tracks.upsert_track(f"p{i}", f"P{i}", "Art", None, None) for i in range(6)]
+    unplayed = [store.tracks.upsert_track(f"u{i}", f"U{i}", "Art", None, None) for i in range(6)]
+    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "P", "P", 12, "h", 0.0), played + unplayed)
     for k in [f"p{i}|art" for i in range(6)]:
-        store.add_history_snapshot(iid, 1.0, [k])      # the P set has plays; the U set has none
+        store.history.record_history_plays(iid, 1.0, [k], source_timezone="UTC")
     # Truncated SVD of this symmetric catalog can choose different bases across
     # BLAS implementations. Equal vectors hold taste fit constant for this test.
     vector = np.array([1, 0, 0, 0], dtype=np.float32).tobytes()
-    store.replace_rec_vectors([(f"{prefix}{i}|art", vector)
+    store.rec_model.replace_rec_vectors([(f"{prefix}{i}|art", vector)
                                for prefix in ("p", "u") for i in range(6)])
 
-    cat = recommend.explore_for_you(store, now=2.0, limit=12)
+    cat = surfaces.explore_for_you(store, now=2.0, limit=12)
     assert len(cat) == 12, "played tracks are de-ranked, not excluded"
     assert all(i.title.startswith("U") for i in cat[:6])
     assert all(i.title.startswith("P") for i in cat[6:])
@@ -28,5 +29,28 @@ def test_catalog_ranks_under_played_first_weighted_not_filtered(store):
 
 
 def test_explore_empty_without_vectors(store):
-    store.upsert_identity("main", "cred", None, True)
-    assert recommend.explore_for_you(store, now=1.0) == []
+    store.identities.upsert_identity("main", "cred", None, True)
+    assert surfaces.explore_for_you(store, now=1.0) == []
+
+
+@pytest.mark.parametrize("partial_model", [False, True])
+def test_catalog_includes_owned_tracks_without_model_coverage(store, partial_model):
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    keys = []
+    for i in range(40):
+        tid = store.tracks.upsert_track(f"v{i}", f"Song {i}", f"Artist {i}", None, None,
+                                        available=i != 0)
+        store.tracks.set_track_genre(tid, "Jazz" if i < 30 else "Techno")
+        keys.append(f"song {i}|artist {i}")
+    store.rec_model.record_feedback("for_you", keys[1], "dismiss", now=1)
+    store.rec_model.record_feedback("for_you", "artist:Artist 2", "mute", now=1)
+    store.rec_model.set_weight("genre:techno", 0, lo=0, now=1)
+    store.history.record_history_plays(iid, 1, [keys[3]], source_timezone="UTC")
+    if partial_model:
+        store.rec_model.replace_rec_vectors([(keys[4], np.array([1, 0], dtype=np.float32).tobytes())])
+
+    result = surfaces.explore_for_you(store, now=2, limit=40)
+
+    assert {t.key for t in result} == set(keys[3:30])
+    assert result[-1].key == keys[3]  # Even unmodeled tracks are ranked by lack of plays.
+    assert all(t.video_id and t.lane == "explore" for t in result)

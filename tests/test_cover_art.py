@@ -35,9 +35,9 @@ def _deezer_stub(monkeypatch, track_payload):
     def fake_get(url):
         calls.append(url)
         if "/search/track" in url:
-            return {"data": [{"id": 99}]}
+            return {"data": [{"id": 99, "title": "Don't Give Up"}]}
         if "/track/99" in url:
-            return track_payload
+            return {"id": 99, "title": "Don't Give Up", "artist": {"name": "Chicane"}, **track_payload}
         return {}
 
     monkeypatch.setattr(deezer, "_get_json", fake_get)
@@ -55,9 +55,10 @@ def test_deezer_art_survives_a_failing_album_lookup(monkeypatch):
     to read `label` and is allowed to fail)."""
     def fake_get(url):
         if "/search/track" in url:
-            return {"data": [{"id": 99}]}
+            return {"data": [{"id": 99, "title": "Don't Give Up"}]}
         if "/track/99" in url:
-            return {"bpm": 130, "album": {"id": 7, "cover_xl": _DEEZER}}
+            return {"id": 99, "title": "Don't Give Up", "artist": {"name": "Chicane"},
+                    "bpm": 130, "album": {"id": 7, "cover_xl": _DEEZER}}
         raise OSError("album lookup down")
 
     monkeypatch.setattr(deezer, "_get_json", fake_get)
@@ -68,7 +69,7 @@ def test_deezer_art_survives_a_failing_album_lookup(monkeypatch):
 
 def test_deezer_art_is_none_when_the_album_has_no_cover(monkeypatch):
     _deezer_stub(monkeypatch, {"bpm": 130, "album": {"id": 7}})
-    assert deezer.enrich("x", "y")["art"] is None
+    assert deezer.enrich("Don't Give Up", "Chicane")["art"] is None
 
 
 def test_deezer_art_is_none_on_no_match(monkeypatch):
@@ -104,13 +105,13 @@ def _run(store, track_id, providers, monkeypatch, caa=None):
     monkeypatch.setattr(waterfall.coverart, "front_cover", fake_front_cover)
     registry = {p.name: p for p in providers}
     config = [{"name": p.name, "enabled": True} for p in providers]
-    tracks = store.album_tracks_for_waterfall("MPREb_x")
+    tracks = store.tracks.album_tracks_for_waterfall("MPREb_x")
     waterfall.run_waterfall(store, tracks, config, on_progress=lambda e: None, registry=registry)
     return seen
 
 
 def _seed(store, thumbnail=None):
-    return store.upsert_track("v1", "T", "A", "Alb", 100, album_browse_id="MPREb_x",
+    return store.tracks.upsert_track("v1", "T", "A", "Alb", 100, album_browse_id="MPREb_x",
                               thumbnail=thumbnail)
 
 
@@ -168,44 +169,44 @@ def _art_of(store, tid):
 
 
 def test_set_track_art_fills_when_there_is_no_art(store):
-    tid = store.upsert_track("v1", "T", "A", "Alb", 100)
-    store.set_track_art(tid, _DEEZER)
+    tid = store.tracks.upsert_track("v1", "T", "A", "Alb", 100)
+    store.tracks.set_track_art(tid, _DEEZER)
     assert _art_of(store, tid) == _DEEZER
 
 
 def test_set_track_art_replaces_a_youtube_placeholder(store):
     # The whole point: YouTube's grey disc is not art, and must not block a real cover.
-    tid = store.upsert_track("v1", "T", "A", "Alb", 100, thumbnail=_YT_TRACK_PH)
-    store.set_track_art(tid, _DEEZER)
+    tid = store.tracks.upsert_track("v1", "T", "A", "Alb", 100, thumbnail=_YT_TRACK_PH)
+    store.tracks.set_track_art(tid, _DEEZER)
     assert _art_of(store, tid) == _DEEZER
 
 
 def test_set_track_art_never_overwrites_real_youtube_art(store):
     # YouTube's own cover is authoritative; a provider's guess must not clobber it.
-    tid = store.upsert_track("v1", "T", "A", "Alb", 100, thumbnail=_REAL)
-    store.set_track_art(tid, _DEEZER)
+    tid = store.tracks.upsert_track("v1", "T", "A", "Alb", 100, thumbnail=_REAL)
+    store.tracks.set_track_art(tid, _DEEZER)
     assert _art_of(store, tid) == _REAL
 
 
 def test_set_track_art_ignores_an_empty_url(store):
-    tid = store.upsert_track("v1", "T", "A", "Alb", 100, thumbnail=_YT_TRACK_PH)
-    store.set_track_art(tid, None)
+    tid = store.tracks.upsert_track("v1", "T", "A", "Alb", 100, thumbnail=_YT_TRACK_PH)
+    store.tracks.set_track_art(tid, None)
     assert _art_of(store, tid) == _YT_TRACK_PH
 
 
 def test_waterfall_pending_includes_a_fully_enriched_track_with_placeholder_art(store):
     """A track can be complete on genre/year/audio yet still show the grey disc. Without art in the
     pending predicate the waterfall would never revisit it, so the cover could never arrive."""
-    tid = store.upsert_track("v1", "T", "A", "Alb", 100, album_browse_id="MPREb_x",
+    tid = store.tracks.upsert_track("v1", "T", "A", "Alb", 100, album_browse_id="MPREb_x",
                              thumbnail=_YT_TRACK_PH)
-    store.set_track_enrichment(tid, "Trance", "2000")
-    store.set_track_audio(tid, bpm=138.0, energy=0.8, danceability=0.7)
-    pending = store.album_tracks_for_waterfall("MPREb_x")
+    store.tracks.set_track_enrichment(tid, "Trance", "2000")
+    store.tracks.set_track_audio(tid, bpm=138.0, energy=0.8, danceability=0.7)
+    pending = store.tracks.album_tracks_for_waterfall("MPREb_x")
     assert [p["id"] for p in pending] == [tid]
 
 
 def test_waterfall_pending_skips_a_fully_enriched_track_with_real_art(store):
-    tid = store.upsert_track("v1", "T", "A", "Alb", 100, album_browse_id="MPREb_x", thumbnail=_REAL)
-    store.set_track_enrichment(tid, "Trance", "2000")
-    store.set_track_audio(tid, bpm=138.0, energy=0.8, danceability=0.7)
-    assert store.album_tracks_for_waterfall("MPREb_x") == []
+    tid = store.tracks.upsert_track("v1", "T", "A", "Alb", 100, album_browse_id="MPREb_x", thumbnail=_REAL)
+    store.tracks.set_track_enrichment(tid, "Trance", "2000")
+    store.tracks.set_track_audio(tid, bpm=138.0, energy=0.8, danceability=0.7)
+    assert store.tracks.album_tracks_for_waterfall("MPREb_x") == []

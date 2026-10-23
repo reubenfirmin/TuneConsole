@@ -66,9 +66,9 @@ messages.length = 0;
 video.paused = true;
 const main = (paused, playlist = "PL1") => listeners.message({
   source: window,
-  data: { __tcSensorVersion: 4,
+  data: { __tcSensorVersion: 4, __tcSensorRevision: 4,
     __tcNow: { title: "Exoskeleton", artist: "GAUPA", videoId: "v1", playlist, paused,
-      brandKnown: true, brandId: "brand-A" } },
+      brandKnown: true, brandId: "brand-A", metadataVerified: true } },
 });
 main(true);
 now = 6000;
@@ -96,14 +96,16 @@ main(true, "");
 assert.equal(messages.at(-1).playlist, "");
 // An explicit context clear must not resurrect a playlist from the old page URL.
 context.location.href = "https://music.youtube.com/watch?v=v1&list=PL_old";
-listeners.message({source: window, data: {__tcSensorVersion: 4, __tcNow: {
+listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {
   title: "Exoskeleton", artist: "GAUPA", videoId: "v1", playlist: "", paused: false,
+  metadataVerified: true,
   brandKnown: true, brandId: "brand-A",
 }}});
 assert.equal(messages.at(-1).playlist, "");
 // Reports without context cannot borrow the queue of a different video.
-listeners.message({source: window, data: {__tcSensorVersion: 4, __tcNow: {
+listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {
   title: "Autoplay", artist: "Artist", videoId: "v2", paused: false,
+  metadataVerified: true,
   brandKnown: true, brandId: "brand-A",
 }}});
 assert.equal(messages.at(-1).playlist, "");
@@ -128,28 +130,31 @@ listeners.message({source: window, data: {__tcNow: {
   title: "Wrong song", artist: "Artist", videoId: "other", paused: false,
 }}});
 assert.equal(messages.length, count);
-// A new DOM song during MAIN throttling keeps the verified account independently of track ID.
+// A new DOM song during MAIN throttling restores presence with the last verified account.
 thumbnail = "https://i.ytimg.com/vi/v3/hqdefault.jpg";
 now = 30000;
 intervals[0]();
-assert.equal(messages.at(-1).type, "play");
+assert.equal(messages.at(-1).type, "now-heartbeat");
+assert.equal(messages.at(-1).metadataVerified, false);
 assert.equal(messages.at(-1).videoId, "v3");
 assert.equal(messages.at(-1).brandId, "brand-A");
 // Regular but incomplete MAIN snapshots must allow DOM fallback, even at a 2s cadence.
 for (const id of ["v4", "v5"]) {
   thumbnail = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
   now += 2000;
-  listeners.message({source: window, data: {__tcSensorVersion: 4, __tcNow: {
+  listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {
     title: "Stale MediaSession title", videoId: "", brandKnown: true, brandId: "brand-A",
   }}});
   intervals[0]();
-  const play = messages.filter(m => m.type === "play").at(-1);
-  assert.equal(play.videoId, id);
-  assert.equal(play.title, "Exoskeleton (Official)");
-  assert.equal(play.brandId, "brand-A");
+  const presence = messages.at(-1);
+  assert.equal(presence.type, "now-heartbeat");
+  assert.equal(presence.metadataVerified, false);
+  assert.equal(presence.videoId, id);
+  assert.equal(presence.title, "Exoskeleton (Official)");
+  assert.equal(presence.brandId, "brand-A");
 }
 const accountReport = (brandKnown, brandId) => listeners.message({source: window,
-  data: {__tcSensorVersion: 4, __tcNow: {title: "", videoId: "", brandKnown, brandId}}});
+  data: {__tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {title: "", videoId: "", brandKnown, brandId}}});
 // Explicit account uncertainty invalidates the cache and cannot advance play deduplication.
 accountReport(false, "");
 assert.equal(messages.at(-1).type, "now-heartbeat");
@@ -161,20 +166,28 @@ listeners.message({source: window, data: {__tcSensorVersion: 4,
   __tcPlayer: {kind: "tick", videoId: "v6", brandKnown: false, brandId: ""}}});
 assert.equal(messages.length, beforeUnknownEvent);
 accountReport(true, "brand-B");
+assert.equal(messages.at(-1).type, "now-heartbeat");
+const verifiedAccountPlay = brandId => listeners.message({source: window, data: {
+  __tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {title:"Song", artist:"Artist", videoId:"v6",
+    brandKnown:true, brandId, metadataVerified:true, paused:false}}});
+verifiedAccountPlay("brand-B");
 assert.equal(messages.at(-1).type, "play");
 assert.equal(messages.at(-1).brandId, "brand-B");
 // The same video on a different account must be recorded for that account too.
 accountReport(true, "");
+assert.equal(messages.at(-1).type, "now-heartbeat");
+verifiedAccountPlay("");
 assert.equal(messages.at(-1).type, "play");
 assert.equal(messages.at(-1).brandId, "");
 video.muted = true;
+now += 6000;
 intervals[0]();
 assert.equal(messages.at(-1).muted, true);
 // A new playing ID must not inherit the previous bar's explicit rating or album.
 video.muted = false;
 likeStatus = "LIKE";
 const snapshot = (videoId, playerBar, metadataVerified = true) => listeners.message({source: window,
-  data: {__tcSensorVersion: 4, __tcNow: {
+  data: {__tcSensorVersion: 4, __tcSensorRevision: 4, __tcNow: {
     title: "Next song", artist: metadataVerified ? "Artist" : "Uploader channel",
     videoId, playerBar, metadataVerified,
     paused: false, brandKnown: true, brandId: "brand-A",
@@ -213,16 +226,47 @@ listeners.message({source: window, data: {__tcSensorVersion: 3, __tcSensorProbeI
   __tcNow: {title: "Legacy", videoId: "old"}}});
 assert.equal(health, undefined);
 listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorProbeId: probeId,
+  __tcSensorRevision: 3, __tcNow: {title: "Outdated implementation", videoId: "old"}}});
+assert.equal(health, undefined, 'same protocol with an obsolete revision cannot satisfy a probe');
+listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorProbeId: probeId, __tcSensorRevision: 4,
   __tcNow: {title: "", videoId: "", brandKnown: false}}});
 assert.equal(health.ok, true);
 assert.equal(health.mainVersion, 4);
+assert.equal(health.mainRevision, 4);
+assert.equal(health.receiverRevision, 3);
 assert.equal(health.mainAgeMs, 0);
+assert.equal(health.capture.hasVideo, false);
+assert.equal(health.capture.accountKnown, false);
 assert.equal(timeouts.size, 0);
+// A live but unverified player must expose the missing identity boundary on the next probe,
+// without exposing credit/account values or converting its heartbeat into an exact play.
+health = undefined;
+listeners.runtime({type: "sensor-ping", main: true}, {}, r => { health = r; });
+listeners.message({source: window, data: {__tcSensorVersion: 4, __tcSensorRevision: 4,
+  __tcSensorProbeId: probes.at(-1).__tcSensorProbe.id, __tcNow: {
+    title: "Private song", artist: "Private artist", videoId: "private-video", brandId: "private-account",
+    brandKnown: true, metadataVerified: false, paused: false, muted: false,
+    playerBar: {videoId: "", ratingVideoId: "private-video", title: "Private song", artist: "Private artist",
+      binding: {barIds: [], targetIds: ["private-video"], sources: [{source: "bar.data", present: true,
+        keys: ["videoDetails"], targetKeys: [], data: {secret: "private-value"}}]}},
+  }}});
+assert.equal(messages.at(-1).type, "now-heartbeat");
+assert.equal(health.capture.metadataVerified, false);
+assert.equal(health.capture.accountKnown, true);
+assert.equal(health.capture.barHasVideo, false);
+assert.equal(health.capture.ratingMatchesVideo, true);
+assert.equal(health.capture.barTitleMatches, true);
+assert.equal(health.capture.barArtistMatches, true);
+assert.equal(health.capture.barCandidates, 0);
+assert.equal(health.capture.ratingCandidates, 1);
+assert.equal(health.capture.sources[0].keys[0], "videoDetails");
+assert(!JSON.stringify(health.capture).includes("private"));
 now += 20000;
 health = undefined;
 listeners.runtime({type: "sensor-ping", main: true}, {}, r => { health = r; });
 [...timeouts.values()][0](); // MAIN did not answer the next probe.
 assert.equal(health.mainAgeMs, 20000);
+assert.equal(health.capture, null, 'an unanswered probe must not reuse older capture evidence');
 assert.equal(timeouts.size, 0);
 (async () => {
   const reply = await new Promise(resolve => listeners.runtime({
@@ -251,6 +295,7 @@ const vm = require('node:vm');
 const messages = [], handlers = new Map(), timers = new Map();
 let serial = 0, now = 30000, available = true, playlist = 'PL_playing';
 let data = {video_id: 'playing', title: 'Song', author: 'Artist'};
+let playerResponse = null;
 let config = {LOGGED_IN: true, DELEGATED_SESSION_ID: 'brand-A'};
 let bar = null;
 const windowHandlers = new Map();
@@ -259,7 +304,8 @@ const video = {
   addEventListener(type, fn) { handlers.set(type, fn); },
   removeEventListener(type, fn) { if (handlers.get(type) === fn) handlers.delete(type); },
 };
-const player = {getVideoData: () => data, getPlaylistId: () => playlist};
+const player = {getVideoData: () => data, getPlaylistId: () => playlist,
+  getPlayerResponse: () => playerResponse};
 const window = {__tcNowPoller: true, postMessage: msg => messages.push(msg),
   addEventListener: (type, fn) => windowHandlers.set(type, fn),
   removeEventListener: (type, fn) => {
@@ -292,6 +338,7 @@ const context = {
 };
 const source = fs.readFileSync('extension/nowplaying_main.js', 'utf8');
 vm.runInNewContext(source, context);
+const sensorRevision = window.__tcNowPoller.revision;
 const tick = () => [...timers.values()].forEach(fn => fn());
 const latest = () => messages.filter(m => m.__tcNow).at(-1).__tcNow;
 const exits = () => messages.filter(m => m.__tcPlayer?.kind === 'track_exit');
@@ -365,6 +412,24 @@ tick();
 assert.equal(latest().playerBar.likeStatus, '', 'a stale rating target must not rate the next song');
 bar = null;
 data.author = 'Artist';
+// Official album artwork has no embedded video ID, but a matching player response
+// can provide it without authorizing stale MediaSession titles or uploader credits.
+playerResponse = {videoDetails: {videoId: 'next', thumbnail: {thumbnails: [
+  {url: 'https://yt3.googleusercontent.com/album=w120'},
+  {url: 'https://yt3.googleusercontent.com/album=w544'},
+]}}};
+tick();
+assert.equal(latest().thumbnail, 'https://yt3.googleusercontent.com/album=w544');
+assert.equal(latest().title, 'Next');
+assert.equal(latest().artist, 'Artist');
+assert.equal(latest().metadataVerified, false, 'artwork alone must not validate recording credits');
+playerResponse.videoDetails.videoId = 'playing';
+tick();
+assert.equal(latest().thumbnail, '', 'a stale player response must not supply the previous artwork');
+playerResponse = {videoDetails: {videoId: 'next', thumbnail: {thumbnails: []}}};
+tick();
+assert.equal(latest().thumbnail, '');
+playerResponse = null;
 playlist = '';
 tick();
 assert.equal(latest().playlist, '', 'an actual queue clear must stay clear');
@@ -398,6 +463,11 @@ assert.equal(window.__tcNowPoller.lastSampleAt, now);
 vm.runInNewContext(source, context);
 assert.equal(timers.size, 1, 'reinjection must not add another interval');
 assert.equal(handlers.size, 4);
+delete window.__tcNowPoller.revision; // An implementation upgrade keeps the wire protocol.
+vm.runInNewContext(source, context);
+assert.equal(timers.size, 1, 'the revised sensor replaces a healthy predecessor without duplicate timers');
+assert.equal(handlers.size, 4);
+assert.equal(window.__tcNowPoller.revision, sensorRevision);
 window.__tcNowPoller.version = 1; // a future version replaces the existing sensor in place
 vm.runInNewContext(source, context);
 tick();

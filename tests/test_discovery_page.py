@@ -7,16 +7,16 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     fake = FakeClient()
     return fake, TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: 1000.0),
                             base_url="http://127.0.0.1")
 
 
 def test_discovery_page_lists_pooled_track(store):
-    store.upsert_discovered_track("a|x", "v1", "Cold Song", "Artist", "Alb", None, "house", "2020",
+    store.discovery.upsert_discovered_track("a|x", "v1", "Cold Song", "Artist", "Alb", None, "house", "2020",
                                   "r", 100.0)
-    store.mark_offered("track", ["a|x"], 200.0)
+    store.discovery.mark_offered("track", ["a|x"], 200.0)
     _, c = _client(store)
     r = c.get("/discovery")
     assert r.status_code == 200
@@ -24,7 +24,7 @@ def test_discovery_page_lists_pooled_track(store):
 
 
 def test_discovery_add_likes_track(store):
-    store.upsert_discovered_track("a|x", "v1", "Cold Song", "Artist", "Alb", None, None, None, "r", 100.0)
+    store.discovery.upsert_discovered_track("a|x", "v1", "Cold Song", "Artist", "Alb", None, None, None, "r", 100.0)
     fake, c = _client(store)
     r = c.post("/discovery/add", data={"kind": "track", "id": "a|x"})
     assert r.status_code == 200
@@ -32,37 +32,37 @@ def test_discovery_add_likes_track(store):
 
 
 def test_fragment_loads_do_not_count_as_album_or_artist_views(store):
-    store.upsert_discovered_album("album", "Artist", "Unseen album", "2026", None, 100.0)
-    store.upsert_discovered_artist("New artist", 1.0, [], [], None, 100.0)
+    store.discovery.upsert_discovered_album("album", "Artist", "Unseen album", "2026", None, 100.0)
+    store.discovery.upsert_discovered_artist("New artist", 1.0, [], [], None, 100.0)
     _, c = _client(store)
     for _ in range(3):
         assert c.get("/home/discover").status_code == 200
         assert c.get("/home/new-artists").status_code == 200
-    assert store.get_discovered_albums()[0]["offered_count"] == 0
-    assert store.get_discovered_artists()[0]["offered_count"] == 0
+    assert store.discovery.get_discovered_albums()[0]["offered_count"] == 0
+    assert store.discovery.get_discovered_artists()[0]["offered_count"] == 0
     assert "less than 1d ago" in c.get("/discovery").text
 
 
 def test_visible_tile_endpoint_counts_once_and_validates_kind(store):
     from uuid import uuid4
 
-    store.upsert_discovered_album("album", "Artist", "Album", "2026", None, 100.0)
+    store.discovery.upsert_discovered_album("album", "Artist", "Album", "2026", None, 100.0)
     _, c = _client(store)
     payload = {"kind": "album", "ids": ["album"], "view_id": str(uuid4())}
     assert c.post("/discovery/impressions", json=payload).status_code == 204
     assert c.post("/discovery/impressions", json=payload).status_code == 204
-    assert store.get_discovered_albums()[0]["offered_count"] == 1
+    assert store.discovery.get_discovered_albums()[0]["offered_count"] == 1
     payload["kind"] = "anything"
     assert c.post("/discovery/impressions", json=payload).status_code == 422
 
 
 def test_saved_metadata_is_visible_without_queue_or_provider_details(store):
-    store.upsert_discovered_track("cold", "v", "Cold Song", "Artist", "Album", None,
+    store.discovery.upsert_discovered_track("cold", "v", "Cold Song", "Artist", "Album", None,
                                   "House", "2020", "album", 100,
                                   audio={"bpm": 128.0, "energy": .8, "danceability": .7})
-    store.record_enrichment_attempt("cold", "musicbrainz", {"year": "2020"}, now=200)
-    store.record_enrichment_attempt("cold", "deezer", {}, now=201)
-    store.record_enrichment_attempt("cold", "acousticbrainz", {}, retry=True, now=202)
+    store.enrichment.record_enrichment_attempt("cold", "musicbrainz", {"year": "2020"}, now=200)
+    store.enrichment.record_enrichment_attempt("cold", "deezer", {}, now=201)
+    store.enrichment.record_enrichment_attempt("cold", "acousticbrainz", {}, retry=True, now=202)
     _, client = _client(store)
     page = client.get("/discovery").text
     for text in ("House", "2020", "128.0 BPM", "Energy 0.8", "Danceability 0.7"):

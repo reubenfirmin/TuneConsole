@@ -21,10 +21,8 @@ _TICKER_BUCKETS = 4   # candle periods, sliced across the actual history span
 def _more_albums(discography, collection):
     """Return only discography albums not already represented in the local collection."""
     browse_ids = {a.get("browse") for a in collection if a.get("browse")}
-    titles = {(a.get("album") or "").strip().casefold() for a in collection}
     return [a for a in discography
-            if a.get("browse_id") not in browse_ids
-            and (a.get("title") or "").strip().casefold() not in titles]
+            if a.get("browse_id") not in browse_ids]
 
 
 def _ticker_periods(earliest, now, window_days=None):
@@ -53,10 +51,10 @@ def _ticker_linker(store, dim):
     if dim == "artist":
         return lambda cat: f"/artist?name={quote(cat)}"
     if dim == "album":
-        browse = store.album_browse_ids()
+        browse = store.charts.album_browse_ids()
         return lambda cat: (f"/album?browse={browse[cat]}" if cat in browse else None)
     if dim == "playlist":
-        ids = {p.title: p.id for p in store.get_playlists()}
+        ids = {p.title: p.id for p in store.playlists.get_playlists()}
         return lambda cat: (f"/playlist/{ids[cat]}" if cat in ids else None)
     return lambda cat: None
 
@@ -64,16 +62,18 @@ def _ticker_linker(store, dim):
 def _build_ticker(store, dim, periods):
     """Assemble one ticker tab: corpus baseline + per-period listen distributions -> ranked rows
     (only categories played at least once in some period, top N by recent share)."""
-    corpus = store.corpus_distribution(dim)
-    windows = {label: store.listen_distribution(dim, since=lo, until=hi) for label, (lo, hi) in periods}
+    corpus = store.charts.corpus_distribution(dim)
+    windows = {label: store.charts.listen_distribution(dim, since=lo, until=hi) for label, (lo, hi) in periods}
     data = ticker_rows(corpus, windows)
     rows = [r for r in data["rows"] if r["high"] > 0][:_TICKER_TOP]
     link = _ticker_linker(store, dim)
-    thumbnails = store.ticker_thumbnails(dim) if dim in ("artist", "album", "playlist") else {}
+    thumbnails = store.charts.ticker_thumbnails(dim) if dim in ("artist", "album", "playlist") else {}
+    labels = store.charts.album_labels() if dim=='album' else {}
     for r in rows:
         r["geo"] = candle_geometry(r, data["axis_max"])
         r["link"] = link(r["cat"])
         r["thumbnail"] = thumbnails.get(r["cat"])
+        r['cat'] = labels.get(r['cat'],r['cat'])
     return {"rows": rows, "axis_max": data["axis_max"]}
 
 
@@ -87,14 +87,14 @@ def build(ctx) -> APIRouter:
         days = _WINDOWS.get(win, None)
         now = now_fn()
         since = None if days is None else now - days * 86400.0
-        earliest, _latest = store.history_bounds()
+        earliest, _latest = store.charts.history_bounds()
         periods, close_days, span_days = _ticker_periods(earliest, now, days)
         tickers = {dim: _build_ticker(store, dim, periods) for dim in _TICKER_DIMS}
         for dim, t in tickers.items():
             t["close_days"], t["span_days"] = close_days, span_days
             t["compare"] = dim in _TICKER_COMPARE
         return templates.TemplateResponse(request, "charts.html", {
-            "songs": store.top_tracks(100, since=since),
+            "songs": store.charts.top_tracks(100, since=since),
             "window": win if win in _WINDOWS else "all",
             "tickers": tickers,
         })
@@ -103,46 +103,21 @@ def build(ctx) -> APIRouter:
     def artist_page(request: Request):
         name = (request.query_params.get("name") or "").strip()
         browse_id = (request.query_params.get("browse") or "").strip() or None
+        artist_id = request.query_params.get('artist_id')
+        canonical = store.artists.get_artist('@artist:'+artist_id) if artist_id else None
+        if canonical:
+            name = canonical['name']
+            browse_id = canonical['provider_ids'].get('youtube') or browse_id
         if not name:
             raise HTTPException(status_code=404, detail="no artist specified")
-        songs = store.artist_songs(name, browse_id)
-        info = fetch_artist_info(ctx, name, browse_id or store.artist_browse_id(name))
+        songs = store.charts.artist_songs(canonical['id'] if canonical else name, browse_id)
+        info = fetch_artist_info(ctx, name, browse_id or store.collection.artist_browse_id(name))
 
         # "Saved" is a single source of truth (membership in the saved-album set, keyed by browse_id)
         # so the collection table and the YouTube-discography table below always agree.
-        saved_ids = store.saved_album_ids()
+        saved_ids = store.collection.saved_album_ids()
 
-        # Section 1, your collection: albums from library tracks, merged with saved metadata.
-        coll = {}
-        for s in songs:
-            key = s["album"] or "Singles / no album"
-            d = coll.setdefault(key.lower(), {"album": key, "songs": 0, "plays": 0, "_pls": set(),
-                                              "browse": None, "year": None, "thumb": None})
-            d["songs"] += 1
-            d["plays"] += s["plays"]
-            d["thumb"] = d["thumb"] or s["thumbnail"]
-            d["browse"] = d["browse"] or s.get("album_browse")
-            d["_pls"].update(p["ytm"] for p in s["playlists"])
-
-        def _by_artist(a):
-            return any(name.lower() == x.strip().lower() for x in (a.get("artist") or "").split(","))
-
-        for a in store.get_saved_albums():
-            if not _by_artist(a):
-                continue
-            key = (a["title"] or "").lower()
-            d = coll.get(key)
-            if d:
-                d["browse"] = d["browse"] or a["browse"]
-                d["year"] = d["year"] or a.get("year")
-                d["thumb"] = d["thumb"] or a.get("thumbnail")
-            else:
-                coll[key] = {"album": a["title"], "songs": 0, "plays": 0, "_pls": set(),
-                             "browse": a["browse"], "year": a.get("year"), "thumb": a.get("thumbnail")}
-        for d in coll.values():
-            d["n_pls"] = len(d.pop("_pls"))
-            d["saved"] = d["browse"] in saved_ids if d["browse"] else False
-        collection = sorted(coll.values(), key=lambda d: (-d["plays"], (d["album"] or "").lower()))
+        collection = store.collection.artist_albums(canonical['id'] if canonical else name,browse_id)
 
         # Section 2, full discography pulled live from YouTube; mark which you've already saved.
         yt_albums = info["albums"] if info and info.get("albums") else []
@@ -151,6 +126,7 @@ def build(ctx) -> APIRouter:
             ya["saved"] = ya.get("browse_id") in saved_ids
         return templates.TemplateResponse(request, "artist.html", {
             "artist": name, "songs": songs, "collection": collection, "yt_albums": yt_albums,
+            "saved_owners": store.collection.saved_album_owners(),
             "total_plays": sum(s["plays"] for s in songs), "info": info,
         })
 

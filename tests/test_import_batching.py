@@ -1,9 +1,13 @@
-from yt_playlist.library.executor import add_items_resilient
+from yt_playlist.library.playlist_writes import add_items_resilient
 
 
 class Client:
     def __init__(self): self.calls = []
-    def add_playlist_items(self, pid, ids): self.calls.append(list(ids))
+    def get_playlist(self, pid, limit=None):
+        return {"tracks": []}
+    def add_playlist_items(self, pid, ids):
+        self.calls.append(list(ids))
+        return "STATUS_SUCCEEDED"
 
 
 def test_import_adds_in_bounded_batches():

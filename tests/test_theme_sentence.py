@@ -6,7 +6,8 @@ entirely - and the old fixed per-lane line ("Deeper into what you already love")
 The sentence is built from the tracks that are there, and drops any clause it can't support.
 """
 from yt_playlist.core.store import Store
-from yt_playlist.rec import recommend
+from yt_playlist.rec import ordering, recipes
+from yt_playlist.util import genre_map
 
 
 def _store():
@@ -17,18 +18,18 @@ def _store():
 
 def _tracks(store, spec):
     """spec: (title, artist, genre, year) tuples -> genre-attached items, as a card carries them."""
-    iid = store.upsert_identity("main", "cred", None, True)
-    pid = store.upsert_playlist(iid, "PL1", "Mix", len(spec), "h", 1.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", len(spec), "h", 1.0)
     ids = []
     for title, artist, genre, year in spec:
-        tid = store.upsert_track(f"v{title}", title, artist, "Alb", 200)
+        tid = store.tracks.upsert_track(f"v{title}", title, artist, "Alb", 200)
         if genre:
-            store.set_track_genre(tid, genre)
+            store.tracks.set_track_genre(tid, genre)
         if year:
-            store.set_track_year(tid, str(year))
+            store.tracks.set_track_year(tid, str(year))
         ids.append(tid)
-    store.set_playlist_tracks(pid, ids)
-    return recommend.attach_genres(store, [
+    store.playlists.set_playlist_tracks(pid, ids)
+    return ordering.attach_genres(store, [
         {"key": f"{t.lower()}|{a.lower()}", "title": t, "artist": a} for t, a, _, _ in spec])
 
 
@@ -37,7 +38,7 @@ def test_it_names_the_genres_and_decades_actually_present():
     items = _tracks(s, [("A", "X", "Indie Rock", 2014), ("B", "Y", "Indie Rock", 2016),
                         ("C", "Z", "Post-Rock", 2021), ("D", "W", "Post-Rock", 2022)])
 
-    said = recommend.theme_sentence(s, "explore", items)
+    said = recipes.theme_sentence(s, "explore", items)
 
     assert said == ("Songs you own but hardly ever play, indie rock and post-rock "
                     "from the 2010s and 2020s.")
@@ -48,17 +49,17 @@ def test_one_dominant_genre_reads_as_mostly():
     items = _tracks(s, [("A", "X", "Trance", 2011), ("B", "Y", "Trance", 2012),
                         ("C", "Z", "Trance", 2013), ("D", "W", "Ambient", 2014)])
 
-    assert "mostly trance" in recommend.theme_sentence(s, "wheelhouse", items)
+    assert "mostly trance" in recipes.theme_sentence(s, "wheelhouse", items)
 
 
 def test_the_lane_still_says_what_these_songs_are_to_you():
     s = _store()
     items = _tracks(s, [("A", "X", "Techno", 2001)] * 1)
 
-    assert recommend.theme_sentence(s, "comfort", items).startswith(
+    assert recipes.theme_sentence(s, "comfort", items).startswith(
         "Favorites you haven't reached for lately")
-    assert recommend.theme_sentence(s, "fresh", items).startswith("Songs you don't own yet")
-    assert recommend.theme_sentence(s, "somelane", items).startswith("Songs picked for you")
+    assert recipes.theme_sentence(s, "fresh", items).startswith("Songs you don't own yet")
+    assert recipes.theme_sentence(s, "somelane", items).startswith("Songs picked for you")
 
 
 def test_a_thinly_tagged_card_claims_no_genre():
@@ -68,7 +69,7 @@ def test_a_thinly_tagged_card_claims_no_genre():
     spec += [(f"U{i}", f"A{i}", None, None) for i in range(9)]
     items = _tracks(s, spec)
 
-    said = recommend.theme_sentence(s, "explore", items)
+    said = recipes.theme_sentence(s, "explore", items)
 
     assert said == "Songs you own but hardly ever play."
 
@@ -79,14 +80,14 @@ def test_a_card_spread_across_many_genres_names_none_of_them():
                         ("C", "Z", "Punk", 2003), ("D", "W", "Folk", 2004),
                         ("E", "V", "Soul", 2005)])
 
-    said = recommend.theme_sentence(s, "explore", items)
+    said = recipes.theme_sentence(s, "explore", items)
 
     assert "techno" not in said                      # no genre reaches the floor
     assert said.startswith("Songs you own but hardly ever play")
 
 
 def test_an_empty_card_still_reads_as_a_sentence():
-    assert recommend.theme_sentence(_store(), "wheelhouse", []) == "Songs close to what you play most."
+    assert recipes.theme_sentence(_store(), "wheelhouse", []) == "Songs close to what you play most."
 
 
 def test_mixed_eras_and_adjacent_genres_do_not_overstate_the_theme():
@@ -95,7 +96,7 @@ def test_mixed_eras_and_adjacent_genres_do_not_overstate_the_theme():
                         ("C", "C", "Funk", 2018), ("D", "D", "Acid Jazz", 1995),
                         ("E", "E", "Acid Jazz", 2001), ("F", "F", "Soul", 1960)])
 
-    assert recommend.theme_sentence(s, "wheelhouse", items) == (
+    assert recipes.theme_sentence(s, "wheelhouse", items) == (
         "Songs close to what you play most, with funk and soul.")
 
 
@@ -104,7 +105,7 @@ def test_unknown_metadata_does_not_turn_a_minority_into_mostly():
     items = _tracks(s, [(f"T{i}", f"A{i}", "Funk" if i < 5 else None,
                          2012 if i < 5 else None) for i in range(12)])
 
-    assert recommend.theme_sentence(s, "wheelhouse", items) == (
+    assert recipes.theme_sentence(s, "wheelhouse", items) == (
         "Songs close to what you play most, with funk.")
 
 
@@ -115,7 +116,7 @@ def test_the_fresh_card_describes_itself_from_what_the_track_carries():
     items = [{"key": "a|x", "title": "A", "artist": "X", "genre": "Post-Punk", "year": 2019},
              {"key": "b|y", "title": "B", "artist": "Y", "genre": "Post-Punk", "year": 2021}]
 
-    said = recommend.theme_sentence(s, "fresh", items)
+    said = recipes.theme_sentence(s, "fresh", items)
 
     assert said == ("Songs you don't own yet that fit your taste, mostly post-punk "
                     "from the 2010s and 2020s.")
@@ -129,14 +130,14 @@ def test_an_untagged_track_borrows_its_artists_genre():
     items = [{"key": "new|underworld", "title": "New", "artist": "Underworld", "year": 2019},
              {"key": "new2|underworld", "title": "New2", "artist": "Underworld", "year": 2019}]
 
-    assert "techno" in recommend.theme_sentence(s, "fresh", items)
+    assert "techno" in recipes.theme_sentence(s, "fresh", items)
 
 
 def test_an_unknown_artist_borrows_nothing():
     s = _store()
     items = [{"key": "n|q", "title": "N", "artist": "Nobody At All", "year": 2019}]
 
-    said = recommend.theme_sentence(s, "fresh", items)
+    said = recipes.theme_sentence(s, "fresh", items)
 
     # No genre clause, so the era follows the lead directly.
     assert said == "Songs you don't own yet that fit your taste, from the 2010s."
@@ -146,7 +147,7 @@ def test_an_unknown_artist_borrows_nothing():
 
 def _seeded_row(store, pool, now=1000.0):
     """The four cards' themes, each rolled from the pool it would have to fill."""
-    from yt_playlist.web.routes import home
+    from yt_playlist.rec import home_cards as home
     return {lane: home._rolled_theme(store, lane, pool, now) for lane in home._ROW_LANES}
 
 
@@ -157,16 +158,16 @@ def _pool(spec):
 
 
 def _library(store, spec):
-    iid = store.upsert_identity("main", "cred", None, True)
-    pid = store.upsert_playlist(iid, "PL1", "Mix", len(spec), "h", 1.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", len(spec), "h", 1.0)
     ids = []
     for i, (genre, year) in enumerate(spec):
-        tid = store.upsert_track(f"v{i}", f"T{i}", f"A{i}", "Alb", 200)
-        store.set_track_genre(tid, genre)
-        store.set_track_year(tid, str(year))
+        tid = store.tracks.upsert_track(f"v{i}", f"T{i}", f"A{i}", "Alb", 200)
+        store.tracks.set_track_genre(tid, genre)
+        store.tracks.set_track_year(tid, str(year))
         ids.append(tid)
-        store.record_history_plays(iid, 1000.0, [f"t{i}|a{i}"])
-    store.set_playlist_tracks(pid, ids)
+        store.history.record_history_plays(iid, 1000.0, [f"t{i}|a{i}"])
+    store.playlists.set_playlist_tracks(pid, ids)
 
 
 def test_the_four_cards_do_not_all_roll_the_same_theme():
@@ -204,7 +205,7 @@ def test_fresh_items_are_focused_on_the_rolled_theme():
     items = [{"key": "a|x", "title": "A", "artist": "X", "genre": "Techno", "year": 2001},
              {"key": "b|y", "title": "B", "artist": "Y", "genre": "Jazz", "year": 1991}]
 
-    out = recommend.theme_filter(s, items, {"genres": [recommend.genre_map.family("Jazz")]})
+    out = recipes.theme_filter(s, items, {"genres": [genre_map.family("Jazz")]})
 
     assert out[0]["title"] == "B"          # the themed one leads
     assert len(out) == 2                    # and the rest still follow, so the card fills
@@ -213,7 +214,7 @@ def test_fresh_items_are_focused_on_the_rolled_theme():
 def test_the_theme_chooses_the_cards_tracks_not_just_their_order():
     """The slice used to be taken BEFORE the theme was rolled, so the theme could only reorder twelve
     tracks chosen without it - every refresh returned the pool's dominant genre whatever rolled."""
-    from yt_playlist.web.routes import home
+    from yt_playlist.rec import home_cards as home
     s = _store()
     # A pool dominated by one genre, with a real seam of another: the theme has to be able to reach it.
     pool = _pool([("Trance", 2011)] * 50 + [("Jazz", 1991)] * 10)
@@ -222,21 +223,20 @@ def test_the_theme_chooses_the_cards_tracks_not_just_their_order():
     themed = card["recipe"]["facets"].get("genres", [None])[0]
     got = [t["genre"] for t in card["tracks"]]
 
-    assert themed in (recommend.genre_map.family("Trance"), recommend.genre_map.family("Jazz"))
-    want = "Jazz" if themed == recommend.genre_map.family("Jazz") else "Trance"
+    assert themed in (genre_map.family("Trance"), genre_map.family("Jazz"))
+    want = "Jazz" if themed == genre_map.family("Jazz") else "Trance"
     assert got.count(want) >= len(got) // 2, f"theme {themed} didn't reach the card: {got}"
 
 
 def test_refreshing_a_card_actually_changes_it():
     """Refresh advances the card's rotation epoch; the tracks have to follow."""
-    from yt_playlist.rec.rec_dao import RecDao
-    from yt_playlist.web.routes import home
+    from yt_playlist.rec import home_cards as home
     s = _store()
     pool = _pool([("Trance", 2011)] * 30 + [("House", 2001)] * 30)
 
     seen = []
     for _ in range(3):
-        RecDao(s).refresh_card("explore", 3, 1000.0)
+        s.rec_surface.refresh_card("explore", 3, 1000.0)
         card = home._carded(s, "explore", "From your catalog", pool, 1000.0)
         seen.append(tuple(t["key"] for t in card["tracks"]))
 

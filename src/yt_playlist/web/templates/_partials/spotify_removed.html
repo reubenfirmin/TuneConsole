@@ -1,0 +1,12 @@
+<div class="notice success" role="status">
+  <strong>Spotify history removed.</strong>
+  <span>Removed Spotify attribution from {{ removed.events }} plays and removed
+    {{ removed.artists_removed }} artist suggestions. Shared plays and independently discovered artists were kept.</span>
+  <span>Learned model caches were cleared; recommendations will refresh from the remaining evidence.</span>
+  <span>Saved taste preferences were kept.</span>
+</div>
+{% if spotify_legacy_unattributed %}
+<p class="section-note">Suggestions from older imports without source attribution were kept because
+  their origin is unknown. Older permanent taste updates also cannot be safely attributed to Spotify.</p>
+{% endif %}
+<p class="section-note"><a href="/setup?tab=import">Import another history file</a></p>

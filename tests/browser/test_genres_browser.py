@@ -30,7 +30,7 @@ def _free_port():
 @pytest.fixture
 def live_app(store):
     # create_app seeds the built-in genre whitelist (incl. "Rock") into the store.
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))

@@ -39,9 +39,9 @@
         <p class="model-health-reading">{{ '%.0f'|format(proj.recall * 100) }}%</p>
         <span class="model-health-meter" aria-hidden="true"><i style="width: {{ '%.1f'|format(proj.recall * 100) }}%"></i></span>
         {% else %}<p class="model-health-unavailable">Not enough track details</p>{% endif %}
-        <p>Checks how well genre, year, artist, and available audio features reproduce the model’s track matches.</p>
+        <p>Predicts held-out tracks from genre, year, and available audio features using five training splits.</p>
         {% if proj.recall is not none %}
-        <p class="model-health-evidence">{{ proj.trials }} tracks checked. This measures how track information supports similarity, not whether you’ll enjoy a song.</p>
+        <p class="model-health-evidence">{{ proj.trials }} tracks scored{% if proj.eligible is defined %} of {{ proj.eligible }} eligible{% endif %}. Track identities are held out; artists may occur on both sides. Artist features are disabled. The reference similarity model stays fixed.</p>
         <details class="model-health-breakdown">
           <summary>Results by available track details</summary>
           <dl class="model-health-breakdown-list">
@@ -51,7 +51,7 @@
           </dl>
         </details>
         {% else %}
-        <p class="model-health-evidence">Build the model and enrich more tracks with genre and other details.</p>
+        <p class="model-health-evidence">Each training split needs at least 20 tracks with usable details. Enrich more tracks, then retry.{% if proj.eligible is defined %} {{ proj.eligible }} eligible; {{ proj.insufficient }} lacked fitting evidence and {{ proj.unscored }} could not be encoded.{% endif %}</p>
         {% endif %}
       </article>
     </div>

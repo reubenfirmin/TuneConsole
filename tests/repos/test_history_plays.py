@@ -33,8 +33,7 @@ def _store():
 
 
 def _counts(s):
-    return {r[0]: r[1] for r in s.conn.execute(
-        "SELECT identity_key, COUNT(*) FROM history_items GROUP BY identity_key")}
+    return s.history.listening_day_counts()
 
 
 # --- _parse_played_date ---
@@ -86,12 +85,12 @@ def test_parse_unparseable_is_undateable_not_today():
     ("America/New_York", "2026-03-08T06:30", "2026-03-08T07:30", "Today", "Today", 0),
 ])
 def test_browser_calendar_day_dedup(zone, first, second, first_label, second_label, new_plays):
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
     first_ts = datetime.datetime.fromisoformat(first + "+00:00").timestamp()
     second_ts = datetime.datetime.fromisoformat(second + "+00:00").timestamp()
-    assert s.record_history_plays(iid, first_ts, [("song|artist", first_label)],
+    assert s.history.record_history_plays(iid, first_ts, [("song|artist", first_label)],
                                   source_timezone=zone) == 1
-    assert s.record_history_plays(iid, second_ts, [("song|artist", second_label)],
+    assert s.history.record_history_plays(iid, second_ts, [("song|artist", second_label)],
                                   source_timezone=zone) == new_plays
     assert _counts(s) == {"song|artist": 1 + new_plays}
 
@@ -115,41 +114,41 @@ def test_legacy_clients_use_machine_local_date(monkeypatch):
 
 
 def test_live_key_and_history_bucket_share_browser_date():
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
     taken_at = datetime.datetime(2026, 10, 21, 0, 30, tzinfo=datetime.timezone.utc).timestamp()
-    assert s.record_history_plays(iid, taken_at, ["song|artist"],
+    assert s.history.record_history_plays(iid, taken_at, ["song|artist"],
                                   source_timezone="America/Costa_Rica") == 1
-    assert s.record_history_plays(iid, taken_at + 3600, [("song|artist", "Today")],
+    assert s.history.record_history_plays(iid, taken_at + 3600, [("song|artist", "Today")],
                                   source_timezone="America/Costa_Rica") == 0
     want = datetime.datetime(2026, 10, 20, 12, tzinfo=datetime.timezone.utc).timestamp()
-    assert s.recent_plays_with_ts() == [("song|artist", want)]
+    assert s.history.recent_plays_with_ts() == [("song|artist", want)]
 
 
 # --- record_history_plays ---
 
 def test_dedups_by_played_date_across_relabel():
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
-    assert s.record_history_plays(iid, _ts(100), [("a|x", "Today")]) == 1
-    assert s.record_history_plays(iid, _ts(101), [("a|x", "Yesterday")]) == 0   # same date -> no inflation
-    assert s.record_history_plays(iid, _ts(101), [("b|y", "Today")]) == 1       # genuinely new
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
+    assert s.history.record_history_plays(iid, _ts(100), [("a|x", "Today")]) == 1
+    assert s.history.record_history_plays(iid, _ts(101), [("a|x", "Yesterday")]) == 0   # same date -> no inflation
+    assert s.history.record_history_plays(iid, _ts(101), [("b|y", "Today")]) == 1       # genuinely new
     assert _counts(s) == {"a|x": 1, "b|y": 1}
 
 
 def test_merges_same_date_repeats():
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
-    assert s.record_history_plays(iid, _ts(100), [("a|x", "Today"), ("a|x", "Today")]) == 1
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
+    assert s.history.record_history_plays(iid, _ts(100), [("a|x", "Today"), ("a|x", "Today")]) == 1
 
 
 def test_accepts_bare_keys_backward_compat():
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
-    assert s.record_history_plays(iid, _ts(100), ["a|x", "b|x"]) == 2     # bare key -> sync day
-    assert s.record_history_plays(iid, _ts(100), ["a|x"]) == 0            # same day, idempotent
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
+    assert s.history.record_history_plays(iid, _ts(100), ["a|x", "b|x"]) == 2     # bare key -> sync day
+    assert s.history.record_history_plays(iid, _ts(100), ["a|x"]) == 0            # same day, idempotent
 
 
 def test_reset_play_history():
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
-    s.record_history_plays(iid, _ts(100), [("a|x", "Today")])
-    s.reset_play_history(iid)
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
+    s.history.record_history_plays(iid, _ts(100), [("a|x", "Today")])
+    s.history.reset_play_history(iid)
     assert _counts(s) == {}
 
 
@@ -161,51 +160,51 @@ def test_reset_play_history():
 # English month names are parsed.
 
 def test_a_window_row_with_no_played_bucket_is_dropped():
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
-    assert s.record_history_plays(iid, _ts(100), [("a|x", "Today"), ("b|y", None)]) == 1
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
+    assert s.history.record_history_plays(iid, _ts(100), [("a|x", "Today"), ("b|y", None)]) == 1
     assert _counts(s) == {"a|x": 1}
 
 
 def test_a_window_row_with_an_empty_played_bucket_is_dropped():
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
-    assert s.record_history_plays(iid, _ts(100), [("a|x", "  ")]) == 0
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
+    assert s.history.record_history_plays(iid, _ts(100), [("a|x", "  ")]) == 0
     assert _counts(s) == {}
 
 
 def test_a_localized_played_bucket_is_dropped_not_stamped_today():
     """A German or Spanish YouTube locale must not silently record its whole window as today's plays."""
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
-    assert s.record_history_plays(iid, _ts(100), [("a|x", "vor 2 Tagen"), ("b|y", "25 de junio")]) == 0
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
+    assert s.history.record_history_plays(iid, _ts(100), [("a|x", "vor 2 Tagen"), ("b|y", "25 de junio")]) == 0
     assert _counts(s) == {}
 
 
 def test_a_dateable_row_still_backfills():
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
-    assert s.record_history_plays(iid, _ts(100), [("a|x", "Yesterday")]) == 1
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
+    assert s.history.record_history_plays(iid, _ts(100), [("a|x", "Yesterday")]) == 1
     assert _counts(s) == {"a|x": 1}
 
 
 def test_repeated_syncs_of_a_lingering_undateable_window_record_nothing():
     """The exact phantom mechanism: the same undateable window seen on five consecutive syncs."""
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
     for d in range(100, 105):
-        s.record_history_plays(iid, _ts(d), [("lingering|track", None)])
+        s.history.record_history_plays(iid, _ts(d), [("lingering|track", None)])
     assert _counts(s) == {}
 
 
 def test_a_dated_row_is_recorded_once_across_repeated_syncs():
     """Contrast: a row YouTube CAN date is recorded once, however many times we see it."""
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
     day100 = datetime.date(1970, 1, 1) + datetime.timedelta(days=100)     # the day _ts(100) falls in
     label = day100.strftime("%b %-d")                                     # e.g. "Apr 11"
-    s.record_history_plays(iid, _ts(100), [("real|track", "Today")])
+    s.history.record_history_plays(iid, _ts(100), [("real|track", "Today")])
     for d in range(101, 105):
-        s.record_history_plays(iid, _ts(d), [("real|track", label)])      # explicit date, same day
+        s.history.record_history_plays(iid, _ts(d), [("real|track", label)])      # explicit date, same day
     assert _counts(s)["real|track"] == 1
 
 
 def test_bare_string_keys_still_mean_the_sync_day():
     """live_plays passes a bare key because it KNOWS the play is happening now."""
-    s = _store(); iid = s.upsert_identity("m", "c", None, True)
-    assert s.record_history_plays(iid, _ts(100), ["a|x"]) == 1
+    s = _store(); iid = s.identities.upsert_identity("m", "c", None, True)
+    assert s.history.record_history_plays(iid, _ts(100), ["a|x"]) == 1
     assert _counts(s) == {"a|x": 1}

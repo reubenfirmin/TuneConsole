@@ -1,10 +1,13 @@
-"""Playlist actions used by the single, shared song menu on every regular song surface."""
-import asyncio
+"""Actions used by the single, shared song menu on every regular song surface."""
+from urllib.parse import urlencode
+
+from yt_playlist.core.activity import activity_for
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
+from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.rec import measurement
 
@@ -34,16 +37,64 @@ class AddSong(BaseModel):
     playlist_id: int = Field(gt=0)
 
 
+class EditMetadata(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    song: Song
+    title: str | None = Field(default=None, min_length=1, max_length=1000)
+    artist: str | None = Field(default=None, max_length=1000)
+    genre: str | None = Field(default=None, max_length=80)
+    year: str | None = Field(default=None, pattern=r"^(?:[0-9]{4})?$")
+
+
 def build(ctx):
     router = APIRouter()
     store = ctx.store
 
+    def unconfirmed_result(exc, *, created):
+        playlist = next((p for p in store.playlists.get_playlists()
+                         if p.ytm_playlist_id == exc.playlist_id), None)
+        return {"status": "partial", "added": bool(exc.confirmed),
+                "url": f"/playlist/{playlist.id}" if playlist else
+                       "https://music.youtube.com/playlist?" + urlencode({"list": exc.playlist_id}),
+                "title": playlist.title if playlist else "Created playlist" if created else "Playlist",
+                "confirmed": len(exc.confirmed), "rejected": len(exc.skipped),
+                "uncertain": len(exc.uncertain), "unattempted": len(exc.unattempted),
+                "recovery_url": "/actions",
+                "message": ("Playlist created, but YouTube has not confirmed this song." if created else
+                            "YouTube has not confirmed this song's addition."),
+                "guidance": ("Review the playlist and Action Log before retrying. Creating again makes another playlist."
+                             if created else "Review the playlist and Action Log before retrying.")}
+
+    @router.get("/songs/metadata")
+    def metadata(video_id: str):
+        track = store.tracks.metadata_for_video(video_id)
+        provenance = store.enrichment.genre_provenance(track['track_id']) if track else None
+        return {"metadata": track, "genre_options": provenance['options'] if provenance else [],
+                "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()),
+                                 key=str.casefold)}
+
+    @router.post("/songs/metadata")
+    def edit_metadata(body: EditMetadata):
+        song = body.song
+        changes = body.model_dump(exclude={'song'}, exclude_none=True)
+        if not changes:
+            return {"message": "Metadata saved."}
+        store.tracks.update_metadata(song.video_id, changes, observation={
+            'title': song.title, 'artist': song.artist, 'album': song.album,
+            'album_browse_id': song.album_browse, 'thumbnail': song.thumbnail,
+            'duration_s': parse_duration(song.duration) if song.duration is not None else None,
+            'created_at': ctx.now_fn(),
+        })
+        ctx.rec_worker.trigger_content_update(video_ids=[song.video_id])
+        return {"message": "Metadata saved."}
+
     @router.get("/songs/playlists")
     def destinations(video_id: str):
         clients = ctx.clients() or {}
-        identities = {i.id: i.label for i in store.get_identities()}
-        containing = store.playlist_ids_for_video(video_id)
-        playlists = [p for p in store.get_playlists()
+        identities = {i.id: i.label for i in store.identities.get_identities()}
+        containing = store.playlists.playlist_ids_for_video(video_id)
+        playlists = [p for p in store.playlists.get_playlists()
                      if p.ytm_playlist_id not in SYSTEM_PLAYLIST_IDS and p.identity_id in clients]
         return {"playlists": [{"id": p.id, "title": p.title,
                                "identity": identities.get(p.identity_id, ""),
@@ -54,8 +105,10 @@ def build(ctx):
     @router.post("/songs/create-playlist")
     async def create_playlist(body: CreatePlaylist):
         try:
-            result = await asyncio.to_thread(ctx.ops().create_playlist_from_song,
+            result = await activity_for(ctx).to_thread(ctx.ops().create_playlist_from_song,
                                              body.name, body.song.track())
+        except PlaylistAddUncertain as exc:
+            return unconfirmed_result(exc, created=True)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
@@ -71,19 +124,21 @@ def build(ctx):
     @router.post("/songs/add-to-playlist")
     async def add_song(body: AddSong):
         try:
-            result = await asyncio.to_thread(ctx.ops().add_song_to_playlist,
+            result = await activity_for(ctx).to_thread(ctx.ops().add_song_to_playlist,
                                              body.playlist_id, body.song.track())
             if not result.get("already_present") and not result["added"]:
                 raise ValueError("YouTube couldn't add this song. Please try another song or playlist.")
+        except PlaylistAddUncertain as exc:
+            return unconfirmed_result(exc, created=False)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
             ctx.logger.exception("add song to playlist failed")
             raise HTTPException(502, "Couldn't add the song. Please try again.") from exc
-        playlist = store.get_playlist(body.playlist_id)
+        playlist = store.playlists.get_playlist(body.playlist_id)
         if result["added"] and not result.get("already_present"):
             measurement.record_action(store, "save", ctx.now_fn(), video_id=body.song.video_id,
-                                      generated=store.get_playlist_groups().get(playlist.ytm_playlist_id) == "Generated")
+                                      generated=store.playlists.is_quarantined_playlist(playlist.scope_ref))
         try:
             ctx.bridge.send_control({"type": "refresh-view", "playlist": playlist.ytm_playlist_id})
         except Exception:  # noqa: BLE001 - a disconnected player must not undo a successful add

@@ -10,7 +10,7 @@ Store-mutation coverage moved here from the JSON-based test_web.py tests
 """
 from fastapi.testclient import TestClient
 
-from yt_playlist.rec import recommend
+from yt_playlist.rec import actions
 from yt_playlist.rec.actions import CLEANUP_SURFACE
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
@@ -22,32 +22,33 @@ def _client(store, provider):
 
 
 def _refreshes(r):
-    return r.status_code == 200 and r.headers.get("hx-refresh") == "true"
+    return r.status_code == 200 and (r.headers.get("hx-refresh") == "true" or
+                                    r.headers.get("hx-redirect", "").startswith("/playlists?result="))
 
 
 def test_group_assigns_and_refreshes(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
 
     r = c.post("/playlists/group", data={"ids": f"{a},{b}", "name": "Faves"})
     assert _refreshes(r)
     assert r.text == ""                                # no JSON body, htmx just reloads
-    assert store.get_playlist_groups() == {"PLA": "Faves", "PLB": "Faves"}
+    assert store.playlists.get_playlist_groups() == {"PLA": "Faves", "PLB": "Faves"}
 
 
 def test_delete_removes_and_refreshes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v1", "S", "X", None, None, 1)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
+    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v1", "S", "X", None, None, 1)])
     fc = FakeClient(tracks={"PLA": [_track("v1", "S", "X")]})
     c = _client(store, lambda: {iid: fc})
 
     r = c.post("/playlists/delete", data={"ids": str(a)})
     assert _refreshes(r)
-    assert store.get_playlist(a) is None and fc.deleted == ["PLA"]
+    assert store.playlists.get_playlist(a) is None and fc.deleted == ["PLA"]
 
 
 def test_delete_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_path):
@@ -55,90 +56,90 @@ def test_delete_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_path):
     # CACHED count/thumbnails. Deleting one must refresh that cache so the card's pending-cleanup
     # icons involving the deleted playlist disappear (issue #73).
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Rock", 4, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Rock copy", 4, "h", 1.0)
-    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(4)]
-    store.set_playlist_tracks(a, t)
-    store.set_playlist_tracks(b, t)
-    recommend.refresh_cleanup(store, 1.0)
-    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 2      # both dupes pending
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Rock", 4, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "Rock copy", 4, "h", 1.0)
+    t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(4)]
+    store.playlists.set_playlist_tracks(a, t)
+    store.playlists.set_playlist_tracks(b, t)
+    actions.refresh_cleanup(store, 1.0)
+    assert store.rec_surface.get_proposals(CLEANUP_SURFACE)["count"] == 2      # both dupes pending
     fc = FakeClient(tracks={"PLA": [_track(f"v{i}", f"S{i}", "X") for i in range(4)]})
     c = _client(store, lambda: {iid: fc})
 
     r = c.post("/playlists/delete", data={"ids": str(a)})
     assert _refreshes(r)
-    assert store.get_playlist(a) is None
-    assert store.get_proposals(CLEANUP_SURFACE)["count"] == 0      # survivor is no longer a dupe
+    assert store.playlists.get_playlist(a) is None
+    assert store.rec_surface.get_proposals(CLEANUP_SURFACE)["count"] == 0      # survivor is no longer a dupe
 
 
 def test_delete_hides_system_playlist_and_refreshes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    lm = store.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)   # undeletable system playlist
-    store.set_playlist_tracks(lm, [store.upsert_track("v1", "S", "X", None, None, 1)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)   # undeletable system playlist
+    store.playlists.set_playlist_tracks(lm, [store.tracks.upsert_track("v1", "S", "X", None, None, 1)])
     c = _client(store, lambda: {iid: FakeClient()})
 
     r = c.post("/playlists/delete", data={"ids": str(lm)})
     assert _refreshes(r)
-    assert store.get_playlist(lm) is not None          # survives on YouTube
-    assert "LM" in store.get_hidden_playlists()        # just hidden from the tab
+    assert store.playlists.get_playlist(lm) is not None          # survives on YouTube
+    assert f"@account:{iid}:LM" in store.playlists.get_hidden_playlists()
 
 
 def test_copy_creates_playlist_and_refreshes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
-    store.set_playlist_tracks(a, [store.upsert_track("v0", "S0", "X", None, None, 1,
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
+    store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S0", "X", None, None, 1,
                                                      thumbnail="https://example.com/song.jpg"),
-                                  store.upsert_track("v1", "S1", "X", None, None, 1)])
+                                  store.tracks.upsert_track("v1", "S1", "X", None, None, 1)])
     fc = FakeClient(tracks={"PLA": [_track("v0", "S0", "X"), _track("v1", "S1", "X")]})
     c = _client(store, lambda: {iid: fc})
 
     r = c.post("/playlists/copy", data={"ids": str(a), "name": "Rock Copy"})
     assert _refreshes(r)
-    copied = next(p for p in store.get_playlists() if p.title == "Rock Copy")
+    copied = next(p for p in store.playlists.get_playlists() if p.title == "Rock Copy")
     assert copied.thumbnail == "https://example.com/song.jpg"
 
 
 def test_copy_merge_unions_tracks_and_refreshes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
-    b = store.upsert_playlist(iid, "PLB", "Pop", 2, "h", 1.0)
-    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
-    store.set_playlist_tracks(a, [t[0], t[1]]); store.set_playlist_tracks(b, [t[1], t[2]])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
+    b = store.playlists.upsert_playlist(iid, "PLB", "Pop", 2, "h", 1.0)
+    t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
+    store.playlists.set_playlist_tracks(a, [t[0], t[1]]); store.playlists.set_playlist_tracks(b, [t[1], t[2]])
     fc = FakeClient(tracks={"PLA": [_track("v0", "S0", "X"), _track("v1", "S1", "X")],
                             "PLB": [_track("v1", "S1", "X"), _track("v2", "S2", "X")]})
     c = _client(store, lambda: {iid: fc})
 
     r = c.post("/playlists/copy", data={"ids": f"{a},{b}", "name": "Combined"})
     assert _refreshes(r)
-    combined = next(p for p in store.get_playlists() if p.title == "Combined")
+    combined = next(p for p in store.playlists.get_playlists() if p.title == "Combined")
     assert combined.track_count == 3                   # union of v0,v1,v2
 
 
 def test_copy_into_appends_union_skipping_dupes(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    src = store.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
-    dst = store.upsert_playlist(iid, "PLB", "Dest", 1, "h", 1.0)
-    t = [store.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
-    store.set_playlist_tracks(src, [t[0], t[1], t[2]])
-    store.set_playlist_tracks(dst, [t[1]])             # v1 already in the destination
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    src = store.playlists.upsert_playlist(iid, "PLA", "Rock", 2, "h", 1.0)
+    dst = store.playlists.upsert_playlist(iid, "PLB", "Dest", 1, "h", 1.0)
+    t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(3)]
+    store.playlists.set_playlist_tracks(src, [t[0], t[1], t[2]])
+    store.playlists.set_playlist_tracks(dst, [t[1]])             # v1 already in the destination
     fc = FakeClient(tracks={"PLA": [_track("v0", "S0", "X"), _track("v1", "S1", "X"), _track("v2", "S2", "X")],
                             "PLB": [_track("v1", "S1", "X")]})
     c = _client(store, lambda: {iid: fc})
 
     r = c.post("/playlists/copy-into", data={"ids": str(src), "target": str(dst)})
     assert _refreshes(r)
-    assert store.get_playlist_track_ids(dst) == [t[1], t[0], t[2]]   # existing kept, v0/v2 appended
+    assert store.playlists.get_playlist_track_ids(dst) == [t[1], t[0], t[2]]   # existing kept, v0/v2 appended
     assert fc.added == [("PLB", ["v0", "v2"])]                       # v1 skipped (already present)
 
 
 def test_copy_into_requires_a_destination(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    a = store.upsert_playlist(iid, "PLA", "Rock", 1, "h", 1.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    a = store.playlists.upsert_playlist(iid, "PLA", "Rock", 1, "h", 1.0)
     c = _client(store, lambda: {iid: FakeClient()})
 
     r = c.post("/playlists/copy-into", data={"ids": str(a), "target": ""})
@@ -147,10 +148,10 @@ def test_copy_into_requires_a_destination(store):
 
 def test_copy_into_rejects_system_target(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.upsert_identity("main", "cred", None, True)
-    src = store.upsert_playlist(iid, "PLA", "Rock", 1, "h", 1.0)
-    lm = store.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 1.0)   # system playlist
-    store.set_playlist_tracks(src, [store.upsert_track("v0", "S0", "X", None, None, 1)])
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    src = store.playlists.upsert_playlist(iid, "PLA", "Rock", 1, "h", 1.0)
+    lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 1.0)   # system playlist
+    store.playlists.set_playlist_tracks(src, [store.tracks.upsert_track("v0", "S0", "X", None, None, 1)])
     c = _client(store, lambda: {iid: FakeClient()})
 
     r = c.post("/playlists/copy-into", data={"ids": str(src), "target": str(lm)})
@@ -159,11 +160,11 @@ def test_copy_into_rejects_system_target(store, monkeypatch, tmp_path):
 
 def test_copy_into_rejects_cross_account_target(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    a = store.upsert_identity("main", "cred", None, True)
-    b = store.upsert_identity("alt", "cred2", "BA", False)             # a second account
-    src = store.upsert_playlist(a, "PLA", "Rock", 1, "h", 1.0)         # source on account A
-    dst = store.upsert_playlist(b, "PLB", "Dest", 0, "h", 1.0)         # target on account B
-    store.set_playlist_tracks(src, [store.upsert_track("v0", "S0", "X", None, None, 1)])
+    a = store.identities.upsert_identity("main", "cred", None, True)
+    b = store.identities.upsert_identity("alt", "cred2", "BA", False)             # a second account
+    src = store.playlists.upsert_playlist(a, "PLA", "Rock", 1, "h", 1.0)         # source on account A
+    dst = store.playlists.upsert_playlist(b, "PLB", "Dest", 0, "h", 1.0)         # target on account B
+    store.playlists.set_playlist_tracks(src, [store.tracks.upsert_track("v0", "S0", "X", None, None, 1)])
     c = _client(store, lambda: {a: FakeClient(), b: FakeClient()})
 
     r = c.post("/playlists/copy-into", data={"ids": str(src), "target": str(dst)})
@@ -171,14 +172,15 @@ def test_copy_into_rejects_cross_account_target(store, monkeypatch, tmp_path):
 
 
 def test_promote_moves_playlist_out_of_generated(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    pid = store.upsert_playlist(iid, "PLG", "Gen Mix", 3, "h", 0.0)
-    store.set_playlist_group("PLG", "Generated")
-    assert store.get_playlist_groups().get("PLG") == "Generated"
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    pid = store.playlists.upsert_playlist(iid, "PLG", "Gen Mix", 3, "h", 0.0)
+    store.playlists.set_playlist_group("PLG", "Generated")
+    store.playlists.mark_generated_playlist('PLG')
+    assert store.playlists.get_playlist_groups().get("PLG") == "Generated"
     c = _client(store, lambda: {iid: FakeClient()})
     r = c.post(f"/playlist/{pid}/promote")
     assert r.status_code == 200 and r.headers.get("hx-refresh") == "true"
-    assert store.get_playlist_groups().get("PLG", "") != "Generated"   # graduated out of quarantine
+    assert store.playlists.get_playlist_groups().get("PLG", "") != "Generated"   # graduated out of quarantine
 
 
 def test_promote_clears_the_marker_on_youtube_too(store):
@@ -186,17 +188,18 @@ def test_promote_clears_the_marker_on_youtube_too(store):
     machines share. Promoting has to clear it there, or every other install keeps quarantining the
     playlist - and this one re-quarantines it on the next sync, since clearing a group deletes the
     row and leaves no local trace of the decision."""
-    from yt_playlist.library import executor
-    iid = store.upsert_identity("main", "cred", None, True)
-    pid = store.upsert_playlist(iid, "PLG", "Gen Mix", 3, "h", 0.0)
-    store.set_playlist_group("PLG", "Generated")
+    from yt_playlist.library import playlist_metadata
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    pid = store.playlists.upsert_playlist(iid, "PLG", "Gen Mix", 3, "h", 0.0)
+    store.playlists.set_playlist_group("PLG", "Generated")
+    store.playlists.mark_generated_playlist('PLG')
     client = FakeClient()
 
     c = _client(store, lambda: {iid: client})
     c.post(f"/playlist/{pid}/promote")
 
-    assert client.edited == [("PLG", {"description": executor.PROMOTED_DESCRIPTION})]
-    assert not executor.is_generated_description(executor.PROMOTED_DESCRIPTION)
+    assert client.edited == [("PLG", {"description": playlist_metadata.PROMOTED_DESCRIPTION})]
+    assert not playlist_metadata.is_generated_description(playlist_metadata.PROMOTED_DESCRIPTION)
 
 
 def test_promote_still_works_when_youtube_refuses_the_edit(store):
@@ -205,36 +208,38 @@ def test_promote_still_works_when_youtube_refuses_the_edit(store):
         def edit_playlist(self, playlistId, **kw):
             raise RuntimeError("nope")
 
-    iid = store.upsert_identity("main", "cred", None, True)
-    pid = store.upsert_playlist(iid, "PLG", "Gen Mix", 3, "h", 0.0)
-    store.set_playlist_group("PLG", "Generated")
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    pid = store.playlists.upsert_playlist(iid, "PLG", "Gen Mix", 3, "h", 0.0)
+    store.playlists.set_playlist_group("PLG", "Generated")
+    store.playlists.mark_generated_playlist('PLG')
 
     c = _client(store, lambda: {iid: Refuses()})
     r = c.post(f"/playlist/{pid}/promote")
 
     assert r.status_code == 200
-    assert store.get_playlist_groups().get("PLG", "") != "Generated"
+    assert store.playlists.get_playlist_groups().get("PLG", "") != "Generated"
 
 
 def test_playlist_rows_use_song_artwork_when_no_cover_is_available(store):
     import json
     import re
 
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     cover = "https://example.com/cover.jpg"
     first = "https://example.com/first.jpg"
     second = "https://example.com/second.jpg"
-    no_art = store.upsert_track("none", "No art", "Artist", None, None)
-    blank_art = store.upsert_track("blank", "Blank art", "Artist", None, None, thumbnail="")
-    a = store.upsert_track("a", "First art", "Artist", None, None, thumbnail=first)
-    b = store.upsert_track("b", "Second art", "Artist", None, None, thumbnail=second)
+    no_art = store.tracks.upsert_track("none", "No art", "Artist", None, None)
+    blank_art = store.tracks.upsert_track("blank", "Blank art", "Artist", None, None, thumbnail="")
+    a = store.tracks.upsert_track("a", "First art", "Artist", None, None, thumbnail=first)
+    b = store.tracks.upsert_track("b", "Second art", "Artist", None, None, thumbnail=second)
     playlists = {}
     for ytm, thumbnail in (("new", None), ("generated", ""), ("covered", cover), ("empty", None)):
-        pid = store.upsert_playlist(iid, ytm, ytm, 0, "", 1, thumbnail=thumbnail, created_at=1)
+        pid = store.playlists.upsert_playlist(iid, ytm, ytm, 0, "", 1, thumbnail=thumbnail, created_at=1)
         playlists[ytm] = pid
         if ytm != "empty":
-            store.set_playlist_tracks(pid, [no_art, blank_art, a, b])
-    store.set_playlist_group("generated", "Generated")
+            store.playlists.set_playlist_tracks(pid, [no_art, blank_art, a, b])
+    store.playlists.set_playlist_group("generated", "Generated")
+    store.playlists.mark_generated_playlist('generated')
     client = _client(store, lambda: {iid: FakeClient()})
 
     def rows():
@@ -251,11 +256,11 @@ def test_playlist_rows_use_song_artwork_when_no_cover_is_available(store):
     assert initial["empty"]["thumbnail"] is None
 
     # Derived artwork follows the current songs, without writing a stale playlist cover.
-    store.set_playlist_tracks(playlists["new"], [no_art, b, a])
+    store.playlists.set_playlist_tracks(playlists["new"], [no_art, b, a])
     assert rows()["new"]["thumbnail"] == second
-    store.set_playlist_tracks(playlists["new"], [no_art, blank_art])
+    store.playlists.set_playlist_tracks(playlists["new"], [no_art, blank_art])
     assert rows()["new"]["thumbnail"] is None
-    assert store.get_playlist(playlists["new"]).thumbnail is None
+    assert store.playlists.get_playlist(playlists["new"]).thumbnail is None
 
 
 def test_playlists_page_carries_generated_created_at(store):
@@ -263,11 +268,12 @@ def test_playlists_page_carries_generated_created_at(store):
     # which relies on each playlist's actual created_at flowing into the page rows.
     import json
     import re
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PLold", "Older Gen", 1, "h", 0.0, created_at=100.0)
-    store.upsert_playlist(iid, "PLnew", "Newer Gen", 1, "h", 0.0, created_at=200.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.upsert_playlist(iid, "PLold", "Older Gen", 1, "h", 0.0, created_at=100.0)
+    store.playlists.upsert_playlist(iid, "PLnew", "Newer Gen", 1, "h", 0.0, created_at=200.0)
     for ytm in ("PLold", "PLnew"):
-        store.set_playlist_group(ytm, "Generated")
+        store.playlists.set_playlist_group(ytm, "Generated")
+        store.playlists.mark_generated_playlist(ytm)
     c = _client(store, lambda: {iid: FakeClient()})
     r = c.get("/playlists")
     assert r.status_code == 200
@@ -281,7 +287,7 @@ def test_generated_sort_recovers_dates_without_claiming_imports_were_created_at_
     import re
     from datetime import datetime
 
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     cases = [
         ("known", "Renamed generated mix", 100, 100),
         ("recipe", "Cluster mix", None, 200),
@@ -291,10 +297,11 @@ def test_generated_sort_recovers_dates_without_claiming_imports_were_created_at_
         ("unknown", "Imported mix", None, None),
     ]
     for ytm, title, created, _ in cases:
-        store.upsert_playlist(iid, ytm, title, 0, "h", 500, created_at=created)
-        store.set_playlist_group(ytm, "Generated")
-    store.set_recipe("recipe", {}, now=200)
-    store.set_recipe("known", {}, now=300)  # actual creation date takes precedence
+        store.playlists.upsert_playlist(iid, ytm, title, 0, "h", 500, created_at=created)
+        store.playlists.set_playlist_group(ytm, "Generated")
+        store.playlists.mark_generated_playlist(ytm)
+    store.rec_surface.set_recipe("recipe", {}, now=200)
+    store.rec_surface.set_recipe("known", {}, now=300)  # actual creation date takes precedence
 
     response = _client(store, lambda: {iid: FakeClient()}).get("/playlists")
     rows = json.loads(re.search(r"playlistsTab\((\[.*?\])\)", response.text).group(1))
@@ -303,7 +310,7 @@ def test_generated_sort_recovers_dates_without_claiming_imports_were_created_at_
         assert rows[ytm]["generated_created"] == expected
         assert rows[ytm]["created"] == created
         assert rows[ytm]["is_new"] is False
-    assert store.get_playlists()[0].first_seen == 500
+    assert store.playlists.get_playlists()[0].first_seen == 500
 
 
 def test_new_playlists_use_seven_day_creation_window_not_recent_edits(store):
@@ -311,19 +318,20 @@ def test_new_playlists_use_seven_day_creation_window_not_recent_edits(store):
     import re
     now = 2_000_000
     cutoff = now - 7 * 86400
-    iid = store.upsert_identity("main", "cred", None, True)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
     for ytm, created_at in (("today", now), ("boundary", cutoff), ("old", cutoff - 1),
                             ("edited", cutoff - 1), ("hidden", now), ("LM", now),
                             ("unknown", None), ("future", now + 1), ("generated", now),
                             ("recipe", None), ("303", None), ("Brexit List", None)):
-        store.upsert_playlist(iid, ytm, ytm, 0, "", now, created_at=created_at)
+        store.playlists.upsert_playlist(iid, ytm, ytm, 0, "", now, created_at=created_at)
     # Neither sync, a rename nor song edits makes an existing playlist new again.
-    edited = store.upsert_playlist(iid, "edited", "Renamed", 2, "new hash", now)
-    store.set_playlist_title(edited, "Renamed again", now)
-    store.set_playlist_track_count(edited, 3, now)
-    store.hide_playlist("hidden")
-    store.set_recipe("recipe", {"theme": "updated recipe"}, now)
-    store.set_playlist_group("generated", "Generated")
+    edited = store.playlists.upsert_playlist(iid, "edited", "Renamed", 2, "new hash", now)
+    store.playlists.set_playlist_title(edited, "Renamed again", now)
+    store.playlists.set_playlist_track_count(edited, 3, now)
+    store.playlists.hide_playlist("hidden")
+    store.rec_surface.set_recipe("recipe", {"theme": "updated recipe"}, now)
+    store.playlists.set_playlist_group("generated", "Generated")
+    store.playlists.mark_generated_playlist('generated')
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                    base_url="http://127.0.0.1")
     html = c.get("/playlists").text
@@ -334,8 +342,8 @@ def test_new_playlists_use_seven_day_creation_window_not_recent_edits(store):
 
 
 def test_playlists_page_hides_group_view_and_column_without_groups(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 0.0)
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 0.0)
     c = _client(store, lambda: {iid: FakeClient()})
 
     html = c.get("/playlists").text
@@ -345,9 +353,10 @@ def test_playlists_page_hides_group_view_and_column_without_groups(store):
 
 
 def test_generated_only_does_not_show_main_table_group_controls(store):
-    iid = store.upsert_identity("main", "cred", None, True)
-    store.upsert_playlist(iid, "PLG", "Generated playlist", 1, "h", 0.0)
-    store.set_playlist_group("PLG", "Generated")
+    iid = store.identities.upsert_identity("main", "cred", None, True)
+    store.playlists.upsert_playlist(iid, "PLG", "Generated playlist", 1, "h", 0.0)
+    store.playlists.set_playlist_group("PLG", "Generated")
+    store.playlists.mark_generated_playlist('PLG')
     c = _client(store, lambda: {iid: FakeClient()})
 
     html = c.get("/playlists").text

@@ -1,0 +1,22 @@
+<section class="card" role="{{ 'status' if action_result.status == 'complete' else 'alert' }}"
+         aria-label="Playlist action result" data-outcome="{{ action_result.status }}">
+  <h2>{{ {'complete': 'Completed', 'partial': 'Partially completed', 'failed': 'Could not complete'}[action_result.status] }}</h2>
+  <p>{{ action_result.message }}</p>
+  {% if action_result.get('copy') %}
+  <p><a href="https://music.youtube.com/playlist?list={{ action_result['copy'].new_ytm|urlencode }}"
+        target="_blank" rel="noopener">Inspect {{ action_result['copy'].title }} on YouTube Music {{ arrow_icon('external') }}</a></p>
+  {% if action_result['copy'].skipped_video_ids %}
+  <p>Skipped songs:</p>
+  <ul>{% for video in action_result['copy'].skipped_video_ids %}
+    <li><a href="https://music.youtube.com/watch?v={{ video|urlencode }}" target="_blank" rel="noopener">{{ video }}</a></li>
+  {% endfor %}</ul>
+  {% endif %}
+  {% endif %}
+  {% if action_result['items'] %}
+  <ul>{% for item in action_result['items'] %}
+    <li><strong>{{ item.title }}</strong> (#{{ item.id }}): {{ item.status }}. {{ item.detail }}</li>
+  {% endfor %}</ul>
+  {% endif %}
+  {% if action_result.guidance %}<p>{{ action_result.guidance }}</p>{% endif %}
+  <p><a href="/playlists">Dismiss result</a></p>
+</section>

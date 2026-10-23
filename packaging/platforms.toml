@@ -1,0 +1,16 @@
+# Runtime changes require regeneration and packaged checks on both architectures.
+[flatpak]
+runtime = "25.08"
+python = "3.13"
+arches = ["x86_64", "aarch64"]
+support_until = "2027-09-01"
+review_by = "2027-06-01"
+owner = "repository release maintainer"
+
+[macos]
+python = "3.12"
+arches = ["arm64", "x86_64"]
+
+[container]
+python = "3.12"
+arches = ["amd64", "arm64"]

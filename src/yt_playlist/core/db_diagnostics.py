@@ -1,0 +1,194 @@
+"""Time SQLite work separately from the serving lock, without logging SQL or values."""
+from contextlib import contextmanager
+from contextvars import ContextVar
+import hashlib
+import logging
+from pathlib import Path
+import sqlite3
+import sys
+from time import monotonic, thread_time
+
+from yt_playlist.core.work_diagnostics import current_phase
+
+logger = logging.getLogger("yt_playlist.database")
+SLOW_SQL_SECONDS = .25
+SLOW_LOCK_SECONDS = .1
+_operation = ContextVar("tuneconsole_database_operation", default="direct")
+
+
+@contextmanager
+def database_operation(name):
+    token = _operation.set(name)
+    try:
+        yield
+    finally:
+        _operation.reset(token)
+
+
+def _outcome(error):
+    if error is None:
+        return "ok"
+    if (getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT
+            or type(error).__name__ in {"WorkClosing", "CancelledError", "KeyboardInterrupt"}):
+        return "cancelled"
+    return "failed"
+
+
+def _site():
+    frame = sys._getframe(1)
+    try:
+        while frame and frame.f_code.co_filename == __file__:
+            frame = frame.f_back
+        return f"{Path(frame.f_code.co_filename).name}:{frame.f_lineno}" if frame else "unknown"
+    finally:
+        del frame
+
+
+def _warn_sql(sql, elapsed, stage, error):
+    verb = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ""
+    if verb not in {"SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP",
+                    "PRAGMA", "COMMIT", "ROLLBACK", "BEGIN", "SAVEPOINT", "RELEASE", "VACUUM",
+                    "REINDEX", "ANALYZE"}:
+        verb = "statement"
+    logger.warning("Slow SQL: operation=%s phase=%s elapsed=%.3fs stage=%s outcome=%s "
+                   "statement=%s sql_id=%s site=%s", _operation.get(), current_phase(), elapsed,
+                   stage, _outcome(error), verb, hashlib.sha256(sql.encode()).hexdigest()[:12], _site())
+
+
+def database_lock_wait(acquire, *args):
+    started = monotonic()
+    error = None
+    acquired = False
+    try:
+        acquired = acquire(*args)
+        return acquired
+    except BaseException as exc:
+        error = exc
+        raise
+    finally:
+        elapsed = monotonic() - started
+        if elapsed >= SLOW_LOCK_SECONDS:
+            logger.warning("Slow database lock wait: operation=%s phase=%s elapsed=%.3fs outcome=%s",
+                           _operation.get(), current_phase(), elapsed,
+                           _outcome(error) if error is not None or acquired else "busy")
+
+
+class PublicationTimings:
+    """Separate maintenance lock ownership, writes and durability work without logging data."""
+
+    def __init__(self):
+        self.stages = {}
+
+    @contextmanager
+    def measure(self, name):
+        started = monotonic(), thread_time()
+        try:
+            yield
+        finally:
+            self._record(name, started)
+
+    def _record(self, name, started):
+        self.stages[name] = {'wall_s': monotonic() - started[0],
+                             'cpu_s': thread_time() - started[1]}
+
+    @contextmanager
+    def locked(self, lock):
+        started = monotonic(), thread_time()
+        with lock:
+            self._record('lock_wait', started)
+            with self.measure('lock'):
+                yield
+
+    def report(self, outcome):
+        held = self.stages.get('lock', {}).get('wall_s', 0)
+        logger.log(logging.INFO if held >= SLOW_LOCK_SECONDS else logging.DEBUG,
+                   'Maintenance publication: phase=%s outcome=%s stages=%s', current_phase(),
+                   outcome, {name: {key: round(value, 6) for key, value in times.items()}
+                             for name, times in self.stages.items()})
+
+
+class DiagnosticCursor(sqlite3.Cursor):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._start("")
+
+    def _start(self, sql):
+        self._sql, self._elapsed, self._reported = sql, 0., False
+
+    def _call(self, stage, target, *args):
+        started = monotonic()
+        error = None
+        try:
+            return target(*args)
+        except StopIteration:
+            raise
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            # Sum only time inside SQLite, excluding Python work between fetches.
+            self._elapsed += monotonic() - started
+            if self._elapsed >= SLOW_SQL_SECONDS and (not self._reported or error is not None):
+                self._reported = True
+                _warn_sql(self._sql, self._elapsed, stage, error)
+
+    def execute(self, sql, parameters=()):
+        self._start(sql)
+        return self._call("execute", super().execute, sql, parameters)
+
+    def executemany(self, sql, parameters):
+        self._start(sql)
+        return self._call("executemany", super().executemany, sql, parameters)
+
+    def executescript(self, sql):
+        self._start(sql)
+        return self._call("executescript", super().executescript, sql)
+
+    def fetchone(self):
+        return self._call("fetchone", super().fetchone)
+
+    def fetchmany(self, size=None):
+        args = () if size is None else (size,)
+        return self._call("fetchmany", super().fetchmany, *args)
+
+    def fetchall(self):
+        return self._call("fetchall", super().fetchall)
+
+    def __next__(self):
+        return self._call("iterate", super().__next__)
+
+
+class DiagnosticConnection(sqlite3.Connection):
+    def cursor(self, factory=DiagnosticCursor):
+        return super().cursor(factory)
+
+    def execute(self, sql, parameters=()):
+        return self.cursor().execute(sql, parameters)
+
+    def executemany(self, sql, parameters):
+        return self.cursor().executemany(sql, parameters)
+
+    def executescript(self, sql):
+        return self.cursor().executescript(sql)
+
+    def _finish(self, sql, target, *args):
+        started = monotonic()
+        error = None
+        try:
+            return target(*args)
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            elapsed = monotonic() - started
+            if elapsed >= SLOW_SQL_SECONDS:
+                _warn_sql(sql, elapsed, "transaction", error)
+
+    def commit(self):
+        return self._finish("COMMIT", super().commit)
+
+    def rollback(self):
+        return self._finish("ROLLBACK", super().rollback)
+
+    def __exit__(self, *args):
+        return self._finish("COMMIT" if args[0] is None else "ROLLBACK", super().__exit__, *args)

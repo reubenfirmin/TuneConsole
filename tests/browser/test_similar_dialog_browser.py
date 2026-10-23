@@ -11,21 +11,21 @@ from yt_playlist.util.matching import identity_key
                 ids=lambda value: f"{value[0]}-{value[1]}-{'artwork' if value[2] else 'no-artwork'}")
 def similar_dialog(live_app, store, page, request):
     kind, width, artwork = request.param
-    playlist = store.get_playlists()[0]
+    playlist = store.playlists.get_playlists()[0]
     browse = "MPRE_layout"
-    store.add_saved_album({"browse": browse, "title": "Layout release", "artist": "Layout artist"})
+    store.collection.add_saved_album({"browse": browse, "title": "Layout release", "artist": "Layout artist"})
     tids, vectors, titles = [], [], []
     for i in range(40):
         title = f"Song {i:02d} " + "A long release title with additional details " * 3 + "x" * 80
         artist = f"Artist {i:02d} with a long artist credit"
-        tids.append(store.upsert_track(f"layout{i}", title, artist, "Layout release", 200,
+        tids.append(store.tracks.upsert_track(f"layout{i}", title, artist, "Layout release", 200,
                                        album_browse_id=browse,
                                        thumbnail="/static/nag/intro.png" if artwork else None))
         vectors.append((identity_key(title, artist), np.array([1, i / 100], dtype=np.float32).tobytes()))
         titles.append(title)
-    store.set_playlist_tracks(playlist.id, tids)
-    store.replace_rec_vectors(vectors)
-    store.set_setting("rec_dim", "2")
+    store.playlists.set_playlist_tracks(playlist.id, tids)
+    store.rec_model.replace_rec_vectors(vectors)
+    store.settings.set_setting("rec_dim", "2")
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.set_viewport_size({"width": width, "height": 600})

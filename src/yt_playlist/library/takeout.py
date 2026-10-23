@@ -11,16 +11,17 @@ actually is). JSON stays the recommended path -- it carries real ISO timestamps 
 but the HTML export is no longer a dead end: it is parsed English-locale-first, with honest
 reporting (never silently lossy) of any entries whose date text could not be parsed."""
 import datetime
+import hashlib
 import io
 import json
 import re
+import time
 import zipfile
 from collections import Counter
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
 from yt_playlist.library.live_plays import resolve_identity
-from yt_playlist.rec.rec_dao import RecDao
 from yt_playlist.util.matching import identity_key
 
 
@@ -91,17 +92,16 @@ def load_watch_history(raw) -> tuple[list, int]:
     Takeout export (HTML) is now parsed too, honestly. Zip -> prefer the .json member (existing
     maybe_unzip logic); if that isn't there, fall back to a .html member (see
     _unzip_html_member). Raw HTML text (starts with '<') -> the HTML parser. Anything else -> the
-    JSON parser (unparsed_dates is always 0 there; every JSON entry carries a real ISO
-    timestamp). Returns (rows, unparsed_dates)."""
+    JSON parser. Both formats report unreadable dates. Returns (rows, unparsed_dates)."""
     data = raw.encode() if isinstance(raw, str) else raw
     if data.startswith(_ZIP_MAGIC):
         try:
-            return parse_watch_history(maybe_unzip(data)), 0
+            return _parse_watch_history(maybe_unzip(data))
         except TakeoutFormatError:
             return parse_watch_history_html(_unzip_html_member(data))
     if data.lstrip()[:1] == b"<":
         return parse_watch_history_html(raw)
-    return parse_watch_history(raw), 0
+    return _parse_watch_history(raw)
 
 
 def _parse_time(s):
@@ -123,6 +123,10 @@ def parse_watch_history(raw) -> list:
     """Takeout watch-history JSON -> [{'video_id','title','artist','ts'}], oldest first. Music rows
     only (YouTube Music header, or a music.youtube.com URL); rows without a parseable time are
     skipped. Raises TakeoutFormatError when the input is not the JSON export at all."""
+    return _parse_watch_history(raw)[0]
+
+
+def _parse_watch_history(raw) -> tuple[list, int]:
     try:
         data = json.loads(raw)
     except (ValueError, TypeError) as e:
@@ -130,6 +134,7 @@ def parse_watch_history(raw) -> list:
     if not isinstance(data, list):
         raise TakeoutFormatError("unexpected JSON shape (expected the watch-history list)")
     out = []
+    unparsed_dates = 0
     for e in data:
         if not isinstance(e, dict):
             continue
@@ -138,6 +143,7 @@ def parse_watch_history(raw) -> list:
             continue
         ts = _parse_time(e.get("time"))
         if ts is None:
+            unparsed_dates += 1
             continue
         title = e.get("title") or ""
         if title.startswith(_WATCHED_PREFIX):
@@ -152,7 +158,7 @@ def parse_watch_history(raw) -> list:
         out.append({"video_id": _video_id(url), "title": title,
                     "artist": artist.strip(), "ts": ts})
     out.sort(key=lambda p: p["ts"])
-    return out
+    return out, unparsed_dates
 
 
 # --- HTML export parser (#61 option B) -----------------------------------------------------
@@ -376,7 +382,7 @@ def parse_watch_history_html(raw) -> tuple[list, int]:
     return rows, unparsed_dates
 
 
-def import_takeout(store, raw) -> dict:
+def import_takeout(store, raw, *, on_progress=None) -> dict:
     """#61 Parse + match + backfill. videoId matches are exact (library lookup); the fallback is the
     normalized title/artist identity_key, accepted only when that key is actually in the library
     (a play of a song you do not own belongs to discovery, not history). Both stores are written:
@@ -388,27 +394,33 @@ def import_takeout(store, raw) -> dict:
     ident = resolve_identity(store, "")
     if ident is None:
         return {"error": "no identity configured"}
+    progress = on_progress or (lambda text: None)
+    progress('Reading Takeout history…')
     parsed, unparsed_dates = load_watch_history(raw)   # the .zip Takeout serves works as-is; JSON
                                                         # or the default HTML export, either way
-    owned = set(RecDao(store).library_keys())
+    progress(f'Matching {len(parsed):,} history entries to your library…')
+    owned = set(store.rec_query.library_keys())
     matched_rows, unmatched = [], Counter()
     for p in parsed:
-        key = store.identity_key_for_video(p["video_id"]) if p["video_id"] else None
+        key = store.tracks.identity_key_for_video(p["video_id"]) if p["video_id"] else None
         if key is None and not p["video_id"]:
-            key = store.match_recording(p["title"], p["artist"])
+            key = store.tracks.match_recording(p["title"], p["artist"])
         if key not in owned:
             unmatched[p["artist"] or "?"] += 1
             continue
         matched_rows.append((key, p["video_id"], p["ts"]))
-    plays_added = store.import_plays(ident, [(k, ts) for k, _v, ts in matched_rows])
-    events_added = store.import_play_events(ident, matched_rows)
+    progress(f'Saving {len(matched_rows):,} matched plays…')
+    plays_added,events_added = store.history.import_listening_events(ident,matched_rows)
+    data = raw.encode() if isinstance(raw, str) else raw
+    import_id = store.history.record_takeout_import(
+        hashlib.sha256(data).hexdigest(), ident, time.time(), parsed, unparsed_dates)
     span_days = 0
     if parsed:
         span_days = int((parsed[-1]["ts"] - parsed[0]["ts"]) // 86400)
     return {"matched": len(matched_rows), "unmatched": sum(unmatched.values()),
             "plays_added": plays_added, "events_added": events_added,
             "span_days": span_days, "unmatched_artists": dict(unmatched),
-            "unparsed_dates": unparsed_dates}
+            "unparsed_dates": unparsed_dates, "import_id": import_id}
 
 
 def seed_discovery_from_unmatched(store, unmatched_artists, now, min_plays=3) -> int:
@@ -428,15 +440,20 @@ def seed_discovery_from_unmatched(store, unmatched_artists, now, min_plays=3) ->
     "because you play ..." / "fits your ..." lines in the New Artists tile simply don't render for
     these, rather than fabricating an explanation.
 
-    Artists ALREADY in the discovered pool are skipped: upsert_discovered_artist overwrites every
+    Artists ALREADY in the discovered pool retain their metadata: upsert_discovered_artist overwrites every
     field on conflict, so re-seeding would clobber a taste-bridge entry's richer because/fits/
-    thumbnail with our empty ones (final-review finding). Seeding only ever ADDS new names.
+    thumbnail with our empty ones (final-review finding). Retain the independent source of interest
+    even for existing suggestions, so removing another import cannot discard this contribution.
 
     Returns how many artists were seeded."""
-    existing = {a.get("artist", "") for a in (store.get_discovered_artists() or [])}
+    existing = {a.get("artist", "") for a in (store.discovery.get_discovered_artists() or [])}
     seeded = 0
     for artist, plays in unmatched_artists.items():
-        if plays >= min_plays and artist not in existing:
-            store.upsert_discovered_artist(artist, float(plays), None, None, None, now)
+        if plays < min_plays:
+            continue
+        if artist in existing:
+            store.discovery.retain_discovered_artist(artist, float(plays))
+        else:
+            store.discovery.upsert_discovered_artist(artist, float(plays), None, None, None, now)
             seeded += 1
     return seeded

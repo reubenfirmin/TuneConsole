@@ -9,8 +9,12 @@ Ordering constraint is data-driven via each provider's `requires`: a provider mu
 one it requires (AcousticBrainz is keyed by MusicBrainz recording MBIDs, so it follows MusicBrainz).
 """
 import json
+import hashlib
+from yt_playlist.util import genre_catalog
 
 _SETTING_KEY = "enrichment_order"
+GENRE_POLICY_VERSION = 2
+_GENRE_PROVIDERS = frozenset(('musicbrainz', 'lastfm', 'discogs', 'deezer'))
 
 # Canonical registry: single source of truth. `key` names the settings entry holding that provider's
 # API key (only Last.fm needs one today); `requires` names a provider that must come before it.
@@ -28,6 +32,30 @@ PROVIDERS = [
 ]
 
 _BY_NAME = {p["name"]: p for p in PROVIDERS}
+
+
+def provider_configuration(store, registry, config=None):
+    """Effective provider availability and settings, without retaining credentials in coverage."""
+    result = {}
+    vocabulary = store.genres.get_genre_whitelist()
+    for p in config if config is not None else load_config(store):
+        mod = registry.get(p["name"])
+        if mod is None:
+            continue
+        status = ("disabled" if not p["enabled"] else
+                  "available" if mod.available(store) else "unavailable")
+        # Order changes do not change the provider's answer. Last.fm resolves environment, saved
+        # and file credentials itself, so changes through any of those paths invalidate coverage.
+        key = mod.api_key(store) if p["name"] == "lastfm" and hasattr(mod, "api_key") else ""
+        inputs = {"version": 1, "key": key}
+        if p['name'] in _GENRE_PROVIDERS:
+            # Old broad answers need another lookup when the vocabulary or
+            # selection policy changes, even on otherwise complete recordings.
+            inputs['genres'] = {'catalog': genre_catalog.REVISION, 'policy': GENRE_POLICY_VERSION,
+                                'enabled': vocabulary}
+        fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+        result[p["name"]] = {"status": status, "fingerprint": fingerprint}
+    return result
 
 
 def _repair_order(names):
@@ -54,7 +82,7 @@ def load_config(store):
     each `{name, label, blurb, key, requires, enabled}`. Unknown saved names are dropped; providers
     absent from saved state are appended (enabled); ordering is repaired to respect `requires`."""
     try:
-        saved = json.loads(store.get_setting(_SETTING_KEY) or "[]")
+        saved = json.loads(store.settings.get_setting(_SETTING_KEY) or "[]")
     except (ValueError, TypeError):
         saved = []
     enabled = {}
@@ -90,4 +118,4 @@ def save_config(store, items):
         req = _BY_NAME[name]["requires"]
         if req is not None and req in names and names.index(req) > i:
             raise ValueError(f"{name!r} must come after {req!r}")
-    store.set_setting(_SETTING_KEY, json.dumps(cleaned))
+    store.settings.set_setting(_SETTING_KEY, json.dumps(cleaned))
